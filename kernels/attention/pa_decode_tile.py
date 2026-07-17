@@ -178,15 +178,11 @@ def compile_pa_decode_tile(
     BLOCK_THREADS = NWARP * WAVE  # 256
 
     # ── LDS layout (shared across the 4 warps) ──
-    # sQ: fp8[ROWS_PADDED,head_dim] staged+quantized query, all M-tiles.
-    # sP: fp8[16,TILE_TOK] quantized probs, reused across M-tiles/KV-tiles
-    # (each write is fully consumed before the next, via an existing barrier).
-    # sQscale: f32[ROWS_PADDED]. sLmax/sLsum: transient cross-warp scratch,
-    # reused across M-tiles. sVPage: V page-index broadcast. sKScale/sVScale/
-    # sVScaleMax: per-token K/V scale staging. No sO/sM/sL/sCorr: the PV output
-    # is register-resident/loop-carried and stored straight to global (V=A/P=B
-    # swap), so no output staging, per-row correction, or reduce scratch is
-    # needed in LDS.
+    # sQ: fp8[ROWS_PADDED,head_dim] staged+quantized query. sP: fp8[16,TILE_TOK]
+    # quantized probs. sQscale: f32[ROWS_PADDED]. sLmax/sLsum: cross-warp scratch.
+    # sVPage: V page-index broadcast. sKScale/sVScale/sVScaleMax: per-token K/V
+    # scale staging. No sO/sM/sL/sCorr: PV output is register-resident/loop-carried
+    # and stored straight to global (V=A/P=B swap).
     f32 = 4
     sQ_bytes = ROWS_PADDED * head_dim * 1  # fp8
     sP_off = sQ_bytes
@@ -201,26 +197,20 @@ def compile_pa_decode_tile(
     # LDS twice (row r and r+8 share a bank); 5 is coprime with 32 banks.
     NWARP_PAD = NWARP + 1
     # Phase-split (M_TILES>1): sLmax gets a per-M-tile slice so all M-tiles'
-    # pass-1 (QK+mask+max-reduce) writes share ONE barrier instead of M_TILES
-    # separate ones (see the phase-1/phase-2 split below). M_TILES==1 has nothing
-    # to merge and takes the single-tile path.
+    # pass-1 (QK+mask+max-reduce) writes share ONE barrier instead of M_TILES.
     sLmax_off = sQscale_off + ROWS_PADDED * f32
     sLsum_off = sLmax_off + M_TILES * MFMA_MNK * NWARP_PAD * f32
     # V page-table prefetch staging: warp w's row is broadcast here for all
     # 4 warps to read (V's page depends on `rgroup`, shared across warps).
     sVPage_off = sLsum_off + MFMA_MNK * NWARP_PAD * f32
     sVPage_bytes = NWARP * PAGES_PER_CHUNK * 4  # i32
-    # Per-token K/V scale staging (per_token_kv only).
-    #
-    # DOUBLE-BUFFER (per_token phase-split only): the tt+1 prefetch stages
-    # into the OTHER buffer (tt&1 ping-pong), so the current tile's v_scale
-    # survives to Phase B and can be re-read there instead of held in
-    # registers across the whole M-tile loop. That lets Phase A hold only
-    # k_scale (16 VGPR) and Phase B only v_scale (16), vs the old single-
-    # buffer path that had to hoist both (32) before the prefetch clobbered
-    # them -- the 16 VGPR freed drops per_token M_TILES=4 under the 256/2-wave
-    # cliff. Costs one extra buffer of LDS.
-    KV_DOUBLE_BUF = per_token_kv and M_TILES > 1
+    # Per-token K/V scale staging (per_token_kv only), double-buffered: the tt+1
+    # prefetch stages into the OTHER buffer (tt&1 ping-pong) so the current tile's
+    # scales survive its own prefetch un-clobbered. In the phase-split this lets
+    # Phase A hold only k_scale (16 VGPR) and Phase B re-read v_scale (vs hoisting
+    # both, 32) -- the freed 16 VGPR drop per_token M_TILES=4 under the 256/2-wave
+    # cliff; M1 uses it too so tt+1's stage doesn't alias tt's read. +1 LDS buffer.
+    KV_DOUBLE_BUF = per_token_kv
     KV_BUFS = 2 if KV_DOUBLE_BUF else 1
     KV_BUF_STRIDE = 2 * NWARP * TOK_PER_WARP * f32  # k-region + v-region, one buffer
     sKScale_off = sVPage_off + sVPage_bytes
@@ -247,7 +237,6 @@ def compile_pa_decode_tile(
         key_scale_ptr: fx.Tensor,  # [1] per-tensor OR [num_blocks, num_kv_heads, block_size] per-token
         value_scale_ptr: fx.Tensor,  # same shape as key_scale_ptr
         max_blocks_per_seq: fx.Int32,
-        num_q_heads: fx.Int32,
         stride_ks_block: fx.Int32,
         stride_ks_head: fx.Int32,
         stride_q_row: fx.Int32,
@@ -259,7 +248,7 @@ def compile_pa_decode_tile(
         seq = fx.Int32(gpu.block_id("x"))
         kv_h = fx.Int32(gpu.block_id("y"))
         part = fx.Int32(gpu.block_id("z"))  # context partition handled by this CTA
-        n_kv = num_q_heads // query_group_size  # num_kv_heads
+        n_kv = fx.Int32(gpu.grid_dim.y)  # num_kv_heads == gridDim.y
 
         # fx.copy-based K/V/Q/context_len loaders (fp8 is 1B/elem, so byte
         # offset == element index). K/V/context_len use UniversalCopy128b/32b
@@ -345,9 +334,7 @@ def compile_pa_decode_tile(
             # it to LDS for every warp to read back (`_v_page_read_row`).
             # Prefetched one tile ahead; store/read-back straddle an
             # already-existing barrier, so no new barrier is needed.
-            # Tile tt starts on a page boundary (TILE_TOK is a multiple of
-            # block_size), so its first page is tt*TILE_TOK // block_size.
-            base_page = tt_i32 * TILE_TOK // block_size
+            base_page = tt_i32 * TILE_TOK // block_size  # tile start is page-aligned
             fetched = _load_phys_scalar(base_page + warp * PAGES_PER_CHUNK, PAGES_PER_CHUNK)
             if lane == 0:
                 fetched_vec = (
@@ -388,18 +375,9 @@ def compile_pa_decode_tile(
             else:
                 # block_size==16: NCHUNK=4 separate physical pages/tokens are
                 # owned by this warp's 64 lanes, one per `rgroup` (0..3) x
-                # `lane16` (0..15) -- previously this looped a compile-time
-                # `a` over all 4 sub-blocks with EVERY lane executing all 4
-                # iterations redundantly (the per-lane token/page only
-                # depends on `a`/`lane16`, never `rgroup`), so all 4
-                # `rgroup`-groups computed and wrote the identical 4 values
-                # 4x over. Using `rgroup` itself (a dynamic per-thread lane
-                # id, matching production's own `rowid`-selects-page
-                # mechanism) to pick this thread's ONE page/token instead
-                # covers all 4 sub-blocks in parallel across the 4
-                # rgroup-groups, with a single load/store each instead of a
-                # 4-iteration loop -- cuts both the redundant global
-                # loads and the LDS store instruction count 4x -> 1x here.
+                # `lane16` (0..15). Each lane picks its ONE page/token via its
+                # own `rgroup`, so the 4 sub-blocks are staged in parallel across
+                # the rgroup-groups with a single load/store each.
                 phys = fx.Int32(
                     vector.extract(arith.unwrap(phys_vec), static_position=[], dynamic_position=[fx.Index(rgroup)])
                 )
@@ -483,6 +461,7 @@ def compile_pa_decode_tile(
             v_scale_f = fx.Float32(value_scale)
         NEG_INF = fx.Float32(float("-inf"))
         ZERO_F = fx.Float32(0.0)
+        fm_contract = arith.FastMathFlags.contract
 
         def _row(byte_off, m_idx, width, elem_ty):
             off = byte_off + m_idx * (width * dsl_size_of(elem_ty))
@@ -605,14 +584,11 @@ def compile_pa_decode_tile(
         OP_ELEMS = MFMA_MNK * VHE_SIZE // (NWARP * WAVE)  # PV C-fragment elements/lane/chunk (probed = 4)
 
         # ── raw dwordx4 V load (B operand) ──
-        # lane (rgroup) takes the contiguous token slice [rgroup*64:+64] for
-        # its head. Either V layout keeps 16 tokens contiguous for a fixed
-        # (page, head, head_elem), so both are one dwordx4 load per
-        # (16-token sub-block, head_elem) -- only the offset formula differs
-        # (trans_v=True has the sub-block index ahead of head_dim; False has
-        # it as a `step*16` offset within head_elem's own block_size row).
-        # A rgroup's 64-token run can span multiple block_size pages, so
-        # `sub`/`step` below walk pages/16-token sub-blocks either way.
+        # lane (rgroup) takes the contiguous token slice [rgroup*64:+64] for its
+        # head. Both V layouts keep 16 tokens contiguous per (page, head_elem), so
+        # each is one dwordx4 load per (16-token sub-block, head_elem); only the
+        # offset formula differs (trans_v below). A rgroup's 64-token run can span
+        # multiple pages, so `sub`/`step` walk pages/16-token sub-blocks.
         NVOPS = TILE_TOK // MFMA_K  # 8 PV k_steps (256 tokens / K=32)
         STEPS_PER_PAGE = block_size // 16
 
@@ -680,11 +656,9 @@ def compile_pa_decode_tile(
 
             next_state = [None, None]  # slots 0/1 (K_SLOT/V_SLOT) filled in at m==0 below
 
-            # k/v-scale-per-token doesn't depend on `m` (only on `warp`/`a`), so
-            # the phase-split hoists it once (via KV_DOUBLE_BUF: k in Phase A,
-            # v re-read in Phase B from the un-clobbered ping-pong buffer) instead
-            # of re-reading per M-tile. The non-phase-split path (head64 / M1)
-            # reads per-m directly (see below).
+            # This tile's ping-pong scale buffer (tt&1); the tt+1 prefetch stages
+            # into the other one. Phase-split reads k in Phase A / re-reads v in
+            # Phase B; M1 reads both per-chunk from this buffer (see below).
             cur_kv_buf = _kv_buf_off(tt)
 
             # V pages/data for this KV-tile iteration don't depend on `m`
@@ -709,12 +683,9 @@ def compile_pa_decode_tile(
             def _lmax_off_m(m):
                 return sLmax_off + (m * MFMA_MNK * NWARP_PAD * f32 if const_expr(M_TILES > 1) else 0)
 
-            # Phase-split (M_TILES>1): split pass-1 (QK + mask + per-warp
-            # max-reduce) into its own loop over every M-tile, writing each
-            # M-tile's own LDS slice, so all M-tiles share ONE barrier instead
-            # of M_TILES separate ones (fewer barrier-adjacent ds_read/ds_write
-            # sequences). Only M_TILES==1 (nothing to merge) takes the
-            # single-barrier-per-m loop below.
+            # Phase-split (M_TILES>1): pass-1 (QK + mask + per-warp max-reduce)
+            # runs its own loop over every M-tile into per-M-tile LDS slices, so
+            # all M-tiles share ONE barrier. M_TILES==1 takes the else below.
             if const_expr(M_TILES > 1):
                 masked_chunks_saved = [None] * M_TILES
                 scale_saved = [None] * M_TILES
@@ -824,16 +795,11 @@ def compile_pa_decode_tile(
                     words = []
                     zero4_p = fx.Vector.filled(4, 0.0, fx.Float32)
                     for a in range_constexpr(NCHUNK):
-                        # Re-mask Pa itself (not just the pre-exp score): a tile
-                        # with zero valid tokens for this row has every
-                        # masked_chunks[a] lane at the -1e30 sentinel AND m_new
-                        # derived from that same sentinel, so
-                        # exp2(score*scale - m_new) cancels to exp2(0)==1 rather
-                        # than ~0. Invalid lanes are exactly the sentinel ones
-                        # (real scaled scores are >> -1e29), so force them to a
-                        # true 0 contribution. Matters most for NP>1 empty
-                        # partitions (an early MTP row whose causal window ends
-                        # before this partition's tiles).
+                        # Re-mask Pa itself: a row with zero valid tokens has both
+                        # masked_chunks[a] and m_new at the -1e30 sentinel, so
+                        # exp2(score*scale - m_new) cancels to exp2(0)==1 instead
+                        # of ~0. Force the sentinel lanes (scores >> -1e29 are real)
+                        # to a true 0. Matters most for NP>1 empty partitions.
                         valid_a = masked_chunks[a] > fx.Vector.filled(4, -1e29, fx.Float32)
                         Pa = valid_a.select(fx.Vector(exp2_f32_fast(masked_chunks[a] * scale - m_new_b)), zero4_p)
                         ls = ls + Pa.reduce(ReductionOp.ADD)
@@ -853,8 +819,7 @@ def compile_pa_decode_tile(
                         fx.Vector.from_elements(words, dtype=fx.Int32)
                     )
                     for sh in (16, 32):
-                        ls = ls.addf(ls.shuffle_xor(sh, WAVE), fastmath=arith.FastMathFlags.contract)
-                    fm_contract = arith.FastMathFlags.contract
+                        ls = ls.addf(ls.shuffle_xor(sh, WAVE), fastmath=fm_contract)
                     # PV output is [head-dim (row), query-row (col=lane16)]
                     # after the operand swap below, so the softmax
                     # correction and running denominator are single
@@ -891,12 +856,9 @@ def compile_pa_decode_tile(
                             op = op * fx.Vector.from_elements([v_max_scaled], dtype=fx.Float32).broadcast_to(OP_ELEMS)
                         o_acc[vh] = o_acc[vh] * corr_b + op
                     next_state.extend([o_acc[0], o_acc[1], m_new, l_new])
-                    # Force full retirement of this M-tile's masked_chunks/
-                    # scale (saved across the phase-1/phase-2 barrier above,
-                    # so already a real per-M-tile live range) before the
-                    # next M-tile's own chain starts, instead of letting the
-                    # scheduler interleave multiple M-tiles' chains for ILP
-                    # at the cost of peak concurrent liveness.
+                    # Force full retirement of this M-tile's chain before the
+                    # next M-tile starts, rather than letting the scheduler
+                    # interleave M-tiles for ILP at the cost of peak liveness.
                     if const_expr(m < M_TILES - 1):
                         fx.rocdl.sched_barrier(0)
             else:
@@ -925,7 +887,7 @@ def compile_pa_decode_tile(
                     k_next, phys_vec1 = _k_ops_flat(tt1)
                     _v_page_fetch_and_stage(tt1)
                     if const_expr(per_token_kv):
-                        _stage_kv_scale_to_lds(phys_vec1)
+                        _stage_kv_scale_to_lds(phys_vec1, _kv_buf_off(tt1))
                 next_state[K_SLOT] = k_next
                 # Softmax: each lane owns ONE qhead (= lane%16); reduce its
                 # tokens with a register reduce + shuffle_xor(16,32). Mask is
@@ -948,7 +910,7 @@ def compile_pa_decode_tile(
                     v_scale_vecs = []
                     scaled_frags = []
                     for a in range_constexpr(NCHUNK):
-                        k_scale_vec, v_scale_vec = _load_kv_scale_vecs(a)
+                        k_scale_vec, v_scale_vec = _load_kv_scale_vecs(a, cur_kv_buf)
                         v_scale_vecs.append(v_scale_vec)
                         scaled_frags.append(frag_Ss[a] * k_scale_vec)
                 else:
@@ -1014,7 +976,9 @@ def compile_pa_decode_tile(
                     ls = ls + Pa.reduce(ReductionOp.ADD)
                     if const_expr(per_token_kv):
                         v_scale_this = (
-                            _load_scale_vec(sVScale_off, a) if const_expr(head_dim == 64) else v_scale_vecs[a]
+                            _load_scale_vec(sVScale_off, a, cur_kv_buf)
+                            if const_expr(head_dim == 64)
+                            else v_scale_vecs[a]
                         )
                         p_scaled = Pa * v_scale_this * norm_factor_b
                     else:
@@ -1027,7 +991,7 @@ def compile_pa_decode_tile(
                 if const_expr(head_dim == 64):
                     fx.rocdl.sched_dswr(NCHUNK)
                 for sh in (16, 32):
-                    ls = ls.addf(ls.shuffle_xor(sh, WAVE), fastmath=arith.FastMathFlags.contract)
+                    ls = ls.addf(ls.shuffle_xor(sh, WAVE), fastmath=fm_contract)
                 # PV (V=A, P=B) -> output [head-dim, query-row=lane16], so
                 # the correction and denominator are single per-lane scalars
                 # keyed on query-row=lane16 (no sCorr LDS round-trip), and
@@ -1039,9 +1003,9 @@ def compile_pa_decode_tile(
                     _st_lw(sLsum_off, qh, warp, ls)
                 gpu.barrier()
                 gsum = _ld_lw_row(sLsum_off, lane16).reduce(ReductionOp.ADD)
-                l_new = fx.Float32(
-                    arith.mulf(arith.unwrap(l_prev), arith.unwrap(corr_reg), fastmath=arith.FastMathFlags.contract)
-                ).addf(gsum, fastmath=arith.FastMathFlags.contract)
+                l_new = fx.Float32(arith.mulf(arith.unwrap(l_prev), arith.unwrap(corr_reg), fastmath=fm_contract)).addf(
+                    gsum, fastmath=fm_contract
+                )
                 p_ops = _view(
                     sP_off + lane16 * SP_ROW_BYTES + rgroup * 64,
                     fx.Int64,
@@ -1083,7 +1047,7 @@ def compile_pa_decode_tile(
                     arith.mulf(
                         arith.unwrap(inv_l),
                         arith.unwrap(v_scale_f * inv_fp8),
-                        fastmath=arith.FastMathFlags.contract,
+                        fastmath=fm_contract,
                     )
                 )
             o_scale_b = fx.Vector.from_elements([o_scale], dtype=fx.Float32).broadcast_to(OP_ELEMS)
@@ -1134,7 +1098,6 @@ def compile_pa_decode_tile(
         key_scale: fx.Tensor,  # [1] per-tensor OR [num_blocks, num_kv_heads, block_size] per-token
         value_scale: fx.Tensor,  # same shape as key_scale
         max_blocks_per_seq: fx.Int32,
-        num_q_heads: fx.Int32,
         num_seqs: fx.Int32,
         num_kv_heads: fx.Int32,
         stride_ks_block: fx.Int32,
@@ -1156,7 +1119,6 @@ def compile_pa_decode_tile(
             key_scale,
             value_scale,
             max_blocks_per_seq,
-            num_q_heads,
             stride_ks_block,
             stride_ks_head,
             stride_q_row,
@@ -1328,7 +1290,6 @@ def pa_decode_tile(
         key_scale_t,
         value_scale_t,
         int(max_blocks_per_seq),
-        int(num_q_heads),
         int(num_seqs),
         int(num_kv_heads),
         stride_ks_block,
