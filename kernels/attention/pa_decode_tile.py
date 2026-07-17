@@ -200,14 +200,12 @@ def compile_pa_decode_tile(
     # NWARP_PAD = NWARP+1 (not NWARP): a plain 16B stride wraps the 32-bank
     # LDS twice (row r and r+8 share a bank); 5 is coprime with 32 banks.
     NWARP_PAD = NWARP + 1
-    # Phase-split for every M_TILES>1 shape (all block_size / head_dim): sLmax
-    # gets a per-M-tile slice so all M-tiles' pass-1 (QK+mask+max-reduce) writes
-    # share ONE barrier instead of M_TILES separate ones (see the phase-1/
-    # phase-2 split below). M_TILES==1 has nothing to merge, so PHASE1_MTILES==1
-    # naturally routes it to the single-slice per-m path.
-    PHASE1_MTILES = M_TILES
+    # Phase-split (M_TILES>1): sLmax gets a per-M-tile slice so all M-tiles'
+    # pass-1 (QK+mask+max-reduce) writes share ONE barrier instead of M_TILES
+    # separate ones (see the phase-1/phase-2 split below). M_TILES==1 has nothing
+    # to merge and takes the single-tile path.
     sLmax_off = sQscale_off + ROWS_PADDED * f32
-    sLsum_off = sLmax_off + PHASE1_MTILES * MFMA_MNK * NWARP_PAD * f32
+    sLsum_off = sLmax_off + M_TILES * MFMA_MNK * NWARP_PAD * f32
     # V page-table prefetch staging: warp w's row is broadcast here for all
     # 4 warps to read (V's page depends on `rgroup`, shared across warps).
     sVPage_off = sLsum_off + MFMA_MNK * NWARP_PAD * f32
@@ -714,16 +712,15 @@ def compile_pa_decode_tile(
                 ).load()
 
             def _lmax_off_m(m):
-                return sLmax_off + (m * MFMA_MNK * NWARP_PAD * f32 if const_expr(PHASE1_MTILES > 1) else 0)
+                return sLmax_off + (m * MFMA_MNK * NWARP_PAD * f32 if const_expr(M_TILES > 1) else 0)
 
-            # Phase-split (PHASE1_MTILES==M_TILES>1, i.e. any M_TILES>1 shape):
-            # split pass-1 (QK + mask + per-warp max-reduce) into its own loop
-            # over every M-tile, writing each M-tile's own LDS slice, so all
-            # M-tiles share ONE barrier instead of M_TILES separate ones
-            # (fewer barrier-adjacent ds_read/ds_write sequences). Only
-            # M_TILES==1 (nothing to merge) takes the single-barrier-per-m
-            # loop below.
-            if const_expr(PHASE1_MTILES > 1):
+            # Phase-split (M_TILES>1): split pass-1 (QK + mask + per-warp
+            # max-reduce) into its own loop over every M-tile, writing each
+            # M-tile's own LDS slice, so all M-tiles share ONE barrier instead
+            # of M_TILES separate ones (fewer barrier-adjacent ds_read/ds_write
+            # sequences). Only M_TILES==1 (nothing to merge) takes the
+            # single-barrier-per-m loop below.
+            if const_expr(M_TILES > 1):
                 masked_chunks_saved = [None] * M_TILES
                 scale_saved = [None] * M_TILES
 
