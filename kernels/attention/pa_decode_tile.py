@@ -1116,22 +1116,19 @@ def compile_pa_decode_tile(
                 o_norm = (o_final[o_slot] * o_scale_b).to(Q_DTYPE)
                 head_base = vh * (NWARP * MFMA_MNK) + warp * MFMA_MNK + rgroup * OP_ELEMS
                 sub = head_base // OP_ELEMS
-                if row_ok:
+                # row_ok is a compile-time bool: when True (full tile) Python
+                # short-circuits the `or`, so `row < TOTAL_ROWS` is never emitted
+                # and the store is unconditional; only a partial last tile falls
+                # back to the runtime bounds guard.
+                if row_ok or row < TOTAL_ROWS:
                     _emit(o_norm, sub)
-                else:
-                    if row < TOTAL_ROWS:
-                        _emit(o_norm, sub)
 
             if const_expr(NP > 1):
                 if warp == 0 and rgroup == 0:
                     base = ((seq * n_kv + kv_h) * NP + part) * TOTAL_ROWS + row
-                    if row_ok:
+                    if row_ok or row < TOTAL_ROWS:
                         pmax_ptr[base] = o_final[_m_slot(m)]
                         psum_ptr[base] = l_row
-                    else:
-                        if row < TOTAL_ROWS:
-                            pmax_ptr[base] = o_final[_m_slot(m)]
-                            psum_ptr[base] = l_row
 
     @flyc.jit
     def pa_decode_tile_launch(
