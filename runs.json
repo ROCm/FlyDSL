@@ -1,8 +1,94 @@
 {
  "schema": 1,
- "updated": "2026-07-16T21:41:59Z",
+ "updated": "2026-07-17T00:57:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29538355438,
+   "pr": 855,
+   "commit": "629e0ee8bf22a2521c8ebf588e4e7906cce61fe3",
+   "branch": "perf/rmsnorm-bwd-two-stage",
+   "event": "pull_request",
+   "title": "[Perf] Optimize RMSNorm backward with staged reduction and vec8 I/O",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29538355438",
+   "created_at": "2026-07-16T22:05:18Z",
+   "updated_at": "2026-07-16T23:29:31Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-16T22:16:03Z",
+     "completed_at": "2026-07-16T22:29:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29538355438/job/87755246490"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-16T22:09:22Z",
+     "completed_at": "2026-07-16T23:29:30Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29538355438/job/87755246540"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-16T22:09:07Z",
+     "completed_at": "2026-07-16T23:14:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29538355438/job/87755246597"
+    }
+   ]
+  },
+  {
+   "run_id": 29537829776,
+   "pr": 785,
+   "commit": "ef63ee80a23387aed6d33fa254fab027f8c93535",
+   "branch": "feat/autotune-rmsnorm-adopt",
+   "event": "pull_request",
+   "title": "[2/5] autotune: add opt-in search and RMSNorm waves-per-EU tuning (#770)",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29537829776",
+   "created_at": "2026-07-16T21:57:46Z",
+   "updated_at": "2026-07-16T23:15:28Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-16T22:01:09Z",
+     "completed_at": "2026-07-16T22:58:30Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29537829776/job/87753740742"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-16T22:00:24Z",
+     "completed_at": "2026-07-16T22:14:54Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29537829776/job/87753740805"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-16T22:00:57Z",
+     "completed_at": "2026-07-16T23:15:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29537829776/job/87753740831"
+    }
+   ]
+  },
   {
    "run_id": 29516144852,
    "pr": 868,
@@ -554,11 +640,11 @@
   },
   {
    "run_id": 29484418117,
-   "pr": 785,
+   "pr": null,
    "commit": "81baca5028cc7caf7cd004aad922bc6350057add",
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
-   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
+   "title": "[2/5] autotune: add opt-in search and RMSNorm waves-per-EU tuning (#770)",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29484418117",
@@ -788,7 +874,7 @@
    "commit": "f011227c5cf93438dafcdabc7eb5965efd88f3e6",
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
-   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
+   "title": "[2/5] autotune: add opt-in search and RMSNorm waves-per-EU tuning (#770)",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29480970486",
@@ -975,7 +1061,7 @@
    "commit": "a6de6a2effd0ed0d703ea4246e6d8c13a215ae39",
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
-   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
+   "title": "[2/5] autotune: add opt-in search and RMSNorm waves-per-EU tuning (#770)",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29477614155",
@@ -1162,7 +1248,7 @@
    "commit": "80d57f928e8e0cc141439ceb0a5d9d1701bb116d",
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
-   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
+   "title": "[2/5] autotune: add opt-in search and RMSNorm waves-per-EU tuning (#770)",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29471116769",
@@ -1274,7 +1360,7 @@
   },
   {
    "run_id": 29457354426,
-   "pr": 855,
+   "pr": null,
    "commit": "097c333bc816f356f2c027e376620c7e0ee37607",
    "branch": "perf/rmsnorm-bwd-two-stage",
    "event": "pull_request",
@@ -1364,7 +1450,7 @@
    "commit": "c4237a4485a31dd50ce2e5c36d784138ee2c25d4",
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
-   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
+   "title": "[2/5] autotune: add opt-in search and RMSNorm waves-per-EU tuning (#770)",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29444443854",
@@ -1407,7 +1493,7 @@
    "commit": "011dacf3e194f1910886a45cd53ca371854fc59b",
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
-   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
+   "title": "[2/5] autotune: add opt-in search and RMSNorm waves-per-EU tuning (#770)",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29439099673",
@@ -1450,7 +1536,7 @@
    "commit": "1bd314d197c110ddb0cad112e14e5421d4483250",
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
-   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
+   "title": "[2/5] autotune: add opt-in search and RMSNorm waves-per-EU tuning (#770)",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29435838086",
@@ -1465,7 +1551,7 @@
    "commit": "79d3ece6a2bccf80f9ba3f8cbcfe8a0190187481",
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
-   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
+   "title": "[2/5] autotune: add opt-in search and RMSNorm waves-per-EU tuning (#770)",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29435051975",
@@ -2184,64 +2270,6 @@
      "started_at": "2026-07-15T00:50:41Z",
      "completed_at": "2026-07-15T03:21:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29380026024/job/87241618404"
-    }
-   ]
-  },
-  {
-   "run_id": 29378123716,
-   "pr": null,
-   "commit": "49890ad97e45b78b8c0884eb168eb281d943d2ff",
-   "branch": "jiacao/conv3d-multi-tile-autotune-v2",
-   "event": "pull_request",
-   "title": "[Kernel] conv3d: parameterize tile size + add autotuner",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29378123716",
-   "created_at": "2026-07-15T00:07:04Z",
-   "updated_at": "2026-07-15T00:08:31Z",
-   "actor": "jiacao-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 29373560296,
-   "pr": 854,
-   "commit": "067598ce3cc5d7c8f4f0fe1a78405b5af60e2d87",
-   "branch": "perf/rmsnorm-bwd-config-cache",
-   "event": "pull_request",
-   "title": "[Test] Expand RMSNorm backward configs, cache reuse, and Torch benchmarks",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29373560296",
-   "created_at": "2026-07-14T22:36:43Z",
-   "updated_at": "2026-07-15T01:33:10Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T22:39:24Z",
-     "completed_at": "2026-07-15T00:17:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29373560296/job/87222276049"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T22:39:05Z",
-     "completed_at": "2026-07-15T01:33:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29373560296/job/87222276076"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T22:38:29Z",
-     "completed_at": "2026-07-14T22:52:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29373560296/job/87222276087"
     }
    ]
   }
