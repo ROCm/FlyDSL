@@ -15,8 +15,6 @@ up to even, and a kv padding-mask on the non-causal path).
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import const_expr, range_constexpr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -36,6 +34,7 @@ from kernels.attention.flash_attn_utils import (
     _dualwave_sync_barrier,
     _make_dualwave_swp_traits,
     _s_barrier,
+    _s_nop,
     _s_setprio,
     _s_waitcnt,
     _sched_barrier,
@@ -119,26 +118,7 @@ def build_flash_attn_dualwave_swp_module(
         kv_vectorized=KV_VECTORIZED,
     )
     traits.BLOCK_N_OUT // traits.BLOCK_N
-    _dualwave_swp_cache_tag = (
-        traits.NUM_HEADS_Q,
-        traits.NUM_HEADS_KV,
-        traits.HEAD_DIM,
-        traits.CAUSAL,
-        traits.DTYPE_STR,
-        traits.WAVES_PER_EU,
-        traits.DAZ,
-        traits.DUALWAVE_SWP_LAZY_RESCALE,
-        traits.DUALWAVE_SWP_SETPRIO,
-        traits.DUALWAVE_SWP_DEBUG_LAZY_COUNTS,
-        traits.DUALWAVE_SWP_ENABLE_STAGGER,
-        traits.NUM_KV_SPLITS,
-        traits.SPLITK,
-        traits.PAGED,
-        traits.VARLEN,
-        traits.CROSS_SEQLEN,
-        traits.KV_CACHE_LAYOUT,
-        traits.KV_VECTORIZED,
-    )
+    _dualwave_swp_cache_tag = traits.cache_tag
 
     # Shared-memory layout: one 16B-aligned K/V region (K0/V0/K1/V1).
     _lds_elem_dtype = dtype_to_elem_type(traits.DTYPE_STR)
@@ -173,11 +153,6 @@ def build_flash_attn_dualwave_swp_module(
         head_dim_runtime: fx.Int32,
         block_table_stride: fx.Int32,
     ):
-        def _s_nop(x):
-            if not isinstance(x, int) or not 0 <= x <= 15:
-                raise ValueError("s_nop immediate must be a Python int in [0, 15]")
-            llvm.inline_asm(ir.Type.parse("!llvm.void"), [], f"s_nop {x}", "", has_side_effects=True)
-
         ctx = DualwaveKernelContext(
             traits,
             Q,
