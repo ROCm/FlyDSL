@@ -782,7 +782,8 @@ def compile_pa_decode_tile(
                     scaled_frags = frag_Ss
 
                 # Reused in pass 2 below, halving the mask instruction count.
-                masked_chunks = [(_ct[a] < thr).select(scaled_frags[a], neg4) for a in range_constexpr(NCHUNK)]
+                valid_chunks = [(_ct[a] < thr) for a in range_constexpr(NCHUNK)]
+                masked_chunks = [valid_chunks[a].select(scaled_frags[a], neg4) for a in range_constexpr(NCHUNK)]
 
                 # pass 1: per-warp max for this qhead
                 pm = fx.Float32(float("-inf"))
@@ -843,8 +844,25 @@ def compile_pa_decode_tile(
                 # 1B/elem): the packed word's 4 fp8 lanes are exactly the 4
                 # consecutive tokens this lane owns in chunk `a`.
                 words = []
+                zero4_p = fx.Vector.filled(4, 0.0, fx.Float32)
                 for a in range_constexpr(NCHUNK):
-                    Pa = fx.Vector(exp2_f32_fast(masked_chunks[a] * scale - m_new_b))
+                    # A tile with zero valid tokens for this row (its whole
+                    # causal window ends before this tile -- e.g. an early
+                    # MTP query position combined with a KV-varlen context
+                    # length that leaves the last tile(s) fully out of
+                    # range) has every entry masked to `neg4` above, so
+                    # `masked_chunks[a]*scale` and `m_new_b` are BOTH derived
+                    # from that same sentinel and cancel to exactly 0 --
+                    # `exp2(0) == 1`, not the intended ~0. Re-masking Pa
+                    # itself (not just the pre-exp score) keeps a fully- or
+                    # partially-masked chunk's invalid lanes at a true 0
+                    # contribution regardless of that cancellation, which
+                    # matters beyond `ls`/`l_new`: in per_token_kv mode an
+                    # all-invalid tile also has zero valid V-scale, driving
+                    # `norm_factor_b` to a huge value from the epsilon floor
+                    # below -- Pa=1 there would blow the fp8 P-pack up to
+                    # +-inf/NaN instead of the safe Pa=0*huge=0.
+                    Pa = valid_chunks[a].select(fx.Vector(exp2_f32_fast(masked_chunks[a] * scale - m_new_b)), zero4_p)
                     ls = ls + Pa.reduce(ReductionOp.ADD)
                     if const_expr(per_token_kv):
                         v_scale_this = _load_v_scale_vec(a) if const_expr(head_dim == 64) else v_scale_vecs[a]

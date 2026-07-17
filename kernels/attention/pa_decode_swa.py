@@ -835,6 +835,20 @@ def compile_pa_decode_sw_reduce(
         lane = tid & c_wave_mask
         wave = fx.Int32(tid >> fx.Int32(6))
 
+        def _exp2_diff_safe(diff):
+            # A partition that never saw a valid token for a row (e.g. an
+            # early MTP query position whose causal window ends before this
+            # partition's tile range) can report a very large-magnitude but
+            # finite "empty" max-logit sentinel rather than -inf (see the
+            # per-tile mask sentinel in pa_decode_tile.py). Feeding that
+            # magnitude straight into the exp2 hardware intrinsic returns NaN
+            # instead of the intended ~0 weight, which then poisons the whole
+            # reduce via `0 * NaN == NaN`. Real cross-partition max
+            # differences are always small (QK-score scale), so clamping the
+            # pre-scale difference leaves genuine values untouched while
+            # forcing pathological ones to underflow cleanly to 0.
+            return _exp2_f32_fast(arith.maxnumf(diff, fx.Float32(-100.0)) * c_log2e)
+
         def _wave_reduce_max_full(val):
             red = val
             for sh in [32, 16, 8, 4, 2, 1]:
@@ -916,7 +930,7 @@ def compile_pa_decode_sw_reduce(
             global_max = _wave_reduce_max(part_max)
             part_scale = arith.select(
                 lane_in_range,
-                _exp2_f32_fast((part_max - global_max) * c_log2e),
+                _exp2_diff_safe(part_max - global_max),
                 c_zero_f,
             )
             scaled_sum = part_sum * part_scale
@@ -985,7 +999,7 @@ def compile_pa_decode_sw_reduce(
                 part_max = arith.select(in_chunk, part_max_raw, c_neg_inf)
                 part_scale = arith.select(
                     in_chunk,
-                    _exp2_f32_fast((part_max - global_max) * c_log2e),
+                    _exp2_diff_safe(part_max - global_max),
                     c_zero_f,
                 )
                 chunk_sum = _block_reduce(part_sum * part_scale, "sum")
@@ -1015,7 +1029,7 @@ def compile_pa_decode_sw_reduce(
                 if in_chunk:
                     part_sum = part_sum_raw
                     part_max = part_max_raw
-                    part_scale = _exp2_f32_fast((part_max - global_max) * c_log2e)
+                    part_scale = _exp2_diff_safe(part_max - global_max)
                     weight = part_sum * part_scale * inv_global_exp_sum
                     part_idx_idx = fx.Index(part_i32)
                     part_weights_lds.store(weight, [part_idx_idx])
