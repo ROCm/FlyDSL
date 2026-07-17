@@ -140,16 +140,23 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
     then read LDS transposed and store coalesced along C. No dtype conversion.
     """
     assert c % TR_VEC == 0, f"fp8 transpose needs C % {TR_VEC} == 0, got C={c}"
-    assert s % TR_VEC == 0, f"fp8 transpose needs S % {TR_VEC} == 0, got S={s}"
+    assert s % TR_VEC == 0, f"fp8 transpose needs s % {TR_VEC} == 0, got s={s}"
     total_bytes = n * c * s
     grid_s = (s + TR_TILE - 1) // TR_TILE
     grid_c = (c + TR_TILE - 1) // TR_TILE
     u8 = fx.Uint8
+    # >2 GB byte offsets overflow the i32 buffer offset (e.g. ss*c or cc*s can reach
+    # ~7e9). For BIG tensors, address input load and output store through raw i64
+    # pointers instead of buffer_load/store's 32-bit element/byte offset.
+    TR_BIG = total_bytes > 0x7FFFFFFF
 
     @flyc.kernel(known_block_size=[TR_THREADS, 1, 1])
     def transpose_kernel(out: fx.Tensor, inp: fx.Tensor):
         in_rsrc = buffer_ops.create_buffer_resource(inp, max_size=False, num_records_bytes=total_bytes)
         out_rsrc = buffer_ops.create_buffer_resource(out, max_size=False, num_records_bytes=total_bytes)
+        if const_expr(TR_BIG):
+            in_base_addr = fx.Int64(buffer_ops.extract_base_index(inp))
+            out_base_addr = fx.Int64(buffer_ops.extract_base_index(out))
         lds_alloc = fx.SharedAllocator(static=False)
         lds = lds_alloc.allocate(fx.Array[u8, TR_TILE * TR_LDS_S, 16]).peek()
 
@@ -180,12 +187,22 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
             cc = c0 + rc
             ss = s0 + sv
             valid = (cc < fx.Index(c)) & (ss < fx.Index(s))
-            # buffer_load offset is in ELEMENTS of dtype (i32). The byte offset
-            # (in_base + cc*s + ss) is 16-byte aligned (ss multiple of 16, s%16==0),
-            # so /4 gives the int32-element offset for a dwordx4 (16B) load.
-            g = fx.Int32((in_base + cc * s + ss) // 4)
-            safe = arith.select(valid, g, fx.Int32(0))
-            v = buffer_ops.buffer_load(in_rsrc, safe, vec_width=4, dtype=fx.Int32)  # dwordx4 = 16B
+            if const_expr(TR_BIG):
+                # i64 byte address; load 16B (dwordx4) via a raw global pointer. Clamp the
+                # coords to 0 when OOB (only possible at a grid edge, i.e. c/s not tile-
+                # aligned) so the raw load never dereferences past the tensor.
+                cc_s = fx.Index(arith.select(valid, fx.Int64(cc), fx.Int64(0)))
+                ss_s = fx.Index(arith.select(valid, fx.Int64(ss), fx.Int64(0)))
+                addr = in_base_addr + (fx.Int64(nb) * fx.Int64(c) + fx.Int64(cc_s)) * fx.Int64(s) + fx.Int64(ss_s)
+                ptr = buffer_ops.create_llvm_ptr(addr, address_space=1)
+                v = llvm.LoadOp(fx.Vector.make_type(4, fx.Int32), ptr, alignment=16).result
+            else:
+                # buffer_load offset is in ELEMENTS of dtype (i32). The byte offset
+                # (in_base + cc*s + ss) is 16-byte aligned (ss multiple of 16, s%16==0),
+                # so /4 gives the int32-element offset for a dwordx4 (16B) load.
+                g = fx.Int32((in_base + cc * s + ss) // 4)
+                safe = arith.select(valid, g, fx.Int32(0))
+                v = buffer_ops.buffer_load(in_rsrc, safe, vec_width=4, dtype=fx.Int32)  # dwordx4 = 16B
             lds_store_i32x4(rc * TR_LDS_S + sv, v.ir_value() if hasattr(v, "ir_value") else v)
 
         llvm.InlineAsmOp(None, [], "s_waitcnt lgkmcnt(0)\n\ts_barrier", "", has_side_effects=True)
@@ -203,8 +220,14 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
                 scalars = [lds_load_scalar((cv + j) * TR_LDS_S + rs) for j in range_constexpr(TR_VEC)]
                 packed_u8 = fx.Vector.from_elements(scalars, dtype=u8)
                 packed = packed_u8.bitcast(fx.Int32)  # v16u8 -> v4i32
-                byte_off = out_base + ss * c + cc
-                buffer_ops.buffer_store(packed, out_rsrc, byte_off, offset_is_bytes=True)
+                if const_expr(TR_BIG):
+                    # i64 byte address; store 16B (dwordx4) via a raw global pointer.
+                    addr = out_base_addr + (fx.Int64(nb) * fx.Int64(s) + fx.Int64(ss)) * fx.Int64(c) + fx.Int64(cc)
+                    ptr = buffer_ops.create_llvm_ptr(addr, address_space=1)
+                    llvm.StoreOp(packed.ir_value() if hasattr(packed, "ir_value") else packed, ptr, alignment=16)
+                else:
+                    byte_off = out_base + ss * c + cc
+                    buffer_ops.buffer_store(packed, out_rsrc, byte_off, offset_is_bytes=True)
 
     @flyc.jit
     def launch(out: fx.Tensor, inp: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
@@ -302,7 +325,15 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
     @flyc.kernel(known_block_size=[BLOCK_THREADS, 1, 1])
     def conv3d_implicit_fp8_kernel(y: fx.Tensor, x: fx.Tensor, weight: fx.Tensor, bias: fx.Tensor):
         f8_ir_t = elem_ty.ir_type
-        x_num_records = n * d * h * width * c
+        # OOB sentinel element offset for padded / out-of-bounds im2col taps. The buffer
+        # element offset is treated as UNSIGNED 32-bit by the hardware bounds check, so
+        # the sentinel must be >= the activation buffer's num_records to be zeroed. The
+        # rebased BIG_IN resource has num_records = 2 GB (0x80000000 elements at 1 B/fp8),
+        # so the sentinel must exceed that; a non-BIG_IN buffer is < 2^31 elements, so it
+        # is covered too. 0xF0000000 (~4.03 G, unsigned) satisfies both. NOTE: a value
+        # < 0x80000000 (e.g. 0x7FFFFF80) is IN-BOUNDS for the 2 GB BIG_IN resource and
+        # would read live data for padding taps (NaNs on >2 GB activations).
+        OOB_SENTINEL_ELEM = 0xF0000000
 
         y_rsrc = buffer_ops.create_buffer_resource(y, max_size=False, num_records_bytes=npq * k * 2)
         if const_expr(has_bias):
@@ -438,7 +469,7 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
                 else:
                     g_elem = (((n_idx * d + in_t) * h + in_h) * width + in_w) * c + cc
             g_elem_i = fx.Int32(g_elem)
-            return arith.select(valid, g_elem_i, fx.Int32(x_num_records))
+            return arith.select(valid, g_elem_i, fx.Int32(OOB_SENTINEL_ELEM))
 
         # ---- conv A G2S: deposit im2col chunks into the GEMM half-block LDS layout ----
         # Physical LDS byte P = wave_id*1024 + step*(N_WAVES*1024) + lane*16 equals the
@@ -481,7 +512,7 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
                 if const_expr(STRIP_IM2COL):
                     k_col = k_base + cc
                     lin = m_row * crs + k_col
-                    safe = fx.Int32(arith.select(m_row < fx.Index(npq), lin, fx.Index(x_num_records)))
+                    safe = fx.Int32(arith.select(m_row < fx.Index(npq), lin, fx.Index(OOB_SENTINEL_ELEM)))
                 else:
                     safe = im2col_safe_elem_pre(spatial, k_base + cc, k_iter)
                 base_i32 = fx.Int32(fx.ptrtoint(lds_dst.ptr)) + fx.Int32(step_off)
