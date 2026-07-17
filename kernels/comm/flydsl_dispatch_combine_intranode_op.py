@@ -166,7 +166,7 @@ def build_geometry_tuning_table_for_config(cfg, path=None):
     if path is None or not Path(path).is_file():
         return None
     try:
-        dispatch_dtype_name = dtype_to_tuning_name(cfg.data_type)
+        dispatch_dtype_name = dtype_to_tuning_name(cfg.dispatch_dtype)
     except ValueError:
         return None
     table = GeometryTuningTable.from_tuning_file(
@@ -230,7 +230,12 @@ class FlyDSLDispatchCombineConfig:
     max_num_inp_token_per_rank: int
     num_experts_per_rank: int
     num_experts_per_token: int
-    data_type: torch.dtype = torch.bfloat16
+    # Statically-pinned dtypes (memory is sized exactly for these, and the
+    # dispatch()/combine() entry points validate the runtime input against them):
+    #   dispatch_dtype = dispatched (quantized) activation dtype, e.g. fp8/fp4
+    #   combine_dtype  = combine wire/output dtype, typically bf16
+    dispatch_dtype: torch.dtype = torch.bfloat16
+    combine_dtype: torch.dtype = torch.bfloat16
     # User-pinned launch geometry, resolved ONCE per op (not per call):
     # pinned value (block_num+warp must be set together) > tuning table >
     # ``default_*`` fallback above. None => not pinned.
@@ -240,33 +245,55 @@ class FlyDSLDispatchCombineConfig:
     combine_warp_num_per_block: Optional[int] = None
     tuning_table: Optional[GeometryTuningTable] = None
     tuning_config_path: Optional[str] = None
+    # Per-token dispatch scale layout (quantized activations): scale_dim = number
+    # of scale values per token, scale_type_size = bytes per scale element.
     scale_dim: int = 0
     scale_type_size: int = 0
     enable_std_moe: bool = False
     zero_copy: bool = False
-    quant_type: str = "none"
+    combine_quant_type: str = "none"
     max_total_recv_tokens: int = 0
-    max_token_type_size: int = 0
+    # When enable_group_major is True the op ALSO owns the expert-major dispatch
+    # buffers the fused stage-1 megakernel (compile_fused_moe_gemm1(fuse_dispatch=))
+    # reads/writes, via an internal FlyDSLDispatchGroupMajorOp (self._gm). It reuses
+    # ``dispatch_dtype`` (the quantized activation dtype) and ``scale_dim`` /
+    # ``scale_type_size``. Default False keeps the op token-major only.
+    enable_group_major: bool = False
+    gm_unit_size: int = 0
+    gm_scheme: str = "fixedslot"
+    gm_compact: bool = False
 
     @property
-    def is_fp4(self):
-        return self.data_type == torch.float4_e2m1fn_x2
+    def dispatch_is_fp4(self):
+        return self.dispatch_dtype == torch.float4_e2m1fn_x2
 
     @property
-    def elem_size(self):
-        return _dtype_elem_size(self.data_type)
+    def combine_is_fp4(self):
+        return self.combine_dtype == torch.float4_e2m1fn_x2
 
     @property
-    def token_bytes(self):
-        if self.is_fp4:
-            return self.hidden_dim // 2
-        return self.hidden_dim * self.elem_size
+    def dispatch_elem_size(self):
+        return _dtype_elem_size(self.dispatch_dtype)
 
     @property
-    def token_view_dim(self):
-        if self.is_fp4:
-            return self.hidden_dim // 2
-        return self.hidden_dim
+    def combine_elem_size(self):
+        return _dtype_elem_size(self.combine_dtype)
+
+    @property
+    def dispatch_token_bytes(self):
+        return _token_bytes_for(self.dispatch_dtype, self.hidden_dim)
+
+    @property
+    def combine_token_bytes(self):
+        return _token_bytes_for(self.combine_dtype, self.hidden_dim)
+
+    @property
+    def dispatch_token_view_dim(self):
+        return _token_view_dim_for(self.dispatch_dtype, self.hidden_dim)
+
+    @property
+    def combine_token_view_dim(self):
+        return _token_view_dim_for(self.combine_dtype, self.hidden_dim)
 
     @property
     def max_recv(self):
@@ -286,15 +313,237 @@ class FlyDSLDispatchCombineConfig:
         return self.world_size * self.effective_max_recv_per_rank
 
     @property
-    def max_token_bytes(self):
-        """Per-row shmem allocation bound (mori ``maxTokenTypeSize``)."""
-        if self.max_token_type_size > 0:
-            return self.hidden_dim * self.max_token_type_size
-        return self.token_bytes
-
-    @property
     def scale_bytes(self):
         return self.scale_dim * self.scale_type_size
+
+
+def _gm_is_fp4(dt):
+    return dt == torch.float4_e2m1fn_x2
+
+
+def _gm_row_bytes(dt, hidden):
+    return hidden // 2 if _gm_is_fp4(dt) else hidden * torch.tensor([], dtype=dt).element_size()
+
+
+def _gm_row_view(dt, hidden):
+    return hidden // 2 if _gm_is_fp4(dt) else hidden
+
+
+class FlyDSLDispatchGroupMajorOp:
+    """Unified handshake-free fixed-slot (cap=mtpr) expert-major dispatch op."""
+
+    def __init__(self, *, rank, world_size, hidden_dim, max_tok_per_rank, experts_per_rank,
+                 topk, data_type, unit_size, scale_dim, scale_type_size=1,
+                 warp_num_per_block=4, block_num=None, num_valid_max=None,
+                 dedup_payload=False, low_latency=True, ll_unified=True,
+                 fused_scale_swizzle=False, scheme="fixedslot", compact=False):
+        assert world_size <= 8
+        # scheme: "fixedslot" = per-token remote-atomic packing (current); "handshake" =
+        # all-gather counts -> dense expert-major direct write (atomic-free).  Same outputs.
+        assert scheme in ("fixedslot", "handshake")
+        self.scheme = scheme
+        # compact (fixedslot/naive only): COUNT-first two-pass -> COMPACT expert-major layout (no
+        # per-expert cap reservation).  Phase-0 counts (remote atomic), block0 broadcasts a dense
+        # prefix-sum base (compact_base[le]), Phase-2 writes payload precisely.  Cuts num_valid_max
+        # from epr*cap (=epr*npes*mtpr, OOMs at large bs) to ~npes*mtpr*topk -> scales to full bs.
+        self.compact = bool(compact and scheme == "fixedslot")
+        self.rank = rank
+        self.npes = world_size
+        self.hidden = hidden_dim
+        self.mtpr = max_tok_per_rank
+        self.epr = experts_per_rank
+        self.topk = topk
+        self.dtype = data_type
+        self.unit = unit_size
+        # cap = per-expert fixed-slot capacity, rounded up to a tile_m multiple.  Each expert
+        # reserves `cap` rows; the post-pass emits only the occupied tiles, so the sparse GEMM
+        # tracks real load (cap only costs reserved address space, NOT GEMM compute).
+        # cap = npes*mtpr = the all-to-one worst case (a token hits an expert at most once, so a
+        # local expert receives at most npes*mtpr tokens) => PROVABLY overflow-free; no drops.
+        self.max_tokens_per_expert = world_size * max_tok_per_rank
+        self.ll_cap = ((self.max_tokens_per_expert + unit_size - 1) // unit_size) * unit_size
+        self.low_latency = True
+        self.ll_unified = True
+        self.scale_dim = scale_dim
+        self.scale_type_size = scale_type_size
+        self.scale_bytes = scale_dim * scale_type_size
+        self.scale_n_i32 = (self.scale_bytes + 3) // 4 if self.scale_bytes > 0 else 0
+        self.fused_scale_swizzle = bool(fused_scale_swizzle and self.scale_bytes > 0)
+        self.warps = warp_num_per_block
+        self._dev = torch.device("cuda", rank)
+        self.row_bytes = _gm_row_bytes(data_type, hidden_dim)
+        self.row_view = _gm_row_view(data_type, hidden_dim)
+
+        try:
+            cu = int(torch.cuda.get_device_properties(self._dev).multi_processor_count)
+        except Exception:
+            cu = 128
+        self._cu = cu
+
+        # Payload extent / GEMM grid bound:
+        #  * fixedslot SPARSE le*cap: needs epr*cap rows (one cap-region per local expert).
+        #  * handshake COMPACT dense: needs only total-recv worst case + per-expert tile_m padding,
+        #    NO per-expert cap reservation -> far smaller buffers AND a tight max_blocks so the
+        #    non-persistent GEMM does not over-launch ~empty CTAs (the cap-based bound launched
+        #    epr*cap/tile_m CTAs vs the ~num_valid actually occupied).
+        if num_valid_max is None:
+            if self.scheme == "handshake" or self.compact:
+                # tr <= npes*mtpr*topk (each of npes ranks' mtpr tokens hits <= topk of my experts);
+                # + epr*unit for the per-expert tile_m padding of the compact layout.
+                num_valid_max = world_size * max_tok_per_rank * topk + experts_per_rank * unit_size
+            else:
+                num_valid_max = experts_per_rank * self.ll_cap + 256
+        self.num_valid_max = int(num_valid_max)
+        self.max_blocks = (self.num_valid_max + unit_size - 1) // unit_size
+        # block_num: full parallelism at prefill; scaled down at small bs where the grid-barrier
+        # + large launch is pure fixed overhead.
+        if block_num is not None:
+            self.block_num = int(block_num)
+        else:
+            self.block_num = min(self._cu, 128, max(8, (max_tok_per_rank * topk) // 4))
+
+        self._alloc()
+        ms.shmem_barrier_all()
+        self._build_p2p()
+        # NOTE: the standalone dispatch KERNEL is no longer compiled/launched here — the dispatch
+        # logic is INLINED in the megakernel's GEMM prologue (compile_fused_moe_gemm1(fuse_dispatch=)).
+        # This op now only owns the symmetric (mori-shmem / P2P) buffers + sort-metadata tensors that
+        # the megakernel reads; there is NO `op.dispatch()` entry point anymore.
+
+    def _sym(self, shape, dtype):
+        t = mori_shmem_create_tensor(shape, dtype)
+        t.zero_()
+        return t
+
+    def _alloc(self):
+        npes, epr = self.npes, self.epr
+        nvm = self.num_valid_max
+        # symmetric (P2P) buffers
+        self.done2 = self._sym((npes,), torch.int32)
+        # persistent per-expert recv count: peers atomic-add as their tokens land; the post-pass
+        # copies running->ll_count then folds running back to 0 (no separate reset launch).
+        self.running = self._sym((epr,), torch.int32)
+        self.ll_count = self._sym((epr,), torch.int32)
+        self.rx_em = self._sym((nvm * self.row_bytes,), torch.int8)
+        self.scale_em = self._sym((max(1, nvm * self.scale_n_i32),), torch.int32)
+        self.idx_em = self._sym((nvm,), torch.int32)
+        self.wts_em = self._sym((nvm,), torch.float32)
+        self.srcmap_em = self._sym((nvm,), torch.int32)
+        # local-only buffers
+        self.gb1 = torch.zeros(1, dtype=torch.int64, device=self._dev)
+        self.sorted_expert_ids = torch.zeros(self.max_blocks, dtype=torch.int32, device=self._dev)
+        # per-occupied-tile sparse row base (le*cap + t*tile_m); GEMM reads bx_m from here.
+        self.tile_row_base = torch.zeros(self.max_blocks, dtype=torch.int32, device=self._dev)
+        self.num_valid = torch.zeros(2, dtype=torch.int32, device=self._dev)
+        # ---- Plan A: native total_recv (distinct recv count, == standard-dispatch dce.total_recv) ----
+        # fixedslot writes per-(token,expert) (running[le] counts copies), so distinct recv is computed
+        # by a per-token distinct-dest-PE dedup pass that bumps dest_ctr[dpe], then a cross-PE recv-count
+        # signal (recv_num, symmetric) accumulates total_recv -- mirrors the sorted path / standard
+        # dispatch.  Lets stage2 combine read total_recv natively (no redundant dce.dispatch).
+        self.total_recv = torch.zeros(1, dtype=torch.int32, device=self._dev)   # local; kernel accumulates
+        self.dest_ctr = torch.zeros(self.npes, dtype=torch.int32, device=self._dev)  # local send-count/dest
+        self.recv_num = self._sym((self.npes,), torch.int32)                    # symmetric: peers signal here
+        # ---- compact (naive count-first) buffers ----
+        # compact_base[le] = dense prefix-sum base (tile_m-padded) for local expert le; symmetric so
+        # senders read the DEST's base to place payload precisely.  done2c = the COUNT cross-PE
+        # done-barrier (separate epoch buffer from done2 which gates the WRITE round).  gb_cnt =
+        # the count-pass grid-arrival counter (separate from gb1 which gates the write-pass).
+        self.compact_base = None
+        self.done2c = None
+        self.gb_cnt = None
+        self.meta2 = None
+        self.write_cursor = None
+        if self.compact:
+            self.compact_base = self._sym((epr,), torch.int32)
+            self.done2c = self._sym((npes,), torch.int32)
+            self.gb_cnt = torch.zeros(1, dtype=torch.int64, device=self._dev)
+            self.meta2 = torch.zeros(1, dtype=torch.int32, device=self._dev)   # payload-ready flag
+            # phase-2 write cursor (SEPARATE from running, which is the count accumulator) so neither
+            # needs a mid-kernel reset (avoids the cross-rank reset race): both start at 0 and are
+            # reset to 0 only at kernel END (after cross-PE#2), mirroring the non-compact post-pass.
+            self.write_cursor = self._sym((epr,), torch.int32)
+            # cross-PE barrier #1b: AFTER each rank's block0 computes compact_base[], BEFORE any sender
+            # reads a DEST's compact_base in phase-2.  Without it a sender can read a dest's stale/zero
+            # compact_base (dest's block0 not done yet) -> wrong slots -> corrupt output on some ranks.
+            self.done2cb = self._sym((npes,), torch.int32)
+            # ---- ALL-GATHER compact (2 cross-PE rounds instead of 3): local count -> bigcnt all-gather
+            # -> each rank computes my_base[ge] LOCALLY (where its tokens land in each dest) -> strict
+            # write with a LOCAL cursor.  Avoids remote count atomics + remote compact_base read.
+            _te = npes * epr
+            self.local_hist = torch.zeros(_te, dtype=torch.int32, device=self._dev)     # per-launch reset
+            self.bigcnt = self._sym((npes * _te,), torch.int32)                          # [src][ge] all-gather
+            self.cnt_done = self._sym((npes,), torch.int32)                              # all-gather epoch barrier
+            self.my_base = torch.zeros(_te, dtype=torch.int32, device=self._dev)         # my tokens' base in each dest
+            self.local_cursor = torch.zeros(_te, dtype=torch.int32, device=self._dev)    # per-launch reset (write cursor)
+        self.swizzled_scale = None
+        if self.fused_scale_swizzle:
+            if self.scale_dim % 8 != 0:
+                raise ValueError(f"scale_dim={self.scale_dim} must be a multiple of 8")
+            m_tiles = (self.num_valid_max + 31) // 32
+            n_tiles = self.scale_dim // 8
+            self.swizzled_scale = torch.zeros((m_tiles, n_tiles, 4, 16), dtype=torch.int32, device=self._dev)
+        # ---- handshake-scheme buffers (all-gather counts -> dense expert-major) ----
+        if self.scheme == "handshake":
+            te = self.npes * self.epr
+            self.local_hist = torch.zeros(te, dtype=torch.int32, device=self._dev)   # in-graph reset
+            self.off_buf = torch.zeros(self.mtpr * self.topk, dtype=torch.int32, device=self._dev)
+            self.my_base = torch.zeros(te, dtype=torch.int32, device=self._dev)
+            self.bigcnt = self._sym((self.npes * te,), torch.int32)                  # [src][global_expert]
+            self.cnt_done = self._sym((self.npes,), torch.int32)                     # count-ready epoch signal
+            # W0 parallel counts-first: 2nd grid-arrival counter (post-SCT barrier). Monotonic, NEVER
+            # reset (epoch = gb2/nblk), CUDAGraph-safe — mirrors gb1.
+            self.gb2 = torch.zeros(1, dtype=torch.int64, device=self._dev)
+
+    def _p2p_table(self, t):
+        tbl = torch.zeros(self.npes, dtype=torch.int64, device=self._dev)
+        for pe in range(self.npes):
+            tbl[pe] = ms.shmem_ptr_p2p(t.data_ptr(), self.rank, pe)
+        return tbl
+
+    def _build_p2p(self):
+        self.p2p_done2 = self._p2p_table(self.done2)
+        self.p2p_running = self._p2p_table(self.running)
+        self.p2p_rx_em = self._p2p_table(self.rx_em)
+        self.p2p_scale_em = self._p2p_table(self.scale_em)
+        self.p2p_idx_em = self._p2p_table(self.idx_em)
+        self.p2p_wts_em = self._p2p_table(self.wts_em)
+        self.p2p_srcmap_em = self._p2p_table(self.srcmap_em)
+        self.p2p_recv_num = self._p2p_table(self.recv_num)   # Plan A: cross-PE recv-count signal target
+        if self.compact:
+            self.p2p_compact_base = self._p2p_table(self.compact_base)
+            self.p2p_done2c = self._p2p_table(self.done2c)
+            self.p2p_write_cursor = self._p2p_table(self.write_cursor)
+            self.p2p_done2cb = self._p2p_table(self.done2cb)
+            self.p2p_bigcnt = self._p2p_table(self.bigcnt)
+            self.p2p_cnt_done = self._p2p_table(self.cnt_done)
+        if self.scheme == "handshake":
+            self.p2p_bigcnt = self._p2p_table(self.bigcnt)
+            self.p2p_cnt_done = self._p2p_table(self.cnt_done)
+
+    def reset_counters(self):
+        """No-op: the per-expert count reset is folded into the kernel post-pass."""
+        return
+
+    @property
+    def ll_cap_used(self):
+        """Per-expert slot capacity (cap = npes*mtpr, tile_m-aligned; provably overflow-free)."""
+        return self.ll_cap
+
+    def _ll_views(self):
+        rx_em_view = self.rx_em.view(self.dtype).view(self.num_valid_max, self.row_view) \
+            if not _gm_is_fp4(self.dtype) else self.rx_em.view(torch.float4_e2m1fn_x2).view(self.num_valid_max, self.row_view)
+        scale_em_view = self.scale_em.view(torch.uint8).view(self.num_valid_max, max(1, self.scale_n_i32 * 4))[:, :self.scale_bytes]
+        scale_em_i32 = self.scale_em.view(self.num_valid_max, max(1, self.scale_n_i32))
+        return dict(rx_em=rx_em_view, scale_em=scale_em_view, scale_em_i32=scale_em_i32,
+                    idx_em=self.idx_em, wts_em=self.wts_em, srcmap_em=self.srcmap_em,
+                    sorted_expert_ids=self.sorted_expert_ids, tile_row_base=self.tile_row_base,
+                    num_valid=self.num_valid, dedup_rx=None,
+                    swizzled_scale=(None if self.swizzled_scale is None else
+                                    self.swizzled_scale
+                                    .view(getattr(torch, "float8_e8m0fnu", torch.uint8))
+                                    .view(-1, self.scale_dim)
+                                    .view(torch.uint8)))
+
 
 
 class FlyDSLDispatchCombineIntraNodeOp:
@@ -384,6 +633,42 @@ class FlyDSLDispatchCombineIntraNodeOp:
         self._comb_no_s1_fn: Dict[Tuple[torch.dtype, bool, int, int], Any] = {}
         self._comb_no_s1_compiled: Dict[Tuple[torch.dtype, bool, int, int], Any] = {}
 
+        self._gm = None
+        if getattr(config, "enable_group_major", False):
+            self._gm = FlyDSLDispatchGroupMajorOp(
+                rank=config.rank, world_size=config.world_size, hidden_dim=config.hidden_dim,
+                max_tok_per_rank=config.max_num_inp_token_per_rank,
+                experts_per_rank=config.num_experts_per_rank, topk=config.num_experts_per_token,
+                data_type=config.dispatch_dtype, unit_size=config.gm_unit_size,
+                scale_dim=config.scale_dim, scale_type_size=config.scale_type_size,
+                scheme=config.gm_scheme, compact=config.gm_compact,
+            )
+            # Unify total_recv: the fused dispatch prologue accumulates distinct-recv into
+            # the SAME buffer combine reads (self.total_recv), so no host/device bridge.
+            self._gm.total_recv = self.total_recv
+            ms.shmem_barrier_all()
+
+        # MegaMoE fused gemm2+combine token-flag machinery: the fused gemm2 epilogue P2P-scatters
+        # into peers' shmem_comb_inp_tok and bumps shmem_comb_token_flag via device_local_counter.
+        _npes_tf = config.world_size
+        _mr_worst_tf = config.max_recv
+        self.shmem_comb_token_flag = mori_shmem_create_tensor((_mr_worst_tf,), torch.int32)
+        self.shmem_comb_token_flag.zero_()
+        self.device_local_counter = torch.zeros(
+            _mr_worst_tf * config.num_experts_per_token
+            + _npes_tf * config.num_experts_per_rank * 128,
+            dtype=torch.int32, device=self._dev)
+        ms.shmem_barrier_all()
+        self._p2p_comb_flag = torch.zeros(_npes_tf, dtype=torch.int64, device=self._dev)
+        for _pe_tf in range(_npes_tf):
+            self._p2p_comb_flag[_pe_tf] = ms.shmem_ptr_p2p(
+                self.shmem_comb_token_flag.data_ptr(), config.rank, _pe_tf)
+        self._fx_tis = self._fx_out_shmem_tok_id_to_src
+        self._fx_comb_flag = fx.Int64(self.shmem_comb_token_flag.data_ptr())
+        self._fx_local_counter = fx.Int64(self.device_local_counter.data_ptr())
+        self._fx_p2p_comb_flag = fx.Int64(self._p2p_comb_flag.data_ptr())
+        ms.shmem_barrier_all()
+
     def load_tuning_config(self, path=None):
         """Build and attach the geometry tuning table for this op's shape."""
         self.cfg.tuning_table = build_geometry_tuning_table_for_config(self.cfg, path)
@@ -397,10 +682,15 @@ class FlyDSLDispatchCombineIntraNodeOp:
         mr = cfg.effective_max_recv
         mr_worst = cfg.max_recv
 
-        tb_max = cfg.max_token_bytes
-        tok_i16_mr = (mr * tb_max + 1) // 2
-        tok_i16_mr_worst = (mr_worst * tb_max + 1) // 2
-        tok_i16_mt = (mt * tb_max + 1) // 2
+        # Fused GEMM2+combine (Plan B) scatters to slot dest_lid*k+s (mt*k rows); the baseline
+        # combine scatter needs mr_worst=npes*mt rows -> size the input for the larger (topk>npes ok).
+        mr_worst_inp = max(mr_worst, mt * k)
+
+        disp_tb = cfg.dispatch_token_bytes
+        comb_tb = cfg.combine_token_bytes
+        tok_i16_mr = (mr * disp_tb + 1) // 2               # dispatch output (dispatch_dtype)
+        tok_i16_mr_worst = (mr_worst_inp * comb_tb + 1) // 2   # combine input, worst-case (combine_dtype)
+        tok_i16_mt = (mt * comb_tb + 1) // 2               # combine output (combine_dtype)
 
         self.shmem_disp_out_tok = mori_shmem_create_tensor((tok_i16_mr,), torch.int16)
         self.shmem_disp_out_wts = mori_shmem_create_tensor((mr * k,), torch.float32)
@@ -410,9 +700,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
         self.shmem_tok_off = mori_shmem_create_tensor((1,), torch.int32)
         self.shmem_recv_tok_num = mori_shmem_create_tensor((npes,), torch.int32)
         self.shmem_tok_id_to_src = mori_shmem_create_tensor((mr,), torch.int32)
-        # TODO(perf): layout optimization -- combine input is sized ws*M
-        # (sparse sender_rank*M+dest_lid slots); could tighten to
-        # effective_max_recv with a compact-layout rework.
+        # combine input sized max(npes, topk)*mt (baseline sender-major slots vs Plan-B dest_lid*k+s).
         self.shmem_comb_inp_tok = mori_shmem_create_tensor((tok_i16_mr_worst,), torch.int16)
         self.shmem_comb_inp_wts = mori_shmem_create_tensor((mr_worst * k,), torch.float32)
         self.shmem_comb_out_tok = mori_shmem_create_tensor((tok_i16_mt,), torch.int16)
@@ -474,34 +762,43 @@ class FlyDSLDispatchCombineIntraNodeOp:
         if cfg.num_experts_per_token > 64:
             raise ValueError(f"num_experts_per_token={cfg.num_experts_per_token} exceeds the warp-lane budget (64)")
 
-        if cfg.data_type not in _SUPPORTED_TOK_DTYPES:
-            raise ValueError(f"data_type={cfg.data_type} not supported. Supported: {_SUPPORTED_TOK_DTYPES}")
-        if cfg.quant_type not in _SUPPORTED_QUANT_TYPES:
-            raise ValueError(f"quant_type={cfg.quant_type!r} not supported. Supported: {_SUPPORTED_QUANT_TYPES}")
-        if cfg.quant_type == "fp8_direct_cast" and cfg.data_type != torch.bfloat16:
+        if cfg.dispatch_dtype not in _SUPPORTED_TOK_DTYPES:
+            raise ValueError(f"dispatch_dtype={cfg.dispatch_dtype} not supported. Supported: {_SUPPORTED_TOK_DTYPES}")
+        if cfg.combine_dtype not in _SUPPORTED_TOK_DTYPES:
+            raise ValueError(f"combine_dtype={cfg.combine_dtype} not supported. Supported: {_SUPPORTED_TOK_DTYPES}")
+        if cfg.combine_quant_type not in _SUPPORTED_QUANT_TYPES:
             raise ValueError(
-                f"quant_type='fp8_direct_cast' requires data_type=bfloat16 " f"(external dtype), got {cfg.data_type}"
+                f"combine_quant_type={cfg.combine_quant_type!r} not supported. Supported: {_SUPPORTED_QUANT_TYPES}"
+            )
+        if cfg.combine_quant_type == "fp8_direct_cast" and cfg.combine_dtype != torch.bfloat16:
+            raise ValueError(
+                f"combine_quant_type='fp8_direct_cast' requires combine_dtype=bfloat16 "
+                f"(external dtype), got {cfg.combine_dtype}"
             )
 
-        if cfg.quant_type == "fp8_direct_cast" and cfg.enable_std_moe:
+        if cfg.combine_quant_type == "fp8_direct_cast" and cfg.enable_std_moe:
             raise NotImplementedError(
-                "quant_type='fp8_direct_cast' is not supported with "
+                "combine_quant_type='fp8_direct_cast' is not supported with "
                 "enable_std_moe=True (asymmetric I/O dtypes not yet wired)"
             )
 
-        if cfg.quant_type == "fp8_direct_cast" and cfg.zero_copy:
+        if cfg.combine_quant_type == "fp8_direct_cast" and cfg.zero_copy:
             raise ValueError(
-                "quant_type='fp8_direct_cast' is incompatible with "
+                "combine_quant_type='fp8_direct_cast' is incompatible with "
                 "zero_copy=True (use_external_inp_buf=False): zero_copy "
                 "skips Stage 1 where the bf16->fp8 cast lives."
             )
 
-        if cfg.token_bytes % _TOK_BYTES_ALIGN != 0:
-            raise ValueError(
-                f"token row bytes ({cfg.token_bytes}) must be a multiple of "
-                f"{_TOK_BYTES_ALIGN} for v4i32 vector loads; check hidden_dim "
-                f"({cfg.hidden_dim}) and data_type ({cfg.data_type})"
-            )
+        for _tag, _tb, _dt in (
+            ("dispatch", cfg.dispatch_token_bytes, cfg.dispatch_dtype),
+            ("combine", cfg.combine_token_bytes, cfg.combine_dtype),
+        ):
+            if _tb % _TOK_BYTES_ALIGN != 0:
+                raise ValueError(
+                    f"{_tag} token row bytes ({_tb}) must be a multiple of "
+                    f"{_TOK_BYTES_ALIGN} for v4i32 vector loads; check hidden_dim "
+                    f"({cfg.hidden_dim}) and {_tag}_dtype ({_dt})"
+                )
 
         # max_total_recv_tokens: 0 disables; >0 needs every rank >= 1 slot.
         if cfg.max_total_recv_tokens < 0:
@@ -523,18 +820,6 @@ class FlyDSLDispatchCombineIntraNodeOp:
                     f"clamping to {hi}.  effective_max_recv_per_rank will be "
                     f"{cfg.max_num_inp_token_per_rank} (M).",
                     stacklevel=2,
-                )
-
-        # max_token_type_size: 0 disables; else must cover the dispatch elem size.
-        if cfg.max_token_type_size < 0:
-            raise ValueError(f"max_token_type_size must be non-negative, got {cfg.max_token_type_size}")
-        if cfg.max_token_type_size > 0:
-            inp_es = 1 if cfg.is_fp4 else cfg.elem_size
-            if cfg.max_token_type_size < inp_es:
-                raise ValueError(
-                    f"max_token_type_size={cfg.max_token_type_size} is smaller than the "
-                    f"dispatch element size ({inp_es} bytes from data_type="
-                    f"{cfg.data_type})"
                 )
 
         if cfg.scale_dim < 0 or cfg.scale_type_size < 0:
@@ -605,21 +890,18 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 f"input rows={cur_tok} exceeds cfg.max_num_inp_token_per_rank="
                 f"{cfg.max_num_inp_token_per_rank} (would OOB-write into shmem)"
             )
-        # input.dtype is the launch-time dtype, not tied to cfg.data_type.
-        if input.dtype not in _SUPPORTED_TOK_DTYPES:
-            raise ValueError(f"input.dtype={input.dtype} not in supported set {_SUPPORTED_TOK_DTYPES}")
-        expected_hdim = _token_view_dim_for(input.dtype, cfg.hidden_dim)
+        # Statically pinned: dispatch input dtype must match cfg.dispatch_dtype
+        # (shmem buffers are sized exactly for it).
+        if input.dtype != cfg.dispatch_dtype:
+            raise ValueError(
+                f"dispatch input.dtype={input.dtype} != cfg.dispatch_dtype="
+                f"{cfg.dispatch_dtype}; buffers are sized for the pinned dispatch dtype"
+            )
+        expected_hdim = cfg.dispatch_token_view_dim
         if input.shape[1] != expected_hdim:
             raise ValueError(
                 f"input.shape[1]={input.shape[1]} != expected {expected_hdim} "
-                f"(hidden_dim={cfg.hidden_dim}, dtype={input.dtype})"
-            )
-        inp_token_bytes = _token_bytes_for(input.dtype, cfg.hidden_dim)
-        if inp_token_bytes > cfg.max_token_bytes:
-            raise ValueError(
-                f"dispatch input.dtype={input.dtype} needs {inp_token_bytes}B/token "
-                f"but shmem buffers are sized for {cfg.max_token_bytes}B/token; "
-                f"set cfg.max_token_type_size to cover the largest dtype the op handles."
+                f"(hidden_dim={cfg.hidden_dim}, dispatch_dtype={cfg.dispatch_dtype})"
             )
 
         if weights.dim() != 2:
@@ -681,13 +963,16 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
         if input.dim() != 2:
             raise ValueError(f"combine input must be 2-D, got shape {tuple(input.shape)}")
-        if strict_input_dtype and input.dtype not in _SUPPORTED_TOK_DTYPES:
-            raise ValueError(f"combine input.dtype={input.dtype} not in supported set {_SUPPORTED_TOK_DTYPES}")
-        view_dtype = (
-            input.dtype
-            if strict_input_dtype
-            else (input.dtype if input.dtype in _SUPPORTED_TOK_DTYPES else cfg.data_type)
-        )
+        # Statically pinned: combine input dtype must match cfg.combine_dtype
+        # (shmem buffers are sized exactly for it).  ``strict_input_dtype=False``
+        # (skip-stage1 fused path) treats ``input`` as a placeholder and relaxes
+        # the check, falling back to combine_dtype for the shape view.
+        if strict_input_dtype and input.dtype != cfg.combine_dtype:
+            raise ValueError(
+                f"combine input.dtype={input.dtype} != cfg.combine_dtype="
+                f"{cfg.combine_dtype}; buffers are sized for the pinned combine dtype"
+            )
+        view_dtype = input.dtype if strict_input_dtype else cfg.combine_dtype
         expected_hdim = _token_view_dim_for(view_dtype, cfg.hidden_dim)
         if input.shape[1] != expected_hdim:
             raise ValueError(
@@ -696,14 +981,6 @@ class FlyDSLDispatchCombineIntraNodeOp:
             )
         if input.shape[0] > cfg.max_recv:
             raise ValueError(f"combine input rows={input.shape[0]} exceeds max_recv={cfg.max_recv}")
-        if strict_input_dtype:
-            inp_token_bytes = _token_bytes_for(input.dtype, cfg.hidden_dim)
-            if inp_token_bytes > cfg.max_token_bytes:
-                raise ValueError(
-                    f"combine input.dtype={input.dtype} needs {inp_token_bytes}B/token "
-                    f"but shmem buffers are sized for {cfg.max_token_bytes}B/token; "
-                    f"set cfg.max_token_type_size to cover the largest dtype the op handles."
-                )
 
         if weights is not None:
             self._check_tensor_device("weights", weights)
@@ -921,7 +1198,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
         zero_copy = cfg.zero_copy
         enable_weights_flag = True
         # fp8_direct_cast fires only when cfg asks AND launch dtype is bf16.
-        fp8_dc = cfg.quant_type == "fp8_direct_cast" and c_dtype == torch.bfloat16
+        fp8_dc = cfg.combine_quant_type == "fp8_direct_cast" and c_dtype == torch.bfloat16
         # Zero-copy contract: peers read shmem_comb_inp_tok; any other pointer is
         # a silent correctness bug.
         if zero_copy and input.data_ptr() != self.shmem_comb_inp_tok.data_ptr():
@@ -1050,10 +1327,8 @@ class FlyDSLDispatchCombineIntraNodeOp:
         cur_tok=None,
         enable_weights: bool = True,
     ):
-        """Skip-Stage1 combine (reserved for fused GEMM2+combine; gated by
-        ``_ENABLE_COMBINE_NO_STAGE1``). Runs Stage 2+3 only; caller must have
-        populated ``shmem_comb_inp[_wts]`` and pass a matching ``cur_tok``.
-        ``enable_weights=False`` DCEs the weight steps (~3-5 us savings)."""
+        """Skip-Stage1 combine (fused GEMM2+combine only; gated by ``_ENABLE_COMBINE_NO_STAGE1``).
+        Runs Stage 2+3; caller pre-populated ``shmem_comb_inp[_wts]`` and passes ``cur_tok``."""
         if not type(self)._ENABLE_COMBINE_NO_STAGE1:
             raise NotImplementedError(
                 "combine_no_stage1 is reserved for the fused GEMM2+combine "
@@ -1067,7 +1342,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
         cfg = self.cfg
         stream = torch.cuda.current_stream()
 
-        fp8_dc = cfg.quant_type == "fp8_direct_cast" and input.dtype == torch.bfloat16
+        fp8_dc = cfg.combine_quant_type == "fp8_direct_cast" and input.dtype == torch.bfloat16
         if fp8_dc and input.dtype != torch.float8_e4m3fn:
             inp_c = input.to(torch.float8_e4m3fn).contiguous()
         else:
@@ -1202,17 +1477,11 @@ class FlyDSLDispatchCombineIntraNodeOp:
         """Return ``shmem_comb_inp_tok`` viewed as ``dtype``; in zero-copy mode the
         caller MUST write into this view before ``op.combine(...)``."""
         cfg = self.cfg
-        dt = dtype if dtype is not None else cfg.data_type
-        if dt not in _SUPPORTED_TOK_DTYPES:
+        dt = dtype if dtype is not None else cfg.combine_dtype
+        if dt != cfg.combine_dtype:
             raise ValueError(
-                f"get_registered_combine_input_buffer: dtype={dt} not in supported set {_SUPPORTED_TOK_DTYPES}"
-            )
-        row_bytes = _token_bytes_for(dt, cfg.hidden_dim)
-        if row_bytes > cfg.max_token_bytes:
-            raise ValueError(
-                f"get_registered_combine_input_buffer: dtype={dt} needs "
-                f"{row_bytes}B/token but buffer is sized for "
-                f"{cfg.max_token_bytes}B/token; bump cfg.max_token_type_size."
+                f"get_registered_combine_input_buffer: dtype={dt} != cfg.combine_dtype="
+                f"{cfg.combine_dtype}; buffer is sized for the pinned combine dtype"
             )
         h = hidden_dim if hidden_dim > 0 else _token_view_dim_for(dt, cfg.hidden_dim)
         return self.shmem_comb_inp_tok.view(torch.int8).view(dt).view(-1, h)

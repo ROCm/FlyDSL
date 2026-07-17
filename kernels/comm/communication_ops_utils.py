@@ -27,6 +27,7 @@ __all__ = [
     "fence_system_acquire",
     "load_i64_global",
     "atomic_add_global_at",
+    "atomic_xchg_global_at",
     "GeometryTuningTable",
 ]
 
@@ -69,10 +70,57 @@ def load_i64_global(addr_i64):
     return _llvm_d.LoadOp(_i64, ptr, alignment=8).result
 
 
-def atomic_add_global_at(addr_i64, val):
-    """Monotonic global ``atomic fetch-and-add``; returns the old value."""
+# NOTE on naming/semantics shared by the atomic_*_global_at helpers below.
+#
+# ``global`` in the name is the ADDRESS SPACE of the operand pointer (LLVM
+# ``addrspace(1)`` = global device memory, via :func:`_to_ptr_global`), NOT the
+# sync scope. It is a fixed property: these always operate on global memory,
+# never LDS/shared. It is orthogonal to the ``syncscope`` argument.
+#
+# ``syncscope`` controls two INDEPENDENT axes of the atomic's ordering/visibility:
+#   * memory scope   : who observes it -- system > agent(device) > workgroup ...
+#   * addr-space span : which address spaces are ordered -- all vs a single one
+# Mapping of the values used here:
+#   * None      -> system scope, ALL address spaces      (strongest on BOTH axes)
+#   * "one-as"  -> system scope, a single (global) addr space  (cross-card OK)
+#   * "agent"   -> device scope (single card), all address spaces
+# Because these ops use ``monotonic`` (relaxed) ordering, no acquire/release
+# fence is emitted regardless of syncscope, so the all-as vs one-as (addr-space
+# span) choice is codegen-neutral here; the axis that actually matters is the
+# memory scope (system = cross-card visible vs agent = single card).
+
+def atomic_add_global_at(addr_i64, val, syncscope="one-as"):
+    """Monotonic global ``atomic fetch-and-add``; returns the old value.
+
+    ``syncscope`` (see module-level NOTE above): ``"one-as"`` (default) =
+    system scope / single global address space -- cross-card visible but does
+    not order LDS ops; ``None`` = system scope across *all* address spaces (the
+    strongest, also orders LDS); ``"agent"`` = device scope for rank-private
+    counters. For ``monotonic`` ordering all-as vs one-as is codegen-neutral.
+    """
     ptr = _to_ptr_global(addr_i64)
-    return _llvm_d.AtomicRMWOp(_llvm_d.AtomicBinOp.add, ptr, arith.unwrap(val), _llvm_d.AtomicOrdering.monotonic).res
+    kwargs = {} if syncscope is None else {"syncscope": syncscope}
+    return _llvm_d.AtomicRMWOp(
+        _llvm_d.AtomicBinOp.add, ptr, arith.unwrap(val),
+        _llvm_d.AtomicOrdering.monotonic, **kwargs,
+    ).res
+
+
+def atomic_xchg_global_at(addr_i64, val, syncscope="agent"):
+    """Monotonic global ``atomic exchange`` (returns the old value).
+
+    ``syncscope`` (see module-level NOTE above) defaults to ``"agent"`` (device
+    scope), matching the consume-on-read reset of a rank-private counter where
+    no cross-card visibility is needed. Pass ``None`` for system scope / all
+    address spaces (strongest), or ``"one-as"`` for system scope / single
+    global address space.
+    """
+    ptr = _to_ptr_global(addr_i64)
+    kwargs = {} if syncscope is None else {"syncscope": syncscope}
+    return _llvm_d.AtomicRMWOp(
+        _llvm_d.AtomicBinOp.xchg, ptr, arith.unwrap(val),
+        _llvm_d.AtomicOrdering.monotonic, **kwargs,
+    ).res
 
 
 @dataclass
