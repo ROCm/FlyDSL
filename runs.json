@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-17T11:26:34Z",
+ "updated": "2026-07-17T12:28:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29580155428,
+   "pr": null,
+   "commit": "09987abdc7c31cc4d8faab375dec03bc69a9c5bc",
+   "branch": "main",
+   "event": "push",
+   "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29580155428",
+   "created_at": "2026-07-17T12:25:07Z",
+   "updated_at": "2026-07-17T12:26:43Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-17T12:26:43Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29580155428/job/87883960623"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-17T12:26:43Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29580155428/job/87883960646"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-17T12:27:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29580155428/job/87883960652"
+    }
+   ]
+  },
   {
    "run_id": 29576646009,
    "pr": 825,
@@ -14,33 +57,33 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29576646009",
    "created_at": "2026-07-17T11:22:54Z",
-   "updated_at": "2026-07-17T11:24:28Z",
+   "updated_at": "2026-07-17T11:33:08Z",
    "actor": "fsx950223",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-17T11:24:33Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-17T11:26:10Z",
+     "completed_at": "2026-07-17T11:51:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29576646009/job/87872791147"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-17T11:24:33Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-17T11:33:08Z",
+     "completed_at": "2026-07-17T11:57:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29576646009/job/87872791148"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-17T11:24:33Z",
+     "started_at": "2026-07-17T11:25:47Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29576646009/job/87872791177"
     }
@@ -96,38 +139,38 @@
    "branch": "hyg/fmha_refactor",
    "event": "pull_request",
    "title": "[FMHA] Refactor kernels into shared helper framework",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29575171628",
    "created_at": "2026-07-17T10:56:52Z",
-   "updated_at": "2026-07-17T11:17:14Z",
+   "updated_at": "2026-07-17T12:26:47Z",
    "actor": "zhiding512",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-17T11:17:14Z",
-     "completed_at": null,
+     "completed_at": "2026-07-17T11:31:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29575171628/job/87868914787"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-17T11:10:49Z",
-     "completed_at": null,
+     "completed_at": "2026-07-17T12:26:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29575171628/job/87868914812"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-17T11:03:55Z",
-     "completed_at": null,
+     "completed_at": "2026-07-17T12:16:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29575171628/job/87868914813"
     }
    ]
@@ -1356,7 +1399,7 @@
   },
   {
    "run_id": 29486771520,
-   "pr": 812,
+   "pr": null,
    "commit": "a903039867461d429a0b97fae1368f60add05b9a",
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
@@ -1417,7 +1460,7 @@
   },
   {
    "run_id": 29486728585,
-   "pr": 812,
+   "pr": null,
    "commit": "92fb048b55517c01038473c3ff73f702f4b35944",
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
@@ -1806,7 +1849,7 @@
   },
   {
    "run_id": 29480678780,
-   "pr": 812,
+   "pr": null,
    "commit": "7c4ade7b9cf486593e87735f4d55fd775d40dcc0",
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
@@ -1993,7 +2036,7 @@
   },
   {
    "run_id": 29474299617,
-   "pr": 812,
+   "pr": null,
    "commit": "41ae377db2308b3f7479e33c0bc2b21ecfcca8ce",
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
@@ -2407,21 +2450,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29439099673/job/87435070684"
     }
    ]
-  },
-  {
-   "run_id": 29435838086,
-   "pr": null,
-   "commit": "1bd314d197c110ddb0cad112e14e5421d4483250",
-   "branch": "feat/autotune-rmsnorm-adopt",
-   "event": "pull_request",
-   "title": "[2/5] autotune: add opt-in search and RMSNorm waves-per-EU tuning (#770)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29435838086",
-   "created_at": "2026-07-15T17:16:48Z",
-   "updated_at": "2026-07-15T18:04:55Z",
-   "actor": "jhinpan",
-   "jobs": []
   }
  ]
 }
