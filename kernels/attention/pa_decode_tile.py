@@ -333,13 +333,6 @@ def compile_pa_decode_tile(
         TOK_CHUNK = NWARP * MFMA_MNK  # 64
         NCHUNK = TILE_TOK // TOK_CHUNK  # 4
 
-        # A compute tile always starts exactly on a page boundary: TILE_TOK
-        # (256) is a multiple of block_size for both supported values (16, 64),
-        # so there's no "within-page" remainder to track.
-        def _tile_tok0_and_page(tt_i32):
-            tok0 = tt_i32 * TILE_TOK
-            return tok0, tok0 // block_size
-
         def _load_phys_scalar(page, vec_width=1):
             result = buffer_ops.buffer_load(
                 bt_rsrc, seq * max_blocks_per_seq + page, vec_width=vec_width, is_scalar=True
@@ -352,7 +345,9 @@ def compile_pa_decode_tile(
             # it to LDS for every warp to read back (`_v_page_read_row`).
             # Prefetched one tile ahead; store/read-back straddle an
             # already-existing barrier, so no new barrier is needed.
-            _, base_page = _tile_tok0_and_page(tt_i32)
+            # Tile tt starts on a page boundary (TILE_TOK is a multiple of
+            # block_size), so its first page is tt*TILE_TOK // block_size.
+            base_page = tt_i32 * TILE_TOK // block_size
             fetched = _load_phys_scalar(base_page + warp * PAGES_PER_CHUNK, PAGES_PER_CHUNK)
             if lane == 0:
                 fetched_vec = (
@@ -452,7 +447,7 @@ def compile_pa_decode_tile(
             return ops  # N_SUBCHUNKS i64 operands
 
         def _k_ops_flat(tt_i32):
-            _, base_page = _tile_tok0_and_page(tt_i32)
+            base_page = tt_i32 * TILE_TOK // block_size  # tile start is page-aligned
             fetched = _load_phys_scalar(base_page + warp * PAGES_PER_CHUNK, PAGES_PER_CHUNK)
             phys_vec = (
                 fx.Vector.from_elements([fx.Int32(fetched)], dtype=fx.Int32)
@@ -679,7 +674,7 @@ def compile_pa_decode_tile(
             k_cur = ostate[K_SLOT]  # this tile's prefetched K, as one (NCHUNK*N_SUBCHUNKS,) i64 vector
             v_page_cur = ostate[V_SLOT]  # this tile's V pages, as one PAGES_PER_CHUNK-wide i32 vector
             tt = fx.Int32(tt)
-            tok0, _ = _tile_tok0_and_page(tt)
+            tok0 = tt * TILE_TOK
 
             tt1 = tt + 1
 
