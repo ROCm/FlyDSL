@@ -19,13 +19,19 @@ to preserve the intended ordering of memory and compute operations.
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
-from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
-from kernels.gemm.fp8_gemm_utils import divmod, pack_i32x4_i32x8, swizzle_128
+from kernels.gemm.fp8_gemm_utils import (
+    G2SLoader,
+    S2RLoader,
+    compute_global_swizzle,
+    divmod,
+    make_fp8_buffer_tensor,
+    pack_i32x4_i32x8,
+    swizzle_128,
+)
 
 
 def _min(a, b):
@@ -122,7 +128,6 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
     BLOCK_K = 128
     NUM_THREADS = 256
     WARP_SIZE = 64
-    NUM_WAVES = NUM_THREADS // WARP_SIZE
 
     SUBTILE_M = 64
     SUBTILE_N = 64
@@ -153,72 +158,38 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
     NUM_K_TILES = K // BLOCK_K
     assert NUM_K_TILES >= 4, f"K={K} gives {NUM_K_TILES} K128 tiles; the two-page pipeline needs at least 4"
 
-    LDS_SYM_A0 = "mxfp8_pp_smem_a0"
-    LDS_SYM_A1 = "mxfp8_pp_smem_a1"
-    LDS_SYM_B0 = "mxfp8_pp_smem_b0"
-    LDS_SYM_B1 = "mxfp8_pp_smem_b1"
-    # Model each ping-pong LDS page as a distinct LLVM alias scope. Loads from
-    # the page being consumed can then be scheduled independently of direct
-    # global-to-LDS refills targeting a different page.
-    LDS_ALIAS_DOMAIN = '#llvm.alias_scope_domain<id = "mxfp8_pp_lds">'
-    SCOPE_IDS = ("a0", "a1", "b0", "b1")
+    LDS_ELEMS_HALF = (BLOCK_M // 2) * BLOCK_K
+    LOAD_PASSES_HALF = LDS_ELEMS_HALF // (NUM_THREADS * VEC_BYTES)
+    assert LOAD_PASSES_HALF == LOAD_PASSES_A_SUBTILE == LOAD_PASSES_B_SUBTILE
+
+    @fx.struct
+    class SharedStorage:
+        # Each logical 256x128 page is two independent 128x128 half-pages.
+        # The hot loop refills one 16-byte pass of one half-page at a time.
+        a0_0: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
+        a0_1: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
+        a1_0: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
+        a1_1: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
+        b0_0: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
+        b0_1: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
+        b1_0: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
+        b1_1: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
 
     @flyc.kernel(known_block_size=[NUM_THREADS, 1, 1])
     def kernel_gemm(
         A: fx.Tensor, B: fx.Tensor, C: fx.Tensor, As: fx.Tensor, Bs: fx.Tensor, c_m: fx.Int32, c_n: fx.Int32
     ):
-        _LDS_PTR_TY = ir.Type.parse("!llvm.ptr<3>")
-        _I8_TY = T.i8
-        _GEP_DYN = -(2**31)
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        lds_a0 = (lds.a0_0, lds.a0_1)
+        lds_a1 = (lds.a1_0, lds.a1_1)
+        lds_b0 = (lds.b0_0, lds.b0_1)
+        lds_b1 = (lds.b1_0, lds.b1_1)
 
-        def _gep_lds(base_ptr, byte_offset_i32):
-            return llvm.getelementptr(_LDS_PTR_TY, base_ptr, [byte_offset_i32], [_GEP_DYN], _I8_TY, None)
-
-        def _scope_attr(ids):
-            """Build an LLVM alias-scope array for the named LDS pages."""
-            inner = ", ".join(f'#llvm.alias_scope<id = "{sid}", domain = {LDS_ALIAS_DOMAIN}>' for sid in ids)
-            return ir.Attribute.parse(f"[{inner}]")
-
-        # Tag each access with alias.scope(page) and noalias(other pages).
-        # These are compile-time promises, justified because A0/A1/B0/B1 are
-        # separate LDS globals; incorrect metadata here could permit invalid
-        # memory reordering.
-        _SCOPE = {sid: _scope_attr((sid,)) for sid in SCOPE_IDS}
-        _NOALIAS = {sid: _scope_attr(tuple(other for other in SCOPE_IDS if other != sid)) for sid in SCOPE_IDS}
-
-        lds_a0_base_ptr = llvm.mlir_addressof(_LDS_PTR_TY, LDS_SYM_A0)
-        lds_a1_base_ptr = llvm.mlir_addressof(_LDS_PTR_TY, LDS_SYM_A1)
-        lds_b0_base_ptr = llvm.mlir_addressof(_LDS_PTR_TY, LDS_SYM_B0)
-        lds_b1_base_ptr = llvm.mlir_addressof(_LDS_PTR_TY, LDS_SYM_B1)
-
-        def _make_lds_view(base_ptr, my_scope, other_scopes):
-            """Create a byte-addressed LDS view carrying LLVM alias metadata."""
-            vec_t = Vec.make_type(4, fx.Int32)
-
-            def vec_load_i32x4_byte_offset(byte_off_idx):
-                # Attach the page's alias.scope and the other pages' noalias
-                # scopes to every LDS read. LLVM can then keep reads from the
-                # current page independent of refills targeting another page.
-                byte_off_i32 = arith.index_cast(T.i32, byte_off_idx)
-                gep = _gep_lds(base_ptr, byte_off_i32)
-                return llvm.LoadOp(
-                    vec_t,
-                    gep,
-                    alignment=4,
-                    alias_scopes=my_scope,
-                    noalias_scopes=other_scopes,
-                ).result
-
-            view = type("AliasScopedF8LDSView", (), {})()
-            view.vec_load_i32x4_byte_offset = vec_load_i32x4_byte_offset
-            return view
-
-        lds_a0 = _make_lds_view(lds_a0_base_ptr, _SCOPE["a0"], _NOALIAS["a0"])
-        lds_a1 = _make_lds_view(lds_a1_base_ptr, _SCOPE["a1"], _NOALIAS["a1"])
-        lds_b0 = _make_lds_view(lds_b0_base_ptr, _SCOPE["b0"], _NOALIAS["b0"])
-        lds_b1 = _make_lds_view(lds_b1_base_ptr, _SCOPE["b1"], _NOALIAS["b1"])
-        a_rsrc = buffer_ops.create_buffer_resource(A, max_size=True)
-        b_rsrc = buffer_ops.create_buffer_resource(B, max_size=True)
+        f8_ir_t = fx.Float8E4M3FN.ir_type
+        gA = make_fp8_buffer_tensor(A, f8_ir_t)
+        gB = make_fp8_buffer_tensor(B, f8_ir_t)
+        a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
+        b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
         as_rsrc = buffer_ops.create_buffer_resource(As, max_size=True)
         bs_rsrc = buffer_ops.create_buffer_resource(Bs, max_size=True)
         tx = gpu.thread_id("x")
@@ -240,10 +211,21 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
         bx_m_idx = fx.Index(bx_m)
         by_n_idx = fx.Index(by_n)
 
-        layout_wave_lane = fx.make_layout((NUM_WAVES, WARP_SIZE), (WARP_SIZE, 1))
-        coord_wave_lane = fx.idx2crd(fx.Int32(tx), layout_wave_lane)
-        wave_id = fx.get(coord_wave_lane, 0)
-        lane = fx.get(coord_wave_lane, 1)
+        # Keep wave/lane arithmetic in i32. compute_global_swizzle() combines
+        # these values with i32 constants, so Index-typed coordinates would make
+        # arith.addi receive mixed operand types.
+        tx_i32 = fx.Int32(tx)
+        wave_id = tx_i32 // fx.Int32(WARP_SIZE)
+        lane = tx_i32 % fx.Int32(WARP_SIZE)
+
+        # The utility mapping is identical to the previous manual staging:
+        # each step contributes one contiguous 16-byte vector per thread, while
+        # the global K coordinate is XOR-unswizzled for the physical LDS slot.
+        gl_off_a = compute_global_swizzle(lane, wave_id, K, LOAD_PASSES_HALF, preshuffled=False)
+        gl_off_b = compute_global_swizzle(lane, wave_id, K, LOAD_PASSES_HALF, preshuffled=False)
+        a_g2s = G2SLoader(a_div, gl_off_a, LOAD_PASSES_HALF, f8_ir_t, wave_id)
+        b_g2s = G2SLoader(b_div, gl_off_b, LOAD_PASSES_HALF, f8_ir_t, wave_id)
+        s2r = S2RLoader(fx.Int32(0), 1)
 
         layout_lane16 = fx.make_layout((4, 16), (16, 1))
         coord_lane16 = fx.idx2crd(fx.Int32(lane), layout_lane16)
@@ -306,18 +288,6 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
             )
             return _one_i32_result(op)
 
-        def _unwrap_mlir_value(x):
-            """Return the bare MLIR value for the known MFMA operand types.
-
-            A/B fragments are ``flydsl.expr.typing.Vector`` wrappers and expose
-            their underlying MLIR value through ``ir_value()``. Scale operands
-            are ``flydsl.expr.utils.arith.ArithValue`` instances, which are
-            already accepted directly by ``llvm.InlineAsmOp``.
-            """
-            if isinstance(x, Vec):
-                return x.ir_value()
-            return x
-
         def _one_i32_result(op):
             # Accept the result attribute names exposed by the supported MLIR Python bindings.
             return getattr(op, "result", getattr(op, "res", op.results[0]))
@@ -339,12 +309,36 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
         c_n_idx = fx.Index(c_n)
 
         def hot_loop_scheduler_q_refill_2n():
-            # 8 chunks:
-            #   1 VMEM/LDS-refill pass
-            #   2 MFMA
+            # Steady-state Q1 schedule: eight chunks of one K+2 VMEM/LDS
+            # refill pass followed by two MFMAs.
             for _ in range_constexpr(8):
                 rocdl.sched_vmem(1)
                 rocdl.sched_mfma(2)
+
+            rocdl.sched_barrier(0)
+
+        def hot_loop_scheduler_q0_refill_a1_2n():
+            # Steady-state Q0 schedule. Each chunk contains exactly:
+            #   1 K+2 VMEM/LDS refill pass
+            #   1 current-tile A-bottom K64 ds_read_b128
+            #   2 current-tile Q0 MFMAs
+            # Repeated eight times, this distributes all eight A-bottom LDS reads
+            # across Q0 and maximizes their distance from reuse of that half-page.
+            for _ in range_constexpr(8):
+                rocdl.sched_vmem(1)
+                rocdl.sched_dsrd(1)
+                rocdl.sched_mfma(2)
+
+            rocdl.sched_barrier(0)
+
+        def hot_loop_scheduler_q_prefetch_4n():
+            # Q2/Q3 carry-prefetch schedule used by both the steady loop and the
+            # penultimate tail tile. Each of eight chunks contains:
+            #   2 LDS reads for one complete next-tile A-top or B-left fragment
+            #   4 MFMAs using the current tile
+            for _ in range_constexpr(8):
+                rocdl.sched_dsrd(2)
+                rocdl.sched_mfma(4)
 
             rocdl.sched_barrier(0)
 
@@ -388,96 +382,50 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
                 load_b_scale_subtile(k128, 1),
             )
 
-        def stage_a_pass(k_base, load_i, lds_a_base_ptr, lds_a_scope, lds_a_noalias):
-            linear = fx.Index(tx) + fx.Index(load_i * NUM_THREADS)
-            byte_base = linear * fx.Index(VEC_BYTES)
-
-            row = byte_base // fx.Index(BLOCK_K)
-            col = byte_base % fx.Index(BLOCK_K)
-
-            # Keep the LDS destination physically contiguous for
-            # raw_ptr_buffer_load_lds, but load the logical K column that maps
-            # to this physical slot under the XOR layout.
-            a_phys_col_bytes = col
-            _, a_log_col_bytes = swizzle_128(row, a_phys_col_bytes)
-            a_global_byte = (bx_m_idx + row) * fx.Index(K) + (k_base + a_log_col_bytes)
-            a_lds_byte_i32 = arith.index_cast(T.i32, byte_base)
-            a_lds_byte_uniform = rocdl.readfirstlane(T.i32, a_lds_byte_i32)
-            a_lds_ptr = _gep_lds(lds_a_base_ptr, a_lds_byte_uniform)
-
-            rocdl.raw_ptr_buffer_load_lds(
-                a_rsrc,
-                a_lds_ptr,
-                fx.Int32(VEC_BYTES),
-                fx.Int32(a_global_byte),
-                fx.Int32(0),
-                fx.Int32(0),
-                fx.Int32(1),
-                alias_scopes=lds_a_scope,
-                noalias_scopes=lds_a_noalias,
+        def stage_a_subtile_pass(k_base, subtile, pass_in_subtile, lds_a):
+            # One pass writes 256 threads * 16 B = 4 KiB. Four passes fill one
+            # 128x128 half-page (16 KiB). Each half has its own LDS base.
+            global_base = (
+                (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2))) * fx.Index(K)
+                + k_base
             )
+            a_g2s.load_one(lds_a[subtile], fx.Int32(global_base), pass_in_subtile)
 
-        def stage_b_pass(k_base, load_i, lds_b_base_ptr, lds_b_scope, lds_b_noalias):
-            linear = fx.Index(tx) + fx.Index(load_i * NUM_THREADS)
-            byte_base = linear * fx.Index(VEC_BYTES)
-
-            row = byte_base // fx.Index(BLOCK_K)
-            col = byte_base % fx.Index(BLOCK_K)
-
-            # Same physical-contiguous LDS write / logical-swizzled global
-            # column scheme as A.
-            b_phys_col_bytes = col
-            _, b_log_col_bytes = swizzle_128(row, b_phys_col_bytes)
-            b_global_byte = (by_n_idx + row) * fx.Index(K) + (k_base + b_log_col_bytes)
-            b_lds_byte_i32 = arith.index_cast(T.i32, byte_base)
-            b_lds_byte_uniform = rocdl.readfirstlane(T.i32, b_lds_byte_i32)
-            b_lds_ptr = _gep_lds(lds_b_base_ptr, b_lds_byte_uniform)
-
-            rocdl.raw_ptr_buffer_load_lds(
-                b_rsrc,
-                b_lds_ptr,
-                fx.Int32(VEC_BYTES),
-                fx.Int32(b_global_byte),
-                fx.Int32(0),
-                fx.Int32(0),
-                fx.Int32(1),
-                alias_scopes=lds_b_scope,
-                noalias_scopes=lds_b_noalias,
+        def stage_b_subtile_pass(k_base, subtile, pass_in_subtile, lds_b):
+            global_base = (
+                (by_n_idx + fx.Index(subtile * (BLOCK_N // 2))) * fx.Index(K)
+                + k_base
             )
+            b_g2s.load_one(lds_b[subtile], fx.Int32(global_base), pass_in_subtile)
 
-        def stage_a_subtile_pass(k_base, subtile, pass_in_subtile, lds_a_base_ptr, lds_a_scope, lds_a_noalias):
-            load_i = subtile * LOAD_PASSES_A_SUBTILE + pass_in_subtile
-            stage_a_pass(k_base, load_i, lds_a_base_ptr, lds_a_scope, lds_a_noalias)
+        def stage_a_subtile(k_base, subtile, lds_a):
+            for pass_in_subtile in range_constexpr(LOAD_PASSES_HALF):
+                stage_a_subtile_pass(k_base, subtile, pass_in_subtile, lds_a)
 
-        def stage_b_subtile_pass(k_base, subtile, pass_in_subtile, lds_b_base_ptr, lds_b_scope, lds_b_noalias):
-            load_i = subtile * LOAD_PASSES_B_SUBTILE + pass_in_subtile
-            stage_b_pass(k_base, load_i, lds_b_base_ptr, lds_b_scope, lds_b_noalias)
+        def stage_b_subtile(k_base, subtile, lds_b):
+            for pass_in_subtile in range_constexpr(LOAD_PASSES_HALF):
+                stage_b_subtile_pass(k_base, subtile, pass_in_subtile, lds_b)
 
-        def stage_a_subtile(k_base, subtile, lds_a_base_ptr, lds_a_scope, lds_a_noalias):
-            start_pass = subtile * LOAD_PASSES_A_SUBTILE
-            stop_pass = start_pass + LOAD_PASSES_A_SUBTILE
-            for load_i in range_constexpr(start_pass, stop_pass):
-                stage_a_pass(k_base, load_i, lds_a_base_ptr, lds_a_scope, lds_a_noalias)
+        def load_frag_half_at_byte_base(lds_page, row_byte_base, half):
+            # Issue exactly one 16-byte LDS read for one K64 half of an MFMA operand.
+            # Keeping the halves separate allows steady-state Q0 to schedule one
+            # A-bottom ds_read_b128 in each refill/MFMA chunk.
+            k_col = reg_lds_k_col0 if half == 0 else reg_lds_k_col1
+            return s2r.load_one(lds_page, fx.Int32(row_byte_base + k_col))
 
-        def stage_b_subtile(k_base, subtile, lds_b_base_ptr, lds_b_scope, lds_b_noalias):
-            start_pass = subtile * LOAD_PASSES_B_SUBTILE
-            stop_pass = start_pass + LOAD_PASSES_B_SUBTILE
-            for load_i in range_constexpr(start_pass, stop_pass):
-                stage_b_pass(k_base, load_i, lds_b_base_ptr, lds_b_scope, lds_b_noalias)
-
-        def load_frag_at_byte_base(lds_view, row_byte_base):
-            # The two K fragments use lane-invariant physical LDS columns.
-            x0 = lds_view.vec_load_i32x4_byte_offset(row_byte_base + reg_lds_k_col0)
-            x1 = lds_view.vec_load_i32x4_byte_offset(row_byte_base + reg_lds_k_col1)
+        def pack_frag_halves(x0, x1):
             return pack_i32x4_i32x8(x0, x1)
 
-        def load_a_frag(lds_a, local_row):
-            return load_frag_at_byte_base(lds_a, local_row * fx.Index(BLOCK_K))
+        def load_frag_at_byte_base(lds_page, row_byte_base):
+            # Default complete-fragment path used outside the dedicated Q0 schedule.
+            x0 = load_frag_half_at_byte_base(lds_page, row_byte_base, 0)
+            x1 = load_frag_half_at_byte_base(lds_page, row_byte_base, 1)
+            return pack_frag_halves(x0, x1)
 
-        def load_b_frag(lds_b, local_row):
-            # B is stored as [N, K], but after staging it uses the same
-            # XOR-swizzled LDS fragment addressing as A.
-            return load_frag_at_byte_base(lds_b, local_row * fx.Index(BLOCK_K))
+        def load_b_frag(lds_b, local_row, half):
+            # B is [N, K]. Each 128-row half-page has a local row origin of 0.
+            half_row = local_row - fx.Index(half * (BLOCK_N // 2))
+            return load_frag_at_byte_base(lds_b[half], half_row * fx.Index(BLOCK_K))
 
         def _acc_idx(subtile_id, mi, ni):
             return subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
@@ -491,10 +439,10 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
             llvm.InlineAsmOp(
                 None,
                 [
-                    _unwrap_mlir_value(a_frag),
-                    _unwrap_mlir_value(b_frag),
-                    _unwrap_mlir_value(a_scale),
-                    _unwrap_mlir_value(b_scale),
+                    arith._to_raw(a_frag),
+                    arith._to_raw(b_frag),
+                    arith._to_raw(a_scale),
+                    arith._to_raw(b_scale),
                 ],
                 (
                     f"v_mfma_scale_f32_16x16x128_f8f6f4 "
@@ -578,7 +526,7 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
             b_scales = scale_tile[2] if sn == 0 else scale_tile[3]
 
             b_row_addr = subtile_n_idx * fx.Index(SUBTILE_N) + fx.Index(ni * MFMA_N) + lane_mod_16
-            b_ni = load_b_frag(lds_b, b_row_addr)
+            b_ni = load_b_frag(lds_b, b_row_addr, sn)
             b_scale_ni = b_scales[ni]
             return b_ni, b_scale_ni
 
@@ -589,14 +537,29 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
             b3, bs3 = load_b_subtile_ni_regs(lds_b, scale_tile, sn, 3)
             return b0, b1, b2, b3, bs0, bs1, bs2, bs3
 
+        def load_a_subtile_mi_half(lds_a, sm, mi, half):
+            # One ds_read_b128 for one K64 half of one A MFMA slice.
+            subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
+            a_row_addr = subtile_m_idx * fx.Index(SUBTILE_M) + fx.Index(mi * MFMA_M) + lane_mod_16
+            half_row = a_row_addr - fx.Index(sm * (BLOCK_M // 2))
+            row_byte_base = half_row * fx.Index(BLOCK_K)
+            return load_frag_half_at_byte_base(lds_a[sm], row_byte_base, half)
+
         def load_a_subtile_mi_regs(lds_a, scale_tile, sm, mi):
             # Fine-grained A register load for one 16-row M-direction MFMA slice.
-            subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
             a_scales = scale_tile[0] if sm == 0 else scale_tile[1]
-            a_row_addr = subtile_m_idx * fx.Index(SUBTILE_M) + fx.Index(mi * MFMA_M) + lane_mod_16
-            a_mi = load_a_frag(lds_a, a_row_addr)
+            x0 = load_a_subtile_mi_half(lds_a, sm, mi, 0)
+            x1 = load_a_subtile_mi_half(lds_a, sm, mi, 1)
+            a_mi = pack_frag_halves(x0, x1)
             a_scale_mi = a_scales[mi]
             return a_mi, a_scale_mi
+
+        def load_a_subtile_regs(lds_a, scale_tile, sm):
+            a0, as0 = load_a_subtile_mi_regs(lds_a, scale_tile, sm, 0)
+            a1, as1 = load_a_subtile_mi_regs(lds_a, scale_tile, sm, 1)
+            a2, as2 = load_a_subtile_mi_regs(lds_a, scale_tile, sm, 2)
+            a3, as3 = load_a_subtile_mi_regs(lds_a, scale_tile, sm, 3)
+            return a0, a1, a2, a3, as0, as1, as2, as3
 
         def hk_one_k_with_refill(
             k128,
@@ -604,12 +567,8 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
             cur_b,
             next_a,
             next_b,
-            refill_a_base,
-            refill_b_base,
-            refill_a_scope,
-            refill_a_noalias,
-            refill_b_scope,
-            refill_b_noalias,
+            refill_a,
+            refill_b,
             a0_regs,
             b0_regs,
             cur_scales,
@@ -630,20 +589,10 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
             # byte extraction or broadcast.
             refill_scales = load_scale_tile(fx.Index(k128 + 2))
             next_scales_ready = prev_refill_scales
-            # B-left is carried as a complete register tile, so its LDS page can be refilled
-            # immediately. Only A-top mi=0 is carried to limit the A-fragment live range.
-            # Split the carried B tile into individual MFMA slices for refill interleaving.
+            # A-top and B-left are both carried as complete 64-row register tiles,
+            # so their LDS half-pages can be refilled immediately.
+            a00, a01, a02, a03, as00, as01, as02, as03 = a0_regs
             b00, b01, b02, b03, bs00, bs01, bs02, bs03 = b0_regs
-            a00, as00 = a0_regs
-            # Read the remaining A-top slices before refilling this LDS page; afterwards the
-            # old contents may be overwritten. Keeping the reads together also preserves contiguous MFMA groups.
-            a01, as01 = load_a_subtile_mi_regs(cur_a, cur_scales, 0, 1)
-            a02, as02 = load_a_subtile_mi_regs(cur_a, cur_scales, 0, 2)
-            a03, as03 = load_a_subtile_mi_regs(cur_a, cur_scales, 0, 3)
-
-            rocdl.sched_barrier(0)
-            _barrier(lgkmcnt=0)
-            rocdl.sched_barrier(0)
 
             b10, bs10 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 0)
             b11, bs11 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 1)
@@ -653,68 +602,83 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
             # Refill the current ping-pong page with K+2, alternating A and B passes.
             k_refill = fx.Index((k128 + 2) * BLOCK_K)
 
+            # Q0: interleave the current tile's A-bottom LDS reads with K+2
+            # refills and Q0 compute. Each complete A-bottom fragment is assembled
+            # from two independently scheduled K64 halves.
             rocdl.sched_barrier(0)
-            stage_a_subtile_pass(k_refill, 0, 0, refill_a_base, refill_a_scope, refill_a_noalias)
+            a10_x0 = load_a_subtile_mi_half(cur_a, 1, 0, 0)
+            stage_a_subtile_pass(k_refill, 0, 0, refill_a)
             mfma_2n(_acc_idx(0, 0, 0), a00, as00, b00, b01, bs00, bs01, 0)
 
-            stage_b_subtile_pass(k_refill, 0, 0, refill_b_base, refill_b_scope, refill_b_noalias)
+            a10_x1 = load_a_subtile_mi_half(cur_a, 1, 0, 1)
+            stage_b_subtile_pass(k_refill, 0, 0, refill_b)
             mfma_2n(_acc_idx(0, 0, 2), a00, as00, b02, b03, bs02, bs03, 2)
 
-            stage_a_subtile_pass(k_refill, 0, 1, refill_a_base, refill_a_scope, refill_a_noalias)
+            a11_x0 = load_a_subtile_mi_half(cur_a, 1, 1, 0)
+            stage_a_subtile_pass(k_refill, 0, 1, refill_a)
             mfma_2n(_acc_idx(0, 1, 0), a01, as01, b00, b01, bs00, bs01, 0)
 
-            stage_b_subtile_pass(k_refill, 0, 1, refill_b_base, refill_b_scope, refill_b_noalias)
+            a11_x1 = load_a_subtile_mi_half(cur_a, 1, 1, 1)
+            stage_b_subtile_pass(k_refill, 0, 1, refill_b)
             mfma_2n(_acc_idx(0, 1, 2), a01, as01, b02, b03, bs02, bs03, 2)
 
-            stage_a_subtile_pass(k_refill, 0, 2, refill_a_base, refill_a_scope, refill_a_noalias)
+            a12_x0 = load_a_subtile_mi_half(cur_a, 1, 2, 0)
+            stage_a_subtile_pass(k_refill, 0, 2, refill_a)
             mfma_2n(_acc_idx(0, 2, 0), a02, as02, b00, b01, bs00, bs01, 0)
 
-            stage_b_subtile_pass(k_refill, 0, 2, refill_b_base, refill_b_scope, refill_b_noalias)
+            a12_x1 = load_a_subtile_mi_half(cur_a, 1, 2, 1)
+            stage_b_subtile_pass(k_refill, 0, 2, refill_b)
             mfma_2n(_acc_idx(0, 2, 2), a02, as02, b02, b03, bs02, bs03, 2)
 
-            stage_a_subtile_pass(k_refill, 0, 3, refill_a_base, refill_a_scope, refill_a_noalias)
+            a13_x0 = load_a_subtile_mi_half(cur_a, 1, 3, 0)
+            stage_a_subtile_pass(k_refill, 0, 3, refill_a)
             mfma_2n(_acc_idx(0, 3, 0), a03, as03, b00, b01, bs00, bs01, 0)
 
-            stage_b_subtile_pass(k_refill, 0, 3, refill_b_base, refill_b_scope, refill_b_noalias)
+            a13_x1 = load_a_subtile_mi_half(cur_a, 1, 3, 1)
+            stage_b_subtile_pass(k_refill, 0, 3, refill_b)
             mfma_2n(_acc_idx(0, 3, 2), a03, as03, b02, b03, bs02, bs03, 2)
 
-            hot_loop_scheduler_q_refill_2n()
+            hot_loop_scheduler_q0_refill_a1_2n()
 
+            # Retire the eight distributed A-bottom LDS reads before K+2 refills
+            # overwrite the current page's A-bottom half-page. Keep this wait as
+            # late as possible to maximize read/compute overlap.
             rocdl.sched_barrier(0)
             _barrier(lgkmcnt=0)
             rocdl.sched_barrier(0)
 
-            a10, as10 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 0)
-            a11, as11 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 1)
-            a12, as12 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 2)
-            a13, as13 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 3)
+            a10 = pack_frag_halves(a10_x0, a10_x1)
+            a11 = pack_frag_halves(a11_x0, a11_x1)
+            a12 = pack_frag_halves(a12_x0, a12_x1)
+            a13 = pack_frag_halves(a13_x0, a13_x1)
+            as10 = cur_scales[1][0]
+            as11 = cur_scales[1][1]
+            as12 = cur_scales[1][2]
+            as13 = cur_scales[1][3]
 
             rocdl.sched_barrier(0)
-            _barrier(lgkmcnt=0)
-            rocdl.sched_barrier(0)
-
-            stage_b_subtile_pass(k_refill, 1, 0, refill_b_base, refill_b_scope, refill_b_noalias)
+            stage_b_subtile_pass(k_refill, 1, 0, refill_b)
             mfma_2n(_acc_idx(1, 0, 0), a00, as00, b10, b11, bs10, bs11, 0)
 
-            stage_a_subtile_pass(k_refill, 1, 0, refill_a_base, refill_a_scope, refill_a_noalias)
+            stage_a_subtile_pass(k_refill, 1, 0, refill_a)
             mfma_2n(_acc_idx(1, 0, 2), a00, as00, b12, b13, bs12, bs13, 2)
 
-            stage_b_subtile_pass(k_refill, 1, 1, refill_b_base, refill_b_scope, refill_b_noalias)
+            stage_b_subtile_pass(k_refill, 1, 1, refill_b)
             mfma_2n(_acc_idx(1, 1, 0), a01, as01, b10, b11, bs10, bs11, 0)
 
-            stage_a_subtile_pass(k_refill, 1, 1, refill_a_base, refill_a_scope, refill_a_noalias)
+            stage_a_subtile_pass(k_refill, 1, 1, refill_a)
             mfma_2n(_acc_idx(1, 1, 2), a01, as01, b12, b13, bs12, bs13, 2)
 
-            stage_b_subtile_pass(k_refill, 1, 2, refill_b_base, refill_b_scope, refill_b_noalias)
+            stage_b_subtile_pass(k_refill, 1, 2, refill_b)
             mfma_2n(_acc_idx(1, 2, 0), a02, as02, b10, b11, bs10, bs11, 0)
 
-            stage_a_subtile_pass(k_refill, 1, 2, refill_a_base, refill_a_scope, refill_a_noalias)
+            stage_a_subtile_pass(k_refill, 1, 2, refill_a)
             mfma_2n(_acc_idx(1, 2, 2), a02, as02, b12, b13, bs12, bs13, 2)
 
-            stage_b_subtile_pass(k_refill, 1, 3, refill_b_base, refill_b_scope, refill_b_noalias)
+            stage_b_subtile_pass(k_refill, 1, 3, refill_b)
             mfma_2n(_acc_idx(1, 3, 0), a03, as03, b10, b11, bs10, bs11, 0)
 
-            stage_a_subtile_pass(k_refill, 1, 3, refill_a_base, refill_a_scope, refill_a_noalias)
+            stage_a_subtile_pass(k_refill, 1, 3, refill_a)
             mfma_2n(_acc_idx(1, 3, 2), a03, as03, b12, b13, bs12, bs13, 2)
             hot_loop_scheduler_q_refill_2n()
 
@@ -724,33 +688,60 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
             _barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE + LOAD_PASSES_SCALES, lgkmcnt=0)
             rocdl.sched_barrier(0)
 
-            next_a0_regs = load_a_subtile_mi_regs(next_a, next_scales_ready, 0, 0)
-
+            next_a00, next_as00 = load_a_subtile_mi_regs(next_a, next_scales_ready, 0, 0)
             mfma_4n(_acc_idx(2, 0, 0), a10, as10, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
+
+            next_a01, next_as01 = load_a_subtile_mi_regs(next_a, next_scales_ready, 0, 1)
             mfma_4n(_acc_idx(2, 1, 0), a11, as11, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
+
+            next_a02, next_as02 = load_a_subtile_mi_regs(next_a, next_scales_ready, 0, 2)
             mfma_4n(_acc_idx(2, 2, 0), a12, as12, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
+
+            next_a03, next_as03 = load_a_subtile_mi_regs(next_a, next_scales_ready, 0, 3)
             mfma_4n(_acc_idx(2, 3, 0), a13, as13, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
 
-            next_b0_regs = load_b_subtile_regs(next_b, next_scales_ready, 0)
+            next_b00, next_bs00 = load_b_subtile_ni_regs(next_b, next_scales_ready, 0, 0)
             mfma_4n(_acc_idx(3, 0, 0), a10, as10, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+
+            next_b01, next_bs01 = load_b_subtile_ni_regs(next_b, next_scales_ready, 0, 1)
             mfma_4n(_acc_idx(3, 1, 0), a11, as11, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+
+            next_b02, next_bs02 = load_b_subtile_ni_regs(next_b, next_scales_ready, 0, 2)
             mfma_4n(_acc_idx(3, 2, 0), a12, as12, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+
+            next_b03, next_bs03 = load_b_subtile_ni_regs(next_b, next_scales_ready, 0, 3)
             mfma_4n(_acc_idx(3, 3, 0), a13, as13, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+
+            hot_loop_scheduler_q_prefetch_4n()
+
+            next_a0_regs = (
+                next_a00,
+                next_a01,
+                next_a02,
+                next_a03,
+                next_as00,
+                next_as01,
+                next_as02,
+                next_as03,
+            )
+            next_b0_regs = (
+                next_b00,
+                next_b01,
+                next_b02,
+                next_b03,
+                next_bs00,
+                next_bs01,
+                next_bs02,
+                next_bs03,
+            )
 
             return next_a0_regs, next_b0_regs, next_scales_ready, refill_scales
 
         def hk_one_k_tail_with_next(cur_a, cur_b, next_a, next_b, a0_regs, b0_regs, cur_scales, next_scales):
             _barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
 
+            a00, a01, a02, a03, as00, as01, as02, as03 = a0_regs
             b00, b01, b02, b03, bs00, bs01, bs02, bs03 = b0_regs
-            a00, as00 = a0_regs
-            a01, as01 = load_a_subtile_mi_regs(cur_a, cur_scales, 0, 1)
-            a02, as02 = load_a_subtile_mi_regs(cur_a, cur_scales, 0, 2)
-            a03, as03 = load_a_subtile_mi_regs(cur_a, cur_scales, 0, 3)
-
-            rocdl.sched_barrier(0)
-            _barrier(lgkmcnt=0)
-            rocdl.sched_barrier(0)
 
             b10, bs10 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 0)
             b11, bs11 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 1)
@@ -780,32 +771,60 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
             _barrier(LOAD_PASSES_A_SUBTILE + LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
             rocdl.sched_barrier(0)
 
-            next_a0_regs = load_a_subtile_mi_regs(next_a, next_scales, 0, 0)
-
+            next_a00, next_as00 = load_a_subtile_mi_regs(next_a, next_scales, 0, 0)
             mfma_4n(_acc_idx(2, 0, 0), a10, as10, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
+
+            next_a01, next_as01 = load_a_subtile_mi_regs(next_a, next_scales, 0, 1)
             mfma_4n(_acc_idx(2, 1, 0), a11, as11, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
+
+            next_a02, next_as02 = load_a_subtile_mi_regs(next_a, next_scales, 0, 2)
             mfma_4n(_acc_idx(2, 2, 0), a12, as12, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
+
+            next_a03, next_as03 = load_a_subtile_mi_regs(next_a, next_scales, 0, 3)
             mfma_4n(_acc_idx(2, 3, 0), a13, as13, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
 
-            next_b0_regs = load_b_subtile_regs(next_b, next_scales, 0)
+            next_b00, next_bs00 = load_b_subtile_ni_regs(next_b, next_scales, 0, 0)
             mfma_4n(_acc_idx(3, 0, 0), a10, as10, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+
+            next_b01, next_bs01 = load_b_subtile_ni_regs(next_b, next_scales, 0, 1)
             mfma_4n(_acc_idx(3, 1, 0), a11, as11, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+
+            next_b02, next_bs02 = load_b_subtile_ni_regs(next_b, next_scales, 0, 2)
             mfma_4n(_acc_idx(3, 2, 0), a12, as12, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+
+            next_b03, next_bs03 = load_b_subtile_ni_regs(next_b, next_scales, 0, 3)
             mfma_4n(_acc_idx(3, 3, 0), a13, as13, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+
+            hot_loop_scheduler_q_prefetch_4n()
+
+            next_a0_regs = (
+                next_a00,
+                next_a01,
+                next_a02,
+                next_a03,
+                next_as00,
+                next_as01,
+                next_as02,
+                next_as03,
+            )
+            next_b0_regs = (
+                next_b00,
+                next_b01,
+                next_b02,
+                next_b03,
+                next_bs00,
+                next_bs01,
+                next_bs02,
+                next_bs03,
+            )
 
             return next_a0_regs, next_b0_regs
 
         def hk_one_k_final(cur_a, cur_b, a0_regs, b0_regs, cur_scales):
             _barrier(vmcnt=0, lgkmcnt=0)
 
+            a00, a01, a02, a03, as00, as01, as02, as03 = a0_regs
             b00, b01, b02, b03, bs00, bs01, bs02, bs03 = b0_regs
-            a00, as00 = a0_regs
-            a01, as01 = load_a_subtile_mi_regs(cur_a, cur_scales, 0, 1)
-            a02, as02 = load_a_subtile_mi_regs(cur_a, cur_scales, 0, 2)
-            a03, as03 = load_a_subtile_mi_regs(cur_a, cur_scales, 0, 3)
-            rocdl.sched_barrier(0)
-            _barrier(lgkmcnt=0)
-            rocdl.sched_barrier(0)
 
             b10, bs10 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 0)
             b11, bs11 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 1)
@@ -853,15 +872,15 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
         scales0 = load_scale_tile(fx.Index(0))
         scales1 = load_scale_tile(fx.Index(1))
 
-        stage_a_subtile(fx.Index(0), 0, lds_a0_base_ptr, _SCOPE["a0"], _NOALIAS["a0"])
-        stage_b_subtile(fx.Index(0), 0, lds_b0_base_ptr, _SCOPE["b0"], _NOALIAS["b0"])
-        stage_b_subtile(fx.Index(0), 1, lds_b0_base_ptr, _SCOPE["b0"], _NOALIAS["b0"])
-        stage_a_subtile(fx.Index(0), 1, lds_a0_base_ptr, _SCOPE["a0"], _NOALIAS["a0"])
+        stage_a_subtile(fx.Index(0), 0, lds_a0)
+        stage_b_subtile(fx.Index(0), 0, lds_b0)
+        stage_b_subtile(fx.Index(0), 1, lds_b0)
+        stage_a_subtile(fx.Index(0), 1, lds_a0)
 
-        stage_a_subtile(fx.Index(BLOCK_K), 0, lds_a1_base_ptr, _SCOPE["a1"], _NOALIAS["a1"])
-        stage_b_subtile(fx.Index(BLOCK_K), 0, lds_b1_base_ptr, _SCOPE["b1"], _NOALIAS["b1"])
-        stage_b_subtile(fx.Index(BLOCK_K), 1, lds_b1_base_ptr, _SCOPE["b1"], _NOALIAS["b1"])
-        stage_a_subtile(fx.Index(BLOCK_K), 1, lds_a1_base_ptr, _SCOPE["a1"], _NOALIAS["a1"])
+        stage_a_subtile(fx.Index(BLOCK_K), 0, lds_a1)
+        stage_b_subtile(fx.Index(BLOCK_K), 0, lds_b1)
+        stage_b_subtile(fx.Index(BLOCK_K), 1, lds_b1)
+        stage_a_subtile(fx.Index(BLOCK_K), 1, lds_a1)
 
         rocdl.sched_barrier(0)
         _barrier(vmcnt=3 * LOAD_PASSES_A_SUBTILE + 4 * LOAD_PASSES_B_SUBTILE)
@@ -872,15 +891,16 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
         # K0 is consumed directly.  K1 MFMA-ready scales are carried as
         # prev_refill_scales and become next_scales_ready at loop entry.
 
-        # Carry only A-top mi=0 across iterations to limit VGPR pressure;
-        # b0_regs carries the complete B-left 64-row register tile.
-        a0_regs = load_a_subtile_mi_regs(lds_a0, scales0, 0, 0)
+        # Seed the carried-register pipeline with K0 A-top. In later steady-state
+        # iterations, Q2/Q3 of the preceding iteration prefetch the next tile's
+        # A-top and B-left register tiles before their LDS half-pages are reused.
+        a0_regs = load_a_subtile_regs(lds_a0, scales0, 0)
 
         rocdl.sched_barrier(0)
         _barrier(vmcnt=3 * LOAD_PASSES_A_SUBTILE + 3 * LOAD_PASSES_B_SUBTILE)
         rocdl.sched_barrier(0)
 
-        # Preload B-left for K0 to registers.
+        # Complete the K0 carried-register seed with B-left.
         b0_regs = load_b_subtile_regs(lds_b0, scales0, 0)
 
         # Main HK loop: exactly one logical K128 per iteration.
@@ -895,12 +915,8 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
                     lds_b0,
                     lds_a1,
                     lds_b1,
-                    lds_a0_base_ptr,
-                    lds_b0_base_ptr,
-                    _SCOPE["a0"],
-                    _NOALIAS["a0"],
-                    _SCOPE["b0"],
-                    _NOALIAS["b0"],
+                    lds_a0,
+                    lds_b0,
                     a0_regs,
                     b0_regs,
                     scales0,
@@ -913,22 +929,20 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
                     lds_b1,
                     lds_a0,
                     lds_b0,
-                    lds_a1_base_ptr,
-                    lds_b1_base_ptr,
-                    _SCOPE["a1"],
-                    _NOALIAS["a1"],
-                    _SCOPE["b1"],
-                    _NOALIAS["b1"],
+                    lds_a1,
+                    lds_b1,
                     a0_regs,
                     b0_regs,
                     scales1,
                     refill_scales,
                 )
 
-        # Common two-page tail.  After the steady loop, a0_regs/b0_regs are
-        # for the next page after the last consumed K128 tile.  The final scale
-        # tile returned by the last refill belongs to the LDS page that was just
-        # refilled, so the tail page order depends on parity:
+        # Common two-page tail. The penultimate tile still uses the Q2/Q3
+        # carry-prefetch scheduler to prepare A-top/B-left for the final tile,
+        # but it performs no K+2 data or scale refill. The final tile performs
+        # compute only. After the steady loop, a0_regs/b0_regs belong to the
+        # next tile to consume, while refill_scales belongs to the page most
+        # recently refilled; therefore tail page order depends on parity:
         #   even NUM_K_TILES: consume LDS0 then final LDS1
         #   odd  NUM_K_TILES: consume LDS1 then final LDS0
         if (NUM_K_TILES % 2) == 0:
@@ -975,23 +989,6 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
         c_n: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        ctx = CompilationContext.get_current()
-        with ir.InsertionPoint(ctx.gpu_module_body):
-            linkage = ir.Attribute.parse("#llvm.linkage<external>")
-            for sym, size in (
-                (LDS_SYM_A0, LDS_BYTES_A),
-                (LDS_SYM_A1, LDS_BYTES_A),
-                (LDS_SYM_B0, LDS_BYTES_B),
-                (LDS_SYM_B1, LDS_BYTES_B),
-            ):
-                llvm.GlobalOp(
-                    global_type=ir.Type.parse(f"!llvm.array<{size} x i8>"),
-                    sym_name=sym,
-                    linkage=linkage,
-                    addr_space=3,
-                    alignment=1024,
-                )
-
         # The integration only dispatches aligned shapes; no partial-tile masking exists.
         grid_x = (c_m // BLOCK_M) * (c_n // BLOCK_N)
         kernel_gemm(
@@ -1003,6 +1000,6 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
             c_m,
             c_n,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
-        ).launch(grid=(grid_x, 1, 1), block=(NUM_THREADS, 1, 1), smem=0, stream=stream)
+        ).launch(grid=(grid_x, 1, 1), block=(NUM_THREADS, 1, 1), stream=stream)
 
     return launch_gemm

@@ -31,6 +31,77 @@ OUT_DTYPE = torch.float16
 MX_BLOCK_K = 32
 ARCH = str(get_rocm_arch())
 
+SWEEP_SHAPES = [
+    (4096, 12288, 4096),
+    (4096, 4096, 4096),
+    (4096, 22016, 4096),
+    (4096, 4096, 11008),
+    (8192, 12288, 4096),
+    (8192, 4096, 4096),
+    (8192, 22016, 4096),
+    (8192, 4096, 11008),
+    (16384, 12288, 4096),
+    (16384, 4096, 4096),
+    (16384, 22016, 4096),
+    (16384, 4096, 11008),
+    (4096, 10240, 8192),
+    (4096, 8192, 8192),
+    (4096, 57344, 8192),
+    (4096, 8192, 28672),
+    (8192, 10240, 8192),
+    (8192, 8192, 8192),
+    (8192, 57344, 8192),
+    (8192, 8192, 28672),
+    (16384, 10240, 8192),
+    (16384, 8192, 8192),
+    (16384, 57344, 8192),
+    (16384, 8192, 28672),
+    (8192, 6144, 4096),
+    (8192, 28672, 4096),
+    (8192, 4096, 14336),
+    (16384, 6144, 4096),
+    (16384, 28672, 4096),
+    (16384, 4096, 14336),
+    (32768, 6144, 4096),
+    (32768, 4096, 4096),
+    (32768, 28672, 4096),
+    (32768, 4096, 14336),
+    (8192, 18432, 16384),
+    (8192, 16384, 16384),
+    (8192, 106496, 16384),
+    (8192, 16384, 53248),
+    (16384, 18432, 16384),
+    (16384, 16384, 16384),
+    (16384, 106496, 16384),
+    (16384, 16384, 53248),
+    (32768, 18432, 16384),
+    (32768, 16384, 16384),
+    (32768, 16384, 53248),
+    (8192, 4608, 3584),
+    (8192, 3584, 3584),
+    (8192, 37888, 3584),
+    (8192, 3584, 18944),
+    (16384, 4608, 3584),
+    (16384, 3584, 3584),
+    (16384, 37888, 3584),
+    (16384, 3584, 18944),
+    (32768, 4608, 3584),
+    (32768, 3584, 3584),
+    (32768, 37888, 3584),
+    (32768, 3584, 18944),
+    (8192, 59136, 8192),
+    (8192, 8192, 29568),
+    (16384, 59136, 8192),
+    (16384, 8192, 29568),
+    (32768, 10240, 8192),
+    (32768, 8192, 8192),
+    (32768, 59136, 8192),
+    (32768, 8192, 29568),
+    (4096, 6144, 4096),
+    (4096, 28672, 4096),
+    (4096, 4096, 14336),
+]
+
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
@@ -75,7 +146,14 @@ def _pack_scale_words(scales_u8: torch.Tensor) -> torch.Tensor:
 
     s32 = scales_u8.contiguous().view(rows, k32_tiles // 4, 4).to(torch.int32)
     iteration_major = (
-        (s32[:, :, 0] | (s32[:, :, 1] << 8) | (s32[:, :, 2] << 16) | (s32[:, :, 3] << 24)).transpose(0, 1).contiguous()
+        (
+            s32[:, :, 0]
+            | (s32[:, :, 1] << 8)
+            | (s32[:, :, 2] << 16)
+            | (s32[:, :, 3] << 24)
+        )
+        .transpose(0, 1)
+        .contiguous()
     )
 
     row = torch.arange(rows, device=scales_u8.device, dtype=torch.int64)
@@ -120,8 +198,8 @@ def _bench_mxfp8_gemm_4wave(
     tile_m: int = 256,
     tile_n: int = 256,
     disable_xcd_remap: bool = False,
-    num_warmups: int = 2,
-    num_iters: int = 10,
+    num_warmups: int = 100,
+    num_iters: int = 100,
     static_weight_scale: bool = True,
 ):
     """Run + verify one MXFP8 GEMM configuration. Returns TFLOPS."""
@@ -129,7 +207,10 @@ def _bench_mxfp8_gemm_4wave(
         pytest.skip("MXFP8 GEMM requires CDNA4 (gfx95*)")
 
     if M % tile_m != 0 or N % tile_n != 0 or K % 128 != 0 or K < 512:
-        pytest.skip("MXFP8 4-wave kernel requires M/N divisible by the selected tile and K >= 512 divisible by 128")
+        pytest.skip(
+            "MXFP8 4-wave kernel requires M/N divisible by the selected tile "
+            "and K >= 512 divisible by 128"
+        )
 
     device = torch.device("cuda")
     a, b, a_scale_raw, b_scale_raw = _make_mxfp8_inputs(M, N, K, device)
@@ -184,6 +265,15 @@ def _bench_mxfp8_gemm_4wave(
     def _launch(c, a_input, b_input, a_scale_input, b_scale_input):
         compiled(*_args(c, a_input, b_input, a_scale_input, b_scale_input))
 
+    # Validate with a standalone, untimed launch. Correctness is intentionally
+    # independent of the warmup/timed performance run below, so every default
+    # or sweep shape must pass validation before its TFLOPS result is measured.
+    c_out.zero_()
+    _launch(c_out, a, b, a_scale, b_scale)
+    torch.cuda.synchronize()
+    _verify_mxfp8_output(c_out, c_ref)
+    print("[validation] PASS")
+
     num_iters = max(2, int(num_iters))
     _, microseconds = run_perftest(
         _launch,
@@ -197,8 +287,6 @@ def _bench_mxfp8_gemm_4wave(
     )
     torch.cuda.synchronize()
 
-    _verify_mxfp8_output(c_out, c_ref)
-
     flops = 2 * M * N * K
     bytes_moved = (
         M * K
@@ -209,7 +297,10 @@ def _bench_mxfp8_gemm_4wave(
     )
     tflops = flops / (microseconds / 1.0e6) / 1.0e12
     tbps = bytes_moved / 1.0e12 / (microseconds / 1.0e6)
-    print(f"[flyc] Throughput: {microseconds:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
+    print(
+        f"[flyc] Throughput: {microseconds:.1f} us, "
+        f"{tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s"
+    )
     return tflops
 
 
@@ -267,6 +358,12 @@ if __name__ == "__main__":
     parser.add_argument("--tile_m", type=int, default=256)
     parser.add_argument("--tile_n", type=int, default=256)
     parser.add_argument(
+        "--sweep",
+        action="store_true",
+        default=False,
+        help="Benchmark the full unique shape sweep.",
+    )
+    parser.add_argument(
         "--disable_xcd_remap",
         action="store_true",
         default=False,
@@ -287,23 +384,47 @@ if __name__ == "__main__":
         "--dynamic_weight_scale",
         action="store_true",
         default=False,
-        help=("Use dynamic tensor arguments for weight and scales instead of static DLPack adaptors."),
+        help=(
+            "Use dynamic tensor arguments for weight and scales instead of "
+            "static DLPack adaptors."
+        ),
     )
     args = parser.parse_args()
 
     torch.set_default_device("cuda")
 
-    try:
-        _bench_mxfp8_gemm_4wave(
-            M=args.M,
-            N=args.N,
-            K=args.K,
-            tile_m=args.tile_m,
-            tile_n=args.tile_n,
-            disable_xcd_remap=args.disable_xcd_remap,
-            num_warmups=args.num_warmups,
-            num_iters=args.num_iters,
-            static_weight_scale=not args.dynamic_weight_scale,
+    shapes = SWEEP_SHAPES if args.sweep else [(args.M, args.N, args.K)]
+    results = []
+
+    for shape_index, (M, N, K) in enumerate(shapes, start=1):
+        if args.sweep:
+            print(
+                f"\n[sweep {shape_index:02d}/{len(shapes):02d}] "
+                f"M={M} N={N} K={K}"
+            )
+
+        try:
+            tflops = _bench_mxfp8_gemm_4wave(
+                M=M,
+                N=N,
+                K=K,
+                tile_m=args.tile_m,
+                tile_n=args.tile_n,
+                disable_xcd_remap=args.disable_xcd_remap,
+                num_warmups=args.num_warmups,
+                num_iters=args.num_iters,
+                static_weight_scale=not args.dynamic_weight_scale,
+            )
+            results.append((M, N, K, tflops))
+        except pytest.skip.Exception as error:
+            print(f"Skipped: {error}")
+
+    if args.sweep:
+        assert len(results) == len(shapes), (
+            f"Sweep completed only {len(results)}/{len(shapes)} shapes; "
+            "one or more shapes were skipped or did not produce a result"
         )
-    except pytest.skip.Exception as error:
-        print(f"Skipped: {error}")
+        print("\nMXFP8 4-wave sweep results:")
+        for M, N, K, tflops in results:
+            print(f"M={M:5d} N={N:6d} K={K:5d} TFLOPS={tflops:.2f}")
+        print(f"\nSweep validation: PASS ({len(results)}/{len(shapes)} shapes)")
