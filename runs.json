@@ -1,11 +1,69 @@
 {
  "schema": 1,
- "updated": "2026-07-18T04:38:12Z",
+ "updated": "2026-07-18T04:45:28Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 29630787278,
+   "run_id": 29631028371,
    "pr": 873,
+   "commit": "b3bb5fd508c13a312e0d777f08ba0efbe14ad802",
+   "branch": "adityas-amd/fix-vector-list-hang",
+   "event": "pull_request",
+   "title": "Fix Vector list()-iteration hang ",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29631028371",
+   "created_at": "2026-07-18T04:43:26Z",
+   "updated_at": "2026-07-18T04:44:02Z",
+   "actor": "adityas-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 29630956485,
+   "pr": null,
+   "commit": "6b82202fbede91590bdc11d683c03c009bd397f3",
+   "branch": "adityas-amd/fix-vector-list-hang",
+   "event": "pull_request",
+   "title": "Fix Vector list()-iteration hang ",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29630956485",
+   "created_at": "2026-07-18T04:40:56Z",
+   "updated_at": "2026-07-18T04:43:28Z",
+   "actor": "adityas-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-18T04:42:23Z",
+     "completed_at": "2026-07-18T04:43:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29630956485/job/88044373190"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-18T04:42:23Z",
+     "completed_at": "2026-07-18T04:43:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29630956485/job/88044373192"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-18T04:42:23Z",
+     "completed_at": "2026-07-18T04:43:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29630956485/job/88044373195"
+    }
+   ]
+  },
+  {
+   "run_id": 29630787278,
+   "pr": null,
    "commit": "fb89c4d47d9e88733df1d95a7bcbee57a68d5675",
    "branch": "adityas-amd/fix-vector-list-hang",
    "event": "pull_request",
@@ -25,11 +83,11 @@
    "branch": "feat/autotune-offline-configs",
    "event": "pull_request",
    "title": "[3/5] autotune: add offline config artifacts (#770)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29630755171",
    "created_at": "2026-07-18T04:33:43Z",
-   "updated_at": "2026-07-18T04:35:13Z",
+   "updated_at": "2026-07-18T04:36:53Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -53,9 +111,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-18T04:35:13Z",
+     "started_at": "2026-07-18T04:36:52Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29630755171/job/88043803423"
     }
@@ -2334,64 +2392,6 @@
      "started_at": "2026-07-16T07:07:58Z",
      "completed_at": "2026-07-16T07:48:20Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29478799716/job/87557903650"
-    }
-   ]
-  },
-  {
-   "run_id": 29477614155,
-   "pr": null,
-   "commit": "a6de6a2effd0ed0d703ea4246e6d8c13a215ae39",
-   "branch": "feat/autotune-rmsnorm-adopt",
-   "event": "pull_request",
-   "title": "[2/5] autotune: add opt-in search and RMSNorm waves-per-EU tuning (#770)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29477614155",
-   "created_at": "2026-07-16T06:44:23Z",
-   "updated_at": "2026-07-16T07:44:50Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 29477550214,
-   "pr": 801,
-   "commit": "bc0cebe7c987b69f074ecf18d723faf388b3a1f8",
-   "branch": "feat/layernorm-backward-769",
-   "event": "pull_request",
-   "title": "[layernorm] Add backward pass for training (PR 3/3, #769)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29477550214",
-   "created_at": "2026-07-16T06:43:09Z",
-   "updated_at": "2026-07-16T09:24:58Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-16T06:52:15Z",
-     "completed_at": "2026-07-16T08:14:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29477550214/job/87553963818"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-16T07:09:23Z",
-     "completed_at": "2026-07-16T08:02:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29477550214/job/87553963825"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-16T09:07:26Z",
-     "completed_at": "2026-07-16T09:24:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29477550214/job/87553963850"
     }
    ]
   }
