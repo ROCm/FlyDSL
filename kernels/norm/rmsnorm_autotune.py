@@ -32,6 +32,7 @@ _rmsnorm_tuner = autotune(
     configs=_search_configs,
     key=["m_in", "N", "dtype_str"],
     default=_default_config,
+    artifact_name="rmsnorm",
 )(rmsnorm_direct)
 
 

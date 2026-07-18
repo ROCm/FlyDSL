@@ -3,12 +3,16 @@
 
 """FlyDSL autotuner - benchmark multiple kernel configs, pick the fastest."""
 
+import hashlib
 import inspect
 import json
 import os
+import tempfile
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable, Dict, List
+
+from .utils import log
 
 try:
     import torch
@@ -55,6 +59,55 @@ def _device_fingerprint() -> str:
         return str(get_rocm_arch())
     except Exception:
         return ""
+
+
+def _device_descriptor(device=None):
+    """Portable identity for the device that will run the call."""
+    if torch is None:
+        return None
+    try:
+        if not torch.cuda.is_available():
+            return None
+        device = torch.cuda.current_device() if device is None else device
+        properties = torch.cuda.get_device_properties(device)
+        name = str(properties.name)
+        compute_units = getattr(properties, "multi_processor_count", None)
+        with torch.cuda.device(device):
+            arch = _device_fingerprint()
+    except Exception:
+        return None
+    if not name or not arch or type(compute_units) is not int or compute_units <= 0:
+        return None
+    return {"name": name, "arch": arch, "compute_units": compute_units}
+
+
+def _artifact_config_dir():
+    value = os.environ.get("FLYDSL_AUTOTUNE_CONFIG_DIR")
+    return Path(value).expanduser().resolve() if value else None
+
+
+def _canonical_json(value) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+            tmp.write(text)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
 
 def _normalize_strides(t) -> tuple:
@@ -172,6 +225,7 @@ class Autotuner:
         post_hook=None,
         do_bench_fn=None,
         default=None,
+        artifact_name=None,
     ):
         self.fn = fn  # JitFunction instance
         self.configs = configs
@@ -187,11 +241,22 @@ class Autotuner:
         self.cache: Dict[tuple, Config] = {}
         self.default = default
 
-        # Infer arg names from the underlying function
-        if hasattr(fn, "func"):
-            self.arg_names = list(inspect.signature(fn.func).parameters.keys())
-        else:
-            self.arg_names = list(inspect.signature(fn).parameters.keys())
+        # Infer arg names from the underlying function.
+        source = fn.func if hasattr(fn, "func") else fn
+        self._signature = inspect.signature(source)
+        self.arg_names = list(self._signature.parameters.keys())
+
+        if artifact_name is not None:
+            if not isinstance(artifact_name, str):
+                raise TypeError("artifact_name must be a string")
+            artifact_name = artifact_name.strip()
+            safe_name = artifact_name.replace("-", "").replace("_", "").replace(".", "")
+            if not artifact_name.isascii() or not safe_name.isalnum() or len(artifact_name) > 64:
+                raise ValueError("artifact_name must use 1-64 letters, digits, '.', '_' or '-'")
+            if len(set(self.key)) != len(self.key) or any(name not in self._signature.parameters for name in self.key):
+                raise ValueError("artifact keys must be unique kernel parameter names")
+        self.artifact_name = artifact_name
+        self._artifact_cache = {}
 
         # Disk cache
         fn_name = getattr(fn, "__name__", None) or getattr(fn, "func", None)
@@ -239,6 +304,10 @@ class Autotuner:
         key_vals.append(("_env_", _env_fingerprint()))
         key_vals.append(("_toolchain_", _toolchain_fingerprint()))
         key_vals.append(("_device_", _device_fingerprint()))
+        if self.artifact_name is not None and os.environ.get("FLYDSL_AUTOTUNE_CONFIG_DIR"):
+            device = _device_descriptor(self._call_device(args, kwargs))
+            descriptor = tuple(sorted(device.items())) if device is not None else None
+            key_vals.append(("_artifact_device_", descriptor))
         effective_hints = getattr(self.fn, "_effective_compile_hints", None)
         if callable(effective_hints):
             hint_key = tuple(
@@ -364,12 +433,128 @@ class Autotuner:
             self._reset_tensors(args, merged)
             return self._run_with_hints(config.compiler_opts(), args, merged)
 
+    def _call_device(self, args, kwargs):
+        if torch is None:
+            return None
+        sig_args = dict(zip(self.arg_names, args))
+        sig_args.update(kwargs)
+        return next(
+            (value.device for value in sig_args.values() if isinstance(value, torch.Tensor) and value.is_cuda),
+            None,
+        )
+
+    def _artifact_ref(self, args, kwargs, *, required):
+        if self.artifact_name is None or not os.environ.get("FLYDSL_AUTOTUNE_CONFIG_DIR"):
+            return None
+        try:
+            bound = self._signature.bind_partial(*args, **kwargs)
+            bound.apply_defaults()
+            key = {}
+            for name in self.key:
+                if name not in bound.arguments:
+                    raise ValueError(f"artifact key {name!r} is missing from the call")
+                value = bound.arguments[name]
+                if hasattr(value, "shape"):
+                    value = tuple(value.shape)
+                elif hasattr(value, "dtype"):
+                    value = str(value.dtype)
+                key[name] = value
+            device = _device_descriptor(self._call_device(args, kwargs))
+            if device is None:
+                raise ValueError("call device identity is unavailable")
+            identity = {"name": self.artifact_name, "key": key, "device": device}
+            digest = hashlib.sha256(_canonical_json(identity).encode()).hexdigest()
+            return _artifact_config_dir() / f"{self.artifact_name}-{digest}.json", identity
+        except (OSError, RuntimeError, TypeError, ValueError, OverflowError, RecursionError) as error:
+            if required:
+                raise ValueError(f"cannot generate offline config identity: {error}") from error
+            log().warning(f"Offline config identity is unavailable: {error}")
+            return None
+
+    def _decode_artifact_config(self, body, args, kwargs):
+        if not isinstance(body, dict):
+            raise ValueError("config must be an object")
+        if "pre_hook" in body:
+            raise ValueError("offline configs cannot contain Config.pre_hook")
+        config = Config.from_dict(body)
+        try:
+            call_bound = self._signature.bind_partial(*args, **kwargs)
+        except TypeError as error:
+            raise ValueError(f"call does not match the kernel signature: {error}") from error
+
+        call_names = set(call_bound.arguments)
+        for name, parameter in self._signature.parameters.items():
+            if parameter.kind is inspect.Parameter.VAR_KEYWORD and name in call_bound.arguments:
+                call_names.update(call_bound.arguments[name])
+
+        injected = config.all_kwargs()
+        overlap = set(injected).intersection(call_names) | set(body).intersection(self.key)
+        if overlap:
+            raise ValueError(f"config would override call arguments: {sorted(overlap)}")
+        if any(type(value) is not int for value in config.compiler_opts().values()):
+            raise ValueError("compiler options must be integers")
+        bound_kwargs = dict(kwargs)
+        bound_kwargs.update(injected)
+        try:
+            self._signature.bind(*args, **bound_kwargs)
+        except TypeError as error:
+            raise ValueError(f"config does not complete the kernel signature: {error}") from error
+        return config
+
+    def _load_artifact(self, ref, args, kwargs):
+        if ref is None:
+            return None
+        path, identity = ref
+        cache_key = str(path)
+        if cache_key in self._artifact_cache:
+            return self._artifact_cache[cache_key]
+
+        try:
+            if not path.is_file():
+                self._artifact_cache[cache_key] = None
+                return None
+            data = json.loads(path.read_text(encoding="utf-8"))
+            _canonical_json(data)
+            if not isinstance(data, dict):
+                raise ValueError("artifact must be an object")
+            if type(data.get("version")) is not int or data["version"] != 1:
+                raise ValueError("unsupported artifact version")
+            if _canonical_json(data.get("identity")) != _canonical_json(identity):
+                raise ValueError("artifact identity does not match")
+            config = self._decode_artifact_config(data["config"], args, kwargs)
+        except (KeyError, OSError, json.JSONDecodeError, TypeError, ValueError, OverflowError, RecursionError) as error:
+            log().warning(f"Ignoring offline config {path.name}: {error}")
+            self._artifact_cache[cache_key] = None
+            return None
+
+        self._artifact_cache[cache_key] = config
+        return config
+
+    def _emit_artifact(self, config, ref, args, kwargs):
+        if config.pre_hook is not None:
+            raise ValueError("offline configs cannot serialize Config.pre_hook")
+        path, identity = ref
+        body = config.to_dict()
+        if json.loads(_canonical_json(body)) != body:
+            raise ValueError("offline config values must preserve their types in JSON")
+        self._decode_artifact_config(body, args, kwargs)
+        payload = {"version": 1, "identity": identity, "config": body}
+        _atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n")
+        self._artifact_cache[str(path)] = config
+        log().info(f"Wrote offline config {path}")
+
     def __call__(self, *args, **kwargs):
         key = self._make_key(args, kwargs)
         force = _tuning_enabled()
 
         if not force and key in self.cache:
             return self._run_config(self.cache[key], args, kwargs)
+
+        artifact = self._artifact_ref(args, kwargs, required=force)
+        if not force:
+            artifact_config = self._load_artifact(artifact, args, kwargs)
+            if artifact_config is not None:
+                return self._run_config(artifact_config, args, kwargs)
 
         if not force and self.default is not None:
             return self._run_config(self.default(*args, **kwargs), args, kwargs)
@@ -392,6 +577,8 @@ class Autotuner:
         best_config, best_time = min(results, key=lambda x: x[1])
         print(f"[autotune] best: {best_config} ({best_time:.3f} ms)")
 
+        if force and artifact is not None:
+            self._emit_artifact(best_config, artifact, args, kwargs)
         self.cache[key] = best_config
         self._save_disk_cache()
 
@@ -428,6 +615,7 @@ def autotune(
     post_hook: Callable = None,
     do_bench: Callable = None,
     default: Callable = None,
+    artifact_name: str = None,
 ):
     """Autotune decorator for @jit functions.
 
@@ -442,6 +630,9 @@ def autotune(
             the current arguments.
         default: optional heuristic ``default(*args, **kwargs) -> Config`` used
             without benchmarking unless ``FLYDSL_AUTOTUNE`` forces a search.
+        artifact_name: stable name for opt-in config lookup and emission through
+            ``FLYDSL_AUTOTUNE_CONFIG_DIR``. The existing ``key`` defines the
+            portable call axes; forced tuning emits a matching artifact.
         restore_value: tensor args the kernel mutates in place (output overlaps
             input, or accumulation). Snapshotted and restored before each bench
             rep so every config is measured on identical inputs. Required when
@@ -464,6 +655,7 @@ def autotune(
             post_hook=post_hook,
             do_bench_fn=do_bench,
             default=default,
+            artifact_name=artifact_name,
         )
 
     return decorator
