@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-18T00:42:16Z",
+ "updated": "2026-07-18T00:52:48Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29623699880,
+   "pr": 872,
+   "commit": "ca9711496009988676843debb14bd04fc860bf26",
+   "branch": "amartin/mxfp8-4wave",
+   "event": "pull_request",
+   "title": "[Kernel] Add optimized 4-wave MXFP8 GEMM kernel for gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29623699880",
+   "created_at": "2026-07-18T00:42:55Z",
+   "updated_at": "2026-07-18T00:45:30Z",
+   "actor": "aris134",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-18T00:44:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29623699880/job/88023878357"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-18T00:45:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29623699880/job/88023878360"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-18T00:45:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29623699880/job/88023878363"
+    }
+   ]
+  },
   {
    "run_id": 29623535072,
    "pr": 872,
@@ -2379,49 +2422,6 @@
    "updated_at": "2026-07-16T03:59:24Z",
    "actor": "fsx950223",
    "jobs": []
-  },
-  {
-   "run_id": 29468076802,
-   "pr": 825,
-   "commit": "0c47df43d91002c0d3685766644dce13dee330a4",
-   "branch": "pa-decode-tile",
-   "event": "pull_request",
-   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29468076802",
-   "created_at": "2026-07-16T03:04:01Z",
-   "updated_at": "2026-07-16T09:06:41Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-16T03:06:19Z",
-     "completed_at": "2026-07-16T03:55:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29468076802/job/87525557289"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-16T03:06:14Z",
-     "completed_at": "2026-07-16T03:50:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29468076802/job/87525557293"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-16T03:06:05Z",
-     "completed_at": "2026-07-16T09:06:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29468076802/job/87525557309"
-    }
-   ]
   }
  ]
 }
