@@ -66,6 +66,7 @@ def test_int_index_out_of_range_raises():
 @pytest.mark.l0_backend_agnostic
 def test_negative_index():
     """v[-1] resolves to the last lane; too-negative raises IndexError."""
+
     def body(v):
         assert v[-1] is not None
         with pytest.raises(IndexError):
