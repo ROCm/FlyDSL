@@ -29,6 +29,7 @@ if torch is None or not torch.cuda.is_available():
 # Imported after the torch guard: rmsnorm() is only defined when torch is present,
 # so importing it earlier makes a torch-less collection fail (ImportError) instead of skip.
 import flydsl.compiler as flyc  # noqa: E402
+from kernels.common.tensor_shim import _run_compiled  # noqa: E402
 from kernels.norm.rmsnorm_kernel import (  # noqa: E402
     build_fused_add_rmsnorm_bwd_module,
     build_fused_add_rmsnorm_dynamicquant_module,
@@ -60,6 +61,39 @@ WARMUP_ITERS = 10
 BENCH_ITERS = 100
 
 
+# Keep plain and fused-add training coverage aligned.  The generic N > 2048
+# cases are especially easy to lose when the two test matrices evolve
+# independently.
+_RMSNORM_BACKWARD_CONFIGS = (
+    (64, 256, "f32"),  # small-N path, f32
+    (16, 512, "bf16"),  # small-N path, bf16
+    (4096, 4096, "bf16"),  # model-relevant large shape
+    (64, 2000, "f32"),  # small-N path, unaligned
+    (128, 4096, "f16"),  # f16, large hidden size
+    (64, 3000, "f32"),  # generic scalar path, unaligned N > 2048
+)
+
+_RMSNORM_AUTOGRAD_CONFIGS = (
+    (64, 256, "f32"),  # small-N path
+    (128, 4096, "bf16"),  # large hidden size
+    (128, 4096, "f16"),  # large hidden size, f16
+    (128, 3000, "f32"),  # generic scalar path, unaligned N > 2048
+)
+
+# Opt-in backward-only performance sweep.  Repeated N=4096 entries exercise
+# the production compiled-function cache across runtime M values; larger hidden
+# sizes keep the data representative without putting benchmark work on the
+# default CI path.
+_RMSNORM_TORCH_BENCH_CONFIGS = (
+    (1, 4096, "bf16"),
+    (128, 4096, "bf16"),
+    (4096, 4096, "bf16"),
+    (512, 2048, "bf16"),
+    (512, 3000, "f32"),
+    (1024, 8192, "bf16"),
+)
+
+
 def _torch_dtype(dtype: str):
     if dtype == "f32":
         return DTYPE_FP32
@@ -70,25 +104,44 @@ def _torch_dtype(dtype: str):
     raise ValueError(f"unsupported dtype: {dtype}")
 
 
-def _get_rmsnorm_configs():
-    shapes_env = os.environ.get("ROCDSL_RMSNORM_SHAPES", "").strip()
-    if shapes_env:
-        configs = []
-        for part in shapes_env.split(";"):
-            p = part.strip()
-            if not p:
-                continue
-            m_s, n_s, dt = [x.strip() for x in p.split(",")]
-            configs.append((int(m_s), int(n_s), dt))
-    else:
-        configs = [
-            (64, 256, "f32"),  # f32 aligned
-            (32, 128, "f16"),  # f16 aligned
-            (64, 2000, "f32"),  # unaligned tail handling
-            (16, 512, "bf16"),  # bf16 small shape
-            (64, 8192, "bf16"),  # bf16 fast-path N with small M
-        ]
+def _get_rmsnorm_shape_override(env_name="ROCDSL_RMSNORM_SHAPES"):
+    shapes_env = os.environ.get(env_name, "").strip()
+    if not shapes_env:
+        return None
+
+    configs = []
+    for part in shapes_env.split(";"):
+        p = part.strip()
+        if not p:
+            continue
+        m_s, n_s, dt = [x.strip() for x in p.split(",")]
+        configs.append((int(m_s), int(n_s), dt))
     return configs
+
+
+def _get_rmsnorm_configs():
+    override = _get_rmsnorm_shape_override()
+    if override is not None:
+        return override
+    return [
+        (64, 256, "f32"),  # f32 aligned
+        (32, 128, "f16"),  # f16 aligned
+        (64, 2000, "f32"),  # unaligned tail handling
+        (16, 512, "bf16"),  # bf16 small shape
+        (64, 8192, "bf16"),  # bf16 fast-path N with small M
+    ]
+
+
+def _get_rmsnorm_backward_configs():
+    return list(_RMSNORM_BACKWARD_CONFIGS)
+
+
+def _get_rmsnorm_autograd_configs():
+    return list(_RMSNORM_AUTOGRAD_CONFIGS)
+
+
+def _get_rmsnorm_torch_bench_configs():
+    return _get_rmsnorm_shape_override("ROCDSL_RMSNORM_BWD_BENCH_SHAPES") or list(_RMSNORM_TORCH_BENCH_CONFIGS)
 
 
 def _get_rmsnorm_large_configs():
@@ -608,17 +661,15 @@ def run_bwd_test(M: int, N: int, dtype: str = "f32"):
     # --- forward with store_rstd: validates rstd from the kernel ---
     out = torch.empty((M, N), device="cuda", dtype=torch_dtype)
     rstd = torch.empty((M,), device="cuda", dtype=DTYPE_FP32)
-    fwd_c = flyc.compile(fwd_fn, x, weight, out, rstd, M, stream)
-    fwd_c(x, weight, out, rstd, M, stream)
+    _run_compiled(fwd_fn, x, weight, out, rstd, M, stream)
     torch.cuda.synchronize()
     rstd_err = (rstd - rstd_ref).abs().max().item()
 
     # --- backward: dx + dweight ---
     dx = torch.empty((M, N), device="cuda", dtype=torch_dtype)
-    dweight = torch.zeros((N,), device="cuda", dtype=DTYPE_FP32)
-    bwd_c = flyc.compile(bwd_fn, x, weight, dy, rstd, dx, dweight, M, stream)
+    dweight = torch.empty((N,), device="cuda", dtype=DTYPE_FP32)
     dweight.zero_()
-    bwd_c(x, weight, dy, rstd, dx, dweight, M, stream)
+    _run_compiled(bwd_fn, x, weight, dy, rstd, dx, dweight, M, stream)
     torch.cuda.synchronize()
 
     dx_err = (dx.to(DTYPE_FP32) - dx_ref).abs().max().item()
@@ -703,8 +754,7 @@ def run_fused_add_bwd_test(M: int, N: int, dtype: str = "f32"):
     out = torch.empty((M, N), device="cuda", dtype=torch_dtype)
     residual_out = torch.empty((M, N), device="cuda", dtype=torch_dtype)
     rstd = torch.empty((M,), device="cuda", dtype=DTYPE_FP32)
-    fwd_c = flyc.compile(fwd_fn, x, residual, weight, out, residual_out, rstd, M, stream)
-    fwd_c(x, residual, weight, out, residual_out, rstd, M, stream)
+    _run_compiled(fwd_fn, x, residual, weight, out, residual_out, rstd, M, stream)
     torch.cuda.synchronize()
 
     rstd_atol = 1e-3
@@ -713,6 +763,7 @@ def run_fused_add_bwd_test(M: int, N: int, dtype: str = "f32"):
     dw_atol = {"f32": 1e-2, "f16": 1e-1, "bf16": 5e-1}[dtype]
 
     all_ok = True
+    cached_bwd = None
     for case_name, dres_out in (("dres_out=None", None), ("dres_out=rand", None)):
         if case_name == "dres_out=rand":
             dres_out = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32).to(torch_dtype).contiguous()
@@ -725,11 +776,14 @@ def run_fused_add_bwd_test(M: int, N: int, dtype: str = "f32"):
         # --- backward: dx (== dresidual by construction), dweight ---
         # The kernel writes dx only; dresidual is dx aliased in the wrapper.
         dx = torch.empty((M, N), device="cuda", dtype=torch_dtype)
-        dweight = torch.zeros((N,), device="cuda", dtype=DTYPE_FP32)
+        dweight = torch.empty((N,), device="cuda", dtype=DTYPE_FP32)
         dres_out_arg = dres_out if dres_out is not None else torch.zeros((M, N), device="cuda", dtype=torch_dtype)
-        bwd_c = flyc.compile(bwd_fn, residual_out, weight, dy, dres_out_arg, rstd, dx, dweight, M, stream)
         dweight.zero_()
-        bwd_c(residual_out, weight, dy, dres_out_arg, rstd, dx, dweight, M, stream)
+        _run_compiled(bwd_fn, residual_out, weight, dy, dres_out_arg, rstd, dx, dweight, M, stream)
+        if cached_bwd is None:
+            cached_bwd = bwd_fn._cf
+        else:
+            assert bwd_fn._cf is cached_bwd, "fused-add backward unexpectedly recompiled"
         torch.cuda.synchronize()
 
         dx_err = (dx.to(DTYPE_FP32) - dx_ref).abs().max().item()
@@ -815,18 +869,128 @@ def run_fused_add_autograd_test(M: int, N: int, dtype: str = "f32"):
     return ok
 
 
+def _bench_rmsnorm_backward_against_torch(M, N, dtype, *, fused_add):
+    """Benchmark public autograd backward; graph construction is excluded."""
+    torch_dtype = _torch_dtype(dtype)
+    torch.manual_seed(42)
+
+    x = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
+    weight = torch.rand((N,), device="cuda", dtype=torch_dtype).contiguous()
+    dy = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
+
+    if fused_add:
+        residual = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
+        dresidual_out = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
+
+        x_fly = x.detach().requires_grad_(True)
+        residual_fly = residual.detach().requires_grad_(True)
+        weight_fly = weight.detach().requires_grad_(True)
+        out_fly, added_fly = fused_add_rmsnorm(x_fly, residual_fly, weight_fly, prenorm=True)
+        fly_outputs = (out_fly, added_fly)
+        fly_inputs = (x_fly, residual_fly, weight_fly)
+
+        x_torch = x.detach().requires_grad_(True)
+        residual_torch = residual.detach().requires_grad_(True)
+        weight_torch = weight.detach().requires_grad_(True)
+        added_torch = x_torch + residual_torch
+        out_torch = torch.nn.functional.rms_norm(added_torch, (N,), weight_torch, EPS)
+        torch_outputs = (out_torch, added_torch)
+        torch_inputs = (x_torch, residual_torch, weight_torch)
+        grad_outputs = (dy, dresidual_out)
+
+    else:
+        x_fly = x.detach().requires_grad_(True)
+        weight_fly = weight.detach().requires_grad_(True)
+        out_fly = rmsnorm(x_fly, weight_fly)
+        fly_outputs = (out_fly,)
+        fly_inputs = (x_fly, weight_fly)
+
+        x_torch = x.detach().requires_grad_(True)
+        weight_torch = weight.detach().requires_grad_(True)
+        out_torch = torch.nn.functional.rms_norm(x_torch, (N,), weight_torch, EPS)
+        torch_outputs = (out_torch,)
+        torch_inputs = (x_torch, weight_torch)
+        grad_outputs = (dy,)
+
+    def run_flydsl():
+        return torch.autograd.grad(fly_outputs, fly_inputs, grad_outputs, retain_graph=True)
+
+    def run_torch():
+        return torch.autograd.grad(torch_outputs, torch_inputs, grad_outputs, retain_graph=True)
+
+    # Compile/warm the FlyDSL backward and validate the two public paths before
+    # recording events. This catches shape-specific numerical failures without
+    # including the check or graph construction in either timing.
+    fly_grads = run_flydsl()
+    torch_grads = run_torch()
+    grad_rtol = {"f32": 1e-4, "f16": 3e-2, "bf16": 1e-1}[dtype]
+    dx_atol = {"f32": 1e-3, "f16": 3e-2, "bf16": 2e-1}[dtype]
+    dw_atol = {"f32": 1e-2, "f16": 2e-1, "bf16": 1.0}[dtype]
+    for index, (fly_grad, torch_grad) in enumerate(zip(fly_grads, torch_grads)):
+        atol = dw_atol if index == len(fly_grads) - 1 else dx_atol
+        torch.testing.assert_close(fly_grad, torch_grad, rtol=grad_rtol, atol=atol)
+    del fly_grads, torch_grads
+
+    flydsl_us = bench_gpu_us_torch(run_flydsl, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
+    torch_us = bench_gpu_us_torch(run_torch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
+    return flydsl_us, torch_us
+
+
+def _print_rmsnorm_torch_perf_table(rows):
+    print("\n" + "=" * 100)
+    print("RMSNorm public-autograd backward perf (gpu us): FlyDSL vs PyTorch eager")
+    print(
+        "Forward graph construction is excluded; backward allocations, dweight zeroing, and dtype casts are included."
+    )
+    print(
+        f"Device: {torch.cuda.get_device_name()} | PyTorch: {torch.__version__} | "
+        f"warmup={WARMUP_ITERS}, iters={BENCH_ITERS}, hot cache"
+    )
+    print("=" * 100)
+    print(
+        f"{'op':18s} {'shape':18s} {'dtype':6s} {'FlyDSL(gpu us)':>16s} "
+        f"{'Torch(gpu us)':>14s} {'Torch/FlyDSL':>13s}"
+    )
+    for op, M, N, dtype, flydsl_us, torch_us in rows:
+        speedup = torch_us / flydsl_us
+        print(f"{op:18s} {f'{M}x{N}':18s} {dtype:6s} " f"{flydsl_us:16.1f} {torch_us:14.1f} {speedup:9.2f}x")
+    print("=" * 100 + "\n")
+
+
+@pytest.mark.benchmark
+def test_rmsnorm_backward_torch_benchmark():
+    """Opt-in representative sweep for the #800 backward follow-up."""
+    if os.environ.get("ROCDSL_COMPARE_TORCH", "0") != "1":
+        pytest.skip("set ROCDSL_COMPARE_TORCH=1 to run the backward performance comparison")
+
+    rows = []
+
+    for M, N, dtype in _get_rmsnorm_torch_bench_configs():
+        flydsl_us, torch_us = _bench_rmsnorm_backward_against_torch(
+            M,
+            N,
+            dtype,
+            fused_add=False,
+        )
+        rows.append(("rmsnorm_bwd", M, N, dtype, flydsl_us, torch_us))
+
+        flydsl_us, torch_us = _bench_rmsnorm_backward_against_torch(
+            M,
+            N,
+            dtype,
+            fused_add=True,
+        )
+        rows.append(("fused_add_bwd", M, N, dtype, flydsl_us, torch_us))
+
+    _print_rmsnorm_torch_perf_table(rows)
+
+
 def test_fused_add_rmsnorm_backward():
     print("=" * 80)
     print("Running FusedAdd RMSNorm Backward Tests")
     print("=" * 80)
 
-    configs = [
-        (64, 256, "f32"),  # generic path, f32 aligned
-        (16, 512, "bf16"),  # generic path, bf16
-        (4096, 4096, "bf16"),  # generic path, large
-        (64, 2000, "f32"),  # generic path, unaligned
-        (128, 4096, "f16"),  # generic path, f16
-    ]
+    configs = _get_rmsnorm_backward_configs()
 
     failures = 0
     for M, N, dtype in configs:
@@ -848,11 +1012,7 @@ def test_fused_add_rmsnorm_autograd():
     print("Running fused_add_rmsnorm() Autograd (end-to-end) Tests")
     print("=" * 80)
 
-    configs = [
-        (64, 256, "f32"),  # generic path
-        (128, 4096, "bf16"),  # generic path
-        (128, 4096, "f16"),  # generic path, f16
-    ]
+    configs = _get_rmsnorm_autograd_configs()
 
     failures = 0
     for M, N, dtype in configs:
@@ -1070,14 +1230,7 @@ def test_rmsnorm_backward():
     print("Running RMSNorm Backward Tests")
     print("=" * 80)
 
-    configs = [
-        (64, 256, "f32"),  # small-N path, f32
-        (16, 512, "bf16"),  # small-N path, bf16
-        (4096, 4096, "bf16"),  # fast vectorized path (N % 2048 == 0, 16-bit)
-        (64, 2000, "f32"),  # small-N path, unaligned f32
-        (128, 4096, "f16"),  # fast vectorized path, f16
-        (64, 3000, "f32"),  # generic scalar path (N > 2048, f32)
-    ]
+    configs = _get_rmsnorm_backward_configs()
 
     failures = 0
     for M, N, dtype in configs:
@@ -1147,12 +1300,7 @@ def test_rmsnorm_autograd():
     print("Running rmsnorm() Autograd (end-to-end) Tests")
     print("=" * 80)
 
-    configs = [
-        (64, 256, "f32"),  # small-N path
-        (128, 4096, "bf16"),  # fast vectorized path
-        (128, 4096, "f16"),  # fast vectorized path, f16
-        (128, 3000, "f32"),  # generic scalar path (N > 2048, f32)
-    ]
+    configs = _get_rmsnorm_autograd_configs()
 
     failures = 0
     for M, N, dtype in configs:
@@ -1458,3 +1606,5 @@ if __name__ == "__main__":
     test_fused_add_rmsnorm_dtype_mismatch()
     test_fused_add_rmsnorm_dynamicquant()
     test_fused_add_rmsnorm_smoothquant()
+    if os.environ.get("ROCDSL_COMPARE_TORCH", "0") == "1":
+        test_rmsnorm_backward_torch_benchmark()

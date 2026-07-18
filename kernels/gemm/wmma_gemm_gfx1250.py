@@ -14,6 +14,7 @@ from flydsl.expr.rocdl import cluster
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
+from kernels.common.mma.pipeline_utils_gfx1250 import make_tail_plan, tdm_epilogue_fence_threshold_bytes
 from kernels.common.utils import align_up as _align_up
 from kernels.gemm.gemm_common_gfx1250 import (
     extract_lds_base_idx,
@@ -27,7 +28,6 @@ from kernels.gemm.gemm_common_gfx1250 import (
     store_acc_vec8_to_buffer,
     store_acc_vec8_to_lds,
 )
-from kernels.mma.pipeline_utils import make_tail_plan, tdm_epilogue_fence_threshold_bytes
 
 WMMA_M, WMMA_N, WMMA_K = 16, 16, 32
 WAVE_SIZE = 32

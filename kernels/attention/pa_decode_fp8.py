@@ -12,8 +12,6 @@ Persistent scheduling (PS) mode:
 Requires: aiter's get_pa_metadata_v1 (module_pa_metadata.so)
 """
 
-from __future__ import annotations
-
 import functools
 import math
 
@@ -21,12 +19,8 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
-from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import Int32, T
-from flydsl.runtime.device import get_rocm_arch
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.attention.pa_common import _compute_block_base_dw_i64, _prefetch_q_chunks
 from kernels.attention.pa_decode_swa import compile_pa_decode_sw, compile_pa_decode_sw_reduce
 from kernels.attention.pa_metadata import compile_pa_decode_metadata
@@ -135,20 +129,16 @@ def _build_pa_thread_invariants(
     pv_prob_read_base = rowid * fx.Int32(MFMA_N * PROB_ROW_STRIDE_BYTES) + lane16id * fx.Int32(PROB_ROW_STRIDE_BYTES)
 
     sm_lane_wave_base = lane16id * fx.Int32(NUM_WARPS)
-    sm_max_off = fx.Index(sm_lane_wave_base + warp_id)
-    sm_sum_off = fx.Index(fx.Int32(NUM_WARPS * MFMA_N) + sm_lane_wave_base + warp_id)
-    sm_rd_max_offs = [fx.Index(sm_lane_wave_base + fx.Int32(w)) for w in range(NUM_WARPS)]
-    sm_rd_sum_offs = [
-        fx.Index(fx.Int32(NUM_WARPS * MFMA_N) + sm_lane_wave_base + fx.Int32(w)) for w in range(NUM_WARPS)
-    ]
+    sm_max_off = sm_lane_wave_base + warp_id
+    sm_sum_off = fx.Int32(NUM_WARPS * MFMA_N) + sm_lane_wave_base + warp_id
+    sm_rd_max_offs = [sm_lane_wave_base + fx.Int32(w) for w in range(NUM_WARPS)]
+    sm_rd_sum_offs = [fx.Int32(NUM_WARPS * MFMA_N) + sm_lane_wave_base + fx.Int32(w) for w in range(NUM_WARPS)]
 
     sm_vmax_wr_off = None
     sm_vmax_rd_offs = None
     if const_expr(per_token_kv):
-        sm_vmax_wr_off = fx.Index(fx.Int32(2 * NUM_WARPS * MFMA_N) + sm_lane_wave_base + warp_id)
-        sm_vmax_rd_offs = [
-            fx.Index(fx.Int32(2 * NUM_WARPS * MFMA_N) + sm_lane_wave_base + fx.Int32(w)) for w in range(NUM_WARPS)
-        ]
+        sm_vmax_wr_off = fx.Int32(2 * NUM_WARPS * MFMA_N) + sm_lane_wave_base + warp_id
+        sm_vmax_rd_offs = [fx.Int32(2 * NUM_WARPS * MFMA_N) + sm_lane_wave_base + fx.Int32(w) for w in range(NUM_WARPS)]
 
     return (
         kv_tok_thread_base,
@@ -267,28 +257,31 @@ def _finish_q_fragments(
     q_w0, q_w1 = q_words
 
     if lane16id == fx.Int32(0):
-        fx.Vector.from_elements([query_scale_lane], dtype=fx.Float32).store(
-            softmax_lds_f32, [fx.Index(local_qhead_idx)]
+        fx.ptr_store(
+            fx.Vector.from_elements([query_scale_lane], dtype=fx.Float32),
+            softmax_lds_f32 + local_qhead_idx,
         )
 
     v01 = fx.Vector.from_elements([q_w0, q_w1], dtype=fx.Int32)
     lds_q_i32 = lds_q_base >> fx.Int32(2)
     if const_expr(q_lanes_per_head < MFMA_N):
         if lane16id < fx.Int32(q_lanes_per_head):
-            v01.store(logits_lds_i32, [fx.Index(lds_q_i32)])
+            fx.ptr_store(v01, logits_lds_i32 + lds_q_i32)
     else:
-        v01.store(logits_lds_i32, [fx.Index(lds_q_i32)])
+        fx.ptr_store(v01, logits_lds_i32 + lds_q_i32)
 
     q_frags = []
     gpu.barrier()
-    query_scale_lane = fx.Vector.load(T.vec(1, fx.Float32.ir_type), softmax_lds_f32, [fx.Index(lane16id)])[0].ir_value()
+    query_scale_lane = fx.ptr_load(softmax_lds_f32 + (lane16id), result_type=fx.Vector.make_type(1, fx.Float32))[
+        0
+    ].ir_value()
     for qkhe in range_constexpr(qkhe_loop):
         for qkr in range_constexpr(2):
             # See layout comment above. Byte offset:
             #   lane16id * HEAD_SIZE + qkhe*64 + rowid*16 + qkr*8
             lds_rd_byte = lane16id * c_head_size + fx.Int32(qkhe << 6) + (rowid << fx.Int32(4)) + fx.Int32(qkr << 3)
             lds_rd_base = lds_rd_byte >> fx.Int32(3)
-            q_v1 = fx.Vector.load(T.vec(1, T.i64), logits_lds_i64, [fx.Index(lds_rd_base)])
+            q_v1 = fx.ptr_load(logits_lds_i64 + (lds_rd_base), result_type=fx.Vector.make_type(1, fx.Int64))
             q_frags.append(q_v1[0])
     return q_frags, query_scale_lane
 
@@ -410,16 +403,21 @@ def _make_pa_phase_helpers(
                 + pv_prob_read_base
                 + arith.constant(j * 8, type=T.i32)
             )
-            pv_prob_i64_indices.append(fx.Index(p_byte >> fx.Int32(3)))
+            pv_prob_i64_indices.append(p_byte >> fx.Int32(3))
 
     def _scale_row_base(td: int):
         return kv_tok_thread_base + fx.Int32(td * MFMA_N)
 
     def _load_k_scale_vec(td: int):
-        return vector.load_op(T.f32x4, scale_lds_f32, [fx.Index(_scale_row_base(td))])
+        return fx.ptr_load(
+            scale_lds_f32 + (_scale_row_base(td)), result_type=fx.Vector.make_type(4, fx.Float32)
+        ).ir_value()
 
     def _load_v_scale_vec(td: int):
-        return vector.load_op(T.f32x4, scale_lds_f32, [fx.Index(fx.Int32(LDS_SCALE_V_OFFSET) + _scale_row_base(td))])
+        return fx.ptr_load(
+            scale_lds_f32 + (fx.Int32(LDS_SCALE_V_OFFSET) + _scale_row_base(td)),
+            result_type=fx.Vector.make_type(4, fx.Float32),
+        ).ir_value()
 
     def _get_k_scale_vec(td: int, k_scale_vecs=None):
         if const_expr(per_token_kv):
@@ -446,10 +444,9 @@ def _make_pa_phase_helpers(
                 v_max_warp = fx.maxnumf(v_max_warp, fx.Vector(vs).reduce("max"))
             for sh in [32, 16]:
                 v_max_warp = fx.maxnumf(v_max_warp, v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
-            vector.store(
+            fx.ptr_store(
                 fx.Vector.from_elements([v_max_warp], dtype=fx.Float32),
-                softmax_lds_f32,
-                [sm_vmax_wr_off],
+                softmax_lds_f32 + sm_vmax_wr_off,
             )
 
     def _token_vec_i32(kv_tok_base, td: int):
@@ -510,10 +507,9 @@ def _make_pa_phase_helpers(
             qk_max = fx.maxnumf(qk_max, fx.Vector(logits_vec).reduce("max"))
         for sh in [32, 16]:
             qk_max = fx.maxnumf(qk_max, qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
-        vector.store(
+        fx.ptr_store(
             fx.Vector.from_elements([qk_max], dtype=fx.Float32),
-            softmax_lds_f32,
-            [sm_max_off],
+            softmax_lds_f32 + sm_max_off,
         )
 
         if const_expr(per_token_kv):
@@ -523,7 +519,7 @@ def _make_pa_phase_helpers(
     def _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, outs, v_scale_vecs):
         partition_max = neg_inf
         partition_sum = zero_f
-        max_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_rd_max_offs[0]]))
+        max_vec = fx.ptr_load(softmax_lds_f32 + (sm_rd_max_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
         for w in range_constexpr(NUM_WARPS):
             partition_max = fx.maxnumf(partition_max, max_vec[w])
 
@@ -537,10 +533,9 @@ def _make_pa_phase_helpers(
             d_out[td] = p_vec
         for sh in [32, 16]:
             local_exp_sum = local_exp_sum + local_exp_sum.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
-        vector.store(
+        fx.ptr_store(
             fx.Vector.from_elements([local_exp_sum], dtype=fx.Float32),
-            softmax_lds_f32,
-            [sm_sum_off],
+            softmax_lds_f32 + sm_sum_off,
         )
         if const_expr(needs_mask):
             accum_scale = arith.select(
@@ -552,7 +547,7 @@ def _make_pa_phase_helpers(
             accum_scale = exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value())
 
         gpu.barrier()
-        sum_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_rd_sum_offs[0]]))
+        sum_vec = fx.ptr_load(softmax_lds_f32 + (sm_rd_sum_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
         for w in range_constexpr(NUM_WARPS):
             partition_sum = arith.addf(
                 arith.unwrap(partition_sum), arith.unwrap(sum_vec[w]), fastmath=arith.FastMathFlags.contract
@@ -567,7 +562,9 @@ def _make_pa_phase_helpers(
 
         if const_expr(per_token_kv):
             v_max_global = zero_f
-            vmax_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_vmax_rd_offs[0]]))
+            vmax_vec = fx.ptr_load(
+                softmax_lds_f32 + (sm_vmax_rd_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32)
+            )
             for w in range_constexpr(NUM_WARPS):
                 w_vmax = vmax_vec[w]
                 v_max_global = fx.maxnumf(v_max_global, w_vmax)
@@ -591,7 +588,7 @@ def _make_pa_phase_helpers(
             byte_base = prob_wr_thread_base + arith.constant(td * MFMA_N * PROB_ROW_STRIDE_BYTES, type=T.i32)
             i32_off = byte_base >> fx.Int32(2)
             pk_vec = vector.from_elements(T.vec(1, T.i32), [pk])
-            vector.store(pk_vec, logits_lds_i32, [fx.Index(i32_off)])
+            fx.ptr_store(pk_vec, logits_lds_i32 + i32_off)
         return rmax, rsum, outs, v_correction
 
     def _pv_mfma(v_ops, outs, v_correction):
@@ -609,7 +606,9 @@ def _make_pa_phase_helpers(
         for vt in range_constexpr(VTLOOP):
             for j in range_constexpr(2):
                 p_i64_idx = pv_prob_i64_indices[vt * 2 + j]
-                p_i64_all.append(fx.Vector.load(T.vec(1, T.i64), logits_lds_i64, [p_i64_idx])[0])
+                p_i64_all.append(
+                    fx.ptr_load(logits_lds_i64 + (p_i64_idx), result_type=fx.Vector.make_type(1, fx.Int64))[0]
+                )
 
         for vhe in range_constexpr(vhe_loop):
             tmp_out = arith.constant_vector(0.0, T.f32x4)
@@ -1011,7 +1010,6 @@ def compile_pa_decode_ps(
     _N_K_h = TLOOP * _QKHELOOP * 2
     _N_V_FLAT_h = 2 * VTLOOP * _VHELOOP
 
-    arch = get_rocm_arch()
     query_load_is_bf16 = query_input_dtype == "bf16"
     if softmax_scale is None:
         softmax_scale = 1.0 / (head_dim**0.5)
@@ -1026,24 +1024,28 @@ def compile_pa_decode_ps(
     # softmax block) and a K/V per-token scale staging region.
     LDS_VMAX_BYTES = NUM_WARPS * MFMA_N * 4 if const_expr(per_token_kv) else 0
     LDS_SOFTMAX_TOTAL = LDS_SOFTMAX_BYTES + LDS_VMAX_BYTES
-    LDS_SCALE_TOTAL = LDS_SCALE_BYTES if const_expr(per_token_kv) else 0
-    # Unique global symbol per compile to avoid module-level symbol clashes
-    # when multiple compiled artifacts are loaded into the same GPU context.
-    _smem_sym_name = (
-        f"pa_ps_smallblk_smem_bs{block_size}_ql{query_length}"
-        f"_qgs{query_group_size}_tv{int(trans_v)}_qd{query_input_dtype}"
-        f"_ptkv{int(per_token_kv)}"
-    )
-    allocator = SmemAllocator(None, arch=arch, global_sym_name=_smem_sym_name)
-    logits_off = 0
-    allocator.ptr = LDS_LOGITS_BYTES
-    softmax_off = LDS_LOGITS_BYTES
-    allocator.ptr += LDS_SOFTMAX_TOTAL
-    # K/V per-token scale staging LDS (per_token_kv only).
-    scale_off_ps = softmax_off + LDS_SOFTMAX_TOTAL
-    allocator.ptr += LDS_SCALE_TOTAL
-    bt_off = scale_off_ps + LDS_SCALE_TOTAL
-    allocator.ptr += NUM_WARPS * TLOOP * 4
+
+    _LOGITS_I32 = LDS_LOGITS_BYTES // 4
+    _SOFTMAX_F32 = LDS_SOFTMAX_TOTAL // 4
+    _SCALE_F32 = LDS_SCALE_BYTES // 4
+    _BT_I32 = NUM_WARPS * TLOOP
+
+    if per_token_kv:
+
+        @fx.struct
+        class SharedStorage:
+            logits: fx.Array[fx.Int32, _LOGITS_I32, 16]
+            softmax: fx.Array[fx.Float32, _SOFTMAX_F32, 16]
+            scale: fx.Array[fx.Float32, _SCALE_F32, 16]
+            bt: fx.Array[fx.Int32, _BT_I32, 16]
+
+    else:
+
+        @fx.struct
+        class SharedStorage:
+            logits: fx.Array[fx.Int32, _LOGITS_I32, 16]
+            softmax: fx.Array[fx.Float32, _SOFTMAX_F32, 16]
+            bt: fx.Array[fx.Int32, _BT_I32, 16]
 
     @flyc.kernel(known_block_size=(BLOCK_THREADS, 1, 1))
     def pa_decode_ps_kernel(
@@ -1118,13 +1120,13 @@ def compile_pa_decode_ps(
             k_scale_val = buffer_ops.buffer_load(ks_rsrc, arith.constant(0, type=T.i32), vec_width=1)
             v_scale_val = buffer_ops.buffer_load(vs_rsrc, arith.constant(0, type=T.i32), vec_width=1)
 
-        smem_base = allocator.get_base()
-        logits_lds_i32 = SmemPtr(smem_base, logits_off, T.i32, shape=(LDS_LOGITS_BYTES // 4,)).get()
-        softmax_lds_f32 = SmemPtr(smem_base, softmax_off, T.f32, shape=(LDS_SOFTMAX_TOTAL // 4,)).get()
-        logits_lds_i64 = SmemPtr(smem_base, logits_off, T.i64, shape=(LDS_LOGITS_BYTES // 8,)).get()
-        bt_lds_i32 = SmemPtr(smem_base, bt_off, T.i32, shape=(NUM_WARPS * TLOOP,)).get()
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        logits_lds_i32 = lds.logits.ptr
+        logits_lds_i64 = fx.recast_iter(fx.Int64, lds.logits.ptr)
+        softmax_lds_f32 = lds.softmax.ptr
+        bt_lds_i32 = lds.bt.ptr
         if const_expr(per_token_kv):
-            scale_lds_f32 = SmemPtr(smem_base, scale_off_ps, T.f32, shape=(LDS_SCALE_BYTES // 4,)).get()
+            scale_lds_f32 = lds.scale.ptr
         else:
             scale_lds_f32 = None
 
@@ -1298,30 +1300,28 @@ def compile_pa_decode_ps(
                 if const_expr(block_size == 64):
                     # block_size=64: `_stage_phys_blocks` returned vec_width=1
                     # → scalar i32, not a Vector.  Wrap in a 1-element
-                    # Vector so we can use the LDS `.store(...)` API.
                     # Each warp writes 1 i32 to bt_lds_i32[warp_id];
                     # `_load_v_phys_blocks_from_lds` reads back the 4-elem
                     # vec starting at offset 0.
-                    fx.Vector.from_elements([phys_block_vec], dtype=fx.Int32).store(
-                        bt_lds_i32,
-                        [fx.Index(warp_id)],
+                    fx.ptr_store(
+                        fx.Vector.from_elements([phys_block_vec], dtype=fx.Int32),
+                        bt_lds_i32 + warp_id,
                     )
                 else:
-                    phys_block_vec.store(
-                        bt_lds_i32,
-                        [fx.Index(warp_id * fx.Int32(TLOOP))],
-                    )
+                    fx.ptr_store(phys_block_vec, bt_lds_i32 + warp_id * fx.Int32(TLOOP))
 
         def _pa_small_block_load_v_phys_blocks_from_lds():
             v_phys_blocks = []
             if const_expr(block_size == 64):
-                phys_block_vec = fx.Vector.load(T.vec(VTLOOP, T.i32), bt_lds_i32, [fx.Index(0)])
+                phys_block_vec = fx.ptr_load(
+                    bt_lds_i32 + (fx.Int32(0)), result_type=fx.Vector.make_type(VTLOOP, fx.Int32)
+                )
                 for vt in range_constexpr(VTLOOP):
                     v_phys_blocks.append(phys_block_vec[vt])
             else:
                 for vt in range_constexpr(VTLOOP):
                     bt_lds_off = fx.Int32(vt * TLOOP) + rowid
-                    phys_block = fx.Vector.load(T.vec(1, T.i32), bt_lds_i32, [fx.Index(bt_lds_off)])[0]
+                    phys_block = fx.ptr_load(bt_lds_i32 + (bt_lds_off), result_type=fx.Vector.make_type(1, fx.Int32))[0]
                     v_phys_blocks.append(phys_block)
             return v_phys_blocks
 
@@ -1411,9 +1411,10 @@ def compile_pa_decode_ps(
             # Warp-local: warp w writes slots [w*64, w*64+64) and reads only
             # those back, so the RAW is intra-wave (compiler lgkmcnt) — no barrier.
             t = warp_id * fx.Int32(WARP_SIZE) + rowid * fx.Int32(MFMA_N) + lane16id
-            fx.Vector.from_elements([k_scale_scalar], dtype=fx.Float32).store(scale_lds_f32, [fx.Index(t)])
-            fx.Vector.from_elements([v_scale_scalar], dtype=fx.Float32).store(
-                scale_lds_f32, [fx.Index(fx.Int32(LDS_SCALE_V_OFFSET) + t)]
+            fx.ptr_store(fx.Vector.from_elements([k_scale_scalar], dtype=fx.Float32), scale_lds_f32 + t)
+            fx.ptr_store(
+                fx.Vector.from_elements([v_scale_scalar], dtype=fx.Float32),
+                scale_lds_f32 + (fx.Int32(LDS_SCALE_V_OFFSET) + t),
             )
 
         def _load_small_block_scale_vecs():
@@ -1421,9 +1422,14 @@ def compile_pa_decode_ps(
             v_scale_vecs = []
             for td in range_constexpr(TLOOP):
                 row = _kv_tok_thread_base + arith.constant(td * MFMA_N, type=T.i32)
-                k_scale_vecs.append(vector.load_op(T.f32x4, scale_lds_f32, [fx.Index(row)]))
+                k_scale_vecs.append(
+                    fx.ptr_load(scale_lds_f32 + (row), result_type=fx.Vector.make_type(4, fx.Float32)).ir_value()
+                )
                 v_scale_vecs.append(
-                    vector.load_op(T.f32x4, scale_lds_f32, [fx.Index(fx.Int32(LDS_SCALE_V_OFFSET) + row)])
+                    fx.ptr_load(
+                        scale_lds_f32 + (fx.Int32(LDS_SCALE_V_OFFSET) + row),
+                        result_type=fx.Vector.make_type(4, fx.Float32),
+                    ).ir_value()
                 )
             return k_scale_vecs, v_scale_vecs
 
@@ -1648,10 +1654,6 @@ def compile_pa_decode_ps(
         gz: Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        allocator.finalized = False
-        ctx = CompilationContext.get_current()
-        with ir.InsertionPoint(ctx.gpu_module_body):
-            allocator.finalize()
         pa_decode_ps_kernel(
             exp_sums,
             max_logits,
@@ -1684,7 +1686,6 @@ def compile_pa_decode_ps(
     return {
         "launch": launch_pa_decode_ps_small_block,
         "kernel": pa_decode_ps_kernel,
-        "allocator": allocator,
         "mtp_groups": _mtp_groups,
     }
 

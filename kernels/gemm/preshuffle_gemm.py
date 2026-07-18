@@ -12,7 +12,7 @@ from flydsl.expr import const_expr, gpu, math, range_constexpr, rocdl, vector
 from flydsl.expr.typing import BFloat16, Float8E4M3FN, Float8E4M3FNUZ, Float16, Float32, Int8, Int32, T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch
-from kernels.mma.mfma_preshuffle_pipeline import xcd_remap_bx_by
+from kernels.common.mma.mfma_preshuffle_pipeline import xcd_remap_bx_by
 
 # (dsrd_preload, dvmem_preload) per (tile_m, tile_n, tile_k).
 _TILE_PRELOAD_TABLE = {

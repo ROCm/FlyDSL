@@ -3,19 +3,13 @@
 
 """FlyDSL sliding-window paged attention decode kernel."""
 
-from __future__ import annotations
-
 import functools
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
-from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr import math as fly_math
 from flydsl.expr.typing import Int32, T
-from flydsl.runtime.device import get_rocm_arch
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.attention.pa_common import _compute_block_base_dw_i64, _prefetch_q_chunks
 from kernels.common import dpp_utils
 from kernels.common.utils import (
@@ -131,29 +125,27 @@ def _build_pa_thread_invariants(
     kv_tok_thread_base = warp_id * c_tokens_per_warp + rowid * 4
     rowid_8x8 = rowid >> fx.Int32(1)
     offset_in_slot = rowid & fx.Int32(1)
+    prob_row_i32 = PROB_ROW_STRIDE_BYTES // 4
+    prob_row_i64 = PROB_ROW_STRIDE_BYTES // 8
     prob_wr_thread_base = (
-        warp_id * fx.Int32(4 * MFMA_N * PROB_ROW_STRIDE_BYTES)
-        + lane16id * fx.Int32(PROB_ROW_STRIDE_BYTES)
-        + rowid_8x8 * fx.Int32(8)
-        + offset_in_slot * 4
+        warp_id * fx.Int32(4 * MFMA_N * prob_row_i32)
+        + lane16id * fx.Int32(prob_row_i32)
+        + rowid_8x8 * fx.Int32(2)
+        + offset_in_slot
     )
-    pv_prob_read_base = rowid * fx.Int32(MFMA_N * PROB_ROW_STRIDE_BYTES) + lane16id * fx.Int32(PROB_ROW_STRIDE_BYTES)
+    pv_prob_read_base = rowid * fx.Int32(MFMA_N * prob_row_i64) + lane16id * fx.Int32(prob_row_i64)
 
     sm_lane_wave_base = lane16id * fx.Int32(NUM_WARPS)
-    sm_max_off = fx.Index(sm_lane_wave_base + warp_id)
-    sm_sum_off = fx.Index(fx.Int32(NUM_WARPS * MFMA_N) + sm_lane_wave_base + warp_id)
-    sm_rd_max_offs = [fx.Index(sm_lane_wave_base + fx.Int32(w)) for w in range(NUM_WARPS)]
-    sm_rd_sum_offs = [
-        fx.Index(fx.Int32(NUM_WARPS * MFMA_N) + sm_lane_wave_base + fx.Int32(w)) for w in range(NUM_WARPS)
-    ]
+    sm_max_off = sm_lane_wave_base + warp_id
+    sm_sum_off = fx.Int32(NUM_WARPS * MFMA_N) + sm_lane_wave_base + warp_id
+    sm_rd_max_offs = [sm_lane_wave_base + fx.Int32(w) for w in range(NUM_WARPS)]
+    sm_rd_sum_offs = [fx.Int32(NUM_WARPS * MFMA_N) + sm_lane_wave_base + fx.Int32(w) for w in range(NUM_WARPS)]
 
     sm_vmax_wr_off = None
     sm_vmax_rd_offs = None
     if const_expr(per_token_kv):
-        sm_vmax_wr_off = fx.Index(fx.Int32(2 * NUM_WARPS * MFMA_N) + sm_lane_wave_base + warp_id)
-        sm_vmax_rd_offs = [
-            fx.Index(fx.Int32(2 * NUM_WARPS * MFMA_N) + sm_lane_wave_base + fx.Int32(w)) for w in range(NUM_WARPS)
-        ]
+        sm_vmax_wr_off = fx.Int32(2 * NUM_WARPS * MFMA_N) + sm_lane_wave_base + warp_id
+        sm_vmax_rd_offs = [fx.Int32(2 * NUM_WARPS * MFMA_N) + sm_lane_wave_base + fx.Int32(w) for w in range(NUM_WARPS)]
 
     return (
         k_tok_thread_base,
@@ -215,9 +207,8 @@ def _compute_sw_mtp_group_state(
 
 @flyc.jit
 def _finish_q_fragments(
-    logits_lds_i32,
-    logits_lds_i64,
-    softmax_lds_f32,
+    logits_base,
+    softmax_base,
     q_chunks,
     lane16id,
     rowid,
@@ -227,24 +218,8 @@ def _finish_q_fragments(
     qkhe_loop: int,
     q_lanes_per_head: int,
 ):
-    # LDS Q layout (compact, per-qhead contiguous):
-    #   Q[head=h][hd=d]  at byte offset  h * HEAD_SIZE + d   (FP8 after conversion)
-    # Total Q footprint = 16 qheads * HEAD_SIZE bytes, aliased with the later P
-    # writes via `logits_lds_i32 / logits_lds_i64` (same base).  For HEAD_SIZE=64,
-    # only the first 8 lanes write Q for each qhead.
-    #
-    # Writer: thread (warp_id W, rowid R', lane16id L') owns qhead = W*4 + R' =
-    # `local_qhead_idx`, and within that qhead owns the 8 FP8 elements at
-    # head_dim [L'*8 .. L'*8+7].  We therefore write 2 i32 words (= 1 i64 = 8 B)
-    # at `local_qhead_idx * HEAD_SIZE + lane16id * 8`.
-    #
-    # Reader: MFMA lane layout for mfma_f32_16x16x32_fp8_fp8 (B = Q^T, N = qhead,
-    # K = head_dim) — reverse-engineered from `_load_k_flat`: thread (rowid R,
-    # lane16id L) consumes, for k_step = qkhe*2 + qkr,
-    #   Q[head = L][hd = (qkhe*4 + R) * 16 + qkr * 8 + 0..7]
-    # i.e. the read byte offset is `L * HEAD_SIZE + qkhe*64 + R*16 + qkr*8`.
-    c_head_size = fx.Int32(head_size)
-    lds_q_base = local_qhead_idx * c_head_size + lane16id * 8
+    c_head_dw = fx.Int32(head_size // 4)
+    lds_q_base = local_qhead_idx * c_head_dw + lane16id * 2
     abs_mask = fx.Vector.filled(4, 0x7FFFFFFF, fx.Int32)
     c_zero_f = fx.Float32(0.0)
     c_one_f = fx.Float32(1.0)
@@ -278,28 +253,29 @@ def _finish_q_fragments(
     q_w0, q_w1 = q_words
 
     if lane16id == fx.Int32(0):
-        fx.Vector.from_elements([query_scale_lane], dtype=fx.Float32).store(
-            softmax_lds_f32, [fx.Index(local_qhead_idx)]
+        fx.ptr_store(
+            fx.Vector.from_elements([query_scale_lane], dtype=fx.Float32),
+            softmax_base + local_qhead_idx,
         )
 
     v01 = fx.Vector.from_elements([q_w0, q_w1], dtype=fx.Int32)
-    lds_q_i32 = lds_q_base >> fx.Int32(2)
     if const_expr(q_lanes_per_head < MFMA_N):
         if lane16id < fx.Int32(q_lanes_per_head):
-            v01.store(logits_lds_i32, [fx.Index(lds_q_i32)])
+            fx.ptr_store(v01, logits_base + lds_q_base)
     else:
-        v01.store(logits_lds_i32, [fx.Index(lds_q_i32)])
+        fx.ptr_store(v01, logits_base + lds_q_base)
 
     q_frags = []
     gpu.barrier()
-    query_scale_lane = fx.Vector.load(T.vec(1, fx.Float32.ir_type), softmax_lds_f32, [fx.Index(lane16id)])[0].ir_value()
+    query_scale_lane = fx.ptr_load(softmax_base + (lane16id), result_type=fx.Vector.make_type(1, fx.Float32))[
+        0
+    ].ir_value()
     for qkhe in range_constexpr(qkhe_loop):
         for qkr in range_constexpr(2):
-            # See layout comment above. Byte offset:
-            #   lane16id * HEAD_SIZE + qkhe*64 + rowid*16 + qkr*8
-            lds_rd_byte = lane16id * c_head_size + fx.Int32(qkhe << 6) + (rowid << fx.Int32(4)) + fx.Int32(qkr << 3)
-            lds_rd_base = lds_rd_byte >> fx.Int32(3)
-            q_v1 = fx.Vector.load(T.vec(1, T.i64), logits_lds_i64, [fx.Index(lds_rd_base)])
+            lds_rd = lane16id * fx.Int32(head_size // 8) + fx.Int32(qkhe * 8) + rowid * fx.Int32(2) + fx.Int32(qkr)
+            q_v1 = fx.ptr_load(
+                fx.recast_iter(fx.Int64, logits_base) + (lds_rd), result_type=fx.Vector.make_type(1, fx.Int64)
+            )
             q_frags.append(q_v1[0])
     return q_frags, query_scale_lane
 
@@ -346,9 +322,8 @@ def _prefetch_sw_mtp_group_queries(
 
 
 def _finish_sw_mtp_subgroup_q_fragments(
-    logits_lds_i32,
-    logits_lds_i64,
-    softmax_lds_f32,
+    logits_base,
+    softmax_base,
     mtp_prefetches,
     lane16id,
     rowid,
@@ -361,9 +336,8 @@ def _finish_sw_mtp_subgroup_q_fragments(
 ):
     qi_val, qhi_pos, q_chunks = mtp_prefetches[mtp_subgroup_idx]
     q_frags, query_scale_lane = _finish_q_fragments(
-        logits_lds_i32,
-        logits_lds_i64,
-        softmax_lds_f32,
+        logits_base,
+        softmax_base,
         q_chunks,
         lane16id,
         rowid,
@@ -396,10 +370,9 @@ def _make_pa_phase_helpers(
     v_global_ptr,
     ks_rsrc,
     vs_rsrc,
-    logits_lds_i32,
-    logits_lds_i64,
-    softmax_lds_f32,
-    scale_lds_f32,
+    logits_base,
+    softmax_base,
+    scale_base,
     stride_ks_block,
     stride_ks_head,
     softmax_scale_base,
@@ -431,15 +404,15 @@ def _make_pa_phase_helpers(
 ):
     # Sliding-window decode always needs an upper-bound mask: even for a
     # single query, the tail block can contain tokens beyond context_len.
-    pv_prob_i64_indices = []
+    pv_prob_i64_elem_offs = []
     for vt in range_constexpr(VTLOOP):
         for j in range_constexpr(2):
-            p_byte = (
-                arith.constant(vt * 4 * MFMA_N * PROB_ROW_STRIDE_BYTES, type=T.i32)
+            p_elem = (
+                arith.constant(vt * 4 * MFMA_N * (PROB_ROW_STRIDE_BYTES // 8), type=T.i32)
                 + pv_prob_read_base
-                + arith.constant(j * 8, type=T.i32)
+                + arith.constant(j, type=T.i32)
             )
-            pv_prob_i64_indices.append(fx.Index(p_byte >> fx.Int32(3)))
+            pv_prob_i64_elem_offs.append(p_elem)
 
     def _load_kv_scale_scalars(tile_token_offset_i32, phys_block):
         if const_expr(per_token_kv):
@@ -470,13 +443,13 @@ def _make_pa_phase_helpers(
         if const_expr(per_token_kv):
             scale_stage_token = warp_id * fx.Int32(WARP_SIZE) + rowid * fx.Int32(MFMA_N) + lane16id
             k_scale_scalar, v_scale_scalar = preloaded_scale_scalars
-            fx.Vector.from_elements([k_scale_scalar], dtype=fx.Float32).store(
-                scale_lds_f32,
-                [fx.Index(scale_stage_token)],
+            fx.ptr_store(
+                fx.Vector.from_elements([k_scale_scalar], dtype=fx.Float32),
+                scale_base + scale_stage_token,
             )
-            fx.Vector.from_elements([v_scale_scalar], dtype=fx.Float32).store(
-                scale_lds_f32,
-                [fx.Index(fx.Int32(LDS_SCALE_V_OFFSET) + scale_stage_token)],
+            fx.ptr_store(
+                fx.Vector.from_elements([v_scale_scalar], dtype=fx.Float32),
+                scale_base + (fx.Int32(LDS_SCALE_V_OFFSET) + scale_stage_token),
             )
             rocdl.sched_barrier(rocdl.mask_vmem_rd)
 
@@ -504,10 +477,13 @@ def _make_pa_phase_helpers(
         return kv_tok_thread_base + fx.Int32(td * MFMA_N)
 
     def _load_k_scale_vec(td: int):
-        return vector.load_op(T.f32x4, scale_lds_f32, [fx.Index(_scale_row_base(td))])
+        return fx.ptr_load(scale_base + (_scale_row_base(td)), result_type=fx.Vector.make_type(4, fx.Float32))
 
     def _load_v_scale_vec(td: int):
-        return vector.load_op(T.f32x4, scale_lds_f32, [fx.Index(fx.Int32(LDS_SCALE_V_OFFSET) + _scale_row_base(td))])
+        return fx.ptr_load(
+            scale_base + (fx.Int32(LDS_SCALE_V_OFFSET) + _scale_row_base(td)),
+            result_type=fx.Vector.make_type(4, fx.Float32),
+        )
 
     def _store_vmax_warp(partition_start, *, seq_end=None):
         if const_expr(per_token_kv):
@@ -524,10 +500,9 @@ def _make_pa_phase_helpers(
                 v_max_warp = v_max_warp.maximumf(fx.Vector(vs).reduce("max"))
             for sh in [32, 16]:
                 v_max_warp = v_max_warp.maximumf(v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
-            vector.store(
+            fx.ptr_store(
                 fx.Vector.from_elements([v_max_warp], dtype=fx.Float32),
-                softmax_lds_f32,
-                [sm_vmax_wr_off],
+                softmax_base + sm_vmax_wr_off,
             )
 
     def _token_vec_i32(kv_tok_base, td: int):
@@ -590,10 +565,9 @@ def _make_pa_phase_helpers(
             qk_max = qk_max.maximumf(fx.Vector(logits_vec).reduce("max"))
         for sh in [32, 16]:
             qk_max = qk_max.maximumf(qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
-        vector.store(
+        fx.ptr_store(
             fx.Vector.from_elements([qk_max], dtype=fx.Float32),
-            softmax_lds_f32,
-            [sm_max_off],
+            softmax_base + sm_max_off,
         )
 
         exp_sum = zero_f
@@ -605,10 +579,9 @@ def _make_pa_phase_helpers(
             d_out[td] = p_vec
         for sh in [32, 16]:
             exp_sum = exp_sum + exp_sum.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
-        vector.store(
+        fx.ptr_store(
             fx.Vector.from_elements([exp_sum], dtype=fx.Float32),
-            softmax_lds_f32,
-            [sm_sum_off],
+            softmax_base + sm_sum_off,
         )
 
         return d_out
@@ -617,12 +590,12 @@ def _make_pa_phase_helpers(
         partition_max = neg_inf
         partition_sum = zero_f
         warp_rescale_factors = []
-        max_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_rd_max_offs[0]]))
+        max_vec = fx.ptr_load(softmax_base + (sm_rd_max_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
         for w in range_constexpr(NUM_WARPS):
             w_max = max_vec[w]
             partition_max = partition_max.maximumf(w_max)
             warp_rescale_factors.append(w_max)
-        sum_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_rd_sum_offs[0]]))
+        sum_vec = fx.ptr_load(softmax_base + (sm_rd_sum_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
         for w in range_constexpr(NUM_WARPS):
             diff_w = warp_rescale_factors[w] - partition_max
             if const_expr(needs_mask):
@@ -671,7 +644,7 @@ def _make_pa_phase_helpers(
 
         if const_expr(per_token_kv):
             v_max_global = zero_f
-            vmax_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_vmax_rd_offs[0]]))
+            vmax_vec = fx.ptr_load(softmax_base + (sm_vmax_rd_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
             for w in range_constexpr(NUM_WARPS):
                 w_vmax = vmax_vec[w]
                 v_max_global = v_max_global.maximumf(w_vmax)
@@ -697,10 +670,9 @@ def _make_pa_phase_helpers(
             p3 = vector.extract(d_out[td], static_position=[3], dynamic_position=[])
             lo = rocdl.cvt_pk_fp8_f32(T.i32, p0, p1, arith.constant(0, type=T.i32), False)
             pk = rocdl.cvt_pk_fp8_f32(T.i32, p2, p3, lo, True)
-            byte_base = prob_wr_thread_base + arith.constant(td * MFMA_N * PROB_ROW_STRIDE_BYTES, type=T.i32)
-            i32_off = byte_base >> fx.Int32(2)
-            pk_vec = vector.from_elements(T.vec(1, T.i32), [pk])
-            vector.store(pk_vec, logits_lds_i32, [fx.Index(i32_off)])
+            elem_base = prob_wr_thread_base + arith.constant(td * MFMA_N * (PROB_ROW_STRIDE_BYTES // 4), type=T.i32)
+            pk_vec = fx.Vector.from_elements([pk], dtype=fx.Int32)
+            fx.ptr_store(pk_vec, logits_base + elem_base)
         return rmax, rsum, outs, v_correction
 
     def _pv_mfma(v_ops, outs, v_correction):
@@ -712,8 +684,11 @@ def _make_pa_phase_helpers(
             for vt in range_constexpr(VTLOOP):
                 v_i64x2 = fx.Vector(v_ops[vt][vhe])
                 for j in range_constexpr(2):
-                    p_i64_idx = pv_prob_i64_indices[vt * 2 + j]
-                    p_i64 = fx.Vector.load(T.vec(1, T.i64), logits_lds_i64, [p_i64_idx])[0]
+                    p_elem_off = pv_prob_i64_elem_offs[vt * 2 + j]
+                    p_i64 = fx.ptr_load(
+                        fx.recast_iter(fx.Int64, logits_base) + (p_elem_off),
+                        result_type=fx.Vector.make_type(1, fx.Int64),
+                    )[0]
                     tmp_out = rocdl.mfma_f32_16x16x32_fp8_fp8(
                         T.f32x4,
                         [
@@ -768,12 +743,11 @@ def compile_pa_decode_sw_reduce(
     reduce_width = 1 if max_context_partition_num <= 1 else 1 << ((max_context_partition_num - 1).bit_length())
     reduce_shuffle_offsets = [off for off in [32, 16, 8, 4, 2, 1] if off < reduce_width]
     red_slots = max(1, (block_threads + WARP_SIZE - 1) // WARP_SIZE)
-    arch = get_rocm_arch()
-    allocator = SmemAllocator(None, arch=arch, global_sym_name="pa_ps_sw_reduce_smem")
-    red_off = allocator._align(allocator.ptr, 16)
-    allocator.ptr = red_off + red_slots * 4
-    part_weights_off = allocator._align(allocator.ptr, 16)
-    allocator.ptr = part_weights_off + max_context_partition_num * 4
+
+    @fx.struct
+    class SharedStorage:
+        red: fx.Array[fx.Float32, red_slots, 16]
+        part_weights: fx.Array[fx.Float32, max_context_partition_num, 16]
 
     @flyc.kernel(known_block_size=(block_threads, 1, 1))
     def pa_decode_sw_reduce_kernel(
@@ -799,12 +773,10 @@ def compile_pa_decode_sw_reduce(
         kv_head_idx = fx.Int32(gpu.block_id("y"))
         eqgs_idx = fx.Int32(gpu.block_id("z"))
 
-        smem_base = allocator.get_base()
-        red_scratch = SmemPtr(smem_base, red_off, T.f32, shape=(red_slots,))
-        red_scratch.get()
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        red_scratch = lds.red.view(fx.make_layout(red_slots, 1))
         if const_expr(max_context_partition_num > WARP_SIZE):
-            part_weights_lds = SmemPtr(smem_base, part_weights_off, T.f32, shape=(max_context_partition_num,))
-            part_weights_lds.get()
+            part_weights_lds = lds.part_weights.view(fx.make_layout(max_context_partition_num, 1))
 
         out_rsrc = buffer_ops.create_buffer_resource_from_addr(output_ptr)
         es_rsrc = buffer_ops.create_buffer_resource_from_addr(exp_sums_ptr)
@@ -846,24 +818,24 @@ def compile_pa_decode_sw_reduce(
             w = _wave_reduce_max_full(val) if const_expr(mode == "max") else _wave_reduce_sum_full(val)
 
             if lane == 0:
-                wave_idx = fx.Index(wave)
-                red_scratch.store(w, [wave_idx])
+                wave_idx = fx.Int32(wave)
+                fx.memref_store(w, red_scratch, wave_idx)
             gpu.barrier()
 
             if wave == 0:
                 in_range = lane < c_red_slots
                 lane_safe = arith.select(in_range, lane, 0)
-                lane_safe_idx = fx.Index(lane_safe)
-                red_val = red_scratch.load([lane_safe_idx])
+                lane_safe_idx = fx.Int32(lane_safe)
+                red_val = fx.memref_load(red_scratch, lane_safe_idx)
                 red_val = arith.select(in_range, red_val, neutral)
                 red_val = (
                     _wave_reduce_max_full(red_val) if const_expr(mode == "max") else _wave_reduce_sum_full(red_val)
                 )
                 if lane == 0:
-                    red_scratch.store(red_val, [fx.Index(0)])
+                    fx.memref_store(red_val, red_scratch, 0)
             gpu.barrier()
 
-            return red_scratch.load([fx.Index(0)])
+            return fx.memref_load(red_scratch, 0)
 
         if const_expr(max_context_partition_num <= WARP_SIZE):
             c_part_num = fx.Int32(max_context_partition_num)
@@ -1005,16 +977,16 @@ def compile_pa_decode_sw_reduce(
                     part_max = part_max_raw
                     part_scale = _exp2_f32_fast((part_max - global_max) * c_log2e)
                     weight = part_sum * part_scale * inv_global_exp_sum
-                    part_idx_idx = fx.Index(part_i32)
-                    part_weights_lds.store(weight, [part_idx_idx])
+                    part_idx_idx = fx.Int32(part_i32)
+                    fx.memref_store(weight, part_weights_lds, part_idx_idx)
 
             gpu.barrier()
 
             acc = c_zero_f
             for part_idx in range_constexpr(max_context_partition_num):
                 part_i32 = fx.Int32(part_idx)
-                part_idx_idx = fx.Index(part_idx)
-                weight = part_weights_lds.load([part_idx_idx])
+                part_idx_idx = fx.Int32(part_idx)
+                weight = fx.memref_load(part_weights_lds, part_idx_idx)
                 logits_off = (
                     batch_idx * stride_logits_seq
                     + kv_head_idx * stride_logits_head
@@ -1064,10 +1036,6 @@ def compile_pa_decode_sw_reduce(
         num_kv_heads,
         stream: fx.Stream = fx.Stream(None),
     ):
-        allocator.finalized = False
-        ctx = CompilationContext.get_current()
-        with ir.InsertionPoint(ctx.gpu_module_body):
-            allocator.finalize()
         pa_decode_sw_reduce_kernel(
             output,
             exp_sums,
@@ -1093,7 +1061,6 @@ def compile_pa_decode_sw_reduce(
     return {
         "launch": launch_pa_decode_sw_reduce,
         "kernel": pa_decode_sw_reduce_kernel,
-        "allocator": allocator,
     }
 
 
@@ -1126,7 +1093,6 @@ def compile_pa_decode_sw(
     sliding_window is a compile-time constant.
     """
     assert sliding_window > 0, "compile_pa_decode_sw requires sliding_window > 0"
-    arch = get_rocm_arch()
     if query_input_dtype not in ("bf16", "f16"):
         raise ValueError("`compile_pa_decode_sw` only supports bf16/f16 query inputs.")
     if head_dim % QKHE_PER_FETCH != 0 or head_dim % (MFMA_N * NUM_WARPS) != 0 or head_dim % Q_ELEMS_PER_LANE != 0:
@@ -1149,14 +1115,21 @@ def compile_pa_decode_sw(
 
     LDS_VMAX_BYTES = NUM_WARPS * MFMA_N * 4 if const_expr(per_token_kv) else 0
     LDS_SOFTMAX_TOTAL = LDS_SOFTMAX_BYTES + LDS_VMAX_BYTES
-    LDS_SCALE_TOTAL = LDS_SCALE_BYTES if const_expr(per_token_kv) else 0
-    allocator = SmemAllocator(None, arch=arch, global_sym_name="pa_ps_sw_smem")
-    logits_off = 0
-    allocator.ptr = LDS_LOGITS_BYTES
-    softmax_off = LDS_LOGITS_BYTES
-    allocator.ptr += LDS_SOFTMAX_TOTAL
-    scale_off = allocator.ptr
-    allocator.ptr += LDS_SCALE_TOTAL
+
+    if per_token_kv:
+
+        @fx.struct
+        class SharedStorage:
+            logits: fx.Array[fx.Int32, LDS_LOGITS_BYTES // 4, 16]
+            softmax: fx.Array[fx.Float32, LDS_SOFTMAX_TOTAL // 4, 16]
+            scale: fx.Array[fx.Float32, LDS_SCALE_BYTES // 4, 16]
+
+    else:
+
+        @fx.struct
+        class SharedStorage:
+            logits: fx.Array[fx.Int32, LDS_LOGITS_BYTES // 4, 16]
+            softmax: fx.Array[fx.Float32, LDS_SOFTMAX_TOTAL // 4, 16]
 
     @flyc.kernel(known_block_size=(BLOCK_THREADS, 1, 1))
     def pa_decode_sw_kernel(
@@ -1225,13 +1198,12 @@ def compile_pa_decode_sw(
             k_scale_val = buffer_ops.buffer_load(ks_rsrc, 0, vec_width=1)
             v_scale_val = buffer_ops.buffer_load(vs_rsrc, 0, vec_width=1)
 
-        smem_base = allocator.get_base()
-        logits_lds_i32 = SmemPtr(smem_base, logits_off, T.i32, shape=(LDS_LOGITS_BYTES // 4,)).get()
-        softmax_lds_f32 = SmemPtr(smem_base, softmax_off, T.f32, shape=(LDS_SOFTMAX_TOTAL // 4,)).get()
-        logits_lds_i64 = SmemPtr(smem_base, logits_off, T.i64, shape=(LDS_LOGITS_BYTES // 8,)).get()
-        scale_lds_f32 = None
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        logits_base = lds.logits.ptr
+        softmax_base = lds.softmax.ptr
+        scale_base = None
         if const_expr(per_token_kv):
-            scale_lds_f32 = SmemPtr(smem_base, scale_off, T.f32, shape=(LDS_SCALE_BYTES // 4,)).get()
+            scale_base = lds.scale.ptr
 
         _softmax_scale_const = arith.constant(_softmax_scale, type=T.f32)
         _softmax_q_scale = _softmax_scale_const * q_scale_val
@@ -1302,10 +1274,9 @@ def compile_pa_decode_sw(
             v_global_ptr=v_global_ptr,
             ks_rsrc=ks_rsrc,
             vs_rsrc=vs_rsrc,
-            logits_lds_i32=logits_lds_i32,
-            logits_lds_i64=logits_lds_i64,
-            softmax_lds_f32=softmax_lds_f32,
-            scale_lds_f32=scale_lds_f32,
+            logits_base=logits_base,
+            softmax_base=softmax_base,
+            scale_base=scale_base,
             stride_ks_block=stride_ks_block,
             stride_ks_head=stride_ks_head,
             softmax_scale_base=_softmax_scale_const,
@@ -1487,9 +1458,8 @@ def compile_pa_decode_sw(
                 prefetched_tile_metadata[3],
             )
             qi_val, qhi_pos, q_frags, query_scale_lane = _finish_sw_mtp_subgroup_q_fragments(
-                logits_lds_i32,
-                logits_lds_i64,
-                softmax_lds_f32,
+                logits_base,
+                softmax_base,
                 mtp_prefetches,
                 lane16id,
                 rowid,
@@ -1594,10 +1564,6 @@ def compile_pa_decode_sw(
         gz: Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        allocator.finalized = False
-        ctx = CompilationContext.get_current()
-        with ir.InsertionPoint(ctx.gpu_module_body):
-            allocator.finalize()
         pa_decode_sw_kernel(
             es,
             ml,
@@ -1635,5 +1601,4 @@ def compile_pa_decode_sw(
     return {
         "launch": launch_pa_decode_sw,
         "kernel": pa_decode_sw_kernel,
-        "allocator": allocator,
     }

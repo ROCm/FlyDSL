@@ -21,7 +21,7 @@ to GPU/ROCDL.
    :maxdepth: 2
    :caption: Language Specification
 
-   arithmetic_types
+   language/arithmetic_types
 
 .. toctree::
    :maxdepth: 2
