@@ -146,14 +146,7 @@ def _pack_scale_words(scales_u8: torch.Tensor) -> torch.Tensor:
 
     s32 = scales_u8.contiguous().view(rows, k32_tiles // 4, 4).to(torch.int32)
     iteration_major = (
-        (
-            s32[:, :, 0]
-            | (s32[:, :, 1] << 8)
-            | (s32[:, :, 2] << 16)
-            | (s32[:, :, 3] << 24)
-        )
-        .transpose(0, 1)
-        .contiguous()
+        (s32[:, :, 0] | (s32[:, :, 1] << 8) | (s32[:, :, 2] << 16) | (s32[:, :, 3] << 24)).transpose(0, 1).contiguous()
     )
 
     row = torch.arange(rows, device=scales_u8.device, dtype=torch.int64)
@@ -207,10 +200,7 @@ def _bench_mxfp8_gemm_4wave(
         pytest.skip("MXFP8 GEMM requires CDNA4 (gfx95*)")
 
     if M % tile_m != 0 or N % tile_n != 0 or K % 128 != 0 or K < 512:
-        pytest.skip(
-            "MXFP8 4-wave kernel requires M/N divisible by the selected tile "
-            "and K >= 512 divisible by 128"
-        )
+        pytest.skip("MXFP8 4-wave kernel requires M/N divisible by the selected tile and K >= 512 divisible by 128")
 
     device = torch.device("cuda")
     a, b, a_scale_raw, b_scale_raw = _make_mxfp8_inputs(M, N, K, device)
@@ -297,10 +287,7 @@ def _bench_mxfp8_gemm_4wave(
     )
     tflops = flops / (microseconds / 1.0e6) / 1.0e12
     tbps = bytes_moved / 1.0e12 / (microseconds / 1.0e6)
-    print(
-        f"[flyc] Throughput: {microseconds:.1f} us, "
-        f"{tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s"
-    )
+    print(f"[flyc] Throughput: {microseconds:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
     return tflops
 
 
@@ -384,10 +371,7 @@ if __name__ == "__main__":
         "--dynamic_weight_scale",
         action="store_true",
         default=False,
-        help=(
-            "Use dynamic tensor arguments for weight and scales instead of "
-            "static DLPack adaptors."
-        ),
+        help=("Use dynamic tensor arguments for weight and scales instead of static DLPack adaptors."),
     )
     args = parser.parse_args()
 
@@ -398,10 +382,7 @@ if __name__ == "__main__":
 
     for shape_index, (M, N, K) in enumerate(shapes, start=1):
         if args.sweep:
-            print(
-                f"\n[sweep {shape_index:02d}/{len(shapes):02d}] "
-                f"M={M} N={N} K={K}"
-            )
+            print(f"\n[sweep {shape_index:02d}/{len(shapes):02d}] M={M} N={N} K={K}")
 
         try:
             tflops = _bench_mxfp8_gemm_4wave(

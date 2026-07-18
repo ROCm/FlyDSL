@@ -385,17 +385,11 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
         def stage_a_subtile_pass(k_base, subtile, pass_in_subtile, lds_a):
             # One pass writes 256 threads * 16 B = 4 KiB. Four passes fill one
             # 128x128 half-page (16 KiB). Each half has its own LDS base.
-            global_base = (
-                (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2))) * fx.Index(K)
-                + k_base
-            )
+            global_base = (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2))) * fx.Index(K) + k_base
             a_g2s.load_one(lds_a[subtile], fx.Int32(global_base), pass_in_subtile)
 
         def stage_b_subtile_pass(k_base, subtile, pass_in_subtile, lds_b):
-            global_base = (
-                (by_n_idx + fx.Index(subtile * (BLOCK_N // 2))) * fx.Index(K)
-                + k_base
-            )
+            global_base = (by_n_idx + fx.Index(subtile * (BLOCK_N // 2))) * fx.Index(K) + k_base
             b_g2s.load_one(lds_b[subtile], fx.Int32(global_base), pass_in_subtile)
 
         def stage_a_subtile(k_base, subtile, lds_a):
