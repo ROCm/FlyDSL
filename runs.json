@@ -1,11 +1,26 @@
 {
  "schema": 1,
- "updated": "2026-07-18T02:47:54Z",
+ "updated": "2026-07-18T02:53:28Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 29627562514,
+   "run_id": 29627705752,
    "pr": 850,
+   "commit": "2ebf0bfe2cdee08399f8bc15786e11bd4900941e",
+   "branch": "binding_fa_opt",
+   "event": "pull_request",
+   "title": "[Perf]optimize flydsl flash attention kernel",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29627705752",
+   "created_at": "2026-07-18T02:49:03Z",
+   "updated_at": "2026-07-18T02:50:34Z",
+   "actor": "binding7012",
+   "jobs": []
+  },
+  {
+   "run_id": 29627562514,
+   "pr": null,
    "commit": "a912398eea0433603e790b8e77b986785016de64",
    "branch": "binding_fa_opt",
    "event": "pull_request",
@@ -2407,21 +2422,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29471116769/job/87534425866"
     }
    ]
-  },
-  {
-   "run_id": 29470251414,
-   "pr": 825,
-   "commit": "d70872a338969c53b8c5e04fcd0d2bef2e0806b4",
-   "branch": "pa-decode-tile",
-   "event": "pull_request",
-   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29470251414",
-   "created_at": "2026-07-16T03:59:23Z",
-   "updated_at": "2026-07-16T07:42:54Z",
-   "actor": "fsx950223",
-   "jobs": []
   }
  ]
 }
