@@ -23,8 +23,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
-from flydsl.expr import math as fmath
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator
 from kernels.attention.flash_attn_utils import (
@@ -36,9 +35,6 @@ from kernels.attention.flash_attn_utils import (
     GenericQLoader,
     GenericSoftmaxHelper,
     GenericStoreHelper,
-    _fadd,
-    _fmul,
-    _fsub,
     _make_flash_attn_generic_traits,
     _waitcnt_vm_n,
     scf_if_dispatch,
@@ -427,12 +423,8 @@ def build_flash_attn_func_module_primary(
                 # ==== Online softmax over 64 KV positions ====
                 s_raw_lo, s_raw_hi = softmax_helper.split_scores(s_acc_lo, s_acc_hi)
                 s_raw_lo, s_raw_hi = softmax_helper.apply_kv_mask(s_raw_lo, s_raw_hi, kv_start)
-                if const_expr(
-                    traits.ENABLE_GFX942_KV_GPFETCH and traits.DTYPE_STR == "bf16" and not traits.USE_K16
-                ):
-                    m_new_raw, corr, neg_scaled_max = softmax_helper.online_softmax_stats(
-                        m_running, s_raw_lo, s_raw_hi
-                    )
+                if const_expr(traits.ENABLE_GFX942_KV_GPFETCH and traits.DTYPE_STR == "bf16" and not traits.USE_K16):
+                    m_new_raw, corr, neg_scaled_max = softmax_helper.online_softmax_stats(m_running, s_raw_lo, s_raw_hi)
                     o_accs, corr_vec = softmax_helper.rescale_o_accs(o_accs, corr)
                 else:
                     m_new_raw, l_new, corr, p_vals_lo, p_vals_hi = softmax_helper.online_softmax(
@@ -492,9 +484,7 @@ def build_flash_attn_func_module_primary(
                 else:
                     p_packs_lo = softmax_helper.build_p_packs(p_vals_lo)
                     p_packs_hi = softmax_helper.build_p_packs(p_vals_hi)
-                    o_accs = gemm_helper.gemm2_pv(
-                        kv_lds_to_vgpr, o_accs, p_packs_lo, p_packs_hi, v_base, corr_vec
-                    )
+                    o_accs = gemm_helper.gemm2_pv(kv_lds_to_vgpr, o_accs, p_packs_lo, p_packs_hi, v_base, corr_vec)
 
                 m_running = m_new_raw
                 l_running = l_new

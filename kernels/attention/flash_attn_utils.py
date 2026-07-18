@@ -1260,9 +1260,7 @@ def _make_flash_attn_generic_traits(
     if enable_gfx942_kv_gpfetch and not enable_gfx942_vec_k:
         qk_prefetch_depth = int(os.getenv("FLYDSL_FLASH_ATTN_FUNC_QK_PF_DEPTH", "3"))
     else:
-        qk_prefetch_depth = (
-            4 if (enable_gfx942_kv_gpfetch or enable_gfx942_vec_k) else (3 if enable_dma else 2)
-        )
+        qk_prefetch_depth = 4 if (enable_gfx942_kv_gpfetch or enable_gfx942_vec_k) else (3 if enable_dma else 2)
 
     lds_k_tile_size = block_n * k_stride
     if kv_vectorized:
@@ -2686,7 +2684,10 @@ class GenericGemmHelper:
         s_hi = ctx.c_zero_v16f32
         for ks in range_constexpr(traits.K_STEPS_QK):
             if const_expr(
-                traits.ENABLE_DMA and traits.USE_HW_TR and not traits.ENABLE_PREFETCH_3BUF and ks == traits.K_STEPS_QK // 2
+                traits.ENABLE_DMA
+                and traits.USE_HW_TR
+                and not traits.ENABLE_PREFETCH_3BUF
+                and ks == traits.K_STEPS_QK // 2
             ):
                 kv_gmem_to_lds.coop_dma_v(kv_start, 0)
                 rocdl.sched_barrier(0)
@@ -2805,6 +2806,7 @@ class GenericSoftmaxHelper:
         fm_fast = ctx.fm_fast
 
         if const_expr(os.getenv("FLYDSL_FLASH_ATTN_FUNC_TREE_REDUCE", "0") == "1"):
+
             def _max_pair(a, b):
                 return _fmax(a, b, fm_fast)
 
@@ -2933,13 +2935,9 @@ class GenericSoftmaxHelper:
             p_exp_lo = []
             p_exp_hi = []
             for j in range_constexpr(traits.MFMA_LANE_K):
-                diff_lo = fmath.fma(
-                    s_raw_lo[p_base + j], ctx.c_sm_scale_log2e, neg_scaled_max, fastmath=ctx.fm_fast
-                )
+                diff_lo = fmath.fma(s_raw_lo[p_base + j], ctx.c_sm_scale_log2e, neg_scaled_max, fastmath=ctx.fm_fast)
                 p_exp_lo.append(self._exp2(diff_lo))
-                diff_hi = fmath.fma(
-                    s_raw_hi[p_base + j], ctx.c_sm_scale_log2e, neg_scaled_max, fastmath=ctx.fm_fast
-                )
+                diff_hi = fmath.fma(s_raw_hi[p_base + j], ctx.c_sm_scale_log2e, neg_scaled_max, fastmath=ctx.fm_fast)
                 p_exp_hi.append(self._exp2(diff_hi))
             for j in range_constexpr(traits.MFMA_LANE_K):
                 local_sum = _fadd(local_sum, p_exp_lo[j], fm_fast)
