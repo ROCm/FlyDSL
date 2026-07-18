@@ -48,9 +48,18 @@ def test_len_of_vector():
 
 
 @pytest.mark.l0_backend_agnostic
-def test_vector_unpacking():
+def test_vector_iteration():
     n = _in_vector_func(3, lambda v: len([x for x in v]))
     assert n == 3
+
+
+@pytest.mark.l0_backend_agnostic
+def test_vector_unpacking():
+    def body(v):
+        a, b, c = v
+        return len((a, b, c))
+
+    assert _in_vector_func(3, body) == 3
 
 
 @pytest.mark.l0_backend_agnostic

@@ -1843,10 +1843,11 @@ class Vector(ArithValue):
         if idx is None:
             return self
         if isinstance(idx, int):
+            orig_idx = idx
             if idx < 0:
                 idx += self.numel
             if not 0 <= idx < self.numel:
-                raise IndexError(f"vector index {idx} out of range for numel {self.numel}")
+                raise IndexError(f"vector index {orig_idx} out of range for numel {self.numel}")
             res = _vector.ExtractOp(self, static_position=[idx], dynamic_position=[]).result
             return self._dtype(res)
         if isinstance(idx, (Numeric, ArithValue, ir.Value)):
