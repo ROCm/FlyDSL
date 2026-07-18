@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-18T01:07:49Z",
+ "updated": "2026-07-18T02:03:03Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "amartin/mxfp8-4wave",
    "event": "pull_request",
    "title": "[Kernel] Add optimized 4-wave MXFP8 GEMM kernel for gfx950",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29623699880",
    "created_at": "2026-07-18T00:42:55Z",
-   "updated_at": "2026-07-18T00:45:30Z",
+   "updated_at": "2026-07-18T01:59:53Z",
    "actor": "aris134",
    "jobs": [
     {
@@ -29,19 +29,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-18T00:45:30Z",
-     "completed_at": null,
+     "completed_at": "2026-07-18T01:28:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29623699880/job/88023878360"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-18T00:45:19Z",
-     "completed_at": null,
+     "completed_at": "2026-07-18T01:59:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29623699880/job/88023878363"
     }
    ]
