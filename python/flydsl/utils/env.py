@@ -230,6 +230,39 @@ class CompileEnvManager(EnvManager):
     arch = OptStr("", env_var="ARCH", description="Override target GPU architecture (e.g. gfx942, gfx950)")
     backend = OptStr("rocm", description="GPU compile backend id (e.g. rocm)")
     llvm_dir = OptStr("", description="External LLVM/MLIR install prefix for final code generation")
+    llvm_pass_pipeline = OptStr(
+        "",
+        description="Custom LLVM new-PM pass pipeline run on the device kernel IR before codegen "
+        "(e.g. 'default<O3>,my-pass'); requires FLYDSL_COMPILE_LLVM_DIR. Overridden by "
+        "@flyc.jit(llvm_pass_pipeline=...).",
+    )
+    llvm_pass_plugins = OptList(
+        [],
+        separator=":",
+        description="Colon-separated LLVM pass plugin .so paths loaded (opt --load-pass-plugin) "
+        "before running llvm_pass_pipeline. Overridden by @flyc.jit(llvm_pass_plugins=...).",
+    )
+    llvm_codegen_passes = OptList(
+        [],
+        description="Comma-separated MIR pass names inserted pre-emit by the fly-llc codegen path "
+        "(requires fly-llc + ld.lld + FLYDSL_COMPILE_LLVM_DIR). Overridden by "
+        "@flyc.jit(llvm_codegen_passes=...).",
+    )
+    llvm_codegen_plugins = OptList(
+        [],
+        separator=":",
+        description="Colon-separated legacy MIR pass plugin .so paths loaded by fly-llc "
+        "(fly-llc --load). Overridden by @flyc.jit(llvm_codegen_plugins=...).",
+    )
+    llvm_codegen_insert_after = OptList(
+        [],
+        description="Comma-separated 'ANCHOR=PASS' entries inserting MIR pass PASS right after "
+        "codegen pass ANCHOR (fly-llc --insert-after), reaching earlier stages than pre-emit "
+        "(e.g. 'machine-scheduler=my-pass' for pre-RA). Overridden by "
+        "@flyc.jit(llvm_codegen_insert_after=...).",
+    )
+    fly_llc = OptStr("", description="Path to the fly-llc tool (default: <FLYDSL_COMPILE_LLVM_DIR>/bin/fly-llc).")
+    lld = OptStr("", description="Path to ld.lld for the fly-llc codegen path (default: <llvm_dir>/bin/ld.lld).")
 
 
 class DebugEnvManager(EnvManager):
