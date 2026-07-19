@@ -28,7 +28,7 @@ if _REPO_ROOT not in sys.path:
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.gemm.fp4_gemm_4wave import compile_fp4_gemm_4w  # noqa: E402
-from tests.kernels.utils import fp4_utils  # noqa: E402
+from tests.kernels.utils import gemm_common_utils  # noqa: E402
 from tests.test_common import run_perftest, verify_output  # noqa: E402
 
 OUT_DTYPE = torch.bfloat16
@@ -40,10 +40,10 @@ if not torch.cuda.is_available():
 
 def _run_torch_w4(x_q, w_q, x_scale, w_scale, dtype=torch.float32):
     """Reference: dequantize fp4 + per-32 e8m0 scale, then mm."""
-    x_f32 = fp4_utils.mxfp4_to_f32(x_q)
-    w_f32 = fp4_utils.mxfp4_to_f32(w_q)
-    x_s = fp4_utils.e8m0_to_f32(x_scale[: x_q.shape[0]].repeat_interleave(32, dim=1))
-    w_s = fp4_utils.e8m0_to_f32(w_scale[: w_q.shape[0]].repeat_interleave(32, dim=1))
+    x_f32 = gemm_common_utils.mxfp4_to_f32(x_q)
+    w_f32 = gemm_common_utils.mxfp4_to_f32(w_q)
+    x_s = gemm_common_utils.e8m0_to_f32(x_scale[: x_q.shape[0]].repeat_interleave(32, dim=1))
+    w_s = gemm_common_utils.e8m0_to_f32(w_scale[: w_q.shape[0]].repeat_interleave(32, dim=1))
     return torch.mm(x_f32 * x_s, (w_f32 * w_s).T).to(dtype)
 
 
@@ -66,17 +66,17 @@ def _bench_fp4_gemm(M, N, K, tile_m=256, tile_n=256, num_warmups=10, num_iters=1
     a_pad[:M] = a_fp32
     b_pad[:N] = b_fp32
 
-    a_q, scale_a_orig, _ = fp4_utils.per_1x32_f4_quant(a_pad)
+    a_q, scale_a_orig, _ = gemm_common_utils.per_1x32_f4_quant(a_pad)
     a_q = a_q[:M]
-    b_q, scale_b_orig, _ = fp4_utils.per_1x32_f4_quant(b_pad)
+    b_q, scale_b_orig, _ = gemm_common_utils.per_1x32_f4_quant(b_pad)
     b_q = b_q[:N]
 
     c_ref = _run_torch_w4(a_q, b_q, scale_a_orig, scale_b_orig)
 
     # Kernel inputs: A row-major fp4; B preshuffled (16,16); both scales preshuffled.
-    b_shuffled = fp4_utils.shuffle_weight_w4(b_q, 16, False, False)
-    scale_a = fp4_utils.shuffle_scale_w4(scale_a_orig, 1, False)
-    scale_b = fp4_utils.shuffle_scale_w4(scale_b_orig, 1, False)
+    b_shuffled = gemm_common_utils.shuffle_weight_w4(b_q, 16, False, False)
+    scale_a = gemm_common_utils.shuffle_scale_w4(scale_a_orig, 1, False)
+    scale_b = gemm_common_utils.shuffle_scale_w4(scale_b_orig, 1, False)
 
     c_out = torch.zeros((M, N), dtype=OUT_DTYPE, device=device)
 

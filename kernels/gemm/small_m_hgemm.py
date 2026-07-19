@@ -35,21 +35,18 @@ the loaded A tile across more N work, and give wide-N shapes a more specialized
 schedule than the generic HGEMM kernel.
 """
 
-from __future__ import annotations
-
 import functools
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import fly, llvm, memref, scf
+from flydsl._mlir.dialects import fly, llvm, scf
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.common.kernels_common import get_llvm_ptr
-from kernels.common.tensor_shim import GTensor, STensor, _to_raw, get_dtype_in_kernel
+from kernels.common.tensor_shim import GTensor, TensorView, _to_raw, get_dtype_in_kernel
 from kernels.common.utils import align_up as _align_up
 from kernels.gemm.splitk_hgemm import (
     OnlineScheduler,
@@ -478,17 +475,28 @@ def compile_small_m_hgemm_kernel(
 
     BLOCK_K_BYTES = BLOCK_K * DTYPE_BYTES
 
-    allocator = SmemAllocator(None, arch=GPU_ARCH, global_sym_name="smem")
-    smem_a_offset = allocator._align(allocator.ptr, 16)
     AS_BYTES = STAGES * BLOCK_M * BLOCK_K * DTYPE_BYTES
     AS_BYTES = max(AS_BYTES, BLOCK_M * BLOCK_N * DTYPE_BYTES)
-    allocator.ptr = smem_a_offset + AS_BYTES
     SMEM_USE = AS_BYTES
     if B_TO_LDS:
-        smem_b_offset = allocator._align(allocator.ptr, 16)
-        allocator.ptr = smem_b_offset + STAGES * BLOCK_N * BLOCK_K * DTYPE_BYTES
-        SMEM_USE += STAGES * BLOCK_N * BLOCK_K * DTYPE_BYTES
+        SMEM_USE = _align_up(AS_BYTES, 16) + STAGES * BLOCK_N * BLOCK_K * DTYPE_BYTES
     assert SMEM_USE <= MAX_LDS_BYTES
+
+    A_SMEM_ELEMS = AS_BYTES // DTYPE_BYTES
+    B_SMEM_ELEMS = STAGES * BLOCK_N * BLOCK_K
+
+    if B_TO_LDS:
+
+        @fx.struct
+        class SharedStorage:
+            a_smem: fx.Array[fx.BFloat16, A_SMEM_ELEMS, 16]
+            b_smem: fx.Array[fx.BFloat16, B_SMEM_ELEMS, 16]
+
+    else:
+
+        @fx.struct
+        class SharedStorage:
+            a_smem: fx.Array[fx.BFloat16, A_SMEM_ELEMS, 16]
 
     LDG_ASYNC_VEC_SIZE = DMA_BYTES // DTYPE_BYTES
     LDG_A_X_THREADS_AS = BLOCK_K // LDG_ASYNC_VEC_SIZE
@@ -538,27 +546,71 @@ def compile_small_m_hgemm_kernel(
         BIAS_ = GTensor(BIAS, dtype=dtype_, shape=(n,))
         bs_ = None
 
-        base_ptr = allocator.get_base()
-        smem_a_ptr = SmemPtr(
-            base_ptr,
-            smem_a_offset,
-            dtype_,
-            shape=(STAGES * BLOCK_M * BLOCK_K,),
-        )
-        as_ = STensor(smem_a_ptr, dtype_, shape=(STAGES, BLOCK_M, BLOCK_K))
+        _lds_ptr_type = ir.Type.parse("!llvm.ptr<3>")
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        a_smem_ptr = lds.a_smem.ptr
+        a_lds_base = fx.Int64(fx.ptrtoint(a_smem_ptr))
         if const_expr(B_TO_LDS):
-            smem_b_ptr = SmemPtr(
-                base_ptr,
-                smem_b_offset,
+            b_smem_ptr = lds.b_smem.ptr
+            b_lds_base = fx.Int64(fx.ptrtoint(b_smem_ptr))
+
+        def _make_lds_load(field_ptr, elem_dtype):
+            def _load(offset, vec_size=1):
+                ptr = fx.recast_iter(elem_dtype, field_ptr) + fx.Int64(offset)
+                vec = arith._to_raw(fx.ptr_load(ptr, result_type=fx.Vector.make_type(vec_size, elem_dtype)))
+                if vec_size > 1:
+                    return vec
+                return vector.extract(vec, static_position=[0], dynamic_position=[])
+
+            return _load
+
+        def _make_lds_store(field_ptr, elem_dtype):
+            elem_ir_ty = elem_dtype.ir_type
+
+            def _store(offset, value, vec_size=1):
+                ptr = fx.recast_iter(elem_dtype, field_ptr) + fx.Int64(offset)
+                if vec_size > 1:
+                    fx.ptr_store(arith._to_raw(value), ptr)
+                else:
+                    vec = vector.from_elements(T.vec(1, elem_ir_ty), [value])
+                    fx.ptr_store(vec, ptr)
+
+            return _store
+
+        as_ = TensorView(
+            dtype_,
+            (STAGES, BLOCK_M, BLOCK_K),
+            None,
+            0,
+            _make_lds_load(a_smem_ptr, fx.BFloat16),
+            _make_lds_store(a_smem_ptr, fx.BFloat16),
+        )
+        if const_expr(B_TO_LDS):
+            bs_ = TensorView(
                 dtype_,
-                shape=(STAGES * BLOCK_N * BLOCK_K,),
+                (STAGES, BLOCK_N, BLOCK_K),
+                None,
+                0,
+                _make_lds_load(b_smem_ptr, fx.BFloat16),
+                _make_lds_store(b_smem_ptr, fx.BFloat16),
             )
-            bs_ = STensor(smem_b_ptr, dtype_, shape=(STAGES, BLOCK_N, BLOCK_K))
-        smem_c_ptr = SmemPtr(base_ptr, smem_a_offset, dtype_, shape=(BLOCK_M * BLOCK_N,))
-        cs_ = STensor(smem_c_ptr, dtype_, shape=(BLOCK_M, BLOCK_N))
+        cs_ = TensorView(
+            dtype_,
+            (BLOCK_M, BLOCK_N),
+            None,
+            0,
+            _make_lds_load(a_smem_ptr, fx.BFloat16),
+            _make_lds_store(a_smem_ptr, fx.BFloat16),
+        )
         if const_expr(IS_SPLIT_K):
-            smem_bc_ptr = SmemPtr(base_ptr, smem_a_offset, T.i32, shape=(1,))
-            bc_ = STensor(smem_bc_ptr, T.i32, shape=(1,))
+            bc_ = TensorView(
+                T.i32,
+                (1,),
+                None,
+                0,
+                _make_lds_load(a_smem_ptr, fx.Int32),
+                _make_lds_store(a_smem_ptr, fx.Int32),
+            )
             semaphore_ = GTensor(semaphore, dtype=T.i32, shape=(-1,))
             signal_ = GTensor(signal, dtype=T.i32, shape=(-1,))
 
@@ -786,10 +838,9 @@ def compile_small_m_hgemm_kernel(
                         global_offset = A_.linear_offset((row_idx, col_idx)) * DTYPE_BYTES
                         global_offset = arith.index_cast(T.i32, global_offset)
                         lds_offset = as_.linear_offset((fx.Index(lds_stage), m_local_idx, k_local_idx)) * DTYPE_BYTES
-                        lds_ptr_type = ir.Type.parse("!llvm.ptr<3>")
-                        lds_addr = memref.extract_aligned_pointer_as_index(as_.memptr) + lds_offset
-                        lds_addr_ = rocdl.readfirstlane(T.i64, arith.index_cast(T.i64, lds_addr))
-                        lds_ptr = llvm.inttoptr(lds_ptr_type, lds_addr_)
+                        lds_addr = a_lds_base + fx.Int64(arith.index_cast(T.i64, arith.unwrap(lds_offset, index=True)))
+                        lds_addr_ = rocdl.readfirstlane(T.i64, arith._to_raw(lds_addr))
+                        lds_ptr = llvm.inttoptr(_lds_ptr_type, lds_addr_)
                         rocdl.raw_ptr_buffer_load_lds(
                             A_.rsrc,
                             lds_ptr,
@@ -979,10 +1030,9 @@ def compile_small_m_hgemm_kernel(
                         global_offset = B_.linear_offset((tile_n_offset + fx.Index(n_local_idx), col_idx))
                         global_offset = arith.index_cast(T.i32, global_offset * DTYPE_BYTES)
                         lds_offset = bs_s.linear_offset((fx.Index(lds_stage), n_local_idx, k_local_idx)) * DTYPE_BYTES
-                        lds_ptr_type = ir.Type.parse("!llvm.ptr<3>")
-                        lds_addr = memref.extract_aligned_pointer_as_index(bs_s.memptr) + lds_offset
-                        lds_addr_ = rocdl.readfirstlane(T.i64, arith.index_cast(T.i64, lds_addr))
-                        lds_ptr = llvm.inttoptr(lds_ptr_type, lds_addr_)
+                        lds_addr = b_lds_base + fx.Int64(arith.index_cast(T.i64, arith.unwrap(lds_offset, index=True)))
+                        lds_addr_ = rocdl.readfirstlane(T.i64, arith._to_raw(lds_addr))
+                        lds_ptr = llvm.inttoptr(_lds_ptr_type, lds_addr_)
                         rocdl.raw_ptr_buffer_load_lds(
                             B_.rsrc,
                             lds_ptr,
@@ -1216,10 +1266,7 @@ def compile_small_m_hgemm_kernel(
         signal: fx.Tensor,
         stream: fx.Stream = fx.Stream(None),
     ):
-        allocator.finalized = False
         ctx = CompilationContext.get_current()
-        with ir.InsertionPoint(ctx.gpu_module_body):
-            allocator.finalize()
         if const_expr(WAVES_PER_EU > 0):
             for op in ctx.gpu_module_body.operations:
                 if hasattr(op, "attributes") and op.OPERATION_NAME == "gpu.func":

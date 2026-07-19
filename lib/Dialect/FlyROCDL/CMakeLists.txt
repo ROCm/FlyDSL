@@ -2,6 +2,7 @@
 # by using string-based type matching instead of dyn_cast when needed.
 add_mlir_dialect_library(MLIRFlyROCDLDialect
   Dialect.cpp
+  Ops.cpp
   CDNA3/MmaAtom.cpp
   CDNA3/CopyAtom.cpp
   CDNA4/MmaAtom.cpp

@@ -54,6 +54,7 @@ echo "[run_benchmark] GPU arch: ${GPU_ARCH} (CDNA=${IS_CDNA}, RDNA4=${IS_RDNA4},
 
 SUCCESS_COUNT=0
 FAIL_COUNT=0
+SKIP_COUNT=0
 
 # ============================================================================
 # Benchmark Configuration
@@ -232,6 +233,27 @@ _show_fail_log() {
   else
     echo "[warn] ${op_name} log missing: ${log_path}" >&2
   fi
+}
+
+# Record a non-zero benchmark exit, downgrading pytest skips to "skipped".
+#
+# run_benchmark.sh runs each kernel test as a plain script (not under pytest),
+# so a pytest.skip()/pytest.importorskip() reached at runtime -- a single-GPU
+# runner hitting a multi-GPU test, an arch guard, or an aiter API drift --
+# surfaces as a non-zero exit plus a "Skipped:" line instead of being absorbed
+# by pytest. Treat those as skipped so an environmental skip cannot turn the
+# whole benchmark job red; genuine failures still count and dump their log tail.
+_fail_or_skip() {
+  # Args: log_path op_name
+  _fos_log="$1"; _fos_op="${2:-unknown}"
+  if grep -q "Skipped:" "${_fos_log}" 2>/dev/null; then
+    SKIP_COUNT=$((SKIP_COUNT + 1))
+    echo "${_fos_op} skipped (pytest.skip; see ${_fos_log})" >&2
+    return 0
+  fi
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+  echo "${_fos_op} failed. Log: ${_fos_log}" >&2
+  _show_fail_log "${_fos_log}" "${_fos_op}"
 }
 
 print_bound_info() {
@@ -547,9 +569,7 @@ if [ "${RUN_SOFTMAX}" -eq 1 ]; then
     if python3 tests/kernels/test_softmax.py >"${log}" 2>&1; then
       SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
-      FAIL_COUNT=$((FAIL_COUNT + 1))
-      echo "softmax failed. Log: ${log}" >&2
-      _show_fail_log "${log}" "softmax"
+      _fail_or_skip "${log}" "softmax"
     fi
     row="$(_py_parse_and_emit softmax "${M}x${N}" "${dtype}" "${log}")"
     # row is tab-separated; default IFS includes tabs.
@@ -572,9 +592,7 @@ if [ "${RUN_LAYERNORM}" -eq 1 ]; then
     if python3 tests/kernels/test_layernorm.py >"${log}" 2>&1; then
       SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
-      FAIL_COUNT=$((FAIL_COUNT + 1))
-      echo "layernorm failed. Log: ${log}" >&2
-      _show_fail_log "${log}" "layernorm"
+      _fail_or_skip "${log}" "layernorm"
     fi
     row="$(_py_parse_and_emit layernorm "${M}x${N}" "${dtype}" "${log}")"
     set -- $row
@@ -596,9 +614,7 @@ if [ "${RUN_RMSNORM}" -eq 1 ]; then
     if python3 tests/kernels/test_rmsnorm.py >"${log}" 2>&1; then
       SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
-      FAIL_COUNT=$((FAIL_COUNT + 1))
-      echo "rmsnorm failed. Log: ${log}" >&2
-      _show_fail_log "${log}" "rmsnorm"
+      _fail_or_skip "${log}" "rmsnorm"
     fi
     row="$(_py_parse_and_emit rmsnorm "${M}x${N}" "${dtype}" "${log}")"
     set -- $row
@@ -647,9 +663,7 @@ if [ "${RUN_FLASH_ATTN}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       --iters 100 >"${log}" 2>&1; then
       SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
-      FAIL_COUNT=$((FAIL_COUNT + 1))
-      echo "flash_attn failed. Log: ${log}" >&2
-      _show_fail_log "${log}" "flash_attn"
+      _fail_or_skip "${log}" "flash_attn"
     fi
     shape_tag="B${batch}S${seq_len}H${heads}Hkv${kv_heads}D${head_dim}_${causal_tag}"
     row="$(_py_parse_and_emit flash_attn "${shape_tag}" "${dtype}" "${log}")"
@@ -675,9 +689,7 @@ if [ "${RUN_MLA}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       --ctx_len "$ctx_len" >"${log}" 2>&1; then
       SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
-      FAIL_COUNT=$((FAIL_COUNT + 1))
-      echo "mla failed. Log: ${log}" >&2
-      _show_fail_log "${log}" "mla"
+      _fail_or_skip "${log}" "mla"
     fi
     row="$(_py_parse_and_emit mla "${shape_tag}" "fp8" "${log}")"
     set -- $row
@@ -707,9 +719,7 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       --tile_k "$tile_k" >"${log}" 2>&1; then
       SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
-      FAIL_COUNT=$((FAIL_COUNT + 1))
-      echo "gemm failed. Log: ${log}" >&2
-      _show_fail_log "${log}" "gemm"
+      _fail_or_skip "${log}" "gemm"
     fi
     gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
     row="$(_py_parse_and_emit gemm "${gemm_shape_tag}" "${dtype}" "${log}")"
@@ -752,9 +762,7 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       --waves_per_eu "${waves_per_eu}" >"${log}" 2>&1; then
       SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
-      FAIL_COUNT=$((FAIL_COUNT + 1))
-      echo "gemm failed. Log: ${log}" >&2
-      _show_fail_log "${log}" "gemm"
+      _fail_or_skip "${log}" "gemm"
     fi
     shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_${waves_per_eu}tg"
     row="$(_py_parse_and_emit gemm_async "${shape_tag}" "${dtype}" "${log}")"
@@ -806,9 +814,7 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
         _emit_row "$1" "$2" "$3" "$4" "$5"
       fi
     else
-      FAIL_COUNT=$((FAIL_COUNT + 1))
-      echo "hgemm failed. Log: ${log}" >&2
-      _show_fail_log "${log}" "hgemm"
+      _fail_or_skip "${log}" "hgemm"
     fi
   done
 
@@ -933,9 +939,7 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       --compare_aiter_ck false >"${log}" 2>&1; then
       SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
-      FAIL_COUNT=$((FAIL_COUNT + 1))
-      echo "moe failed. Log: ${log}" >&2
-      _show_fail_log "${log}" "moe"
+      _fail_or_skip "${log}" "moe"
     fi
     # Emit stage1 + stage2 rows (parse from log; keep terminal output concise).
     # Keep shape string compact (no spaces/commas) so table alignment stays stable.
@@ -1038,9 +1042,7 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       --compare_aiter_ck false >"${log}" 2>&1; then
       SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
-      FAIL_COUNT=$((FAIL_COUNT + 1))
-      echo "moe w4a16 failed. Log: ${log}" >&2
-      _show_fail_log "${log}" "moe_w4a16"
+      _fail_or_skip "${log}" "moe_w4a16"
     fi
     shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
 
@@ -1125,20 +1127,19 @@ if [ "${IS_RDNA_WMMA}" = "true" ]; then
     cat "${log}"
     SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
   else
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-    echo "RDNA WMMA benchmark failed. Log: ${log}" >&2
-    tail -20 "${log}" >&2
+    _fail_or_skip "${log}" "RDNA WMMA benchmark"
   fi
 fi
 
 # Summary
-TOTAL=$((SUCCESS_COUNT + FAIL_COUNT))
+TOTAL=$((SUCCESS_COUNT + FAIL_COUNT + SKIP_COUNT))
 echo ""
 echo "========================================================================"
 echo "Benchmark Summary"
 echo "========================================================================"
 echo "Total: ${TOTAL} tests"
 echo "Success: ${SUCCESS_COUNT}"
+echo "Skipped: ${SKIP_COUNT}"
 echo "Failed: ${FAIL_COUNT}"
 echo "Logs: ${BENCH_LOG_DIR}"
 echo ""

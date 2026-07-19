@@ -319,12 +319,27 @@ class Numeric(metaclass=NumericMeta):
     def __hash__(self):
         return hash(type(self)) ^ hash(self.value)
 
+    def is_static(self):
+        """Whether this holds a compile-time value rather than a run-time ``ir.Value``."""
+        return not isinstance(self.value, ir.Value)
+
     def select(self, true_value, false_value):
-        """Ternary select (for Boolean conditions from Int32 comparisons)."""
+        """Ternary select driven by this condition."""
         from .typing import as_dsl_value
 
-        result = ArithValue(self).select(true_value, false_value)
-        return as_dsl_value(result, true_value)
+        cond = self if isinstance(self, Boolean) else self.__dsl_bool__()
+
+        tv = _try_coerce_rhs(true_value)
+        fv = _try_coerce_rhs(false_value)
+        if tv is not None and fv is not None:
+            dest = _resolve_numeric_type(type(tv), type(fv))
+            true_value, false_value, exemplar = tv.to(dest), fv.to(dest), dest
+            if cond.is_static():
+                return true_value if bool(cond.value) else false_value
+        else:
+            exemplar = true_value
+        result = ArithValue(cond).select(true_value, false_value)
+        return as_dsl_value(result, exemplar)
 
     @classmethod
     def __coerce__(cls, value):
@@ -374,6 +389,18 @@ class Numeric(metaclass=NumericMeta):
         if isinstance(self.value, (bool, int, float)):
             return type(self)(-self.value)
         return type(self)(-self.value)
+
+    def __pos__(self):
+        return self
+
+    def __abs__(self):
+        # Match the IR-level restriction (_abs_op) for both static and run-time
+        # values: abs is undefined for a boolean.
+        if type(self) is Boolean:
+            raise TypeError("abs is not supported for boolean type")
+        if isinstance(self.value, (int, float, bool)):
+            return type(self)(abs(self.value))
+        return type(self)(abs(self.ir_value()))
 
     def __dsl_bool__(self):
         if isinstance(self.value, (int, float, bool)):
@@ -505,6 +532,21 @@ class Numeric(metaclass=NumericMeta):
     def __pow__(self, other):
         return _make_binop(operator.pow)(self, other)
 
+    def __rpow__(self, other):
+        return _make_binop(operator.pow, swap=True)(self, other)
+
+    def __divmod__(self, other):
+        quotient = self.__floordiv__(other)
+        if quotient is NotImplemented:
+            return NotImplemented
+        return (quotient, self.__mod__(other))
+
+    def __rdivmod__(self, other):
+        quotient = self.__rfloordiv__(other)
+        if quotient is NotImplemented:
+            return NotImplemented
+        return (quotient, self.__rmod__(other))
+
     def __eq__(self, other):
         return _make_binop(operator.eq)(self, other)
 
@@ -613,6 +655,10 @@ class Integer(Numeric, metaclass=NumericMeta, width=32, signed=True, ir_type=T.i
 
     def __invert__(self):
         res_type = type(self)
+        if isinstance(self.value, (bool, int)):
+            if res_type is Boolean:
+                return Boolean(not self.value)
+            return res_type(~int(self.value))
         return res_type(self.ir_value().__invert__())
 
     def __lshift__(self, other):
@@ -650,9 +696,6 @@ class Integer(Numeric, metaclass=NumericMeta, width=32, signed=True, ir_type=T.i
 
     def __rxor__(self, other):
         return self.__xor__(other)
-
-    def is_static(self):
-        return not isinstance(self.value, ir.Value)
 
 
 class Float(Numeric, metaclass=NumericMeta, width=32, ir_type=T.f32):

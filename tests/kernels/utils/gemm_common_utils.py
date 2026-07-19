@@ -770,6 +770,26 @@ def per_1x32_f6_quant(x):
     return a_pad, scale, a_unpacked
 
 
+def per_1x32_f8_quant(x):
+    """Per-1x32 MXFP8 (E4M3) quant of an operand, 1 byte/code (no packing).
+
+    Returns:
+      x_q:   (.., K) float8_e4m3fn - the fp8 codes the kernel reads.
+      scale: (.., K//32) e8m0 uint8 (unshuffled; caller applies shuffle_scale_w4).
+    """
+    block = 32
+    fp8_max = float(torch.finfo(torch.float8_e4m3fn).max)
+    shape_original = x.shape
+    x_flat = x.contiguous().view(-1, block).float()
+    max_abs = torch.amax(torch.abs(x_flat), dim=-1).clamp_min(1e-30)
+    scale_e8m0 = f32_to_e8m0(max_abs / fp8_max)
+    scale_f32 = e8m0_to_f32(scale_e8m0).clamp_min(1e-30)
+    x_q = (x_flat / scale_f32.view(-1, 1)).clamp(-fp8_max, fp8_max).to(torch.float8_e4m3fn)
+    x_q = x_q.view(shape_original).contiguous()
+    scale = scale_e8m0.view(*shape_original[:-1], shape_original[-1] // block).view(torch.uint8).contiguous()
+    return x_q, scale
+
+
 def preshuffle_b_16x16(b: Tensor, rows: int, cols: int) -> Tensor:
     """Preshuffle B data into 16x16 byte tiles for WMMA-friendly LDS loads.
 

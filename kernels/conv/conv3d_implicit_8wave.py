@@ -17,6 +17,7 @@ import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
+from kernels.common.mem_ops import buffer_atomic_add
 
 TILE_M = 128
 TILE_N = 128
@@ -508,7 +509,7 @@ def compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, 
                             if const_expr(use_splitk):
                                 off_b = fx.Int32(off_sk * 4)
                                 z0 = fx.Int32(0)
-                                rocdl.raw_ptr_buffer_atomic_fadd(a[i], y_rsrc, off_b, z0, z0)
+                                buffer_atomic_add(a[i], y_rsrc, off_b, z0, z0)
                             else:
                                 cval = (a[i] + bias_val).to(elem_ty) if const_expr(has_bias) else a[i].to(elem_ty)
                                 buffer_ops.buffer_store(cval, y_rsrc, off_nk)

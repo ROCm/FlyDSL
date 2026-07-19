@@ -39,6 +39,7 @@ lib/python*/site-packages/
 .vscode/
 .cursor/
 .idea/
+.claude/
 *.swp
 *.swo
 *~

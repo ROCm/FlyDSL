@@ -7,6 +7,7 @@ from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import (
     MmaOpGFX1250_WMMAScaleType,
     MmaOpGFX1250_WMMAType,
 )
+from ..._mlir.dialects import fly_rocdl
 from ..._mlir.dialects.fly import AtomicOp, PointerType
 from ..._mlir.dialects.fly_rocdl import (
     CopyOpCDNA3BufferAtomicType,
@@ -17,8 +18,18 @@ from ..._mlir.dialects.fly_rocdl import (
     TargetAddressSpace,
 )
 from ..._mlir.extras import types as T
+from ..meta import dsl_loc_tracing
 from ..primitive import cosize, get_iter, get_layout, get_scalar, make_ptr, make_view
-from ..typing import Int16, Int32, Int64, Tensor
+from ..typing import (
+    AddressSpace,
+    Int16,
+    Int32,
+    Int64,
+    Pointer,
+    Tensor,
+    is_generic_address_space,
+    is_target_address_space,
+)
 
 
 def BufferCopy(bit_size, cache_modifier=0):
@@ -213,14 +224,57 @@ def TDM(
     )
 
 
+def make_buffer_ptr(ptr: Pointer, num_records_bytes=None):
+    """Construct a new buffer-resource (``BufferDesc``) pointer from a global
+    pointer, for hardware OOB-checked loads / stores.
+
+    ``num_records_bytes`` is the descriptor byte count.  When ``None``
+    (default) it falls back to the max size ``0xFFFFFFFF``.
+    """
+    if not is_generic_address_space(ptr.address_space, AddressSpace.Global):
+        raise ValueError(f"make_buffer_ptr requires a global-address-space pointer, got {ptr.address_space}")
+
+    elem_ty = ptr.element_type
+
+    if num_records_bytes is None:
+        num_records_bytes = Int64(0xFFFFFFFF)
+    elif not isinstance(num_records_bytes, Int64):
+        # Coerce to i64: ROCDL make.buffer.rsrc requires an i64 num_records operand.
+        num_records_bytes = Int64(num_records_bytes)
+
+    from ...runtime.device import get_rocm_arch, is_rdna_arch
+
+    arch = get_rocm_arch()
+    flags = (7 << 12) | (4 << 15)
+    if is_rdna_arch(arch):
+        flags |= 1 << 24  # reserved bit, must be 1 on RDNA
+        flags |= 2 << 28  # OOB_SELECT = 2 (no bounds checking)
+
+    buf_ptr_ty = PointerType.get(
+        elem_ty=elem_ty.ir_type,
+        address_space=TargetAddressSpace.BufferDesc,
+        alignment=ptr.alignment,
+    )
+    return make_ptr(
+        buf_ptr_ty,
+        [
+            ptr,
+            Int16(0).ir_value(),
+            num_records_bytes.ir_value(),
+            Int32(flags).ir_value(),
+        ],
+    )
+
+
 def make_buffer_tensor(
     tensor: Tensor,
     max_size: bool = True,
     *,
     num_records_bytes=None,
 ) -> Tensor:
-    """Wrap ``tensor`` in a buffer-resource view for hardware OOB-checked
-    loads / stores (CDNA buffer copy). For the gfx1250 TDM DMA use
+    """Construct a new buffer-resource-backed tensor from a global-pointer
+    tensor, for hardware OOB-checked loads / stores and buffer_copy atoms
+    (CDNA buffer copy); layout is unchanged. For the gfx1250 TDM DMA use
     :func:`make_tdm_atom` instead — TDM needs a raw VA, not a buffer resource.
 
     ``max_size=True`` (default) sets the descriptor to ``0xFFFFFFFF``.
@@ -233,39 +287,15 @@ def make_buffer_tensor(
     ptr = get_iter(tensor)
     layout = get_layout(tensor)
 
-    if num_records_bytes is not None:
-        # Coerce to i64: ROCDL make.buffer.rsrc requires an i64 num_records
-        # operand.  Int64(...) handles Python int, other fx Integer types
-        # (e.g. fx.Int32(M) * N), and raw ir.Value with i32/index/float types
-        # -- emitting the appropriate extension / cast.  Idempotent when the
-        # input is already Int64.
-        if not isinstance(num_records_bytes, Int64):
-            num_records_bytes = Int64(num_records_bytes)
-    elif max_size:
-        num_records_bytes = Int64(0xFFFFFFFF)
-    else:
+    if num_records_bytes is None and not max_size:
+        # Derive the byte count from the layout footprint.
         elem_bits = elem_ty.width
         if elem_bits % 8 == 0:
             num_records_bytes = Int64(get_scalar(cosize(layout)) * (elem_bits // 8))
         else:
             num_records_bytes = Int64((get_scalar(cosize(layout)) * elem_bits + 7) // 8)
 
-    from ..buffer_ops import _get_buffer_flags
-
-    buf_ptr_ty = PointerType.get(
-        elem_ty=elem_ty.ir_type,
-        address_space=TargetAddressSpace.BufferDesc,
-        alignment=ptr.alignment,
-    )
-    buf_ptr = make_ptr(
-        buf_ptr_ty,
-        [
-            ptr,
-            Int16(0).ir_value(),
-            num_records_bytes.ir_value(),
-            Int32(_get_buffer_flags()).ir_value(),
-        ],
-    )
+    buf_ptr = make_buffer_ptr(ptr, num_records_bytes=num_records_bytes)
     return make_view(buf_ptr, layout)
 
 
@@ -359,3 +389,18 @@ def advance_tdm_atom(atom, byte_offset) -> object:
 
     off = byte_offset if isinstance(byte_offset, Int64) else Int64(byte_offset)
     return atom_set_value(atom, "imm_offset", off)
+
+
+@dsl_loc_tracing
+def get_buffer_rsrc(ptr: Pointer):
+    """Extract the raw ROCDL buffer resource (``!llvm.ptr<8>``) from a
+    buffer-descriptor pointer.
+
+    ``ptr`` must be a buffer-descriptor pointer, e.g. the value produced by
+    :func:`make_buffer_ptr` or the iterator of a :func:`make_buffer_tensor`
+    result.
+    """
+    if not is_target_address_space(ptr.address_space, TargetAddressSpace.BufferDesc):
+        raise ValueError(f"get_buffer_rsrc requires a buffer-descriptor pointer, got {ptr.address_space}")
+
+    return fly_rocdl.get_buffer_rsrc(ptr)
