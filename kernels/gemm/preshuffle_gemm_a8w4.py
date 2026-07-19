@@ -10,8 +10,8 @@ from flydsl.expr import buffer_ops, const_expr, gpu, math, range_constexpr, rocd
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
-from kernels.mma.mfma_epilogues import mfma_epilog
-from kernels.mma.mfma_preshuffle_pipeline import (
+from kernels.common.mma.mfma_epilogues import mfma_epilog
+from kernels.common.mma.mfma_preshuffle_pipeline import (
     _buffer_load_vec,
     buffer_copy_gmem16_dwordx4,
     load_b_pack_k32,
@@ -2143,8 +2143,13 @@ def compile_preshuffle_gemm_a8w4(
     dsrd_preload: int = 2,
     dvmem_preload: int = 2,
     xcd_swizzle: int = 0,
+    epilogue: str = "none",
 ):
-    """MXFP8 activation x MXFP4 weight preshuffle GEMM for gfx950."""
+    """MXFP8 activation x MXFP4 weight preshuffle GEMM for gfx950.
+
+    ``epilogue`` fuses a bias add (and optional activation) into the GEMM store:
+    "none", "bias", "bias_relu", "bias_silu", "bias_gelu" (tanh-approx GELU).
+    """
     if str(get_hip_arch()) != "gfx950":
         raise RuntimeError(f"A8W4 GEMM requires gfx950, got {get_hip_arch()}")
     return compile_preshuffle_gemm_a8(
@@ -2163,6 +2168,7 @@ def compile_preshuffle_gemm_a8w4(
         dsrd_preload=dsrd_preload,
         dvmem_preload=dvmem_preload,
         xcd_swizzle=xcd_swizzle,
+        epilogue=epilogue,
     )
 
 
