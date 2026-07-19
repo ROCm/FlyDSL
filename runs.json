@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-19T12:38:24Z",
+ "updated": "2026-07-19T15:39:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -973,21 +973,21 @@
    "branch": "pr/enh-shuffle-ops",
    "event": "pull_request",
    "title": "[Feat] Export shuffle xor/up/down/idx ops",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29569752397",
    "created_at": "2026-07-17T09:22:52Z",
-   "updated_at": "2026-07-17T10:21:25Z",
+   "updated_at": "2026-07-19T15:01:40Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-17T09:25:36Z",
-     "completed_at": "2026-07-17T10:13:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29569752397/job/87850834574"
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-19T15:01:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29569752397/job/88206199872"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -996,7 +996,7 @@
      "conclusion": "success",
      "started_at": "2026-07-17T09:25:33Z",
      "completed_at": "2026-07-17T10:21:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29569752397/job/87850834612"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29569752397/job/88206200189"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -1005,7 +1005,7 @@
      "conclusion": "success",
      "started_at": "2026-07-17T09:38:15Z",
      "completed_at": "2026-07-17T09:53:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29569752397/job/87850834689"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29569752397/job/88206200308"
     }
    ]
   },
