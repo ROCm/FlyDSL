@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-07-19T21:38:07Z",
+ "updated": "2026-07-20T03:56:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29715603942,
+   "pr": 825,
+   "commit": "82d1211beb1a567ace2e5c3fe26f633df0722d60",
+   "branch": "pa-decode-tile",
+   "event": "pull_request",
+   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29715603942",
+   "created_at": "2026-07-20T03:52:53Z",
+   "updated_at": "2026-07-20T03:54:05Z",
+   "actor": "fsx950223",
+   "jobs": []
+  },
+  {
+   "run_id": 29713950473,
+   "pr": 825,
+   "commit": "96734303c9a29cf0f123348b126f867e4bda5904",
+   "branch": "pa-decode-tile",
+   "event": "pull_request",
+   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29713950473",
+   "created_at": "2026-07-20T03:07:33Z",
+   "updated_at": "2026-07-20T03:53:26Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-20T03:10:01Z",
+     "completed_at": "2026-07-20T03:53:21Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29713950473/job/88263226589"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-20T03:09:45Z",
+     "completed_at": "2026-07-20T03:53:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29713950473/job/88263226622"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-20T03:08:49Z",
+     "completed_at": "2026-07-20T03:38:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29713950473/job/88263226625"
+    }
+   ]
+  },
   {
    "run_id": 29698800684,
    "pr": 837,
@@ -2280,64 +2338,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29480986346/job/87564670285"
     }
    ]
-  },
-  {
-   "run_id": 29480970486,
-   "pr": null,
-   "commit": "f011227c5cf93438dafcdabc7eb5965efd88f3e6",
-   "branch": "feat/autotune-rmsnorm-adopt",
-   "event": "pull_request",
-   "title": "[2/5] autotune: add opt-in search and RMSNorm waves-per-EU tuning (#770)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29480970486",
-   "created_at": "2026-07-16T07:44:49Z",
-   "updated_at": "2026-07-16T08:43:07Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-16T08:06:00Z",
-     "completed_at": "2026-07-16T08:43:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29480970486/job/87566939214"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-16T07:58:31Z",
-     "completed_at": "2026-07-16T08:42:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29480970486/job/87566939263"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-16T07:59:52Z",
-     "completed_at": "2026-07-16T08:20:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29480970486/job/87566939304"
-    }
-   ]
-  },
-  {
-   "run_id": 29480856448,
-   "pr": 825,
-   "commit": "b67005d5ec70688327ca2678c7f7e524e53a8084",
-   "branch": "pa-decode-tile",
-   "event": "pull_request",
-   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29480856448",
-   "created_at": "2026-07-16T07:42:53Z",
-   "updated_at": "2026-07-16T07:48:55Z",
-   "actor": "fsx950223",
-   "jobs": []
   }
  ]
 }
