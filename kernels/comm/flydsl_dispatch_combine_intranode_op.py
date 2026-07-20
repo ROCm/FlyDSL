@@ -230,15 +230,8 @@ class FlyDSLDispatchCombineConfig:
     max_num_inp_token_per_rank: int
     num_experts_per_rank: int
     num_experts_per_token: int
-    # Statically-pinned dtypes (memory is sized exactly for these, and the
-    # dispatch()/combine() entry points validate the runtime input against them):
-    #   dispatch_dtype = dispatched (quantized) activation dtype, e.g. fp8/fp4
-    #   combine_dtype  = combine wire/output dtype, typically bf16
     dispatch_dtype: torch.dtype = torch.bfloat16
     combine_dtype: torch.dtype = torch.bfloat16
-    # User-pinned launch geometry, resolved ONCE per op (not per call):
-    # pinned value (block_num+warp must be set together) > tuning table >
-    # ``default_*`` fallback above. None => not pinned.
     dispatch_block_num: Optional[int] = None
     dispatch_warp_num_per_block: Optional[int] = None
     combine_block_num: Optional[int] = None
@@ -253,11 +246,8 @@ class FlyDSLDispatchCombineConfig:
     zero_copy: bool = False
     combine_quant_type: str = "none"
     max_total_recv_tokens: int = 0
-    # When enable_group_major is True the op ALSO owns the expert-major dispatch
-    # buffers the fused stage-1 megakernel (compile_fused_moe_gemm1(fuse_dispatch=))
-    # reads/writes, via an internal FlyDSLDispatchGroupMajorOp (self._gm). It reuses
-    # ``dispatch_dtype`` (the quantized activation dtype) and ``scale_dim`` /
-    # ``scale_type_size``. Default False keeps the op token-major only.
+    # enable_group_major: also own the expert-major dispatch buffers (FlyDSLDispatchGroupMajorOp
+    # self._gm) the fused stage-1 megakernel reads/writes. Default False = token-major only.
     enable_group_major: bool = False
     gm_unit_size: int = 0
     gm_scheme: str = "fixedslot"
@@ -317,36 +307,28 @@ class FlyDSLDispatchCombineConfig:
         return self.scale_dim * self.scale_type_size
 
 
-def _gm_is_fp4(dt):
-    return dt == torch.float4_e2m1fn_x2
-
-
-def _gm_row_bytes(dt, hidden):
-    return hidden // 2 if _gm_is_fp4(dt) else hidden * torch.tensor([], dtype=dt).element_size()
-
-
-def _gm_row_view(dt, hidden):
-    return hidden // 2 if _gm_is_fp4(dt) else hidden
+def build_p2p_table(t, rank, npes, dev):
+    """i64[npes] table of intra-node P2P pointers to ``t`` on every peer (self incl.)."""
+    tbl = torch.zeros(npes, dtype=torch.int64, device=dev)
+    for pe in range(npes):
+        tbl[pe] = ms.shmem_ptr_p2p(t.data_ptr(), rank, pe)
+    return tbl
 
 
 class FlyDSLDispatchGroupMajorOp:
-    """Unified handshake-free fixed-slot (cap=mtpr) expert-major dispatch op."""
+    """Handshake-free fixed-slot (cap=npes*mtpr) expert-major dispatch buffers.
+
+    Owns the symmetric (mori-shmem / P2P) payload/scale buffers + sort-metadata the
+    fused megakernel's dispatch prologue reads/writes; ``compact`` selects the
+    count-first COMPACT layout (smaller buffers, scales to full batch size).
+    """
 
     def __init__(self, *, rank, world_size, hidden_dim, max_tok_per_rank, experts_per_rank,
-                 topk, data_type, unit_size, scale_dim, scale_type_size=1,
-                 warp_num_per_block=4, block_num=None, num_valid_max=None,
-                 dedup_payload=False, low_latency=True, ll_unified=True,
-                 fused_scale_swizzle=False, scheme="fixedslot", compact=False):
+                 topk, data_type, unit_size, scale_dim, scale_type_size=1, compact=False):
         assert world_size <= 8
-        # scheme: "fixedslot" = per-token remote-atomic packing (current); "handshake" =
-        # all-gather counts -> dense expert-major direct write (atomic-free).  Same outputs.
-        assert scheme in ("fixedslot", "handshake")
-        self.scheme = scheme
-        # compact (fixedslot/naive only): COUNT-first two-pass -> COMPACT expert-major layout (no
-        # per-expert cap reservation).  Phase-0 counts (remote atomic), block0 broadcasts a dense
-        # prefix-sum base (compact_base[le]), Phase-2 writes payload precisely.  Cuts num_valid_max
-        # from epr*cap (=epr*npes*mtpr, OOMs at large bs) to ~npes*mtpr*topk -> scales to full bs.
-        self.compact = bool(compact and scheme == "fixedslot")
+        # compact: count-first 2-pass compact layout (no per-expert cap reservation) -> smaller
+        # num_valid_max (~npes*mtpr*topk vs epr*cap), scales to full bs.
+        self.compact = bool(compact)
         self.rank = rank
         self.npes = world_size
         self.hidden = hidden_dim
@@ -355,60 +337,32 @@ class FlyDSLDispatchGroupMajorOp:
         self.topk = topk
         self.dtype = data_type
         self.unit = unit_size
-        # cap = per-expert fixed-slot capacity, rounded up to a tile_m multiple.  Each expert
-        # reserves `cap` rows; the post-pass emits only the occupied tiles, so the sparse GEMM
-        # tracks real load (cap only costs reserved address space, NOT GEMM compute).
-        # cap = npes*mtpr = the all-to-one worst case (a token hits an expert at most once, so a
-        # local expert receives at most npes*mtpr tokens) => PROVABLY overflow-free; no drops.
+        # cap = npes*mtpr (tile_m-aligned) = per-expert fixed-slot capacity; the all-to-one worst
+        # case, so provably overflow-free. Only reserves address space, not GEMM compute.
         self.max_tokens_per_expert = world_size * max_tok_per_rank
         self.ll_cap = ((self.max_tokens_per_expert + unit_size - 1) // unit_size) * unit_size
-        self.low_latency = True
-        self.ll_unified = True
         self.scale_dim = scale_dim
         self.scale_type_size = scale_type_size
         self.scale_bytes = scale_dim * scale_type_size
         self.scale_n_i32 = (self.scale_bytes + 3) // 4 if self.scale_bytes > 0 else 0
-        self.fused_scale_swizzle = bool(fused_scale_swizzle and self.scale_bytes > 0)
-        self.warps = warp_num_per_block
         self._dev = torch.device("cuda", rank)
-        self.row_bytes = _gm_row_bytes(data_type, hidden_dim)
-        self.row_view = _gm_row_view(data_type, hidden_dim)
+        self.row_bytes = _token_bytes_for(data_type, hidden_dim)
+        self.row_view = _token_view_dim_for(data_type, hidden_dim)
 
-        try:
-            cu = int(torch.cuda.get_device_properties(self._dev).multi_processor_count)
-        except Exception:
-            cu = 128
-        self._cu = cu
-
-        # Payload extent / GEMM grid bound:
-        #  * fixedslot SPARSE le*cap: needs epr*cap rows (one cap-region per local expert).
-        #  * handshake COMPACT dense: needs only total-recv worst case + per-expert tile_m padding,
-        #    NO per-expert cap reservation -> far smaller buffers AND a tight max_blocks so the
-        #    non-persistent GEMM does not over-launch ~empty CTAs (the cap-based bound launched
-        #    epr*cap/tile_m CTAs vs the ~num_valid actually occupied).
-        if num_valid_max is None:
-            if self.scheme == "handshake" or self.compact:
-                # tr <= npes*mtpr*topk (each of npes ranks' mtpr tokens hits <= topk of my experts);
-                # + epr*unit for the per-expert tile_m padding of the compact layout.
-                num_valid_max = world_size * max_tok_per_rank * topk + experts_per_rank * unit_size
-            else:
-                num_valid_max = experts_per_rank * self.ll_cap + 256
+        # num_valid_max: compact = recv worst case (npes*mtpr*topk) + per-expert tile_m padding;
+        # fixedslot = epr*cap (sparse le*cap layout).
+        if self.compact:
+            num_valid_max = world_size * max_tok_per_rank * topk + experts_per_rank * unit_size
+        else:
+            num_valid_max = experts_per_rank * self.ll_cap + 256
         self.num_valid_max = int(num_valid_max)
         self.max_blocks = (self.num_valid_max + unit_size - 1) // unit_size
-        # block_num: full parallelism at prefill; scaled down at small bs where the grid-barrier
-        # + large launch is pure fixed overhead.
-        if block_num is not None:
-            self.block_num = int(block_num)
-        else:
-            self.block_num = min(self._cu, 128, max(8, (max_tok_per_rank * topk) // 4))
 
         self._alloc()
         ms.shmem_barrier_all()
         self._build_p2p()
-        # NOTE: the standalone dispatch KERNEL is no longer compiled/launched here — the dispatch
-        # logic is INLINED in the megakernel's GEMM prologue (compile_fused_moe_gemm1(fuse_dispatch=)).
-        # This op now only owns the symmetric (mori-shmem / P2P) buffers + sort-metadata tensors that
-        # the megakernel reads; there is NO `op.dispatch()` entry point anymore.
+        # No standalone dispatch kernel: the megakernel's GEMM prologue (fuse_dispatch=) inlines it;
+        # this op only owns the symmetric buffers + sort-metadata it reads (no op.dispatch()).
 
     def _sym(self, shape, dtype):
         t = mori_shmem_create_tensor(shape, dtype)
@@ -420,8 +374,7 @@ class FlyDSLDispatchGroupMajorOp:
         nvm = self.num_valid_max
         # symmetric (P2P) buffers
         self.done2 = self._sym((npes,), torch.int32)
-        # persistent per-expert recv count: peers atomic-add as their tokens land; the post-pass
-        # copies running->ll_count then folds running back to 0 (no separate reset launch).
+        # running: per-expert recv count (peers atomic-add); post-pass copies -> ll_count, resets to 0.
         self.running = self._sym((epr,), torch.int32)
         self.ll_count = self._sym((epr,), torch.int32)
         self.rx_em = self._sym((nvm * self.row_bytes,), torch.int8)
@@ -435,70 +388,34 @@ class FlyDSLDispatchGroupMajorOp:
         # per-occupied-tile sparse row base (le*cap + t*tile_m); GEMM reads bx_m from here.
         self.tile_row_base = torch.zeros(self.max_blocks, dtype=torch.int32, device=self._dev)
         self.num_valid = torch.zeros(2, dtype=torch.int32, device=self._dev)
-        # ---- Plan A: native total_recv (distinct recv count, == standard-dispatch dce.total_recv) ----
-        # fixedslot writes per-(token,expert) (running[le] counts copies), so distinct recv is computed
-        # by a per-token distinct-dest-PE dedup pass that bumps dest_ctr[dpe], then a cross-PE recv-count
-        # signal (recv_num, symmetric) accumulates total_recv -- mirrors the sorted path / standard
-        # dispatch.  Lets stage2 combine read total_recv natively (no redundant dce.dispatch).
+        # total_recv (distinct recv count, == standard dispatch): per-token dedup bumps dest_ctr[dpe],
+        # then a cross-PE recv_num signal accumulates it, so stage2 combine reads it natively.
         self.total_recv = torch.zeros(1, dtype=torch.int32, device=self._dev)   # local; kernel accumulates
         self.dest_ctr = torch.zeros(self.npes, dtype=torch.int32, device=self._dev)  # local send-count/dest
         self.recv_num = self._sym((self.npes,), torch.int32)                    # symmetric: peers signal here
-        # ---- compact (naive count-first) buffers ----
-        # compact_base[le] = dense prefix-sum base (tile_m-padded) for local expert le; symmetric so
-        # senders read the DEST's base to place payload precisely.  done2c = the COUNT cross-PE
-        # done-barrier (separate epoch buffer from done2 which gates the WRITE round).  gb_cnt =
-        # the count-pass grid-arrival counter (separate from gb1 which gates the write-pass).
+        # compact all-gather count-first buffers: local count -> bigcnt all-gather -> each rank
+        # computes my_base[ge] locally -> strict write with a local cursor (2 cross-PE rounds).
         self.compact_base = None
         self.done2c = None
         self.gb_cnt = None
         self.meta2 = None
         self.write_cursor = None
         if self.compact:
-            self.compact_base = self._sym((epr,), torch.int32)
-            self.done2c = self._sym((npes,), torch.int32)
-            self.gb_cnt = torch.zeros(1, dtype=torch.int64, device=self._dev)
+            self.compact_base = self._sym((epr,), torch.int32)          # dense prefix-sum base per local expert
+            self.done2c = self._sym((npes,), torch.int32)               # COUNT cross-PE done-barrier (vs done2 WRITE)
+            self.gb_cnt = torch.zeros(1, dtype=torch.int64, device=self._dev)  # count-pass grid-arrival counter
             self.meta2 = torch.zeros(1, dtype=torch.int32, device=self._dev)   # payload-ready flag
-            # phase-2 write cursor (SEPARATE from running, which is the count accumulator) so neither
-            # needs a mid-kernel reset (avoids the cross-rank reset race): both start at 0 and are
-            # reset to 0 only at kernel END (after cross-PE#2), mirroring the non-compact post-pass.
-            self.write_cursor = self._sym((epr,), torch.int32)
-            # cross-PE barrier #1b: AFTER each rank's block0 computes compact_base[], BEFORE any sender
-            # reads a DEST's compact_base in phase-2.  Without it a sender can read a dest's stale/zero
-            # compact_base (dest's block0 not done yet) -> wrong slots -> corrupt output on some ranks.
-            self.done2cb = self._sym((npes,), torch.int32)
-            # ---- ALL-GATHER compact (2 cross-PE rounds instead of 3): local count -> bigcnt all-gather
-            # -> each rank computes my_base[ge] LOCALLY (where its tokens land in each dest) -> strict
-            # write with a LOCAL cursor.  Avoids remote count atomics + remote compact_base read.
+            self.write_cursor = self._sym((epr,), torch.int32)          # phase-2 write cursor (reset only at kernel end)
+            self.done2cb = self._sym((npes,), torch.int32)              # cross-PE#1b: gate compact_base read in phase-2
             _te = npes * epr
             self.local_hist = torch.zeros(_te, dtype=torch.int32, device=self._dev)     # per-launch reset
             self.bigcnt = self._sym((npes * _te,), torch.int32)                          # [src][ge] all-gather
             self.cnt_done = self._sym((npes,), torch.int32)                              # all-gather epoch barrier
             self.my_base = torch.zeros(_te, dtype=torch.int32, device=self._dev)         # my tokens' base in each dest
             self.local_cursor = torch.zeros(_te, dtype=torch.int32, device=self._dev)    # per-launch reset (write cursor)
-        self.swizzled_scale = None
-        if self.fused_scale_swizzle:
-            if self.scale_dim % 8 != 0:
-                raise ValueError(f"scale_dim={self.scale_dim} must be a multiple of 8")
-            m_tiles = (self.num_valid_max + 31) // 32
-            n_tiles = self.scale_dim // 8
-            self.swizzled_scale = torch.zeros((m_tiles, n_tiles, 4, 16), dtype=torch.int32, device=self._dev)
-        # ---- handshake-scheme buffers (all-gather counts -> dense expert-major) ----
-        if self.scheme == "handshake":
-            te = self.npes * self.epr
-            self.local_hist = torch.zeros(te, dtype=torch.int32, device=self._dev)   # in-graph reset
-            self.off_buf = torch.zeros(self.mtpr * self.topk, dtype=torch.int32, device=self._dev)
-            self.my_base = torch.zeros(te, dtype=torch.int32, device=self._dev)
-            self.bigcnt = self._sym((self.npes * te,), torch.int32)                  # [src][global_expert]
-            self.cnt_done = self._sym((self.npes,), torch.int32)                     # count-ready epoch signal
-            # W0 parallel counts-first: 2nd grid-arrival counter (post-SCT barrier). Monotonic, NEVER
-            # reset (epoch = gb2/nblk), CUDAGraph-safe — mirrors gb1.
-            self.gb2 = torch.zeros(1, dtype=torch.int64, device=self._dev)
 
     def _p2p_table(self, t):
-        tbl = torch.zeros(self.npes, dtype=torch.int64, device=self._dev)
-        for pe in range(self.npes):
-            tbl[pe] = ms.shmem_ptr_p2p(t.data_ptr(), self.rank, pe)
-        return tbl
+        return build_p2p_table(t, self.rank, self.npes, self._dev)
 
     def _build_p2p(self):
         self.p2p_done2 = self._p2p_table(self.done2)
@@ -516,33 +433,20 @@ class FlyDSLDispatchGroupMajorOp:
             self.p2p_done2cb = self._p2p_table(self.done2cb)
             self.p2p_bigcnt = self._p2p_table(self.bigcnt)
             self.p2p_cnt_done = self._p2p_table(self.cnt_done)
-        if self.scheme == "handshake":
-            self.p2p_bigcnt = self._p2p_table(self.bigcnt)
-            self.p2p_cnt_done = self._p2p_table(self.cnt_done)
 
     def reset_counters(self):
         """No-op: the per-expert count reset is folded into the kernel post-pass."""
         return
 
-    @property
-    def ll_cap_used(self):
-        """Per-expert slot capacity (cap = npes*mtpr, tile_m-aligned; provably overflow-free)."""
-        return self.ll_cap
-
     def _ll_views(self):
-        rx_em_view = self.rx_em.view(self.dtype).view(self.num_valid_max, self.row_view) \
-            if not _gm_is_fp4(self.dtype) else self.rx_em.view(torch.float4_e2m1fn_x2).view(self.num_valid_max, self.row_view)
+        rx_dtype = torch.float4_e2m1fn_x2 if _is_fp4_dtype(self.dtype) else self.dtype
+        rx_em_view = self.rx_em.view(rx_dtype).view(self.num_valid_max, self.row_view)
         scale_em_view = self.scale_em.view(torch.uint8).view(self.num_valid_max, max(1, self.scale_n_i32 * 4))[:, :self.scale_bytes]
         scale_em_i32 = self.scale_em.view(self.num_valid_max, max(1, self.scale_n_i32))
         return dict(rx_em=rx_em_view, scale_em=scale_em_view, scale_em_i32=scale_em_i32,
                     idx_em=self.idx_em, wts_em=self.wts_em, srcmap_em=self.srcmap_em,
                     sorted_expert_ids=self.sorted_expert_ids, tile_row_base=self.tile_row_base,
-                    num_valid=self.num_valid, dedup_rx=None,
-                    swizzled_scale=(None if self.swizzled_scale is None else
-                                    self.swizzled_scale
-                                    .view(getattr(torch, "float8_e8m0fnu", torch.uint8))
-                                    .view(-1, self.scale_dim)
-                                    .view(torch.uint8)))
+                    num_valid=self.num_valid, dedup_rx=None)
 
 
 
@@ -560,29 +464,21 @@ class FlyDSLDispatchCombineIntraNodeOp:
         ms.shmem_barrier_all()
 
         npes = config.world_size
-        self._p2p_tok_off = torch.zeros(npes, dtype=torch.int64, device=self._dev)
-        self._p2p_tis = torch.zeros(npes, dtype=torch.int64, device=self._dev)
-        self._p2p_out_wts = torch.zeros(npes, dtype=torch.int64, device=self._dev)
-        self._p2p_out_idx = torch.zeros(npes, dtype=torch.int64, device=self._dev)
-        self._p2p_out_tok = torch.zeros(npes, dtype=torch.int64, device=self._dev)
-        self._p2p_recv_num = torch.zeros(npes, dtype=torch.int64, device=self._dev)
-        self._p2p_out_scales = torch.zeros(npes, dtype=torch.int64, device=self._dev)
-        for pe in range(npes):
-            self._p2p_tok_off[pe] = ms.shmem_ptr_p2p(self.shmem_tok_off.data_ptr(), r, pe)
-            self._p2p_tis[pe] = ms.shmem_ptr_p2p(self.shmem_tok_id_to_src.data_ptr(), r, pe)
-            self._p2p_out_wts[pe] = ms.shmem_ptr_p2p(self.shmem_disp_out_wts.data_ptr(), r, pe)
-            self._p2p_out_idx[pe] = ms.shmem_ptr_p2p(self.shmem_disp_out_idx.data_ptr(), r, pe)
-            self._p2p_out_tok[pe] = ms.shmem_ptr_p2p(self.shmem_disp_out_tok.data_ptr(), r, pe)
-            self._p2p_recv_num[pe] = ms.shmem_ptr_p2p(self.shmem_recv_tok_num.data_ptr(), r, pe)
-            self._p2p_out_scales[pe] = ms.shmem_ptr_p2p(self.shmem_out_scales.data_ptr(), r, pe)
-
-        self._p2p_comb_inp = torch.zeros(npes, dtype=torch.int64, device=self._dev)
-        self._p2p_comb_inp_wts = torch.zeros(npes, dtype=torch.int64, device=self._dev)
-        self._p2p_xdb_mem = torch.zeros(npes, dtype=torch.int64, device=self._dev)
-        for pe in range(npes):
-            self._p2p_comb_inp[pe] = ms.shmem_ptr_p2p(self.shmem_comb_inp_tok.data_ptr(), r, pe)
-            self._p2p_comb_inp_wts[pe] = ms.shmem_ptr_p2p(self.shmem_comb_inp_wts.data_ptr(), r, pe)
-            self._p2p_xdb_mem[pe] = ms.shmem_ptr_p2p(self.shmem_xdev_bar_mem.data_ptr(), r, pe)
+        # intra-node P2P pointer tables (attr -> the symmetric tensor it mirrors on every peer).
+        _p2p_srcs = {
+            "_p2p_tok_off": self.shmem_tok_off,
+            "_p2p_tis": self.shmem_tok_id_to_src,
+            "_p2p_out_wts": self.shmem_disp_out_wts,
+            "_p2p_out_idx": self.shmem_disp_out_idx,
+            "_p2p_out_tok": self.shmem_disp_out_tok,
+            "_p2p_recv_num": self.shmem_recv_tok_num,
+            "_p2p_out_scales": self.shmem_out_scales,
+            "_p2p_comb_inp": self.shmem_comb_inp_tok,
+            "_p2p_comb_inp_wts": self.shmem_comb_inp_wts,
+            "_p2p_xdb_mem": self.shmem_xdev_bar_mem,
+        }
+        for _attr, _src in _p2p_srcs.items():
+            setattr(self, _attr, build_p2p_table(_src, r, npes, self._dev))
 
         # Dispatch (encode) and combine (decode, Stage 3) must agree on this.
         self._effective_max_recv = config.effective_max_recv
@@ -595,43 +491,46 @@ class FlyDSLDispatchCombineIntraNodeOp:
         # Start at 1: a zero flag would satisfy the first wait and skip the sync.
         self._xdev_flag = torch.ones(1, dtype=torch.int64, device=self._dev)
 
-        self._fx_out_tok = fx.Int64(self.shmem_disp_out_tok.data_ptr())
-        self._fx_out_idx = fx.Int64(self.shmem_disp_out_idx.data_ptr())
-        self._fx_tok_off = fx.Int64(self.shmem_tok_off.data_ptr())
-        self._fx_recv_num = fx.Int64(self.shmem_recv_tok_num.data_ptr())
-        self._fx_dest_ctr = fx.Int64(self.dest_pe_ctr.data_ptr())
-        self._fx_disp_bar = fx.Int64(self.disp_bar.data_ptr())
-        self._fx_tok_map = fx.Int64(self.dest_tok_map.data_ptr())
-        self._fx_out_shmem_tok_id_to_src = fx.Int64(self.shmem_tok_id_to_src.data_ptr())
-        self._fx_out_total_recv = fx.Int64(self.total_recv.data_ptr())
-        self._fx_comb_inp = fx.Int64(self.shmem_comb_inp_tok.data_ptr())
-        self._fx_comb_out = fx.Int64(self.shmem_comb_out_tok.data_ptr())
-        self._fx_xdb_mem = fx.Int64(self.shmem_xdev_bar_mem.data_ptr())
-        self._fx_xdev_flag = fx.Int64(self._xdev_flag.data_ptr())
-
-        self._fx_comb_bar = fx.Int64(self.comb_bar.data_ptr())
-        self._fx_trecv = fx.Int64(self.total_recv.data_ptr())
-        self._fx_p2p_tok_off = fx.Int64(self._p2p_tok_off.data_ptr())
-        self._fx_p2p_out_tok_id_to_src = fx.Int64(self._p2p_tis.data_ptr())
-        self._fx_p2p_out_wts = fx.Int64(self._p2p_out_wts.data_ptr())
-        self._fx_p2p_out_idx = fx.Int64(self._p2p_out_idx.data_ptr())
-        self._fx_p2p_out_tok = fx.Int64(self._p2p_out_tok.data_ptr())
-        self._fx_p2p_recv_num = fx.Int64(self._p2p_recv_num.data_ptr())
-        self._fx_p2p_out_scales = fx.Int64(self._p2p_out_scales.data_ptr())
-        self._fx_out_scales = fx.Int64(self.shmem_out_scales.data_ptr())
-        self._fx_p2p_comb_inp = fx.Int64(self._p2p_comb_inp.data_ptr())
-        self._fx_p2p_comb_inp_wts = fx.Int64(self._p2p_comb_inp_wts.data_ptr())
-        self._fx_p2p_xdb_mem = fx.Int64(self._p2p_xdb_mem.data_ptr())
-        self._fx_comb_inp_wts = fx.Int64(self.shmem_comb_inp_wts.data_ptr())
-        self._fx_comb_out_wts = fx.Int64(self.shmem_comb_out_wts.data_ptr())
-        self._fx_packed_recv_count = fx.Int64(self.packed_recv_count.data_ptr())
-        self._fx_packed_recv_src_info = fx.Int64(self.packed_recv_src_info.data_ptr())
-        self._fx_disp_tok_map = fx.Int64(self.disp_tok_to_ep_slot_map.data_ptr())
-        self._fx_disp_grid_bar = fx.Int64(self.disp_grid_bar.data_ptr())
-        self._fx_disp_out_wts = fx.Int64(self.shmem_disp_out_wts.data_ptr())
-
-        self._comb_no_s1_fn: Dict[Tuple[torch.dtype, bool, int, int], Any] = {}
-        self._comb_no_s1_compiled: Dict[Tuple[torch.dtype, bool, int, int], Any] = {}
+        # fx.Int64 device-pointer handles the dispatch/combine kernels take as args
+        # (attr -> source tensor). ``_fx_out_total_recv`` and ``_fx_trecv`` both point at
+        # total_recv but stay distinct handles (mega re-points _fx_out_total_recv separately).
+        _fx_srcs = {
+            "_fx_out_tok": self.shmem_disp_out_tok,
+            "_fx_out_idx": self.shmem_disp_out_idx,
+            "_fx_tok_off": self.shmem_tok_off,
+            "_fx_recv_num": self.shmem_recv_tok_num,
+            "_fx_dest_ctr": self.dest_pe_ctr,
+            "_fx_disp_bar": self.disp_bar,
+            "_fx_tok_map": self.dest_tok_map,
+            "_fx_out_shmem_tok_id_to_src": self.shmem_tok_id_to_src,
+            "_fx_out_total_recv": self.total_recv,
+            "_fx_comb_inp": self.shmem_comb_inp_tok,
+            "_fx_comb_out": self.shmem_comb_out_tok,
+            "_fx_xdb_mem": self.shmem_xdev_bar_mem,
+            "_fx_xdev_flag": self._xdev_flag,
+            "_fx_comb_bar": self.comb_bar,
+            "_fx_trecv": self.total_recv,
+            "_fx_p2p_tok_off": self._p2p_tok_off,
+            "_fx_p2p_out_tok_id_to_src": self._p2p_tis,
+            "_fx_p2p_out_wts": self._p2p_out_wts,
+            "_fx_p2p_out_idx": self._p2p_out_idx,
+            "_fx_p2p_out_tok": self._p2p_out_tok,
+            "_fx_p2p_recv_num": self._p2p_recv_num,
+            "_fx_p2p_out_scales": self._p2p_out_scales,
+            "_fx_out_scales": self.shmem_out_scales,
+            "_fx_p2p_comb_inp": self._p2p_comb_inp,
+            "_fx_p2p_comb_inp_wts": self._p2p_comb_inp_wts,
+            "_fx_p2p_xdb_mem": self._p2p_xdb_mem,
+            "_fx_comb_inp_wts": self.shmem_comb_inp_wts,
+            "_fx_comb_out_wts": self.shmem_comb_out_wts,
+            "_fx_packed_recv_count": self.packed_recv_count,
+            "_fx_packed_recv_src_info": self.packed_recv_src_info,
+            "_fx_disp_tok_map": self.disp_tok_to_ep_slot_map,
+            "_fx_disp_grid_bar": self.disp_grid_bar,
+            "_fx_disp_out_wts": self.shmem_disp_out_wts,
+        }
+        for _attr, _src in _fx_srcs.items():
+            setattr(self, _attr, fx.Int64(_src.data_ptr()))
 
         self._gm = None
         if getattr(config, "enable_group_major", False):
@@ -641,7 +540,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 experts_per_rank=config.num_experts_per_rank, topk=config.num_experts_per_token,
                 data_type=config.dispatch_dtype, unit_size=config.gm_unit_size,
                 scale_dim=config.scale_dim, scale_type_size=config.scale_type_size,
-                scheme=config.gm_scheme, compact=config.gm_compact,
+                compact=config.gm_compact,
             )
             # Unify total_recv: the fused dispatch prologue accumulates distinct-recv into
             # the SAME buffer combine reads (self.total_recv), so no host/device bridge.
@@ -659,10 +558,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
             + _npes_tf * config.num_experts_per_rank * 128,
             dtype=torch.int32, device=self._dev)
         ms.shmem_barrier_all()
-        self._p2p_comb_flag = torch.zeros(_npes_tf, dtype=torch.int64, device=self._dev)
-        for _pe_tf in range(_npes_tf):
-            self._p2p_comb_flag[_pe_tf] = ms.shmem_ptr_p2p(
-                self.shmem_comb_token_flag.data_ptr(), config.rank, _pe_tf)
+        self._p2p_comb_flag = build_p2p_table(self.shmem_comb_token_flag, config.rank, _npes_tf, self._dev)
         self._fx_tis = self._fx_out_shmem_tok_id_to_src
         self._fx_comb_flag = fx.Int64(self.shmem_comb_token_flag.data_ptr())
         self._fx_local_counter = fx.Int64(self.device_local_counter.data_ptr())
@@ -1152,81 +1048,82 @@ class FlyDSLDispatchCombineIntraNodeOp:
             )
         return result
 
-    def _get_combine_jit(self, c_dtype, zero_copy, enable_weights_flag, fp8_dc, block_num, warp_num_per_block):
-        """Lazy-jit a combine kernel specialized to the launch-time dtype/flags +
-        geometry. Zero-copy hard-wires skip_stage1 (caller pre-staged)."""
-        key = (c_dtype, bool(zero_copy), bool(enable_weights_flag), bool(fp8_dc), block_num, warp_num_per_block)
-        if key not in self._comb_jit_cache:
-            cfg = self.cfg
-            self._comb_jit_cache[key] = make_combine_jit(
-                rank=cfg.rank,
-                npes=cfg.world_size,
-                experts_per_token=cfg.num_experts_per_token,
-                hidden_dim=cfg.hidden_dim,
-                max_tok_per_rank=cfg.max_num_inp_token_per_rank,
-                block_num=block_num,
-                warp_num_per_block=warp_num_per_block,
-                data_type=c_dtype,
-                enable_weights=bool(enable_weights_flag),
-                enable_std_moe=cfg.enable_std_moe,
-                zero_copy=bool(zero_copy),
-                # skip_stage1 is now independent of zero_copy (mutually exclusive);
-                # the regular combine() path never skips Stage 1.
-                skip_stage1=False,
-                fp8_direct_cast=bool(fp8_dc),
-                max_recv=self._effective_max_recv,
-            )
-        return self._comb_jit_cache[key], key
+    def _resolve_cur_tok(self, cur_tok, who):
+        """cur_tok explicit or the last dispatch()'s input count; validated in range."""
+        if cur_tok is None:
+            cur_tok = getattr(self, "_last_inp_cur_tok", None)
+            if cur_tok is None:
+                raise ValueError(
+                    f"{who} requires an explicit cur_tok or a preceding dispatch() on this op "
+                    "(cur_tok defaults to the dispatch input.shape[0])."
+                )
+        mt = self.cfg.max_num_inp_token_per_rank
+        if cur_tok < 0 or cur_tok > mt:
+            raise ValueError(f"cur_tok={cur_tok} out of range [0, max_num_inp_token_per_rank={mt}]")
+        return cur_tok
 
-    def combine(
-        self,
-        input,
-        weights,
-        indices,
-        packed_recv_x=None,
-        cur_tok=None,
-    ):
-        """Intranode combine. ``input.dtype`` selects the kernel specialization.
-        Zero-copy mode requires the caller to write into the buffer from
-        ``get_registered_combine_input_buffer()`` first. Launch geometry is
-        resolved from cfg (combine pin > tuning table > default)."""
-        self._check_combine_inputs(input, weights, indices, packed_recv_x)
+    def _run_combine_kernel(self, cache, key, fn, inp_ptr, wts_ptr, prx_ptr, cur_tok, stream):
+        """Compile-on-first-call / call-cached launch for the combine kernel. The first
+        call passes fx-typed scalars (flyc infers the signature); cached calls use raw ints.
+        The persistent ``_fx_*`` pointer handles are reused unchanged in both forms."""
+        fixed = (
+            self._fx_comb_inp,
+            self._fx_comb_out,
+            self._fx_xdb_mem,
+            self._fx_xdev_flag,
+            self._fx_tok_map,
+            self._fx_comb_bar,
+            self._fx_trecv,
+            self._fx_out_shmem_tok_id_to_src,
+            self._fx_p2p_comb_inp,
+            self._fx_p2p_xdb_mem,
+        )
+        tail = (self._fx_comb_inp_wts, self._fx_comb_out_wts, self._fx_p2p_comb_inp_wts)
+        std = (self._fx_disp_tok_map, self._fx_disp_out_wts)
+        compiled = cache.get(key)
+        if compiled is None:
+            cache[key] = flyc.compile(
+                fn,
+                fx.Int64(inp_ptr), *fixed, fx.Int64(wts_ptr), *tail, fx.Int64(prx_ptr), *std,
+                cur_tok, stream,
+            )
+        else:
+            compiled(
+                inp_ptr, *fixed, wts_ptr, *tail, prx_ptr, *std,
+                cur_tok, stream,
+            )
+
+    def _launch_combine(self, input, weights, indices, packed_recv_x, cur_tok, enable_weights, skip_stage1):
+        """Shared driver for ``combine`` (skip_stage1=False) and ``combine_no_stage1``
+        (skip_stage1=True). Resolves dtype/geometry, jits, launches, returns (out_tok, out_wts).
+        Launch geometry is resolved from cfg (combine pin > tuning table > default)."""
         cfg = self.cfg
         stream = torch.cuda.current_stream()
+        # skip_stage1 treats input as a placeholder -> relax the dtype check.
+        self._check_combine_inputs(input, weights, indices, packed_recv_x, strict_input_dtype=not skip_stage1)
 
-        c_dtype = input.dtype
-        zero_copy = cfg.zero_copy
-        enable_weights_flag = True
         # fp8_direct_cast fires only when cfg asks AND launch dtype is bf16.
-        fp8_dc = cfg.combine_quant_type == "fp8_direct_cast" and c_dtype == torch.bfloat16
-        # Zero-copy contract: peers read shmem_comb_inp_tok; any other pointer is
-        # a silent correctness bug.
-        if zero_copy and input.data_ptr() != self.shmem_comb_inp_tok.data_ptr():
-            raise ValueError(
-                "zero_copy mode requires the caller to write into the buffer "
-                "returned by op.get_registered_combine_input_buffer(combine_dtype). "
-                f"Got input.data_ptr()={input.data_ptr():#x} but "
-                f"shmem_comb_inp_tok.data_ptr()={self.shmem_comb_inp_tok.data_ptr():#x}."
-            )
-
-        inp_c = input if input.is_contiguous() else input.contiguous()
-
-        # cur_tok defaults to the last dispatch()'s input count.
-        if cur_tok is None:
-            stashed = getattr(self, "_last_inp_cur_tok", None)
-            if stashed is None:
-                raise ValueError(
-                    "combine() requires either an explicit cur_tok or a "
-                    "preceding dispatch() call on the same op (cur_tok "
-                    "defaults to the dispatch input.shape[0])."
-                )
-            _cur_tok = stashed
+        fp8_dc = cfg.combine_quant_type == "fp8_direct_cast" and input.dtype == torch.bfloat16
+        if skip_stage1:
+            # placeholder input: pre-cast to fp8 so the kernel dtype + out view match.
+            if fp8_dc and input.dtype != torch.float8_e4m3fn:
+                inp_c = input.to(torch.float8_e4m3fn).contiguous()
+            else:
+                inp_c = input if input.is_contiguous() else input.contiguous()
+            c_dtype = torch.float8_e4m3fn if fp8_dc else input.dtype
         else:
-            _cur_tok = cur_tok
-        if _cur_tok < 0 or _cur_tok > cfg.max_num_inp_token_per_rank:
-            raise ValueError(
-                f"cur_tok={_cur_tok} out of range " f"[0, max_num_inp_token_per_rank={cfg.max_num_inp_token_per_rank}]"
-            )
+            # Zero-copy contract: peers read shmem_comb_inp_tok; any other pointer is a bug.
+            if cfg.zero_copy and input.data_ptr() != self.shmem_comb_inp_tok.data_ptr():
+                raise ValueError(
+                    "zero_copy mode requires the caller to write into the buffer "
+                    "returned by op.get_registered_combine_input_buffer(combine_dtype). "
+                    f"Got input.data_ptr()={input.data_ptr():#x} but "
+                    f"shmem_comb_inp_tok.data_ptr()={self.shmem_comb_inp_tok.data_ptr():#x}."
+                )
+            inp_c = input if input.is_contiguous() else input.contiguous()
+            c_dtype = input.dtype
+
+        _cur_tok = self._resolve_cur_tok(cur_tok, "combine_no_stage1()" if skip_stage1 else "combine()")
 
         # Resolve geometry on cur_tok, not input.shape[0] (ws*M under zero_copy).
         bn, wpb = _resolve_launch_geometry(
@@ -1250,70 +1147,53 @@ class FlyDSLDispatchCombineIntraNodeOp:
         else:
             prx_ptr = packed_recv_x.data_ptr() if packed_recv_x is not None else 0
 
-        _std_args_comb = (
-            fx.Int64(prx_ptr),
-            self._fx_disp_tok_map,
-            self._fx_disp_out_wts,
+        key = (c_dtype, bool(cfg.zero_copy), bool(enable_weights), bool(fp8_dc), bn, wpb, bool(skip_stage1))
+        fn = self._comb_jit_cache.get(key)
+        if fn is None:
+            fn = make_combine_jit(
+                rank=cfg.rank,
+                npes=cfg.world_size,
+                experts_per_token=cfg.num_experts_per_token,
+                hidden_dim=cfg.hidden_dim,
+                max_tok_per_rank=cfg.max_num_inp_token_per_rank,
+                block_num=bn,
+                warp_num_per_block=wpb,
+                data_type=c_dtype,
+                enable_weights=bool(enable_weights),
+                enable_std_moe=cfg.enable_std_moe,
+                zero_copy=cfg.zero_copy,
+                skip_stage1=bool(skip_stage1),
+                fp8_direct_cast=bool(fp8_dc),
+                # Must match dispatch's encoding stride so tok_map decode lines up.
+                max_recv=self._effective_max_recv,
+            )
+            self._comb_jit_cache[key] = fn
+        self._run_combine_kernel(
+            self._comb_compiled_cache, key, fn, inp_c.data_ptr(), wts_ptr, prx_ptr, _cur_tok, stream
         )
-
-        comb_fn, comb_key = self._get_combine_jit(c_dtype, zero_copy, enable_weights_flag, fp8_dc, bn, wpb)
-        comb_compiled = self._comb_compiled_cache.get(comb_key)
-        if comb_compiled is None:
-            args = (
-                fx.Int64(inp_c.data_ptr()),
-                self._fx_comb_inp,
-                self._fx_comb_out,
-                self._fx_xdb_mem,
-                self._fx_xdev_flag,
-                self._fx_tok_map,
-                self._fx_comb_bar,
-                self._fx_trecv,
-                self._fx_out_shmem_tok_id_to_src,
-                self._fx_p2p_comb_inp,
-                self._fx_p2p_xdb_mem,
-                fx.Int64(wts_ptr),
-                self._fx_comb_inp_wts,
-                self._fx_comb_out_wts,
-                self._fx_p2p_comb_inp_wts,
-                *_std_args_comb,
-                _cur_tok,
-                stream,
-            )
-            comb_compiled = flyc.compile(comb_fn, *args)
-            self._comb_compiled_cache[comb_key] = comb_compiled
-        else:
-            comb_compiled(
-                inp_c.data_ptr(),
-                self._fx_comb_inp,
-                self._fx_comb_out,
-                self._fx_xdb_mem,
-                self._fx_xdev_flag,
-                self._fx_tok_map,
-                self._fx_comb_bar,
-                self._fx_trecv,
-                self._fx_out_shmem_tok_id_to_src,
-                self._fx_p2p_comb_inp,
-                self._fx_p2p_xdb_mem,
-                wts_ptr,
-                self._fx_comb_inp_wts,
-                self._fx_comb_out_wts,
-                self._fx_p2p_comb_inp_wts,
-                prx_ptr,
-                self._fx_disp_tok_map,
-                self._fx_disp_out_wts,
-                _cur_tok,
-                stream,
-            )
 
         mt = cfg.max_num_inp_token_per_rank
         k = cfg.num_experts_per_token
-
         out_token_bytes = _token_bytes_for(c_dtype, cfg.hidden_dim)
         out_view_dim = _token_view_dim_for(c_dtype, cfg.hidden_dim)
         out_tok = self.shmem_comb_out_tok.view(torch.int8)[: mt * out_token_bytes].view(c_dtype).view(mt, out_view_dim)
         out_wts = self.shmem_comb_out_wts.view(mt, k)
-
         return out_tok, out_wts
+
+    def combine(
+        self,
+        input,
+        weights,
+        indices,
+        packed_recv_x=None,
+        cur_tok=None,
+    ):
+        """Intranode combine. ``input.dtype`` selects the kernel specialization.
+        Zero-copy mode requires the caller to write into the buffer from
+        ``get_registered_combine_input_buffer()`` first."""
+        return self._launch_combine(
+            input, weights, indices, packed_recv_x, cur_tok, enable_weights=True, skip_stage1=False
+        )
 
     # Gated reserved API: only the fused GEMM2+combine path is contract-safe.
     _ENABLE_COMBINE_NO_STAGE1 = False
@@ -1336,137 +1216,9 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 "FlyDSLDispatchCombineIntraNodeOp._ENABLE_COMBINE_NO_STAGE1=True "
                 "after auditing the upstream IPC-ordering contract."
             )
-
-        # Stage 1 bypassed: kernel never reads input, so relax the dtype check.
-        self._check_combine_inputs(input, weights, indices, packed_recv_x, strict_input_dtype=False)
-        cfg = self.cfg
-        stream = torch.cuda.current_stream()
-
-        fp8_dc = cfg.combine_quant_type == "fp8_direct_cast" and input.dtype == torch.bfloat16
-        if fp8_dc and input.dtype != torch.float8_e4m3fn:
-            inp_c = input.to(torch.float8_e4m3fn).contiguous()
-        else:
-            inp_c = input if input.is_contiguous() else input.contiguous()
-        c_dtype = torch.float8_e4m3fn if fp8_dc else input.dtype
-
-        # input is a placeholder here, so cur_tok cannot come from its shape.
-        if cur_tok is not None:
-            _cur_tok = cur_tok
-        else:
-            stashed = getattr(self, "_last_inp_cur_tok", None)
-            if stashed is None:
-                raise ValueError(
-                    "combine_no_stage1() requires an explicit cur_tok "
-                    "when no prior dispatch() has been issued on this op "
-                    "(the fused GEMM2+combine path populates "
-                    "shmem_comb_inp directly, so dispatch is bypassed)."
-                )
-            _cur_tok = stashed
-        if _cur_tok < 0 or _cur_tok > cfg.max_num_inp_token_per_rank:
-            raise ValueError(
-                f"cur_tok={_cur_tok} out of range " f"[0, max_num_inp_token_per_rank={cfg.max_num_inp_token_per_rank}]"
-            )
-
-        bn, wpb = _resolve_launch_geometry(
-            "combine",
-            cfg.combine_block_num,
-            cfg.combine_warp_num_per_block,
-            cfg.tuning_table,
-            _cur_tok,
-            _DEFAULT_COMBINE_BLOCK_NUM,
-            _DEFAULT_COMBINE_WARP_NUM,
+        return self._launch_combine(
+            input, weights, indices, packed_recv_x, cur_tok, enable_weights=enable_weights, skip_stage1=True
         )
-        _check_block_num_resident("combine", bn)
-
-        wts_ptr = self.shmem_disp_out_wts.data_ptr() if weights is None else weights.data_ptr()
-
-        _prx_ref = None
-        if fp8_dc and packed_recv_x is not None:
-            _prx_ref = packed_recv_x.view(torch.bfloat16).to(torch.float8_e4m3fn).contiguous()
-            prx_ptr = _prx_ref.data_ptr()
-        else:
-            prx_ptr = packed_recv_x.data_ptr() if packed_recv_x is not None else 0
-
-        no_s1_key = (c_dtype, bool(enable_weights), bn, wpb)
-
-        if no_s1_key not in self._comb_no_s1_fn:
-            from .flydsl_dispatch_combine_intranode_kernel import make_combine_jit
-
-            self._comb_no_s1_fn[no_s1_key] = make_combine_jit(
-                rank=cfg.rank,
-                npes=cfg.world_size,
-                experts_per_token=cfg.num_experts_per_token,
-                hidden_dim=cfg.hidden_dim,
-                max_tok_per_rank=cfg.max_num_inp_token_per_rank,
-                block_num=bn,
-                warp_num_per_block=wpb,
-                data_type=c_dtype,
-                enable_weights=bool(enable_weights),
-                enable_std_moe=cfg.enable_std_moe,
-                zero_copy=cfg.zero_copy,
-                skip_stage1=True,
-                fp8_direct_cast=bool(fp8_dc),
-                # Must match dispatch's encoding stride so tok_map decode lines up.
-                max_recv=self._effective_max_recv,
-            )
-
-        if no_s1_key not in self._comb_no_s1_compiled:
-            args = (
-                fx.Int64(inp_c.data_ptr()),
-                self._fx_comb_inp,
-                self._fx_comb_out,
-                self._fx_xdb_mem,
-                self._fx_xdev_flag,
-                self._fx_tok_map,
-                self._fx_comb_bar,
-                self._fx_trecv,
-                self._fx_out_shmem_tok_id_to_src,
-                self._fx_p2p_comb_inp,
-                self._fx_p2p_xdb_mem,
-                fx.Int64(wts_ptr),
-                self._fx_comb_inp_wts,
-                self._fx_comb_out_wts,
-                self._fx_p2p_comb_inp_wts,
-                fx.Int64(prx_ptr),
-                self._fx_disp_tok_map,
-                self._fx_disp_out_wts,
-                _cur_tok,
-                stream,
-            )
-            self._comb_no_s1_compiled[no_s1_key] = flyc.compile(self._comb_no_s1_fn[no_s1_key], *args)
-        else:
-            self._comb_no_s1_compiled[no_s1_key](
-                inp_c.data_ptr(),
-                self._fx_comb_inp,
-                self._fx_comb_out,
-                self._fx_xdb_mem,
-                self._fx_xdev_flag,
-                self._fx_tok_map,
-                self._fx_comb_bar,
-                self._fx_trecv,
-                self._fx_out_shmem_tok_id_to_src,
-                self._fx_p2p_comb_inp,
-                self._fx_p2p_xdb_mem,
-                wts_ptr,
-                self._fx_comb_inp_wts,
-                self._fx_comb_out_wts,
-                self._fx_p2p_comb_inp_wts,
-                prx_ptr,
-                self._fx_disp_tok_map,
-                self._fx_disp_out_wts,
-                _cur_tok,
-                stream,
-            )
-
-        mt = cfg.max_num_inp_token_per_rank
-        k = cfg.num_experts_per_token
-
-        out_token_bytes = _token_bytes_for(c_dtype, cfg.hidden_dim)
-        out_view_dim = _token_view_dim_for(c_dtype, cfg.hidden_dim)
-        out_tok = self.shmem_comb_out_tok.view(torch.int8)[: mt * out_token_bytes].view(c_dtype).view(mt, out_view_dim)
-        out_wts = self.shmem_comb_out_wts.view(mt, k)
-
-        return out_tok, out_wts
 
     def get_dispatch_src_token_pos(self):
         torch.cuda.synchronize()
