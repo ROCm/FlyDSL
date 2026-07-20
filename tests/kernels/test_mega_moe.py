@@ -317,7 +317,7 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
     import torch.nn.functional as _F
     from aiter import dtypes as _adt
     from aiter.ops.quant import per_1x32_mx_quant_hip
-    from kernels.moe.mega_moe import MegaMoE
+    from kernels.mega_moe import MegaMoE
     from kernels.moe.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1, compile_mixed_moe_gemm2
 
     def _relL2(a, b):
