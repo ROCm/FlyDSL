@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-20T07:27:07Z",
+ "updated": "2026-07-20T08:25:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29726222975,
+   "pr": 786,
+   "commit": "09dd1105fb2e667628bf15c6887bea4e8a0652d3",
+   "branch": "feat/autotune-offline-configs",
+   "event": "pull_request",
+   "title": "[3/5] autotune: add offline config artifacts (#770)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29726222975",
+   "created_at": "2026-07-20T07:57:02Z",
+   "updated_at": "2026-07-20T07:59:24Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-20T07:59:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29726222975/job/88300048815"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-20T07:59:23Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29726222975/job/88300048837"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-20T07:58:35Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29726222975/job/88300048855"
+    }
+   ]
+  },
   {
    "run_id": 29723648371,
    "pr": 825,
@@ -10,38 +53,38 @@
    "branch": "pa-decode-tile",
    "event": "pull_request",
    "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29723648371",
    "created_at": "2026-07-20T07:08:12Z",
-   "updated_at": "2026-07-20T07:10:34Z",
+   "updated_at": "2026-07-20T08:22:28Z",
    "actor": "fsx950223",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-20T07:09:18Z",
-     "completed_at": null,
+     "completed_at": "2026-07-20T07:30:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29723648371/job/88291900610"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-20T07:10:33Z",
-     "completed_at": null,
+     "completed_at": "2026-07-20T08:22:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29723648371/job/88291900615"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-20T07:09:08Z",
-     "completed_at": null,
+     "completed_at": "2026-07-20T07:25:14Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29723648371/job/88291900623"
     }
    ]
@@ -53,20 +96,20 @@
    "branch": "main",
    "event": "push",
    "title": "[2/5] autotune: add opt-in search and RMSNorm waves-per-EU tuning (#7\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29722954171",
    "created_at": "2026-07-20T06:53:54Z",
-   "updated_at": "2026-07-20T07:10:34Z",
+   "updated_at": "2026-07-20T08:22:30Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-20T06:56:11Z",
-     "completed_at": null,
+     "completed_at": "2026-07-20T07:38:03Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29722954171/job/88289809819"
     },
     {
@@ -81,10 +124,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-20T07:10:33Z",
-     "completed_at": null,
+     "completed_at": "2026-07-20T08:22:29Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29722954171/job/88289809857"
     }
    ]
@@ -409,7 +452,7 @@
   },
   {
    "run_id": 29630755171,
-   "pr": 786,
+   "pr": null,
    "commit": "ff067a9d27d2c0a07224e0ee3c3292c19d5d3ede",
    "branch": "feat/autotune-offline-configs",
    "event": "pull_request",
@@ -2349,49 +2392,6 @@
      "started_at": "2026-07-16T09:42:08Z",
      "completed_at": "2026-07-16T09:59:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29484418117/job/87575679921"
-    }
-   ]
-  },
-  {
-   "run_id": 29482783396,
-   "pr": 866,
-   "commit": "f3cc4140bd4651c25dff1e934f3def2677025fa1",
-   "branch": "atom_1250_refactor",
-   "event": "pull_request",
-   "title": "Atom 1250 refactor",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29482783396",
-   "created_at": "2026-07-16T08:14:53Z",
-   "updated_at": "2026-07-16T09:13:03Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-16T08:15:46Z",
-     "completed_at": "2026-07-16T09:12:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29482783396/job/87570298334"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-16T08:16:44Z",
-     "completed_at": "2026-07-16T08:39:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29482783396/job/87570298385"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-16T08:20:24Z",
-     "completed_at": "2026-07-16T09:13:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29482783396/job/87570298465"
     }
    ]
   }
