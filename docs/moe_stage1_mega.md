@@ -2,11 +2,11 @@
 
 面向**节点内专家并行（EP）推理**的 MoE **stage-1**（dispatch → gate/up GEMM）融合算子。把生产基线的 5-kernel 流水（`量化 → dispatch → moe_sorting → scale-sort → group-GEMM`）压成 **一次 launch 的 2 个 kernel**：① 激活量化（原生 FlyDSL `per_1x32_mx_quant`）；②一个「**dispatch ⊕ 持久 group-GEMM**」融合核（本文档主角）。① 融进 ② 的方案见 §11（已分析，当前 ROI 太低暂不做）。
 
-- **端到端入口**：`kernels/moe/mega_moe.py::MegaMoE`——`forward(x_bf16, wts, topk_ids) -> bf16`（内部：FlyDSL 量化 → stage1 → stage2；`forward_bf16` 为其别名，`forward_prequant(x_q, scales, ...)` 为预量化入口）。见 §9。
-- **stage1 融合核**：`kernels/moe/mega_moe_gemm1.py::compile_fused_moe_gemm1(fuse_dispatch="fixedslot", ...)`；dispatch 前奏内联在 `kernels/moe/mega_moe_dispatch.py::emit_dispatch_prologue`（GEMM K-loop / epilogue 在 `mega_moe_kloop.py` / `mega_moe_epilogue.py` / `mega_moe_utils.py`）。
-- **激活量化**：`kernels/moe/mega_moe_quant.py::per_1x32_mx_quant`——原生 FlyDSL MXFP4/MXFP8 + e8m0（替代 aiter `per_1x32_mx_quant_hip`；由 `MegaMoE.quantize` 调用）。
+- **端到端入口**：`kernels/mega_moe/mega_moe.py::MegaMoE`——`forward(x_bf16, wts, topk_ids) -> bf16`（内部：FlyDSL 量化 → stage1 → stage2；`forward_bf16` 为其别名，`forward_prequant(x_q, scales, ...)` 为预量化入口）。见 §9。
+- **stage1 融合核**：`kernels/mega_moe/gemm1.py::compile_fused_moe_gemm1(fuse_dispatch="fixedslot", ...)`；dispatch 前奏内联在 `kernels/mega_moe/dispatch.py::emit_dispatch_prologue`（GEMM K-loop / epilogue 在 `kernels/mega_moe/kloop.py` / `kernels/mega_moe/epilogue.py` / `kernels/mega_moe/utils.py`）。
+- **激活量化**：`kernels/mega_moe/quant.py::per_1x32_mx_quant`——原生 FlyDSL MXFP4/MXFP8 + e8m0（替代 aiter `per_1x32_mx_quant_hip`；由 `MegaMoE.quantize` 调用）。
 - **对称/P2P 缓冲**：`kernels/comm/flydsl_dispatch_combine_intranode_op.py::FlyDSLDispatchCombineIntraNodeOp`（只用其对称/P2P 缓冲，不单独 launch dispatch kernel）。
-- **stage2**：`MegaMoeStage2` + `compile_fused_moe_gemm2_combine`（`mega_moe.py`），封装共享的 GEMM2+combine（`kernels/moe/mixed_moe_gemm_2stage.py`）。
+- **stage2**：`MegaMoE._run_fused_stage2` + `compile_fused_moe_gemm2_combine`（`kernels/mega_moe/mega_moe.py`），封装共享的 GEMM2+combine（`kernels/moe/mixed_moe_gemm_2stage.py`）。
 - **测试**：`tests/kernels/test_mega_moe.py`（8-rank torchrun，端到端精度+性能，§10）、`tests/kernels/test_mega_moe_validation.py`（编译期不支持场景/路由校验）。
 
 > **性能概览（8×MI355X，CUDAGraph device-time，8 卡均值，端到端 stage1+stage2；数据见 §6）**：三网络全 bs 精度与生产 ATOM 栈逐位级一致（relL2 ~1e-5，纯量化抖动）；端到端 megav1 普遍 **1.08–1.40×**（小/中 bs 最明显）。收益拆解见 §4。
@@ -472,7 +472,7 @@ stage1 的优化开关**都已从 env 收敛为编译期参数**，由 `resolve_
 
 | env | 默认 | 含义 |
 | --- | --- | --- |
-| `FLIR_CK_LDS128` | `1` | GEMM LDS128 路径（`mega_moe_gemm1.py`，已调优，勿动） |
+| `FLIR_CK_LDS128` | `1` | GEMM LDS128 路径（`kernels/mega_moe/gemm1.py`，已调优，勿动） |
 | `FLYDSL_FUSED_ZERO_MODE` | `""` | `=normal` 强制清零 combine 输入 buffer（诊断用；默认跳过，靠全量覆写保证安全） |
 
 ---
@@ -483,8 +483,8 @@ stage1 的优化开关**都已从 env 收敛为编译期参数**，由 `resolve_
 
 ### 9.0 端到端封装 `MegaMoE`（零桥接）
 
-- **入口**：`kernels/moe/mega_moe.py::MegaMoE`。主入口 `forward(x_bf16, wts, topk_ids) -> bf16 [run_tokens, model_dim]`——内部先 `quantize`（原生 FlyDSL `per_1x32_mx_quant`）再跑 stage1+stage2；`forward_bf16` 是它的别名。另有 `forward_prequant(x_q, scales, wts, topk_ids)` 吃预量化输入（跳过内部量化，供上游已量化 / 基准对齐用），输出与 `forward` 逐位一致。
-- **组成**：`stage1 = MegaMoeStage1`（`enable_fused_stage1=True` 时的融合 dispatch+GEMM1 megakernel）⊕ `stage2 = MegaMoeStage2`（`compile_fused_moe_gemm2_combine`：GEMM2 epilogue 内联 combine Stage-1 P2P scatter + Stage-2/3）。
+- **入口**：`kernels/mega_moe/mega_moe.py::MegaMoE`。主入口 `forward(x_bf16, wts, topk_ids) -> bf16 [run_tokens, model_dim]`——内部先 `quantize`（原生 FlyDSL `per_1x32_mx_quant`）再跑 stage1+stage2；`forward_bf16` 是它的别名。另有 `forward_prequant(x_q, scales, wts, topk_ids)` 吃预量化输入（跳过内部量化，供上游已量化 / 基准对齐用），输出与 `forward` 逐位一致。
+- **组成**（均折叠为 `MegaMoE` 方法）：`_run_fused_stage1`（`enable_fused_stage1=True` 时的融合 dispatch+GEMM1 megakernel）⊕ `_run_fused_stage2`（`compile_fused_moe_gemm2_combine`：GEMM2 epilogue 内联 combine Stage-1 P2P scatter + Stage-2/3）。
 - **零桥接（与 fixslot 同构）**:`forward` 内**只有**：① `stage1.forward`(1 个 megakernel launch);② `g2.run`(GEMM2+combine)。**无冗余 dispatch、无 host 数据搬运/适配**。两个关键之所以零桥接:
   - `total_recv`(combine 需要的 distinct-recv 计数)由 stage1 **megakernel 核内直接写进 combine op 的 buffer**(Plan A,§9.3),不再像历史那样为拿 fresh `total_recv` 额外跑一次 `comb_op.dispatch`。
   - `tok_id_to_src`(combine 的 scatter-back 映射)= **identity(`arange`)**,因为 stage1 产出的 `sorted_token_ids` 已编码 `src_global = dest_token`(§9.2);故构造期设一次、`forward` 内不碰。
@@ -684,7 +684,7 @@ GEMM2 硬编码 a2@logical,所以 combo 必须「compact dispatch(绕 4GB)+ GEMM
    - `disp[36..39] = total_recv / dest_ctr / recv_num / p2p_recv_num`(Plan A,避开 compact_ag 已占的 21=gb_cnt、24=meta2);
    - `disp[40] = _sti`、`disp[41] = _se_atom`(atom 元数据输出,**独立于** A-gather 的 `_trb`/`_se` ARG)。
 2. **A-gather 参数 vs 输出分离**(`forward`)。combo 下 `_sorted_arg=_trb`、`_se_arg=_se`(compact tile 结构,A-gather 用),`_wt_arg=wts_em`;`_sti`/`_se_atom` 由 GEMM emit 到 disp 40/41。非-compact atom 则 `_sorted_arg=_sti`、`_se_arg=_se_atom`(static A-gather 不占 ARG,可 in-place)。
-3. **GEMM1 emit**(`mega_moe_epilogue.py` lds_tid 装载处,`atom_contract` 门控)。每 tile 取 `srcmap[bx_m+tx]`→ 写 `_sti[disp40]`、`_sw_atom[disp20]`(real 行,logical index)、`_se_atom[disp41]`(本地专家)。a2-logical 写仍走通用 `precompute_row`(读 lds_tid → t_ok 掩码 → 写 `out[t*topk+s]`)。
+3. **GEMM1 emit**(`kernels/mega_moe/epilogue.py` lds_tid 装载处,`atom_contract` 门控)。每 tile 取 `srcmap[bx_m+tx]`→ 写 `_sti[disp40]`、`_sw_atom[disp20]`(real 行,logical index)、`_se_atom[disp41]`(本地专家)。a2-logical 写仍走通用 `precompute_row`(读 lds_tid → t_ok 掩码 → 写 `out[t*topk+s]`)。
 4. **padding sentinel = block0 核内 gap-fill**(§9.5 关键,**对齐 fixslot 零额外动作**)。compact dense 的 tile-pad gap 槽(每专家 <tile_m)从不被 peer 写、srcmap 残留上一launch → 必须 sentinel。做法:**block0 在 metadata 阶段**(已算出每专家 dense base `_ebase` + 计数 `ll_count`)对 `srcmap[ebase+cnt : ebase+ntiles*tile_m]` 写 sentinel(`t=npes*mtpr`)。**核内、无 host memset、只填 gap(极少)**;GEMM 直接读 srcmap(pad=sentinel → `t_ok` 自动掩码 → 不写 a2、`_sti` 携带 sentinel → stage2 跳过)。
 5. **Plan A 去重**(§9.3):fixed-slot 在 payload loop 内 inline 维护 `dest_ctr`(无第二遍 token pass);combo 的 `total_recv` 走核内 LDS 直方图去重(避免全局原子争用)。
 6. **buffer 尺寸**:combo a2(`_out`)= npes·mtpr·topk 行(logical);srcmap_em = nvm(compact dense)。
@@ -742,7 +742,7 @@ python3 -m pytest tests/kernels/test_mega_moe_validation.py -q
 
 ## 11. 激活量化融进 stage1（已分析，当前不做）
 
-**现状**：激活量化是本融合核之前的一个独立 FlyDSL 小核 `per_1x32_mx_quant`（`kernels/moe/mega_moe_quant.py`）——bf16 激活 → fp8/fp4 payload + e8m0 行 scale 落 HBM；dispatch 前奏（`emit_dispatch_prologue` 的 payload copy，§1.1）再从 HBM 读 `x_q`+scale，按 `(token, k_slot)` P2P 写给目标卡。**同一 token 的 payload 被 topk 个 wave 各读一次**（读 fp8 `topk×md` 字节）。
+**现状**：激活量化是本融合核之前的一个独立 FlyDSL 小核 `per_1x32_mx_quant`（`kernels/mega_moe/quant.py`）——bf16 激活 → fp8/fp4 payload + e8m0 行 scale 落 HBM；dispatch 前奏（`emit_dispatch_prologue` 的 payload copy，§1.1）再从 HBM 读 `x_q`+scale，按 `(token, k_slot)` P2P 写给目标卡。**同一 token 的 payload 被 topk 个 wave 各读一次**（读 fp8 `topk×md` 字节）。
 
 **融合设想**：把量化折进 dispatch payload——直接读 bf16、核内量化、P2P 写 fp8/fp4 + e8m0，省掉独立 quant 核 + `x_q`/scale 的 HBM 往返。
 
@@ -752,7 +752,7 @@ python3 -m pytest tests/kernels/test_mega_moe_validation.py -q
 - naive（在 per-(token,kslot) copy 里内联量化）：读 bf16 `k·2·md`。k=6~8 时**比现状更多** → 亏（把 bf16 重读 + 重算了 k 次）。
 - smart（**每 token 量化一次**，暂存 LDS/寄存器，再做 k 次 P2P copy）：只读 bf16 `2·md`。本地 HBM ~降 4–5×，且省掉独立核。
 
-smart 需要把 payload 循环从 `(token,kslot)` 并行改成 **token 归 wave** 并行（一个 wave 读一次 bf16、量化一次、循环 k 个专家做 P2P），复用 `mega_moe_quant` 的 per-group 量化逻辑，暂存到 pong LDS。跨卡 P2P 写量（`k·md`，走 xGMI，是 dispatch 真正瓶颈）不变。
+smart 需要把 payload 循环从 `(token,kslot)` 并行改成 **token 归 wave** 并行（一个 wave 读一次 bf16、量化一次、循环 k 个专家做 P2P），复用 `kernels/mega_moe/quant.py` 的 per-group 量化逻辑，暂存到 pong LDS。跨卡 P2P 写量（`k·md`，走 xGMI，是 dispatch 真正瓶颈）不变。
 
 **收益天花板（实测，v4_pro a8w4，端到端 `forward` = quant + megav1）**：小 bs 下 stage1 被 cross-PE dispatch 握手延迟主导，quant 是 ~2.5–3.7µs 的固定小量，占比很小：
 

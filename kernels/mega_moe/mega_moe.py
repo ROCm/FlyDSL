@@ -35,8 +35,8 @@ from kernels.comm.flydsl_dispatch_combine_intranode_op import (
 
 # activation MX quant + sorted-scale scatter: native FlyDSL kernels (both stage-1
 # paths are aiter-free; these replace aiter per_1x32_mx_quant_hip / mxfp4_moe_sort_hip).
-from ..mixed_moe_gemm_2stage import compile_mixed_moe_gemm1, compile_mixed_moe_gemm2
-from ..moe_sorting_kernel import moe_sorting_flydsl, moe_sorting_get_workspace_size
+from kernels.moe.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1, compile_mixed_moe_gemm2
+from kernels.moe.moe_sorting_kernel import moe_sorting_flydsl, moe_sorting_get_workspace_size
 from .gemm1 import GateMode, compile_fused_moe_gemm1
 from .quant import mxfp4_moe_scale_sort
 from .quant import per_1x32_mx_quant as _flydsl_mx_quant

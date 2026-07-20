@@ -114,7 +114,7 @@ except Exception:  # noqa: BLE001
     fp4_utils = None  # type: ignore[assignment]
 
 try:
-    from kernels.moe.mega_moe import compile_fused_moe_gemm2_combine  # type: ignore
+    from kernels.mega_moe import compile_fused_moe_gemm2_combine  # type: ignore
 
     class MegaMoeStage2:
         """Standalone fused GEMM2+combine op for this profiler (thin adapter over the

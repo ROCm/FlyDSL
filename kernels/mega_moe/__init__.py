@@ -4,7 +4,7 @@
 """MegaMoE fused MoE operator (packaged).
 
 Public symbols are lazy-loaded so that importing a light submodule
-(e.g. ``kernels.moe.mega_moe.gemm1``) does not pull in the full operator's
+(e.g. ``kernels.mega_moe.gemm1``) does not pull in the full operator's
 heavy dependencies (``mori.shmem`` / ``torch.distributed``) via the package.
 """
 
