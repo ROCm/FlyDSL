@@ -547,22 +547,8 @@ class FlyDSLDispatchCombineIntraNodeOp:
             self._gm.total_recv = self.total_recv
             ms.shmem_barrier_all()
 
-        # MegaMoE fused gemm2+combine token-flag machinery: the fused gemm2 epilogue P2P-scatters
-        # into peers' shmem_comb_inp_tok and bumps shmem_comb_token_flag via device_local_counter.
-        _npes_tf = config.world_size
-        _mr_worst_tf = config.max_recv
-        self.shmem_comb_token_flag = mori_shmem_create_tensor((_mr_worst_tf,), torch.int32)
-        self.shmem_comb_token_flag.zero_()
-        self.device_local_counter = torch.zeros(
-            _mr_worst_tf * config.num_experts_per_token
-            + _npes_tf * config.num_experts_per_rank * 128,
-            dtype=torch.int32, device=self._dev)
-        ms.shmem_barrier_all()
-        self._p2p_comb_flag = build_p2p_table(self.shmem_comb_token_flag, config.rank, _npes_tf, self._dev)
+        # tok_id_to_src alias the fused gemm2+combine path reads (identity map under fused stage-1).
         self._fx_tis = self._fx_out_shmem_tok_id_to_src
-        self._fx_comb_flag = fx.Int64(self.shmem_comb_token_flag.data_ptr())
-        self._fx_local_counter = fx.Int64(self.device_local_counter.data_ptr())
-        self._fx_p2p_comb_flag = fx.Int64(self._p2p_comb_flag.data_ptr())
         ms.shmem_barrier_all()
 
     def load_tuning_config(self, path=None):
