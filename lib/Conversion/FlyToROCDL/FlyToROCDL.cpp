@@ -608,13 +608,13 @@ private:
   static bool isBF8(Type ty) { return isa<Float8E5M2FNUZType>(ty); }
   static bool isF8(Type ty) { return isFP8(ty) || isBF8(ty); }
 
-  static Type getMfmaABType(MLIRContext *ctx, Type elemTy) {
+  static Type getMfmaABType(MLIRContext *ctx, Type elemTy, int32_t k = 0) {
     if (elemTy.isF32())
       return Float32Type::get(ctx);
     if (elemTy.isF16())
       return VectorType::get({4}, Float16Type::get(ctx));
     if (elemTy.isBF16())
-      return VectorType::get({2}, IntegerType::get(ctx, 16));
+      return VectorType::get({(k >= 16) ? 4 : 2}, IntegerType::get(ctx, 16));
     if (isF8(elemTy))
       return IntegerType::get(ctx, 64);
     return nullptr;
@@ -654,6 +654,8 @@ private:
         return 16;
       if (m == 16 && k == 8)
         return 4;
+      if (m == 16 && k == 16)
+        return 4;
       if (m == 4 && k == 2)
         return 4;
     }
@@ -690,8 +692,8 @@ private:
     Type elemTyB = atomTy.getElemTyB();
     MLIRContext *ctx = rewriter.getContext();
 
-    Type abTyA = getMfmaABType(ctx, elemTyA);
-    Type abTyB = getMfmaABType(ctx, elemTyB);
+    Type abTyA = getMfmaABType(ctx, elemTyA, k);
+    Type abTyB = getMfmaABType(ctx, elemTyB, k);
     if (!abTyA || !abTyB)
       return rewriter.notifyMatchFailure(op, "unsupported element type for MFMA");
 
@@ -723,6 +725,7 @@ private:
     DISPATCH_MFMA(4, 2, elemTyA.isBF16(), mfma_f32_4x4x2bf16)
     DISPATCH_MFMA(32, 4, elemTyA.isBF16(), mfma_f32_32x32x4bf16)
     DISPATCH_MFMA(16, 8, elemTyA.isBF16(), mfma_f32_16x16x8bf16)
+    DISPATCH_MFMA(16, 16, elemTyA.isBF16(), mfma_f32_16x16x16bf16_1k)
 
     DISPATCH_MFMA(16, 32, isFP8(elemTyA) && isFP8(elemTyB), mfma_f32_16x16x32_fp8_fp8)
     DISPATCH_MFMA(16, 32, isFP8(elemTyA) && isBF8(elemTyB), mfma_f32_16x16x32_fp8_bf8)

@@ -216,13 +216,13 @@ class TiledMma:
         return self.get_slice(thr_idx)
 
     def make_fragment_A(self, a: Tensor):
-        return make_fragment_like(a)
+        return mma_make_fragment(MmaOperand.A, self.value, a)
 
     def make_fragment_B(self, b: Tensor):
-        return make_fragment_like(b)
+        return mma_make_fragment(MmaOperand.B, self.value, b)
 
     def make_fragment_C(self, c: Tensor):
-        return make_fragment_like(c)
+        return mma_make_fragment(MmaOperand.C, self.value, c)
 
     @property
     def tile_size_mnk(self):

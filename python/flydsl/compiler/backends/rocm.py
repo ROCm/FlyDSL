@@ -32,11 +32,13 @@ class RocmBackend(BaseBackend):
         chip = self.target.arch
         waves_per_eu = compile_hints.get("waves_per_eu")
         maxnreg = compile_hints.get("maxnreg")
+        expert_scheduling_mode = compile_hints.get("expert_scheduling_mode")
 
         debug_opt = "-g" if env.debug.enable_debug_info else ""
         wpe_opt = f" --amdgpu-waves-per-eu={waves_per_eu}" if waves_per_eu else ""
         maxnreg_opt = f" --amdgpu-num-vgpr={maxnreg}" if maxnreg else ""
-        all_opts = f"{debug_opt}{wpe_opt}{maxnreg_opt}".strip()
+        esm_opt = " --amdgpu-expert-scheduling-mode" if expert_scheduling_mode else ""
+        all_opts = f"{debug_opt}{wpe_opt}{maxnreg_opt}{esm_opt}".strip()
 
         wave64 = "false" if is_rdna_arch(chip) else "true"
         return [
@@ -72,8 +74,7 @@ class RocmBackend(BaseBackend):
 
     def native_lib_patterns(self) -> List[str]:
         return [
-            "_fly*.so",
-            "_fly_rocdl*.so",
+            "_mlirDialectsFly*.so",
             "libFly*.so",
             "libfly_jit_runtime.so",
             "libmlir_rocm_runtime.so",

@@ -17,6 +17,7 @@ import os
 import sys
 import logging
 import math
+import flydsl.compiler as flyc
 
 import torch
 import torch.nn.functional as F
@@ -323,10 +324,14 @@ def test_moe_blockscale_e2e(
     out1 = torch.zeros((token, topk, inter_dim), dtype=torch.float16, device=device)
     stream = torch.cuda.current_stream()
 
+    compiled_exe1 = flyc.compile(exe1, out1.view(-1), a1_bq.view(-1), w1_shuf, a1_scale_fly, w1_scale_fly,
+                                sorted_ids, sorted_expert_ids, sorted_weights, num_valid_ids,
+                                token, inter_dim, model_dim, size_expert_ids, stream)
+
     def launch_stage1():
-        exe1(out1.view(-1), a1_bq.view(-1), w1_shuf, a1_scale_fly, w1_scale_fly,
-             sorted_ids, sorted_expert_ids, sorted_weights, num_valid_ids,
-             token, inter_dim, model_dim, size_expert_ids, stream)
+        compiled_exe1(out1.view(-1), a1_bq.view(-1), w1_shuf, a1_scale_fly, w1_scale_fly,
+                      sorted_ids, sorted_expert_ids, sorted_weights, num_valid_ids,
+                      token, inter_dim, model_dim, size_expert_ids, stream)
 
     _, us1 = run_perftest(launch_stage1, num_iters=num_iters, num_warmup=num_warmup)
     torch.cuda.synchronize()
@@ -365,10 +370,14 @@ def test_moe_blockscale_e2e(
 
     out2 = torch.zeros((token, model_dim), dtype=torch.float16, device=device)
 
+    compiled_exe2 = flyc.compile(exe2, out2.view(-1), a2_bq.view(-1), w2_shuf, a2_scale_fly, w2_scale_fly,
+                                sorted_ids, sorted_expert_ids, sorted_weights, num_valid_ids,
+                                token, model_dim, inter_dim, size_expert_ids, stream)
+
     def launch_stage2():
-        exe2(out2.view(-1), a2_bq.view(-1), w2_shuf, a2_scale_fly, w2_scale_fly,
-             sorted_ids, sorted_expert_ids, sorted_weights, num_valid_ids,
-             token, model_dim, inter_dim, size_expert_ids, stream)
+        compiled_exe2(out2.view(-1), a2_bq.view(-1), w2_shuf, a2_scale_fly, w2_scale_fly,
+                      sorted_ids, sorted_expert_ids, sorted_weights, num_valid_ids,
+                      token, model_dim, inter_dim, size_expert_ids, stream)
 
     _, us2 = run_perftest(launch_stage2, num_iters=num_iters, num_warmup=num_warmup)
     torch.cuda.synchronize()

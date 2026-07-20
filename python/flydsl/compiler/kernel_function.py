@@ -398,8 +398,8 @@ class KernelLauncher:
                 kernel_operands,
                 async_dependencies=async_deps,
                 dynamic_shared_memory_size=smem_val,
-                loc=launch_loc,
                 cluster_size=cluster_size,
+                loc=launch_loc,
                 ip=None,
             )
 
@@ -475,6 +475,13 @@ class KernelFunction:
                     ir.TypeAttr.get(func_type),
                     known_block_size=self._known_block_size,
                 )
+                if CompilationContext.get_compile_hints().get("expert_scheduling_mode"):
+                    gpu_func.attributes["passthrough"] = ir.ArrayAttr.get([
+                        ir.ArrayAttr.get([
+                            ir.StringAttr.get("amdgpu-expert-scheduling-mode"),
+                            ir.StringAttr.get("true")
+                        ])
+                    ])
             gpu_func.regions[0].blocks.append(*kernel_arg_types)
             entry_block = gpu_func.regions[0].blocks[0]
 

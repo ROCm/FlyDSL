@@ -64,8 +64,6 @@ FlyDSL/
 │   │   ├── gpu.py                    # GPU dialect ops (thread_idx, block_idx, barrier)
 │   │   ├── buffer_ops.py             # Buffer / memory operations
 │   │   └── rocdl.py                  # ROCm-specific intrinsics
-│   ├── lang/ir/
-│   │   └── types.py                  # T / Types helper
 │   ├── runtime/
 │   │   └── device.py                 # get_rocm_arch() — GPU architecture detection
 │   └── utils/

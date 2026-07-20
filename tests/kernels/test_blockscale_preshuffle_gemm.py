@@ -8,6 +8,7 @@
 import os
 import sys
 import logging
+import flydsl.compiler as flyc
 
 import torch
 import torch.nn.functional as F
@@ -196,9 +197,11 @@ def test_blockscale_preshuffle_gemm(
 
     c_out = torch.zeros((M, N), dtype=torch_out_dtype, device=device)
 
+    compiled_exe = flyc.compile(exe, c_out, x, b_shuffled, x_scale_t, w_scale_flat,
+                               M, N, torch.cuda.current_stream())
+
     def launch_kernel(c, a, b, sa, sb):
-        stream = torch.cuda.current_stream()
-        exe(c, a, b, sa, sb, M, N, stream)
+        compiled_exe(c, a, b, sa, sb, M, N, torch.cuda.current_stream())
 
     bench_iters = max(2, int(bench_iters))
     bench_warmup = int(bench_warmup)

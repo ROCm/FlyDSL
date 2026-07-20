@@ -254,6 +254,20 @@ def cluster_load_async_to_lds(global_ptr, lds_ptr, size_bytes, offset=0, cpol=0,
     fn(global_ptr, lds_ptr, offset, cpol, mask)
 
 
+def disable_xdl_arb_stall():
+    """Disable WMMA multicycle arbitration stall by setting SCHED_MODE bit 4."""
+    from ..._mlir import ir as _ir
+    from ..._mlir.dialects import llvm as _llvm
+    from .. import arith as _arith
+    from ..typing import T
+
+    # hwreg encoding: ID=26(SCHED_MODE), Offset=4, Size=1 -> 282
+    imm_val = _arith.unwrap(_arith.constant(282, type=T.i32))
+    val_val = _arith.unwrap(_arith.constant(1, type=T.i32))
+    
+    _llvm.call_intrinsic(None, "llvm.amdgcn.s.setreg", [imm_val, val_val], [], [])
+
+
 def s_wait_asynccnt(count=0):
     """Wait for outstanding async load/store operations (ASYNCcnt counter)."""
     _ods_s_wait_asynccnt(count)
@@ -331,3 +345,7 @@ def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, 
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_load_lds as _op
     return _op(_to_ir(rsrc), _to_ir(lds_ptr), _to_ir(size), _to_ir(voffset),
                _to_ir(soffset), _to_ir(offset), _to_ir(aux), **kw)
+
+__all__ = [
+    'disable_xdl_arb_stall',
+]

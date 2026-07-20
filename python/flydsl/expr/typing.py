@@ -300,6 +300,13 @@ class Tensor:
 
 
 class Stream:
+    """Opaque async queue handle for kernel launch.
+
+    ``None`` is the default queue; an :class:`int` is a raw pointer. Any other
+    value is interpreted by the active device runtime
+    (:mod:`flydsl.runtime.device_runtime`).
+    """
+
     _is_stream_param = True
 
     def __init__(self, value=None):

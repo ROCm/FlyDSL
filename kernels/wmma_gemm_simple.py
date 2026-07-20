@@ -67,7 +67,7 @@ def compile_wmma_gemm(
             f"tile_n must be a multiple of waves_per_block*{WMMA_N}={waves_per_block * WMMA_N}, got {tile_n}"
         )
 
-    gpu_arch = str(get_hip_arch(timeout_s=300))
+    gpu_arch = str(get_hip_arch())
     assert gpu_arch.startswith("gfx1250"), f"Expected a gfx1250 architecture, got {gpu_arch}"
 
     wmma_op = rocdl.wmma_f32_16x16x32_f16 if is_f16 else rocdl.wmma_f32_16x16x32_bf16

@@ -27,6 +27,28 @@ fi
 BENCH_LOG_DIR="${BENCH_LOG_DIR:-/tmp/flydsl_bench}"
 mkdir -p "${BENCH_LOG_DIR}"
 
+# Auto-select GPU with the most free VRAM (skip if HIP_VISIBLE_DEVICES is already set).
+if [ -z "${HIP_VISIBLE_DEVICES:-}" ] && command -v python3 >/dev/null 2>&1; then
+    _best_gpu=$(python3 -c "
+import torch
+if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+    best = max(range(torch.cuda.device_count()), key=lambda i: torch.cuda.mem_get_info(i)[0])
+    print(best)
+" 2>/dev/null || true)
+    if [ -n "${_best_gpu}" ]; then
+        export HIP_VISIBLE_DEVICES="${_best_gpu}"
+        echo "[run_benchmark] Auto-selected GPU ${_best_gpu} (most free VRAM)"
+    fi
+fi
+
+# Detect GPU architecture — CDNA-only benchmarks are guarded by IS_CDNA.
+GPU_ARCH=$(python3 -c "from flydsl.runtime.device import get_rocm_arch; print(get_rocm_arch())" 2>/dev/null || echo "unknown")
+IS_CDNA=false
+IS_RDNA4=false
+case "${GPU_ARCH}" in gfx9*) IS_CDNA=true ;; esac
+case "${GPU_ARCH}" in gfx120*) IS_RDNA4=true ;; esac
+echo "[run_benchmark] GPU arch: ${GPU_ARCH} (CDNA=${IS_CDNA}, RDNA4=${IS_RDNA4})"
+
 SUCCESS_COUNT=0
 FAIL_COUNT=0
 
@@ -392,8 +414,8 @@ if [ "${RUN_RMSNORM}" -eq 1 ]; then
   done
 fi
 
-# Preshuffle GEMM
-if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
+# Preshuffle GEMM (CDNA only — uses MFMA)
+if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
   for shape in $GEMM_SHAPES; do
     oldIFS=$IFS
     IFS=,
@@ -515,8 +537,8 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
   done
 fi
 
-# MoE
-if [ "${RUN_MOE}" -eq 1 ]; then
+# MoE (CDNA only — uses MFMA)
+if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
   for shape in $MOE_SHAPES; do
     oldIFS=$IFS
     IFS=,
@@ -564,6 +586,23 @@ if [ "${RUN_MOE}" -eq 1 ]; then
       _emit_row "moe_gemm2" "${shape_moe}" "${dt_s2}" "${tb_s2}" "${tf_s2}"
     fi
   done
+fi
+
+# RDNA4 WMMA GEMM benchmarks (via benchmark_common.py)
+if [ "${IS_RDNA4}" = "true" ]; then
+  echo ""
+  echo "========================================================================"
+  echo "RDNA4 WMMA Benchmarks"
+  echo "========================================================================"
+  log="${BENCH_LOG_DIR}/rdna_wmma_sweep.log"
+  if python3 -c "from tests.kernels.benchmark_common import run_wmma_sweep, print_perf_table; rows = run_wmma_sweep(); print_perf_table(rows)" >"${log}" 2>&1; then
+    cat "${log}"
+    SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+  else
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    echo "RDNA4 WMMA benchmark failed. Log: ${log}" >&2
+    tail -20 "${log}" >&2
+  fi
 fi
 
 # Summary
