@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-# Shared helpers for the MegaMoE fused group-GEMM1 closure (gemm1).
+"""Shared helpers for the MegaMoE fused group-GEMM1 closure (``gemm1``)."""
 
 import types
 from collections import namedtuple
@@ -20,7 +20,6 @@ from kernels.common.layout_utils import get as layout_get
 from kernels.common.layout_utils import idx2crd
 from kernels.common.mma.mfma_preshuffle_pipeline import make_preshuffle_b_layout, make_preshuffle_scale_layout
 
-# compile-time config / layout / LDS + IR view builders
 # Deep-pipeline K-loop schedule tables (per-phase op lists + n_phases) consumed by KLoop.
 PipeSchedule = namedtuple("PipeSchedule", ["pp_mfma", "pp_a_reads", "pp_b_loads", "pp_has_scale", "n_phases"])
 
@@ -121,10 +120,10 @@ def make_layouts(
     sort_block_m,
     model_dim,
 ):
-    """Preshuffle B / A-scale / B-scale logical data layouts.
+    """Preshuffle B / B-scale logical data layouts.
 
-    Returns (layout_b, layout_a_scale, layout_b_scale, sorted_m); sorted_m (the sorted A-scale
-    row count) is also consumed by the caller's a-scale buffer sizing.
+    Returns (layout_b, layout_b_scale, sorted_m); sorted_m (the sorted A-scale row count) is
+    consumed by the caller's a-scale buffer sizing.
     """
     # B preshuffle layout [E*2*inter_dim, model_dim]; expert e gate rows at [e*2*inter_dim, +inter_dim).
     c_n_total = arith.constant(w_experts * (2 * inter_dim), index=True)
@@ -134,17 +133,12 @@ def make_layouts(
         c_k=k_in // pack_K,
         kpack_bytes=kpack_bytes,
         elem_bytes=b_elem_bytes,
-        # k_major=True,
     )
     layout_b = b_layout.layout_b
 
-    # A-scale [sorted_size, K/32]: indexed by sorted_row position, not token_id.
-    sorted_m = size_expert_ids_in * arith.constant(sort_block_m, index=True)
-    layout_a_scale = make_preshuffle_scale_layout(arith, c_mn=sorted_m, c_k=arith.constant(model_dim, index=True))
-    # B-scale: [E*2*inter_dim, K/32]
+    sorted_m = size_expert_ids_in * arith.constant(sort_block_m, index=True)  # sorted A-scale row count
     layout_b_scale = make_preshuffle_scale_layout(arith, c_mn=c_n_total, c_k=arith.constant(model_dim, index=True))
-
-    return layout_b, layout_a_scale, layout_b_scale, sorted_m
+    return layout_b, layout_b_scale, sorted_m
 
 
 WaveTiling = namedtuple("WaveTiling", ["num_waves", "total_waves", "total_threads", "pack_M", "n_per_wave", "pack_N"])
@@ -429,9 +423,6 @@ class ExpertOperandBases:
         # scale bases
         lane_div_16,
         layout_b_scale,
-        layout_a_scale,
-        sort_block_m,
-        scale_mn_pack,
     ):
         self.gate_up_interleave = gate_up_interleave
         self.num_acc_n = num_acc_n
@@ -442,52 +433,34 @@ class ExpertOperandBases:
         self.pack_N = pack_N
         self.lane_div_16 = lane_div_16
         self.layout_b_scale = layout_b_scale
-        self.layout_a_scale = layout_a_scale
-        self.sort_block_m = sort_block_m
-        self.scale_mn_pack = scale_mn_pack
 
     def gate_up_n_blocks(self, expert_off_idx, by_n):
         """Per-tile N-tile block/intra lists for B weight gather. Returns (gate_n_blk_list,
-        gate_n_intra_list, up_n_blk_list, up_n_intra_list, col_g_list, inter_idx); inter_idx is
-        also consumed by downstream inline code (bias / interleave).
+        gate_n_intra_list, up_n_blk_list, up_n_intra_list, inter_idx); inter_idx is also
+        consumed by downstream inline code (bias / interleave).
         """
         gate_n_intra_list = []
         gate_n_blk_list = []
         up_n_intra_list = []
         up_n_blk_list = []
-        col_g_list = []
         c_n0_static = self.w_experts * (2 * self.inter_dim) // 16
         layout_n_blk_intra = fx.make_layout((c_n0_static, 16), stride=(16, 1))
         inter_idx = arith.constant(self.inter_dim, index=True)
 
         for i in range_constexpr(self.num_acc_n):
-            offset = i * 16
-            c_offset = arith.constant(offset, index=True)
-            if const_expr(not self.gate_up_interleave):
-                col_g = by_n + self.n_tile_base + c_offset + self.lane_mod_16
-                col_g_list.append(col_g)
-
+            c_offset = arith.constant(i * 16, index=True)
             global_n = by_n + self.n_tile_base + c_offset + self.lane_mod_16
-            # Gate/interleave: rows [expert_off, expert_off + 2*inter_dim)
+            # Gate/interleave rows [expert_off, expert_off + 2*inter_dim); up rows are +inter_dim.
             gate_row_w = expert_off_idx + global_n
             gate_coord = idx2crd(gate_row_w, layout_n_blk_intra)
             gate_n_blk_list.append(layout_get(gate_coord, 0))
             gate_n_intra_list.append(layout_get(gate_coord, 1))
             if const_expr(not self.gate_up_interleave):
-                up_row_w = gate_row_w + inter_idx
-                up_coord = idx2crd(up_row_w, layout_n_blk_intra)
+                up_coord = idx2crd(gate_row_w + inter_idx, layout_n_blk_intra)
                 up_n_blk_list.append(layout_get(up_coord, 0))
                 up_n_intra_list.append(layout_get(up_coord, 1))
 
-        if const_expr(self.gate_up_interleave):
-            gui_num_acc_n_out = self.num_acc_n // self.pack_N
-            for gui_i in range_constexpr(gui_num_acc_n_out):
-                gui_offset = gui_i * 16
-                gui_c_offset = arith.constant(gui_offset, index=True)
-                gui_col_g = (by_n + self.n_tile_base) // arith.constant(2, index=True) + gui_c_offset + self.lane_mod_16
-                col_g_list.append(gui_col_g)
-
-        return gate_n_blk_list, gate_n_intra_list, up_n_blk_list, up_n_intra_list, col_g_list, inter_idx
+        return gate_n_blk_list, gate_n_intra_list, up_n_blk_list, up_n_intra_list, inter_idx
 
     def scale_lane_elem(self):
         """Loop-invariant per-lane scale element offset (shared by A & B scale bases)."""
@@ -607,8 +580,6 @@ class TileScheduler:
         sort_block_m,
         skip_gemm,
         # decode: global->local expert + tile geometry
-        rank,
-        experts_per_rank,
         experts,
         fz_epr,
         fz_cap,
@@ -621,15 +592,12 @@ class TileScheduler:
         # readlane namespace (passed in to avoid a circular import)
         epk,
     ):
-        self.mode = mode
         self.xcd_swizzle = xcd_swizzle
         self.gate_up_interleave = gate_up_interleave
         self.n_in = n_in
         self.tile_n = tile_n
         self.sort_block_m = sort_block_m
         self.skip_gemm = skip_gemm
-        self.rank = rank
-        self.experts_per_rank = experts_per_rank
         self.experts = experts
         self.fz_epr = fz_epr
         self.fz_cap = fz_cap
@@ -640,13 +608,9 @@ class TileScheduler:
         self._epk = epk
         # P-static decode predicate; when fz_epr > 64 the static build falls through to SPARSE.
         self._p_static = mode == "static" and fz_epr <= 64
-        # mode is always "static" or "sparse" (dense fixed-slot layout is unused).
         # scratch stashed across the method boundaries.
-        self._c0_p = None
-        self._c1_p = None
         self._c_cu_p = None
         self._total_m_tiles = None
-        self._num_valid_i32 = None
 
     def swizzled_wg(self, bx_persist, by):
         """XCD-swizzle WG remap.  Uses the ACTUAL launched grid_dim.y."""
@@ -685,7 +649,7 @@ class TileScheduler:
 
     def tiles_per_block(self, num_valid_i32):
         """Persistent round-robin bound: ceil(ceil(num_valid/sort_block_m)/grid_y).
-        Emits _c0_p/_c1_p/_c_cu_p and stashes _total_m_tiles for decode.
+        Stashes _c_cu_p/_total_m_tiles for decode; returns (lo, tiles_per_block, step).
         """
         c0_p = arith.constant(0, index=True)
         c1_p = arith.constant(1, index=True)
@@ -697,16 +661,13 @@ class TileScheduler:
         tiles_per_block = (total_m_tiles + c_cu_p - c1_p) / c_cu_p
         if const_expr(self.skip_gemm):
             tiles_per_block = arith.constant(0, index=True)  # DIAG: skip consumer GEMM (time prologue+producer)
-        self._c0_p = c0_p
-        self._c1_p = c1_p
         self._c_cu_p = c_cu_p
         self._total_m_tiles = total_m_tiles
-        self._num_valid_i32 = num_valid_i32
         return c0_p, tiles_per_block, c1_p
 
     def setup_persistent(self):
         """P-static: per-warp ll_count prefix scan in registers (loop-invariant).
-        Returns the register state consumed by decode, or None for sparse/dense.
+        Returns the register state consumed by decode, or None for sparse.
         """
         if const_expr(self._p_static):
             # per-warp ll_count prefix in registers (lane le holds ll_count[le], ntiles[le], exclusive prefix); each tile reads (expert,k) via readlane.
@@ -731,7 +692,7 @@ class TileScheduler:
         return None
 
     def decode(self, bx_persist, mi_p, persist_state, *, sorted_rsrc, expert_rsrc):
-        """Per-tile 3-way decode -> TileCoord (static / sparse / dense const_expr branch).
+        """Per-tile decode -> TileCoord (P-static or sparse const_expr branch).
 
         sorted_rsrc/expert_rsrc are passed here (not at construction) because they are created
         after the XCD-swizzle emission point.

@@ -40,14 +40,6 @@ def _if_then(if_op, scf=None):
 
 
 @contextmanager
-def _guard(pred):
-    """`with _guard(pred):` — SCF IfOp then-region for a boolean predicate (keeps callers free of
-    bare `scf.IfOp`)."""
-    with _if_then(_scf.IfOp(pred)) as blk:
-        yield blk
-
-
-@contextmanager
 def _if_else(if_op, scf=None):
     """Context manager for SCF IfOp else-region across old/new Python APIs.
 

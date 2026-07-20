@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-# Stage-1 fused-MoE group-GEMM1 epilogue: activation + gate/up combine + output-quant + scatter (Activation/OutputQuant/Scatter atoms + Gemm1Epilogue.run dispatch).
+"""Stage-1 fused-MoE GEMM1 epilogue: activation + gate/up combine + output-quant + scatter."""
 
+import flydsl.compiler as flyc
 from flydsl._mlir.dialects import scf
 from flydsl._mlir.dialects.arith import CmpIPredicate
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import T
-from kernels.common.kernels_common import _guard
 from kernels.common.mma.mfma_epilogues import c_shuffle_epilog
 from kernels.common.utils import exp2_amdgcn_scalar, fabs_f32, idx_to_ptr, lds_load, rcp_amdgcn_scalar, store_nt
 
 
+@flyc.jit
 def reduce_slice_k_partials(acc_list, *, lds_scratch, wid_k, local_tid, slice_k, vec4_f32):
     """Intra-CTA slice-K reduction: sum per-K-slice partial MFMA accumulators across the
     ``slice_k`` wave groups via LDS and broadcast the sum back to every group's registers.
@@ -23,7 +24,7 @@ def reduce_slice_k_partials(acc_list, *, lds_scratch, wid_k, local_tid, slice_k,
     positions = [base + arith.constant(a * 4, index=True) for a in range_constexpr(n)]
     for g in range_constexpr(slice_k):
         gpu.barrier()
-        with _guard(arith.cmpi(CmpIPredicate.eq, wid_k, arith.constant(g, index=True))):
+        if arith.cmpi(CmpIPredicate.eq, wid_k, arith.constant(g, index=True)):
             for a in range_constexpr(n):
                 if const_expr(g == 0):
                     vector.store(acc_list[a], lds_scratch, [positions[a]], alignment=16)
@@ -34,6 +35,7 @@ def reduce_slice_k_partials(acc_list, *, lds_scratch, wid_k, local_tid, slice_k,
     return [vector.load_op(vec4_f32, lds_scratch, [positions[a]]) for a in range_constexpr(n)]
 
 
+@flyc.jit
 def stage_srcmap_to_lds(
     *,
     tc,
@@ -69,7 +71,7 @@ def stage_srcmap_to_lds(
 
     c_tile_m_idx = arith.constant(tile_m, index=True)
     tid_in_range = arith.cmpi(CmpIPredicate.ult, tx, c_tile_m_idx)
-    with _guard(tid_in_range):
+    if tid_in_range:
         tid_row = bx_m + tx
         # atom_contract: lds_tid = dispatch srcmap[slot] = (k_slot<<24)|src_global -> epilogue writes a2@logical.
         atom_srcmap_addr = buffer_ops.buffer_load(
@@ -110,7 +112,7 @@ def stage_srcmap_to_lds(
             # sorted-row weight (stage2 doweight): real rows get the recv wt, padding 0.
             ca_wt_sorted = arith.select(ca_real, ca_wt, arith.constant(0.0, type=T.f32))
             buffer_ops.buffer_store(ca_wt_sorted, wts_sorted_rsrc, ca_row, offset_is_bytes=False)
-            with _guard(ca_real):
+            if ca_real:
                 buffer_ops.buffer_store(ca_wt, atom_sw_out_rsrc, ca_logw, offset_is_bytes=False)
         if const_expr(static_tiles and fz_epr <= 64):
             # Unconditional per-row emit of compact sorted_token_ids + combine weight (outside store_pair to avoid stale padding rows); padding rows get sentinel t = npes*mtpr.
@@ -129,20 +131,20 @@ def stage_srcmap_to_lds(
             wt_e = buffer_ops.buffer_load(sorted_w_rsrc, tid_row, vec_width=1, dtype=T.f32)
             wt_e_sorted = arith.select(real_e, wt_e, arith.constant(0.0, type=T.f32))
             buffer_ops.buffer_store(wt_e_sorted, wts_sorted_rsrc, crow_e, offset_is_bytes=False)
-            with _guard(real_e):
+            if real_e:
                 buffer_ops.buffer_store(wt_e, atom_sw_out_rsrc, log_we, offset_is_bytes=False)
 
     if const_expr(static_tiles and fz_epr <= 64):
         # static-tiles: emit LOCAL expert id (_ef) one entry per compact tile at index `bx`, matching gemm2's expert_ids[bx_m // sort_block_m] read.
         tx0 = arith.cmpi(CmpIPredicate.eq, tx, arith.constant(0, index=True))
-        with _guard(tx0):
+        if tx0:
             bx_i32_se = arith.index_cast(T.i32, bx)
             buffer_ops.buffer_store(ef, expert_rsrc, bx_i32_se, offset_is_bytes=False)
 
     if const_expr(ca):
         # compact+atom: emit _se_atom (disp 41) = LOCAL expert id, one entry per compact tile at index `bx`, matching gemm2's expert_ids[bx_m // sort_block_m] read.
         tx0_ca = arith.cmpi(CmpIPredicate.eq, tx, arith.constant(0, index=True))
-        with _guard(tx0_ca):
+        if tx0_ca:
             ca_se_addr = buffer_ops.buffer_load(
                 buffer_ops.create_buffer_resource_from_addr(addr_disp),
                 arith.constant(41),
@@ -276,7 +278,6 @@ class OutputQuant:
         self._c0x80000000_i32 = arith.constant(0x80000000, type=T.i32)
         self._c0_f32 = arith.constant(0.0, type=T.f32)
 
-        self._c8_i32 = arith.constant(8, type=T.i32)
         fp_headroom = 2 if need_fp4 else (8 if need_fp8 else 0)
         self._c_headroom_i32 = arith.constant(fp_headroom, type=T.i32)
 
@@ -299,6 +300,7 @@ class OutputQuant:
         e2m1 = arith.minui(rounded, self._c7_i32)
         return (s >> self._c28_i32) | e2m1
 
+    @flyc.jit
     def quantize(self, *, frag, idx_to_llvm_ptr, row_byte_base, col_g0, row_local, bx):
         """Quant + pack + store the fp4/fp8 fragment, and (if _need_sort) emit the swizzled
         e8m0 a2-scale byte for gemm2.
@@ -393,7 +395,7 @@ class OutputQuant:
         if const_expr(self.need_sort):
             col_g0_i32 = arith.index_cast(T.i32, col_g0)
             is_scale_writer = arith.cmpi(CmpIPredicate.eq, col_g0_i32 & self._c31_i32, self._c0_i32)
-            with _guard(is_scale_writer):
+            if is_scale_writer:
                 # atom_contract: a2-scale lives at the COMPACT sorted row (bx = compact tile index, NOT sparse slot bx_m), matching stage2 gemm2's scale[compact_row] read.
                 bx_i32_sc = arith.index_cast(T.i32, bx)
                 rl_i32_sc = arith.index_cast(T.i32, row_local)
@@ -430,15 +432,10 @@ class Scatter:
     def __init__(
         self,
         *,
-        contiguous_io,
         out_base_idx,
         out_row_stride,
         lds_tid,
         mask24_i32,
-        num_valid_i32,
-        topk_i32_v,
-        tokens_i32_v,
-        topk,
         fz_npes,
         fz_mtpr,
         fz_k,
@@ -450,15 +447,10 @@ class Scatter:
         bx,
         quant,
     ):
-        self.contiguous_io = contiguous_io
         self.out_base_idx = out_base_idx
         self.out_row_stride = out_row_stride
         self.lds_tid = lds_tid
         self.mask24_i32 = mask24_i32
-        self.num_valid_i32 = num_valid_i32
-        self.topk_i32_v = topk_i32_v
-        self.tokens_i32_v = tokens_i32_v
-        self.topk = topk
         self.fz_npes = fz_npes
         self.fz_mtpr = fz_mtpr
         self.fz_k = fz_k
@@ -533,9 +525,7 @@ class Scatter:
 class Gemm1Epilogue:
     """Activation + gate/up combine + output-quant + scatter, wired through the ``c_shuffle_epilog`` callback seam via ``run``'s 2-way dispatch."""
 
-    def __init__(self, *, activation, quant, scatter):
-        self.activation = activation
-        self.quant = quant
+    def __init__(self, *, scatter):
         self.scatter = scatter
 
     def run(

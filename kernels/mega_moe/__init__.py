@@ -14,7 +14,6 @@ import importlib
 _LAZY = {
     "MegaMoE": "mega_moe",
     "Stage1Output": "mega_moe",
-    "compile_fused_moe_gemm2_combine": "mega_moe",
     "compile_fused_moe_gemm1": "gemm1",
     "GateMode": "gemm1",
 }

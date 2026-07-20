@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-# K-loop compute atoms for the fused-operator stage1 GEMM (`compile_fused_moe_gemm1`).
+"""K-loop compute atoms for the fused stage-1 GEMM (``compile_fused_moe_gemm1``)."""
 
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import T
@@ -51,11 +51,9 @@ class G2SLoaderX(object):
         self._x_load_bytes = x_load_bytes
         self._k_blocks16 = k_blocks16
         self._layout_lds = layout_lds
-        # slice_k>1: total_threads/wave_id are K-slice group counts and lds_group_base
-        # (wid_k*input_elems) offsets into this group's X buffer; slice_k==1 -> full counts, base None.
+        # slice_k>1: total_threads/wave_id are K-slice group counts; lds_group_base offsets this group's X buffer.
         self._total_threads = total_threads
         self._wave_id = wave_id
-        self._use_async_copy = use_async_copy
         self._has_group_base = lds_group_base is not None
         self._lds_group_base = lds_group_base if lds_group_base is not None else arith.index(0)
         # per-tile gather lists (set by for_tile)
@@ -443,8 +441,7 @@ class KScaleLoader(object):
         gpu.barrier()
 
     def load_a_scale_i32(self, mi, koff):
-        # Reads the two vec2-i32 A-scale straight from LDS (staged by the prologue, no swizzle)
-        # and repacks to CK layout.
+        # Read the two vec2-i32 A-scale from LDS (prologue-staged, no swizzle) and repack to CK layout.
         raw_sni = self._raw_sni
         raw_klane_sh = self._raw_klane_sh
         lane_mod_16 = self._lane_mod_16
@@ -549,9 +546,6 @@ class MfmaScaleGU(object):
         self._gate_up_interleave = gate_up_interleave
         self._single_b_pipe = gate_up_interleave
 
-    def for_tile(self):
-        pass
-
     @staticmethod
     def pack_i64x4_to_i32x8(x0, x1, x2, x3):
         vec4_i64 = T.vec(4, T.i64)
@@ -570,7 +564,6 @@ class MfmaScaleGU(object):
         gate_b_scale=None,
         up_b_scale=None,
         *,
-        prefetch_epilogue=False,
         ku_count=None,
     ):
         cbsz = self._cbsz
@@ -593,9 +586,6 @@ class MfmaScaleGU(object):
         single_b = gate_up_interleave
         up_list = None if single_b else list(acc_up_in)
         mfma_res_ty = vec4_f32
-        epilogue_pf = None
-        if const_expr(prefetch_epilogue):
-            epilogue_pf = (None, None, None)
 
         c0_i64 = arith.constant(0, type=T.i64)
 
@@ -673,7 +663,7 @@ class MfmaScaleGU(object):
                                                 up_bs_val,
                                             ],
                                         )
-        return gate_list, up_list, epilogue_pf
+        return gate_list, up_list
 
     def compute_bmajor_mfma_phase(
         self,
@@ -861,7 +851,7 @@ class KLoop(object):
         """One interleaved half-iteration (deep pipeline): DMA targets lds_write (the OTHER
         buffer) while ds_read uses lds_read (DMA'd in the previous half); MFMAs run on prev
         data."""
-        # --- rebind loop-invariants ---
+        # rebind loop-invariants
         k_base_idx = self._k_base_idx
         pack_K = self._pack_K
         pack_N = self._pack_N
@@ -916,7 +906,7 @@ class KLoop(object):
         if const_expr(not use_async_copy):
             x_regs = load_x_tile(abs_k_dma)
 
-        # ---- Extract previous scale values ----
+        # extract previous scale values
         prev_asvs = []
         for mi_p in range_constexpr(m_repeat_packed):
             prev_asvs.append(
@@ -946,7 +936,7 @@ class KLoop(object):
                     )
                 )
 
-        # ---- Execute phases from unified schedule ----
+        # execute phases from unified schedule
         a_all = {}
         b_gate_all = {}
         b_up_all = {}
@@ -1042,8 +1032,7 @@ class KLoop(object):
                 )
             rocdl.s_setprio(0)
             if const_expr(isched >= 2):
-                # CK-style: interleave this phase's loads into its MFMA stream (R MFMAs per
-                # load) to hide VMEM(B)/DS(A) latency; final group drains the remaining MFMAs.
+                # CK-style: interleave this phase's loads into its MFMA stream (R MFMAs/load) to hide VMEM/DS latency.
                 na_s = len(pp_a_reads[p])
                 nb_s = len(pp_b_loads[p])
                 if const_expr(isched == 3):
@@ -1065,7 +1054,7 @@ class KLoop(object):
                 rocdl.sched_mfma(256)
             rocdl.sched_barrier(0)
 
-        # ---- Assemble loaded data for next half-iteration ----
+        # assemble loaded data for next half-iteration
         cur_a_tile = []
         for k in range_constexpr(k_unroll):
             for mi in range_constexpr(m_repeat):
@@ -1122,8 +1111,8 @@ class KLoop(object):
 
     def run(self, a_scale_pong, gate_bs_pong, up_bs_pong):
         """Prime -> ping/pong steady loop -> odd/even drain. Receives the k0 B/A-scale prefetch
-        (a_scale_pong/gate_bs_pong/up_bs_pong); returns (acc_gate, acc_up, epilogue_pf)."""
-        # --- rebind loop-invariants ---
+        (a_scale_pong/gate_bs_pong/up_bs_pong); returns (acc_gate, acc_up)."""
+        # rebind loop-invariants
         acc_init = self._acc_init
         num_acc_n = self._num_acc_n
         m_repeat = self._m_repeat
@@ -1240,7 +1229,7 @@ class KLoop(object):
                 )
 
         if const_expr(odd_k_tiles):
-            acc_gate, acc_up, epilogue_pf = compute_tile(
+            acc_gate, acc_up = compute_tile(
                 acc_gate,
                 acc_up,
                 gate_w_pong,
@@ -1249,7 +1238,6 @@ class KLoop(object):
                 a_scale_pong,
                 gate_bs_pong,
                 up_bs_pong,
-                prefetch_epilogue=True,
                 ku_count=k_unroll,
             )
         else:
@@ -1264,7 +1252,7 @@ class KLoop(object):
             a_scale_ping, gate_bs_ping, up_bs_ping = prefetch_ab_scale_tile(
                 k_tail1 // arith.constant(pack_K * 128, index=True)
             )
-            acc_gate, acc_up, _ = compute_tile(
+            acc_gate, acc_up = compute_tile(
                 acc_gate,
                 acc_up,
                 gate_w_pong,
@@ -1279,7 +1267,7 @@ class KLoop(object):
             rocdl.s_waitcnt(0)
             barrier()
             a_tile_ping = prefetch_full_a_from_lds(lds_x_ping)
-            acc_gate, acc_up, epilogue_pf = compute_tile(
+            acc_gate, acc_up = compute_tile(
                 acc_gate,
                 acc_up,
                 gate_w_ping,
@@ -1288,8 +1276,7 @@ class KLoop(object):
                 a_scale_ping,
                 gate_bs_ping,
                 up_bs_ping,
-                prefetch_epilogue=True,
                 ku_count=k_unroll,
             )
 
-        return acc_gate, acc_up, epilogue_pf
+        return acc_gate, acc_up

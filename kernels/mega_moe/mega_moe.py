@@ -3,13 +3,10 @@
 
 """End-to-end intra-node EP-MoE single operator ``MegaMoE`` (a full MoE layer).
 
-``MegaMoE`` folds both stages in-house: fused stage-1 (dispatch + GEMM1 megakernel,
-``_build_fused_stage1`` / ``_run_fused_stage1``) and fused stage-2 (GEMM2 + EP combine,
-``_build_fused_stage2`` / ``_run_fused_stage2`` over ``compile_fused_moe_gemm2_combine``),
-with non-fused fallbacks for each. The expert-major dispatch symmetric buffers are owned by
-``FlyDSLDispatchCombineIntraNodeOp`` (``comb_op._gm``, enabled by ``enable_group_major``);
-``total_recv`` is shared with combine (no bridge). Main entry
-``MegaMoE.forward(x_bf16, wts, topk_ids)``: quantize -> stage1 -> stage2 -> bf16.
+Folds both stages in-house (fused stage-1 dispatch+GEMM1 megakernel, fused stage-2 GEMM2+combine),
+each with a non-fused fallback. Dispatch symmetric buffers live in ``comb_op._gm``; ``total_recv``
+is shared with combine. Main entry ``MegaMoE.forward(x_bf16, wts, topk_ids)``: quantize -> stage1
+-> stage2 -> bf16.
 """
 
 from __future__ import annotations
@@ -37,11 +34,12 @@ from kernels.comm.flydsl_dispatch_combine_intranode_op import (
 # paths are aiter-free; these replace aiter per_1x32_mx_quant_hip / mxfp4_moe_sort_hip).
 from kernels.moe.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1, compile_mixed_moe_gemm2
 from kernels.moe.moe_sorting_kernel import moe_sorting_flydsl, moe_sorting_get_workspace_size
+
 from .gemm1 import GateMode, compile_fused_moe_gemm1
 from .quant import mxfp4_moe_scale_sort
 from .quant import per_1x32_mx_quant as _flydsl_mx_quant
 
-__all__ = ["MegaMoE", "Stage1Output", "compile_fused_moe_gemm2_combine"]
+__all__ = ["MegaMoE", "Stage1Output"]
 
 
 def is_fp4(dt):
@@ -117,11 +115,7 @@ def mega_tuned_tile(model_dim, inter_dim, experts, topk, quant, mtpr, ep_size, g
     if not rows:
         return None
 
-    buckets = {
-        int(r["num_tokens"]): r
-        for r in rows
-        if _shape_matches(r, model_dim, inter_dim, experts, topk, dtype)
-    }
+    buckets = {int(r["num_tokens"]): r for r in rows if _shape_matches(r, model_dim, inter_dim, experts, topk, dtype)}
     if not buckets:
         return None
     if int(mtpr) in buckets:
@@ -170,7 +164,7 @@ def mega_gemm2_tuned_table(model_dim, inter_dim, experts, topk, ep_size, gpu_mod
 
 
 # ---- stage-2 fused GEMM2+combine builder (thin wrapper over compile_mixed_moe_gemm2) ----
-def compile_fused_moe_gemm2_combine(
+def _compile_fused_moe_gemm2_combine(
     *,
     model_dim: int,
     inter_dim: int,
@@ -565,11 +559,10 @@ class MegaMoE:
         stable ``Stage1Output`` buffers. ``self.sort_block_m`` is set here.
         """
         cfg = self._s1cfg
-        assert self.mega_scheme == "fixedslot", (
-            f"scheme={self.mega_scheme!r}: only 'fixedslot' supported (handshake removed)"
-        )
+        assert (
+            self.mega_scheme == "fixedslot"
+        ), f"scheme={self.mega_scheme!r}: only 'fixedslot' supported (handshake removed)"
         out_dtype = self.a2_dtype  # out_dtype "auto" -> activation a_dtype
-        self._s1_data_type = cfg["data_type"]
         self._s1_scale_dim = cfg["scale_dim"]
         self._s1_compact = cfg["compact"]
         self._s1_unit_size = int(cfg["unit_size"])
@@ -581,7 +574,6 @@ class MegaMoE:
         self._s1_slice_k = int(cfg.get("slice_k", 1))
         self._s1_xcd = cfg["xcd"]
         self._s1_b_nt = int(cfg.get("b_nt", 0))
-        self._s1_tune_tokens = int(cfg["tune_tokens"])
 
         # w1/w1_scale are this rank's `epr` expert rows ONLY (ATOM local convention).
         self._s1_w1 = w1.contiguous()
@@ -597,7 +589,6 @@ class MegaMoE:
         # metadata-ready flag (monotonic, NEVER reset -> CUDAGraph-safe).
         self._s1_meta = torch.zeros(1, dtype=torch.int32, device=self.dev)
         # total_recv is UNIFIED with combine (op.total_recv aliases comb_op.total_recv).
-        self._s1_trecv_buf = None
 
         # Compile the megakernel (serialize across ranks to bound peak memory).
         self._s1_mega = None
@@ -643,7 +634,6 @@ class MegaMoE:
         self._s1_nv = op.num_valid
 
         # Output / scratch.
-        self._s1_out_dtype = out_dtype
         nf4 = out_dtype == "fp4"
         nf8 = out_dtype == "fp8"
         self._s1_out_is_quant = nf4 or nf8
@@ -734,7 +724,7 @@ class MegaMoE:
             tbl[19] = op.srcmap_em.data_ptr()  # 19 LOCAL srcmap (override compact_base)
             tbl[20] = self._s1_sw_atom.data_ptr()  # 20 compact sorted_weights out
             tbl += [
-                (self._s1_trecv_buf if self._s1_trecv_buf is not None else op.total_recv).data_ptr(),
+                op.total_recv.data_ptr(),
                 op.dest_ctr.data_ptr(),  # 36 total_recv | 37 dest_ctr(local)
                 op.recv_num.data_ptr(),
                 op.p2p_recv_num.data_ptr(),  # 38 recv_num | 39 p2p_recv_num
@@ -746,14 +736,13 @@ class MegaMoE:
             tbl += [
                 op.srcmap_em.data_ptr(),  # 19 LOCAL srcmap (k_slot<<24|src_global)
                 self._s1_sw_atom.data_ptr(),  # 20 compact sorted_weights out
-                (self._s1_trecv_buf if self._s1_trecv_buf is not None else op.total_recv).data_ptr(),
+                op.total_recv.data_ptr(),
                 op.dest_ctr.data_ptr(),  # 21 total_recv | 22 dest_ctr(local)
                 op.recv_num.data_ptr(),
                 op.p2p_recv_num.data_ptr(),  # 23 recv_num(local) | 24 p2p_recv_num
                 self._s1_wts_sorted.data_ptr(),
             ]  # 25 sorted-row weights out
         self._s1_disp = torch.tensor(tbl, dtype=torch.int64, device=self.dev)
-        self._s1_disp_host = torch.tensor(tbl, dtype=torch.int64)
 
     def _s1_agv(self, t):
         return t.view(torch.uint8) if self.a2_dtype == "fp4" else t
@@ -775,7 +764,7 @@ class MegaMoE:
 
         pd_ptr = 0
         # total_recv accumulates in-kernel each launch -> zero first (graph-safe).
-        (self._s1_trecv_buf if self._s1_trecv_buf is not None else op.total_recv).zero_()
+        op.total_recv.zero_()
         er_ptr = op.ll_count.data_ptr() if (self.mega_scheme == "fixedslot" and not self._s1_compact) else 0
         if self._s1_compact:
             op.local_hist.zero_()
@@ -956,7 +945,7 @@ class MegaMoE:
         # Plan B writes into shmem_comb_inp_tok's [0, mt*k) sub-range; the combine op sizes it to
         # max(npes, topk)*mtpr so any topk stays in-bounds.
         k = comb_cfg.num_experts_per_token
-        lf = compile_fused_moe_gemm2_combine(
+        lf = _compile_fused_moe_gemm2_combine(
             model_dim=comb_cfg.hidden_dim,
             inter_dim=self.inter_dim,
             experts=comb_cfg.num_experts_per_rank,
