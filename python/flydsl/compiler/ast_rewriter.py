@@ -18,6 +18,7 @@ from ..expr import const_expr
 from ..expr.meta import capture_user_location, file_location
 from ..expr.typing import as_dsl_value, as_ir_value
 from ..utils import env, log
+from .protocol import construct_from_ir_values
 
 
 def _set_lineno(node, n=1):
@@ -56,6 +57,167 @@ def _unwrap_constexpr(node):
     if _is_constexpr(node):
         return node.args[0] if node.args else node
     return node
+
+
+# ---------------------------------------------------------------------------
+# Explode / assemble Python containers for control-flow carried state.
+#
+# A dynamic scf.if / scf.for / scf.while can only carry a *flat* list of
+# ir.Value as its results / iter_args / block_args. A carried Python variable,
+# however, may be a *container* (list / tuple / dict / SimpleNamespace, possibly
+# nested) whose elements are DSL values. These helpers explode such a container
+# into the flat ir.Value list the scf op needs, and assemble the original
+# container shape back on the way out.
+#
+# The structural template used for assembly is the *pre-region value* itself:
+# it already records the container nesting and each element's dtype. Elements
+# reuse the existing DSL<->ir.Value protocol (as_ir_value / as_dsl_value /
+# protocol.construct_from_ir_values), so scalars, Vectors and @fx.struct values
+# all keep working; a bare scalar is just the degenerate single-slot case, so
+# previous (scalar-only) behaviour is preserved.
+# ---------------------------------------------------------------------------
+
+
+def _carried_slot_count(element):
+    """Number of ir.Value slots a single (non-container) carried element occupies.
+
+    Pure: it must never materialize new IR (so it is safe to call for slicing).
+    """
+    if isinstance(element, ir.Value):
+        return 1
+    if hasattr(element, "__get_ir_types__"):
+        return len(element.__get_ir_types__())
+    if hasattr(element, "__extract_to_ir_values__"):
+        # extract returns the element's *existing* ir.Values, no new ops are built
+        return len(element.__extract_to_ir_values__())
+    # bare python scalar -> as_ir_value would coerce it to a single constant
+    return 1
+
+
+def _explode_carried(value, out):
+    """Depth-first explode ``value`` into ``out`` (a list of ir.Value slots).
+
+    Containers (list/tuple/dict/SimpleNamespace) are recursed; every other
+    object is treated as a single element and lowered with ``as_ir_value`` so
+    that the exact per-element coercion (e.g. python int -> constant, multi-value
+    struct -> several ir.Values) matches the rest of the codebase.
+    """
+    if isinstance(value, (list, tuple)):
+        for v in value:
+            _explode_carried(v, out)
+    elif isinstance(value, dict):
+        for v in value.values():
+            _explode_carried(v, out)
+    elif isinstance(value, types.SimpleNamespace):
+        for v in vars(value).values():
+            _explode_carried(v, out)
+    else:
+        raw = as_ir_value(value)
+        # a multi-value element (e.g. an @fx.struct) extracts to a python list
+        if isinstance(raw, list):
+            out.extend(raw)
+        else:
+            out.append(raw)
+
+
+def _assemble_carried(exemplar, slots, cursor):
+    """Inverse of :func:`_explode_carried`.
+
+    Assemble the container shape of ``exemplar`` consuming ``slots[cursor:]``;
+    returns ``(value, next_cursor)``. ``exemplar`` supplies both the nesting and,
+    at the elements, the DSL type to wrap each ir.Value slot back into.
+    """
+    if isinstance(exemplar, (list, tuple)):
+        items = []
+        for ex in exemplar:
+            v, cursor = _assemble_carried(ex, slots, cursor)
+            items.append(v)
+        return type(exemplar)(items), cursor
+    if isinstance(exemplar, dict):
+        built = {}
+        for k, ex in exemplar.items():
+            built[k], cursor = _assemble_carried(ex, slots, cursor)
+        return built, cursor
+    if isinstance(exemplar, types.SimpleNamespace):
+        built = {}
+        for k, ex in vars(exemplar).items():
+            built[k], cursor = _assemble_carried(ex, slots, cursor)
+        return types.SimpleNamespace(**built), cursor
+    # single element
+    n = _carried_slot_count(exemplar)
+    seg = list(slots[cursor : cursor + n])
+    cursor += n
+    if n == 1:
+        # scalar element: identical to the previous per-name packing
+        element = as_dsl_value(seg[0], exemplar)
+    else:
+        # multi-value element (e.g. @fx.struct): rebuild via the DSL protocol
+        element = construct_from_ir_values(type(exemplar), exemplar, seg)
+    return element, cursor
+
+
+def _explode_states(names, values, ctx_label):
+    """Explode every carried ``value`` into a shared flat ir.Value slot list.
+
+    Returns ``(state_raw, counts, exemplars, result_types)`` where
+    ``counts[i]`` is how many flat ir.Value slots ``names[i]`` contributed and
+    ``exemplars[i]`` is its pre-region value (the assembly template).
+    """
+    state_raw = []
+    counts = []
+    exemplars = []
+    for name, value in zip(names, values):
+        slots = []
+        _explode_carried(value, slots)
+        for slot in slots:
+            if not isinstance(slot, ir.Value):
+                raise TypeError(
+                    f"{ctx_label} variable '{name}' contains a {type(slot).__name__} "
+                    "that is not an MLIR Value; only MLIR-backed elements can be carried "
+                    "through dynamic control flow. Initialize the element with a DSL value "
+                    "(e.g. fx.Int32(0), fx.Float32(0.0))."
+                )
+        counts.append(len(slots))
+        exemplars.append(value)
+        state_raw.extend(slots)
+    result_types = [v.type for v in state_raw]
+    return state_raw, counts, exemplars, result_types
+
+
+def _assemble_states(slots, counts, exemplars):
+    """Split ``slots`` per carried name (by ``counts``) and rebuild each value
+    from its ``exemplar`` template. Inverse of :func:`_explode_states`."""
+    out = []
+    cursor = 0
+    for count, exemplar in zip(counts, exemplars):
+        seg = list(slots[cursor : cursor + count])
+        cursor += count
+        value, _ = _assemble_carried(exemplar, seg, 0)
+        out.append(value)
+    return out
+
+
+def _explode_branch_outputs(names, values, counts, result_types, ctx_label):
+    """Explode a branch/body's produced values and verify they match the region
+    boundary exactly (same slot count and same per-slot dtype), so scf.if/for/
+    while operand/result unification stays legal and user mistakes fail early."""
+    out_raw, out_counts, _exemplars, out_types = _explode_states(names, values, ctx_label)
+    for name, c_in, c_out in zip(names, counts, out_counts):
+        if c_in != c_out:
+            raise TypeError(
+                f"{ctx_label} variable '{name}' changed container shape across the "
+                f"region boundary: entered with {c_in} MLIR value slot(s) but the "
+                f"branch/body produced {c_out}. A carried container's length/nesting "
+                "must be identical on entry and exit."
+            )
+    for slot, (t_in, t_out) in enumerate(zip(result_types, out_types)):
+        if t_in != t_out:
+            raise TypeError(
+                f"{ctx_label}: carried element type mismatch at slot {slot}: "
+                f"expected {t_in}, got {t_out}. A carried element's dtype must match on "
+                "entry and exit."
+            )
+    return out_raw
 
 
 def _collect_assigned_vars(body_stmts, active_symbols, orelse_stmts=None, test_expr=None):
@@ -659,54 +821,28 @@ class ReplaceIfWithDispatch(Transformer):
         if else_fn is None:
             else_fn = lambda *args: {}
 
-        state_raw = []
-        for name, value in zip(result_names, result_values):
-            raw = as_ir_value(value)
-            if not isinstance(raw, ir.Value):
-                raise TypeError(
-                    f"state variable '{name}' is {type(raw).__name__}, not an MLIR Value; "
-                    "stateful dynamic if requires MLIR-backed values."
-                )
-            state_raw.append(raw)
-
-        result_types = [v.type for v in state_raw]
+        # Explode each carried value (possibly a list/tuple/dict/nested
+        # container) into the flat ir.Value slots that scf.if can carry as
+        # results; `counts`/`exemplars` let us assemble the containers on exit.
+        state_raw, counts, exemplars, result_types = _explode_states(result_names, result_values, "dynamic if/else")
         if_op = scf.IfOp(cond_i1, result_types, has_else=True, loc=capture_user_location())
 
-        with ir.InsertionPoint(if_op.regions[0].blocks[0]):
-            then_result = ReplaceIfWithDispatch._call_branch(then_fn, result_names, result_values)
-            then_values = ReplaceIfWithDispatch._normalize_branch_result(
-                then_result, result_names, result_map, "then-branch"
-            )
-            then_raw = ReplaceIfWithDispatch._unwrap_mlir_values(then_values, result_names, "then-branch")
-            for name, expect_ty, got in zip(result_names, result_types, then_raw):
-                if got.type != expect_ty:
-                    raise TypeError(
-                        f"if/else variable '{name}' type mismatch in then-branch: "
-                        f"expected {expect_ty}, got {got.type}"
-                    )
-            scf.YieldOp(then_raw, loc=capture_user_location())
+        def _emit_branch(fn, block, label):
+            with ir.InsertionPoint(block):
+                branch_result = ReplaceIfWithDispatch._call_branch(fn, result_names, result_values)
+                branch_values = ReplaceIfWithDispatch._normalize_branch_result(
+                    branch_result, result_names, result_map, label
+                )
+                branch_raw = _explode_branch_outputs(result_names, branch_values, counts, result_types, label)
+                scf.YieldOp(branch_raw, loc=capture_user_location())
 
+        _emit_branch(then_fn, if_op.regions[0].blocks[0], "then-branch")
         if len(if_op.regions[1].blocks) == 0:
             if_op.regions[1].blocks.append(*[])
-        with ir.InsertionPoint(if_op.regions[1].blocks[0]):
-            else_result = ReplaceIfWithDispatch._call_branch(else_fn, result_names, result_values)
-            else_values = ReplaceIfWithDispatch._normalize_branch_result(
-                else_result, result_names, result_map, "else-branch"
-            )
-            else_raw = ReplaceIfWithDispatch._unwrap_mlir_values(else_values, result_names, "else-branch")
-            for name, expect_ty, got in zip(result_names, result_types, else_raw):
-                if got.type != expect_ty:
-                    raise TypeError(
-                        f"if/else variable '{name}' type mismatch in else-branch: "
-                        f"expected {expect_ty}, got {got.type}"
-                    )
-            scf.YieldOp(else_raw, loc=capture_user_location())
+        _emit_branch(else_fn, if_op.regions[1].blocks[0], "else-branch")
 
-        wrapped = ReplaceIfWithDispatch._pack_dispatch_results(list(if_op.results), result_values)
-        if len(result_names) == 1:
-            final_values = [wrapped]
-        else:
-            final_values = list(wrapped)
+        # Re-pack the flat scf.if results back into each name's container shape.
+        final_values = _assemble_states(list(if_op.results), counts, exemplars)
         return ReplaceIfWithDispatch._pack_named_values(result_names, final_values)
 
     @classmethod
@@ -886,39 +1022,34 @@ class ReplaceIfWithDispatch(Transformer):
         if not isinstance(cond_i1, ir.Value):
             raise TypeError(f"dynamic ifexp condition must lower to ir.Value, got {type(cond_i1).__name__}")
 
+        # A ternary may evaluate to a *container* (e.g. `[a, b] if c else [x, y]`),
+        # so treat its value like a single carried state entry and explode it.
+        # Probe both branches in a throwaway region to learn the flat structure
+        # (slot count + dtypes) and the container template for assembly.
+        NAME = ("<ifexp>",)
         sandbox = scf.ExecuteRegionOp(result=[])
         sandbox.region.blocks.append()
         with ir.InsertionPoint(sandbox.region.blocks[0]):
             probe_then = then_fn()
-            probe_then_raw = as_ir_value(probe_then)
-            probe_else = else_fn()
-            probe_else_raw = as_ir_value(probe_else)
-            if not isinstance(probe_then_raw, ir.Value):
-                raise TypeError(
-                    f"dynamic ifexp then-branch must produce an MLIR Value, " f"got {type(probe_then_raw).__name__}"
-                )
-            if not isinstance(probe_else_raw, ir.Value):
-                raise TypeError(
-                    f"dynamic ifexp else-branch must produce an MLIR Value, " f"got {type(probe_else_raw).__name__}"
-                )
-            if probe_then_raw.type != probe_else_raw.type:
-                raise TypeError(
-                    f"dynamic ifexp type mismatch: "
-                    f"then-branch produces {probe_then_raw.type}, "
-                    f"else-branch produces {probe_else_raw.type}"
-                )
-            yield_type = probe_then_raw.type
+            _then_raw, counts, exemplars, yield_types = _explode_states(
+                NAME, (probe_then,), "dynamic ifexp then-branch"
+            )
+            # else must produce the same structure and element dtypes as then
+            _explode_branch_outputs(NAME, (else_fn(),), counts, yield_types, "dynamic ifexp else-branch")
+        sandbox.operation.erase()
 
-        op = scf.IfOp(cond_i1, [yield_type], has_else=True, loc=capture_user_location())
+        op = scf.IfOp(cond_i1, yield_types, has_else=True, loc=capture_user_location())
         with ir.InsertionPoint(op.regions[0].blocks[0]):
-            scf.YieldOp([as_ir_value(then_fn())], loc=capture_user_location())
+            then_raw = _explode_branch_outputs(NAME, (then_fn(),), counts, yield_types, "dynamic ifexp then-branch")
+            scf.YieldOp(then_raw, loc=capture_user_location())
         if len(op.regions[1].blocks) == 0:
             op.regions[1].blocks.append()
         with ir.InsertionPoint(op.regions[1].blocks[0]):
-            scf.YieldOp([as_ir_value(else_fn())], loc=capture_user_location())
+            else_raw = _explode_branch_outputs(NAME, (else_fn(),), counts, yield_types, "dynamic ifexp else-branch")
+            scf.YieldOp(else_raw, loc=capture_user_location())
 
-        sandbox.operation.erase()
-        return as_dsl_value(op.results[0], probe_then)
+        # Assemble the flat scf.if results into the ternary's (possibly container) value.
+        return _assemble_states(list(op.results), counts, exemplars)[0]
 
 
 @ASTRewriter.register
@@ -1008,15 +1139,9 @@ class InsertEmptyYieldForSCFFor(Transformer):
                 scf.YieldOp([], loc=capture_user_location())
             return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
 
-        state_raw = []
-        for name, value in zip(result_names, result_values):
-            raw = as_ir_value(value)
-            if not isinstance(raw, ir.Value):
-                raise TypeError(
-                    f"for-loop variable '{name}' is {type(raw).__name__}, not an MLIR Value; "
-                    "only MLIR-backed values can be loop-carried in dynamic for loops."
-                )
-            state_raw.append(raw)
+        # Explode carried values (possibly containers) into the flat iter_args
+        # scf.for needs; assemble containers for the body and for the results.
+        state_raw, counts, exemplars, result_types = _explode_states(result_names, result_values, "dynamic for loop")
 
         loc = capture_user_location()
         for_op = scf.ForOp(start_val, stop_val, step_val, state_raw, loc=loc)
@@ -1024,27 +1149,19 @@ class InsertEmptyYieldForSCFFor(Transformer):
 
         with ir.InsertionPoint(for_op.body):
             iv = for_op.induction_variable
-            inner_args = [as_dsl_value(a, ex) for a, ex in zip(for_op.inner_iter_args, result_values)]
+            # inner_iter_args are flat; assemble them into each name's container
+            # so the body sees the same list/tuple/... shape it wrote.
+            inner_args = _assemble_states(list(for_op.inner_iter_args), counts, exemplars)
 
             body_result = body_fn(iv, result_names, *inner_args)
 
             body_values = ReplaceIfWithDispatch._normalize_branch_result(
                 body_result, result_names, result_map, "for-body"
             )
-            body_raw = ReplaceIfWithDispatch._unwrap_mlir_values(body_values, result_names, "for-body")
-            result_types = [v.type for v in state_raw]
-            for name, expect_ty, got in zip(result_names, result_types, body_raw):
-                if got.type != expect_ty:
-                    raise TypeError(
-                        f"for-loop variable '{name}' type mismatch: " f"expected {expect_ty}, got {got.type}"
-                    )
+            body_raw = _explode_branch_outputs(result_names, body_values, counts, result_types, "for-body")
             scf.YieldOp(body_raw, loc=capture_user_location())
 
-        wrapped = ReplaceIfWithDispatch._pack_dispatch_results(list(for_op.results), result_values)
-        if len(result_names) == 1:
-            final_values = [wrapped]
-        else:
-            final_values = list(wrapped)
+        final_values = _assemble_states(list(for_op.results), counts, exemplars)
         return ReplaceIfWithDispatch._pack_named_values(result_names, final_values)
 
     @classmethod
@@ -1334,17 +1451,9 @@ class CanonicalizeWhile(Transformer):
                 f"const_expr() if it is a compile-time constant."
             )
 
-        state_raw = []
-        for name, value in zip(result_names, result_values):
-            raw = as_ir_value(value)
-            if not isinstance(raw, ir.Value):
-                raise TypeError(
-                    f"while-loop variable '{name}' is {type(raw).__name__}, not an MLIR Value; "
-                    "only MLIR-backed values can be loop-carried in dynamic while loops."
-                )
-            state_raw.append(raw)
-
-        result_types = [v.type for v in state_raw]
+        # Explode carried values (possibly containers) into the flat state the
+        # scf.while before/after blocks carry; assemble containers per block.
+        state_raw, counts, exemplars, result_types = _explode_states(result_names, result_values, "dynamic while loop")
         loc = capture_user_location()
         while_op = scf.WhileOp(result_types, state_raw, loc=loc)
         # Give the loop-carried block arguments the user location.
@@ -1354,7 +1463,7 @@ class CanonicalizeWhile(Transformer):
 
         with ir.InsertionPoint(while_op.regions[0].blocks[0]):
             before_args = list(while_op.regions[0].blocks[0].arguments)
-            wrapped_before = [as_dsl_value(a, ex) for a, ex in zip(before_args, result_values)] if result_names else []
+            wrapped_before = _assemble_states(before_args, counts, exemplars) if result_names else []
             before_cond = ReplaceIfWithDispatch._call_branch(before_fn, result_names, wrapped_before)
             cond_i1 = ReplaceIfWithDispatch._to_i1(before_cond)
             if not isinstance(cond_i1, ir.Value):
@@ -1363,18 +1472,13 @@ class CanonicalizeWhile(Transformer):
 
         with ir.InsertionPoint(while_op.regions[1].blocks[0]):
             after_args = list(while_op.regions[1].blocks[0].arguments)
-            wrapped_after = [as_dsl_value(a, ex) for a, ex in zip(after_args, result_values)] if result_names else []
+            wrapped_after = _assemble_states(after_args, counts, exemplars) if result_names else []
             body_result = ReplaceIfWithDispatch._call_branch(after_fn, result_names, wrapped_after)
             if result_names:
                 body_values = ReplaceIfWithDispatch._normalize_branch_result(
                     body_result, result_names, result_map, "while-body"
                 )
-                body_raw = ReplaceIfWithDispatch._unwrap_mlir_values(body_values, result_names, "while-body")
-                for name, expect_ty, got in zip(result_names, result_types, body_raw):
-                    if got.type != expect_ty:
-                        raise TypeError(
-                            f"while-loop variable '{name}' type mismatch: expected {expect_ty}, got {got.type}"
-                        )
+                body_raw = _explode_branch_outputs(result_names, body_values, counts, result_types, "while-body")
                 scf.YieldOp(body_raw, loc=capture_user_location())
             else:
                 scf.YieldOp([], loc=capture_user_location())
@@ -1382,11 +1486,7 @@ class CanonicalizeWhile(Transformer):
         if not result_names:
             return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
 
-        wrapped = ReplaceIfWithDispatch._pack_dispatch_results(list(while_op.results), result_values)
-        if len(result_names) == 1:
-            final_values = [wrapped]
-        else:
-            final_values = list(wrapped)
+        final_values = _assemble_states(list(while_op.results), counts, exemplars)
         return ReplaceIfWithDispatch._pack_named_values(result_names, final_values)
 
     @classmethod
