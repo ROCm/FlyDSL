@@ -3,28 +3,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""System (device) tests: carry a Python list through dynamic if/for/while in a
+"""End-to-end tests: carry a Python list through dynamic if/for/while/ifexp in a
 real @flyc.kernel, launch it, and check the results against the expected values.
 
-This is the end-to-end counterpart of test_dynamic_controlflow_list_carry.py.
-The pattern (a list local reassigned inside a runtime-conditioned region) is the
-one that previously failed to compile with
-``TypeError: ... is list, not an MLIR Value``.
+This is the end-to-end counterpart of the MLIR-level unit tests in
+tests/unit/test_dynamic_controlflow_list_carry.py. The pattern (a list local
+reassigned inside a runtime-conditioned region) is the one that previously
+failed to compile with ``TypeError: ... is list, not an MLIR Value``.
 """
 
 import pytest
+import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
-try:
-    import torch
-except ImportError:
-    torch = None
-
-if torch is None or not torch.cuda.is_available():
+if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available", allow_module_level=True)
 
 
@@ -107,7 +103,7 @@ def _run_ifexp_list(Out: fx.Tensor, flag: fx.Int32, stream: fx.Stream = fx.Strea
 # ── Tests ───────────────────────────────────────────────────────────────────
 
 
-class TestDynamicControlFlowListCarryDevice:
+class TestDynamicControlFlowListCarryE2E:
     def test_if_list_taken(self):
         out, t_out = _out(2)
         _run_if_list(t_out, fx.Int32(1))  # flag>0 -> then branch
