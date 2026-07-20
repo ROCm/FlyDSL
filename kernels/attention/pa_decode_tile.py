@@ -655,6 +655,12 @@ def compile_pa_decode_tile(
             v_page_cur = ostate[V_SLOT]  # this tile's V pages, as one PAGES_PER_CHUNK-wide i32 vector
             tt = fx.Int32(tt)
             tok0 = tt * TILE_TOK
+            # per_tensor phase-split is latency-bound at occ-2 with MFMA-hazard
+            # s_nop in the loop; let the IGLP scheduler interleave MFMA with the
+            # softmax VALU/LDS to hide some of it. per_token is at the VGPR cliff
+            # (leave its hand-tuned schedule); M1/head64 use their own paths.
+            if const_expr(not per_token_kv and M_TILES > 1):
+                fx.rocdl.iglp_opt(0)
 
             tt1 = tt + 1
 
