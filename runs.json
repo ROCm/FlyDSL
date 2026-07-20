@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-20T09:23:54Z",
+ "updated": "2026-07-20T10:22:36Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29733374898,
+   "pr": 825,
+   "commit": "fbd87d29440ae32322b325726265c4f198c21c32",
+   "branch": "pa-decode-tile",
+   "event": "pull_request",
+   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29733374898",
+   "created_at": "2026-07-20T09:58:20Z",
+   "updated_at": "2026-07-20T10:00:34Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-20T09:59:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29733374898/job/88323028712"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-20T09:59:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29733374898/job/88323028730"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-20T10:00:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29733374898/job/88323028739"
+    }
+   ]
+  },
   {
    "run_id": 29726222975,
    "pr": 786,
@@ -2349,49 +2392,6 @@
      "started_at": "2026-07-16T09:15:23Z",
      "completed_at": "2026-07-16T09:33:04Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29486223641/job/87581404988"
-    }
-   ]
-  },
-  {
-   "run_id": 29484418117,
-   "pr": null,
-   "commit": "81baca5028cc7caf7cd004aad922bc6350057add",
-   "branch": "feat/autotune-rmsnorm-adopt",
-   "event": "pull_request",
-   "title": "[2/5] autotune: add opt-in search and RMSNorm waves-per-EU tuning (#770)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29484418117",
-   "created_at": "2026-07-16T08:42:33Z",
-   "updated_at": "2026-07-16T10:08:27Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-16T08:44:50Z",
-     "completed_at": "2026-07-16T09:59:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29484418117/job/87575679888"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-16T08:45:37Z",
-     "completed_at": "2026-07-16T10:08:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29484418117/job/87575679918"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-16T09:42:08Z",
-     "completed_at": "2026-07-16T09:59:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29484418117/job/87575679921"
     }
    ]
   }
