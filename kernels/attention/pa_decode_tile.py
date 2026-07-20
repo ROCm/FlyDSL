@@ -723,7 +723,7 @@ def compile_pa_decode_tile(
                     n_valid_tile = (causal_bound[m] - tok0).to(fx.Float32)
                     base_tok_f = fx.Int32(warp * TOK_CHUNK + l16g * 4).to(fx.Float32)
                     thr = fx.Vector.from_elements([n_valid_tile - base_tok_f], dtype=fx.Float32).broadcast_to(4)
-                    neg4 = fx.Vector.filled(4, -1e30, fx.Float32)
+                    neg4 = fx.Vector.filled(4, float("-inf"), fx.Float32)
 
                     if const_expr(per_token_kv):
                         scaled_frags = [frag_Ss[a] * k_scale_shared[a] for a in range_constexpr(NCHUNK)]
@@ -790,18 +790,17 @@ def compile_pa_decode_tile(
                         norm_factor_b = fx.Vector.from_elements([norm_factor], dtype=fx.Float32).broadcast_to(4)
 
                     m_new = arith.maxnumf(m_prev, _ld_lw_row(_lmax_off_m(m), qh).reduce(ReductionOp.MAX))
-                    m_new_b = fx.Vector.from_elements([m_new], dtype=fx.Float32).broadcast_to(4)
+                    # A fully-invalid row (no valid token in any tile) keeps the
+                    # -inf mask sentinel; use 0 as the effective max so masked
+                    # lanes give exp2(-inf - 0) == 0 (and avoid the -inf-(-inf)
+                    # cancellation). One select per row replaces the old per-chunk
+                    # re-mask; masked tokens in a valid row are naturally 0.
+                    safe_max = arith.select(m_new > NEG_INF, m_new, ZERO_F)
+                    m_new_b = fx.Vector.from_elements([safe_max], dtype=fx.Float32).broadcast_to(4)
                     ls = fx.Float32(0.0)
                     words = []
-                    zero4_p = fx.Vector.filled(4, 0.0, fx.Float32)
                     for a in range_constexpr(NCHUNK):
-                        # Re-mask Pa itself: a row with zero valid tokens has both
-                        # masked_chunks[a] and m_new at the -1e30 sentinel, so
-                        # exp2(score*scale - m_new) cancels to exp2(0)==1 instead
-                        # of ~0. Force the sentinel lanes (scores >> -1e29 are real)
-                        # to a true 0. Matters most for NP>1 empty partitions.
-                        valid_a = masked_chunks[a] > fx.Vector.filled(4, -1e29, fx.Float32)
-                        Pa = valid_a.select(fx.Vector(exp2_f32_fast(masked_chunks[a] * scale - m_new_b)), zero4_p)
+                        Pa = fx.Vector(exp2_f32_fast(masked_chunks[a] * scale - m_new_b))
                         ls = ls + Pa.reduce(ReductionOp.ADD)
                         if const_expr(per_token_kv):
                             v_sc = (
@@ -825,7 +824,8 @@ def compile_pa_decode_tile(
                     # correction and running denominator are single
                     # per-lane scalars keyed on query-row=lane16 -- no
                     # sCorr LDS round-trip, no per-output-row gather.
-                    corr_reg = fx.Float32(exp2_amdgcn_scalar(m_prev - m_new))
+                    safe_prev = arith.select(m_prev > NEG_INF, m_prev, ZERO_F)
+                    corr_reg = fx.Float32(exp2_amdgcn_scalar(safe_prev - safe_max))
                     if l16g == 0:
                         _st_lw(sLsum_off, qh, warp, ls)
                     gpu.barrier()
