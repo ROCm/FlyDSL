@@ -114,14 +114,92 @@ except Exception:  # noqa: BLE001
     fp4_utils = None  # type: ignore[assignment]
 
 try:
-    from kernels.moe.mega_moe import (  # type: ignore
-        MegaMoeStage2,
-    )
-    # Module-level READY=False means the file is in place but the kernel
-    # implementation isn't wired up; the test gracefully skips the fused
-    # path instead of erroring.
-    HAS_FUSED_OP = bool(getattr(MegaMoeStage2, "READY", False))
-    _FUSED_IMPORT_ERR = "" if HAS_FUSED_OP else "MegaMoeStage2.READY = False (kernel not yet wired)"
+    from kernels.moe.mega_moe import compile_fused_moe_gemm2_combine  # type: ignore
+
+    class MegaMoeStage2:
+        """Standalone fused GEMM2+combine op for this profiler (thin adapter over the
+        public ``compile_fused_moe_gemm2_combine`` + ``comb_op.combine_no_stage1``).
+
+        MegaMoE folds this stage in-house (``_run_fused_stage2``); the profiler benches
+        the GEMM2+combine unit in isolation, so it keeps this equivalent local wrapper.
+        """
+
+        READY = True
+
+        def __init__(self, *, comb_cfg, comb_op, inter_dim, tile_m=32, tile_n=128, tile_k=128,
+                     persist_m=-1, sort_block_m=0, b_nt=2, a_dtype="fp8", b_dtype="fp4",
+                     xcd_swizzle=0, use_token_flag_sync=False, doweight_fused=True):
+            self.comb_cfg = comb_cfg
+            self.comb_op = comb_op
+            FlyDSLDispatchCombineIntraNodeOp._ENABLE_COMBINE_NO_STAGE1 = True
+            self.inter_dim = int(inter_dim)
+            self._cfg = (int(tile_m), int(tile_n), int(tile_k), int(persist_m),
+                         int(b_nt), int(xcd_swizzle))
+            self.sort_block_m = int(sort_block_m)
+            self.a_dtype, self.b_dtype = a_dtype, b_dtype
+            self.use_token_flag_sync = bool(use_token_flag_sync)
+            self.doweight_fused = bool(doweight_fused)
+            self._fp8_cast = (getattr(comb_cfg, "combine_quant_type", "none") == "fp8_direct_cast"
+                              and comb_cfg.combine_dtype == torch.bfloat16)
+            self._out_dtype_str = ("fp8e4m3fn" if self._fp8_cast
+                                   else ("bf16" if comb_cfg.combine_dtype == torch.bfloat16 else "f16"))
+            self._launch = None
+            self._compiled = None
+            dev = torch.device("cuda", comb_cfg.rank)
+            max_recv = comb_cfg.world_size * comb_cfg.max_num_inp_token_per_rank
+            self._dummy_out = torch.zeros(1, dtype=comb_cfg.combine_dtype, device=dev)
+            self._dummy_bias = torch.empty(0, dtype=comb_cfg.combine_dtype, device=dev)
+            inp_dtype = torch.float8_e4m3fn if self._fp8_cast else comb_cfg.combine_dtype
+            self._dummy_inp = torch.zeros(max_recv, comb_cfg.hidden_dim, dtype=inp_dtype, device=dev)
+
+        def _ensure_launch(self):
+            if self._launch is not None:
+                return self._launch
+            tile_m, tile_n, tile_k, persist_m, b_nt, xcd_swizzle = self._cfg
+            comb_cfg = self.comb_cfg
+            k = comb_cfg.num_experts_per_token
+            self._launch = compile_fused_moe_gemm2_combine(
+                model_dim=comb_cfg.hidden_dim, inter_dim=self.inter_dim,
+                experts=comb_cfg.num_experts_per_rank, topk=k, tile_m=tile_m, tile_n=tile_n,
+                tile_k=tile_k, persist_m=persist_m, sort_block_m=self.sort_block_m, b_nt=b_nt,
+                a_dtype=self.a_dtype, b_dtype=self.b_dtype, out_dtype=self._out_dtype_str,
+                rank=comb_cfg.rank, npes=comb_cfg.world_size,
+                max_tok_per_rank=comb_cfg.max_num_inp_token_per_rank, experts_per_token=k,
+                xcd_swizzle=xcd_swizzle, use_token_flag_sync=self.use_token_flag_sync,
+                doweight_fused=self.doweight_fused,
+            )
+            return self._launch
+
+        def run(self, *, a2, w2, a2_scale, w2_scale, sorted_token_ids, sorted_expert_ids,
+                sorted_weights, num_valid_ids, wts_buf=None, cur_tok=None, stream=None):
+            launch_fn = self._ensure_launch()
+            comb_cfg, comb_op = self.comb_cfg, self.comb_op
+            if stream is None:
+                stream = torch.cuda.current_stream()
+            s_fx = fx.Stream(stream.cuda_stream)
+            tokens_in = comb_cfg.world_size * comb_cfg.max_num_inp_token_per_rank
+            n_in = comb_cfg.hidden_dim
+            k_in = self.inter_dim
+            size_expert_ids = sorted_expert_ids.numel()
+            addr_wts_buf = (fx.Int64(wts_buf.data_ptr()) if wts_buf is not None
+                            else comb_op._fx_disp_out_wts)
+            common_args = (
+                self._dummy_out, a2, w2, a2_scale, w2_scale, sorted_token_ids, sorted_expert_ids,
+                sorted_weights, num_valid_ids, self._dummy_bias, comb_op._fx_tis,
+                comb_op._fx_p2p_comb_inp, addr_wts_buf, comb_op._fx_p2p_comb_inp_wts,
+                comb_op._fx_local_counter, comb_op._fx_p2p_comb_flag, comb_op._fx_out_total_recv,
+            )
+            if self._compiled is None:
+                self._compiled = flyc.compile(
+                    launch_fn, *common_args, fx.Int32(tokens_in), fx.Int32(n_in),
+                    fx.Int32(k_in), fx.Int32(size_expert_ids), s_fx)
+            else:
+                self._compiled(*common_args, tokens_in, n_in, k_in, size_expert_ids, s_fx)
+            return comb_op.combine_no_stage1(self._dummy_inp, None, None,
+                                             cur_tok=cur_tok, enable_weights=True)
+
+    HAS_FUSED_OP = True
+    _FUSED_IMPORT_ERR = ""
 except Exception as _e:  # noqa: BLE001
     MegaMoeStage2 = None
     HAS_FUSED_OP = False

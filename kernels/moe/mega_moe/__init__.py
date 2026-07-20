@@ -13,8 +13,6 @@ import importlib
 # Public name -> submodule that defines it.
 _LAZY = {
     "MegaMoE": "mega_moe",
-    "MegaMoeStage1": "mega_moe",
-    "MegaMoeStage2": "mega_moe",
     "Stage1Output": "mega_moe",
     "compile_fused_moe_gemm2_combine": "mega_moe",
     "compile_fused_moe_gemm1": "gemm1",
