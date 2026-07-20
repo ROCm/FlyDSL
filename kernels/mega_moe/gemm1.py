@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-# FUSED-OPERATOR stage1 dispatch⊕GEMM builder for the MoE megakernel (compile_fused_moe_gemm1).
-
 """MoE stage-1 fused dispatch⊕GEMM kernel builder (FlyDSL MFMA, CDNA4 / MI355X).
 
-`compile_fused_moe_gemm1` builds the persistent sparse-tile gate/up+silu group-GEMM with the
+``compile_fused_moe_gemm1`` builds the persistent sparse-tile gate/up+silu group-GEMM with the
 fixedslot in-kernel dispatch prologue. See docs/moe_stage1_mega.md.
 """
 
@@ -20,15 +18,13 @@ from flydsl.expr import arith, buffer_ops, const_expr, gpu, rocdl
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator
-from kernels.common.kernels_common import _guard, validate_moe_dtypes
+from kernels.common.kernels_common import validate_moe_dtypes
 from kernels.common.layout_utils import get as layout_get
 from kernels.common.layout_utils import idx2crd
 from kernels.common.mma.mfma_preshuffle_pipeline import (
     tile_chunk_coord_i32,
 )
-
-# GateMode is re-exported from moe_common (must be the SAME enum object for `is` comparisons).
-from kernels.moe.moe_common import GateMode  # single source of truth (re-exported below)
+from kernels.moe.moe_common import GateMode  # single source of truth (SAME enum for `is` compares)
 
 from .dispatch import emit_dispatch_prologue  # noqa: E402
 from .epilogue import (
@@ -147,8 +143,7 @@ def compile_fused_moe_gemm1(
 
     gate_up_interleave = gate_mode is GateMode.INTERLEAVE
 
-    # Per-group K extent: each K-slice wave group runs the mainloop over its own [wid_k*_k_slice, (wid_k+1)*_k_slice).
-    k_dim = k_slice
+    k_dim = k_slice  # per-group K extent (each K-slice wave group runs the mainloop over its slice)
 
     bytes_x_per_tile = int(tile_m) * int(tile_k) * int(a_elem_bytes)
     # X gather per K-slice group: group_threads threads load the FULL tile_m*tile_k of their K-slice (== total_threads at slice_k==1).
@@ -347,8 +342,8 @@ def compile_fused_moe_gemm1(
         # w1/scale span only this rank's experts_per_rank experts (LOCAL slice; expert_off_idx is LOCAL).
         assert experts_per_rank > 0, "fused gemm1 requires experts_per_rank>0 (local-w1 layout)"
         w_experts = experts_per_rank
-        # Preshuffle B / A-scale / B-scale data layouts -> mega_moe_groupgemm_utils.make_layouts.
-        layout_b, layout_a_scale, layout_b_scale, sorted_m = make_layouts(
+        # Preshuffle B / B-scale data layouts (see utils.make_layouts).
+        layout_b, layout_b_scale, sorted_m = make_layouts(
             arith,
             w_experts=w_experts,
             inter_dim=inter_dim,
@@ -384,8 +379,6 @@ def compile_fused_moe_gemm1(
             tile_n=tile_n,
             sort_block_m=sort_block_m,
             skip_gemm=False,
-            rank=rank,
-            experts_per_rank=experts_per_rank,
             experts=experts,
             fz_epr=fz_epr,
             fz_cap=fz_cap,
@@ -406,13 +399,12 @@ def compile_fused_moe_gemm1(
         layout_tx_wave_lane = fx.make_layout((total_waves, 64), stride=(64, 1))
         layout_lane16 = fx.make_layout((4, 16), stride=(16, 1))
 
-        # Per-block LDS memref views -> mega_moe_groupgemm_utils.build_lds_views.
+        # Per-block LDS memref views -> utils.build_lds_views.
         v = build_lds_views(allocator_pong, allocator_ping, lds=lds, tile_m=tile_m, tile_n=tile_n)
         lds_x_pong, lds_x_ping = v.x_pong, v.x_ping
         lds_out, lds_out_B = v.out, v.out_B
         lds_tid, lds_a_scale = v.tid, v.a_scale
 
-        # Buffer resources
         c_a_pack = arith.constant(int(a_elem_vec_pack), index=True)
         c_elem_bytes = arith.constant(int(a_elem_bytes), index=True)
 
@@ -425,7 +417,6 @@ def compile_fused_moe_gemm1(
         w_nbytes_s1 = (w_experts * (2 * inter_dim) * model_dim) // 2
         w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False, num_records_bytes=w_nbytes_s1)
 
-        # Out: [tokens*topk, inter_dim]
         numids_rsrc = buffer_ops.create_buffer_resource(
             arg_num_valid_ids,
             max_size=False,
@@ -440,7 +431,6 @@ def compile_fused_moe_gemm1(
         sx_nbytes_i32 = arith.index_cast(T.i32, sx_nbytes_idx)
         sx_rsrc = buffer_ops.create_buffer_resource(arg_scale_x, max_size=False, num_records_bytes=sx_nbytes_i32)
 
-        c32 = arith.constant(32, index=True)
         kblk_w = k_in / c32
         mn_w = arith.constant(w_experts * (2 * inter_dim), index=True)
         sw_nbytes_idx = mn_w * kblk_w
@@ -526,9 +516,6 @@ def compile_fused_moe_gemm1(
                     group_tid = tx
                 tx_i32_base = group_tid * c_chunk_i32
 
-                topk_i32 = arith.constant(topk)
-                tokens_i32 = arith.index_cast(T.i32, tokens_in)
-
                 def x_tile_chunk_coord_i32(i: int):
                     return tile_chunk_coord_i32(
                         arith,
@@ -585,16 +572,12 @@ def compile_fused_moe_gemm1(
                     pack_N=pack_N,
                     lane_div_16=lane_div_16,
                     layout_b_scale=layout_b_scale,
-                    layout_a_scale=layout_a_scale,
-                    sort_block_m=sort_block_m,
-                    scale_mn_pack=scale_mn_pack,
                 )
                 (
                     gate_n_blk_list,
                     gate_n_intra_list,
                     up_n_blk_list,
                     up_n_intra_list,
-                    col_g_list,
                     inter_idx,
                 ) = op_bases.gate_up_n_blocks(expert_off_idx, by_n)
 
@@ -722,9 +705,8 @@ def compile_fused_moe_gemm1(
                     vec4_f32=vec4_f32,
                     gate_up_interleave=gate_up_interleave,
                 )
-                mfma_gu.for_tile()
 
-                # KLoop (mega_moe_kloop): CUTLASS-style collective mainloop (prime -> steady -> drain) in run().
+                # KLoop: CUTLASS-style collective mainloop (prime -> steady -> drain) in run().
                 kloop = KLoop(
                     g2s_x=g2s_x,
                     s2r_a=s2r_a,
@@ -768,7 +750,6 @@ def compile_fused_moe_gemm1(
                     rearrange_b_scale=rearrange_b_scale,
                 )
 
-                # Pipeline (split ping/pong allocators)
                 rocdl.sched_barrier(0)
 
                 # raw_a_scale: stage this tile's full A-scale to LDS once before the K-loop (KScaleLoader).
@@ -807,7 +788,7 @@ def compile_fused_moe_gemm1(
                 )
 
                 # Deep-pipeline mainloop: prime -> ping/pong steady loop -> drain (see KLoop.run).
-                acc_gate, acc_up, epilogue_pf = kloop.run(a_scale_pong, gate_bs_pong, up_bs_pong)
+                acc_gate, acc_up = kloop.run(a_scale_pong, gate_bs_pong, up_bs_pong)
 
                 # slice_k: reduce per-K-slice partials across wave groups in LDS and broadcast, BEFORE activation, so silu(sum_gate)*sum_up is the correct full-K result.
                 if const_expr(slice_k > 1):
@@ -861,15 +842,10 @@ def compile_fused_moe_gemm1(
                     sort_block_m=sort_block_m,
                 )
                 epi_scatter = Scatter(
-                    contiguous_io=True,
                     out_base_idx=out_base_idx,
                     out_row_stride=out_row_stride,
                     lds_tid=lds_tid,
                     mask24_i32=mask24_i32,
-                    num_valid_i32=num_valid_i32,
-                    topk_i32_v=topk_i32,
-                    tokens_i32_v=tokens_i32,
-                    topk=topk,
                     fz_npes=fz_npes,
                     fz_mtpr=fz_mtpr,
                     fz_k=fz_k,
@@ -885,7 +861,7 @@ def compile_fused_moe_gemm1(
                 frag_elem = T.f32
 
                 # slice_k>1: reduction broadcasts the summed acc to every group, so each runs the cshuffle epilogue over its OWN group_threads/group_tid; idempotent writes keep control flow uniform.
-                epi = Gemm1Epilogue(activation=epi_act, quant=epi_quant, scatter=epi_scatter)
+                epi = Gemm1Epilogue(scatter=epi_scatter)
                 epi.run(
                     acc=epi_acc,
                     gui_out_n=epi_gui_out_n,
@@ -908,8 +884,8 @@ def compile_fused_moe_gemm1(
                     frag_elem=frag_elem,
                 )
 
-            with _guard(blk_valid):
-                with _guard(exp_valid):
+            if blk_valid:
+                if exp_valid:
                     moe_gemm1_body()
 
             gpu.barrier()

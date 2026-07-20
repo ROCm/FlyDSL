@@ -16,7 +16,6 @@ from flydsl.expr import math as fmath
 from flydsl.expr.arith import ArithValue, CmpIPredicate
 from flydsl.expr.typing import Int32, T
 from flydsl.expr.vector import ReductionOp
-from kernels.common.kernels_common import _guard
 
 BLOCK = 64
 GROUP = 32
@@ -58,7 +57,7 @@ def build_per_1x32_mx_quant_module(n: int, quant_mode: str):
         group_id = ArithValue(fx.block_idx.x) * arith.constant(BLOCK, type=i32) + ArithValue(fx.thread_idx.x)
         num_groups = ArithValue(m) * arith.constant(scale_n, type=i32)
 
-        with _guard(arith.cmpi(CmpIPredicate.ult, group_id, num_groups)):
+        if arith.cmpi(CmpIPredicate.ult, group_id, num_groups):
             # 32 bf16 = 16 dwords: 4x dwordx4 loads, abs-max reduced per vec<8> chunk.
             in_dw = group_id * arith.constant(GROUP * 2 // 4, type=i32)
             vec8_bf16 = T.vec(8, T.bf16)
@@ -144,7 +143,9 @@ def _get_launcher(n: int, quant_mode: str):
 def per_1x32_mx_quant(x, quant_mode="fp4", stream=None):
     """Drop-in for aiter per_1x32_mx_quant_hip: bf16 [m, n] -> (payload, e8m0 u8 scale).
 
-    fp4 -> y [m, n//2] uint8 (fp4x2); fp8 -> y [m, n] float8_e4m3fn.
+    fp4 -> y [m, n//2] float4_e2m1fn_x2 (2 fp4/byte); fp8 -> y [m, n] float8_e4m3fn.
+    The fp4 payload dtype mirrors aiter's (quant_dtype=fp4x2) so downstream dispatch ops that pin
+    dispatch_dtype=float4_e2m1fn_x2 consume it directly (no re-view at the call site).
     """
     assert x.dtype == torch.bfloat16, f"x must be bf16, got {x.dtype}"
     x = x.contiguous()
@@ -160,7 +161,11 @@ def per_1x32_mx_quant(x, quant_mode="fp4", stream=None):
     scale = torch.empty((m, scale_n), dtype=torch.uint8, device=x.device)
     grid_blocks = (m * scale_n + BLOCK - 1) // BLOCK
     fx_stream = fx.Stream(stream if stream is not None else torch.cuda.current_stream().cuda_stream)
+    # The kernel writes raw bytes via dwordx4 buffer stores; allocate the fp4 payload as uint8 for the
+    # store, then return it viewed as float4_e2m1fn_x2 to match aiter's output dtype exactly.
     _get_launcher(n, quant_mode)(x, y, scale, int(m), int(grid_blocks), stream=fx_stream)
+    if quant_mode == "fp4":
+        y = y.view(torch.float4_e2m1fn_x2)
     return y, scale
 
 
@@ -231,10 +236,10 @@ def build_mxfp4_moe_scale_sort_module(cols: int):
             return ArithValue(buffer_ops.buffer_load(scale_rsrc, base + col, vec_width=1, dtype=T.i8)).extui(i32)
 
         # sorted_len is a multiple of unit_size(32), so a tile is fully valid or fully skipped.
-        with _guard(arith.cmpi(CmpIPredicate.ult, row_base, num_valid_ids)):
+        if arith.cmpi(CmpIPredicate.ult, row_base, num_valid_ids):
             for wc in range_constexpr(n_word_chunks):
                 w = tid + arith.constant(wc * SCALE_SORT_BLOCK, type=i32)
-                with _guard(arith.cmpi(CmpIPredicate.ult, w, words_i32)):
+                if arith.cmpi(CmpIPredicate.ult, w, words_i32):
                     d2 = w & c15_i32
                     tmp = w >> c4_i32
                     d5 = tmp & c3_i32

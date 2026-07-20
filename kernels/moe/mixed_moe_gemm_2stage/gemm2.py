@@ -1637,9 +1637,6 @@ def compile_mixed_moe_gemm2(
                             alignment=_e_vec * out_elem_bytes,
                         )
 
-                # No per-row epilogue callback (token-level-sync removed).
-                after_row_stores = None
-
                 # Fused-P2P epilogue, Plan B: each (src_tok, s) P2P-stores (SLC) to its own remote
                 # shmem_comb_inp_tok slot dest_lid*k+s; combine (skip_stage1) reduces over tok_id*k+j.
                 # Requires s == j_global (else slots collide); the buffer is sized max(npes,topk)*mtpr
@@ -1825,7 +1822,6 @@ def compile_mixed_moe_gemm2(
                     write_row_to_lds=write_row_to_lds,
                     precompute_row=precompute_row,
                     store_pair=store_pair,
-                    after_row_stores=after_row_stores,
                 )
 
             _all_valid = arith.andi(blk_valid, arith.andi(exp_valid, tile_has_tokens))

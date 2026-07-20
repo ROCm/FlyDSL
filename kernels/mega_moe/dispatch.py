@@ -3,9 +3,8 @@
 
 """Fused all-to-all EP dispatch prologue for the MoE stage-1 megakernel.
 
-Traced inline at the GEMM call site; runs three mutually-exclusive fixed-slot schemes (fixedslot /
-naive-compact / compact-allgather), each guarded by ``const_expr`` and ending in a grid barrier.
-Python if/for is lowered to ``scf`` via ``ASTRewriter.transform``.
+Traced inline at the GEMM call site; ``const_expr`` fixed-slot schemes (decode / compact
+all-gather) each end in a grid barrier. Python if/for lowers to ``scf`` via ``ASTRewriter``.
 """
 
 import mori.ir.flydsl as mori_shmem
@@ -60,7 +59,6 @@ def emit_dispatch_prologue(
     addr_in_wts,
     addr_in_sc,
 ):
-    # Fused dispatch prologue: decode, handshake-free fixed-slot; same persistent grid as the GEMM.
     # _ctm/_ctm1 hoisted before the const_expr branches (rewriter needs the local set before control flow).
     ctm = arith.constant(sort_block_m)
     ctm1 = arith.constant(sort_block_m - 1)
@@ -189,8 +187,7 @@ def emit_dispatch_prologue(
                     va = buffer_ops.buffer_load(rsrc_src, co, vec_width=4, dtype=T.i32)
                     buffer_ops.buffer_store(va, rsrc_dst, co)
 
-        # Post-write arrival (N->1, only block0 waits; not a symmetric grid barrier): each block arrives via
-        # atomic_add gb1 (release); block0 spins (acquire, sees all writes), does cross-PE + post-pass, publishes meta_flag.
+        # Post-write arrival (N->1, not a grid barrier): blocks atomic_add gb1 (release); block0 spins (acquire) -> cross-PE + post-pass -> publish meta_flag.
         fx.barrier()
         e0_i32 = arith.constant(0)
         if tid == 0:
@@ -207,9 +204,8 @@ def emit_dispatch_prologue(
             mori_shmem.int64_wait_until_equals(a_gb1, tg2)
             epk.fence_agent_acquire()
             epoch_i32 = arith.trunci(T.i32, arith.unwrap(tg2 // bn))
-            # Cross-PE handshake (also the payload/running barrier): signal peer recv_num[rank]=dest_ctr+1
-            # (>=1 even for 0 tokens) after fence release; block0 wait+acquire makes peer writes visible
-            # before post-pass reads running[]. recv_num self-resets; dest_ctr reset here; total_recv pre-zeroed.
+            # Cross-PE handshake (also payload/running barrier): signal peer recv_num[rank]=dest_ctr+1 (>=1 even for 0 tokens)
+            # after release; wait+acquire makes peer writes visible before post-pass reads running[]. recv_num/dest_ctr self-reset.
             epk.fence_system_release()
             for dpe in range(lane, fz_npes, 64):
                 sig = buffer_ops.buffer_load(crfa(a_dctr), dpe, vec_width=1, dtype=T.i32) + arith.constant(1)
@@ -234,8 +230,7 @@ def emit_dispatch_prologue(
             ctm = arith.constant(fz_tile_m)
             ctm1 = arith.constant(fz_tile_m - 1)
             if const_expr(static_tiles and fz_epr <= 64):
-                # P-static: no compact tile-list (se/trb); only num_valid + copy/reset (lane le owns expert le).
-                # GEMM derives (expert,k) via an on-the-fly readlane prefix-scan of ll_count.
+                # P-static: no compact tile-list (se/trb); only num_valid + copy/reset (lane le owns expert le). GEMM derives (expert,k) via readlane prefix-scan of ll_count.
                 le_ok = arith.cmpi(CmpIPredicate.ult, lane, arith.constant(fz_epr))
                 run_lane = arith.select(
                     le_ok, buffer_ops.buffer_load(r_run, lane, vec_width=1, dtype=T.i32), arith.constant(0)
@@ -270,8 +265,7 @@ def emit_dispatch_prologue(
                     buffer_ops.buffer_store(cnt2, r_cnt, lei)
                     buffer_ops.buffer_store(arith.constant(0), r_run, lei)
             if const_expr(static_tiles and fz_epr <= 64):
-                # nv/ll_count are intra-GPU, so agent release suffices for GEMM blocks. running reset is
-                # deferred past meta (off critical path); its system fence keeps it cross-PE-visible next launch.
+                # nv/ll_count intra-GPU -> agent release suffices; running reset deferred past meta (system fence keeps it cross-PE-visible next launch).
                 epk.fence_agent_release()
                 buffer_ops.buffer_store(epoch_i32, crfa(a_meta), arith.constant(0))
                 le_okr = arith.cmpi(CmpIPredicate.ult, lane, arith.constant(fz_epr))
@@ -419,8 +413,7 @@ def emit_dispatch_prologue(
             epk.fence_system_acquire()
             r_bc = crfa(a_bc)
             r_mb = crfa(a_mb)
-            # Reduce bigcnt[npes*te] -> LDS cs[ge] (total) + sp[ge] (sender<rank prefix), parallel over warp0.
-            # warp0-only: use s_waitcnt for LDS ordering (fx.barrier would deadlock: other warps are at meta wait).
+            # Reduce bigcnt[npes*te] -> LDS cs[ge] (total) + sp[ge] (sender<rank prefix) over warp0; s_waitcnt for LDS ordering (fx.barrier would deadlock: other warps at meta wait).
             csl = SmemPtr(pong_base, cnt_lds_off, T.i32, shape=(2 * fz_total_experts,)).get()
             for ge in range(lane, fz_total_experts, 64):
                 cs = arith.constant(0)
@@ -447,8 +440,7 @@ def emit_dispatch_prologue(
             r_trb = crfa(a_trb)
             r_nv = crfa(a_nv)
             r_cnt = crfa(a_cnt)
-            # block0 sentinel-fills only the tile-pad GAP slots of this rank's srcmap (real slots are
-            # P2P-written by peers in PHASE-2); GEMM reads srcmap directly (pad = sentinel -> t_ok masks).
+            # block0 sentinel-fills only the tile-pad GAP slots of this rank's srcmap (real slots P2P-written by peers in PHASE-2); pad=sentinel -> t_ok masks.
             r_sm = crfa(dpa(19))
             ca_sent = arith.constant(fz_npes * fz_mtpr)
             acc = arith.constant(0)
@@ -479,7 +471,7 @@ def emit_dispatch_prologue(
             epk.fence_agent_acquire()
         fx.barrier()
 
-        # ---- PHASE-2: strict write to my_base[ge] + LOCAL cursor (no remote base read) ----
+        # PHASE-2: strict write to my_base[ge] + LOCAL cursor (no remote base read)
         r_mb2 = crfa(a_mb)
         for wk in range(gwid, wl, gwn):
             src_tok = wk // arith.constant(fz_k)
@@ -541,8 +533,7 @@ def emit_dispatch_prologue(
                     va = buffer_ops.buffer_load(rsrc_src, co, vec_width=4, dtype=T.i32)
                     buffer_ops.buffer_store(va, rsrc_dst, co)
 
-        # Per-token distinct-dest dedup -> dest_ctr: per-block LDS histogram (ds_add, all threads; each
-        # thread dedups its token's k dests via a bitmask) -> one global atomic/dest/block; reuses _chl LDS.
+        # Per-token distinct-dest dedup -> dest_ctr: per-block LDS histogram (each thread bitmask-dedups its k dests) -> one global atomic/dest/block; reuses _chl LDS.
         ckk = arith.constant(fz_k)
         cte2 = arith.constant(fz_total_experts)
         for e2 in range(tid, fz_npes, c_bt):
@@ -585,8 +576,7 @@ def emit_dispatch_prologue(
             for spe in range(lane, fz_npes, 64):
                 mori_shmem.int32_wait_until_equals(a_done2 + epk._to_i64(spe) * 4, epochw_i32)
             epk.fence_system_acquire()
-            # Cross-PE recv-count -> total_recv: signal peer recv_num[rank]=dest_ctr+1, then total_recv += (signal-1).
-            # recv_num self-resets (wait==0 before write, 0 after read); dest_ctr reset here.
+            # Cross-PE recv-count -> total_recv: signal peer recv_num[rank]=dest_ctr+1, then total_recv += (signal-1). recv_num self-resets; dest_ctr reset here.
             epk.fence_system_release()
             for dpe2b in range(lane, fz_npes, 64):
                 sig = buffer_ops.buffer_load(crfa(a_dctr), dpe2b, vec_width=1, dtype=T.i32) + arith.constant(1)
