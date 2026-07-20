@@ -1419,7 +1419,11 @@ def compile_mixed_moe_gemm2(
                         # DMA X(next_k1) -> ping (non-blocking, overlaps with compute)
                         prefetch_x_to_lds(next_k1, lds_x_ping)
                         b_ping_lo = load_b_tile_lo(next_k1_bk) if _b_split_enabled else load_b_tile(next_k1_bk)
-                        a_scale_ping, b_scale_ping = prefetch_ab_scale_tile(_k_base(next_k1), _k_shift_bits(next_k1))
+                        # k_shift is host-static (feeds const_expr + arith.constant): derive it from the
+                        # Python loop index, not the traced ``next_k1`` Value (which would bad_cast).
+                        a_scale_ping, b_scale_ping = prefetch_ab_scale_tile(
+                            _k_base(next_k1), _k_shift_bits(k_iv_py + tile_k)
+                        )
 
                         acc, _ = compute_tile(
                             acc,
