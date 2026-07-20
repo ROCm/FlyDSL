@@ -462,6 +462,10 @@ def compile_pa_decode_tile(
         NEG_INF = fx.Float32(float("-inf"))
         ZERO_F = fx.Float32(0.0)
         fm_contract = arith.FastMathFlags.contract
+        # Softmax scores are finite or the -inf mask sentinel -- never NaN -- so
+        # nnan lets maxnum lower to a bare v_max (no v_cmp_u NaN check + its s_nop
+        # hazard) and fuse to v_max3. (ninf must NOT be set: -inf is load-bearing.)
+        fm_nnan = arith.FastMathFlags.nnan
 
         def _row(byte_off, m_idx, width, elem_ty):
             off = byte_off + m_idx * (width * dsl_size_of(elem_ty))
@@ -734,9 +738,11 @@ def compile_pa_decode_tile(
 
                     pm = fx.Float32(float("-inf"))
                     for a in range_constexpr(NCHUNK):
-                        pm = arith.maxnumf(pm, masked_chunks[a].reduce(ReductionOp.MAX))
+                        pm = arith.maxnumf(
+                            pm, masked_chunks[a].reduce(ReductionOp.MAX, fastmath=fm_nnan), fastmath=fm_nnan
+                        )
                     for sh in (16, 32):
-                        pm = arith.maxnumf(pm, pm.shuffle_xor(sh, WAVE))
+                        pm = arith.maxnumf(pm, pm.shuffle_xor(sh, WAVE), fastmath=fm_nnan)
                     _st_lw(_lmax_off_m(m), qh, warp, pm * scale)
 
                     masked_chunks_saved[m] = masked_chunks
@@ -789,7 +795,11 @@ def compile_pa_decode_tile(
                         norm_factor = fx.Float32(rcp_f32(v_max_safe))
                         norm_factor_b = fx.Vector.from_elements([norm_factor], dtype=fx.Float32).broadcast_to(4)
 
-                    m_new = arith.maxnumf(m_prev, _ld_lw_row(_lmax_off_m(m), qh).reduce(ReductionOp.MAX))
+                    m_new = arith.maxnumf(
+                        m_prev,
+                        _ld_lw_row(_lmax_off_m(m), qh).reduce(ReductionOp.MAX, fastmath=fm_nnan),
+                        fastmath=fm_nnan,
+                    )
                     # A fully-invalid row (no valid token in any tile) keeps the
                     # -inf mask sentinel; use 0 as the effective max so masked
                     # lanes give exp2(-inf - 0) == 0 (and avoid the -inf-(-inf)
