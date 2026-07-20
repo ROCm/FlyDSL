@@ -128,7 +128,7 @@ try:
 
         def __init__(self, *, comb_cfg, comb_op, inter_dim, tile_m=32, tile_n=128, tile_k=128,
                      persist_m=-1, sort_block_m=0, b_nt=2, a_dtype="fp8", b_dtype="fp4",
-                     xcd_swizzle=0, use_token_flag_sync=False, doweight_fused=True):
+                     xcd_swizzle=0, doweight_fused=True):
             self.comb_cfg = comb_cfg
             self.comb_op = comb_op
             FlyDSLDispatchCombineIntraNodeOp._ENABLE_COMBINE_NO_STAGE1 = True
@@ -137,7 +137,6 @@ try:
                          int(b_nt), int(xcd_swizzle))
             self.sort_block_m = int(sort_block_m)
             self.a_dtype, self.b_dtype = a_dtype, b_dtype
-            self.use_token_flag_sync = bool(use_token_flag_sync)
             self.doweight_fused = bool(doweight_fused)
             self._fp8_cast = (getattr(comb_cfg, "combine_quant_type", "none") == "fp8_direct_cast"
                               and comb_cfg.combine_dtype == torch.bfloat16)
@@ -165,8 +164,7 @@ try:
                 a_dtype=self.a_dtype, b_dtype=self.b_dtype, out_dtype=self._out_dtype_str,
                 rank=comb_cfg.rank, npes=comb_cfg.world_size,
                 max_tok_per_rank=comb_cfg.max_num_inp_token_per_rank, experts_per_token=k,
-                xcd_swizzle=xcd_swizzle, use_token_flag_sync=self.use_token_flag_sync,
-                doweight_fused=self.doweight_fused,
+                xcd_swizzle=xcd_swizzle, doweight_fused=self.doweight_fused,
             )
             return self._launch
 
@@ -187,7 +185,7 @@ try:
                 self._dummy_out, a2, w2, a2_scale, w2_scale, sorted_token_ids, sorted_expert_ids,
                 sorted_weights, num_valid_ids, self._dummy_bias, comb_op._fx_tis,
                 comb_op._fx_p2p_comb_inp, addr_wts_buf, comb_op._fx_p2p_comb_inp_wts,
-                comb_op._fx_local_counter, comb_op._fx_p2p_comb_flag, comb_op._fx_out_total_recv,
+                comb_op._fx_out_total_recv,
             )
             if self._compiled is None:
                 self._compiled = flyc.compile(
@@ -2093,7 +2091,6 @@ def run_acceptance(rank, world_size, args):
         scale_dim=args.scale_dim,
         scale_type_size=args.scale_type_size,
         combine_quant_type=args.combine_quant_type,
-        use_token_flag_sync=args.token_flag_sync,
     )
     args.max_num_inp_token_per_rank = cap_tok  # consumed by _build_gemm2_static_inputs
 
@@ -2152,7 +2149,6 @@ def run_acceptance(rank, world_size, args):
             b_nt=args.b_nt,
             a_dtype=args.gemm2_a_dtype, b_dtype=args.gemm2_b_dtype,
             xcd_swizzle=args.xcd_swizzle,
-            use_token_flag_sync=args.token_flag_sync,
         )
 
     ms.shmem_barrier_all()
@@ -2554,16 +2550,6 @@ def _parse_args():
                         "combine to mori (gemm2 stays flydsl) for a 'mori "
                         "dispatch + flydsl gemm2 + mori combine' baseline; "
                         "needs profile/bench mode + bf16/fp16/fp8 dtype.")
-    # ── fused (gemm2 + combine) ─────────────────────────────────────────────
-    # token-level-sync: per-token flag sync switch. When on, dispatch / combine
-    # kernels enable reset + spin-wait and the fused gemm2 epilogue adds
-    # cross-device atomic_add. When off, the whole block is const_expr DCEd
-    # and behaviour matches baseline exactly. Only observable under
-    # --bench-op fused / both (the fused path).
-    p.add_argument("--token-flag-sync", dest="token_flag_sync",
-                   action=argparse.BooleanOptionalAction, default=False,
-                   help="Enable the token-level-sync per-token flag cross-device sync "
-                        "path; --no-token-flag-sync (default) disables it")
     # GEMM2
     # Default a=fp4/b=fp4 (production a4w4: GEMM1 output is SiLU + per-1x32
     # quantized to fp4 before feeding GEMM2; see ut_per1x32.py). The early

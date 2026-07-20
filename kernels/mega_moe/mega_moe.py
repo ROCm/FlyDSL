@@ -192,7 +192,6 @@ def compile_fused_moe_gemm2_combine(
     model_dim_pad: int = 0,
     inter_dim_pad: int = 0,
     xcd_swizzle: int = 0,
-    use_token_flag_sync: bool = False,
     doweight_fused: bool = False,
 ):
     """Compile the fused GEMM2+combine kernel and return its host launcher.
@@ -252,7 +251,6 @@ def compile_fused_moe_gemm2_combine(
         use_cshuffle_epilog=True,
         xcd_swizzle=xcd_swizzle,
         fused_p2p_scatter=fused_cfg,
-        use_token_flag_sync=use_token_flag_sync,
     )
 
 
@@ -831,7 +829,6 @@ class MegaMoE:
         a_dtype: str = "fp8",
         b_dtype: str = "fp4",
         xcd_swizzle: int = 0,
-        use_token_flag_sync: bool = False,
         doweight_fused: bool = True,
         gemm2_tile_table: dict | None = None,
     ):
@@ -848,7 +845,6 @@ class MegaMoE:
         self._g2_a_dtype = a_dtype
         self._g2_b_dtype = b_dtype
         self._g2_xcd_swizzle = xcd_swizzle
-        self._g2_use_token_flag_sync = bool(use_token_flag_sync)
         # weight the GEMM2 epilogue (combine_no_stage1 reduces unweighted) -> on by default.
         self._g2_doweight_fused = bool(doweight_fused)
 
@@ -979,7 +975,6 @@ class MegaMoE:
             max_tok_per_rank=comb_cfg.max_num_inp_token_per_rank,
             experts_per_token=k,
             xcd_swizzle=xcd_swizzle,
-            use_token_flag_sync=self._g2_use_token_flag_sync,
             doweight_fused=self._g2_doweight_fused,
         )
         self._g2_launch_by_tile[cfg] = lf
@@ -1041,8 +1036,6 @@ class MegaMoE:
             comb_op._fx_p2p_comb_inp,
             addr_wts_buf,
             comb_op._fx_p2p_comb_inp_wts,
-            comb_op._fx_local_counter,
-            comb_op._fx_p2p_comb_flag,
             comb_op._fx_out_total_recv,
         )
         compiled = self._g2_compiled_by_tile.get(cfg)
