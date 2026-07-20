@@ -1739,6 +1739,10 @@ if torch is not None:
         assert (
             x.dtype == weight.dtype == bias.dtype
         ), f"x/weight/bias dtypes must match, got {x.dtype}/{weight.dtype}/{bias.dtype}"
-        x_flat = x.reshape(-1, N)
-        out_flat = LayerNormFunction.apply(x_flat, weight, bias, eps)
+        # Raw-pointer kernels reconstruct dense rows and stride-1 affine
+        # vectors, so materialize those layouts at the public boundary.
+        x_flat = x.reshape(-1, N).contiguous()
+        weight_flat = weight.contiguous()
+        bias_flat = bias.contiguous()
+        out_flat = LayerNormFunction.apply(x_flat, weight_flat, bias_flat, eps)
         return out_flat.reshape(x.shape)

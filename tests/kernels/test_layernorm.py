@@ -1319,6 +1319,44 @@ def test_layernorm_pointer_storage_offset(M, N, dtype):
     torch.testing.assert_close(bias.grad.to(DTYPE_FP32), dbias_ref, rtol=grad_rtol, atol=grad_atol)
 
 
+def test_layernorm_strided_input_and_affine_params():
+    """Public layernorm materializes layouts required by its raw-pointer kernels."""
+    torch.manual_seed(0)
+    M, N = 3, 257
+
+    x_storage = torch.randn((2 * M, N), device="cuda", dtype=DTYPE_FP32)
+    weight_storage = torch.randn((2 * N,), device="cuda", dtype=DTYPE_FP32)
+    # Keep N elements allocated so a layout regression reads in-bounds data
+    # instead of risking an out-of-bounds access in optimized Python mode.
+    bias_storage = torch.randn((N,), device="cuda", dtype=DTYPE_FP32)
+
+    x = x_storage[::2].detach().requires_grad_(True)
+    weight = weight_storage[::2].detach().requires_grad_(True)
+    bias = bias_storage[:1].expand(N).detach().requires_grad_(True)
+    dout = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32)
+
+    assert x.stride() == (2 * N, 1)
+    assert weight.stride() == (2,)
+    assert bias.stride() == (0,)
+    assert not x.is_contiguous()
+    assert not weight.is_contiguous()
+    assert not bias.is_contiguous()
+
+    out = layernorm(x, weight, bias)
+    out.backward(dout)
+
+    x_ref = x.detach().clone().requires_grad_(True)
+    weight_ref = weight.detach().clone().requires_grad_(True)
+    bias_ref = bias.detach().clone().requires_grad_(True)
+    out_ref = torch.nn.functional.layer_norm(x_ref, (N,), weight_ref, bias_ref, EPS)
+    out_ref.backward(dout)
+
+    torch.testing.assert_close(out, out_ref, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(x.grad, x_ref.grad, rtol=1e-4, atol=1e-3)
+    torch.testing.assert_close(weight.grad, weight_ref.grad, rtol=1e-4, atol=1e-2)
+    torch.testing.assert_close(bias.grad, bias_ref.grad, rtol=1e-4, atol=1e-2)
+
+
 @pytest.mark.multi_gpu
 def test_layernorm_multi_gpu():
     """Compiled-fn cache must not reuse a device-0 kernel on device 1 (would fault)."""
