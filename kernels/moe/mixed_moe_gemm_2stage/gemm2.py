@@ -19,8 +19,8 @@ from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.common.layout_utils import crd2idx, idx2crd
 from kernels.common.layout_utils import get as layout_get
 from kernels.common.mem_ops import buffer_atomic_add
-from kernels.mma.mfma_epilogues import c_shuffle_epilog
-from kernels.mma.mfma_preshuffle_pipeline import (
+from kernels.common.mma.mfma_epilogues import c_shuffle_epilog
+from kernels.common.mma.mfma_preshuffle_pipeline import (
     _buffer_load_vec,
     buffer_copy_gmem16_dwordx4,
     lds_store_4b_xor16,

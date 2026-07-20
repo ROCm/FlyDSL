@@ -1229,7 +1229,7 @@ def _compute_pipeline_plan(
     ``TDM_PER_STEP`` and the derived fence counts account for the extra
     ``tensor_load_gather`` instructions issued for scales.
     """
-    from kernels.mma.pipeline_utils import make_tail_plan
+    from kernels.common.mma.pipeline_utils_gfx1250 import make_tail_plan
 
     pre_loaded = int(num_buffers) - 1
     loop_iters = (num_k_tiles - pre_loaded) // int(num_buffers)
