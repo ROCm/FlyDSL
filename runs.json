@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-21T04:26:52Z",
+ "updated": "2026-07-21T04:33:36Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -53,11 +53,11 @@
    "branch": "pa-decode-tile",
    "event": "pull_request",
    "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29797943621",
    "created_at": "2026-07-21T03:13:10Z",
-   "updated_at": "2026-07-21T03:21:00Z",
+   "updated_at": "2026-07-21T04:30:56Z",
    "actor": "fsx950223",
    "jobs": [
     {
@@ -81,10 +81,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-21T03:15:41Z",
-     "completed_at": null,
+     "completed_at": "2026-07-21T04:30:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29797943621/job/88533229532"
     }
    ]
