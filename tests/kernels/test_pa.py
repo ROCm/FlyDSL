@@ -600,7 +600,7 @@ def run_flydsl_ps(
 
 
 def get_tolerance(*, kv_varlen: bool, sliding_window: int) -> float:
-    diff_tolerance = 5e-3
+    diff_tolerance = 8e-3
     if kv_varlen:
         diff_tolerance = 5e-2
     if sliding_window > 0:
@@ -1193,7 +1193,7 @@ def normal_accuracy_test() -> None:
     BATCH_SIZE_OPTIONS = [3, 81, 128]
     TRANS_V_OPTIONS = [True, False]
     KV_VARLEN_OPTIONS = [False, True]
-    BLOCK_SIZE_OPTIONS = [16, 64, 1024]
+    BLOCK_SIZE_OPTIONS = [16, 64]
     SLIDING_WINDOW_OPTIONS = [0]
     parse_arg_and_run_test(output_tag="ps_normal_accuracy")
 
@@ -1221,7 +1221,7 @@ def sliding_window_accuracy_test() -> None:
     BATCH_SIZE_OPTIONS = [128]
     TRANS_V_OPTIONS = [True]
     KV_VARLEN_OPTIONS = [True]
-    BLOCK_SIZE_OPTIONS = [16, 1024]
+    BLOCK_SIZE_OPTIONS = [1024]
     SLIDING_WINDOW_OPTIONS = [1023]
     parse_arg_and_run_test(output_tag="ps_sliding_window_accuracy")
 

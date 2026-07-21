@@ -1121,7 +1121,15 @@ def compile_pa_decode_tile(
                 if warp == 0 and rgroup == 0:
                     base = ((seq * n_kv + kv_h) * NP + part) * TOTAL_ROWS + row
                     if row < TOTAL_ROWS:
-                        pmax_ptr[base] = o_final[_m_slot(m)]
+                        # The running max is carried internally in log2 units
+                        # (score * softmax_scale * LOG2E, see scale_qk) so the
+                        # in-kernel exp2 is exact. The shared reduce kernel
+                        # (compile_pa_decode_sw_reduce) expects per-partition
+                        # max-logits in natural-log units -- it re-applies LOG2E
+                        # itself when combining partitions -- so convert back
+                        # here to avoid double-counting LOG2E in the reduce's
+                        # cross-partition rescale.
+                        pmax_ptr[base] = o_final[_m_slot(m)] * fx.Float32(1.0 / LOG2E)
                         psum_ptr[base] = l_row
 
     @flyc.jit
