@@ -105,44 +105,35 @@ constexpr int32_t kOuterStrideUnset = static_cast<int32_t>(0x80000000);
 // is assumed 1), imm_offset (i64)}. See CopyAtom.td for field semantics.
 static constexpr unsigned kMaxTdmRank = 5;
 
+// Struct slots for the per-dim geometry: extent_i at kExtentSlot0+i (i32, i in
+// 0..kMaxTdmRank-1), stride_i at kStrideSlot0+i (i64, i in 0..kMaxTdmRank-2).
+// These are TDM-private (not shared AtomStateField cases); see tdmGeomSlot.
+static constexpr unsigned kExtentSlot0 = 1;
+static constexpr unsigned kStrideSlot0 = kExtentSlot0 + kMaxTdmRank; // 6
+
 std::optional<unsigned> CopyOpGFX1250TDMType::getFieldIndex(AtomStateField field) {
   switch (field) {
   case AtomStateField::WorkgroupMask:
     return 0;
-  case AtomStateField::Extent0:
-    return 1;
-  case AtomStateField::Extent1:
-    return 2;
-  case AtomStateField::Extent2:
-    return 3;
-  case AtomStateField::Extent3:
-    return 4;
-  case AtomStateField::Extent4:
-    return 5;
-  case AtomStateField::Stride0:
-    return 6;
-  case AtomStateField::Stride1:
-    return 7;
-  case AtomStateField::Stride2:
-    return 8;
-  case AtomStateField::Stride3:
-    return 9;
   // Byte offset added to the global base at lowering (i64, carry-safe). Lets a
   // K-loop advance the tile by bumping one scalar (imm_offset) instead of
   // re-deriving the base pointer. Default 0 folds away.
   case AtomStateField::ImmOffset:
-    return 10;
+    return kStrideSlot0 + (kMaxTdmRank - 1); // 10, last slot after the strides
   default:
     return std::nullopt;
   }
 }
 
-// The i'th extent / stride state field (Extent0.., Stride0..).
-static AtomStateField extentField(unsigned i) {
-  return static_cast<AtomStateField>(static_cast<unsigned>(AtomStateField::Extent0) + i);
-}
-static AtomStateField strideField(unsigned i) {
-  return static_cast<AtomStateField>(static_cast<unsigned>(AtomStateField::Stride0) + i);
+// TDM-private per-dim geometry fields, resolved by name instead of via the shared
+// AtomStateField enum: "extent_i" -> kExtentSlot0+i, "stride_i" -> kStrideSlot0+i.
+static std::optional<unsigned> tdmGeomSlot(StringRef name) {
+  unsigned i;
+  if (name.consume_front("extent_") && !name.getAsInteger(10, i) && i < kMaxTdmRank)
+    return kExtentSlot0 + i;
+  if (name.consume_front("stride_") && !name.getAsInteger(10, i) && i < kMaxTdmRank - 1)
+    return kStrideSlot0 + i;
+  return std::nullopt;
 }
 
 Type CopyOpGFX1250TDMType::getConvertedType(MLIRContext *ctx) const {
@@ -163,15 +154,18 @@ Value CopyOpGFX1250TDMType::getDefaultState(OpBuilder &builder, Location loc) co
     state =
         LLVM::InsertValueOp::create(builder, loc, state, v, ArrayRef<int64_t>{*getFieldIndex(f)});
   };
+  auto insertSlot = [&](unsigned slot, Value v) {
+    state = LLVM::InsertValueOp::create(builder, loc, state, v, ArrayRef<int64_t>{slot});
+  };
   Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
   Value noClamp = arith::ConstantIntOp::create(builder, loc, 0x7FFFFFFF, 32);
   Value strideUnset = arith::ConstantIntOp::create(builder, loc, kOuterStrideUnset, 64);
   Value zero64 = arith::ConstantIntOp::create(builder, loc, 0, 64);
   insert(AtomStateField::WorkgroupMask, zero);
   for (unsigned i = 0; i < kMaxTdmRank; ++i)
-    insert(extentField(i), noClamp);
+    insertSlot(kExtentSlot0 + i, noClamp);
   for (unsigned i = 0; i < kMaxTdmRank - 1; ++i)
-    insert(strideField(i), strideUnset);
+    insertSlot(kStrideSlot0 + i, strideUnset);
   insert(AtomStateField::ImmOffset, zero64);
   return state;
 }
@@ -181,10 +175,13 @@ Value CopyOpGFX1250TDMType::setAtomState(OpBuilder &builder, Location loc, Value
   auto fieldStr = dyn_cast<StringAttr>(fieldAttr);
   if (!fieldStr)
     return nullptr;
-  auto field = symbolizeAtomStateField(fieldStr.getValue());
-  if (!field)
-    return nullptr;
-  auto idx = getFieldIndex(*field);
+  // Per-dim extent/stride are TDM-private (resolved by name); everything else goes
+  // through the shared AtomStateField enum.
+  std::optional<unsigned> idx = tdmGeomSlot(fieldStr.getValue());
+  if (!idx) {
+    if (auto field = symbolizeAtomStateField(fieldStr.getValue()))
+      idx = getFieldIndex(*field);
+  }
   if (!idx)
     return nullptr;
   return LLVM::InsertValueOp::create(builder, loc, atomStruct, fieldValue, ArrayRef<int64_t>{*idx});
@@ -305,15 +302,18 @@ LogicalResult CopyOpGFX1250TDMType::emitAtomCall(OpBuilder &builder, Location lo
     return LLVM::ExtractValueOp::create(builder, loc, atomVal,
                                         ArrayRef<int64_t>{*getFieldIndex(f)});
   };
+  auto slotField = [&](unsigned slot) {
+    return LLVM::ExtractValueOp::create(builder, loc, atomVal, ArrayRef<int64_t>{slot});
+  };
 
   // Per-dim (tensor order) tensor extent (i32) and stride in elements (i64). The
   // innermost stride (dim rank-1) is assumed 1; stride_i covers dims 0..rank-2,
   // falling back to the static layout stride when the state slot is left unset.
   SmallVector<Value> extent(rank), strideElems(rank);
   for (int32_t i = 0; i < rank; ++i)
-    extent[i] = stateField(extentField(i));
+    extent[i] = slotField(kExtentSlot0 + i);
   for (int32_t i = 0; i < rank - 1; ++i) {
-    Value st = stateField(strideField(i));
+    Value st = slotField(kStrideSlot0 + i);
     if (hasStaticStride) {
       int64_t s = layout.getStride().at(i).getLeafAsInt().getValue();
       Value unset =
