@@ -292,8 +292,8 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
             # Accept the result attribute names exposed by the supported MLIR Python bindings.
             return getattr(op, "result", getattr(op, "res", op.results[0]))
 
-        def read_pinned_accumulator(acc_idx):
-            acc_pin = PIN_ACC_BASE + acc_idx * 4
+        def read_physical_accumulator_slot(slot_idx):
+            acc_pin = PIN_ACC_BASE + slot_idx * 4
             r0 = _inline_asm_i32(f"v_accvgpr_read_b32 $0, a[{acc_pin + 0}]", "=v")
             r1 = _inline_asm_i32(f"v_accvgpr_read_b32 $0, a[{acc_pin + 1}]", "=v")
             r2 = _inline_asm_i32(f"v_accvgpr_read_b32 $0, a[{acc_pin + 2}]", "=v")
@@ -451,6 +451,33 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
                 has_side_effects=True,
             )
 
+        def pinned_final_mfma(dst_slot, old_acc_idx, a_frag, b_frag, a_scale, b_scale, mi, ni):
+            # Final-page form used by HK: destination and previous partial sum
+            # may be different AGPR ranges.  Once old_acc_idx is consumed, its
+            # physical slot is dead and can be reused as a later destination.
+            dst_pin = PIN_ACC_BASE + dst_slot * 4
+            old_pin = PIN_ACC_BASE + old_acc_idx * 4
+            llvm.InlineAsmOp(
+                None,
+                [
+                    arith._to_raw(a_frag),
+                    arith._to_raw(b_frag),
+                    arith._to_raw(a_scale),
+                    arith._to_raw(b_scale),
+                ],
+                (
+                    f"v_mfma_scale_f32_16x16x128_f8f6f4 "
+                    f"a[{dst_pin}:{dst_pin + 3}], "
+                    f"$0, $1, "
+                    f"a[{old_pin}:{old_pin + 3}], "
+                    f"$2, $3 "
+                    f"op_sel:[{mi & 1},{ni & 1},0] "
+                    f"op_sel_hi:[{mi >> 1},{ni >> 1},0]"
+                ),
+                (f"v,v,v,v,~{{a{dst_pin}}},~{{a{dst_pin + 1}}},~{{a{dst_pin + 2}}},~{{a{dst_pin + 3}}}"),
+                has_side_effects=True,
+            )
+
         def mfma_4n(acc_base, a_frag, a_scale, b0, b1, b2, b3, bs0, bs1, bs2, bs3):
             """Emit four N-direction scaled MFMAs into fixed physical AGPR accumulators."""
             mi = (acc_base // MFMA_N_PER_SUBTILE) % MFMA_M_PER_SUBTILE
@@ -464,33 +491,23 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
             pinned_mfma(acc_base + 0, a_frag, b0, a_scale, bs0, mi, ni_base + 0)
             pinned_mfma(acc_base + 1, a_frag, b1, a_scale, bs1, mi, ni_base + 1)
 
-        def store_output():
-            c_n_idx = fx.Index(c_n)
-            for sm in range_constexpr(2):
-                # HK store mapping: each wave owns the same 64x64 warp-position
-                # inside all four 128x128 quadrants, not one contiguous 128x128 tile.
-                subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
+        def store_acc_vector_for_logical_idx(logical_acc_idx, acc):
+            subtile_id = logical_acc_idx // (MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE)
+            local_idx = logical_acc_idx % (MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE)
+            sm = subtile_id // 2
+            sn = subtile_id % 2
+            mi = local_idx // MFMA_N_PER_SUBTILE
+            ni = local_idx % MFMA_N_PER_SUBTILE
 
-                for sn in range_constexpr(2):
-                    subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
-                    subtile_id = sm * 2 + sn
+            subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
+            subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
+            row_base = subtile_m_idx * SUBTILE_M + fx.Index(mi * MFMA_M) + lane_div_16 * 4
+            col = subtile_n_idx * SUBTILE_N + fx.Index(ni * MFMA_N) + lane_mod_16
+            for ii in range_constexpr(4):
+                row = row_base + fx.Index(ii)
+                c_idx = row * fx.Index(c_n) + col
+                buffer_ops.buffer_store(Vec(acc)[ii].to(fx.Float16), c_rsrc, c_idx)
 
-                    subtile_m_base = subtile_m_idx * SUBTILE_M
-                    subtile_n_base = subtile_n_idx * SUBTILE_N
-
-                    for mi in range_constexpr(MFMA_M_PER_SUBTILE):
-                        row_base = subtile_m_base + fx.Index(mi * MFMA_M) + lane_div_16 * 4
-
-                        for ni in range_constexpr(MFMA_N_PER_SUBTILE):
-                            col = subtile_n_base + fx.Index(ni * MFMA_N) + lane_mod_16
-                            acc_idx = _acc_idx(subtile_id, mi, ni)
-                            acc = read_pinned_accumulator(acc_idx)
-
-                            for ii in range_constexpr(4):
-                                row = row_base + fx.Index(ii)
-                                c_idx = row * c_n_idx + col
-                                val = Vec(acc)[ii].to(fx.Float16)
-                                buffer_ops.buffer_store(val, c_rsrc, c_idx)
 
         # Explicit register coordinates for HK-style four-quadrant mapping.
         # BLOCK_M/BLOCK_N are 256x256.  Four waves map to warp positions
@@ -820,15 +837,12 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
             a00, a01, a02, a03, as00, as01, as02, as03 = a0_regs
             b00, b01, b02, b03, bs00, bs01, bs02, bs03 = b0_regs
 
+            # Materialize the remaining final-page A/B fragments once.  The
+            # subsequent schedule is entirely register/AGPR traffic.
             b10, bs10 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 0)
             b11, bs11 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 1)
             b12, bs12 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 2)
             b13, bs13 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 3)
-
-            mfma_4n(_acc_idx(0, 0, 0), a00, as00, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
-            mfma_4n(_acc_idx(0, 1, 0), a01, as01, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
-            mfma_4n(_acc_idx(0, 2, 0), a02, as02, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
-            mfma_4n(_acc_idx(0, 3, 0), a03, as03, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
 
             rocdl.sched_barrier(0)
             _barrier(lgkmcnt=0)
@@ -839,24 +853,66 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
             a12, as12 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 2)
             a13, as13 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 3)
 
-            mfma_4n(_acc_idx(1, 0, 0), a00, as00, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
-            mfma_4n(_acc_idx(1, 1, 0), a01, as01, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
-            mfma_4n(_acc_idx(1, 2, 0), a02, as02, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
-            mfma_4n(_acc_idx(1, 3, 0), a03, as03, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
-
             rocdl.sched_barrier(0)
             _barrier(lgkmcnt=0)
             rocdl.sched_barrier(0)
 
-            mfma_4n(_acc_idx(2, 0, 0), a10, as10, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
-            mfma_4n(_acc_idx(2, 1, 0), a11, as11, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
-            mfma_4n(_acc_idx(2, 2, 0), a12, as12, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
-            mfma_4n(_acc_idx(2, 3, 0), a13, as13, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
+            a_frags = (a00, a01, a02, a03, a10, a11, a12, a13)
+            a_scales = (as00, as01, as02, as03, as10, as11, as12, as13)
+            b_frags = (b00, b01, b02, b03, b10, b11, b12, b13)
+            b_scales = (bs00, bs01, bs02, bs03, bs10, bs11, bs12, bs13)
 
-            mfma_4n(_acc_idx(3, 0, 0), a10, as10, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
-            mfma_4n(_acc_idx(3, 1, 0), a11, as11, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
-            mfma_4n(_acc_idx(3, 2, 0), a12, as12, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
-            mfma_4n(_acc_idx(3, 3, 0), a13, as13, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
+            # Rolling final-page epilogue.
+            #
+            # Finalize accumulators in their own physical AGPR slots, but delay
+            # each AGPR read/store until several independent final MFMAs have
+            # been issued. 
+            #
+            #   MFMA 0, MFMA 1, MFMA 2, MFMA 3, drain 0,
+            #   MFMA 4, drain 1, MFMA 5, drain 2, ...
+            #
+            # The buffer stores are only issued here; they may remain in flight
+            # while later MFMAs and accumulator drains continue.
+            FINAL_EPILOGUE_DEPTH = 4
+            pending = []
+
+            for old_acc_idx in range_constexpr(ACCS_PER_WAVE):
+                subtile_id = old_acc_idx // (MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE)
+                local_idx = old_acc_idx % (MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE)
+                sm = subtile_id // 2
+                sn = subtile_id % 2
+                mi = local_idx // MFMA_N_PER_SUBTILE
+                ni = local_idx % MFMA_N_PER_SUBTILE
+
+                a_frag_idx = sm * MFMA_M_PER_SUBTILE + mi
+                b_frag_idx = sn * MFMA_N_PER_SUBTILE + ni
+
+                # Final MFMA remains in-place.  The logical accumulator's own
+                # AGPR slot is unique and cannot conflict with another pending
+                # result, so no ad-hoc physical-slot permutation is needed.
+                pinned_final_mfma(
+                    old_acc_idx,
+                    old_acc_idx,
+                    a_frags[a_frag_idx],
+                    b_frags[b_frag_idx],
+                    a_scales[a_frag_idx],
+                    b_scales[b_frag_idx],
+                    mi,
+                    ni,
+                )
+                pending.append(old_acc_idx)
+
+                # Drain the oldest completed result only after enough newer
+                # independent MFMAs have supplied the MFMA->AGPR-read spacing.
+                if len(pending) == FINAL_EPILOGUE_DEPTH:
+                    drain_acc_idx = pending.pop(0)
+                    acc = read_physical_accumulator_slot(drain_acc_idx)
+                    store_acc_vector_for_logical_idx(drain_acc_idx, acc)
+
+            # Flush the final results after all final-page MFMAs have issued.
+            for drain_acc_idx in pending:
+                acc = read_physical_accumulator_slot(drain_acc_idx)
+                store_acc_vector_for_logical_idx(drain_acc_idx, acc)
 
         # Prologue: stage K0/K1 data into ping-pong LDS pages. Scales are not staged in
         # LDS: As/Bs are already MFMA-ready preshuffled packed uint32 [K128, row],
@@ -966,11 +1022,6 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
             )
             hk_one_k_final(lds_a0, lds_b0, a0_regs, b0_regs, scales0)
 
-        rocdl.sched_barrier(0)
-        _barrier()
-        rocdl.sched_barrier(0)
-
-        store_output()
 
     @flyc.jit
     def launch_gemm(
