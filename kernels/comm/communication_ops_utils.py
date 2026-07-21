@@ -89,6 +89,7 @@ def load_i64_global(addr_i64):
 # span) choice is codegen-neutral here; the axis that actually matters is the
 # memory scope (system = cross-card visible vs agent = single card).
 
+
 def atomic_add_global_at(addr_i64, val, syncscope="one-as"):
     """Monotonic global ``atomic fetch-and-add``; returns the old value.
 
@@ -101,8 +102,11 @@ def atomic_add_global_at(addr_i64, val, syncscope="one-as"):
     ptr = _to_ptr_global(addr_i64)
     kwargs = {} if syncscope is None else {"syncscope": syncscope}
     return _llvm_d.AtomicRMWOp(
-        _llvm_d.AtomicBinOp.add, ptr, arith.unwrap(val),
-        _llvm_d.AtomicOrdering.monotonic, **kwargs,
+        _llvm_d.AtomicBinOp.add,
+        ptr,
+        arith.unwrap(val),
+        _llvm_d.AtomicOrdering.monotonic,
+        **kwargs,
     ).res
 
 
@@ -118,8 +122,11 @@ def atomic_xchg_global_at(addr_i64, val, syncscope="agent"):
     ptr = _to_ptr_global(addr_i64)
     kwargs = {} if syncscope is None else {"syncscope": syncscope}
     return _llvm_d.AtomicRMWOp(
-        _llvm_d.AtomicBinOp.xchg, ptr, arith.unwrap(val),
-        _llvm_d.AtomicOrdering.monotonic, **kwargs,
+        _llvm_d.AtomicBinOp.xchg,
+        ptr,
+        arith.unwrap(val),
+        _llvm_d.AtomicOrdering.monotonic,
+        **kwargs,
     ).res
 
 

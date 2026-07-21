@@ -2321,7 +2321,9 @@ def run_profiler(rank, world_size, args):
     meta["token_bytes_per_tok"] = cfg.dispatch_token_bytes
     meta["combine_dtype"] = str(_comb_dtype)
     if rank == 0:
-        print(f"[setup] per-rank total_recv = {total_recv_per_rank} tokens; " f"token bytes = {cfg.dispatch_token_bytes}")
+        print(
+            f"[setup] per-rank total_recv = {total_recv_per_rank} tokens; " f"token bytes = {cfg.dispatch_token_bytes}"
+        )
 
     # profile+eager needs an external warmup; the other three combos
     # warm up inside their own functions.

@@ -323,8 +323,21 @@ class FlyDSLDispatchGroupMajorOp:
     count-first COMPACT layout (smaller buffers, scales to full batch size).
     """
 
-    def __init__(self, *, rank, world_size, hidden_dim, max_tok_per_rank, experts_per_rank,
-                 topk, data_type, unit_size, scale_dim, scale_type_size=1, compact=False):
+    def __init__(
+        self,
+        *,
+        rank,
+        world_size,
+        hidden_dim,
+        max_tok_per_rank,
+        experts_per_rank,
+        topk,
+        data_type,
+        unit_size,
+        scale_dim,
+        scale_type_size=1,
+        compact=False,
+    ):
         assert world_size <= 8
         # compact: count-first 2-pass compact layout (no per-expert cap reservation) -> smaller
         # num_valid_max (~npes*mtpr*topk vs epr*cap), scales to full bs.
@@ -390,9 +403,9 @@ class FlyDSLDispatchGroupMajorOp:
         self.num_valid = torch.zeros(2, dtype=torch.int32, device=self._dev)
         # total_recv (distinct recv count, == standard dispatch): per-token dedup bumps dest_ctr[dpe],
         # then a cross-PE recv_num signal accumulates it, so stage2 combine reads it natively.
-        self.total_recv = torch.zeros(1, dtype=torch.int32, device=self._dev)   # local; kernel accumulates
+        self.total_recv = torch.zeros(1, dtype=torch.int32, device=self._dev)  # local; kernel accumulates
         self.dest_ctr = torch.zeros(self.npes, dtype=torch.int32, device=self._dev)  # local send-count/dest
-        self.recv_num = self._sym((self.npes,), torch.int32)                    # symmetric: peers signal here
+        self.recv_num = self._sym((self.npes,), torch.int32)  # symmetric: peers signal here
         # compact all-gather count-first buffers: local count -> bigcnt all-gather -> each rank
         # computes my_base[ge] locally -> strict write with a local cursor (2 cross-PE rounds).
         self.compact_base = None
@@ -401,18 +414,18 @@ class FlyDSLDispatchGroupMajorOp:
         self.meta2 = None
         self.write_cursor = None
         if self.compact:
-            self.compact_base = self._sym((epr,), torch.int32)          # dense prefix-sum base per local expert
-            self.done2c = self._sym((npes,), torch.int32)               # COUNT cross-PE done-barrier (vs done2 WRITE)
+            self.compact_base = self._sym((epr,), torch.int32)  # dense prefix-sum base per local expert
+            self.done2c = self._sym((npes,), torch.int32)  # COUNT cross-PE done-barrier (vs done2 WRITE)
             self.gb_cnt = torch.zeros(1, dtype=torch.int64, device=self._dev)  # count-pass grid-arrival counter
-            self.meta2 = torch.zeros(1, dtype=torch.int32, device=self._dev)   # payload-ready flag
-            self.write_cursor = self._sym((epr,), torch.int32)          # phase-2 write cursor (reset only at kernel end)
-            self.done2cb = self._sym((npes,), torch.int32)              # cross-PE#1b: gate compact_base read in phase-2
+            self.meta2 = torch.zeros(1, dtype=torch.int32, device=self._dev)  # payload-ready flag
+            self.write_cursor = self._sym((epr,), torch.int32)  # phase-2 write cursor (reset only at kernel end)
+            self.done2cb = self._sym((npes,), torch.int32)  # cross-PE#1b: gate compact_base read in phase-2
             _te = npes * epr
-            self.local_hist = torch.zeros(_te, dtype=torch.int32, device=self._dev)     # per-launch reset
-            self.bigcnt = self._sym((npes * _te,), torch.int32)                          # [src][ge] all-gather
-            self.cnt_done = self._sym((npes,), torch.int32)                              # all-gather epoch barrier
-            self.my_base = torch.zeros(_te, dtype=torch.int32, device=self._dev)         # my tokens' base in each dest
-            self.local_cursor = torch.zeros(_te, dtype=torch.int32, device=self._dev)    # per-launch reset (write cursor)
+            self.local_hist = torch.zeros(_te, dtype=torch.int32, device=self._dev)  # per-launch reset
+            self.bigcnt = self._sym((npes * _te,), torch.int32)  # [src][ge] all-gather
+            self.cnt_done = self._sym((npes,), torch.int32)  # all-gather epoch barrier
+            self.my_base = torch.zeros(_te, dtype=torch.int32, device=self._dev)  # my tokens' base in each dest
+            self.local_cursor = torch.zeros(_te, dtype=torch.int32, device=self._dev)  # per-launch reset (write cursor)
 
     def _p2p_table(self, t):
         return build_p2p_table(t, self.rank, self.npes, self._dev)
@@ -425,7 +438,7 @@ class FlyDSLDispatchGroupMajorOp:
         self.p2p_idx_em = self._p2p_table(self.idx_em)
         self.p2p_wts_em = self._p2p_table(self.wts_em)
         self.p2p_srcmap_em = self._p2p_table(self.srcmap_em)
-        self.p2p_recv_num = self._p2p_table(self.recv_num)   # Plan A: cross-PE recv-count signal target
+        self.p2p_recv_num = self._p2p_table(self.recv_num)  # Plan A: cross-PE recv-count signal target
         if self.compact:
             self.p2p_compact_base = self._p2p_table(self.compact_base)
             self.p2p_done2c = self._p2p_table(self.done2c)
@@ -441,13 +454,22 @@ class FlyDSLDispatchGroupMajorOp:
     def _ll_views(self):
         rx_dtype = torch.float4_e2m1fn_x2 if _is_fp4_dtype(self.dtype) else self.dtype
         rx_em_view = self.rx_em.view(rx_dtype).view(self.num_valid_max, self.row_view)
-        scale_em_view = self.scale_em.view(torch.uint8).view(self.num_valid_max, max(1, self.scale_n_i32 * 4))[:, :self.scale_bytes]
+        scale_em_view = self.scale_em.view(torch.uint8).view(self.num_valid_max, max(1, self.scale_n_i32 * 4))[
+            :, : self.scale_bytes
+        ]
         scale_em_i32 = self.scale_em.view(self.num_valid_max, max(1, self.scale_n_i32))
-        return dict(rx_em=rx_em_view, scale_em=scale_em_view, scale_em_i32=scale_em_i32,
-                    idx_em=self.idx_em, wts_em=self.wts_em, srcmap_em=self.srcmap_em,
-                    sorted_expert_ids=self.sorted_expert_ids, tile_row_base=self.tile_row_base,
-                    num_valid=self.num_valid, dedup_rx=None)
-
+        return dict(
+            rx_em=rx_em_view,
+            scale_em=scale_em_view,
+            scale_em_i32=scale_em_i32,
+            idx_em=self.idx_em,
+            wts_em=self.wts_em,
+            srcmap_em=self.srcmap_em,
+            sorted_expert_ids=self.sorted_expert_ids,
+            tile_row_base=self.tile_row_base,
+            num_valid=self.num_valid,
+            dedup_rx=None,
+        )
 
 
 class FlyDSLDispatchCombineIntraNodeOp:
@@ -535,11 +557,16 @@ class FlyDSLDispatchCombineIntraNodeOp:
         self._gm = None
         if getattr(config, "enable_group_major", False):
             self._gm = FlyDSLDispatchGroupMajorOp(
-                rank=config.rank, world_size=config.world_size, hidden_dim=config.hidden_dim,
+                rank=config.rank,
+                world_size=config.world_size,
+                hidden_dim=config.hidden_dim,
                 max_tok_per_rank=config.max_num_inp_token_per_rank,
-                experts_per_rank=config.num_experts_per_rank, topk=config.num_experts_per_token,
-                data_type=config.dispatch_dtype, unit_size=config.gm_unit_size,
-                scale_dim=config.scale_dim, scale_type_size=config.scale_type_size,
+                experts_per_rank=config.num_experts_per_rank,
+                topk=config.num_experts_per_token,
+                data_type=config.dispatch_dtype,
+                unit_size=config.gm_unit_size,
+                scale_dim=config.scale_dim,
+                scale_type_size=config.scale_type_size,
                 compact=config.gm_compact,
             )
             # Unify total_recv: the fused dispatch prologue accumulates distinct-recv into
@@ -570,9 +597,9 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
         disp_tb = cfg.dispatch_token_bytes
         comb_tb = cfg.combine_token_bytes
-        tok_i16_mr = (mr * disp_tb + 1) // 2               # dispatch output (dispatch_dtype)
-        tok_i16_mr_worst = (mr_worst_inp * comb_tb + 1) // 2   # combine input, worst-case (combine_dtype)
-        tok_i16_mt = (mt * comb_tb + 1) // 2               # combine output (combine_dtype)
+        tok_i16_mr = (mr * disp_tb + 1) // 2  # dispatch output (dispatch_dtype)
+        tok_i16_mr_worst = (mr_worst_inp * comb_tb + 1) // 2  # combine input, worst-case (combine_dtype)
+        tok_i16_mt = (mt * comb_tb + 1) // 2  # combine output (combine_dtype)
 
         self.shmem_disp_out_tok = mori_shmem_create_tensor((tok_i16_mr,), torch.int16)
         self.shmem_disp_out_wts = mori_shmem_create_tensor((mr * k,), torch.float32)
@@ -1070,13 +1097,25 @@ class FlyDSLDispatchCombineIntraNodeOp:
         if compiled is None:
             cache[key] = flyc.compile(
                 fn,
-                fx.Int64(inp_ptr), *fixed, fx.Int64(wts_ptr), *tail, fx.Int64(prx_ptr), *std,
-                cur_tok, stream,
+                fx.Int64(inp_ptr),
+                *fixed,
+                fx.Int64(wts_ptr),
+                *tail,
+                fx.Int64(prx_ptr),
+                *std,
+                cur_tok,
+                stream,
             )
         else:
             compiled(
-                inp_ptr, *fixed, wts_ptr, *tail, prx_ptr, *std,
-                cur_tok, stream,
+                inp_ptr,
+                *fixed,
+                wts_ptr,
+                *tail,
+                prx_ptr,
+                *std,
+                cur_tok,
+                stream,
             )
 
     def _launch_combine(self, input, weights, indices, packed_recv_x, cur_tok, enable_weights, skip_stage1):
