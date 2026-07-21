@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-21T12:36:25Z",
+ "updated": "2026-07-21T12:50:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29831297661,
+   "pr": 869,
+   "commit": "441630b024abc9a459a47061ba930cee652edf68",
+   "branch": "kernel/sage-attention-cdna",
+   "event": "pull_request",
+   "title": "[Kernel] Add CDNA SageAttention kernel",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29831297661",
+   "created_at": "2026-07-21T12:43:30Z",
+   "updated_at": "2026-07-21T12:46:58Z",
+   "actor": "LiuYinfeng01",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-21T12:45:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29831297661/job/88636981087"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-21T12:46:57Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29831297661/job/88636981096"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-21T12:46:17Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29831297661/job/88636981136"
+    }
+   ]
+  },
   {
    "run_id": 29825760749,
    "pr": 850,
@@ -2219,49 +2262,6 @@
      "started_at": "2026-07-17T09:54:11Z",
      "completed_at": "2026-07-17T10:13:15Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29571437772/job/87856170944"
-    }
-   ]
-  },
-  {
-   "run_id": 29570585492,
-   "pr": 825,
-   "commit": "1b3509bd388cb6fa72a98bbe68a79b9faec00955",
-   "branch": "pa-decode-tile",
-   "event": "pull_request",
-   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29570585492",
-   "created_at": "2026-07-17T09:36:41Z",
-   "updated_at": "2026-07-17T09:51:48Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-17T09:38:25Z",
-     "completed_at": "2026-07-17T09:51:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29570585492/job/87853471893"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-17T09:39:41Z",
-     "completed_at": "2026-07-17T09:51:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29570585492/job/87853471895"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-17T09:39:53Z",
-     "completed_at": "2026-07-17T09:51:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29570585492/job/87853471923"
     }
    ]
   }
