@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-21T11:35:25Z",
+ "updated": "2026-07-21T12:36:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,38 +10,38 @@
    "branch": "binding_fa_opt",
    "event": "pull_request",
    "title": "[Perf]optimize flydsl flash attention kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29825760749",
    "created_at": "2026-07-21T11:21:08Z",
-   "updated_at": "2026-07-21T11:23:34Z",
+   "updated_at": "2026-07-21T12:32:47Z",
    "actor": "binding7012",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-21T11:23:21Z",
-     "completed_at": null,
+     "completed_at": "2026-07-21T11:37:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29825760749/job/88618970490"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-21T11:23:33Z",
-     "completed_at": null,
+     "completed_at": "2026-07-21T12:11:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29825760749/job/88618970500"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-21T11:23:20Z",
-     "completed_at": null,
+     "completed_at": "2026-07-21T12:32:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29825760749/job/88618970521"
     }
    ]
