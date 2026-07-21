@@ -732,9 +732,7 @@ def run_pa_decode_ps_test(
         gluon_time = measure_us(gluon_call)
         gluon_tol = get_tolerance(kv_varlen=kv_varlen, sliding_window=sliding_window)
         print("\nGluon vs Torch:")
-        torch.testing.assert_close(
-            gluon_output, reference_output, atol=gluon_tol, rtol=gluon_tol
-        )
+        torch.testing.assert_close(gluon_output, reference_output, atol=gluon_tol, rtol=gluon_tol)
         print("Gluon vs Torch PASSED")
 
     kv_page_indices, kv_indptr = build_ps_page_data(
@@ -758,10 +756,19 @@ def run_pa_decode_ps_test(
     ps_value_scale: torch.Tensor = value_scale_original
     flydsl_ps_output = torch.empty_like(reference_output)
 
+    # Mirror pa_decode_tile's own num_partitions choice (keyed on
+    # batch/kv-heads/max_blocks/block_size) so the FlyDSL PS buffers are sized
+    # exactly as the tile kernel picks; sliding_window keeps the SW path's
+    # window-based count.
     max_context_partition_num = get_recommended_splits(
-        sliding_window,
-        context_partition_size,
-        query_length,
+        batch_size,
+        num_kv_heads,
+        sliding_window=sliding_window,
+        context_partition_size=context_partition_size,
+        query_length=query_length,
+        max_blocks_per_seq=block_tables.shape[1],
+        block_size=block_size,
+        device=device,
     )
     # Preallocate the FlyDSL intermediate buffers (partial exp-sums / max-logits /
     # output) unconditionally so CUDA-graph capture works for every path, not just
@@ -806,9 +813,7 @@ def run_pa_decode_ps_test(
     flydsl_ps_time = measure_us(flydsl_ps_call)
     ps_tol = get_tolerance(kv_varlen=kv_varlen, sliding_window=sliding_window)
     print("\nFlyDSL PS vs Torch:")
-    torch.testing.assert_close(
-        flydsl_ps_output, reference_output, atol=ps_tol, rtol=ps_tol
-    )
+    torch.testing.assert_close(flydsl_ps_output, reference_output, atol=ps_tol, rtol=ps_tol)
     print("FlyDSL PS vs Torch PASSED")
 
     if HAS_GLUON:
