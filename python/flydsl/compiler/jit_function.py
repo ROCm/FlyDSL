@@ -45,6 +45,7 @@ from .kernel_function import (
     effective_fastmath_hint,
     func_def_location,
     get_gpu_module_body,
+    merge_compile_hints,
 )
 from .link_utils import _append_link_lib_options_to_attach_targets, _format_link_lib_options
 from .protocol import (
@@ -747,14 +748,11 @@ class PipelineConfig:
     external: bool
 
 
-def _pipeline_fragments_for_mode(backend) -> PipelineConfig:
+def _pipeline_fragments_for_mode(backend, *, compile_hints: dict) -> PipelineConfig:
     """Return pipeline configuration including optional external split."""
-    from .kernel_function import CompilationContext
-
-    hints = CompilationContext.get_compile_hints()
-    llvm_opts = hints.get("llvm_options")
+    llvm_opts = compile_hints.get("llvm_options")
     if _use_external_binary_codegen():
-        pre_binary_fragments, binary_fragment = backend.external_binary_pipeline_fragments(compile_hints=hints)
+        pre_binary_fragments, binary_fragment = backend.external_binary_pipeline_fragments(compile_hints=compile_hints)
         return PipelineConfig(
             fragments=[*pre_binary_fragments, binary_fragment],
             pre_binary=pre_binary_fragments,
@@ -763,7 +761,7 @@ def _pipeline_fragments_for_mode(backend) -> PipelineConfig:
             external=True,
         )
 
-    fragments = backend.pipeline_fragments(compile_hints=hints)
+    fragments = backend.pipeline_fragments(compile_hints=compile_hints)
     return PipelineConfig(
         fragments=fragments,
         pre_binary=None,
@@ -798,8 +796,10 @@ class MlirCompiler:
 
         backend = get_backend(arch=arch)
 
+        compile_hints = CompilationContext.get_compile_hints()
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
-        cfg = _pipeline_fragments_for_mode(backend)
+        backend.lower_compile_hints(module, compile_hints=compile_hints)
+        cfg = _pipeline_fragments_for_mode(backend, compile_hints=compile_hints)
         fragments = cfg.fragments
         pre_binary_fragments = cfg.pre_binary
         binary_fragment = cfg.binary_fragment
@@ -1203,6 +1203,10 @@ class JitFunction:
             return self
         return partial(self.__call__, obj)
 
+    def _effective_compile_hints(self):
+        """Resolve persistent defaults and the current thread-local overlay."""
+        return merge_compile_hints(self.compile_hints, CompilationContext.get_compile_hints())
+
     def _get_global_refs(self, owner_cls=None) -> List[Tuple[str, str, dict]]:
         """Memoized global-ref discovery (see :func:`_discover_global_refs`)."""
         cache = self._global_refs_cache
@@ -1280,7 +1284,7 @@ class JitFunction:
         self.cache_manager = JitCacheManager(cache_dir)
         self.cache_manager.load_all()
 
-    def _resolve_and_make_cache_key(self, bound_args):
+    def _resolve_and_make_cache_key(self, bound_args, *, effective_hints=None):
         """Resolve raw call values into JitArgument instances *in place* and
         build the tuple cache key from them.
 
@@ -1298,8 +1302,16 @@ class JitFunction:
         sig = self._sig
         # Re-read env vars on every call.
         key_parts = [("_env_", _cache_invalidating_env_values()), ("_target_", self._backend_target)]
-        if self.compile_hints:
-            key_parts.append(("_hints_", tuple(sorted((k, str(v)) for k, v in self.compile_hints.items()))))
+        if effective_hints is None:
+            effective_hints = self._effective_compile_hints()
+        if effective_hints:
+            hint_key = tuple(
+                sorted(
+                    (key, type(value).__module__, type(value).__qualname__, repr(value))
+                    for key, value in effective_hints.items()
+                )
+            )
+            key_parts.append(("_hints_", hint_key))
 
         for name, arg in bound_args.items():
             param = sig.parameters.get(name)
@@ -1349,9 +1361,11 @@ class JitFunction:
             cache[owner_cls] = (("_globals_", tuple(sorted(stable.items()))),) if stable else ()
         return cache[owner_cls]
 
-    def _build_full_cache_key(self, bound_arguments, *, owner_cls=None, bound_self=None):
+    def _build_full_cache_key(self, bound_arguments, *, owner_cls=None, bound_self=None, effective_hints=None):
         """Build the complete cache key: arg signatures + stable globals snapshot + self type."""
-        cache_key = self._globals_key_prefix(owner_cls) + self._resolve_and_make_cache_key(bound_arguments)
+        cache_key = self._globals_key_prefix(owner_cls) + self._resolve_and_make_cache_key(
+            bound_arguments, effective_hints=effective_hints
+        )
         if bound_self is not None:
             cache_key = (("_self_type_", type(bound_self)),) + cache_key
         return cache_key
@@ -1386,7 +1400,14 @@ class JitFunction:
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
 
-        cache_key = self._build_full_cache_key(bound.arguments, owner_cls=owner_cls, bound_self=bound_self)
+        # Resolve once so cache identity and compilation use the same options.
+        effective_hints = self._effective_compile_hints()
+        cache_key = self._build_full_cache_key(
+            bound.arguments,
+            owner_cls=owner_cls,
+            bound_self=bound_self,
+            effective_hints=effective_hints,
+        )
 
         args_tuple = tuple(bound.arguments.values())
 
@@ -1449,7 +1470,7 @@ class JitFunction:
                 )
             raise RuntimeError(msg)
 
-        _hints_ctx = CompilationContext.compile_hints(self.compile_hints) if self.compile_hints else nullcontext()
+        _hints_ctx = CompilationContext.compile_hints(effective_hints) if effective_hints else nullcontext()
 
         compiled_func = None  # will be set inside lock or compile path
 

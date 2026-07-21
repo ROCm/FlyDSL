@@ -206,6 +206,21 @@ def test_key_insensitive_to_kwarg_order():
     assert k1 == k2
 
 
+def test_key_varies_with_effective_compile_hints():
+    hints = {"waves_per_eu": 1}
+
+    def fn(a, out, **kw):
+        pass
+
+    fn._effective_compile_hints = lambda: dict(hints)
+    tuner = _make_tuner(fn=fn)
+    args = (FakeTensor((8, 8)), FakeTensor((8, 8)))
+    first = tuner._make_key(args, {})
+    hints["waves_per_eu"] = 2
+
+    assert tuner._make_key(args, {}) != first
+
+
 # ── restore_value (in-place correctness) ────────────────────────────────
 def test_restore_value_restores_between_reps():
     """A kernel that mutates its input in place must see pristine inputs on
@@ -343,14 +358,21 @@ def test_disk_cache_roundtrip(tmp_path, monkeypatch):
 
 # ── decorator ────────────────────────────────────────────────────────────
 def test_autotune_decorator_wraps_into_autotuner():
-    """@autotune returns an Autotuner that forwards restore_value/reset_to_zero."""
+    """@autotune returns an Autotuner and forwards its options."""
 
     def fake_jit(a, out, **kw):
         pass
 
+    def configs(a, out):
+        return [Config(BLOCK=128)]
+
+    def default(a, out):
+        return Config(BLOCK=64)
+
     tuned = autotune(
-        configs=[Config(BLOCK=128)],
+        configs=configs,
         key=["a"],
+        default=default,
         restore_value=["a"],
         reset_to_zero=["out"],
     )(fake_jit)
@@ -358,7 +380,77 @@ def test_autotune_decorator_wraps_into_autotuner():
     assert isinstance(tuned, Autotuner)
     assert tuned.restore_value == ["a"]
     assert tuned.reset_to_zero == ["out"]
-    assert [c.kwargs["BLOCK"] for c in tuned.configs] == [128]
+    assert tuned.configs is configs
+    assert tuned.default is default
+
+
+# ── two-track default/search ─────────────────────────────────────────────
+def test_cache_hit_precedes_default_and_search(monkeypatch):
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    default_calls = 0
+
+    def fn(a, out, BLOCK):
+        out._data[0] = float(BLOCK)
+
+    def default(a, out):
+        nonlocal default_calls
+        default_calls += 1
+        return Config(BLOCK=999)
+
+    def fail_bench(call, warmup, rep):
+        pytest.fail("normal path benchmarked configs")
+
+    tuner = _make_tuner(
+        fn=fn,
+        configs=[Config(BLOCK=64), Config(BLOCK=128)],
+        default=default,
+        do_bench_fn=fail_bench,
+    )
+    a = FakeTensor((8,))
+    out = FakeTensor((1,))
+    args = (a, out)
+    tuner.cache[tuner._make_key(args, {})] = Config(BLOCK=128)
+
+    tuner(*args)
+
+    assert out._data[0] == 128.0
+    assert default_calls == 0
+
+    tuner.cache.clear()
+    tuner(*args)
+
+    assert out._data[0] == 999.0
+    assert default_calls == 1
+
+
+def test_force_search_bypasses_cache_and_default(monkeypatch):
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    calls = {"configs": 0, "default": 0, "bench": 0}
+
+    def fn(a, out, BLOCK):
+        out._data[0] = float(BLOCK)
+
+    def configs(a, out):
+        calls["configs"] += 1
+        return [Config(BLOCK=64), Config(BLOCK=128)]
+
+    def default(a, out):
+        calls["default"] += 1
+        return Config(BLOCK=7)
+
+    def bench(call, warmup, rep):
+        calls["bench"] += 1
+        call()
+        return float(calls["bench"])
+
+    tuner = _make_tuner(fn=fn, configs=configs, default=default, do_bench_fn=bench)
+    args = (FakeTensor((8,)), FakeTensor((1,)))
+    tuner.cache[tuner._make_key(args, {})] = Config(BLOCK=999)
+
+    tuner(*args)
+
+    assert calls == {"configs": 1, "default": 0, "bench": 2}
+    assert args[1]._data[0] == 64.0
 
 
 if __name__ == "__main__":

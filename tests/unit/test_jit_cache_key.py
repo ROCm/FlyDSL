@@ -6,6 +6,7 @@ from __future__ import annotations
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.jit_argument import JitArgumentRegistry
+from flydsl.compiler.kernel_function import CompilationContext
 
 
 class _FakeCudaStream:
@@ -62,3 +63,25 @@ def test_future_annotations_runtime_int32_ignores_value_in_cache_key():
     assert key1 == key2
     assert ("n", (fx.Int32,)) in key1
     assert ("n", (int, 1)) not in key1
+
+
+def test_thread_local_wpe_overrides_persistent_hint_and_enters_cache_key():
+    @flyc.jit
+    def launch(stream: fx.Stream = fx.Stream(None)):
+        pass
+
+    launch.compile_hints = {"waves_per_eu": 4}
+    persistent = _cache_key(launch)
+    with CompilationContext.compile_hints({"waves_per_eu": 1}):
+        outer = _cache_key(launch)
+        assert launch._effective_compile_hints()["waves_per_eu"] == 1
+        with CompilationContext.compile_hints({"waves_per_eu": 2}):
+            inner = _cache_key(launch)
+            assert launch._effective_compile_hints()["waves_per_eu"] == 2
+        assert launch._effective_compile_hints()["waves_per_eu"] == 1
+    assert launch._effective_compile_hints()["waves_per_eu"] == 4
+    with CompilationContext.compile_hints({"waves_per_eu": "2"}):
+        invalid_type = _cache_key(launch)
+
+    assert len({persistent, outer, inner}) == 3
+    assert invalid_type != inner
