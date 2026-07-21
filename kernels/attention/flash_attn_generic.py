@@ -62,6 +62,7 @@ def build_flash_attn_func_module_primary(
     paged=False,
     kv_cache_layout="linear",
     skip_kv_pad_mask=None,
+    return_lse=False,
 ):
     """Build a generic f16/bf16 flash-attention launcher.
 
@@ -100,6 +101,7 @@ def build_flash_attn_func_module_primary(
             paged=paged,
             kv_cache_layout=kv_cache_layout,
             skip_kv_pad_mask=skip_kv_pad_mask,
+            return_lse=return_lse,
         )
         _launcher_m256 = build_flash_attn_func_module_primary(
             num_heads,
@@ -122,6 +124,7 @@ def build_flash_attn_func_module_primary(
             paged=paged,
             kv_cache_layout=kv_cache_layout,
             skip_kv_pad_mask=skip_kv_pad_mask,
+            return_lse=return_lse,
         )
         _bs_threshold = 2048 * num_heads if gpu_arch.startswith("gfx942") else 4096 * num_heads
 
@@ -204,6 +207,7 @@ def build_flash_attn_func_module_primary(
         unsafe_fp_math=unsafe_fp_math,
         sm_scale=sm_scale,
         skip_kv_pad_mask=skip_kv_pad_mask,
+        return_lse=return_lse,
     )
     _flash_attn_generic_cache_tag = traits.cache_tag
 
@@ -246,6 +250,7 @@ def build_flash_attn_func_module_primary(
         K: fx.Tensor,
         V: fx.Tensor,
         O: fx.Tensor,  # noqa: E741
+        LSE: fx.Tensor,
         seq_len: fx.Int32,
         seq_len_kv: fx.Int32,
         CuSeqQ: fx.Tensor,
@@ -255,7 +260,7 @@ def build_flash_attn_func_module_primary(
     ):
         # Make shape/mode traits visible to the JIT cache key.
         _ = _flash_attn_generic_cache_tag
-        ctx = GenericFlashAttnContext(traits, K, V, seq_len, seq_len_kv, allocator, lds_kv_offset)
+        ctx = GenericFlashAttnContext(traits, K, V, seq_len, seq_len_kv, allocator, lds_kv_offset, LSE=LSE)
         ctx.init_types_and_pointers()
         gemm_helper = GenericGemmHelper(ctx)
         softmax_helper = GenericSoftmaxHelper(ctx)
@@ -509,6 +514,7 @@ def build_flash_attn_func_module_primary(
         K: fx.Tensor,
         V: fx.Tensor,
         O: fx.Tensor,  # noqa: E741
+        LSE: fx.Tensor,
         CuSeqQ: fx.Tensor,
         CuSeqKv: fx.Tensor,
         BlockTable: fx.Tensor,
@@ -542,6 +548,7 @@ def build_flash_attn_func_module_primary(
             K,
             V,
             O,
+            LSE,
             seq_len,
             seq_len_kv,
             CuSeqQ,
@@ -587,6 +594,7 @@ def build_flash_attn_func_module_primary(
         batch_size,
         seq_len,
         *,
+        lse=None,
         cu_seqlens_q=None,
         cu_seqlens_kv=None,
         block_table=None,
@@ -594,23 +602,42 @@ def build_flash_attn_func_module_primary(
         seq_len_kv=None,
         stream=None,
     ):
+        if traits.RETURN_LSE and lse is None:
+            raise ValueError("return_lse=True requires an lse output tensor")
         # Dense/non-paged pass the output tensor as a placeholder for the unused
-        # cu_seqlens / block_table slots; the kernel only reads them under
-        # const_expr(VARLEN) / const_expr(PAGED).
+        # cu_seqlens / block_table / LSE slots; the kernel only reads/writes them
+        # under const_expr(VARLEN) / const_expr(PAGED) / const_expr(RETURN_LSE).
+        lse_t = lse if lse is not None else Out
         cq = cu_seqlens_q if cu_seqlens_q is not None else Out
         ck = cu_seqlens_kv if cu_seqlens_kv is not None else Out
         bt = block_table if block_table is not None else Out
         skv = seq_len if seq_len_kv is None else seq_len_kv
         with CompilationContext.compile_hints(_fmha_compile_hints):
             return launch_flash_attn_generic(
-                Q, K, V, Out, cq, ck, bt, block_table_stride, batch_size, seq_len, skv, fx.Stream(stream)
+                Q, K, V, Out, lse_t, cq, ck, bt, block_table_stride, batch_size, seq_len, skv, fx.Stream(stream)
             )
 
-    def _compile(Q, K, V, Out, batch_size, seq_len, seq_len_kv=None, stream=None):
+    def _compile(Q, K, V, Out, batch_size, seq_len, seq_len_kv=None, lse=None, stream=None):
+        if traits.RETURN_LSE and lse is None:
+            raise ValueError("return_lse=True requires an lse output tensor")
+        lse_t = lse if lse is not None else Out
         skv = seq_len if seq_len_kv is None else seq_len_kv
         with CompilationContext.compile_hints(_fmha_compile_hints):
             return flyc.compile(
-                launch_flash_attn_generic, Q, K, V, Out, Out, Out, Out, 0, batch_size, seq_len, skv, fx.Stream(stream)
+                launch_flash_attn_generic,
+                Q,
+                K,
+                V,
+                Out,
+                lse_t,
+                Out,
+                Out,
+                Out,
+                0,
+                batch_size,
+                seq_len,
+                skv,
+                fx.Stream(stream),
             )
 
     _launch.compile = _compile
@@ -640,6 +667,7 @@ def build_flash_attn_func_module_primary(
             paged=paged,
             kv_cache_layout=kv_cache_layout,
             skip_kv_pad_mask=True,
+            return_lse=return_lse,
         )
         _launch_mask = build_flash_attn_func_module_primary(
             num_heads,
@@ -662,6 +690,7 @@ def build_flash_attn_func_module_primary(
             paged=paged,
             kv_cache_layout=kv_cache_layout,
             skip_kv_pad_mask=False,
+            return_lse=return_lse,
         )
 
         def _pad_dispatch(*args, **kwargs):
