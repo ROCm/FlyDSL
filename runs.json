@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-21T03:39:02Z",
+ "updated": "2026-07-21T04:26:52Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29799138483,
+   "pr": 876,
+   "commit": "657ad70076eda384b851f593e86d257e96e454fe",
+   "branch": "mega_moe_v1",
+   "event": "pull_request",
+   "title": "MegaMoEV1 on Gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29799138483",
+   "created_at": "2026-07-21T03:40:25Z",
+   "updated_at": "2026-07-21T04:03:32Z",
+   "actor": "yanboshao",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-21T03:42:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29799138483/job/88536714628"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-21T03:42:08Z",
+     "completed_at": "2026-07-21T04:22:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29799138483/job/88536714635"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-21T04:03:32Z",
+     "completed_at": "2026-07-21T04:20:47Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29799138483/job/88536714770"
+    }
+   ]
+  },
   {
    "run_id": 29797943621,
    "pr": 825,
@@ -20,19 +63,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-21T03:21:00Z",
-     "completed_at": null,
+     "completed_at": "2026-07-21T04:03:15Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29797943621/job/88533229478"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-21T03:15:36Z",
-     "completed_at": null,
+     "completed_at": "2026-07-21T04:03:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29797943621/job/88533229506"
     },
     {
@@ -2257,49 +2300,6 @@
      "started_at": "2026-07-16T22:00:57Z",
      "completed_at": "2026-07-16T23:15:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29537829776/job/87753740831"
-    }
-   ]
-  },
-  {
-   "run_id": 29516144852,
-   "pr": 868,
-   "commit": "023104114ff95ccf5d36fe0467e1ab06bc763623",
-   "branch": "pr/docs-arithmetic-types",
-   "event": "pull_request",
-   "title": "[Docs] Arithmetic types: authoritative spec + conformance suite",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29516144852",
-   "created_at": "2026-07-16T16:34:29Z",
-   "updated_at": "2026-07-16T18:03:25Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-16T16:41:03Z",
-     "completed_at": "2026-07-16T17:57:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29516144852/job/87682585413"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-16T16:40:49Z",
-     "completed_at": "2026-07-16T18:03:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29516144852/job/87682585438"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-16T16:40:06Z",
-     "completed_at": "2026-07-16T16:55:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29516144852/job/87682585466"
     }
    ]
   }
