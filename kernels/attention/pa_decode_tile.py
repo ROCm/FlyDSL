@@ -56,8 +56,6 @@ LDS scratch into the shared running (m, l)) so all 4 stay busy instead of one
 wave doing the whole row.
 """
 
-from __future__ import annotations
-
 import functools
 
 import torch
@@ -212,8 +210,7 @@ def compile_pa_decode_tile(
     # Phase A hold only k_scale (16 VGPR) and Phase B re-read v_scale (vs hoisting
     # both, 32) -- the freed 16 VGPR drop per_token M_TILES=4 under the 256/2-wave
     # cliff; M1 uses it too so tt+1's stage doesn't alias tt's read. +1 LDS buffer.
-    KV_DOUBLE_BUF = per_token_kv
-    KV_BUFS = 2 if KV_DOUBLE_BUF else 1
+    KV_BUFS = 2 if per_token_kv else 1
     KV_BUF_STRIDE = 2 * NWARP * TOK_PER_WARP * f32  # k-region + v-region, one buffer
     sKScale_off = sVPage_off + sVPage_bytes
     sVScale_off = sKScale_off + NWARP * TOK_PER_WARP * f32
@@ -223,6 +220,13 @@ def compile_pa_decode_tile(
     # path), so a single NWARP-wide cross-warp slot suffices.
     sVScaleMax_bytes = NWARP_PAD * f32 if per_token_kv else 0
     total_bytes = sVScaleMax_off + sVScaleMax_bytes
+
+    # LDS blob: one i32 array carved into typed byte-offset views (see the
+    # `_lds_*` helpers in the kernel). Every region size above is 4-byte
+    # aligned, so `total_bytes // 4` covers the blob exactly.
+    @fx.struct
+    class SharedStorage:
+        buf: fx.Array[fx.Int32, total_bytes // 4, 16]
 
     @flyc.kernel(known_block_size=(BLOCK_THREADS, 1, 1))
     def pa_decode_tile_kernel(
@@ -324,15 +328,27 @@ def compile_pa_decode_tile(
         part_end_raw = part_start + tiles_per_part
         part_end = arith.select(part_end_raw < num_tiles, part_end_raw, num_tiles)
 
-        # One i8 blob carved into typed views via byte-offset pointers.
-        # Defined here so the V page-prefetch helpers below (issued before
-        # the Q-quant barrier, alongside K's own prologue prefetch) can use it.
-        lds_base = fx.SharedAllocator().allocate(total_bytes).peek().ptr  # i8 base pointer
+        # One i8 blob carved into typed byte-offset pointers. Defined here so
+        # the V page-prefetch helpers below (issued before the Q-quant barrier,
+        # alongside K's own prologue prefetch) can use it. `lds_base` is an
+        # ir.Value pointer (dominates), safe to reference inside scf control
+        # flow; the Python `lds` handle is not.
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        lds_base = fx.recast_iter(fx.Uint8, lds.buf.ptr)  # byte-addressed base
 
-        def _view(byte_off, elem_ty, layout):
+        def _lds_ptr(byte_off, elem_ty):
+            # Typed shared pointer `byte_off` bytes into the blob. Each access
+            # is naturally aligned, so pin the element-size alignment explicitly
+            # (a bare recast off the byte base would gcd the alignment to 1).
             p = fx.add_offset(lds_base, fx.make_int_tuple(byte_off))
             ptr_ty = fx.PointerType.get(elem_ty.ir_type, fx.AddressSpace.Shared, dsl_size_of(elem_ty))
-            return fx.Tensor(fx.make_view(fx.recast_iter(ptr_ty, p), layout))
+            return fx.recast_iter(ptr_ty, p)
+
+        def _lds_load(byte_off, elem_ty, n):
+            return fx.ptr_load(_lds_ptr(byte_off, elem_ty), result_type=fx.Vector.make_type(n, elem_ty))
+
+        def _lds_store(byte_off, elem_ty, vec):
+            fx.ptr_store(vec, _lds_ptr(byte_off, elem_ty))
 
         c16 = 16
         lane16 = lane - (lane // c16) * c16  # 0..15: this row's head-dim chunk index
@@ -361,23 +377,19 @@ def compile_pa_decode_tile(
                     if const_expr(PAGES_PER_CHUNK == 1)
                     else fx.Vector(fetched)
                 )
-                _view(
-                    sVPage_off + warp * (PAGES_PER_CHUNK * 4),
-                    fx.Int32,
-                    fx.make_layout(PAGES_PER_CHUNK, 1),
-                ).store(fetched_vec)
+                _lds_store(sVPage_off + warp * (PAGES_PER_CHUNK * 4), fx.Int32, fetched_vec)
 
         def _v_page_read_row():
             # One PAGES_PER_CHUNK-wide Vector (not a list) so the loop-carried
             # `if tt1 < part_end: v_page_next = _v_page_read_row()` below can
             # reassign it directly.
             off = sVPage_off + rgroup * (PAGES_PER_CHUNK * 4)
-            return _view(off, fx.Int32, fx.make_layout(PAGES_PER_CHUNK, 1)).load()
+            return _lds_load(off, fx.Int32, PAGES_PER_CHUNK)
 
         def _kv_buf_off(tt_val):
             # ping-pong buffer byte offset for the double-buffered KV-scale
             # staging (0 when single-buffered -- compile-time constant then).
-            if const_expr(KV_DOUBLE_BUF):
+            if const_expr(per_token_kv):
                 return (tt_val & fx.Int32(1)) * KV_BUF_STRIDE
             return 0
 
@@ -389,8 +401,8 @@ def compile_pa_decode_tile(
                 k_scale_vec = fx.Vector(buffer_ops.buffer_load(ks_rsrc, scale_idx, vec_width=NCHUNK, dtype=fx.Float32))
                 v_scale_vec = fx.Vector(buffer_ops.buffer_load(vs_rsrc, scale_idx, vec_width=NCHUNK, dtype=fx.Float32))
                 slot = (warp * TOK_PER_WARP + base_tok) * f32
-                _view(sKScale_off + buf_off + slot, fx.Float32, fx.make_layout(NCHUNK, 1)).store(k_scale_vec)
-                _view(sVScale_off + buf_off + slot, fx.Float32, fx.make_layout(NCHUNK, 1)).store(v_scale_vec)
+                _lds_store(sKScale_off + buf_off + slot, fx.Float32, k_scale_vec)
+                _lds_store(sVScale_off + buf_off + slot, fx.Float32, v_scale_vec)
             else:
                 # block_size==16: NCHUNK=4 separate physical pages/tokens are
                 # owned by this warp's 64 lanes, one per `rgroup` (0..3) x
@@ -405,11 +417,15 @@ def compile_pa_decode_tile(
                 v_scale_scalar = fx.Float32(buffer_ops.buffer_load(vs_rsrc, scale_idx, vec_width=1, dtype=fx.Float32))
                 fx.rocdl.sched_barrier(fx.rocdl.mask_vmem_rd)
                 slot = (warp * TOK_PER_WARP + rgroup * c16 + lane16) * f32
-                _view(sKScale_off + buf_off + slot, fx.Float32, fx.make_layout(1, 1)).store(
-                    fx.Vector.from_elements([k_scale_scalar], dtype=fx.Float32)
+                _lds_store(
+                    sKScale_off + buf_off + slot,
+                    fx.Float32,
+                    fx.Vector.from_elements([k_scale_scalar], dtype=fx.Float32),
                 )
-                _view(sVScale_off + buf_off + slot, fx.Float32, fx.make_layout(1, 1)).store(
-                    fx.Vector.from_elements([v_scale_scalar], dtype=fx.Float32)
+                _lds_store(
+                    sVScale_off + buf_off + slot,
+                    fx.Float32,
+                    fx.Vector.from_elements([v_scale_scalar], dtype=fx.Float32),
                 )
 
         def _load_scale_vec(base_off, a, buf_off=0):
@@ -417,7 +433,7 @@ def compile_pa_decode_tile(
             # region (sKScale_off or sVScale_off), at ping-pong buffer buf_off.
             # Reads (not holds) let Phase A/B keep only one side live at a time.
             slot = (warp * TOK_CHUNK + a * c16 + rgroup * 4) * f32
-            return _view(base_off + buf_off + slot, fx.Float32, fx.make_layout(4, 1)).load()
+            return _lds_load(base_off + buf_off + slot, fx.Float32, 4)
 
         def _load_kv_scale_vecs(a, buf_off=0):
             return _load_scale_vec(sKScale_off, a, buf_off), _load_scale_vec(sVScale_off, a, buf_off)
@@ -486,24 +502,25 @@ def compile_pa_decode_tile(
         # hazard) and fuse to v_max3. (ninf must NOT be set: -inf is load-bearing.)
         fm_nnan = arith.FastMathFlags.nnan
 
-        def _row(byte_off, m_idx, width, elem_ty):
-            off = byte_off + m_idx * (width * dsl_size_of(elem_ty))
-            return _view(off, elem_ty, fx.make_layout(width, 1))
+        def _row_off(byte_off, m_idx, width, elem_ty):
+            return byte_off + m_idx * (width * dsl_size_of(elem_ty))
 
         def _ld1(byte_off, m_idx):
-            return _row(byte_off, m_idx, 1, fx.Float32).load()[0]
+            return _lds_load(_row_off(byte_off, m_idx, 1, fx.Float32), fx.Float32, 1)[0]
 
         def _st1(byte_off, m_idx, val):
-            _row(byte_off, m_idx, 1, fx.Float32).store(fx.Vector.from_elements([val], dtype=fx.Float32))
+            _lds_store(
+                _row_off(byte_off, m_idx, 1, fx.Float32), fx.Float32, fx.Vector.from_elements([val], dtype=fx.Float32)
+            )
 
         # f32[16, NWARP] cross-warp scratch: scalar write at (row, warp), vec read of a row's NWARP valid slots.
         def _st_lw(base_off, row, w, val):
             off = base_off + (row * NWARP_PAD + w) * 4
-            _view(off, fx.Float32, fx.make_layout(1, 1)).store(fx.Vector.from_elements([val], dtype=fx.Float32))
+            _lds_store(off, fx.Float32, fx.Vector.from_elements([val], dtype=fx.Float32))
 
         def _ld_lw_row(base_off, row):
             off = base_off + row * (NWARP_PAD * 4)
-            return _view(off, fx.Float32, fx.make_layout(NWARP, 1)).load()
+            return _lds_load(off, fx.Float32, NWARP)
 
         def _f32_to_fp8_words(vf32):
             # f32 -> fp8 must use the HW cvt (arith.truncf to fp8 doesn't lower);
@@ -517,7 +534,7 @@ def compile_pa_decode_tile(
             return fx.Vector.from_elements(words, dtype=fx.Int32)
 
         def _st_words(byte_off, words):
-            _view(byte_off, fx.Int32, fx.make_layout(words.shape[0], 1)).store(words)
+            _lds_store(byte_off, fx.Int32, words)
 
         qh_local = warp * 4 + rgroup  # 0..15: this thread's query row within an M-tile
 
@@ -592,9 +609,7 @@ def compile_pa_decode_tile(
             q_row_off = m * MFMA_MNK * head_dim
             for qkhe in range_constexpr(QKHE_LOOP):
                 he_idx = qkhe * RGROUP_QUARTERS + rgroup
-                chunk = _view(
-                    q_row_off + lane16 * head_dim + he_idx * QK_CHUNK_ELEMS, fx.Int64, fx.make_layout(2, 1)
-                ).load()
+                chunk = _lds_load(q_row_off + lane16 * head_dim + he_idx * QK_CHUNK_ELEMS, fx.Int64, 2)
                 q_ops_all.extend([chunk[0], chunk[1]])
         # q_ops_all[m*N_SUBCHUNKS+s] for s=0..N_SUBCHUNKS-1, s = qkhe*2+qkr,
         # = M-tile m's head[he_idx*16+qkr*8 : +8] of qhead=lane16
@@ -710,9 +725,7 @@ def compile_pa_decode_tile(
             q_scale_vec = None
             if const_expr(M_TILES > 1):
                 qh_for_scale = lane - (lane // c16) * c16
-                q_scale_vec = _view(
-                    sQscale_off + qh_for_scale * (M_TILES * f32), fx.Float32, fx.make_layout(M_TILES, 1)
-                ).load()
+                q_scale_vec = _lds_load(sQscale_off + qh_for_scale * (M_TILES * f32), fx.Float32, M_TILES)
 
             def _lmax_off_m(m):
                 return sLmax_off + (m * MFMA_MNK * NWARP_PAD * f32 if const_expr(M_TILES > 1) else 0)
@@ -854,9 +867,13 @@ def compile_pa_decode_tile(
                         words.append(_f32_to_fp8_words(p_scaled)[0])
 
                     p_off0 = sP_off + qh * SP_ROW_BYTES + warp * TOK_CHUNK + l16g * 4
-                    _view(p_off0, fx.Int32, fx.make_layout(NCHUNK, c16 // 4)).store(
-                        fx.Vector.from_elements(words, dtype=fx.Int32)
-                    )
+                    # The NCHUNK P words scatter across the row at stride c16//4
+                    # i32 (the token->fp8-lane interleave the PV ds_read_b128
+                    # expects); one strided store per chunk.
+                    for a in range_constexpr(NCHUNK):
+                        _lds_store(
+                            p_off0 + a * (c16 // 4) * f32, fx.Int32, fx.Vector.from_elements([words[a]], dtype=fx.Int32)
+                        )
                     for sh in (16, 32):
                         ls = ls.addf(ls.shuffle_xor(sh, WAVE), fastmath=fm_contract)
                     # PV output is [head-dim (row), query-row (col=lane16)]
@@ -877,11 +894,7 @@ def compile_pa_decode_tile(
                         arith.mulf(arith.unwrap(l_prev), arith.unwrap(corr_reg), fastmath=fm_contract)
                     ).addf(gsum, fastmath=fm_contract)
 
-                    p_ops = _view(
-                        sP_off + lane16 * SP_ROW_BYTES + rgroup * 64,
-                        fx.Int64,
-                        fx.make_layout(NVOPS, 1),
-                    ).load()
+                    p_ops = _lds_load(sP_off + lane16 * SP_ROW_BYTES + rgroup * 64, fx.Int64, NVOPS)
 
                     corr_b = fx.Vector.from_elements([corr_reg], dtype=fx.Float32).broadcast_to(OP_ELEMS)
                     for vh in range_constexpr(VHE_CHUNKS):
@@ -1025,9 +1038,11 @@ def compile_pa_decode_tile(
                         p_scaled = Pa * fx.Vector.filled(4, FP8_MAX, fx.Float32)
                     words.append(_f32_to_fp8_words(p_scaled)[0])
                 p_off0 = sP_off + qh * SP_ROW_BYTES + warp * TOK_CHUNK + l16g * 4
-                _view(p_off0, fx.Int32, fx.make_layout(NCHUNK, c16 // 4)).store(
-                    fx.Vector.from_elements(words, dtype=fx.Int32)
-                )
+                # NCHUNK P words scatter at stride c16//4 i32 (see phase-split).
+                for a in range_constexpr(NCHUNK):
+                    _lds_store(
+                        p_off0 + a * (c16 // 4) * f32, fx.Int32, fx.Vector.from_elements([words[a]], dtype=fx.Int32)
+                    )
                 if const_expr(head_dim == 64):
                     fx.rocdl.sched_dswr(NCHUNK)
                 for sh in (16, 32):
@@ -1046,11 +1061,7 @@ def compile_pa_decode_tile(
                 l_new = fx.Float32(arith.mulf(arith.unwrap(l_prev), arith.unwrap(corr_reg), fastmath=fm_contract)).addf(
                     gsum, fastmath=fm_contract
                 )
-                p_ops = _view(
-                    sP_off + lane16 * SP_ROW_BYTES + rgroup * 64,
-                    fx.Int64,
-                    fx.make_layout(NVOPS, 1),
-                ).load()
+                p_ops = _lds_load(sP_off + lane16 * SP_ROW_BYTES + rgroup * 64, fx.Int64, NVOPS)
                 corr_b = fx.Vector.from_elements([corr_reg], dtype=fx.Float32).broadcast_to(OP_ELEMS)
                 # Single tile: no sibling M-tile chain to hide the V-load latency
                 # behind, so batch both vh's V loads upfront (the 2nd hides behind
