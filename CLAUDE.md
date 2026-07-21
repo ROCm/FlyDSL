@@ -81,6 +81,7 @@ FlyDSL/
 | Layout algebra | [`docs/layout_system_guide.md`](docs/layout_system_guide.md) | Shape/Stride/Layout/Coord APIs, products, divides, coordinate mapping |
 | CuTe layout reference | [`docs/cute_layout_algebra_guide.md`](docs/cute_layout_algebra_guide.md) | Mathematical background and FlyDSL mapping of CuTe concepts |
 | Kernel authoring | [`docs/kernel_authoring_guide.md`](docs/kernel_authoring_guide.md) | `@flyc.kernel`, `@flyc.jit`, launch config, LDS, tiled copy/MMA |
+| Kernel tuning | [`docs/kernel_tuning_guide.md`](docs/kernel_tuning_guide.md) | Tiling, LDS double-buffer/swizzle, prefetch, MFMA scheduling, occupancy, ATT/PMC profiling |
 | Pre-built kernels | [`docs/prebuilt_kernels_guide.md`](docs/prebuilt_kernels_guide.md) | Norm, Softmax, GEMM, MoE, attention, dtype/config notes |
 | External bitcode integration | [`docs/extern_integration_guide.md`](docs/extern_integration_guide.md) | `ffi` + `link_extern`: plug pre-compiled LLVM bitcode into the JIT pipeline (`python/flydsl/expr/extern.py`, `compiler/extern_link.py`) |
 | Testing & benchmarking | [`docs/testing_benchmarking_guide.md`](docs/testing_benchmarking_guide.md) | Test categories, benchmark harness, performance comparisons |
@@ -169,7 +170,7 @@ helper code that is not part of the traced closure.
 | `gfx950` / `gfx95*` | MI350 / MI355X | 64 | MFMA | CDNA4 path; FP4, MFMA scale, wider LDS copy paths, 160KB LDS |
 | `gfx11*` | RDNA3 / RDNA3.5 (Strix Halo, e.g. gfx1151) | 32 | WMMA | No MFMA; f16/bf16 (and i8/i4) WMMA GEMM; legacy v16-operand WMMA ABI; **no native FP8** (kernels fail-fast); `kernels/rdna3_f16_gemm.py`. `is_rdna_arch()` returns True. |
 | `gfx120*` | RDNA4 (gfx1201 = Radeon AI PRO R9700) | 32 | WMMA | RDNA path, wave32; new v8-operand WMMA ABI; native FP8. `is_rdna_arch()` returns True. |
-| `gfx1250` | MI450 | 32 | WMMA / TDM | FP8/FP4 GEMM, MoE, async/TDM copy helpers, 320KB LDS. NOTE: `is_rdna_arch('gfx1250')` returns **False** and `get_warp_size` returns 64 — the gfx1250 kernels hardcode `WAVE_SIZE = 32` themselves. |
+| `gfx1250` | — | 32 | WMMA / TDM | FP8/FP4 GEMM, MoE, async/TDM copy helpers, 320KB LDS. NOTE: `is_rdna_arch('gfx1250')` returns **False** and `get_warp_size` returns 64 — the gfx1250 kernels hardcode `WAVE_SIZE = 32` themselves. |
 
 Use `from flydsl.runtime.device import get_rocm_arch, is_rdna_arch` rather than
 hard-coding behavior when possible. `is_rdna_arch()`

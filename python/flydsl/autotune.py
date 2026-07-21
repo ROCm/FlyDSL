@@ -6,6 +6,7 @@
 import inspect
 import json
 import os
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable, Dict, List
 
@@ -13,6 +14,68 @@ try:
     import torch
 except ImportError:
     torch = None
+
+
+def _tuning_enabled() -> bool:
+    """Whether to bypass cached/default configs and run a fresh search."""
+    return os.environ.get("FLYDSL_AUTOTUNE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_fingerprint() -> tuple:
+    """Sorted cache-invalidating env vars (reuses the JIT's canonical list)."""
+    try:
+        from .compiler.jit_function import _cache_invalidating_env_values
+
+        return tuple(sorted(_cache_invalidating_env_values()))
+    except Exception:
+        return ()
+
+
+def _toolchain_fingerprint() -> str:
+    """Hash of the compiler toolchain, so a codegen change invalidates old
+    configs. Reuses jit_function._flydsl_key(); falls back to the version."""
+    try:
+        from .compiler.jit_function import _flydsl_key
+
+        return _flydsl_key()
+    except Exception:
+        try:
+            import flydsl
+
+            return str(getattr(flydsl, "__version__", ""))
+        except Exception:
+            return ""
+
+
+def _device_fingerprint() -> str:
+    """GPU arch string (e.g. 'gfx950'), or '' if unavailable."""
+    try:
+        from .runtime.device import get_rocm_arch
+
+        return str(get_rocm_arch())
+    except Exception:
+        return ""
+
+
+def _normalize_strides(t) -> tuple:
+    """Bucket strides to {0, 1, other}: the layout *pattern* (broadcast /
+    contiguous / strided) affects the best config, the exact numbers don't."""
+    strides = getattr(t, "stride", None)
+    if strides is None:
+        return ()
+    try:
+        vals = strides() if callable(strides) else strides
+    except Exception:
+        return ()
+    out = []
+    for s in vals:
+        if s == 0:
+            out.append(0)
+        elif s == 1:
+            out.append(1)
+        else:
+            out.append("s")
+    return tuple(out)
 
 
 class Config:
@@ -104,9 +167,11 @@ class Autotuner:
         rep,
         prune_configs_by=None,
         reset_to_zero=None,
+        restore_value=None,
         pre_hook=None,
         post_hook=None,
         do_bench_fn=None,
+        default=None,
     ):
         self.fn = fn  # JitFunction instance
         self.configs = configs
@@ -115,10 +180,12 @@ class Autotuner:
         self.rep = rep
         self.prune_configs_by = prune_configs_by
         self.reset_to_zero = reset_to_zero or []
+        self.restore_value = restore_value or []
         self.pre_hook = pre_hook
         self.post_hook = post_hook
         self._do_bench = do_bench_fn or do_bench
         self.cache: Dict[tuple, Config] = {}
+        self.default = default
 
         # Infer arg names from the underlying function
         if hasattr(fn, "func"):
@@ -137,7 +204,8 @@ class Autotuner:
         self._load_disk_cache()
 
     def _make_key(self, args, kwargs):
-        """Build cache key from key-arg values + all arg dtypes."""
+        """Cache key over shape/dtype/stride + arch + toolchain + env. A config
+        tuned under any of these axes must not be reused under another."""
         sig_args = dict(zip(self.arg_names, args))
         sig_args.update(kwargs)
 
@@ -151,17 +219,41 @@ class Autotuner:
             else:
                 key_vals.append(v)
 
-        # Also include dtypes of tensor args for type specialization
+        # Tensor dtypes + stride patterns, sorted so kwarg order doesn't change
+        # the key (else identical calls would tune twice).
         dtype_parts = []
+        stride_parts = []
         for name, val in sig_args.items():
             if hasattr(val, "dtype"):
                 dtype_parts.append(f"{name}:{val.dtype}")
-        key_vals.append(tuple(dtype_parts))
+            if hasattr(val, "shape") and hasattr(val, "stride"):
+                stride_parts.append(f"{name}:{_normalize_strides(val)}")
+        key_vals.append(tuple(sorted(dtype_parts)))
+        key_vals.append(tuple(sorted(stride_parts)))
+
+        # Environment / toolchain / device specialization, all read live so a
+        # mid-process change (arch override, compiler env) can't reuse a config
+        # tuned under different conditions. _flydsl_key is lru_cached, so this is
+        # cheap. (_toolchain/_device fingerprints are functions, not frozen at
+        # construction — otherwise the device axis would go stale.)
+        key_vals.append(("_env_", _env_fingerprint()))
+        key_vals.append(("_toolchain_", _toolchain_fingerprint()))
+        key_vals.append(("_device_", _device_fingerprint()))
+        effective_hints = getattr(self.fn, "_effective_compile_hints", None)
+        if callable(effective_hints):
+            hint_key = tuple(
+                sorted(
+                    (key, type(value).__module__, type(value).__qualname__, repr(value))
+                    for key, value in effective_hints().items()
+                )
+            )
+            key_vals.append(("_compile_hints_", hint_key))
 
         return tuple(str(v) for v in key_vals)
 
     def _reset_tensors(self, args, kwargs):
-        """Zero out tensors listed in reset_to_zero before benchmark."""
+        """Zero out reset_to_zero tensors before a run (each bench rep and the
+        real post-tune / cache-hit call)."""
         if not self.reset_to_zero:
             return
         sig_args = dict(zip(self.arg_names, args))
@@ -171,6 +263,28 @@ class Autotuner:
             if t is not None and hasattr(t, "zero_"):
                 t.zero_()
 
+    def _snapshot_tensors(self, args, kwargs):
+        """Clone restore_value tensors so each bench rep starts from pristine
+        inputs. Without this, an in-place / accumulating kernel would mutate its
+        own inputs across reps and the winning config would be chosen on
+        corrupted data."""
+        if not self.restore_value:
+            return {}
+        sig_args = dict(zip(self.arg_names, args))
+        sig_args.update(kwargs)
+        snapshot = {}
+        for name in self.restore_value:
+            t = sig_args.get(name)
+            if t is not None and hasattr(t, "clone"):
+                snapshot[name] = (t, t.clone())
+        return snapshot
+
+    @staticmethod
+    def _restore_tensors(snapshot):
+        """Copy each snapshotted tensor back into its original buffer."""
+        for _name, (dst, src) in snapshot.items():
+            dst.copy_(src)
+
     def _prune(self, configs, args, kwargs):
         if self.prune_configs_by is not None:
             sig_args = dict(zip(self.arg_names, args))
@@ -178,44 +292,90 @@ class Autotuner:
             return self.prune_configs_by(configs, sig_args)
         return configs
 
+    def _stream_context(self, args, kwargs):
+        """Use an explicit torch/raw stream for benchmark events and setup ops."""
+        if torch is None:
+            return nullcontext()
+        sig_args = dict(zip(self.arg_names, args))
+        sig_args.update(kwargs)
+        stream = sig_args.get("stream")
+        if isinstance(stream, torch.cuda.Stream):
+            return torch.cuda.stream(stream)
+        if isinstance(stream, int):
+            device = next(
+                (value.device for value in sig_args.values() if isinstance(value, torch.Tensor) and value.is_cuda),
+                None,
+            )
+            stream = (
+                torch.cuda.default_stream(device) if stream == 0 else torch.cuda.ExternalStream(stream, device=device)
+            )
+            return torch.cuda.stream(stream)
+        return nullcontext()
+
     def _bench_one(self, config, args, kwargs):
         """Compile and benchmark one config. Returns time in ms."""
         merged_kwargs = dict(kwargs)
         merged_kwargs.update(config.all_kwargs())
         compiler_opts = config.compiler_opts()
 
-        def kernel_call():
-            if config.pre_hook:
-                config.pre_hook(merged_kwargs)
-            self._reset_tensors(args, merged_kwargs)
-            if self.pre_hook:
-                self.pre_hook(merged_kwargs)
-            self._run_with_hints(compiler_opts, args, merged_kwargs)
-            if self.post_hook:
-                self.post_hook(merged_kwargs)
+        with self._stream_context(args, merged_kwargs):
+            # Snapshot once before any rep runs, so restores are from pristine input.
+            snapshot = self._snapshot_tensors(args, merged_kwargs)
 
-        return self._do_bench(kernel_call, warmup=self.warmup, rep=self.rep)
+            def kernel_call():
+                # Order: restore/reset the inputs first, THEN run the pre_hooks, so a
+                # hook that sets up state (incl. mutating a tensor) isn't clobbered
+                # by the restore. Each benchmark rep starts from clean inputs.
+                self._restore_tensors(snapshot)
+                self._reset_tensors(args, merged_kwargs)
+                if config.pre_hook:
+                    config.pre_hook(merged_kwargs)
+                if self.pre_hook:
+                    self.pre_hook(merged_kwargs)
+                self._run_with_hints(compiler_opts, args, merged_kwargs)
+                if self.post_hook:
+                    self.post_hook(merged_kwargs)
+
+            try:
+                return self._do_bench(kernel_call, warmup=self.warmup, rep=self.rep)
+            finally:
+                # Leave the caller's tensors as a single clean run would.
+                if snapshot:
+                    self._restore_tensors(snapshot)
 
     def _run_with_hints(self, compiler_opts, args, kwargs):
-        """Run the kernel function with optional compiler hints."""
-        from .compiler.kernel_function import CompilationContext
-
+        """Run the kernel with optional compiler hints. Import is deferred so
+        the core stays importable without the compiled bindings when unused."""
         if compiler_opts:
+            from .compiler.kernel_function import CompilationContext
+
             with CompilationContext.compile_hints(compiler_opts):
                 self.fn(*args, **kwargs)
         else:
             self.fn(*args, **kwargs)
 
+    def _run_config(self, config, args, kwargs):
+        """Run the chosen config as a real (non-benchmark) call. Re-applies
+        reset_to_zero so cache hits and the post-tune run behave like a single
+        clean run (restore_value tensors are already restored by _bench_one)."""
+        merged = dict(kwargs)
+        merged.update(config.all_kwargs())
+        with self._stream_context(args, merged):
+            self._reset_tensors(args, merged)
+            return self._run_with_hints(config.compiler_opts(), args, merged)
+
     def __call__(self, *args, **kwargs):
         key = self._make_key(args, kwargs)
-        if key in self.cache:
-            best = self.cache[key]
-            merged = dict(kwargs)
-            merged.update(best.all_kwargs())
-            return self._run_with_hints(best.compiler_opts(), args, merged)
+        force = _tuning_enabled()
 
-        # Benchmark all configs
-        configs = self._prune(self.configs, args, kwargs)
+        if not force and key in self.cache:
+            return self._run_config(self.cache[key], args, kwargs)
+
+        if not force and self.default is not None:
+            return self._run_config(self.default(*args, **kwargs), args, kwargs)
+
+        configs = self.configs(*args, **kwargs) if callable(self.configs) else self.configs
+        configs = self._prune(configs, args, kwargs)
         print(f"[autotune] tuning {len(configs)} configs...")
         results = []
         for i, config in enumerate(configs):
@@ -235,10 +395,7 @@ class Autotuner:
         self.cache[key] = best_config
         self._save_disk_cache()
 
-        # Final run with best config
-        merged = dict(kwargs)
-        merged.update(best_config.all_kwargs())
-        return self._run_with_hints(best_config.compiler_opts(), args, merged)
+        return self._run_config(best_config, args, kwargs)
 
     # --- Disk cache ---
     def _load_disk_cache(self):
@@ -260,15 +417,17 @@ class Autotuner:
 
 
 def autotune(
-    configs: List[Config],
+    configs,
     key: List[str] = None,
     warmup: int = 5,
     rep: int = 25,
     prune_configs_by: Callable = None,
     reset_to_zero: List[str] = None,
+    restore_value: List[str] = None,
     pre_hook: Callable = None,
     post_hook: Callable = None,
     do_bench: Callable = None,
+    default: Callable = None,
 ):
     """Autotune decorator for @jit functions.
 
@@ -277,6 +436,18 @@ def autotune(
         @flyc.jit
         def myKernel(..., BLOCK: fx.Constexpr[int], ...):
             ...
+
+    Args:
+        configs: sequence of :class:`Config`, or a callable returning one for
+            the current arguments.
+        default: optional heuristic ``default(*args, **kwargs) -> Config`` used
+            without benchmarking unless ``FLYDSL_AUTOTUNE`` forces a search.
+        restore_value: tensor args the kernel mutates in place (output overlaps
+            input, or accumulation). Snapshotted and restored before each bench
+            rep so every config is measured on identical inputs. Required when
+            tuning any in-place kernel (e.g. fused-add rmsnorm).
+        reset_to_zero: tensor args to zero before each rep (accumulate-into-zero
+            kernels).
     """
 
     def decorator(fn):
@@ -288,9 +459,11 @@ def autotune(
             rep,
             prune_configs_by=prune_configs_by,
             reset_to_zero=reset_to_zero,
+            restore_value=restore_value,
             pre_hook=pre_hook,
             post_hook=post_hook,
             do_bench_fn=do_bench,
+            default=default,
         )
 
     return decorator

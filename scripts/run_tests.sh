@@ -42,14 +42,15 @@ if [ "${RUN_TESTS_FULL:-0}" != "1" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 1. All pytest-based tests (kernels + unit + system + examples)
+# 1. All pytest-based tests (kernels + language + unit + system + examples)
 # ---------------------------------------------------------------------------
 echo "========================================================================"
-echo "Pytest: kernels + unit + system + examples"
+echo "Pytest: kernels + language + unit + system + examples"
 echo "========================================================================"
 
 python3 -m pytest \
     tests/kernels/ \
+    tests/language/ \
     tests/unit/ \
     tests/system/ \
     tests/python/examples/ \

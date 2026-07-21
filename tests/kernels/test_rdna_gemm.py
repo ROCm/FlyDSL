@@ -20,9 +20,9 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.rdna3_f16_gemm import create_wmma_gemm_module as _create_wmma_gemm_module_gfx11  # noqa: E402
-from kernels.rdna_f16_gemm import create_wmma_gemm_module as _create_wmma_gemm_module_gfx12  # noqa: E402
-from kernels.rdna_fp8_preshuffle_gemm import (  # noqa: E402
+from kernels.gemm.rdna3_f16_gemm import create_wmma_gemm_module as _create_wmma_gemm_module_gfx11  # noqa: E402
+from kernels.gemm.rdna_f16_gemm import create_wmma_gemm_module as _create_wmma_gemm_module_gfx12  # noqa: E402
+from kernels.gemm.rdna_fp8_preshuffle_gemm import (  # noqa: E402
     compile_fp8_gemm,
     fp8_quantize_per_channel,
     fp8_quantize_per_token,

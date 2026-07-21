@@ -25,9 +25,9 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.fp8_gemm_4wave import compile_fp8_gemm_4w  # noqa: E402
-from kernels.fp8_gemm_8wave import compile_fp8_gemm_8w  # noqa: E402
-from kernels.fp8_gemm_utils import preshuffle_b  # noqa: E402
+from kernels.gemm.fp8_gemm_4wave import compile_fp8_gemm_4w  # noqa: E402
+from kernels.gemm.fp8_gemm_8wave import compile_fp8_gemm_8w  # noqa: E402
+from kernels.gemm.fp8_gemm_utils import preshuffle_b  # noqa: E402
 from tests.test_common import run_perftest, verify_output  # noqa: E402
 from tests.utils import pertoken_quant  # noqa: E402
 
@@ -204,6 +204,7 @@ def _bench_fp8_gemm(
         pytest.param(5120, 5120, 8320, 256, 256, id="5120x5120x8320"),
         pytest.param(8192, 8192, 8192, 256, 256, marks=pytest.mark.large_shape, id="8192x8192x8192"),
         pytest.param(9728, 8192, 8320, 256, 256, marks=pytest.mark.large_shape, id="9728x8192x8320"),
+        pytest.param(16384, 16384, 16384, 256, 256, marks=pytest.mark.large_shape, id="16384x16384x16384"),
     ],
 )
 @pytest.mark.parametrize("preshuffle_b", [False, True], ids=["rowmajor", "preshuffle_b"])
@@ -226,6 +227,7 @@ def test_fp8_gemm_4wave(M, N, K, tile_m, tile_n, preshuffle_b):
         pytest.param(5120, 5120, 8320, 256, 256, id="5120x5120x8320"),
         pytest.param(8192, 8192, 8192, 256, 256, marks=pytest.mark.large_shape, id="8192x8192x8192"),
         pytest.param(9728, 8192, 8320, 256, 256, marks=pytest.mark.large_shape, id="9728x8192x8320"),
+        pytest.param(16384, 16384, 16384, 256, 256, marks=pytest.mark.large_shape, id="16384x16384x16384"),
     ],
 )
 @pytest.mark.parametrize("preshuffle_b", [False, True], ids=["rowmajor", "preshuffle_b"])

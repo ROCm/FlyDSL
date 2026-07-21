@@ -326,6 +326,47 @@ func.func @test_store_vec_scalar(%mem: !fly.memref<f32, register, (2,3):(4,8)>, 
 
 // -----
 
+// === load_vec on a CoordTensor (leaf-int base) ===
+// load_vec evaluates base + layout(i) for i in [0, size) into a vector<size x i32>; each
+// element is materialized via crd2idx (no memory load). With base=0 and row stride 0,
+// column-major element i carries its column index, so all elements fold to one dense constant.
+
+// CHECK-LABEL: @test_load_vec_coord_tensor
+func.func @test_load_vec_coord_tensor() -> vector<6xi32> {
+  %base = fly.make_int_tuple() : () -> !fly.int_tuple<0>
+  %s = fly.make_int_tuple() : () -> !fly.int_tuple<(2, 3)>
+  %d = fly.make_int_tuple() : () -> !fly.int_tuple<(0, 1)>
+  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(2, 3)>, !fly.int_tuple<(0, 1)>) -> !fly.layout<(2, 3):(0, 1)>
+  %ct = fly.make_view(%base, %layout) : (!fly.int_tuple<0>, !fly.layout<(2, 3) : (0, 1)>) -> !fly.coord_tensor<0, (2, 3):(0, 1)>
+  // CHECK: %[[CST:.*]] = arith.constant dense<[0, 0, 1, 1, 2, 2]> : vector<6xi32>
+  // CHECK: return %[[CST]] : vector<6xi32>
+  %vec = fly.memref.load_vec(%ct) : (!fly.coord_tensor<0, (2, 3) : (0, 1)>) -> vector<6xi32>
+  return %vec : vector<6xi32>
+}
+
+// A dynamic i64 stride widens the result element type to i64: the offset crd2idx produces is
+// i64, so even with an i32 (static 0) base the vector is vector<3xi64>. Element i carries
+// i * stride: 0, stride, 2*stride.
+// CHECK-LABEL: @test_load_vec_coord_tensor_i64_stride
+// CHECK-SAME: (%[[STRIDE:.*]]: i64)
+func.func @test_load_vec_coord_tensor_i64_stride(%stride: i64) -> vector<3xi64> {
+  %base = fly.make_int_tuple() : () -> !fly.int_tuple<0>
+  %s = fly.make_int_tuple() : () -> !fly.int_tuple<(3)>
+  %d = fly.make_int_tuple(%stride) : (i64) -> !fly.int_tuple<(?{i64})>
+  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(3)>, !fly.int_tuple<(?{i64})>) -> !fly.layout<(3):(?{i64})>
+  %ct = fly.make_view(%base, %layout) : (!fly.int_tuple<0>, !fly.layout<(3) : (?{i64})>) -> !fly.coord_tensor<0, (3):(?{i64})>
+  // CHECK-DAG: %[[C2:.*]] = arith.constant 2 : i64
+  // CHECK-DAG: %[[CST:.*]] = arith.constant dense<0> : vector<3xi64>
+  // CHECK: %[[V1:.*]] = vector.insert %[[STRIDE]], %[[CST]] [1] : i64 into vector<3xi64>
+  // CHECK: %[[MUL:.*]] = arith.muli %[[STRIDE]], %[[C2]] : i64
+  // CHECK: %[[V2:.*]] = vector.insert %[[MUL]], %[[V1]] [2] : i64 into vector<3xi64>
+  // CHECK: return %[[V2]] : vector<3xi64>
+  %vec = fly.memref.load_vec(%ct) : (!fly.coord_tensor<0, (3) : (?{i64})>) -> vector<3xi64>
+  return %vec : vector<3xi64>
+}
+
+// -----
+
 // === End-to-End: Alloca + Load + Store Pipeline ===
 
 // CHECK-LABEL: @test_alloca_load_store

@@ -411,7 +411,7 @@ def _make_composite_class(
         )
 
     @classmethod
-    def __construct_from_ir_values__(cls, values):
+    def __construct_from_ir_values__(cls, values, exemplar=None):
         rebuilt = {}
         cursor = 0
         for name, eff_type in _effective_field_defs(cls):

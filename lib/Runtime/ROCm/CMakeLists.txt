@@ -13,5 +13,5 @@ target_include_directories(FlyJitRuntime PRIVATE
   ${MLIR_INCLUDE_DIRS}
 )
 target_compile_features(FlyJitRuntime PRIVATE cxx_std_17)
-target_link_libraries(FlyJitRuntime PRIVATE hip::host hip::amdhip64)
+target_link_libraries(FlyJitRuntime PRIVATE hip::host hip::amdhip64 ${CMAKE_DL_LIBS})
 set_target_properties(FlyJitRuntime PROPERTIES OUTPUT_NAME "fly_jit_runtime")

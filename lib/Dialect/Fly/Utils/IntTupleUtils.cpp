@@ -176,12 +176,26 @@ IntTupleAttr IntTupleBuilder<IntTupleAttr>::ge(IntTupleAttr lhs, IntTupleAttr rh
   return IntTupleAttr::get(lhs.getLeafAsInt() >= rhs.getLeafAsInt());
 }
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::eq(IntTupleAttr lhs, IntTupleAttr rhs) const {
-  assert(lhs.isLeafInt() && rhs.isLeafInt());
-  return IntTupleAttr::get(lhs.getLeafAsInt() == rhs.getLeafAsInt());
+  assert(lhs.isLeaf() && rhs.isLeaf());
+  if (lhs.isLeafInt() && rhs.isLeafInt()) {
+    return IntTupleAttr::get(lhs.getLeafAsInt() == rhs.getLeafAsInt());
+  }
+  if (lhs.isLeafBasis() && rhs.isLeafBasis()) {
+    return IntTupleAttr::get(lhs.getLeafAsBasis() == rhs.getLeafAsBasis());
+  }
+  // A scalar leaf and a basis monomial never coincide.
+  return IntTupleAttr::getLeafStatic(lhs.getContext(), 0);
 }
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::ne(IntTupleAttr lhs, IntTupleAttr rhs) const {
-  assert(lhs.isLeafInt() && rhs.isLeafInt());
-  return IntTupleAttr::get(lhs.getLeafAsInt() != rhs.getLeafAsInt());
+  assert(lhs.isLeaf() && rhs.isLeaf());
+  if (lhs.isLeafInt() && rhs.isLeafInt()) {
+    return IntTupleAttr::get(lhs.getLeafAsInt() != rhs.getLeafAsInt());
+  }
+  if (lhs.isLeafBasis() && rhs.isLeafBasis()) {
+    return IntTupleAttr::get(lhs.getLeafAsBasis() != rhs.getLeafAsBasis());
+  }
+  // A scalar leaf and a basis monomial never coincide.
+  return IntTupleAttr::getLeafStatic(lhs.getContext(), 1);
 }
 
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::min(IntTupleAttr lhs, IntTupleAttr rhs) const {

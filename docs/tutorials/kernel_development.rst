@@ -71,7 +71,7 @@ instructions via ``make_mma_atom`` and ``make_tiled_mma``:
        fx.gemm(mma_atom, frag_C, frag_A, frag_B, frag_C)
 
 See ``examples/03-tiledMma.py`` for a complete GEMM example and
-``kernels/preshuffle_gemm.py`` for a production GEMM implementation with
+``kernels/gemm/preshuffle_gemm.py`` for a production GEMM implementation with
 LDS pipeline.
 
 Shared Memory (LDS)
@@ -84,7 +84,7 @@ data movement:
 2. Use cooperative loads to fill LDS from global memory
 3. Synchronize with barriers before consuming LDS data
 
-See ``kernels/preshuffle_gemm.py`` for LDS double-buffering patterns.
+See ``kernels/gemm/preshuffle_gemm.py`` for LDS double-buffering patterns.
 
 Performance Optimization
 ------------------------
@@ -101,11 +101,10 @@ Reference Implementations
 
 Study these kernels for real-world patterns:
 
-- ``kernels/preshuffle_gemm.py`` -- MFMA + LDS pipeline GEMM
-- ``kernels/preshuffle_gemm_flyc.py`` -- GEMM using new ``@flyc.kernel`` API
-- ``kernels/softmax_kernel.py`` -- online numerically stable softmax
-- ``kernels/layernorm_kernel.py`` -- fused normalization
-- ``kernels/pa_decode_fp8.py`` -- paged attention decode with FP8
+- ``kernels/gemm/preshuffle_gemm.py`` -- MFMA + LDS pipeline GEMM
+- ``kernels/norm/softmax_kernel.py`` -- online numerically stable softmax
+- ``kernels/norm/layernorm_kernel.py`` -- fused normalization
+- ``kernels/attention/pa_decode_fp8.py`` -- paged attention decode with FP8
 
 .. seealso::
 

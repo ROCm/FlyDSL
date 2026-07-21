@@ -185,7 +185,7 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
     dtype = dt_norm
 
     if op == "softmax":
-        from kernels.softmax_kernel import build_softmax_module
+        from kernels.norm.softmax_kernel import build_softmax_module
 
         # M is runtime; module construction uses a dummy M.
         # `flydsl.compile()` already has its own cache.
@@ -196,7 +196,7 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
         return bench_gpu_us_torch(lambda: exe(x, y, M), warmup=warmup, iters=iters)
 
     if op == "layernorm":
-        from kernels.layernorm_kernel import build_layernorm_module
+        from kernels.norm.layernorm_kernel import build_layernorm_module
 
         m = build_layernorm_module(N, dtype)
         exe = flydsl.compile(m)
@@ -207,7 +207,7 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
         return bench_gpu_us_torch(lambda: exe(x, gamma, beta, y, M), warmup=warmup, iters=iters)
 
     if op == "rmsnorm":
-        from kernels.rmsnorm_kernel import build_rmsnorm_module
+        from kernels.norm.rmsnorm_kernel import build_rmsnorm_module
 
         m = build_rmsnorm_module(N, dtype)
         exe = flydsl.compile(m)
@@ -224,9 +224,9 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
         from flydsl.runtime.device import get_rocm_arch as _get_arch
 
         if str(_get_arch() or "").startswith("gfx11"):
-            from kernels.rdna3_f16_gemm import create_wmma_gemm_module
+            from kernels.gemm.rdna3_f16_gemm import create_wmma_gemm_module
         else:
-            from kernels.rdna_f16_gemm import create_wmma_gemm_module
+            from kernels.gemm.rdna_f16_gemm import create_wmma_gemm_module
 
         K = N  # square by default; caller can override via config
         torch_dtype = torch.bfloat16 if dtype == "bf16" else torch.float16
@@ -241,7 +241,7 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
         )
 
     if op == "wmma_fp8_gemm":
-        from kernels.rdna_fp8_preshuffle_gemm import (
+        from kernels.gemm.rdna_fp8_preshuffle_gemm import (
             compile_fp8_gemm,
             fp8_quantize_per_channel,
             fp8_quantize_per_token,
@@ -399,7 +399,7 @@ def run_wmma_sweep(
             print(f"ERROR: fp8_gemm {shape} FAILED: {e}")
             fail_count += 1
         try:
-            from kernels.rdna_fp8_preshuffle_gemm import fp8_quantize_per_channel, fp8_quantize_per_token
+            from kernels.gemm.rdna_fp8_preshuffle_gemm import fp8_quantize_per_channel, fp8_quantize_per_token
 
             A_f32 = torch.randn(M, K, device="cuda") * 0.1
             B_f32 = torch.randn(K, N, device="cuda") * 0.1
