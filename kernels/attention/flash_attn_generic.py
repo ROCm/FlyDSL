@@ -8,7 +8,6 @@ layout, streams K/V through LDS, and performs the online softmax over KV blocks.
 Q/K/V/O are flattened from BSHD, with GQA/MQA represented by a smaller KV-head
 count.
 
-
 Launches one block per Q tile and head:
 ``grid_x = batch * ceil(seq_len / BLOCK_M) * num_heads``. Tail Q/KV tiles are
 handled by buffer-resource bounds and softmax masking, so dense seq_len only
