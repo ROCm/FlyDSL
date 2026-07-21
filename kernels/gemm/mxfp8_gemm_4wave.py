@@ -866,7 +866,7 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
             #
             # Finalize accumulators in their own physical AGPR slots, but delay
             # each AGPR read/store until several independent final MFMAs have
-            # been issued. 
+            # been issued.
             #
             #   MFMA 0, MFMA 1, MFMA 2, MFMA 3, drain 0,
             #   MFMA 4, drain 1, MFMA 5, drain 2, ...
