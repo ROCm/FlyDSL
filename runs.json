@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-21T21:45:02Z",
+ "updated": "2026-07-21T23:55:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,29 +10,29 @@
    "branch": "feat/autotune-offline-configs",
    "event": "pull_request",
    "title": "[3/5] autotune: add offline config artifacts (#770)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29869540703",
    "created_at": "2026-07-21T21:20:11Z",
-   "updated_at": "2026-07-21T21:21:19Z",
+   "updated_at": "2026-07-21T23:52:19Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-21T21:21:18Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-21T21:44:10Z",
+     "completed_at": "2026-07-21T23:52:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29869540703/job/88766286403"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-21T21:21:18Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-21T21:50:10Z",
+     "completed_at": "2026-07-21T23:49:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29869540703/job/88766286432"
     },
     {
