@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-21T11:13:34Z",
+ "updated": "2026-07-21T11:35:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29825760749,
+   "pr": 850,
+   "commit": "c422f4d3c2566b5381d819bc28da90a2ec32de5e",
+   "branch": "binding_fa_opt",
+   "event": "pull_request",
+   "title": "[Perf]optimize flydsl flash attention kernel",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29825760749",
+   "created_at": "2026-07-21T11:21:08Z",
+   "updated_at": "2026-07-21T11:23:34Z",
+   "actor": "binding7012",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-21T11:23:21Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29825760749/job/88618970490"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-21T11:23:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29825760749/job/88618970500"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-21T11:23:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29825760749/job/88618970521"
+    }
+   ]
+  },
   {
    "run_id": 29820645526,
    "pr": 866,
@@ -10,20 +53,20 @@
    "branch": "atom_1250_refactor",
    "event": "pull_request",
    "title": "Atom 1250 refactor",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29820645526",
    "created_at": "2026-07-21T10:02:09Z",
-   "updated_at": "2026-07-21T10:16:05Z",
+   "updated_at": "2026-07-21T11:33:50Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-21T10:03:55Z",
-     "completed_at": null,
+     "completed_at": "2026-07-21T11:33:49Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29820645526/job/88602505221"
     },
     {
@@ -48,7 +91,7 @@
   },
   {
    "run_id": 29819690864,
-   "pr": 850,
+   "pr": null,
    "commit": "e4fd2957f63848639e449928c513ea9cd68486d5",
    "branch": "binding_fa_opt",
    "event": "pull_request",
@@ -2219,49 +2262,6 @@
      "started_at": "2026-07-17T09:39:53Z",
      "completed_at": "2026-07-17T09:51:42Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29570585492/job/87853471923"
-    }
-   ]
-  },
-  {
-   "run_id": 29569752397,
-   "pr": 871,
-   "commit": "03da132a6ee288c22e5ed5a90850a74d791076e0",
-   "branch": "pr/enh-shuffle-ops",
-   "event": "pull_request",
-   "title": "[Feat] Export shuffle xor/up/down/idx ops",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29569752397",
-   "created_at": "2026-07-17T09:22:52Z",
-   "updated_at": "2026-07-19T16:05:00Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-19T15:01:39Z",
-     "completed_at": "2026-07-19T16:04:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29569752397/job/88206199872"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-17T09:25:33Z",
-     "completed_at": "2026-07-17T10:21:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29569752397/job/88206200189"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-17T09:38:15Z",
-     "completed_at": "2026-07-17T09:53:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29569752397/job/88206200308"
     }
    ]
   }
