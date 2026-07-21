@@ -845,7 +845,7 @@ def flydsl_flash_attn_func(
                     raise NotImplementedError(
                         "flydsl_flash_attn_func: debug_counts requires the gfx950 DUALWAVE_SWP path"
                     )
-                if debug_lazy or (can_dualwave and (_arch.startswith("gfx950") or _dense_routes_to_dualwave(B, Sq))):
+                if debug_lazy or (can_dualwave and _dense_routes_to_dualwave(B, Sq)):
                     exe = _build_dense_dualwave(
                         num_heads=H,
                         num_kv_heads=num_kv_heads,
