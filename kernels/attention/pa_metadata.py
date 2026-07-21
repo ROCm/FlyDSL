@@ -2077,7 +2077,7 @@ def compile_pa_decode_metadata(
 #   reduce_partial_map: slot → partial row base (in the sliced buffer).
 # Direct (non-split) outputs have empty groups (indptr delta 0) and are skipped.
 @functools.lru_cache(maxsize=64)
-def compile_pa_ps_reduce(
+def compile_pa_metadata_reduce(
     *,
     query_length: int,
     num_query_heads: int,
@@ -2088,7 +2088,7 @@ def compile_pa_ps_reduce(
     assert 0 < block_threads <= 1024, "head_size must fit in one workgroup"
 
     @flyc.kernel(known_block_size=(block_threads, 1, 1))
-    def pa_ps_reduce_kernel(
+    def pa_metadata_reduce_kernel(
         final_output_ptr: fx.Tensor,
         partial_output_ptr: fx.Tensor,
         partial_lse_ptr: fx.Tensor,
@@ -2165,7 +2165,7 @@ def compile_pa_ps_reduce(
             buffer_ops.buffer_store(out_val, out_rsrc, out_off)
 
     @flyc.jit
-    def launch_pa_ps_reduce(
+    def launch_pa_metadata_reduce(
         final_output,
         partial_output,
         partial_lse,
@@ -2179,7 +2179,7 @@ def compile_pa_ps_reduce(
         num_groups,
         stream: fx.Stream = fx.Stream(None),
     ):
-        pa_ps_reduce_kernel(
+        pa_metadata_reduce_kernel(
             final_output,
             partial_output,
             partial_lse,
@@ -2196,7 +2196,7 @@ def compile_pa_ps_reduce(
             stream=stream,
         )
 
-    return {"launch": launch_pa_ps_reduce, "kernel": pa_ps_reduce_kernel}
+    return {"launch": launch_pa_metadata_reduce, "kernel": pa_metadata_reduce_kernel}
 
 
 _PA_PS_REDUCE_DTYPE_STR = {
@@ -2206,7 +2206,7 @@ _PA_PS_REDUCE_DTYPE_STR = {
 }
 
 
-def pa_ps_reduce(
+def pa_metadata_reduce(
     *,
     partial_output: torch.Tensor,
     partial_lse: torch.Tensor,
@@ -2230,7 +2230,7 @@ def pa_ps_reduce(
     stride_po_row = num_query_heads * head_size
     stride_pl_row = num_query_heads
     out_dtype_str = _PA_PS_REDUCE_DTYPE_STR[final_output.dtype]
-    compiled = compile_pa_ps_reduce(
+    compiled = compile_pa_metadata_reduce(
         query_length=int(max_seqlen_q),
         num_query_heads=int(num_query_heads),
         head_size=int(head_size),

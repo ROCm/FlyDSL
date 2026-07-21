@@ -733,7 +733,7 @@ def run_pa_decode_ps_test(
         gluon_tol = get_tolerance(kv_varlen=kv_varlen, sliding_window=sliding_window)
         print("\nGluon vs Torch:")
         torch.testing.assert_close(
-            gluon_output, reference_output, atol=gluon_tol, rtol=gluon_tol, msg="[Gluon vs Torch] mismatch"
+            gluon_output, reference_output, atol=gluon_tol, rtol=gluon_tol
         )
         print("Gluon vs Torch PASSED")
 
@@ -807,7 +807,7 @@ def run_pa_decode_ps_test(
     ps_tol = get_tolerance(kv_varlen=kv_varlen, sliding_window=sliding_window)
     print("\nFlyDSL PS vs Torch:")
     torch.testing.assert_close(
-        flydsl_ps_output, reference_output, atol=ps_tol, rtol=ps_tol, msg="[FlyDSL PS vs Torch] mismatch"
+        flydsl_ps_output, reference_output, atol=ps_tol, rtol=ps_tol
     )
     print("FlyDSL PS vs Torch PASSED")
 

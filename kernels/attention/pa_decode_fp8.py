@@ -1096,7 +1096,6 @@ def pa_decode_ps_launch(
                 "(per-sequence physical block index table)."
             )
         batch_size = context_lengths.shape[0]
-        tile_pmax = tile_psum = tile_pout = None
         if is_graph_capturing:
             # Buffer sizes must be fixed ahead of capture and stay identical
             # across every replay, so require the caller to have preallocated
@@ -1107,7 +1106,6 @@ def pa_decode_ps_launch(
                     "CUDA graph capture requires preallocated `exp_sums`, `max_logits`, "
                     "and `temporary_output` for the tile-backed small-block PS path."
                 )
-            tile_pmax, tile_psum, tile_pout = max_logits, exp_sums, temporary_output
         # pa_decode_tile requires an exact [num_blocks, num_kv_heads,
         # block_size] per-token scale shape; callers here may pass an extra
         # trailing singleton dim (e.g. from a pertoken-quant helper), which
@@ -1127,13 +1125,10 @@ def pa_decode_ps_launch(
             value_scale,
             softmax_scale=softmax_scale,
             stream=s,
-            # Use the caller's `max_context_partition_num` (the count they sized
-            # any preallocated buffers with); `or None` keeps the default 0 as
-            # "let pa_decode_tile pick and allocate its own partition buffers".
-            num_partitions=max_context_partition_num or None,
-            pmax=tile_pmax,
-            psum=tile_psum,
-            pout=tile_pout,
+            num_partitions=max_context_partition_num,
+            pmax=max_logits,
+            psum=exp_sums,
+            pout=temporary_output,
         )
         return "ps_small_block"
 
@@ -1204,11 +1199,11 @@ def pa_decode_ps_launch(
         s,
     )
 
-    from kernels.attention.pa_metadata import pa_ps_reduce
+    from kernels.attention.pa_metadata import pa_metadata_reduce
 
     # Deterministic FlyDSL reduce replaces the racy aiter pa_reduce_v1/mla_reduce_v1
     # (root cause of the flaky test_pa NaN). Same partial layout / reduce maps.
-    pa_ps_reduce(
+    pa_metadata_reduce(
         partial_output=partial_output[query_length:],
         partial_lse=partial_lse[query_length:],
         reduce_indptr=metadata["reduce_indptr"],
