@@ -508,7 +508,6 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
                 c_idx = row * fx.Index(c_n) + col
                 buffer_ops.buffer_store(Vec(acc)[ii].to(fx.Float16), c_rsrc, c_idx)
 
-
         # Explicit register coordinates for HK-style four-quadrant mapping.
         # BLOCK_M/BLOCK_N are 256x256.  Four waves map to warp positions
         # inside each 128x128 quadrant:
@@ -1021,7 +1020,6 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
                 scales0,
             )
             hk_one_k_final(lds_a0, lds_b0, a0_regs, b0_regs, scales0)
-
 
     @flyc.jit
     def launch_gemm(
