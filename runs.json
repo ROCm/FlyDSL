@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-21T10:38:02Z",
+ "updated": "2026-07-21T11:11:10Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -29,19 +29,19 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-21T10:16:04Z",
-     "completed_at": null,
+     "completed_at": "2026-07-21T10:42:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29820645526/job/88602505234"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-21T10:04:53Z",
-     "completed_at": null,
+     "completed_at": "2026-07-21T11:07:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29820645526/job/88602505320"
     }
    ]
@@ -53,11 +53,11 @@
    "branch": "binding_fa_opt",
    "event": "pull_request",
    "title": "[Perf]optimize flydsl flash attention kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29819690864",
    "created_at": "2026-07-21T09:47:46Z",
-   "updated_at": "2026-07-21T09:50:41Z",
+   "updated_at": "2026-07-21T11:08:34Z",
    "actor": "binding7012",
    "jobs": [
     {
@@ -81,10 +81,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-21T09:50:20Z",
-     "completed_at": null,
+     "completed_at": "2026-07-21T11:08:33Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29819690864/job/88599429602"
     }
    ]
@@ -234,10 +234,10 @@
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-21T09:59:35Z",
-     "completed_at": null,
+     "completed_at": "2026-07-21T10:47:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29810183418/job/88600783498"
     },
     {
