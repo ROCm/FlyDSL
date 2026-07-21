@@ -2192,27 +2192,16 @@ public:
     if (srcRank != dstRank)
       return rewriter.notifyMatchFailure(op, "src/dst ranks mismatch");
 
-    // Atoms that move a whole N-D tile in one call (e.g. TDM DMA) declare
-    // getCopyRank() == N and read the tile geometry from the rank-N memref
-    // layout. Emit a single call once the tile matches that rank, instead of
-    // decomposing it. The default rank 1 (guarded by > 1 here) leaves the
-    // per-element path below unchanged for every other atom.
+    // A whole-tile copy atom (e.g. the gfx1250 TDM DMA) moves the entire N-D tile
+    // in one call and reads its geometry from the operand memref layout, so emit a
+    // single call on the tile instead of decomposing it per element. The atom's own
+    // emitAtomCall verifies the operand rank matches the tile. Detected via a
+    // boundary-safe type trait rather than a concrete cross-dialect cast.
     if (auto copyAtomTy = dyn_cast<CopyAtomType>(copyAtomVal.getType())) {
-      if (auto copyOp = dyn_cast<CopyOpTypeInterface>(copyAtomTy.getCopyOp())) {
-        unsigned copyRank = copyOp.getCopyRank();
-        if (copyRank > 1) {
-          // A whole-tile atom reads its geometry from the rank-N memref, so the
-          // tile must be presented at exactly that rank. Anything else (a
-          // larger, not-yet-tiled memref or a lower-rank tile) has no valid
-          // per-element decomposition for this atom — fail loudly here rather
-          // than silently peeling it apart into wrong per-element calls below.
-          if (srcRank != static_cast<int32_t>(copyRank))
-            return rewriter.notifyMatchFailure(
-                op, "whole-tile copy atom requires a memref of its exact copy rank");
-          CopyAtomCall::create(rewriter, loc, copyAtomVal, src, dst, pred);
-          rewriter.eraseOp(op);
-          return success();
-        }
+      if (copyAtomTy.getCopyOp().hasTrait<WholeTileCopy>()) {
+        CopyAtomCall::create(rewriter, loc, copyAtomVal, src, dst, pred);
+        rewriter.eraseOp(op);
+        return success();
       }
     }
 

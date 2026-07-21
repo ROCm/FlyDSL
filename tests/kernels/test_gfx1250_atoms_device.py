@@ -71,9 +71,9 @@ def _compile_tdm_roundtrip(M: int, N: int, num_warps: int):
         lds = fx.SharedAllocator().allocate(fx.Array[fx.Float16, M * N]).peek()
         lds2d = fx.make_view(lds.ptr, fx.make_layout((M, N), (N, 1)))
 
-        # Global -> LDS. tensor_extents = full tile (no OOB clamp); the innermost
-        # stride is assumed 1 so only the outer stride (N) is carried, and it
-        # falls back to the static layout stride here (passed None).
+        # Global -> LDS. The base pointer comes from the global operand; the tile
+        # extents (full tile => no OOB clamp) and strides (None => static layout
+        # fallback) are atom state populated by make_tdm_atom.
         load_atom = fx.rocdl.make_tdm_atom(a2d, [M, N], num_warps=num_warps)
         fx.copy_atom_call(load_atom, a2d, lds2d)
         tdm_ops.tensor_wait(0)
