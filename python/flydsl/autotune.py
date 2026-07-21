@@ -12,7 +12,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable, Dict, List
 
-from .utils import log
+from .utils import env, log
 
 try:
     import torch
@@ -81,9 +81,12 @@ def _device_descriptor(device=None):
     return {"name": name, "arch": arch, "compute_units": compute_units}
 
 
-def _artifact_config_dir():
-    value = os.environ.get("FLYDSL_AUTOTUNE_CONFIG_DIR")
-    return Path(value).expanduser().resolve() if value else None
+def _artifacts_enabled() -> bool:
+    return bool(env.autotune.config_dir)
+
+
+def _artifact_config_dir() -> Path:
+    return Path(env.autotune.config_dir).expanduser().resolve()
 
 
 def _canonical_json(value) -> str:
@@ -304,7 +307,7 @@ class Autotuner:
         key_vals.append(("_env_", _env_fingerprint()))
         key_vals.append(("_toolchain_", _toolchain_fingerprint()))
         key_vals.append(("_device_", _device_fingerprint()))
-        if self.artifact_name is not None and os.environ.get("FLYDSL_AUTOTUNE_CONFIG_DIR"):
+        if self.artifact_name is not None and _artifacts_enabled():
             device = _device_descriptor(self._call_device(args, kwargs))
             descriptor = tuple(sorted(device.items())) if device is not None else None
             key_vals.append(("_artifact_device_", descriptor))
@@ -444,7 +447,7 @@ class Autotuner:
         )
 
     def _artifact_ref(self, args, kwargs, *, required):
-        if self.artifact_name is None or not os.environ.get("FLYDSL_AUTOTUNE_CONFIG_DIR"):
+        if self.artifact_name is None or not _artifacts_enabled():
             return None
         try:
             bound = self._signature.bind_partial(*args, **kwargs)
