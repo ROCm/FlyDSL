@@ -2495,9 +2495,9 @@ def test_moe_stage1_persistent(
     """
     if "gfx95" not in ARCH:
         pytest.skip(f"{in_dtype} requires gfx950+, got {ARCH}")
-    from tests.kernels.utils import fp4_utils
+    from tests.kernels.utils import gemm_common_utils
 
-    if fp4_utils is None:
+    if gemm_common_utils is None:
         pytest.skip("FP4 dependencies not available (triton/mixed_moe_gemm not installed)")
     if model_dim < 256 or tile_k < 256:
         pytest.skip(f"{in_dtype} requires model_dim >= 256 and tile_k >= 256, got {model_dim}, {tile_k}")

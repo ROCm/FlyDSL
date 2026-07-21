@@ -272,7 +272,7 @@ def _dequant_mx_to_f32(t_f32, quant_mode):
     values the kernel consumes.  An accuracy oracle built on these (weights, and optionally the
     activation) isolates the kernel arithmetic error from the (dominant) quant floor, giving a far
     tighter gate than a full-precision oracle.  Aiter-free port of aiter RefModel._mxfp4_quant +
-    fp4_utils dequant (mxfp4_to_f32 / e8m0_to_f32 live in gemm_common_utils; quant is per-1x32 along
+    gemm_common_utils dequant (mxfp4_to_f32 / e8m0_to_f32 live in gemm_common_utils; quant is per-1x32 along
     the last / K dim).  ``_chunked_fp4_quant`` bounds the fp4 temporary for big weights."""
     orig = tuple(t_f32.shape)
     t2d = t_f32.reshape(-1, orig[-1])
