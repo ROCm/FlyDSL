@@ -2764,9 +2764,7 @@ class GenericSoftmaxHelper:
                     kv_col = col_base_i32 + fx.Int32(moff[r])
                     out.append((kv_col > q_mask_limit_i32).select(c_neg_inf, scores[2 * r]))
                     out.append(
-                        (kv_col + fx.Int32(traits.K_SUB_N) > q_mask_limit_i32).select(
-                            c_neg_inf, scores[2 * r + 1]
-                        )
+                        (kv_col + fx.Int32(traits.K_SUB_N) > q_mask_limit_i32).select(c_neg_inf, scores[2 * r + 1])
                     )
                 return out
 
@@ -2786,9 +2784,7 @@ class GenericSoftmaxHelper:
             for r in range_constexpr(16):
                 kv_col = col_base_i32 + fx.Int32(moff[r])
                 masked_lo = (kv_col >= seq_len_i32).select(ctx.c_neg_inf, s_raw_lo[r])
-                masked_hi = (kv_col + fx.Int32(traits.K_SUB_N) >= seq_len_i32).select(
-                    ctx.c_neg_inf, s_raw_hi[r]
-                )
+                masked_hi = (kv_col + fx.Int32(traits.K_SUB_N) >= seq_len_i32).select(ctx.c_neg_inf, s_raw_hi[r])
                 s_raw_lo[r] = (needs_pad_mask).select(masked_lo, s_raw_lo[r])
                 s_raw_hi[r] = (needs_pad_mask).select(masked_hi, s_raw_hi[r])
         return s_raw_lo, s_raw_hi
@@ -3375,9 +3371,7 @@ class DualwaveKernelContext:
             self.max_num_tiles = self.num_kv_tiles
 
         self.max_num_tiles = ((self.max_num_tiles + fx.Index(1)) // fx.Index(2)) * fx.Index(2)
-        self.max_num_tiles = fx.Index(
-            (self.max_num_tiles < fx.Index(4)).select(fx.Index(4), self.max_num_tiles)
-        )
+        self.max_num_tiles = fx.Index((self.max_num_tiles < fx.Index(4)).select(fx.Index(4), self.max_num_tiles))
 
         if const_expr(traits.SPLITK):
             chunk = ((self.max_num_tiles + (traits.NUM_KV_SPLITS - 1)) // traits.NUM_KV_SPLITS + 1) // 2 * 2
@@ -3388,9 +3382,7 @@ class DualwaveKernelContext:
                 (self.split_t_end < self.max_num_tiles).select(self.split_t_end, self.max_num_tiles)
             )
             self.split_t_end = fx.Index(
-                (self.max_num_tiles - self.split_t_end < fx.Index(4)).select(
-                    self.max_num_tiles, self.split_t_end
-                )
+                (self.max_num_tiles - self.split_t_end < fx.Index(4)).select(self.max_num_tiles, self.split_t_end)
             )
             self.split_nonempty = self.split_t0 + fx.Index(4) <= self.max_num_tiles
         else:
@@ -4350,9 +4342,7 @@ class DualwaveFp8KernelContext:
             split_t0 = self.split_idx * chunk
             split_t_end = split_t0 + chunk
             split_t_end = fx.Index((split_t_end < max_num_tiles).select(split_t_end, max_num_tiles))
-            split_t_end = fx.Index(
-                (max_num_tiles - split_t_end < fx.Index(4)).select(max_num_tiles, split_t_end)
-            )
+            split_t_end = fx.Index((max_num_tiles - split_t_end < fx.Index(4)).select(max_num_tiles, split_t_end))
             self.split_nonempty = split_t0 + fx.Index(4) <= max_num_tiles
         else:
             split_t0 = 0
