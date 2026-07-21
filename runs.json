@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-21T16:14:54Z",
+ "updated": "2026-07-21T16:24:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -98,20 +98,20 @@
    "branch": "binding_fa_opt",
    "event": "pull_request",
    "title": "[Perf]optimize flydsl flash attention kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29841467347",
    "created_at": "2026-07-21T14:55:25Z",
-   "updated_at": "2026-07-21T15:13:38Z",
+   "updated_at": "2026-07-21T16:21:14Z",
    "actor": "binding7012",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-21T15:03:08Z",
-     "completed_at": null,
+     "completed_at": "2026-07-21T16:21:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29841467347/job/88673034396"
     },
     {
