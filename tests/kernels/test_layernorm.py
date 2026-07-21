@@ -80,6 +80,8 @@ def _get_layernorm_configs():
             (32, 128, "f16"),  # f16 aligned
             (64, 2000, "f32"),  # unaligned tail handling
             (16, 512, "bf16"),  # bf16 small shape
+            (64, 4096, "f16"),  # f16 vectorized fast path below 8192
+            (64, 8192, "f16"),  # f16 fast-path N
             (64, 8192, "bf16"),  # bf16 fast-path N with small M
         ]
     return configs
@@ -545,13 +547,13 @@ def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     return ok, flydsl_gpu_us
 
 
-def _reference_layernorm(input_dev, gamma_dev, beta_dev):
+def _reference_layernorm(input_dev, gamma_dev, beta_dev, eps: float = EPS):
     x = input_dev.to(DTYPE_FP32)
     gamma = gamma_dev.to(DTYPE_FP32)
     beta = beta_dev.to(DTYPE_FP32)
     mean = x.mean(dim=1, keepdim=True)
     var = x.var(dim=1, keepdim=True, unbiased=False)
-    return ((x - mean) / torch.sqrt(var + EPS) * gamma + beta).to(DTYPE_FP32)
+    return ((x - mean) / torch.sqrt(var + eps) * gamma + beta).to(DTYPE_FP32)
 
 
 def _reference_layernorm_quant(input_dev, gamma_dev, beta_dev, *, xscale_dev=None):
@@ -971,8 +973,48 @@ def test_fused_add_layernorm_smoothquant():
         raise SystemExit(1)
 
 
+def test_layernorm_eps_honored():
+    """eps must be baked into LayerNorm kernels, matching RMSNorm behavior."""
+    print("=" * 80)
+    print("Running LayerNorm eps-honored Test")
+    print("=" * 80)
+    torch.manual_seed(0)
+
+    for M, N in ((32, 256), (32, 3000)):
+        x = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32).contiguous()
+        gamma = torch.rand((N,), device="cuda", dtype=DTYPE_FP32).contiguous()
+        beta = torch.rand((N,), device="cuda", dtype=DTYPE_FP32).contiguous()
+        out = torch.empty_like(x)
+        stream = torch.cuda.current_stream()
+
+        for eps in (1e-5, 1e-6, 1e-2):
+            launch_fn = build_layernorm_module(N, "f32", eps=eps)
+            compiled_fn = flyc.compile(launch_fn, x, gamma, beta, out, M, stream)
+            compiled_fn(x, gamma, beta, out, M, stream)
+            torch.cuda.synchronize()
+
+            ref = _reference_layernorm(x, gamma, beta, eps=eps)
+            err = (out - ref).abs().max().item()
+            print(f"  N={N} eps={eps:g}: max err vs torch ref = {err:.3e}")
+            assert err < 1e-4, f"N={N} eps={eps} not honored (err={err})"
+
+        y_large_eps = torch.empty_like(x)
+        y_small_eps = torch.empty_like(x)
+        compiled_large = flyc.compile(build_layernorm_module(N, "f32", eps=1e-2), x, gamma, beta, y_large_eps, M, stream)
+        compiled_small = flyc.compile(build_layernorm_module(N, "f32", eps=1e-6), x, gamma, beta, y_small_eps, M, stream)
+        compiled_large(x, gamma, beta, y_large_eps, M, stream)
+        compiled_small(x, gamma, beta, y_small_eps, M, stream)
+        torch.cuda.synchronize()
+        diff = (y_large_eps - y_small_eps).abs().max().item()
+        print(f"  N={N} eps 1e-2 vs 1e-6 output diff = {diff:.3e} (must be > 0)")
+        assert diff > 0, f"N={N}: eps appears to be ignored"
+
+    print("  -> PASSED")
+
+
 if __name__ == "__main__":
     test_layernorm()
+    test_layernorm_eps_honored()
     test_fused_add_layernorm()
     test_layernorm_dynamicquant()
     test_layernorm_smoothquant()

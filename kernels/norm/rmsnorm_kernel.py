@@ -782,6 +782,7 @@ def _build_rmsnorm_quant_module(
     *,
     is_smooth: bool,
     quant_dtype_str: str = "i8",
+    eps: float = EPS,
 ):
     tile_cols = BLOCK_THREADS * VEC_WIDTH
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
@@ -805,7 +806,7 @@ def _build_rmsnorm_quant_module(
         quant_dtype = _quant_dtype_to_elem_type(quant_dtype_str)
 
         fm_fast = arith.FastMathFlags.fast
-        eps_c = EPS
+        eps_c = eps
         n_float = float(N)
         c_zero_f = fx.Float32(0.0)
         c_one_f = fx.Float32(1.0)
@@ -1123,12 +1124,14 @@ def build_rmsnorm_dynamicquant_module(
     N: int,
     dtype_str: str,
     quant_dtype_str: str = "i8",
+    eps: float = EPS,
 ):
     return _build_rmsnorm_quant_module(
         N,
         dtype_str,
         is_smooth=False,
         quant_dtype_str=quant_dtype_str,
+        eps=eps,
     )
 
 
@@ -1136,12 +1139,14 @@ def build_rmsnorm_smoothquant_module(
     N: int,
     dtype_str: str,
     quant_dtype_str: str = "i8",
+    eps: float = EPS,
 ):
     return _build_rmsnorm_quant_module(
         N,
         dtype_str,
         is_smooth=True,
         quant_dtype_str=quant_dtype_str,
+        eps=eps,
     )
 
 
@@ -1151,6 +1156,7 @@ def _build_fused_add_rmsnorm_quant_module(
     *,
     is_smooth: bool,
     quant_dtype_str: str = "i8",
+    eps: float = EPS,
 ):
     arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
@@ -1179,7 +1185,7 @@ def _build_fused_add_rmsnorm_quant_module(
         quant_dtype = _quant_dtype_to_elem_type(quant_dtype_str)
 
         fm_fast = arith.FastMathFlags.fast
-        eps_c = EPS
+        eps_c = eps
         n_float = float(N)
         c_zero_f = fx.Float32(0.0)
         c_one_f = fx.Float32(1.0)
@@ -1522,12 +1528,14 @@ def build_fused_add_rmsnorm_dynamicquant_module(
     N: int,
     dtype_str: str,
     quant_dtype_str: str = "i8",
+    eps: float = EPS,
 ):
     return _build_fused_add_rmsnorm_quant_module(
         N,
         dtype_str,
         is_smooth=False,
         quant_dtype_str=quant_dtype_str,
+        eps=eps,
     )
 
 
@@ -1535,12 +1543,14 @@ def build_fused_add_rmsnorm_smoothquant_module(
     N: int,
     dtype_str: str,
     quant_dtype_str: str = "i8",
+    eps: float = EPS,
 ):
     return _build_fused_add_rmsnorm_quant_module(
         N,
         dtype_str,
         is_smooth=True,
         quant_dtype_str=quant_dtype_str,
+        eps=eps,
     )
 
 

@@ -6,8 +6,8 @@
 LayerNorm(x) = (x - mean) / sqrt(var + eps) * gamma + beta
 
 Two paths:
-  - Fast path (N == BLOCK_THREADS * VEC_WIDTH * 4): vectorised tiled copy,
-    register caching, pipelined gamma/beta loads.
+  - Fast path (N is a multiple of BLOCK_THREADS * VEC_WIDTH): vectorised
+    tiled copy, register caching, pipelined gamma/beta loads.
   - Generic path (arbitrary N): scalar 2-pass implementation.
 """
 
@@ -112,12 +112,13 @@ def _quant_dtype_max(dtype_str: str) -> float:
     raise ValueError(f"unsupported quant dtype: {dtype_str!r} (expected 'i8' or 'int8')")
 
 
-def build_layernorm_module(N: int, dtype_str: str):
+def build_layernorm_module(N: int, dtype_str: str, eps: float = EPS):
     arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
+    tile_cols = BLOCK_THREADS * VEC_WIDTH
 
     SharedStorage = _make_reduction_storage(RED_SLOTS)
 
@@ -134,7 +135,7 @@ def build_layernorm_module(N: int, dtype_str: str):
 
         elem_dtype = dtype_to_elem_type(dtype_str)
         fm_fast = arith.FastMathFlags.fast
-        eps_c = EPS
+        eps_c = eps
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         s_sum = lds.s_sum.view(fx.make_layout(RED_SLOTS, 1))
@@ -194,12 +195,12 @@ def build_layernorm_module(N: int, dtype_str: str):
             return mean, rstd
 
         # ==================================================================
-        # Fast path: N == BLOCK_THREADS * VEC_WIDTH * 4
+        # Fast path: N is a multiple of BLOCK_THREADS * VEC_WIDTH
         # Uses buffer_load / buffer_store for high-bandwidth vectorised
         # memory access (same approach as preshuffle_gemm).
         # ==================================================================
-        if const_expr(N == (BLOCK_THREADS * VEC_WIDTH * 4) and elem_bits <= 16):
-            num_tiles_py = 4
+        if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
+            num_tiles_py = N // tile_cols
             c_zero_f = fx.Float32(0.0)
             thread_sum = c_zero_f
             thread_sumsq = c_zero_f
@@ -342,12 +343,13 @@ def build_layernorm_module(N: int, dtype_str: str):
     return launch_layernorm
 
 
-def build_fused_add_layernorm_module(N: int, dtype_str: str):
+def build_fused_add_layernorm_module(N: int, dtype_str: str, eps: float = EPS):
     arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
+    tile_cols = BLOCK_THREADS * VEC_WIDTH
 
     SharedStorage = _make_reduction_storage(RED_SLOTS)
 
@@ -365,7 +367,7 @@ def build_fused_add_layernorm_module(N: int, dtype_str: str):
 
         elem_dtype = dtype_to_elem_type(dtype_str)
         fm_fast = arith.FastMathFlags.fast
-        eps_c = EPS
+        eps_c = eps
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         s_sum = lds.s_sum.view(fx.make_layout(RED_SLOTS, 1))
@@ -419,10 +421,10 @@ def build_fused_add_layernorm_module(N: int, dtype_str: str):
             return mean, fmath.rsqrt(var + eps_c, fastmath=fm_fast)
 
         # ==================================================================
-        # Fast path: N == BLOCK_THREADS * VEC_WIDTH * 4
+        # Fast path: N is a multiple of BLOCK_THREADS * VEC_WIDTH
         # ==================================================================
-        if const_expr(N == (BLOCK_THREADS * VEC_WIDTH * 4) and elem_bits <= 16):
-            num_tiles_py = 4
+        if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
+            num_tiles_py = N // tile_cols
             c_zero_f = fx.Float32(0.0)
             thread_sum = c_zero_f
             thread_sumsq = c_zero_f
@@ -568,9 +570,11 @@ def _build_layernorm_quant_module(
     *,
     is_smooth: bool,
     quant_dtype_str: str = "i8",
+    eps: float = EPS,
 ):
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
+    tile_cols = BLOCK_THREADS * VEC_WIDTH
     quant_dtype_max = _quant_dtype_max(quant_dtype_str)
 
     SharedStorage = _make_reduction_storage(RED_SLOTS)
@@ -591,7 +595,7 @@ def _build_layernorm_quant_module(
         quant_dtype = _quant_dtype_to_elem_type(quant_dtype_str)
 
         fm_fast = arith.FastMathFlags.fast
-        eps_c = EPS
+        eps_c = eps
         n_float = float(N)
         c_zero_f = fx.Float32(0.0)
         c_one_f = fx.Float32(1.0)
@@ -676,10 +680,10 @@ def _build_layernorm_quant_module(
             return fx.memref_load(s_sum, 0)
 
         # ==================================================================
-        # Fast path: N == BLOCK_THREADS * VEC_WIDTH * 4
+        # Fast path: N is a multiple of BLOCK_THREADS * VEC_WIDTH
         # ==================================================================
-        if const_expr(N == (BLOCK_THREADS * VEC_WIDTH * 4) and elem_bits <= 16):
-            num_tiles_py = 4
+        if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
+            num_tiles_py = N // tile_cols
             quant_half_width = VEC_WIDTH // 2
             abs_mask = full(VEC_WIDTH, fx.Uint32(0x7FFFFFFF), fx.Uint32)
 
@@ -912,12 +916,14 @@ def _build_fused_add_layernorm_quant_module(
     *,
     is_smooth: bool,
     quant_dtype_str: str = "i8",
+    eps: float = EPS,
 ):
     arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
+    tile_cols = BLOCK_THREADS * VEC_WIDTH
     quant_dtype_max = _quant_dtype_max(quant_dtype_str)
 
     SharedStorage = _make_reduction_storage(RED_SLOTS)
@@ -940,7 +946,7 @@ def _build_fused_add_layernorm_quant_module(
         quant_dtype = _quant_dtype_to_elem_type(quant_dtype_str)
 
         fm_fast = arith.FastMathFlags.fast
-        eps_c = EPS
+        eps_c = eps
         n_float = float(N)
         c_zero_f = fx.Float32(0.0)
         c_one_f = fx.Float32(1.0)
@@ -1025,10 +1031,10 @@ def _build_fused_add_layernorm_quant_module(
             return fx.memref_load(s_sum, 0)
 
         # ==================================================================
-        # Fast path: N == BLOCK_THREADS * VEC_WIDTH * 4
+        # Fast path: N is a multiple of BLOCK_THREADS * VEC_WIDTH
         # ==================================================================
-        if const_expr(N == (BLOCK_THREADS * VEC_WIDTH * 4) and elem_bits <= 16):
-            num_tiles_py = 4
+        if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
+            num_tiles_py = N // tile_cols
             quant_half_width = VEC_WIDTH // 2
             abs_mask = full(VEC_WIDTH, fx.Uint32(0x7FFFFFFF), fx.Uint32)
 
@@ -1288,12 +1294,14 @@ def build_layernorm_dynamicquant_module(
     N: int,
     dtype_str: str,
     quant_dtype_str: str = "i8",
+    eps: float = EPS,
 ):
     return _build_layernorm_quant_module(
         N,
         dtype_str,
         is_smooth=False,
         quant_dtype_str=quant_dtype_str,
+        eps=eps,
     )
 
 
@@ -1301,12 +1309,14 @@ def build_layernorm_smoothquant_module(
     N: int,
     dtype_str: str,
     quant_dtype_str: str = "i8",
+    eps: float = EPS,
 ):
     return _build_layernorm_quant_module(
         N,
         dtype_str,
         is_smooth=True,
         quant_dtype_str=quant_dtype_str,
+        eps=eps,
     )
 
 
@@ -1314,12 +1324,14 @@ def build_fused_add_layernorm_dynamicquant_module(
     N: int,
     dtype_str: str,
     quant_dtype_str: str = "i8",
+    eps: float = EPS,
 ):
     return _build_fused_add_layernorm_quant_module(
         N,
         dtype_str,
         is_smooth=False,
         quant_dtype_str=quant_dtype_str,
+        eps=eps,
     )
 
 
@@ -1327,10 +1339,12 @@ def build_fused_add_layernorm_smoothquant_module(
     N: int,
     dtype_str: str,
     quant_dtype_str: str = "i8",
+    eps: float = EPS,
 ):
     return _build_fused_add_layernorm_quant_module(
         N,
         dtype_str,
         is_smooth=True,
         quant_dtype_str=quant_dtype_str,
+        eps=eps,
     )
