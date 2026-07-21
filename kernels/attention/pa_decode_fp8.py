@@ -1096,20 +1096,12 @@ def pa_decode_ps_launch(
                 "(per-sequence physical block index table)."
             )
         batch_size = context_lengths.shape[0]
-        np_tile = None
         tile_pmax = tile_psum = tile_pout = None
         if is_graph_capturing:
-            # Buffer sizes must be fixed ahead of capture and stay
-            # identical across every replay, so force the same
-            # `max_context_partition_num` heuristic the other PS paths use
-            # here (instead of pa_decode_tile's own internal per-call
-            # choice) and require the caller to have preallocated
-            # exp_sums/max_logits/temporary_output for it, exactly as the
-            # other paths already require.
-            np_tile = max_context_partition_num
-            if np_tile == 0:
-                blocks_per_partition = KV_COMPUTE_BLOCK // block_size
-                np_tile = get_recommended_splits(batch_size, num_kv_heads, split_kv_blocks=blocks_per_partition)
+            # Buffer sizes must be fixed ahead of capture and stay identical
+            # across every replay, so require the caller to have preallocated
+            # exp_sums/max_logits/temporary_output, exactly as the other PS
+            # paths already require.
             if exp_sums is None or max_logits is None or temporary_output is None:
                 raise ValueError(
                     "CUDA graph capture requires preallocated `exp_sums`, `max_logits`, "
@@ -1135,7 +1127,10 @@ def pa_decode_ps_launch(
             value_scale,
             softmax_scale=softmax_scale,
             stream=s,
-            num_partitions=np_tile,
+            # Use the caller's `max_context_partition_num` (the count they sized
+            # any preallocated buffers with); `or None` keeps the default 0 as
+            # "let pa_decode_tile pick and allocate its own partition buffers".
+            num_partitions=max_context_partition_num or None,
             pmax=tile_pmax,
             psum=tile_psum,
             pout=tile_pout,

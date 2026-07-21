@@ -37,9 +37,11 @@ is a compile-time constant, 16 or 64 only. ``head_dim`` must be a multiple of
                    ``_pa_small_block_load_v_trans``) or the plain, un-shuffled
                    [num_blocks, num_kv_heads, head_dim, block_size]
 * ``block_tables`` [num_seqs, max_blocks_per_seq]                    int32
-                   (must cover ceil(context_len/256)*256/block_size pages,
-                    not just ceil(context_len/block_size) -- the last tile
-                    always issues a full 256-token-span load)
+                   (ceil(context_len/block_size) pages is enough; the last
+                    tile issues a full 256-token-span load, but pages past the
+                    real count are read through a size-bounded resource that
+                    returns 0 for the out-of-range tail -- those tokens are
+                    masked out of the softmax anyway)
 * ``context_lengths`` [num_seqs]                                     int32
 * ``output``       [num_seqs, num_q_heads, head_dim]                 same dtype as ``query`` (f16/bf16)
 
@@ -273,10 +275,15 @@ def compile_pa_decode_tile(
 
         _k_load_fp8x16 = _make_flat_loader(key_cache_ptr, FP8, 16, fx.UniversalCopy128b())
         _v_load_fp8x16 = _make_flat_loader(value_cache_ptr, FP8, 16, fx.UniversalCopy128b())
-        # QCHUNK 16-bit elements (f16 or bf16, per Q_DTYPE) per lane's load:
-        # 128 bits for QCHUNK=8 (head_dim=128), 64 bits for QCHUNK=4 (head_dim=64).
-        _q_copy_op = fx.rocdl.BufferCopy128b() if QCHUNK == 8 else fx.rocdl.BufferCopy64b()
-        _q_load_chunk = _make_flat_loader(query_ptr, Q_DTYPE, QCHUNK, _q_copy_op)
+        # QCHUNK 16-bit elements (f16 or bf16, per Q_DTYPE) per lane's load.
+        # A buffer load tops out at 128b (dwordx4), so the per-lane chunk is
+        # fetched in QLOAD_UNIT-wide pieces: 128b for QLOAD_UNIT=8 (head_dim
+        # 128/256), 64b for QLOAD_UNIT=4 (head_dim=64). head_dim=256 (QCHUNK=16)
+        # needs N_QLOADS=2 pieces; 64/128 need one.
+        QLOAD_UNIT = QCHUNK if QCHUNK < 8 else 8
+        N_QLOADS = QCHUNK // QLOAD_UNIT
+        _q_copy_op = fx.rocdl.BufferCopy128b() if QLOAD_UNIT == 8 else fx.rocdl.BufferCopy64b()
+        _q_load_chunk = _make_flat_loader(query_ptr, Q_DTYPE, QLOAD_UNIT, _q_copy_op)
         _ctxlen_load = _make_flat_loader(context_lengths_ptr, fx.Int32, 1, fx.rocdl.BufferCopy32b())
 
         def _k_load16(byte_off):
@@ -286,7 +293,19 @@ def compile_pa_decode_tile(
             return _v_load_fp8x16(byte_off).bitcast(fx.Int64)
 
         context_len = fx.Int32(_ctxlen_load(seq)[0])
-        bt_rsrc = buffer_ops.create_buffer_resource(block_tables_ptr, max_size=True)
+        # Bound block_tables to its real extent (num_seqs * max_blocks_per_seq
+        # int32 entries). The compute loop addresses whole 256-token tiles, so
+        # the last (partial) tile can index a page past ceil(context/block_size)
+        # -- i.e. past what a caller sized block_tables for. With the resource
+        # bounded, that out-of-range read returns 0 (page 0) via the hardware
+        # bounds check instead of faulting; the tail tokens it belongs to are
+        # masked out of the softmax, so reading page 0's KV for them is
+        # harmless. Mirrors production pa's safe out-of-range block handling and
+        # lets callers size block_tables to just ceil(context/block_size) pages.
+        bt_num_records_bytes = fx.Index(gpu.grid_dim.x) * fx.Index(max_blocks_per_seq) * 4  # int32 entries
+        bt_rsrc = buffer_ops.create_buffer_resource(
+            block_tables_ptr, max_size=False, num_records_bytes=bt_num_records_bytes
+        )
         ks_rsrc = buffer_ops.create_buffer_resource(key_scale_ptr, max_size=True)
         vs_rsrc = buffer_ops.create_buffer_resource(value_scale_ptr, max_size=True)
         # Per-tensor: a single global scale, read once. Per-token: read
@@ -510,23 +529,27 @@ def compile_pa_decode_tile(
         def _quant_q_row(m, qi, gs_head, q_row_off):
             qh0 = kv_h * query_group_size + gs_head
             row_byte0 = ((seq * query_length + qi) * stride_q_row + qh0 * stride_q_head) * 2  # 16-bit float = 2B/elem
-            chunk_off = row_byte0 + lane16 * (QCHUNK * 2)
-            q_chunk = _q_load_chunk(chunk_off // 2)  # byte offset -> element index
+            base_elem = (row_byte0 + lane16 * (QCHUNK * 2)) // 2  # byte offset -> element index
+            # QCHUNK elements, loaded as N_QLOADS contiguous QLOAD_UNIT pieces
+            # (a buffer load is 128b max); head_dim=256 splits into 2 pieces.
+            q_units = [_q_load_chunk(base_elem + u * QLOAD_UNIT) for u in range_constexpr(N_QLOADS)]
 
-            local_absmax = fmath.absf(q_chunk).reduce(ReductionOp.MAX)
-            absmax = local_absmax.to(fx.Float32)
+            absmax = fmath.absf(q_units[0]).reduce(ReductionOp.MAX).to(fx.Float32)
+            for u in range_constexpr(1, N_QLOADS):
+                absmax = arith.maxnumf(absmax, fmath.absf(q_units[u]).reduce(ReductionOp.MAX).to(fx.Float32))
             for sh in (8, 4, 2, 1):
                 absmax = arith.maxnumf(absmax, dpp_utils.dpp_xor_f32(absmax, sh))
 
             q_scale = absmax * fx.Float32(1.0 / FP8_MAX)
             inv = fx.Float32(rcp_f32(arith.maxnumf(q_scale, fx.Float32(1e-20))))
-            inv_b = fx.Vector.from_elements([inv], dtype=fx.Float32).broadcast_to(QCHUNK)
+            inv_b = fx.Vector.from_elements([inv], dtype=fx.Float32).broadcast_to(QLOAD_UNIT)
 
-            q_scaled_chunk = q_chunk.to(fx.Float32) * inv_b
-            _st_words(
-                q_row_off + qh_local * head_dim + lane16 * QCHUNK,
-                _f32_to_fp8_words(q_scaled_chunk),
-            )
+            for u in range_constexpr(N_QLOADS):
+                q_scaled_unit = q_units[u].to(fx.Float32) * inv_b
+                _st_words(
+                    q_row_off + qh_local * head_dim + lane16 * QCHUNK + u * QLOAD_UNIT,
+                    _f32_to_fp8_words(q_scaled_unit),
+                )
             if lane16 == 0:
                 # Transposed [qh][m] (not [m][qh]) so the whole M_TILES-wide
                 # row for a fixed qh is contiguous, letting the KV-loop read
@@ -633,23 +656,24 @@ def compile_pa_decode_tile(
             ]
 
         K_SLOT, V_SLOT = 0, 1
+        # Per-M-tile loop-carried state after the K/V slots: one output chunk
+        # per VHE_CHUNKS (2 for head_dim=128, 4 for head_dim=256, 1 for 64),
+        # then running-max + running-denom.
+        STATE_PER_M = VHE_CHUNKS + 2
 
-        def _o0_slot(m):
-            return 2 + 4 * m
-
-        def _o1_slot(m):
-            return 2 + 4 * m + 1
+        def _o_slot(m, vh):
+            return 2 + STATE_PER_M * m + vh
 
         def _m_slot(m):
-            return 2 + 4 * m + 2
+            return 2 + STATE_PER_M * m + VHE_CHUNKS
 
         def _l_slot(m):
-            return 2 + 4 * m + 3
+            return 2 + STATE_PER_M * m + VHE_CHUNKS + 1
 
         o_zero = fx.Vector.filled(OP_ELEMS, 0.0, fx.Float32)
         init_state = [k_pf0, v_page_pf0]
         for _m in range_constexpr(M_TILES):
-            init_state.extend([o_zero, o_zero, NEG_INF, ZERO_F])
+            init_state.extend([o_zero] * VHE_CHUNKS + [NEG_INF, ZERO_F])
         for tt, ostate in range(part_start, part_end, 1, init=init_state):
             k_cur = ostate[K_SLOT]  # this tile's prefetched K, as one (NCHUNK*N_SUBCHUNKS,) i64 vector
             v_page_cur = ostate[V_SLOT]  # this tile's V pages, as one PAGES_PER_CHUNK-wide i32 vector
@@ -783,7 +807,7 @@ def compile_pa_decode_tile(
                     v_scale_shared = [_load_scale_vec(sVScale_off, a, cur_kv_buf) for a in range_constexpr(NCHUNK)]
 
                 for m in range_constexpr(M_TILES):
-                    o_acc = [ostate[_o0_slot(m)], ostate[_o1_slot(m)]]
+                    o_acc = [ostate[_o_slot(m, vh)] for vh in range_constexpr(VHE_CHUNKS)]
                     m_prev = ostate[_m_slot(m)]  # this thread's own running max, carried from last tile
                     l_prev = ostate[_l_slot(m)]  # this thread's own running denom, carried from last tile
 
@@ -871,19 +895,19 @@ def compile_pa_decode_tile(
                         if const_expr(per_token_kv):
                             op = op * fx.Vector.from_elements([v_max_scaled], dtype=fx.Float32).broadcast_to(OP_ELEMS)
                         o_acc[vh] = o_acc[vh] * corr_b + op
-                    next_state.extend([o_acc[0], o_acc[1], m_new, l_new])
+                    next_state.extend([*o_acc, m_new, l_new])
                     # Force full retirement of this M-tile's chain before the
                     # next M-tile starts, rather than letting the scheduler
                     # interleave M-tiles for ILP at the cost of peak liveness.
                     if const_expr(m < M_TILES - 1):
                         fx.rocdl.sched_barrier(0)
             else:
-                # M_TILES==1 single tile: loop-carried state is [K=0, V=1, o0=2,
-                # o1=3, running-max=4, running-denom=5] (tile-0 of _o0_slot(m)=2+4*m,
-                # _o1_slot=3+4*m, _m_slot=4+4*m, _l_slot=5+4*m).
-                o_acc = [ostate[2], ostate[3]]
-                m_prev = ostate[4]  # this thread's own running max, carried from last tile
-                l_prev = ostate[5]  # this thread's own running denom, carried from last tile
+                # M_TILES==1 single tile: loop-carried state is [K=0, V=1, then
+                # VHE_CHUNKS output chunks, running-max, running-denom] -- see
+                # _o_slot/_m_slot/_l_slot (m==0 here).
+                o_acc = [ostate[_o_slot(0, vh)] for vh in range_constexpr(VHE_CHUNKS)]
+                m_prev = ostate[_m_slot(0)]  # this thread's own running max, carried from last tile
+                l_prev = ostate[_l_slot(0)]  # this thread's own running denom, carried from last tile
                 # QK: each NCHUNK chunk accumulates N_SUBCHUNKS k_steps into
                 # one f32x4 C-fragment (D[token, qhead]), using this M-tile's
                 # own Q operand.
@@ -1041,7 +1065,7 @@ def compile_pa_decode_tile(
                     if const_expr(per_token_kv):
                         op = op * fx.Vector.from_elements([v_max_scaled], dtype=fx.Float32).broadcast_to(OP_ELEMS)
                     o_acc[vh] = o_acc[vh] * corr_b + op
-                next_state.extend([o_acc[0], o_acc[1], m_new, l_new])
+                next_state.extend([*o_acc, m_new, l_new])
             results = yield next_state
         o_final = results
 
@@ -1083,7 +1107,7 @@ def compile_pa_decode_tile(
                     pout_chunk.store(o_norm)
 
             for vh in range_constexpr(VHE_CHUNKS):
-                o_slot = _o0_slot(m) if vh == 0 else _o1_slot(m)
+                o_slot = _o_slot(m, vh)
                 o_norm = (o_final[o_slot] * o_scale_b).to(Q_DTYPE)
                 head_base = vh * (NWARP * MFMA_MNK) + warp * MFMA_MNK + rgroup * OP_ELEMS
                 sub = head_base // OP_ELEMS
