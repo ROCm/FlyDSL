@@ -569,6 +569,19 @@ jobs:
               --output-dir /tmp/flydsl_ci_sweep
           "
 
+      # MegaMoE A8W4 production kernel (aiter-free): 8-GPU accuracy/functionality (v4_pro / v4_flash
+      # single fused op vs a torch f32 oracle) + CUDAGraph E2E perf vs the committed golden baseline
+      # (tests/kernels/mega_moe_perf_baseline.json; match-or-better). A8W4 needs CDNA4, so every case
+      # self-skips on the gfx942 (mi325) leg of this matrix.
+      - name: Run multi-GPU MegaMoE A8W4 tests (v4_pro / v4_flash, 8-GPU accuracy + perf)
+        timeout-minutes: 45
+        run: |
+          docker exec flydsl_test bash -c "
+            cd /flydsl-test
+            python3 -m pytest tests/kernels/test_mega_moe.py \
+              -m multi_gpu -v --no-header --tb=short
+          "
+
       - name: Run multi-GPU allreduce tests
         timeout-minutes: 30
         run: |
