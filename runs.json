@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-21T18:49:19Z",
+ "updated": "2026-07-21T20:42:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29864777973,
+   "pr": 786,
+   "commit": "b4f96b41c4977782082c4335572aa12fd4060798",
+   "branch": "feat/autotune-offline-configs",
+   "event": "pull_request",
+   "title": "[3/5] autotune: add offline config artifacts (#770)",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29864777973",
+   "created_at": "2026-07-21T20:12:36Z",
+   "updated_at": "2026-07-21T20:37:31Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-21T20:16:22Z",
+     "completed_at": "2026-07-21T20:37:31Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29864777973/job/88750315447"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-21T20:14:05Z",
+     "completed_at": "2026-07-21T20:30:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29864777973/job/88750315458"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-21T20:18:26Z",
+     "completed_at": "2026-07-21T20:37:30Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29864777973/job/88750315464"
+    }
+   ]
+  },
   {
    "run_id": 29852179422,
    "pr": 869,
@@ -1263,7 +1306,7 @@
   },
   {
    "run_id": 29726222975,
-   "pr": 786,
+   "pr": null,
    "commit": "09dd1105fb2e667628bf15c6887bea4e8a0652d3",
    "branch": "feat/autotune-offline-configs",
    "event": "pull_request",
@@ -2051,49 +2094,6 @@
      "started_at": "2026-07-17T12:32:40Z",
      "completed_at": "2026-07-17T12:35:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29580446288/job/87884963239"
-    }
-   ]
-  },
-  {
-   "run_id": 29580155428,
-   "pr": null,
-   "commit": "09987abdc7c31cc4d8faab375dec03bc69a9c5bc",
-   "branch": "main",
-   "event": "push",
-   "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29580155428",
-   "created_at": "2026-07-17T12:25:07Z",
-   "updated_at": "2026-07-17T12:30:43Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-17T12:26:43Z",
-     "completed_at": "2026-07-17T12:30:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29580155428/job/87883960623"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-17T12:27:47Z",
-     "completed_at": "2026-07-17T12:30:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29580155428/job/87883960646"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-17T12:27:28Z",
-     "completed_at": "2026-07-17T12:30:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29580155428/job/87883960652"
     }
    ]
   }
