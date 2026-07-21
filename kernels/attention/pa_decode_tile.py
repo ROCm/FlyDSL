@@ -536,12 +536,12 @@ def compile_pa_decode_tile(
 
             absmax = fmath.absf(q_units[0]).reduce(ReductionOp.MAX).to(fx.Float32)
             for u in range_constexpr(1, N_QLOADS):
-                absmax = arith.maxnumf(absmax, fmath.absf(q_units[u]).reduce(ReductionOp.MAX).to(fx.Float32))
+                absmax = fx.maxnumf(absmax, fmath.absf(q_units[u]).reduce(ReductionOp.MAX).to(fx.Float32))
             for sh in (8, 4, 2, 1):
-                absmax = arith.maxnumf(absmax, dpp_utils.dpp_xor_f32(absmax, sh))
+                absmax = fx.maxnumf(absmax, dpp_utils.dpp_xor_f32(absmax, sh))
 
             q_scale = absmax * fx.Float32(1.0 / FP8_MAX)
-            inv = fx.Float32(rcp_f32(arith.maxnumf(q_scale, fx.Float32(1e-20))))
+            inv = fx.Float32(rcp_f32(fx.maxnumf(q_scale, fx.Float32(1e-20))))
             inv_b = fx.Vector.from_elements([inv], dtype=fx.Float32).broadcast_to(QLOAD_UNIT)
 
             for u in range_constexpr(N_QLOADS):
@@ -735,9 +735,9 @@ def compile_pa_decode_tile(
                     v_scale_A = [_load_scale_vec(sVScale_off, a, cur_kv_buf) for a in range_constexpr(NCHUNK)]
                     pv_max = fx.Float32(0.0)
                     for a in range_constexpr(NCHUNK):
-                        pv_max = arith.maxnumf(pv_max, v_scale_A[a].reduce(ReductionOp.MAX))
+                        pv_max = fx.maxnumf(pv_max, v_scale_A[a].reduce(ReductionOp.MAX))
                     for sh in (16, 32):
-                        pv_max = arith.maxnumf(pv_max, pv_max.shuffle_xor(sh, WAVE))
+                        pv_max = fx.maxnumf(pv_max, pv_max.shuffle_xor(sh, WAVE))
                     _st_lw(sVScaleMax_off, 0, warp, pv_max)
                     k_scale_shared = [_load_scale_vec(sKScale_off, a, cur_kv_buf) for a in range_constexpr(NCHUNK)]
 
@@ -768,11 +768,11 @@ def compile_pa_decode_tile(
 
                     pm = fx.Float32(float("-inf"))
                     for a in range_constexpr(NCHUNK):
-                        pm = arith.maxnumf(
+                        pm = fx.maxnumf(
                             pm, masked_chunks[a].reduce(ReductionOp.MAX, fastmath=fm_nnan), fastmath=fm_nnan
                         )
                     for sh in (16, 32):
-                        pm = arith.maxnumf(pm, pm.shuffle_xor(sh, WAVE), fastmath=fm_nnan)
+                        pm = fx.maxnumf(pm, pm.shuffle_xor(sh, WAVE), fastmath=fm_nnan)
                     _st_lw(_lmax_off_m(m), qh, warp, pm * scale)
 
                     masked_chunks_saved[m] = masked_chunks
@@ -825,7 +825,7 @@ def compile_pa_decode_tile(
                         norm_factor = fx.Float32(rcp_f32(v_max_safe))
                         norm_factor_b = fx.Vector.from_elements([norm_factor], dtype=fx.Float32).broadcast_to(4)
 
-                    m_new = arith.maxnumf(
+                    m_new = fx.maxnumf(
                         m_prev,
                         _ld_lw_row(_lmax_off_m(m), qh).reduce(ReductionOp.MAX, fastmath=fm_nnan),
                         fastmath=fm_nnan,
@@ -960,9 +960,9 @@ def compile_pa_decode_tile(
                 # pass 1: per-warp max for this qhead
                 pm = fx.Float32(float("-inf"))
                 for a in range_constexpr(NCHUNK):
-                    pm = arith.maxnumf(pm, masked_chunks[a].reduce(ReductionOp.MAX))
+                    pm = fx.maxnumf(pm, masked_chunks[a].reduce(ReductionOp.MAX))
                 for sh in (16, 32):
-                    pm = arith.maxnumf(pm, pm.shuffle_xor(sh, WAVE))
+                    pm = fx.maxnumf(pm, pm.shuffle_xor(sh, WAVE))
                 # All 4 lanes sharing this qhead hold the identical
                 # post-shuffle_xor `pm`, so this write is harmlessly redundant.
                 _st_lw(sLmax_off, qh, warp, pm * scale)
@@ -975,9 +975,9 @@ def compile_pa_decode_tile(
                 if const_expr(per_token_kv):
                     pv_max = fx.Float32(0.0)
                     for a in range_constexpr(NCHUNK):
-                        pv_max = arith.maxnumf(pv_max, v_scale_vecs[a].reduce(ReductionOp.MAX))
+                        pv_max = fx.maxnumf(pv_max, v_scale_vecs[a].reduce(ReductionOp.MAX))
                     for sh in (16, 32):
-                        pv_max = arith.maxnumf(pv_max, pv_max.shuffle_xor(sh, WAVE))
+                        pv_max = fx.maxnumf(pv_max, pv_max.shuffle_xor(sh, WAVE))
                     _st_lw(sVScaleMax_off, 0, warp, pv_max)
                 gpu.barrier()
                 # Read back next tile's V page-index row now that the barrier
@@ -999,7 +999,7 @@ def compile_pa_decode_tile(
                     norm_factor = fx.Float32(rcp_f32(v_max_safe))
                     norm_factor_b = fx.Vector.from_elements([norm_factor], dtype=fx.Float32).broadcast_to(4)
                 # pass 2: global max over warps -> exp -> fp8 P pack (-> sP) -> sum
-                m_new = arith.maxnumf(m_prev, _ld_lw_row(sLmax_off, qh).reduce(ReductionOp.MAX))
+                m_new = fx.maxnumf(m_prev, _ld_lw_row(sLmax_off, qh).reduce(ReductionOp.MAX))
                 m_new_b = fx.Vector.from_elements([m_new], dtype=fx.Float32).broadcast_to(4)
                 ls = fx.Float32(0.0)
                 # Raw i32-word store straight to sP[qhead][token_base:+4] (fp8,

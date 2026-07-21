@@ -1185,15 +1185,15 @@ def normal_accuracy_test() -> None:
     global SLIDING_WINDOW_OPTIONS
     COMPUTE_TYPE_OPTIONS = ["fp8"]
     CONTEXT_PARTITION_SIZE_OPTIONS = [256]
-    HEAD_DIMENSION_OPTIONS = [128]
-    HEAD_CONFIGURATIONS = [(8, 1), (16, 1)]
+    HEAD_DIMENSION_OPTIONS = [128, 256]
+    HEAD_CONFIGURATIONS = [(8, 1), (16, 1), (4, 1)]
     QUERY_LENGTH_OPTIONS = [1, 2, 3, 4]
     QUANT_MODE_OPTIONS = ["per_token", "per_tensor"]
-    CONTEXT_LENGTH_OPTIONS = [1027]
-    BATCH_SIZE_OPTIONS = [3, 81]
-    TRANS_V_OPTIONS = [True]
+    CONTEXT_LENGTH_OPTIONS = [1027, 8192]
+    BATCH_SIZE_OPTIONS = [3, 81, 128]
+    TRANS_V_OPTIONS = [True, False]
     KV_VARLEN_OPTIONS = [False, True]
-    BLOCK_SIZE_OPTIONS = [1024]
+    BLOCK_SIZE_OPTIONS = [16, 64, 1024]
     SLIDING_WINDOW_OPTIONS = [0]
     parse_arg_and_run_test(output_tag="ps_normal_accuracy")
 
@@ -1222,7 +1222,7 @@ def sliding_window_accuracy_test() -> None:
     TRANS_V_OPTIONS = [True]
     KV_VARLEN_OPTIONS = [True]
     BLOCK_SIZE_OPTIONS = [16, 1024]
-    SLIDING_WINDOW_OPTIONS = [0]
+    SLIDING_WINDOW_OPTIONS = [1023]
     parse_arg_and_run_test(output_tag="ps_sliding_window_accuracy")
 
 
@@ -1234,126 +1234,6 @@ def test_multi_case_set(case_set_name: str) -> None:
         sliding_window_accuracy_test()
     else:
         raise ValueError(f"Unsupported case set: {case_set_name}")
-
-
-def _run_pa_decode_tile_case(
-    num_kv_heads: int,
-    group_size: int,
-    context_len: int,
-    num_seqs: int,
-    block_size: int,
-    head_dim: int = 128,
-    query_dtype: torch.dtype = torch.float16,
-    per_token_kv: bool = False,
-    query_length: int = 1,
-    trans_v: bool = True,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Drive ``pa_decode_tile`` directly (no aiter/gluon PS harness) and return
-    ``(output, reference)`` for an fp8 KV cache. Used by the tile-kernel
-    reference tests below, which exercise head_dim/GQA/block-size combinations
-    the PS harness (``run_pa_decode_ps_test``) does not cover."""
-    from kernels.attention.pa_decode_tile import pa_decode_tile
-
-    setup_seed(0)
-    dev = "cuda"
-    num_q_heads = num_kv_heads * group_size
-    tile_tok = 256
-    num_tiles = (context_len + tile_tok - 1) // tile_tok
-    max_blocks = num_tiles * tile_tok // block_size
-    num_blocks = num_seqs * max_blocks
-    if per_token_kv:
-        k_scale = (torch.rand(num_blocks, num_kv_heads, block_size, device=dev) * 0.03 + 0.02).contiguous()
-        v_scale = (torch.rand(num_blocks, num_kv_heads, block_size, device=dev) * 0.03 + 0.02).contiguous()
-        k_scale_bcast = k_scale.unsqueeze(-1)  # broadcast over head_dim, K's own trailing axis
-        v_scale_bcast = v_scale[:, :, None, :]  # broadcast over head_dim, V's own axis-2 (before block_size)
-    else:
-        k_scale = v_scale = 0.04
-        k_scale_bcast = k_scale
-        v_scale_bcast = v_scale
-
-    query = (
-        torch.randn(num_seqs * query_length, num_q_heads, head_dim, device=dev, dtype=query_dtype) * 0.3
-    ).contiguous()
-    k_f = torch.randn(num_blocks, num_kv_heads, block_size, head_dim, device=dev) * 0.3
-    v_f = torch.randn(num_blocks, num_kv_heads, head_dim, block_size, device=dev) * 0.3
-    fp8_max = torch.finfo(dtypes.fp8).max
-    key_cache_plain = (k_f / k_scale_bcast).clamp(-fp8_max, fp8_max).to(dtypes.fp8)
-    value_cache_plain = (v_f / v_scale_bcast).clamp(-fp8_max, fp8_max).to(dtypes.fp8)
-    key_cache = (
-        key_cache_plain.view(num_blocks, num_kv_heads, block_size, head_dim // 16, 16)
-        .permute(0, 1, 3, 2, 4)
-        .contiguous()
-    )
-    value_cache = shuffle_value_cache_layout(value_cache_plain) if trans_v else value_cache_plain
-
-    block_tables = torch.zeros(num_seqs, max_blocks, dtype=torch.int32, device=dev)
-    for s in range(num_seqs):
-        for b in range(max_blocks):
-            block_tables[s, b] = s * max_blocks + b
-    context_lengths = torch.full((num_seqs,), context_len, dtype=torch.int32, device=dev)
-
-    output = torch.zeros(num_seqs * query_length, num_q_heads, head_dim, device=dev, dtype=query_dtype)
-    pa_decode_tile(
-        output,
-        query,
-        key_cache,
-        value_cache,
-        block_tables,
-        context_lengths,
-        key_scale=k_scale,
-        value_scale=v_scale,
-    )
-    torch.cuda.synchronize()
-
-    kc = key_cache_plain.to(torch.float32) * k_scale_bcast
-    vc = value_cache_plain.to(torch.float32) * v_scale_bcast
-    refs = []
-    for s in range(num_seqs):
-        keys = torch.empty(context_len, num_kv_heads, head_dim, device=dev)
-        vals = torch.empty(context_len, num_kv_heads, head_dim, device=dev)
-        for t in range(context_len):
-            phys = int(block_tables[s, t // block_size].item())
-            within = t % block_size
-            keys[t] = kc[phys, :, within, :]
-            vals[t] = vc[phys, :, :, within]
-        q = query[s * query_length : (s + 1) * query_length].to(torch.float32)
-        refs.append(reference_masked_attention(q, keys, vals, 1.0 / head_dim**0.5, query_dtype, is_causal=True))
-    ref = torch.cat(refs, dim=0)
-    return output.to(torch.float32), ref.to(torch.float32)
-
-
-# Qwen3.5-397B-A17B full-attention layers: head_dim=256. Full model is GQA 32
-# query / 2 KV heads (group_size=16); a TP=8 deployment shards query heads
-# 32->4 and replicates the 2 KV heads to 1 per rank (2 < 8), giving a per-GPU
-# shape of (4, 1) with group_size=4. Both are driven through the tile kernel
-# directly; the PS harness (test_multi_case_set) can't co-run head_dim 128 and
-# 256 in one process.
-@pytest.mark.parametrize("num_kv_heads,group_size", [(2, 16), (1, 4)])
-@pytest.mark.parametrize("block_size", [16, 64])
-@pytest.mark.parametrize("context_len", [1027, 256, 17])
-@pytest.mark.parametrize("per_token_kv", [False, True])
-@pytest.mark.parametrize("query_dtype", [torch.float16, torch.bfloat16])
-def test_pa_decode_tile_qwen3_5_397b(
-    num_kv_heads: int,
-    group_size: int,
-    block_size: int,
-    context_len: int,
-    per_token_kv: bool,
-    query_dtype: torch.dtype,
-) -> None:
-    output, ref = _run_pa_decode_tile_case(
-        num_kv_heads=num_kv_heads,
-        group_size=group_size,
-        context_len=context_len,
-        num_seqs=3,
-        block_size=block_size,
-        head_dim=256,
-        query_dtype=query_dtype,
-        per_token_kv=per_token_kv,
-    )
-    torch.testing.assert_close(
-        output, ref, atol=1e-2, rtol=0, msg="tile PA decode (Qwen3.5-397B head_dim=256) mismatch"
-    )
 
 
 if __name__ == "__main__":
