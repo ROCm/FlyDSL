@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-07-21T00:57:31Z",
+ "updated": "2026-07-21T01:24:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29792897063,
+   "pr": null,
+   "commit": "d06eb788716f67fbfed6b7b92cdb1daf07d05919",
+   "branch": "main",
+   "event": "push",
+   "title": "[layernorm] Add backward pass for training (PR 3/3, #769) (#801)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29792897063",
+   "created_at": "2026-07-21T01:21:25Z",
+   "updated_at": "2026-07-21T01:22:03Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 29792848303,
+   "pr": null,
+   "commit": "52cfa233c8ad85d64d3ec3aeb31a2c705d011eae",
+   "branch": "main",
+   "event": "push",
+   "title": "[Perf] Optimize RMSNorm backward with staged reduction and vec8 I/O (\u2026",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29792848303",
+   "created_at": "2026-07-21T01:20:18Z",
+   "updated_at": "2026-07-21T01:21:33Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 29786767540,
    "pr": 801,
@@ -2288,92 +2318,6 @@
      "started_at": "2026-07-16T11:04:16Z",
      "completed_at": "2026-07-16T12:26:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492926585/job/87603421322"
-    }
-   ]
-  },
-  {
-   "run_id": 29492301807,
-   "pr": 870,
-   "commit": "0d0578e70fee80790e1a99e3c11e22b2e7f3f4ba",
-   "branch": "fix-mxfp4-preshuffle-import",
-   "event": "pull_request",
-   "title": "fix(kernels): correct stale kernels.mma import in mxfp4_preshuffle",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492301807",
-   "created_at": "2026-07-16T10:51:17Z",
-   "updated_at": "2026-07-16T12:15:37Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-16T10:53:50Z",
-     "completed_at": "2026-07-16T12:15:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492301807/job/87601402605"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-16T10:53:54Z",
-     "completed_at": "2026-07-16T11:44:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492301807/job/87601402613"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-16T11:15:39Z",
-     "completed_at": "2026-07-16T11:27:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492301807/job/87601402643"
-    }
-   ]
-  },
-  {
-   "run_id": 29492181381,
-   "pr": 869,
-   "commit": "9541e6bb322d050e1009f38002069eee7eafc69a",
-   "branch": "kernel/sage-attention-cdna",
-   "event": "pull_request",
-   "title": "[Kernel] Add CDNA SageAttention kernel",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492181381",
-   "created_at": "2026-07-16T10:49:15Z",
-   "updated_at": "2026-07-16T11:15:23Z",
-   "actor": "LiuYinfeng01",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-16T10:51:48Z",
-     "completed_at": "2026-07-16T11:08:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492181381/job/87600940897"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-16T11:05:08Z",
-     "completed_at": "2026-07-16T11:15:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492181381/job/87600940935"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-16T10:51:49Z",
-     "completed_at": "2026-07-16T11:07:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492181381/job/87600940988"
     }
    ]
   }
