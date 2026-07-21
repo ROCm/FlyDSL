@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-21T15:01:00Z",
+ "updated": "2026-07-21T15:08:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29841790382,
+   "pr": 872,
+   "commit": "8b5ab266fb0a39d4eb86acccfb5792656167aa61",
+   "branch": "amartin/mxfp8-4wave",
+   "event": "pull_request",
+   "title": "[Kernel] Add optimized 4-wave MXFP8 GEMM kernel for gfx950",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29841790382",
+   "created_at": "2026-07-21T14:59:25Z",
+   "updated_at": "2026-07-21T15:05:20Z",
+   "actor": "aris134",
+   "jobs": []
+  },
   {
    "run_id": 29841675333,
    "pr": 872,
@@ -10,11 +25,11 @@
    "branch": "amartin/mxfp8-4wave",
    "event": "pull_request",
    "title": "[Kernel] Add optimized 4-wave MXFP8 GEMM kernel for gfx950",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29841675333",
    "created_at": "2026-07-21T14:58:00Z",
-   "updated_at": "2026-07-21T14:58:02Z",
+   "updated_at": "2026-07-21T14:59:27Z",
    "actor": "aris134",
    "jobs": []
   },
@@ -44,9 +59,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29841467347",
    "created_at": "2026-07-21T14:55:25Z",
-   "updated_at": "2026-07-21T14:55:25Z",
+   "updated_at": "2026-07-21T15:02:10Z",
    "actor": "binding7012",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-21T15:03:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29841467347/job/88673034396"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-21T15:02:29Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29841467347/job/88673034411"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-21T15:02:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29841467347/job/88673034482"
+    }
+   ]
   },
   {
    "run_id": 29840782836,
@@ -80,10 +123,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-21T14:56:32Z",
-     "completed_at": null,
+     "completed_at": "2026-07-21T15:01:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29840761390/job/88671243124"
     },
     {
@@ -2079,49 +2122,6 @@
      "started_at": "2026-07-17T11:01:24Z",
      "completed_at": "2026-07-17T11:20:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29575270352/job/87868465875"
-    }
-   ]
-  },
-  {
-   "run_id": 29575171628,
-   "pr": 845,
-   "commit": "2b0928c9b21cbeb18b29f3f1900a0cf32e9c081b",
-   "branch": "hyg/fmha_refactor",
-   "event": "pull_request",
-   "title": "[FMHA] Refactor kernels into shared helper framework",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29575171628",
-   "created_at": "2026-07-17T10:56:52Z",
-   "updated_at": "2026-07-17T12:26:47Z",
-   "actor": "zhiding512",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-17T11:17:14Z",
-     "completed_at": "2026-07-17T11:31:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29575171628/job/87868914787"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-17T11:10:49Z",
-     "completed_at": "2026-07-17T12:26:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29575171628/job/87868914812"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-17T11:03:55Z",
-     "completed_at": "2026-07-17T12:16:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29575171628/job/87868914813"
     }
    ]
   }
