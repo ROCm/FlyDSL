@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-22T05:58:52Z",
+ "updated": "2026-07-22T07:16:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29897940797,
+   "pr": 879,
+   "commit": "8ba9362126ab31ed414a0ad7b05449a79dc747aa",
+   "branch": "fix/moe-gemm1-4gb-offset-overflow",
+   "event": "pull_request",
+   "title": "Fix/moe gemm1 4gb offset overflow for kimi k2.6 pp4/pp4",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29897940797",
+   "created_at": "2026-07-22T06:48:11Z",
+   "updated_at": "2026-07-22T06:49:10Z",
+   "actor": "ZhaiFeiyue",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-22T06:50:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29897940797/job/88852181853"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-22T06:49:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29897940797/job/88852181870"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-22T06:49:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29897940797/job/88852181898"
+    }
+   ]
+  },
   {
    "run_id": 29889687853,
    "pr": 876,
@@ -2153,49 +2196,6 @@
      "started_at": "2026-07-18T04:36:52Z",
      "completed_at": "2026-07-18T05:42:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29630755171/job/88043803423"
-    }
-   ]
-  },
-  {
-   "run_id": 29629313438,
-   "pr": null,
-   "commit": "1633bf74fda05b0999c2c07d0de8d43270624ca5",
-   "branch": "feat/autotune-offline-configs",
-   "event": "pull_request",
-   "title": "[3/5] autotune: add offline config artifacts (#770)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29629313438",
-   "created_at": "2026-07-18T03:43:13Z",
-   "updated_at": "2026-07-18T04:00:16Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-18T03:45:07Z",
-     "completed_at": "2026-07-18T04:00:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29629313438/job/88039849511"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-18T03:44:22Z",
-     "completed_at": "2026-07-18T03:59:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29629313438/job/88039849519"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-18T03:45:15Z",
-     "completed_at": "2026-07-18T04:00:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29629313438/job/88039849520"
     }
    ]
   }
