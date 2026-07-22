@@ -2141,6 +2141,38 @@ def test_moe_gemm_2stage_bf16_out(use_reduce):
     )
 
 
+@pytest.mark.large_shape
+@pytest.mark.skipif("gfx95" not in ARCH, reason="a4w4 MXFP4 requires gfx950+")
+def test_moe_gemm1_a4w4_weight_offset_over_4gb():
+    """Regression: a4w4 gemm1 weight offset must not overflow 32-bit when w1 > 4GB.
+
+    With experts=320, inter_dim=2048, model_dim=7168 the gate/up weight tensor is
+    320 * (2*2048) * 7168 * 0.5B = 4.38 GB > 2**32. Stage1 loads w1 via buffer_load
+    whose hardware voffset is 32-bit; a single resource spanning the whole tensor
+    wraps for high-index experts and loads wrong weights (observed rel_err ~0.5 at
+    w1=4.4GB vs 0.0 at 3.5GB). Real models hit this at tp1 (e.g. Kimi-K2.6:
+    385 experts x inter=2048 = 5.25 GB). The per-expert i64 re-based buffer
+    resource keeps each load's offset within one expert. Fails on the unfixed
+    kernel, passes with the fix.
+    """
+    run_moe_stage1(
+        tokens=64,
+        model_dim=7168,
+        inter_dim=2048,
+        experts=320,
+        topk=8,
+        tile_m=32,
+        tile_n=128,
+        tile_k=256,
+        doweight_stage1=False,
+        in_dtype="fp4",
+        out_dtype="bf16",
+        skip_ref=False,
+        num_iters=1,
+        num_warmup=0,
+    )
+
+
 @pytest.mark.parametrize("scale_dtype", ["f32", "bf16"], ids=["scale_f32", "scale_bf16"])
 def test_moe_gemm_w4a16_groupwise_scale(scale_dtype):
     """Test W4A16 groupwise scale with f32 and bf16 (packed) scale dtypes."""
