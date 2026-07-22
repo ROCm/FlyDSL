@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-22T08:35:06Z",
+ "updated": "2026-07-22T09:03:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29906258064,
+   "pr": 825,
+   "commit": "4629fe56e39424385a10a32e1fb8401369b73122",
+   "branch": "pa-decode-tile",
+   "event": "pull_request",
+   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29906258064",
+   "created_at": "2026-07-22T09:00:52Z",
+   "updated_at": "2026-07-22T09:01:42Z",
+   "actor": "fsx950223",
+   "jobs": []
+  },
   {
    "run_id": 29904392531,
    "pr": 825,
@@ -10,38 +25,38 @@
    "branch": "pa-decode-tile",
    "event": "pull_request",
    "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29904392531",
    "created_at": "2026-07-22T08:32:27Z",
-   "updated_at": "2026-07-22T08:33:37Z",
+   "updated_at": "2026-07-22T09:01:19Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-22T08:34:05Z",
-     "completed_at": null,
+     "completed_at": "2026-07-22T09:01:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29904392531/job/88872485482"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-22T08:33:37Z",
-     "completed_at": null,
+     "completed_at": "2026-07-22T09:00:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29904392531/job/88872485501"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-22T08:33:37Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-22T08:34:14Z",
+     "completed_at": "2026-07-22T09:01:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29904392531/job/88872485505"
     }
    ]
@@ -2209,21 +2224,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29698683028",
    "created_at": "2026-07-19T18:25:20Z",
    "updated_at": "2026-07-19T18:26:33Z",
-   "actor": "amd-xiaoyu12",
-   "jobs": []
-  },
-  {
-   "run_id": 29697175562,
-   "pr": null,
-   "commit": "a973ce5194a2d4b562595261272bc5948c65d4d5",
-   "branch": "xiaoyu/a8w4-quark",
-   "event": "pull_request",
-   "title": "Add a8w4 kernel for Quark mix-precision",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29697175562",
-   "created_at": "2026-07-19T17:36:59Z",
-   "updated_at": "2026-07-19T17:38:03Z",
    "actor": "amd-xiaoyu12",
    "jobs": []
   }
