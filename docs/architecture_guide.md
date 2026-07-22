@@ -382,8 +382,8 @@ Transforms Python control flow to MLIR ops at the AST level:
 | Variable | Default | Description |
 |---|---|---|
 | `FLYDSL_COMPILE_OPT_LEVEL` | `2` | Optimization level (0–3) |
-| `COMPILE_ONLY` | `0` | If `1`, compile without creating an executor. Returns `None`. |
-| `ARCH` | auto-detect | Override target GPU architecture (e.g., `gfx942`, `gfx950`). |
+| `COMPILE_ONLY` | `0` | If `1`, compile without creating an executor. A device-less workflow must set an explicit target. |
+| `ARCH` | invocation device | Highest-priority target GPU architecture override (e.g., `gfx942`, `gfx950`). |
 
 ### 5.2 Debug Options (`FLYDSL_DEBUG_*`)
 
@@ -408,11 +408,21 @@ Transforms Python control flow to MLIR ops at the AST level:
 
 ### 5.4 Architecture Detection Priority
 
-`get_rocm_arch()` in `runtime/device.py` checks in order:
-1. `FLYDSL_GPU_ARCH` env var
-2. `HSA_OVERRIDE_GFX_VERSION` env var (supports `9.4.2` → `gfx942` format)
-3. `rocm_agent_enumerator` system tool
-4. Default: `gfx942`
+ROCm compilation resolves the target in this order:
+
+1. `ARCH`
+2. `FLYDSL_GPU_ARCH`
+3. `HSA_OVERRIDE_GFX_VERSION` (supports `9.4.2` → `gfx942`)
+4. The logical device carried by the invocation's tensor arguments
+5. The HIP current device when no argument carries device metadata
+
+There is no fallback ISA. If HIP cannot resolve an execution device, FlyDSL
+raises instead of assuming `gfx942`. Device-less compile-only workflows must
+set one of the three explicit overrides.
+
+The architecture participates in the compiled-artifact cache key. Same-ISA
+devices may reuse that artifact, while loaded executable state remains isolated
+per logical device.
 
 ---
 

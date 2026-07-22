@@ -5,6 +5,8 @@ import ctypes
 import importlib
 import pickle
 import threading
+from contextlib import nullcontext
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -60,10 +62,11 @@ def _resolve_qualname(ref: str) -> Optional[Callable]:
 
 @lru_cache(maxsize=1)
 def _resolve_runtime_libs() -> List[str]:
+    from .._mlir import _mlir_libs
     from .backends import get_backend
 
     backend = get_backend()
-    mlir_libs_dir = Path(__file__).resolve().parent.parent / "_mlir" / "_mlir_libs"
+    mlir_libs_dir = Path(_mlir_libs.__file__).resolve().parent
     libs = [mlir_libs_dir / name for name in backend.jit_runtime_lib_basenames()]
     for lib in libs:
         if not lib.exists():
@@ -85,9 +88,10 @@ def _pack_ciface_args(*args) -> ctypes.c_void_p:
 class GpuJitModule:
     """Owns GPU modules loaded for one ExecutionEngine."""
 
-    def __init__(self, engine: ExecutionEngine, modules: List[int]):
+    def __init__(self, engine: ExecutionEngine, modules: List[int], device=None):
         self.engine = engine
         self.modules = list(modules)
+        self.device = device
         self._runtime_lib = ctypes.CDLL(str(_resolve_runtime_libs()[0]))
         self._runtime_lib.mgpuModuleUnload.argtypes = [ctypes.c_void_p]
         self._runtime_lib.mgpuModuleUnload.restype = None
@@ -97,10 +101,15 @@ class GpuJitModule:
         if self._unloaded:
             return
         try:
-            for module in self.modules:
-                if module:
-                    self._runtime_lib.mgpuModuleUnload(ctypes.c_void_p(module))
-            self.modules.clear()
+            from ..runtime.device_runtime import get_device_runtime
+
+            runtime = get_device_runtime()
+            guard = runtime.device_guard(self.device.index) if self.device is not None else nullcontext()
+            with guard:
+                for module in self.modules:
+                    if module:
+                        self._runtime_lib.mgpuModuleUnload(ctypes.c_void_p(module))
+                self.modules.clear()
         finally:
             self._unloaded = True
 
@@ -214,6 +223,15 @@ class CallState:
         return dispatch(args_tuple)
 
 
+@dataclass
+class _DeviceExecutable:
+    module: object
+    engine: object
+    jit_module: object
+    context: object
+    func_exe: object
+
+
 class CompiledArtifact:
     def __init__(
         self,
@@ -230,10 +248,7 @@ class CompiledArtifact:
         self._post_load_processors = post_load_processors or []
         self._link_libs = link_libs or []
         self._uses_explicit_module = uses_explicit_module
-        self._module = None
-        self._engine = None
-        self._jit_module = None
-        self._func_exe = None
+        self._executables = {}
         self._lock = threading.Lock()
 
     def __getstate__(self):
@@ -298,22 +313,22 @@ class CompiledArtifact:
             raise pickle.UnpicklingError(
                 "CompiledArtifact could not resolve required post-load " f"processors: {missing}"
             )
-        self._module = None
-        self._engine = None
-        self._jit_module = None
-        self._func_exe = None
+        self._executables = {}
         self._lock = threading.Lock()
 
-    def _ensure_engine(self):
-        with self._lock:
-            if self._engine is not None:
-                return
+    def _load_executable(self, device):
+        from ..runtime.device_runtime import get_device_runtime
+        from .jit_function import _create_mlir_context
 
-            # Keep the Context alive on self._ctx: destroying it
-            # while ExecutionEngine still holds HSA code objects
-            # causes GPU memory access faults.
-            from .jit_function import _create_mlir_context
-
+        runtime = get_device_runtime()
+        if device is not None and runtime.kind != device.kind:
+            raise RuntimeError(
+                f"Compiled artifact device runtime {device.kind!r} does not match " f"active runtime {runtime.kind!r}"
+            )
+        guard = runtime.device_guard(device.index) if device is not None else nullcontext()
+        with guard:
+            # Keep the Context alive with the ExecutionEngine: destroying it
+            # while HSA code objects are loaded causes GPU memory access faults.
             ctx = _create_mlir_context()
             with ctx:
                 module = ir.Module.parse(self._ir_text)
@@ -343,25 +358,24 @@ class CompiledArtifact:
                         "loader symbol used by MLIR."
                     )
 
-                jit_module = GpuJitModule(engine, loaded_modules)
+                jit_module = GpuJitModule(engine, loaded_modules, device)
                 for proc in self._post_load_processors:
                     for mod_handle in loaded_modules:
                         proc(mod_handle)
             else:
                 jit_module = None
 
-            self._module = module
-            self._engine = engine
-            self._jit_module = jit_module
-            self._ctx = ctx
+            func_ptr = engine.raw_lookup(self._entry)
+            func_exe = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(func_ptr)
+            return _DeviceExecutable(module, engine, jit_module, ctx, func_exe)
 
-    def _get_func_exe(self):
-        if self._func_exe is None:
-            if self._engine is None:
-                self._ensure_engine()
-            func_ptr = self._engine.raw_lookup(self._entry)
-            self._func_exe = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(func_ptr)
-        return self._func_exe
+    def _get_func_exe(self, device):
+        with self._lock:
+            executable = self._executables.get(device)
+            if executable is None:
+                executable = self._load_executable(device)
+                self._executables[device] = executable
+            return executable.func_exe
 
     def dump(self, compiled: bool = True):
         if compiled:

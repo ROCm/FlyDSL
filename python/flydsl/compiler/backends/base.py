@@ -49,6 +49,18 @@ class BaseBackend(metaclass=ABCMeta):
         ...
 
     @classmethod
+    def detect_target_for_device(cls, device) -> GPUTarget:
+        """Resolve a target from invocation-device metadata.
+
+        Backends must opt in explicitly so a device-bearing invocation never
+        silently falls back to process-wide detection.
+        """
+        raise RuntimeError(
+            f"{cls.__name__} cannot resolve a target from invocation device {device}; "
+            "pass an explicit target architecture"
+        )
+
+    @classmethod
     def make_target(cls, arch: str) -> GPUTarget:
         """Build a GPUTarget for an explicit *arch* string.
 

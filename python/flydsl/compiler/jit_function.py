@@ -25,6 +25,7 @@ from .._mlir.passmanager import PassManager
 from ..expr.meta import tracing_context
 from ..expr.typing import Constexpr, Stream
 from ..expr.utils.arith import fastmath as fastmath_ctx
+from ..runtime.device_runtime import Device, get_device_runtime
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
 from .backends import compile_backend_name, get_backend
@@ -36,7 +37,12 @@ from .diagnostics import (
     warn_annotation_value_mismatch,
     warn_invalid_annotations,
 )
-from .jit_argument import convert_to_jit_arguments, is_type_param_annotation, resolve_signature
+from .jit_argument import (
+    convert_to_jit_arguments,
+    is_type_param_annotation,
+    jit_argument_device,
+    resolve_signature,
+)
 from .jit_executor import CallState, CompiledArtifact
 from .kernel_function import (
     CompilationContext,
@@ -59,6 +65,21 @@ from .protocol import (
 EXTRA_SOURCE_DIRS: List[str] = []
 
 CacheInfo = namedtuple("CacheInfo", ["hits", "misses", "currsize", "disk_size"])
+
+
+@dataclass(frozen=True)
+class _Invocation:
+    target: Any
+    device: Optional[Device]
+
+
+def _device_guard(device: Optional[Device]):
+    if device is None:
+        return nullcontext()
+    runtime = get_device_runtime()
+    if runtime.kind != device.kind:
+        raise RuntimeError(f"Invocation device runtime {device.kind!r} does not match active runtime {runtime.kind!r}")
+    return runtime.device_guard(device.index)
 
 
 class FileLock:
@@ -292,16 +313,29 @@ def _snapshot_refs(refs: List[Tuple[str, str, dict]], *, stable: bool) -> Dict[T
     return out
 
 
-def _flydsl_key() -> str:
+def _flydsl_key(target=None) -> str:
     extra = list(EXTRA_SOURCE_DIRS)
     env_extra = os.environ.get("FLYDSL_EXTRA_SOURCE_DIRS", "")
     if env_extra:
         extra.extend(d.strip() for d in env_extra.split(":") if d.strip())
-    return _flydsl_key_cached(_use_external_binary_codegen(), env.compile.llvm_dir, tuple(extra))
+    backend = get_backend(target.backend, arch=target.arch) if target is not None else get_backend()
+    return _flydsl_key_cached(
+        _use_external_binary_codegen(),
+        env.compile.llvm_dir,
+        backend.target.backend,
+        backend.target.arch,
+        tuple(extra),
+    )
 
 
 @lru_cache(maxsize=4)
-def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_dirs: tuple = ()) -> str:
+def _flydsl_key_cached(
+    use_external_binary: bool,
+    llvm_dir: str,
+    backend_name: str,
+    backend_arch: str,
+    extra_source_dirs: tuple = (),
+) -> str:
     """Compute a hash fingerprint of the entire FlyDSL compiler toolchain.
 
     Covers:
@@ -345,7 +379,7 @@ def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_di
             contents.append(hashlib.sha256(f.read()).hexdigest())
 
     # 2) Hash native shared libraries (C++ passes, runtime wrappers, bindings).
-    backend = get_backend()
+    backend = get_backend(backend_name, arch=backend_arch)
     mlir_libs_dir = flydsl_root / "_mlir" / "_mlir_libs"
     if mlir_libs_dir.is_dir():
         for pattern in backend.native_lib_patterns():
@@ -570,14 +604,14 @@ def _collect_dependency_sources(
     return sources
 
 
-def _jit_function_cache_key(func: Callable, owner_cls=None) -> str:
+def _jit_function_cache_key(func: Callable, owner_cls=None, target=None) -> str:
     in_progress = _keys_in_progress()
     added = id(func) not in in_progress
     if added:
         in_progress.add(id(func))
     try:
         parts = []
-        parts.append(_flydsl_key())
+        parts.append(_flydsl_key(target))
         parts.append(_get_func_source(func))
         try:
             rootFile = inspect.getfile(func)
@@ -1172,11 +1206,11 @@ class JitFunction:
         self.compile_hints = dict(compile_hints) if compile_hints is not None else {}
         self.manager_key = None
         self._manager_owner_cls = None
+        self._manager_target = None
         self.cache_manager = None
-        self._call_state_cache = {}  # cache_key -> CallState
+        self._call_state_cache = {}  # (artifact cache key, device) -> CallState
         self._sig = None  # lazy: set on first call
         self._has_self_param = False  # lazy: set in _ensure_sig
-        self._backend_target = None  # lazy: GPUTarget resolved once in _ensure_sig
         self._mem_cache = {}
         self._last_compiled = None  # (cache_key, CompiledArtifact) for compile()
         self._extern_linkage_keys = set()
@@ -1250,16 +1284,16 @@ class JitFunction:
             self._sig = full_sig.replace(parameters=params[1:])
         else:
             self._sig = full_sig
-        self._backend_target = get_backend().target  # frozen dataclass, stable
 
         # Definition-time annotation validity check (once per function, signature-only).
         warn_invalid_annotations(self._sig, context="@jit")
 
-    def _ensure_cache_manager(self, owner_cls=None):
-        if self.manager_key is not None and self._manager_owner_cls is owner_cls:
+    def _ensure_cache_manager(self, owner_cls=None, target=None):
+        if self.manager_key is not None and self._manager_owner_cls is owner_cls and self._manager_target == target:
             return
         self._manager_owner_cls = owner_cls
-        self.manager_key = _jit_function_cache_key(self.func, owner_cls=owner_cls)
+        self._manager_target = target
+        self.manager_key = _jit_function_cache_key(self.func, owner_cls=owner_cls, target=target)
 
         run_only = env.runtime.run_only
         if run_only and env.debug.dump_ir:
@@ -1284,9 +1318,9 @@ class JitFunction:
         self.cache_manager = JitCacheManager(cache_dir)
         self.cache_manager.load_all()
 
-    def _resolve_and_make_cache_key(self, bound_args, *, effective_hints=None):
+    def _resolve_and_make_cache_key(self, bound_args, *, effective_hints=None, return_invocation=False):
         """Resolve raw call values into JitArgument instances *in place* and
-        build the tuple cache key from them.
+        build the tuple cache key and invocation target from them.
 
         Side effect: entries in ``bound_args`` whose annotation is neither
         ``Constexpr[T]`` nor ``Type[T]`` are replaced with their resolved
@@ -1300,29 +1334,18 @@ class JitFunction:
         from .jit_argument import JitArgumentRegistry
 
         sig = self._sig
-        # Re-read env vars on every call.
-        key_parts = [("_env_", _cache_invalidating_env_values()), ("_target_", self._backend_target)]
-        if effective_hints is None:
-            effective_hints = self._effective_compile_hints()
-        if effective_hints:
-            hint_key = tuple(
-                sorted(
-                    (key, type(value).__module__, type(value).__qualname__, repr(value))
-                    for key, value in effective_hints.items()
-                )
-            )
-            key_parts.append(("_hints_", hint_key))
-
+        argument_key_parts = []
+        devices = set()
         for name, arg in bound_args.items():
             param = sig.parameters.get(name)
             ann = param.annotation if param else inspect.Parameter.empty
 
             if ann is not inspect.Parameter.empty:
                 if Constexpr.is_constexpr_annotation(ann):
-                    key_parts.append((name, Constexpr.value_signature(arg)))
+                    argument_key_parts.append((name, Constexpr.value_signature(arg)))
                     continue
                 if is_type_param_annotation(ann):
-                    key_parts.append((name, arg))
+                    argument_key_parts.append((name, arg))
                     continue
 
             if isinstance(arg, JitArgument):
@@ -1339,9 +1362,34 @@ class JitFunction:
                 jit_arg = ctor(arg)
 
             bound_args[name] = jit_arg
-            key_parts.append((name, cache_signature(jit_arg)))
+            argument_key_parts.append((name, cache_signature(jit_arg)))
+            device = jit_argument_device(jit_arg)
+            if device is not None:
+                devices.add(device)
 
-        return tuple(key_parts)
+        if len(devices) > 1:
+            rendered = ", ".join(f"{device.kind}:{device.index}" for device in sorted(devices, key=repr))
+            raise ValueError(f"FlyDSL JIT arguments must reside on the same device, got {rendered}")
+        device = next(iter(devices), None)
+        backend = get_backend(device=device)
+        invocation = _Invocation(target=backend.target, device=device)
+
+        # Re-read env vars on every call.
+        key_parts = [("_env_", _cache_invalidating_env_values()), ("_target_", invocation.target)]
+        if effective_hints is None:
+            effective_hints = self._effective_compile_hints()
+        if effective_hints:
+            hint_key = tuple(
+                sorted(
+                    (key, type(value).__module__, type(value).__qualname__, repr(value))
+                    for key, value in effective_hints.items()
+                )
+            )
+            key_parts.append(("_hints_", hint_key))
+        key_parts.extend(argument_key_parts)
+
+        cache_key = tuple(key_parts)
+        return (cache_key, invocation) if return_invocation else cache_key
 
     def _globals_key_prefix(self, owner_cls=None) -> tuple:
         """Memoized ``("_globals_", ...)`` cache-key segment for ``owner_cls``.
@@ -1361,14 +1409,23 @@ class JitFunction:
             cache[owner_cls] = (("_globals_", tuple(sorted(stable.items()))),) if stable else ()
         return cache[owner_cls]
 
-    def _build_full_cache_key(self, bound_arguments, *, owner_cls=None, bound_self=None, effective_hints=None):
+    def _build_full_cache_key(
+        self,
+        bound_arguments,
+        *,
+        owner_cls=None,
+        bound_self=None,
+        effective_hints=None,
+        return_invocation=False,
+    ):
         """Build the complete cache key: arg signatures + stable globals snapshot + self type."""
-        cache_key = self._globals_key_prefix(owner_cls) + self._resolve_and_make_cache_key(
-            bound_arguments, effective_hints=effective_hints
+        resolved_key, invocation = self._resolve_and_make_cache_key(
+            bound_arguments, effective_hints=effective_hints, return_invocation=True
         )
+        cache_key = self._globals_key_prefix(owner_cls) + resolved_key
         if bound_self is not None:
             cache_key = (("_self_type_", type(bound_self)),) + cache_key
-        return cache_key
+        return (cache_key, invocation) if return_invocation else cache_key
 
     @staticmethod
     def _cache_key_to_str(cache_key) -> str:
@@ -1387,7 +1444,6 @@ class JitFunction:
                 raise TypeError(f"{self.func.__name__}() missing 'self' argument")
             bound_self, args = args[0], args[1:]
         owner_cls = type(bound_self) if bound_self is not None else None
-        self._ensure_cache_manager(owner_cls)
 
         # snapshot the used globals on first compile (per owner_cls) and RAISE on
         # any later change.
@@ -1400,28 +1456,39 @@ class JitFunction:
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
 
-        # Resolve once so cache identity and compilation use the same options.
-        effective_hints = self._effective_compile_hints()
-        cache_key = self._build_full_cache_key(
-            bound.arguments,
-            owner_cls=owner_cls,
-            bound_self=bound_self,
-            effective_hints=effective_hints,
-        )
-
-        args_tuple = tuple(bound.arguments.values())
-
-        # Compile/runtime pairing at JIT entry (not in CompiledArtifact / ExecutionEngine init).
+        # Validate the process-wide compile/runtime pairing before target
+        # resolution consults invocation-device metadata.
         from ..runtime.device_runtime import ensure_compile_runtime_pairing_from_env
 
         ensure_compile_runtime_pairing_from_env(compile_backend_name())
 
+        # Resolve once so cache identity and compilation use the same options.
+        effective_hints = self._effective_compile_hints()
+        cache_key, invocation = self._build_full_cache_key(
+            bound.arguments,
+            owner_cls=owner_cls,
+            bound_self=bound_self,
+            effective_hints=effective_hints,
+            return_invocation=True,
+        )
+
+        args_tuple = tuple(bound.arguments.values())
+        if invocation.device is None and not env.compile.compile_only:
+            runtime = get_device_runtime()
+            invocation = _Invocation(
+                target=invocation.target,
+                device=Device(kind=runtime.kind, index=runtime.current_device_id()),
+            )
+        dispatch_key = (cache_key, invocation.device)
+        self._ensure_cache_manager(owner_cls, invocation.target)
+
         # Fast path: reuse pre-built CallState (no ctypes alloc, no DLPack)
-        call_state = self._call_state_cache.get(cache_key)
+        call_state = self._call_state_cache.get(dispatch_key)
         if call_state is not None:
             if env.compile.compile_only:
                 return None
-            return call_state(args_tuple)
+            with _device_guard(invocation.device):
+                return call_state(args_tuple)
 
         # Normal path: check in-process cache first, then optional disk cache.
         # In run_only mode the disk cache is read regardless of enable_cache, since
@@ -1447,10 +1514,11 @@ class JitFunction:
             state = _build_call_state(
                 sig,
                 args_tuple,
-                cached_func._get_func_exe(),
+                cached_func._get_func_exe(invocation.device),
             )
-            self._call_state_cache[cache_key] = state
-            return state(args_tuple)
+            self._call_state_cache[dispatch_key] = state
+            with _device_guard(invocation.device):
+                return state(args_tuple)
 
         if run_only:
             cdir = getattr(self.cache_manager, "cache_dir", None)
@@ -1490,7 +1558,9 @@ class JitFunction:
                 self._mem_cache[cache_key] = compiled_func
                 self._last_compiled = (cache_key, compiled_func)
             else:
-                with _create_mlir_context() as ctx, _hints_ctx:
+                # Tracing helpers that query the current architecture must see
+                # the same device that selected the backend target.
+                with _device_guard(invocation.device), _create_mlir_context() as ctx, _hints_ctx:
                     param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
                     # Per-call value/annotation consistency check.
                     for pname, dsl_type in zip(param_names, dsl_types):
@@ -1512,7 +1582,10 @@ class JitFunction:
                     module.operation.attributes["gpu.container_module"] = ir.UnitAttr.get()
 
                     with ir.InsertionPoint(module.body), loc:
-                        backend = get_backend()
+                        backend = get_backend(
+                            invocation.target.backend,
+                            arch=invocation.target.arch,
+                        )
                         gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets())
 
                         func_op = func.FuncOp(self.func.__name__, (ir_types, []))
@@ -1601,7 +1674,7 @@ class JitFunction:
 
         # OUTSIDE lock: engine init + kernel launch
         if env.compile.compile_only:
-            print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={get_backend().target.arch})")
+            print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={invocation.target.arch})")
             return None
 
         # The in-process CompiledArtifact cache above owns the ExecutionEngine/
@@ -1610,10 +1683,11 @@ class JitFunction:
         state = _build_call_state(
             sig,
             args_tuple,
-            compiled_func._get_func_exe(),
+            compiled_func._get_func_exe(invocation.device),
         )
-        self._call_state_cache[cache_key] = state
-        return state(args_tuple)
+        self._call_state_cache[dispatch_key] = state
+        with _device_guard(invocation.device):
+            return state(args_tuple)
 
 
 def _ensure_stream_arg(jit_args: list) -> bool:
@@ -1639,22 +1713,26 @@ class CompiledFunction:
     All MLIR compilation, signature analysis, and argument metadata resolution
     happen once at ``compile()`` time.  The ``__call__`` hot path does only:
 
-    1. Update pre-allocated ctypes storage (data_ptr / scalar extraction)
-    2. Invoke the JIT'd C function pointer
+    1. Enter the compiled invocation device when needed
+    2. Update pre-allocated ctypes storage (data_ptr / scalar extraction)
+    3. Invoke the JIT'd C function pointer
 
     No ``inspect.Signature.bind``, no ``_resolve_and_make_cache_key``, no cache lookup.
     Accepts **positional arguments only** (same count and order as the
-    original ``@flyc.jit`` function).
+    original ``@flyc.jit`` function). The callable is pinned to its compile
+    invocation device; replacement tensor arguments must remain on that device.
     """
 
-    __slots__ = ("_call_state", "_keepalive")
+    __slots__ = ("_call_state", "_keepalive", "_device")
 
-    def __init__(self, call_state, keepalive):
+    def __init__(self, call_state, keepalive, device):
         self._call_state = call_state
         self._keepalive = keepalive  # prevent GC of CompiledArtifact / ExecutionEngine
+        self._device = device
 
     def __call__(self, *args):
-        return self._call_state(args)
+        with _device_guard(self._device):
+            return self._call_state(args)
 
 
 def _compile_impl(func, *args) -> CompiledFunction:
@@ -1685,7 +1763,13 @@ def _compile_impl(func, *args) -> CompiledFunction:
     sig = jf._sig  # guaranteed initialized after __call__
     bound = sig.bind(*args)
     bound.apply_defaults()
-    cache_key = jf._build_full_cache_key(bound.arguments)
+    cache_key, invocation = jf._build_full_cache_key(bound.arguments, return_invocation=True)
+    if invocation.device is None and not env.compile.compile_only:
+        runtime = get_device_runtime()
+        invocation = _Invocation(
+            target=invocation.target,
+            device=Device(kind=runtime.kind, index=runtime.current_device_id()),
+        )
     args_tuple = tuple(bound.arguments.values())
 
     # Look up the CompiledArtifact.  We must hold a direct reference to it
@@ -1701,11 +1785,16 @@ def _compile_impl(func, *args) -> CompiledFunction:
     if artifact is None:
         raise RuntimeError("flyc.compile(): compilation succeeded but no cached artifact found.")
 
-    call_state = jf._call_state_cache.get(cache_key)
+    dispatch_key = (cache_key, invocation.device)
+    call_state = jf._call_state_cache.get(dispatch_key)
     if call_state is None:
-        call_state = _build_call_state(sig, args_tuple, artifact._get_func_exe())
+        call_state = _build_call_state(
+            sig,
+            args_tuple,
+            artifact._get_func_exe(invocation.device),
+        )
 
-    return CompiledFunction(call_state, artifact)
+    return CompiledFunction(call_state, artifact, invocation.device)
 
 
 class CompileCallable:

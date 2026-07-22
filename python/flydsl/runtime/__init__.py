@@ -5,6 +5,7 @@
 
 from .device_runtime import (
     COMPILE_BACKEND_TO_RUNTIME_KIND,
+    Device,
     DeviceRuntime,
     RocmDeviceRuntime,
     ensure_compile_runtime_compatible,
@@ -16,6 +17,7 @@ from .device_runtime import (
 
 __all__ = [
     "COMPILE_BACKEND_TO_RUNTIME_KIND",
+    "Device",
     "DeviceRuntime",
     "RocmDeviceRuntime",
     "ensure_compile_runtime_compatible",

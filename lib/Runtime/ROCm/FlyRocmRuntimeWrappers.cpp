@@ -14,6 +14,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cstring>
 #include <dlfcn.h>
 #include <vector>
 
@@ -235,4 +236,20 @@ extern "C" StridedMemRefType<int32_t, 1> mgpuMemGetDeviceMemRef1dInt32(int32_t *
 extern "C" void mgpuSetDefaultDevice(int32_t device) {
   defaultDevice = device;
   HIP_REPORT_IF_ERROR(hipSetDevice(device));
+}
+
+extern "C" int32_t mgpuGetDeviceArch(int32_t device, char *arch, size_t capacity) {
+  if (!arch || capacity == 0)
+    return static_cast<int32_t>(hipErrorInvalidValue);
+
+  hipDeviceProp_t properties{};
+  hipError_t result = hipGetDeviceProperties(&properties, device);
+  if (result != hipSuccess)
+    return static_cast<int32_t>(result);
+
+  const size_t length = std::strlen(properties.gcnArchName);
+  if (length + 1 > capacity)
+    return static_cast<int32_t>(hipErrorInvalidValue);
+  std::memcpy(arch, properties.gcnArchName, length + 1);
+  return static_cast<int32_t>(hipSuccess);
 }

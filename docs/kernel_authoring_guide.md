@@ -572,8 +572,12 @@ FLYDSL_RUNTIME_ENABLE_CACHE=0 python my_script.py  # or: rm -rf ~/.flydsl/cache
 ### 9.4 Compile-Only Mode
 
 ```bash
-COMPILE_ONLY=1 python my_script.py
+ARCH=gfx942 COMPILE_ONLY=1 python my_script.py
 ```
+
+When the invocation has no GPU tensor, compile-only mode requires an explicit
+`ARCH`, `FLYDSL_GPU_ARCH`, or `HSA_OVERRIDE_GFX_VERSION`; FlyDSL does not guess
+an ISA.
 
 ---
 

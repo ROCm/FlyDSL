@@ -63,11 +63,14 @@ def _make_backend(name: str, arch: str) -> BaseBackend:
     return backend_cls(target)
 
 
-def get_backend(name: Optional[str] = None, *, arch: str = "") -> BaseBackend:
+def get_backend(name: Optional[str] = None, *, arch: str = "", device=None) -> BaseBackend:
     """Resolve a backend instance.
 
     *name* defaults to ``FLYDSL_COMPILE_BACKEND`` env var (or ``'rocm'``).
     *arch* overrides the auto-detected architecture when non-empty.
+    *device* supplies invocation-device metadata when no explicit *arch* is
+    given. Explicit environment overrides remain backend-owned and take
+    precedence over the device architecture.
 
     Compile/runtime pairing (``FLYDSL_COMPILE_BACKEND`` vs ``FLYDSL_RUNTIME_KIND``)
     is validated on each :class:`~flydsl.compiler.jit_function.JitFunction` call
@@ -85,7 +88,8 @@ def get_backend(name: Optional[str] = None, *, arch: str = "") -> BaseBackend:
                 raise ImportError(f"Compile backend '{name}' failed to import") from _import_errors[name]
             available = ", ".join(sorted(_registry)) or "(none)"
             raise ValueError(f"Unknown compile backend '{name}'. Registered backends: {available}")
-        arch = backend_cls.detect_target().arch
+        target = backend_cls.detect_target_for_device(device) if device is not None else backend_cls.detect_target()
+        arch = target.arch
     return _make_backend(name, arch)
 
 

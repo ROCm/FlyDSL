@@ -52,6 +52,7 @@ def reset_jit(jit_fn):
     jit_fn._last_compiled = None
     jit_fn.manager_key = None
     jit_fn._manager_owner_cls = None
+    jit_fn._manager_target = None
     jit_fn.cache_manager = None
     jit_fn._target = None
 
@@ -66,7 +67,7 @@ def frontend_only_compile(monkeypatch):
     monkeypatch.setenv("ARCH", "gfx942")
     monkeypatch.setenv("COMPILE_ONLY", "1")
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
-    monkeypatch.setattr(jit_function, "_flydsl_key", lambda: "test-flydsl-key")
+    monkeypatch.setattr(jit_function, "_flydsl_key", lambda *_args: "test-flydsl-key")
 
     def compile_noop(cls, module, *, arch: str = "", func_name: str = "", link_libs=None):
         return module

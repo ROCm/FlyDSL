@@ -95,6 +95,10 @@ public:
     return reinterpret_cast<int64_t>(static_cast<char *>(tensor_->data) + tensor_->byte_offset);
   }
 
+  int getDeviceType() const { return static_cast<int>(tensor_->device.device_type); }
+
+  int getDeviceId() const { return tensor_->device.device_id; }
+
   int64_t getSizeInBytes() const {
     int64_t numElements = 1;
     for (int64_t s : shape_) {

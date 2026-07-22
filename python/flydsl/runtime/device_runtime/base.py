@@ -6,7 +6,17 @@
 from __future__ import annotations
 
 from abc import ABCMeta, abstractmethod
+from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import ClassVar
+
+
+@dataclass(frozen=True)
+class Device:
+    """Logical device identity within one process-wide runtime stack."""
+
+    kind: str
+    index: int
 
 
 class DeviceRuntime(metaclass=ABCMeta):
@@ -26,3 +36,23 @@ class DeviceRuntime(metaclass=ABCMeta):
     @abstractmethod
     def current_device_id(self) -> int:
         """Current device id for this runtime."""
+
+    def set_device_id(self, device_id: int) -> None:
+        """Make *device_id* current for the calling thread."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement set_device_id()")
+
+    def device_arch(self, device_id: int) -> str:
+        """Return the compile architecture for one logical device."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement device_arch()")
+
+    @contextmanager
+    def device_guard(self, device_id: int):
+        """Run with *device_id* current, restoring the caller's device."""
+        previous = self.current_device_id()
+        if previous != device_id:
+            self.set_device_id(device_id)
+        try:
+            yield
+        finally:
+            if previous != device_id:
+                self.set_device_id(previous)

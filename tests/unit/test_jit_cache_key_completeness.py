@@ -17,6 +17,12 @@ from flydsl.compiler import jit_function
 from flydsl.compiler.protocol import cache_signature
 
 
+@pytest.fixture(autouse=True)
+def _explicit_gpu_free_target(monkeypatch):
+    """These cache-key tests do not own a GPU invocation."""
+    monkeypatch.setenv("ARCH", "gfx942")
+
+
 def _key(jit_fn, *args):
     jit_fn._ensure_sig()
     bound = jit_fn._sig.bind(*args)
@@ -57,6 +63,7 @@ def test_globals_drift_default_raises(tmp_path, monkeypatch):
     spec = importlib.util.spec_from_file_location("drift_default", src)
     mod = importlib.util.module_from_spec(spec)
     monkeypatch.setenv("COMPILE_ONLY", "1")  # auto-restored, no leak across tests
+    monkeypatch.setenv("ARCH", "gfx942")
     spec.loader.exec_module(mod)
     A = torch.zeros(8, dtype=torch.float32)
     mod.k(A)
@@ -91,8 +98,8 @@ def test_cache_key_is_device_independent():
     """The cache key's target is arch-only, with no device id component.
 
     The compiled kernel binary is device-independent, so a single in-process
-    artifact / func_exe is shared across same-arch GPUs (as on main). Folding a
-    device id into the key would needlessly split the cache per device.
+    artifact is shared across same-arch GPUs. Loaded executables remain
+    device-specific outside this artifact key.
     """
     from flydsl.compiler.backends import GPUTarget, get_backend
 
@@ -187,6 +194,7 @@ def _load_mod(tmp_path, name, body):
 def _reset_manager_key(jit_fn):
     jit_fn.manager_key = None
     jit_fn._manager_owner_cls = None
+    jit_fn._manager_target = None
     jit_fn.cache_manager = None
 
 
@@ -237,6 +245,7 @@ def test_dict_global_inplace_mutation_raises(tmp_path, monkeypatch):
         "    return A\n",
     )
     monkeypatch.setenv("COMPILE_ONLY", "1")
+    monkeypatch.setenv("ARCH", "gfx942")
     A = torch.zeros(8, dtype=torch.float32)
     mod.k(A)
     mod.CFG["tile"] = 128  # in-place mutation (same object id)
@@ -281,7 +290,7 @@ def test_top_level_launch_named_jit_does_not_recurse_forever(tmp_path, monkeypat
     ``kernel(...).launch(...)`` must not blow the stack while building its key.
     """
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
-    monkeypatch.setattr(jit_function, "_flydsl_key", lambda: "test-flydsl-key")
+    monkeypatch.setattr(jit_function, "_flydsl_key", lambda *_args: "test-flydsl-key")
     mod = _load_mod(
         tmp_path,
         "launch_attr_collision",
@@ -309,7 +318,7 @@ def test_top_level_launch_named_jit_does_not_recurse_forever(tmp_path, monkeypat
 
 def test_jit_self_reference_does_not_recurse_forever(tmp_path, monkeypatch):
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
-    monkeypatch.setattr(jit_function, "_flydsl_key", lambda: "test-flydsl-key")
+    monkeypatch.setattr(jit_function, "_flydsl_key", lambda *_args: "test-flydsl-key")
     mod = _load_mod(
         tmp_path,
         "jit_self_ref",
@@ -332,7 +341,7 @@ def test_jit_self_reference_does_not_recurse_forever(tmp_path, monkeypatch):
 
 def test_mutually_referential_jits_do_not_recurse_forever(tmp_path, monkeypatch):
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
-    monkeypatch.setattr(jit_function, "_flydsl_key", lambda: "test-flydsl-key")
+    monkeypatch.setattr(jit_function, "_flydsl_key", lambda *_args: "test-flydsl-key")
     mod = _load_mod(
         tmp_path,
         "jit_mutual_ref",
@@ -383,7 +392,7 @@ def test_in_progress_stack_is_thread_local():
 def test_key_computation_leaves_no_in_progress_leak(tmp_path, monkeypatch):
     """The in-progress stack must be empty again after keying."""
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
-    monkeypatch.setattr(jit_function, "_flydsl_key", lambda: "test-flydsl-key")
+    monkeypatch.setattr(jit_function, "_flydsl_key", lambda *_args: "test-flydsl-key")
     mod = _load_mod(
         tmp_path,
         "jit_no_leak",

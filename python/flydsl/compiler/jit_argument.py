@@ -27,9 +27,27 @@ from ..expr.typing import (
     Tensor,
     address_space_from_attr,
 )
+from ..runtime.device_runtime import Device
 from .protocol import DslType, JitArgument
 
 _RESOLVE_SIG_WARNED = set()
+
+
+def _dlpack_device(device_type: int, device_id: int) -> Optional[Device]:
+    # DLPack: kDLCUDA=2, kDLROCM=10. PyTorch uses its "cuda" namespace
+    # for ROCm but exports kDLROCM from __dlpack__.
+    if device_type == 10:
+        return Device(kind="rocm", index=int(device_id))
+    if device_type == 2:
+        kind = "rocm" if getattr(torch.version, "hip", None) else "cuda"
+        return Device(kind=kind, index=int(device_id))
+    return None
+
+
+def jit_argument_device(value) -> Optional[Device]:
+    """Return optional framework-adapter device metadata from a JIT argument."""
+    provider = getattr(value, "__flydsl_device__", None)
+    return provider() if provider is not None else None
 
 
 def resolve_signature(func):
@@ -451,6 +469,11 @@ class DLTensorJitArg(MemRefJitArg):
         dladaptor = DLTensorAdaptor(dl)
         self.dladaptor = dladaptor
         self.with_stream_dlpack = with_stream
+        try:
+            device_type, device_id = dladaptor.device_type, dladaptor.device_id
+        except AttributeError:
+            device_type, device_id = dltensor.__dlpack_device__()
+        self.device = _dlpack_device(device_type, device_id)
         super().__init__(
             element_bits=dladaptor.element_bits,
             shape=dladaptor.shape,
@@ -465,6 +488,9 @@ class DLTensorJitArg(MemRefJitArg):
     def element_type(self):
         # The dtype as an ir Type, built in the active (compile) context.
         return self.dladaptor.dtype
+
+    def __flydsl_device__(self):
+        return self.device
 
     def __c_abi_spec__(self):
         with_stream = self.with_stream_dlpack
@@ -551,6 +577,10 @@ class TorchTensorJitArg(MemRefJitArg):
         dynamic_layout: bool = True,
     ):
         self.torch_tensor = tensor
+        self.device = None
+        if tensor.device.type == "cuda":
+            kind = "rocm" if getattr(torch.version, "hip", None) else "cuda"
+            self.device = Device(kind=kind, index=tensor.get_device())
         super().__init__(
             element_bits=tensor.element_size() * 8,
             shape=tensor.shape,
@@ -564,6 +594,9 @@ class TorchTensorJitArg(MemRefJitArg):
     @property
     def element_type(self):
         return torch_dtype_to_mlir_type(self.dtype)
+
+    def __flydsl_device__(self):
+        return self.device
 
     def __c_abi_spec__(self):
         def ptr_fill(a, s):

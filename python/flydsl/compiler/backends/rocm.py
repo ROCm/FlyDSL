@@ -3,7 +3,7 @@
 
 from typing import List, Tuple
 
-from ...runtime.device import get_rocm_arch, is_rdna_arch
+from ...runtime.device import get_rocm_arch, get_rocm_arch_override, is_rdna_arch, normalize_rocm_arch
 from ...utils import env
 from .base import BaseBackend, GPUTarget
 
@@ -12,19 +12,40 @@ class RocmBackend(BaseBackend):
     """ROCm / AMDGPU compile backend (HIP runtime, ROCDL lowering)."""
 
     @staticmethod
+    def _explicit_arch() -> str:
+        return get_rocm_arch_override() or ""
+
+    @classmethod
+    def _target(cls, arch: str) -> GPUTarget:
+        warp_size = 32 if is_rdna_arch(arch) else 64
+        return GPUTarget(backend="rocm", arch=arch, warp_size=warp_size)
+
+    @staticmethod
     def supports_target(target: GPUTarget) -> bool:
         return target.backend == "rocm"
 
     @staticmethod
     def detect_target() -> GPUTarget:
-        arch = env.compile.arch or get_rocm_arch()
-        warp_size = 32 if is_rdna_arch(arch) else 64
-        return GPUTarget(backend="rocm", arch=arch, warp_size=warp_size)
+        arch = RocmBackend._explicit_arch()
+        if not arch:
+            if env.compile.compile_only:
+                raise RuntimeError(
+                    "ROCm compile-only target is unresolved; set ARCH, FLYDSL_GPU_ARCH, "
+                    "or HSA_OVERRIDE_GFX_VERSION to an explicit target"
+                )
+            arch = get_rocm_arch()
+        return RocmBackend._target(arch)
+
+    @classmethod
+    def detect_target_for_device(cls, device) -> GPUTarget:
+        if device.kind != "rocm":
+            raise ValueError(f"ROCm backend requires a ROCm device, got {device}")
+        arch = cls._explicit_arch() or get_rocm_arch(device.index)
+        return cls._target(arch)
 
     @classmethod
     def make_target(cls, arch: str) -> GPUTarget:
-        warp_size = 32 if is_rdna_arch(arch) else 64
-        return GPUTarget(backend="rocm", arch=arch, warp_size=warp_size)
+        return cls._target(normalize_rocm_arch(arch, source="target architecture"))
 
     # -- compile pipeline ------------------------------------------------
 

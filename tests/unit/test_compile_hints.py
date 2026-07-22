@@ -46,6 +46,7 @@ def _reset_jit_caches(jit_fn):
     jit_fn._mem_cache.clear()
     jit_fn._last_compiled = None
     jit_fn.manager_key = None
+    jit_fn._manager_target = None
     jit_fn.cache_manager = None
 
 
@@ -236,11 +237,7 @@ class TestCacheKeyIncludesTarget:
         assert target_entry == get_backend().target
 
     def test_different_arch_gives_different_key(self, monkeypatch):
-        """Monkeypatch ARCH env var → different GPUTarget → different cache key.
-
-        _backend_target is resolved once in _ensure_sig(); we reset _sig to
-        force re-resolution after changing ARCH.
-        """
+        """Changing ARCH is resolved per invocation and changes the cache key."""
         from flydsl.compiler.backends import _make_backend, get_backend
 
         jf = _noop_launch
@@ -251,7 +248,6 @@ class TestCacheKeyIncludesTarget:
         bound.apply_defaults()
 
         key1 = jf._resolve_and_make_cache_key(bound.arguments)
-        saved_target = jf._backend_target
 
         real_arch = get_backend().target.arch
         fake_arch = "gfx950" if real_arch != "gfx950" else "gfx942"
@@ -260,10 +256,6 @@ class TestCacheKeyIncludesTarget:
         _make_backend.cache_clear()
 
         try:
-            jf._sig = None
-            jf._backend_target = None
-            jf._ensure_sig()
-
             key2 = jf._resolve_and_make_cache_key(bound.arguments)
             assert key1 != key2
             t1 = next(v for k, v in key1 if k == "_target_")
@@ -272,8 +264,6 @@ class TestCacheKeyIncludesTarget:
         finally:
             monkeypatch.delenv("ARCH", raising=False)
             _make_backend.cache_clear()
-            jf._sig = sig
-            jf._backend_target = saved_target
 
 
 class TestCacheDisabledRegression:

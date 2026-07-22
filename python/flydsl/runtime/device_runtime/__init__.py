@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Dict, Optional, Type
 
 from ...utils import env
-from .base import DeviceRuntime
+from .base import Device, DeviceRuntime
 from .rocm import RocmDeviceRuntime
 
 # Compile-backend id -> device-runtime kind (single string namespace).
@@ -163,6 +163,7 @@ def get_device_runtime() -> DeviceRuntime:
 
 __all__ = [
     "COMPILE_BACKEND_TO_RUNTIME_KIND",
+    "Device",
     "DeviceRuntime",
     "RocmDeviceRuntime",
     "ensure_compile_runtime_compatible",

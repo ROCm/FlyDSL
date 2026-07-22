@@ -34,7 +34,7 @@ def frontend_only_jit(monkeypatch):
     monkeypatch.setenv("ARCH", "gfx942")
     monkeypatch.setenv("COMPILE_ONLY", "1")
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
-    monkeypatch.setattr(jit_function, "_flydsl_key", lambda: "test-flydsl-key")
+    monkeypatch.setattr(jit_function, "_flydsl_key", lambda *_args: "test-flydsl-key")
 
     def compile_layout_pipeline(cls, module, **_kwargs):
         pm = PassManager.parse(FLY_PIPELINE)

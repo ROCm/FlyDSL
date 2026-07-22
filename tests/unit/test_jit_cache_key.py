@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.jit_argument import JitArgumentRegistry
@@ -14,6 +16,12 @@ class _FakeCudaStream:
 
 
 JitArgumentRegistry.register(_FakeCudaStream)(fx.Stream)
+
+
+@pytest.fixture(autouse=True)
+def _explicit_gpu_free_target(monkeypatch):
+    """These cache-key tests do not own a GPU invocation."""
+    monkeypatch.setenv("ARCH", "gfx942")
 
 
 @flyc.jit
