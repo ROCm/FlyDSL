@@ -756,19 +756,16 @@ def run_pa_decode_ps_test(
     ps_value_scale: torch.Tensor = value_scale_original
     flydsl_ps_output = torch.empty_like(reference_output)
 
-    # Mirror pa_decode_tile's own num_partitions choice (keyed on
-    # batch/kv-heads/max_blocks/block_size) so the FlyDSL PS buffers are sized
-    # exactly as the tile kernel picks; sliding_window keeps the SW path's
-    # window-based count.
+    # Match pa_decode_ps_kernel: each split unit is one 256-token partition,
+    # containing context_partition_size // block_size physical KV blocks.
+    blocks_per_partition = context_partition_size // block_size
     max_context_partition_num = get_recommended_splits(
         batch_size,
         num_kv_heads,
+        blocks_per_partition,
         sliding_window=sliding_window,
         context_partition_size=context_partition_size,
         query_length=query_length,
-        max_blocks_per_seq=block_tables.shape[1],
-        block_size=block_size,
-        device=device,
     )
     # Preallocate the FlyDSL intermediate buffers (partial exp-sums / max-logits /
     # output) unconditionally so CUDA-graph capture works for every path, not just

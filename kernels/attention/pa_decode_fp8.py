@@ -843,12 +843,6 @@ def get_recommended_splits(
     sliding_window: int = 0,
     context_partition_size: int = KV_COMPUTE_BLOCK,
     query_length: int = 1,
-    max_blocks_per_seq: int | None = None,
-    block_size: int = 1,
-    device: torch.device | None = None,
-    target_ctas_per_cu: int = 8,
-    min_tiles_per_partition: int = 2,
-    tile_tok: int = 256,
 ) -> int:
     """Recommend ``max_context_partition_num`` for PS partitioned paths.
 
@@ -862,22 +856,13 @@ def get_recommended_splits(
         window_token_count = sliding_window + query_length
         return cdiv(window_token_count - 1, context_partition_size) + 1
 
-    props = torch.cuda.get_device_properties(device or torch.device("cuda"))
+    props = torch.cuda.get_device_properties(torch.device("cuda"))
     # Reference uses occupancy = 2 (see `get_occupancy()` in the Gluon module).
     occupancy = 2
     num_sm = props.multi_processor_count * occupancy
     denom = max(1, num_sequences * num_kv_heads * split_kv_blocks)
     n = cdiv(num_sm, denom) * split_kv_blocks
-    base_np = max(4, min(n, 8))
-    if max_blocks_per_seq is None:
-        return base_np
-
-    device_cus = props.multi_processor_count
-    cu_fill_np = cdiv(target_ctas_per_cu * device_cus, num_sequences * num_kv_heads)
-    max_possible_tiles = cdiv(max_blocks_per_seq * block_size, tile_tok)
-    cu_starved = (num_sequences * num_kv_heads) < device_cus
-    tiles_np_cap = max_possible_tiles if cu_starved else max(1, max_possible_tiles // min_tiles_per_partition)
-    return max(1, min(max(base_np, cu_fill_np), tiles_np_cap))
+    return max(4, min(n, 8))
 
 
 # Small block_size (16/64) is routed through the load-balanced worklist

@@ -1099,10 +1099,13 @@ def pa_decode_tile(
     ), f"value_scale tensor must be float32 on {dev}, got {value_scale_t.dtype} on {value_scale_t.device}"
 
     if not num_partitions:
-        from kernels.attention.pa_decode_fp8 import get_recommended_splits
+        from kernels.attention.pa_decode_fp8 import KV_COMPUTE_BLOCK, get_recommended_splits
 
+        blocks_per_partition = KV_COMPUTE_BLOCK // block_size
         num_partitions = get_recommended_splits(
-            num_seqs, num_kv_heads, max_blocks_per_seq=max_blocks_per_seq, block_size=block_size, device=dev
+            num_seqs,
+            num_kv_heads,
+            split_kv_blocks=blocks_per_partition,
         )
 
     compiled = compile_pa_decode_tile(
