@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-22T20:29:21Z",
+ "updated": "2026-07-22T21:43:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29960050819,
+   "pr": 844,
+   "commit": "eb470729e4f5b2822148bd4bcb68bce3fdf0545e",
+   "branch": "forward_lse",
+   "event": "pull_request",
+   "title": "Add forward LSE output to FlyDSL flash attention kernels",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29960050819",
+   "created_at": "2026-07-22T21:39:47Z",
+   "updated_at": "2026-07-22T21:40:21Z",
+   "actor": "amd-wsung102",
+   "jobs": []
+  },
   {
    "run_id": 29955014628,
    "pr": 786,
@@ -14,9 +29,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29955014628",
    "created_at": "2026-07-22T20:24:49Z",
-   "updated_at": "2026-07-22T20:26:27Z",
+   "updated_at": "2026-07-22T20:27:52Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-22T20:27:51Z",
+     "completed_at": "2026-07-22T20:59:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29955014628/job/89042161604"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-22T20:27:49Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29955014628/job/89042161635"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-22T20:27:38Z",
+     "completed_at": "2026-07-22T20:38:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29955014628/job/89042161671"
+    }
+   ]
   },
   {
    "run_id": 29954477565,
@@ -2202,49 +2245,6 @@
    "updated_at": "2026-07-21T02:45:26Z",
    "actor": "GwilliamHu",
    "jobs": []
-  },
-  {
-   "run_id": 29792897063,
-   "pr": null,
-   "commit": "d06eb788716f67fbfed6b7b92cdb1daf07d05919",
-   "branch": "main",
-   "event": "push",
-   "title": "[layernorm] Add backward pass for training (PR 3/3, #769) (#801)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29792897063",
-   "created_at": "2026-07-21T01:21:25Z",
-   "updated_at": "2026-07-21T02:11:05Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-21T01:24:21Z",
-     "completed_at": "2026-07-21T02:04:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29792897063/job/88518410681"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-21T01:23:13Z",
-     "completed_at": "2026-07-21T02:11:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29792897063/job/88518410705"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-21T01:24:01Z",
-     "completed_at": "2026-07-21T01:56:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29792897063/job/88518410722"
-    }
-   ]
   }
  ]
 }
