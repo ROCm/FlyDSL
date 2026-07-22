@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-22T09:47:12Z",
+ "updated": "2026-07-22T10:08:42Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,32 @@
    "branch": "mega_moe_v1",
    "event": "pull_request",
    "title": "MegaMoEV1 on Gfx950",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29909098251",
    "created_at": "2026-07-22T09:43:27Z",
-   "updated_at": "2026-07-22T09:44:31Z",
+   "updated_at": "2026-07-22T09:45:10Z",
    "actor": "yanboshao",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-22T09:45:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29909098251/job/88887830931"
+    },
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-22T09:45:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29909098251/job/88887830933"
+    }
+   ]
   },
   {
    "run_id": 29907460372,
