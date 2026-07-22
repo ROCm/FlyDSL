@@ -848,7 +848,14 @@ def build_flash_attn_dualwave_swp_module(
         # seq_len_kv defaults to seq_len (self-attention / equal Q,KV lengths).
         if seq_len_kv is None:
             seq_len_kv = seq_len
-        # LSE is only written under const_expr(traits.RETURN_LSE); O is a placeholder otherwise.
+        # LSE placeholder (O) is only safe when RETURN_LSE is off. When built with
+        # return_lse=True the kernel stores fp32 LSE, so falling back to O would
+        # overwrite the output buffer / write an incompatible layout.
+        if return_lse and lse is None:
+            raise ValueError(
+                "flash_attn_dualwave_swp was built with return_lse=True but no `lse` tensor was "
+                "provided; pass an fp32 [batch, num_heads, seq_len] LSE tensor."
+            )
         lse_out = lse if lse is not None else O
         if traits.SPLITK:
             if workspace is None:
@@ -937,6 +944,11 @@ def build_flash_attn_dualwave_swp_module(
             head_dim_runtime = traits.HEAD_DIM
         if seq_len_kv is None:
             seq_len_kv = seq_len
+        if return_lse and lse is None:
+            raise ValueError(
+                "flash_attn_dualwave_swp was built with return_lse=True but no `lse` tensor was "
+                "provided; pass an fp32 [batch, num_heads, seq_len] LSE tensor."
+            )
         lse_out = lse if lse is not None else O
         if traits.SPLITK:
             if workspace is None:
