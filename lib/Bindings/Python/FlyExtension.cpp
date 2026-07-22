@@ -1002,10 +1002,8 @@ NB_MODULE(_mlirDialectsFly, m) {
       .def_prop_ro("shape", &DLTensorAdaptor::getShape, "Get tensor shape as tuple")
       .def_prop_ro("stride", &DLTensorAdaptor::getStride, "Get tensor stride as tuple")
       .def_prop_ro("data_ptr", &DLTensorAdaptor::getDataPtr, "Get data pointer as int64")
-      .def_prop_ro("device_type", &DLTensorAdaptor::getDeviceType,
-                   "Get the DLPack device type")
-      .def_prop_ro("device_id", &DLTensorAdaptor::getDeviceId,
-                   "Get the logical device id")
+      .def_prop_ro("device_type", &DLTensorAdaptor::getDeviceType, "Get the DLPack device type")
+      .def_prop_ro("device_id", &DLTensorAdaptor::getDeviceId, "Get the logical device id")
       .def_prop_ro("address_space", &DLTensorAdaptor::getAddressSpace,
                    "Get address space (0=host, 1=device)")
       .def_prop_ro(
