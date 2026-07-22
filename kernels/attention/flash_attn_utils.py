@@ -3005,8 +3005,8 @@ class GenericStoreHelper:
         lse_local = ctx.q_head_idx * ctx.seq_len_v + q_row
         # One writer per row: low half-wave + in-bounds q_row; else redirect to the
         # dropped OOB sentinel.
-        off_row = ArithValue(q_row < ctx.seqlen_q_b).select(lse_local, ctx.lse_oob_off)
-        off = fx.Index(ArithValue(ctx.lane_div_32 == fx.Index(0)).select(off_row, ctx.lse_oob_off))
+        off_row = (q_row < ctx.seqlen_q_b).select(lse_local, ctx.lse_oob_off)
+        off = fx.Index((ctx.lane_div_32 == fx.Index(0)).select(off_row, ctx.lse_oob_off))
         buffer_ops.buffer_store(as_mlir_value(fx.Float32(lse_val)), ctx.lse_rsrc, as_mlir_value(fx.Int32(off)))
 
     def finalize_o(self, loop_results):
@@ -4171,8 +4171,8 @@ class DualwaveStoreHelper(DualwaveKernelContext):
         )
         lse_local = self.q_head_idx * self.seq_len_v + q_row
         # One writer per row: low half-wave + in-bounds q_row; else the dropped OOB sentinel.
-        lse_off_row = ArithValue(q_row < self.seqlen_q_v).select(lse_local, lse_per_batch_elems)
-        lse_off = fx.Index(ArithValue(self.lane < fx.Index(32)).select(lse_off_row, lse_per_batch_elems))
+        lse_off_row = (q_row < self.seqlen_q_v).select(lse_local, lse_per_batch_elems)
+        lse_off = fx.Index((self.lane < fx.Index(32)).select(lse_off_row, lse_per_batch_elems))
         _ws_store_f32(lse_val, lse_off, lse_rsrc)
 
     def store_final_o(self, v_o, q_row, m_row=None, l_row=None):
@@ -5116,7 +5116,7 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
             fmath.log(as_mlir_value(den), fastmath=self.fm_fast),
             self.fm_fast,
         )
-        lse_off = fx.Index(ArithValue(self.col == fx.Index(0)).select(self.local_ml_idx, lse_per_batch_elems))
+        lse_off = fx.Index((self.col == fx.Index(0)).select(self.local_ml_idx, lse_per_batch_elems))
         buffer_ops.buffer_store(as_mlir_value(fx.Float32(lse_val)), lse_rsrc, as_mlir_value(fx.Int32(lse_off)))
 
     def store_output(self, o_pack):

@@ -101,6 +101,7 @@ def build_flash_attn_func_module_primary(
             paged=paged,
             kv_cache_layout=kv_cache_layout,
             skip_kv_pad_mask=skip_kv_pad_mask,
+            return_lse=return_lse,
         )
         _launcher_m256 = build_flash_attn_func_module_primary(
             num_heads,
@@ -123,6 +124,7 @@ def build_flash_attn_func_module_primary(
             paged=paged,
             kv_cache_layout=kv_cache_layout,
             skip_kv_pad_mask=skip_kv_pad_mask,
+            return_lse=return_lse,
         )
         _bs_threshold = 2048 * num_heads if gpu_arch.startswith("gfx942") else 4096 * num_heads
 
@@ -673,6 +675,7 @@ def build_flash_attn_func_module_primary(
             paged=paged,
             kv_cache_layout=kv_cache_layout,
             skip_kv_pad_mask=True,
+            return_lse=return_lse,
         )
         _launch_mask = build_flash_attn_func_module_primary(
             num_heads,
@@ -695,6 +698,7 @@ def build_flash_attn_func_module_primary(
             paged=paged,
             kv_cache_layout=kv_cache_layout,
             skip_kv_pad_mask=False,
+            return_lse=return_lse,
         )
 
         def _pad_dispatch(*args, **kwargs):
