@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-22T10:08:42Z",
+ "updated": "2026-07-22T11:54:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29916294977,
+   "pr": 880,
+   "commit": "7273ad82a9f1a09a32e2232fc3e449133f90da3d",
+   "branch": "lhc/refactor-expr",
+   "event": "pull_request",
+   "title": "refactor(expr): move buffer_ops to expr.rocdl; split gfx1250 mcast policy to kernels.common",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29916294977",
+   "created_at": "2026-07-22T11:35:41Z",
+   "updated_at": "2026-07-22T11:39:03Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-22T11:37:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29916294977/job/88911037545"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-22T11:37:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29916294977/job/88911037564"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-22T11:39:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29916294977/job/88911037586"
+    }
+   ]
+  },
   {
    "run_id": 29909098251,
    "pr": 876,
@@ -10,29 +53,29 @@
    "branch": "mega_moe_v1",
    "event": "pull_request",
    "title": "MegaMoEV1 on Gfx950",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29909098251",
    "created_at": "2026-07-22T09:43:27Z",
-   "updated_at": "2026-07-22T09:45:10Z",
+   "updated_at": "2026-07-22T11:17:46Z",
    "actor": "yanboshao",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-22T09:45:10Z",
+     "started_at": "2026-07-22T11:17:45Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29909098251/job/88887830931"
     },
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-22T09:45:10Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-22T10:08:18Z",
+     "completed_at": "2026-07-22T10:56:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29909098251/job/88887830933"
     }
    ]
@@ -44,11 +87,11 @@
    "branch": "pa-decode-tile",
    "event": "pull_request",
    "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29907460372",
    "created_at": "2026-07-22T09:18:49Z",
-   "updated_at": "2026-07-22T09:20:15Z",
+   "updated_at": "2026-07-22T11:51:31Z",
    "actor": "fsx950223",
    "jobs": [
     {
@@ -63,19 +106,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-22T09:21:12Z",
-     "completed_at": null,
+     "completed_at": "2026-07-22T10:29:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29907460372/job/88882517727"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-22T09:20:15Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-22T10:09:24Z",
+     "completed_at": "2026-07-22T11:51:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29907460372/job/88882517750"
     }
    ]
@@ -211,7 +254,7 @@
   },
   {
    "run_id": 29900776331,
-   "pr": 880,
+   "pr": null,
    "commit": "c46016f26ff220a65cd813e9a2b14f711990f8e0",
    "branch": "lhc/refactor-expr",
    "event": "pull_request",
@@ -2256,49 +2299,6 @@
      "started_at": "2026-07-20T03:54:57Z",
      "completed_at": "2026-07-20T04:29:23Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29715603942/job/88268342767"
-    }
-   ]
-  },
-  {
-   "run_id": 29713950473,
-   "pr": 825,
-   "commit": "96734303c9a29cf0f123348b126f867e4bda5904",
-   "branch": "pa-decode-tile",
-   "event": "pull_request",
-   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29713950473",
-   "created_at": "2026-07-20T03:07:33Z",
-   "updated_at": "2026-07-20T03:53:26Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-20T03:10:01Z",
-     "completed_at": "2026-07-20T03:53:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29713950473/job/88263226589"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-20T03:09:45Z",
-     "completed_at": "2026-07-20T03:53:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29713950473/job/88263226622"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-20T03:08:49Z",
-     "completed_at": "2026-07-20T03:38:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29713950473/job/88263226625"
     }
    ]
   }
