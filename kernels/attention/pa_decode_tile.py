@@ -33,7 +33,7 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.protocol import dsl_size_of
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, vector
+from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from flydsl.expr.vector import ReductionOp
@@ -320,9 +320,7 @@ def compile_pa_decode_tile(
             else:
                 # block_size==16: each lane stages its own rgroup's page/token,
                 # so the 4 sub-blocks stage in parallel across rgroup-groups.
-                phys = fx.Int32(
-                    vector.extract(arith.unwrap(phys_vec), static_position=[], dynamic_position=[fx.Index(rgroup)])
-                )
+                phys = fx.Int32(phys_vec[rgroup])
                 scale_idx = phys * stride_ks_block + kv_h * stride_ks_head + lane16
                 k_scale_scalar = fx.Float32(buffer_ops.buffer_load(ks_rsrc, scale_idx, vec_width=1, dtype=fx.Float32))
                 v_scale_scalar = fx.Float32(buffer_ops.buffer_load(vs_rsrc, scale_idx, vec_width=1, dtype=fx.Float32))

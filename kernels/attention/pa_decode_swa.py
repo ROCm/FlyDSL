@@ -8,12 +8,12 @@ import functools
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
-from flydsl.expr import math as fly_math
 from flydsl.expr.typing import Int32, T
 from kernels.attention.pa_common import _compute_block_base_dw_i64, _prefetch_q_chunks
 from kernels.common import dpp_utils
 from kernels.common.utils import (
     cdiv,
+    exp2_f32_fast,
     global_load_i32,
     global_load_i64x2,
     global_ptr_from_addr,
@@ -63,10 +63,6 @@ def _get_sw_mtp_group_count(query_length: int, query_group_size: int) -> int:
 
 def _get_sw_mtp_pair_offset(mtp_group_idx: int, mtp_subgroup_idx: int = 0) -> int:
     return mtp_group_idx * MFMA_N + mtp_subgroup_idx * MFMA_N
-
-
-def _exp2_f32_fast(value):
-    return fly_math.exp2(value, fastmath=arith.FastMathFlags.fast)
 
 
 def _load_k_flat(
@@ -574,7 +570,7 @@ def _make_pa_phase_helpers(
         safe_qk_max = arith.select(qk_max > neg_inf, qk_max, zero_f) if const_expr(kv_tok_base is not None) else qk_max
         for td in range_constexpr(TLOOP):
             diff_vec = fx.Vector(d_out[td]) - vector.broadcast(T.f32x4, arith.unwrap(safe_qk_max))
-            p_vec = _exp2_f32_fast(diff_vec * vector.broadcast(T.f32x4, arith.unwrap(fx.Float32(LOG2E))))
+            p_vec = exp2_f32_fast(diff_vec * vector.broadcast(T.f32x4, arith.unwrap(fx.Float32(LOG2E))))
             exp_sum = exp_sum + fx.Vector(p_vec).reduce("add")
             d_out[td] = p_vec
         for sh in [32, 16]:
@@ -600,7 +596,7 @@ def _make_pa_phase_helpers(
             diff_w = warp_rescale_factors[w] - partition_max
             if const_expr(needs_mask):
                 diff_w = arith.select(partition_max > neg_inf, diff_w, zero_f)
-            wf = _exp2_f32_fast(diff_w * fx.Float32(LOG2E).ir_value())
+            wf = exp2_f32_fast(diff_w * fx.Float32(LOG2E).ir_value())
             w_sum = sum_vec[w]
             wf_sum = arith.mulf(arith.unwrap(w_sum), arith.unwrap(wf), fastmath=arith.FastMathFlags.contract)
             partition_sum = arith.addf(arith.unwrap(partition_sum), wf_sum, fastmath=arith.FastMathFlags.contract)
@@ -618,17 +614,17 @@ def _make_pa_phase_helpers(
         if const_expr(needs_mask):
             accum_scale = arith.select(
                 rmax > neg_inf,
-                _exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value()),
+                exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value()),
                 zero_f,
             )
             part_to_new = arith.select(
                 partition_max > neg_inf,
-                _exp2_f32_fast((partition_max - new_rmax) * fx.Float32(LOG2E).ir_value()),
+                exp2_f32_fast((partition_max - new_rmax) * fx.Float32(LOG2E).ir_value()),
                 zero_f,
             )
         else:
-            accum_scale = _exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value())
-            part_to_new = _exp2_f32_fast((partition_max - new_rmax) * fx.Float32(LOG2E).ir_value())
+            accum_scale = exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value())
+            part_to_new = exp2_f32_fast((partition_max - new_rmax) * fx.Float32(LOG2E).ir_value())
 
         accum_sum = arith.mulf(arith.unwrap(accum_scale), arith.unwrap(rsum), fastmath=arith.FastMathFlags.contract)
         partition_sum_scaled = arith.mulf(
@@ -664,12 +660,9 @@ def _make_pa_phase_helpers(
                 d_out[td] = d_out[td] * vector.broadcast(T.f32x4, arith.unwrap(prob_scale))
 
         for td in range_constexpr(TLOOP):
-            p0 = vector.extract(d_out[td], static_position=[0], dynamic_position=[])
-            p1 = vector.extract(d_out[td], static_position=[1], dynamic_position=[])
-            p2 = vector.extract(d_out[td], static_position=[2], dynamic_position=[])
-            p3 = vector.extract(d_out[td], static_position=[3], dynamic_position=[])
-            lo = rocdl.cvt_pk_fp8_f32(T.i32, p0, p1, arith.constant(0, type=T.i32), False)
-            pk = rocdl.cvt_pk_fp8_f32(T.i32, p2, p3, lo, True)
+            pv = fx.Vector(d_out[td])
+            lo = rocdl.cvt_pk_fp8_f32(T.i32, pv[0], pv[1], arith.constant(0, type=T.i32), False)
+            pk = rocdl.cvt_pk_fp8_f32(T.i32, pv[2], pv[3], lo, True)
             elem_base = prob_wr_thread_base + arith.constant(td * MFMA_N * (PROB_ROW_STRIDE_BYTES // 4), type=T.i32)
             pk_vec = fx.Vector.from_elements([pk], dtype=fx.Int32)
             fx.ptr_store(pk_vec, logits_base + elem_base)
@@ -819,7 +812,7 @@ def compile_pa_decode_sw_reduce(
             # differences are always small (QK-score scale), so clamping the
             # pre-scale difference leaves genuine values untouched while
             # forcing pathological ones to underflow cleanly to 0.
-            return _exp2_f32_fast(arith.maxnumf(diff, fx.Float32(-100.0)) * c_log2e)
+            return exp2_f32_fast(fx.maxnumf(diff, fx.Float32(-100.0)) * c_log2e)
 
         def _wave_reduce_max_full(val):
             red = val
