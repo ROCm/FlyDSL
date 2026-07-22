@@ -1,22 +1,65 @@
 {
  "schema": 1,
- "updated": "2026-07-22T22:12:25Z",
+ "updated": "2026-07-22T22:32:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 29961868368,
+   "run_id": 29963056833,
    "pr": 883,
-   "commit": "bf44258130759c1d3116b8c00d1aaa2d61c46e5a",
+   "commit": "7152332312ae06aaec6e0cf3de25251d7dd43f43",
    "branch": "fix/device-aware-jit-target-878",
    "event": "pull_request",
    "title": "[Runtime] Resolve JIT target from invocation device",
    "status": "in_progress",
    "conclusion": null,
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29961868368",
-   "created_at": "2026-07-22T22:09:32Z",
-   "updated_at": "2026-07-22T22:09:54Z",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29963056833",
+   "created_at": "2026-07-22T22:29:55Z",
+   "updated_at": "2026-07-22T22:30:46Z",
    "actor": "jhinpan",
    "jobs": []
+  },
+  {
+   "run_id": 29961868368,
+   "pr": null,
+   "commit": "bf44258130759c1d3116b8c00d1aaa2d61c46e5a",
+   "branch": "fix/device-aware-jit-target-878",
+   "event": "pull_request",
+   "title": "[Runtime] Resolve JIT target from invocation device",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29961868368",
+   "created_at": "2026-07-22T22:09:32Z",
+   "updated_at": "2026-07-22T22:30:27Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-22T22:10:56Z",
+     "completed_at": "2026-07-22T22:20:32Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29961868368/job/89064698941"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-22T22:11:04Z",
+     "completed_at": "2026-07-22T22:30:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29961868368/job/89064698992"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-22T22:20:24Z",
+     "completed_at": "2026-07-22T22:30:21Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29961868368/job/89064698993"
+    }
+   ]
   },
   {
    "run_id": 29961712110,
@@ -83,10 +126,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-22T21:41:32Z",
-     "completed_at": null,
+     "completed_at": "2026-07-22T22:20:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29960050819/job/89058883711"
     }
    ]
@@ -2190,49 +2233,6 @@
      "started_at": "2026-07-21T03:15:41Z",
      "completed_at": "2026-07-21T04:30:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29797943621/job/88533229532"
-    }
-   ]
-  },
-  {
-   "run_id": 29797851558,
-   "pr": 825,
-   "commit": "0173bde6d8c2019b0db2e6fc583d1db20815886c",
-   "branch": "pa-decode-tile",
-   "event": "pull_request",
-   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29797851558",
-   "created_at": "2026-07-21T03:11:13Z",
-   "updated_at": "2026-07-21T03:13:51Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-21T03:11:55Z",
-     "completed_at": "2026-07-21T03:13:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29797851558/job/88532855089"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-21T03:12:33Z",
-     "completed_at": "2026-07-21T03:13:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29797851558/job/88532855107"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-21T03:12:39Z",
-     "completed_at": "2026-07-21T03:13:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29797851558/job/88532855123"
     }
    ]
   }
