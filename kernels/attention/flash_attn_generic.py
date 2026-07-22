@@ -603,11 +603,16 @@ def build_flash_attn_func_module_primary(
     ):
         # Dense/non-paged pass the output tensor as a placeholder for the unused
         # cu_seqlens / block_table slots; the kernel only reads them under
-        # const_expr(VARLEN) / const_expr(PAGED). LSE is likewise a placeholder
-        # unless the kernel was built with return_lse=True (RETURN_LSE store gate).
+        # const_expr(VARLEN) / const_expr(PAGED).
         cq = cu_seqlens_q if cu_seqlens_q is not None else Out
         ck = cu_seqlens_kv if cu_seqlens_kv is not None else Out
         bt = block_table if block_table is not None else Out
+        # RETURN_LSE stores fp32 LSE, so Out is not a safe placeholder for a missing lse.
+        if return_lse and lse is None:
+            raise ValueError(
+                "flash_attn_generic was built with return_lse=True but no `lse` tensor was "
+                "provided; pass an fp32 [batch, num_heads, seq_len] LSE tensor."
+            )
         ls = lse if lse is not None else Out
         skv = seq_len if seq_len_kv is None else seq_len_kv
         with CompilationContext.compile_hints(_fmha_compile_hints):
@@ -616,6 +621,11 @@ def build_flash_attn_func_module_primary(
             )
 
     def _compile(Q, K, V, Out, batch_size, seq_len, seq_len_kv=None, lse=None, stream=None):
+        if return_lse and lse is None:
+            raise ValueError(
+                "flash_attn_generic was built with return_lse=True but no `lse` tensor was "
+                "provided; pass an fp32 [batch, num_heads, seq_len] LSE tensor."
+            )
         ls = lse if lse is not None else Out
         skv = seq_len if seq_len_kv is None else seq_len_kv
         with CompilationContext.compile_hints(_fmha_compile_hints):

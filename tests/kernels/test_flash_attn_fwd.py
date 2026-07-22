@@ -3289,17 +3289,8 @@ def main():
 # ============================================================================
 # Forward LSE (log-sum-exp) correctness tests
 # ----------------------------------------------------------------------------
-# Validates the per-row LSE emitted by ``flydsl_flash_attn_func(..., return_lse=True)``
-# against a float32 PyTorch reference. The interface contract is:
-#
-#     LSE_i = ln( sum_j exp( sm_scale * (q_i . k_j) ) )     (masked keys excluded)
-#
-# i.e. natural log, with the softmax scale (sm_scale = 1/sqrt(head_dim)) folded in,
-# and a fully-masked row (no visible keys) storing -inf. Output layout is fp32
-# ``[B, num_heads, Sq]`` (varlen: ``[B, num_heads, max_seqlen_q]``, padded rows are
-# left undefined and not checked). Covers the dense (gfx950 dualwave / generic),
-# split-K combine, and varlen store paths, plus GQA, cross-attention (Skv != Sq)
-# and fully-masked rows.
+# Validates return_lse=True output against a float32 PyTorch reference across the
+# dense, split-K combine and varlen paths (plus GQA, cross-attn, fully-masked rows).
 # ============================================================================
 
 # bf16 inputs accumulate the dot product in the kernel with a slightly different

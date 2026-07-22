@@ -682,8 +682,7 @@ def build_flash_attn_dualwave_swp_module(
                 _s_barrier()
 
             # Store O as 128b writes by fusing each lane's half with its half-wave partner.
-            # LSE (natural log, scale folded) is stored alongside O when RETURN_LSE; l_row
-            # is still the row sum here (l_inv above is a separate reciprocal).
+            # LSE stored alongside O when RETURN_LSE (l_row is the row sum, not l_inv).
             if const_expr(not traits.SPLITK):
                 output_store.store_final_o(v_o, ctx.q_row, m_row, l_row)
             else:
@@ -848,9 +847,7 @@ def build_flash_attn_dualwave_swp_module(
         # seq_len_kv defaults to seq_len (self-attention / equal Q,KV lengths).
         if seq_len_kv is None:
             seq_len_kv = seq_len
-        # LSE placeholder (O) is only safe when RETURN_LSE is off. When built with
-        # return_lse=True the kernel stores fp32 LSE, so falling back to O would
-        # overwrite the output buffer / write an incompatible layout.
+        # RETURN_LSE stores fp32 LSE, so O is not a safe placeholder for a missing lse.
         if return_lse and lse is None:
             raise ValueError(
                 "flash_attn_dualwave_swp was built with return_lse=True but no `lse` tensor was "

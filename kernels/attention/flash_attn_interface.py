@@ -616,11 +616,8 @@ def flydsl_flash_attn_func(
     v_descale: Optional[torch.Tensor] = None,
     # Output tensor; allocated if None.
     out: Optional[torch.Tensor] = None,
-    # Also return the per-row log-sum-exp (LSE) needed by the backward pass.
-    # LSE convention: natural log, softmax scale folded in, i.e.
-    # LSE_i = ln(sum_j exp(sm_scale * (q_i . k_j))). fp32 tensor of shape
-    # [B, num_heads, Sq] (varlen: [B, num_heads, max_seqlen_q], padded). Not
-    # supported for fp8.
+    # Also return per-row LSE = ln(sum_j exp(sm_scale * q_i.k_j)); fp32
+    # [B, num_heads, Sq]. Needed by backward; not supported for fp8.
     return_lse: bool = False,
     # Kernel build options.
     waves_per_eu: int = 2,

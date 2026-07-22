@@ -2026,13 +2026,10 @@ class GenericFlashAttnContext:
         self.o_rsrc = buffer_ops.create_buffer_resource(
             O, max_size=False, num_records_bytes=q_nrec_bytes, base_byte_offset=q_batch_byte_off
         )
-        # LSE output: fp32 [batch, num_heads, seq_len] (varlen: padded to max_seqlen_q).
-        # Per-batch descriptor folds the batch offset into the base so the flat index
-        # stays 0-based within the batch. Only built when RETURN_LSE.
+        # LSE output: fp32 [batch, num_heads, seq_len], per-batch descriptor.
         if const_expr(traits.RETURN_LSE):
             self.lse_per_batch_elems = fx.Index(traits.NUM_HEADS_Q) * self.seq_len_v
-            # Out-of-bounds sentinel (== num records) that the buffer bound drops,
-            # used to predicate the per-row store to a single writer lane.
+            # OOB sentinel (== num records) the buffer bound drops; predicates the store.
             self.lse_oob_off = self.lse_per_batch_elems
             _lse_nrec_bytes = as_mlir_value(self.lse_per_batch_elems * fx.Index(4))
             _lse_batch_byte_off = as_mlir_value(self.batch_idx * self.lse_per_batch_elems * fx.Index(4))
@@ -2997,10 +2994,8 @@ class GenericStoreHelper:
                     buffer_ops.buffer_store(zero_pack, o_rsrc, o_global * fx.Index(2), offset_is_bytes=True)
 
     def store_lse(self, m_final, l_final, q_row):
-        # LSE = sm_scale * m_raw + ln(l); natural log, softmax scale folded in.
-        # m_raw is the unscaled row max of q.k and l the row sum of
-        # exp(sm_scale*(q.k) - sm_scale*m_raw), so a fully-masked row (m_raw=-inf,
-        # l=0) yields -inf.
+        # LSE = sm_scale * m_raw + ln(l); natural log, softmax scale folded in
+        # (fully-masked row has l == 0 -> -inf).
         ctx = self.ctx
         lse_val = _fadd(
             _fmul(m_final, ctx.c_sm_scale, ctx.fm_fast),
@@ -3008,9 +3003,8 @@ class GenericStoreHelper:
             ctx.fm_fast,
         )
         lse_local = ctx.q_head_idx * ctx.seq_len_v + q_row
-        # One writer per row: the low half-wave (lane_div_32 == 0) stores; the high
-        # half-wave and any partial-tile OOB row (q_row >= seqlen_q_b) redirect to the
-        # sentinel offset (== num records), which the hardware buffer bound drops.
+        # One writer per row: low half-wave + in-bounds q_row; else redirect to the
+        # dropped OOB sentinel.
         off_row = ArithValue(q_row < ctx.seqlen_q_b).select(lse_local, ctx.lse_oob_off)
         off = fx.Index(ArithValue(ctx.lane_div_32 == fx.Index(0)).select(off_row, ctx.lse_oob_off))
         buffer_ops.buffer_store(as_mlir_value(fx.Float32(lse_val)), ctx.lse_rsrc, as_mlir_value(fx.Int32(off)))
@@ -4163,10 +4157,8 @@ class DualwaveStoreHelper(DualwaveKernelContext):
         _store_empty_split()
 
     def _store_lse_row(self, m_row, l_row, q_row):
-        # LSE = m_row * ln2 + ln(l_row); natural log with the softmax scale folded in
-        # (m_row is already sm_scale*log2e-scaled). fp32 [batch, num_heads, seq_len];
-        # a per-batch descriptor folds the batch offset into the base. A fully-masked
-        # row has l_row == 0, so ln(l_row) = -inf.
+        # LSE = m_row * ln2 + ln(l_row); natural log, scale folded (m_row is
+        # sm_scale*log2e-scaled). Fully-masked row has l_row == 0 -> -inf.
         traits = self.traits
         lse_base_i64 = fx.Int64(fx.ptrtoint(fx.get_iter(self.LSE)))
         lse_per_batch_elems = fx.Index(traits.NUM_HEADS_Q) * self.seq_len_v
@@ -4178,9 +4170,7 @@ class DualwaveStoreHelper(DualwaveKernelContext):
             self.fm_fast,
         )
         lse_local = self.q_head_idx * self.seq_len_v + q_row
-        # One writer per row (low half-wave); the high half-wave and partial-tile OOB
-        # rows (q_row >= seqlen_q_v) redirect to the sentinel offset (== num records),
-        # which the hardware buffer bound drops.
+        # One writer per row: low half-wave + in-bounds q_row; else the dropped OOB sentinel.
         lse_off_row = ArithValue(q_row < self.seqlen_q_v).select(lse_local, lse_per_batch_elems)
         lse_off = fx.Index(ArithValue(self.lane < fx.Index(32)).select(lse_off_row, lse_per_batch_elems))
         _ws_store_f32(lse_val, lse_off, lse_rsrc)
@@ -5115,10 +5105,8 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
         return Vec.from_elements([fx.Int32(lo), fx.Int32(hi)], fx.Int32)
 
     def store_lse(self, m_max, den):
-        # Combined LSE = m_max * ln2 + ln(den); den = sum_s 2^(m_s - m_max) * l_s is the
-        # global base-2 denominator relative to m_max, so ln(den) completes the natural-log,
-        # scale-folded LSE. One lane per (b, h, s) row (col == 0) writes; the rest redirect
-        # to the sentinel offset (== num records), dropped by the buffer bound.
+        # Combined LSE = m_max * ln2 + ln(den); den = sum_s 2^(m_s - m_max) * l_s
+        # completes the natural-log, scale-folded LSE. One lane (col == 0) writes.
         lse_base_i64 = fx.Int64(fx.ptrtoint(fx.get_iter(self.LSE)))
         lse_per_batch_elems = fx.Index(self.traits.NUM_HEADS_Q) * self.seq_len_v
         lse_per_batch_bytes = lse_per_batch_elems * fx.Index(4)
