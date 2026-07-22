@@ -203,7 +203,7 @@ def compile_fused_moe_gemm1(
         bnt = f"_bnt{b_nt}" if b_nt != 0 else ""  # B-load cache modifier (empty at 0 -> unchanged symbol)
         return (
             f"mfma_fmoe1_silu_mul_a{a_dtype}_w{b_dtype}_{out_s}_t{tile_m}x{tile_n}x{tile_k}"
-            f"_persist_cu{cu_num}{fp4q}{fp8q}{sort}{asy}{gui}{xcd}_ci_ras_spt{isd}{fuse}{sk}{bnt}_w1l{experts_per_rank}_v37"
+            f"_persist_cu{cu_num}{fp4q}{fp8q}{sort}{asy}{gui}{xcd}_ci_ras_spt{isd}{fuse}{sk}{bnt}_w1l{experts_per_rank}_v1"
         ).replace("-", "_")
 
     module_name = get_module_name()
@@ -265,7 +265,7 @@ def compile_fused_moe_gemm1(
     gui_ratio = 1 if gate_up_interleave else 2
     vmcnt_before_barrier = tile_m // 32 // fp4_ratio + tile_n // 32 * gui_ratio
 
-    @flyc.kernel(known_block_size=[total_threads, 1, 1])
+    @flyc.kernel(name=module_name, known_block_size=[total_threads, 1, 1])
     def moe_gemm1(
         arg_out: fx.Tensor,
         arg_x: fx.Tensor,
