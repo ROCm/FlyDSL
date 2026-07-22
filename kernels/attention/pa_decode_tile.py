@@ -778,8 +778,11 @@ def compile_pa_decode_tile(
                             op = op * fx.Vector.from_elements([v_max_scaled], dtype=fx.Float32).broadcast_to(OP_ELEMS)
                         o_acc[vh] = o_acc[vh] * corr_b + op
                     next_state.extend([*o_acc, m_new, l_new])
-                    # Retire this M-tile's chain before the next starts (cap peak liveness).
+                    # sP and sLsum are reused by the next M-tile. Synchronize
+                    # all waves after their LDS reads before any wave overwrites
+                    # those regions, then retire this tile's dependency chain.
                     if const_expr(m < M_TILES - 1):
+                        gpu.barrier()
                         fx.rocdl.sched_barrier(0)
             else:
                 # M_TILES==1 single tile (m==0 for the _o_slot/_m_slot/_l_slot helpers).
