@@ -14,7 +14,6 @@ import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr
 from flydsl.expr.typing import T
-from flydsl.expr.utils.arith import ArithValue as _ArithValue
 from kernels.common.mem_ops import buffer_atomic_add
 from kernels.gemm.fp8_gemm_utils import Mfma16x16x128, make_fp8_buffer_tensor, pack_i32x4_i32x8
 
@@ -194,9 +193,7 @@ def compile_pack_weight_kctrs_bf16_to_ktrsc_fp8(k, c, kt, kh, kw):
 
 
 @functools.lru_cache(maxsize=64)
-def compile_conv3d_implicit_fp8(
-    n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias=False, splitk=1
-):
+def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias=False, splitk=1):
     """Compile the FP8 conv: x is NDHWC FP8 bytes, weight is KTRSC FP8 bytes."""
     do = (d + 2 * pt - kt) // st + 1
     ho = (h + 2 * ph - kh) // sh + 1
@@ -413,77 +410,38 @@ def compile_conv3d_implicit_fp8(
                 b0_0 = read_b_vec(stage, 0, 0)
                 fx.rocdl.sched_dsrd(3)
 
-        _vec_store = (n == 1) and (not use_splitk) and (dhw % MFMA_C_VALUES == 0) and (not BIG_OUT)
-
-        if const_expr(BIG_OUT):
-            y_elem_base = fx.Int64(buffer_ops.extract_base_index(y))
-
-        def _big_store(off_elem, value):
-            addr = y_elem_base + fx.Int64(off_elem) * fx.Int64(2)
-            ptr = buffer_ops.create_llvm_ptr(addr, address_space=1)
-            v = value.ir_value() if hasattr(value, "ir_value") else value
-            llvm.StoreOp(v, ptr, alignment=2)
-
-        def store_acc():
-            for mi in range_constexpr(MI_M):
-                row_base = m_offset + wave_m * WARP_M + mi * MFMA_M + c_m_vec
-                for ni in range_constexpr(MI_N):
-                    col = n_offset + fx.Index(wave_n * WARP_N + ni * MFMA_N) + c_n
-                    col_valid = col < fx.Index(k)
-                    if const_expr(has_bias and not use_splitk):
-                        bias_val = fx.Float32(buffer_ops.buffer_load(bias_rsrc, col, vec_width=1, dtype=fx.Float32))
-                    acc_vec = Vec(acc[mi * MI_N + ni])
-
-                    if const_expr(_vec_store):
-                        off0 = col * dhw + fx.Index(row_base)
-
-                        def _emit_vec4():
-                            vals = []
-                            for i in range_constexpr(MFMA_C_VALUES):
-                                o = acc_vec[i] + bias_val if const_expr(has_bias) else acc_vec[i]
-                                vals.append(o.to(fx.BFloat16))
-                            v4 = fx.Vector.from_elements(vals, dtype=fx.BFloat16)
-                            buffer_ops.buffer_store(v4, y_rsrc, off0)
-
-                        if col_valid:
-                            _emit_vec4()
-                        continue
-
-                    for i in range_constexpr(MFMA_C_VALUES):
-                        row = row_base + i
-                        out = acc_vec[i]
-                        if const_expr(use_splitk):
-                            # Atomics ignore hardware OOB suppression; guard explicitly.
-                            valid = (col < fx.Index(k)) & (row < fx.Index(npq))
-                            if valid:
-                                off_b = fx.Int32((row * k + col) * 4)
-                                z0 = fx.Int32(0)
-                                buffer_atomic_add(out, y_rsrc, off_b, z0, z0)
-                        else:
-                            if const_expr(has_bias):
-                                out = out + bias_val
-                            # NCDHW output[n_idx, col, sp]: n_idx*(k*dhw) + col*dhw + sp.
-                            # n==1 fast path: n_idx=0, sp=row, no integer division.
-                            if const_expr(n == 1):
-                                off_ncdhw = col * dhw + row
-                            else:
-                                n_idx = row // dhw
-                                sp = row % dhw
-                                off_ncdhw = n_idx * (k * dhw) + col * dhw + sp
-                            if const_expr(BIG_OUT):
-                                if col_valid:
-                                    _big_store(off_ncdhw, out.to(fx.BFloat16))
+        def store_half_pair(acc0, acc1, m_half):
+            for wm in range_constexpr(QM_STEPS):
+                row_base = m_offset + m_half * HALF_M + wave_m * (HALF_M // WAVE_M) + wm * MFMA_M + c_m_vec
+                for n_half in range_constexpr(2):
+                    acc = acc0 if const_expr(n_half == 0) else acc1
+                    for wn in range_constexpr(QN_STEPS):
+                        col = n_offset + fx.Index(n_half * HALF_N + wave_n * (HALF_N // WAVE_N) + wn * MFMA_N) + c_n
+                        col_valid = col < fx.Index(k)
+                        if const_expr(has_bias and not use_splitk):
+                            bias_val = fx.Float32(buffer_ops.buffer_load(bias_rsrc, col, vec_width=1, dtype=fx.Float32))
+                        acc_vec = Vec(acc[wm * QN_STEPS + wn])
+                        for i in range_constexpr(MFMA_C_VALUES):
+                            row = row_base + i
+                            out = acc_vec[i]
+                            if const_expr(use_splitk):
+                                # Atomics ignore hardware OOB suppression; guard explicitly.
+                                valid = (col < fx.Index(k)) & (row < fx.Index(npq))
+                                if valid:
+                                    off_b = fx.Int32((row * k + col) * 4)
+                                    z0 = fx.Int32(0)
+                                    buffer_atomic_add(out, y_rsrc, off_b, z0, z0)
                             else:
                                 if const_expr(has_bias):
                                     out = out + bias_val
-                                # NCDHW output[ni, col, sp]: ni*(k*dhw) + col*dhw + sp.
-                                # n==1 fast path: ni=0, sp=row, no integer division.
+                                # NCDHW output[n_idx, col, sp]: n_idx*(k*dhw) + col*dhw + sp.
+                                # n==1 fast path: n_idx=0, sp=row, no integer division.
                                 if const_expr(n == 1):
                                     off_ncdhw = col * dhw + row
                                 else:
-                                    ni = row // dhw
+                                    n_idx = row // dhw
                                     sp = row % dhw
-                                    off_ncdhw = ni * (k * dhw) + col * dhw + sp
+                                    off_ncdhw = n_idx * (k * dhw) + col * dhw + sp
                                 buffer_ops.buffer_store(out.to(fx.BFloat16), y_rsrc, off_ncdhw, mask=col_valid)
 
         store_half_pair(acc00, acc01, 0)
