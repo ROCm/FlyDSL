@@ -30,6 +30,8 @@ if not torch.cuda.is_available():
     print("CUDA/ROCm not available")
     sys.exit(1)
 
+import pytest  # noqa: E402
+
 from kernels.attention.flash_attn_interface import flydsl_flash_attn_func  # noqa: E402
 from tests.test_common import run_perftest  # noqa: E402
 
@@ -3282,6 +3284,190 @@ def main():
         else:
             print("Some tests FAILED")
             sys.exit(1)
+
+
+# ============================================================================
+# Forward LSE (log-sum-exp) correctness tests
+# ----------------------------------------------------------------------------
+# Validates the per-row LSE emitted by ``flydsl_flash_attn_func(..., return_lse=True)``
+# against a float32 PyTorch reference. The interface contract is:
+#
+#     LSE_i = ln( sum_j exp( sm_scale * (q_i . k_j) ) )     (masked keys excluded)
+#
+# i.e. natural log, with the softmax scale (sm_scale = 1/sqrt(head_dim)) folded in,
+# and a fully-masked row (no visible keys) storing -inf. Output layout is fp32
+# ``[B, num_heads, Sq]`` (varlen: ``[B, num_heads, max_seqlen_q]``, padded rows are
+# left undefined and not checked). Covers the dense (gfx950 dualwave / generic),
+# split-K combine, and varlen store paths, plus GQA, cross-attention (Skv != Sq)
+# and fully-masked rows.
+# ============================================================================
+
+# bf16 inputs accumulate the dot product in the kernel with a slightly different
+# ordering than the fp32 reference, so allow a small absolute tolerance.
+_ATOL_BF16 = 8e-3
+_ATOL_F16 = 4e-3
+
+
+def _lse_sm_scale(head_dim: int) -> float:
+    return 1.0 / math.sqrt(head_dim)
+
+
+def _reference_lse(q, k, causal, num_kv_heads):
+    """float32 reference LSE for dense inputs.
+
+    q: [B, Sq, H, D], k: [B, Skv, Hkv, D] -> lse: [B, H, Sq] (natural log, scale
+    folded). Causal is bottom-right aligned: key j is visible to query i iff
+    ``j <= i + (Skv - Sq)`` (matches the kernel's bottom-right convention).
+    """
+    B, Sq, H, D = q.shape
+    Skv, Hkv = k.shape[1], k.shape[2]
+    sm = _lse_sm_scale(D)
+    qf = q.float().permute(0, 2, 1, 3)  # B, H, Sq, D
+    kf = k.float().permute(0, 2, 1, 3)  # B, Hkv, Skv, D
+    kf = kf.repeat_interleave(H // Hkv, dim=1)  # B, H, Skv, D
+    scores = torch.einsum("bhqd,bhkd->bhqk", qf, kf) * sm
+    if causal:
+        qi = torch.arange(Sq, device=q.device).view(Sq, 1)
+        ki = torch.arange(Skv, device=q.device).view(1, Skv)
+        mask = (ki > (qi + (Skv - Sq))).view(1, 1, Sq, Skv)
+        scores = scores.masked_fill(mask, float("-inf"))
+    return torch.logsumexp(scores, dim=-1)  # B, H, Sq
+
+
+def _assert_lse_matches(lse, lse_ref, atol):
+    """Finite rows match within atol; -inf (fully-masked) rows match exactly."""
+    lse = lse.float()
+    lse_ref = lse_ref.float()
+    finite = torch.isfinite(lse_ref)
+    # Fully-masked rows: reference is -inf, kernel must be non-finite (i.e. -inf).
+    if (~finite).any():
+        assert bool(((~torch.isfinite(lse)) == (~finite)).all()), "masked (-inf) rows mismatch"
+    if finite.any():
+        diff = (lse[finite] - lse_ref[finite]).abs().max().item()
+        assert diff <= atol, f"LSE max abs diff {diff:.3e} exceeds atol {atol:.3e}"
+
+
+def _rand_lse(*shape, dtype, device="cuda"):
+    return torch.randn(*shape, device=device, dtype=dtype)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize(
+    "B,S,H,Hkv,D",
+    [
+        (2, 256, 8, 8, 128),  # MHA
+        (2, 256, 8, 2, 128),  # GQA
+        (1, 256, 4, 1, 128),  # MQA
+        (2, 192, 4, 4, 64),  # D=64
+        (3, 128, 6, 3, 128),  # GQA, odd batch
+    ],
+)
+def test_lse_dense(dtype, causal, B, S, H, Hkv, D):
+    torch.manual_seed(S + H + D + int(causal))
+    q = _rand_lse(B, S, H, D, dtype=dtype)
+    k = _rand_lse(B, S, Hkv, D, dtype=dtype)
+    v = _rand_lse(B, S, Hkv, D, dtype=dtype)
+    _, lse = flydsl_flash_attn_func(q, k, v, causal=causal, num_kv_heads=Hkv, return_lse=True)
+    torch.cuda.synchronize()
+    assert lse.shape == (B, H, S)
+    assert lse.dtype == torch.float32
+    atol = _ATOL_BF16 if dtype == torch.bfloat16 else _ATOL_F16
+    _assert_lse_matches(lse, _reference_lse(q, k, causal, Hkv), atol)
+
+
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("num_kv_splits", [2, 3])
+@pytest.mark.parametrize("D", [64, 128])
+def test_lse_splitk(causal, num_kv_splits, D):
+    # Split-K requires seq_len >= 384, D in {64,128}, bf16/f16.
+    B, S, H = 1, 512, 8
+    torch.manual_seed(S + D + num_kv_splits + int(causal))
+    dtype = torch.bfloat16
+    q = _rand_lse(B, S, H, D, dtype=dtype)
+    k = _rand_lse(B, S, H, D, dtype=dtype)
+    v = _rand_lse(B, S, H, D, dtype=dtype)
+    _, lse = flydsl_flash_attn_func(q, k, v, causal=causal, num_kv_splits=num_kv_splits, return_lse=True)
+    torch.cuda.synchronize()
+    assert lse.shape == (B, H, S)
+    _assert_lse_matches(lse, _reference_lse(q, k, causal, H), _ATOL_BF16)
+
+
+@pytest.mark.parametrize("causal", [False, True])
+def test_lse_varlen(causal):
+    dtype = torch.bfloat16
+    D, H, Hkv = 128, 4, 4
+    seqs = [100, 200, 60]
+    torch.manual_seed(sum(seqs) + int(causal))
+    cu = torch.tensor([0, 100, 300, 360], dtype=torch.int32, device="cuda")
+    max_seqlen_q = max(seqs)
+    total = int(cu[-1].item())
+    q = _rand_lse(total, H, D, dtype=dtype)
+    k = _rand_lse(total, Hkv, D, dtype=dtype)
+    v = _rand_lse(total, Hkv, D, dtype=dtype)
+    _, lse = flydsl_flash_attn_func(
+        q,
+        k,
+        v,
+        causal=causal,
+        cu_seqlens_q=cu,
+        cu_seqlens_kv=cu,
+        max_seqlen_q=max_seqlen_q,
+        cross_seqlen=False,
+        return_lse=True,
+    )
+    torch.cuda.synchronize()
+    assert lse.shape == (len(seqs), H, max_seqlen_q)
+    for b, (s0, s1) in enumerate(zip(cu[:-1].tolist(), cu[1:].tolist())):
+        n = s1 - s0
+        qb = q[s0:s1].unsqueeze(0)  # 1, n, H, D
+        kb = k[s0:s1].unsqueeze(0)
+        ref = _reference_lse(qb, kb, causal, Hkv)[0]  # H, n
+        # Only the valid [:, :n] region is defined; padded rows are ignored.
+        _assert_lse_matches(lse[b, :, :n], ref, _ATOL_BF16)
+
+
+def test_lse_fully_masked_rows():
+    """Cross-attention causal with Skv < Sq: leading query rows see no keys -> -inf."""
+    dtype = torch.bfloat16
+    B, Sq, Skv, H, D = 2, 128, 32, 4, 128
+    torch.manual_seed(Sq + Skv)
+    q = _rand_lse(B, Sq, H, D, dtype=dtype)
+    k = _rand_lse(B, Skv, H, D, dtype=dtype)
+    v = _rand_lse(B, Skv, H, D, dtype=dtype)
+    _, lse = flydsl_flash_attn_func(q, k, v, causal=True, return_lse=True)
+    torch.cuda.synchronize()
+    ref = _reference_lse(q, k, True, H)
+    assert (~torch.isfinite(ref)).any(), "test setup should produce fully-masked rows"
+    _assert_lse_matches(lse, ref, _ATOL_BF16)
+
+
+def test_return_lse_false_returns_only_out():
+    """Backwards-compat: default return_lse=False returns a bare tensor."""
+    dtype = torch.bfloat16
+    q = _rand_lse(2, 128, 4, 128, dtype=dtype)
+    k = _rand_lse(2, 128, 4, 128, dtype=dtype)
+    v = _rand_lse(2, 128, 4, 128, dtype=dtype)
+    out = flydsl_flash_attn_func(q, k, v, causal=False)
+    torch.cuda.synchronize()
+    assert isinstance(out, torch.Tensor)
+    assert out.shape == q.shape
+
+
+def test_return_lse_rejects_fp8():
+    dtype = torch.bfloat16
+    q = _rand_lse(2, 128, 4, 128, dtype=dtype)
+    with pytest.raises(NotImplementedError):
+        flydsl_flash_attn_func(
+            q.to(torch.float8_e4m3fn),
+            q.to(torch.float8_e4m3fn),
+            q.to(torch.float8_e4m3fn),
+            causal=False,
+            q_descale=torch.ones(1, device="cuda"),
+            k_descale=torch.ones(1, device="cuda"),
+            v_descale=torch.ones(1, device="cuda"),
+            return_lse=True,
+        )
 
 
 if __name__ == "__main__":

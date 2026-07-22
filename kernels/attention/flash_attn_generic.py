@@ -62,6 +62,7 @@ def build_flash_attn_func_module_primary(
     paged=False,
     kv_cache_layout="linear",
     skip_kv_pad_mask=None,
+    return_lse=False,
 ):
     """Build a generic f16/bf16 flash-attention launcher.
 
@@ -204,6 +205,7 @@ def build_flash_attn_func_module_primary(
         unsafe_fp_math=unsafe_fp_math,
         sm_scale=sm_scale,
         skip_kv_pad_mask=skip_kv_pad_mask,
+        return_lse=return_lse,
     )
     _flash_attn_generic_cache_tag = traits.cache_tag
 
@@ -246,6 +248,7 @@ def build_flash_attn_func_module_primary(
         K: fx.Tensor,
         V: fx.Tensor,
         O: fx.Tensor,  # noqa: E741
+        LSE: fx.Tensor,
         seq_len: fx.Int32,
         seq_len_kv: fx.Int32,
         CuSeqQ: fx.Tensor,
@@ -278,8 +281,9 @@ def build_flash_attn_func_module_primary(
         if const_expr(traits.KV_VECTORIZED and traits.V_NOMAJOR_DMA):
             kv_gmem_to_lds.init_dma_nomajor()
 
-        # Per-batch Q/O descriptors, then K/V DMA resources when DMA is enabled.
-        ctx.init_descriptors(Q, O)
+        # Per-batch Q/O (and LSE when RETURN_LSE) descriptors, then K/V DMA
+        # resources when DMA is enabled.
+        ctx.init_descriptors(Q, O, LSE)
         if const_expr(traits.ENABLE_DMA):
             kv_gmem_to_lds.init_dma()
 
@@ -509,6 +513,7 @@ def build_flash_attn_func_module_primary(
         K: fx.Tensor,
         V: fx.Tensor,
         O: fx.Tensor,  # noqa: E741
+        LSE: fx.Tensor,
         CuSeqQ: fx.Tensor,
         CuSeqKv: fx.Tensor,
         BlockTable: fx.Tensor,
@@ -542,6 +547,7 @@ def build_flash_attn_func_module_primary(
             K,
             V,
             O,
+            LSE,
             seq_len,
             seq_len_kv,
             CuSeqQ,
@@ -592,25 +598,42 @@ def build_flash_attn_func_module_primary(
         block_table=None,
         block_table_stride=0,
         seq_len_kv=None,
+        lse=None,
         stream=None,
     ):
         # Dense/non-paged pass the output tensor as a placeholder for the unused
         # cu_seqlens / block_table slots; the kernel only reads them under
-        # const_expr(VARLEN) / const_expr(PAGED).
+        # const_expr(VARLEN) / const_expr(PAGED). LSE is likewise a placeholder
+        # unless the kernel was built with return_lse=True (RETURN_LSE store gate).
         cq = cu_seqlens_q if cu_seqlens_q is not None else Out
         ck = cu_seqlens_kv if cu_seqlens_kv is not None else Out
         bt = block_table if block_table is not None else Out
+        ls = lse if lse is not None else Out
         skv = seq_len if seq_len_kv is None else seq_len_kv
         with CompilationContext.compile_hints(_fmha_compile_hints):
             return launch_flash_attn_generic(
-                Q, K, V, Out, cq, ck, bt, block_table_stride, batch_size, seq_len, skv, fx.Stream(stream)
+                Q, K, V, Out, ls, cq, ck, bt, block_table_stride, batch_size, seq_len, skv, fx.Stream(stream)
             )
 
-    def _compile(Q, K, V, Out, batch_size, seq_len, seq_len_kv=None, stream=None):
+    def _compile(Q, K, V, Out, batch_size, seq_len, seq_len_kv=None, lse=None, stream=None):
+        ls = lse if lse is not None else Out
         skv = seq_len if seq_len_kv is None else seq_len_kv
         with CompilationContext.compile_hints(_fmha_compile_hints):
             return flyc.compile(
-                launch_flash_attn_generic, Q, K, V, Out, Out, Out, Out, 0, batch_size, seq_len, skv, fx.Stream(stream)
+                launch_flash_attn_generic,
+                Q,
+                K,
+                V,
+                Out,
+                ls,
+                Out,
+                Out,
+                Out,
+                0,
+                batch_size,
+                seq_len,
+                skv,
+                fx.Stream(stream),
             )
 
     _launch.compile = _compile
