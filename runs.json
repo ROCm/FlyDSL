@@ -1,8 +1,109 @@
 {
  "schema": 1,
- "updated": "2026-07-22T01:24:24Z",
+ "updated": "2026-07-22T02:47:57Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29886580934,
+   "pr": 869,
+   "commit": "bdf6b859069d034cae29408252ca5ba95f99822a",
+   "branch": "kernel/sage-attention-cdna",
+   "event": "pull_request",
+   "title": "[Kernel] Add CDNA SageAttention kernel",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29886580934",
+   "created_at": "2026-07-22T02:43:47Z",
+   "updated_at": "2026-07-22T02:45:15Z",
+   "actor": "LiuYinfeng01",
+   "jobs": []
+  },
+  {
+   "run_id": 29886039933,
+   "pr": null,
+   "commit": "829c7b4abf9b2a3e69145995a9e1d44f3a6cad5c",
+   "branch": "main",
+   "event": "push",
+   "title": "[Perf]optimize flydsl flash attention kernel for gfx942(#850)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29886039933",
+   "created_at": "2026-07-22T02:31:18Z",
+   "updated_at": "2026-07-22T02:35:25Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-22T02:35:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29886039933/job/88816862194"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-22T02:33:35Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29886039933/job/88816862204"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-22T02:33:35Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29886039933/job/88816862211"
+    }
+   ]
+  },
+  {
+   "run_id": 29884980233,
+   "pr": 869,
+   "commit": "9b5a5b4603102ede6ca303f85656148c7ff2e043",
+   "branch": "kernel/sage-attention-cdna",
+   "event": "pull_request",
+   "title": "[Kernel] Add CDNA SageAttention kernel",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29884980233",
+   "created_at": "2026-07-22T02:07:48Z",
+   "updated_at": "2026-07-22T02:44:21Z",
+   "actor": "LiuYinfeng01",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-22T02:09:50Z",
+     "completed_at": "2026-07-22T02:44:20Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29884980233/job/88813728837"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-22T02:09:50Z",
+     "completed_at": "2026-07-22T02:44:17Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29884980233/job/88813728839"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-22T02:09:27Z",
+     "completed_at": "2026-07-22T02:34:34Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29884980233/job/88813728840"
+    }
+   ]
+  },
   {
    "run_id": 29878705929,
    "pr": 788,
@@ -2022,79 +2123,6 @@
    "created_at": "2026-07-18T02:49:03Z",
    "updated_at": "2026-07-18T02:50:34Z",
    "actor": "binding7012",
-   "jobs": []
-  },
-  {
-   "run_id": 29627562514,
-   "pr": null,
-   "commit": "a912398eea0433603e790b8e77b986785016de64",
-   "branch": "binding_fa_opt",
-   "event": "pull_request",
-   "title": "[Perf]optimize flydsl flash attention kernel",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29627562514",
-   "created_at": "2026-07-18T02:44:11Z",
-   "updated_at": "2026-07-18T02:45:14Z",
-   "actor": "binding7012",
-   "jobs": []
-  },
-  {
-   "run_id": 29623699880,
-   "pr": 872,
-   "commit": "ca9711496009988676843debb14bd04fc860bf26",
-   "branch": "amartin/mxfp8-4wave",
-   "event": "pull_request",
-   "title": "[Kernel] Add optimized 4-wave MXFP8 GEMM kernel for gfx950",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29623699880",
-   "created_at": "2026-07-18T00:42:55Z",
-   "updated_at": "2026-07-18T01:59:53Z",
-   "actor": "aris134",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-18T00:44:45Z",
-     "completed_at": "2026-07-18T00:58:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29623699880/job/88023878357"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-18T00:45:30Z",
-     "completed_at": "2026-07-18T01:28:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29623699880/job/88023878360"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-18T00:45:19Z",
-     "completed_at": "2026-07-18T01:59:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29623699880/job/88023878363"
-    }
-   ]
-  },
-  {
-   "run_id": 29623535072,
-   "pr": 872,
-   "commit": "2fc00523c508070501039fa5436e5b2f26b7a4f8",
-   "branch": "amartin/mxfp8-4wave",
-   "event": "pull_request",
-   "title": "[Kernel] Add optimized 4-wave MXFP8 GEMM kernel for gfx950",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29623535072",
-   "created_at": "2026-07-18T00:38:23Z",
-   "updated_at": "2026-07-18T00:39:48Z",
-   "actor": "aris134",
    "jobs": []
   }
  ]
