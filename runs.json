@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-22T14:28:36Z",
+ "updated": "2026-07-22T14:31:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "skill/kernel-code-cleanup",
    "event": "pull_request",
    "title": "Add FlyDSL kernel code cleanup skill",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29928635470",
    "created_at": "2026-07-22T14:26:57Z",
-   "updated_at": "2026-07-22T14:26:57Z",
+   "updated_at": "2026-07-22T14:28:05Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-22T14:28:00Z",
+     "completed_at": "2026-07-22T14:28:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29928635470/job/88952381869"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-22T14:28:00Z",
+     "completed_at": "2026-07-22T14:28:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29928635470/job/88952381939"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-22T14:28:00Z",
+     "completed_at": "2026-07-22T14:28:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29928635470/job/88952381972"
+    }
+   ]
   },
   {
    "run_id": 29928434010,
