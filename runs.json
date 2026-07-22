@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-21T23:58:53Z",
+ "updated": "2026-07-22T00:54:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -9,14 +9,42 @@
    "commit": "302bc84e028e9a84493c29b869926b02b10b292e",
    "branch": "feat/autotune-ci-guard",
    "event": "pull_request",
-   "title": "[4/5] autotune: CI guard + committed-config regression check (#770)",
+   "title": "autotune: keep CI search opt-in (#770)",
    "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29878705929",
    "created_at": "2026-07-21T23:56:30Z",
-   "updated_at": "2026-07-21T23:56:39Z",
+   "updated_at": "2026-07-21T23:58:04Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-21T23:57:48Z",
+     "completed_at": "2026-07-22T00:15:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29878705929/job/88794789058"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-21T23:58:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29878705929/job/88794789070"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-21T23:57:58Z",
+     "completed_at": "2026-07-22T00:51:57Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29878705929/job/88794789071"
+    }
+   ]
   },
   {
    "run_id": 29878654241,
@@ -24,7 +52,7 @@
    "commit": "61b56ce2bde68a72d06c5bd42791235e10091003",
    "branch": "feat/autotune-ci-guard",
    "event": "pull_request",
-   "title": "[4/5] autotune: CI guard + committed-config regression check (#770)",
+   "title": "autotune: keep CI search opt-in (#770)",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29878654241",
