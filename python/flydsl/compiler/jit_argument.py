@@ -34,20 +34,33 @@ _RESOLVE_SIG_WARNED = set()
 
 
 def _dlpack_device(device_type: int, device_id: int) -> Optional[Device]:
-    # DLPack: kDLCUDA=2, kDLROCM=10. PyTorch uses its "cuda" namespace
-    # for ROCm but exports kDLROCM from __dlpack__.
+    # DLPack: kDLCUDA=2 and kDLROCM=10 are unambiguous producer APIs.
     if device_type == 10:
         return Device(kind="rocm", index=int(device_id))
     if device_type == 2:
-        kind = "rocm" if getattr(torch.version, "hip", None) else "cuda"
-        return Device(kind=kind, index=int(device_id))
+        return Device(kind="cuda", index=int(device_id))
     return None
 
 
 def jit_argument_device(value) -> Optional[Device]:
     """Return optional framework-adapter device metadata from a JIT argument."""
     provider = getattr(value, "__flydsl_device__", None)
-    return provider() if provider is not None else None
+    if provider is not None:
+        device = provider()
+        if device is not None:
+            return device
+
+    if isinstance(value, Stream):
+        raw = value.value
+        stream_device = getattr(raw, "device", None)
+        if getattr(stream_device, "type", None) == "cuda":
+            index = stream_device.index
+            if index is None:
+                index = getattr(raw, "device_index", None)
+            if index is not None:
+                kind = "rocm" if getattr(torch.version, "hip", None) else "cuda"
+                return Device(kind=kind, index=int(index))
+    return None
 
 
 def resolve_signature(func):

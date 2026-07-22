@@ -48,6 +48,7 @@ def _reset_jit_caches(jit_fn):
     jit_fn.manager_key = None
     jit_fn._manager_target = None
     jit_fn.cache_manager = None
+    jit_fn._cache_managers.clear()
 
 
 # ──────────────────────────────────────────────────────────────
@@ -317,3 +318,19 @@ class TestCacheDisabledRegression:
         assert avg_us >= 0
         assert len(_noop_launch._mem_cache) == 1
         assert len(_noop_launch._call_state_cache) == 1
+
+
+def test_compile_callable_compile_only_does_not_initialize_engine(monkeypatch):
+    from flydsl.compiler.jit_executor import CompiledArtifact
+    from flydsl.runtime.device import get_rocm_arch
+
+    _reset_jit_caches(_noop_launch)
+    monkeypatch.setenv("ARCH", get_rocm_arch())
+    monkeypatch.setenv("COMPILE_ONLY", "1")
+
+    def unexpected_engine_init(*_args, **_kwargs):
+        raise AssertionError("compile-only flyc.compile() initialized an executor")
+
+    monkeypatch.setattr(CompiledArtifact, "_get_func_exe", unexpected_engine_init)
+
+    assert flyc.compile(_noop_launch, torch.cuda.current_stream()) is None

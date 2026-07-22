@@ -31,13 +31,15 @@ def _env_fingerprint() -> tuple:
         return ()
 
 
-def _toolchain_fingerprint() -> str:
+def _toolchain_fingerprint(arch: str = "") -> str:
     """Hash of the compiler toolchain, so a codegen change invalidates old
     configs. Reuses jit_function._flydsl_key(); falls back to the version."""
     try:
+        from .compiler.backends import get_backend
         from .compiler.jit_function import _flydsl_key
 
-        return _flydsl_key()
+        target = get_backend(arch=arch).target if arch else None
+        return _flydsl_key(target)
     except Exception:
         try:
             import flydsl
@@ -47,14 +49,38 @@ def _toolchain_fingerprint() -> str:
             return ""
 
 
-def _device_fingerprint() -> str:
+def _device_fingerprint(device_id=None) -> str:
     """GPU arch string (e.g. 'gfx950'), or '' if unavailable."""
     try:
         from .runtime.device import get_rocm_arch
 
-        return str(get_rocm_arch())
+        return str(get_rocm_arch(device_id))
     except Exception:
         return ""
+
+
+def _invocation_device_id(sig_args) -> int | None:
+    """Resolve one logical GPU device from tensor/stream arguments."""
+    devices = set()
+    for value in sig_args.values():
+        device_id = None
+        dlpack_device = getattr(value, "__dlpack_device__", None)
+        if callable(dlpack_device):
+            try:
+                device_type, candidate = dlpack_device()
+                if int(device_type) in (2, 10):
+                    device_id = int(candidate)
+            except Exception:
+                pass
+        if device_id is None and torch is not None and isinstance(value, torch.cuda.Stream):
+            stream_device = value.device
+            device_id = stream_device.index
+        if device_id is not None:
+            devices.add(device_id)
+
+    if len(devices) > 1:
+        raise ValueError(f"FlyDSL autotune arguments must reside on the same device, got {sorted(devices)}")
+    return next(iter(devices), None)
 
 
 def _normalize_strides(t) -> tuple:
@@ -236,9 +262,11 @@ class Autotuner:
         # tuned under different conditions. _flydsl_key is lru_cached, so this is
         # cheap. (_toolchain/_device fingerprints are functions, not frozen at
         # construction — otherwise the device axis would go stale.)
+        device_id = _invocation_device_id(sig_args)
+        device_fingerprint = _device_fingerprint(device_id)
         key_vals.append(("_env_", _env_fingerprint()))
-        key_vals.append(("_toolchain_", _toolchain_fingerprint()))
-        key_vals.append(("_device_", _device_fingerprint()))
+        key_vals.append(("_toolchain_", _toolchain_fingerprint(device_fingerprint)))
+        key_vals.append(("_device_", device_fingerprint))
         effective_hints = getattr(self.fn, "_effective_compile_hints", None)
         if callable(effective_hints):
             hint_key = tuple(

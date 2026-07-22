@@ -466,6 +466,7 @@ def _collect_class_member_dependency_sources(
     rootFile,
     owner_cls,
     visited: Set[int],
+    target=None,
 ) -> List[str]:
     sources = []
 
@@ -483,7 +484,15 @@ def _collect_class_member_dependency_sources(
 
         visited.add(id(underlying))
         sources.append(f"class:{owner_cls.__qualname__}.{name}:{_get_func_source(underlying)}")
-        sources.extend(_collect_dependency_sources(underlying, rootFile, visited, owner_cls=owner_cls))
+        sources.extend(
+            _collect_dependency_sources(
+                underlying,
+                rootFile,
+                visited,
+                owner_cls=owner_cls,
+                target=target,
+            )
+        )
 
     return sources
 
@@ -541,6 +550,7 @@ def _collect_dependency_sources(
     rootFile,
     visited: Optional[Set[int]] = None,
     owner_cls=None,
+    target=None,
 ) -> List[str]:
     from .kernel_function import KernelFunction
 
@@ -558,8 +568,8 @@ def _collect_dependency_sources(
                 label = getattr(val.func, "__qualname__", getattr(val.func, "__name__", name))
                 sources.append(f"{prefix}jit-recursive:{name}:{label}")
                 return False
-            val._ensure_cache_manager()
-            sources.append(f"{prefix}jit:{name}:{val.manager_key}")
+            manager_key, _manager = val._ensure_cache_manager(target=target)
+            sources.append(f"{prefix}jit:{name}:{manager_key}")
             return False  # do not recurse: manager_key already covers transitive deps
         sources.append(f"{prefix}{name}:{_get_func_source(underlying)}")
         return True  # recurse to pick up nested helpers
@@ -578,7 +588,7 @@ def _collect_dependency_sources(
         visited.add(id(underlying))
         should_recurse = _emit("", name, obj, underlying)
         if should_recurse:
-            sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+            sources.extend(_collect_dependency_sources(underlying, rootFile, visited, target=target))
 
     # 2) Scan closure variables (co_freevars → __closure__) for callable
     #    dependencies.  This catches @flyc.kernel functions defined in an
@@ -595,11 +605,19 @@ def _collect_dependency_sources(
             visited.add(id(underlying))
             should_recurse = _emit("closure:", name, val, underlying)
             if should_recurse:
-                sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+                sources.extend(_collect_dependency_sources(underlying, rootFile, visited, target=target))
 
     owner_cls = owner_cls or _owner_class_from_func(func)
     if owner_cls is not None:
-        sources.extend(_collect_class_member_dependency_sources(func, rootFile, owner_cls, visited))
+        sources.extend(
+            _collect_class_member_dependency_sources(
+                func,
+                rootFile,
+                owner_cls,
+                visited,
+                target=target,
+            )
+        )
 
     return sources
 
@@ -617,7 +635,7 @@ def _jit_function_cache_key(func: Callable, owner_cls=None, target=None) -> str:
             rootFile = inspect.getfile(func)
         except (TypeError, OSError):
             rootFile = ""
-        depSources = _collect_dependency_sources(func, rootFile, owner_cls=owner_cls)
+        depSources = _collect_dependency_sources(func, rootFile, owner_cls=owner_cls, target=target)
         depSources.sort()
         parts.extend(depSources)
 
@@ -1208,6 +1226,8 @@ class JitFunction:
         self._manager_owner_cls = None
         self._manager_target = None
         self.cache_manager = None
+        self._cache_managers = {}
+        self._cache_managers_lock = threading.Lock()
         self._call_state_cache = {}  # (artifact cache key, device) -> CallState
         self._sig = None  # lazy: set on first call
         self._has_self_param = False  # lazy: set in _ensure_sig
@@ -1289,12 +1309,6 @@ class JitFunction:
         warn_invalid_annotations(self._sig, context="@jit")
 
     def _ensure_cache_manager(self, owner_cls=None, target=None):
-        if self.manager_key is not None and self._manager_owner_cls is owner_cls and self._manager_target == target:
-            return
-        self._manager_owner_cls = owner_cls
-        self._manager_target = target
-        self.manager_key = _jit_function_cache_key(self.func, owner_cls=owner_cls, target=target)
-
         run_only = env.runtime.run_only
         if run_only and env.debug.dump_ir:
             raise ValueError(
@@ -1303,20 +1317,33 @@ class JitFunction:
             )
 
         need_cache = env.runtime.enable_cache or run_only
-        if not need_cache:
-            self.cache_manager = None
-            return
-
         cache_root = env.runtime.cache_dir
-        if not cache_root:
-            if run_only:
-                raise RuntimeError("FLYDSL_RUNTIME_RUN_ONLY=1 but FLYDSL_RUNTIME_CACHE_DIR is empty.")
-            self.cache_manager = None
-            return
+        manager_slot = (owner_cls, target, need_cache, cache_root)
+        with self._cache_managers_lock:
+            entry = self._cache_managers.get(manager_slot)
 
-        cache_dir = Path(cache_root) / f"{self.func.__name__}_{self.manager_key}"
-        self.cache_manager = JitCacheManager(cache_dir)
-        self.cache_manager.load_all()
+        if entry is None:
+            manager_key = _jit_function_cache_key(self.func, owner_cls=owner_cls, target=target)
+            manager = None
+            if need_cache:
+                if not cache_root:
+                    if run_only:
+                        raise RuntimeError("FLYDSL_RUNTIME_RUN_ONLY=1 but FLYDSL_RUNTIME_CACHE_DIR is empty.")
+                else:
+                    cache_dir = Path(cache_root) / f"{self.func.__name__}_{manager_key}"
+                    manager = JitCacheManager(cache_dir)
+                    manager.load_all()
+            candidate = (manager_key, manager)
+            with self._cache_managers_lock:
+                entry = self._cache_managers.setdefault(manager_slot, candidate)
+
+        with self._cache_managers_lock:
+            # Preserve the single-manager introspection attributes for existing
+            # callers, but execution uses the returned target-local pair.
+            self._manager_owner_cls = owner_cls
+            self._manager_target = target
+            self.manager_key, self.cache_manager = entry
+            return entry
 
     def _resolve_and_make_cache_key(self, bound_args, *, effective_hints=None, return_invocation=False):
         """Resolve raw call values into JitArgument instances *in place* and
@@ -1480,7 +1507,7 @@ class JitFunction:
                 device=Device(kind=runtime.kind, index=runtime.current_device_id()),
             )
         dispatch_key = (cache_key, invocation.device)
-        self._ensure_cache_manager(owner_cls, invocation.target)
+        manager_key, cache_manager = self._ensure_cache_manager(owner_cls, invocation.target)
 
         # Fast path: reuse pre-built CallState (no ctypes alloc, no DLPack)
         call_state = self._call_state_cache.get(dispatch_key)
@@ -1500,7 +1527,7 @@ class JitFunction:
         cached_func = self._mem_cache.get(cache_key)
         if cached_func is None and allow_disk_cache and not env.debug.dump_ir:
             str_key = self._cache_key_to_str(cache_key)
-            cached_func = self.cache_manager.get(str_key) if self.cache_manager else None
+            cached_func = cache_manager.get(str_key) if cache_manager else None
             if cached_func is not None and getattr(cached_func, "_link_libs", None):
                 _rejected_link_libs = True
                 cached_func = None
@@ -1521,12 +1548,12 @@ class JitFunction:
                 return state(args_tuple)
 
         if run_only:
-            cdir = getattr(self.cache_manager, "cache_dir", None)
+            cdir = getattr(cache_manager, "cache_dir", None)
             cdir_exists = cdir.exists() if cdir is not None else False
             msg = (
                 f"FLYDSL_RUNTIME_RUN_ONLY=1 but no usable AOT cache for "
                 f"{self.func.__name__}: "
-                f"manager_key={self.manager_key}, "
+                f"manager_key={manager_key}, "
                 f"cache_key={self._cache_key_to_str(cache_key)[:96]}..., "
                 f"cache_dir={cdir} (exists={cdir_exists})"
             )
@@ -1543,10 +1570,10 @@ class JitFunction:
         compiled_func = None  # will be set inside lock or compile path
 
         # Determine whether to use compile_lock for cross-process safety.
-        _use_compile_lock = use_disk_cache and self.cache_manager and not env.debug.dump_ir
+        _use_compile_lock = use_disk_cache and cache_manager and not env.debug.dump_ir
         if _use_compile_lock:
             str_key = self._cache_key_to_str(cache_key)
-            _compile_lock_ctx = self.cache_manager.compile_lock(str_key)
+            _compile_lock_ctx = cache_manager.compile_lock(str_key)
         else:
             _compile_lock_ctx = nullcontext((None, None))
 
@@ -1735,7 +1762,7 @@ class CompiledFunction:
             return self._call_state(args)
 
 
-def _compile_impl(func, *args) -> CompiledFunction:
+def _compile_impl(func, *args) -> Optional[CompiledFunction]:
     """Pre-compile a ``@flyc.jit`` function, returning a fast callable.
 
     Usage::
@@ -1758,6 +1785,8 @@ def _compile_impl(func, *args) -> CompiledFunction:
     jf = func
 
     jf(*args)
+    if env.compile.compile_only:
+        return None
 
     # Retrieve the CallState (already built by __call__ above).
     sig = jf._sig  # guaranteed initialized after __call__

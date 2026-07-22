@@ -54,6 +54,7 @@ def reset_jit(jit_fn):
     jit_fn._manager_owner_cls = None
     jit_fn._manager_target = None
     jit_fn.cache_manager = None
+    jit_fn._cache_managers.clear()
     jit_fn._target = None
 
     jit_fn._sig = None

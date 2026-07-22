@@ -9,11 +9,11 @@ Pre-compiles preshuffle GEMM kernels for specified configurations and stores
 the compiled binaries in a cache directory.
 
 Usage:
-    # Pre-compile with default configurations (auto-detect GPU arch)
-    python tests/python/examples/aot_example.py
+    # Device-less pre-compilation requires an explicit target
+    ARCH=gfx942 python tests/python/examples/aot_example.py
 
     # Custom cache directory
-    FLYDSL_RUNTIME_CACHE_DIR=/my/cache python tests/python/examples/aot_example.py
+    ARCH=gfx942 FLYDSL_RUNTIME_CACHE_DIR=/my/cache python tests/python/examples/aot_example.py
 
     # Pre-compile and verify by running kernels on GPU
     python tests/python/examples/aot_example.py --run_kernel
@@ -281,7 +281,10 @@ def main():
     args = parser.parse_args()
 
     cache_dir = os.environ.get("FLYDSL_RUNTIME_CACHE_DIR", "~/.flydsl/cache")
-    arch = os.environ.get("ARCH", "(auto-detect)")
+    arch = os.environ.get("ARCH") or os.environ.get("FLYDSL_GPU_ARCH") or os.environ.get("HSA_OVERRIDE_GFX_VERSION")
+    if not args.run_kernel and not arch:
+        parser.error("device-less pre-compilation requires ARCH, FLYDSL_GPU_ARCH, " "or HSA_OVERRIDE_GFX_VERSION")
+    arch = arch or "(invocation device)"
 
     configs = CONFIG_PRESETS[args.preset]
     dtypes = DTYPE_PRESETS.get(args.in_dtype, [args.in_dtype])

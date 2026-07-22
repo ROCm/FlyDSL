@@ -55,15 +55,11 @@ def _get_buffer_flags(arch=None):
       bits [29:28] - OOB_SELECT (RDNA only): 0=structured, 2=none, 3=check offset
       bits [31:30] - Type (must be 0)
 
-    CDNA (gfx9xx):    (7 << 12) | (4 << 15)                         = 0x20070
-    RDNA (gfx10+):    (7 << 12) | (4 << 15) | (1 << 24) | (2 << 28) = 0x21020070
+    CDNA (gfx9xx):    (7 << 12) | (4 << 15)                         = 0x27000
+    RDNA (gfx10+):    (7 << 12) | (4 << 15) | (1 << 24) | (2 << 28) = 0x21027000
       - bit 24 set to 1 (required on RDNA)
       - OOB_SELECT=2 (no bounds checking, matching LLVM boundsCheck=false)
     """
-    import os
-
-    if arch is None:
-        arch = os.environ.get("FLYDSL_GPU_ARCH")
     flags = (7 << 12) | (4 << 15)
     if is_rdna_arch(arch):
         flags |= 1 << 24  # reserved bit, must be 1 on RDNA

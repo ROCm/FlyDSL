@@ -33,9 +33,10 @@ def _isolate_disk_cache(tmp_path, monkeypatch):
 class FakeTensor:
     """Minimal tensor stand-in with the attributes _make_key / restore_value use."""
 
-    def __init__(self, shape, dtype="float32", strides=None, fill=0.0):
+    def __init__(self, shape, dtype="float32", strides=None, fill=0.0, device_id=None):
         self.shape = tuple(shape)
         self.dtype = dtype
+        self.device_id = device_id
         if strides is None:
             # row-major contiguous strides
             strides = []
@@ -52,6 +53,11 @@ class FakeTensor:
 
     def stride(self):
         return self._strides
+
+    def __dlpack_device__(self):
+        if self.device_id is None:
+            raise RuntimeError("fake tensor has no device")
+        return (10, self.device_id)
 
     def zero_(self):
         self._data = [0.0] * len(self._data)
@@ -159,7 +165,7 @@ def test_key_varies_with_toolchain_fingerprint(monkeypatch):
     a = FakeTensor((8, 8))
     k1 = t._make_key((a, a), {})
     # read live per key, so a toolchain change mid-process invalidates the key
-    monkeypatch.setattr(at, "_toolchain_fingerprint", lambda: "a-different-fingerprint")
+    monkeypatch.setattr(at, "_toolchain_fingerprint", lambda *_args: "a-different-fingerprint")
     k2 = t._make_key((a, a), {})
     assert k1 != k2
 
@@ -171,9 +177,34 @@ def test_key_varies_with_device_fingerprint(monkeypatch):
     t = _make_tuner()
     a = FakeTensor((8, 8))
     k1 = t._make_key((a, a), {})
-    monkeypatch.setattr(at, "_device_fingerprint", lambda: "gfx_other")
+    monkeypatch.setattr(at, "_device_fingerprint", lambda *_args: "gfx_other")
     k2 = t._make_key((a, a), {})
     assert k1 != k2  # arch is a real key axis, read live (not frozen at construction)
+
+
+def test_key_uses_invocation_device_and_rejects_mixed_devices(monkeypatch):
+    import importlib
+
+    at = importlib.import_module("flydsl.autotune")
+    monkeypatch.setattr(at, "_device_fingerprint", lambda device_id=None: f"gfx_device_{device_id}")
+    monkeypatch.setattr(at, "_toolchain_fingerprint", lambda arch="": f"toolchain_{arch}")
+    tuner = _make_tuner()
+
+    key0 = tuner._make_key(
+        (FakeTensor((8, 8), device_id=0), FakeTensor((8, 8), device_id=0)),
+        {},
+    )
+    key1 = tuner._make_key(
+        (FakeTensor((8, 8), device_id=1), FakeTensor((8, 8), device_id=1)),
+        {},
+    )
+    assert key0 != key1
+
+    with pytest.raises(ValueError, match="same device"):
+        tuner._make_key(
+            (FakeTensor((8, 8), device_id=0), FakeTensor((8, 8), device_id=1)),
+            {},
+        )
 
 
 def test_key_varies_with_env_fingerprint(monkeypatch):

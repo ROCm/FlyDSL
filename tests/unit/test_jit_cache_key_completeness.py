@@ -196,6 +196,7 @@ def _reset_manager_key(jit_fn):
     jit_fn._manager_owner_cls = None
     jit_fn._manager_target = None
     jit_fn.cache_manager = None
+    jit_fn._cache_managers.clear()
 
 
 def _manager_key(jit_fn, *, reset=False):
