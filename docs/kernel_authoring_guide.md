@@ -236,24 +236,7 @@ as_i32 = vec.bitcast(fx.Int32)
 as_bf16 = vec.to(fx.BFloat16)
 ```
 
-### 4.3 Buffer Operations (`fx.buffer_ops`)
-
-AMD buffer load/store intrinsics for efficient global memory access:
-
-```python
-from flydsl.expr import buffer_ops
-
-# Create buffer resource descriptor from memref
-rsrc = buffer_ops.create_buffer_resource(memref_value)
-
-# Buffer load (vectorized)
-data = buffer_ops.buffer_load(rsrc, byte_offset, vec_width=4)
-
-# Buffer store
-buffer_ops.buffer_store(data, rsrc, byte_offset)
-```
-
-### 4.4 ROCm Intrinsics (`fx.rocdl`)
+### 4.3 ROCm Intrinsics (`fx.rocdl`)
 
 #### High-Level Helpers
 
@@ -392,7 +375,7 @@ than the tile for ragged edges (HW OOB clamp) and `strides=` for a dynamic/true
 global stride that differs from the packed tile stride. Unlike the CDNA buffer copy,
 TDM needs a **raw VA** — do not wrap the global tensor in `make_buffer_tensor`.
 
-### 4.5 GPU Operations (`fx.gpu`)
+### 4.4 GPU Operations (`fx.gpu`)
 
 ```python
 from flydsl.expr import gpu
@@ -710,9 +693,7 @@ Writing a new kernel?
 | `python/flydsl/compiler/ast_rewriter.py` | `ASTRewriter` — Python AST → MLIR control flow |
 | `python/flydsl/expr/typing.py` | `Types` (`T`), `Tensor`, `Stream`, `Constexpr` |
 | `python/flydsl/expr/arith.py` | Arithmetic operations |
-| `python/flydsl/expr/vector.py` | Vector dialect operations |
 | `python/flydsl/expr/gpu.py` | GPU operations (thread_id, barrier, ...) |
-| `python/flydsl/expr/buffer_ops.py` | AMD buffer load/store operations |
 | `python/flydsl/expr/rocdl/` | ROCm dialect intrinsics (MFMA/WMMA, buffer, TDM, cluster) |
 | `python/flydsl/expr/primitive.py` | Layout algebra primitives (make_shape, crd2idx, etc.) |
 | `python/flydsl/expr/gpu.py` | `SharedAllocator`, GPU ops (thread_id, barrier, ...) |
