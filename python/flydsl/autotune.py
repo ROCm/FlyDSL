@@ -7,12 +7,12 @@ import hashlib
 import inspect
 import json
 import os
-import tempfile
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable, Dict, List
 
 from .utils import env, log
+from .utils.file import atomic_write
 
 try:
     import torch
@@ -91,26 +91,6 @@ def _artifact_config_dir() -> Path:
 
 def _canonical_json(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as tmp:
-            tmp_path = Path(tmp.name)
-            tmp.write(text)
-        os.replace(tmp_path, path)
-    finally:
-        if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
 
 
 def _normalize_strides(t) -> tuple:
@@ -542,7 +522,9 @@ class Autotuner:
             raise ValueError("offline config values must preserve their types in JSON")
         self._decode_artifact_config(body, args, kwargs)
         payload = {"version": 1, "identity": identity, "config": body}
-        _atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n")
+        with atomic_write(path, mode="w", encoding="utf-8") as output:
+            json.dump(payload, output, indent=2, sort_keys=True, allow_nan=False)
+            output.write("\n")
         self._artifact_cache[str(path)] = config
         log().info(f"Wrote offline config {path}")
 
