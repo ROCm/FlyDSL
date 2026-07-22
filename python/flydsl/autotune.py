@@ -20,6 +20,9 @@ except ImportError:
     torch = None
 
 
+_ARTIFACT_VERSION = 1
+
+
 def _tuning_enabled() -> bool:
     """Whether to bypass cached/default configs and run a fresh search."""
     return os.environ.get("FLYDSL_AUTOTUNE", "").strip().lower() in ("1", "true", "yes", "on")
@@ -290,7 +293,7 @@ class Autotuner:
         if self.artifact_name is not None and _artifacts_enabled():
             device = _device_descriptor(self._call_device(args, kwargs))
             descriptor = tuple(sorted(device.items())) if device is not None else None
-            key_vals.append(("_artifact_device_", descriptor))
+            key_vals.append(("_artifact_", _ARTIFACT_VERSION, self.artifact_name, descriptor))
         effective_hints = getattr(self.fn, "_effective_compile_hints", None)
         if callable(effective_hints):
             hint_key = tuple(
@@ -454,6 +457,21 @@ class Autotuner:
             log().warning(f"Offline config identity is unavailable: {error}")
             return None
 
+    def _validate_artifact_config_types(self, injected):
+        for name, value in injected.items():
+            parameter = self._signature.parameters.get(name)
+            if parameter is None or parameter.annotation is inspect.Parameter.empty:
+                continue
+            annotation = parameter.annotation
+            coerce = getattr(annotation, "__coerce__", None)
+            try:
+                if callable(coerce):
+                    coerce(value)
+                elif annotation in (bool, int, float, str) and type(value) is not annotation:
+                    raise TypeError(f"expects {annotation.__name__}, got {type(value).__name__}")
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"config value for {name!r} does not match its annotation: {error}") from error
+
     def _decode_artifact_config(self, body, args, kwargs):
         if not isinstance(body, dict):
             raise ValueError("config must be an object")
@@ -476,6 +494,7 @@ class Autotuner:
             raise ValueError(f"config would override call arguments: {sorted(overlap)}")
         if any(type(value) is not int for value in config.compiler_opts().values()):
             raise ValueError("compiler options must be integers")
+        self._validate_artifact_config_types(injected)
         bound_kwargs = dict(kwargs)
         bound_kwargs.update(injected)
         try:
@@ -489,29 +508,44 @@ class Autotuner:
             return None
         path, identity = ref
         cache_key = str(path)
-        if cache_key in self._artifact_cache:
-            return self._artifact_cache[cache_key]
-
-        try:
-            if not path.is_file():
+        if cache_key not in self._artifact_cache:
+            try:
+                if not path.is_file():
+                    self._artifact_cache[cache_key] = None
+                    return None
+                data = json.loads(path.read_text(encoding="utf-8"))
+                _canonical_json(data)
+                if not isinstance(data, dict):
+                    raise ValueError("artifact must be an object")
+                if type(data.get("version")) is not int or data["version"] != _ARTIFACT_VERSION:
+                    raise ValueError("unsupported artifact version")
+                if _canonical_json(data.get("identity")) != _canonical_json(identity):
+                    raise ValueError("artifact identity does not match")
+                body = data["config"]
+                if not isinstance(body, dict):
+                    raise ValueError("config must be an object")
+                self._artifact_cache[cache_key] = body
+            except (
+                KeyError,
+                OSError,
+                json.JSONDecodeError,
+                TypeError,
+                ValueError,
+                OverflowError,
+                RecursionError,
+            ) as error:
+                log().warning(f"Ignoring offline config {path.name}: {error}")
                 self._artifact_cache[cache_key] = None
                 return None
-            data = json.loads(path.read_text(encoding="utf-8"))
-            _canonical_json(data)
-            if not isinstance(data, dict):
-                raise ValueError("artifact must be an object")
-            if type(data.get("version")) is not int or data["version"] != 1:
-                raise ValueError("unsupported artifact version")
-            if _canonical_json(data.get("identity")) != _canonical_json(identity):
-                raise ValueError("artifact identity does not match")
-            config = self._decode_artifact_config(data["config"], args, kwargs)
-        except (KeyError, OSError, json.JSONDecodeError, TypeError, ValueError, OverflowError, RecursionError) as error:
-            log().warning(f"Ignoring offline config {path.name}: {error}")
-            self._artifact_cache[cache_key] = None
-            return None
 
-        self._artifact_cache[cache_key] = config
-        return config
+        body = self._artifact_cache[cache_key]
+        if body is None:
+            return None
+        try:
+            return self._decode_artifact_config(body, args, kwargs)
+        except (TypeError, ValueError, OverflowError, RecursionError) as error:
+            log().warning(f"Ignoring offline config {path.name}: {error}")
+            return None
 
     def _emit_artifact(self, config, ref, args, kwargs):
         if config.pre_hook is not None:
@@ -521,11 +555,11 @@ class Autotuner:
         if json.loads(_canonical_json(body)) != body:
             raise ValueError("offline config values must preserve their types in JSON")
         self._decode_artifact_config(body, args, kwargs)
-        payload = {"version": 1, "identity": identity, "config": body}
+        payload = {"version": _ARTIFACT_VERSION, "identity": identity, "config": body}
         with atomic_write(path, mode="w", encoding="utf-8") as output:
             json.dump(payload, output, indent=2, sort_keys=True, allow_nan=False)
             output.write("\n")
-        self._artifact_cache[str(path)] = config
+        self._artifact_cache[str(path)] = body
         log().info(f"Wrote offline config {path}")
 
     def __call__(self, *args, **kwargs):

@@ -458,7 +458,15 @@ def test_force_search_bypasses_cache_and_default(monkeypatch):
 
 
 # ── offline config artifacts ────────────────────────────────────────────
-def _artifact_kernel(a, out, m_in, N, dtype_str, BLOCK_THREADS: int, stream: int = 0):
+class FakeConstexprInt:
+    @classmethod
+    def __coerce__(cls, value):
+        if type(value) is not int:
+            raise TypeError(f"expects int, got {type(value).__name__}")
+        return value
+
+
+def _artifact_kernel(a, out, m_in, N, dtype_str, BLOCK_THREADS: FakeConstexprInt, stream: int = 0):
     out._data[0] = float(BLOCK_THREADS)
 
 
@@ -543,6 +551,27 @@ def test_artifact_lifecycle(monkeypatch, tmp_path, artifact_dir):
     assert json.loads(path.read_text())["config"] == {"BLOCK_THREADS": 128}
 
 
+def test_artifact_schema_partitions_searched_winner_cache(monkeypatch, artifact_dir):
+    args = (FakeTensor((16, 512)), FakeTensor((1,)), 16, 512, "bf16")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    old_schema = _make_artifact_tuner(
+        artifact_name="rmsnorm-v1",
+        configs=[Config(BLOCK_THREADS=64)],
+    )
+    old_schema(*args)
+
+    new_schema = _make_artifact_tuner(artifact_name="rmsnorm-v2")
+    ref = new_schema._artifact_ref(args, {}, required=True)
+    new_schema._emit_artifact(Config(BLOCK_THREADS=128), ref, args, {})
+
+    monkeypatch.delenv("FLYDSL_AUTOTUNE")
+    loaded = _make_artifact_tuner(artifact_name="rmsnorm-v2")
+    out = FakeTensor((1,))
+    loaded(args[0], out, *args[2:])
+
+    assert out._data[0] == 128.0
+
+
 def test_artifact_identity_uses_declared_key_and_device(artifact_dir, monkeypatch):
     import importlib
 
@@ -568,7 +597,19 @@ def test_artifact_identity_uses_declared_key_and_device(artifact_dir, monkeypatc
     assert scratch_key != tuner._make_key(args, {})
 
 
-@pytest.mark.parametrize("case", ["corrupt", "version", "identity", "config", "override"])
+def test_cached_artifact_is_revalidated_for_each_call(monkeypatch, tmp_path, artifact_dir):
+    _, args = _emit_artifact(monkeypatch, artifact_dir)
+    monkeypatch.delenv("FLYDSL_AUTOTUNE")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "fresh-cache"))
+    tuner = _make_artifact_tuner()
+    ref = tuner._artifact_ref(args, {}, required=True)
+
+    assert tuner._load_artifact(ref, args, {}).to_dict() == {"BLOCK_THREADS": 64}
+    assert tuner._load_artifact(ref, args, {"BLOCK_THREADS": 32}) is None
+    assert tuner._load_artifact(ref, args, {}).to_dict() == {"BLOCK_THREADS": 64}
+
+
+@pytest.mark.parametrize("case", ["corrupt", "version", "identity", "config", "override", "type"])
 def test_invalid_artifact_falls_back(monkeypatch, tmp_path, artifact_dir, case):
     path, args = _emit_artifact(monkeypatch, artifact_dir)
     payload = json.loads(path.read_text())
@@ -581,6 +622,8 @@ def test_invalid_artifact_falls_back(monkeypatch, tmp_path, artifact_dir, case):
             payload["identity"]["key"]["N"] = 1024
         elif case == "config":
             payload["config"] = {"UNKNOWN": 64}
+        elif case == "type":
+            payload["config"] = {"BLOCK_THREADS": "64"}
         else:
             payload["config"] = {"BLOCK_THREADS": 64, "N": 1024}
         path.write_text(json.dumps(payload))
