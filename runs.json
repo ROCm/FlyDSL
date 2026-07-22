@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-22T09:22:29Z",
+ "updated": "2026-07-22T09:47:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29909098251,
+   "pr": 876,
+   "commit": "dc1fb10ba05b6936ce69027d9e4ba8381901bf35",
+   "branch": "mega_moe_v1",
+   "event": "pull_request",
+   "title": "MegaMoEV1 on Gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29909098251",
+   "created_at": "2026-07-22T09:43:27Z",
+   "updated_at": "2026-07-22T09:44:31Z",
+   "actor": "yanboshao",
+   "jobs": []
+  },
   {
    "run_id": 29907460372,
    "pr": 825,
@@ -14,9 +29,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29907460372",
    "created_at": "2026-07-22T09:18:49Z",
-   "updated_at": "2026-07-22T09:19:06Z",
+   "updated_at": "2026-07-22T09:20:15Z",
    "actor": "fsx950223",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-22T09:20:38Z",
+     "completed_at": "2026-07-22T09:44:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29907460372/job/88882517675"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-22T09:21:12Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29907460372/job/88882517727"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-22T09:20:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29907460372/job/88882517750"
+    }
+   ]
   },
   {
    "run_id": 29906258064,
@@ -283,11 +326,11 @@
    "branch": "mega_moe_v1",
    "event": "pull_request",
    "title": "MegaMoEV1 on Gfx950",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29889687853",
    "created_at": "2026-07-22T03:55:18Z",
-   "updated_at": "2026-07-22T05:18:34Z",
+   "updated_at": "2026-07-22T09:43:29Z",
    "actor": "yanboshao",
    "jobs": [
     {
@@ -329,10 +372,10 @@
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-22T05:18:34Z",
-     "completed_at": null,
+     "completed_at": "2026-07-22T09:43:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29889687853/job/88838343669"
     }
    ]
@@ -2239,21 +2282,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29713950473/job/88263226625"
     }
    ]
-  },
-  {
-   "run_id": 29698800684,
-   "pr": 837,
-   "commit": "5d8120d535162c027199a3f83c1cb3959a70f5dd",
-   "branch": "xiaoyu/a8w4-quark",
-   "event": "pull_request",
-   "title": "Add a8w4 kernel for Quark mix-precision",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29698800684",
-   "created_at": "2026-07-19T18:29:30Z",
-   "updated_at": "2026-07-19T18:30:29Z",
-   "actor": "amd-xiaoyu12",
-   "jobs": []
   }
  ]
 }
