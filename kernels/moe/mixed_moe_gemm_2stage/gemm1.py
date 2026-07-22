@@ -526,8 +526,6 @@ def compile_mixed_moe_gemm1(
             x_nbytes_i32 = arith.index_cast(T.i32, x_nbytes_idx)
             x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False, num_records_bytes=x_nbytes_i32)
 
-            w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
-
             # Out: [tokens*topk, inter_dim]
             numids_rsrc = buffer_ops.create_buffer_resource(
                 arg_num_valid_ids,
@@ -605,6 +603,24 @@ def compile_mixed_moe_gemm1(
             def _moe_gemm1_body():
                 # Gate expert offset: first inter_dim rows of each expert's 2*inter_dim block
                 expert_off_idx = expert_idx * arith.constant(2 * inter_dim, index=True)
+
+                # --- >4GB weight-offset overflow fix ---
+                # The weight (w1) is loaded via buffer_load, whose hardware voffset is 32-bit.
+                # A single buffer resource spanning the whole w1 tensor overflows that offset
+                # once w1 exceeds 2^32 bytes (e.g. K2.6 tp1: 385 experts x 2*2048 x 7168 fp4
+                # = 5.6GB), so high-index experts load wrong weights -> garbage output.
+                # Re-base the resource at this block's expert using a 64-bit byte offset so the
+                # per-load 32-bit offset only ever spans one expert (< 2^32). Weight row indices
+                # below are made expert-relative to match. Scale/bias resources are left absolute
+                # (they never exceed 4GB for supported shapes).
+                per_expert_w_bytes = (2 * inter_dim * model_dim * b_elem_bytes) // pack_K
+                expert_byte_off = expert_idx * arith.constant(per_expert_w_bytes, index=True)
+                w_rsrc_e = buffer_ops.create_buffer_resource(
+                    arg_w,
+                    max_size=False,
+                    num_records_bytes=per_expert_w_bytes,
+                    base_byte_offset=expert_byte_off,
+                )
 
                 # X loading -- KEY DIFFERENCE from stage2: X row = token_id only
                 x_load_bytes = 16
@@ -708,8 +724,10 @@ def compile_mixed_moe_gemm1(
                         col_g_list.append(col_g)
 
                     global_n = by_n + n_tile_base + c_offset + lane_mod_16
-                    # Gate/interleave: rows [expert_off, expert_off + 2*inter_dim)
-                    gate_row_w = expert_off_idx + global_n
+                    # Expert-relative row: the weight resource (w_rsrc_e) is re-based to this
+                    # expert's start, so rows are within [0, 2*inter_dim) -> the 32-bit buffer
+                    # offset never crosses 4GB. (Was: expert_off_idx + global_n.)
+                    gate_row_w = global_n
                     gate_coord = idx2crd(fx.Int32(gate_row_w), layout_n_blk_intra)
                     gate_n_blk_list.append(layout_get(gate_coord, 0))
                     gate_n_intra_list.append(layout_get(gate_coord, 1))
@@ -751,7 +769,7 @@ def compile_mixed_moe_gemm1(
                     b16 = _buffer_load_vec(
                         buffer_ops,
                         vector,
-                        w_rsrc,
+                        w_rsrc_e,
                         idx_pack,
                         elem_type=_w_elem_type(),
                         vec_elems=vec_elems,
