@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-22T08:26:50Z",
+ "updated": "2026-07-22T08:35:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29904392531,
+   "pr": 825,
+   "commit": "7802b0dd87f1950f81d22cd9cdcb99986640f22b",
+   "branch": "pa-decode-tile",
+   "event": "pull_request",
+   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29904392531",
+   "created_at": "2026-07-22T08:32:27Z",
+   "updated_at": "2026-07-22T08:33:37Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-22T08:34:05Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29904392531/job/88872485482"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-22T08:33:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29904392531/job/88872485501"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-22T08:33:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29904392531/job/88872485505"
+    }
+   ]
+  },
   {
    "run_id": 29901136504,
    "pr": 825,
@@ -10,11 +53,11 @@
    "branch": "pa-decode-tile",
    "event": "pull_request",
    "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29901136504",
    "created_at": "2026-07-22T07:41:42Z",
-   "updated_at": "2026-07-22T08:00:49Z",
+   "updated_at": "2026-07-22T08:32:56Z",
    "actor": "fsx950223",
    "jobs": [
     {
@@ -29,19 +72,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-22T07:44:06Z",
-     "completed_at": null,
+     "completed_at": "2026-07-22T08:32:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29901136504/job/88862171745"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-22T08:00:49Z",
-     "completed_at": null,
+     "completed_at": "2026-07-22T08:27:03Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29901136504/job/88862171750"
     }
    ]
@@ -2183,49 +2226,6 @@
    "updated_at": "2026-07-19T17:38:03Z",
    "actor": "amd-xiaoyu12",
    "jobs": []
-  },
-  {
-   "run_id": 29631028371,
-   "pr": 873,
-   "commit": "b3bb5fd508c13a312e0d777f08ba0efbe14ad802",
-   "branch": "adityas-amd/fix-vector-list-hang",
-   "event": "pull_request",
-   "title": "Fix Vector list()-iteration hang ",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29631028371",
-   "created_at": "2026-07-18T04:43:26Z",
-   "updated_at": "2026-07-18T05:52:36Z",
-   "actor": "adityas-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-18T04:45:30Z",
-     "completed_at": "2026-07-18T05:30:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29631028371/job/88044556059"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-18T04:47:13Z",
-     "completed_at": "2026-07-18T05:00:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29631028371/job/88044556064"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-18T04:45:12Z",
-     "completed_at": "2026-07-18T05:52:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29631028371/job/88044556074"
-    }
-   ]
   }
  ]
 }
