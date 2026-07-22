@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Manual tile autotuner for the implicit-GEMM conv3d kernels.
-"""
+"""Manual tile autotuner for the implicit-GEMM conv3d kernels."""
 
 import json
 import os
