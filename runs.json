@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-07-22T22:09:26Z",
+ "updated": "2026-07-22T22:12:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29961868368,
+   "pr": 883,
+   "commit": "bf44258130759c1d3116b8c00d1aaa2d61c46e5a",
+   "branch": "fix/device-aware-jit-target-878",
+   "event": "pull_request",
+   "title": "[Runtime] Resolve JIT target from invocation device",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29961868368",
+   "created_at": "2026-07-22T22:09:32Z",
+   "updated_at": "2026-07-22T22:09:54Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 29961712110,
+   "pr": null,
+   "commit": "e0461479e0ce8cf762093d324b682fdcd672d905",
+   "branch": "fix/device-aware-jit-target-878",
+   "event": "pull_request",
+   "title": "[Runtime] Resolve JIT target from invocation device",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29961712110",
+   "created_at": "2026-07-22T22:06:50Z",
+   "updated_at": "2026-07-22T22:08:30Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 29961668720,
    "pr": null,
@@ -10,11 +40,11 @@
    "branch": "fix/device-aware-jit-target-878",
    "event": "pull_request",
    "title": "[Runtime] Resolve JIT target from invocation device",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29961668720",
    "created_at": "2026-07-22T22:06:05Z",
-   "updated_at": "2026-07-22T22:06:42Z",
+   "updated_at": "2026-07-22T22:07:06Z",
    "actor": "jhinpan",
    "jobs": []
   },
@@ -2203,74 +2233,6 @@
      "started_at": "2026-07-21T03:12:39Z",
      "completed_at": "2026-07-21T03:13:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29797851558/job/88532855123"
-    }
-   ]
-  },
-  {
-   "run_id": 29797395525,
-   "pr": 876,
-   "commit": "dfb5837640d08bfec9b385d0e0772805c69a32f3",
-   "branch": "mega_moe_v1",
-   "event": "pull_request",
-   "title": "MegaMoEV1 on Gfx950",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29797395525",
-   "created_at": "2026-07-21T03:01:42Z",
-   "updated_at": "2026-07-21T03:36:17Z",
-   "actor": "yanboshao",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-21T03:03:57Z",
-     "completed_at": "2026-07-21T03:30:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29797395525/job/88531623833"
-    },
-    {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-21T03:03:56Z",
-     "completed_at": "2026-07-21T03:36:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29797395525/job/88531623841"
-    }
-   ]
-  },
-  {
-   "run_id": 29796782108,
-   "pr": 876,
-   "commit": "c5e19079d106dd16ee08a2bed93a349e203e4669",
-   "branch": "mega_moe_v1",
-   "event": "pull_request",
-   "title": "MegaMoEV1 on Gfx950",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29796782108",
-   "created_at": "2026-07-21T02:47:58Z",
-   "updated_at": "2026-07-21T03:02:13Z",
-   "actor": "yanboshao",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-21T02:50:18Z",
-     "completed_at": "2026-07-21T03:02:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29796782108/job/88529762779"
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-21T02:50:18Z",
-     "completed_at": "2026-07-21T03:02:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29796782108/job/88529762792"
     }
    ]
   }
