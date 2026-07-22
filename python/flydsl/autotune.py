@@ -49,37 +49,36 @@ def _toolchain_fingerprint(arch: str = "") -> str:
             return ""
 
 
-def _device_fingerprint(device_id=None) -> str:
+def _device_fingerprint(device=None) -> str:
     """GPU arch string (e.g. 'gfx950'), or '' if unavailable."""
     try:
         from .runtime.device import get_rocm_arch
 
-        return str(get_rocm_arch(device_id))
+        if device is not None and device.kind != "rocm":
+            return f"{device.kind}:{device.index}"
+        return str(get_rocm_arch(None if device is None else device.index))
     except Exception:
         return ""
 
 
-def _invocation_device_id(sig_args) -> int | None:
-    """Resolve one logical GPU device from tensor/stream arguments."""
+def _invocation_device(sig_args):
+    """Resolve one canonical logical GPU device from call arguments."""
+    from .runtime.device_runtime import Device, device_from_argument
+
     devices = set()
     for value in sig_args.values():
-        device_id = None
-        dlpack_device = getattr(value, "__dlpack_device__", None)
-        if callable(dlpack_device):
-            try:
-                device_type, candidate = dlpack_device()
-                if int(device_type) in (2, 10):
-                    device_id = int(candidate)
-            except Exception:
-                pass
-        if device_id is None and torch is not None and isinstance(value, torch.cuda.Stream):
+        device = device_from_argument(value)
+        if device is None and torch is not None and isinstance(value, torch.cuda.Stream):
             stream_device = value.device
-            device_id = stream_device.index
-        if device_id is not None:
-            devices.add(device_id)
+            if stream_device.index is not None:
+                kind = "rocm" if getattr(torch.version, "hip", None) else "cuda"
+                device = Device(kind=kind, index=int(stream_device.index))
+        if device is not None:
+            devices.add(device)
 
     if len(devices) > 1:
-        raise ValueError(f"FlyDSL autotune arguments must reside on the same device, got {sorted(devices)}")
+        rendered = ", ".join(f"{device.kind}:{device.index}" for device in sorted(devices, key=repr))
+        raise ValueError(f"FlyDSL autotune arguments must reside on the same device, got {rendered}")
     return next(iter(devices), None)
 
 
@@ -262,8 +261,8 @@ class Autotuner:
         # tuned under different conditions. _flydsl_key is lru_cached, so this is
         # cheap. (_toolchain/_device fingerprints are functions, not frozen at
         # construction — otherwise the device axis would go stale.)
-        device_id = _invocation_device_id(sig_args)
-        device_fingerprint = _device_fingerprint(device_id)
+        device = _invocation_device(sig_args)
+        device_fingerprint = _device_fingerprint(device)
         key_vals.append(("_env_", _env_fingerprint()))
         key_vals.append(("_toolchain_", _toolchain_fingerprint(device_fingerprint)))
         key_vals.append(("_device_", device_fingerprint))
@@ -326,18 +325,20 @@ class Autotuner:
             return nullcontext()
         sig_args = dict(zip(self.arg_names, args))
         sig_args.update(kwargs)
+        device = _invocation_device(sig_args)
         stream = sig_args.get("stream")
         if isinstance(stream, torch.cuda.Stream):
             return torch.cuda.stream(stream)
         if isinstance(stream, int):
-            device = next(
-                (value.device for value in sig_args.values() if isinstance(value, torch.Tensor) and value.is_cuda),
-                None,
-            )
+            torch_device = None if device is None else torch.device("cuda", device.index)
             stream = (
-                torch.cuda.default_stream(device) if stream == 0 else torch.cuda.ExternalStream(stream, device=device)
+                torch.cuda.default_stream(torch_device)
+                if stream == 0
+                else torch.cuda.ExternalStream(stream, device=torch_device)
             )
             return torch.cuda.stream(stream)
+        if device is not None:
+            return torch.cuda.device(device.index)
         return nullcontext()
 
     def _bench_one(self, config, args, kwargs):

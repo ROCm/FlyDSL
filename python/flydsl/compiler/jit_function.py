@@ -466,7 +466,6 @@ def _collect_class_member_dependency_sources(
     rootFile,
     owner_cls,
     visited: Set[int],
-    target=None,
 ) -> List[str]:
     sources = []
 
@@ -490,7 +489,6 @@ def _collect_class_member_dependency_sources(
                 rootFile,
                 visited,
                 owner_cls=owner_cls,
-                target=target,
             )
         )
 
@@ -532,25 +530,11 @@ def _collect_closure_scalar_vals(func, visited_ids: Optional[Set[int]] = None) -
     return vals
 
 
-# Per-thread ``id(func)`` set of keys being computed, to break cache-key
-# dependency cycles. Thread-local so concurrent compilations don't collide.
-_key_computation = threading.local()
-
-
-def _keys_in_progress() -> Set[int]:
-    stack = getattr(_key_computation, "stack", None)
-    if stack is None:
-        stack = set()
-        _key_computation.stack = stack
-    return stack
-
-
 def _collect_dependency_sources(
     func,
     rootFile,
     visited: Optional[Set[int]] = None,
     owner_cls=None,
-    target=None,
 ) -> List[str]:
     from .kernel_function import KernelFunction
 
@@ -559,19 +543,13 @@ def _collect_dependency_sources(
     sources = []
 
     def _emit(prefix: str, name: str, val, underlying):
-        # JitFunction has its own manager_key — use it as a stable identity
-        # so cross-directory deps are tracked without dragging in the full
-        # source file (which would force ad-hoc same-dir filtering).
+        closure_vals = sorted(_collect_closure_scalar_vals(underlying))
+        closure_suffix = f":closure_vals={','.join(closure_vals)}" if closure_vals else ""
         if isinstance(val, JitFunction):
-            # Cycle: this jit is already being keyed — emit a placeholder.
-            if id(val.func) in _keys_in_progress():
-                label = getattr(val.func, "__qualname__", getattr(val.func, "__name__", name))
-                sources.append(f"{prefix}jit-recursive:{name}:{label}")
-                return False
-            manager_key, _manager = val._ensure_cache_manager(target=target)
-            sources.append(f"{prefix}jit:{name}:{manager_key}")
-            return False  # do not recurse: manager_key already covers transitive deps
-        sources.append(f"{prefix}{name}:{_get_func_source(underlying)}")
+            label = f"{val.func.__module__}:{val.func.__qualname__}"
+            sources.append(f"{prefix}jit:{name}:{label}:{_get_func_source(underlying)}{closure_suffix}")
+            return True
+        sources.append(f"{prefix}{name}:{_get_func_source(underlying)}{closure_suffix}")
         return True  # recurse to pick up nested helpers
 
     # 1) Scan global name references (co_names → __globals__)
@@ -588,7 +566,7 @@ def _collect_dependency_sources(
         visited.add(id(underlying))
         should_recurse = _emit("", name, obj, underlying)
         if should_recurse:
-            sources.extend(_collect_dependency_sources(underlying, rootFile, visited, target=target))
+            sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
 
     # 2) Scan closure variables (co_freevars → __closure__) for callable
     #    dependencies.  This catches @flyc.kernel functions defined in an
@@ -605,7 +583,7 @@ def _collect_dependency_sources(
             visited.add(id(underlying))
             should_recurse = _emit("closure:", name, val, underlying)
             if should_recurse:
-                sources.extend(_collect_dependency_sources(underlying, rootFile, visited, target=target))
+                sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
 
     owner_cls = owner_cls or _owner_class_from_func(func)
     if owner_cls is not None:
@@ -615,7 +593,6 @@ def _collect_dependency_sources(
                 rootFile,
                 owner_cls,
                 visited,
-                target=target,
             )
         )
 
@@ -623,35 +600,32 @@ def _collect_dependency_sources(
 
 
 def _jit_function_cache_key(func: Callable, owner_cls=None, target=None) -> str:
-    in_progress = _keys_in_progress()
-    added = id(func) not in in_progress
-    if added:
-        in_progress.add(id(func))
+    parts = []
+    parts.append(_flydsl_key(target))
+    parts.append(_get_func_source(func))
     try:
-        parts = []
-        parts.append(_flydsl_key(target))
-        parts.append(_get_func_source(func))
-        try:
-            rootFile = inspect.getfile(func)
-        except (TypeError, OSError):
-            rootFile = ""
-        depSources = _collect_dependency_sources(func, rootFile, owner_cls=owner_cls, target=target)
-        depSources.sort()
-        parts.extend(depSources)
+        rootFile = inspect.getfile(func)
+    except (TypeError, OSError):
+        rootFile = ""
+    depSources = _collect_dependency_sources(
+        func,
+        rootFile,
+        visited={id(func)},
+        owner_cls=owner_cls,
+    )
+    depSources.sort()
+    parts.extend(depSources)
 
-        # Collect scalar closure values recursively — this covers compile-time parameters
-        # (tile_m, tile_n, waves_per_eu, etc.) captured directly by the @jit launcher OR
-        # indirectly via nested @kernel / helper functions, without requiring an explicit
-        # _cache_tag tuple in every kernel factory function.
-        all_closure_vals = sorted(_collect_closure_scalar_vals(func))
-        if all_closure_vals:
-            parts.append("closure_vals:" + ",".join(all_closure_vals))
+    # Collect scalar closure values recursively — this covers compile-time parameters
+    # (tile_m, tile_n, waves_per_eu, etc.) captured directly by the @jit launcher OR
+    # indirectly via nested @kernel / helper functions, without requiring an explicit
+    # _cache_tag tuple in every kernel factory function.
+    all_closure_vals = sorted(_collect_closure_scalar_vals(func))
+    if all_closure_vals:
+        parts.append("closure_vals:" + ",".join(all_closure_vals))
 
-        combined = "\n".join(parts)
-        return hashlib.sha256(combined.encode()).hexdigest()[:32]
-    finally:
-        if added:
-            in_progress.discard(id(func))
+    combined = "\n".join(parts)
+    return hashlib.sha256(combined.encode()).hexdigest()[:32]
 
 
 def _stage_label_from_fragment(fragment: str) -> str:

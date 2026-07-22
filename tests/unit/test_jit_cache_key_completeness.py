@@ -341,6 +341,8 @@ def test_jit_self_reference_does_not_recurse_forever(tmp_path, monkeypatch):
 
 
 def test_mutually_referential_jits_do_not_recurse_forever(tmp_path, monkeypatch):
+    import threading
+
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
     monkeypatch.setattr(jit_function, "_flydsl_key", lambda *_args: "test-flydsl-key")
     mod = _load_mod(
@@ -362,51 +364,59 @@ def test_mutually_referential_jits_do_not_recurse_forever(tmp_path, monkeypatch)
         """,
     )
 
-    _reset_manager_key(mod.first)
-    _reset_manager_key(mod.second)
-    first_key = _manager_key(mod.first)
-    second_key = _manager_key(mod.second)
+    observed = set()
+    for _ in range(20):
+        _reset_manager_key(mod.first)
+        _reset_manager_key(mod.second)
+        barrier = threading.Barrier(2)
+        result = {}
 
-    assert first_key == _manager_key(mod.first)
-    assert second_key == _manager_key(mod.second)
+        def resolve(name, fn):
+            barrier.wait()
+            result[name] = _manager_key(fn)
 
+        threads = [
+            threading.Thread(target=resolve, args=("first", mod.first)),
+            threading.Thread(target=resolve, args=("second", mod.second)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+            assert not thread.is_alive()
+        observed.add((result["first"], result["second"]))
 
-def test_in_progress_stack_is_thread_local():
-    """Each thread must get its own in-progress set."""
-    import threading
-
-    main_stack = jit_function._keys_in_progress()
-    assert jit_function._keys_in_progress() is main_stack
-
-    other = {}
-
-    def worker():
-        other["stack"] = jit_function._keys_in_progress()
-
-    t = threading.Thread(target=worker)
-    t.start()
-    t.join()
-
-    assert other["stack"] is not main_stack
+    assert len(observed) == 1
 
 
-def test_key_computation_leaves_no_in_progress_leak(tmp_path, monkeypatch):
-    """The in-progress stack must be empty again after keying."""
+def test_parent_key_includes_nested_jit_closure_values(tmp_path, monkeypatch):
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
     monkeypatch.setattr(jit_function, "_flydsl_key", lambda *_args: "test-flydsl-key")
-    mod = _load_mod(
-        tmp_path,
-        "jit_no_leak",
-        """
-        import flydsl.compiler as flyc
-        import flydsl.expr as fx
 
-        @flyc.jit
-        def solo(A: fx.Tensor):
-            _ = solo
-            return A
-        """,
-    )
+    def load(name, tile):
+        return _load_mod(
+            tmp_path,
+            name,
+            f"""
+            import flydsl.compiler as flyc
+            import flydsl.expr as fx
 
-    _manager_key(mod.solo, reset=True)
-    assert jit_function._keys_in_progress() == set()
+            def make_child(tile):
+                @flyc.jit
+                def child(A: fx.Tensor):
+                    _ = tile
+                    return A
+                return child
+
+            child = make_child({tile})
+
+            @flyc.jit
+            def parent(A: fx.Tensor):
+                return child(A)
+            """,
+        )
+
+    first = load("nested_closure_64", 64)
+    second = load("nested_closure_128", 128)
+
+    assert _manager_key(first.parent, reset=True) != _manager_key(second.parent, reset=True)

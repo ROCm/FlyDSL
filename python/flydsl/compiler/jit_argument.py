@@ -27,28 +27,21 @@ from ..expr.typing import (
     Tensor,
     address_space_from_attr,
 )
-from ..runtime.device_runtime import Device
+from ..runtime.device_runtime import Device, device_from_argument, device_from_dlpack
 from .protocol import DslType, JitArgument
 
 _RESOLVE_SIG_WARNED = set()
 
 
 def _dlpack_device(device_type: int, device_id: int) -> Optional[Device]:
-    # DLPack: kDLCUDA=2 and kDLROCM=10 are unambiguous producer APIs.
-    if device_type == 10:
-        return Device(kind="rocm", index=int(device_id))
-    if device_type == 2:
-        return Device(kind="cuda", index=int(device_id))
-    return None
+    return device_from_dlpack(device_type, device_id)
 
 
 def jit_argument_device(value) -> Optional[Device]:
     """Return optional framework-adapter device metadata from a JIT argument."""
-    provider = getattr(value, "__flydsl_device__", None)
-    if provider is not None:
-        device = provider()
-        if device is not None:
-            return device
+    device = device_from_argument(value)
+    if device is not None:
+        return device
 
     if isinstance(value, Stream):
         raw = value.value

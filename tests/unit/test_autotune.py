@@ -16,10 +16,12 @@ with no GPU, no torch, and no compiled bindings.
 """
 
 import json
+from contextlib import nullcontext
 
 import pytest
 
 from flydsl.autotune import Autotuner, Config, _normalize_strides, autotune
+from flydsl.runtime.device_runtime import Device
 
 
 @pytest.fixture(autouse=True)
@@ -69,6 +71,15 @@ class FakeTensor:
 
     def copy_(self, other):
         self._data = list(other._data)
+
+
+class FakeWrappedTensor(FakeTensor):
+    def __init__(self, shape, device_id):
+        super().__init__(shape)
+        self._device = Device(kind="rocm", index=device_id)
+
+    def __flydsl_device__(self):
+        return self._device
 
 
 def _make_tuner(fn=None, **kw):
@@ -186,7 +197,11 @@ def test_key_uses_invocation_device_and_rejects_mixed_devices(monkeypatch):
     import importlib
 
     at = importlib.import_module("flydsl.autotune")
-    monkeypatch.setattr(at, "_device_fingerprint", lambda device_id=None: f"gfx_device_{device_id}")
+    monkeypatch.setattr(
+        at,
+        "_device_fingerprint",
+        lambda device=None: f"gfx_device_{None if device is None else device.index}",
+    )
     monkeypatch.setattr(at, "_toolchain_fingerprint", lambda arch="": f"toolchain_{arch}")
     tuner = _make_tuner()
 
@@ -205,6 +220,34 @@ def test_key_uses_invocation_device_and_rejects_mixed_devices(monkeypatch):
             (FakeTensor((8, 8), device_id=0), FakeTensor((8, 8), device_id=1)),
             {},
         )
+
+
+def test_autotune_uses_canonical_provider_and_guards_benchmark_device(monkeypatch):
+    import importlib
+
+    at = importlib.import_module("flydsl.autotune")
+    monkeypatch.setattr(
+        at,
+        "_device_fingerprint",
+        lambda device=None: f"gfx_device_{None if device is None else device.index}",
+    )
+    monkeypatch.setattr(at, "_toolchain_fingerprint", lambda arch="": f"toolchain_{arch}")
+    selected = []
+
+    def device_context(index):
+        selected.append(index)
+        return nullcontext()
+
+    monkeypatch.setattr(at.torch.cuda, "device", device_context)
+    tuner = _make_tuner()
+    tensor = FakeWrappedTensor((8, 8), device_id=1)
+
+    key = tuner._make_key((tensor, tensor), {})
+    with tuner._stream_context((tensor, tensor), {}):
+        pass
+
+    assert "gfx_device_1" in "".join(key)
+    assert selected == [1]
 
 
 def test_key_varies_with_env_fingerprint(monkeypatch):

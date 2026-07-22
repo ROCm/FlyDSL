@@ -19,6 +19,35 @@ class Device:
     index: int
 
 
+def device_from_dlpack(device_type: int, device_id: int) -> Device | None:
+    """Map canonical DLPack GPU device types to a FlyDSL device."""
+    if int(device_type) == 10:  # kDLROCM
+        return Device(kind="rocm", index=int(device_id))
+    if int(device_type) == 2:  # kDLCUDA
+        return Device(kind="cuda", index=int(device_id))
+    return None
+
+
+def device_from_argument(value) -> Device | None:
+    """Read framework-neutral device metadata from a call argument."""
+    provider = getattr(value, "__flydsl_device__", None)
+    if provider is not None:
+        device = provider()
+        if device is not None:
+            if not isinstance(device, Device):
+                raise TypeError(f"__flydsl_device__ must return Device or None, got {device!r}")
+            return device
+
+    dlpack_device = getattr(value, "__dlpack_device__", None)
+    if callable(dlpack_device):
+        try:
+            device_type, device_id = dlpack_device()
+        except Exception:
+            return None
+        return device_from_dlpack(device_type, device_id)
+    return None
+
+
 class DeviceRuntime(metaclass=ABCMeta):
     """Vendor-neutral runtime: one implementation per process (HIP, CUDA, …).
 

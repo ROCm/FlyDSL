@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Dict, Optional, Type
 
 from ...utils import env
-from .base import Device, DeviceRuntime
+from .base import Device, DeviceRuntime, device_from_argument, device_from_dlpack
 from .rocm import RocmDeviceRuntime
 
 # Compile-backend id -> device-runtime kind (single string namespace).
@@ -165,6 +165,8 @@ __all__ = [
     "COMPILE_BACKEND_TO_RUNTIME_KIND",
     "Device",
     "DeviceRuntime",
+    "device_from_argument",
+    "device_from_dlpack",
     "RocmDeviceRuntime",
     "ensure_compile_runtime_compatible",
     "ensure_compile_runtime_pairing_from_env",

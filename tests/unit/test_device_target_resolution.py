@@ -85,16 +85,6 @@ def _stream_launch(x, stream: fx.Stream):
     pass
 
 
-@flyc.jit
-def _nested_launch():
-    pass
-
-
-@flyc.jit
-def _parent_launch():
-    _nested_launch()
-
-
 @pytest.fixture(autouse=True)
 def _target_env(monkeypatch):
     old_runtime = dr._instance
@@ -103,8 +93,6 @@ def _target_env(monkeypatch):
     _make_backend.cache_clear()
     if hasattr(_device_less_launch, "_cache_managers"):
         _device_less_launch._cache_managers.clear()
-    _nested_launch._cache_managers.clear()
-    _parent_launch._cache_managers.clear()
     yield
     dr._instance = old_runtime
     _make_backend.cache_clear()
@@ -214,16 +202,6 @@ def test_cache_managers_are_isolated_by_target_under_concurrency(tmp_path, monke
     assert results["gfx942"][1] is not results["gfx950"][1]
     assert results["gfx942"][1].cache_dir.name.endswith("_gfx942")
     assert results["gfx950"][1].cache_dir.name.endswith("_gfx950")
-
-
-def test_nested_jit_cache_manager_inherits_invocation_target(monkeypatch):
-    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
-    target = get_backend(arch="gfx950").target
-
-    _parent_launch._ensure_cache_manager(target=target)
-
-    nested_targets = {slot[1] for slot in _nested_launch._cache_managers}
-    assert nested_targets == {target}
 
 
 def test_compile_only_without_device_requires_explicit_target(monkeypatch):
