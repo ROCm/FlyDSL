@@ -1,11 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-07-22T15:58:47Z",
+ "updated": "2026-07-22T18:46:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 29935517953,
+   "run_id": 29943569652,
    "pr": 820,
+   "commit": "1555134146a9779882ce73ba8cd413c34301b7fd",
+   "branch": "jiacao/conv3d-multi-tile-autotune-v2",
+   "event": "pull_request",
+   "title": "[Kernel] conv3d: parameterize tile size + add autotuner",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29943569652",
+   "created_at": "2026-07-22T17:43:35Z",
+   "updated_at": "2026-07-22T17:45:24Z",
+   "actor": "jiacao-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-22T17:45:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29943569652/job/89003435742"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-22T17:45:23Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29943569652/job/89003435779"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-22T17:45:06Z",
+     "completed_at": "2026-07-22T18:00:30Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29943569652/job/89003435792"
+    }
+   ]
+  },
+  {
+   "run_id": 29935517953,
+   "pr": null,
    "commit": "00c8d3059a151a5605b26c01f2d82d8c950de655",
    "branch": "jiacao/conv3d-multi-tile-autotune-v2",
    "event": "pull_request",
@@ -2228,49 +2271,6 @@
      "started_at": "2026-07-20T17:49:10Z",
      "completed_at": "2026-07-20T19:07:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29764987788/job/88429237097"
-    }
-   ]
-  },
-  {
-   "run_id": 29735659949,
-   "pr": 874,
-   "commit": "50f5181860803859dbdb3c3d4873e3fc6ef7fdbb",
-   "branch": "xudoyuan/dyn-cf-list-carry",
-   "event": "pull_request",
-   "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29735659949",
-   "created_at": "2026-07-20T10:36:43Z",
-   "updated_at": "2026-07-20T11:58:30Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-20T10:37:58Z",
-     "completed_at": "2026-07-20T10:52:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29735659949/job/88330415107"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-20T10:38:07Z",
-     "completed_at": "2026-07-20T11:58:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29735659949/job/88330415122"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-20T10:38:07Z",
-     "completed_at": "2026-07-20T11:24:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29735659949/job/88330415157"
     }
    ]
   }
