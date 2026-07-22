@@ -6,6 +6,7 @@
 import inspect
 import json
 import os
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable, Dict, List
 
@@ -13,6 +14,11 @@ try:
     import torch
 except ImportError:
     torch = None
+
+
+def _tuning_enabled() -> bool:
+    """Whether to bypass cached/default configs and run a fresh search."""
+    return os.environ.get("FLYDSL_AUTOTUNE", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _env_fingerprint() -> tuple:
@@ -165,6 +171,7 @@ class Autotuner:
         pre_hook=None,
         post_hook=None,
         do_bench_fn=None,
+        default=None,
     ):
         self.fn = fn  # JitFunction instance
         self.configs = configs
@@ -178,6 +185,7 @@ class Autotuner:
         self.post_hook = post_hook
         self._do_bench = do_bench_fn or do_bench
         self.cache: Dict[tuple, Config] = {}
+        self.default = default
 
         # Infer arg names from the underlying function
         if hasattr(fn, "func"):
@@ -231,6 +239,15 @@ class Autotuner:
         key_vals.append(("_env_", _env_fingerprint()))
         key_vals.append(("_toolchain_", _toolchain_fingerprint()))
         key_vals.append(("_device_", _device_fingerprint()))
+        effective_hints = getattr(self.fn, "_effective_compile_hints", None)
+        if callable(effective_hints):
+            hint_key = tuple(
+                sorted(
+                    (key, type(value).__module__, type(value).__qualname__, repr(value))
+                    for key, value in effective_hints().items()
+                )
+            )
+            key_vals.append(("_compile_hints_", hint_key))
 
         return tuple(str(v) for v in key_vals)
 
@@ -275,35 +292,56 @@ class Autotuner:
             return self.prune_configs_by(configs, sig_args)
         return configs
 
+    def _stream_context(self, args, kwargs):
+        """Use an explicit torch/raw stream for benchmark events and setup ops."""
+        if torch is None:
+            return nullcontext()
+        sig_args = dict(zip(self.arg_names, args))
+        sig_args.update(kwargs)
+        stream = sig_args.get("stream")
+        if isinstance(stream, torch.cuda.Stream):
+            return torch.cuda.stream(stream)
+        if isinstance(stream, int):
+            device = next(
+                (value.device for value in sig_args.values() if isinstance(value, torch.Tensor) and value.is_cuda),
+                None,
+            )
+            stream = (
+                torch.cuda.default_stream(device) if stream == 0 else torch.cuda.ExternalStream(stream, device=device)
+            )
+            return torch.cuda.stream(stream)
+        return nullcontext()
+
     def _bench_one(self, config, args, kwargs):
         """Compile and benchmark one config. Returns time in ms."""
         merged_kwargs = dict(kwargs)
         merged_kwargs.update(config.all_kwargs())
         compiler_opts = config.compiler_opts()
 
-        # Snapshot once before any rep runs, so restores are from pristine input.
-        snapshot = self._snapshot_tensors(args, merged_kwargs)
+        with self._stream_context(args, merged_kwargs):
+            # Snapshot once before any rep runs, so restores are from pristine input.
+            snapshot = self._snapshot_tensors(args, merged_kwargs)
 
-        def kernel_call():
-            # Order: restore/reset the inputs first, THEN run the pre_hooks, so a
-            # hook that sets up state (incl. mutating a tensor) isn't clobbered
-            # by the restore. Each benchmark rep starts from clean inputs.
-            self._restore_tensors(snapshot)
-            self._reset_tensors(args, merged_kwargs)
-            if config.pre_hook:
-                config.pre_hook(merged_kwargs)
-            if self.pre_hook:
-                self.pre_hook(merged_kwargs)
-            self._run_with_hints(compiler_opts, args, merged_kwargs)
-            if self.post_hook:
-                self.post_hook(merged_kwargs)
-
-        try:
-            return self._do_bench(kernel_call, warmup=self.warmup, rep=self.rep)
-        finally:
-            # Leave the caller's tensors as a single clean run would.
-            if snapshot:
+            def kernel_call():
+                # Order: restore/reset the inputs first, THEN run the pre_hooks, so a
+                # hook that sets up state (incl. mutating a tensor) isn't clobbered
+                # by the restore. Each benchmark rep starts from clean inputs.
                 self._restore_tensors(snapshot)
+                self._reset_tensors(args, merged_kwargs)
+                if config.pre_hook:
+                    config.pre_hook(merged_kwargs)
+                if self.pre_hook:
+                    self.pre_hook(merged_kwargs)
+                self._run_with_hints(compiler_opts, args, merged_kwargs)
+                if self.post_hook:
+                    self.post_hook(merged_kwargs)
+
+            try:
+                return self._do_bench(kernel_call, warmup=self.warmup, rep=self.rep)
+            finally:
+                # Leave the caller's tensors as a single clean run would.
+                if snapshot:
+                    self._restore_tensors(snapshot)
 
     def _run_with_hints(self, compiler_opts, args, kwargs):
         """Run the kernel with optional compiler hints. Import is deferred so
@@ -322,16 +360,22 @@ class Autotuner:
         clean run (restore_value tensors are already restored by _bench_one)."""
         merged = dict(kwargs)
         merged.update(config.all_kwargs())
-        self._reset_tensors(args, merged)
-        return self._run_with_hints(config.compiler_opts(), args, merged)
+        with self._stream_context(args, merged):
+            self._reset_tensors(args, merged)
+            return self._run_with_hints(config.compiler_opts(), args, merged)
 
     def __call__(self, *args, **kwargs):
         key = self._make_key(args, kwargs)
-        if key in self.cache:
+        force = _tuning_enabled()
+
+        if not force and key in self.cache:
             return self._run_config(self.cache[key], args, kwargs)
 
-        # Benchmark all configs
-        configs = self._prune(self.configs, args, kwargs)
+        if not force and self.default is not None:
+            return self._run_config(self.default(*args, **kwargs), args, kwargs)
+
+        configs = self.configs(*args, **kwargs) if callable(self.configs) else self.configs
+        configs = self._prune(configs, args, kwargs)
         print(f"[autotune] tuning {len(configs)} configs...")
         results = []
         for i, config in enumerate(configs):
@@ -373,7 +417,7 @@ class Autotuner:
 
 
 def autotune(
-    configs: List[Config],
+    configs,
     key: List[str] = None,
     warmup: int = 5,
     rep: int = 25,
@@ -383,6 +427,7 @@ def autotune(
     pre_hook: Callable = None,
     post_hook: Callable = None,
     do_bench: Callable = None,
+    default: Callable = None,
 ):
     """Autotune decorator for @jit functions.
 
@@ -393,6 +438,10 @@ def autotune(
             ...
 
     Args:
+        configs: sequence of :class:`Config`, or a callable returning one for
+            the current arguments.
+        default: optional heuristic ``default(*args, **kwargs) -> Config`` used
+            without benchmarking unless ``FLYDSL_AUTOTUNE`` forces a search.
         restore_value: tensor args the kernel mutates in place (output overlaps
             input, or accumulation). Snapshotted and restored before each bench
             rep so every config is measured on identical inputs. Required when
@@ -414,6 +463,7 @@ def autotune(
             pre_hook=pre_hook,
             post_hook=post_hook,
             do_bench_fn=do_bench,
+            default=default,
         )
 
     return decorator

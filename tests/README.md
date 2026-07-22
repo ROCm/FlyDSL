@@ -47,6 +47,8 @@ Use the same names as [`python/flydsl/utils/env.py`](../python/flydsl/utils/env.
 | Compile without execution | `COMPILE_ONLY` |
 | JIT cache directory | `FLYDSL_RUNTIME_CACHE_DIR` |
 | Enable/disable JIT disk cache | `FLYDSL_RUNTIME_ENABLE_CACHE` (`0` / `false` to disable; in-memory cache remains active) |
+| Force autotuning search | `FLYDSL_AUTOTUNE` (`1` / `true` to ignore the heuristic/cached best) |
+| Autotune result cache directory | `FLYDSL_AUTOTUNE_CACHE_DIR` |
 | IR dump | `FLYDSL_DUMP_IR`, `FLYDSL_DUMP_DIR` |
 | Device runtime kind | `FLYDSL_RUNTIME_KIND` |
 | ROCm arch hints (detection helpers) | `FLYDSL_GPU_ARCH`, `HSA_OVERRIDE_GFX_VERSION` |
@@ -90,4 +92,3 @@ export FLYDSL_RUNTIME_ENABLE_CACHE=0  # or: rm -rf ~/.flydsl/cache
 ## MLIR FileCheck tests
 
 `tests/mlir/**/*.mlir` checks are driven by **`scripts/run_tests.sh`** (FileCheck + `fly-opt`), not by pytest. Tiering for those may be documented in parallel in this README as the RFC rollout continues; see RFC open questions.
-
