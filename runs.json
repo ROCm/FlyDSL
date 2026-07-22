@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-22T23:13:45Z",
+ "updated": "2026-07-22T23:21:24Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -169,20 +169,20 @@
    "branch": "forward_lse",
    "event": "pull_request",
    "title": "Add forward LSE output to FlyDSL flash attention kernels",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29960050819",
    "created_at": "2026-07-22T21:39:47Z",
-   "updated_at": "2026-07-22T21:41:36Z",
+   "updated_at": "2026-07-22T23:18:13Z",
    "actor": "amd-wsung102",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-22T21:41:36Z",
-     "completed_at": null,
+     "completed_at": "2026-07-22T23:18:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29960050819/job/89058883642"
     },
     {
