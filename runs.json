@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-22T14:39:38Z",
+ "updated": "2026-07-22T15:00:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29930978573,
+   "pr": 882,
+   "commit": "7fd39aa16e5ed343fd622406dd45653021e4e467",
+   "branch": "skill/authoring-cleanup",
+   "event": "pull_request",
+   "title": "Skill: align kernel-authoring with code-cleanup (drop buffer_ops/ArithValue)",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29930978573",
+   "created_at": "2026-07-22T14:56:11Z",
+   "updated_at": "2026-07-22T14:58:02Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-22T14:57:58Z",
+     "completed_at": "2026-07-22T14:58:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29930978573/job/88960660974"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-22T14:57:56Z",
+     "completed_at": "2026-07-22T14:57:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29930978573/job/88960661060"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-22T14:57:56Z",
+     "completed_at": "2026-07-22T14:57:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29930978573/job/88960661076"
+    }
+   ]
+  },
   {
    "run_id": 29929089390,
    "pr": null,
@@ -2256,49 +2299,6 @@
      "started_at": "2026-07-20T10:31:04Z",
      "completed_at": "2026-07-20T10:36:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29735266115/job/88329134988"
-    }
-   ]
-  },
-  {
-   "run_id": 29733374898,
-   "pr": 825,
-   "commit": "fbd87d29440ae32322b325726265c4f198c21c32",
-   "branch": "pa-decode-tile",
-   "event": "pull_request",
-   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29733374898",
-   "created_at": "2026-07-20T09:58:20Z",
-   "updated_at": "2026-07-20T11:57:24Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-20T09:59:28Z",
-     "completed_at": "2026-07-20T10:23:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29733374898/job/88323028712"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-20T09:59:39Z",
-     "completed_at": "2026-07-20T11:57:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29733374898/job/88323028730"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-20T10:00:34Z",
-     "completed_at": "2026-07-20T10:57:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29733374898/job/88323028739"
     }
    ]
   }
