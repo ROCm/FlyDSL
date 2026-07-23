@@ -195,32 +195,41 @@ def launch_gemm_a8w4_mxscale(
         gSB = _gv(gSB_base, sb_off0, (SB_SUPERS, tile_k), (tile_k, 1))
         atomSB = _tdm1(gSB, None, k64, b_mask)
 
-        _adv = fx.rocdl.advance_tdm_atom
-
-        def _wcopy(w, atom, gt, lv):
+        def _wcopy(w, atom, gt, lv, imm_offset):
             if wave == w:
-                fx.copy(atom, gt, lv)
+                fx.copy(atom, gt, lv, imm_offset=imm_offset)
 
         def issue(s, kt):
             pa = _buf_ptr(s)
+            kt64 = fx.Int64(kt)
             for h in range_constexpr(2):
                 _wcopy(
                     W_A[h],
-                    _adv(atomA_h[h], kt * tile_k),
+                    atomA_h[h],
                     gA_h[h],
                     _lv(fx.add_offset(pa, h * HM * A_LDS_ROW), (HM, tile_k), (A_LDS_ROW, 1)),
+                    kt64 * fx.Int64(tile_k),
                 )
                 _wcopy(
                     W_B[h],
-                    _adv(atomB_h[h], kt * (PACK_TK * 16)),
+                    atomB_h[h],
                     gB_h[h],
                     _lv(fx.add_offset(pa, STAGE_A + h * HB * B_LDS_ROW), (HB, PACK_TK * 16), (B_LDS_ROW, 1)),
+                    kt64 * fx.Int64(PACK_TK * 16),
                 )
             _wcopy(
-                W_SA, _adv(atomSA, kt * tile_k), gSA, _lv(fx.add_offset(pa, SA_OFF), (SA_SUPERS, tile_k), (tile_k, 1))
+                W_SA,
+                atomSA,
+                gSA,
+                _lv(fx.add_offset(pa, SA_OFF), (SA_SUPERS, tile_k), (tile_k, 1)),
+                kt64 * fx.Int64(tile_k),
             )
             _wcopy(
-                W_SB, _adv(atomSB, kt * tile_k), gSB, _lv(fx.add_offset(pa, SB_OFF), (SB_SUPERS, tile_k), (tile_k, 1))
+                W_SB,
+                atomSB,
+                gSB,
+                _lv(fx.add_offset(pa, SB_OFF), (SB_SUPERS, tile_k), (tile_k, 1)),
+                kt64 * fx.Int64(tile_k),
             )
 
         wmb = wave_m * warp_tile_m
