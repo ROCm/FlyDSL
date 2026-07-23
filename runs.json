@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-23T19:53:23Z",
+ "updated": "2026-07-23T20:11:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,19 +10,19 @@
    "branch": "jiacao/conv3d-multi-tile-autotune-v2",
    "event": "pull_request",
    "title": "[Kernel] conv3d: parameterize tile size + add autotuner",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30035122856",
    "created_at": "2026-07-23T18:45:54Z",
-   "updated_at": "2026-07-23T18:47:04Z",
+   "updated_at": "2026-07-23T19:52:26Z",
    "actor": "jiacao-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-23T18:47:04Z",
+     "started_at": "2026-07-23T19:52:26Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30035122856/job/89301373135"
     },
@@ -38,10 +38,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-23T19:06:23Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T19:59:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30035122856/job/89301373237"
     }
    ]
@@ -53,11 +53,11 @@
    "branch": "main",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add 8 wave GQA sliding-window attention kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30025899976",
    "created_at": "2026-07-23T16:37:19Z",
-   "updated_at": "2026-07-23T18:52:27Z",
+   "updated_at": "2026-07-23T20:08:23Z",
    "actor": "amd-nprotaso",
    "jobs": [
     {
@@ -72,10 +72,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-23T18:52:26Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T20:08:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30025899976/job/89270444650"
     },
     {
@@ -571,11 +571,11 @@
    "branch": "forward_lse",
    "event": "pull_request",
    "title": "Add forward LSE output to FlyDSL flash attention kernels",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30017858434",
    "created_at": "2026-07-23T14:52:29Z",
-   "updated_at": "2026-07-23T18:30:34Z",
+   "updated_at": "2026-07-23T19:56:56Z",
    "actor": "amd-wsung102",
    "jobs": [
     {
@@ -590,10 +590,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-23T18:30:33Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T19:56:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30017858434/job/89242703765"
     },
     {
