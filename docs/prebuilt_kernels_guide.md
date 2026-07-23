@@ -361,7 +361,7 @@ What operation do you need?
 | `kernels/gemm/blockscale_preshuffle_gemm.py` | Blockscale GEMM |
 | `kernels/gemm/hgemm_splitk.py` | FP16 GEMM split-K |
 | `kernels/moe/moe_gemm_2stage.py` | MoE GEMM 2-stage (gate/up + reduce) |
-| `kernels/moe/mixed_moe_gemm_2stage.py` | Mixed-precision MoE GEMM |
+| `kernels/moe/mxfp_moe/` | Fused a4w4/a8w4 MoE 2-stage GEMM (device fp4 re-quant) |
 | `kernels/attention/pa_decode_fp8.py` | Paged attention decode (FP8) |
 | `kernels/attention/flash_attn_generic.py` | FlashAttention generic fallback |
 | `kernels/attention/flash_attn_gfx950.py` | FlashAttention gfx950 bf16/f16 fast path |

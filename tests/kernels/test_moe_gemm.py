@@ -75,7 +75,7 @@ except Exception:
     HAS_AITER = False
 
 # Kernel implementations live under `kernels/`; this test file is the harness.
-# The a4w4 (mxfp4) path now drives the fused mxmoe pipeline (device-side re-quant,
+# The a4w4 (mxfp4) path now drives the fused mxfp_moe pipeline (device-side re-quant,
 # sorted fp4 intermediate) that replaced the parametric mixed_moe_gemm_2stage.
 from kernels.moe.moe_gemm_2stage import (  # noqa: E402
     MoeGemm2Mode,
@@ -83,7 +83,7 @@ from kernels.moe.moe_gemm_2stage import (  # noqa: E402
     compile_moe_gemm2,
     compile_moe_gemm2_ex,
 )
-from kernels.moe.mxmoe import (  # noqa: E402
+from kernels.moe.mxfp_moe import (  # noqa: E402
     flydsl_mxfp4_gemm1,
     flydsl_mxfp4_gemm2,
 )
@@ -92,14 +92,14 @@ from kernels.moe.mxmoe import (  # noqa: E402
 def _mixed_moe_removed(*_args, **_kwargs):
     """Sentinel for the removed parametric mixed a4w4/a8w4 kernel builders.
 
-    a4w4 now runs through the fused mxmoe pipeline (see _run_mxmoe_fp4_e2e); the
+    a4w4 now runs through the fused mxfp_moe pipeline (see _run_mxfp_moe_fp4_e2e); the
     a8w4 host-prep branches in run_moe_stage1/run_moe_stage2 are retained but
     skip-guarded until a8w4 is ported to the fused kernels. These branches still
     reference the old builder names, so bind them to a loud stub instead of
     leaving them undefined.
     """
     raise NotImplementedError(
-        "mixed_moe_gemm_2stage was replaced by the fused mxmoe pipeline; "
+        "mixed_moe_gemm_2stage was replaced by the fused mxfp_moe pipeline; "
         "re-point the a8w4 branch at flydsl_mxfp4_gemm1/2 before enabling it."
     )
 
@@ -450,10 +450,10 @@ def run_moe_stage1(
     is_fp4_path = is_fp4 or is_a8w4  # shared weight/shuffle pipeline
     if is_fp4_path:
         # The parametric mixed_moe_gemm_2stage pipeline this runner drove for
-        # a4w4/a8w4 was replaced by the fused mxmoe kernels. a4w4 is now covered
+        # a4w4/a8w4 was replaced by the fused mxfp_moe kernels. a4w4 is now covered
         # end-to-end by test_moe_gemm_2stage's fp4 path; a8w4 is not yet ported.
         pytest.skip(
-            "a4w4/a8w4 stage1 runner retired: a4w4 covered by the fused mxmoe "
+            "a4w4/a8w4 stage1 runner retired: a4w4 covered by the fused mxfp_moe "
             "e2e path in test_moe_gemm_2stage; a8w4 pending fused-kernel support"
         )
     use_packed_int4 = is_int4 or is_int4_bf16
@@ -1087,9 +1087,9 @@ def run_moe_stage2(
     is_fp4_path = is_fp4 or is_a8w4
     if is_fp4_path:
         # See run_moe_stage1: the mixed a4w4/a8w4 stage2 path was replaced by the
-        # fused mxmoe kernels; a4w4 is exercised via the e2e path.
+        # fused mxfp_moe kernels; a4w4 is exercised via the e2e path.
         pytest.skip(
-            "a4w4/a8w4 stage2 runner retired: a4w4 covered by the fused mxmoe "
+            "a4w4/a8w4 stage2 runner retired: a4w4 covered by the fused mxfp_moe "
             "e2e path in test_moe_gemm_2stage; a8w4 pending fused-kernel support"
         )
     use_packed_int4 = is_int4 or is_int4_bf16
@@ -1697,7 +1697,7 @@ def run_moe_stage2(
     return None
 
 
-def _run_mxmoe_e2e(
+def _run_mxfp_moe_e2e(
     *,
     tokens: int,
     model_dim: int,
@@ -1717,7 +1717,7 @@ def _run_mxmoe_e2e(
     interleave: bool = False,
     skip_ref: bool = False,
 ):
-    """End-to-end a4w4 / a8w4 correctness via the fused mxmoe pipeline.
+    """End-to-end a4w4 / a8w4 correctness via the fused mxfp_moe pipeline.
 
     ``a_dtype`` selects the stage1 activation: "fp4" (a4w4, MX-FP4 A) or "fp8"
     (a8w4, MX-FP8 e4m3 A). W1/W2 are always MX-FP4 and the stage1->stage2
@@ -1817,11 +1817,11 @@ def _run_mxmoe_e2e(
 
     if use_reduce:
         # Reduce (nonatomic) epilog writes flat bf16 per sorted position; reduce on
-        # host. The mxmoe stage2 mode is coupled to tile_m: reduce is a BM == 128
+        # host. The mxfp_moe stage2 mode is coupled to tile_m: reduce is a BM == 128
         # path, atomic is the BM in {16,32,64} path. (Callers pick the mode by
         # tile_m; the pytest matrix skips the mismatched combo.)
         if BM != 128:
-            pytest.skip(f"fused mxmoe reduce (nonatomic) epilog requires tile_m == 128, got {BM}")
+            pytest.skip(f"fused mxfp_moe reduce (nonatomic) epilog requires tile_m == 128, got {BM}")
         flat = torch.zeros(sorted_size * model_dim, dtype=torch.bfloat16, device=dev)
         flydsl_mxfp4_gemm2(
             inter_sorted_quant=aqout,
@@ -1853,7 +1853,7 @@ def _run_mxmoe_e2e(
         # The atomic (scatter-to-token) epilog is supported at BM in {16, 32, 64}.
         # BM == 128 down-proj is covered by the reduce (nonatomic) path instead.
         if BM == 128:
-            pytest.skip("fused mxmoe atomic epilog unsupported at tile_m == 128; use reduce mode")
+            pytest.skip("fused mxfp_moe atomic epilog unsupported at tile_m == 128; use reduce mode")
         out_buf = torch.zeros(tokens * model_dim, dtype=torch.bfloat16, device=dev)
         flydsl_mxfp4_gemm2(
             inter_sorted_quant=aqout,
@@ -1897,14 +1897,14 @@ def _run_mxmoe_e2e(
         verify_output(out, ref2, rtol=0.5, atol=0.5, logits_diff_threshold=1)
 
 
-@pytest.mark.skipif("gfx95" not in ARCH, reason="mxmoe a4w4/a8w4 requires gfx950+")
+@pytest.mark.skipif("gfx95" not in ARCH, reason="mxfp_moe a4w4/a8w4 requires gfx950+")
 @pytest.mark.parametrize("a_dtype", ["fp4", "fp8"])
 @pytest.mark.parametrize(
     "variant",
     ["bm32_atomic", "inline_bm16", "interleave_bm64"],
 )
-def test_mxmoe_variants(a_dtype, variant):
-    """Cover the fused mxmoe gemm1 variants the FP4-M/L e2e shapes don't reach:
+def test_mxfp_moe_variants(a_dtype, variant):
+    """Cover the fused mxfp_moe gemm1 variants the FP4-M/L e2e shapes don't reach:
     BM==32 (atomic), inline_quant (BM==16, bf16 hidden -> on-device quant), and the
     interleaved gate/up layout. Both a4w4 (fp4) and a8w4 (fp8) activations."""
     device = torch.device("cuda")
@@ -1934,7 +1934,7 @@ def test_mxmoe_variants(a_dtype, variant):
         tile_m=tile_m,
         moe_sort_mode="torch",
     )
-    _run_mxmoe_e2e(
+    _run_mxfp_moe_e2e(
         tokens=tokens,
         model_dim=model_dim,
         inter_dim=inter_dim,
@@ -2093,11 +2093,11 @@ def test_moe_gemm_2stage(
             pytest.skip(f"{in_dtype} stage2 requires inter_dim >= 256 and tile_k2 >= 256, got {inter_dim}, {tile_k2}")
         if tile_m < 32 or tile_m % 32 != 0:
             pytest.skip(f"{in_dtype} requires tile_m % 32 == 0 and tile_m >= 32, got {tile_m}")
-        # The fused mxmoe gemm1 unrolls the K loop as prologue(kStages=2) + main +
+        # The fused mxfp_moe gemm1 unrolls the K loop as prologue(kStages=2) + main +
         # drain; with model_dim == kStages*tile_k (512) the main loop that inits
         # the accumulator is empty, so require model_dim > 512 (FP4-S is skipped).
         if model_dim <= 512:
-            pytest.skip(f"fused mxmoe gemm1 requires model_dim > 512, got {model_dim}")
+            pytest.skip(f"fused mxfp_moe gemm1 requires model_dim > 512, got {model_dim}")
     device = torch.device("cuda")
     # torch.manual_seed(int(seed))
 
@@ -2141,9 +2141,9 @@ def test_moe_gemm_2stage(
         compare_aiter_ck = False
 
     if in_dtype in ("fp4", "a8w4"):
-        # a4w4 / a8w4 drive the fused mxmoe pipeline end-to-end (device-side
+        # a4w4 / a8w4 drive the fused mxfp_moe pipeline end-to-end (device-side
         # re-quant, sorted fp4 intermediate) rather than the retired mixed path.
-        _run_mxmoe_e2e(
+        _run_mxfp_moe_e2e(
             tokens=tokens,
             model_dim=model_dim,
             inter_dim=inter_dim,
@@ -2913,7 +2913,7 @@ if __name__ == "__main__":
         if dt in ("fp4", "a8w4") and "gfx95" not in ARCH:
             print(f"Skipping {dt}: requires gfx950+, got {ARCH}")
             continue
-        # mxmoe (fp4/a8w4) stage2 mode is coupled to tile_m: atomic for tile_m<128,
+        # mxfp_moe (fp4/a8w4) stage2 mode is coupled to tile_m: atomic for tile_m<128,
         # reduce (nonatomic) only at tile_m==128. Run the one applicable mode rather
         # than the fp8-style atomic/reduce sweep (which would pick an invalid combo).
         if dt in ("fp4", "a8w4"):

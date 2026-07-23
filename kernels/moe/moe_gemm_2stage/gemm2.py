@@ -1,7 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""MoE GEMM stage2 (MFMA) kernel builder + reduce-mode dispatch."""
+"""MoE GEMM stage2 (MFMA) kernel builder + reduce-mode dispatch.
+
+Legacy authoring API (SmemAllocator/SmemPtr + raw buffer_ops); slated for
+deprecation -- refactor to the current fx.* surface (make_buffer_tensor +
+SharedAllocator + fx.copy/fx.gemm). See kernels/moe/mxfp_moe and the
+kernel-code-cleanup skill.
+"""
 
 import functools
 import logging
@@ -215,7 +221,8 @@ def compile_moe_gemm2(
     if out_is_bf16:
         if not supports_bf16_global_atomics(gpu_arch):
             raise ValueError(
-                f"out_dtype='bf16' requires bf16 global atomics ({bf16_global_atomics_arch_description()}), got arch={gpu_arch!r}"
+                f"out_dtype='bf16' requires bf16 global atomics "
+                f"({bf16_global_atomics_arch_description()}), got arch={gpu_arch!r}"
             )
 
     if out_is_f32:
@@ -459,7 +466,8 @@ def compile_moe_gemm2(
                         x_load_bytes = 4
                     else:
                         raise ValueError(
-                            f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 4 to use the dword-indexed load mapping."
+                            f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible "
+                            "by 4 to use the dword-indexed load mapping."
                         )
                 num_x_loads = bytes_per_thread_x // x_load_bytes
                 chunk_i32 = x_load_bytes // 4  # dwords per chunk (1/2/4)

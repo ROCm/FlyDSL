@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Host-side launch glue for the fused a4w4 mxmoe kernels.
+"""Host-side launch glue for the fused a4w4 mxfp_moe kernels.
 
 Ported (self-contained) from aiter's ``mxfp4_gemm1_kernels.py`` /
 ``mxfp4_gemm2_kernels.py``. Kernel launch args are raw device pointers
@@ -13,8 +13,8 @@ import functools
 import torch
 
 import flydsl.compiler as flyc
-from kernels.moe.mxmoe.gemm1 import compile_gemm1_a4w4_port, gemm1_grid
-from kernels.moe.mxmoe.gemm2 import compile_gemm2_a4w4_port
+from kernels.moe.mxfp_moe.gemm1 import compile_gemm1_a4w4_port, gemm1_grid
+from kernels.moe.mxfp_moe.gemm2 import compile_gemm2_a4w4_port
 
 # gemm1 (BM, use_nt, inline_quant, a_dtype) variants the kernel supports.
 # a_dtype="fp4" is a4w4 (mxfp4 A); "fp8" is a8w4 (fp8 e4m3 A x mxfp4 W1).
@@ -137,9 +137,9 @@ def flydsl_mxfp4_gemm1(
     ``inter_sorted_quant`` / ``inter_sorted_shuffled_scale`` (both pre-allocated).
     """
     if D_HIDDEN % BK != 0:
-        raise NotImplementedError(f"mxmoe gemm1 requires D_HIDDEN (K) % {BK} == 0, got H={D_HIDDEN}")
+        raise NotImplementedError(f"mxfp_moe gemm1 requires D_HIDDEN (K) % {BK} == 0, got H={D_HIDDEN}")
     if (2 * D_INTER) % BN != 0:
-        raise NotImplementedError(f"mxmoe gemm1 requires 2*D_INTER (N_OUT) % {BN} == 0, got D_INTER={D_INTER}")
+        raise NotImplementedError(f"mxfp_moe gemm1 requires 2*D_INTER (N_OUT) % {BN} == 0, got D_INTER={D_INTER}")
 
     # Non-temporal (streaming) B loads help at small M -- there is no cross-tile
     # weight reuse, so streaming avoids polluting L2. But once M is large enough
@@ -157,7 +157,7 @@ def flydsl_mxfp4_gemm1(
 
     if (BM, use_nt, inline_quant, a_dtype) not in _G1_SUPPORTED:
         raise NotImplementedError(
-            f"mxmoe gemm1 unsupported variant "
+            f"mxfp_moe gemm1 unsupported variant "
             f"(BM={BM}, use_nt={use_nt}, inline_quant={inline_quant}, a_dtype={a_dtype})"
         )
 
@@ -216,12 +216,12 @@ def flydsl_mxfp4_gemm2(
     """Down-projection stage2. Consumes the stage1 sorted fp4 intermediate."""
     if D_INTER % BK != 0:
         raise NotImplementedError(
-            f"mxmoe gemm2 contraction D_INTER (inter_dim) must be a multiple of " f"{BK}, got D_INTER={D_INTER}"
+            f"mxfp_moe gemm2 contraction D_INTER (inter_dim) must be a multiple of " f"{BK}, got D_INTER={D_INTER}"
         )
     if D_HIDDEN % BN != 0:
-        raise NotImplementedError(f"mxmoe gemm2 requires D_HIDDEN (N_OUT=model_dim) % {BN} == 0, " f"got H={D_HIDDEN}")
+        raise NotImplementedError(f"mxfp_moe gemm2 requires D_HIDDEN (N_OUT=model_dim) % {BN} == 0, got H={D_HIDDEN}")
     if (BM, use_nt, epilog) not in _G2_SUPPORTED:
-        raise NotImplementedError(f"mxmoe gemm2 unsupported variant (BM={BM}, use_nt={use_nt}, epilog={epilog})")
+        raise NotImplementedError(f"mxfp_moe gemm2 unsupported variant (BM={BM}, use_nt={use_nt}, epilog={epilog})")
 
     launch = _get_compiled_gemm2(BM, use_nt, NE, D_HIDDEN, epilog, D_INTER, D_INTER_REAL, BN, BK, xcd_swizzle)
     max_m_blocks = (max_sorted + BM - 1) // BM
