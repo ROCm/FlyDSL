@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-23T00:58:00Z",
+ "updated": "2026-07-23T01:11:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -96,11 +96,11 @@
    "branch": "feat/rmsnorm-mixed-weight-dtype",
    "event": "pull_request",
    "title": "[rmsnorm] Support FP32 weights with FP16/BF16 activations",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29967225505",
    "created_at": "2026-07-22T23:48:15Z",
-   "updated_at": "2026-07-22T23:50:26Z",
+   "updated_at": "2026-07-23T01:09:16Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -115,10 +115,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-22T23:50:25Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T01:09:15Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29967225505/job/89081482285"
     },
     {
