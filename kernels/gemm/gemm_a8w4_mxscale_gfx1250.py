@@ -16,8 +16,6 @@ from .gemm_common_gfx1250 import (
     lds_load_b32_raw,
     lds_load_b128_raw,
     pipeline_fence,
-    pipeline_fence_signal,
-    pipeline_fence_wait,
     workgroup_barrier,
 )
 
@@ -271,7 +269,7 @@ def launch_gemm_a8w4_mxscale(
             sa_k = [load_sa(buf, wm, ks) for wm in range_constexpr(wmma_m_rep)]
             return wt, sb_k, sa_k
 
-        def _kstep(buf, ks, wt, sb_k, sa_k, nxt_ks):
+        def _kstep(buf, ks, wt, sb_k, sa_k, nxt_ks, prefetch_kt=None):
             act_f = [_rmem(16, load_a(buf, wm, ks)) for wm in _FRONT]
             if const_expr(len(_BACK) > 0):
                 act_b = [_rmem(16, load_a(buf, wm, ks)) for wm in _BACK]
@@ -279,16 +277,21 @@ def launch_gemm_a8w4_mxscale(
             else:
                 rocdl.s_wait_dscnt(0)
             _mma_rows(_FRONT, act_f, wt, sa_k, sb_k)
+            if const_expr(prefetch_kt is not None):
+                rocdl.sched_barrier(0)
+                issue(prefetch_kt % num_buffers, prefetch_kt)
+                rocdl.sched_barrier(0)
             if const_expr(len(_BACK) > 0):
                 rocdl.s_wait_dscnt(0)
                 _mma_rows(_BACK, act_b, wt, sa_k, sb_k)
             return _load_b_scales(buf, nxt_ks) if const_expr(nxt_ks is not None) else None
 
-        def compute_ktile(buf):
+        def compute_ktile(buf, prefetch_kt):
             prev = _load_b_scales(buf, 0)
             for ks in range_constexpr(K_WS):
                 nxt_ks = ks + 1 if const_expr(ks + 1 < K_WS) else None
-                prev = _kstep(buf, ks, prev[0], prev[1], prev[2], nxt_ks)
+                pk = prefetch_kt if const_expr(ks == 0) else None
+                prev = _kstep(buf, ks, prev[0], prev[1], prev[2], nxt_ks, prefetch_kt=pk)
             _fr, _bk = front_wm * wmma_n_rep, len(_BACK) * wmma_n_rep
             for _ks in range_constexpr(K_WS):
                 rocdl.sched_dsrd((_BS_DS if _ks == 0 else 0) + front_wm * DS_A)
@@ -307,10 +310,8 @@ def launch_gemm_a8w4_mxscale(
         for kt in range(n_steady):
             s = kt % num_buffers
             buf = _bidx(_buf_ptr(s))
-            pipeline_fence_signal(outstanding=(num_buffers - 2), use_cluster=False)
-            issue((kt + num_buffers - 1) % num_buffers, kt + num_buffers - 1)
-            pipeline_fence_wait(use_cluster=False)
-            compute_ktile(buf)
+            pipeline_fence(outstanding=(num_buffers - 2), use_cluster=False)
+            compute_ktile(buf, kt + (num_buffers - 1))
             if const_expr(use_cluster) and kt % num_buffers == num_buffers - 1:
                 cluster.cluster_barrier()
         for j in range_constexpr(num_buffers - 1):
@@ -318,7 +319,7 @@ def launch_gemm_a8w4_mxscale(
             s = kt % num_buffers
             buf = _bidx(_buf_ptr(s))
             pipeline_fence(outstanding=(num_buffers - 2 - j), use_cluster=False)
-            compute_ktile(buf)
+            compute_ktile(buf, None)
 
         accs = [c_frags[idx].load().ir_value() for idx in range_constexpr(n_acc)]
 
