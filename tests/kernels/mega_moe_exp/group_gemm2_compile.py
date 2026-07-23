@@ -18,7 +18,7 @@ _TOKENS = 4096
 
 
 def main():
-    launch = compile_group_gemm2(model_dim=MODEL_DIM, inter_dim=INTER_DIM, experts=EXPERTS, a_dtype="fp8", grid_mult=1)
+    launch = compile_group_gemm2(model_dim=MODEL_DIM, inter_dim=INTER_DIM, experts=EXPERTS, grid_mult=1)
     dev = torch.device("cuda", 0)
     a2rows = _MAX_BLOCKS * 32
     out = torch.zeros(_TOKENS, MODEL_DIM, dtype=torch.bfloat16, device=dev)

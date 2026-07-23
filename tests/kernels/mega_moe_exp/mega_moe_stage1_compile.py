@@ -14,9 +14,8 @@ MODEL_DIM = 2048
 INTER_DIM = 1024
 NPES = 8
 EPR = 8
-EXPERTS = NPES * EPR
 FUSE_TOPK = 1
-TILE_M, TILE_N, TILE_K = 32, 256, 256
+TILE_N, TILE_K = 256, 256
 SBM = 32
 FUSE_CAP = 512
 FUSE_MTPR = 512
@@ -47,31 +46,6 @@ def _alloc():
 
 
 def main():
-    launch = compile_mega_moe_stage1(
-        model_dim=MODEL_DIM,
-        inter_dim=INTER_DIM,
-        experts=EXPERTS,
-        topk=FUSE_TOPK,
-        rank=0,
-        experts_per_rank=EPR,
-        fuse_npes=NPES,
-        fuse_topk=FUSE_TOPK,
-        fuse_cap=FUSE_CAP,
-        fuse_mtpr=FUSE_MTPR,
-        fuse_scale_dim=_SCALE_DIM,
-        tile_m=TILE_M,
-        tile_n=TILE_N,
-        tile_k=TILE_K,
-        sort_block_m=SBM,
-        num_waves=4,
-        grid_mult=GRID_MULT,
-        wgm=1,
-        mfma_amajor=True,
-        swizzle_a=True,
-        a_dtype="fp8",
-        out_dtype="fp8",
-        num_dispatch_cu=32,
-    )
     t = _alloc()
     dev = torch.device("cuda", 0)
     s = fx.Stream(torch.cuda.current_stream().cuda_stream)
@@ -80,7 +54,9 @@ def main():
     _in_idx = torch.zeros(FUSE_MTPR * max(1, FUSE_TOPK), dtype=torch.int32, device=dev)
     _in_wts = torch.zeros(FUSE_MTPR * max(1, FUSE_TOPK), dtype=torch.float32, device=dev)
     _in_sc = torch.zeros(FUSE_MTPR * (MODEL_DIM // 32), dtype=torch.uint8, device=dev)
-    _ready = torch.zeros(1, dtype=torch.int32, device=dev)
+    _parity = torch.zeros(1, dtype=torch.int32, device=dev)
+    _expected = torch.zeros(2, dtype=torch.int32, device=dev)
+    _ready = torch.zeros(2, dtype=torch.int32, device=dev)
     args = (
         t["out"],
         t["x"],
@@ -101,11 +77,34 @@ def main():
         fx.Int64(_in_idx.data_ptr()),
         fx.Int64(_in_wts.data_ptr()),
         fx.Int64(_in_sc.data_ptr()),
+        fx.Int64(_parity.data_ptr()),
+        fx.Int64(_expected.data_ptr()),
         fx.Int64(_ready.data_ptr()),
         s,
     )
-    flyc.compile(launch, *args)
-    print("[OK] mega_moe_stage1 compiled (arch=gfx950)")
+    for dispatch_cu in (32, 64):
+        launch = compile_mega_moe_stage1(
+            model_dim=MODEL_DIM,
+            inter_dim=INTER_DIM,
+            rank=0,
+            experts_per_rank=EPR,
+            fuse_npes=NPES,
+            fuse_topk=FUSE_TOPK,
+            fuse_cap=FUSE_CAP,
+            fuse_mtpr=FUSE_MTPR,
+            fuse_scale_dim=_SCALE_DIM,
+            sort_block_m=SBM,
+            tile_n=TILE_N,
+            tile_k=TILE_K,
+            num_waves=4,
+            grid_mult=GRID_MULT,
+            wgm=1,
+            mfma_amajor=True,
+            swizzle_a=True,
+            num_dispatch_cu=dispatch_cu,
+        )
+        flyc.compile(launch, *args)
+        print(f"[OK] mega_moe_stage1 compiled (arch=gfx950, dispatch_cu={dispatch_cu})")
     return 0
 
 

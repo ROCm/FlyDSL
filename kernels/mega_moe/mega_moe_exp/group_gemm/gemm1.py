@@ -30,32 +30,13 @@ class _LdsF32View:
         self.ptr = ptr
 
 
-def compile_moe_group_gemm1(
-    *,
-    model_dim: int,
-    inter_dim: int,
-    experts: int,
-    topk: int = 1,
-    tile_m: int = 64,
-    tile_n: int = 256,
-    tile_k: int = 256,
-    sort_block_m: int = 64,
-    sched_nmajor: bool = False,
-    pipe_weights: bool = True,
-    mfma_amajor: bool = False,
-    swizzle_a: bool = False,
-    a_dtype: str = "fp8",
-    out_dtype: str = "fp8",
-    debug_gate: bool = False,
-    use_xcd: bool = True,
-    num_waves: int = 4,
-    num_cu: int = 256,
-    grid_mult: int = 2,
-    wgm: int = 1,
-):
-    is_f8_a = a_dtype == "fp8"
-    a_row_bytes = model_dim if is_f8_a else model_dim // 2
-    assert tile_m % 16 == 0 and tile_n % 16 == 0
+# fmt: off
+def compile_moe_group_gemm1(*, model_dim: int, inter_dim: int, sort_block_m: int=64, tile_n: int=256,
+    tile_k: int=256, sched_nmajor: bool=False, pipe_weights: bool=True, mfma_amajor: bool=False,
+    swizzle_a: bool=False, use_xcd: bool=True, num_waves: int=4, num_cu: int=256, grid_mult: int=2,
+    wgm: int=1):
+# fmt: on
+    assert sort_block_m % 16 == 0 and tile_n % 16 == 0
     assert model_dim % tile_k == 0
     NUM_WAVES = int(num_waves)
     assert tile_n % NUM_WAVES == 0
@@ -68,17 +49,16 @@ def compile_moe_group_gemm1(
     use_xcd_eff = use_xcd and (grid_x % NUM_XCDS == 0)  # XCD grouping needs grid.x % 8 == 0
     GROUP_SIZE = wgm * N_TILES
     BLOCKS_PER_XCD = grid_x // NUM_XCDS
-    M_REPEAT = tile_m // 16
+    M_REPEAT = sort_block_m // 16
     NUM_ACC_N = n_per_wave // 16
     assert NUM_ACC_N % 2 == 0 and M_REPEAT % 2 == 0
 
     TILE_K_BYTES = tile_k // 2  # fp4 packed K-step bytes (one LDS row must be %128==0)
     assert TILE_K_BYTES % 128 == 0
-    A_K_STEP_BYTES = tile_k if is_f8_a else tile_k // 2
-    SUB_BYTES = 256 if is_f8_a else 128  # A bytes per 256-K MFMA sub-step
-    assert A_K_STEP_BYTES % SUB_BYTES == 0
-    STAGE = A_K_STEP_BYTES // SUB_BYTES  # 256-K sub-steps per A refill/barrier
-    SUB_I32 = SUB_BYTES // 4
+    A_K_STEP_BYTES = tile_k
+    assert A_K_STEP_BYTES == 256
+    STAGE = 1
+    SUB_I32 = 64
     K_ITERS = model_dim // tile_k
     TOTAL_THREADS = NUM_WAVES * 64
 
@@ -95,21 +75,11 @@ def compile_moe_group_gemm1(
         A_scale: fx.Array[fx.Int8, n_scale_bytes, 16]
 
     @flyc.kernel(known_block_size=[TOTAL_THREADS, 1, 1])
-    def kernel(
-        out: fx.Tensor,
-        x: fx.Tensor,
-        w: fx.Tensor,
-        scale_x: fx.Tensor,
-        scale_w: fx.Tensor,
-        sorted_token_ids: fx.Tensor,
-        expert_ids: fx.Tensor,
-        num_valid_ids: fx.Tensor,
-        out_scale: fx.Tensor,
-        tokens: fx.Int32,
-        n: fx.Int32,
-        k: fx.Int32,
-        size_expert_ids: fx.Int32,
-    ):
+    # fmt: off
+    def kernel(out: fx.Tensor, x: fx.Tensor, w: fx.Tensor, scale_x: fx.Tensor, scale_w: fx.Tensor,
+        sorted_token_ids: fx.Tensor, expert_ids: fx.Tensor, num_valid_ids: fx.Tensor, out_scale: fx.Tensor,
+        tokens: fx.Int32, n: fx.Int32, k: fx.Int32, size_expert_ids: fx.Int32):
+    # fmt: on
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         a_buf = lds.pool
         a_scale_lds = lds.A_scale
@@ -124,11 +94,9 @@ def compile_moe_group_gemm1(
         sorted_rsrc = _buffer_ops.create_buffer_resource(sorted_token_ids, max_size=True)
         expert_rsrc = _buffer_ops.create_buffer_resource(expert_ids, max_size=True)
         nv_rsrc = _buffer_ops.create_buffer_resource(num_valid_ids, max_size=True)
-        # out/out_scale MUST be byte-bounded: padding rows store to a sentinel relying on HW OOB drop.
         _rows = size_expert_ids * fx.Int32(sort_block_m)
-        out_elem_bytes = 2 if out_dtype == "bf16" else 1
         scale_cols = (inter_dim // 32 + 7) // 8 * 8
-        out_nbytes = _rows * fx.Int32(inter_dim * out_elem_bytes)
+        out_nbytes = _rows * fx.Int32(inter_dim)
         os_nbytes = _rows * fx.Int32(scale_cols) + fx.Int32(8192)
         out_rsrc = _buffer_ops.create_buffer_resource(out, max_size=False, num_records_bytes=out_nbytes)
         os_rsrc = _buffer_ops.create_buffer_resource(out_scale, max_size=False, num_records_bytes=os_nbytes)
@@ -140,15 +108,11 @@ def compile_moe_group_gemm1(
         sched = TileScheduler(expert_rsrc=expert_rsrc, inter_dim=inter_dim, use_xcd=use_xcd_eff)
         n_wave_base = wave_id * fx.Int32(n_per_wave)
 
-        a_gather = ATileLoader(
-            x_rsrc=x_rsrc,
-            row_bytes=a_row_bytes,
-            sort_block_m=sort_block_m,
-            k_step_bytes=A_K_STEP_BYTES,
-            total_threads=TOTAL_THREADS,
-            swizzle=swizzle_a,
-        )
-        a_s2r = AS2RLoader(is_f8_a=is_f8_a, m_repeat=M_REPEAT, k_step_bytes=A_K_STEP_BYTES, swizzle=swizzle_a)
+        # fmt: off
+        a_gather = ATileLoader(x_rsrc=x_rsrc, row_bytes=model_dim, sort_block_m=sort_block_m,
+            k_step_bytes=A_K_STEP_BYTES, total_threads=TOTAL_THREADS, swizzle=swizzle_a)
+        # fmt: on
+        a_s2r = AS2RLoader(m_repeat=M_REPEAT, k_step_bytes=A_K_STEP_BYTES, swizzle=swizzle_a)
         b_loader = BWeightLoader(w_rsrc=w_rsrc, num_acc_n=NUM_ACC_N, k_step_bytes=TILE_K_BYTES, model_dim=model_dim)
         b_scale = BScaleLoader(scale_rsrc=sw_rsrc, num_acc_n=NUM_ACC_N, model_dim=model_dim)
         a_scale = AScaleLoader(
@@ -158,25 +122,13 @@ def compile_moe_group_gemm1(
             sort_block_m=sort_block_m,
             total_threads=TOTAL_THREADS,
         )
-        mfma = MfmaScaleGU(is_f8_a=is_f8_a, m_repeat=M_REPEAT, num_acc_n=NUM_ACC_N)
-        epi = SiluQuantEpilogue(
-            out_rsrc=out_rsrc,
-            out_scale_rsrc=os_rsrc,
-            sorted_rsrc=sorted_rsrc,
-            tokens=tokens,
-            inter_dim=inter_dim,
-            m_repeat=M_REPEAT,
-            num_acc_n=NUM_ACC_N,
-            sort_block_m=sort_block_m,
-            tile_m=sort_block_m,
-            tile_n=tile_n,
-            num_waves=NUM_WAVES,
-            lds_out=c_tile,
-            out_dtype=out_dtype,
-            debug_gate=debug_gate,
-        )
+        mfma = MfmaScaleGU(m_repeat=M_REPEAT, num_acc_n=NUM_ACC_N)
+        # fmt: off
+        epi = SiluQuantEpilogue(out_rsrc=out_rsrc, out_scale_rsrc=os_rsrc, sorted_rsrc=sorted_rsrc, tokens=tokens,
+            inter_dim=inter_dim, m_repeat=M_REPEAT, num_acc_n=NUM_ACC_N, sort_block_m=sort_block_m, tile_n=tile_n,
+            num_waves=NUM_WAVES, lds_out=c_tile)
+        # fmt: on
 
-        # Flat 1-D persistent loop over (m_tile, n_tile); XCD mode keeps a wgm*N_TILES super-group on one XCD.
         if const_expr(use_xcd_eff):
             it0 = fx.Int32(fx.block_idx.x) // fx.Int32(NUM_XCDS)
             it_stride = fx.Int32(BLOCKS_PER_XCD)
@@ -195,33 +147,12 @@ def compile_moe_group_gemm1(
                 return sg * gsz + within
             return it_v
 
-        # One (m_tile, n_tile) unit.  Kept as a nested fn CALLED BY NAME from the while body so the atom
-        # objects pass as plain args (not method-call receivers) -> the while's carried-var analysis only
-        # threads `itv`, not the atoms.  range(init=) K-loop works here (nested body is AST-rewritten).
-        def _do_tile(
-            m_tile,
-            n_tile_base,
-            sched,
-            a_gather,
-            a_s2r,
-            b_loader,
-            b_scale,
-            a_scale,
-            mfma,
-            epi,
-            a_buf,
-            a_scale_lds,
-            a_lds_i32,
-            K_ITERS,
-            STAGE,
-            SUB_I32,
-            M_REPEAT,
-            NUM_ACC_N,
-            A_K_STEP_BYTES,
-            sort_block_m,
-            pipe_weights,
-            mfma_amajor,
-        ):
+        # Pass atom objects explicitly so loop-carried analysis only tracks runtime state.
+        # fmt: off
+        def _do_tile(m_tile, n_tile_base, sched, a_gather, a_s2r, b_loader, b_scale, a_scale, mfma, epi, a_buf,
+            a_scale_lds, a_lds_i32, K_ITERS, STAGE, SUB_I32, M_REPEAT, NUM_ACC_N, A_K_STEP_BYTES, sort_block_m,
+            pipe_weights, mfma_amajor):
+        # fmt: on
             N_ACC = M_REPEAT * NUM_ACC_N
             last = fx.Int32(K_ITERS - 1)
             tile_row_base = m_tile * fx.Int32(sort_block_m)
@@ -232,7 +163,6 @@ def compile_moe_group_gemm1(
             a_scale.stage(a_scale_lds, tile_row_base)
             wait_lds_barrier()
             if pipe_weights:
-                # Pipelined weights: carry b_prev + acc; issue next-step B loads into this step's MFMA.
                 assert STAGE == 1, "pipelined weight prefetch assumes STAGE==1 (fp8-A, tile_k=256)"
                 b0 = b_loader.load_step(b_row, fx.Int32(0))
                 init = [mfma.zero_value for _ in range(N_ACC)]
@@ -264,7 +194,6 @@ def compile_moe_group_gemm1(
                 acc = [Vec(r) for r in state[:N_ACC]]
                 epi.store(acc, m_tile, tile_row_base, n_tile_base)
             else:
-                # Plain rolled K-loop: weights loaded in-body, consumed immediately (lower B-reg pressure).
                 init = [mfma.zero_value for _ in range(N_ACC)]
                 for sp_i, state in range(0, K_ITERS, 1, init=init):
                     sp = fx.Int32(sp_i)
@@ -290,7 +219,6 @@ def compile_moe_group_gemm1(
                 acc = [Vec(r) for r in state[:N_ACC]]
                 epi.store(acc, m_tile, tile_row_base, n_tile_base)
 
-        # Persistent grid-stride loop over dynamic (runtime) work count (high-level device while loop).
         itv = it0
         while _it_to_flat(itv) < total_work:
             flat = _it_to_flat(itv)
@@ -301,49 +229,19 @@ def compile_moe_group_gemm1(
                 m_tile = flat // fx.Int32(N_TILES)
                 n_tile = flat - m_tile * fx.Int32(N_TILES)
             n_tile_base = n_wave_base + n_tile * fx.Int32(tile_n)
-            _do_tile(
-                m_tile,
-                n_tile_base,
-                sched,
-                a_gather,
-                a_s2r,
-                b_loader,
-                b_scale,
-                a_scale,
-                mfma,
-                epi,
-                a_buf,
-                a_scale_lds,
-                a_lds_i32,
-                K_ITERS,
-                STAGE,
-                SUB_I32,
-                M_REPEAT,
-                NUM_ACC_N,
-                A_K_STEP_BYTES,
-                sort_block_m,
-                pipe_weights,
-                mfma_amajor,
-            )
+            # fmt: off
+            _do_tile(m_tile, n_tile_base, sched, a_gather, a_s2r, b_loader, b_scale, a_scale, mfma, epi, a_buf,
+                a_scale_lds, a_lds_i32, K_ITERS, STAGE, SUB_I32, M_REPEAT, NUM_ACC_N, A_K_STEP_BYTES,
+                sort_block_m, pipe_weights, mfma_amajor)
+            # fmt: on
             itv = itv + it_stride
 
     @flyc.jit
-    def launch(
-        out: fx.Tensor,
-        x: fx.Tensor,
-        w: fx.Tensor,
-        scale_x: fx.Tensor,
-        scale_w: fx.Tensor,
-        sorted_token_ids: fx.Tensor,
-        expert_ids: fx.Tensor,
-        num_valid_ids: fx.Tensor,
-        out_scale: fx.Tensor,
-        tokens: fx.Int32,
-        n: fx.Int32,
-        k: fx.Int32,
-        size_expert_ids: fx.Int32,
-        stream: fx.Stream,
-    ):
+    # fmt: off
+    def launch(out: fx.Tensor, x: fx.Tensor, w: fx.Tensor, scale_x: fx.Tensor, scale_w: fx.Tensor,
+        sorted_token_ids: fx.Tensor, expert_ids: fx.Tensor, num_valid_ids: fx.Tensor, out_scale: fx.Tensor,
+        tokens: fx.Int32, n: fx.Int32, k: fx.Int32, size_expert_ids: fx.Int32, stream: fx.Stream):
+    # fmt: on
         kernel(
             out,
             x,
