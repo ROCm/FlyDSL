@@ -2,8 +2,8 @@
 
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as llvm_dialect
-from flydsl._mlir.dialects import scf
-from flydsl.expr import arith, buffer_ops, gpu, rocdl, tdm_ops, vector
+from flydsl._mlir.dialects import scf, vector
+from flydsl.expr import arith, as_ir_value, gpu, rocdl, tdm_ops
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.rocdl import cluster
 from flydsl.expr.typing import T
@@ -12,6 +12,7 @@ from flydsl.utils.smem_allocator import (
     get_mlir_type_size,
     get_op_result_or_value,
 )
+from kernels.common import buffer_ops
 
 
 def get_lds_memref(lds_ptr):
@@ -23,7 +24,7 @@ def get_lds_memref(lds_ptr):
 
 def _lds_vec_type(memref, total_bits):
     """Build a vector type matching *memref*'s element type for *total_bits*."""
-    raw_mr = arith.unwrap(memref)
+    raw_mr = as_ir_value(memref)
     elem_type = ir.MemRefType(raw_mr.type).element_type
     elem_bits = get_mlir_type_size(elem_type) * 8
     n = total_bits // elem_bits
@@ -41,8 +42,8 @@ def lds_load_b128(memref, elem_off):
         elem_off: Element offset in memref element units.
     """
     vec_ty = _lds_vec_type(memref, 128)
-    loaded = vector.load_op(vec_ty, memref, [elem_off])
-    return vector.bitcast(ir.VectorType.get([4], ir.IntegerType.get_signless(32)), loaded)
+    loaded = vector.load(vec_ty, as_ir_value(memref), [as_ir_value(elem_off)])
+    return vector.bitcast(ir.VectorType.get([4], ir.IntegerType.get_signless(32)), as_ir_value(loaded))
 
 
 def lds_store_b128(memref, elem_off, data):
@@ -58,8 +59,8 @@ def lds_store_b128(memref, elem_off, data):
               ``vec<8×f16>``, ``vec<8×bf16>``).
     """
     vec_ty = _lds_vec_type(memref, 128)
-    typed_vec = vector.bitcast(vec_ty, data)
-    vector.store(typed_vec, memref, [elem_off])
+    typed_vec = vector.bitcast(vec_ty, as_ir_value(data))
+    vector.store(as_ir_value(typed_vec), as_ir_value(memref), [as_ir_value(elem_off)])
 
 
 def extract_lds_base_idx(smem_ptr):
@@ -67,7 +68,7 @@ def extract_lds_base_idx(smem_ptr):
     from flydsl._mlir.dialects import memref as _memref
 
     membuf = get_lds_memref(smem_ptr)
-    raw_memref = arith.unwrap(membuf)
+    raw_memref = as_ir_value(membuf)
     return _memref.extract_aligned_pointer_as_index(raw_memref)
 
 
@@ -204,12 +205,15 @@ def store_acc_vec8_to_lds(memref, base_elem_off, imm_elem_off, acc_vec8, out_ele
     off = base_elem_off + arith.index(imm_elem_off)
     if out_elem is not None:
         h_vec = arith.trunc_f(T.vec(8, out_elem), acc_vec8)
-        i32_vec = vector.bitcast(T.vec(4, T.i32), h_vec)
+        i32_vec = vector.bitcast(T.vec(4, T.i32), as_ir_value(h_vec))
         lds_store_b128(memref, off, i32_vec)
     else:
         for half in range(2):
-            vals = [vector.extract(acc_vec8, static_position=[half * 4 + vi], dynamic_position=[]) for vi in range(4)]
-            vec4 = vector.from_elements(T.vec(4, T.f32), vals)
+            vals = [
+                vector.extract(as_ir_value(acc_vec8), dynamic_position=[], static_position=[half * 4 + vi])
+                for vi in range(4)
+            ]
+            vec4 = vector.from_elements(T.vec(4, T.f32), [as_ir_value(e) for e in vals])
             lds_store_b128(memref, off + arith.index(half * 8), vec4)
 
 
@@ -233,13 +237,16 @@ def store_acc_vec8_to_buffer(acc_vec8, c_rsrc, addr, out_elem=None, offset_is_by
     """
     if out_elem is not None:
         h_vec = arith.trunc_f(T.vec(8, out_elem), acc_vec8)
-        i32_vec = vector.bitcast(T.vec(4, T.i32), h_vec)
+        i32_vec = vector.bitcast(T.vec(4, T.i32), as_ir_value(h_vec))
         buffer_ops.buffer_store(i32_vec, c_rsrc, addr, offset_is_bytes=offset_is_bytes)
         return 1
     else:
         for half in range(2):
-            vals = [vector.extract(acc_vec8, static_position=[half * 4 + vi], dynamic_position=[]) for vi in range(4)]
-            vec4 = vector.from_elements(T.vec(4, T.f32), vals)
+            vals = [
+                vector.extract(as_ir_value(acc_vec8), dynamic_position=[], static_position=[half * 4 + vi])
+                for vi in range(4)
+            ]
+            vec4 = vector.from_elements(T.vec(4, T.f32), [as_ir_value(e) for e in vals])
             if isinstance(addr, (list, tuple)):
                 buffer_ops.buffer_store(vec4, c_rsrc, addr[half])
             else:

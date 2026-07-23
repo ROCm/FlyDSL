@@ -672,14 +672,14 @@ def lds_load_pack_k32(
     if ck_lds128:
         coord_a16 = (curr_row_a_lds, col_base_swz)
         idx_a16 = preshuffle_crd2idx(tuple(fx.Int32(c) for c in coord_a16), layout_lds) + lds_base
-        loaded_a16 = vector.load_op(vec16_ty, lds_memref, [idx_a16])
+        loaded_a16 = vector.load(vec16_ty, fx.as_ir_value(lds_memref), [fx.as_ir_value(idx_a16)])
         a_vec128 = vector.bitcast(vec2_i64_ty, loaded_a16)
         return vector.extract(a_vec128, static_position=[half], dynamic_position=[])
     else:
         col_swizzled = col_base_swz + (half * 8)
         coord_a = (curr_row_a_lds, col_swizzled)
         idx_a = preshuffle_crd2idx(tuple(fx.Int32(c) for c in coord_a), layout_lds) + lds_base
-        loaded_a8 = vector.load_op(vec8_ty, lds_memref, [idx_a])
+        loaded_a8 = vector.load(vec8_ty, fx.as_ir_value(lds_memref), [fx.as_ir_value(idx_a)])
         a_vec64 = vector.bitcast(vec1_i64_ty, loaded_a8)
         return vector.extract(a_vec64, static_position=[0], dynamic_position=[])
 

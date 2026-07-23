@@ -33,12 +33,11 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.protocol import dsl_size_of
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr
+from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
-from flydsl.expr.typing import T
-from flydsl.expr.vector import ReductionOp
+from flydsl.expr.typing import ReductionOp, T
 from flydsl.runtime.device import get_rocm_arch
-from kernels.common import dpp_utils
+from kernels.common import buffer_ops, dpp_utils
 from kernels.common.tensor_shim import _run_compiled
 from kernels.common.utils import (
     cdiv,

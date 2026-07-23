@@ -24,7 +24,8 @@ Computes C[M,N] = A[M,K] @ B_T[N,K]^T
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm as _llvm
-from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
+from kernels.common import buffer_ops
 
 WMMA_M = 16
 WMMA_N = 16

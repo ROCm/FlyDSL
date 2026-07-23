@@ -16,9 +16,10 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm, rocdl, scf
 from flydsl.compiler.ast_rewriter import ASTRewriter
 from flydsl.expr import arith as ea
-from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr
+from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.comm.custom_all_reduce import _KMAXBLOCKS as _MAX_BLOCKS
+from kernels.common import buffer_ops
 
 # ---------------------------------------------------------------------------
 # Low-level memory helpers — all operate on raw i64 device addresses.

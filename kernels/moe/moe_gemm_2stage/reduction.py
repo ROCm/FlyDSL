@@ -8,10 +8,11 @@ import functools
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import scf
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, vector
+from flydsl._mlir.dialects import scf, vector
+from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
+from kernels.common import buffer_ops
 from kernels.common.kernels_common import _if_else, _if_then
 
 
