@@ -284,7 +284,7 @@ if lane == c_zero:
     ...
 
 in_range = lane < c_limit
-val = fx.arith.select(in_range, good_val, zero_val)
+val = in_range.select(good_val, zero_val)
 
 # Avoid for simple integer comparisons
 in_range = arith.cmpi(arith.CmpIPredicate.slt, lane, c_limit)
@@ -484,7 +484,7 @@ Use `Vec.filled(...)` for splats and `Vec.from_elements(...)` for vectors from s
 | Multiply | `a * b` | Yes | Use direct FOp only for explicit fastmath |
 | Negate | `-a` | Yes | |
 | Max | `a.maximumf(b)` | Yes | Good for ReLU |
-| Compare | `arith.cmpf(a, b, pred)` | Yes | Returns i1/vec<i1> |
+| Compare | `a < b`, `a == b`, `a > b` | Yes | Operators; keep `arith.cmpf(...)` only for fastmath/unordered predicates |
 | Select | `cond.select(t, f)` | Yes | |
 | Abs | no direct helper | Use `-v`, comparison, and `cond.select(...)` |
 | FMA | `a * b + c` | Yes | Use direct FOp only when explicit fastmath is needed |
@@ -714,11 +714,9 @@ The preshuffle GEMM pattern in `kernels/gemm/preshuffle_gemm.py`:
 ### Warp Reduction (AMD wave64)
 XOR-shuffle-based intra-wave reduction:
 ```python
-width_i32 = fx.Int32(64)
 for sh in [32, 16, 8, 4, 2, 1]:
-    off = fx.Int32(sh)
-    peer = gpu.ShuffleOp(val, off, width_i32, mode="xor").shuffleResult
-    val = ArithValue(val) + peer  # use explicit FOp only if fastmath flags are needed
+    peer = val.shuffle_xor(fx.Int32(sh), fx.Int32(64))  # typed numeric method
+    val = val + peer                                    # or val.addf(peer, fastmath=...) for fastmath
 ```
 
 ### Block Reduction
@@ -922,7 +920,7 @@ Pass raw `torch.Tensor` objects instead.
 
 10. **INT4 (W4A8)**: A matrix is int8, B matrix is packed int4 (2 values/byte), unpacked to int8 in-kernel.
 
-11. **`arith.absf` does not exist**: Prefer `Vector`/`ArithValue` operators: `neg = -v`, `is_neg = v < zero`, `out = is_neg.select(neg, v)`.
+11. **`arith.absf` does not exist**: Prefer `Vector`/`Numeric` operators: `neg = -v`, `is_neg = v < zero`, `out = is_neg.select(neg, v)`.
 
 12. **Scalar broadcast to vector**: Use `Vec.filled(width, value, fx.Float32)` to create a splat constant vector. Do NOT use raw vector ops for ordinary arithmetic.
 

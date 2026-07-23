@@ -43,7 +43,7 @@ def vec_add_kernel(
     tid = gpu.thread_idx.x
     bid = gpu.block_idx.x
     idx = bid * 256 + tid
-    # ... kernel body using fx.*, ArithValue, Vector, and buffer ops ...
+    # ... kernel body using fx.*, Vector, and buffer ops ...
 
 @flyc.jit
 def vec_add(
@@ -198,7 +198,7 @@ c42 = fx.Int64(42)          # 64-bit integer constant (prefer over the deprecate
 c3_14 = fx.Float32(3.14)    # f32 constant
 mask = fx.Int32(0xFF)       # i32 constant
 
-# Arithmetic (operator overloading via ArithValue / Numeric)
+# Arithmetic (operators overloaded on fx numeric types)
 result = a + b
 result = a * 2
 result = a // 4
@@ -209,7 +209,7 @@ i64_val = fx.Int64(int_val) # cast to 64-bit integer (fx.Index is deprecated)
 i32_val = fx.Int32(i64_val) # cast to i32
 
 # Select
-result = cond.select(true_val, false_val)  # when cond is an ArithValue
+result = cond.select(true_val, false_val)  # cond is an fx compare result
 
 # Bitwise
 result = a & b
