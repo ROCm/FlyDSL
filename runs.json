@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-07-23T04:15:16Z",
+ "updated": "2026-07-23T04:22:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29979228033,
+   "pr": 885,
+   "commit": "3e812c4d04571051460c88c6cacbd5e80b388356",
+   "branch": "gfx1250/gemm-refactor",
+   "event": "pull_request",
+   "title": "[WIP][gfx1250] Refactor GEMM kernels with layout/atom API",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29979228033",
+   "created_at": "2026-07-23T04:18:40Z",
+   "updated_at": "2026-07-23T04:19:24Z",
+   "actor": "aoli26",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-23T04:19:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29979228033/job/89117493327"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-23T04:19:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29979228033/job/89117493338"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-23T04:19:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29979228033/job/89117493339"
+    }
+   ]
+  },
+  {
+   "run_id": 29979209233,
+   "pr": 885,
+   "commit": "6847d9a7076197c595b44aae29371849db817f1c",
+   "branch": "gfx1250/gemm-refactor",
+   "event": "pull_request",
+   "title": "[WIP][gfx1250] Refactor GEMM kernels with layout/atom API",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29979209233",
+   "created_at": "2026-07-23T04:18:13Z",
+   "updated_at": "2026-07-23T04:18:41Z",
+   "actor": "aoli26",
+   "jobs": []
+  },
   {
    "run_id": 29978950127,
    "pr": 869,
@@ -10,13 +68,41 @@
    "branch": "kernel/sage-attention-cdna",
    "event": "pull_request",
    "title": "[Kernel] Add CDNA SageAttention kernel",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29978950127",
    "created_at": "2026-07-23T04:12:12Z",
-   "updated_at": "2026-07-23T04:12:50Z",
+   "updated_at": "2026-07-23T04:13:24Z",
    "actor": "LiuYinfeng01",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-23T04:13:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29978950127/job/89116740633"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-23T04:13:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29978950127/job/89116740635"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-23T04:13:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29978950127/job/89116740646"
+    }
+   ]
   },
   {
    "run_id": 29978072927,
@@ -2167,64 +2253,6 @@
      "started_at": "2026-07-21T08:48:56Z",
      "completed_at": "2026-07-21T10:23:29Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29815614644/job/88586345621"
-    }
-   ]
-  },
-  {
-   "run_id": 29814604892,
-   "pr": 825,
-   "commit": "5dec4a2b4b0a3c0b1191c8a9a1ab95e9c90e5b96",
-   "branch": "pa-decode-tile",
-   "event": "pull_request",
-   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29814604892",
-   "created_at": "2026-07-21T08:31:13Z",
-   "updated_at": "2026-07-21T08:32:38Z",
-   "actor": "fsx950223",
-   "jobs": []
-  },
-  {
-   "run_id": 29814461599,
-   "pr": null,
-   "commit": "8e70ae73ebb58a6c20c1c8ea719ae41ce0f124ad",
-   "branch": "main",
-   "event": "push",
-   "title": "[Feat] Export shuffle xor/up/down/idx ops (#871)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29814461599",
-   "created_at": "2026-07-21T08:29:05Z",
-   "updated_at": "2026-07-21T10:36:17Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-21T08:30:58Z",
-     "completed_at": "2026-07-21T08:50:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29814461599/job/88582771289"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-21T08:31:42Z",
-     "completed_at": "2026-07-21T10:09:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29814461599/job/88582771350"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-21T08:41:43Z",
-     "completed_at": "2026-07-21T10:36:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29814461599/job/88582771569"
     }
    ]
   }
