@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-23T06:52:04Z",
+ "updated": "2026-07-23T06:53:49Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29986384860,
+   "pr": 888,
+   "commit": "4e5e73c5edc054c3ad3df8d7f9ae916a0f4b760e",
+   "branch": "add-8wave-gemm-locality",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add cache-aware 8-wave BF16/FP16 GEMM",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986384860",
+   "created_at": "2026-07-23T06:51:45Z",
+   "updated_at": "2026-07-23T06:52:32Z",
+   "actor": "zhanglx13",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-23T06:52:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986384860/job/89139204034"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-23T06:52:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986384860/job/89139204059"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-23T06:52:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986384860/job/89139204061"
+    }
+   ]
+  },
   {
    "run_id": 29986281527,
    "pr": 886,
@@ -10,13 +53,41 @@
    "branch": "lse_addition",
    "event": "pull_request",
    "title": "Add optional forward LSE output",
-   "status": "pending",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986281527",
    "created_at": "2026-07-23T06:49:51Z",
-   "updated_at": "2026-07-23T06:49:52Z",
+   "updated_at": "2026-07-23T06:51:02Z",
    "actor": "AakarshAMD",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-23T06:51:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986281527/job/89138944112"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-23T06:51:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986281527/job/89138944127"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-23T06:51:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986281527/job/89138944181"
+    }
+   ]
   },
   {
    "run_id": 29986161336,
@@ -40,29 +111,29 @@
    "branch": "lse_addition",
    "event": "pull_request",
    "title": "Add optional forward LSE output",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29985518980",
    "created_at": "2026-07-23T06:35:28Z",
-   "updated_at": "2026-07-23T06:49:52Z",
+   "updated_at": "2026-07-23T06:50:29Z",
    "actor": "AakarshAMD",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-23T06:37:18Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T06:50:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29985518980/job/89136595558"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-23T06:37:19Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T06:50:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29985518980/job/89136595571"
     },
     {
@@ -2203,21 +2274,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29841467347/job/88673034482"
     }
    ]
-  },
-  {
-   "run_id": 29840782836,
-   "pr": null,
-   "commit": "482163733fd166b4b79e36cfa3ebbdf604022a37",
-   "branch": "binding_fa_opt",
-   "event": "pull_request",
-   "title": "[Perf]optimize flydsl flash attention kernel",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29840782836",
-   "created_at": "2026-07-21T14:47:14Z",
-   "updated_at": "2026-07-21T14:50:43Z",
-   "actor": "binding7012",
-   "jobs": []
   }
  ]
 }
