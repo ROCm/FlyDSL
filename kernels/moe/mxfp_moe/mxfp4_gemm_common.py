@@ -7,6 +7,7 @@ from flydsl._mlir.dialects import llvm
 from flydsl._mlir.dialects import memref as memref_dialect
 from flydsl.expr import arith, buffer_ops
 from flydsl.expr.typing import T
+from kernels.common.layout_utils import crd2idx  # noqa: F401  (re-exported for gemm1/gemm2)
 
 from . import dpp_utils
 
