@@ -16,7 +16,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
-from flydsl.expr.vector import ReductionOp, full
+from flydsl.expr.typing import ReductionOp, full
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import dtype_to_elem_type
 

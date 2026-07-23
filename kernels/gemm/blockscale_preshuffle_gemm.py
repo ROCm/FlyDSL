@@ -10,11 +10,12 @@ Scale layouts: scale_a [scale_k, M] transposed, scale_b [scale_n, scale_k] row-m
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
+from flydsl._mlir.dialects import llvm, vector
+from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch
+from kernels.common import buffer_ops
 from kernels.common.mma.mfma_epilogues import mfma_epilog
 from kernels.common.mma.mfma_preshuffle_pipeline import (
     _buffer_load_vec,

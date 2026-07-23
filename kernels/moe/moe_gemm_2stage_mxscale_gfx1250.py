@@ -16,7 +16,9 @@ from __future__ import annotations
 import functools
 
 from flydsl.runtime.device import get_rocm_arch
+from flydsl.expr import as_ir_value
 
+from kernels.common.gfx1250_cluster import compute_mcast_masks
 from kernels.moe.moe_gemm_2stage import (
     MoeGemm2Mode,
     compile_moe_reduction,
@@ -92,12 +94,13 @@ def _compile_stage1_mxscale_kernel_impl(
     import flydsl.expr as fx
     from flydsl._mlir import ir
     from flydsl._mlir.dialects import llvm as llvm_dialect
-    from flydsl._mlir.dialects import memref, scf
+    from flydsl._mlir.dialects import memref, scf, vector
     from flydsl.compiler.kernel_function import CompilationContext
-    from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops, vector
+    from flydsl.expr import arith, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops
     from flydsl.expr.rocdl import cluster
     from flydsl.expr.typing import T
     from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
+    from kernels.common import buffer_ops
 
     tp = _compute_mxscale_tiling(
         data_format=data_format, K=int(model_dim),
@@ -404,7 +407,7 @@ def _compile_stage1_mxscale_kernel_impl(
 
         if const_expr(use_cluster):
             _local_x, _local_y = cluster.compute_cluster_position()
-            _a_mcast_mask, b_mcast_mask = cluster.compute_mcast_masks(
+            _a_mcast_mask, b_mcast_mask = compute_mcast_masks(
                 _local_x, _local_y, int(cluster_m), int(cluster_n))
         else:
             b_mcast_mask = 0
@@ -504,8 +507,10 @@ def _compile_stage1_mxscale_kernel_impl(
                     x_idx_safe = arith.select(load_ok, x_idx, arith.constant(0, type=T.i32))
                     x_val = arith.select(load_ok, buffer_ops.buffer_load(x_rsrc, x_idx_safe, vec_width=1, dtype=T.i8), arith.constant(0, type=T.i8))
                     lds_idx = row * arith.index(lds_a_stride_bytes) + col
-                    v1 = vector.from_elements(T.vec(1, T.i8), [x_val])
-                    vector.store(v1, target_lds, [lds_idx], alignment=1)
+                    v1 = vector.from_elements(T.vec(1, T.i8), [as_ir_value(x_val)])
+                    vector.store(
+                        as_ir_value(v1), as_ir_value(target_lds), [as_ir_value(lds_idx)], alignment=1
+                    )
                     scf.YieldOp([])
 
         # Pre-compute token row indices for ALL tile_m rows (once, outside K-loop).
@@ -555,8 +560,8 @@ def _compile_stage1_mxscale_kernel_impl(
                     sorted_rsrc, _row_safe_i32, vec_width=1, dtype=T.i32)
                 _sentinel = arith.constant(-1, type=T.i32)  # 0xFFFFFFFF
                 _val = arith.select(_row_valid, _raw, _sentinel)
-                _vec1 = vector.from_elements(T.vec(1, T.i32), [_val])
-                vector.store(_vec1, lds_tid, [tx], alignment=4)
+                _vec1 = vector.from_elements(T.vec(1, T.i32), [as_ir_value(_val)])
+                vector.store(as_ir_value(_vec1), as_ir_value(lds_tid), [as_ir_value(tx)], alignment=4)
                 scf.YieldOp([])
             workgroup_barrier(use_cluster=use_cluster)
 
@@ -700,14 +705,14 @@ def _compile_stage1_mxscale_kernel_impl(
                 # differs), so we can extract them from any buffer's base
                 # descriptor.
                 _base_addr_lo.append(vector.extract(
-                    _per_buf[0].dgroup0,
-                    static_position=[2],
+                    as_ir_value(_per_buf[0].dgroup0),
                     dynamic_position=[],
+                    static_position=[2],
                 ))
                 _base_addr_hi.append(vector.extract(
-                    _per_buf[0].dgroup0,
-                    static_position=[3],
+                    as_ir_value(_per_buf[0].dgroup0),
                     dynamic_position=[],
+                    static_position=[3],
                 ))
 
             _a_gather_cache["desc"] = _descs
@@ -762,16 +767,16 @@ def _compile_stage1_mxscale_kernel_impl(
 
         def _extract_desc_addr_lo(desc):
             return vector.extract(
-                desc.dgroup0,
-                static_position=[2],
+                as_ir_value(desc.dgroup0),
                 dynamic_position=[],
+                static_position=[2],
             )
 
         def _extract_desc_addr_hi(desc):
             return vector.extract(
-                desc.dgroup0,
-                static_position=[3],
+                as_ir_value(desc.dgroup0),
                 dynamic_position=[],
+                static_position=[3],
             )
 
         def _build_b_base_descs():
@@ -2317,12 +2322,13 @@ def _compile_stage2_mxscale_kernel_impl(
     import flydsl.expr as fx
     from flydsl._mlir import ir
     from flydsl._mlir.dialects import llvm as llvm_dialect
-    from flydsl._mlir.dialects import memref, scf
+    from flydsl._mlir.dialects import memref, scf, vector
     from flydsl.compiler.kernel_function import CompilationContext
-    from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops, vector
+    from flydsl.expr import arith, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops
     from flydsl.expr.rocdl import cluster
     from flydsl.expr.typing import T
     from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
+    from kernels.common import buffer_ops
 
     if bool(use_tdm_store) and bool(accumulate):
         raise ValueError("use_tdm_store is not compatible with accumulate=True in moe mxscale stage2")
@@ -2570,7 +2576,7 @@ def _compile_stage2_mxscale_kernel_impl(
 
         if const_expr(use_cluster):
             _local_x, _local_y = cluster.compute_cluster_position()
-            _a_mcast_mask, b_mcast_mask = cluster.compute_mcast_masks(
+            _a_mcast_mask, b_mcast_mask = compute_mcast_masks(
                 _local_x, _local_y, int(cluster_m), int(cluster_n))
         else:
             b_mcast_mask = 0
@@ -2689,8 +2695,8 @@ def _compile_stage2_mxscale_kernel_impl(
                     sorted_rsrc, _row_safe_i32, vec_width=1, dtype=T.i32)
                 _sentinel = arith.constant(-1, type=T.i32)  # 0xFFFFFFFF
                 _val = arith.select(_row_valid, _raw, _sentinel)
-                _vec1 = vector.from_elements(T.vec(1, T.i32), [_val])
-                vector.store(_vec1, lds_tid, [tx], alignment=4)
+                _vec1 = vector.from_elements(T.vec(1, T.i32), [as_ir_value(_val)])
+                vector.store(as_ir_value(_vec1), as_ir_value(lds_tid), [as_ir_value(tx)], alignment=4)
                 scf.YieldOp([])
             workgroup_barrier(use_cluster=use_cluster)
 
@@ -2746,8 +2752,10 @@ def _compile_stage2_mxscale_kernel_impl(
                     x_idx_safe = arith.select(load_ok, x_idx, arith.constant(0, type=T.i32))
                     x_val = arith.select(load_ok, buffer_ops.buffer_load(x_rsrc, x_idx_safe, vec_width=1, dtype=T.i8), arith.constant(0, type=T.i8))
                     lds_idx = row * arith.index(lds_a_stride_bytes) + col
-                    v1 = vector.from_elements(T.vec(1, T.i8), [x_val])
-                    vector.store(v1, target_lds, [lds_idx], alignment=1)
+                    v1 = vector.from_elements(T.vec(1, T.i8), [as_ir_value(x_val)])
+                    vector.store(
+                        as_ir_value(v1), as_ir_value(target_lds), [as_ir_value(lds_idx)], alignment=1
+                    )
                     scf.YieldOp([])
 
         # Cache of K-invariant pieces of the stage2 TDM gather descriptor.
@@ -2807,14 +2815,14 @@ def _compile_stage2_mxscale_kernel_impl(
                     _per_buf.append(_base_desc)
                 _descs.append(_per_buf)
                 _base_addr_lo.append(vector.extract(
-                    _per_buf[0].dgroup0,
-                    static_position=[2],
+                    as_ir_value(_per_buf[0].dgroup0),
                     dynamic_position=[],
+                    static_position=[2],
                 ))
                 _base_addr_hi.append(vector.extract(
-                    _per_buf[0].dgroup0,
-                    static_position=[3],
+                    as_ir_value(_per_buf[0].dgroup0),
                     dynamic_position=[],
+                    static_position=[3],
                 ))
 
             _a_gather_cache["desc"] = _descs
@@ -3109,16 +3117,16 @@ def _compile_stage2_mxscale_kernel_impl(
 
         def _extract_desc_addr_lo(desc):
             return vector.extract(
-                desc.dgroup0,
-                static_position=[2],
+                as_ir_value(desc.dgroup0),
                 dynamic_position=[],
+                static_position=[2],
             )
 
         def _extract_desc_addr_hi(desc):
             return vector.extract(
-                desc.dgroup0,
-                static_position=[3],
+                as_ir_value(desc.dgroup0),
                 dynamic_position=[],
+                static_position=[3],
             )
 
         def _build_b_base_descs():

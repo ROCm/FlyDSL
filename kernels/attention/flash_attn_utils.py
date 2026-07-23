@@ -21,12 +21,13 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly, llvm, vector
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TargetAddressSpace
 from flydsl.compiler.ast_rewriter import ReplaceIfWithDispatch
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 from flydsl.utils.smem_allocator import SmemPtr
+from kernels.common import buffer_ops
 from kernels.common.kernels_common import dtype_to_elem_type
 
 _LOG2E = host_math.log2(host_math.e)

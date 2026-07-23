@@ -23,11 +23,12 @@ Compile options:
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm, scf
+from flydsl._mlir.dialects import llvm, scf, vector
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, vector
+from flydsl.expr import arith, as_ir_value, const_expr, range_constexpr
 from flydsl.expr.arith import ArithValue, CmpIPredicate
 from flydsl.expr.typing import Int32, T
+from kernels.common import buffer_ops
 
 BLOCK_THREADS = 256
 WARP_SIZE = 64
@@ -239,17 +240,17 @@ def build_silu_and_mul_fq_module(
                         up_raw = buffer_ops.buffer_load(in_rsrc, up_dw, vec_width=1, dtype=i32)
                         gate_bf16 = vector.bitcast(
                             vec_bf16_ty,
-                            vector.from_elements(vec1_i32_ty, [gate_raw]),
+                            as_ir_value(vector.from_elements(vec1_i32_ty, [as_ir_value(gate_raw)])),
                         )
                         up_bf16 = vector.bitcast(
                             vec_bf16_ty,
-                            vector.from_elements(vec1_i32_ty, [up_raw]),
+                            as_ir_value(vector.from_elements(vec1_i32_ty, [as_ir_value(up_raw)])),
                         )
                     else:
                         gate_raw = buffer_ops.buffer_load(in_rsrc, gate_dw, vec_width=vec_dw, dtype=i32)
                         up_raw = buffer_ops.buffer_load(in_rsrc, up_dw, vec_width=vec_dw, dtype=i32)
-                        gate_bf16 = vector.bitcast(vec_bf16_ty, gate_raw)
-                        up_bf16 = vector.bitcast(vec_bf16_ty, up_raw)
+                        gate_bf16 = vector.bitcast(vec_bf16_ty, as_ir_value(gate_raw))
+                        up_bf16 = vector.bitcast(vec_bf16_ty, as_ir_value(up_raw))
                     gate_f32 = gate_bf16.extf(vec_f32_ty)
                     up_f32 = up_bf16.extf(vec_f32_ty)
 
@@ -264,8 +265,8 @@ def build_silu_and_mul_fq_module(
 
                     act_vals = []
                     for vi in range_constexpr(VEC):
-                        g = vector.extract(gate_f32, static_position=[vi], dynamic_position=[])
-                        u = vector.extract(up_f32, static_position=[vi], dynamic_position=[])
+                        g = vector.extract(as_ir_value(gate_f32), dynamic_position=[], static_position=[vi])
+                        u = vector.extract(as_ir_value(up_f32), dynamic_position=[], static_position=[vi])
 
                         if enable_bias:
                             bias_col = col0 + arith.constant(vi, type=i32)
@@ -438,12 +439,14 @@ def build_silu_and_mul_fq_module(
                         out_dw_off = out_byte_off >> c2_i32
                         _vec_f32_ty = T.vec(VEC, f32)
                         _vec_bf16_ty = T.vec(VEC, T.bf16)
-                        act_f32_vec = vector.from_elements(_vec_f32_ty, act_vals)
+                        act_f32_vec = vector.from_elements(_vec_f32_ty, [as_ir_value(e) for e in act_vals])
                         act_bf16_vec = act_f32_vec.truncf(_vec_bf16_ty)
-                        act_i32 = vector.bitcast(T.vec(VEC * elem_bytes_bf16 // 4, i32), act_bf16_vec)
+                        act_i32 = vector.bitcast(T.vec(VEC * elem_bytes_bf16 // 4, i32), as_ir_value(act_bf16_vec))
                         vec_dw_out = VEC * elem_bytes_bf16 // 4
                         if const_expr(vec_dw_out == 1):
-                            store_scalar = vector.extract(act_i32, static_position=[0], dynamic_position=[])
+                            store_scalar = vector.extract(
+                                as_ir_value(act_i32), dynamic_position=[], static_position=[0]
+                            )
                             buffer_ops.buffer_store(store_scalar, out_rsrc, out_dw_off)
                         else:
                             buffer_ops.buffer_store(act_i32, out_rsrc, out_dw_off)

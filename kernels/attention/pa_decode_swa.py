@@ -7,11 +7,12 @@ import functools
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
+from flydsl._mlir.dialects import vector
+from flydsl.expr import arith, as_ir_value, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fly_math
 from flydsl.expr.typing import Int32, T
 from kernels.attention.pa_common import _compute_block_base_dw_i64, _prefetch_q_chunks
-from kernels.common import dpp_utils
+from kernels.common import buffer_ops, dpp_utils
 from kernels.common.utils import (
     cdiv,
     global_load_i32,
@@ -494,7 +495,7 @@ def _make_pa_phase_helpers(
                 for i in range_constexpr(4):
                     if const_expr(kv_tok_base is not None):
                         kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
-                        vs_i = vector.extract(vs, static_position=[i], dynamic_position=[])
+                        vs_i = vector.extract(as_ir_value(vs), static_position=[i], dynamic_position=[])
                         vs_i = arith.select(kv_tok < seq_end, vs_i, zero_f)
                         vs = vector.insert(vs_i, vs, static_position=[i], dynamic_position=[])
                 v_max_warp = v_max_warp.maximumf(fx.Vector(vs).reduce("max"))
@@ -664,10 +665,10 @@ def _make_pa_phase_helpers(
                 d_out[td] = d_out[td] * vector.broadcast(T.f32x4, arith.unwrap(prob_scale))
 
         for td in range_constexpr(TLOOP):
-            p0 = vector.extract(d_out[td], static_position=[0], dynamic_position=[])
-            p1 = vector.extract(d_out[td], static_position=[1], dynamic_position=[])
-            p2 = vector.extract(d_out[td], static_position=[2], dynamic_position=[])
-            p3 = vector.extract(d_out[td], static_position=[3], dynamic_position=[])
+            p0 = vector.extract(as_ir_value(d_out[td]), static_position=[0], dynamic_position=[])
+            p1 = vector.extract(as_ir_value(d_out[td]), static_position=[1], dynamic_position=[])
+            p2 = vector.extract(as_ir_value(d_out[td]), static_position=[2], dynamic_position=[])
+            p3 = vector.extract(as_ir_value(d_out[td]), static_position=[3], dynamic_position=[])
             lo = rocdl.cvt_pk_fp8_f32(T.i32, p0, p1, arith.constant(0, type=T.i32), False)
             pk = rocdl.cvt_pk_fp8_f32(T.i32, p2, p3, lo, True)
             elem_base = prob_wr_thread_base + arith.constant(td * MFMA_N * (PROB_ROW_STRIDE_BYTES // 4), type=T.i32)

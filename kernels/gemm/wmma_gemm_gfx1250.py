@@ -8,12 +8,14 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops
+from flydsl.expr import arith, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.rocdl import cluster
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
+from kernels.common import buffer_ops
+from kernels.common.gfx1250_cluster import compute_mcast_masks
 from kernels.common.mma.pipeline_utils_gfx1250 import make_tail_plan, tdm_epilogue_fence_threshold_bytes
 from kernels.common.utils import align_up as _align_up
 from kernels.gemm.gemm_common_gfx1250 import (
@@ -239,7 +241,7 @@ def compile_wmma_gemm_tdm(
         # --- Cluster MCAST setup ---
         if const_expr(use_cluster):
             local_x, local_y = cluster.compute_cluster_position()
-            a_mcast_mask, b_mcast_mask = cluster.compute_mcast_masks(local_x, local_y, cluster_m, cluster_n)
+            a_mcast_mask, b_mcast_mask = compute_mcast_masks(local_x, local_y, cluster_m, cluster_n)
         else:
             a_mcast_mask = 0
             b_mcast_mask = 0
