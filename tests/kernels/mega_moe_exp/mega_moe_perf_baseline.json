@@ -1,0 +1,23 @@
+{
+  "_comment": "Experimental MegaMoE v2 forward() CUDAGraph E2E latency (ms), one fused op per rank, mean across 8 ranks. Regenerate with tests/kernels/mega_moe_exp/test_mega_moe_v2.py and write back to this file.",
+  "_captured": "8x AMD MI355X (gfx950), iters=20, expandable_segments. NOTE: v4_pro bs=16384 is omitted -- its fused-stage2 a2 buffer (max_recv*topk*inter_dim ~= 2.4e9 elems) exceeds the flydsl 32-bit buffer num_records cap; v4_flash bs=16384 fits.",
+  "v4_flash:a8w4:8": 0.1135,
+  "v4_flash:a8w4:16": 0.1232,
+  "v4_flash:a8w4:32": 0.1274,
+  "v4_flash:a8w4:64": 0.1352,
+  "v4_flash:a8w4:128": 0.1488,
+  "v4_flash:a8w4:512": 0.2631,
+  "v4_flash:a8w4:2048": 0.765,
+  "v4_flash:a8w4:4096": 1.559,
+  "v4_flash:a8w4:8192": 2.9255,
+  "v4_flash:a8w4:16384": 5.7008,
+  "v4_pro:a8w4:8": 0.2574,
+  "v4_pro:a8w4:16": 0.3157,
+  "v4_pro:a8w4:32": 0.3267,
+  "v4_pro:a8w4:64": 0.338,
+  "v4_pro:a8w4:128": 0.3508,
+  "v4_pro:a8w4:512": 0.6221,
+  "v4_pro:a8w4:2048": 1.6634,
+  "v4_pro:a8w4:4096": 3.1158,
+  "v4_pro:a8w4:8192": 6.0063
+}

@@ -4,34 +4,36 @@
 
 import flydsl.compiler as flyc  # noqa: F401
 import flydsl.expr as fx
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm as _llvm
-from flydsl._mlir.dialects import scf
-from flydsl._mlir.dialects.arith import CmpIPredicate
-from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import buffer_ops as _buffer_ops
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
+from kernels.moe.mixed_moe_gemm_2stage.common import _barrier
 
 _PACK = 2  # fp4 micro-scale pack (per-32 E8M0): pack_M = pack_N = pack_K = 2
 
 
 def wait_lds_barrier():
     """Drain LDS (ds) writes + s_barrier WITHOUT waiting on VMEM (keeps B loads outstanding)."""
-    _llvm.inline_asm(res=None, operands_=[], asm_string="s_waitcnt lgkmcnt(0)\ns_barrier",
-                     constraints="", has_side_effects=True)
+    _barrier(lgkmcnt=0)
 
 
 class TileScheduler:
     """Per-tile expert / gate-base-row resolver (flat persistent loop + XCD swizzle live in kernel body)."""
 
-    def __init__(self, *, expert_rsrc, inter_dim, use_xcd):
+    def __init__(self, *, expert_rsrc, inter_dim, use_xcd, expert_offset=0):
         self._expert_rsrc = expert_rsrc
         self._inter_dim = inter_dim
         self._use_xcd = use_xcd
+        # sorted_expert_ids carries GLOBAL ids (dispatch writes le + rank*epr); the weights w1 are
+        # this rank's epr experts ONLY -> index by LOCAL id (global - rank*epr). 0 for standalone.
+        self._expert_offset = int(expert_offset)
 
     def expert_of(self, m_tile_i32):
-        return _buffer_ops.buffer_load(self._expert_rsrc, m_tile_i32, vec_width=1, dtype=fx.Int32)
+        g = _buffer_ops.buffer_load(self._expert_rsrc, m_tile_i32, vec_width=1, dtype=fx.Int32)
+        if const_expr(self._expert_offset != 0):
+            return g - fx.Int32(self._expert_offset)
+        return g
 
     def gate_base_row(self, expert_i32):
         return expert_i32 * fx.Int32(2 * self._inter_dim)
@@ -72,7 +74,7 @@ class ATileLoader:
 
     def load_regs(self, k_step_byte_off):
         """Read this K-step's 16-B chunks gmem->reg (VMEM); only the K-step offset varies. Returns (lds_off, vec4)."""
-        koff = arith.ArithValue(arith._to_raw(k_step_byte_off))
+        koff = fx.Int32(k_step_byte_off)
         regs = []
         for lds_byte, chunk_base in self._chunks:
             g_i32 = (chunk_base + koff) // fx.Int32(4)
@@ -81,7 +83,7 @@ class ATileLoader:
 
     def store(self, lds_dst, regs, base_i32=0):
         """Scatter loaded chunks into LDS via ds_write (precomputed lds_byte incl. swizzle). base_i32 = ping/pong."""
-        base_bytes = arith.ArithValue(arith._to_raw(base_i32)) * fx.Int32(4)
+        base_bytes = fx.Int32(base_i32) * fx.Int32(4)
         for lds_byte, v in regs:
             ptr = fx.recast_iter(fx.Uint8, fx.add_offset(lds_dst.ptr, fx.make_int_tuple(base_bytes + lds_byte)))
             fx.ptr_store(Vec(v).bitcast(fx.Uint8), ptr)
@@ -108,7 +110,7 @@ class AS2RLoader:
     def load_operand(self, lds_src, mi, ksub, base_i32=0):
         """A operand for m-tile mi, K=128 sub-block ksub. base_i32 = ping/pong. fp8 32-per-lane = 16@K + 16@K+64."""
         row = fx.Int32(mi * 16) + fx.Int32(self._lane % 16)
-        row_i32 = row * fx.Int32(self._k_step_bytes // 4) + arith.ArithValue(arith._to_raw(base_i32))
+        row_i32 = row * fx.Int32(self._k_step_bytes // 4) + fx.Int32(base_i32)
         klane4 = fx.Int32(self._lane // 16) * fx.Int32(4)
         z = fx.Int64(0)
 
@@ -148,8 +150,12 @@ class BWeightLoader:
         lane_k = fx.Int32(self._lane // 16)
         n_blk = (row_base_i32 // fx.Int32(16)) + fx.Int32(ni)
         k0 = kstep_i32 * fx.Int32(2) + fx.Int32(ksub)
-        byte = (n_blk * fx.Int32(self._stride_n0) + k0 * fx.Int32(self._stride_k0)
-                + lane_k * fx.Int32(self._stride_klane) + lane_row * fx.Int32(self._stride_nlane))
+        byte = (
+            n_blk * fx.Int32(self._stride_n0)
+            + k0 * fx.Int32(self._stride_k0)
+            + lane_k * fx.Int32(self._stride_klane)
+            + lane_row * fx.Int32(self._stride_nlane)
+        )
         i32_off = byte // fx.Int32(4)
         v = _buffer_ops.buffer_load(self._w_rsrc, i32_off, vec_width=4, dtype=fx.Int32)
         return Vec(v)
@@ -232,39 +238,60 @@ class AScaleLoader:
         off = row_i32 * fx.Int32(self._n_scale) + col_i32
         ptr = fx.recast_iter(fx.Uint8, fx.add_offset(lds_ascale.ptr, fx.make_int_tuple(off)))
         v = fx.make_view(ptr, fx.make_layout(1, 1)).load()
-        return arith.ArithValue(arith._to_raw(Vec(v)[0])).extui(T.i32)
+        return Vec(v)[0].to(fx.Int32)
 
 
 class MfmaScaleGU:
-    """gate+up dual-acc scaled MFMA (fp8/fp4 A x fp4 B) via rocdl.mfma_scale_f32_16x16x128_f8f6f4 (f32x4 VGPR acc)."""
+    """Gate/up scaled-MFMA atoms for fp8/fp4 A x fp4 B."""
 
     def __init__(self, *, is_f8_a, m_repeat, num_acc_n):
         self._is_f8_a = is_f8_a
-        self._cbsz = 0 if is_f8_a else 4
-        self._blgp = 4
         self._m_repeat = m_repeat
         self._num_acc_n = num_acc_n
-        self.res_ty = Vec.make_type(4, fx.Float32)
+        self._a_ndw = 8 if is_f8_a else 4
+        elem_a = fx.Float8E4M3FN if is_f8_a else fx.Float4E2M1FN
+        self._atoms = {
+            (osa, osb): fx.make_mma_atom(
+                fx.rocdl.cdna4.MFMA_Scale(
+                    16,
+                    16,
+                    128,
+                    elem_a,
+                    fx.Float4E2M1FN,
+                    opsel_a=osa,
+                    opsel_b=osb,
+                )
+            )
+            for osa in range(4)
+            for osb in range(4)
+        }
         self.zero_value = Vec.filled(4, 0.0, fx.Float32)
 
     def idx(self, mi, ni):
         return mi * self._num_acc_n + ni
 
-    def _widen_b(self, b_i32x4):
-        # fp4 B pack (i32x4 = 128b) -> i32x8 (256b) zero high half (blgp:4 reads low 128b).
-        lo = Vec(b_i32x4).bitcast(fx.Int64)
-        z = fx.Int64(0)
-        return Vec.from_elements([lo[0], lo[1], z, z], fx.Int64).bitcast(fx.Int32)
-
     def _mfma(self, a_op, b_op, acc, sa_v, sb_v, ksub, ia, jb):
-        # opsel_{a,b} = ksub*PACK + tile-in-pair select the e8m0 scale byte.
         opsel_a = ksub * _PACK + ia
         opsel_b = ksub * _PACK + jb
-        return rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-            self.res_ty,
-            [arith._to_raw(a_op), arith._to_raw(b_op), arith._to_raw(acc), self._cbsz, self._blgp,
-             opsel_a, arith._to_raw(sa_v), opsel_b, arith._to_raw(sb_v)],
+        a_frag = fx.make_rmem_tensor(self._a_ndw, fx.Int32)
+        b_frag = fx.make_rmem_tensor(4, fx.Int32)
+        c_frag = fx.make_rmem_tensor(4, fx.Float32)
+        a_vec = Vec(a_op)
+        if const_expr(not self._is_f8_a):
+            a_vec = Vec.from_elements([a_vec[i] for i in range_constexpr(4)], fx.Int32)
+        a_frag.store(a_vec)
+        b_frag.store(Vec(b_op))
+        c_frag.store(Vec(acc))
+        fx.gemm(
+            self._atoms[(opsel_a, opsel_b)],
+            c_frag,
+            a_frag,
+            b_frag,
+            c_frag,
+            scale_a=sa_v,
+            scale_b=sb_v,
         )
+        return Vec(c_frag.load())
 
     def call(self, a_load, b, acc, sa, sb):
         """Non-pipelined lazy-A K-step: a_load(mi,ksub) on demand (one A operand live -> low VGPR, wins small bs)."""
@@ -275,8 +302,7 @@ class MfmaScaleGU:
                 ia = mi % _PACK
                 for ni in range_constexpr(self._num_acc_n):
                     aidx = self.idx(mi, ni)
-                    acc[aidx] = self._mfma(a_op, self._widen_b(b[ni][ksub]), acc[aidx], sa_v,
-                                           sb[ni // _PACK], ksub, ia, ni % _PACK)
+                    acc[aidx] = self._mfma(a_op, b[ni][ksub], acc[aidx], sa_v, sb[ni // _PACK], ksub, ia, ni % _PACK)
         return acc
 
     def call_pipe(self, a_load, b_prev, acc, sa, sb, load_next):
@@ -290,11 +316,11 @@ class MfmaScaleGU:
             jb = ni % _PACK
             sb_v = sb[ni // _PACK]
             for ksub in range_constexpr(_PACK):
-                b_op = self._widen_b(b_prev[ni][ksub])
                 for mi in range_constexpr(self._m_repeat):
                     aidx = self.idx(mi, ni)
-                    acc[aidx] = self._mfma(a_ops[mi][ksub], b_op, acc[aidx], sa[mi // _PACK], sb_v,
-                                           ksub, mi % _PACK, jb)
+                    acc[aidx] = self._mfma(
+                        a_ops[mi][ksub], b_prev[ni][ksub], acc[aidx], sa[mi // _PACK], sb_v, ksub, mi % _PACK, jb
+                    )
         return acc, b_next
 
     def call_pipe_am(self, a_load, b_prev, acc, sa, sb, load_next):
@@ -315,8 +341,9 @@ class MfmaScaleGU:
                     nb += 1
                 for ni in range_constexpr(nn):
                     aidx = self.idx(mi, ni)
-                    acc[aidx] = self._mfma(a_op, self._widen_b(b_prev[ni][ksub]), acc[aidx], sa_v,
-                                           sb[ni // _PACK], ksub, ia, ni % _PACK)
+                    acc[aidx] = self._mfma(
+                        a_op, b_prev[ni][ksub], acc[aidx], sa_v, sb[ni // _PACK], ksub, ia, ni % _PACK
+                    )
                 g += 1
         while nb < nn:
             b_next[nb] = load_next(nb)
@@ -327,8 +354,34 @@ class MfmaScaleGU:
 class SiluQuantEpilogue:
     """silu(gate)*up -> fp8 + per-32 E8M0 out-scale (aiter/CK swizzled), via inline .ptr cshuffle."""
 
-    def __init__(self, *, out_rsrc, out_scale_rsrc, sorted_rsrc, tokens, inter_dim, m_repeat, num_acc_n,
-                 sort_block_m, tile_m, tile_n, num_waves, lds_out, out_dtype="fp8", debug_gate=False):
+    def __init__(
+        self,
+        *,
+        out_rsrc,
+        out_scale_rsrc,
+        sorted_rsrc,
+        tokens,
+        inter_dim,
+        m_repeat,
+        num_acc_n,
+        sort_block_m,
+        tile_m,
+        tile_n,
+        num_waves,
+        lds_out,
+        out_dtype="fp8",
+        debug_gate=False,
+        atom_contract=False,
+        lds_tid=None,
+        out_row_stride=None,
+        fz_npes=0,
+        fz_mtpr=0,
+        fz_k=1,
+        fz_epr=0,
+        fz_tile_m=0,
+        static_tiles=False,
+        always_valid=False,
+    ):
         self._out_rsrc = out_rsrc
         self._out_scale_rsrc = out_scale_rsrc
         self._sorted_rsrc = sorted_rsrc
@@ -343,18 +396,28 @@ class SiluQuantEpilogue:
         self._lds_out = lds_out
         self._out_dtype = out_dtype
         self._debug_gate = debug_gate
+        # atom_contract (MegaMoE fused merge): a2 DATA @ logical row t*fz_k+s (t=src_global from
+        # lds_tid srcmap), a2-SCALE @ compact sorted row bx*sort_block_m+row_local. Preserves the
+        # gemm2 handoff. When False, keep the standalone sorted-row path (bench only).
+        self._atom_contract = atom_contract
+        self._lds_tid = lds_tid  # _LdsPtr(i32) srcmap view when atom_contract
+        self._out_row_stride = out_row_stride if out_row_stride is not None else inter_dim
+        self._fz_npes = fz_npes
+        self._fz_mtpr = fz_mtpr
+        self._fz_k = fz_k
+        self._fz_epr = fz_epr
+        self._fz_tile_m = fz_tile_m
+        self._static_tiles = static_tiles
+        # always_valid: write every row unconditionally (fixed-slot fused stage1; padding rows are
+        # dropped downstream by gemm2's guard). Skips the sorted_token_ids<tokens validity gate.
+        self._always_valid = always_valid
         self._lane = fx.thread_idx.x % 64
         self._sorted_scale_cols_i32 = (inter_dim // 32 + 7) // 8 * 8
 
     def _silu(self, g):
-        f32 = T.f32
-        neg_log2e = arith.constant(-1.4426950408889634, type=f32)
-        t = g * neg_log2e
-        emu = _llvm.call_intrinsic(f32, "llvm.amdgcn.exp2.f32", [arith._to_raw(t)], [], [])
-        one = arith.constant(1.0, type=f32)
-        den = one + arith.ArithValue(emu)
-        sig = _llvm.call_intrinsic(f32, "llvm.amdgcn.rcp.f32", [arith._to_raw(den)], [], [])
-        return g * arith.ArithValue(sig)
+        # silu(g) = g*sigmoid(g); sigmoid = 1/(1+exp2(-g*log2e)).
+        emu = (g * fx.Float32(-1.4426950408889634)).exp2()
+        return g * (fx.Float32(1.0) / (fx.Float32(1.0) + emu))
 
     def _combine(self, acc):
         """acc = gate/up interleaved (even ni = gate, odd = up); debug_gate short-circuits to raw gate tiles."""
@@ -375,7 +438,31 @@ class SiluQuantEpilogue:
         elems = [self._silu(gv[i]) * uv[i] for i in range_constexpr(4)]
         return Vec.from_elements(elems, fx.Float32)
 
-    def store(self, acc, tile_i32, tile_row_base_i32, n_tile_base_i32):
+    def _read_i32_lds(self, lds_tid, row_i32):
+        """Read one i32 srcmap entry lds_tid[row] (ds_read), for atom_contract logical-row decode."""
+        ptr = fx.add_offset(lds_tid.ptr, fx.make_int_tuple(row_i32))
+        v = fx.make_view(ptr, fx.make_layout(1, 1)).load()
+        return Vec(v)[0]
+
+    def _atom_row(self, row_i32, bx_i32, cnt_ef, kf):
+        """atom_contract per-row decode -> (row_valid, out_row_base, row_g_for_scale).
+
+        a2 DATA row = t*fz_k+s (t=src_global, s=k_slot from lds_tid srcmap); a2-SCALE row =
+        compact bx*sort_block_m+row (validity: t/s bounds + P-static position < ll_count).
+        """
+        fused2 = self._read_i32_lds(self._lds_tid, row_i32)
+        t = fused2 & fx.Int32(0xFFFFFF)
+        s = fused2 >> fx.Int32(24)
+        valid = (t < fx.Int32(self._fz_npes * self._fz_mtpr)) & (s < fx.Int32(self._fz_k))
+        if const_expr(self._static_tiles and self._fz_epr <= 64):
+            pos = kf * fx.Int32(self._fz_tile_m) + row_i32
+            valid = valid & (pos < cnt_ef)
+        out_row = t * fx.Int32(self._fz_k) + s
+        out_row_base = out_row * fx.Int32(self._out_row_stride)
+        row_g = bx_i32 * fx.Int32(self._sort_block_m) + row_i32
+        return valid, out_row_base, row_g
+
+    def store(self, acc, tile_i32, tile_row_base_i32, n_tile_base_i32, cnt_ef=None, kf=None):
         """CShuffle: write acc f32 -> LDS, barrier, coalesced quant read -> fp8 + swizzled e8m0 out-scale."""
         combined = self._combine(acc)
         out_col_base = n_tile_base_i32 // fx.Int32(2)  # 2*inter_dim gate/up stream -> output column
@@ -397,12 +484,11 @@ class SiluQuantEpilogue:
                         c = out_col_base + fx.Int32(ni * 16) + fx.Int32(lane % 16)
                         bf = vni[i].to(fx.BFloat16)
                         oi = slot * fx.Int32(self._inter_dim) + c
-                        oi = arith.select(valid, oi, fx.Int32(0x40000000))
+                        oi = valid.select(oi, fx.Int32(0x40000000))
                         _buffer_ops.buffer_store(bf, self._out_rsrc, oi, offset_is_bytes=False)
             return
 
         # fp8 CShuffle (inline .ptr): write acc f32 -> LDS, barrier, coalesced quant read.
-        f32 = T.f32
         tx = fx.thread_idx.x
         wave = tx // fx.Int32(64)
         lane = tx % fx.Int32(64)
@@ -426,13 +512,7 @@ class SiluQuantEpilogue:
         gpu.barrier()
 
         # read phase: coalesced (mlane=tx//32, nlane=tx%32), e_vec=2; per-32-col abs-max via xor-reduce.
-        c0 = arith.constant(0, type=T.i32)
-        c8 = arith.constant(8, type=T.i32)
-        c23 = arith.constant(23, type=T.i32)
-        c64 = arith.constant(64, type=T.i32)
-        c254 = arith.constant(254, type=T.i32)
-        cround = arith.constant(0x400000, type=T.i32)
-        cmask = arith.constant(0xFF800000, type=T.i32)
+        c64 = fx.Int32(64)
         n32 = fx.Int32(self._sorted_scale_cols_i32 * 32)
         NLANE = 32
         EVEC = 2
@@ -445,52 +525,58 @@ class SiluQuantEpilogue:
 
         for mr in range_constexpr(m_reps):
             row = fx.Int32(mr * rows_per_iter) + mlane
-            slot = tile_row_base_i32 + row
-            tok = _buffer_ops.buffer_load(self._sorted_rsrc, slot, vec_width=1, dtype=fx.Int32)
-            valid = tok < fx.Int32(self._tokens)
-            row_g = tile_i32 * fx.Int32(self._sort_block_m) + row
+            if const_expr(self._atom_contract):
+                valid, out_row_base, row_g = self._atom_row(row, tile_i32, cnt_ef, kf)
+            else:
+                slot = tile_row_base_i32 + row
+                row_g = tile_i32 * fx.Int32(self._sort_block_m) + row
+                if const_expr(self._always_valid):
+                    valid = fx.Int32(0) == fx.Int32(0)  # fixed-slot tile list: every tile row is real
+                    # a2 DATA written at the COMPACT row (== a2-SCALE row_g, == gemm2's compact read
+                    # m_block*BM+..); NOT the sparse fixed-slot `slot`. stage2 maps compact->fixed-slot
+                    # (for srcmap/weight) via trb. Padding beyond num_valid is masked by gemm2's gate.
+                    out_row_base = row_g * fx.Int32(self._inter_dim)
+                else:
+                    tok = _buffer_ops.buffer_load(self._sorted_rsrc, slot, vec_width=1, dtype=fx.Int32)
+                    valid = tok < fx.Int32(self._tokens)
+                    out_row_base = slot * fx.Int32(self._inter_dim)
             for nr in range_constexpr(n_reps):
                 col0 = fx.Int32(nr * NLANE * EVEC) + nlane * fx.Int32(EVEC)
                 idx = row * fx.Int32(cs_tile_n) + col0
                 f32_iter = fx.recast_iter(fx.Float32, fx.add_offset(cptr, fx.make_int_tuple(idx)))
                 frag = fx.make_view(f32_iter, fx.make_layout(EVEC, 1)).load()
-                v0 = arith.ArithValue(arith._to_raw(frag[0]))
-                v1 = arith.ArithValue(arith._to_raw(frag[1]))
-                a0 = arith.ArithValue(_llvm.call_intrinsic(f32, "llvm.fabs.f32", [arith._to_raw(v0)], [], []))
-                a1 = arith.ArithValue(_llvm.call_intrinsic(f32, "llvm.fabs.f32", [arith._to_raw(v1)], [], []))
-                m = arith.maximumf(a0, a1)
+                v0 = frag[0]
+                v1 = frag[1]
+                a0 = v0.maximumf(fx.Float32(0.0) - v0)
+                a1 = v1.maximumf(fx.Float32(0.0) - v1)
+                m = a0.maximumf(a1)
                 for off in (1, 2, 4, 8):
-                    m = arith.maximumf(m, m.shuffle_xor(arith.constant(off, type=T.i32), c64))
-                max_rounded = (m.bitcast(T.i32) + cround) & cmask
-                e8m0_v = arith.maxsi((max_rounded >> c23) - c8, c0)
-                quant_scale = ((arith.ArithValue(c254) - arith.ArithValue(e8m0_v)) << c23).bitcast(T.f32)
+                    m = m.maximumf(m.shuffle_xor(fx.Int32(off), c64))
+                max_rounded = (m.bitcast(fx.Int32) + fx.Int32(0x400000)) & fx.Int32(0xFF800000)
+                _e = (max_rounded >> fx.Int32(23)) - fx.Int32(8)
+                e8m0_v = (_e > fx.Int32(0)).select(_e, fx.Int32(0))
+                quant_scale = ((fx.Int32(254) - e8m0_v) << fx.Int32(23)).bitcast(fx.Float32)
                 gcol = out_tile_base + col0
 
                 # VECTORIZED fp8: cvt_pk both cols -> one i16 buffer_store_short at slot*inter_dim + gcol.
-                scaled0 = arith.ArithValue(arith._to_raw(v0)) * quant_scale
-                scaled1 = arith.ArithValue(arith._to_raw(v1)) * quant_scale
-                packed = rocdl.cvt_pk_fp8_f32(T.i32, scaled0, scaled1, c0, 0)
-                packed_raw = packed._value if hasattr(packed, "_value") else packed
-                short_raw = arith.TruncIOp(T.i16, packed_raw).result
-                out_byte = slot * fx.Int32(self._inter_dim) + gcol
-                _sentinel = arith._to_raw(fx.Int32(0x40000000))
-                out_byte = arith.select(arith._to_raw(valid), arith._to_raw(out_byte), _sentinel)
+                scaled0 = v0 * quant_scale
+                scaled1 = v1 * quant_scale
+                packed = rocdl.cvt_pk_fp8_f32(T.i32, scaled0, scaled1, fx.Int32(0), 0)
+                short_raw = fx.Int32(packed).to(fx.Int16)
+                out_byte = out_row_base + gcol
+                out_byte = valid.select(out_byte, fx.Int32(0x40000000))
                 _buffer_ops.buffer_store(short_raw, self._out_rsrc, out_byte, offset_is_bytes=True)
 
-                # e8m0 out-scale byte: one writer per 32-col block, swizzled aiter/CK layout.
+                # e8m0 out-scale byte: one writer per 32-col block (else -> sentinel OOB drop), swizzled aiter/CK.
                 col_s = gcol >> fx.Int32(5)
-                is_writer = arith.cmpi(CmpIPredicate.eq, arith._to_raw(gcol & fx.Int32(31)), arith._to_raw(c0))
-                _if = scf.IfOp(is_writer)
-                with ir.InsertionPoint(_if.then_block):
-                    d0 = row_g >> fx.Int32(5)
-                    d1 = (row_g >> fx.Int32(4)) & fx.Int32(1)
-                    d2 = row_g & fx.Int32(15)
-                    d3 = col_s >> fx.Int32(3)
-                    d4 = (col_s >> fx.Int32(2)) & fx.Int32(1)
-                    d5 = col_s & fx.Int32(3)
-                    byte_off = (d0 * n32 + d3 * fx.Int32(256) + d5 * fx.Int32(64)
-                                + d2 * fx.Int32(4) + d4 * fx.Int32(2) + d1)
-                    e8m0_i8 = arith.TruncIOp(T.i8, arith._to_raw(e8m0_v)).result
-                    _buffer_ops.buffer_store(e8m0_i8, self._out_scale_rsrc, arith._to_raw(byte_off),
-                                             offset_is_bytes=True)
-                    scf.YieldOp([])
+                is_writer = (gcol & fx.Int32(31)) == fx.Int32(0)
+                d0 = row_g >> fx.Int32(5)
+                d1 = (row_g >> fx.Int32(4)) & fx.Int32(1)
+                d2 = row_g & fx.Int32(15)
+                d3 = col_s >> fx.Int32(3)
+                d4 = (col_s >> fx.Int32(2)) & fx.Int32(1)
+                d5 = col_s & fx.Int32(3)
+                byte_off = d0 * n32 + d3 * fx.Int32(256) + d5 * fx.Int32(64) + d2 * fx.Int32(4) + d4 * fx.Int32(2) + d1
+                byte_off = is_writer.select(byte_off, fx.Int32(0x40000000))
+                e8m0_i8 = e8m0_v.to(fx.Int8)
+                _buffer_ops.buffer_store(e8m0_i8, self._out_scale_rsrc, byte_off, offset_is_bytes=True)
