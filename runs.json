@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-23T07:42:50Z",
+ "updated": "2026-07-23T08:17:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29990610838,
+   "pr": 887,
+   "commit": "be9f88d783787fdb9500064bf1bccd1ee5f89c66",
+   "branch": "dev/kyle/grouped_gemm",
+   "event": "pull_request",
+   "title": "gemm: add fp8 per-tensor grouped GEMM forward (M-grouped/MoE)",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29990610838",
+   "created_at": "2026-07-23T08:14:38Z",
+   "updated_at": "2026-07-23T08:14:39Z",
+   "actor": "kyle-256",
+   "jobs": []
+  },
   {
    "run_id": 29988293135,
    "pr": 887,
@@ -10,38 +25,38 @@
    "branch": "dev/kyle/grouped_gemm",
    "event": "pull_request",
    "title": "gemm: add fp8 per-tensor grouped GEMM forward (M-grouped/MoE)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29988293135",
    "created_at": "2026-07-23T07:27:38Z",
-   "updated_at": "2026-07-23T07:28:27Z",
+   "updated_at": "2026-07-23T08:15:00Z",
    "actor": "kyle-256",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-23T07:28:27Z",
+     "started_at": "2026-07-23T08:14:10Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29988293135/job/89145130447"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-23T07:28:27Z",
+     "started_at": "2026-07-23T07:50:58Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29988293135/job/89145130452"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-23T07:28:27Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T08:14:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29988293135/job/89145130459"
     }
    ]
@@ -53,20 +68,20 @@
    "branch": "lhc/refactor-expr",
    "event": "pull_request",
    "title": "refactor(expr): move buffer_ops and split gfx1250 mcast policy to kernels.common",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986917281",
    "created_at": "2026-07-23T07:01:04Z",
-   "updated_at": "2026-07-23T07:32:55Z",
+   "updated_at": "2026-07-23T08:14:09Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-23T07:32:42Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T08:01:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986917281/job/89140968609"
     },
     {
@@ -81,10 +96,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-23T07:08:31Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T08:14:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986917281/job/89140968730"
     }
    ]
@@ -964,11 +979,11 @@
    "branch": "feat/autotune-offline-configs",
    "event": "pull_request",
    "title": "[3/5] autotune: add offline config artifacts (#770)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29955014628",
    "created_at": "2026-07-22T20:24:49Z",
-   "updated_at": "2026-07-23T07:16:04Z",
+   "updated_at": "2026-07-23T08:10:27Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -983,9 +998,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-23T07:16:05Z",
+     "started_at": "2026-07-23T08:01:11Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29955014628/job/89143208908"
     },
@@ -2285,21 +2300,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29841790382",
    "created_at": "2026-07-21T14:59:25Z",
    "updated_at": "2026-07-21T15:05:20Z",
-   "actor": "aris134",
-   "jobs": []
-  },
-  {
-   "run_id": 29841675333,
-   "pr": 872,
-   "commit": "20dcca73558f3d2e7d39ef90635f2eae9688a44e",
-   "branch": "amartin/mxfp8-4wave",
-   "event": "pull_request",
-   "title": "[Kernel] Add optimized 4-wave MXFP8 GEMM kernel for gfx950",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29841675333",
-   "created_at": "2026-07-21T14:58:00Z",
-   "updated_at": "2026-07-21T14:59:27Z",
    "actor": "aris134",
    "jobs": []
   }
