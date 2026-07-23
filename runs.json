@@ -1,20 +1,50 @@
 {
  "schema": 1,
- "updated": "2026-07-23T06:49:04Z",
+ "updated": "2026-07-23T06:52:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 29985518980,
+   "run_id": 29986281527,
    "pr": 886,
+   "commit": "53ac95bf2bc66aeb12a39da1407790b9e3595171",
+   "branch": "lse_addition",
+   "event": "pull_request",
+   "title": "Add optional forward LSE output",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986281527",
+   "created_at": "2026-07-23T06:49:51Z",
+   "updated_at": "2026-07-23T06:49:52Z",
+   "actor": "AakarshAMD",
+   "jobs": []
+  },
+  {
+   "run_id": 29986161336,
+   "pr": 887,
+   "commit": "51ca97246d22bb9dbe353d4ee4ea1d2a344e834b",
+   "branch": "dev/kyle/grouped_gemm",
+   "event": "pull_request",
+   "title": "gemm: add fp8 per-tensor grouped GEMM forward (M-grouped/MoE)",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986161336",
+   "created_at": "2026-07-23T06:47:34Z",
+   "updated_at": "2026-07-23T06:48:28Z",
+   "actor": "kyle-256",
+   "jobs": []
+  },
+  {
+   "run_id": 29985518980,
+   "pr": null,
    "commit": "2d289de58a8918583f95b07dd3946231915e79fb",
    "branch": "lse_addition",
    "event": "pull_request",
    "title": "Add optional forward LSE output",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29985518980",
    "created_at": "2026-07-23T06:35:28Z",
-   "updated_at": "2026-07-23T06:36:58Z",
+   "updated_at": "2026-07-23T06:49:52Z",
    "actor": "AakarshAMD",
    "jobs": [
     {
@@ -38,10 +68,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-23T06:36:57Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T06:49:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29985518980/job/89136595589"
     }
    ]
@@ -2186,64 +2216,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29840782836",
    "created_at": "2026-07-21T14:47:14Z",
    "updated_at": "2026-07-21T14:50:43Z",
-   "actor": "binding7012",
-   "jobs": []
-  },
-  {
-   "run_id": 29840761390,
-   "pr": null,
-   "commit": "5e90bf7ec36df5509c62827722c45d7f85c8fbe0",
-   "branch": "main",
-   "event": "push",
-   "title": "Atom 1250 refactor (#866)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29840761390",
-   "created_at": "2026-07-21T14:46:58Z",
-   "updated_at": "2026-07-21T16:11:40Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-21T14:56:32Z",
-     "completed_at": "2026-07-21T15:01:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29840761390/job/88671243124"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-21T14:55:58Z",
-     "completed_at": "2026-07-21T15:12:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29840761390/job/88671243232"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-21T14:56:10Z",
-     "completed_at": "2026-07-21T16:11:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29840761390/job/88671243339"
-    }
-   ]
-  },
-  {
-   "run_id": 29839633476,
-   "pr": null,
-   "commit": "844337b66f6b0055d14e52c17f5bb69d4ffcb545",
-   "branch": "binding_fa_opt",
-   "event": "pull_request",
-   "title": "[Perf]optimize flydsl flash attention kernel",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29839633476",
-   "created_at": "2026-07-21T14:33:07Z",
-   "updated_at": "2026-07-21T14:34:14Z",
    "actor": "binding7012",
    "jobs": []
   }
