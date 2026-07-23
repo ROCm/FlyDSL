@@ -20,8 +20,8 @@ Optional B preshuffle uses the same on-disk layout as
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm as _llvm
-from flydsl.expr import arith, const_expr, range_constexpr
-from flydsl.expr import vector as _vector
+from flydsl._mlir.dialects import vector as _vector
+from flydsl.expr import arith, as_ir_value, const_expr, range_constexpr
 from flydsl.expr.typing import T as _T
 from kernels.gemm.fp8_gemm_utils import (
     G2SLoader,
@@ -46,8 +46,8 @@ class Mfma16x16x128AGPR(Mfma16x16x128):
     scale is left default (=0); the real per-token scale is applied in StoreC."""
 
     def _do_mma(self, a, b, c):
-        a_i32x8 = _vector.bitcast(_T.vec(8, _T.i32), a)
-        b_i32x8 = _vector.bitcast(_T.vec(8, _T.i32), b)
+        a_i32x8 = _vector.bitcast(_T.vec(8, _T.i32), as_ir_value(a))
+        b_i32x8 = _vector.bitcast(_T.vec(8, _T.i32), as_ir_value(b))
         res_ty = _T.vec(4, _T.f32)
         return _llvm.inline_asm(
             res_ty,
