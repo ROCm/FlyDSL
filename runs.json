@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-07-23T04:28:11Z",
+ "updated": "2026-07-23T04:58:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29980835699,
+   "pr": 876,
+   "commit": "6364549925f28904b3b410965fa2eb1641b1128d",
+   "branch": "mega_moe_v1",
+   "event": "pull_request",
+   "title": "MegaMoEV1 on Gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29980835699",
+   "created_at": "2026-07-23T04:56:51Z",
+   "updated_at": "2026-07-23T04:56:58Z",
+   "actor": "yanboshao",
+   "jobs": []
+  },
+  {
+   "run_id": 29980806506,
+   "pr": 869,
+   "commit": "2e9e7cb28b9daa6d8393907c8660d7ec004dc993",
+   "branch": "kernel/sage-attention-cdna",
+   "event": "pull_request",
+   "title": "[Kernel] Add CDNA SageAttention kernel",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29980806506",
+   "created_at": "2026-07-23T04:56:09Z",
+   "updated_at": "2026-07-23T04:56:54Z",
+   "actor": "LiuYinfeng01",
+   "jobs": []
+  },
   {
    "run_id": 29979228033,
    "pr": 885,
@@ -29,10 +59,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-23T04:19:24Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-23T04:36:06Z",
+     "completed_at": "2026-07-23T04:48:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29979228033/job/89117493338"
     },
     {
@@ -68,38 +98,38 @@
    "branch": "kernel/sage-attention-cdna",
    "event": "pull_request",
    "title": "[Kernel] Add CDNA SageAttention kernel",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29978950127",
    "created_at": "2026-07-23T04:12:12Z",
-   "updated_at": "2026-07-23T04:13:24Z",
+   "updated_at": "2026-07-23T04:56:11Z",
    "actor": "LiuYinfeng01",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-23T04:13:24Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T04:56:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29978950127/job/89116740633"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-23T04:13:24Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T04:56:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29978950127/job/89116740635"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-23T04:13:50Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T04:35:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29978950127/job/89116740646"
     }
    ]
@@ -2167,92 +2197,6 @@
      "started_at": "2026-07-21T10:04:53Z",
      "completed_at": "2026-07-21T11:07:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29820645526/job/88602505320"
-    }
-   ]
-  },
-  {
-   "run_id": 29819690864,
-   "pr": null,
-   "commit": "e4fd2957f63848639e449928c513ea9cd68486d5",
-   "branch": "binding_fa_opt",
-   "event": "pull_request",
-   "title": "[Perf]optimize flydsl flash attention kernel",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29819690864",
-   "created_at": "2026-07-21T09:47:46Z",
-   "updated_at": "2026-07-21T11:08:34Z",
-   "actor": "binding7012",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-21T09:50:41Z",
-     "completed_at": "2026-07-21T10:09:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29819690864/job/88599429570"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-21T09:49:39Z",
-     "completed_at": "2026-07-21T10:15:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29819690864/job/88599429590"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-21T09:50:20Z",
-     "completed_at": "2026-07-21T11:08:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29819690864/job/88599429602"
-    }
-   ]
-  },
-  {
-   "run_id": 29815614644,
-   "pr": 825,
-   "commit": "7ce6ba79f511294b5818539398c6454e323675cc",
-   "branch": "pa-decode-tile",
-   "event": "pull_request",
-   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29815614644",
-   "created_at": "2026-07-21T08:46:55Z",
-   "updated_at": "2026-07-21T10:23:30Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-21T08:48:45Z",
-     "completed_at": "2026-07-21T10:09:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29815614644/job/88586345595"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-21T08:51:44Z",
-     "completed_at": "2026-07-21T09:19:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29815614644/job/88586345602"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-21T08:48:56Z",
-     "completed_at": "2026-07-21T10:23:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29815614644/job/88586345621"
     }
    ]
   }
