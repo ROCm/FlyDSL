@@ -16,6 +16,8 @@ from .gemm_common_gfx1250 import (
     lds_load_b32_raw,
     lds_load_b128_raw,
     pipeline_fence,
+    pipeline_fence_signal,
+    pipeline_fence_wait,
     workgroup_barrier,
 )
 
@@ -147,49 +149,32 @@ def launch_gemm_a8w4_mxscale(
         gB_base = fx.recast_iter(fx.Int8, arg_b)
         gSA_base, gSB_base = fx.get_iter(arg_scale_a), fx.get_iter(arg_scale_b)
 
-        HM, HB = tile_m // 2, (tile_n // 16) // 2
+        W_A, W_B, W_SA, W_SB = 0, 1, 2 % num_waves, 3 % num_waves
         a_off0 = blk_m64 * lda64
         b_off0 = (blk_n64 // 16) * Kp16
         sa_off0 = (blk_m64 // 32) * k64
         sb_off0 = (blk_n64 // 32) * k64
-        W_A, W_B = (0, 1), (2, 3)
-        W_SA, W_SB = 4 % num_waves, 5 % num_waves
 
-        gA_h, atomA_h, gB_h, atomB_h = [], [], [], []
-        for h in range_constexpr(2):
-            ga = _gv(gA_base, a_off0 + fx.Int64(h * HM) * lda64, (HM, tile_k), (tile_k, 1))
-            gA_h.append(ga)
-            atomA_h.append(
-                fx.atom_set_value(
-                    fx.rocdl.make_tdm_atom(
-                        ga,
-                        [mn_oob - h * HM, None],
-                        strides=[lda64, None],
-                        num_warps=1,
-                        pad_interval=tile_k,
-                        pad_amount=LDS_PAD_A,
-                        early_timeout=True,
-                    ),
-                    "workgroup_mask",
-                    a_mask,
-                )
-            )
-            gb = _gv(gB_base, b_off0 + fx.Int64(h * HB) * Kp16, (HB, PACK_TK * 16), (PACK_TK * 16, 1))
-            gB_h.append(gb)
-            atomB_h.append(
-                fx.atom_set_value(
-                    fx.rocdl.make_tdm_atom(
-                        gb,
-                        [None, None],
-                        strides=[Kp16, None],
-                        num_warps=1,
-                        early_timeout=True,
-                    ),
-                    "workgroup_mask",
-                    b_mask,
-                )
-            )
-
+        gA = _gv(gA_base, a_off0, (tile_m, tile_k), (tile_k, 1))
+        atomA = fx.atom_set_value(
+            fx.rocdl.make_tdm_atom(
+                gA,
+                [mn_oob, None],
+                strides=[lda64, None],
+                num_warps=1,
+                pad_interval=tile_k,
+                pad_amount=LDS_PAD_A,
+                early_timeout=True,
+            ),
+            "workgroup_mask",
+            a_mask,
+        )
+        gB = _gv(gB_base, b_off0, (tile_n // 16, PACK_TK * 16), (PACK_TK * 16, 1))
+        atomB = fx.atom_set_value(
+            fx.rocdl.make_tdm_atom(gB, [None, None], strides=[Kp16, None], num_warps=1, early_timeout=True),
+            "workgroup_mask",
+            b_mask,
+        )
         gSA = _gv(gSA_base, sa_off0, (SA_SUPERS, tile_k), (tile_k, 1))
         atomSA = _tdm1(gSA, sa_oob, k64, a_mask)
         gSB = _gv(gSB_base, sb_off0, (SB_SUPERS, tile_k), (tile_k, 1))
@@ -202,21 +187,14 @@ def launch_gemm_a8w4_mxscale(
         def issue(s, kt):
             pa = _buf_ptr(s)
             kt64 = fx.Int64(kt)
-            for h in range_constexpr(2):
-                _wcopy(
-                    W_A[h],
-                    atomA_h[h],
-                    gA_h[h],
-                    _lv(fx.add_offset(pa, h * HM * A_LDS_ROW), (HM, tile_k), (A_LDS_ROW, 1)),
-                    kt64 * fx.Int64(tile_k),
-                )
-                _wcopy(
-                    W_B[h],
-                    atomB_h[h],
-                    gB_h[h],
-                    _lv(fx.add_offset(pa, STAGE_A + h * HB * B_LDS_ROW), (HB, PACK_TK * 16), (B_LDS_ROW, 1)),
-                    kt64 * fx.Int64(PACK_TK * 16),
-                )
+            _wcopy(W_A, atomA, gA, _lv(pa, (tile_m, tile_k), (A_LDS_ROW, 1)), kt64 * fx.Int64(tile_k))
+            _wcopy(
+                W_B,
+                atomB,
+                gB,
+                _lv(fx.add_offset(pa, STAGE_A), (tile_n // 16, PACK_TK * 16), (B_LDS_ROW, 1)),
+                kt64 * fx.Int64(PACK_TK * 16),
+            )
             _wcopy(
                 W_SA,
                 atomSA,
@@ -293,7 +271,7 @@ def launch_gemm_a8w4_mxscale(
             sa_k = [load_sa(buf, wm, ks) for wm in range_constexpr(wmma_m_rep)]
             return wt, sb_k, sa_k
 
-        def _kstep(buf, ks, wt, sb_k, sa_k, nxt_ks, prefetch_kt=None):
+        def _kstep(buf, ks, wt, sb_k, sa_k, nxt_ks):
             act_f = [_rmem(16, load_a(buf, wm, ks)) for wm in _FRONT]
             if const_expr(len(_BACK) > 0):
                 act_b = [_rmem(16, load_a(buf, wm, ks)) for wm in _BACK]
@@ -301,21 +279,16 @@ def launch_gemm_a8w4_mxscale(
             else:
                 rocdl.s_wait_dscnt(0)
             _mma_rows(_FRONT, act_f, wt, sa_k, sb_k)
-            if const_expr(prefetch_kt is not None):
-                rocdl.sched_barrier(0)
-                issue(prefetch_kt % num_buffers, prefetch_kt)
-                rocdl.sched_barrier(0)
             if const_expr(len(_BACK) > 0):
                 rocdl.s_wait_dscnt(0)
                 _mma_rows(_BACK, act_b, wt, sa_k, sb_k)
             return _load_b_scales(buf, nxt_ks) if const_expr(nxt_ks is not None) else None
 
-        def compute_ktile(buf, prefetch_kt):
+        def compute_ktile(buf):
             prev = _load_b_scales(buf, 0)
             for ks in range_constexpr(K_WS):
                 nxt_ks = ks + 1 if const_expr(ks + 1 < K_WS) else None
-                pk = prefetch_kt if const_expr(ks == 0) else None
-                prev = _kstep(buf, ks, prev[0], prev[1], prev[2], nxt_ks, prefetch_kt=pk)
+                prev = _kstep(buf, ks, prev[0], prev[1], prev[2], nxt_ks)
             _fr, _bk = front_wm * wmma_n_rep, len(_BACK) * wmma_n_rep
             for _ks in range_constexpr(K_WS):
                 rocdl.sched_dsrd((_BS_DS if _ks == 0 else 0) + front_wm * DS_A)
@@ -334,8 +307,10 @@ def launch_gemm_a8w4_mxscale(
         for kt in range(n_steady):
             s = kt % num_buffers
             buf = _bidx(_buf_ptr(s))
-            pipeline_fence(outstanding=(num_buffers - 2), use_cluster=False)
-            compute_ktile(buf, kt + (num_buffers - 1))
+            pipeline_fence_signal(outstanding=(num_buffers - 2), use_cluster=False)
+            issue((kt + num_buffers - 1) % num_buffers, kt + num_buffers - 1)
+            pipeline_fence_wait(use_cluster=False)
+            compute_ktile(buf)
             if const_expr(use_cluster) and kt % num_buffers == num_buffers - 1:
                 cluster.cluster_barrier()
         for j in range_constexpr(num_buffers - 1):
@@ -343,7 +318,7 @@ def launch_gemm_a8w4_mxscale(
             s = kt % num_buffers
             buf = _bidx(_buf_ptr(s))
             pipeline_fence(outstanding=(num_buffers - 2 - j), use_cluster=False)
-            compute_ktile(buf, None)
+            compute_ktile(buf)
 
         accs = [c_frags[idx].load().ir_value() for idx in range_constexpr(n_acc)]
 

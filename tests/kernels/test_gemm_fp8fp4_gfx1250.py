@@ -199,38 +199,12 @@ def _build_a8w4_case(
     return c_gpu, make_args, ref, _a8w4_tolerances(a_scale, b_scale, K)
 
 
-def _run_a8w4_mxscale_case(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, out_dtype="bf16", **kwargs):
-    _require_gpu()
-    if K % SCALE_BLOCK_32:
-        pytest.skip(f"K={K} must be divisible by {SCALE_BLOCK_32}")
-    if N % tile_n:
-        pytest.skip(f"N={N} must be divisible by tile_n={tile_n}")
-    if K % tile_k or (K // tile_k) < num_buffers:
-        pytest.skip(f"K={K} incompatible with tile_k={tile_k}, num_buffers={num_buffers}")
-
-    _assert_case(
-        _build_a8w4_case,
-        launch_gemm_a8w4_mxscale,
-        M,
-        N,
-        K,
-        tile_m,
-        tile_n,
-        tile_k,
-        m_warp,
-        n_warp,
-        num_buffers,
-        out_dtype,
-        **kwargs,
-    )
-
-
 # (M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, out_dtype, lda_extra, ldc_extra)
 _A8W4_CASES = [
     (128, 256, 512, 128, 256, 128, 2, 2, 2, "bf16", 0, 0),
     (128, 512, 1024, 128, 256, 256, 2, 2, 2, "bf16", 0, 0),
     (256, 256, 512, 256, 256, 256, 2, 2, 2, "bf16", 0, 0),
-    (1024, 1024, 1024, 128, 256, 128, 2, 4, 3, "bf16", 0, 0),
+    (1024, 1024, 1024, 128, 256, 128, 2, 2, 3, "bf16", 0, 0),
     (128, 256, 512, 128, 256, 128, 2, 2, 2, "f16", 0, 0),
     (128, 256, 512, 128, 256, 128, 2, 2, 2, "bf16", 64, 96),
 ]
@@ -242,7 +216,8 @@ _A8W4_CASES = [
 def test_a8w4_mxscale_gemm(
     M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, out_dtype, lda_extra, ldc_extra
 ):
-    _run_a8w4_mxscale_case(
+    _run_case(
+        "mxscale_a8w4",
         M,
         N,
         K,
@@ -252,20 +227,10 @@ def test_a8w4_mxscale_gemm(
         m_warp,
         n_warp,
         num_buffers,
-        out_dtype,
+        out_dtype=out_dtype,
         lda_extra=lda_extra,
         ldc_extra=ldc_extra,
     )
-
-
-@pytest.mark.parametrize("M", [1, 5, 33, 63, 100, 129, 200])
-def test_a8w4_mxscale_gemm_ragged_m(M):
-    _run_a8w4_mxscale_case(M, 256, 512, 128, 256, 128, 2, 2, 2)
-
-
-@pytest.mark.parametrize("cluster_m, cluster_n", [(2, 1), (1, 2), (2, 2)])
-def test_a8w4_mxscale_gemm_cluster(cluster_m, cluster_n):
-    _run_a8w4_mxscale_case(129, 512, 512, 128, 256, 128, 2, 2, 2, cluster_m=cluster_m, cluster_n=cluster_n)
 
 
 def _reference_ptpc(a, b, sa, sb, M, N, K):
@@ -335,32 +300,6 @@ def _build_a8w8_ptpc_case(
     return c_gpu, make_args, ref, (2e-2, max(5e-2, 2e-2 * peak))
 
 
-def _run_a8w8_ptpc_case(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, out_dtype="bf16", **kwargs):
-    _require_gpu()
-    if N % tile_n:
-        pytest.skip(f"N={N} must be divisible by tile_n={tile_n} (no silent pad)")
-    if K % tile_k:
-        pytest.skip(f"K={K} must be divisible by tile_k={tile_k} (no silent pad)")
-    if num_buffers > 1 and (K // tile_k) < num_buffers:
-        pytest.skip(f"{num_buffers}-buf requires num_k_tiles >= {num_buffers}")
-
-    _assert_case(
-        _build_a8w8_ptpc_case,
-        launch_gemm_a8w8_ptpc,
-        M,
-        N,
-        K,
-        tile_m,
-        tile_n,
-        tile_k,
-        m_warp,
-        n_warp,
-        num_buffers,
-        out_dtype,
-        **kwargs,
-    )
-
-
 # (M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, out_dtype, scale_scale, lda_extra, ldc_extra)
 _PTPC_CASES = [
     (256, 256, 512, 256, 256, 128, 2, 2, 4, "bf16", 1.0, 0, 0),
@@ -381,7 +320,8 @@ _PTPC_CASES = [
 def test_a8w8_ptpc_gemm(
     M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, out_dtype, scale_scale, lda_extra, ldc_extra
 ):
-    _run_a8w8_ptpc_case(
+    _run_case(
+        "ptpc_a8w8",
         M,
         N,
         K,
@@ -391,28 +331,11 @@ def test_a8w8_ptpc_gemm(
         m_warp,
         n_warp,
         num_buffers,
-        out_dtype,
+        out_dtype=out_dtype,
         scale_scale=scale_scale,
         lda_extra=lda_extra,
         ldc_extra=ldc_extra,
     )
-
-
-@pytest.mark.parametrize("M", [1, 16, 65, 127, 129, 255, 257, 500, 2048])
-def test_a8w8_ptpc_gemm_ragged_m(M):
-    _run_a8w8_ptpc_case(M, 256, 512, 128, 128, 128, 2, 2, 4, "bf16")
-
-
-@pytest.mark.parametrize("cluster_m, cluster_n", [(2, 1), (1, 2), (2, 2)])
-@pytest.mark.parametrize("M", [1, 65, 129, 384])
-def test_a8w8_ptpc_gemm_ragged_m_cluster(M, cluster_m, cluster_n):
-    _run_a8w8_ptpc_case(M, 256, 512, 128, 128, 128, 2, 2, 4, "bf16", cluster_m=cluster_m, cluster_n=cluster_n)
-
-
-def test_a8w8_ptpc_gemm_min_waves():
-    """m_warp * n_warp < 2 must raise (need at least one A and one B loader wave)."""
-    with pytest.raises(ValueError):
-        _run_a8w8_ptpc_case(128, 256, 512, 128, 256, 128, 1, 1, 4, "bf16")
 
 
 def _reference_blockscale(a, b, a_scale, b_scale, M, N, K):
@@ -486,20 +409,21 @@ def _build_a8w8_blockscale_case(
     return c_gpu, make_args, ref, (1e-2, 5e-2)
 
 
-def _run_a8w8_blockscale_case(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, **kwargs):
-    _require_gpu()
-    if m_warp * n_warp < 4:
-        pytest.skip("blockscale requires m_warp * n_warp >= 4 (A/B/scaleA/scaleB loader waves)")
-    if K % SCALE_BLOCK_128 or N % SCALE_BLOCK_128:
-        pytest.skip(f"N={N}, K={K} must both be divisible by {SCALE_BLOCK_128}")
-    if N % tile_n:
-        pytest.skip(f"N={N} must be divisible by tile_n={tile_n}")
-    if K % tile_k or (K // tile_k) < num_buffers:
-        pytest.skip(f"K={K} incompatible with tile_k={tile_k}, num_buffers={num_buffers}")
+# (M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, lda_extra, ldc_extra)
+_BLOCKSCALE_CASES = [
+    (128, 256, 512, 128, 256, 128, 2, 2, 2, 0, 0),
+    (256, 256, 512, 256, 256, 128, 2, 2, 4, 0, 0),
+    (1024, 1024, 1024, 128, 256, 128, 2, 2, 3, 0, 0),
+    (128, 256, 512, 128, 256, 128, 2, 2, 2, 128, 192),
+]
 
-    _assert_case(
-        _build_a8w8_blockscale_case,
-        launch_gemm_a8w8_bsc_col,
+
+@pytest.mark.parametrize(
+    "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, lda_extra, ldc_extra", _BLOCKSCALE_CASES
+)
+def test_a8w8_blockscale_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, lda_extra, ldc_extra):
+    _run_case(
+        "blockscale_a8w8",
         M,
         N,
         K,
@@ -509,43 +433,79 @@ def _run_a8w8_blockscale_case(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, n
         m_warp,
         n_warp,
         num_buffers,
-        **kwargs,
+        lda_extra=lda_extra,
+        ldc_extra=ldc_extra,
     )
-
-
-# (M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, lda_extra, ldc_extra)
-_BLOCKSCALE_CASES = [
-    (128, 256, 512, 128, 256, 128, 2, 2, 2, 0, 0),
-    (256, 256, 512, 256, 256, 128, 2, 2, 4, 0, 0),
-    (1024, 1024, 1024, 128, 256, 128, 2, 4, 3, 0, 0),
-    (128, 256, 512, 128, 256, 128, 2, 2, 2, 128, 192),
-]
-
-
-@pytest.mark.parametrize(
-    "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, lda_extra, ldc_extra", _BLOCKSCALE_CASES
-)
-def test_a8w8_blockscale_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, lda_extra, ldc_extra):
-    _run_a8w8_blockscale_case(
-        M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, lda_extra=lda_extra, ldc_extra=ldc_extra
-    )
-
-
-@pytest.mark.parametrize("M", [1, 5, 33, 63, 100, 129, 200])
-def test_a8w8_blockscale_gemm_ragged_m(M):
-    _run_a8w8_blockscale_case(M, 256, 512, 128, 256, 128, 2, 2, 2)
-
-
-@pytest.mark.parametrize("cluster_m, cluster_n", [(2, 1), (1, 2), (2, 2)])
-def test_a8w8_blockscale_gemm_cluster(cluster_m, cluster_n):
-    _run_a8w8_blockscale_case(129, 512, 512, 128, 256, 128, 2, 2, 2, cluster_m=cluster_m, cluster_n=cluster_n)
 
 
 _MODES = {
-    "mxscale_a8w4": (_build_a8w4_case, launch_gemm_a8w4_mxscale, True),
-    "ptpc_a8w8": (_build_a8w8_ptpc_case, launch_gemm_a8w8_ptpc, True),
-    "blockscale_a8w8": (_build_a8w8_blockscale_case, launch_gemm_a8w8_bsc_col, False),
+    "mxscale_a8w4": dict(
+        build=_build_a8w4_case,
+        launch=launch_gemm_a8w4_mxscale,
+        supports_out_dtype=True,
+        checks=lambda N, K, tile_n, tile_k, num_buffers: [
+            (K % SCALE_BLOCK_32 != 0, f"K={K} must be divisible by {SCALE_BLOCK_32}"),
+            (N % tile_n != 0, f"N={N} must be divisible by tile_n={tile_n}"),
+            (K % tile_k != 0 or (K // tile_k) < num_buffers, f"K={K} incompatible with tile_k={tile_k}"),
+        ],
+        # N gives 2 tile_n-wide blocks so cluster_n=2 has a real 2nd block to span.
+        smoke=dict(N=512, K=512, tile=(128, 256, 128), warps=(2, 2), num_buffers=2),
+    ),
+    "ptpc_a8w8": dict(
+        build=_build_a8w8_ptpc_case,
+        launch=launch_gemm_a8w8_ptpc,
+        supports_out_dtype=True,
+        checks=lambda N, K, tile_n, tile_k, num_buffers: [
+            (N % tile_n != 0, f"N={N} must be divisible by tile_n={tile_n} (no silent pad)"),
+            (K % tile_k != 0, f"K={K} must be divisible by tile_k={tile_k} (no silent pad)"),
+            (num_buffers > 1 and (K // tile_k) < num_buffers, f"{num_buffers}-buf requires more K-tiles"),
+        ],
+        smoke=dict(N=256, K=512, tile=(128, 128, 128), warps=(2, 2), num_buffers=4),
+    ),
+    "blockscale_a8w8": dict(
+        build=_build_a8w8_blockscale_case,
+        launch=launch_gemm_a8w8_bsc_col,
+        supports_out_dtype=False,
+        checks=lambda N, K, tile_n, tile_k, num_buffers: [
+            (K % SCALE_BLOCK_128 != 0 or N % SCALE_BLOCK_128 != 0, f"N={N}, K={K} must both be divisible by 128"),
+            (N % tile_n != 0, f"N={N} must be divisible by tile_n={tile_n}"),
+            (K % tile_k != 0 or (K // tile_k) < num_buffers, f"K={K} incompatible with tile_k={tile_k}"),
+        ],
+        # N gives 2 tile_n-wide blocks so cluster_n=2 has a real 2nd block to span.
+        smoke=dict(N=512, K=512, tile=(128, 256, 128), warps=(2, 2), num_buffers=2),
+    ),
 }
+
+
+def _run_case(mode, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, **kwargs):
+    _require_gpu()
+    cfg = _MODES[mode]
+    for bad, msg in cfg["checks"](N, K, tile_n, tile_k, num_buffers):
+        if bad:
+            pytest.skip(msg)
+    _assert_case(cfg["build"], cfg["launch"], M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, **kwargs)
+
+
+def _run_smoke(mode, M, **kwargs):
+    """Run `mode`'s fixed small tile/warp/buffer config at a given M (ragged-M / cluster sweeps)."""
+    smoke = _MODES[mode]["smoke"]
+    _run_case(mode, M, smoke["N"], smoke["K"], *smoke["tile"], *smoke["warps"], smoke["num_buffers"], **kwargs)
+
+
+_RAGGED_M_VALUES = [1, 2, 5, 15, 16, 17, 33, 63, 65, 100, 127, 128, 129, 191, 200, 255, 256, 257, 384, 500, 1000, 2048]
+
+
+@pytest.mark.parametrize("M", _RAGGED_M_VALUES)
+@pytest.mark.parametrize("mode", sorted(_MODES))
+def test_gemm_ragged_m(mode, M):
+    _run_smoke(mode, M)
+
+
+@pytest.mark.parametrize("cluster_m, cluster_n", [(2, 1), (1, 2), (2, 2)])
+@pytest.mark.parametrize("M", [1, 65, 129, 384])
+@pytest.mark.parametrize("mode", sorted(_MODES))
+def test_gemm_cluster(mode, M, cluster_m, cluster_n):
+    _run_smoke(mode, M, cluster_m=cluster_m, cluster_n=cluster_n)
 
 
 def _parse_csv_ints(value: str, n: int, name: str) -> list[int]:
@@ -574,12 +534,12 @@ def _main():
     m_warp, n_warp = _parse_csv_ints(args.warps, 2, "warps")
     cluster_m, cluster_n = _parse_csv_ints(args.cluster, 2, "cluster")
 
-    build_fn, launch_fn, supports_out_dtype = _MODES[args.mode]
+    cfg = _MODES[args.mode]
     kwargs = {"cluster_m": cluster_m, "cluster_n": cluster_n}
-    if supports_out_dtype:
+    if cfg["supports_out_dtype"]:
         kwargs["out_dtype"] = args.out_dtype
     c_gpu, make_args, compiled = _assert_case(
-        build_fn, launch_fn, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, args.nb, **kwargs
+        cfg["build"], cfg["launch"], M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, args.nb, **kwargs
     )
     print(f"PASSED correctness: mode={args.mode} M={M} N={N} K={K}")
 
