@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-23T16:00:02Z",
+ "updated": "2026-07-23T16:05:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30023289075,
+   "pr": 892,
+   "commit": "8fa1ac188d84388bdc48885e97ed16fedf1c31c7",
+   "branch": "worktree-mxmoe-a8w4",
+   "event": "pull_request",
+   "title": "Refactor mxmoe",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30023289075",
+   "created_at": "2026-07-23T16:02:11Z",
+   "updated_at": "2026-07-23T16:02:51Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 30021369878,
    "pr": 833,
@@ -68,38 +83,38 @@
    "branch": "worktree-mxmoe-a8w4",
    "event": "pull_request",
    "title": "Refactor mxmoe",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30020236192",
    "created_at": "2026-07-23T15:22:27Z",
-   "updated_at": "2026-07-23T15:24:21Z",
+   "updated_at": "2026-07-23T16:02:12Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-23T15:24:21Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T16:02:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30020236192/job/89251238366"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-23T15:24:21Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T16:02:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30020236192/job/89251238408"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-23T15:24:21Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T16:02:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30020236192/job/89251238411"
     }
    ]
@@ -2240,49 +2255,6 @@
    "updated_at": "2026-07-22T15:45:28Z",
    "actor": "jiacao-amd",
    "jobs": []
-  },
-  {
-   "run_id": 29930978573,
-   "pr": 882,
-   "commit": "7fd39aa16e5ed343fd622406dd45653021e4e467",
-   "branch": "skill/authoring-cleanup",
-   "event": "pull_request",
-   "title": "Skill: align kernel-authoring with code-cleanup (drop buffer_ops/ArithValue)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29930978573",
-   "created_at": "2026-07-22T14:56:11Z",
-   "updated_at": "2026-07-22T14:58:02Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-22T14:57:58Z",
-     "completed_at": "2026-07-22T14:58:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29930978573/job/88960660974"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-22T14:57:56Z",
-     "completed_at": "2026-07-22T14:57:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29930978573/job/88960661060"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-22T14:57:56Z",
-     "completed_at": "2026-07-22T14:57:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29930978573/job/88960661076"
-    }
-   ]
   }
  ]
 }
