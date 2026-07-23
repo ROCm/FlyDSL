@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-23T15:40:13Z",
+ "updated": "2026-07-23T15:42:58Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "gfx1250_tdm_gather_scatter",
    "event": "pull_request",
    "title": "Gfx1250 tdm gather scatter",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30021369878",
    "created_at": "2026-07-23T15:37:04Z",
-   "updated_at": "2026-07-23T15:38:41Z",
+   "updated_at": "2026-07-23T15:38:48Z",
    "actor": "coderfeli",
    "jobs": []
   },
