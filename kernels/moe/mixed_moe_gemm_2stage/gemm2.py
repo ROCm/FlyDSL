@@ -9,13 +9,14 @@ import os
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm, memref, scf
+from flydsl._mlir.dialects import llvm, memref, scf, vector
 from flydsl._mlir.dialects.arith import CmpIPredicate
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
+from flydsl.expr import arith, as_ir_value, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+from kernels.common import buffer_ops
 from kernels.common.layout_utils import crd2idx, idx2crd
 from kernels.common.layout_utils import get as layout_get
 from kernels.common.mem_ops import buffer_atomic_add
@@ -690,11 +691,11 @@ def compile_mixed_moe_gemm2(
                         x_vec = load_x(idx_i32)
 
                         if const_expr(x_load_bytes == 16):
-                            parts.append(vector.bitcast(vec4_i32, x_vec))
+                            parts.append(vector.bitcast(vec4_i32, as_ir_value(x_vec)))
                         elif const_expr(x_load_bytes == 8):
-                            parts.append(vector.bitcast(vec2_i32, x_vec))
+                            parts.append(vector.bitcast(vec2_i32, as_ir_value(x_vec)))
                         else:
-                            parts.append(vector.bitcast(vec1_i32, x_vec))
+                            parts.append(vector.bitcast(vec1_i32, as_ir_value(x_vec)))
                     return parts
 
                 # tx -> wave/lane (GEMM-style decomposition).
@@ -785,9 +786,9 @@ def compile_mixed_moe_gemm2(
                         offset_in_bytes=(b_elem_bytes == 1),
                         cache_modifier=b_nt,
                     )
-                    b_i64x2 = vector.bitcast(vec2_i64, b16)
-                    b0 = vector.extract(b_i64x2, static_position=[0], dynamic_position=[])
-                    b1 = vector.extract(b_i64x2, static_position=[1], dynamic_position=[])
+                    b_i64x2 = vector.bitcast(vec2_i64, as_ir_value(b16))
+                    b0 = vector.extract(as_ir_value(b_i64x2), static_position=[0], dynamic_position=[])
+                    b1 = vector.extract(as_ir_value(b_i64x2), static_position=[1], dynamic_position=[])
                     return b0, b1
 
                 def load_b_tile(base_k, ku_limit=k_unroll):
@@ -842,13 +843,13 @@ def compile_mixed_moe_gemm2(
                         + n_lane
                     )
                     s = buffer_ops.buffer_load(rsrc, idx_pack, vec_width=1, dtype=T.i32)
-                    return vector.from_elements(T.vec(1, T.i32), [s])
+                    return vector.from_elements(T.vec(1, T.i32), [as_ir_value(s)])
 
                 def _apply_k_shift(scale_vec, k_shift_bits):
                     if const_expr(k_shift_bits > 0):
-                        val = vector.extract(scale_vec, static_position=[0], dynamic_position=[])
+                        val = vector.extract(as_ir_value(scale_vec), static_position=[0], dynamic_position=[])
                         val = arith.shrui(val, arith.constant(k_shift_bits, type=T.i32))
-                        return vector.from_elements(T.vec(1, T.i32), [val])
+                        return vector.from_elements(T.vec(1, T.i32), [as_ir_value(val)])
                     return scale_vec
 
                 def load_b_scale_tile(base_k, k_shift_bits=0, ku_packed_limit=k_unroll_packed):
@@ -955,10 +956,10 @@ def compile_mixed_moe_gemm2(
                     col_base_swz_bytes = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
                     col_base_swz = col_base_swz_bytes if elem_bytes == 1 else (col_base_swz_bytes / arith.index(2))
                     idx_a16 = crd2idx([fx.Int32(curr_row_a_lds), fx.Int32(col_base_swz)], layout_lds)
-                    loaded_a16 = vector.load_op(vec16_x, lds_buffer, [idx_a16])
-                    a_i64x2 = vector.bitcast(vec2_i64, loaded_a16)
-                    a0 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
-                    a1 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
+                    loaded_a16 = vector.load(vec16_x, as_ir_value(lds_buffer), [as_ir_value(idx_a16)])
+                    a_i64x2 = vector.bitcast(vec2_i64, as_ir_value(loaded_a16))
+                    a0 = vector.extract(as_ir_value(a_i64x2), static_position=[0], dynamic_position=[])
+                    a1 = vector.extract(as_ir_value(a_i64x2), static_position=[1], dynamic_position=[])
                     return a0, a1
 
                 def compute_tile(
@@ -1036,13 +1037,15 @@ def compile_mixed_moe_gemm2(
 
                         for mi in range_constexpr(m_repeat_packed):
                             a_scale_i32 = a_scale[ku128 * m_repeat_packed + mi]
-                            a_scale_val = vector.extract(a_scale_i32, static_position=[0], dynamic_position=[])
+                            a_scale_val = vector.extract(
+                                as_ir_value(a_scale_i32), static_position=[0], dynamic_position=[]
+                            )
                             if const_expr(_m_scale_shift_i32 is not None):
                                 a_scale_val = arith.shrui(a_scale_val, _m_scale_shift_i32)
                             for ni in range_constexpr(num_acc_n_packed):
                                 b_scale_i32 = b_scale[ku128 * num_acc_n_packed + ni]
                                 b_scale_val = vector.extract(
-                                    b_scale_i32,
+                                    as_ir_value(b_scale_i32),
                                     static_position=[0],
                                     dynamic_position=[],
                                 )
@@ -1162,8 +1165,8 @@ def compile_mixed_moe_gemm2(
                 with ir.InsertionPoint(_if_tid.then_block):
                     _tid_row = bx_m + tx
                     _tid_val = buffer_ops.buffer_load(sorted_rsrc, _tid_row, vec_width=1, dtype=T.i32)
-                    _tid_vec1 = vector.from_elements(T.vec(1, T.i32), [_tid_val])
-                    vector.store(_tid_vec1, lds_tid, [tx])
+                    _tid_vec1 = vector.from_elements(T.vec(1, T.i32), [as_ir_value(_tid_val)])
+                    vector.store(as_ir_value(_tid_vec1), as_ir_value(lds_tid), [as_ir_value(tx)])
                     scf.YieldOp([])
 
                 gpu.barrier()
@@ -1411,7 +1414,7 @@ def compile_mixed_moe_gemm2(
                     for ni in range_constexpr(num_acc_n):
                         col_local = col_base_local + (ni * 16)
                         acc_idx = mi * num_acc_n + ni
-                        v = vector.extract(acc[acc_idx], static_position=[ii], dynamic_position=[])
+                        v = vector.extract(as_ir_value(acc[acc_idx]), static_position=[ii], dynamic_position=[])
                         if const_expr(is_int8):
                             v = arith.sitofp(f32, v)
                         if const_expr(enable_bias):
@@ -1423,9 +1426,9 @@ def compile_mixed_moe_gemm2(
 
                         lds_idx = row_base_lds + col_local
                         vec1_out = T.vec(1, out_elem())
-                        v1 = vector.from_elements(vec1_out, [v_out])
+                        v1 = vector.from_elements(vec1_out, [as_ir_value(v_out)])
 
-                        vector.store(v1, lds_out, [lds_idx], alignment=2)
+                        vector.store(as_ir_value(v1), as_ir_value(lds_out), [as_ir_value(lds_idx)], alignment=2)
 
                 def precompute_row(*, row_local, row):
                     # Use lds_tid (sorted_idx preloaded to LDS) instead of buffer_load

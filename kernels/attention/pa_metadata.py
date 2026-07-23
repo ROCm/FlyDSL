@@ -41,11 +41,12 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
+from flydsl._mlir.dialects import vector
+from flydsl.expr import arith, as_ir_value, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, T
 from flydsl.runtime.device import get_rocm_arch
 from kernels.attention.pa_common import _compute_block_base_dw_i64, _prefetch_q_chunks
-from kernels.common import dpp_utils
+from kernels.common import buffer_ops, dpp_utils
 from kernels.common.kernels_common import get_warp_size
 from kernels.common.tensor_shim import _run_compiled
 from kernels.common.utils import (
@@ -582,7 +583,7 @@ def _make_pa_phase_helpers(
                 for i in range_constexpr(4):
                     if const_expr(kv_tok_base is not None):
                         kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
-                        vs_i = vector.extract(vs, static_position=[i], dynamic_position=[])
+                        vs_i = vector.extract(as_ir_value(vs), static_position=[i], dynamic_position=[])
                         vs_i = arith.select(kv_tok < seq_end, vs_i, zero_f)
                         vs = vector.insert(vs_i, vs, static_position=[i], dynamic_position=[])
                 v_max_warp = fx.maxnumf(v_max_warp, fx.Vector(vs).reduce("max"))
@@ -725,10 +726,10 @@ def _make_pa_phase_helpers(
             v_correction = v_scale_val
 
         for td in range_constexpr(TLOOP):
-            p0 = vector.extract(d_out[td], static_position=[0], dynamic_position=[])
-            p1 = vector.extract(d_out[td], static_position=[1], dynamic_position=[])
-            p2 = vector.extract(d_out[td], static_position=[2], dynamic_position=[])
-            p3 = vector.extract(d_out[td], static_position=[3], dynamic_position=[])
+            p0 = vector.extract(as_ir_value(d_out[td]), static_position=[0], dynamic_position=[])
+            p1 = vector.extract(as_ir_value(d_out[td]), static_position=[1], dynamic_position=[])
+            p2 = vector.extract(as_ir_value(d_out[td]), static_position=[2], dynamic_position=[])
+            p3 = vector.extract(as_ir_value(d_out[td]), static_position=[3], dynamic_position=[])
             lo = rocdl.cvt_pk_fp8_f32(T.i32, p0, p1, arith.constant(0, type=T.i32), False)
             pk = rocdl.cvt_pk_fp8_f32(T.i32, p2, p3, lo, True)
             elem_base = prob_wr_thread_base + arith.constant(td * MFMA_N * (PROB_ROW_STRIDE_BYTES // 4), type=T.i32)
@@ -1499,8 +1500,8 @@ def compile_pa_decode_metadata(
         # ── Work loop bounds ──
         # wi[cu_id] and wi[cu_id+1] are adjacent int32; load both in one vec2 load.
         work_bounds = buffer_ops.buffer_load(wi_rsrc, cu_id, vec_width=2, dtype=T.i32)
-        work_start = vector.extract(work_bounds, static_position=[0], dynamic_position=[])
-        work_end = vector.extract(work_bounds, static_position=[1], dynamic_position=[])
+        work_start = vector.extract(as_ir_value(work_bounds), static_position=[0], dynamic_position=[])
+        work_end = vector.extract(as_ir_value(work_bounds), static_position=[1], dynamic_position=[])
 
         # Outer work loop — each work item = one (batch, kv_head_range, kv_page_range)
         _work_start_idx = fx.Index(arith.unwrap(work_start))
@@ -1519,12 +1520,12 @@ def compile_pa_decode_metadata(
             wi_hi = buffer_ops.buffer_load(
                 winfo_rsrc, info_base + arith.constant(4, type=T.i32), vec_width=4, dtype=T.i32
             )
-            batch_idx = vector.extract(wi_lo, static_position=[0], dynamic_position=[])
-            partial_idx = vector.extract(wi_lo, static_position=[1], dynamic_position=[])
-            qo_start = vector.extract(wi_lo, static_position=[2], dynamic_position=[])
-            kv_start = vector.extract(wi_hi, static_position=[0], dynamic_position=[])
-            kv_end = vector.extract(wi_hi, static_position=[1], dynamic_position=[])
-            q_head_range = vector.extract(wi_hi, static_position=[3], dynamic_position=[])
+            batch_idx = vector.extract(as_ir_value(wi_lo), static_position=[0], dynamic_position=[])
+            partial_idx = vector.extract(as_ir_value(wi_lo), static_position=[1], dynamic_position=[])
+            qo_start = vector.extract(as_ir_value(wi_lo), static_position=[2], dynamic_position=[])
+            kv_start = vector.extract(as_ir_value(wi_hi), static_position=[0], dynamic_position=[])
+            kv_end = vector.extract(as_ir_value(wi_hi), static_position=[1], dynamic_position=[])
+            q_head_range = vector.extract(as_ir_value(wi_hi), static_position=[3], dynamic_position=[])
 
             # work_info.kv_start/kv_end are cumulative partition indices (256-token
             # units, summed across batches).  partition_indptr[batch] gives the
@@ -1536,8 +1537,8 @@ def compile_pa_decode_metadata(
             # array.  kv_page_end clamps small-block page-gather reads so the last
             # (partial) partition never reads past the sequence.
             _kvind2 = buffer_ops.buffer_load(kvindptr_rsrc, batch_idx, vec_width=2, dtype=T.i32)
-            kv_page_base = vector.extract(_kvind2, static_position=[0], dynamic_position=[])
-            kv_page_end = vector.extract(_kvind2, static_position=[1], dynamic_position=[])
+            kv_page_base = vector.extract(as_ir_value(_kvind2), static_position=[0], dynamic_position=[])
+            kv_page_end = vector.extract(as_ir_value(_kvind2), static_position=[1], dynamic_position=[])
             local_part_start = kv_start - kv_part_base
 
             # Derive kv_head from q_head_range

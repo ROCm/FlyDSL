@@ -29,8 +29,8 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl.expr import arith, const_expr, range_constexpr
-from flydsl.expr import buffer_ops as _buffer_ops
 from flydsl.expr.typing import Vector as Vec
+from kernels.common import buffer_ops as _buffer_ops
 from kernels.gemm.fp8_gemm_utils import (
     G2SLoader,
     ceildiv,
