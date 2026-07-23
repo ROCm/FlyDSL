@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ctypes
 import functools
+import threading
 from pathlib import Path
 from typing import ClassVar
 
@@ -14,15 +15,21 @@ from .base import DeviceRuntime
 
 # Cached HIP runtime handle (``libamdhip64``); cached once.
 _HIP_LIB = None
-_HIP_LIB_TRIED = False
+_HIP_LIB_LOCK = threading.Lock()
 _FLY_RUNTIME_LIB = None
-_FLY_RUNTIME_LIB_TRIED = False
+_FLY_RUNTIME_LIB_LOCK = threading.Lock()
 
 
 def _get_hip_lib():
-    global _HIP_LIB, _HIP_LIB_TRIED
-    if not _HIP_LIB_TRIED:
-        _HIP_LIB_TRIED = True
+    global _HIP_LIB
+    if _HIP_LIB is not None:
+        return _HIP_LIB
+
+    with _HIP_LIB_LOCK:
+        if _HIP_LIB is not None:
+            return _HIP_LIB
+
+        last_error = None
         for soname in ("libamdhip64.so", "libamdhip64.so.6", "libamdhip64.so.5"):
             try:
                 lib = ctypes.CDLL(soname)
@@ -33,31 +40,39 @@ def _get_hip_lib():
                 lib.hipGetDeviceCount.argtypes = [ctypes.POINTER(ctypes.c_int)]
                 lib.hipGetDeviceCount.restype = ctypes.c_int
                 _HIP_LIB = lib
-                break
-            except OSError:
-                continue
-    if _HIP_LIB is None:
-        raise RuntimeError("Unable to load libamdhip64; cannot resolve the active ROCm device")
-    return _HIP_LIB
+                return lib
+            except OSError as exc:
+                last_error = exc
+
+        raise RuntimeError("Unable to load libamdhip64; cannot resolve the active ROCm device") from last_error
 
 
 def _get_fly_runtime_lib():
-    global _FLY_RUNTIME_LIB, _FLY_RUNTIME_LIB_TRIED
-    if not _FLY_RUNTIME_LIB_TRIED:
-        _FLY_RUNTIME_LIB_TRIED = True
-        from ..._mlir import _mlir_libs
+    global _FLY_RUNTIME_LIB
+    if _FLY_RUNTIME_LIB is not None:
+        return _FLY_RUNTIME_LIB
 
-        path = Path(_mlir_libs.__file__).resolve().parent / "libfly_jit_runtime.so"
+    with _FLY_RUNTIME_LIB_LOCK:
+        if _FLY_RUNTIME_LIB is not None:
+            return _FLY_RUNTIME_LIB
+
+        # Resolve against this concrete FlyDSL package, not the importable
+        # _mlir_libs module: editable/CI environments can also contain an older
+        # installed FlyDSL namespace whose runtime lacks the new symbol.
+        path = Path(__file__).resolve().parents[2] / "_mlir" / "_mlir_libs" / "libfly_jit_runtime.so"
         try:
             lib = ctypes.CDLL(str(path))
+        except OSError as exc:
+            raise RuntimeError(f"Unable to load FlyDSL ROCm runtime at {path}: {exc}") from exc
+        try:
             lib.mgpuGetDeviceArch.argtypes = [ctypes.c_int32, ctypes.c_char_p, ctypes.c_size_t]
             lib.mgpuGetDeviceArch.restype = ctypes.c_int32
-            _FLY_RUNTIME_LIB = lib
-        except (AttributeError, OSError):
-            _FLY_RUNTIME_LIB = None
-    if _FLY_RUNTIME_LIB is None:
-        raise RuntimeError("Unable to load libfly_jit_runtime.so; rebuild FlyDSL before resolving a ROCm device target")
-    return _FLY_RUNTIME_LIB
+        except AttributeError as exc:
+            raise RuntimeError(
+                f"FlyDSL ROCm runtime at {path} does not export mgpuGetDeviceArch; rebuild FlyDSL"
+            ) from exc
+        _FLY_RUNTIME_LIB = lib
+        return lib
 
 
 def _hip_get_device() -> int:

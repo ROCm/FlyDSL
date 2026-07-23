@@ -12,7 +12,9 @@ implementation, so they hold regardless of loop-vs-codegen internals.
 """
 
 import ctypes
+import gc
 import struct
+import weakref
 
 import pytest
 
@@ -99,3 +101,22 @@ def test_callstate_dispatch_packs_changing_args_and_auto_stream():
         assert layout == _expected_layout_bytes(t)
         assert scalar == ival
         assert auto_stream in (None, 0)  # auto-stream slot stays NULL (default stream)
+
+
+def test_callstate_keeps_function_owner_alive():
+    """A cached raw function pointer must not outlive its owning engine/artifact."""
+
+    class Owner:
+        pass
+
+    owner = Owner()
+    owner_ref = weakref.ref(owner)
+    state = CallState([], lambda _packed: None, keepalive=owner)
+
+    del owner
+    gc.collect()
+    assert owner_ref() is not None
+
+    del state
+    gc.collect()
+    assert owner_ref() is None

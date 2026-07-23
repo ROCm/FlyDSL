@@ -420,3 +420,53 @@ def test_parent_key_includes_nested_jit_closure_values(tmp_path, monkeypatch):
     second = load("nested_closure_128", 128)
 
     assert _manager_key(first.parent, reset=True) != _manager_key(second.parent, reset=True)
+
+
+def test_parent_key_includes_cross_directory_child_helpers(tmp_path, monkeypatch):
+    import importlib.util
+
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+    monkeypatch.setattr(jit_function, "_flydsl_key", lambda *_args: "test-flydsl-key")
+
+    def load_version(version, helper_return):
+        root = tmp_path / version
+        child_dir = root / "child"
+        parent_dir = root / "parent"
+        child_dir.mkdir(parents=True)
+        parent_dir.mkdir(parents=True)
+
+        child_path = child_dir / "child_module.py"
+        child_path.write_text(textwrap.dedent(f"""
+                import flydsl.compiler as flyc
+                import flydsl.expr as fx
+
+                def helper(A):
+                    return {helper_return}
+
+                @flyc.jit
+                def child(A: fx.Tensor):
+                    return helper(A)
+                """))
+        child_spec = importlib.util.spec_from_file_location("cross_dir_child", child_path)
+        child_mod = importlib.util.module_from_spec(child_spec)
+        child_spec.loader.exec_module(child_mod)
+
+        parent_path = parent_dir / "parent_module.py"
+        parent_path.write_text(textwrap.dedent("""
+                import flydsl.compiler as flyc
+                import flydsl.expr as fx
+
+                @flyc.jit
+                def parent(A: fx.Tensor):
+                    return child(A)
+                """))
+        parent_spec = importlib.util.spec_from_file_location("cross_dir_parent", parent_path)
+        parent_mod = importlib.util.module_from_spec(parent_spec)
+        parent_mod.child = child_mod.child
+        parent_spec.loader.exec_module(parent_mod)
+        return parent_mod
+
+    first = load_version("first", "A")
+    second = load_version("second", "(A, A)")
+
+    assert _manager_key(first.parent, reset=True) != _manager_key(second.parent, reset=True)

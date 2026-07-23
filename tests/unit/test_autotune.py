@@ -238,7 +238,14 @@ def test_autotune_uses_canonical_provider_and_guards_benchmark_device(monkeypatc
         selected.append(index)
         return nullcontext()
 
-    monkeypatch.setattr(at.torch.cuda, "device", device_context)
+    class FakeCuda:
+        Stream = type("FakeStream", (), {})
+        device = staticmethod(device_context)
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+    monkeypatch.setattr(at, "torch", FakeTorch())
     tuner = _make_tuner()
     tensor = FakeWrappedTensor((8, 8), device_id=1)
 
@@ -248,6 +255,61 @@ def test_autotune_uses_canonical_provider_and_guards_benchmark_device(monkeypatc
 
     assert "gfx_device_1" in "".join(key)
     assert selected == [1]
+
+
+def test_autotune_resolves_and_benchmarks_wrapped_stream(monkeypatch):
+    import importlib
+
+    import flydsl.expr as fx
+
+    at = importlib.import_module("flydsl.autotune")
+    selected_streams = []
+
+    class FakeDevice:
+        type = "cuda"
+        index = 1
+
+    class FakeStream:
+        device = FakeDevice()
+        device_index = 1
+        cuda_stream = 1234
+
+    class FakeCuda:
+        Stream = FakeStream
+
+        @staticmethod
+        def stream(stream):
+            selected_streams.append(stream)
+            return nullcontext()
+
+    class FakeVersion:
+        hip = "test"
+
+    class FakeTorch:
+        cuda = FakeCuda()
+        version = FakeVersion()
+
+    monkeypatch.setattr(at, "torch", FakeTorch())
+    raw_stream = FakeStream()
+    wrapped_stream = fx.Stream(raw_stream)
+
+    device = at._invocation_device({"stream": wrapped_stream})
+    assert device.index == 1
+
+    def launch(stream):
+        pass
+
+    tuner = Autotuner(
+        fn=launch,
+        configs=[Config(BLOCK=128)],
+        key=[],
+        warmup=1,
+        rep=1,
+    )
+    with tuner._stream_context((wrapped_stream,), {}):
+        pass
+
+    assert selected_streams == [raw_stream]
 
 
 def test_key_varies_with_env_fingerprint(monkeypatch):

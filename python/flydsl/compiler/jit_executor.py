@@ -199,13 +199,17 @@ class CallState:
     -- no per-slot loop, no ctypes allocation. Thread-local for thread safety.
     """
 
-    __slots__ = ("_func_exe", "_spec", "_tls", "_factory")
+    __slots__ = ("_func_exe", "_spec", "_tls", "_factory", "_keepalive")
 
-    def __init__(self, slot_specs, func_exe):
+    def __init__(self, slot_specs, func_exe, *, keepalive=None):
         self._func_exe = func_exe
         self._spec = slot_specs  # list of (arg_idx, ctype, fill)
         self._tls = threading.local()
         self._factory = _build_dispatch_factory(slot_specs)
+        # A ctypes function created from a raw ExecutionEngine address does not
+        # retain that engine. Keep its owning CompiledArtifact alive for exactly
+        # as long as this cached dispatch state can call the pointer.
+        self._keepalive = keepalive
 
     def _make_dispatch(self):
         # Allocate one typed storage per slot + the packed pointer array; the null

@@ -27,7 +27,7 @@ from ..expr.typing import (
     Tensor,
     address_space_from_attr,
 )
-from ..runtime.device_runtime import Device, device_from_argument, device_from_dlpack
+from ..runtime.device_runtime import Device, device_from_argument, device_from_dlpack, device_from_stream_argument
 from .protocol import DslType, JitArgument
 
 _RESOLVE_SIG_WARNED = set()
@@ -43,17 +43,8 @@ def jit_argument_device(value) -> Optional[Device]:
     if device is not None:
         return device
 
-    if isinstance(value, Stream):
-        raw = value.value
-        stream_device = getattr(raw, "device", None)
-        if getattr(stream_device, "type", None) == "cuda":
-            index = stream_device.index
-            if index is None:
-                index = getattr(raw, "device_index", None)
-            if index is not None:
-                kind = "rocm" if getattr(torch.version, "hip", None) else "cuda"
-                return Device(kind=kind, index=int(index))
-    return None
+    kind = "rocm" if getattr(torch.version, "hip", None) else "cuda"
+    return device_from_stream_argument(value, cuda_kind=kind)
 
 
 def resolve_signature(func):

@@ -19,7 +19,15 @@ from __future__ import annotations
 from typing import Dict, Optional, Type
 
 from ...utils import env
-from .base import Device, DeviceRuntime, device_from_argument, device_from_dlpack
+from .base import (
+    Device,
+    DeviceRuntime,
+    device_from_argument,
+    device_from_dlpack,
+)
+from .base import (
+    device_from_stream_argument as device_from_stream_argument,
+)
 from .rocm import RocmDeviceRuntime
 
 # Compile-backend id -> device-runtime kind (single string namespace).

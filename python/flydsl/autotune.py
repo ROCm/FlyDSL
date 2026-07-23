@@ -63,16 +63,14 @@ def _device_fingerprint(device=None) -> str:
 
 def _invocation_device(sig_args):
     """Resolve one canonical logical GPU device from call arguments."""
-    from .runtime.device_runtime import Device, device_from_argument
+    from .runtime.device_runtime import device_from_argument, device_from_stream_argument
 
     devices = set()
     for value in sig_args.values():
         device = device_from_argument(value)
-        if device is None and torch is not None and isinstance(value, torch.cuda.Stream):
-            stream_device = value.device
-            if stream_device.index is not None:
-                kind = "rocm" if getattr(torch.version, "hip", None) else "cuda"
-                device = Device(kind=kind, index=int(stream_device.index))
+        if device is None:
+            kind = "rocm" if torch is not None and getattr(torch.version, "hip", None) else "cuda"
+            device = device_from_stream_argument(value, cuda_kind=kind)
         if device is not None:
             devices.add(device)
 
@@ -327,6 +325,8 @@ class Autotuner:
         sig_args.update(kwargs)
         device = _invocation_device(sig_args)
         stream = sig_args.get("stream")
+        if getattr(stream, "_is_stream_param", False):
+            stream = stream.value
         if isinstance(stream, torch.cuda.Stream):
             return torch.cuda.stream(stream)
         if isinstance(stream, int):

@@ -204,6 +204,31 @@ def test_cache_managers_are_isolated_by_target_under_concurrency(tmp_path, monke
     assert results["gfx950"][1].cache_dir.name.endswith("_gfx950")
 
 
+def test_compiled_artifact_publication_is_canonical_under_concurrency():
+    @flyc.jit
+    def launch(x):
+        pass
+
+    cache_key = (("shared", True),)
+    candidates = [object(), object()]
+    barrier = threading.Barrier(len(candidates))
+    published = []
+
+    def publish(candidate):
+        barrier.wait()
+        published.append(launch._publish_artifact(cache_key, candidate))
+
+    threads = [threading.Thread(target=publish, args=(candidate,)) for candidate in candidates]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(published) == 2
+    assert published[0] is published[1]
+    assert launch._mem_cache[cache_key] is published[0]
+
+
 def test_compile_only_without_device_requires_explicit_target(monkeypatch):
     dr._instance = _FakeRuntime(("gfx942",))
     monkeypatch.setenv("COMPILE_ONLY", "1")
@@ -236,6 +261,78 @@ def test_device_guard_restores_the_callers_device():
 
     assert runtime.current_device_id() == 0
     assert runtime.set_calls == [1, 0]
+
+
+@pytest.mark.parametrize(
+    ("getter_name", "cache_name"),
+    [
+        ("_get_hip_lib", "_HIP_LIB"),
+        ("_get_fly_runtime_lib", "_FLY_RUNTIME_LIB"),
+    ],
+)
+def test_rocm_runtime_library_initialization_is_atomic(monkeypatch, getter_name, cache_name):
+    from flydsl.runtime.device_runtime import rocm
+
+    class _FakeFunction:
+        argtypes = None
+        restype = None
+
+        def __call__(self, *_args):
+            return 0
+
+    class _FakeRuntimeLibrary:
+        hipGetDevice = _FakeFunction()
+        hipSetDevice = _FakeFunction()
+        hipGetDeviceCount = _FakeFunction()
+        mgpuGetDeviceArch = _FakeFunction()
+
+    entered_loader = threading.Event()
+    release_loader = threading.Event()
+    second_started = threading.Event()
+    second_finished = threading.Event()
+    load_calls = []
+    results = []
+    errors = []
+
+    def load_library(_soname):
+        load_calls.append(_soname)
+        entered_loader.set()
+        assert release_loader.wait(timeout=5)
+        return _FakeRuntimeLibrary()
+
+    monkeypatch.setattr(rocm, cache_name, None)
+    monkeypatch.setattr(rocm.ctypes, "CDLL", load_library)
+    getter = getattr(rocm, getter_name)
+
+    def resolve(*, second=False):
+        if second:
+            second_started.set()
+        try:
+            results.append(getter())
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            if second:
+                second_finished.set()
+
+    first = threading.Thread(target=resolve)
+    second = threading.Thread(target=resolve, kwargs={"second": True})
+    first.start()
+    assert entered_loader.wait(timeout=5)
+    second.start()
+    assert second_started.wait(timeout=5)
+    second_finished.wait(timeout=0.1)
+    release_loader.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not errors
+    assert len(results) == 2
+    assert results[0] is results[1]
+    assert len(load_calls) == 1
+    if getter_name == "_get_fly_runtime_lib":
+        expected = rocm.Path(rocm.__file__).resolve().parents[2] / "_mlir" / "_mlir_libs" / "libfly_jit_runtime.so"
+        assert load_calls == [str(expected)]
 
 
 def test_compiled_artifact_loads_device_bound_state_once_per_device(monkeypatch):

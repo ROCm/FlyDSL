@@ -48,6 +48,20 @@ def device_from_argument(value) -> Device | None:
     return None
 
 
+def device_from_stream_argument(value, *, cuda_kind: str = "cuda") -> Device | None:
+    """Read a CUDA/HIP-style stream's logical device without importing a framework."""
+    raw = value.value if getattr(value, "_is_stream_param", False) else value
+    stream_device = getattr(raw, "device", None)
+    if getattr(stream_device, "type", None) != "cuda":
+        return None
+    index = getattr(stream_device, "index", None)
+    if index is None:
+        index = getattr(raw, "device_index", None)
+    if index is None:
+        return None
+    return Device(kind=cuda_kind, index=int(index))
+
+
 class DeviceRuntime(metaclass=ABCMeta):
     """Vendor-neutral runtime: one implementation per process (HIP, CUDA, …).
 

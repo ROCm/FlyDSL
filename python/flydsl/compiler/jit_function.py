@@ -447,6 +447,16 @@ def _is_user_function(func, rootFile):
     return os.path.dirname(os.path.abspath(funcFile)) == os.path.dirname(os.path.abspath(rootFile))
 
 
+def _dependency_root_file(value, underlying, fallback):
+    """Use a nested DSL callable's own directory when walking its helpers."""
+    if isinstance(value, (JitFunction, KernelFunction)):
+        try:
+            return inspect.getfile(underlying)
+        except (TypeError, OSError):
+            pass
+    return fallback
+
+
 def _owner_class_from_func(func):
     qualname = getattr(func, "__qualname__", "")
     parts = qualname.split(".")[:-1]
@@ -566,7 +576,13 @@ def _collect_dependency_sources(
         visited.add(id(underlying))
         should_recurse = _emit("", name, obj, underlying)
         if should_recurse:
-            sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+            sources.extend(
+                _collect_dependency_sources(
+                    underlying,
+                    _dependency_root_file(obj, underlying, rootFile),
+                    visited,
+                )
+            )
 
     # 2) Scan closure variables (co_freevars → __closure__) for callable
     #    dependencies.  This catches @flyc.kernel functions defined in an
@@ -583,7 +599,13 @@ def _collect_dependency_sources(
             visited.add(id(underlying))
             should_recurse = _emit("closure:", name, val, underlying)
             if should_recurse:
-                sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+                sources.extend(
+                    _collect_dependency_sources(
+                        underlying,
+                        _dependency_root_file(val, underlying, rootFile),
+                        visited,
+                    )
+                )
 
     owner_cls = owner_cls or _owner_class_from_func(func)
     if owner_cls is not None:
@@ -1130,7 +1152,7 @@ def _resolve_jit_arg_type(arg, annotation):
     return constructor
 
 
-def _build_call_state(sig, args_tuple, func_exe):
+def _build_call_state(sig, args_tuple, func_exe, *, keepalive=None):
     """Build a CallState for fast repeated dispatch.
 
     Resolves each parameter's JitArgument type using the same registry as
@@ -1170,7 +1192,7 @@ def _build_call_state(sig, args_tuple, func_exe):
     if not has_user_stream:
         slot_specs.append((-1, ctypes.c_void_p, None))
 
-    return CallState(slot_specs, func_exe)
+    return CallState(slot_specs, func_exe, keepalive=keepalive)
 
 
 class JitFunction:
@@ -1206,6 +1228,7 @@ class JitFunction:
         self._sig = None  # lazy: set on first call
         self._has_self_param = False  # lazy: set in _ensure_sig
         self._mem_cache = {}
+        self._artifact_cache_lock = threading.Lock()
         self._last_compiled = None  # (cache_key, CompiledArtifact) for compile()
         self._extern_linkage_keys = set()
 
@@ -1265,6 +1288,18 @@ class JitFunction:
         if self.cache_manager is None:
             return None
         return self.cache_manager.cache_info()
+
+    def _publish_artifact(self, cache_key, artifact):
+        """Publish and return the one in-process artifact for *cache_key*.
+
+        Cold concurrent callers may independently compile or unpickle the same
+        key. They must rebind to the retained artifact before creating function
+        pointers or CallState objects.
+        """
+        with self._artifact_cache_lock:
+            canonical = self._mem_cache.setdefault(cache_key, artifact)
+            self._last_compiled = (cache_key, canonical)
+            return canonical
 
     def _ensure_sig(self):
         """Initialize signature + param metadata on first call (not at decoration time)."""
@@ -1506,7 +1541,7 @@ class JitFunction:
                 _rejected_link_libs = True
                 cached_func = None
             if cached_func is not None:
-                self._mem_cache[cache_key] = cached_func
+                cached_func = self._publish_artifact(cache_key, cached_func)
 
         if cached_func is not None:
             if env.compile.compile_only:
@@ -1516,6 +1551,7 @@ class JitFunction:
                 sig,
                 args_tuple,
                 cached_func._get_func_exe(invocation.device),
+                keepalive=cached_func,
             )
             self._call_state_cache[dispatch_key] = state
             with _device_guard(invocation.device):
@@ -1555,9 +1591,7 @@ class JitFunction:
 
             if _lock_result is not None and not getattr(_lock_result, "_link_libs", None):
                 # Cache hit after waiting for another process to compile.
-                compiled_func = _lock_result
-                self._mem_cache[cache_key] = compiled_func
-                self._last_compiled = (cache_key, compiled_func)
+                compiled_func = self._publish_artifact(cache_key, _lock_result)
             else:
                 # Tracing helpers that query the current architecture must see
                 # the same device that selected the backend target.
@@ -1659,14 +1693,9 @@ class JitFunction:
                         uses_explicit_module=extern_linked,
                     )
 
-                    # Always keep a reference to the latest compilation result so
-                    # flyc.compile() can retrieve it even when caching is disabled.
-                    self._last_compiled = (cache_key, compiled_func)
-
-                    # Keep compiled artifacts alive within the process even when disk
-                    # cache is disabled. This preserves code object lifetime for
-                    # profiler/roctracer teardown and enables fast same-process reuse.
-                    self._mem_cache[cache_key] = compiled_func
+                    # Keep one canonical artifact alive even when disk caching is
+                    # disabled, and discard any duplicate produced by a cold race.
+                    compiled_func = self._publish_artifact(cache_key, compiled_func)
                     if _cache_writer and not extern_linked:
                         try:
                             _cache_writer(compiled_func)
@@ -1678,13 +1707,13 @@ class JitFunction:
             print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={invocation.target.arch})")
             return None
 
-        # The in-process CompiledArtifact cache above owns the ExecutionEngine/
-        # code object, so the function pointer remains valid even when disk
-        # cache is off.
+        # CallState explicitly retains the CompiledArtifact that owns this raw
+        # function pointer.
         state = _build_call_state(
             sig,
             args_tuple,
             compiled_func._get_func_exe(invocation.device),
+            keepalive=compiled_func,
         )
         self._call_state_cache[dispatch_key] = state
         with _device_guard(invocation.device):
@@ -1795,6 +1824,7 @@ def _compile_impl(func, *args) -> Optional[CompiledFunction]:
             sig,
             args_tuple,
             artifact._get_func_exe(invocation.device),
+            keepalive=artifact,
         )
 
     return CompiledFunction(call_state, artifact, invocation.device)
