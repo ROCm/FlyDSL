@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-07-23T09:48:38Z",
+ "updated": "2026-07-23T09:55:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29997141423,
+   "pr": 890,
+   "commit": "19802d8e9c529712e2eb50ab462189bbf437d7b9",
+   "branch": "ci/main-only-mlir-cache",
+   "event": "pull_request",
+   "title": "[CI] Save MLIR caches only from main",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29997141423",
+   "created_at": "2026-07-23T09:53:23Z",
+   "updated_at": "2026-07-23T09:54:10Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 29997006605,
+   "pr": null,
+   "commit": "fa0a93b58db86ce8df5daa91fe6eea884a2dd521",
+   "branch": "ci/main-only-mlir-cache",
+   "event": "pull_request",
+   "title": "[CI] Save MLIR caches only from main",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29997006605",
+   "created_at": "2026-07-23T09:51:22Z",
+   "updated_at": "2026-07-23T09:53:39Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-23T09:52:04Z",
+     "completed_at": "2026-07-23T09:53:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29997006605/job/89173116339"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-23T09:52:04Z",
+     "completed_at": "2026-07-23T09:53:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29997006605/job/89173116367"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-23T09:52:45Z",
+     "completed_at": "2026-07-23T09:53:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29997006605/job/89173116483"
+    }
+   ]
+  },
   {
    "run_id": 29996642212,
    "pr": 876,
@@ -10,13 +68,41 @@
    "branch": "mega_moe_v1",
    "event": "pull_request",
    "title": "MegaMoEV1 on Gfx950",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29996642212",
    "created_at": "2026-07-23T09:45:52Z",
-   "updated_at": "2026-07-23T09:46:22Z",
+   "updated_at": "2026-07-23T09:46:58Z",
    "actor": "yanboshao",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-23T09:47:35Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29996642212/job/89172009394"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-23T09:46:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29996642212/job/89172009462"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-23T09:47:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29996642212/job/89172009473"
+    }
+   ]
   },
   {
    "run_id": 29995112496,
@@ -25,11 +111,11 @@
    "branch": "ci/comment-only-smoke-test",
    "event": "pull_request",
    "title": "Test CI with comment-only change",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29995112496",
    "created_at": "2026-07-23T09:23:28Z",
-   "updated_at": "2026-07-23T09:24:51Z",
+   "updated_at": "2026-07-23T09:54:06Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -53,9 +139,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-23T09:24:50Z",
+     "started_at": "2026-07-23T09:54:06Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29995112496/job/89167149313"
     }
@@ -96,10 +182,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-23T09:29:07Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T09:53:23Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29993871958/job/89163114178"
     }
    ]
@@ -2270,92 +2356,6 @@
      "started_at": "2026-07-22T02:09:27Z",
      "completed_at": "2026-07-22T02:34:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29884980233/job/88813728840"
-    }
-   ]
-  },
-  {
-   "run_id": 29878705929,
-   "pr": 788,
-   "commit": "302bc84e028e9a84493c29b869926b02b10b292e",
-   "branch": "feat/autotune-ci-guard",
-   "event": "pull_request",
-   "title": "autotune: keep CI search opt-in (#770)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29878705929",
-   "created_at": "2026-07-21T23:56:30Z",
-   "updated_at": "2026-07-22T01:22:59Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-21T23:57:48Z",
-     "completed_at": "2026-07-22T00:15:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29878705929/job/88794789058"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-21T23:58:04Z",
-     "completed_at": "2026-07-22T01:22:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29878705929/job/88794789070"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-21T23:57:58Z",
-     "completed_at": "2026-07-22T00:51:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29878705929/job/88794789071"
-    }
-   ]
-  },
-  {
-   "run_id": 29878654241,
-   "pr": null,
-   "commit": "61b56ce2bde68a72d06c5bd42791235e10091003",
-   "branch": "feat/autotune-ci-guard",
-   "event": "pull_request",
-   "title": "autotune: keep CI search opt-in (#770)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29878654241",
-   "created_at": "2026-07-21T23:55:31Z",
-   "updated_at": "2026-07-21T23:56:32Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-21T23:56:15Z",
-     "completed_at": "2026-07-21T23:56:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29878654241/job/88794637835"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-21T23:56:15Z",
-     "completed_at": "2026-07-21T23:56:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29878654241/job/88794637861"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-21T23:56:15Z",
-     "completed_at": "2026-07-21T23:56:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29878654241/job/88794637923"
     }
    ]
   }
