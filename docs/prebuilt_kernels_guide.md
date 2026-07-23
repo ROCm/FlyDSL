@@ -342,7 +342,6 @@ What operation do you need?
 │
 ├── MoE (Mixture of Experts)
 │   ├── Blockscale MoE (gate+up+reduce)
-│   │   └── → kernels/moe/moe_blockscale_2stage.py
 │   └── Standard MoE (fp8/f16/bf16/int8/int4)
 │       └── → kernels/moe/moe_gemm_2stage.py
 │
@@ -362,7 +361,6 @@ What operation do you need?
 | `kernels/gemm/blockscale_preshuffle_gemm.py` | Blockscale GEMM |
 | `kernels/gemm/hgemm_splitk.py` | FP16 GEMM split-K |
 | `kernels/moe/moe_gemm_2stage.py` | MoE GEMM 2-stage (gate/up + reduce) |
-| `kernels/moe/moe_blockscale_2stage.py` | MoE Blockscale 2-stage |
 | `kernels/moe/mixed_moe_gemm_2stage.py` | Mixed-precision MoE GEMM |
 | `kernels/attention/pa_decode_fp8.py` | Paged attention decode (FP8) |
 | `kernels/attention/flash_attn_generic.py` | FlashAttention generic fallback |
@@ -392,7 +390,6 @@ What operation do you need?
 | `tests/kernels/test_blockscale_preshuffle_gemm.py` | Blockscale GEMM |
 | `tests/kernels/test_hgemm_splitk.py` | FP16 GEMM split-K |
 | `tests/kernels/test_moe_gemm.py` | MoE GEMM |
-| `tests/kernels/test_moe_blockscale.py` | MoE Blockscale GEMM |
 | `tests/kernels/test_moe_reduce.py` | MoE reduce kernel |
 | `tests/kernels/test_pa.py` | Paged attention decode |
 | `tests/kernels/test_flash_attn_fwd.py` | FlashAttention |

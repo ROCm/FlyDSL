@@ -103,7 +103,6 @@ FlyDSL/
 │   │   └── fused_rope_cache_kernel.py # Fused RoPE + KV cache
 │   ├── moe/                          # Mixture-of-experts kernels
 │   │   ├── moe_gemm_2stage.py        # MoE GEMM (2-stage gate/up + reduce)
-│   │   ├── moe_blockscale_2stage.py  # MoE Blockscale GEMM
 │   │   ├── mixed_moe_gemm_2stage.py  # Mixed-precision MoE GEMM
 │   │   ├── moe_sorting_kernel.py     # MoE token sorting
 │   │   └── topk_gating_softmax_kernel.py # Top-k gating softmax
