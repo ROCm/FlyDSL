@@ -32,6 +32,7 @@ if not torch.cuda.is_available():
 
 import pytest  # noqa: E402
 
+from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.attention.flash_attn_interface import flydsl_flash_attn_func  # noqa: E402
 from tests.test_common import run_perftest  # noqa: E402
 
@@ -3298,6 +3299,13 @@ def main():
 _ATOL_BF16 = 8e-3
 _ATOL_F16 = 4e-3
 
+# Split-K and varlen LSE use the gfx950 DUALWAVE_SWP kernel; dense LSE runs on the
+# gfx942-compatible generic path too. (RDNA is skipped file-wide via CDNA_ONLY_TESTS.)
+_requires_gfx950 = pytest.mark.skipif(
+    not str(get_rocm_arch()).startswith("gfx950"),
+    reason=f"requires gfx950 DUALWAVE_SWP, got {get_rocm_arch()!s}",
+)
+
 
 def _lse_sm_scale(head_dim: int) -> float:
     return 1.0 / math.sqrt(head_dim)
@@ -3367,6 +3375,7 @@ def test_lse_dense(dtype, causal, B, S, H, Hkv, D):
     _assert_lse_matches(lse, _reference_lse(q, k, causal, Hkv), atol)
 
 
+@_requires_gfx950
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("num_kv_splits", [2, 3])
 @pytest.mark.parametrize("D", [64, 128])
@@ -3384,6 +3393,7 @@ def test_lse_splitk(causal, num_kv_splits, D):
     _assert_lse_matches(lse, _reference_lse(q, k, causal, H), _ATOL_BF16)
 
 
+@_requires_gfx950
 @pytest.mark.parametrize("causal", [False, True])
 def test_lse_varlen(causal):
     dtype = torch.bfloat16
