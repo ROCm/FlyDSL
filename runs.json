@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-23T11:37:15Z",
+ "updated": "2026-07-23T12:52:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -81,10 +81,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-23T10:51:59Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T12:02:50Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29999383400/job/89185539356"
     }
    ]
