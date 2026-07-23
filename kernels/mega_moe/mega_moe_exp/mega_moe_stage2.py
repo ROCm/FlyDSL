@@ -14,9 +14,18 @@ from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from kernels.gemm.fp8_gemm_utils import ceildiv
-from kernels.moe.mixed_moe_gemm_2stage.common import _barrier
 
-from .group_gemm2 import BM, BN, gemm2_compute, lds_bytes_for_gemm2, lds_typed_ptr, lds_vec_load
+from .group_gemm2 import (
+    BM,
+    BN,
+    gemm2_compute,
+    lds_bytes_for_gemm2,
+    lds_typed_ptr,
+    lds_vec_load,
+    spart_group_m01,
+    spart_output_tile_index,
+    waitcnt_barrier,
+)
 
 
 def p2p_scatter_epilog(
@@ -130,6 +139,12 @@ def compile_mega_moe_stage2(
     doweight: bool = True,
     num_cu: int = 256,
     grid_mult: int = 1,
+    SBM: int = None,
+    inter_dim_pad: int = 0,
+    model_dim_pad: int = 0,
+    g2_bhoist: bool = True,
+    g2_ascale_pf: bool = True,
+    g2_spart: int = 0,
 ):
     assert max_tok > 0 and (max_tok & (max_tok - 1)) == 0, "max_tok must be power of two"
     log2_max_tok = max_tok.bit_length() - 1
@@ -138,6 +153,7 @@ def compile_mega_moe_stage2(
     D_INTER = inter_dim
     num_n_blocks = N_OUT // 256
     assert N_OUT % 256 == 0
+    _spart = spart_group_m01(g2_spart)
     grid_x = num_cu * grid_mult
     lds_bytes = lds_bytes_for_gemm2(D_INTER, a_dtype, aStages)
     TOTAL_THREADS = 256
@@ -170,6 +186,11 @@ def compile_mega_moe_stage2(
 
         itv = fx.Int32(fx.block_idx.x)
         while itv < total_work:
+            if const_expr(_spart is not None):
+                _mb, _nb = spart_output_tile_index(itv, num_m_tiles, num_n_blocks, _spart[0], _spart[1])
+                unit_bx = _mb * fx.Int32(num_n_blocks) + _nb
+            else:
+                unit_bx = itv
             accm_vecs, m_row, n_block_idx = gemm2_compute(
                 lds_base_i32,
                 addr_ascale,
@@ -178,7 +199,7 @@ def compile_mega_moe_stage2(
                 addr_eids,
                 addr_aq,
                 i32_max_m_blocks,
-                itv,
+                unit_bx,
                 lane,
                 wave,
                 N_OUT=N_OUT,
@@ -187,6 +208,11 @@ def compile_mega_moe_stage2(
                 a_dtype=a_dtype,
                 use_nt=use_nt,
                 expert_offset=rank * experts,
+                SBM=SBM,
+                inter_dim_pad=inter_dim_pad,
+                model_dim_pad=model_dim_pad,
+                g2_bhoist=g2_bhoist,
+                g2_ascale_pf=g2_ascale_pf,
             )
             # compact tile -> fixed-slot base for srcmap/weight (a2 DATA/SCALE are compact; srcmap_em/
             # wts_em are fixed-slot). m_block_idx = m_row // BM (gemm2 returns m_row = m_block*BM).
@@ -210,7 +236,7 @@ def compile_mega_moe_stage2(
                 doweight=doweight,
             )
             # overlap: wait only on LDS (cshuffle) so remote SLC P2P stores drain async (xGMI overlap).
-            _barrier(vmcnt=63, lgkmcnt=0)
+            waitcnt_barrier(vmcnt=63, lgkmcnt=0)
             itv = itv + fx.Int32(grid_x)
 
     @flyc.jit
