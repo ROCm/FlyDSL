@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-23T18:53:02Z",
+ "updated": "2026-07-23T19:53:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -29,18 +29,18 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-23T18:47:04Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-23T19:02:12Z",
+     "completed_at": "2026-07-23T19:18:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30035122856/job/89301373203"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-23T18:47:04Z",
+     "started_at": "2026-07-23T19:06:23Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30035122856/job/89301373237"
     }
@@ -53,11 +53,11 @@
    "branch": "main",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add 8 wave GQA sliding-window attention kernel",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30025899976",
    "created_at": "2026-07-23T16:37:19Z",
-   "updated_at": "2026-07-23T16:38:31Z",
+   "updated_at": "2026-07-23T18:52:27Z",
    "actor": "amd-nprotaso",
    "jobs": [
     {
@@ -72,19 +72,19 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-23T16:38:31Z",
+     "started_at": "2026-07-23T18:52:26Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30025899976/job/89270444650"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-23T18:44:58Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T19:01:19Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30025899976/job/89270444687"
     }
    ]
@@ -212,11 +212,11 @@
    "branch": "kernel/sage-attention-cdna",
    "event": "pull_request",
    "title": "[Kernel] Add CDNA SageAttention kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30021025580",
    "created_at": "2026-07-23T15:32:35Z",
-   "updated_at": "2026-07-23T18:30:33Z",
+   "updated_at": "2026-07-23T19:51:53Z",
    "actor": "LiuYinfeng01",
    "jobs": [
     {
@@ -231,10 +231,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-23T18:30:33Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T19:51:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30021025580/job/89253786782"
     },
     {
@@ -298,11 +298,11 @@
    "branch": "ci/main-only-mlir-cache",
    "event": "pull_request",
    "title": "[CI] Share MLIR cache across GPU jobs",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30019842941",
    "created_at": "2026-07-23T15:17:26Z",
-   "updated_at": "2026-07-23T16:19:18Z",
+   "updated_at": "2026-07-23T19:23:50Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -317,9 +317,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-23T16:19:18Z",
+     "started_at": "2026-07-23T19:23:50Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30019842941/job/89265660494"
     },
