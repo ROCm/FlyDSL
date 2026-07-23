@@ -1715,6 +1715,7 @@ def _run_mxmoe_e2e(
     a_dtype: str = "fp4",
     inline_quant: bool = False,
     interleave: bool = False,
+    skip_ref: bool = False,
 ):
     """End-to-end a4w4 / a8w4 correctness via the fused mxmoe pipeline.
 
@@ -1815,8 +1816,10 @@ def _run_mxmoe_e2e(
     w2_scale_1d = gcu.e8m0_shuffle(w2_scale.view(experts * model_dim, inter_dim // 32)).view(torch.uint8).contiguous()
 
     if use_reduce:
-        # nonatomic epilog writes flat bf16 per sorted position; reduce on host.
-        # The plain nonatomic (reduce) epilog is only supported at BM == 128.
+        # Reduce (nonatomic) epilog writes flat bf16 per sorted position; reduce on
+        # host. The mxmoe stage2 mode is coupled to tile_m: reduce is a BM == 128
+        # path, atomic is the BM in {16,32,64} path. (Callers pick the mode by
+        # tile_m; the pytest matrix skips the mismatched combo.)
         if BM != 128:
             pytest.skip(f"fused mxmoe reduce (nonatomic) epilog requires tile_m == 128, got {BM}")
         flat = torch.zeros(sorted_size * model_dim, dtype=torch.bfloat16, device=dev)
@@ -1876,21 +1879,22 @@ def _run_mxmoe_e2e(
         out = out_buf.view(tokens, model_dim).float()
 
     # --- reference (stage1 -> host re-quant -> stage2) ------------------------
-    ref1 = torch_moe_gemm1(
-        x_q, w1_q, x_scale, w1_scale, topk_ids.long(), topk_weights, inter_dim=inter_dim, doweight_stage1=False
-    )
-    a2_q, a2_scale = _per_1x32_fp4_quant(ref1.reshape(tokens * topk, inter_dim))
-    ref2 = torch_moe_gemm2(
-        a2_q.view(tokens, topk, -1),
-        w2_q,
-        a2_scale.view(tokens, topk, -1),
-        w2_scale,
-        topk_ids.long(),
-        topk_weights,
-        model_dim=model_dim,
-        doweight_stage2=True,
-    )
-    verify_output(out, ref2, rtol=0.5, atol=0.5, logits_diff_threshold=1)
+    if not skip_ref:
+        ref1 = torch_moe_gemm1(
+            x_q, w1_q, x_scale, w1_scale, topk_ids.long(), topk_weights, inter_dim=inter_dim, doweight_stage1=False
+        )
+        a2_q, a2_scale = _per_1x32_fp4_quant(ref1.reshape(tokens * topk, inter_dim))
+        ref2 = torch_moe_gemm2(
+            a2_q.view(tokens, topk, -1),
+            w2_q,
+            a2_scale.view(tokens, topk, -1),
+            w2_scale,
+            topk_ids.long(),
+            topk_weights,
+            model_dim=model_dim,
+            doweight_stage2=True,
+        )
+        verify_output(out, ref2, rtol=0.5, atol=0.5, logits_diff_threshold=1)
 
 
 @pytest.mark.skipif("gfx95" not in ARCH, reason="mxmoe a4w4/a8w4 requires gfx950+")
@@ -2154,6 +2158,7 @@ def test_moe_gemm_2stage(
             topk_weights=topk_weights,
             routing=routing,
             a_dtype="fp8" if in_dtype == "a8w4" else "fp4",
+            skip_ref=bool(skip_ref),
         )
         return
 
@@ -2908,5 +2913,12 @@ if __name__ == "__main__":
         if dt in ("fp4", "a8w4") and "gfx95" not in ARCH:
             print(f"Skipping {dt}: requires gfx950+, got {ARCH}")
             continue
-        for use_reduce in reduce_flags:
+        # mxmoe (fp4/a8w4) stage2 mode is coupled to tile_m: atomic for tile_m<128,
+        # reduce (nonatomic) only at tile_m==128. Run the one applicable mode rather
+        # than the fp8-style atomic/reduce sweep (which would pick an invalid combo).
+        if dt in ("fp4", "a8w4"):
+            dt_reduce_flags = [int(args.tile_m) == 128]
+        else:
+            dt_reduce_flags = reduce_flags
+        for use_reduce in dt_reduce_flags:
             run_one(dt, use_reduce)
