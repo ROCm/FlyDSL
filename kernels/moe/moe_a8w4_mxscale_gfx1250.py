@@ -505,8 +505,7 @@ def launch_moe_gemm_a8w4(
 
     m_tiles = (i32_m + (tile_m - 1)) // tile_m
     n_tiles = (N + (tile_n - 1)) // tile_n
-    n_tiles_c = ((n_tiles + cluster_n - 1) // cluster_n) * cluster_n
-    grid = (m_tiles, n_tiles_c, 1) if use_cluster else (m_tiles * n_tiles, 1, 1)
+    grid = (m_tiles, n_tiles, 1) if use_cluster else (m_tiles * n_tiles, 1, 1)
     cluster_arg = (cluster_m, cluster_n, 1) if use_cluster else None
     kernel_moe_a8w4_mxscale(
         arg_c,
