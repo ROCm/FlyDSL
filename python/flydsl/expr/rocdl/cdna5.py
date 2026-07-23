@@ -69,6 +69,7 @@ def TDM(
     cache_modifier=0,
     atomic_barrier=False,
     early_timeout=False,
+    index_width=0,
 ):
     """Create a gfx1250 N-D TDM (Tensor Data Mover) Global<->LDS copy atom *type*.
 
@@ -80,10 +81,15 @@ def TDM(
     ``atomic_barrier`` (descriptor bit 18, HW auto-barrier) and ``early_timeout``
     (bit 21, multicast-load GL1 knob) set compile-time descriptor config bits.
 
+    ``index_width`` selects the descriptor packing: 0 = tiled (contiguous N-D tile);
+    16 or 32 = rank-2 row gather/scatter, where the row indices ride as the
+    ``index_ptr`` atom state (set via ``fx.gather`` / ``fx.scatter``) with that
+    element width and the row count comes from the tile layout. :func:`make_tdm_atom`
+    builds a tiled atom; :func:`make_tdm_gather_atom` builds a gather atom.
+
     The global base pointer comes from the ``copy_atom_call`` global operand; the
     per-dim extent (OOB), per-dim stride, ``imm_offset`` (K-loop tile bump), and the
     MCAST ``workgroup_mask`` are runtime atom state set via ``fx.atom.set_value``.
-    :func:`make_tdm_atom` builds the atom and populates the descriptor from a tensor.
     """
     return CopyOpGFX1250TDMType.get(
         rank,
@@ -93,6 +99,7 @@ def TDM(
         cache_modifier,
         atomic_barrier=atomic_barrier,
         early_timeout=early_timeout,
+        index_width=index_width,
     )
 
 
@@ -166,4 +173,81 @@ def make_tdm_atom(
             else (strides[i] if isinstance(strides[i], Int64) else Int64(strides[i]))
         )
         atom = atom_set_value(atom, f"stride_{i}", st)
+    return atom
+
+
+def make_tdm_gather_atom(
+    tensor: Tensor,
+    index_tensor: Tensor,
+    tensor_extents,
+    strides=None,
+    *,
+    num_warps=1,
+    pad_interval=0,
+    pad_amount=0,
+    cache_modifier=0,
+    atomic_barrier=False,
+    early_timeout=False,
+) -> object:
+    """Build a gfx1250 TDM *gather* copy atom (rank 2).
+
+    Gathers a set of rows selected by a row-index buffer. Issue it via
+    ``fx.gather(atom, base_iter, index_tensor, dst)`` / ``fx.scatter`` — the row
+    indices ride as the ``index_ptr`` atom state (set by ``fx.gather``) and the
+    number of rows comes from the destination tile layout. The global base pointer
+    comes from the ``copy_atom_call`` global operand (as in :func:`make_tdm_atom`).
+
+    The row-index element width (16 or 32) is taken from ``index_tensor``'s element
+    type — pass the same index tensor you hand to ``fx.gather`` / ``fx.scatter``.
+
+    ``tensor_extents`` is the rank-2 per-dim tensor extent for OOB handling
+    ``[rows(outermost), row_width(innermost)]`` (``None`` = no clamp on that axis).
+    ``strides`` optionally overrides the per-dim strides in elements (only dim 0 is
+    stored; innermost is assumed 1); ``None`` falls back to the tile's static layout
+    stride.
+    """
+    from ..primitive import atom_set_value, make_copy_atom
+
+    NO_CLAMP = 0x7FFFFFFF
+    STRIDE_UNSET = -0x80000000  # matches kOuterStrideUnset in CopyAtom.cpp
+
+    # Row-index element width comes from the index tensor's dtype (i16 or i32).
+    idx_elem = index_tensor.element_type
+    try:
+        index_width = ir.IntegerType(idx_elem).width
+    except (TypeError, ValueError):
+        raise ValueError(f"make_tdm_gather_atom: index_tensor must be an i16/i32 integer tensor, got {idx_elem}")
+    if index_width not in (16, 32):
+        raise ValueError(f"make_tdm_gather_atom: index element type must be i16 or i32, got i{index_width}")
+    extents = list(tensor_extents)
+    if len(extents) != 2:
+        raise ValueError(f"make_tdm_gather_atom: gather is rank 2, got {len(extents)} extents")
+    strides = list(strides) if strides is not None else [None, None]
+    if len(strides) != 2:
+        raise ValueError(f"make_tdm_gather_atom: expected 2 strides, got {len(strides)}")
+
+    copy_op = CopyOpGFX1250TDMType.get(
+        2,
+        num_warps,
+        pad_interval,
+        pad_amount,
+        cache_modifier,
+        atomic_barrier=atomic_barrier,
+        early_timeout=early_timeout,
+        index_width=index_width,
+    )
+    atom = make_copy_atom(copy_op, tensor.element_type)
+    for i in range(2):
+        ext = (
+            Int32(NO_CLAMP)
+            if extents[i] is None
+            else (extents[i] if isinstance(extents[i], Int32) else Int32(extents[i]))
+        )
+        atom = atom_set_value(atom, f"extent_{i}", ext)
+    st = (
+        Int64(STRIDE_UNSET)
+        if strides[0] is None
+        else (strides[0] if isinstance(strides[0], Int64) else Int64(strides[0]))
+    )
+    atom = atom_set_value(atom, "stride_0", st)
     return atom

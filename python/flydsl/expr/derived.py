@@ -221,7 +221,17 @@ def gather(copy_atom, base_iter, offset_tensor, dst_tensor, *, pred=None):
     ``base_iter``. The reconstructed source view uses the copy atom's source
     value layout, while ``dst_tensor[(None, v), rest]`` supplies the matching
     destination ``(AtomV,)`` slice.
+
+    Whole-tile atoms (``copy_atom.is_whole_tile``, e.g. the gfx1250 TDM gather
+    atom) instead move all rows in one hardware call: ``offset_tensor`` is the
+    row-index buffer (carried as the atom's ``index_ptr`` state), ``dst_tensor`` the
+    destination tile, and ``base_iter`` supplies the global base pointer.
     """
+    if copy_atom.is_whole_tile:
+        atom = copy_atom.set_value({"index_ptr": get_iter(offset_tensor)})
+        src_token = make_view(base_iter, get_layout(dst_tensor))
+        copy_atom_call(atom, src_token, dst_tensor, pred=pred)
+        return
     src_layout = copy_atom.layout_src_tv[1]
     for off, dst_v, pred_v in _gather_scatter_expand(offset_tensor, dst_tensor, pred):
         src_v = make_view(base_iter + off, src_layout)
@@ -244,7 +254,17 @@ def scatter(copy_atom, src_tensor, base_iter, offset_tensor, *, pred=None):
     For each ``(v, rest)`` instance, ``src_tensor[(None, v), rest]`` supplies
     the source ``(AtomV,)`` slice. The reconstructed destination view uses the copy
     atom's destination value layout at ``base_iter + offset_tensor[v, rest]``.
+
+    Whole-tile atoms (``copy_atom.is_whole_tile``, e.g. the gfx1250 TDM scatter
+    atom) instead move all rows in one hardware call: ``offset_tensor`` is the
+    row-index buffer (carried as the atom's ``index_ptr`` state), ``src_tensor`` the
+    source tile, and ``base_iter`` supplies the global base pointer.
     """
+    if copy_atom.is_whole_tile:
+        atom = copy_atom.set_value({"index_ptr": get_iter(offset_tensor)})
+        dst_token = make_view(base_iter, get_layout(src_tensor))
+        copy_atom_call(atom, src_tensor, dst_token, pred=pred)
+        return
     dst_layout = copy_atom.layout_dst_tv[1]
     for off, src_v, pred_v in _gather_scatter_expand(offset_tensor, src_tensor, pred):
         dst_v = make_view(base_iter + off, dst_layout)

@@ -34,7 +34,7 @@ func.func @bad_mma_blocksize(
 
 // CHECK: numWarps must be a positive power of two, got 3
 func.func @bad_tdm_warps(
-    %a: !fly.copy_atom<!fly_rocdl.gfx1250.tdm<rank = 2, warps = 3, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>) {
+    %a: !fly.copy_atom<!fly_rocdl.gfx1250.tdm<rank = 2, warps = 3, pad = 0, 0, cache = 0, barrier = false, timeout = false, iwidth = 0>, 0>) {
   return
 }
 
@@ -42,7 +42,7 @@ func.func @bad_tdm_warps(
 
 // CHECK: padInterval and padAmount must both be zero or both non-zero
 func.func @bad_tdm_pad(
-    %a: !fly.copy_atom<!fly_rocdl.gfx1250.tdm<rank = 2, warps = 1, pad = 64, 0, cache = 0, barrier = false, timeout = false>, 0>) {
+    %a: !fly.copy_atom<!fly_rocdl.gfx1250.tdm<rank = 2, warps = 1, pad = 64, 0, cache = 0, barrier = false, timeout = false, iwidth = 0>, 0>) {
   return
 }
 
@@ -52,7 +52,7 @@ func.func @bad_tdm_pad(
 // interval -> a wrong encoded bitfield). Caught statically by the verifier.
 // CHECK: padInterval must be a power of two (in elements), got 48
 func.func @bad_tdm_pad_pow2(
-    %a: !fly.copy_atom<!fly_rocdl.gfx1250.tdm<rank = 2, warps = 1, pad = 48, 8, cache = 0, barrier = false, timeout = false>, 0>) {
+    %a: !fly.copy_atom<!fly_rocdl.gfx1250.tdm<rank = 2, warps = 1, pad = 48, 8, cache = 0, barrier = false, timeout = false, iwidth = 0>, 0>) {
   return
 }
 
