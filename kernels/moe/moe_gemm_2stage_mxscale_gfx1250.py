@@ -18,6 +18,7 @@ import functools
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.expr import as_ir_value
 
+from kernels.common.gfx1250_cluster import compute_mcast_masks
 from kernels.moe.moe_gemm_2stage import (
     MoeGemm2Mode,
     compile_moe_reduction,
@@ -406,7 +407,7 @@ def _compile_stage1_mxscale_kernel_impl(
 
         if const_expr(use_cluster):
             _local_x, _local_y = cluster.compute_cluster_position()
-            _a_mcast_mask, b_mcast_mask = cluster.compute_mcast_masks(
+            _a_mcast_mask, b_mcast_mask = compute_mcast_masks(
                 _local_x, _local_y, int(cluster_m), int(cluster_n))
         else:
             b_mcast_mask = 0
@@ -2575,7 +2576,7 @@ def _compile_stage2_mxscale_kernel_impl(
 
         if const_expr(use_cluster):
             _local_x, _local_y = cluster.compute_cluster_position()
-            _a_mcast_mask, b_mcast_mask = cluster.compute_mcast_masks(
+            _a_mcast_mask, b_mcast_mask = compute_mcast_masks(
                 _local_x, _local_y, int(cluster_m), int(cluster_n))
         else:
             b_mcast_mask = 0

@@ -25,6 +25,7 @@ from flydsl.expr import arith, as_ir_value, const_expr, gpu, range_constexpr, td
 from flydsl.expr.rocdl import cluster
 from flydsl.expr.typing import T
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
+from kernels.common.gfx1250_cluster import compute_mcast_masks
 
 try:
     import torch
@@ -91,7 +92,7 @@ def _compile_tdm_mcast_add(grid_m, grid_n, cluster_m, cluster_n):
         # --- Cluster multicast masks ---
         if const_expr(use_cluster):
             local_x, local_y = cluster.compute_cluster_position()
-            a_mcast_mask, b_mcast_mask = cluster.compute_mcast_masks(local_x, local_y, cluster_m, cluster_n)
+            a_mcast_mask, b_mcast_mask = compute_mcast_masks(local_x, local_y, cluster_m, cluster_n)
         else:
             a_mcast_mask = 0
             b_mcast_mask = 0
