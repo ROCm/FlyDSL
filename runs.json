@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-07-23T09:11:29Z",
+ "updated": "2026-07-23T09:48:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29996642212,
+   "pr": 876,
+   "commit": "12141a5b10e43c72ebca5c4741b95d48c177f6dc",
+   "branch": "mega_moe_v1",
+   "event": "pull_request",
+   "title": "MegaMoEV1 on Gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29996642212",
+   "created_at": "2026-07-23T09:45:52Z",
+   "updated_at": "2026-07-23T09:46:22Z",
+   "actor": "yanboshao",
+   "jobs": []
+  },
+  {
+   "run_id": 29995112496,
+   "pr": 889,
+   "commit": "98abfae21453698c9dd5fc0282b38bb03453e55a",
+   "branch": "ci/comment-only-smoke-test",
+   "event": "pull_request",
+   "title": "Test CI with comment-only change",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29995112496",
+   "created_at": "2026-07-23T09:23:28Z",
+   "updated_at": "2026-07-23T09:24:51Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-23T09:41:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29995112496/job/89167149303"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-23T09:25:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29995112496/job/89167149307"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-23T09:24:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29995112496/job/89167149313"
+    }
+   ]
+  },
   {
    "run_id": 29993871958,
    "pr": 880,
@@ -10,19 +68,19 @@
    "branch": "lhc/refactor-expr",
    "event": "pull_request",
    "title": "refactor(expr): move buffer_ops and split gfx1250 mcast policy to kernels.common",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29993871958",
    "created_at": "2026-07-23T09:06:02Z",
-   "updated_at": "2026-07-23T09:06:40Z",
+   "updated_at": "2026-07-23T09:29:08Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-23T09:07:26Z",
+     "started_at": "2026-07-23T09:10:57Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29993871958/job/89163114080"
     },
@@ -38,9 +96,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-23T09:07:26Z",
+     "started_at": "2026-07-23T09:29:07Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29993871958/job/89163114178"
     }
@@ -63,19 +121,19 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-23T09:01:15Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T09:25:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29993327648/job/89161414744"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-23T09:07:18Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T09:28:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29993327648/job/89161414800"
     },
     {
@@ -541,20 +599,20 @@
    "branch": "mega_moe_v1",
    "event": "pull_request",
    "title": "MegaMoEV1 on Gfx950",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29980835699",
    "created_at": "2026-07-23T04:56:51Z",
-   "updated_at": "2026-07-23T04:57:34Z",
+   "updated_at": "2026-07-23T09:45:53Z",
    "actor": "yanboshao",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-23T04:57:34Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T09:45:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29980835699/job/89122132721"
     },
     {
@@ -2298,92 +2356,6 @@
      "started_at": "2026-07-21T23:56:15Z",
      "completed_at": "2026-07-21T23:56:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29878654241/job/88794637923"
-    }
-   ]
-  },
-  {
-   "run_id": 29869540703,
-   "pr": null,
-   "commit": "18dfd2be2e0289f5eb02f6134c8ce6d8dd0a3c0f",
-   "branch": "feat/autotune-offline-configs",
-   "event": "pull_request",
-   "title": "[3/5] autotune: add offline config artifacts (#770)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29869540703",
-   "created_at": "2026-07-21T21:20:11Z",
-   "updated_at": "2026-07-21T23:52:19Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-21T21:44:10Z",
-     "completed_at": "2026-07-21T23:52:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29869540703/job/88766286403"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-21T21:50:10Z",
-     "completed_at": "2026-07-21T23:49:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29869540703/job/88766286432"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-21T21:22:16Z",
-     "completed_at": "2026-07-21T21:39:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29869540703/job/88766286472"
-    }
-   ]
-  },
-  {
-   "run_id": 29864777973,
-   "pr": null,
-   "commit": "b4f96b41c4977782082c4335572aa12fd4060798",
-   "branch": "feat/autotune-offline-configs",
-   "event": "pull_request",
-   "title": "[3/5] autotune: add offline config artifacts (#770)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29864777973",
-   "created_at": "2026-07-21T20:12:36Z",
-   "updated_at": "2026-07-21T20:37:31Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-21T20:16:22Z",
-     "completed_at": "2026-07-21T20:37:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29864777973/job/88750315447"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-21T20:14:05Z",
-     "completed_at": "2026-07-21T20:30:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29864777973/job/88750315458"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-21T20:18:26Z",
-     "completed_at": "2026-07-21T20:37:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29864777973/job/88750315464"
     }
    ]
   }
