@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-23T01:11:20Z",
+ "updated": "2026-07-23T01:58:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,20 +10,20 @@
    "branch": "fix/device-aware-jit-target-878",
    "event": "pull_request",
    "title": "[Runtime] Resolve JIT target from invocation device",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29969066346",
    "created_at": "2026-07-23T00:26:15Z",
-   "updated_at": "2026-07-23T00:32:29Z",
+   "updated_at": "2026-07-23T01:56:40Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-23T00:32:29Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-23T01:28:23Z",
+     "completed_at": "2026-07-23T01:56:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29969066346/job/89087768742"
     },
     {
