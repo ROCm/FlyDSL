@@ -3,7 +3,8 @@
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm
+from flydsl._mlir.dialects import llvm, memref
+from flydsl._mlir.dialects.arith import AtomicRMWKind
 from flydsl.expr import arith, const_expr, rocdl
 from flydsl.expr.typing import T
 
@@ -15,8 +16,39 @@ from kernels.common.mem_ops import global_load_i64x2 as global_load_i64x2
 from kernels.common.mem_ops import global_ptr_from_addr as global_ptr_from_addr
 
 
+def lds_load(lds_memref, index):
+    """Scalar load from an LDS memref view at a single index."""
+    return memref.load(lds_memref, [index])
+
+
+def lds_store(value, lds_memref, index):
+    """Scalar store to an LDS memref view at a single index (memref.store arg order)."""
+    memref.store(arith.unwrap(value), lds_memref, [index])
+
+
+def lds_atomic_add(value, lds_memref, index):
+    """LDS ds_add (atomic add) at a single index; returns the pre-add value."""
+    return memref.atomic_rmw(AtomicRMWKind.addi, arith.unwrap(value), lds_memref, [index])
+
+
 def rcp_f32(value):
     return rocdl.rcp(T.f32, value)
+
+
+def rcp_amdgcn_scalar(value):
+    raw = arith.unwrap(value) if hasattr(value, "ir_value") or hasattr(value, "type") else value
+    return llvm.call_intrinsic(ir.F32Type.get(), "llvm.amdgcn.rcp.f32", [raw], [], [])
+
+
+def fabs_f32(value):
+    raw = arith.unwrap(value) if hasattr(value, "ir_value") or hasattr(value, "type") else value
+    return llvm.call_intrinsic(ir.F32Type.get(), "llvm.fabs.f32", [raw], [], [])
+
+
+def store_nt(value, ptr, *, alignment):
+    """Non-temporal (streaming) store of a scalar to an llvm ptr."""
+    raw = value._value if hasattr(value, "_value") else value
+    llvm.StoreOp(raw, ptr, alignment=alignment, nontemporal=True)
 
 
 def exp2_amdgcn_scalar(scalar_value):
@@ -89,3 +121,20 @@ def urem_const(value, divisor: int):
 def unflatten_k(k_flat, qkhe_loop: int = 2):
     n = qkhe_loop * 2
     return [[k_flat[td * n + j] for j in range(n)] for td in range(len(k_flat) // n)]
+
+
+def int_to_ptr(int_value, addr_space):
+    """Cast an integer SSA value to an ``!llvm.ptr<addr_space>``."""
+    raw = int_value._value if hasattr(int_value, "_value") else int_value
+    return llvm.inttoptr(ir.Type.parse(f"!llvm.ptr<{addr_space}>"), raw)
+
+
+def idx_to_ptr(idx_value, addr_space=1):
+    """Cast an index SSA value to an ``!llvm.ptr<addr_space>`` (index -> i64 -> ptr)."""
+    idx_raw = idx_value._value if hasattr(idx_value, "_value") else idx_value
+    return int_to_ptr(arith.index_cast(T.i64, idx_raw), addr_space)
+
+
+def lds_base_index(lds_memref):
+    """Aligned base address of an LDS memref view as an index value."""
+    return memref.extract_aligned_pointer_as_index(lds_memref)
