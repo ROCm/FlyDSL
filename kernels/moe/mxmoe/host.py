@@ -140,6 +140,21 @@ def flydsl_mxfp4_gemm1(
         raise NotImplementedError(f"mxmoe gemm1 requires D_HIDDEN (K) % {BK} == 0, got H={D_HIDDEN}")
     if (2 * D_INTER) % BN != 0:
         raise NotImplementedError(f"mxmoe gemm1 requires 2*D_INTER (N_OUT) % {BN} == 0, got D_INTER={D_INTER}")
+
+    # Non-temporal (streaming) B loads help at small M -- there is no cross-tile
+    # weight reuse, so streaming avoids polluting L2. But once M is large enough
+    # that each expert owns more than one M-block, consecutive M-tiles of the
+    # same expert reuse the same W1 columns: streaming then discards reusable B
+    # and the kernel becomes HBM-read-bound (L2 hit ~34% vs ~59%). Switch to the
+    # cached (non-nt) variant when total M-blocks >= experts (avg >= 1 padded
+    # block/expert), which measured ~22% faster at M_eff=8192 while the small-M
+    # streaming win is preserved below the crossover. Only auto-relax the BM==32
+    # streaming default; never force streaming on when the caller disabled it.
+    if use_nt and not inline_quant and BM == 32:
+        total_m_blocks = (int(n_tokens) * int(topk) + BM - 1) // BM
+        if total_m_blocks >= int(NE):
+            use_nt = False
+
     if (BM, use_nt, inline_quant, a_dtype) not in _G1_SUPPORTED:
         raise NotImplementedError(
             f"mxmoe gemm1 unsupported variant "

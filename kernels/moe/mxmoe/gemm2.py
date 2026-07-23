@@ -238,20 +238,46 @@ def compile_gemm2_a4w4_port(
                 _issue_all_a_loads(_udiv(tile, _num_n_blocks) * fx.Int32(BM))
                 _run_tile(tile)
         else:
-            m_row0 = _udiv(bx_i32, _num_n_blocks) * fx.Int32(BM)
-            if const_expr(_n_load_waves < 4):
-                if wave < fx.Int32(_n_load_waves):
-                    _issue_all_a_loads(m_row0)
-            else:
-                _issue_all_a_loads(m_row0)
-            rocdl.sched_barrier(0)
-
             cumsum0 = llvm.load(T.i32, _global_ptr1(arg_cumsum, fx.Int32(0)))
             total_m_blocks = _udiv(cumsum0, BM)
             bound = total_m_blocks * fx.Int32(_num_n_blocks)
 
+            # Non-persistent atomic path is HBM-bandwidth-bound (down-proj reads the
+            # full fp4 weight column-block per tile, ~4% L2 reuse). A plain m-major
+            # linear grid clusters consecutive tiles onto the same XCD/HBM channels;
+            # round-robin the launch index across the 8 XCDs (bijective over [0,bound))
+            # to balance channel utilization. Optional group swizzle (xcd_swizzle>0)
+            # further improves per-XCD L2 locality along M.
+            _NXCD = 8
+            _xq = _udiv(bound, _NXCD)
+            _xr = _umod(bound, _NXCD)
+            _SW = xcd_swizzle
+
+            def _xcd_np(pid):
+                xc = _umod(pid, _NXCD)
+                wgid = xc * _xq + fx.Int32(arith.minsi(_raw(xc), _raw(_xr))) + _udiv(pid, _NXCD)
+                if const_expr(_SW <= 0):
+                    return wgid
+                _ng = fx.Int32(_SW * _num_n_blocks)
+                group_id = wgid // _ng
+                first_pid_m = group_id * fx.Int32(_SW)
+                remaining_m = total_m_blocks - first_pid_m
+                group_size_m = fx.Int32(arith.minsi(_raw(remaining_m), _raw(fx.Int32(_SW))))
+                wig = wgid % _ng
+                m_block = first_pid_m + (wig % group_size_m)
+                n_block = wig // group_size_m
+                return m_block * fx.Int32(_num_n_blocks) + n_block
+
             if bx_i32 < bound:
-                _run_tile(bx_i32)
+                tile = _xcd_np(bx_i32)
+                m_row0 = _udiv(tile, _num_n_blocks) * fx.Int32(BM)
+                if const_expr(_n_load_waves < 4):
+                    if wave < fx.Int32(_n_load_waves):
+                        _issue_all_a_loads(m_row0)
+                else:
+                    _issue_all_a_loads(m_row0)
+                rocdl.sched_barrier(0)
+                _run_tile(tile)
 
     @flyc.jit
     def launch_gemm2(
@@ -526,7 +552,14 @@ def _gemm2_body(
     else:
         a_scale_v = [load_a_scale_tile(kt) for kt in range_constexpr(_K_TILES_TOTAL)]
         b_scale_v = [load_b_scale_tile(kt) for kt in range_constexpr(_K_TILES_TOTAL)]
-        b = [load_b_tile(kt) for kt in range_constexpr(_K_TILES_TOTAL)]
+        # Software-pipeline the B tiles instead of preloading all _K_TILES_TOTAL of
+        # them: preloading all K tiles keeps every B fragment live across the whole
+        # k-loop (>=384 VGPR for K=3072/BK=256), which forces the f32 accumulators
+        # into AGPRs and drops occupancy to 1 wave/SIMD. Keeping only _bPF B tiles
+        # resident (one-ahead prefetch) lets the accumulators stay in ArchVGPRs and
+        # restores 2 waves/SIMD. A stays LDS-double-buffered as before.
+        _bPF = 2
+        b_pf = [load_b_tile(kt) for kt in range_constexpr(_bPF)]
 
         for OFFSET in range_constexpr(_kUnroll):
             kt = OFFSET
@@ -536,16 +569,23 @@ def _gemm2_body(
             _kloop_fence()
             a = issue_a_ds_read(slot)
             issue_a_load_lds(write_slot, next_kt)
+            # Prefetch the B tile _bPF iterations ahead so at most _bPF B tiles are
+            # live at once.
+            b_cur = b_pf[kt % _bPF]
+            b_next_kt = kt + _bPF
+            if const_expr(b_next_kt < _K_TILES_TOTAL):
+                b_pf[kt % _bPF] = load_b_tile(b_next_kt)
             a_scale_sub = [a_scale_v[kt][sub] for sub in range_constexpr(_kSubBlocks)]
-            mfma_cluster(b[kt], a, a_scale_sub, b_scale_v[kt], init=(OFFSET == 0))
+            mfma_cluster(b_cur, a, a_scale_sub, b_scale_v[kt], init=(OFFSET == 0))
 
         for S in range_constexpr(kStages):
             kt = _K_TILES_TOTAL - kStages + S
             slot = kt % _aStages
             _kloop_fence()
             a = issue_a_ds_read(slot)
+            b_cur = b_pf[kt % _bPF]
             a_scale_sub = [a_scale_v[kt][sub] for sub in range_constexpr(_kSubBlocks)]
-            mfma_cluster(b[kt], a, a_scale_sub, b_scale_v[kt], init=False)
+            mfma_cluster(b_cur, a, a_scale_sub, b_scale_v[kt], init=False)
 
     if epilog == "nonatomic":
         out_base = _global_base_ptr1(arg_out)
