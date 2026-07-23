@@ -29,7 +29,6 @@ def main():
         rank=0,
         npes=NPES,
         max_tok=MAX_TOK,
-        a_dtype="fp8",
         grid_mult=1,
     )
     dev = torch.device("cuda", 0)

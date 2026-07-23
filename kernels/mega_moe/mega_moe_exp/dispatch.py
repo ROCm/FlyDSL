@@ -10,33 +10,16 @@ from flydsl.expr import buffer_ops, const_expr, range_constexpr
 
 from ..utils import epk
 
+_PRODUCER_PHASE_QUANTUM = 1 << 32
+
 
 @flyc.jit
-def emit_dispatch_prologue(
-    *,
-    num_waves,
-    fz_npes,
-    fz_epr,
-    fz_k,
-    fz_cap,
-    fz_mtpr,
-    fz_rank,
-    fz_tile_m,
-    fz_total_experts,
-    fz_nbytes,
-    fz_n_i32,
-    fz_safe_end_i32,
-    fz_scale_n_i32,
-    fz_enable_scales,
-    addr_disp,
-    i32_cur_tok,
-    addr_in_tok,
-    addr_in_idx,
-    addr_in_wts,
-    addr_in_sc,
-    dispatch_blocks,
-    addr_ready
-):
+# fmt: off
+def emit_dispatch_prologue(*, num_waves, fz_npes, fz_epr, fz_k, fz_cap, fz_mtpr, fz_rank, fz_tile_m,
+    fz_total_experts, fz_nbytes, fz_n_i32, fz_safe_end_i32, fz_scale_n_i32, fz_enable_scales, addr_disp,
+    i32_cur_tok, addr_in_tok, addr_in_idx, addr_in_wts, addr_in_sc, dispatch_blocks, addr_ready,
+    epoch_parity, epoch_expected):
+# fmt: on
     """Producer-only fixed-slot EP dispatch for the oversubscribed v2 stage-1 kernel."""
     crfa = buffer_ops.create_buffer_resource_from_addr
     rdisp = crfa(addr_disp)
@@ -60,7 +43,6 @@ def emit_dispatch_prologue(
     a_se = dp(15)
     a_trb = dp(16)
     a_nv = dp(17)
-    a_meta = dp(18)
     a_sm = dp(19)
     a_trecv = dp(21)
     a_dctr = dp(22)
@@ -78,7 +60,6 @@ def emit_dispatch_prologue(
     c_cap = fx.Int32(fz_cap)
     r_idx = crfa(a_idx)
     r_wts = crfa(a_wts)
-    bn = fx.Uint64(nblk)
 
     def _process(wk):
         src_tok = wk // fx.Int32(fz_k)
@@ -152,17 +133,20 @@ def emit_dispatch_prologue(
 
     for wk in range(gwid, wl, gwn):
         _process(wk)
+    fx.rocdl.s_waitcnt(0)
     fx.barrier()
     if tid == 0:
         epk.fence_agent_release()
-        epk.atomic_add_agent(a_gb1, fx.Int64(1))
+        phase = fx.Int64(_PRODUCER_PHASE_QUANTUM)
+        leader_add = phase - fx.Int64(dispatch_blocks - 1)
+        add_value = (flat == fx.Int32(0)).select(leader_add, fx.Int64(1))
+        arrival_old = fx.Int64(epk.atomic_add_agent(a_gb1, add_value))
+        if flat == fx.Int32(0):
+            phase_target = (arrival_old // phase + fx.Int64(1)) * phase
+            mori_shmem.int64_wait_until_equals(a_gb1, phase_target)
+    fx.barrier()
     if gwid == 0:
-        one2b = fx.Uint64(1)
-        gb1now = fx.Uint64(buffer_ops.buffer_load(crfa(a_gb1), fx.Int32(0), vec_width=1, dtype=fx.Int64))
-        tg2 = ((gb1now - one2b) // bn + one2b) * bn
-        mori_shmem.int64_wait_until_equals(a_gb1, tg2)
         epk.fence_agent_acquire()
-        epoch_i32 = fx.Int32(tg2 // bn)
         epk.fence_system_release()
         for dpe in range(lane, fz_npes, 64):
             sig = buffer_ops.buffer_load(crfa(a_dctr), dpe, vec_width=1, dtype=fx.Int32) + fx.Int32(1)
@@ -171,12 +155,19 @@ def emit_dispatch_prologue(
             ) * fx.Int64(4)
             mori_shmem.int32_wait_until_equals(rnum_remote, fx.Int32(0))
             epk.store_i32_system(rnum_remote, fx.Int32(0), sig)
-        for spe in range(lane, fz_npes, 64):
-            rn_src = a_rnum + fx.Int64(spe) * fx.Int64(4)
-            sv = fx.Int32(mori_shmem.int32_wait_until_greater_than(rn_src, fx.Int32(0)))
-            epk.store_i32_system(rn_src, fx.Int32(0), fx.Int32(0))
-            epk.atomic_add_system(a_trecv, sv - fx.Int32(1))
-            buffer_ops.buffer_store(fx.Int32(0), crfa(a_dctr), spe)
+        recv_count = fx.Int32(0)
+        for spe in range_constexpr(fz_npes):
+            if lane == spe:
+                rn_src = a_rnum + fx.Int64(spe) * fx.Int64(4)
+                sv = fx.Int32(mori_shmem.int32_wait_until_greater_than(rn_src, fx.Int32(0)))
+                epk.store_i32_system(rn_src, fx.Int32(0), fx.Int32(0))
+                buffer_ops.buffer_store(fx.Int32(0), crfa(a_dctr), spe)
+                recv_count = sv - fx.Int32(1)
+        total_recv = fx.Int32(0)
+        for spe in range_constexpr(fz_npes):
+            total_recv = total_recv + fx.Int32(epk._readlane(recv_count, spe))
+        if lane == 0:
+            buffer_ops.buffer_store(total_recv, crfa(a_trecv), fx.Int32(0))
         epk.fence_system_acquire()
         r_run = crfa(a_run)
         r_se = crfa(a_se)
@@ -208,17 +199,15 @@ def emit_dispatch_prologue(
             buffer_ops.buffer_store(cnt2, r_cnt, lei)
             buffer_ops.buffer_store(fx.Int32(0), r_run, lei)
         epk.fence_system_release()
-        epk.fence_agent_release()
-        buffer_ops.buffer_store(epoch_i32, crfa(a_meta), fx.Int32(0))
-        epk.fence_system_release()
         if lane == 0:
-            epk.store_i32_system(addr_ready, fx.Int32(0), fx.Int32(1))
+            epk.store_i32_system(addr_ready, epoch_parity, epoch_expected)
 
 
 @flyc.jit
-def wait_dispatch_ready(addr_ready):
+def wait_dispatch_ready(addr_ready, epoch_parity, epoch_expected):
     """Consumer-side acquire for the split producer/consumer stage-1 kernel."""
     if fx.thread_idx.x == 0:
-        mori_shmem.int32_wait_until_greater_than(addr_ready, fx.Int32(0))
+        ready_addr = addr_ready + fx.Int64(epoch_parity) * fx.Int64(4)
+        mori_shmem.int32_wait_until_equals(ready_addr, epoch_expected)
         epk.fence_system_acquire()
     fx.barrier()

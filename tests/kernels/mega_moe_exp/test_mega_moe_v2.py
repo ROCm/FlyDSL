@@ -29,6 +29,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 import torch
 import torch.distributed as dist
@@ -416,13 +417,6 @@ def _prepare(dev, *, quant, tokens, model_dim, inter_dim, experts, topk, seed, r
     else:
         raise SystemExit(f"unknown quant {quant!r} (use a8w4|a4w4)")
 
-    # accuracy ground-truth: keep this rank's LOCAL experts' ORIGINAL (pre-quant) weights in bf16,
-    # so the oracle can compute a torch f32 reference (true MoE) and locate which stack diverges.
-    w_ref_local = None
-    if keep_ref:
-        _epr = experts // world
-        w_ref_local = w1_fp32[rank * _epr : (rank + 1) * _epr].to(torch.bfloat16).contiguous()
-
     # weight: MX-FP4 + shuffle for the GEMM (shared across a8w4/a4w4)
     w1_flat = w1_fp32.view(experts * (2 * inter_dim), model_dim)
     w1_fp4, w1_scale_raw = _chunked_fp4_quant(w1_flat)
@@ -444,6 +438,10 @@ def _prepare(dev, *, quant, tokens, model_dim, inter_dim, experts, topk, seed, r
         .view(torch.uint8)
         .contiguous()
     )
+    w_ref_local = None
+    if keep_ref:
+        epr = experts // world
+        w_ref_local = w1_fp32[rank * epr : (rank + 1) * epr].contiguous()
     del w1_fp32, w1_flat, w1_fp4, w1_scale_raw
     torch.cuda.empty_cache()
 
@@ -460,13 +458,13 @@ def _prepare(dev, *, quant, tokens, model_dim, inter_dim, experts, topk, seed, r
         scale_w1_1d=scale_w1_1d,
         w_kernel_gui=w_kernel_gui,
         scale_gui=scale_gui,
+        w_ref_local=w_ref_local,
         topk_ids=topk_ids,
         wts=wts,
         token_dtype=token_dtype,
         a_dtype=a_dtype,
         row_view_dim=row_view_dim,
         x_bf16=x_fp32.to(torch.bfloat16).contiguous(),  # --from-bf16: production-quant source
-        w_ref_local=w_ref_local,  # bf16 local-expert weights (accuracy ground truth)
     )
 
 
@@ -631,9 +629,14 @@ def _run_full_e2e(
         enable_fused_stage1=_s1_fused,
         enable_fused_stage2=_s2_fused,
         gate_mode=_mega_gate_mode,
+        stage1_dispatch_cu=None if args.v2_dispatch_cu <= 0 else args.v2_dispatch_cu,
+        stage1_grid_mult=None if args.v2_grid_mult <= 0 else args.v2_grid_mult,
     )
     torch.cuda.synchronize()
     ms.shmem_barrier_all()
+    skew_ms = float(getattr(args, "rank_skew_ms", 0.0))
+    if skew_ms > 0:
+        time.sleep(rank * skew_ms / 1000.0)
 
     _mega_out_holder = {}
 
@@ -1051,8 +1054,10 @@ def _run_mega_only(
     wts,
     w_kernel_gui=None,
     scale_gui=None,
+    w_ref_local=None,
     check_acc=True,
     measure_perf=False,
+    stage1_only=False,
 ):
     """Aiter-free CI path: run ONLY MegaMoE (single fused op, bf16 in -> bf16 out).
 
@@ -1084,16 +1089,21 @@ def _run_mega_only(
     _floor = 0.28 if _is_fp4 else 0.10
 
     # ---- W2 (down-proj): MX-FP4, same pipeline as _prepare's W1 (replicated cross-rank) ----
-    torch.manual_seed(args.seed + 4242)
-    w2_f32 = torch.randn((experts * model_dim, inter_dim), device=dev, dtype=torch.float32) * (
-        float(inter_dim) ** -0.25
-    )
-    w2_fp4, w2_sr = _chunked_fp4_quant(w2_f32)
-    _w2sl = slice(rank * epr * model_dim, (rank + 1) * epr * model_dim)
-    w2_kernel = shuffle_weight(w2_fp4[_w2sl]).view(torch.uint8).contiguous().view(-1)
-    w2_scale_1d = gemm_common_utils.e8m0_shuffle(w2_sr[_w2sl]).view(torch.uint8).contiguous().view(-1)
-    del w2_fp4, w2_sr
-    torch.cuda.empty_cache()
+    if stage1_only:
+        w2_f32 = None
+        w2_kernel = torch.empty(1, dtype=torch.uint8, device=dev)
+        w2_scale_1d = torch.empty(1, dtype=torch.uint8, device=dev)
+    else:
+        torch.manual_seed(args.seed + 4242)
+        w2_f32 = torch.randn((experts * model_dim, inter_dim), device=dev, dtype=torch.float32) * (
+            float(inter_dim) ** -0.25
+        )
+        w2_fp4, w2_sr = _chunked_fp4_quant(w2_f32)
+        _w2sl = slice(rank * epr * model_dim, (rank + 1) * epr * model_dim)
+        w2_kernel = shuffle_weight(w2_fp4[_w2sl]).view(torch.uint8).contiguous().view(-1)
+        w2_scale_1d = gemm_common_utils.e8m0_shuffle(w2_sr[_w2sl]).view(torch.uint8).contiguous().view(-1)
+        del w2_fp4, w2_sr
+        torch.cuda.empty_cache()
 
     # ---- MegaMoE local weights: this rank's epr experts (gemm1 indexes by local expert id) ----
     _wpe = w_kernel.numel() // experts
@@ -1127,24 +1137,73 @@ def _run_mega_only(
         enable_fused_stage1=True,
         enable_fused_stage2=True,
         gate_mode=_gate_mode,
+        stage1_dispatch_cu=None if args.v2_dispatch_cu <= 0 else args.v2_dispatch_cu,
+        stage1_grid_mult=None if args.v2_grid_mult <= 0 else args.v2_grid_mult,
     )
     torch.cuda.synchronize()
     ms.shmem_barrier_all()
+    skew_ms = float(getattr(args, "rank_skew_ms", 0.0))
+    if skew_ms > 0:
+        time.sleep(rank * skew_ms / 1000.0)
 
     wc = wts[:run_tokens].contiguous()
     ic = topk_ids[:run_tokens].to(torch.int32).contiguous()
     x_in = x_bf16[:run_tokens].contiguous()
+    moe._validate_stage1 = bool(stage1_only)
+    if stage1_only:
+        x_s1, scale_s1 = moe.quantize(x_in)
 
     _out = {}
 
     def _body():
-        # bf16 in -> internal FlyDSL MX quant -> fused stage1+stage2 -> bf16 out (single op, no aiter).
-        _out["o"] = moe.forward(x_in, wc, ic)
+        if stage1_only:
+            _out["s1"] = moe._run_fused_stage1(x_s1, wc, scale_s1, ic)
+        else:
+            _out["o"] = moe.forward(x_in, wc, ic)
 
     _body()
     torch.cuda.synchronize()
     ms.shmem_barrier_all()
-    out_mega = _out["o"][:run_tokens].float().cpu().numpy().copy()
+    out_mega = None if stage1_only else _out["o"][:run_tokens].float().cpu().numpy().copy()
+
+    stage1_rel = -1.0
+    if (
+        (stage1_only or os.environ.get("MEGA_V2_DIAG", "0") == "1")
+        and hasattr(moe, "_diag_s1_deq")
+        and w_ref_local is not None
+    ):
+        got_s1 = moe._diag_s1_deq
+        inp_s1 = moe._diag_s1_input
+        eids_s1 = moe._diag_s1_eids.to(torch.int64)
+        ref_s1 = torch.empty_like(got_s1)
+        for expert in torch.unique(eids_s1).tolist():
+            rows = torch.nonzero(eids_s1 == int(expert), as_tuple=False).flatten()
+            w1e = _dequant_mx_to_f32(w_ref_local[expert - rank * epr], "fp4")
+            xr = inp_s1[rows]
+            ref_s1[rows] = _F.silu(xr @ w1e[:inter_dim].t()) * (xr @ w1e[inter_dim:].t())
+        stage1_rel = (torch.norm(got_s1 - ref_s1) / torch.norm(ref_s1)).item()
+        stage1_ratio = (torch.norm(got_s1) / torch.norm(ref_s1)).item()
+        print(
+            f"[v2-diag rank={rank}] stage1-vs-ref: relL2={stage1_rel:.4e} norm_ratio={stage1_ratio:.4f}",
+            flush=True,
+        )
+
+    if stage1_only:
+        stage1_rel_max = _all_max(dev, stage1_rel)
+        stage1_ok = 0.0 <= stage1_rel_max < 0.10
+        if rank == 0:
+            print(
+                f"[STAGE1-ONLY] {args.network} {quant} bs={run_tokens} -> "
+                f"{'PASS' if stage1_ok else 'FAIL'} (all {world} ranks) [relL2={stage1_rel_max:.4e}]",
+                flush=True,
+            )
+        return dict(
+            network=args.network,
+            quant=quant,
+            tokens=run_tokens,
+            mega_stage1_relL2=stage1_rel_max,
+            full_e2e_pass=stage1_ok,
+        )
 
     # ---- accuracy: dequant-weights reference (single layer) OR chained N-layer accumulation ----
     n_layers = int(getattr(args, "layers", 1))
@@ -1158,29 +1217,6 @@ def _run_mega_only(
         _ = torch.randn((run_tokens, model_dim), device=dev, dtype=torch.float32)  # advance RNG like _prepare
         w1_all = torch.randn((experts, 2 * inter_dim, model_dim), device=dev, dtype=torch.float32) * _init
         w2_all = w2_f32.view(experts, model_dim, inter_dim)
-        if os.environ.get("MEGA_V2_DIAG", "0") == "1" and hasattr(moe, "_diag_s1_deq"):
-            got_s1 = moe._diag_s1_deq
-            src_tok = (moe._diag_s1_src & 0x00FFFFFF).to(torch.int64) % mtpr
-            eids_s1 = moe._diag_s1_eids.to(torch.int64)
-            x_mx = _dequant_mx_to_f32(x_in.float(), "fp8")
-            ref_s1 = torch.empty_like(got_s1)
-            ref_s1_swapped = torch.empty_like(got_s1)
-            for e in torch.unique(eids_s1).tolist():
-                rows_e = torch.nonzero(eids_s1 == int(e), as_tuple=False).flatten()
-                w1e = _dequant_mx_to_f32(w1_all[e], "fp4")
-                xr = x_mx[src_tok[rows_e]]
-                gate = xr @ w1e[:inter_dim].t()
-                up = xr @ w1e[inter_dim:].t()
-                ref_s1[rows_e] = _F.silu(gate) * up
-                ref_s1_swapped[rows_e] = _F.silu(up) * gate
-            s1_rel = (torch.norm(got_s1 - ref_s1) / torch.norm(ref_s1)).item()
-            s1_swap_rel = (torch.norm(got_s1 - ref_s1_swapped) / torch.norm(ref_s1_swapped)).item()
-            s1_ratio = (torch.norm(got_s1) / torch.norm(ref_s1)).item()
-            print(
-                f"[v2-diag rank={rank}] stage1-vs-ref: relL2={s1_rel:.4e} "
-                f"swapped_relL2={s1_swap_rel:.4e} norm_ratio={s1_ratio:.4f}",
-                flush=True,
-            )
         if n_layers > 1:
             # ===== chained N-layer accumulation (real DeepSeek-V4 depth): device (moe.forward per
             # layer + RMSNorm + residual) vs the pure-torch dequant-weights RefModel over the SAME
@@ -1225,31 +1261,42 @@ def _run_mega_only(
         torch.cuda.empty_cache()
     relL2 = _acc_metric  # kept name for the return dict / downstream reporting
 
-    # ---- perf: CUDAGraph device time of moe.forward (mean across ranks), golden match-or-better ----
+    # ---- perf: CUDAGraph device time (mean across ranks) ----
     mega_ms = -1.0
+    stage1_ms = -1.0
     perf_ok = True
     perf_note = ""
     if measure_perf:
-        ms.shmem_barrier_all()
-        _body()
-        torch.cuda.synchronize()
-        ms.shmem_barrier_all()
-        _cap = torch.cuda.Stream()
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g, stream=_cap):
-            _body()
-        for _ in range(10):
-            g.replay()
-        torch.cuda.synchronize()
         _n = max(1, int(args.iters))
-        _s = torch.cuda.Event(enable_timing=True)
-        _e = torch.cuda.Event(enable_timing=True)
-        _s.record()
-        for _ in range(_n):
-            g.replay()
-        _e.record()
-        torch.cuda.synchronize()
-        mega_ms = _all_mean(dev, _s.elapsed_time(_e) / _n)
+
+        def _time_graph(fn):
+            ms.shmem_barrier_all()
+            fn()
+            torch.cuda.synchronize()
+            ms.shmem_barrier_all()
+            capture_stream = torch.cuda.Stream()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=capture_stream):
+                fn()
+            for _ in range(10):
+                graph.replay()
+            torch.cuda.synchronize()
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            for _ in range(_n):
+                graph.replay()
+            end.record()
+            torch.cuda.synchronize()
+            return _all_mean(dev, start.elapsed_time(end) / _n)
+
+        x_s1, scale_s1 = moe.quantize(x_in)
+
+        def _stage1_body():
+            moe._run_fused_stage1(x_s1, wc, scale_s1, ic)
+
+        stage1_ms = _time_graph(_stage1_body)
+        mega_ms = _time_graph(_body)
         _base = _perf_baseline_lookup(getattr(args, "perf_baseline", ""), args.network, quant, run_tokens)
         if _base is not None and _base > 0:
             _tol = float(args.perf_tol)
@@ -1262,9 +1309,10 @@ def _run_mega_only(
     _all_ok = _all_max(dev, 0.0 if ok else 1.0) < 0.5
     _relL2_max = _all_max(dev, relL2 if relL2 >= 0 else 0.0)
     _ms_max = _all_max(dev, mega_ms if mega_ms >= 0 else 0.0)
+    _s1_ms_max = _all_max(dev, stage1_ms if stage1_ms >= 0 else 0.0)
     if rank == 0:
         _acc_s = f"{_acc_label}={_relL2_max:.3e} (floor~{_acc_floor})" if check_acc else "acc:skip"
-        _perf_s = f"megav1={_ms_max:.4f}ms  {perf_note}" if measure_perf else "perf:skip"
+        _perf_s = f"stage1={_s1_ms_max:.4f}ms e2e={_ms_max:.4f}ms  {perf_note}" if measure_perf else "perf:skip"
         print(
             f"[MEGA-ONLY] {args.network} {quant} bs={run_tokens} seed={args.seed} -> "
             f"{'PASS' if _all_ok else 'FAIL'} (all {world} ranks)  [{_acc_s}]  [{_perf_s}]",
@@ -1275,6 +1323,7 @@ def _run_mega_only(
         quant=quant,
         tokens=run_tokens,
         mega_only_relL2=relL2,
+        mega_stage1_ms=stage1_ms,
         mega_only_ms=mega_ms,
         full_e2e_pass=bool(_all_ok),
     )
@@ -1302,7 +1351,7 @@ def run_one(args, rank, world, dev):
         seed=args.seed,
         rank=rank,
         world=world,
-        keep_ref=False,
+        keep_ref=bool(args.stage1_only) or os.environ.get("MEGA_V2_DIAG", "0") == "1",
     )
     w_kernel, scale_w1_1d = T["w_kernel"], T["scale_w1_1d"]
     topk_ids, wts = T["topk_ids"], T["wts"]
@@ -1331,8 +1380,10 @@ def run_one(args, rank, world, dev):
             wts=wts,
             w_kernel_gui=T.get("w_kernel_gui"),
             scale_gui=T.get("scale_gui"),
+            w_ref_local=T.get("w_ref_local"),
             check_acc=not bool(args.skip_acc),
             measure_perf=bool(args.measure_perf),
+            stage1_only=bool(args.stage1_only),
         )
 
     # Manual/dev path: production end-to-end comparison megav1 vs a fully-FlyDSL ATOM baseline
@@ -1376,7 +1427,10 @@ def main():
     p.add_argument("--waves-per-eu", type=int, default=4)
     p.add_argument("--async-copy", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--iters", type=int, default=30)
+    p.add_argument("--v2-dispatch-cu", type=int, default=0, help="<=0 uses the MegaMoE v2 launch table")
+    p.add_argument("--v2-grid-mult", type=int, default=-1, help="<=0 uses the GEMM1 tune table")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--rank-skew-ms", type=float, default=0.0, help="delay rank r by r*N ms before first forward")
     p.add_argument(
         "--layers",
         type=int,
@@ -1468,6 +1522,11 @@ def main():
         "(--perf-baseline). This is what the multi-gpu CI runs.",
     )
     p.add_argument(
+        "--stage1-only",
+        action="store_true",
+        help="(--mega-only) validate dispatch+GEMM1 only; do not execute GEMM2/combine or build W2.",
+    )
+    p.add_argument(
         "--measure-perf",
         action="store_true",
         help="(--mega-only) time moe.forward under CUDAGraph and gate against --perf-baseline "
@@ -1501,6 +1560,8 @@ def main():
         "to this path (used to capture the baseline on a reference machine).",
     )
     args = p.parse_args()
+    if args.stage1_only and not args.mega_only:
+        p.error("--stage1-only requires --mega-only")
 
     rank = int(os.environ.get("RANK", "0"))
     world = int(os.environ.get("WORLD_SIZE", "1"))
