@@ -13,6 +13,7 @@ implementation, so they hold regardless of loop-vs-codegen internals.
 
 import ctypes
 import gc
+import inspect
 import struct
 import weakref
 
@@ -21,7 +22,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from flydsl.compiler import jit_argument as ja  # noqa: E402
-from flydsl.compiler.jit_function import CallState  # noqa: E402
+from flydsl.compiler.jit_function import CallState, _build_call_state  # noqa: E402
 from flydsl.expr.numeric import Int32  # noqa: E402
 
 
@@ -106,17 +107,25 @@ def test_callstate_dispatch_packs_changing_args_and_auto_stream():
 def test_callstate_keeps_function_owner_alive():
     """A cached raw function pointer must not outlive its owning engine/artifact."""
 
-    class Owner:
-        pass
+    calls = []
+    device = object()
 
-    owner = Owner()
-    owner_ref = weakref.ref(owner)
-    state = CallState([], lambda _packed: None, keepalive=owner)
+    class Artifact:
+        def _get_func_exe(self, actual_device):
+            assert actual_device is device
+            return lambda _packed: calls.append(True)
 
-    del owner
+    artifact = Artifact()
+    artifact_ref = weakref.ref(artifact)
+    state = _build_call_state(inspect.Signature(), (), artifact, device)
+
+    del artifact
     gc.collect()
-    assert owner_ref() is not None
+    assert artifact_ref() is not None
+
+    state(())
+    assert calls == [True]
 
     del state
     gc.collect()
-    assert owner_ref() is None
+    assert artifact_ref() is None

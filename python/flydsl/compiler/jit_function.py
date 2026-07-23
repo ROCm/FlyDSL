@@ -1152,12 +1152,13 @@ def _resolve_jit_arg_type(arg, annotation):
     return constructor
 
 
-def _build_call_state(sig, args_tuple, func_exe, *, keepalive=None):
+def _build_call_state(sig, args_tuple, artifact, device):
     """Build a CallState for fast repeated dispatch.
 
     Resolves each parameter's JitArgument type using the same registry as
     convert_to_jit_arguments, then asks it for a reusable slot specification.
-    This ensures a single source of truth for argument packing.
+    The artifact supplies both the function pointer and its lifetime owner, so
+    callers cannot publish a pointer with a missing or mismatched keepalive.
     """
 
     slot_specs = []
@@ -1192,7 +1193,11 @@ def _build_call_state(sig, args_tuple, func_exe, *, keepalive=None):
     if not has_user_stream:
         slot_specs.append((-1, ctypes.c_void_p, None))
 
-    return CallState(slot_specs, func_exe, keepalive=keepalive)
+    return CallState(
+        slot_specs,
+        artifact._get_func_exe(device),
+        keepalive=artifact,
+    )
 
 
 class JitFunction:
@@ -1550,8 +1555,8 @@ class JitFunction:
             state = _build_call_state(
                 sig,
                 args_tuple,
-                cached_func._get_func_exe(invocation.device),
-                keepalive=cached_func,
+                cached_func,
+                invocation.device,
             )
             self._call_state_cache[dispatch_key] = state
             with _device_guard(invocation.device):
@@ -1712,8 +1717,8 @@ class JitFunction:
         state = _build_call_state(
             sig,
             args_tuple,
-            compiled_func._get_func_exe(invocation.device),
-            keepalive=compiled_func,
+            compiled_func,
+            invocation.device,
         )
         self._call_state_cache[dispatch_key] = state
         with _device_guard(invocation.device):
@@ -1823,8 +1828,8 @@ def _compile_impl(func, *args) -> Optional[CompiledFunction]:
         call_state = _build_call_state(
             sig,
             args_tuple,
-            artifact._get_func_exe(invocation.device),
-            keepalive=artifact,
+            artifact,
+            invocation.device,
         )
 
     return CompiledFunction(call_state, artifact, invocation.device)
