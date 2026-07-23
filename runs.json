@@ -1,11 +1,69 @@
 {
  "schema": 1,
- "updated": "2026-07-23T16:25:53Z",
+ "updated": "2026-07-23T16:39:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 30024697925,
+   "run_id": 30025899976,
    "pr": 894,
+   "commit": "8aa5718d45ebea9ceecdb4acdb61447adf23a82c",
+   "branch": "main",
+   "event": "pull_request",
+   "title": "[Kernel][MI350] Add 8 wave GQA sliding-window attention kernel",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30025899976",
+   "created_at": "2026-07-23T16:37:19Z",
+   "updated_at": "2026-07-23T16:37:53Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
+  {
+   "run_id": 30025724745,
+   "pr": null,
+   "commit": "7ffebf8dad6e273805cacba9ee6b618bdb207e4e",
+   "branch": "main",
+   "event": "pull_request",
+   "title": "[Kernel][MI350] Add 8 wave GQA sliding-window attention kernel",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30025724745",
+   "created_at": "2026-07-23T16:34:52Z",
+   "updated_at": "2026-07-23T16:37:20Z",
+   "actor": "amd-nprotaso",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-23T16:36:22Z",
+     "completed_at": "2026-07-23T16:37:19Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30025724745/job/89269924546"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-23T16:36:22Z",
+     "completed_at": "2026-07-23T16:37:20Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30025724745/job/89269924587"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-23T16:36:22Z",
+     "completed_at": "2026-07-23T16:37:20Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30025724745/job/89269924627"
+    }
+   ]
+  },
+  {
+   "run_id": 30024697925,
+   "pr": null,
    "commit": "fcd7e1588287f10522c1687617320e7bdde56153",
    "branch": "main",
    "event": "pull_request",
@@ -308,10 +366,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-23T16:15:42Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T16:29:23Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30018220233/job/89244190534"
     },
     {
@@ -485,11 +543,11 @@
    "branch": "pa-decode-tile",
    "event": "pull_request",
    "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30017582468",
    "created_at": "2026-07-23T14:48:57Z",
-   "updated_at": "2026-07-23T14:50:02Z",
+   "updated_at": "2026-07-23T16:29:56Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -513,9 +571,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-23T14:50:02Z",
+     "started_at": "2026-07-23T16:29:56Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30017582468/job/89241814128"
     }
@@ -2252,64 +2310,6 @@
    "created_at": "2026-07-22T20:15:28Z",
    "updated_at": "2026-07-22T20:17:03Z",
    "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 29943569652,
-   "pr": null,
-   "commit": "1555134146a9779882ce73ba8cd413c34301b7fd",
-   "branch": "jiacao/conv3d-multi-tile-autotune-v2",
-   "event": "pull_request",
-   "title": "[Kernel] conv3d: parameterize tile size + add autotuner",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29943569652",
-   "created_at": "2026-07-22T17:43:35Z",
-   "updated_at": "2026-07-22T19:19:49Z",
-   "actor": "jiacao-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-22T17:45:22Z",
-     "completed_at": "2026-07-22T19:08:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29943569652/job/89003435742"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-22T17:45:23Z",
-     "completed_at": "2026-07-22T19:19:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29943569652/job/89003435779"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-22T17:45:06Z",
-     "completed_at": "2026-07-22T18:00:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29943569652/job/89003435792"
-    }
-   ]
-  },
-  {
-   "run_id": 29935517953,
-   "pr": null,
-   "commit": "00c8d3059a151a5605b26c01f2d82d8c950de655",
-   "branch": "jiacao/conv3d-multi-tile-autotune-v2",
-   "event": "pull_request",
-   "title": "[Kernel] conv3d: parameterize tile size + add autotuner",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29935517953",
-   "created_at": "2026-07-22T15:53:52Z",
-   "updated_at": "2026-07-22T15:55:31Z",
-   "actor": "jiacao-amd",
    "jobs": []
   }
  ]
