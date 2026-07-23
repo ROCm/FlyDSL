@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-23T18:26:45Z",
+ "updated": "2026-07-23T18:46:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -38,9 +38,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-23T16:38:31Z",
+     "started_at": "2026-07-23T18:44:58Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30025899976/job/89270444687"
     }
@@ -111,19 +111,19 @@
    "branch": "worktree-mxmoe-a8w4",
    "event": "pull_request",
    "title": "Refactor mxmoe",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30023289075",
    "created_at": "2026-07-23T16:02:11Z",
-   "updated_at": "2026-07-23T16:03:29Z",
+   "updated_at": "2026-07-23T18:30:34Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-23T16:03:29Z",
+     "started_at": "2026-07-23T18:30:33Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30023289075/job/89261599530"
     },
@@ -169,11 +169,11 @@
    "branch": "kernel/sage-attention-cdna",
    "event": "pull_request",
    "title": "[Kernel] Add CDNA SageAttention kernel",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30021025580",
    "created_at": "2026-07-23T15:32:35Z",
-   "updated_at": "2026-07-23T15:33:51Z",
+   "updated_at": "2026-07-23T18:30:33Z",
    "actor": "LiuYinfeng01",
    "jobs": [
     {
@@ -188,9 +188,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-23T15:33:51Z",
+     "started_at": "2026-07-23T18:30:33Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30021025580/job/89253786782"
     },
@@ -265,10 +265,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-23T17:45:22Z",
-     "completed_at": null,
+     "completed_at": "2026-07-23T18:44:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30019842941/job/89265660448"
     },
     {
@@ -528,11 +528,11 @@
    "branch": "forward_lse",
    "event": "pull_request",
    "title": "Add forward LSE output to FlyDSL flash attention kernels",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30017858434",
    "created_at": "2026-07-23T14:52:29Z",
-   "updated_at": "2026-07-23T14:53:13Z",
+   "updated_at": "2026-07-23T18:30:34Z",
    "actor": "amd-wsung102",
    "jobs": [
     {
@@ -547,9 +547,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-23T14:53:13Z",
+     "started_at": "2026-07-23T18:30:33Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30017858434/job/89242703765"
     },
