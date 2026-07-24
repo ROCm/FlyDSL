@@ -88,12 +88,6 @@ def _promote(v):
     return v
 
 
-def _promote_scalars(values):
-    """Promote bare python scalars in each carried state (recursively, so nested
-    literals like ``{"count": 0}`` are handled too)."""
-    return [_promote(v) for v in values]
-
-
 def _flatten_like(entry, out, path, ctx_label):
     """Flatten a branch output ``out`` into ir.Values ordered to match the entry
     template ``entry``: dict/namespace are aligned by key (order-insensitive, since
@@ -136,7 +130,7 @@ def _unpack_states(values):
     flat ir.Value list + its ir.Types. Returns ``(exemplar, state_raw, result_types)``;
     ``exemplar`` (scalars promoted) is the template :func:`_pack_states` rebuilds from.
     """
-    exemplar = _promote_scalars(values)
+    exemplar = [_promote(v) for v in values]
     return exemplar, extract_to_ir_values(exemplar), get_ir_types(exemplar)
 
 
