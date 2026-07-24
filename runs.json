@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-24T03:56:23Z",
+ "updated": "2026-07-24T04:27:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "worktree-mxmoe-a8w4",
    "event": "pull_request",
    "title": "Refactor mxmoe",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30065420068",
    "created_at": "2026-07-24T03:54:47Z",
-   "updated_at": "2026-07-24T03:55:24Z",
+   "updated_at": "2026-07-24T03:56:00Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-24T04:09:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30065420068/job/89395421378"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-24T04:13:04Z",
+     "completed_at": "2026-07-24T04:23:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30065420068/job/89395421383"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-24T03:56:00Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30065420068/job/89395421404"
+    }
+   ]
   },
   {
    "run_id": 30065289974,
@@ -87,18 +115,18 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-24T03:41:20Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-24T03:57:24Z",
+     "completed_at": "2026-07-24T04:12:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064817364/job/89393701237"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-24T03:41:20Z",
+     "started_at": "2026-07-24T04:06:23Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064817364/job/89393701320"
     }
@@ -169,28 +197,28 @@
    "branch": "gfx1250/gemm-refactor",
    "event": "pull_request",
    "title": "[gfx1250] Refactor MoE/GEMM kernels with layout/atom API",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064578426",
    "created_at": "2026-07-24T03:34:47Z",
-   "updated_at": "2026-07-24T03:36:51Z",
+   "updated_at": "2026-07-24T04:06:12Z",
    "actor": "aoli26",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-24T03:37:25Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T03:56:49Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064578426/job/89393170014"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-24T03:36:51Z",
+     "started_at": "2026-07-24T04:06:11Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064578426/job/89393170022"
     },
