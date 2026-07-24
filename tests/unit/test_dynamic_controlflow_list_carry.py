@@ -189,7 +189,7 @@ def test_if_list_length_change_errors():
             with InsertionPoint(entry):
                 cond = entry.arguments[0]
                 lst = [_i32(0), _i32(1)]
-                with pytest.raises(TypeError, match="does not match the region entry"):
+                with pytest.raises(TypeError, match="changed type across the region"):
                     ReplaceIfWithDispatch.scf_if_dispatch(
                         cond,
                         lambda names, lst: {"lst": [_i32(10)]},  # length 1 != 2
@@ -210,7 +210,7 @@ def test_if_list_dtype_change_errors():
             with InsertionPoint(entry):
                 cond = entry.arguments[0]
                 lst = [_i32(0)]
-                with pytest.raises(TypeError, match="does not match the region entry"):
+                with pytest.raises(TypeError, match="changed type across the region"):
                     ReplaceIfWithDispatch.scf_if_dispatch(
                         cond,
                         lambda names, lst: {"lst": [_i64(10)]},  # i64 != i32
@@ -405,7 +405,7 @@ def test_ifexp_shape_mismatch_errors():
             entry = f.add_entry_block()
             with InsertionPoint(entry):
                 cond = entry.arguments[0]
-                with pytest.raises(TypeError, match="does not match the region entry"):
+                with pytest.raises(TypeError, match="changed type across the region"):
                     ReplaceIfWithDispatch.scf_ifexp_dispatch(
                         cond, lambda: [_i32(1), _i32(2)], lambda: [_i32(3)]  # len 1 != 2
                     )
