@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-24T20:33:45Z",
+ "updated": "2026-07-24T20:39:22Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,9 +14,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30124059807",
    "created_at": "2026-07-24T20:26:13Z",
-   "updated_at": "2026-07-24T20:31:13Z",
+   "updated_at": "2026-07-24T20:33:30Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-24T20:33:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30124059807/job/89584726824"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-24T20:34:26Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30124059807/job/89584726831"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-24T20:34:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30124059807/job/89584726896"
+    }
+   ]
   },
   {
    "run_id": 30123651903,
@@ -113,11 +141,11 @@
    "branch": "feat/autotune-offline-configs",
    "event": "pull_request",
    "title": "[3/5] autotune: add offline config artifacts (#770)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30117815364",
    "created_at": "2026-07-24T18:40:03Z",
-   "updated_at": "2026-07-24T19:22:57Z",
+   "updated_at": "2026-07-24T20:38:19Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -132,10 +160,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-24T19:22:56Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T20:38:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30117815364/job/89571463762"
     },
     {
