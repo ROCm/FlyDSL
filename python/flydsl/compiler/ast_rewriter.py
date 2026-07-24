@@ -993,8 +993,10 @@ class InsertEmptyYieldForSCFFor(Transformer):
                 scf.YieldOp([], loc=capture_user_location())
             return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
 
-        # Unpack carried states to flat iter_args; `exemplar` re-packs body + results.
-        exemplar, state_raw, result_types = _unpack_states(result_values)
+        # Unpack carried states to flat iter_args; `exemplar` re-packs body +
+        # results. scf.for infers its result types from iter_args, so the flat
+        # types are unused here.
+        exemplar, state_raw, _ = _unpack_states(result_values)
 
         loc = capture_user_location()
         for_op = scf.ForOp(start_val, stop_val, step_val, state_raw, loc=loc)
