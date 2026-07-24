@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-24T12:34:19Z",
+ "updated": "2026-07-24T12:50:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30094457874,
+   "pr": 892,
+   "commit": "40301b78ae710ed3e805cd11aa136ea03bcb0b19",
+   "branch": "worktree-mxmoe-a8w4",
+   "event": "pull_request",
+   "title": "Refactor mxmoe",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30094457874",
+   "created_at": "2026-07-24T12:48:46Z",
+   "updated_at": "2026-07-24T12:48:50Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 30088428867,
    "pr": 892,
@@ -81,10 +96,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-24T11:24:07Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T12:39:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30088415445/job/89467511803"
     }
    ]
@@ -2313,49 +2328,6 @@
      "started_at": "2026-07-23T16:23:36Z",
      "completed_at": "2026-07-23T18:09:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30017369767/job/89241169570"
-    }
-   ]
-  },
-  {
-   "run_id": 30016782482,
-   "pr": null,
-   "commit": "9f65f28a7cf36ea298885afcc3dd82e8a80c2bc8",
-   "branch": "jiacao/conv3d-multi-tile-autotune-v2",
-   "event": "pull_request",
-   "title": "[Kernel] conv3d: parameterize tile size + add autotuner",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30016782482",
-   "created_at": "2026-07-23T14:38:40Z",
-   "updated_at": "2026-07-23T18:11:37Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T14:50:21Z",
-     "completed_at": "2026-07-23T15:08:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30016782482/job/89239041618"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T16:23:24Z",
-     "completed_at": "2026-07-23T18:11:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30016782482/job/89239041671"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T14:40:35Z",
-     "completed_at": "2026-07-23T15:43:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30016782482/job/89239041786"
     }
    ]
   }
