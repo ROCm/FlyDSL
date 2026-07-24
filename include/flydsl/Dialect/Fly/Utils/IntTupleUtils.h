@@ -848,16 +848,11 @@ namespace detail {
 
 template <class IntTuple>
 std::pair<IntTuple, IntTuple> intTupleZip2ByImpl(const IntTupleBuilder<IntTuple> &builder,
-                                                 IntTuple t, IntTupleAttr guide) {
+                                                 IntTuple t, IntTupleAttr guide, int noneValue) {
   using Collector = typename IntTupleBuilder<IntTuple>::ElemCollector;
   if (guide.isLeaf()) {
     assert(t.rank() == 2 && "intTupleZip2By expects rank-2 tuple at terminal");
     return {builder.at(t, 0), builder.at(t, 1)};
-  }
-  // Canonicalize singleton guide wrappers so 1D profiles behave as leaf guides.
-  // This keeps zip2By robust after singleton unwrapping in product/divide type canonicalization.
-  if (guide.rank() == 1) {
-    return intTupleZip2ByImpl(builder, t, guide.at(0));
   }
   Collector firsts;
   Collector seconds;
@@ -866,7 +861,14 @@ std::pair<IntTuple, IntTuple> intTupleZip2ByImpl(const IntTupleBuilder<IntTuple>
   int32_t tRank = t.rank();
   assert(tRank >= guideRank && "Mismatched ranks in intTupleZip2By");
   for (int i = 0; i < guideRank; ++i) {
-    auto [first, second] = intTupleZip2ByImpl(builder, builder.at(t, i), guide.at(i));
+    if (guide.at(i).isLeafNone()) {
+      // i'th guide is None, implies view i'th mode s:d as (1,s):(0,d) for zip
+      // here first is either 1 or 0 depending on whether it's shape or stride
+      firsts.push_back(builder.materializeConstantLeaf(noneValue));
+      seconds.push_back(builder.at(t, i));
+      continue;
+    }
+    auto [first, second] = intTupleZip2ByImpl(builder, builder.at(t, i), guide.at(i), noneValue);
     firsts.push_back(first);
     seconds.push_back(second);
   }
@@ -879,13 +881,14 @@ std::pair<IntTuple, IntTuple> intTupleZip2ByImpl(const IntTupleBuilder<IntTuple>
 } // namespace detail
 
 template <class IntTuple>
-IntTuple intTupleZip2By(const IntTupleBuilder<IntTuple> &builder, IntTuple t, IntTupleAttr guide) {
+IntTuple intTupleZip2By(const IntTupleBuilder<IntTuple> &builder, IntTuple t, IntTupleAttr guide,
+                        int noneValue = 0) {
   if (guide.isLeaf()) {
     assert(t.rank() == 2 && "intTupleZip2By expects rank-2 tuple at terminal");
     return t;
   } else {
     using Collector = typename IntTupleBuilder<IntTuple>::ElemCollector;
-    auto [first, second] = detail::intTupleZip2ByImpl(builder, t, guide);
+    auto [first, second] = detail::intTupleZip2ByImpl(builder, t, guide, noneValue);
     Collector collector;
     collector.push_back(first);
     collector.push_back(second);
