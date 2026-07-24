@@ -88,13 +88,6 @@ def extract_to_ir_values(obj) -> List[ir.Value]:
         return list(chain.from_iterable(extract_to_ir_values(v) for v in obj.values()))
     if isinstance(obj, (tuple, list)):
         return list(chain.from_iterable(extract_to_ir_values(x) for x in obj))
-    # Bare scalar leaf (e.g. a python int/float/bool, or an object exposing ir_value()):
-    # coerce to a single ir.Value so scalars can be carried like any other leaf.
-    from ..expr.typing import as_ir_value
-
-    raw = as_ir_value(obj)
-    if isinstance(raw, ir.Value):
-        return [raw]
     raise TypeError(f"Cannot extract IR values from {obj}")
 
 
