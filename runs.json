@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-24T09:32:02Z",
+ "updated": "2026-07-24T09:45:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30083553786,
+   "pr": 786,
+   "commit": "9ded54ebf45d82ace9dae1f21e2bd576d7395814",
+   "branch": "feat/autotune-offline-configs",
+   "event": "pull_request",
+   "title": "[3/5] autotune: add offline config artifacts (#770)",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30083553786",
+   "created_at": "2026-07-24T09:42:37Z",
+   "updated_at": "2026-07-24T09:43:23Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 30082085462,
    "pr": null,
@@ -14,9 +29,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30082085462",
    "created_at": "2026-07-24T09:18:24Z",
-   "updated_at": "2026-07-24T09:19:19Z",
+   "updated_at": "2026-07-24T09:31:24Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-24T09:32:57Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30082085462/job/89448271717"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-24T09:31:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30082085462/job/89448271747"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-24T09:31:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30082085462/job/89448271750"
+    }
+   ]
   },
   {
    "run_id": 30081650538,
@@ -154,10 +197,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-24T08:39:35Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T09:43:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30079547971/job/89437946085"
     }
    ]
@@ -2287,49 +2330,6 @@
    "updated_at": "2026-07-23T10:12:35Z",
    "actor": "AiyyappanMR",
    "jobs": []
-  },
-  {
-   "run_id": 29997141423,
-   "pr": null,
-   "commit": "19802d8e9c529712e2eb50ab462189bbf437d7b9",
-   "branch": "ci/main-only-mlir-cache",
-   "event": "pull_request",
-   "title": "[CI] Share MLIR cache across GPU jobs",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29997141423",
-   "created_at": "2026-07-23T09:53:23Z",
-   "updated_at": "2026-07-23T10:28:21Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-23T10:27:02Z",
-     "completed_at": "2026-07-23T10:28:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29997141423/job/89173711035"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-23T09:55:18Z",
-     "completed_at": "2026-07-23T10:28:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29997141423/job/89173711039"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-23T09:54:47Z",
-     "completed_at": "2026-07-23T10:27:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29997141423/job/89173711050"
-    }
-   ]
   }
  ]
 }
