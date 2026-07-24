@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-24T10:05:32Z",
+ "updated": "2026-07-24T10:16:36Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,9 +14,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30084773290",
    "created_at": "2026-07-24T10:02:37Z",
-   "updated_at": "2026-07-24T10:04:06Z",
+   "updated_at": "2026-07-24T10:06:54Z",
    "actor": "xudoyuan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-24T10:06:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30084773290/job/89455093528"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-24T10:06:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30084773290/job/89455093562"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-24T10:08:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30084773290/job/89455093569"
+    }
+   ]
   },
   {
    "run_id": 30083553786,
@@ -169,10 +197,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-24T09:09:14Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T10:07:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30081175435/job/89443733207"
     }
    ]
@@ -313,19 +341,19 @@
    "branch": "fix/skip_rmsnorm_sq",
    "event": "pull_request",
    "title": "[fix] Temporarily quarantine rmsnorm smoothquant on gfx1201",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30076858081",
    "created_at": "2026-07-24T07:51:22Z",
-   "updated_at": "2026-07-24T08:14:40Z",
+   "updated_at": "2026-07-24T10:11:41Z",
    "actor": "cschenjunlin",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-24T08:14:40Z",
+     "started_at": "2026-07-24T10:11:41Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30076858081/job/89433674262"
     },
