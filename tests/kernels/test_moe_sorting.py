@@ -35,6 +35,7 @@ if is_rdna_arch():
 
 from kernels.moe.moe_sorting_kernel import (  # noqa: E402
     UNIT_SIZE,
+    _moe_softmax_sort_path,
     _supports_fused_oneshot,
     moe_softmax_sort_flydsl,
     moe_sorting_flydsl,
@@ -779,7 +780,17 @@ def _check_outputs_equal(ref_tuple, fused_tuple, *, topk, M, unit_size, label):
     return passed
 
 
-def _run_softmax_sort_fused_test(T, E, topk, dtype_str, *, renormalize=True, unit_size=UNIT_SIZE, model_dim=4096):
+def _run_softmax_sort_fused_test(
+    T,
+    E,
+    topk,
+    dtype_str,
+    *,
+    renormalize=True,
+    unit_size=UNIT_SIZE,
+    model_dim=4096,
+    expert_mask=None,
+):
     """Generate gating logits, run both paths, compare. Returns bool."""
     print(f"\n{'=' * 60}")
     print(f"Fused softmax_sort test: T={T}, E={E}, topk={topk}, " f"dtype={dtype_str}, renorm={renormalize}")
@@ -802,6 +813,7 @@ def _run_softmax_sort_fused_test(T, E, topk, dtype_str, *, renormalize=True, uni
         dtype_str,
         model_dim=model_dim,
         unit_size=unit_size,
+        expert_mask=expert_mask,
         renormalize=renormalize,
     )
     ref_out = _two_kernel_reference(
@@ -811,6 +823,7 @@ def _run_softmax_sort_fused_test(T, E, topk, dtype_str, *, renormalize=True, uni
         dtype_str,
         model_dim=model_dim,
         unit_size=unit_size,
+        expert_mask=expert_mask,
         renormalize=renormalize,
     )
     torch.cuda.synchronize()
@@ -857,14 +870,48 @@ def test_moe_softmax_sort_fused_oneshot(T, E, topk, dtype_str):
     )
 
 
+WIDE_FUSED_CONFIGS = [
+    (17, 256, 8, "bf16"),
+    (31, 256, 8, "bf16"),
+    (32, 256, 8, "bf16"),
+    (33, 256, 8, "bf16"),
+    (48, 256, 8, "bf16"),
+    (63, 256, 8, "bf16"),
+    (64, 256, 8, "bf16"),
+    (17, 128, 4, "bf16"),
+    (31, 128, 4, "bf16"),
+    (32, 128, 4, "bf16"),
+    (33, 128, 4, "bf16"),
+    (48, 128, 4, "bf16"),
+    (63, 128, 4, "bf16"),
+    (64, 128, 4, "bf16"),
+]
+
+
+@pytest.mark.parametrize("T,E,topk,dtype_str", WIDE_FUSED_CONFIGS)
+def test_moe_softmax_sort_wide(T, E, topk, dtype_str):
+    assert _moe_softmax_sort_path(T, E, topk, dtype_str) == "wide"
+    assert _run_softmax_sort_fused_test(T, E, topk, dtype_str)
+
+
+@pytest.mark.parametrize("E,topk", [(256, 8), (128, 4)])
+def test_moe_softmax_sort_wide_no_renormalize(E, topk):
+    assert _run_softmax_sort_fused_test(33, E, topk, "bf16", renormalize=False)
+
+
+@pytest.mark.parametrize("E,topk", [(256, 8), (128, 4)])
+def test_moe_softmax_sort_wide_expert_mask(E, topk):
+    expert_mask = torch.zeros(E, dtype=torch.int32, device="cuda")
+    expert_mask[::3] = 1
+    assert _run_softmax_sort_fused_test(33, E, topk, "bf16", expert_mask=expert_mask)
+
+
 @pytest.mark.parametrize(
     "T,E,topk,dtype_str",
     [
-        # M > FUSED_ONESHOT_MAX_T forces the fused entry to take its 2-kernel fallback
-        # (separate gating + moe_sorting launches). The gating layout must
-        # still be supported.
-        (32, 256, 8, "bf16"),
-        (64, 256, 8, "bf16"),
+        # M above the gfx95 wide-fusion cap uses the general fallback.
+        (65, 256, 8, "bf16"),
+        (65, 128, 4, "bf16"),
         (128, 256, 8, "bf16"),
         (1024, 256, 8, "bf16"),
     ],
@@ -1220,7 +1267,7 @@ def run_fused_bench_comparison(token_sweep=None, dtype_str="bf16", num_experts=2
         unfused_kernel = bench_kernel_us(unfused_fn)
         fused_kernel = bench_kernel_us(fused_fn)
 
-        path = "fused" if T <= 16 else "fallback"
+        path = _moe_softmax_sort_path(T, E, topk, dtype_str)
 
         def fmt(v, w=12):
             return f"{v:{w}.1f}us" if v is not None else f"{'N/A':>{w + 2}s}"
