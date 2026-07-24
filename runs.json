@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-24T03:40:47Z",
+ "updated": "2026-07-24T03:44:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30064817364,
+   "pr": 869,
+   "commit": "42aea08192f9c2c376d1cfb0b815e6e57df2d915",
+   "branch": "kernel/sage-attention-cdna",
+   "event": "pull_request",
+   "title": "[Kernel] Add CDNA SageAttention kernel",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064817364",
+   "created_at": "2026-07-24T03:40:31Z",
+   "updated_at": "2026-07-24T03:41:20Z",
+   "actor": "LiuYinfeng01",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-24T03:41:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064817364/job/89393701232"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-24T03:41:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064817364/job/89393701237"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-24T03:41:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064817364/job/89393701320"
+    }
+   ]
+  },
   {
    "run_id": 30064697484,
    "pr": 869,
@@ -10,38 +53,38 @@
    "branch": "kernel/sage-attention-cdna",
    "event": "pull_request",
    "title": "[Kernel] Add CDNA SageAttention kernel",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064697484",
    "created_at": "2026-07-24T03:37:41Z",
-   "updated_at": "2026-07-24T03:39:05Z",
+   "updated_at": "2026-07-24T03:40:33Z",
    "actor": "LiuYinfeng01",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-24T03:39:05Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T03:40:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064697484/job/89393426773"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-24T03:39:05Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T03:40:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064697484/job/89393426782"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-24T03:39:05Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T03:40:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064697484/job/89393426809"
     }
    ]
@@ -2350,49 +2393,6 @@
      "started_at": "2026-07-22T23:50:25Z",
      "completed_at": "2026-07-23T00:39:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29967225505/job/89081482288"
-    }
-   ]
-  },
-  {
-   "run_id": 29963978638,
-   "pr": null,
-   "commit": "e58a45d641af90d002128b3bee43c7ecc3299583",
-   "branch": "fix/device-aware-jit-target-878",
-   "event": "pull_request",
-   "title": "[Runtime] Resolve JIT target from invocation device",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29963978638",
-   "created_at": "2026-07-22T22:46:02Z",
-   "updated_at": "2026-07-22T23:10:34Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-22T22:48:13Z",
-     "completed_at": "2026-07-22T22:57:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29963978638/job/89071525469"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-22T22:48:23Z",
-     "completed_at": "2026-07-22T23:10:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29963978638/job/89071525485"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-22T22:48:22Z",
-     "completed_at": "2026-07-22T23:10:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29963978638/job/89071525487"
     }
    ]
   }
