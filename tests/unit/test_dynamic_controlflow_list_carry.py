@@ -189,7 +189,7 @@ def test_if_list_length_change_errors():
             with InsertionPoint(entry):
                 cond = entry.arguments[0]
                 lst = [_i32(0), _i32(1)]
-                with pytest.raises(TypeError, match="changed type across the region"):
+                with pytest.raises(TypeError, match="changed structure across the region"):
                     ReplaceIfWithDispatch.scf_if_dispatch(
                         cond,
                         lambda names, lst: {"lst": [_i32(10)]},  # length 1 != 2
@@ -210,7 +210,7 @@ def test_if_list_dtype_change_errors():
             with InsertionPoint(entry):
                 cond = entry.arguments[0]
                 lst = [_i32(0)]
-                with pytest.raises(TypeError, match="changed type across the region"):
+                with pytest.raises(TypeError, match="changed structure across the region"):
                     ReplaceIfWithDispatch.scf_if_dispatch(
                         cond,
                         lambda names, lst: {"lst": [_i64(10)]},  # i64 != i32
@@ -218,6 +218,53 @@ def test_if_list_dtype_change_errors():
                         result_names=("lst",),
                         result_values=(lst,),
                     )
+
+
+def test_if_dict_key_reorder_errors():
+    """A branch reordering dict keys must error, not silently map values to the
+    wrong slots (guards a silent miscompile)."""
+    with Context(), Location.unknown():
+        module = Module.create()
+        i1 = IntegerType.get_signless(1)
+        with InsertionPoint(module.body):
+            f = func.FuncOp("if_reorder", FunctionType.get([i1], []))
+            entry = f.add_entry_block()
+            with InsertionPoint(entry):
+                cond = entry.arguments[0]
+                d = {"a": _i32(1), "b": _i32(2)}
+                with pytest.raises(TypeError, match="changed structure across the region"):
+                    ReplaceIfWithDispatch.scf_if_dispatch(
+                        cond,
+                        lambda names, d: {"d": {"a": _i32(10), "b": _i32(20)}},
+                        lambda names, d: {"d": {"b": _i32(200), "a": _i32(100)}},  # keys reordered
+                        result_names=("d",),
+                        result_values=(d,),
+                    )
+
+
+def test_for_carries_bare_scalar_literal():
+    """A bare python int initializer (``acc = 0``) must carry through the loop and
+    come back as a DSL numeric, not a raw ir.Value (guards the acc = 0 pattern)."""
+    with Context(), Location.unknown():
+        module = Module.create()
+        i32 = IntegerType.get_signless(32)
+        with InsertionPoint(module.body):
+            f = func.FuncOp("for_bare_scalar", FunctionType.get([], [i32]))
+            entry = f.add_entry_block()
+            with InsertionPoint(entry):
+                acc = 0  # bare python int, not fx.Int32
+
+                def body_fn(iv, names, acc):
+                    assert isinstance(acc, Int32)  # packed back as a DSL numeric
+                    return {"acc": acc + _i32(1)}
+
+                out = InsertEmptyYieldForSCFFor.scf_for_dispatch(
+                    0, 5, 1, body_fn, result_names=("acc",), result_values=(acc,)
+                )
+                assert isinstance(out, Int32)
+                func.ReturnOp([out.ir_value()])
+        assert module.operation.verify()
+        assert "scf.for" in str(module)
 
 
 # ── container variety: dict / tuple / SimpleNamespace + nesting/mixed ────────
@@ -405,7 +452,7 @@ def test_ifexp_shape_mismatch_errors():
             entry = f.add_entry_block()
             with InsertionPoint(entry):
                 cond = entry.arguments[0]
-                with pytest.raises(TypeError, match="changed type across the region"):
+                with pytest.raises(TypeError, match="changed structure across the region"):
                     ReplaceIfWithDispatch.scf_ifexp_dispatch(
                         cond, lambda: [_i32(1), _i32(2)], lambda: [_i32(3)]  # len 1 != 2
                     )
