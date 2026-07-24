@@ -17,7 +17,7 @@ import torch
 import torch.nn.functional as F
 
 from flydsl.runtime.device import get_rocm_arch
-from kernels.conv.conv3d_implicit_8wave_fp8 import conv3d_implicit_8wave_fp8
+from kernels.conv.conv3d_implicit_fp8 import conv3d_implicit_fp8
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -48,7 +48,7 @@ def test_conv3d_fp8_vs_fp8cast_reference(n, c, t, h, w, k, stride, padding):
     x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16)
     weight = torch.randn((k, c, 3, 3, 3), device="cuda", dtype=torch.bfloat16)
 
-    y = conv3d_implicit_8wave_fp8(x, weight, stride=stride, padding=padding)
+    y = conv3d_implicit_fp8(x, weight, stride=stride, padding=padding)
     ref = F.conv3d(
         x.to(torch.float8_e4m3fn).to(torch.bfloat16),
         weight.to(torch.float8_e4m3fn).to(torch.bfloat16),

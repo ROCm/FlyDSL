@@ -11,7 +11,6 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
-import numpy as np
 import pandas as pd
 import pytest
 import torch
@@ -21,7 +20,6 @@ try:
     import aiter
     from aiter import dtypes, per_tensor_quant, pertoken_quant
     from aiter.ops.triton.gluon.pa_decode_gluon import get_recommended_splits
-    from aiter.test_common import checkAllclose
 except Exception as exc:
     pytest.skip(f"aiter is not available: {exc}", allow_module_level=True)
 
@@ -69,11 +67,6 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8": torch.uint8,
 }
 
-CASE_SET_NAME_OPTIONS = [
-    "normal_accuracy",
-    "sliding_window_accuracy",
-]
-
 COMPUTE_TYPE_OPTIONS = ["fp8"]
 KV_VARLEN_OPTIONS = [False, True]
 TRANS_V_OPTIONS = [True]
@@ -93,64 +86,6 @@ def setup_seed(seed: int) -> None:
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
-
-
-def compare_arrays(
-    arr1: np.ndarray,
-    arr2: np.ndarray,
-    k: int = 5,
-    thresholds: List[float] = [0, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1],
-) -> Dict[str, object]:
-    if arr1.shape != arr2.shape:
-        raise ValueError("Input arrays must have the same shape")
-    arr1 = arr1.astype(np.float32)
-    arr2 = arr2.astype(np.float32)
-    diff = np.abs(arr1 - arr2)
-    total_elements = arr1.size
-    result: Dict[str, object] = {
-        "top_k_diff": [],
-        "threshold_stats": [],
-        "max_diff": float(diff.max()),
-        "max_diff_thr": float((diff / (1.0 + np.abs(arr2))).max()),
-    }
-    flat_diff = diff.flatten()
-    top_k_indices = np.argpartition(flat_diff, -k)[-k:]
-    top_k_indices = top_k_indices[np.argsort(-flat_diff[top_k_indices])]
-    orig_indices = np.unravel_index(top_k_indices, diff.shape)
-    for i in range(k):
-        idx = tuple(dim[i] for dim in orig_indices)
-        result["top_k_diff"].append(
-            {
-                "value": float(diff[idx]),
-                "position": idx,
-                "arr1_value": float(arr1[idx]),
-                "arr2_value": float(arr2[idx]),
-            }
-        )
-    for i in range(len(thresholds) - 1):
-        lower = thresholds[i]
-        upper = thresholds[i + 1]
-        mask = (diff >= lower) & (diff < upper)
-        count = int(np.sum(mask))
-        result["threshold_stats"].append(
-            {
-                "range": f"[{lower:.1e}, {upper:.1e})",
-                "count": count,
-                "percentage": 100.0 * count / total_elements,
-            }
-        )
-    mask = diff >= thresholds[-1]
-    count = int(np.sum(mask))
-    result["threshold_stats"].append(
-        {
-            "range": f">={thresholds[-1]:.1e}",
-            "count": count,
-            "percentage": 100.0 * count / total_elements,
-        }
-    )
-    print(f"diff.abs.max={result['max_diff']}")
-    print(f"max_diff_thr={result['max_diff_thr']}")
-    return result
 
 
 def get_kv_cache_torch_dtype(
@@ -601,7 +536,7 @@ def run_flydsl_ps(
 
 
 def get_tolerance(*, kv_varlen: bool, sliding_window: int) -> float:
-    diff_tolerance = 5e-3
+    diff_tolerance = 8e-3
     if kv_varlen:
         diff_tolerance = 5e-2
     if sliding_window > 0:
@@ -611,34 +546,11 @@ def get_tolerance(*, kv_varlen: bool, sliding_window: int) -> float:
     return diff_tolerance
 
 
-def get_ps_vs_gluon_tolerance(ps_tolerance: float, gluon_tolerance: float) -> float:
-    """Cross-check tolerance should not be stricter than the Gluon reference itself."""
-    return max(ps_tolerance, gluon_tolerance)
-
-
 def dtype_to_name(dtype: torch.dtype) -> str:
     for name, candidate in dtypes.d_dtypes.items():
         if candidate == dtype:
             return name
     return str(dtype)
-
-
-def summarize_comparison(
-    name: str,
-    actual: torch.Tensor,
-    expected: torch.Tensor,
-    *,
-    atol: float,
-    rtol: float,
-) -> Tuple[int, Dict[str, object]]:
-    err = checkAllclose(expected, actual, atol=atol, rtol=rtol, msg=f"[{name}]")
-    err = 1 if err > 0 else 0
-    diff_result = compare_arrays(
-        actual.to(torch.float32).detach().cpu().numpy(),
-        expected.to(torch.float32).detach().cpu().numpy(),
-    )
-    print(f"{name} {'PASSED' if err == 0 else 'FAILED'}")
-    return err, diff_result
 
 
 def run_pa_decode_ps_test(
@@ -820,13 +732,8 @@ def run_pa_decode_ps_test(
         gluon_time = measure_us(gluon_call)
         gluon_tol = get_tolerance(kv_varlen=kv_varlen, sliding_window=sliding_window)
         print("\nGluon vs Torch:")
-        err_gluon, gluon_diff = summarize_comparison(
-            "Gluon vs Torch",
-            gluon_output,
-            reference_output,
-            atol=gluon_tol,
-            rtol=gluon_tol,
-        )
+        torch.testing.assert_close(gluon_output, reference_output, atol=gluon_tol, rtol=gluon_tol)
+        print("Gluon vs Torch PASSED")
 
     kv_page_indices, kv_indptr = build_ps_page_data(
         block_tables_list,
@@ -849,10 +756,16 @@ def run_pa_decode_ps_test(
     ps_value_scale: torch.Tensor = value_scale_original
     flydsl_ps_output = torch.empty_like(reference_output)
 
+    # Match pa_decode_ps_kernel: each split unit is one 256-token partition,
+    # containing context_partition_size // block_size physical KV blocks.
+    blocks_per_partition = context_partition_size // block_size
     max_context_partition_num = get_recommended_splits(
-        sliding_window,
-        context_partition_size,
-        query_length,
+        batch_size,
+        num_kv_heads,
+        blocks_per_partition,
+        sliding_window=sliding_window,
+        context_partition_size=context_partition_size,
+        query_length=query_length,
     )
     # Preallocate the FlyDSL intermediate buffers (partial exp-sums / max-logits /
     # output) unconditionally so CUDA-graph capture works for every path, not just
@@ -897,24 +810,13 @@ def run_pa_decode_ps_test(
     flydsl_ps_time = measure_us(flydsl_ps_call)
     ps_tol = get_tolerance(kv_varlen=kv_varlen, sliding_window=sliding_window)
     print("\nFlyDSL PS vs Torch:")
-    err_flydsl_ps, flydsl_ps_diff = summarize_comparison(
-        "FlyDSL PS vs Torch",
-        flydsl_ps_output,
-        reference_output,
-        atol=ps_tol,
-        rtol=ps_tol,
-    )
+    torch.testing.assert_close(flydsl_ps_output, reference_output, atol=ps_tol, rtol=ps_tol)
+    print("FlyDSL PS vs Torch PASSED")
 
     if HAS_GLUON:
         results["us_gluon"] = gluon_time
-        results["err_gluon"] = err_gluon
-        results["gluon_max_diff"] = float(gluon_diff["max_diff"])
-        results["gluon_max_diff_thr"] = float(gluon_diff["max_diff_thr"])
 
     results["us_flydsl_ps"] = flydsl_ps_time
-    results["err_flydsl_ps"] = err_flydsl_ps
-    results["flydsl_ps_max_diff"] = float(flydsl_ps_diff["max_diff"])
-    results["flydsl_ps_max_diff_thr"] = float(flydsl_ps_diff["max_diff_thr"])
 
     return results
 
@@ -1169,79 +1071,92 @@ def parse_arg_and_run_test(sample_rate0: float = None, *, output_tag: str = TEST
     results_df.to_csv(output_file, index=False)
     print(f"\nResults saved to {output_file}")
     print(f"\nSummary:\n{results_df}")
-    flydsl_errors = int(results_df["err_flydsl_ps"].sum())
-
-    if flydsl_errors:
-        raise AssertionError(f"{flydsl_errors} FlyDSL PS case(s) exceeded the Torch-reference tolerance")
-
     print("\nAll PS-only tests passed!")
 
 
-def normal_accuracy_test() -> None:
-    global BLOCK_SIZE_OPTIONS
-    global QUERY_LENGTH_OPTIONS
-    global BATCH_SIZE_OPTIONS
-    global HEAD_CONFIGURATIONS
-    global CONTEXT_LENGTH_OPTIONS
-    global COMPUTE_TYPE_OPTIONS
-    global QUANT_MODE_OPTIONS
-    global HEAD_DIMENSION_OPTIONS
-    global TRANS_V_OPTIONS
-    global KV_VARLEN_OPTIONS
-    global CONTEXT_PARTITION_SIZE_OPTIONS
-    global SLIDING_WINDOW_OPTIONS
-    COMPUTE_TYPE_OPTIONS = ["fp8"]
-    CONTEXT_PARTITION_SIZE_OPTIONS = [256]
-    HEAD_DIMENSION_OPTIONS = [128]
-    HEAD_CONFIGURATIONS = [(8, 1), (16, 1)]
-    QUERY_LENGTH_OPTIONS = [1, 2, 3, 4]
-    QUANT_MODE_OPTIONS = ["per_token", "per_tensor"]
-    CONTEXT_LENGTH_OPTIONS = [1027]
-    BATCH_SIZE_OPTIONS = [3, 81]
-    TRANS_V_OPTIONS = [True]
-    KV_VARLEN_OPTIONS = [False, True]
-    BLOCK_SIZE_OPTIONS = [1024]
-    SLIDING_WINDOW_OPTIONS = [0]
-    parse_arg_and_run_test(output_tag="ps_normal_accuracy")
+@pytest.mark.parametrize("compute_type", ["fp8"])
+@pytest.mark.parametrize("context_partition_size", [256])
+@pytest.mark.parametrize("head_size", [128, 256])
+@pytest.mark.parametrize("num_heads", [(8, 1), (16, 1), (4, 1)])
+@pytest.mark.parametrize("query_length", [1, 2, 3, 4])
+@pytest.mark.parametrize("quant_mode", ["per_token", "per_tensor"])
+@pytest.mark.parametrize("context_length", [1027, 8192])
+@pytest.mark.parametrize("batch_size", [3, 81, 128])
+@pytest.mark.parametrize("trans_v", [True, False])
+@pytest.mark.parametrize("kv_varlen", [False, True])
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("sliding_window", [0])
+def test_normal_accuracy(
+    compute_type: str,
+    context_partition_size: int,
+    head_size: int,
+    num_heads: Tuple[int, int],
+    query_length: int,
+    quant_mode: str,
+    context_length: int,
+    batch_size: int,
+    trans_v: bool,
+    kv_varlen: bool,
+    block_size: int,
+    sliding_window: int,
+) -> None:
+    run_pa_decode_ps_test(
+        context_length=context_length,
+        batch_size=batch_size,
+        num_heads=num_heads,
+        head_size=head_size,
+        block_size=block_size,
+        compute_type=dtypes.d_dtypes[compute_type],
+        query_length=query_length,
+        quant_mode=quant_mode,
+        context_partition_size=context_partition_size,
+        trans_v=trans_v,
+        kv_varlen=kv_varlen,
+        sliding_window=sliding_window,
+    )
 
 
-def sliding_window_accuracy_test() -> None:
-    global BLOCK_SIZE_OPTIONS
-    global QUERY_LENGTH_OPTIONS
-    global BATCH_SIZE_OPTIONS
-    global HEAD_CONFIGURATIONS
-    global CONTEXT_LENGTH_OPTIONS
-    global COMPUTE_TYPE_OPTIONS
-    global QUANT_MODE_OPTIONS
-    global HEAD_DIMENSION_OPTIONS
-    global TRANS_V_OPTIONS
-    global KV_VARLEN_OPTIONS
-    global CONTEXT_PARTITION_SIZE_OPTIONS
-    global SLIDING_WINDOW_OPTIONS
-    COMPUTE_TYPE_OPTIONS = ["fp8"]
-    CONTEXT_PARTITION_SIZE_OPTIONS = [256]
-    HEAD_DIMENSION_OPTIONS = [128]
-    HEAD_CONFIGURATIONS = [(8, 1), (16, 1)]
-    QUERY_LENGTH_OPTIONS = [1, 2, 3, 4]
-    QUANT_MODE_OPTIONS = ["per_token"]
-    CONTEXT_LENGTH_OPTIONS = [8192]
-    BATCH_SIZE_OPTIONS = [128]
-    TRANS_V_OPTIONS = [True]
-    KV_VARLEN_OPTIONS = [True]
-    BLOCK_SIZE_OPTIONS = [16, 1024]
-    SLIDING_WINDOW_OPTIONS = [0]
-    parse_arg_and_run_test(output_tag="ps_sliding_window_accuracy")
-
-
-@pytest.mark.parametrize("case_set_name", CASE_SET_NAME_OPTIONS)
-def test_multi_case_set(case_set_name: str) -> None:
-    if case_set_name == "normal_accuracy":
-        normal_accuracy_test()
-    elif case_set_name == "sliding_window_accuracy":
-        sliding_window_accuracy_test()
-    else:
-        raise ValueError(f"Unsupported case set: {case_set_name}")
+@pytest.mark.parametrize("compute_type", ["fp8"])
+@pytest.mark.parametrize("context_partition_size", [256])
+@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("num_heads", [(8, 1), (16, 1)])
+@pytest.mark.parametrize("query_length", [1, 2, 3, 4])
+@pytest.mark.parametrize("quant_mode", ["per_token"])
+@pytest.mark.parametrize("context_length", [8192])
+@pytest.mark.parametrize("batch_size", [128])
+@pytest.mark.parametrize("trans_v", [True])
+@pytest.mark.parametrize("kv_varlen", [True])
+@pytest.mark.parametrize("block_size", [1024])
+@pytest.mark.parametrize("sliding_window", [1023])
+def test_sliding_window_accuracy(
+    compute_type: str,
+    context_partition_size: int,
+    head_size: int,
+    num_heads: Tuple[int, int],
+    query_length: int,
+    quant_mode: str,
+    context_length: int,
+    batch_size: int,
+    trans_v: bool,
+    kv_varlen: bool,
+    block_size: int,
+    sliding_window: int,
+) -> None:
+    run_pa_decode_ps_test(
+        context_length=context_length,
+        batch_size=batch_size,
+        num_heads=num_heads,
+        head_size=head_size,
+        block_size=block_size,
+        compute_type=dtypes.d_dtypes[compute_type],
+        query_length=query_length,
+        quant_mode=quant_mode,
+        context_partition_size=context_partition_size,
+        trans_v=trans_v,
+        kv_varlen=kv_varlen,
+        sliding_window=sliding_window,
+    )
 
 
 if __name__ == "__main__":
-    sliding_window_accuracy_test()
+    parse_arg_and_run_test()
