@@ -88,7 +88,7 @@ def test_ifexp_dynamic_type_mismatch_raises():
             entry = f.add_entry_block()
             with InsertionPoint(entry):
                 cond = entry.arguments[0]
-                with pytest.raises(TypeError, match="type mismatch"):
+                with pytest.raises(TypeError, match="does not match the region entry"):
                     ReplaceIfWithDispatch.scf_ifexp_dispatch(
                         cond,
                         lambda: Int32(arith.ConstantOp(i32, 1).result),

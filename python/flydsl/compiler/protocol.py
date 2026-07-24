@@ -41,6 +41,8 @@ def get_ir_types(obj) -> List[ir.Type]:
         return obj.__get_ir_types__()
     if isinstance(obj, SimpleNamespace):
         return list(chain.from_iterable(get_ir_types(v) for v in vars(obj).values()))
+    if isinstance(obj, dict):
+        return list(chain.from_iterable(get_ir_types(v) for v in obj.values()))
     if isinstance(obj, (tuple, list)):
         return list(chain.from_iterable(get_ir_types(x) for x in obj))
     # derive IR types from extract_to_ir_values if possible
@@ -82,6 +84,8 @@ def extract_to_ir_values(obj) -> List[ir.Value]:
         return obj.__extract_to_ir_values__()
     if isinstance(obj, SimpleNamespace):
         return list(chain.from_iterable(extract_to_ir_values(v) for v in vars(obj).values()))
+    if isinstance(obj, dict):
+        return list(chain.from_iterable(extract_to_ir_values(v) for v in obj.values()))
     if isinstance(obj, (tuple, list)):
         return list(chain.from_iterable(extract_to_ir_values(x) for x in obj))
     raise TypeError(f"Cannot extract IR values from {obj}")
@@ -99,16 +103,31 @@ def construct_from_ir_values(dsl_type, args, values: List[ir.Value]) -> DslType:
         if cursor != len(values):
             raise ValueError(f"SimpleNamespace expected {cursor} ir.Values, got {len(values)}")
         return SimpleNamespace(**rebuilt)
+    if isinstance(args, dict):
+        rebuilt = {}
+        cursor = 0
+        for key, value in args.items():
+            n = len(get_ir_types(value))
+            rebuilt[key] = construct_from_ir_values(type(value), value, values[cursor : cursor + n])
+            cursor += n
+        if cursor != len(values):
+            raise ValueError(f"dict expected {cursor} ir.Values, got {len(values)}")
+        return rebuilt
     if hasattr(dsl_type, "__construct_from_ir_values__"):
         exemplar = args if not isinstance(args, type) else None
         return dsl_type.__construct_from_ir_values__(values, exemplar)
-    if isinstance(dsl_type, (tuple, list)):
+    if isinstance(args, (tuple, list)):
+        # Dispatch on args (the exemplar), like the SimpleNamespace/dict branches, so a
+        # top-level list/tuple exemplar works too. When dsl_type is itself a sequence of
+        # types (e.g. the @jit param types) use it; otherwise derive per-element types.
+        types_seq = dsl_type if isinstance(dsl_type, (tuple, list)) else [type(a) for a in args]
         elems = []
-        for ty, arg in zip(dsl_type, args, strict=True):
+        cursor = 0
+        for ty, arg in zip(types_seq, args, strict=True):
             count = len(get_ir_types(arg))
-            elems.append(construct_from_ir_values(ty, arg, values[:count]))
-            values = values[count:]
-        return type(dsl_type)(elems)
+            elems.append(construct_from_ir_values(ty, arg, values[cursor : cursor + count]))
+            cursor += count
+        return type(args)(elems)
     raise TypeError(f"Cannot construct DSL value for {dsl_type}")
 
 

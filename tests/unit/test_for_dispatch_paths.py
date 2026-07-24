@@ -146,7 +146,7 @@ def test_scf_for_dispatch_type_mismatch_raises_error():
                 def body_fn(iv, names, x):
                     return {"x": arith.ConstantOp(i64, 99).result}
 
-                with pytest.raises(TypeError, match="type mismatch"):
+                with pytest.raises(TypeError, match="does not match the region entry"):
                     InsertEmptyYieldForSCFFor.scf_for_dispatch(
                         0,
                         4,
