@@ -776,6 +776,11 @@ struct PyCopyAtomType : PyConcreteType<PyCopyAtomType> {
     c.def_prop_ro("copy_op", [](PyCopyAtomType &self) -> MlirType {
       return wrap(self.toCppType().getCopyOp());
     });
+    // True for atoms that transfer a whole N-D tile in one copy_atom_call (e.g. the
+    // gfx1250 TDM DMA); the DSL gather/scatter routing keys on this.
+    c.def_prop_ro("is_whole_tile", [](PyCopyAtomType &self) -> bool {
+      return self.toCppType().getCopyOp().hasTrait<WholeTileCopy>();
+    });
     c.def_prop_ro("val_bits", [](PyCopyAtomType &self) { return self.toCppType().getValBits(); });
     c.def_prop_ro("thr_layout", [](PyCopyAtomType &self) -> MlirType {
       return wrap(LayoutType::get(cast<LayoutAttr>(self.toCppType().getThrLayout())));

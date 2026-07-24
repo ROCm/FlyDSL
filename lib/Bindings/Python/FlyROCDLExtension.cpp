@@ -186,20 +186,22 @@ struct PyCopyOpGFX1250TDMType : PyConcreteType<PyCopyOpGFX1250TDMType> {
     c.def_static(
         "get",
         [](int32_t rank, int32_t numWarps, int32_t padInterval, int32_t padAmount,
-           int32_t cacheModifier, bool atomicBarrier, bool earlyTimeout,
+           int32_t cacheModifier, bool atomicBarrier, bool earlyTimeout, int32_t indexWidth,
            DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
           return PyCopyOpGFX1250TDMType(
               context->getRef(),
               wrap(CopyOpGFX1250TDMType::get(ctx, rank, numWarps, padInterval, padAmount,
-                                             cacheModifier, atomicBarrier, earlyTimeout)));
+                                             cacheModifier, atomicBarrier, earlyTimeout,
+                                             indexWidth)));
         },
         "rank"_a, "num_warps"_a, "pad_interval"_a = 0, "pad_amount"_a = 0, "cache_modifier"_a = 0,
-        "atomic_barrier"_a = false, "early_timeout"_a = false, nb::kw_only(),
+        "atomic_barrier"_a = false, "early_timeout"_a = false, "index_width"_a = 0, nb::kw_only(),
         "context"_a = nb::none(),
         "Create a CopyOpGFX1250TDMType (N-D TDM Global<->LDS copy) with tensor rank (1-5), "
         "warp count, optional LDS padding (interval/amount in elements), cache modifier, and "
-        "the descriptor atomic_barrier / early_timeout config bits (default false)");
+        "the descriptor atomic_barrier / early_timeout config bits (default false). "
+        "index_width in bits selects the packing: 0 = tiled, 16 or 32 = rank-2 row gather.");
   }
 };
 

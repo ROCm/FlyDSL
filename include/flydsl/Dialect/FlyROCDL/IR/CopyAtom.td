@@ -61,6 +61,11 @@ def FlyROCDL_CopyOpLdsReadTranspose : FlyROCDL_CopyOp<"CopyOpCDNA4LdsReadTranspo
 //     memref's static layout stride; set it for a dynamic/true global stride that
 //     differs from the packed tile-internal stride.
 //   `imm_offset` (default 0): i64 byte offset added to base (K-loop tile bump).
+//
+// `index_width` selects the descriptor packing: 0 moves a contiguous N-D tile
+// (tiled); 16 or 32 makes it a rank-2 row gather/scatter that reads a set of rows
+// selected by the `index_ptr` atom state (a global i16/i32 row-index buffer of that
+// width), with the row count taken from the tile layout's outer extent.
 //===----------------------------------------------------------------------===//
 
 // TDM moves the whole N-D tile in one DMA, so it carries the WholeTileCopy trait
@@ -78,12 +83,16 @@ def FlyROCDL_CopyOpGFX1250TDM : FlyROCDL_StatefulCopyOp<"CopyOpGFX1250TDM", "gfx
     // Descriptor config bits (GROUP1 sgpr0): atomic_barrier_enable [18] sets the
     // HW auto-barrier bit; early_timeout [21] is a multicast-load GL1 knob.
     "bool":$atomicBarrier,
-    "bool":$earlyTimeout
+    "bool":$earlyTimeout,
+    // Gather row-index element width in bits: 0 = tiled (contiguous N-D tile),
+    // 16 or 32 = rank-2 row gather/scatter. The row-index buffer itself rides as
+    // the `index_ptr` atom state.
+    "int32_t":$indexWidth
   );
   let assemblyFormat = [{
     `<` `rank` `=` $rank `,` `warps` `=` $numWarps `,` `pad` `=` $padInterval `,` $padAmount
     `,` `cache` `=` $cacheModifier `,` `barrier` `=` $atomicBarrier
-    `,` `timeout` `=` $earlyTimeout `>`
+    `,` `timeout` `=` $earlyTimeout `,` `iwidth` `=` $indexWidth `>`
   }];
   let genVerifyDecl = 1;
 }

@@ -1083,6 +1083,12 @@ class CopyAtom(BuiltinDslType):
         return self.type.val_bits
 
     @property
+    def is_whole_tile(self):
+        """True if the atom transfers a whole N-D tile per copy_atom_call (e.g. the
+        gfx1250 TDM DMA); gather/scatter route on this."""
+        return self.type.is_whole_tile
+
+    @property
     def thr_layout(self):
         return static(self.type.thr_layout)
 
