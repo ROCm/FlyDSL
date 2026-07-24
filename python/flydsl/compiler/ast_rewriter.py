@@ -18,7 +18,7 @@ from ..expr import const_expr
 from ..expr.meta import capture_user_location, file_location
 from ..expr.typing import as_ir_value
 from ..utils import env, log
-from .protocol import construct_from_ir_values, extract_to_ir_values
+from .protocol import construct_from_ir_values, extract_to_ir_values, get_ir_types
 
 
 def _set_lineno(node, n=1):
@@ -70,82 +70,56 @@ def _unwrap_constexpr(node):
 # building the scf op, and pack it back (during body tracing and on the results)
 # so user code and downstream see the original container shape.
 #
-# There is no separate treedef object: the *pre-region value* itself is the
-# structural template. The 3 helpers below are the only shared pieces; they are
-# reused by all four control-flow dispatchers (if / for / while / ifexp) and
-# delegate the actual flatten/rebuild to the existing DSL<->ir.Value protocol
-# (protocol.extract_to_ir_values / construct_from_ir_values). Per-construct logic
-# (building the specific scf op, then/else vs before/after wiring) stays inline
-# in each dispatcher.
+# There is no separate treedef object: the whole tuple/list of *pre-region
+# values* is itself the structural template. The 3 helpers below are the only
+# shared pieces; they are reused by all four control-flow dispatchers
+# (if / for / while / ifexp) and delegate the flatten/rebuild straight to the
+# DSL<->ir.Value protocol (extract_to_ir_values / get_ir_types /
+# construct_from_ir_values), treating the carried states as one pytree.
+# Per-construct logic (building the specific scf op, then/else vs before/after
+# wiring) stays inline in each dispatcher.
 # ---------------------------------------------------------------------------
 
 
-def _explode_states(names, values, ctx_label):
-    """UNPACK. Flatten every carried ``value`` (scalar or nested container) into
-    one shared flat ir.Value list via ``protocol.extract_to_ir_values``.
+def _unpack_states(values):
+    """UNPACK. Promote bare python scalars to MLIR constants, then flatten the
+    whole carried-state pytree ``values`` into one flat ir.Value list plus its
+    MLIR types, via the DSL<->ir protocol.
 
-    Returns ``(state_raw, counts, exemplars, result_types)`` where ``counts[i]``
-    is how many ir.Values ``names[i]`` contributed and ``exemplars[i]`` is its
-    pre-region value (the template used later to pack the flat values back).
-    Called by every dispatcher before building the scf op.
+    Returns ``(exemplar, state_raw, result_types)`` where ``exemplar`` is
+    ``values`` with scalars promoted -- the structure template that
+    :func:`_pack_states` rebuilds from. Scalar promotion (e.g. a branch that
+    yields a literal ``7``) lives here, not in the shared protocol layer, to keep
+    that layer's flatten contract pure.
     """
-    state_raw = []
-    counts = []
-    exemplars = []
-    for name, value in zip(names, values):
-        # A bare python scalar (e.g. a literal ``7`` returned from a branch) is
-        # not a leaf protocol can flatten; promote it to an MLIR constant up
-        # front so it becomes an ordinary ir.Value leaf. DSL values and
-        # list/tuple/dict/nested containers are left for extract_to_ir_values.
-        # Keeping this coercion here (not in the shared protocol layer) matches
-        # the pre-refactor control flow, which normalized every carried value
-        # via as_ir_value before flattening.
-        if isinstance(value, (bool, int, float)):
-            value = as_ir_value(value)
-        slots = extract_to_ir_values(value)
-        counts.append(len(slots))
-        exemplars.append(value)
-        state_raw.extend(slots)
-    result_types = [v.type for v in state_raw]
-    return state_raw, counts, exemplars, result_types
+    exemplar = [as_ir_value(v) if isinstance(v, (bool, int, float)) else v for v in values]
+    return exemplar, extract_to_ir_values(exemplar), get_ir_types(exemplar)
 
 
-def _assemble_states(slots, counts, exemplars):
-    """PACK (inverse of :func:`_explode_states`). Split flat ``slots`` per carried
-    name (by ``counts``) and rebuild each value from its ``exemplar`` template via
-    ``protocol.construct_from_ir_values``. Used to hand the region body its
-    containers (from block args) and to rebuild the final scf results.
+def _unpack_branch_outputs(values, result_types, ctx_label):
+    """UNPACK + VERIFY. Flatten a branch/body's produced ``values`` the same way
+    as the region entry, and check the result structure matches it (identical flat
+    ir.Value types -- a pytree-style structural equality check covering both
+    container shape and element dtypes). Returns the flat list to ``scf.yield``.
     """
-    out = []
-    cursor = 0
-    for count, exemplar in zip(counts, exemplars):
-        seg = list(slots[cursor : cursor + count])
-        cursor += count
-        out.append(construct_from_ir_values(type(exemplar), exemplar, seg))
-    return out
-
-
-def _explode_branch_outputs(names, values, counts, result_types, ctx_label):
-    """UNPACK + VERIFY. Flatten a region body/branch's produced values and check
-    their structure matches the region entry: same per-name ir.Value count AND
-    same per-slot dtype (a pytree-style structural equality check).
-    Returns the flat list to ``scf.yield``. Used by every dispatcher.
-    """
-    out_raw, out_counts, _exemplars, out_types = _explode_states(names, values, ctx_label)
-    for name, c_in, c_out in zip(names, counts, out_counts):
-        if c_in != c_out:
-            raise TypeError(
-                f"{ctx_label} variable '{name}' changed container shape across the "
-                f"region: entered with {c_in} MLIR value(s) but the branch/body produced "
-                f"{c_out}. A carried container's length/nesting must match on entry and exit."
-            )
-    for slot, (t_in, t_out) in enumerate(zip(result_types, out_types)):
-        if t_in != t_out:
-            raise TypeError(
-                f"{ctx_label}: carried element dtype mismatch at slot {slot}: expected "
-                f"{t_in}, got {t_out}. A carried element's dtype must match on entry and exit."
-            )
+    _exemplar, out_raw, out_types = _unpack_states(values)
+    if out_types != result_types:
+        raise TypeError(
+            f"{ctx_label}: branch/body output structure does not match the region "
+            f"entry (entered with {result_types}, produced {out_types}). A carried "
+            "container's shape and element dtypes must match on entry and exit."
+        )
     return out_raw
+
+
+def _pack_states(slots, exemplar):
+    """PACK (inverse of :func:`_unpack_states`). Rebuild the carried-state pytree
+    from the flat ``slots`` using ``exemplar`` (the promoted entry values) as the
+    structure template, via ``protocol.construct_from_ir_values``. Returns the
+    per-name value list -- used to hand a region body its containers (from block
+    args) and to rebuild the final scf results.
+    """
+    return construct_from_ir_values(type(exemplar), exemplar, list(slots))
 
 
 def _collect_assigned_vars(body_stmts, active_symbols, orelse_stmts=None, test_expr=None):
@@ -727,10 +701,10 @@ class ReplaceIfWithDispatch(Transformer):
         if else_fn is None:
             else_fn = lambda *args: {}
 
-        # Explode each carried value (possibly a list/tuple/dict/nested
-        # container) into the flat ir.Value slots that scf.if can carry as
-        # results; `counts`/`exemplars` let us assemble the containers on exit.
-        state_raw, counts, exemplars, result_types = _explode_states(result_names, result_values, "dynamic if/else")
+        # Unpack all carried states (possibly list/tuple/dict/nested containers)
+        # into the flat ir.Value slots scf.if carries; `exemplar` is the template
+        # used to pack the containers back on exit.
+        exemplar, state_raw, result_types = _unpack_states(result_values)
         if_op = scf.IfOp(cond_i1, result_types, has_else=True, loc=capture_user_location())
 
         def _emit_branch(fn, block, label):
@@ -739,8 +713,7 @@ class ReplaceIfWithDispatch(Transformer):
                 branch_values = ReplaceIfWithDispatch._normalize_branch_result(
                     branch_result, result_names, result_map, label
                 )
-                branch_raw = _explode_branch_outputs(result_names, branch_values, counts, result_types, label)
-                scf.YieldOp(branch_raw, loc=capture_user_location())
+                scf.YieldOp(_unpack_branch_outputs(branch_values, result_types, label), loc=capture_user_location())
 
         _emit_branch(then_fn, if_op.regions[0].blocks[0], "then-branch")
         if len(if_op.regions[1].blocks) == 0:
@@ -748,7 +721,7 @@ class ReplaceIfWithDispatch(Transformer):
         _emit_branch(else_fn, if_op.regions[1].blocks[0], "else-branch")
 
         # Re-pack the flat scf.if results back into each name's container shape.
-        final_values = _assemble_states(list(if_op.results), counts, exemplars)
+        final_values = _pack_states(list(if_op.results), exemplar)
         return ReplaceIfWithDispatch._pack_named_values(result_names, final_values)
 
     @classmethod
@@ -929,33 +902,29 @@ class ReplaceIfWithDispatch(Transformer):
             raise TypeError(f"dynamic ifexp condition must lower to ir.Value, got {type(cond_i1).__name__}")
 
         # A ternary may evaluate to a *container* (e.g. `[a, b] if c else [x, y]`),
-        # so treat its value like a single carried state entry and explode it.
+        # so treat its value as a single-entry carried-state pytree and unpack it.
         # Probe both branches in a throwaway region to learn the flat structure
-        # (slot count + dtypes) and the container template for assembly.
-        NAME = ("<ifexp>",)
+        # (dtypes) and the container template for assembly.
         sandbox = scf.ExecuteRegionOp(result=[])
         sandbox.region.blocks.append()
         with ir.InsertionPoint(sandbox.region.blocks[0]):
-            probe_then = then_fn()
-            _then_raw, counts, exemplars, yield_types = _explode_states(
-                NAME, (probe_then,), "dynamic ifexp then-branch"
-            )
+            exemplar, _then_raw, yield_types = _unpack_states((then_fn(),))
             # else must produce the same structure and element dtypes as then
-            _explode_branch_outputs(NAME, (else_fn(),), counts, yield_types, "dynamic ifexp else-branch")
+            _unpack_branch_outputs((else_fn(),), yield_types, "dynamic ifexp else-branch")
         sandbox.operation.erase()
 
         op = scf.IfOp(cond_i1, yield_types, has_else=True, loc=capture_user_location())
         with ir.InsertionPoint(op.regions[0].blocks[0]):
-            then_raw = _explode_branch_outputs(NAME, (then_fn(),), counts, yield_types, "dynamic ifexp then-branch")
+            then_raw = _unpack_branch_outputs((then_fn(),), yield_types, "dynamic ifexp then-branch")
             scf.YieldOp(then_raw, loc=capture_user_location())
         if len(op.regions[1].blocks) == 0:
             op.regions[1].blocks.append()
         with ir.InsertionPoint(op.regions[1].blocks[0]):
-            else_raw = _explode_branch_outputs(NAME, (else_fn(),), counts, yield_types, "dynamic ifexp else-branch")
+            else_raw = _unpack_branch_outputs((else_fn(),), yield_types, "dynamic ifexp else-branch")
             scf.YieldOp(else_raw, loc=capture_user_location())
 
         # Assemble the flat scf.if results into the ternary's (possibly container) value.
-        return _assemble_states(list(op.results), counts, exemplars)[0]
+        return _pack_states(list(op.results), exemplar)[0]
 
 
 @ASTRewriter.register
@@ -1045,9 +1014,9 @@ class InsertEmptyYieldForSCFFor(Transformer):
                 scf.YieldOp([], loc=capture_user_location())
             return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
 
-        # Explode carried values (possibly containers) into the flat iter_args
-        # scf.for needs; assemble containers for the body and for the results.
-        state_raw, counts, exemplars, result_types = _explode_states(result_names, result_values, "dynamic for loop")
+        # Unpack carried states (possibly containers) into the flat iter_args
+        # scf.for needs; `exemplar` re-packs containers for the body and results.
+        exemplar, state_raw, result_types = _unpack_states(result_values)
 
         loc = capture_user_location()
         for_op = scf.ForOp(start_val, stop_val, step_val, state_raw, loc=loc)
@@ -1055,19 +1024,18 @@ class InsertEmptyYieldForSCFFor(Transformer):
 
         with ir.InsertionPoint(for_op.body):
             iv = for_op.induction_variable
-            # inner_iter_args are flat; assemble them into each name's container
+            # inner_iter_args are flat; pack them into each name's container
             # so the body sees the same list/tuple/... shape it wrote.
-            inner_args = _assemble_states(list(for_op.inner_iter_args), counts, exemplars)
+            inner_args = _pack_states(list(for_op.inner_iter_args), exemplar)
 
             body_result = body_fn(iv, result_names, *inner_args)
 
             body_values = ReplaceIfWithDispatch._normalize_branch_result(
                 body_result, result_names, result_map, "for-body"
             )
-            body_raw = _explode_branch_outputs(result_names, body_values, counts, result_types, "for-body")
-            scf.YieldOp(body_raw, loc=capture_user_location())
+            scf.YieldOp(_unpack_branch_outputs(body_values, result_types, "for-body"), loc=capture_user_location())
 
-        final_values = _assemble_states(list(for_op.results), counts, exemplars)
+        final_values = _pack_states(list(for_op.results), exemplar)
         return ReplaceIfWithDispatch._pack_named_values(result_names, final_values)
 
     @classmethod
@@ -1357,9 +1325,9 @@ class CanonicalizeWhile(Transformer):
                 f"const_expr() if it is a compile-time constant."
             )
 
-        # Explode carried values (possibly containers) into the flat state the
-        # scf.while before/after blocks carry; assemble containers per block.
-        state_raw, counts, exemplars, result_types = _explode_states(result_names, result_values, "dynamic while loop")
+        # Unpack carried states (possibly containers) into the flat state the
+        # scf.while before/after blocks carry; `exemplar` re-packs per block.
+        exemplar, state_raw, result_types = _unpack_states(result_values)
         loc = capture_user_location()
         while_op = scf.WhileOp(result_types, state_raw, loc=loc)
         # Give the loop-carried block arguments the user location.
@@ -1369,7 +1337,7 @@ class CanonicalizeWhile(Transformer):
 
         with ir.InsertionPoint(while_op.regions[0].blocks[0]):
             before_args = list(while_op.regions[0].blocks[0].arguments)
-            wrapped_before = _assemble_states(before_args, counts, exemplars) if result_names else []
+            wrapped_before = _pack_states(before_args, exemplar) if result_names else []
             before_cond = ReplaceIfWithDispatch._call_branch(before_fn, result_names, wrapped_before)
             cond_i1 = ReplaceIfWithDispatch._to_i1(before_cond)
             if not isinstance(cond_i1, ir.Value):
@@ -1378,21 +1346,22 @@ class CanonicalizeWhile(Transformer):
 
         with ir.InsertionPoint(while_op.regions[1].blocks[0]):
             after_args = list(while_op.regions[1].blocks[0].arguments)
-            wrapped_after = _assemble_states(after_args, counts, exemplars) if result_names else []
+            wrapped_after = _pack_states(after_args, exemplar) if result_names else []
             body_result = ReplaceIfWithDispatch._call_branch(after_fn, result_names, wrapped_after)
             if result_names:
                 body_values = ReplaceIfWithDispatch._normalize_branch_result(
                     body_result, result_names, result_map, "while-body"
                 )
-                body_raw = _explode_branch_outputs(result_names, body_values, counts, result_types, "while-body")
-                scf.YieldOp(body_raw, loc=capture_user_location())
+                scf.YieldOp(
+                    _unpack_branch_outputs(body_values, result_types, "while-body"), loc=capture_user_location()
+                )
             else:
                 scf.YieldOp([], loc=capture_user_location())
 
         if not result_names:
             return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
 
-        final_values = _assemble_states(list(while_op.results), counts, exemplars)
+        final_values = _pack_states(list(while_op.results), exemplar)
         return ReplaceIfWithDispatch._pack_named_values(result_names, final_values)
 
     @classmethod
