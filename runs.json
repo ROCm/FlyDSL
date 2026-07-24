@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-24T10:29:54Z",
+ "updated": "2026-07-24T10:37:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30086641137,
+   "pr": 874,
+   "commit": "7af9ec5c099cd5f14ecc507022c027287dc3ea7d",
+   "branch": "xudoyuan/dyn-cf-list-carry",
+   "event": "pull_request",
+   "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30086641137",
+   "created_at": "2026-07-24T10:34:31Z",
+   "updated_at": "2026-07-24T10:35:40Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 30085793803,
    "pr": 874,
@@ -10,38 +25,38 @@
    "branch": "xudoyuan/dyn-cf-list-carry",
    "event": "pull_request",
    "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30085793803",
    "created_at": "2026-07-24T10:20:01Z",
-   "updated_at": "2026-07-24T10:26:25Z",
+   "updated_at": "2026-07-24T10:34:46Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-24T10:26:25Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T10:34:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30085793803/job/89458740799"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-24T10:27:52Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T10:29:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30085793803/job/89458740844"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-24T10:27:09Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T10:34:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30085793803/job/89458740864"
     }
    ]
@@ -2313,49 +2328,6 @@
      "started_at": "2026-07-23T13:18:50Z",
      "completed_at": "2026-07-23T13:30:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30010586008/job/89217602227"
-    }
-   ]
-  },
-  {
-   "run_id": 29999396993,
-   "pr": 892,
-   "commit": "331aab64894090e8cb46276cc0a4a2d5d3bfc983",
-   "branch": "worktree-mxmoe-a8w4",
-   "event": "pull_request",
-   "title": "Refactor mxmoe",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29999396993",
-   "created_at": "2026-07-23T10:28:01Z",
-   "updated_at": "2026-07-23T11:35:37Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T10:29:35Z",
-     "completed_at": "2026-07-23T10:48:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29999396993/job/89180976389"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-23T10:29:54Z",
-     "completed_at": "2026-07-23T11:03:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29999396993/job/89180976450"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T10:30:02Z",
-     "completed_at": "2026-07-23T11:35:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29999396993/job/89180976466"
     }
    ]
   }
