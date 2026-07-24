@@ -191,6 +191,26 @@ def _run_for_bare_acc(Out: fx.Tensor, n: fx.Int32, stream: fx.Stream = fx.Stream
     _kernel_for_bare_acc(Out, n).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
 
 
+# ── branch listing dict keys in a different order (aligned by key, not slot) ─
+
+
+@flyc.kernel
+def _kernel_if_dict_reorder(Out: fx.Tensor, flag: fx.Int32):
+    d = {"a": fx.Int32(1), "b": fx.Int32(2)}
+    if flag > fx.Int32(0):
+        d = {"a": fx.Int32(10), "b": fx.Int32(20)}
+    else:
+        d = {"b": fx.Int32(200), "a": fx.Int32(100)}  # keys reordered; must stay a=100, b=200
+    rsrc = fx.buffer_ops.create_buffer_resource(Out)
+    fx.buffer_ops.buffer_store(d["a"], rsrc, fx.Int32(0))
+    fx.buffer_ops.buffer_store(d["b"], rsrc, fx.Int32(1))
+
+
+@flyc.jit
+def _run_if_dict_reorder(Out: fx.Tensor, flag: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+    _kernel_if_dict_reorder(Out, flag).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
+
+
 # ── Tests ───────────────────────────────────────────────────────────────────
 
 
@@ -272,3 +292,15 @@ class TestDynamicControlFlowListCarryE2E:
         _run_for_bare_acc(t_out, fx.Int32(5))  # acc = 0; +1 x5 -> 5
         torch.cuda.synchronize()
         assert out[0].item() == 5, out.tolist()
+
+    def test_if_dict_key_reorder_taken(self):
+        out, t_out = _out(2)
+        _run_if_dict_reorder(t_out, fx.Int32(1))  # then: {a:10, b:20}
+        torch.cuda.synchronize()
+        assert out[0].item() == 10 and out[1].item() == 20, out.tolist()
+
+    def test_if_dict_key_reorder_not_taken(self):
+        out, t_out = _out(2)
+        _run_if_dict_reorder(t_out, fx.Int32(0))  # else lists keys b,a -> must stay a=100, b=200
+        torch.cuda.synchronize()
+        assert out[0].item() == 100 and out[1].item() == 200, out.tolist()
