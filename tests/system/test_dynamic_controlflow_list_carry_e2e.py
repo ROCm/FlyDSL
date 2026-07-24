@@ -19,6 +19,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl.expr import buffer_ops
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -40,9 +41,9 @@ def _kernel_if_list(Out: fx.Tensor, flag: fx.Int32):
     lst = [fx.Int32(1), fx.Int32(2)]
     if flag > fx.Int32(0):  # runtime condition -> dynamic scf.if
         lst = [lst[0] + fx.Int32(10), lst[1] + fx.Int32(20)]
-    rsrc = fx.buffer_ops.create_buffer_resource(Out)
-    fx.buffer_ops.buffer_store(lst[0], rsrc, fx.Int32(0))
-    fx.buffer_ops.buffer_store(lst[1], rsrc, fx.Int32(1))
+    rsrc = buffer_ops.create_buffer_resource(Out)
+    buffer_ops.buffer_store(lst[0], rsrc, fx.Int32(0))
+    buffer_ops.buffer_store(lst[1], rsrc, fx.Int32(1))
 
 
 @flyc.jit
@@ -58,9 +59,9 @@ def _kernel_for_list(Out: fx.Tensor, n: fx.Int32):
     lst = [fx.Int32(0), fx.Int32(100)]
     for i in range(n):
         lst = [lst[0] + fx.Int32(1), lst[1] - fx.Int32(1)]
-    rsrc = fx.buffer_ops.create_buffer_resource(Out)
-    fx.buffer_ops.buffer_store(lst[0], rsrc, fx.Int32(0))
-    fx.buffer_ops.buffer_store(lst[1], rsrc, fx.Int32(1))
+    rsrc = buffer_ops.create_buffer_resource(Out)
+    buffer_ops.buffer_store(lst[0], rsrc, fx.Int32(0))
+    buffer_ops.buffer_store(lst[1], rsrc, fx.Int32(1))
 
 
 @flyc.jit
@@ -76,9 +77,9 @@ def _kernel_while_list(Out: fx.Tensor, n: fx.Int32):
     lst = [n, fx.Int32(0)]
     while lst[0] > fx.Int32(0):
         lst = [lst[0] - fx.Int32(1), lst[1] + fx.Int32(1)]
-    rsrc = fx.buffer_ops.create_buffer_resource(Out)
-    fx.buffer_ops.buffer_store(lst[0], rsrc, fx.Int32(0))
-    fx.buffer_ops.buffer_store(lst[1], rsrc, fx.Int32(1))
+    rsrc = buffer_ops.create_buffer_resource(Out)
+    buffer_ops.buffer_store(lst[0], rsrc, fx.Int32(0))
+    buffer_ops.buffer_store(lst[1], rsrc, fx.Int32(1))
 
 
 @flyc.jit
@@ -92,9 +93,9 @@ def _run_while_list(Out: fx.Tensor, n: fx.Int32, stream: fx.Stream = fx.Stream(N
 @flyc.kernel
 def _kernel_ifexp_list(Out: fx.Tensor, flag: fx.Int32):
     lst = [fx.Int32(1), fx.Int32(2)] if flag > fx.Int32(0) else [fx.Int32(3), fx.Int32(4)]
-    rsrc = fx.buffer_ops.create_buffer_resource(Out)
-    fx.buffer_ops.buffer_store(lst[0], rsrc, fx.Int32(0))
-    fx.buffer_ops.buffer_store(lst[1], rsrc, fx.Int32(1))
+    rsrc = buffer_ops.create_buffer_resource(Out)
+    buffer_ops.buffer_store(lst[0], rsrc, fx.Int32(0))
+    buffer_ops.buffer_store(lst[1], rsrc, fx.Int32(1))
 
 
 @flyc.jit
@@ -110,9 +111,9 @@ def _kernel_if_dict(Out: fx.Tensor, flag: fx.Int32):
     d = {"a": fx.Int32(1), "b": fx.Int32(2)}
     if flag > fx.Int32(0):  # runtime condition -> dynamic scf.if
         d = {"a": d["a"] + fx.Int32(10), "b": d["b"] + fx.Int32(20)}
-    rsrc = fx.buffer_ops.create_buffer_resource(Out)
-    fx.buffer_ops.buffer_store(d["a"], rsrc, fx.Int32(0))
-    fx.buffer_ops.buffer_store(d["b"], rsrc, fx.Int32(1))
+    rsrc = buffer_ops.create_buffer_resource(Out)
+    buffer_ops.buffer_store(d["a"], rsrc, fx.Int32(0))
+    buffer_ops.buffer_store(d["b"], rsrc, fx.Int32(1))
 
 
 @flyc.jit
@@ -128,9 +129,9 @@ def _kernel_for_tuple(Out: fx.Tensor, n: fx.Int32):
     t = (fx.Int32(0), fx.Int32(100))
     for i in range(n):
         t = (t[0] + fx.Int32(1), t[1] - fx.Int32(1))
-    rsrc = fx.buffer_ops.create_buffer_resource(Out)
-    fx.buffer_ops.buffer_store(t[0], rsrc, fx.Int32(0))
-    fx.buffer_ops.buffer_store(t[1], rsrc, fx.Int32(1))
+    rsrc = buffer_ops.create_buffer_resource(Out)
+    buffer_ops.buffer_store(t[0], rsrc, fx.Int32(0))
+    buffer_ops.buffer_store(t[1], rsrc, fx.Int32(1))
 
 
 @flyc.jit
@@ -146,9 +147,9 @@ def _kernel_while_ns(Out: fx.Tensor, n: fx.Int32):
     s = SimpleNamespace(cnt=n, acc=fx.Int32(0))
     while s.cnt > fx.Int32(0):
         s = SimpleNamespace(cnt=s.cnt - fx.Int32(1), acc=s.acc + fx.Int32(1))
-    rsrc = fx.buffer_ops.create_buffer_resource(Out)
-    fx.buffer_ops.buffer_store(s.cnt, rsrc, fx.Int32(0))
-    fx.buffer_ops.buffer_store(s.acc, rsrc, fx.Int32(1))
+    rsrc = buffer_ops.create_buffer_resource(Out)
+    buffer_ops.buffer_store(s.cnt, rsrc, fx.Int32(0))
+    buffer_ops.buffer_store(s.acc, rsrc, fx.Int32(1))
 
 
 @flyc.jit
@@ -164,9 +165,9 @@ def _kernel_if_nested(Out: fx.Tensor, flag: fx.Int32):
     pair = (fx.Int32(1), {"v": fx.Int32(2)})
     if flag > fx.Int32(0):  # runtime condition -> dynamic scf.if
         pair = (pair[0] + fx.Int32(10), {"v": pair[1]["v"] + fx.Int32(20)})
-    rsrc = fx.buffer_ops.create_buffer_resource(Out)
-    fx.buffer_ops.buffer_store(pair[0], rsrc, fx.Int32(0))
-    fx.buffer_ops.buffer_store(pair[1]["v"], rsrc, fx.Int32(1))
+    rsrc = buffer_ops.create_buffer_resource(Out)
+    buffer_ops.buffer_store(pair[0], rsrc, fx.Int32(0))
+    buffer_ops.buffer_store(pair[1]["v"], rsrc, fx.Int32(1))
 
 
 @flyc.jit
@@ -182,8 +183,8 @@ def _kernel_for_bare_acc(Out: fx.Tensor, n: fx.Int32):
     acc = 0  # bare python int, promoted to an MLIR constant, carried as a DSL numeric
     for i in range(n):
         acc = acc + fx.Int32(1)
-    rsrc = fx.buffer_ops.create_buffer_resource(Out)
-    fx.buffer_ops.buffer_store(acc, rsrc, fx.Int32(0))
+    rsrc = buffer_ops.create_buffer_resource(Out)
+    buffer_ops.buffer_store(acc, rsrc, fx.Int32(0))
 
 
 @flyc.jit
@@ -201,9 +202,9 @@ def _kernel_if_dict_reorder(Out: fx.Tensor, flag: fx.Int32):
         d = {"a": fx.Int32(10), "b": fx.Int32(20)}
     else:
         d = {"b": fx.Int32(200), "a": fx.Int32(100)}  # keys reordered; must stay a=100, b=200
-    rsrc = fx.buffer_ops.create_buffer_resource(Out)
-    fx.buffer_ops.buffer_store(d["a"], rsrc, fx.Int32(0))
-    fx.buffer_ops.buffer_store(d["b"], rsrc, fx.Int32(1))
+    rsrc = buffer_ops.create_buffer_resource(Out)
+    buffer_ops.buffer_store(d["a"], rsrc, fx.Int32(0))
+    buffer_ops.buffer_store(d["b"], rsrc, fx.Int32(1))
 
 
 @flyc.jit
@@ -233,13 +234,13 @@ def _deep_bump(s, k):  # return the same nested shape with every leaf += k
 
 
 def _deep_store(s, Out):
-    rsrc = fx.buffer_ops.create_buffer_resource(Out)
-    fx.buffer_ops.buffer_store(s["a"], rsrc, fx.Int32(0))
-    fx.buffer_ops.buffer_store(s["b"][0], rsrc, fx.Int32(1))
-    fx.buffer_ops.buffer_store(s["b"][1][0], rsrc, fx.Int32(2))
-    fx.buffer_ops.buffer_store(s["b"][1][1], rsrc, fx.Int32(3))
-    fx.buffer_ops.buffer_store(s["c"]["d"], rsrc, fx.Int32(4))
-    fx.buffer_ops.buffer_store(s["c"]["e"][0], rsrc, fx.Int32(5))
+    rsrc = buffer_ops.create_buffer_resource(Out)
+    buffer_ops.buffer_store(s["a"], rsrc, fx.Int32(0))
+    buffer_ops.buffer_store(s["b"][0], rsrc, fx.Int32(1))
+    buffer_ops.buffer_store(s["b"][1][0], rsrc, fx.Int32(2))
+    buffer_ops.buffer_store(s["b"][1][1], rsrc, fx.Int32(3))
+    buffer_ops.buffer_store(s["c"]["d"], rsrc, fx.Int32(4))
+    buffer_ops.buffer_store(s["c"]["e"][0], rsrc, fx.Int32(5))
 
 
 @flyc.kernel
