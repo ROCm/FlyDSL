@@ -131,7 +131,6 @@ def test_rmsnorm_autotuned_search_then_cache_hit(monkeypatch):
     assert completed == len(_SEARCH_CONFIGS)
     _assert_close(out, ref)
 
-
     artifacts = list(Path(os.environ["FLYDSL_AUTOTUNE_CONFIG_DIR"]).glob("*.json"))
     assert len(artifacts) == 1
     payload = json.loads(artifacts[0].read_text())
@@ -184,6 +183,7 @@ def test_rmsnorm_autotuned_search_then_cache_hit(monkeypatch):
 
     assert completed == len(_SEARCH_CONFIGS)
     _assert_close(offline, ref)
+
 
 def test_rmsnorm_weight_dtype_has_distinct_tuning_identity():
     x, g, _ = _inputs(M=1)
