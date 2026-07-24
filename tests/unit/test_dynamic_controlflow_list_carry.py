@@ -13,6 +13,8 @@ carry a single ir.Value per name. These tests lock in the container round-trip
 when a branch/body changes a container's shape or an element's dtype.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from flydsl._mlir.dialects import arith, func
@@ -218,6 +220,136 @@ def test_if_list_dtype_change_errors():
                     )
 
 
+# ── container variety: dict / tuple / SimpleNamespace + nesting/mixed ────────
+
+
+def _carry_through_if(make_exemplar, make_then, make_else, fname="if_carry"):
+    """Carry ``make_exemplar()``'s value through a dynamic scf.if whose branches
+    reassign it to ``make_then()`` / ``make_else()``; return ``(out, ir_text)``.
+
+    Must be called inside ``with Context(), Location.unknown()``. Reused by the
+    container-variety tests below to avoid repeating the MLIR scaffolding.
+    """
+    module = Module.create()
+    i1 = IntegerType.get_signless(1)
+    with InsertionPoint(module.body):
+        f = func.FuncOp(fname, FunctionType.get([i1], []))
+        entry = f.add_entry_block()
+        with InsertionPoint(entry):
+            cond = entry.arguments[0]
+            out = ReplaceIfWithDispatch.scf_if_dispatch(
+                cond,
+                lambda names, v: {"v": make_then()},
+                lambda names, v: {"v": make_else()},
+                result_names=("v",),
+                result_values=(make_exemplar(),),
+            )
+            func.ReturnOp([])
+    assert module.operation.verify()
+    return out, str(module)
+
+
+def test_if_carries_pure_dict():
+    with Context(), Location.unknown():
+        out, ir = _carry_through_if(
+            lambda: {"a": _i32(1), "b": _i32(2)},
+            lambda: {"a": _i32(10), "b": _i32(20)},
+            lambda: {"a": _i32(30), "b": _i32(40)},
+            fname="if_dict",
+        )
+        assert isinstance(out, dict) and list(out) == ["a", "b"]
+        assert all(isinstance(v, Int32) for v in out.values())
+        assert "-> (i32, i32)" in ir
+
+
+def test_if_carries_pure_tuple():
+    with Context(), Location.unknown():
+        out, ir = _carry_through_if(
+            lambda: (_i32(1), _i32(2), _i32(3)),
+            lambda: (_i32(10), _i32(20), _i32(30)),
+            lambda: (_i32(40), _i32(50), _i32(60)),
+            fname="if_tuple",
+        )
+        assert isinstance(out, tuple) and len(out) == 3
+        assert all(isinstance(v, Int32) for v in out)
+        assert "-> (i32, i32, i32)" in ir
+
+
+def test_if_carries_simplenamespace():
+    with Context(), Location.unknown():
+        out, ir = _carry_through_if(
+            lambda: SimpleNamespace(x=_i32(1), y=_i32(2)),
+            lambda: SimpleNamespace(x=_i32(10), y=_i32(20)),
+            lambda: SimpleNamespace(x=_i32(30), y=_i32(40)),
+            fname="if_ns",
+        )
+        assert isinstance(out, SimpleNamespace)
+        assert isinstance(out.x, Int32) and isinstance(out.y, Int32)
+        assert "-> (i32, i32)" in ir
+
+
+def test_if_carries_tuple_of_dict():
+    """The requested mixed case: a tuple containing a dict."""
+    with Context(), Location.unknown():
+        out, ir = _carry_through_if(
+            lambda: (_i32(1), {"k": _i32(2), "m": _i32(3)}),
+            lambda: (_i32(10), {"k": _i32(20), "m": _i32(30)}),
+            lambda: (_i32(40), {"k": _i32(50), "m": _i32(60)}),
+            fname="if_tuple_of_dict",
+        )
+        assert isinstance(out, tuple) and len(out) == 2
+        assert isinstance(out[0], Int32)
+        assert isinstance(out[1], dict) and list(out[1]) == ["k", "m"]
+        assert all(isinstance(v, Int32) for v in out[1].values())
+        assert "-> (i32, i32, i32)" in ir  # 1 + 2 leaves
+
+
+def test_if_carries_dict_of_list():
+    """A dict whose value is a list (and a scalar sibling)."""
+    with Context(), Location.unknown():
+        out, ir = _carry_through_if(
+            lambda: {"xs": [_i32(1), _i32(2)], "n": _i32(3)},
+            lambda: {"xs": [_i32(10), _i32(20)], "n": _i32(30)},
+            lambda: {"xs": [_i32(40), _i32(50)], "n": _i32(60)},
+            fname="if_dict_of_list",
+        )
+        assert isinstance(out, dict) and list(out) == ["xs", "n"]
+        assert isinstance(out["xs"], list) and len(out["xs"]) == 2
+        assert isinstance(out["n"], Int32)
+        assert "-> (i32, i32, i32)" in ir
+
+
+def test_if_carries_ns_of_mixed():
+    """SimpleNamespace holding a list, a tuple and a scalar."""
+    with Context(), Location.unknown():
+        out, ir = _carry_through_if(
+            lambda: SimpleNamespace(vec=[_i32(1), _i32(2)], tup=(_i32(3), _i32(4)), scal=_i32(5)),
+            lambda: SimpleNamespace(vec=[_i32(10), _i32(20)], tup=(_i32(30), _i32(40)), scal=_i32(50)),
+            lambda: SimpleNamespace(vec=[_i32(60), _i32(70)], tup=(_i32(80), _i32(90)), scal=_i32(99)),
+            fname="if_ns_mixed",
+        )
+        assert isinstance(out, SimpleNamespace)
+        assert isinstance(out.vec, list) and len(out.vec) == 2
+        assert isinstance(out.tup, tuple) and len(out.tup) == 2
+        assert isinstance(out.scal, Int32)
+        assert "-> (i32, i32, i32, i32, i32)" in ir  # 2 + 2 + 1 leaves
+
+
+def test_if_carries_deeply_nested_mixed():
+    """list -> [ dict{a: tuple(i32,i32)}, list[i32] ]: containers nested 3 deep."""
+    with Context(), Location.unknown():
+        out, ir = _carry_through_if(
+            lambda: [{"a": (_i32(1), _i32(2))}, [_i32(3)]],
+            lambda: [{"a": (_i32(10), _i32(20))}, [_i32(30)]],
+            lambda: [{"a": (_i32(40), _i32(50))}, [_i32(60)]],
+            fname="if_deep",
+        )
+        assert isinstance(out, list) and len(out) == 2
+        assert isinstance(out[0], dict) and isinstance(out[0]["a"], tuple)
+        assert isinstance(out[1], list) and len(out[1]) == 1
+        assert "-> (i32, i32, i32)" in ir  # 2 + 1 leaves
+
+
 # ─────────────────────────────── ifexp ─────────────────────────────────────
 
 
@@ -310,6 +442,34 @@ def test_for_carries_list():
         assert "-> (i32, i32)" in text
 
 
+def test_for_carries_dict():
+    """for i in range(3): carry a dict whose value is a nested list."""
+    with Context(), Location.unknown():
+        module = Module.create()
+        i32 = IntegerType.get_signless(32)
+        with InsertionPoint(module.body):
+            f = func.FuncOp("for_dict", FunctionType.get([], [i32, i32]))
+            entry = f.add_entry_block()
+            with InsertionPoint(entry):
+                d = {"acc": _i32(0), "vec": [_i32(5)]}
+
+                def body_fn(iv, names, d):
+                    assert isinstance(d, dict) and list(d) == ["acc", "vec"]
+                    assert isinstance(d["vec"], list)
+                    return {"d": {"acc": d["acc"] + _i32(1), "vec": [d["vec"][0] + _i32(1)]}}
+
+                out = InsertEmptyYieldForSCFFor.scf_for_dispatch(
+                    0, 3, 1, body_fn, result_names=("d",), result_values=(d,)
+                )
+                assert isinstance(out, dict) and isinstance(out["vec"], list)
+                func.ReturnOp([out["acc"].ir_value(), out["vec"][0].ir_value()])
+
+        text = str(module)
+        assert module.operation.verify()
+        assert "scf.for" in text
+        assert "-> (i32, i32)" in text
+
+
 # ─────────────────────────────── while ─────────────────────────────────────
 
 
@@ -336,6 +496,33 @@ def test_while_carries_list():
                 )
                 assert isinstance(out, list) and len(out) == 2
                 func.ReturnOp([out[0].ir_value(), out[1].ir_value()])
+
+        text = str(module)
+        assert module.operation.verify()
+        assert "scf.while" in text
+
+
+def test_while_carries_tuple_of_dict():
+    """while t[0] > 0: carry a tuple containing a dict (mixed nesting)."""
+    with Context(), Location.unknown():
+        module = Module.create()
+        i32 = IntegerType.get_signless(32)
+        with InsertionPoint(module.body):
+            f = func.FuncOp("while_tuple_of_dict", FunctionType.get([], [i32, i32]))
+            entry = f.add_entry_block()
+            with InsertionPoint(entry):
+                t = (_i32(4), {"c": _i32(0)})
+
+                def before_fn(names, t):
+                    assert isinstance(t, tuple) and isinstance(t[1], dict)
+                    return t[0] > _i32(0)
+
+                def after_fn(names, t):
+                    return {"t": (t[0] - _i32(1), {"c": t[1]["c"] + _i32(1)})}
+
+                out = CanonicalizeWhile.scf_while_dispatch(before_fn, after_fn, result_names=("t",), result_values=(t,))
+                assert isinstance(out, tuple) and isinstance(out[1], dict)
+                func.ReturnOp([out[0].ir_value(), out[1]["c"].ir_value()])
 
         text = str(module)
         assert module.operation.verify()
