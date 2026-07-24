@@ -6,8 +6,8 @@
 RMSNorm(x) = x / sqrt(mean(x^2) + eps) * gamma
 
 Two paths:
-  - Fast path (N % tile_cols == 0): buffer_load/store vectorised access.
-  - Generic path (arbitrary N): scalar copy_atom_call.
+  - Fast path (N % tile_cols == 0): 128-bit buffer copies.
+  - Generic path (arbitrary N): scalar guarded copies.
 """
 
 import math
@@ -1529,10 +1529,9 @@ if torch is not None:
     from kernels.common.tensor_shim import _run_compiled
     from kernels.norm.rmsnorm_common import torch_dtype_to_str as _torch_dtype_to_str
 
-    # Forward caches retain CompiledFunctions; eps is a compile-time kernel
-    # constant, so it is part of the key.  Backward caches instead retain one
-    # persistent JitFunction launcher per structural specialization and device;
-    # _run_compiled owns the launcher's single CompiledFunction in ``._cf``.
+    # Each cache retains one JitFunction launcher per specialization and device;
+    # _run_compiled owns the launcher's CompiledFunction in ``._cf``. eps is a
+    # compile-time forward constant, so it remains part of those cache keys.
     _FWD_CACHE: dict = {}
     _BWD_CACHE: dict = {}
 
@@ -1579,68 +1578,49 @@ if torch is not None:
             return ("two_stage", min(M, num_programs))
         return ("atomic", None)
 
-    def _get_fwd_compiled(
-        x,
-        weight,
-        out,
-        rstd,
-        M,
+    def _get_fwd_launcher(
         N,
         dtype_str,
         weight_dtype_str,
         store_rstd,
         eps,
-        stream,
+        device,
     ):
-        key = (N, dtype_str, weight_dtype_str, store_rstd, float(eps), x.device)
-        entry = _FWD_CACHE.get(key)
-        if entry is None:
-            launch_fn = build_rmsnorm_module(
-                N,
-                dtype_str,
-                store_rstd=store_rstd,
-                eps=eps,
-                weight_dtype_str=weight_dtype_str,
-            )
-            if store_rstd:
-                compiled = flyc.compile(launch_fn, x, weight, out, rstd, M, stream)
-            else:
-                compiled = flyc.compile(launch_fn, x, weight, out, M, stream)
-            _FWD_CACHE[key] = compiled
-            entry = compiled
-        return entry
+        key = (N, dtype_str, weight_dtype_str, store_rstd, float(eps), device)
+        launcher = _FWD_CACHE.get(key)
+        if launcher is None:
+            with torch.cuda.device(device):
+                launcher = build_rmsnorm_module(
+                    N,
+                    dtype_str,
+                    store_rstd=store_rstd,
+                    eps=eps,
+                    weight_dtype_str=weight_dtype_str,
+                )
+            _FWD_CACHE[key] = launcher
+        return launcher
 
     def rmsnorm_fwd(x, weight, eps=EPS, store_rstd=False):
         """Forward RMSNorm. Returns (out, rstd). eps is baked into the kernel."""
         assert x.dim() == 2, "rmsnorm_fwd expects a 2D (M, N) input"
         assert x.is_contiguous() and weight.is_contiguous(), "rmsnorm_fwd expects contiguous inputs"
         assert weight.device == x.device, "rmsnorm_fwd: weight and x must be on the same device"
+        device = x.device
         M, N = x.shape
         out = torch.empty_like(x)
-        rstd = torch.empty((M,), device=x.device, dtype=torch.float32) if store_rstd else None
+        rstd = torch.empty((M,), device=device, dtype=torch.float32) if store_rstd else None
         dtype_str = _torch_dtype_to_str(x.dtype)
         weight_dtype_str = _resolve_rmsnorm_weight_dtype(dtype_str, _torch_dtype_to_str(weight.dtype))
-        # Bind compile + launch to the tensors' device so the compiled kernel and
-        # the stream belong to the right GPU/context (multi-GPU correctness).
-        with torch.cuda.device(x.device):
-            stream = torch.cuda.current_stream()
-            compiled = _get_fwd_compiled(
-                x,
-                weight,
-                out,
-                rstd,
-                M,
-                N,
-                dtype_str,
-                weight_dtype_str,
-                store_rstd,
-                eps,
-                stream,
-            )
-            if store_rstd:
-                compiled(x, weight, out, rstd, M, stream)
-            else:
-                compiled(x, weight, out, M, stream)
+        launcher = _get_fwd_launcher(
+            N,
+            dtype_str,
+            weight_dtype_str,
+            store_rstd,
+            eps,
+            device,
+        )
+        args = (x, weight, out, rstd, M) if store_rstd else (x, weight, out, M)
+        _run_compiled_on_device(launcher, device, args)
         return out, rstd
 
     def rmsnorm_bwd(x, weight, dout, rstd, eps=EPS):
@@ -1751,38 +1731,27 @@ if torch is not None:
     _FUSED_ADD_FWD_CACHE: dict = {}
     _FUSED_ADD_BWD_CACHE: dict = {}
 
-    def _get_fused_add_fwd_compiled(
-        x,
-        residual,
-        weight,
-        out,
-        residual_out,
-        rstd,
-        M,
+    def _get_fused_add_fwd_launcher(
         N,
         dtype_str,
         weight_dtype_str,
         store_rstd,
         eps,
-        stream,
+        device,
     ):
-        key = (N, dtype_str, weight_dtype_str, store_rstd, float(eps), x.device)
-        entry = _FUSED_ADD_FWD_CACHE.get(key)
-        if entry is None:
-            launch_fn = build_fused_add_rmsnorm_module(
-                N,
-                dtype_str,
-                store_rstd=store_rstd,
-                eps=eps,
-                weight_dtype_str=weight_dtype_str,
-            )
-            if store_rstd:
-                compiled = flyc.compile(launch_fn, x, residual, weight, out, residual_out, rstd, M, stream)
-            else:
-                compiled = flyc.compile(launch_fn, x, residual, weight, out, residual_out, M, stream)
-            _FUSED_ADD_FWD_CACHE[key] = compiled
-            entry = compiled
-        return entry
+        key = (N, dtype_str, weight_dtype_str, store_rstd, float(eps), device)
+        launcher = _FUSED_ADD_FWD_CACHE.get(key)
+        if launcher is None:
+            with torch.cuda.device(device):
+                launcher = build_fused_add_rmsnorm_module(
+                    N,
+                    dtype_str,
+                    store_rstd=store_rstd,
+                    eps=eps,
+                    weight_dtype_str=weight_dtype_str,
+                )
+            _FUSED_ADD_FWD_CACHE[key] = launcher
+        return launcher
 
     def fused_add_rmsnorm_fwd(x, residual, weight, eps=EPS, store_rstd=False):
         """Forward fused-add RMSNorm. Returns (out, residual_out, rstd).
@@ -1803,30 +1772,24 @@ if torch is not None:
         M, N = x.shape
         out = torch.empty_like(x)
         residual_out = torch.empty_like(x)
-        rstd = torch.empty((M,), device=x.device, dtype=torch.float32) if store_rstd else None
+        device = x.device
+        rstd = torch.empty((M,), device=device, dtype=torch.float32) if store_rstd else None
         dtype_str = _torch_dtype_to_str(x.dtype)
         weight_dtype_str = _resolve_rmsnorm_weight_dtype(dtype_str, _torch_dtype_to_str(weight.dtype))
-        with torch.cuda.device(x.device):
-            stream = torch.cuda.current_stream()
-            compiled = _get_fused_add_fwd_compiled(
-                x,
-                residual,
-                weight,
-                out,
-                residual_out,
-                rstd,
-                M,
-                N,
-                dtype_str,
-                weight_dtype_str,
-                store_rstd,
-                eps,
-                stream,
-            )
-            if store_rstd:
-                compiled(x, residual, weight, out, residual_out, rstd, M, stream)
-            else:
-                compiled(x, residual, weight, out, residual_out, M, stream)
+        launcher = _get_fused_add_fwd_launcher(
+            N,
+            dtype_str,
+            weight_dtype_str,
+            store_rstd,
+            eps,
+            device,
+        )
+        args = (
+            (x, residual, weight, out, residual_out, rstd, M)
+            if store_rstd
+            else (x, residual, weight, out, residual_out, M)
+        )
+        _run_compiled_on_device(launcher, device, args)
         return out, residual_out, rstd
 
     def fused_add_rmsnorm_bwd(added, weight, dout, rstd, dresidual_out=None, eps=EPS):
