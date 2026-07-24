@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-24T18:52:53Z",
+ "updated": "2026-07-24T19:58:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30122026550,
+   "pr": 901,
+   "commit": "f80da765e8de042d17f430f1005a1a9531b82f30",
+   "branch": "moe_sorting_optimization",
+   "event": "pull_request",
+   "title": "Add Optimized MoE Routing Path",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30122026550",
+   "created_at": "2026-07-24T19:56:09Z",
+   "updated_at": "2026-07-24T19:57:08Z",
+   "actor": "amd-wsung102",
+   "jobs": []
+  },
   {
    "run_id": 30117815364,
    "pr": 786,
@@ -14,9 +29,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30117815364",
    "created_at": "2026-07-24T18:40:03Z",
-   "updated_at": "2026-07-24T18:43:12Z",
+   "updated_at": "2026-07-24T19:22:57Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-24T19:22:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30117815364/job/89571463744"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-24T19:22:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30117815364/job/89571463762"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-24T19:22:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30117815364/job/89571463777"
+    }
+   ]
   },
   {
    "run_id": 30113835020,
@@ -2285,49 +2328,6 @@
      "started_at": "2026-07-23T16:58:09Z",
      "completed_at": "2026-07-23T17:48:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30019842941/job/89265660516"
-    }
-   ]
-  },
-  {
-   "run_id": 30019083114,
-   "pr": 833,
-   "commit": "6ee97c5c9b23858b6212f67a454f6e6dd3672efa",
-   "branch": "gfx1250_tdm_gather_scatter",
-   "event": "pull_request",
-   "title": "Gfx1250 tdm gather scatter",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30019083114",
-   "created_at": "2026-07-23T15:07:51Z",
-   "updated_at": "2026-07-23T15:37:39Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-23T15:10:02Z",
-     "completed_at": "2026-07-23T15:37:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30019083114/job/89247354583"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-23T15:10:02Z",
-     "completed_at": "2026-07-23T15:37:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30019083114/job/89247354612"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-23T15:25:20Z",
-     "completed_at": "2026-07-23T15:37:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30019083114/job/89247354620"
     }
    ]
   }
