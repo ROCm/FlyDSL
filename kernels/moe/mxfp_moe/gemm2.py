@@ -14,8 +14,8 @@ from .mxfp4_gemm_common import (
     _gep1,
     _gep3,
     _global_base_ptr1,
+    _global_i32_at,
     _global_i32_buffer_tiles,
-    _global_ptr1,
     _inline_dpp_quad_amax,
     _lds_ptr3,
     _lds_swizzle_mask,
@@ -205,7 +205,7 @@ def compile_gemm2_a4w4_port(
             )
 
         if const_expr(_persistent):
-            cumsum0 = llvm.load(T.i32, _global_ptr1(arg_cumsum, fx.Int32(0)))
+            cumsum0 = _global_i32_at(arg_cumsum, fx.Int32(0))
             total_m_blocks = _udiv(cumsum0, BM)
             bound = total_m_blocks * fx.Int32(_num_n_blocks)
             grid_nb = fx.Int32(gpu.grid_dim.x)
@@ -243,7 +243,7 @@ def compile_gemm2_a4w4_port(
                 _issue_all_a_loads(_udiv(tile, _num_n_blocks) * fx.Int32(BM))
                 _run_tile(tile)
         else:
-            cumsum0 = llvm.load(T.i32, _global_ptr1(arg_cumsum, fx.Int32(0)))
+            cumsum0 = _global_i32_at(arg_cumsum, fx.Int32(0))
             total_m_blocks = _udiv(cumsum0, BM)
             bound = total_m_blocks * fx.Int32(_num_n_blocks)
 
@@ -380,8 +380,7 @@ def _gemm2_body(
 
     m_block_idx = _udiv(bx_i32, _num_n_blocks)
     n_block_idx = bx_i32 - m_block_idx * fx.Int32(_num_n_blocks)
-    e = llvm.load(T.i32, _global_ptr1(arg_eids, m_block_idx * fx.Int32(4)))
-    e = rocdl.readfirstlane(T.i32, e)
+    e = rocdl.readfirstlane(T.i32, _raw(_global_i32_at(arg_eids, m_block_idx)))
     m_row = m_block_idx * fx.Int32(BM)
 
     _asc_num_bytes = fx.Int64(i32_max_m_blocks) * fx.Int64(_asc_per_mb)

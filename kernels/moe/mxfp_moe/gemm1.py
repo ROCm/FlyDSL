@@ -11,20 +11,26 @@ from flydsl.expr.typing import T
 from . import dpp_utils
 from .mxfp4_gemm_common import (
     _e8m0_from_amax,
-    _e8m0_roundup,
     _fabs_f32,
+    _global_i32_at,
     _global_i32_buffer_tiles,
     _global_i32_buffer_view,
+    _global_i32_load,
+    _global_scalar_tiles,
     _inline_dpp_quad_amax,
+    _inline_e8m0,
+    _layout_idx,
     _lds_swizzle_mask,
+    _pkmax_u16,
     _raw,
+    _scalar_store,
     _scale_mma_atoms,
+    _silu_mul_batch,
     _udiv,
     _umax_i32,
     _umod,
     bq_bytes_for,
     bscale_bytes_for,
-    crd2idx,
     k_half_for,
     k_tiles_total_for,
     kas_per_chunk_dw_for,
@@ -39,47 +45,6 @@ from .mxfp4_gemm_common import (
 )
 
 
-def _global_i32_ptr(addr_i64):
-    ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=4)
-    return fx.inttoptr(ptr_ty, fx.Int64(addr_i64))
-
-
-def _global_i32_at(addr_i64, idx):
-    # Plain scalar read: fx pointer index, no tiling/register-fragment machinery.
-    return _global_i32_ptr(addr_i64)[idx]
-
-
-def _global_i32_load(tiles, idx):
-    # Atom/types must be built with an active MLIR trace context, not as globals.
-    atom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Int32)
-    r = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
-    fx.copy_atom_call(atom, fx.slice(tiles, (None, idx)), r)
-    return r.load()[0]
-
-
-def _global_scalar_tiles(addr_i64, numeric_cls, num_elems):
-    ptr_ty = fx.PointerType.get(
-        numeric_cls.ir_type,
-        address_space=fx.AddressSpace.Global,
-        alignment=numeric_cls.width // 8,
-    )
-    ptr = fx.inttoptr(ptr_ty, fx.Int64(addr_i64))
-    flat = fx.make_view(ptr, fx.make_layout(num_elems, 1))
-    return fx.logical_divide(flat, fx.make_layout(1, 1))
-
-
-def _scalar_store(tiles, idx, value, numeric_cls):
-    atom = fx.make_copy_atom(fx.UniversalCopy(numeric_cls.width), numeric_cls)
-    r = fx.make_rmem_tensor(fx.make_layout(1, 1), numeric_cls)
-    r.store(fx.Vector.from_elements([numeric_cls(value)], numeric_cls))
-    fx.copy_atom_call(atom, r, fx.slice(tiles, (None, idx)))
-
-
-def _layout_idx(layout, *coords):
-    idx_coords = [fx.Int64(c) for c in coords]
-    return fx.Int32(crd2idx(idx_coords, layout))
-
-
 def n_out_for(inter):
     return 2 * inter
 
@@ -90,29 +55,6 @@ def k_g2_half_for(inter):
 
 def out_as_per_chunk_dw_for(inter):
     return ((inter // 32) // 4 // 2) * 64
-
-
-LOG2E = 1.4426950408889634
-
-
-def _silu_mul_batch(gs, us):
-    e = [fx.Float32(rocdl.exp2(T.f32, _raw(g * fx.Float32(-LOG2E)))) for g in gs]
-    sig = [fx.Float32(rocdl.rcp(T.f32, _raw(fx.Float32(1.0) + ei))) for ei in e]
-    return [gs[i] * sig[i] * us[i] for i in range(len(gs))]
-
-
-def _pkmax_u16(a_i32, b_i32):
-    _v2i16 = T.vec(2, T.i16)
-    va = llvm.BitcastOp(_v2i16, _raw(a_i32)).result
-    vb = llvm.BitcastOp(_v2i16, _raw(b_i32)).result
-    vm = arith.MaxUIOp(va, vb).result
-    out = llvm.BitcastOp(T.i32, vm).result
-    return fx.Int32(out)
-
-
-def _inline_e8m0(amax_u16_i32):
-    f32 = fx.Float32(_raw((fx.Int32(_raw(amax_u16_i32)) & fx.Int32(0xFFFF)) << fx.Int32(16)).bitcast(T.f32))
-    return _e8m0_roundup(f32)
 
 
 def gemm1_grid(n_tokens, BM, *, NE, TOPK, INTER, BN=256):
