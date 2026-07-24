@@ -57,13 +57,6 @@ KERNEL_NAME = "rmsnorm"
 SMALL_N_THRESHOLD = 2048
 
 
-def _store_yscale(scale_copy_atom, yscale_div, index, val):
-    r = fx.make_rmem_tensor(1, fx.Float32)
-    ts = fx.Vector.filled(1, val, fx.Float32)
-    fx.memref_store_vec(ts, r)
-    fx.copy_atom_call(scale_copy_atom, r, fx.slice(yscale_div, (None, index)))
-
-
 def _quant_dtype_to_elem_type(dtype_str: str):
     if dtype_str in ("i8", "int8"):
         return fx.Int8
@@ -933,7 +926,7 @@ def _build_rmsnorm_quant_module(
             final_scale = (scale == c_zero_f).select(c_one_f, scale)
 
             if tid == 0:
-                _store_yscale(scale_copy_atom, yscale_div, bid, final_scale)
+                _store_scalar(scale_copy_atom, fx.Float32, yscale_div, bid, final_scale)
 
             inv_scale = c_one_f / final_scale
 
@@ -1019,7 +1012,7 @@ def _build_rmsnorm_quant_module(
             final_scale = (scale == c_zero_f).select(c_one_f, scale)
 
             if tid == 0:
-                _store_yscale(scale_copy_atom, yscale_div, bid, final_scale)
+                _store_scalar(scale_copy_atom, fx.Float32, yscale_div, bid, final_scale)
 
             inv_scale = c_one_f / final_scale
 
@@ -1310,7 +1303,7 @@ def _build_fused_add_rmsnorm_quant_module(
             final_scale = (scale == c_zero_f).select(c_one_f, scale)
 
             if tid == 0:
-                _store_yscale(scale_copy_atom, yscale_div, bid, final_scale)
+                _store_scalar(scale_copy_atom, fx.Float32, yscale_div, bid, final_scale)
 
             inv_scale = c_one_f / final_scale
 
@@ -1409,7 +1402,7 @@ def _build_fused_add_rmsnorm_quant_module(
             final_scale = (scale == c_zero_f).select(c_one_f, scale)
 
             if tid == 0:
-                _store_yscale(scale_copy_atom, yscale_div, bid, final_scale)
+                _store_scalar(scale_copy_atom, fx.Float32, yscale_div, bid, final_scale)
 
             inv_scale = c_one_f / final_scale
 
