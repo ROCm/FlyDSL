@@ -454,5 +454,47 @@ def test_force_search_bypasses_cache_and_default(monkeypatch):
     assert args[1]._data[0] == 64.0
 
 
+# ── return-value propagation ─────────────────────────────────────────────
+def test_call_returns_tuned_fn_value(monkeypatch):
+    """The tuned function's return value must propagate through __call__ on both
+    the search path and the cache-hit path."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")  # force the search path first
+
+    def fn(a, out, BLOCK):
+        return ("result", BLOCK)
+
+    tuner = _make_tuner(
+        fn=fn,
+        configs=[Config(BLOCK=64), Config(BLOCK=128)],
+        do_bench_fn=lambda call, warmup, rep: (call(), 1.0)[1],
+    )
+    args = (FakeTensor((8,)), FakeTensor((1,)))
+
+    searched = tuner(*args)  # search path -> runs the winning config
+    assert searched == ("result", 64)
+
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "0")
+    hit = tuner(*args)  # cache-hit path
+    assert hit == ("result", 64)
+
+
+def test_call_returns_none_when_fn_returns_none(monkeypatch):
+    """In-place kernels (write into `out`, return nothing) still return None --
+    the fix only forwards whatever the tuned fn returns, it doesn't fabricate."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+
+    def fn(a, out, BLOCK):
+        out._data[0] = float(BLOCK)  # writes in place, returns None
+
+    tuner = _make_tuner(
+        fn=fn,
+        configs=[Config(BLOCK=64)],
+        do_bench_fn=lambda call, warmup, rep: (call(), 1.0)[1],
+    )
+    args = (FakeTensor((8,)), FakeTensor((1,)))
+    assert tuner(*args) is None
+    assert args[1]._data[0] == 64.0
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
