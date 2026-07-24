@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "gpu_arch": "gfx950",
+  "gpu_model": "mi355x",
+  "kernel_type": "MegaStage1V2",
+  "ep_size": 4,
+  "autotune_schema": 6,
+  "megastage1_v2": [
+    {
+      "scope": "stage1_only",
+      "dtype": "fp8_ocp",
+      "model_dim": 7168,
+      "inter_dim": 3072,
+      "total_experts": 192,
+      "experts_per_rank": 48,
+      "topk": 6,
+      "num_tokens": 8192,
+      "max_tokens_per_rank": 8192,
+      "fuse_cap": 32768,
+      "num_cu": 256,
+      "use_xcd": true,
+      "dispatch_mode": "compact",
+      "sort_block_m": 128,
+      "tile_n": 512,
+      "tile_k": 256,
+      "num_waves": 8,
+      "wgm": 2,
+      "grid_mult": 3,
+      "sched_nmajor": false,
+      "pipe_weights": true,
+      "mfma_amajor": true,
+      "swizzle_a": true,
+      "num_dispatch_cu": 32,
+      "tune_use_xcd": true,
+      "use_tile_resource": false,
+      "waves_per_eu_hint": 2
+    }
+  ]
+}

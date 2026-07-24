@@ -1149,7 +1149,6 @@ def _run_mega_only(
     wc = wts[:run_tokens].contiguous()
     ic = topk_ids[:run_tokens].to(torch.int32).contiguous()
     x_in = x_bf16[:run_tokens].contiguous()
-    moe._validate_stage1 = bool(stage1_only)
     if stage1_only:
         x_s1, scale_s1 = moe.quantize(x_in)
 
@@ -1167,14 +1166,50 @@ def _run_mega_only(
     out_mega = None if stage1_only else _out["o"][:run_tokens].float().cpu().numpy().copy()
 
     stage1_rel = -1.0
-    if (
-        (stage1_only or os.environ.get("MEGA_V2_DIAG", "0") == "1")
-        and hasattr(moe, "_diag_s1_deq")
-        and w_ref_local is not None
-    ):
-        got_s1 = moe._diag_s1_deq
-        inp_s1 = moe._diag_s1_input
-        eids_s1 = moe._diag_s1_eids.to(torch.int64)
+    if stage1_only and w_ref_local is not None:
+        s1 = _out["s1"]
+        if s1 is moe._s1_small_output:
+            op, tile_m = moe._s1_small_op, 32
+        else:
+            op, tile_m = moe._s1_op, int(moe._s1_active_tile_m)
+        nvalid = int(op.num_valid.view(-1)[0].item())
+        tiles = nvalid // tile_m
+        trb = op.tile_row_base[:tiles].to(torch.int64)
+        source_rows = (trb[:, None] + torch.arange(tile_m, device=dev)[None, :]).reshape(-1)
+        src = op.srcmap_em[source_rows]
+        valid = ((src & 0x00FFFFFF) < moe.max_recv) & ((src >> 24) < moe.topk)
+        compact_rows = torch.arange(nvalid, device=dev, dtype=torch.int64)[valid]
+        src_valid = src[valid]
+        src_tok = (src_valid & 0x00FFFFFF).to(torch.int64) % moe.mtpr
+        x_e8 = scale_s1.view(torch.uint8).view(-1, model_dim // 32)[src_tok].float()
+        inp_s1 = (
+            x_s1.view(-1, model_dim)[src_tok]
+            .float()
+            .view(-1, model_dim // 32, 32)
+            .mul(torch.pow(2.0, x_e8 - 127.0)[:, :, None])
+            .reshape(-1, model_dim)
+        )
+        scale_cols = (inter_dim // 32 + 7) // 8 * 8
+        cols = torch.arange(inter_dim // 32, device=dev, dtype=torch.int64)
+        d0, d1, d2 = compact_rows >> 5, (compact_rows >> 4) & 1, compact_rows & 15
+        d3, d4, d5 = cols >> 3, (cols >> 2) & 1, cols & 3
+        scale_offsets = (
+            d0[:, None] * (scale_cols * 32)
+            + d3[None, :] * 256
+            + d5[None, :] * 64
+            + d2[:, None] * 4
+            + d4[None, :] * 2
+            + d1[:, None]
+        )
+        e8 = s1.a2_scale[scale_offsets]
+        got_s1 = (
+            s1.a2.view(-1, inter_dim)[compact_rows]
+            .float()
+            .view(-1, inter_dim // 32, 32)
+            .mul(torch.pow(2.0, e8.float() - 127.0)[:, :, None])
+            .reshape(-1, inter_dim)
+        )
+        eids_s1 = op.sorted_expert_ids[:tiles].repeat_interleave(tile_m)[valid]
         ref_s1 = torch.empty_like(got_s1)
         for expert in torch.unique(eids_s1).tolist():
             rows = torch.nonzero(eids_s1 == int(expert), as_tuple=False).flatten()
@@ -1351,7 +1386,7 @@ def run_one(args, rank, world, dev):
         seed=args.seed,
         rank=rank,
         world=world,
-        keep_ref=bool(args.stage1_only) or os.environ.get("MEGA_V2_DIAG", "0") == "1",
+        keep_ref=bool(args.stage1_only),
     )
     w_kernel, scale_w1_1d = T["w_kernel"], T["scale_w1_1d"]
     topk_ids, wts = T["topk_ids"], T["wts"]

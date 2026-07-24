@@ -41,8 +41,19 @@ class TileScheduler:
 class ATileLoader:
     """Expert-major A rows (row slot == sorted row) read contiguously gmem->reg (load_regs) then reg->LDS (store)."""
 
-    def __init__(self, *, x_rsrc, row_bytes, sort_block_m, k_step_bytes, total_threads, swizzle=False):
+    def __init__(
+        self,
+        *,
+        x_rsrc,
+        row_bytes,
+        sort_block_m,
+        k_step_bytes,
+        total_threads,
+        swizzle=False,
+        x_base_addr=None,
+    ):
         self._x_rsrc = x_rsrc
+        self._x_base_addr = x_base_addr
         self._sort_block_m = sort_block_m
         self._k_step_bytes = k_step_bytes
         self._total_threads = total_threads
@@ -52,8 +63,14 @@ class ATileLoader:
         self._tile_row_base = None
 
     def for_tile(self, tile_row_base_i32):
-        """Precompute per-chunk (LDS byte off incl. per-row XOR bank swizzle, K-independent gmem row byte)."""
+        """Precompute LDS and tile-local global offsets for one M tile."""
         self._tile_row_base = tile_row_base_i32
+        if self._x_base_addr is not None:
+            tile_base_addr = self._x_base_addr + fx.Int64(tile_row_base_i32) * fx.Int64(self._row_bytes)
+            self._tile_rsrc = _buffer_ops.create_buffer_resource_from_addr(
+                tile_base_addr,
+                num_records_bytes=self._sort_block_m * self._row_bytes,
+            )
         chunks_per_row = self._k_step_bytes // 16
         row_stride_i32 = self._k_step_bytes // 4
         total_chunks = self._sort_block_m * chunks_per_row
@@ -62,7 +79,10 @@ class ATileLoader:
             lin = fx.Int32(c) + fx.Int32(self._tx)
             row = lin // fx.Int32(chunks_per_row)
             chunk = lin % fx.Int32(chunks_per_row)
-            row_byte = (tile_row_base_i32 + row) * fx.Int32(self._row_bytes)
+            if self._x_base_addr is not None:
+                row_byte = row * fx.Int32(self._row_bytes)
+            else:
+                row_byte = (tile_row_base_i32 + row) * fx.Int32(self._row_bytes)
             if const_expr(self._swizzle):
                 col_i32 = chunk * fx.Int32(4)
                 swz = row * fx.Int32(row_stride_i32) + (col_i32 ^ ((row & fx.Int32(15)) << fx.Int32(2)))
@@ -77,7 +97,8 @@ class ATileLoader:
         regs = []
         for lds_byte, chunk_base in self._chunks:
             g_i32 = (chunk_base + koff) // fx.Int32(4)
-            regs.append((lds_byte, _buffer_ops.buffer_load(self._x_rsrc, g_i32, vec_width=4, dtype=fx.Int32)))
+            x_rsrc = self._tile_rsrc if self._x_base_addr is not None else self._x_rsrc
+            regs.append((lds_byte, _buffer_ops.buffer_load(x_rsrc, g_i32, vec_width=4, dtype=fx.Int32)))
         return regs
 
     def store(self, lds_dst, regs, base_i32=0):
@@ -125,11 +146,12 @@ class AS2RLoader:
 class BWeightLoader:
     """Per-K-step fp4 gate&up weights VMEM->reg (i32x8, 128b widened). shuffle_weight_w4 N-major layout."""
 
-    def __init__(self, *, w_rsrc, num_acc_n, k_step_bytes, model_dim):
+    def __init__(self, *, w_rsrc, num_acc_n, k_step_bytes, model_dim, cache_modifier=0):
         self._w_rsrc = w_rsrc
         self._num_acc_n = num_acc_n
         self._k_step_bytes = k_step_bytes
         self._model_dim = model_dim
+        self._cache_modifier = int(cache_modifier)
         self._lane = fx.thread_idx.x % 64
         self._stride_nlane = 16
         self._stride_klane = 256
@@ -148,7 +170,13 @@ class BWeightLoader:
             + lane_row * fx.Int32(self._stride_nlane)
         )
         i32_off = byte // fx.Int32(4)
-        v = _buffer_ops.buffer_load(self._w_rsrc, i32_off, vec_width=4, dtype=fx.Int32)
+        v = _buffer_ops.buffer_load(
+            self._w_rsrc,
+            i32_off,
+            vec_width=4,
+            dtype=fx.Int32,
+            cache_modifier=self._cache_modifier,
+        )
         return Vec(v)
 
     def load_step(self, row_base_i32, kstep_i32):
@@ -446,3 +474,4 @@ class SiluQuantEpilogue:
                 byte_off = is_writer.select(byte_off, fx.Int32(0x40000000))
                 e8m0_i8 = e8m0_v.to(fx.Int8)
                 _buffer_ops.buffer_store(e8m0_i8, self._out_scale_rsrc, byte_off, offset_is_bytes=True)
+        wait_lds_barrier()
