@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-24T05:34:34Z",
+ "updated": "2026-07-24T05:37:01Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30069792875,
+   "pr": 874,
+   "commit": "dbee1637a1cd9c3e798b558b94b7d3559bbd66f6",
+   "branch": "xudoyuan/dyn-cf-list-carry",
+   "event": "pull_request",
+   "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30069792875",
+   "created_at": "2026-07-24T05:34:20Z",
+   "updated_at": "2026-07-24T05:34:21Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 30069691161,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[CI] Share MLIR cache across GPU jobs (#890)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30069691161",
    "created_at": "2026-07-24T05:32:13Z",
-   "updated_at": "2026-07-24T05:32:42Z",
+   "updated_at": "2026-07-24T05:33:19Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -25,38 +40,38 @@
    "branch": "xudoyuan/dyn-cf-list-carry",
    "event": "pull_request",
    "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30069413711",
    "created_at": "2026-07-24T05:26:00Z",
-   "updated_at": "2026-07-24T05:27:23Z",
+   "updated_at": "2026-07-24T05:34:21Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-24T05:27:23Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T05:34:21Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30069413711/job/89407069355"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-24T05:32:46Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T05:34:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30069413711/job/89407069369"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-24T05:27:23Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T05:34:21Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30069413711/job/89407069395"
     }
    ]
@@ -440,10 +455,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-24T04:06:23Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T05:34:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064817364/job/89393701320"
     }
    ]
@@ -513,11 +528,11 @@
    "branch": "gfx1250/gemm-refactor",
    "event": "pull_request",
    "title": "[gfx1250] Refactor MoE/GEMM kernels with layout/atom API",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064578426",
    "created_at": "2026-07-24T03:34:47Z",
-   "updated_at": "2026-07-24T04:06:12Z",
+   "updated_at": "2026-07-24T05:34:35Z",
    "actor": "aoli26",
    "jobs": [
     {
@@ -532,10 +547,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-24T04:06:11Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T05:34:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064578426/job/89393170022"
     },
     {
@@ -2359,49 +2374,6 @@
      "started_at": "2026-07-23T05:50:50Z",
      "completed_at": "2026-07-23T07:36:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29982877465/job/89128563257"
-    }
-   ]
-  },
-  {
-   "run_id": 29982570827,
-   "pr": null,
-   "commit": "bfe30ce0c838882110005c39b4ebcad97d867c38",
-   "branch": "lhc/refactor-expr",
-   "event": "pull_request",
-   "title": "refactor(expr): move buffer_ops and split gfx1250 mcast policy to kernels.common",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29982570827",
-   "created_at": "2026-07-23T05:35:37Z",
-   "updated_at": "2026-07-23T06:46:41Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T05:36:50Z",
-     "completed_at": "2026-07-23T05:55:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29982570827/job/89127561213"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-23T05:36:59Z",
-     "completed_at": "2026-07-23T06:10:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29982570827/job/89127561225"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-23T05:38:31Z",
-     "completed_at": "2026-07-23T06:46:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29982570827/job/89127561281"
     }
    ]
   }
