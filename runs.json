@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-24T15:04:09Z",
+ "updated": "2026-07-24T15:06:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30103678184,
+   "pr": 899,
+   "commit": "d759f6c8010426902420d1b2d880df9bc7290e7d",
+   "branch": "aryaman/fix-autotune-return-value",
+   "event": "pull_request",
+   "title": "[fix] Autotuner: propagate the tuned function's return value",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30103678184",
+   "created_at": "2026-07-24T15:03:50Z",
+   "updated_at": "2026-07-24T15:04:34Z",
+   "actor": "aryaman-gupta",
+   "jobs": []
+  },
   {
    "run_id": 30103511781,
    "pr": 874,
@@ -25,38 +40,38 @@
    "branch": "aryaman/fix-autotune-return-value",
    "event": "pull_request",
    "title": "[fix] Autotuner: propagate the tuned function's return value",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30102793085",
    "created_at": "2026-07-24T14:51:29Z",
-   "updated_at": "2026-07-24T14:57:04Z",
+   "updated_at": "2026-07-24T15:04:10Z",
    "actor": "aryaman-gupta",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-24T14:56:53Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T15:04:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30102793085/job/89513944158"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-24T14:57:04Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T15:04:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30102793085/job/89513944164"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-24T14:57:03Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T15:04:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30102793085/job/89513944186"
     }
    ]
@@ -2285,49 +2300,6 @@
      "started_at": "2026-07-23T15:44:24Z",
      "completed_at": "2026-07-23T16:56:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30018032904/job/89243309764"
-    }
-   ]
-  },
-  {
-   "run_id": 30017858434,
-   "pr": 844,
-   "commit": "305e33a6aff57354b57045a8958e94c981553458",
-   "branch": "forward_lse",
-   "event": "pull_request",
-   "title": "Add forward LSE output to FlyDSL flash attention kernels",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30017858434",
-   "created_at": "2026-07-23T14:52:29Z",
-   "updated_at": "2026-07-23T19:56:56Z",
-   "actor": "amd-wsung102",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T14:58:28Z",
-     "completed_at": "2026-07-23T15:50:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30017858434/job/89242703751"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T18:30:33Z",
-     "completed_at": "2026-07-23T19:56:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30017858434/job/89242703765"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T15:52:56Z",
-     "completed_at": "2026-07-23T16:15:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30017858434/job/89242703794"
     }
    ]
   }
