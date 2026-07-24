@@ -93,22 +93,16 @@ def _explode_states(names, values, ctx_label):
     counts = []
     exemplars = []
     for name, value in zip(names, values):
-        try:
-            slots = extract_to_ir_values(value)
-        except TypeError as exc:
-            # ``value`` is not a DSL/container leaf that protocol knows how to
-            # flatten. It may still be a bare python scalar (e.g. ``7``) that
-            # should be promoted to an MLIR constant so it can be carried; this
-            # mirrors the pre-refactor control-flow behaviour and keeps the
-            # scalar coercion out of the shared protocol layer.
-            raw = as_ir_value(value)
-            slots = raw if isinstance(raw, list) else [raw]
-            if not all(isinstance(s, ir.Value) for s in slots):
-                raise TypeError(
-                    f"{ctx_label} variable '{name}' of type {type(value).__name__} cannot be "
-                    f"carried through dynamic control flow ({exc}). Its elements must be "
-                    "MLIR-backed DSL values (e.g. fx.Int32(0), fx.Float32(0.0))."
-                ) from exc
+        # A bare python scalar (e.g. a literal ``7`` returned from a branch) is
+        # not a leaf protocol can flatten; promote it to an MLIR constant up
+        # front so it becomes an ordinary ir.Value leaf. DSL values and
+        # list/tuple/dict/nested containers are left for extract_to_ir_values.
+        # Keeping this coercion here (not in the shared protocol layer) matches
+        # the pre-refactor control flow, which normalized every carried value
+        # via as_ir_value before flattening.
+        if isinstance(value, (bool, int, float)):
+            value = as_ir_value(value)
+        slots = extract_to_ir_values(value)
         counts.append(len(slots))
         exemplars.append(value)
         state_raw.extend(slots)
