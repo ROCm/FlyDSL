@@ -569,6 +569,17 @@ def _make_ws_rsrc(ws_base_i64, byte_offset, nrec_bytes):
     return buffer_ops.create_buffer_resource_from_addr(addr_i64, num_records_bytes=as_mlir_value(fx.Int64(nrec_bytes)))
 
 
+def _make_lse_rsrc(LSE, batch_idx, num_heads, seq_len):
+    per_batch_elems = fx.Index(num_heads) * seq_len
+    per_batch_bytes = per_batch_elems * fx.Index(4)
+    base_i64 = fx.Int64(fx.ptrtoint(fx.get_iter(LSE)))
+    rsrc = buffer_ops.create_buffer_resource_from_addr(
+        as_mlir_value(base_i64 + fx.Int64(batch_idx * per_batch_bytes)),
+        num_records_bytes=as_mlir_value(fx.Int64(per_batch_bytes)),
+    )
+    return rsrc, per_batch_elems
+
+
 def _make_rebased_view(base_iter, byte_off, nrec_bytes, layout, _buf_flags_i32, _elem_ir):
     base_i64 = fx.Int64(fx.ptrtoint(base_iter))
     shifted = fx.inttoptr(base_iter.type, base_i64 + fx.Int64(byte_off))
@@ -1022,10 +1033,12 @@ class FlashAttnGenericTraits:
     K_VEC_N_STRIDE: int
     K_VEC_HI_N_OFFSET: int
     QK_PREFETCH_DEPTH: int
+    RETURN_LSE: bool
 
     @property
     def cache_tag(self):
         return (
+            self.RETURN_LSE,
             self.NUM_HEADS_Q,
             self.NUM_HEADS_KV,
             self.GQA_GROUP_SIZE,
@@ -1130,6 +1143,7 @@ def _make_flash_attn_generic_traits(
     unsafe_fp_math=True,
     sm_scale=None,
     skip_kv_pad_mask=None,
+    return_lse=False,
 ):
     """Build compile-time traits for ``flash_attn_generic``."""
     block_n = 64
@@ -1354,6 +1368,7 @@ def _make_flash_attn_generic_traits(
         K_VEC_N_STRIDE=k_vec_n_stride,
         K_VEC_HI_N_OFFSET=k_vec_hi_n_offset,
         QK_PREFETCH_DEPTH=qk_prefetch_depth,
+        RETURN_LSE=bool(return_lse),
     )
 
 
@@ -1437,10 +1452,12 @@ class DualwaveSwpTraits:
     LDS_SCOPE_NAMES: tuple[str, str, str, str]
     NEG_INF_F32_BITS: int
     LGKMCNT_0_ONLY: int
+    RETURN_LSE: bool
 
     @property
     def cache_tag(self):
         return (
+            self.RETURN_LSE,
             self.NUM_HEADS_Q,
             self.NUM_HEADS_KV,
             self.HEAD_DIM,
@@ -1480,6 +1497,7 @@ def _make_dualwave_swp_traits(
     paged=False,
     kv_cache_layout="linear",
     kv_vectorized=None,
+    return_lse=False,
 ):
     """Build gfx950 DUALWAVE_SWP compile-time layout traits."""
     # Tile shape and wave geometry follow the gfx950 dual-wave 8-wave CTA.
@@ -1629,6 +1647,7 @@ def _make_dualwave_swp_traits(
         LDS_SCOPE_NAMES=("lds_k0", "lds_k1", "lds_v0", "lds_v1"),
         NEG_INF_F32_BITS=0xFF800000,
         LGKMCNT_0_ONLY=0xC07F,
+        RETURN_LSE=bool(return_lse),
     )
 
 
@@ -1884,7 +1903,7 @@ def _make_dualwave_swp_fp8_traits(
 class GenericFlashAttnContext:
     """Runtime setup state for the generic flash-attention kernel."""
 
-    def __init__(self, traits, K, V, seq_len, seq_len_kv, allocator, lds_kv_offset):
+    def __init__(self, traits, K, V, seq_len, seq_len_kv, allocator, lds_kv_offset, LSE=None):
         self.traits = traits
         self.K = K
         self.V = V
@@ -1892,6 +1911,7 @@ class GenericFlashAttnContext:
         self.seq_len_kv = seq_len_kv
         self.allocator = allocator
         self.lds_kv_offset = lds_kv_offset
+        self.LSE = LSE
 
     def init_types_and_pointers(self):
         traits = self.traits
@@ -1972,6 +1992,7 @@ class GenericFlashAttnContext:
         self.c_zero_f = fx.Float32(0.0)
         self.c_zero_i32 = fx.Int32(0)
         self.c_sm_scale_log2e = fx.Float32(sm_scale * _LOG2E)
+        self.sm_scale_v = fx.Float32(sm_scale)
         self.c_zero_v16f32 = Vec.filled(16, 0.0, fx.Float32)
         self.width_i32 = fx.Int32(traits.WARP_SIZE)
         self.shuf_32_i32 = fx.Int32(32)
@@ -2957,9 +2978,21 @@ class GenericStoreHelper:
     def __init__(self, ctx):
         self.ctx = ctx
 
+    def store_lse(self, lse_val, q_row):
+        """Single-writer-per-row fp32 LSE store into ``[B, H, seq_len]``."""
+        ctx = self.ctx
+        traits = ctx.traits
+        lse_rsrc, oob = _make_lse_rsrc(ctx.LSE, ctx.batch_idx, traits.NUM_HEADS_Q, ctx.seq_len_v)
+        local_idx = ctx.q_head_idx * ctx.seq_len_v + q_row
+        row_idx = (q_row < ctx.seqlen_q_b).select(local_idx, oob)
+        store_idx = fx.Index((ctx.lane_div_32 == fx.Index(0)).select(row_idx, oob))
+        _ws_store_f32(lse_val, store_idx, lse_rsrc)
+
     def zero_o_block(self, o_rsrc, q_row):
         ctx = self.ctx
         traits = ctx.traits
+        if const_expr(traits.RETURN_LSE):
+            self.store_lse(ctx.c_neg_inf, q_row)
         if const_expr(traits.USE_PERMLANE_OSTORE):
             zero_pack = Vec.filled(4, 0, fx.Int32)
             for dc in range_constexpr(traits.D_CHUNKS):
@@ -2996,8 +3029,15 @@ class GenericStoreHelper:
     def normalize_and_store_o(self, loop_results, o_rsrc, q_row):
         ctx = self.ctx
         traits = ctx.traits
+        m_final = loop_results[0]
         l_final = loop_results[1]
         o_finals = [loop_results[2 + dc] for dc in range_constexpr(traits.D_CHUNKS)]
+
+        if const_expr(traits.RETURN_LSE):
+            lse_val = _fadd(
+                _fmul(ctx.sm_scale_v, m_final, ctx.fm_fast), fmath.log(l_final, fastmath=ctx.fm_fast), ctx.fm_fast
+            )
+            self.store_lse(lse_val, q_row)
 
         inv_l_rcp = rocdl.rcp(T.f32, l_final)
         if const_expr(traits.CAUSAL):
@@ -3083,6 +3123,7 @@ class DualwaveKernelContext:
         stride_kv_n=None,
         head_dim_runtime=None,
         block_table_stride=None,
+        LSE=None,
     ):
         if isinstance(traits_or_ctx, DualwaveKernelContext):
             self.__dict__.update(traits_or_ctx.__dict__)
@@ -3105,6 +3146,7 @@ class DualwaveKernelContext:
         self.stride_kv_n = stride_kv_n
         self.head_dim_runtime = head_dim_runtime
         self.block_table_stride = block_table_stride
+        self.LSE = LSE
 
     def init_types_and_constants(self, head_dim_runtime=None):
         if head_dim_runtime is None:
@@ -4039,6 +4081,8 @@ class DualwaveStoreHelper(DualwaveKernelContext):
         lane_mod_32 = self.lane_mod_32
         seq_len_v = self.seq_len_v
 
+        return_lse = traits.RETURN_LSE
+
         @flyc.jit
         def _zero_o_block_if_needed():
             if causal_end_raw_i32 <= fx.Int32(0):
@@ -4056,6 +4100,8 @@ class DualwaveStoreHelper(DualwaveKernelContext):
                                 _store_atom_128=self.store_atom_128,
                                 o_div=self.o_div,
                             )
+                if const_expr(return_lse):
+                    self.store_lse(fx.Float32(float("-inf")), q_row_z)
 
         _zero_o_block_if_needed()
 
@@ -4111,6 +4157,26 @@ class DualwaveStoreHelper(DualwaveKernelContext):
                         _store_splitk_ml_row(fx.Float32(-1e30), c_zero_f, local_ml_e, _mrow_rsrc_e, _lrow_rsrc_e)
 
         _store_empty_split()
+
+    def store_lse_from_ml(self, m_row, l_row, q_row):
+        """Convert dualwave's log2-domain (m_row, l_row) to natural-log LSE and store it.
+
+        ``m_row`` is already ``sm_scale * log2(e)``-scaled (Q was pre-scaled before the
+        QK matmul), so ``m_row * ln2 + ln(l_row)`` is the natural-log LSE.
+        """
+        ln2 = 1.0 / _LOG2E
+        lse_val = _fadd(
+            _fmul(m_row, fx.Float32(ln2), self.fm_fast), fmath.log(l_row, fastmath=self.fm_fast), self.fm_fast
+        )
+        self.store_lse(lse_val, q_row)
+
+    def store_lse(self, lse_val, q_row):
+        """Single-writer-per-row fp32 LSE store into ``[B, H, seq_len]``."""
+        lse_rsrc, oob = _make_lse_rsrc(self.LSE, self.batch_idx, self.traits.NUM_HEADS_Q, self.seq_len_v)
+        local_idx = self.q_head_idx * self.seq_len_v + q_row
+        row_idx = (q_row < self.seqlen_q_v).select(local_idx, oob)
+        store_idx = fx.Index((self.lane < fx.Index(32)).select(row_idx, oob))
+        _ws_store_f32(lse_val, store_idx, lse_rsrc)
 
     def store_final_o(self, v_o, q_row):
         self._store_final_o_row(v_o, q_row)
@@ -4874,6 +4940,7 @@ class DualwaveSplitKCombineContext:
         batch_size=None,
         seq_len=None,
         stride_q_n=None,
+        LSE=None,
     ):
         if isinstance(traits_or_ctx, DualwaveSplitKCombineContext):
             self.__dict__.update(traits_or_ctx.__dict__)
@@ -4887,6 +4954,7 @@ class DualwaveSplitKCombineContext:
         self.batch_size = batch_size
         self.seq_len = seq_len
         self.stride_q_n = stride_q_n
+        self.LSE = LSE
 
     def init_types_and_constants(self):
         self.elem_dtype = dtype_to_elem_type(self.traits.DTYPE_STR)
@@ -5043,6 +5111,16 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
             as_mlir_value(fx.Int32(o_global * fx.Index(2))),
             offset_is_bytes=True,
         )
+
+    def store_lse(self, m_max, den):
+        """Single-writer-per-row fp32 LSE store for the split-K combine pass."""
+        ln2 = 1.0 / _LOG2E
+        lse_val = _fadd(
+            _fmul(m_max, fx.Float32(ln2), self.fm_fast), fmath.log(den, fastmath=self.fm_fast), self.fm_fast
+        )
+        lse_rsrc, oob = _make_lse_rsrc(self.LSE, self.batch_idx, self.traits.NUM_HEADS_Q, self.seq_len_v)
+        store_idx = fx.Index((self.col == fx.Index(0)).select(self.local_ml_idx, oob))
+        _ws_store_f32(lse_val, store_idx, lse_rsrc)
 
 
 # Misc debug and public helpers
