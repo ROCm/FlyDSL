@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-24T04:41:53Z",
+ "updated": "2026-07-24T04:49:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30067707819,
+   "pr": null,
+   "commit": "33efd75e4eb6f3216afd0adbd83a8f1dc290d7cf",
+   "branch": "main",
+   "event": "push",
+   "title": "[gfx1250] Refactor MoE/GEMM kernels with layout/atom API (#885)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30067707819",
+   "created_at": "2026-07-24T04:47:35Z",
+   "updated_at": "2026-07-24T04:48:27Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 30067303523,
    "pr": 892,
@@ -10,28 +25,28 @@
    "branch": "worktree-mxmoe-a8w4",
    "event": "pull_request",
    "title": "Refactor mxmoe",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30067303523",
    "created_at": "2026-07-24T04:38:07Z",
-   "updated_at": "2026-07-24T04:39:25Z",
+   "updated_at": "2026-07-24T04:39:31Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-24T04:39:31Z",
+     "started_at": "2026-07-24T04:43:51Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30067303523/job/89400848431"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-24T04:39:31Z",
+     "started_at": "2026-07-24T04:40:28Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30067303523/job/89400848437"
     },
@@ -830,12 +845,30 @@
    "event": "push",
    "title": "ci(autotune): keep broad test runs deterministic (#788)",
    "status": "completed",
-   "conclusion": "failure",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30018810534",
    "created_at": "2026-07-23T15:04:20Z",
-   "updated_at": "2026-07-23T18:21:22Z",
+   "updated_at": "2026-07-24T04:47:37Z",
    "actor": "coderfeli",
    "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-24T04:41:46Z",
+     "completed_at": "2026-07-24T04:47:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30018810534/job/89401120937"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-24T04:41:46Z",
+     "completed_at": "2026-07-24T04:47:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30018810534/job/89401120941"
+    },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
@@ -843,31 +876,13 @@
      "conclusion": "success",
      "started_at": "2026-07-23T16:20:23Z",
      "completed_at": "2026-07-23T17:39:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30018810534/job/89246022452"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-23T16:43:11Z",
-     "completed_at": "2026-07-23T16:59:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30018810534/job/89246022476"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-23T18:10:20Z",
-     "completed_at": "2026-07-23T18:21:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30018810534/job/89246022478"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30018810534/job/89401138176"
     }
    ]
   },
   {
    "run_id": 30018220233,
-   "pr": 885,
+   "pr": null,
    "commit": "2717a0bde2cdb0df8916530d6bac6309b83fc5a5",
    "branch": "gfx1250/gemm-refactor",
    "event": "pull_request",
@@ -953,7 +968,7 @@
   },
   {
    "run_id": 30018156647,
-   "pr": 885,
+   "pr": null,
    "commit": "96231961a4221b4c19c638933751dd1c7967e2a0",
    "branch": "gfx1250/gemm-refactor",
    "event": "pull_request",
@@ -1226,7 +1241,7 @@
   },
   {
    "run_id": 30011532318,
-   "pr": 885,
+   "pr": null,
    "commit": "7ebdef2b1b00cd3389918ea09a102c383b0fb818",
    "branch": "gfx1250/gemm-refactor",
    "event": "pull_request",
@@ -1269,7 +1284,7 @@
   },
   {
    "run_id": 30010586008,
-   "pr": 885,
+   "pr": null,
    "commit": "7b516ef1eb1524fe0d9a3a1881933ae61aeb0935",
    "branch": "gfx1250/gemm-refactor",
    "event": "pull_request",
@@ -1646,7 +1661,7 @@
   },
   {
    "run_id": 29993327648,
-   "pr": 885,
+   "pr": null,
    "commit": "1dc260269c3e1fdff37df0ddd1a8f68f188f742b",
    "branch": "gfx1250/gemm-refactor",
    "event": "pull_request",
@@ -2211,7 +2226,7 @@
   },
   {
    "run_id": 29979228033,
-   "pr": 885,
+   "pr": null,
    "commit": "3e812c4d04571051460c88c6cacbd5e80b388356",
    "branch": "gfx1250/gemm-refactor",
    "event": "pull_request",
@@ -2254,7 +2269,7 @@
   },
   {
    "run_id": 29979209233,
-   "pr": 885,
+   "pr": null,
    "commit": "6847d9a7076197c595b44aae29371849db817f1c",
    "branch": "gfx1250/gemm-refactor",
    "event": "pull_request",
@@ -2350,49 +2365,6 @@
      "started_at": "2026-07-23T03:53:35Z",
      "completed_at": "2026-07-23T04:10:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29978072927/job/89114135604"
-    }
-   ]
-  },
-  {
-   "run_id": 29975793898,
-   "pr": null,
-   "commit": "8fcfee4421e48d9f011a6af88eecd512e345176b",
-   "branch": "main",
-   "event": "push",
-   "title": "Skill: align kernel-authoring with code-cleanup (drop buffer_ops/Arit\u2026",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29975793898",
-   "created_at": "2026-07-23T02:59:29Z",
-   "updated_at": "2026-07-23T03:00:47Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T03:00:42Z",
-     "completed_at": "2026-07-23T03:00:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29975793898/job/89107251103"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T03:00:43Z",
-     "completed_at": "2026-07-23T03:00:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29975793898/job/89107251108"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T03:00:42Z",
-     "completed_at": "2026-07-23T03:00:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29975793898/job/89107251151"
     }
    ]
   }
