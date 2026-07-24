@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-24T09:17:04Z",
+ "updated": "2026-07-24T09:19:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30082085462,
+   "pr": null,
+   "commit": "0fd4518e207f7ef47a27749f2e70751589acf64c",
+   "branch": "main",
+   "event": "push",
+   "title": "feat(rmsnorm): support mixed weight dtypes (#884)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30082085462",
+   "created_at": "2026-07-24T09:18:24Z",
+   "updated_at": "2026-07-24T09:18:26Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 30081650538,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[fix] Temporarily quarantine rmsnorm smoothquant on gfx1201 (#895)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30081650538",
    "created_at": "2026-07-24T09:11:21Z",
-   "updated_at": "2026-07-24T09:12:32Z",
+   "updated_at": "2026-07-24T09:18:26Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -111,11 +126,11 @@
    "branch": "revert-890-ci/main-only-mlir-cache",
    "event": "pull_request",
    "title": "Revert \"[CI] Share MLIR cache across GPU jobs\"",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30079547971",
    "created_at": "2026-07-24T08:36:50Z",
-   "updated_at": "2026-07-24T08:37:51Z",
+   "updated_at": "2026-07-24T09:17:52Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -130,9 +145,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-24T08:37:51Z",
+     "started_at": "2026-07-24T09:17:51Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30079547971/job/89437946069"
     },
@@ -197,11 +212,11 @@
    "branch": "main",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add 8 wave GQA sliding-window attention kernel",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30077196279",
    "created_at": "2026-07-24T07:57:12Z",
-   "updated_at": "2026-07-24T08:06:22Z",
+   "updated_at": "2026-07-24T09:17:52Z",
    "actor": "amd-nprotaso",
    "jobs": [
     {
@@ -225,9 +240,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-24T08:06:22Z",
+     "started_at": "2026-07-24T09:17:51Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30077196279/job/89432142418"
     }
@@ -313,11 +328,11 @@
    "branch": "worktree-mxmoe-a8w4",
    "event": "pull_request",
    "title": "Refactor mxmoe",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30076185312",
    "created_at": "2026-07-24T07:39:25Z",
-   "updated_at": "2026-07-24T07:43:50Z",
+   "updated_at": "2026-07-24T09:17:40Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -341,9 +356,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-24T07:43:50Z",
+     "started_at": "2026-07-24T09:17:39Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30076185312/job/89428075337"
     }
@@ -2313,49 +2328,6 @@
      "started_at": "2026-07-23T09:54:47Z",
      "completed_at": "2026-07-23T10:27:48Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29997141423/job/89173711050"
-    }
-   ]
-  },
-  {
-   "run_id": 29997006605,
-   "pr": null,
-   "commit": "fa0a93b58db86ce8df5daa91fe6eea884a2dd521",
-   "branch": "ci/main-only-mlir-cache",
-   "event": "pull_request",
-   "title": "[CI] Share MLIR cache across GPU jobs",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29997006605",
-   "created_at": "2026-07-23T09:51:22Z",
-   "updated_at": "2026-07-23T09:53:39Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-23T09:52:04Z",
-     "completed_at": "2026-07-23T09:53:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29997006605/job/89173116339"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-23T09:52:04Z",
-     "completed_at": "2026-07-23T09:53:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29997006605/job/89173116367"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-23T09:52:45Z",
-     "completed_at": "2026-07-23T09:53:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29997006605/job/89173116483"
     }
    ]
   }
