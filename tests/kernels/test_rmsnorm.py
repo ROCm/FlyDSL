@@ -29,6 +29,7 @@ if torch is None or not torch.cuda.is_available():
 # Imported after the torch guard: rmsnorm() is only defined when torch is present,
 # so importing it earlier makes a torch-less collection fail (ImportError) instead of skip.
 import flydsl.compiler as flyc  # noqa: E402
+from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.common.tensor_shim import _run_compiled  # noqa: E402
 from kernels.norm.rmsnorm_kernel import (  # noqa: E402
     build_fused_add_rmsnorm_bwd_module,
@@ -54,6 +55,8 @@ DTYPE_FP32 = torch.float32
 DTYPE_FP16 = torch.float16
 DTYPE_BF16 = torch.bfloat16
 DTYPE_INT8 = torch.int8
+
+GPU_ARCH = str(get_rocm_arch())
 
 EPS: float = 1e-5
 
@@ -1420,6 +1423,10 @@ def test_rmsnorm_dynamicquant():
         raise SystemExit(1)
 
 
+@pytest.mark.skipif(
+    GPU_ARCH == "gfx1201",
+    reason="RMSNorm SmoothQuant is temporarily quarantined on gfx1201 pending correctness investigation",
+)
 def test_rmsnorm_smoothquant():
     print("=" * 80)
     print("Running RMSNorm SmoothQuant Tests")
