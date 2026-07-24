@@ -1,8 +1,109 @@
 {
  "schema": 1,
- "updated": "2026-07-24T07:30:35Z",
+ "updated": "2026-07-24T07:49:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30076548384,
+   "pr": 895,
+   "commit": "478c639f7af5be2662e4802af4bd4413ca04b2e6",
+   "branch": "fix/skip_rmsnorm_sq",
+   "event": "pull_request",
+   "title": "[fix] Temporarily quarantine rmsnorm smoothquant on gfx1201",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30076548384",
+   "created_at": "2026-07-24T07:45:50Z",
+   "updated_at": "2026-07-24T07:47:17Z",
+   "actor": "cschenjunlin",
+   "jobs": []
+  },
+  {
+   "run_id": 30076185312,
+   "pr": 892,
+   "commit": "83f4a4b975cfb05f28ea3a961a4cb8ed01a07724",
+   "branch": "worktree-mxmoe-a8w4",
+   "event": "pull_request",
+   "title": "Refactor mxmoe",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30076185312",
+   "created_at": "2026-07-24T07:39:25Z",
+   "updated_at": "2026-07-24T07:43:50Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-24T07:44:36Z",
+     "completed_at": "2026-07-24T07:47:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30076185312/job/89428075306"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-24T07:45:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30076185312/job/89428075324"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-24T07:43:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30076185312/job/89428075337"
+    }
+   ]
+  },
+  {
+   "run_id": 30075703232,
+   "pr": 874,
+   "commit": "56188f8f310f2007036bc29a9de97856d5549d1a",
+   "branch": "xudoyuan/dyn-cf-list-carry",
+   "event": "pull_request",
+   "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30075703232",
+   "created_at": "2026-07-24T07:30:41Z",
+   "updated_at": "2026-07-24T07:33:20Z",
+   "actor": "xudoyuan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-24T07:34:04Z",
+     "completed_at": "2026-07-24T07:34:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30075703232/job/89426289186"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-24T07:34:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30075703232/job/89426289218"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-24T07:33:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30075703232/job/89426289220"
+    }
+   ]
+  },
   {
    "run_id": 30074744255,
    "pr": null,
@@ -1977,11 +2078,11 @@
    "branch": "mega_moe_v1",
    "event": "pull_request",
    "title": "MegaMoEV1 on Gfx950",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29996642212",
    "created_at": "2026-07-23T09:45:52Z",
-   "updated_at": "2026-07-23T11:03:43Z",
+   "updated_at": "2026-07-24T07:37:32Z",
    "actor": "yanboshao",
    "jobs": [
     {
@@ -2023,9 +2124,9 @@
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-23T11:03:43Z",
+     "started_at": "2026-07-24T07:37:32Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29996642212/job/89188107095"
     }
@@ -2210,30 +2311,21 @@
    "branch": "dev/kyle/grouped_gemm",
    "event": "pull_request",
    "title": "gemm: add fp8 per-tensor grouped GEMM forward (M-grouped/MoE)",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29990610838",
    "created_at": "2026-07-23T08:14:38Z",
-   "updated_at": "2026-07-24T03:52:36Z",
+   "updated_at": "2026-07-24T07:41:03Z",
    "actor": "kyle-256",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T03:44:51Z",
-     "completed_at": "2026-07-24T03:52:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29990610838/job/89382635094"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T08:21:30Z",
-     "completed_at": "2026-07-23T08:40:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29990610838/job/89382635408"
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-24T07:41:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29990610838/job/89427584854"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -2242,7 +2334,16 @@
      "conclusion": "success",
      "started_at": "2026-07-23T08:17:00Z",
      "completed_at": "2026-07-23T09:08:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29990610838/job/89382635498"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29990610838/job/89427585172"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-23T08:21:30Z",
+     "completed_at": "2026-07-23T08:40:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29990610838/job/89427585446"
     }
    ]
   },
@@ -2331,107 +2432,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986917281/job/89140968730"
     }
    ]
-  },
-  {
-   "run_id": 29986384860,
-   "pr": 888,
-   "commit": "4e5e73c5edc054c3ad3df8d7f9ae916a0f4b760e",
-   "branch": "add-8wave-gemm-locality",
-   "event": "pull_request",
-   "title": "[Kernel][MI350] Add cache-aware 8-wave BF16/FP16 GEMM",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986384860",
-   "created_at": "2026-07-23T06:51:45Z",
-   "updated_at": "2026-07-23T07:40:50Z",
-   "actor": "zhanglx13",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-23T07:30:49Z",
-     "completed_at": "2026-07-23T07:40:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986384860/job/89139204034"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T07:12:45Z",
-     "completed_at": "2026-07-23T07:32:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986384860/job/89139204059"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-23T07:08:24Z",
-     "completed_at": "2026-07-23T07:18:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986384860/job/89139204061"
-    }
-   ]
-  },
-  {
-   "run_id": 29986281527,
-   "pr": null,
-   "commit": "53ac95bf2bc66aeb12a39da1407790b9e3595171",
-   "branch": "lse_addition",
-   "event": "pull_request",
-   "title": "Add optional forward LSE output",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986281527",
-   "created_at": "2026-07-23T06:49:51Z",
-   "updated_at": "2026-07-23T08:38:46Z",
-   "actor": "AakarshAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T06:51:56Z",
-     "completed_at": "2026-07-23T07:12:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986281527/job/89138944112"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T07:08:29Z",
-     "completed_at": "2026-07-23T08:38:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986281527/job/89138944127"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-23T07:30:46Z",
-     "completed_at": "2026-07-23T07:40:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986281527/job/89138944181"
-    }
-   ]
-  },
-  {
-   "run_id": 29986161336,
-   "pr": 887,
-   "commit": "51ca97246d22bb9dbe353d4ee4ea1d2a344e834b",
-   "branch": "dev/kyle/grouped_gemm",
-   "event": "pull_request",
-   "title": "gemm: add fp8 per-tensor grouped GEMM forward (M-grouped/MoE)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29986161336",
-   "created_at": "2026-07-23T06:47:34Z",
-   "updated_at": "2026-07-23T06:48:28Z",
-   "actor": "kyle-256",
-   "jobs": []
   }
  ]
 }
