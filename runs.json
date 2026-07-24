@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-24T10:16:36Z",
+ "updated": "2026-07-24T10:23:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30085793803,
+   "pr": 874,
+   "commit": "f8b16452d3a5082a5212aef4a03b3204b066d3f0",
+   "branch": "xudoyuan/dyn-cf-list-carry",
+   "event": "pull_request",
+   "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30085793803",
+   "created_at": "2026-07-24T10:20:01Z",
+   "updated_at": "2026-07-24T10:20:28Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 30084773290,
    "pr": 874,
@@ -10,38 +25,38 @@
    "branch": "xudoyuan/dyn-cf-list-carry",
    "event": "pull_request",
    "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30084773290",
    "created_at": "2026-07-24T10:02:37Z",
-   "updated_at": "2026-07-24T10:06:54Z",
+   "updated_at": "2026-07-24T10:20:29Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-24T10:06:54Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T10:20:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30084773290/job/89455093528"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-24T10:06:54Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T10:20:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30084773290/job/89455093562"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-24T10:08:02Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T10:20:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30084773290/job/89455093569"
     }
    ]
@@ -2313,49 +2328,6 @@
      "started_at": "2026-07-23T10:30:02Z",
      "completed_at": "2026-07-23T11:35:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29999396993/job/89180976466"
-    }
-   ]
-  },
-  {
-   "run_id": 29999383400,
-   "pr": null,
-   "commit": "a5f8236a1ab56c5c46a8e915033548969c0c070a",
-   "branch": "ci/main-only-mlir-cache",
-   "event": "pull_request",
-   "title": "[CI] Share MLIR cache across GPU jobs",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29999383400",
-   "created_at": "2026-07-23T10:27:48Z",
-   "updated_at": "2026-07-23T15:17:27Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-23T14:29:40Z",
-     "completed_at": "2026-07-23T15:17:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29999383400/job/89236276155"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T10:52:20Z",
-     "completed_at": "2026-07-23T14:11:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29999383400/job/89236276780"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T10:51:59Z",
-     "completed_at": "2026-07-23T12:02:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29999383400/job/89236277038"
     }
    ]
   }
