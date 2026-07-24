@@ -194,7 +194,27 @@ def insert_point(ctx):
 
 ## 4. Performance Measurement
 
-### 4.1 `tests/test_common.py`
+### 4.1 `flydsl.profiling.do_bench`
+
+Use the package-level event timer when a benchmark or tuning workflow only
+needs GPU latency:
+
+```python
+from flydsl.profiling import do_bench
+
+latency_ms = do_bench(lambda: launch_kernel(...), warmup=5, rep=25)
+```
+
+`warmup` and `rep` are iteration counts. The default result is the
+upper-middle latency in milliseconds; pass a non-empty `quantiles` sequence to
+return selected sorted samples. The helper uses PyTorch's CUDA-compatible event
+interface, so the same call works with PyTorch CUDA and HIP builds. The measured
+callable must enqueue its work on PyTorch's current stream. Use a non-negative
+`warmup`, a positive `rep`, and quantiles in the inclusive range `[0, 1]`.
+Pass `setup` to restore or reset inputs before every iteration without including
+that work in the timed event interval.
+
+### 4.2 `tests/test_common.py`
 
 Core performance testing utilities (adapted from AIter).
 
@@ -224,7 +244,7 @@ verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2, msg='')
 ```
 High-level validation wrapper around `checkAllclose`.
 
-### 4.2 `tests/kernels/benchmark_common.py`
+### 4.3 `tests/kernels/benchmark_common.py`
 
 Shared benchmark harness for performance comparison.
 
