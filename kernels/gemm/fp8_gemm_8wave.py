@@ -5,6 +5,15 @@
 
 Algorithm derived from HipKittens FP8_8wave
 (https://github.com/HazyResearch/HipKittens/blob/7782744ba1fd259a377a99e2ea8f71384cc80e55/kernels/gemm/fp8fp32/FP8_8wave/8_wave.cu#L1)
+
+The non-scaled base MFMA is issued through the higher-level ``fx.make_tiled_mma``
++ ``fx.gemm(tiled_mma, ...)`` idiom (see ``Mfma16x16x128`` in
+``fp8_gemm_utils``). The gmem->LDS (``G2SLoader``, direct ``buffer_load_lds``)
+and LDS->reg (``S2RLoader``) copies stay hand-swizzled: their fractional
+``wait_barrier(count)`` / ``s_barrier`` interleaving is the perf-critical
+ping-pong schedule, which a ``make_tiled_copy`` / ``make_composed_layout``
+rewrite would perturb (and the preshuffled LDS layout has no XOR-swizzle
+equivalent).
 """
 
 import flydsl.compiler as flyc

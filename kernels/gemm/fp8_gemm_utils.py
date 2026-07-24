@@ -210,7 +210,14 @@ def wait_barrier(count):
 
 class Mfma16x16x128:
     def __init__(self, n_tiles_a, n_tiles_b):
+        # Single-atom TiledMma (1x1x1 atom layout): the base MFMA is issued one
+        # 16x16x128 tile at a time, interleaved by the hand-tuned schedule, so a
+        # trivial atom layout keeps ``fx.gemm(self.tiled_mma, ...)`` emitting the
+        # exact same single MFMA per call as the bare atom did. The higher-level
+        # TiledMma vocabulary carries the operand/accumulator fragment shapes
+        # (A/B -> 8xi32, C -> 4xf32) that ``make_fragment_A/B/C`` derive.
         self.atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
+        self.tiled_mma = fx.make_tiled_mma(self.atom, fx.make_layout((1, 1, 1), (0, 0, 0)))
         self.zero_value = Vec.filled(4, 0.0, fx.Float32)
         self.n_tiles_a = n_tiles_a
         self.n_tiles_b = n_tiles_b
@@ -232,7 +239,7 @@ class Mfma16x16x128:
         a_frag = self._make_operand_frag(a)
         b_frag = self._make_operand_frag(b)
         c_frag = self._make_accum_frag(c)
-        fx.gemm(self.atom, c_frag, a_frag, b_frag, c_frag)
+        fx.gemm(self.tiled_mma, c_frag, a_frag, b_frag, c_frag)
         return c_frag.load().ir_value()
 
     def call(self, a, b, c, *, set_prio=True):
@@ -248,7 +255,7 @@ class Mfma16x16x128:
         for i in range_constexpr(self.n_tiles_a):
             for j in range_constexpr(self.n_tiles_b):
                 cf = c_frags[self.idx(i, j)]
-                fx.gemm(self.atom, cf, a_frags[i], b_frags[j], cf)
+                fx.gemm(self.tiled_mma, cf, a_frags[i], b_frags[j], cf)
         if const_expr(set_prio):
             rocdl.s_setprio(0)
             rocdl.s_barrier()
