@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-24T06:56:58Z",
+ "updated": "2026-07-24T07:13:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30073900011,
+   "pr": 874,
+   "commit": "448c7c621616dd9cdbc8f7c5314d2a4f4652e478",
+   "branch": "xudoyuan/dyn-cf-list-carry",
+   "event": "pull_request",
+   "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30073900011",
+   "created_at": "2026-07-24T06:58:21Z",
+   "updated_at": "2026-07-24T07:01:05Z",
+   "actor": "xudoyuan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-24T07:00:46Z",
+     "completed_at": "2026-07-24T07:01:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30073900011/job/89420667714"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-24T07:01:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30073900011/job/89420667753"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-24T07:01:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30073900011/job/89420667765"
+    }
+   ]
+  },
   {
    "run_id": 30071868651,
    "pr": 874,
@@ -124,10 +167,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-24T06:02:51Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T07:03:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30069691161/job/89411944225"
     }
    ]
@@ -2387,49 +2430,6 @@
      "started_at": "2026-07-23T06:36:57Z",
      "completed_at": "2026-07-23T06:49:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29985518980/job/89136595589"
-    }
-   ]
-  },
-  {
-   "run_id": 29983920158,
-   "pr": null,
-   "commit": "f514448f4306afe5ba7255630bb9b6f2c18754f4",
-   "branch": "lse_addition",
-   "event": "pull_request",
-   "title": "Add optional forward LSE output",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29983920158",
-   "created_at": "2026-07-23T06:04:16Z",
-   "updated_at": "2026-07-23T06:36:06Z",
-   "actor": "AakarshAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-23T06:05:05Z",
-     "completed_at": "2026-07-23T06:35:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29983920158/job/89131647646"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-23T06:11:06Z",
-     "completed_at": "2026-07-23T06:36:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29983920158/job/89131647659"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-23T06:25:55Z",
-     "completed_at": "2026-07-23T06:36:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29983920158/job/89131647685"
     }
    ]
   }
