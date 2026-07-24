@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Correctness tests for the CDNA SageAttention kernel."""
+"""Correctness tests for the CDNA SageAttention kernel (AMD MI308X / gfx942)."""
 
 import math
 
@@ -15,10 +15,15 @@ from kernels.attention.sage_attn_cdna import build_sage_attn_cdna_module
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
 _ARCH = get_rocm_arch()
+try:
+    _GPU_NAME = torch.cuda.get_device_name(0) if torch.cuda.is_available() else ""
+except Exception:
+    _GPU_NAME = ""
+_IS_MI308X = isinstance(_ARCH, str) and _ARCH.startswith("gfx942") and "MI308" in _GPU_NAME.upper()
 pytestmark.append(
     pytest.mark.skipif(
-        not isinstance(_ARCH, str) or not (_ARCH.startswith("gfx942") or _ARCH.startswith("gfx950")),
-        reason=f"SageAttention requires gfx942 or gfx950, got {_ARCH}",
+        not _IS_MI308X,
+        reason=f"SageAttention CDNA kernel supports only AMD MI308X (gfx942); got arch={_ARCH} name={_GPU_NAME}",
     )
 )
 
@@ -109,3 +114,66 @@ def test_sage_attn_bf16(causal):
     assert torch.isfinite(out).all()
     assert cosine.min().item() > 0.97
     assert cosine.mean().item() > 0.99
+
+
+def _bench_tflops(batch, seq_len, heads, head_dim, causal, block_m=256, block_n=64, iters=20):
+    """Benchmark one shape; return kernel-only TFLOPS on MI308X."""
+    import time
+
+    torch.manual_seed(42)
+    q = torch.randn(batch, seq_len, heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    sm = head_dim**-0.5
+    q8, qs, k8, ks, vf8, vs = _quantize(q, k, v, block_m, block_n, sm)
+    out = torch.empty_like(q)
+    dummy = torch.empty(1, device="cuda", dtype=torch.float32)
+    kernel = build_sage_attn_cdna_module(
+        num_q_heads=heads,
+        num_kv_heads=heads,
+        head_dim=head_dim,
+        causal=causal,
+        sm_scale=sm,
+        block_m=block_m,
+        block_n=block_n,
+        gfx942_w256=True,
+        v_transposed=True,
+    )
+    args = (
+        q8.reshape(-1),
+        k8.reshape(-1),
+        vf8.reshape(-1),
+        out.reshape(-1),
+        qs,
+        ks,
+        vs,
+        dummy,
+        dummy,
+        dummy,
+        dummy,
+        batch,
+        seq_len,
+        seq_len,
+        qs.shape[2],
+    )
+    stream = torch.cuda.current_stream()
+    for _ in range(3):
+        kernel(*args, stream=stream)
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(iters):
+        kernel(*args, stream=stream)
+    torch.cuda.synchronize()
+    us = (time.perf_counter() - t0) / iters * 1e6
+    flops = 2 * (2 * batch * heads * seq_len * seq_len * head_dim) * (0.5 if causal else 1.0)
+    return us, flops / (us * 1e-6) / 1e12
+
+
+if __name__ == "__main__":
+    print(f"arch={_ARCH}  SageAttention CDNA (MI308X) kernel TFLOPS")
+    print(f"{'shape':>22} {'causal':>6} {'us':>10} {'TFLOPS':>9}")
+    for shape in [(1, 4608, 24, 128), (1, 8448, 24, 128)]:
+        for causal in (False, True):
+            us, tflops = _bench_tflops(*shape, causal=causal)
+            b, s, h, d = shape
+            print(f"{f'B{b}_S{s}_H{h}_D{d}':>22} {str(causal):>6} {us:>10.1f} {tflops:>9.2f}")
