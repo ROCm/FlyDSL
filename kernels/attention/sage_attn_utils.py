@@ -3,18 +3,18 @@
 
 """Shared module-level helpers for the CDNA SageAttention kernel.
 
-State-free MLIR-facing free functions extracted from build_sage_attn_cdna_module.
-Moving them here changes nothing about the emitted IR/ISA.
+State-free fx-facing free functions extracted from build_sage_attn_cdna_module.
 """
 
 import math as host_math
 
+import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly as _fly
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl.expr import arith
-from flydsl.expr import math as _math
 from flydsl.expr.typing import T
+from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as _raw
 
 _LOG2E = host_math.log2(host_math.e)
@@ -43,26 +43,25 @@ def _pointer_store(value: ir.Value, ptr: ir.Value):
     return _llvm.StoreOp(_llvm_value(value), _llvm_value(ptr))
 
 
-def _fadd(a, b, fm):
-    return arith.addf(_raw(a), _raw(b), fastmath=fm)
+def _f32_to_bf16_trunc(f32_raw):
+    """Bitwise f32 → bf16 truncation (upper 16 bits)."""
+    i32_val = arith.bitcast(T.i32, _raw(f32_raw))
+    upper = arith.ShRUIOp(i32_val, arith.constant(16, type=T.i32)).result
+    i16_val = arith.TruncIOp(T.i16, upper).result
+    return arith.bitcast(T.bf16, i16_val)
 
 
-def _fsub(a, b, fm):
-    return arith.subf(_raw(a), _raw(b), fastmath=fm)
+def _i32_pair_to_i64(lo, hi):
+    return ((fx.Uint64(hi) << 32) | fx.Uint64(lo)).ir_value()
 
 
-def _fmul(a, b, fm):
-    return arith.mulf(_raw(a), _raw(b), fastmath=fm)
+def _lds_vec_load(vec_type, lds_view, offset):
+    return Vec.load(vec_type, lds_view, [fx.Index(offset)])
 
 
-def _fmax(a, b, fm):
-    return arith.MaxNumFOp(_raw(a), _raw(b), fastmath=fm).result
+def _lds_vec_store(vec, lds_view, offset):
+    Vec(vec).store(lds_view, [fx.Index(offset)])
 
 
-def _ffma(a, b, c, fm):
-    """Fused a*b + c (single rounding); folds the QK descale into the exp arg."""
-    return _math.fma(_raw(a), _raw(b), _raw(c), fastmath=fm)
-
-
-def _sitofp(v):
-    return arith.SIToFPOp(T.f32, _raw(v)).result
+def _lds_vec_store_elem(elem, lds_view, offset, elem_ty):
+    Vec.from_elements([elem], elem_ty).store(lds_view, [fx.Index(offset)])

@@ -10,7 +10,6 @@ import torch
 import torch.nn.functional as F
 
 from flydsl.runtime.device import get_rocm_arch
-from kernels.attention.sage_attn_cdna import build_sage_attn_cdna_module
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -19,13 +18,13 @@ try:
     _GPU_NAME = torch.cuda.get_device_name(0) if torch.cuda.is_available() else ""
 except Exception:
     _GPU_NAME = ""
-_IS_MI308X = isinstance(_ARCH, str) and _ARCH.startswith("gfx942") and "MI308" in _GPU_NAME.upper()
-pytestmark.append(
-    pytest.mark.skipif(
-        not _IS_MI308X,
-        reason=f"SageAttention CDNA kernel supports only AMD MI308X (gfx942); got arch={_ARCH} name={_GPU_NAME}",
+if not (isinstance(_ARCH, str) and _ARCH.startswith("gfx942") and "MI308" in _GPU_NAME.upper()):
+    pytest.skip(
+        f"SageAttention CDNA kernel supports only AMD MI308X (gfx942); got arch={_ARCH} name={_GPU_NAME}",
+        allow_module_level=True,
     )
-)
+
+from kernels.attention.sage_attn_cdna import build_sage_attn_cdna_module  # noqa: E402
 
 
 def _fp8_dtype():
@@ -72,7 +71,7 @@ def test_sage_attn_bf16(causal):
     q_int8, q_scale, k_int8, k_scale, v_fp8, v_scale = _quantize(q, k, v, block_m, block_n, softmax_scale)
 
     out = torch.empty_like(q)
-    dummy = torch.empty(1, device="cuda", dtype=torch.float32)
+    bias = torch.empty(1, device="cuda", dtype=torch.float32)
     kernel = build_sage_attn_cdna_module(
         num_q_heads=heads,
         num_kv_heads=heads,
@@ -81,7 +80,6 @@ def test_sage_attn_bf16(causal):
         sm_scale=softmax_scale,
         block_m=block_m,
         block_n=block_n,
-        gfx942_w256=True,
         v_transposed=True,
     )
     kernel(
@@ -92,10 +90,7 @@ def test_sage_attn_bf16(causal):
         q_scale,
         k_scale,
         v_scale,
-        dummy,
-        dummy,
-        dummy,
-        dummy,
+        bias,
         batch,
         seq_len,
         seq_len,
@@ -112,7 +107,7 @@ def test_sage_attn_bf16(causal):
     ).transpose(1, 2)
     cosine = F.cosine_similarity(out.float().reshape(-1, head_dim), ref.reshape(-1, head_dim), dim=1)
     assert torch.isfinite(out).all()
-    assert cosine.min().item() > 0.97
+    assert cosine.min().item() > 0.99
     assert cosine.mean().item() > 0.99
 
 
@@ -127,7 +122,7 @@ def _bench_tflops(batch, seq_len, heads, head_dim, causal, block_m=256, block_n=
     sm = head_dim**-0.5
     q8, qs, k8, ks, vf8, vs = _quantize(q, k, v, block_m, block_n, sm)
     out = torch.empty_like(q)
-    dummy = torch.empty(1, device="cuda", dtype=torch.float32)
+    bias = torch.empty(1, device="cuda", dtype=torch.float32)
     kernel = build_sage_attn_cdna_module(
         num_q_heads=heads,
         num_kv_heads=heads,
@@ -136,7 +131,6 @@ def _bench_tflops(batch, seq_len, heads, head_dim, causal, block_m=256, block_n=
         sm_scale=sm,
         block_m=block_m,
         block_n=block_n,
-        gfx942_w256=True,
         v_transposed=True,
     )
     args = (
@@ -147,10 +141,7 @@ def _bench_tflops(batch, seq_len, heads, head_dim, causal, block_m=256, block_n=
         qs,
         ks,
         vs,
-        dummy,
-        dummy,
-        dummy,
-        dummy,
+        bias,
         batch,
         seq_len,
         seq_len,
