@@ -295,6 +295,32 @@ def test_for_carries_bare_scalar_literal():
         assert "scf.for" in str(module)
 
 
+def test_for_carries_nested_bare_scalar():
+    """Bare python scalars nested inside a container (dict -> list -> int) must be
+    promoted at any depth, not just at the top level."""
+    with Context(), Location.unknown():
+        module = Module.create()
+        i32 = IntegerType.get_signless(32)
+        with InsertionPoint(module.body):
+            f = func.FuncOp("for_nested_bare", FunctionType.get([], [i32, i32]))
+            entry = f.add_entry_block()
+            with InsertionPoint(entry):
+                d = {"count": 0, "vec": [0, _i32(5)]}  # bare 0 at two nesting depths
+
+                def body_fn(iv, names, d):
+                    assert isinstance(d["count"], Int32)
+                    assert isinstance(d["vec"][0], Int32)
+                    return {"d": {"count": d["count"] + _i32(1), "vec": [d["vec"][0] + _i32(1), d["vec"][1]]}}
+
+                out = InsertEmptyYieldForSCFFor.scf_for_dispatch(
+                    0, 3, 1, body_fn, result_names=("d",), result_values=(d,)
+                )
+                assert isinstance(out["count"], Int32) and isinstance(out["vec"][0], Int32)
+                func.ReturnOp([out["count"].ir_value(), out["vec"][0].ir_value()])
+        assert module.operation.verify()
+        assert "scf.for" in str(module)
+
+
 def test_for_carries_bare_float_literal():
     """Same as above for a bare python float initializer (``acc = 0.0``)."""
     with Context(), Location.unknown():

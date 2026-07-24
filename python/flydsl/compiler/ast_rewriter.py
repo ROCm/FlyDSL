@@ -70,13 +70,28 @@ def _unwrap_constexpr(node):
 # ---------------------------------------------------------------------------
 
 
-def _promote_scalars(values):
-    """Promote bare python scalars (e.g. ``0``, ``0.0``) to DSL numerics so they
-    carry like any other leaf. Wrapping to a DSL value -- not a raw ir.Value --
-    keeps the exemplar reconstructable by :func:`_pack_states` (a raw ir.Value has
-    no __construct_from_ir_values__). DSL values and containers pass through.
+def _promote(v):
+    """Promote a bare python scalar (e.g. ``0``, ``0.0``) to a DSL numeric, at any
+    depth. Wrapping to a DSL value -- not a raw ir.Value -- keeps the exemplar
+    reconstructable by :func:`_pack_states` (a raw ir.Value has no
+    __construct_from_ir_values__). Containers are rebuilt with promoted leaves;
+    DSL values pass through unchanged.
     """
-    return [as_dsl_value(as_ir_value(v)) if isinstance(v, (bool, int, float)) else v for v in values]
+    if isinstance(v, (bool, int, float)):
+        return as_dsl_value(as_ir_value(v))
+    if isinstance(v, dict):
+        return {k: _promote(x) for k, x in v.items()}
+    if isinstance(v, types.SimpleNamespace):
+        return types.SimpleNamespace(**{k: _promote(x) for k, x in vars(v).items()})
+    if isinstance(v, (list, tuple)):
+        return type(v)(_promote(x) for x in v)
+    return v
+
+
+def _promote_scalars(values):
+    """Promote bare python scalars in each carried state (recursively, so nested
+    literals like ``{"count": 0}`` are handled too)."""
+    return [_promote(v) for v in values]
 
 
 def _flatten_like(entry, out, path, ctx_label):
