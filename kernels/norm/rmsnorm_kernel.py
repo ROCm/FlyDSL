@@ -16,7 +16,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
-from flydsl.expr.typing import ReductionOp, full
+from flydsl.expr.typing import ReductionOp
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import dtype_to_elem_type
 
@@ -59,7 +59,7 @@ SMALL_N_THRESHOLD = 2048
 
 def _store_yscale(scale_copy_atom, yscale_div, index, val):
     r = fx.make_rmem_tensor(1, fx.Float32)
-    ts = full(1, fx.Float32(val), fx.Float32)
+    ts = fx.Vector.filled(1, val, fx.Float32)
     fx.memref_store_vec(ts, r)
     fx.copy_atom_call(scale_copy_atom, r, fx.slice(yscale_div, (None, index)))
 
@@ -210,7 +210,7 @@ def build_rmsnorm_module(
 
             if const_expr(store_rstd):
                 if tid == 0:
-                    _store_scalar(rstd_copy_atom, fx.Float32, fx.Float32, rstd_div, bid, rrms)
+                    _store_scalar(rstd_copy_atom, fx.Float32, rstd_div, bid, rrms)
 
             # Pass 2: normalize + gamma + store (reuse cached input)
             for tile_i in range_constexpr(num_tiles):
@@ -267,7 +267,7 @@ def build_rmsnorm_module(
 
             if const_expr(store_rstd):
                 if tid == 0:
-                    _store_scalar(rstd_copy_atom, fx.Float32, fx.Float32, rstd_div, bid, rrms)
+                    _store_scalar(rstd_copy_atom, fx.Float32, rstd_div, bid, rrms)
 
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
@@ -279,7 +279,7 @@ def build_rmsnorm_module(
                     norm = x * rrms
                     y = norm * g
                     y_e = _to_elem_scalar(dtype_str, elem_dtype, y)
-                    _store_scalar(copy_atom_s, elem_dtype, elem_dtype, out_div, idx, y_e)
+                    _store_scalar(copy_atom_s, elem_dtype, out_div, idx, y_e)
 
     if store_rstd:
 
@@ -372,7 +372,7 @@ def _build_rmsnorm_large_m_small_n_module(
 
         lane = tid % THREADS_PER_ROW
         row_local = tid // THREADS_PER_ROW
-        row = bid * fx.Int32(BLOCK_M) + row_local
+        row = bid * BLOCK_M + row_local
 
         if row < MIn:
             elem_dtype = dtype_to_elem_type(dtype_str)
@@ -409,7 +409,7 @@ def _build_rmsnorm_large_m_small_n_module(
                 w = x
                 for _sh_exp in range_constexpr(int(math.log2(THREADS_PER_ROW))):
                     off = THREADS_PER_ROW // (2 << _sh_exp)
-                    peer = w.shuffle_xor(off, fx.Int32(THREADS_PER_ROW))
+                    peer = w.shuffle_xor(off, THREADS_PER_ROW)
                     w = w.addf(peer, fastmath=fm_fast)
                 return w
 
@@ -432,7 +432,7 @@ def _build_rmsnorm_large_m_small_n_module(
 
             if const_expr(store_rstd):
                 if lane == 0:
-                    _store_scalar(rstd_copy_atom, fx.Float32, fx.Float32, rstd_div, row, rrms)
+                    _store_scalar(rstd_copy_atom, fx.Float32, rstd_div, row, rrms)
 
             for base_idx_int in range_constexpr(0, BLOCK_N, THREADS_PER_ROW):
                 idx = lane + base_idx_int
@@ -443,7 +443,7 @@ def _build_rmsnorm_large_m_small_n_module(
                     g = g_e if weight_dtype_str == "f32" else g_e.to(fx.Float32)
                     y = (x * rrms) * g
                     y_e = _to_elem_scalar(dtype_str, elem_dtype, y)
-                    _store_scalar(copy_atom_s, elem_dtype, elem_dtype, out_div, idx, y_e)
+                    _store_scalar(copy_atom_s, elem_dtype, out_div, idx, y_e)
 
     if store_rstd:
 
@@ -458,7 +458,7 @@ def _build_rmsnorm_large_m_small_n_module(
         ):
             launcher = rmsnorm_large_m_small_n_kernel(Input, Gamma, Rstd, Output, m_in)
             launcher.launch(
-                grid=((m_in + fx.Int32(BLOCK_M - 1)) // fx.Int32(BLOCK_M), 1, 1),
+                grid=((m_in + BLOCK_M - 1) // BLOCK_M, 1, 1),
                 block=(BLOCK_THREADS_SPECIAL, 1, 1),
                 stream=stream,
             )
@@ -477,7 +477,7 @@ def _build_rmsnorm_large_m_small_n_module(
         # we pass Gamma to fill the argument (it is never dereferenced in-kernel).
         launcher = rmsnorm_large_m_small_n_kernel(Input, Gamma, Gamma, Output, m_in)
         launcher.launch(
-            grid=((m_in + fx.Int32(BLOCK_M - 1)) // fx.Int32(BLOCK_M), 1, 1),
+            grid=((m_in + BLOCK_M - 1) // BLOCK_M, 1, 1),
             block=(BLOCK_THREADS_SPECIAL, 1, 1),
             stream=stream,
         )
@@ -625,7 +625,7 @@ def build_fused_add_rmsnorm_module(
 
             if const_expr(store_rstd):
                 if tid == 0:
-                    _store_scalar(rstd_copy_atom, fx.Float32, fx.Float32, rstd_div, bid, rrms)
+                    _store_scalar(rstd_copy_atom, fx.Float32, rstd_div, bid, rrms)
 
             # Pass 2: normalize + gamma + store (reuse cached added values)
             for tile_i in range_constexpr(num_tiles):
@@ -677,7 +677,7 @@ def build_fused_add_rmsnorm_module(
                 residual = residual_e if dtype_str == "f32" else residual_e.to(fx.Float32)
                 added_e = _to_elem_scalar(dtype_str, elem_dtype, x + residual)
                 if idx < N:
-                    _store_scalar(copy_atom_s, elem_dtype, elem_dtype, residual_out_div, idx, added_e)
+                    _store_scalar(copy_atom_s, elem_dtype, residual_out_div, idx, added_e)
                 added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                 added2 = added * added
                 thread_sumsq = thread_sumsq + is_valid.select(added2, c_zero_f)
@@ -689,7 +689,7 @@ def build_fused_add_rmsnorm_module(
 
             if const_expr(store_rstd):
                 if tid == 0:
-                    _store_scalar(rstd_copy_atom, fx.Float32, fx.Float32, rstd_div, bid, rrms)
+                    _store_scalar(rstd_copy_atom, fx.Float32, rstd_div, bid, rrms)
 
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
@@ -700,7 +700,7 @@ def build_fused_add_rmsnorm_module(
                     added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                     y = (added * rrms) * g
                     y_e = _to_elem_scalar(dtype_str, elem_dtype, y)
-                    _store_scalar(copy_atom_s, elem_dtype, elem_dtype, out_div, idx, y_e)
+                    _store_scalar(copy_atom_s, elem_dtype, out_div, idx, y_e)
 
     if store_rstd:
 
@@ -869,7 +869,7 @@ def _build_rmsnorm_quant_module(
         if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
             num_tiles = N // tile_cols
             quant_half_width = VEC_WIDTH // 2
-            abs_mask = full(VEC_WIDTH, fx.Uint32(0x7FFFFFFF), fx.Uint32)
+            abs_mask = fx.Vector.filled(VEC_WIDTH, 0x7FFFFFFF, fx.Uint32)
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
@@ -1038,7 +1038,7 @@ def _build_rmsnorm_quant_module(
                         y = y * s
                     q = y * inv_scale
                     q_i8 = q.to(quant_dtype)
-                    _store_scalar(copy_atom_qs, quant_dtype, quant_dtype, out_div, idx, q_i8)
+                    _store_scalar(copy_atom_qs, quant_dtype, out_div, idx, q_i8)
 
     if is_smooth:
 
@@ -1238,7 +1238,7 @@ def _build_fused_add_rmsnorm_quant_module(
         if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
             num_tiles = N // tile_cols
             quant_half_width = VEC_WIDTH // 2
-            abs_mask = full(VEC_WIDTH, fx.Uint32(0x7FFFFFFF), fx.Uint32)
+            abs_mask = fx.Vector.filled(VEC_WIDTH, 0x7FFFFFFF, fx.Uint32)
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             ResidualIn_buf = fx.rocdl.make_buffer_tensor(ResidualIn)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -1376,7 +1376,7 @@ def _build_fused_add_rmsnorm_quant_module(
                 residual = residual_e if dtype_str == "f32" else residual_e.to(fx.Float32)
                 added_e = _to_elem_scalar(dtype_str, elem_dtype, x + residual)
                 if idx < N:
-                    _store_scalar(copy_atom_s, elem_dtype, elem_dtype, residual_out_div, idx, added_e)
+                    _store_scalar(copy_atom_s, elem_dtype, residual_out_div, idx, added_e)
                 added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                 added2 = added * added
                 thread_sumsq = thread_sumsq + is_valid.select(added2, c_zero_f)
@@ -1428,7 +1428,7 @@ def _build_fused_add_rmsnorm_quant_module(
                         y = y * s
                     q = y * inv_scale
                     q_i8 = q.to(quant_dtype)
-                    _store_scalar(copy_atom_qs, quant_dtype, quant_dtype, out_div, idx, q_i8)
+                    _store_scalar(copy_atom_qs, quant_dtype, out_div, idx, q_i8)
 
     if is_smooth:
 
