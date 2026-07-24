@@ -5,7 +5,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
-from flydsl.expr.typing import Float4E2M1FN, T
+from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
 from .mxfp4_gemm_common import (
@@ -14,11 +14,13 @@ from .mxfp4_gemm_common import (
     _gep1,
     _gep3,
     _global_base_ptr1,
+    _global_i32_buffer_tiles,
     _global_ptr1,
     _inline_dpp_quad_amax,
     _lds_ptr3,
     _lds_swizzle_mask,
     _raw,
+    _scale_mma_atoms,
     _udiv,
     _umod,
     bq_bytes_for,
@@ -37,20 +39,6 @@ from .mxfp4_gemm_common import (
 )
 
 NUM_CU = 256
-
-
-def _global_i32_buffer_view(addr_i64, num_bytes):
-    # fx.copy's BufferCopy/BufferCopyLDS atoms take soffset as an element count, not
-    # the bytes buffer_ops.buffer_load's soffset_bytes expected. Mirror gemm1's helper.
-    num_bytes_i64 = fx.Int64(num_bytes)
-    ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=4)
-    ptr = fx.inttoptr(ptr_ty, fx.Int64(addr_i64))
-    view = fx.Tensor(fx.make_view(ptr, fx.make_layout(num_bytes_i64 // fx.Int64(4), 1)))
-    return fx.rocdl.make_buffer_tensor(view, max_size=False, num_records_bytes=num_bytes_i64)
-
-
-def _global_i32_buffer_tiles(addr_i64, num_bytes, tile_elems):
-    return fx.logical_divide(_global_i32_buffer_view(addr_i64, num_bytes), fx.make_layout(tile_elems, 1))
 
 
 def aq_bytes_for(max_m, k):
@@ -532,13 +520,7 @@ def _gemm2_body(
     # scales). opsel_a/opsel_b select the active 128-K half of the shared operand;
     # scale_a/scale_b carry the e8m0 words. Perf-neutral vs the raw
     # mfma_scale_f32_16x16x128_f8f6f4 intrinsic on gfx950.
-    scale_atoms = {
-        (osa, osb): fx.make_mma_atom(
-            fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, Float4E2M1FN, Float4E2M1FN, opsel_a=osa, opsel_b=osb)
-        )
-        for osa in range(4)
-        for osb in range(4)
-    }
+    scale_atoms = _scale_mma_atoms("fp4")
     # accm[i][J] holds the running f32[4] accumulator as an rmem tensor.
     accm = [[None, None, None, None] for _ in range(_kMChunks)]
 

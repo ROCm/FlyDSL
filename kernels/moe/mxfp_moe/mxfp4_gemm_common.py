@@ -6,7 +6,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl._mlir.dialects import memref as memref_dialect
 from flydsl.expr import arith, buffer_ops
-from flydsl.expr.typing import T
+from flydsl.expr.typing import Float4E2M1FN, Float8E4M3FN, T
 from kernels.common.layout_utils import crd2idx  # noqa: F401  (re-exported for gemm1/gemm2)
 
 from . import dpp_utils
@@ -30,6 +30,38 @@ def _udiv(a, c):
 def _umod(a, c):
     cc = fx.Int32(c) if isinstance(c, int) else c
     return fx.Int32(arith.remui(_raw(a), _raw(cc)))
+
+
+# A elem selects the f8f6f4 cbsz for the scaled MFMA atom: fp4 (e2m1) -> cbsz 4,
+# fp8 (e4m3) -> cbsz 0. B (blgp) is always mxfp4.
+_A_ELEM = {"fp4": Float4E2M1FN, "fp8": Float8E4M3FN}
+
+
+def _scale_mma_atoms(a_dtype):
+    """16 (opsel_a, opsel_b) scaled 16x16x128 MFMA atoms; A elem = fp4/fp8, B = fp4."""
+    elem_a = _A_ELEM[a_dtype]
+    return {
+        (osa, osb): fx.make_mma_atom(
+            fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, elem_a, Float4E2M1FN, opsel_a=osa, opsel_b=osb)
+        )
+        for osa in range(4)
+        for osb in range(4)
+    }
+
+
+def _global_i32_buffer_view(addr_i64, num_bytes):
+    # fx.copy's BufferCopy/BufferCopyLDS atoms take soffset as an element count, not
+    # the bytes buffer_ops.buffer_load's soffset_bytes expected.
+    # make_layout's dynamic-shape leaf must be i32/i64, not fx.Index.
+    num_bytes_i64 = fx.Int64(num_bytes)
+    ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=4)
+    ptr = fx.inttoptr(ptr_ty, fx.Int64(addr_i64))
+    view = fx.Tensor(fx.make_view(ptr, fx.make_layout(num_bytes_i64 // fx.Int64(4), 1)))
+    return fx.rocdl.make_buffer_tensor(view, max_size=False, num_records_bytes=num_bytes_i64)
+
+
+def _global_i32_buffer_tiles(addr_i64, num_bytes, tile_elems):
+    return fx.logical_divide(_global_i32_buffer_view(addr_i64, num_bytes), fx.make_layout(tile_elems, 1))
 
 
 def _lds_ptr3(base_i32, byte_off_i32):

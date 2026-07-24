@@ -6,17 +6,22 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
-from flydsl.expr.typing import Float4E2M1FN, Float8E4M3FN, T
+from flydsl.expr.typing import T
 
 from . import dpp_utils
 from .mxfp4_gemm_common import (
     _e8m0_from_amax,
     _e8m0_roundup,
     _fabs_f32,
+    _global_i32_buffer_tiles,
+    _global_i32_buffer_view,
     _inline_dpp_quad_amax,
     _lds_swizzle_mask,
     _raw,
+    _scale_mma_atoms,
+    _udiv,
     _umax_i32,
+    _umod,
     bq_bytes_for,
     bscale_bytes_for,
     crd2idx,
@@ -32,30 +37,6 @@ from .mxfp4_gemm_common import (
     lds_acc_bytes_for,
     num_n_blocks_for,
 )
-
-# A elem selects the f8f6f4 cbsz for the scaled MFMA atom: fp4 (e2m1) -> cbsz 4,
-# fp8 (e4m3) -> cbsz 0. B (blgp) is always mxfp4.
-_A_ELEM = {"fp4": Float4E2M1FN, "fp8": Float8E4M3FN}
-
-
-def _scale_mma_atoms(a_dtype):
-    """16 (opsel_a, opsel_b) scaled 16x16x128 MFMA atoms; A elem = fp4/fp8, B = fp4."""
-    elem_a = _A_ELEM[a_dtype]
-    return {
-        (osa, osb): fx.make_mma_atom(
-            fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, elem_a, Float4E2M1FN, opsel_a=osa, opsel_b=osb)
-        )
-        for osa in range(4)
-        for osb in range(4)
-    }
-
-
-def _udiv(a, c):
-    return fx.Int32(fx.Uint32(a) // fx.Uint32(c))
-
-
-def _umod(a, c):
-    return fx.Int32(fx.Uint32(a) % fx.Uint32(c))
 
 
 def _global_i32_ptr(addr_i64):
@@ -208,19 +189,6 @@ def _gemm1_body(
     aq_num_records = fx.Int64(i32_ntok * fx.Int32(A_ROW_BYTES))
     _asc_per_mb = max(BM // 32, 1) * kAS_per_chunk_dw * 4
     ascale_num = fx.Int64(i32_total_m_blocks) * fx.Int64(_asc_per_mb)
-
-    # fx.copy's BufferCopy/BufferCopyLDS atoms take soffset as an element count,
-    # not the bytes buffer_ops.buffer_load's soffset_bytes expected.
-    def _global_i32_buffer_view(addr_i64, num_bytes):
-        # make_layout's dynamic-shape leaf must be i32/i64, not fx.Index.
-        num_bytes_i64 = fx.Int64(num_bytes)
-        ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=4)
-        ptr = fx.inttoptr(ptr_ty, fx.Int64(addr_i64))
-        view = fx.Tensor(fx.make_view(ptr, fx.make_layout(num_bytes_i64 // fx.Int64(4), 1)))
-        return fx.rocdl.make_buffer_tensor(view, max_size=False, num_records_bytes=num_bytes_i64)
-
-    def _global_i32_buffer_tiles(addr_i64, num_bytes, tile_elems):
-        return fx.logical_divide(_global_i32_buffer_view(addr_i64, num_bytes), fx.make_layout(tile_elems, 1))
 
     bq_tiles = _global_i32_buffer_tiles(arg_bq, BQ_BYTES, 4)
     bq_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(b_aux), fx.Int32)
@@ -535,10 +503,8 @@ def _gemm1_body(
         # baked into the atom, exactly mirroring the raw intrinsic's opsel operands.
         fx.gemm(scale_atoms[(opsel_a, opsel_b)], ci, a_frag, b_frag, ci, scale_a=sa, scale_b=sb)
 
-    def mfma_cluster(b_slot, a, a_scale, bs_slot, J, init):
-        # init is unused: the accumulators are pre-seeded to 0, so every issue
-        # accumulates (A*B + C). Kept in the signature to avoid churning call sites.
-        del init
+    def mfma_cluster(b_slot, a, a_scale, bs_slot, J):
+        # Accumulators are pre-seeded to 0, so every issue accumulates (A*B + C).
         if const_expr(interleave):
             mni = J // 2
             in_b = J % 2
@@ -610,7 +576,7 @@ def _gemm1_body(
             if const_expr(BM != 128):
                 rocdl.sched_barrier(0)
                 rocdl.s_setprio(1)
-            mfma_cluster(b[slot_b], a_cur, asc_cur, b_scale_v[slot_b], J, init=(OFFSET == 0))
+            mfma_cluster(b[slot_b], a_cur, asc_cur, b_scale_v[slot_b], J)
             if const_expr(BM != 128):
                 rocdl.s_setprio(0)
             rocdl.sched_barrier(0)
@@ -631,7 +597,7 @@ def _gemm1_body(
             a_cur = issue_a_ds_read(kt % kAStages)
             asc_cur = issue_a_scale_ds_read(kt)
         for J in range_constexpr(4):
-            mfma_cluster(b[kt % kStages], a_cur, asc_cur, b_scale_v[kt % kStages], J, init=False)
+            mfma_cluster(b[kt % kStages], a_cur, asc_cur, b_scale_v[kt % kStages], J)
 
     gpu.barrier()
 
@@ -858,7 +824,7 @@ def compile_gemm1_a4w4_port(
             n_block = wig // group_size_m
             return m_block * fx.Int32(_NUM_N_BLOCKS) + n_block
 
-        if fx.Int32(bx_i32) < bound:
+        if bx_i32 < bound:
             if const_expr(_SW > 0):
                 _tile = _xcd(bx_i32)
             else:
