@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-24T11:08:45Z",
+ "updated": "2026-07-24T11:25:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,9 +14,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30088428867",
    "created_at": "2026-07-24T11:06:16Z",
-   "updated_at": "2026-07-24T11:06:57Z",
+   "updated_at": "2026-07-24T11:15:37Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-24T11:15:16Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30088428867/job/89467375317"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-24T11:15:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30088428867/job/89467375326"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-24T11:15:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30088428867/job/89467375355"
+    }
+   ]
   },
   {
    "run_id": 30088415445,
@@ -25,13 +53,41 @@
    "branch": "main",
    "event": "push",
    "title": "[CI] Make MLIR cache fallback reliable (#897)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30088415445",
    "created_at": "2026-07-24T11:06:01Z",
-   "updated_at": "2026-07-24T11:06:54Z",
+   "updated_at": "2026-07-24T11:15:04Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-24T11:15:44Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30088415445/job/89467511761"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-24T11:15:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30088415445/job/89467511773"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-24T11:15:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30088415445/job/89467511803"
+    }
+   ]
   },
   {
    "run_id": 30086876788,
@@ -68,10 +124,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-24T10:43:22Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T11:18:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30086876788/job/89461496045"
     }
    ]
@@ -500,20 +556,20 @@
    "branch": "fix/skip_rmsnorm_sq",
    "event": "pull_request",
    "title": "[fix] Temporarily quarantine rmsnorm smoothquant on gfx1201",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30076858081",
    "created_at": "2026-07-24T07:51:22Z",
-   "updated_at": "2026-07-24T10:11:41Z",
+   "updated_at": "2026-07-24T11:23:37Z",
    "actor": "cschenjunlin",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-24T10:11:41Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T11:23:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30076858081/job/89433674262"
     },
     {
