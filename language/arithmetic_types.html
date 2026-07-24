@@ -1,0 +1,874 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Arithmetic Types &mdash; FlyDSL 0.3.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
+      <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=e259d695"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=f281be69"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Architecture &amp; Compilation Pipeline Guide" href="../architecture_guide.html" />
+    <link rel="prev" title="Quick Start" href="../quickstart.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            FlyDSL
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../installation.html">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../installation.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../installation.html#install-from-pypi">Install from PyPI</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../installation.html#build-from-source">Build from source</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../installation.html#step-1-build-llvm-mlir">Step 1: Build LLVM/MLIR</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../installation.html#step-2-build-flydsl">Step 2: Build FlyDSL</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../installation.html#step-3-install-flydsl">Step 3: Install FlyDSL</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../installation.html#verify-installation">Verify Installation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../installation.html#troubleshooting">Troubleshooting</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart.html">Quick Start</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../quickstart.html#a-minimal-vector-add-kernel">A Minimal Vector Add Kernel</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../quickstart.html#key-concepts">Key Concepts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../quickstart.html#compilation-pipeline">Compilation Pipeline</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../quickstart.html#aot-pre-compilation">AOT Pre-compilation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../quickstart.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Language Specification</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Arithmetic Types</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#the-type-tower">The type tower</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#numeric-scalars">Numeric scalars</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#public-methods">Public methods</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#vector">Vector</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#compile-time-and-run-time-values">Compile-time and run-time values</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#arithmetic-preserves-the-compile-time-property">Arithmetic preserves the compile-time property</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#python-literals">Python literals</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#using-a-compile-time-value-as-python">Using a compile-time value as Python</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#type-interoperability">Type interoperability</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#operand-normalization">Operand normalization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#common-type">Common type</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#result-type">Result type</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../architecture_guide.html">Architecture &amp; Compilation Pipeline Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../architecture_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../architecture_guide.html#project-structure">1. Project Structure</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../architecture_guide.html#architecture">2. Architecture</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../architecture_guide.html#compilation-pipeline">3. Compilation Pipeline</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#high-level-flow">3.1 High-Level Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#pipeline-stages-in-detail">3.2 Pipeline Stages in Detail</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#jit-compilation-flow">3.3 JIT Compilation Flow</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../architecture_guide.html#key-abstractions">4. Key Abstractions</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#flyc-jit-host-launcher">4.1 <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code> — Host Launcher</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#flyc-kernel-gpu-kernel">4.2 <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> — GPU Kernel</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#kernellauncher">4.3 <code class="docutils literal notranslate"><span class="pre">KernelLauncher</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#jitcfunction">4.4 <code class="docutils literal notranslate"><span class="pre">JITCFunction</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#dsltype-jitargument-protocols">4.5 <code class="docutils literal notranslate"><span class="pre">DslType</span></code> / <code class="docutils literal notranslate"><span class="pre">JitArgument</span></code> Protocols</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#astrewriter">4.6 <code class="docutils literal notranslate"><span class="pre">ASTRewriter</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../architecture_guide.html#environment-variables">5. Environment Variables</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#compilation-options-flydsl-compile">5.1 Compilation Options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_COMPILE_*</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#debug-options-flydsl-debug">5.2 Debug Options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_*</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#runtime-options-flydsl-runtime">5.3 Runtime Options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_RUNTIME_*</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#architecture-detection-priority">5.4 Architecture Detection Priority</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../architecture_guide.html#target-hardware">6. Target Hardware</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../architecture_guide.html#ir-dump-workflow">7. IR Dump Workflow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../architecture_guide.html#source-files">8. Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../layout_system_guide.html">Layout Algebra Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#core-types">1. Core Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#inttuple-patterns">IntTuple Patterns</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#construction">2. Construction</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#python-api-via-flydsl-expr">Python API (via <code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#coordinate-mapping">3. Coordinate Mapping</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#crd2idx-coordinate-to-index"><code class="docutils literal notranslate"><span class="pre">crd2idx</span></code> — Coordinate to Index</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#idx2crd-index-to-coordinate-inverse"><code class="docutils literal notranslate"><span class="pre">idx2crd</span></code> — Index to Coordinate (inverse)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#example">Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#query-operations">4. Query Operations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#layout-algebra">5. Layout Algebra</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#composition-composition-a-b">5.1 Composition: <code class="docutils literal notranslate"><span class="pre">composition(A,</span> <span class="pre">B)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#complement-complement-tiler-target-size">5.2 Complement: <code class="docutils literal notranslate"><span class="pre">complement(tiler,</span> <span class="pre">target_size)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#coalesce-coalesce-layout">5.3 Coalesce: <code class="docutils literal notranslate"><span class="pre">coalesce(layout)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#right-inverse-right-inverse-layout">5.4 Right Inverse: <code class="docutils literal notranslate"><span class="pre">right_inverse(layout)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#recast-layout-recast-layout-layout-old-bits-new-bits">5.5 Recast Layout: <code class="docutils literal notranslate"><span class="pre">recast_layout(layout,</span> <span class="pre">old_bits,</span> <span class="pre">new_bits)</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#product-operations">6. Product Operations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#divide-operations">7. Divide Operations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#structural-operations">8. Structural Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#select-int-tuple-indices"><code class="docutils literal notranslate"><span class="pre">select(int_tuple,</span> <span class="pre">indices)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#group-int-tuple-begin-end"><code class="docutils literal notranslate"><span class="pre">group(int_tuple,</span> <span class="pre">begin,</span> <span class="pre">end)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#append-base-elem-prepend-base-elem"><code class="docutils literal notranslate"><span class="pre">append(base,</span> <span class="pre">elem)</span></code> / <code class="docutils literal notranslate"><span class="pre">prepend(base,</span> <span class="pre">elem)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#slice-src-coord"><code class="docutils literal notranslate"><span class="pre">slice(src,</span> <span class="pre">coord)</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#memref-view-copy-operations">9. MemRef / View / Copy Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#memref-operations">MemRef Operations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#view-and-offset">View and Offset</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#copy-atoms-and-tiled-copies">Copy Atoms and Tiled Copies</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../layout_system_guide.html#copy-atom-types">Copy Atom Types</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../layout_system_guide.html#id1">Construction</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../layout_system_guide.html#thread-slicing-and-partitioning">Thread Slicing and Partitioning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../layout_system_guide.html#execution">Execution</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../layout_system_guide.html#introspection">Introspection</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#nested-hierarchical-layouts">10. Nested / Hierarchical Layouts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#inttuple-arithmetic">11. IntTuple Arithmetic</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#printf-debugging">12. Printf Debugging</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#decision-tree">13. Decision Tree</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#source-files">14. Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../kernel_authoring_guide.html">Kernel Authoring Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#basic-kernel-pattern">1. Basic Kernel Pattern</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#flyc-kernel-flyc-jit">1.1 <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> + <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#how-it-works">1.2 How It Works</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#parameter-types">2. Parameter Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#fx-tensor">2.1 <code class="docutils literal notranslate"><span class="pre">fx.Tensor</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#fx-constexpr-t">2.2 <code class="docutils literal notranslate"><span class="pre">fx.Constexpr[T]</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#fx-int32">2.3 <code class="docutils literal notranslate"><span class="pre">fx.Int32</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#fx-stream">2.4 <code class="docutils literal notranslate"><span class="pre">fx.Stream</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#custom-argument-types">2.5 Custom Argument Types</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#thread-block-hierarchy">3. Thread / Block Hierarchy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#expression-api-flydsl-expr">4. Expression API (<code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#arithmetic-and-numeric-types">4.1 Arithmetic and Numeric Types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#vector-values-vector">4.2 Vector Values (<code class="docutils literal notranslate"><span class="pre">Vector</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#rocm-intrinsics-fx-rocdl">4.3 ROCm Intrinsics (<code class="docutils literal notranslate"><span class="pre">fx.rocdl</span></code>)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../kernel_authoring_guide.html#high-level-helpers">High-Level Helpers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../kernel_authoring_guide.html#mfma-instructions">MFMA Instructions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../kernel_authoring_guide.html#instruction-scheduling-barriers">Instruction Scheduling Barriers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../kernel_authoring_guide.html#math-intrinsics">Math Intrinsics</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../kernel_authoring_guide.html#low-level-ops">Low-Level Ops</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../kernel_authoring_guide.html#gfx1250-wmma-tdm-atoms-wave32">gfx1250 WMMA &amp; TDM atoms (wave32)</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#gpu-operations-fx-gpu">4.4 GPU Operations (<code class="docutils literal notranslate"><span class="pre">fx.gpu</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#control-flow">5. Control Flow</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#python-loops">5.1 Python Loops</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#const-expr">5.2 <code class="docutils literal notranslate"><span class="pre">const_expr()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#shared-memory-lds">6. Shared Memory (LDS)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#fx-sharedallocator-fx-struct">6.1 <code class="docutils literal notranslate"><span class="pre">fx.SharedAllocator</span></code> + <code class="docutils literal notranslate"><span class="pre">&#64;fx.struct</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#legacy-smemallocator">6.2 Legacy <code class="docutils literal notranslate"><span class="pre">SmemAllocator</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#lds-capacity">6.3 LDS Capacity</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#launch-configuration">7. Launch Configuration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#kernellauncher-launch">7.1 <code class="docutils literal notranslate"><span class="pre">KernelLauncher.launch()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#dynamic-grid-block-dimensions">7.2 Dynamic Grid/Block Dimensions</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#synchronization">8. Synchronization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#compilation-caching">9. Compilation &amp; Caching</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#automatic-caching">9.1 Automatic Caching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#cache-invalidation">9.2 Cache Invalidation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#disk-cache-invalidation">9.3 Disk Cache Invalidation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#compile-only-mode">9.4 Compile-Only Mode</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#debugging">10. Debugging</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#dumping-ir">10.1 Dumping IR</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#printing-ir">10.2 Printing IR</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#ast-diff">10.3 AST Diff</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#complete-example-preshuffle-gemm">11. Complete Example: Preshuffle GEMM</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#decision-tree">12. Decision Tree</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#source-files">13. Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../kernel_tuning_guide.html">Kernel Tuning Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_tuning_guide.html#background-the-gpu-performance-model">0. Background: The GPU Performance Model</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_tuning_guide.html#thread-traces-and-instruction-interleaving">Thread traces and instruction interleaving</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_tuning_guide.html#the-latencies-you-are-hiding">The latencies you are hiding</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_tuning_guide.html#hiding-lds-latency">Hiding LDS latency</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_tuning_guide.html#hiding-global-memory-latency">Hiding global-memory latency</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_tuning_guide.html#bandwidth">Bandwidth</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_tuning_guide.html#is-the-kernel-memory-compute-or-latency-bound">Is the kernel memory-, compute-, or latency-bound?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_tuning_guide.html#tiling-strategy">1. Tiling Strategy</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_tuning_guide.html#recommended-configurations">Recommended configurations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_tuning_guide.html#constraints">Constraints</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_tuning_guide.html#lds-double-buffering-ping-pong">2. LDS Double-Buffering (Ping-Pong)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_tuning_guide.html#lds-bank-conflict-swizzle">3. LDS Bank-Conflict Swizzle</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_tuning_guide.html#arch-note-gfx950-has-64-banks">Arch note (gfx950 has 64 banks)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_tuning_guide.html#padding-as-an-alternative">Padding as an alternative</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_tuning_guide.html#data-prefetch-pipeline">4. Data Prefetch Pipeline</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_tuning_guide.html#loop-carried-prefetch-with-range-init">Loop-carried prefetch with <code class="docutils literal notranslate"><span class="pre">range(...,</span> <span class="pre">init=...)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_tuning_guide.html#async-copy-global-lds-dma">Async copy (global → LDS DMA)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_tuning_guide.html#mfma-instruction-scheduling">5. MFMA Instruction Scheduling</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_tuning_guide.html#epilogue-strategies">6. Epilogue Strategies</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_tuning_guide.html#register-budget-occupancy">7. Register Budget &amp; Occupancy</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_tuning_guide.html#the-three-resources">The three resources</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_tuning_guide.html#architecture-differences-at-a-glance">Architecture differences at a glance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_tuning_guide.html#estimating-and-measuring">Estimating and measuring</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_tuning_guide.html#performance-metrics-roofline">8. Performance Metrics &amp; Roofline</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_tuning_guide.html#profiling-att-traces-pmc-counters">9. Profiling: ATT Traces &amp; PMC Counters</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_tuning_guide.html#bisecting-a-performance-regression">10. Bisecting a Performance Regression</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_tuning_guide.html#optimization-checklist">11. Optimization Checklist</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_tuning_guide.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../prebuilt_kernels_guide.html">Pre-built Kernel Library Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../prebuilt_kernels_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../prebuilt_kernels_guide.html#normalization-kernels">1. Normalization Kernels</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../prebuilt_kernels_guide.html#layernorm-kernels-norm-layernorm-kernel-py">1.1 LayerNorm (<code class="docutils literal notranslate"><span class="pre">kernels/norm/layernorm_kernel.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../prebuilt_kernels_guide.html#rmsnorm-kernels-norm-rmsnorm-kernel-py">1.2 RMSNorm (<code class="docutils literal notranslate"><span class="pre">kernels/norm/rmsnorm_kernel.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../prebuilt_kernels_guide.html#softmax-kernel">2. Softmax Kernel</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../prebuilt_kernels_guide.html#softmax-kernels-norm-softmax-kernel-py">2.1 Softmax (<code class="docutils literal notranslate"><span class="pre">kernels/norm/softmax_kernel.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../prebuilt_kernels_guide.html#gemm-kernel">3. GEMM Kernel</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../prebuilt_kernels_guide.html#preshuffle-gemm-kernels-gemm-preshuffle-gemm-py">3.1 Preshuffle GEMM (<code class="docutils literal notranslate"><span class="pre">kernels/gemm/preshuffle_gemm.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../prebuilt_kernels_guide.html#b-flashattention-forward-kernels-attention-flash-attn-generic-py-kernels-attention-flash-attn-gfx950-py-kernels-attention-flash-attn-fp8-gfx950-py">3b. FlashAttention Forward (<code class="docutils literal notranslate"><span class="pre">kernels/attention/flash_attn_generic.py</span></code>, <code class="docutils literal notranslate"><span class="pre">kernels/attention/flash_attn_gfx950.py</span></code>, <code class="docutils literal notranslate"><span class="pre">kernels/attention/flash_attn_fp8_gfx950.py</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../prebuilt_kernels_guide.html#fp8-e4m3fn-forward">fp8 (e4m3fn) forward</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../prebuilt_kernels_guide.html#shared-utilities">4. Shared Utilities</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../prebuilt_kernels_guide.html#common-kernel-helpers-kernels-common-kernels-common-py">4.1 Common Kernel Helpers (<code class="docutils literal notranslate"><span class="pre">kernels/common/kernels_common.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../prebuilt_kernels_guide.html#mfma-epilogues-kernels-mma-mfma-epilogues-py">4.2 MFMA Epilogues (<code class="docutils literal notranslate"><span class="pre">kernels/mma/mfma_epilogues.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../prebuilt_kernels_guide.html#preshuffle-pipeline-kernels-mma-mfma-preshuffle-pipeline-py">4.3 Preshuffle Pipeline (<code class="docutils literal notranslate"><span class="pre">kernels/mma/mfma_preshuffle_pipeline.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../prebuilt_kernels_guide.html#layout-coordinate-helpers">4.4 Layout Coordinate Helpers</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../prebuilt_kernels_guide.html#kernel-api-comparison">5. Kernel API Comparison</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../prebuilt_kernels_guide.html#new-api-gemm">New API (GEMM)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../prebuilt_kernels_guide.html#kernel-decision-tree">6. Kernel Decision Tree</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../prebuilt_kernels_guide.html#source-files">7. Source Files</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../prebuilt_kernels_guide.html#test-files">8. Test Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../testing_benchmarking_guide.html">Testing &amp; Benchmarking Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#test-categories">1. Test Categories</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#mlir-lit-tests-tests-mlir">1.1 MLIR Lit Tests (<code class="docutils literal notranslate"><span class="pre">tests/mlir/</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#python-tests-tests-python">1.2 Python Tests (<code class="docutils literal notranslate"><span class="pre">tests/python/</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#gpu-kernel-tests-tests-kernels">1.3 GPU Kernel Tests (<code class="docutils literal notranslate"><span class="pre">tests/kernels/</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#aot-examples-tests-python-examples">1.4 AOT Examples (<code class="docutils literal notranslate"><span class="pre">tests/python/examples/</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#test-runner-scripts">2. Test Runner Scripts</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#scripts-run-tests-sh">2.1 <code class="docutils literal notranslate"><span class="pre">scripts/run_tests.sh</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#scripts-run-benchmark-sh">2.2 <code class="docutils literal notranslate"><span class="pre">scripts/run_benchmark.sh</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#pytest-configuration">3. Pytest Configuration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#tests-conftest-py">3.1 <code class="docutils literal notranslate"><span class="pre">tests/conftest.py</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#performance-measurement">4. Performance Measurement</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#tests-test-common-py">4.1 <code class="docutils literal notranslate"><span class="pre">tests/test_common.py</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#tests-kernels-benchmark-common-py">4.2 <code class="docutils literal notranslate"><span class="pre">tests/kernels/benchmark_common.py</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#test-utilities-tests-utils-py">5. Test Utilities (<code class="docutils literal notranslate"><span class="pre">tests/utils.py</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#weight-utilities">Weight Utilities</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#writing-new-tests">6. Writing New Tests</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#pyir-test-pattern-no-gpu">6.1 PyIR Test Pattern (No GPU)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#gpu-kernel-test-pattern-new-api">6.2 GPU Kernel Test Pattern (New API)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#benchmark-test-pattern">6.3 Benchmark Test Pattern</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#gemm-test-cli-arguments">7. GEMM Test CLI Arguments</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#test-configuration-via-environment-variables">8. Test Configuration via Environment Variables</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#ir-dump-workflow">9. IR Dump Workflow</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#via-mlircompiler">Via <code class="docutils literal notranslate"><span class="pre">MlirCompiler</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#dedicated-ir-dump-script">Dedicated IR Dump Script</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#source-files">10. Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../cute_layout_algebra_guide.html">CuTe Layout Algebra Reference for FlyDSL</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#overview">1. Overview</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#what-is-the-cute-layout-algebra">1.1 What is the CuTe Layout Algebra?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#flydsl-as-an-amd-implementation">1.2 FlyDSL as an AMD Implementation</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#layout-algebra-fundamentals">2. Layout Algebra Fundamentals</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#core-types">2.1 Core Types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#query-operations">2.2 Query Operations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#coordinate-mapping">2.3 Coordinate Mapping</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#layout-algebra-operations">2.4 Layout Algebra Operations</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../cute_layout_algebra_guide.html#composition">Composition</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../cute_layout_algebra_guide.html#complement">Complement</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../cute_layout_algebra_guide.html#coalesce">Coalesce</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../cute_layout_algebra_guide.html#products">Products</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../cute_layout_algebra_guide.html#divides">Divides</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../cute_layout_algebra_guide.html#partitioning-utilities">Partitioning Utilities</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#flydsl-kernel-development">3. FlyDSL Kernel Development</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#thread-and-block-hierarchy">4. Thread and Block Hierarchy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#tensor-creation-and-memory">5. Tensor Creation and Memory</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#tensor-construction">5.1 Tensor Construction</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#memory-hierarchy">5.2 Memory Hierarchy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#swizzling-bank-conflict-avoidance">5.3 Swizzling (Bank Conflict Avoidance)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#data-movement">6. Data Movement</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#copy-atoms-and-tiled-copies">6.1 Copy Atoms and Tiled Copies</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#buffer-loads-amd-specific">6.2 Buffer Loads (AMD-specific)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#compute-operations-mfma">7. Compute Operations (MFMA)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#synchronization">8. Synchronization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#compilation-and-execution">9. Compilation and Execution</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#compilation-pipeline">9.1 Compilation Pipeline</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#environment-variables">9.2 Environment Variables</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#complete-example-gemm-with-layout-algebra">10. Complete Example: GEMM with Layout Algebra</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#references">11. References</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#cute-layout-algebra-bsd-3-clause">CuTe Layout Algebra (BSD-3-Clause)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#flydsl-source-files">FlyDSL Source Files</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../api/dsl.html">FlyDSL Python DSL</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../api/dsl.html#module-flydsl">Core Module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/dsl.html#expression-api-flydsl-expr">Expression API (<code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#layout-construction">Layout Construction</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#layout-inspection">Layout Inspection</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#layout-algebra">Layout Algebra</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#layout-products-divides">Layout Products &amp; Divides</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#coordinate-mapping">Coordinate Mapping</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#memory-operations">Memory Operations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#copy-gemm">Copy &amp; GEMM</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#derived-tiled-operations-flydsl-expr-derived">Derived Tiled Operations (<code class="docutils literal notranslate"><span class="pre">flydsl.expr.derived</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#type-annotations">Type Annotations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#gpu-intrinsics-flydsl-expr-gpu">GPU Intrinsics (<code class="docutils literal notranslate"><span class="pre">flydsl.expr.gpu</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#arithmetic-and-numeric-types">Arithmetic and Numeric Types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#vector-values-flydsl-expr-typing-vector">Vector Values (<code class="docutils literal notranslate"><span class="pre">flydsl.expr.typing.Vector</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#rocdl-operations-flydsl-expr-rocdl">ROCDL Operations (<code class="docutils literal notranslate"><span class="pre">flydsl.expr.rocdl</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../api/dsl.html#compiler-api-flydsl-compiler">Compiler API (<code class="docutils literal notranslate"><span class="pre">flydsl.compiler</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../api/compiler.html">Compiler &amp; Pipeline</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../api/compiler.html#flyc-kernel-and-flyc-jit"><code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> and <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/compiler.html#compilation-flow">Compilation Flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/compiler.html#tensor-arguments">Tensor Arguments</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/compiler.html#rocdl-operations">ROCDL Operations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/compiler.html#fly-opt-cli">fly-opt CLI</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../api/kernels.html">Pre-built Kernels</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../api/kernels.html#gemm-kernels">GEMM Kernels</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/kernels.html#moe-mixture-of-experts-kernels">MoE (Mixture-of-Experts) Kernels</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/kernels.html#paged-attention">Paged Attention</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/kernels.html#normalization">Normalization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/kernels.html#softmax">Softmax</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/kernels.html#utilities">Utilities</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Tutorials</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../tutorials/index.html">Tutorials</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../tutorials/basic_usage.html">Basic Usage</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../tutorials/basic_usage.html#setting-up-the-environment">Setting Up the Environment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../tutorials/basic_usage.html#understanding-layouts">Understanding Layouts</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../tutorials/basic_usage.html#defining-a-kernel">Defining a Kernel</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../tutorials/basic_usage.html#launching-kernels">Launching Kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../tutorials/basic_usage.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../tutorials/kernel_development.html">Kernel Development</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../tutorials/kernel_development.html#tiled-copies">Tiled Copies</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../tutorials/kernel_development.html#mfma-instructions">MFMA Instructions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../tutorials/kernel_development.html#shared-memory-lds">Shared Memory (LDS)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../tutorials/kernel_development.html#performance-optimization">Performance Optimization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../tutorials/kernel_development.html#reference-implementations">Reference Implementations</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">FlyDSL</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Arithmetic Types</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/language/arithmetic_types.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="arithmetic-types">
+<h1>Arithmetic Types<a class="headerlink" href="#arithmetic-types" title="Link to this heading"></a></h1>
+<p>The arithmetic layer is the set of scalar (<code class="docutils literal notranslate"><span class="pre">Numeric</span></code>) and SIMD (<code class="docutils literal notranslate"><span class="pre">Vector</span></code>) values
+a kernel computes with: the types themselves, their public operations.</p>
+<section id="the-type-tower">
+<h2>The type tower<a class="headerlink" href="#the-type-tower" title="Link to this heading"></a></h2>
+<p>Every arithmetic value is either a scalar <code class="docutils literal notranslate"><span class="pre">Numeric</span></code> or a <code class="docutils literal notranslate"><span class="pre">Vector</span></code> of a <code class="docutils literal notranslate"><span class="pre">Numeric</span></code>
+element type. A type class is also its constructor: <code class="docutils literal notranslate"><span class="pre">Float32(x)</span></code> builds (or
+casts to) a <code class="docutils literal notranslate"><span class="pre">Float32</span></code>.</p>
+<section id="numeric-scalars">
+<h3>Numeric scalars<a class="headerlink" href="#numeric-scalars" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">Numeric</span></code> is the base of every scalar that wraps an <code class="docutils literal notranslate"><span class="pre">ir.Value</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Integers</strong> — <code class="docutils literal notranslate"><span class="pre">Int4</span></code> <code class="docutils literal notranslate"><span class="pre">Int8</span></code> <code class="docutils literal notranslate"><span class="pre">Int16</span></code> <code class="docutils literal notranslate"><span class="pre">Int32</span></code> <code class="docutils literal notranslate"><span class="pre">Int64</span></code> <code class="docutils literal notranslate"><span class="pre">Int128</span></code>, <code class="docutils literal notranslate"><span class="pre">Uint8</span></code>
+<code class="docutils literal notranslate"><span class="pre">Uint16</span></code> <code class="docutils literal notranslate"><span class="pre">Uint32</span></code> <code class="docutils literal notranslate"><span class="pre">Uint64</span></code> <code class="docutils literal notranslate"><span class="pre">Uint128</span></code>. Signedness and width are fixed per type.</p></li>
+<li><p><strong>Floats</strong> — <code class="docutils literal notranslate"><span class="pre">Float16</span></code> <code class="docutils literal notranslate"><span class="pre">BFloat16</span></code> <code class="docutils literal notranslate"><span class="pre">Float32</span></code> <code class="docutils literal notranslate"><span class="pre">Float64</span></code>.</p></li>
+<li><p><strong>Narrow floats</strong> — <code class="docutils literal notranslate"><span class="pre">Float8E5M2</span></code> <code class="docutils literal notranslate"><span class="pre">Float8E4M3FN</span></code> <code class="docutils literal notranslate"><span class="pre">Float8E4M3FNUZ</span></code>
+<code class="docutils literal notranslate"><span class="pre">Float8E4M3B11FNUZ</span></code> <code class="docutils literal notranslate"><span class="pre">Float8E4M3</span></code>, <code class="docutils literal notranslate"><span class="pre">Float6E2M3FN</span></code> <code class="docutils literal notranslate"><span class="pre">Float6E3M2FN</span></code>,
+<code class="docutils literal notranslate"><span class="pre">Float8E8M0FNU</span></code>, <code class="docutils literal notranslate"><span class="pre">Float4E2M1FN</span></code>. These are storage/transport types, not meant
+for direct arithmetic, and native support is architecture-restricted.</p></li>
+<li><p><strong><code class="docutils literal notranslate"><span class="pre">Boolean</span></code></strong> — the <code class="docutils literal notranslate"><span class="pre">i1</span></code> type; the result of comparisons and predicates.</p></li>
+</ul>
+</section>
+<section id="public-methods">
+<h3>Public methods<a class="headerlink" href="#public-methods" title="Link to this heading"></a></h3>
+<p>Common to <code class="docutils literal notranslate"><span class="pre">Numeric</span></code> and <code class="docutils literal notranslate"><span class="pre">Vector</span></code>, elementwise for <code class="docutils literal notranslate"><span class="pre">Vector</span></code>:</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Method</p></th>
+<th class="head"><p>Meaning</p></th>
+<th class="head"><p>Example</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">Type(x)</span></code></p></td>
+<td><p>construct or cast — the type class is its own constructor. A <code class="docutils literal notranslate"><span class="pre">Vector</span></code> alias type (<code class="docutils literal notranslate"><span class="pre">Float32x4</span></code>, …) broadcasts a scalar across every lane</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Int32(5)</span></code>, <code class="docutils literal notranslate"><span class="pre">Float32(thread_idx.x)</span></code>; <code class="docutils literal notranslate"><span class="pre">Float32x4(1.0)</span></code> → all four lanes <code class="docutils literal notranslate"><span class="pre">1.0</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>Arithmetic — <code class="docutils literal notranslate"><span class="pre">+</span></code> <code class="docutils literal notranslate"><span class="pre">-</span></code> <code class="docutils literal notranslate"><span class="pre">*</span></code> <code class="docutils literal notranslate"><span class="pre">/</span></code> <code class="docutils literal notranslate"><span class="pre">//</span></code> <code class="docutils literal notranslate"><span class="pre">%</span></code> <code class="docutils literal notranslate"><span class="pre">**</span></code>, unary <code class="docutils literal notranslate"><span class="pre">+x</span></code> <code class="docutils literal notranslate"><span class="pre">-x</span></code> <code class="docutils literal notranslate"><span class="pre">abs(x)</span></code>, <code class="docutils literal notranslate"><span class="pre">divmod(x,</span> <span class="pre">y)</span></code></p></td>
+<td><p>result type follows <em>Type interoperability</em>; elementwise with scalar broadcast for <code class="docutils literal notranslate"><span class="pre">Vector</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Int32(3)</span> <span class="pre">+</span> <span class="pre">Int32(4)</span></code> → <code class="docutils literal notranslate"><span class="pre">Int32(7)</span></code>; <code class="docutils literal notranslate"><span class="pre">vec</span> <span class="pre">*</span> <span class="pre">2.0</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>Bitwise/shift — <code class="docutils literal notranslate"><span class="pre">&amp;</span></code> <code class="docutils literal notranslate"><span class="pre">|</span></code> <code class="docutils literal notranslate"><span class="pre">^</span></code> <code class="docutils literal notranslate"><span class="pre">&lt;&lt;</span></code> <code class="docutils literal notranslate"><span class="pre">&gt;&gt;</span></code>, unary <code class="docutils literal notranslate"><span class="pre">~x</span></code></p></td>
+<td><p>integer-only</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Int32(6)</span> <span class="pre">&amp;</span> <span class="pre">Int32(3)</span></code> → <code class="docutils literal notranslate"><span class="pre">Int32(2)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>Comparison — <code class="docutils literal notranslate"><span class="pre">&lt;</span></code> <code class="docutils literal notranslate"><span class="pre">&lt;=</span></code> <code class="docutils literal notranslate"><span class="pre">&gt;</span></code> <code class="docutils literal notranslate"><span class="pre">&gt;=</span></code> <code class="docutils literal notranslate"><span class="pre">==</span></code> <code class="docutils literal notranslate"><span class="pre">!=</span></code></p></td>
+<td><p>result is <code class="docutils literal notranslate"><span class="pre">Boolean</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">a</span> <span class="pre">&lt;</span> <span class="pre">b</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">x.bitcast(dtype)</span></code></p></td>
+<td><p>reinterpret the bits: <code class="docutils literal notranslate"><span class="pre">Numeric</span></code> equal width; <code class="docutils literal notranslate"><span class="pre">Vector</span></code> equal <em>total</em> width, recomputing the lane count</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Float32(1.0).bitcast(Int32)</span></code>; <code class="docutils literal notranslate"><span class="pre">Float32x4(0.0).bitcast(Int8)</span></code> → <code class="docutils literal notranslate"><span class="pre">Int8x16</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">x.dtype</span></code></p></td>
+<td><p>the scalar type (<code class="docutils literal notranslate"><span class="pre">Numeric</span></code>) / element type (<code class="docutils literal notranslate"><span class="pre">Vector</span></code>)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Int32(5).dtype</span></code> / <code class="docutils literal notranslate"><span class="pre">Int32x4(0).dtype</span></code> → <code class="docutils literal notranslate"><span class="pre">Int32</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">x.ir_value()</span></code></p></td>
+<td><p>the underlying <code class="docutils literal notranslate"><span class="pre">ir.Value</span></code>, materializing a constant for a compile-time value</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Int32(5).ir_value()</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">cond.select(true_value,</span> <span class="pre">false_value)</span></code></p></td>
+<td><p>ternary select; a non-<code class="docutils literal notranslate"><span class="pre">Boolean</span></code> <code class="docutils literal notranslate"><span class="pre">cond</span></code> is converted by truthiness (nonzero)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">(a</span> <span class="pre">&lt;</span> <span class="pre">b).select(a,</span> <span class="pre">b)</span></code> → min</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">x.to(dtype)</span></code></p></td>
+<td><p>value-preserving conversion to another type</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Int32(5).to(Float32)</span></code> → <code class="docutils literal notranslate"><span class="pre">Float32(5.0)</span></code></p></td>
+</tr>
+</tbody>
+</table>
+<p><code class="docutils literal notranslate"><span class="pre">Numeric</span></code>-only methods:</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Method</p></th>
+<th class="head"><p>Meaning</p></th>
+<th class="head"><p>Example</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">x.is_static()</span></code></p></td>
+<td><p>whether the value is compile-time (Python) rather than run-time (<code class="docutils literal notranslate"><span class="pre">ir.Value</span></code>)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Int32(5).is_static()</span></code> → <code class="docutils literal notranslate"><span class="pre">True</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">Numeric.width</span></code> / <code class="docutils literal notranslate"><span class="pre">Numeric.log_width</span></code></p></td>
+<td><p>the type’s bit width, and <code class="docutils literal notranslate"><span class="pre">ceil(log2(width))</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Int32.width</span></code> → <code class="docutils literal notranslate"><span class="pre">32</span></code>; <code class="docutils literal notranslate"><span class="pre">Int32.log_width</span></code> → <code class="docutils literal notranslate"><span class="pre">5</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">as_numeric</span></code> / <code class="docutils literal notranslate"><span class="pre">Numeric.from_python_value(value)</span></code></p></td>
+<td><p>build a <code class="docutils literal notranslate"><span class="pre">Numeric</span></code> from a Python value</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">as_numeric(5)</span></code> → <code class="docutils literal notranslate"><span class="pre">Int32(5)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">Numeric.from_ir_type(ir_type)</span></code></p></td>
+<td><p>the <code class="docutils literal notranslate"><span class="pre">Numeric</span></code> type for an MLIR type</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Numeric.from_ir_type(T.f32())</span></code> → <code class="docutils literal notranslate"><span class="pre">Float32</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="vector">
+<h3>Vector<a class="headerlink" href="#vector" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">Vector</span></code> is a fixed-length sequence of <code class="docutils literal notranslate"><span class="pre">N</span></code> elements of a single <code class="docutils literal notranslate"><span class="pre">Numeric</span></code>
+element type. It has value semantics and inherits the scalar operators, applied
+elementwise; a scalar operand is auto-broadcast across the lanes.</p>
+<ul class="simple">
+<li><p><strong>Type aliases</strong> — <code class="docutils literal notranslate"><span class="pre">Float32x4</span></code>, <code class="docutils literal notranslate"><span class="pre">BFloat16x8</span></code>, <code class="docutils literal notranslate"><span class="pre">Int32x4</span></code>, … name a
+<code class="docutils literal notranslate"><span class="pre">dtype</span></code>×<code class="docutils literal notranslate"><span class="pre">N</span></code> vector type directly (<code class="docutils literal notranslate"><span class="pre">&lt;dtype&gt;x&lt;N&gt;</span></code>).</p></li>
+</ul>
+</section>
+</section>
+<section id="compile-time-and-run-time-values">
+<h2>Compile-time and run-time values<a class="headerlink" href="#compile-time-and-run-time-values" title="Link to this heading"></a></h2>
+<p>A <code class="docutils literal notranslate"><span class="pre">Numeric</span></code> is <em>polymorphic in the value it holds</em> — the type is the same either
+way, and <code class="docutils literal notranslate"><span class="pre">is_static()</span></code> reports which:</p>
+<ul class="simple">
+<li><p>a <strong>compile-time value</strong> — a Python <code class="docutils literal notranslate"><span class="pre">int</span></code> / <code class="docutils literal notranslate"><span class="pre">float</span></code> / <code class="docutils literal notranslate"><span class="pre">bool</span></code>, known while
+tracing; or</p></li>
+<li><p>a <strong>run-time value</strong> — an <code class="docutils literal notranslate"><span class="pre">ir.Value</span></code> from an MLIR op, known only at execution.</p></li>
+</ul>
+<p>A <code class="docutils literal notranslate"><span class="pre">Vector</span></code> is always run-time — it is backed by an MLIR vector value, so it has
+no compile-time (folded) form.</p>
+<section id="arithmetic-preserves-the-compile-time-property">
+<h3>Arithmetic preserves the compile-time property<a class="headerlink" href="#arithmetic-preserves-the-compile-time-property" title="Link to this heading"></a></h3>
+<p>If every operand is compile-time, the result is compile-time — the host folds it
+and emits no MLIR (<code class="docutils literal notranslate"><span class="pre">Int32(3)</span> <span class="pre">+</span> <span class="pre">Int32(4)</span></code> ⇒ <code class="docutils literal notranslate"><span class="pre">Int32</span></code> holding <code class="docutils literal notranslate"><span class="pre">7</span></code>). As soon as one
+operand is run-time, the result is run-time and an MLIR op is emitted. This
+holds uniformly across arithmetic, comparison, bitwise, and shift operators.</p>
+</section>
+<section id="python-literals">
+<h3>Python literals<a class="headerlink" href="#python-literals" title="Link to this heading"></a></h3>
+<p>A bare literal stays plain Python while it only meets other Python values
+(<code class="docutils literal notranslate"><span class="pre">2</span> <span class="pre">+</span> <span class="pre">3</span></code> is ordinary Python). On contact with a <code class="docutils literal notranslate"><span class="pre">Numeric</span></code> it takes a DSL type
+<em>by value</em> (see <em>Operand normalization</em>) as a compile-time value; on contact
+with a <code class="docutils literal notranslate"><span class="pre">Vector</span></code> it broadcasts to the lanes and the result is run-time. After
+this the interoperability rules apply. An explicit <code class="docutils literal notranslate"><span class="pre">Int32(5)</span></code> is likewise
+compile-time until combined with a run-time value.</p>
+</section>
+<section id="using-a-compile-time-value-as-python">
+<h3>Using a compile-time value as Python<a class="headerlink" href="#using-a-compile-time-value-as-python" title="Link to this heading"></a></h3>
+<p>Because it holds a real Python value, a compile-time <code class="docutils literal notranslate"><span class="pre">Numeric</span></code> works wherever
+Python expects one — <code class="docutils literal notranslate"><span class="pre">int(x)</span></code>, <code class="docutils literal notranslate"><span class="pre">bool(x)</span></code>, indexing, a Python <code class="docutils literal notranslate"><span class="pre">if</span></code> — so a DSL
+constant can still drive host-side control flow. A run-time <code class="docutils literal notranslate"><span class="pre">Numeric</span></code> raises if
+forced to a Python value.</p>
+</section>
+</section>
+<section id="type-interoperability">
+<h2>Type interoperability<a class="headerlink" href="#type-interoperability" title="Link to this heading"></a></h2>
+<p>How a binary operation between two DSL numeric values determines the type its
+operands are converted to (the <em>common type</em>) and the type it produces (the
+<em>result type</em>). The rules are the same whether operands are scalar (<code class="docutils literal notranslate"><span class="pre">Numeric</span></code>),
+<code class="docutils literal notranslate"><span class="pre">Vector</span></code>, or a mix of the two; <code class="docutils literal notranslate"><span class="pre">Vector</span> <span class="pre">⊗</span> <span class="pre">Vector</span></code> additionally broadcasts shapes,
+which is independent of type and covered in the layout guides.</p>
+<section id="operand-normalization">
+<h3>Operand normalization<a class="headerlink" href="#operand-normalization" title="Link to this heading"></a></h3>
+<p>Before the rules below apply, operands are normalized:</p>
+<ul class="simple">
+<li><p><strong>Python literals</strong> take a DSL type by value: an <code class="docutils literal notranslate"><span class="pre">int</span></code> becomes <code class="docutils literal notranslate"><span class="pre">Int32</span></code>, or
+<code class="docutils literal notranslate"><span class="pre">Int64</span></code> when it falls outside the <code class="docutils literal notranslate"><span class="pre">Int32</span></code> range; a <code class="docutils literal notranslate"><span class="pre">float</span></code> becomes <code class="docutils literal notranslate"><span class="pre">Float32</span></code>;
+a <code class="docutils literal notranslate"><span class="pre">bool</span></code> becomes <code class="docutils literal notranslate"><span class="pre">Boolean</span></code>.</p></li>
+<li><p><strong><code class="docutils literal notranslate"><span class="pre">Boolean</span></code></strong> depends on the operation:</p>
+<ul>
+<li><p>In arithmetic (<code class="docutils literal notranslate"><span class="pre">+</span> <span class="pre">-</span> <span class="pre">*</span> <span class="pre">/</span> <span class="pre">//</span> <span class="pre">%</span></code>) it is converted to <code class="docutils literal notranslate"><span class="pre">Int32</span></code> and then follows
+the <code class="docutils literal notranslate"><span class="pre">Int32</span></code> rules.</p></li>
+<li><p>In comparisons it is compared directly and the result is <code class="docutils literal notranslate"><span class="pre">Boolean</span></code>.</p></li>
+<li><p>In bitwise (<code class="docutils literal notranslate"><span class="pre">&amp;</span> <span class="pre">|</span> <span class="pre">^</span></code>) and shift (<code class="docutils literal notranslate"><span class="pre">&lt;&lt;</span> <span class="pre">&gt;&gt;</span></code>) it stays <code class="docutils literal notranslate"><span class="pre">Boolean</span></code> and the result
+is <code class="docutils literal notranslate"><span class="pre">Boolean</span></code>.</p></li>
+</ul>
+</li>
+</ul>
+</section>
+<section id="common-type">
+<h3>Common type<a class="headerlink" href="#common-type" title="Link to this heading"></a></h3>
+<p>For two numeric operands (after normalization above; <code class="docutils literal notranslate"><span class="pre">Boolean</span></code> in arithmetic is
+already <code class="docutils literal notranslate"><span class="pre">Int32</span></code> here), the common type is:</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>lhs \ rhs</p></th>
+<th class="head"><p>Int8</p></th>
+<th class="head"><p>Int16</p></th>
+<th class="head"><p>Int32</p></th>
+<th class="head"><p>Int64</p></th>
+<th class="head"><p>Uint32</p></th>
+<th class="head"><p>Float16</p></th>
+<th class="head"><p>BFloat16</p></th>
+<th class="head"><p>Float32</p></th>
+<th class="head"><p>Float64</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Int8</p></td>
+<td><p>Int8</p></td>
+<td><p>Int16</p></td>
+<td><p>Int32</p></td>
+<td><p>Int64</p></td>
+<td><p>Uint32</p></td>
+<td><p>Float16</p></td>
+<td><p>BFloat16</p></td>
+<td><p>Float32</p></td>
+<td><p>Float64</p></td>
+</tr>
+<tr class="row-odd"><td><p>Int16</p></td>
+<td><p>Int16</p></td>
+<td><p>Int16</p></td>
+<td><p>Int32</p></td>
+<td><p>Int64</p></td>
+<td><p>Uint32</p></td>
+<td><p>Float16</p></td>
+<td><p>BFloat16</p></td>
+<td><p>Float32</p></td>
+<td><p>Float64</p></td>
+</tr>
+<tr class="row-even"><td><p>Int32</p></td>
+<td><p>Int32</p></td>
+<td><p>Int32</p></td>
+<td><p>Int32</p></td>
+<td><p>Int64</p></td>
+<td><p>Uint32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float64</p></td>
+</tr>
+<tr class="row-odd"><td><p>Int64</p></td>
+<td><p>Int64</p></td>
+<td><p>Int64</p></td>
+<td><p>Int64</p></td>
+<td><p>Int64</p></td>
+<td><p>Int64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+</tr>
+<tr class="row-even"><td><p>Uint32</p></td>
+<td><p>Uint32</p></td>
+<td><p>Uint32</p></td>
+<td><p>Uint32</p></td>
+<td><p>Int64</p></td>
+<td><p>Uint32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float64</p></td>
+</tr>
+<tr class="row-odd"><td><p>Float16</p></td>
+<td><p>Float16</p></td>
+<td><p>Float16</p></td>
+<td><p>Float32</p></td>
+<td><p>Float64</p></td>
+<td><p>Float32</p></td>
+<td><p>Float16</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float64</p></td>
+</tr>
+<tr class="row-even"><td><p>BFloat16</p></td>
+<td><p>BFloat16</p></td>
+<td><p>BFloat16</p></td>
+<td><p>Float32</p></td>
+<td><p>Float64</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>BFloat16</p></td>
+<td><p>Float32</p></td>
+<td><p>Float64</p></td>
+</tr>
+<tr class="row-odd"><td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float64</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float64</p></td>
+</tr>
+<tr class="row-even"><td><p>Float64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+</tr>
+</tbody>
+</table>
+<p>The table follows these rules (other integer widths obey the same integer
+rules):</p>
+<ul class="simple">
+<li><p><strong>Same type</strong> → itself.</p></li>
+<li><p><strong>Two integers, same signedness</strong> → the wider one (<code class="docutils literal notranslate"><span class="pre">Int8</span> <span class="pre">+</span> <span class="pre">Int8</span></code> stays <code class="docutils literal notranslate"><span class="pre">Int8</span></code>;
+there is no promotion to a machine <code class="docutils literal notranslate"><span class="pre">int</span></code>).</p></li>
+<li><p><strong>Two integers, mixed signedness</strong> → the unsigned type when it is at least as
+wide as the signed one, otherwise the signed type. So <code class="docutils literal notranslate"><span class="pre">Int32</span> <span class="pre">+</span> <span class="pre">Uint32</span></code> is
+<code class="docutils literal notranslate"><span class="pre">Uint32</span></code>, and <code class="docutils literal notranslate"><span class="pre">Int64</span> <span class="pre">+</span> <span class="pre">Uint32</span></code> is <code class="docutils literal notranslate"><span class="pre">Int64</span></code>.</p></li>
+<li><p><strong>One float, one integer</strong> → the float, widened to cover the integer’s width:
+<code class="docutils literal notranslate"><span class="pre">Float16</span> <span class="pre">+</span> <span class="pre">Int32</span></code> is <code class="docutils literal notranslate"><span class="pre">Float32</span></code>, <code class="docutils literal notranslate"><span class="pre">Float32</span> <span class="pre">+</span> <span class="pre">Int64</span></code> is <code class="docutils literal notranslate"><span class="pre">Float64</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">Float16</span> <span class="pre">+</span> <span class="pre">Int8</span></code> is <code class="docutils literal notranslate"><span class="pre">Float16</span></code>.</p></li>
+<li><p><strong>Two floats</strong> → the wider one; at equal width the higher-precision one
+(<code class="docutils literal notranslate"><span class="pre">Float64</span> <span class="pre">&gt;</span> <span class="pre">Float32</span> <span class="pre">&gt;</span> <span class="pre">Float16</span></code>/<code class="docutils literal notranslate"><span class="pre">BFloat16</span></code>). <code class="docutils literal notranslate"><span class="pre">Float16</span></code> and <code class="docutils literal notranslate"><span class="pre">BFloat16</span></code> are
+equal width and neither converts to the other without loss, so they combine to
+<code class="docutils literal notranslate"><span class="pre">Float32</span></code>.</p></li>
+</ul>
+</section>
+<section id="result-type">
+<h3>Result type<a class="headerlink" href="#result-type" title="Link to this heading"></a></h3>
+<p>Given the common type <code class="docutils literal notranslate"><span class="pre">C</span></code> from the table above:</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Operation</p></th>
+<th class="head"><p>Result type</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">+</span></code>  <code class="docutils literal notranslate"><span class="pre">-</span></code>  <code class="docutils literal notranslate"><span class="pre">*</span></code> <code class="docutils literal notranslate"><span class="pre">//</span></code>  <code class="docutils literal notranslate"><span class="pre">%</span></code> <code class="docutils literal notranslate"><span class="pre">**</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">C</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">C</span></code> if <code class="docutils literal notranslate"><span class="pre">C</span></code> is a <code class="docutils literal notranslate"><span class="pre">Float</span></code>; if <code class="docutils literal notranslate"><span class="pre">C</span></code> is an <code class="docutils literal notranslate"><span class="pre">Integer</span></code>, <code class="docutils literal notranslate"><span class="pre">Float32</span></code> when its width is at most 32 bits, otherwise <code class="docutils literal notranslate"><span class="pre">Float64</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">&lt;</span></code>  <code class="docutils literal notranslate"><span class="pre">&lt;=</span></code>  <code class="docutils literal notranslate"><span class="pre">&gt;</span></code>  <code class="docutils literal notranslate"><span class="pre">&gt;=</span></code>  <code class="docutils literal notranslate"><span class="pre">==</span></code>  <code class="docutils literal notranslate"><span class="pre">!=</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Boolean</span></code> (operands are compared as <code class="docutils literal notranslate"><span class="pre">C</span></code>)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">&amp;</span></code>  <code class="docutils literal notranslate"><span class="pre">|</span></code>  <code class="docutils literal notranslate"><span class="pre">^</span></code>  <code class="docutils literal notranslate"><span class="pre">&lt;&lt;</span></code>  <code class="docutils literal notranslate"><span class="pre">&gt;&gt;</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">C</span></code>; operands must be <code class="docutils literal notranslate"><span class="pre">Integer</span></code> (a <code class="docutils literal notranslate"><span class="pre">Float</span></code> operand raises <code class="docutils literal notranslate"><span class="pre">TypeError</span></code>)</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="../quickstart.html" class="btn btn-neutral float-left" title="Quick Start" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="../architecture_guide.html" class="btn btn-neutral float-right" title="Architecture &amp; Compilation Pipeline Guide" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2026, Advanced Micro Devices, Inc..</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
