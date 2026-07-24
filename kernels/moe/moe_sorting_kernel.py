@@ -38,9 +38,9 @@ from flydsl.runtime.device import get_rocm_arch
 from kernels.common import buffer_ops
 from kernels.common.kernels_common import get_warp_size
 from kernels.moe.topk_gating_softmax_kernel import (
-    build_topk_gating_softmax_module,
     _compute_topk_gating_layout,
     _emit_topk_gating_softmax_body,
+    build_topk_gating_softmax_module,
 )
 
 BLOCK_SIZE = 256
