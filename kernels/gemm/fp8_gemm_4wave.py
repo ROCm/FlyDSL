@@ -15,6 +15,15 @@ preserve the original kernel's interleaved-cluster scheduling.
 
 Optional B preshuffle uses the same on-disk layout as
 ``preshuffle_gemm`` / ``shuffle_weight((16, 16))``.
+
+The non-AGPR MFMA path (``Mfma16x16x128.call`` / ``call_one`` for non-256x256
+tiles and the loop tails) is issued through the higher-level
+``fx.make_tiled_mma`` + ``fx.gemm(tiled_mma, ...)`` idiom (see
+``fp8_gemm_utils``). The 256x256 interleaved cluster keeps
+``Mfma16x16x128AGPR._do_mma`` on inline asm because pinning the accumulator in
+AGPR (``=a,v,v,0``) is the whole point of that path and cannot route through
+``fx.gemm``. The gmem->LDS / LDS->reg copies stay hand-swizzled to preserve the
+interleaved-cluster instruction schedule.
 """
 
 import flydsl.compiler as flyc
