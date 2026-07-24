@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-07-24T17:39:07Z",
+ "updated": "2026-07-24T18:51:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30117815364,
+   "pr": 786,
+   "commit": "ca10e438f6b4234a7245138407f4b2eb4797869e",
+   "branch": "feat/autotune-offline-configs",
+   "event": "pull_request",
+   "title": "[3/5] autotune: add offline config artifacts (#770)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30117815364",
+   "created_at": "2026-07-24T18:40:03Z",
+   "updated_at": "2026-07-24T18:43:12Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 30113835020,
+   "pr": 874,
+   "commit": "11629cc74fa56c0675693e77a53361253a38e305",
+   "branch": "xudoyuan/dyn-cf-list-carry",
+   "event": "pull_request",
+   "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30113835020",
+   "created_at": "2026-07-24T17:39:10Z",
+   "updated_at": "2026-07-24T17:43:21Z",
+   "actor": "xudoyuan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-24T17:43:08Z",
+     "completed_at": "2026-07-24T18:31:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30113835020/job/89550350579"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-24T17:43:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30113835020/job/89550350605"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-24T17:43:20Z",
+     "completed_at": "2026-07-24T18:46:21Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30113835020/job/89550350632"
+    }
+   ]
+  },
   {
    "run_id": 30109422592,
    "pr": 874,
@@ -536,7 +594,7 @@
   },
   {
    "run_id": 30083553786,
-   "pr": 786,
+   "pr": null,
    "commit": "9ded54ebf45d82ace9dae1f21e2bd576d7395814",
    "branch": "feat/autotune-offline-configs",
    "event": "pull_request",
@@ -2270,92 +2328,6 @@
      "started_at": "2026-07-23T15:25:20Z",
      "completed_at": "2026-07-23T15:37:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30019083114/job/89247354620"
-    }
-   ]
-  },
-  {
-   "run_id": 30018810534,
-   "pr": null,
-   "commit": "1afc0b0f5188c5c9eac679930afb392268bfaaa9",
-   "branch": "main",
-   "event": "push",
-   "title": "ci(autotune): keep broad test runs deterministic (#788)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30018810534",
-   "created_at": "2026-07-23T15:04:20Z",
-   "updated_at": "2026-07-24T04:47:37Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T04:41:46Z",
-     "completed_at": "2026-07-24T04:47:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30018810534/job/89401120937"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T04:41:46Z",
-     "completed_at": "2026-07-24T04:47:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30018810534/job/89401120941"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T16:20:23Z",
-     "completed_at": "2026-07-23T17:39:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30018810534/job/89401138176"
-    }
-   ]
-  },
-  {
-   "run_id": 30018220233,
-   "pr": null,
-   "commit": "2717a0bde2cdb0df8916530d6bac6309b83fc5a5",
-   "branch": "gfx1250/gemm-refactor",
-   "event": "pull_request",
-   "title": "[gfx1250] Refactor MoE/GEMM kernels with layout/atom API",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30018220233",
-   "created_at": "2026-07-23T14:56:59Z",
-   "updated_at": "2026-07-23T18:21:13Z",
-   "actor": "aoli26",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-23T16:15:42Z",
-     "completed_at": "2026-07-23T16:29:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30018220233/job/89244190534"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-23T18:10:12Z",
-     "completed_at": "2026-07-23T18:21:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30018220233/job/89244190560"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-23T15:51:57Z",
-     "completed_at": "2026-07-23T16:20:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30018220233/job/89244190595"
     }
    ]
   }
