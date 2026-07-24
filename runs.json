@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-24T15:51:10Z",
+ "updated": "2026-07-24T16:19:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,28 +10,28 @@
    "branch": "xudoyuan/dyn-cf-list-carry",
    "event": "pull_request",
    "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30104438087",
    "created_at": "2026-07-24T15:14:37Z",
-   "updated_at": "2026-07-24T15:17:36Z",
+   "updated_at": "2026-07-24T16:13:59Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-24T15:17:59Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T16:01:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30104438087/job/89518984261"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-24T15:17:36Z",
+     "started_at": "2026-07-24T16:13:58Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30104438087/job/89518984282"
     },
@@ -53,11 +53,11 @@
    "branch": "aryaman/fix-autotune-return-value",
    "event": "pull_request",
    "title": "[fix] Autotuner: propagate the tuned function's return value",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30103678184",
    "created_at": "2026-07-24T15:03:50Z",
-   "updated_at": "2026-07-24T15:15:57Z",
+   "updated_at": "2026-07-24T16:17:12Z",
    "actor": "aryaman-gupta",
    "jobs": [
     {
@@ -72,19 +72,19 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-24T15:15:56Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T16:13:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30103678184/job/89516686279"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-24T15:08:30Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T16:17:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30103678184/job/89516686323"
     }
    ]
