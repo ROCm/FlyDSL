@@ -5,8 +5,9 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl._mlir.dialects import memref as memref_dialect
-from flydsl.expr import arith, buffer_ops, rocdl
+from flydsl.expr import arith, rocdl
 from flydsl.expr.typing import Float4E2M1FN, Float8E4M3FN, T
+from kernels.common import buffer_ops
 from kernels.common.layout_utils import crd2idx
 
 from . import dpp_utils
