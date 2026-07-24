@@ -60,9 +60,7 @@ FlyDSL/
 │   │   ├── primitive.py              # Primitive operations (layout algebra, copy, gemm)
 │   │   ├── derived.py                # Derived types (CopyAtom, MmaAtom, TiledCopy)
 │   │   ├── arith.py                  # Arithmetic dialect ops
-│   │   ├── vector.py                 # Vector dialect ops
 │   │   ├── gpu.py                    # GPU dialect ops (thread_idx, block_idx, barrier)
-│   │   ├── buffer_ops.py             # Buffer / memory operations
 │   │   └── rocdl/                    # ROCm-specific intrinsics (MFMA/WMMA, buffer, TDM, cluster)
 │   ├── runtime/
 │   │   └── device.py                 # get_rocm_arch() — GPU architecture detection

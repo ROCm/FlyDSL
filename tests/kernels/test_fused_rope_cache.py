@@ -313,7 +313,7 @@ def run_test(
         value_cache = torch.zeros(num_blocks, num_kv_heads, head_dim, block_size, device=device, dtype=torch_dtype)
 
     if apply_scale:
-        # fp8 cache: allocate as fp8 type for storage, but kernel uses raw buffer_ops.
+        # fp8 cache: allocate as fp8 type for storage, but the kernel writes it via raw buffer stores.
         # Scales must be 1-D tensors (FlyDSL requires at least one dimension).
         kc_fp8 = torch.zeros_like(key_cache).to(FP8_DTYPE)
         vc_fp8 = torch.zeros_like(value_cache).to(FP8_DTYPE)

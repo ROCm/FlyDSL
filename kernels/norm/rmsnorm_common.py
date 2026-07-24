@@ -12,7 +12,7 @@ have to import from each other. Keeping these here follows the topical
 
 import flydsl.expr as fx
 from flydsl.expr import const_expr
-from flydsl.expr.vector import full
+from flydsl.expr.typing import full
 from kernels.common.kernels_common import get_warp_size
 
 KERNEL_NAME = "rmsnorm"

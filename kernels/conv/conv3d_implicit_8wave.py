@@ -15,8 +15,9 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, rocdl
+from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
+from kernels.common import buffer_ops
 from kernels.common.mem_ops import buffer_atomic_add
 
 TILE_M = 128

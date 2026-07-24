@@ -10,13 +10,14 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import math as math_dialect
-from flydsl._mlir.dialects import scf
+from flydsl._mlir.dialects import scf, vector
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
+from flydsl.expr import arith, as_ir_value, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+from kernels.common import buffer_ops
 from kernels.common.kernels_common import _if_then
 from kernels.common.mma.mfma_epilogues import mfma_epilog
 from kernels.common.mma.mfma_preshuffle_pipeline import (
@@ -430,7 +431,7 @@ def compile_moe_blockscale_gemm1(
                     idx_i32 = x_row_base_div4[i] + base_k_div4 + x_col_local_i32[i]
                     x_vec = load_x(idx_i32, x_load_bytes_v)
                     if const_expr(x_load_bytes_v == 16):
-                        parts.append(vector.bitcast(T.i32x4, x_vec))
+                        parts.append(vector.bitcast(T.i32x4, as_ir_value(x_vec)))
                     elif const_expr(x_load_bytes_v == 8):
                         parts.append(x_vec)
                     else:
@@ -594,10 +595,10 @@ def compile_moe_blockscale_gemm1(
                 )
                 idx_a16 = preshuffle_crd2idx((fx.Int32(curr_row_a_lds), fx.Int32(col_base_swz)), layout_lds)
                 idx_a16 = idx_a16 + lds_base
-                loaded_a16 = vector.load_op(vec16_x, lds_x, [idx_a16])
-                a_i64x2 = vector.bitcast(T.i64x2, loaded_a16)
-                a0 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
-                a1 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
+                loaded_a16 = vector.load(vec16_x, as_ir_value(lds_x), [as_ir_value(idx_a16)])
+                a_i64x2 = vector.bitcast(T.i64x2, as_ir_value(loaded_a16))
+                a0 = vector.extract(as_ir_value(a_i64x2), static_position=[0], dynamic_position=[])
+                a1 = vector.extract(as_ir_value(a_i64x2), static_position=[1], dynamic_position=[])
                 return a0, a1
 
             # --- Blockscale pre-decode and helpers ---
@@ -663,7 +664,7 @@ def compile_moe_blockscale_gemm1(
 
                     s_a_vec4_list = []
                     for mi in range_constexpr(m_repeat):
-                        s_a_vec4_list.append(vector.from_elements(T.f32x4, s_a_vecs[mi]))
+                        s_a_vec4_list.append(vector.from_elements(T.f32x4, [as_ir_value(e) for e in s_a_vecs[mi]]))
                     all_combined.append((s_a_vec4_list, s_w_gate_vals, s_w_up_vals))
                 return all_combined
 
@@ -1000,8 +1001,8 @@ def compile_moe_blockscale_gemm1(
                         col_local = col_base_local + (ni * 16)
 
                         acc_idx = mi * num_acc_n + ni
-                        vg = vector.extract(acc_gate[acc_idx], static_position=[ii], dynamic_position=[])
-                        vu = vector.extract(acc_up[acc_idx], static_position=[ii], dynamic_position=[])
+                        vg = vector.extract(as_ir_value(acc_gate[acc_idx]), static_position=[ii], dynamic_position=[])
+                        vu = vector.extract(as_ir_value(acc_up[acc_idx]), static_position=[ii], dynamic_position=[])
 
                         y = silu(vg) * vu
                         if const_expr(doweight_stage1):
@@ -1009,8 +1010,8 @@ def compile_moe_blockscale_gemm1(
                         y16 = arith.trunc_f(T.f16, y)
 
                         lds_idx = row_base_lds + col_local
-                        v1 = vector.from_elements(T.vec(1, T.f16), [y16])
-                        vector.store(v1, lds_out, [lds_idx], alignment=2)
+                        v1 = vector.from_elements(T.vec(1, T.f16), [as_ir_value(y16)])
+                        vector.store(as_ir_value(v1), as_ir_value(lds_out), [as_ir_value(lds_idx)], alignment=2)
 
                 def precompute_row(*, row_local, row):
                     fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=T.i32)
@@ -1077,8 +1078,8 @@ def compile_moe_blockscale_gemm1(
                         col_i32 = col_i32_list[ni]
 
                         acc_idx = mi * num_acc_n + ni
-                        vg = vector.extract(acc_gate[acc_idx], static_position=[ii], dynamic_position=[])
-                        vu = vector.extract(acc_up[acc_idx], static_position=[ii], dynamic_position=[])
+                        vg = vector.extract(as_ir_value(acc_gate[acc_idx]), static_position=[ii], dynamic_position=[])
+                        vu = vector.extract(as_ir_value(acc_up[acc_idx]), static_position=[ii], dynamic_position=[])
 
                         y = silu(vg) * vu
                         if const_expr(doweight_stage1):

@@ -236,24 +236,7 @@ as_i32 = vec.bitcast(fx.Int32)
 as_bf16 = vec.to(fx.BFloat16)
 ```
 
-### 4.3 Buffer Operations (`fx.buffer_ops`)
-
-AMD buffer load/store intrinsics for efficient global memory access:
-
-```python
-from flydsl.expr import buffer_ops
-
-# Create buffer resource descriptor from memref
-rsrc = buffer_ops.create_buffer_resource(memref_value)
-
-# Buffer load (vectorized)
-data = buffer_ops.buffer_load(rsrc, byte_offset, vec_width=4)
-
-# Buffer store
-buffer_ops.buffer_store(data, rsrc, byte_offset)
-```
-
-### 4.4 ROCm Intrinsics (`fx.rocdl`)
+### 4.3 ROCm Intrinsics (`fx.rocdl`)
 
 #### High-Level Helpers
 
@@ -364,11 +347,11 @@ mma = fx.atom_set_value(mma, "scale_b", fx.Int32(scale_b))
 fx.gemm(mma, frag_C, frag_A, frag_B, frag_C)
 ```
 
-**TDM async copy atom** — the descriptor (base pointer, per-dim extent for HW
-out-of-bounds handling, per-dim stride) is carried as **atom state**; the global
-operand of `copy_atom_call` is a *shape/direction token only* (its layout gives
-the compile-time N-D tile shape, its address space picks load vs store — its
-pointer is unused). Build it with `rocdl.make_tdm_atom`:
+**TDM async copy atom** — the **base pointer comes from the `copy_atom_call` global
+operand** (its pointer); the per-dim extent (HW out-of-bounds handling), per-dim
+stride, `imm_offset` (K-loop tile bump), and MCAST `workgroup_mask` are runtime
+**atom state**. The global operand's address space also picks load vs store. Build
+it with `rocdl.make_tdm_atom`:
 
 ```python
 # make_tdm_atom(tensor, tensor_extents, strides=None, *, num_warps,
@@ -378,19 +361,21 @@ lds = fx.SharedAllocator().allocate(fx.Array[fx.Float16, M * N]).peek()
 lds2d = fx.make_view(lds.ptr, fx.make_layout((M, N), (N, 1)))       # note: lds.ptr
 g2d = fx.make_view(fx.get_iter(A), fx.make_layout((M, N), (N, 1)))  # raw VA, not make_buffer_tensor
 
-atom = rocdl.make_tdm_atom(g2d, [M, N], num_warps=4)   # rank = len(extents), 1–5D
-fx.copy_atom_call(atom, g2d, lds2d)                    # Global → LDS (direction from address spaces)
-rocdl.tdm_ops.tensor_wait(0)                           # await the async DMA (s_wait_tensorcnt)
+atom = rocdl.make_tdm_atom(g2d, [M, N], num_warps=4)  # rank = len(extents), 1–5D
+fx.copy_atom_call(atom, g2d, lds2d)                   # Global → LDS (base from g2d)
+rocdl.tdm_ops.tensor_wait(0)                          # await the async DMA (s_wait_tensorcnt)
 
-# K-loop: bump one scalar instead of re-deriving base (imm_offset, carry-safe i64)
-atom = rocdl.advance_tdm_atom(atom, k_tile * k_stride_bytes)
+# K-loop: bump one scalar (imm_offset, carry-safe i64) instead of re-deriving base:
+fx.copy(atom, g2d, lds2d, imm_offset=k_tile * k_stride_bytes)
 ```
 
-`rocdl.TDM(rank, num_warps, ...)` builds just the atom *type* when you want to set
-the descriptor state manually. Unlike the CDNA buffer copy, TDM needs a **raw VA**
-— do not wrap the global tensor in `make_buffer_tensor`.
+`rocdl.TDM(rank, num_warps, ...)` (in `rocdl.cdna5`) builds just the atom *type*
+when you want to set the descriptor state manually. Pass `tensor_extents` smaller
+than the tile for ragged edges (HW OOB clamp) and `strides=` for a dynamic/true
+global stride that differs from the packed tile stride. Unlike the CDNA buffer copy,
+TDM needs a **raw VA** — do not wrap the global tensor in `make_buffer_tensor`.
 
-### 4.5 GPU Operations (`fx.gpu`)
+### 4.4 GPU Operations (`fx.gpu`)
 
 ```python
 from flydsl.expr import gpu
@@ -708,9 +693,7 @@ Writing a new kernel?
 | `python/flydsl/compiler/ast_rewriter.py` | `ASTRewriter` — Python AST → MLIR control flow |
 | `python/flydsl/expr/typing.py` | `Types` (`T`), `Tensor`, `Stream`, `Constexpr` |
 | `python/flydsl/expr/arith.py` | Arithmetic operations |
-| `python/flydsl/expr/vector.py` | Vector dialect operations |
 | `python/flydsl/expr/gpu.py` | GPU operations (thread_id, barrier, ...) |
-| `python/flydsl/expr/buffer_ops.py` | AMD buffer load/store operations |
 | `python/flydsl/expr/rocdl/` | ROCm dialect intrinsics (MFMA/WMMA, buffer, TDM, cluster) |
 | `python/flydsl/expr/primitive.py` | Layout algebra primitives (make_shape, crd2idx, etc.) |
 | `python/flydsl/expr/gpu.py` | `SharedAllocator`, GPU ops (thread_id, barrier, ...) |

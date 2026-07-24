@@ -19,8 +19,9 @@ from flydsl._mlir.dialects import arith as _std_arith
 from flydsl._mlir.dialects import fly as _fly
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl.expr import arith as _expr_arith
-from flydsl.expr import buffer_ops, const_expr, rocdl
+from flydsl.expr import const_expr, rocdl
 from flydsl.expr.typing import T
+from kernels.common import buffer_ops
 
 # Public API. Prefer the unified names; the legacy aliases at the bottom of this
 # list exist only so pre-consolidation imports keep working (re-exported by
