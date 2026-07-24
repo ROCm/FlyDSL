@@ -64,7 +64,6 @@ def p2p_scatter_epilog(
     tx_i32 = fx.Int32(gpu.thread_id("x"))
     m_lane = tx_i32 // 32
     n_lane = tx_i32 % 32
-    col_start = n_lane * 2
     out_elem_bytes = 2  # bf16
     token_nbytes = N_OUT * out_elem_bytes
 
@@ -115,15 +114,16 @@ def p2p_scatter_epilog(
         dest_row_byte = slot * fx.Int32(token_nbytes) + n_block_idx * fx.Int32(BN * out_elem_bytes)
         wmul = weight[mr] if const_expr(doweight) else fx.Float32(1.0)
         if valid:
-            for sc in range_constexpr(4):
-                idx0 = row_in_block * BN + col_start + fx.Int32(sc * 64)
-                v2 = Vec(
-                    lds_vec_load(lds_acc_base, idx0 * fx.Int32(4), Vec.make_type(2, fx.Float32), fx.Float32, align=8)
-                )
-                pk = Vec.from_elements([v2[0] * wmul, v2[1] * wmul], fx.Float32).to(fx.BFloat16)
-                col_byte = (col_start + fx.Int32(sc * 64)) * fx.Int32(out_elem_bytes)
-                off_bytes = dest_row_byte + col_byte
-                buffer_ops.buffer_store(pk, rsrc_dst, off_bytes, offset_is_bytes=True, cache_modifier=2)
+            # LDS-coalesced P2P: each lane owns 8 contiguous columns -> one b128 (8xbf16, 16B) store;
+            # the 32 n-lanes cover the full BN row slice at consecutive remote addrs -> coalesced.
+            col8 = n_lane * fx.Int32(8)
+            idx0 = row_in_block * BN + col8
+            v8 = Vec(
+                lds_vec_load(lds_acc_base, idx0 * fx.Int32(4), Vec.make_type(8, fx.Float32), fx.Float32, align=16)
+            )
+            pk = Vec.from_elements([v8[i] * wmul for i in range(8)], fx.Float32).to(fx.BFloat16)
+            off_bytes = dest_row_byte + col8 * fx.Int32(out_elem_bytes)
+            buffer_ops.buffer_store(pk, rsrc_dst, off_bytes, offset_is_bytes=True, cache_modifier=2)
 
 
 def compile_mega_moe_stage2(
@@ -244,7 +244,9 @@ def compile_mega_moe_stage2(
                 BM=BM,
                 BN=BN,
             )
-            # overlap: wait only on LDS (cshuffle) so remote SLC P2P stores drain async (xGMI overlap).
+            # LDS-reuse sync across persistent iters (cshuffle acc unions the next tile's A-LDS region):
+            # vmcnt=63 keeps P2P stores draining async (already the aiter "no release fence" win); the
+            # lgkmcnt=0 + s_barrier guards the acc LDS from the next iter's A-load DMA. Not the vmem fence.
             waitcnt_barrier(vmcnt=63, lgkmcnt=0)
             itv = itv + fx.Int32(grid_x)
 
