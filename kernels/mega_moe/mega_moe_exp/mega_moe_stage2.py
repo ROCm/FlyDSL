@@ -46,6 +46,8 @@ def p2p_scatter_epilog(
     log2_max_tok,
     mask_max_tok,
     doweight,
+    BM=BM,
+    BN=BN,
 ):
     """cshuffle accm -> LDS -> weighted bf16 -> P2P store to dest rank's shmem_comb_inp_tok slot.
 
@@ -145,8 +147,11 @@ def compile_mega_moe_stage2(
     g2_bhoist: bool = True,
     g2_ascale_pf: bool = True,
     g2_spart: int = 0,
+    BM: int = BM,
+    BN: int = BN,
 ):
     assert max_tok > 0 and (max_tok & (max_tok - 1)) == 0, "max_tok must be power of two"
+    assert BM in (16, 32, 64, 128), f"BM must be in {{16,32,64,128}}, got {BM}"
     log2_max_tok = max_tok.bit_length() - 1
     mask_max_tok = max_tok - 1
     N_OUT = model_dim
@@ -155,7 +160,7 @@ def compile_mega_moe_stage2(
     assert N_OUT % 256 == 0
     _spart = spart_group_m01(g2_spart)
     grid_x = num_cu * grid_mult
-    lds_bytes = lds_bytes_for_gemm2(D_INTER, a_dtype, aStages)
+    lds_bytes = lds_bytes_for_gemm2(D_INTER, a_dtype, aStages, False, BM, BN)
     TOTAL_THREADS = 256
 
     @flyc.kernel(known_block_size=[TOTAL_THREADS, 1, 1])
@@ -207,6 +212,8 @@ def compile_mega_moe_stage2(
                 aStages=aStages,
                 a_dtype=a_dtype,
                 use_nt=use_nt,
+                BM=BM,
+                BN=BN,
                 expert_offset=rank * experts,
                 SBM=SBM,
                 inter_dim_pad=inter_dim_pad,
@@ -234,6 +241,8 @@ def compile_mega_moe_stage2(
                 log2_max_tok=log2_max_tok,
                 mask_max_tok=mask_max_tok,
                 doweight=doweight,
+                BM=BM,
+                BN=BN,
             )
             # overlap: wait only on LDS (cshuffle) so remote SLC P2P stores drain async (xGMI overlap).
             waitcnt_barrier(vmcnt=63, lgkmcnt=0)

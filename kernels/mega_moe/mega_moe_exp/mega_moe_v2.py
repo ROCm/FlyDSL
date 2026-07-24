@@ -234,7 +234,7 @@ class MegaMoEV2(MegaMoE):
         return self._s1_output
 
     def _build_fused_stage2(self, **kw):
-        from .mega_moe_stage2 import compile_mega_moe_stage2
+        from ..mega_moe import _detect_gpu_model, mega_gemm2_tuned_table
 
         FlyDSLDispatchCombineIntraNodeOp._ENABLE_COMBINE_NO_STAGE1 = True
         comb_cfg = self.comb_cfg
@@ -242,7 +242,8 @@ class MegaMoEV2(MegaMoE):
         max_recv = comb_cfg.world_size * comb_cfg.max_num_inp_token_per_rank
         k = comb_cfg.num_experts_per_token
         cu_num = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
-        self._g2v2_launch = compile_mega_moe_stage2(
+        # shared compile kwargs; BM is picked per run_tokens (autotune) and clamped to sort_block_m.
+        self._g2v2_kw = dict(
             model_dim=comb_cfg.hidden_dim,
             inter_dim=self.inter_dim,
             experts=comb_cfg.num_experts_per_rank,
@@ -255,7 +256,51 @@ class MegaMoEV2(MegaMoE):
             num_cu=cu_num,
             grid_mult=1,
         )
+        # per-M autotune table (dsv4 ep JSON); tile_m selected at run() and clamped to a divisor of
+        # sort_block_m (SBM%BM==0). None -> always the default BM=32.
+        self._g2v2_tile_table = mega_gemm2_tuned_table(
+            comb_cfg.hidden_dim,
+            self.inter_dim,
+            comb_cfg.num_experts_per_rank,
+            k,
+            comb_cfg.world_size,
+            _detect_gpu_model(int(comb_cfg.rank)),
+            quant="a8w4",
+        )
+        self._g2v2_by_bm = {}
+        self._g2v2_launch = self._g2v2_get_launch(self._g2v2_clamp_bm(32))
         self._g2_dummy_inp = torch.zeros(max_recv, comb_cfg.hidden_dim, dtype=comb_cfg.combine_dtype, device=dev)
+
+    def _g2v2_clamp_bm(self, tile_m):
+        """Clamp tile_m to a power-of-two divisor of sort_block_m in {16,32,64,128}."""
+        sbm = int(self.sort_block_m)
+        bm = min(int(tile_m), sbm) if sbm > 0 else int(tile_m)
+        while bm > 16 and (bm not in (16, 32, 64, 128) or (sbm > 0 and sbm % bm != 0)):
+            bm //= 2
+        return max(bm, 16)
+
+    def _g2v2_select_bm(self, run_tokens):
+        """nextPow2-bucket the token count into the tuning table -> clamped BM (default 32 on miss)."""
+        table = self._g2v2_tile_table
+        if not table or run_tokens is None:
+            return self._g2v2_clamp_bm(32)
+        keys = sorted(table)
+        b = 1 << max(0, (int(run_tokens) - 1)).bit_length()
+        b = min(max(b, keys[0]), keys[-1])
+        if b not in table:
+            ge = [x for x in keys if x >= b]
+            b = ge[0] if ge else keys[-1]
+        return self._g2v2_clamp_bm(table[b]["tile_m"])
+
+    def _g2v2_get_launch(self, bm):
+        """Get-or-compile the stage2 launcher for a given BM (compile cache keyed by BM)."""
+        launch = self._g2v2_by_bm.get(bm)
+        if launch is None:
+            from .mega_moe_stage2 import compile_mega_moe_stage2
+
+            launch = compile_mega_moe_stage2(BM=bm, **self._g2v2_kw)
+            self._g2v2_by_bm[bm] = launch
+        return launch
 
     def _run_fused_stage2(self, s1, run_tokens, stream=None):
         comb_op = self.comb_op
@@ -277,7 +322,8 @@ class MegaMoEV2(MegaMoE):
             comb_op._fx_tis,
             comb_op._fx_p2p_comb_inp,
         )
-        _run_compiled(self._g2v2_launch, *args, fx.Int32(size_expert_ids), s_fx)
+        launch = self._g2v2_get_launch(self._g2v2_select_bm(run_tokens))  # per-M autotune (clamped BM)
+        _run_compiled(launch, *args, fx.Int32(size_expert_ids), s_fx)
         diag = os.environ.get("MEGA_V2_DIAG", "0") == "1"
         if diag:
             torch.cuda.synchronize()
