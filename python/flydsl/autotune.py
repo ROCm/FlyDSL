@@ -350,9 +350,9 @@ class Autotuner:
             from .compiler.kernel_function import CompilationContext
 
             with CompilationContext.compile_hints(compiler_opts):
-                self.fn(*args, **kwargs)
+                return self.fn(*args, **kwargs)
         else:
-            self.fn(*args, **kwargs)
+            return self.fn(*args, **kwargs)
 
     def _run_config(self, config, args, kwargs):
         """Run the chosen config as a real (non-benchmark) call. Re-applies
