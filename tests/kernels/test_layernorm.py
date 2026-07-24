@@ -97,6 +97,8 @@ def _get_layernorm_configs():
             (32, 128, "f16"),  # f16 aligned
             (64, 2000, "f32"),  # unaligned tail handling
             (16, 512, "bf16"),  # bf16 small shape
+            (64, 4096, "f16"),  # f16 vectorized fast path below 8192
+            (64, 8192, "f16"),  # f16 fast-path N
             (64, 8192, "bf16"),  # bf16 fast-path N with small M
         ]
     return configs
@@ -578,13 +580,13 @@ def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     return ok, flydsl_gpu_us
 
 
-def _reference_layernorm(input_dev, gamma_dev, beta_dev):
+def _reference_layernorm(input_dev, gamma_dev, beta_dev, eps: float = EPS):
     x = input_dev.to(DTYPE_FP32)
     gamma = gamma_dev.to(DTYPE_FP32)
     beta = beta_dev.to(DTYPE_FP32)
     mean = x.mean(dim=1, keepdim=True)
     var = x.var(dim=1, keepdim=True, unbiased=False)
-    return ((x - mean) / torch.sqrt(var + EPS) * gamma + beta).to(DTYPE_FP32)
+    return ((x - mean) / torch.sqrt(var + eps) * gamma + beta).to(DTYPE_FP32)
 
 
 def _reference_layernorm_quant(input_dev, gamma_dev, beta_dev, *, xscale_dev=None):

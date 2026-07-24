@@ -136,6 +136,8 @@ def _get_rmsnorm_configs():
         (32, 128, "f16"),  # f16 aligned
         (64, 2000, "f32"),  # unaligned tail handling
         (16, 512, "bf16"),  # bf16 small shape
+        (64, 4096, "f16"),  # f16 vectorized fast path below 8192
+        (64, 8192, "f16"),  # f16 fast-path N
         (64, 8192, "bf16"),  # bf16 fast-path N with small M
     ]
 
