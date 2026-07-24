@@ -12,6 +12,7 @@ from flydsl.expr import const_expr, range_constexpr, rocdl, tdm_ops
 from flydsl.expr.rocdl import cluster
 from flydsl.expr.typing import Constexpr, T
 from flydsl.expr.typing import Vector as Vec
+from kernels.common.gfx1250_cluster import compute_mcast_masks
 from kernels.gemm.gemm_common_gfx1250 import (
     fused_silu_swiglu_elem,
     lds_load_b32_raw,
@@ -147,7 +148,7 @@ def launch_moe_gemm_a8w4(
             # 2-D grid (m_tiles, n_tiles); cluster_n consecutive N-tiles of one
             # M-tile multicast the shared A (same expert). B is per-WG.
             local_x, local_y = cluster.compute_cluster_position()
-            a_mask, _ = cluster.compute_mcast_masks(local_x, local_y, cluster_m, cluster_n)
+            a_mask, _ = compute_mcast_masks(local_x, local_y, cluster_m, cluster_n)
             b_mask = 0
             blk_m = bid_x * tile_m
             blk_n = fx.block_idx.y * tile_n

@@ -11,6 +11,7 @@ from flydsl.expr.typing import Constexpr, T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import check_smem_capacity
+from kernels.common.gfx1250_cluster import compute_mcast_masks
 
 from .gemm_common_gfx1250 import (
     lds_load_b32_raw,
@@ -73,7 +74,6 @@ def launch_gemm_a8w4_mxscale(
     SB_OFF = STAGE_A + STAGE_B + STAGE_SA
     PITCH = ((STAGE_A + STAGE_B + STAGE_SA + STAGE_SB + 1023) // 1024) * 1024
 
-    out_elem = T.f16 if out_is_f16 else T.bf16
     C_STORE_B = ((tile_m * tile_n * 2 + 127) // 128) * 128
     ARENA_B = max(num_buffers * PITCH, C_STORE_B)
     check_smem_capacity(ARENA_B, str(get_hip_arch()))
@@ -109,7 +109,7 @@ def launch_gemm_a8w4_mxscale(
         wave_n = wave % n_warp
         if const_expr(use_cluster):
             local_x, local_y = cluster.compute_cluster_position()
-            a_mask, b_mask = cluster.compute_mcast_masks(local_x, local_y, cluster_m, cluster_n)
+            a_mask, b_mask = compute_mcast_masks(local_x, local_y, cluster_m, cluster_n)
         else:
             a_mask, b_mask = 0, 0
         blk_m = bid_x * tile_m
@@ -324,15 +324,14 @@ def launch_gemm_a8w4_mxscale(
         accs = [c_frags[idx].load().ir_value() for idx in range_constexpr(n_acc)]
 
         pipeline_fence(outstanding=0, use_cluster=use_cluster)
+        oc = fx.Float16 if out_is_f16 else fx.BFloat16
         for wm in range_constexpr(wmma_m_rep):
             row_rel = wmb + wm * 16 + lane16
             for wn in range_constexpr(wmma_n_rep):
                 col_rel = wnb + wn * 16 + kgrp * 8
-                h = fx.trunc_f(T.vec(8, out_elem), accs[wm * wmma_n_rep + wn])
-                i8v = fx.vector.bitcast(T.vec(16, T.i8), h)
-                fx.ptr_store(i8v, base_ptr + (row_rel * tile_n + col_rel) * 2)
+                h = Vec(accs[wm * wmma_n_rep + wn]).to(oc)
+                fx.ptr_store(h.bitcast(fx.Int8), base_ptr + (row_rel * tile_n + col_rel) * 2)
         workgroup_barrier(use_cluster=False)
-        oc = fx.Float16 if out_is_f16 else fx.BFloat16
         c_off_rt = blk_m64 * ldc64 + blk_n64
         gtC = _gv(fx.get_iter(arg_c), c_off_rt, (tile_m, tile_n), (tile_n, 1))
         atomC = fx.rocdl.make_tdm_atom(
