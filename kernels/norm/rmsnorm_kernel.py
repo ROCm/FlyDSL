@@ -170,12 +170,9 @@ def build_rmsnorm_module(
 
             return fx.memref_load(s_red, 0), fx.memref_load(s_red2, 0)
 
-        # ==================================================================
-        # Fast path: N is a multiple of tile_cols
-        # ==================================================================
+        # Fast path for complete 128-bit tiles.
         if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
             num_tiles = N // tile_cols
-            # ── Layout API: buffer-backed tensors + tiled access ─────
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -229,9 +226,7 @@ def build_rmsnorm_module(
                 _store_vec(copy_atom, VEC_WIDTH, elem_dtype, out_e, out_div, out_idx)
 
         else:
-            # ==============================================================
-            # Generic path: scalar 2-pass for arbitrary N
-            # ==============================================================
+            # Scalar fallback for arbitrary N.
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -580,12 +575,9 @@ def build_fused_add_rmsnorm_module(
 
             return fx.memref_load(s_red, 0), fx.memref_load(s_red2, 0)
 
-        # ==================================================================
-        # Fast path: N is a multiple of tile_cols
-        # ==================================================================
+        # Fast path for complete 128-bit tiles.
         if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
             num_tiles = N // tile_cols
-            # ── Layout API: buffer-backed tensors + tiled access ─────
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             ResidualIn_buf = fx.rocdl.make_buffer_tensor(ResidualIn)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -645,9 +637,7 @@ def build_fused_add_rmsnorm_module(
                 _store_vec(copy_atom, VEC_WIDTH, elem_dtype, y_e, out_div, idx)
 
         else:
-            # ==============================================================
-            # Generic path: scalar 2-pass for arbitrary N
-            # ==============================================================
+            # Scalar fallback for arbitrary N.
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             ResidualIn_buf = fx.rocdl.make_buffer_tensor(ResidualIn)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -875,14 +865,11 @@ def _build_rmsnorm_quant_module(
 
             return fx.memref_load(s_red, 0)
 
-        # ==================================================================
-        # Fast path: N is a multiple of tile_cols
-        # ==================================================================
+        # Fast path for complete 128-bit tiles.
         if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
             num_tiles = N // tile_cols
             quant_half_width = VEC_WIDTH // 2
             abs_mask = full(VEC_WIDTH, fx.Uint32(0x7FFFFFFF), fx.Uint32)
-            # ── Layout API: buffer-backed tensors + tiled access ─────
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
@@ -961,9 +948,7 @@ def _build_rmsnorm_quant_module(
                 _store_vec(copy_atom_q, quant_half_width, quant_dtype, q_hi, out_div_q, out_idx + 1)
 
         else:
-            # ==============================================================
-            # Generic path: scalar 3-pass for arbitrary N
-            # ==============================================================
+            # Scalar fallback for arbitrary N.
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
@@ -1249,14 +1234,11 @@ def _build_fused_add_rmsnorm_quant_module(
 
             return fx.memref_load(s_red, 0)
 
-        # ==================================================================
-        # Fast path: N is a multiple of tile_cols
-        # ==================================================================
+        # Fast path for complete 128-bit tiles.
         if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
             num_tiles = N // tile_cols
             quant_half_width = VEC_WIDTH // 2
             abs_mask = full(VEC_WIDTH, fx.Uint32(0x7FFFFFFF), fx.Uint32)
-            # ── Layout API: buffer-backed tensors + tiled access ─────
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             ResidualIn_buf = fx.rocdl.make_buffer_tensor(ResidualIn)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -1343,9 +1325,7 @@ def _build_fused_add_rmsnorm_quant_module(
                 _store_vec(copy_atom_q, quant_half_width, quant_dtype, q_hi, out_div_q, out_idx + 1)
 
         else:
-            # ==============================================================
-            # Generic path: scalar 3-pass for arbitrary N
-            # ==============================================================
+            # Scalar fallback for arbitrary N.
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             ResidualIn_buf = fx.rocdl.make_buffer_tensor(ResidualIn)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -1522,9 +1502,7 @@ def build_fused_add_rmsnorm_smoothquant_module(
     )
 
 
-# =====================================================================
-# Python wrappers + autograd (quack-aligned). PR 1: plain rmsnorm.
-# =====================================================================
+# Python wrappers and autograd.
 if torch is not None:
     from kernels.common.tensor_shim import _run_compiled
     from kernels.norm.rmsnorm_common import torch_dtype_to_str as _torch_dtype_to_str
@@ -1725,9 +1703,7 @@ if torch is not None:
         out_flat = RMSNormFunction.apply(x_flat, weight, eps)
         return out_flat.reshape(x.shape)
 
-    # -----------------------------------------------------------------
-    # Fused-add / prenorm RMSNorm wrappers + autograd (PR 2).
-    # -----------------------------------------------------------------
+    # Fused-add / prenorm wrappers and autograd.
     _FUSED_ADD_FWD_CACHE: dict = {}
     _FUSED_ADD_BWD_CACHE: dict = {}
 
