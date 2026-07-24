@@ -35,11 +35,8 @@ def exp2_f32_fast(value):
     raw = arith.unwrap(value) if hasattr(value, "ir_value") or hasattr(value, "type") else value
     ty = raw.type
     if isinstance(ty, ir.VectorType):
-        n = ty.shape[0]
-        elems = []
-        for i in range(n):
-            scalar = _vector_dialect.extract(raw, static_position=[i], dynamic_position=[])
-            elems.append(exp2_amdgcn_scalar(scalar))
+        vec = fx.Vector(raw)
+        elems = [exp2_amdgcn_scalar(vec[i]) for i in range(ty.shape[0])]
         return _vector_dialect.from_elements(ty, elems)
     return exp2_amdgcn_scalar(raw)
 
