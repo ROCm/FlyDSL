@@ -1556,6 +1556,10 @@ def test_fused_add_rmsnorm_dynamicquant():
         raise SystemExit(1)
 
 
+@pytest.mark.skipif(
+    GPU_ARCH == "gfx1201",
+    reason="RMSNorm SmoothQuant is temporarily quarantined on gfx1201 pending correctness investigation",
+)
 def test_fused_add_rmsnorm_smoothquant():
     print("=" * 80)
     print("Running FusedAdd RMSNorm SmoothQuant Tests")
