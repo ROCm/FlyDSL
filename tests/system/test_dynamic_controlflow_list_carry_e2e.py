@@ -211,6 +211,76 @@ def _run_if_dict_reorder(Out: fx.Tensor, flag: fx.Int32, stream: fx.Stream = fx.
     _kernel_if_dict_reorder(Out, flag).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
 
 
+# ── deep mixed nesting (dict / list / tuple mutually nested), all leaves ─────
+# structure: {"a": i32, "b": [i32, (i32, i32)], "c": {"d": i32, "e": [i32]}}
+# 6 leaves; every dynamic-control-flow variant below rewrites all 6.
+
+
+def _deep_init():
+    return {
+        "a": fx.Int32(1),
+        "b": [fx.Int32(2), (fx.Int32(3), fx.Int32(4))],
+        "c": {"d": fx.Int32(5), "e": [fx.Int32(6)]},
+    }
+
+
+def _deep_bump(s, k):  # return the same nested shape with every leaf += k
+    return {
+        "a": s["a"] + fx.Int32(k),
+        "b": [s["b"][0] + fx.Int32(k), (s["b"][1][0] + fx.Int32(k), s["b"][1][1] + fx.Int32(k))],
+        "c": {"d": s["c"]["d"] + fx.Int32(k), "e": [s["c"]["e"][0] + fx.Int32(k)]},
+    }
+
+
+def _deep_store(s, Out):
+    rsrc = fx.buffer_ops.create_buffer_resource(Out)
+    fx.buffer_ops.buffer_store(s["a"], rsrc, fx.Int32(0))
+    fx.buffer_ops.buffer_store(s["b"][0], rsrc, fx.Int32(1))
+    fx.buffer_ops.buffer_store(s["b"][1][0], rsrc, fx.Int32(2))
+    fx.buffer_ops.buffer_store(s["b"][1][1], rsrc, fx.Int32(3))
+    fx.buffer_ops.buffer_store(s["c"]["d"], rsrc, fx.Int32(4))
+    fx.buffer_ops.buffer_store(s["c"]["e"][0], rsrc, fx.Int32(5))
+
+
+@flyc.kernel
+def _kernel_for_deep(Out: fx.Tensor, n: fx.Int32):
+    s = _deep_init()
+    for i in range(n):
+        s = _deep_bump(s, 1)  # rewrite all 6 leaves each iteration
+    _deep_store(s, Out)
+
+
+@flyc.jit
+def _run_for_deep(Out: fx.Tensor, n: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+    _kernel_for_deep(Out, n).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
+
+
+@flyc.kernel
+def _kernel_if_deep(Out: fx.Tensor, flag: fx.Int32):
+    s = _deep_init()
+    if flag > fx.Int32(0):
+        s = _deep_bump(s, 10)  # rewrite all 6 leaves in the then-branch
+    _deep_store(s, Out)
+
+
+@flyc.jit
+def _run_if_deep(Out: fx.Tensor, flag: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+    _kernel_if_deep(Out, flag).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
+
+
+@flyc.kernel
+def _kernel_while_deep(Out: fx.Tensor, n: fx.Int32):
+    s = _deep_init()
+    while s["a"] < n:  # loop-carried condition reads a nested leaf
+        s = _deep_bump(s, 1)  # rewrite all 6 leaves each iteration
+    _deep_store(s, Out)
+
+
+@flyc.jit
+def _run_while_deep(Out: fx.Tensor, n: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+    _kernel_while_deep(Out, n).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
+
+
 # ── Tests ───────────────────────────────────────────────────────────────────
 
 
@@ -304,3 +374,28 @@ class TestDynamicControlFlowListCarryE2E:
         _run_if_dict_reorder(t_out, fx.Int32(0))  # else lists keys b,a -> must stay a=100, b=200
         torch.cuda.synchronize()
         assert out[0].item() == 100 and out[1].item() == 200, out.tolist()
+
+    # deep mixed nesting (dict/list/tuple), every leaf rewritten in the region
+    def test_for_deep_nested_all_leaves(self):
+        out, t_out = _out(6)
+        _run_for_deep(t_out, fx.Int32(3))  # init [1,2,3,4,5,6] + 3 each -> [4,5,6,7,8,9]
+        torch.cuda.synchronize()
+        assert out.tolist() == [4, 5, 6, 7, 8, 9], out.tolist()
+
+    def test_if_deep_nested_taken(self):
+        out, t_out = _out(6)
+        _run_if_deep(t_out, fx.Int32(1))  # then: +10 each -> [11..16]
+        torch.cuda.synchronize()
+        assert out.tolist() == [11, 12, 13, 14, 15, 16], out.tolist()
+
+    def test_if_deep_nested_not_taken(self):
+        out, t_out = _out(6)
+        _run_if_deep(t_out, fx.Int32(0))  # else keeps init
+        torch.cuda.synchronize()
+        assert out.tolist() == [1, 2, 3, 4, 5, 6], out.tolist()
+
+    def test_while_deep_nested_all_leaves(self):
+        out, t_out = _out(6)
+        _run_while_deep(t_out, fx.Int32(3))  # a: 1->3 (2 iters), all +2 -> [3,4,5,6,7,8]
+        torch.cuda.synchronize()
+        assert out.tolist() == [3, 4, 5, 6, 7, 8], out.tolist()
