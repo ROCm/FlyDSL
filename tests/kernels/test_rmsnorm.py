@@ -29,8 +29,8 @@ if torch is None or not torch.cuda.is_available():
 # Imported after the torch guard: rmsnorm() is only defined when torch is present,
 # so importing it earlier makes a torch-less collection fail (ImportError) instead of skip.
 import flydsl.compiler as flyc  # noqa: E402
-from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 import kernels.norm.rmsnorm_kernel as rmsnorm_kernel_impl  # noqa: E402
+from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.common.tensor_shim import _run_compiled  # noqa: E402
 from kernels.norm.rmsnorm_kernel import (  # noqa: E402
     build_fused_add_rmsnorm_bwd_module,
