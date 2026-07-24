@@ -369,11 +369,14 @@ def test_mfma_w4_flyc_preshuffle(
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
     waves_per_eu: int = 0,
 ):
-    """FP4 (MXFP4) preshuffle GEMM (layout-API v2) — gfx950 only."""
+    """FP4 (MXFP4) preshuffle GEMM (layout-API v2) — gfx950 only.
+
+    Note: this test always launches the fp4-A path (see _mxfp4_launcher("fp4")
+    below). The fp8-A (a8w4) path is covered separately by
+    tests/kernels/test_a8w4_preshuffle.py.
+    """
     if get_rocm_arch() != "gfx950":
         pytest.skip(f"FP4 GEMM requires gfx950, got {get_rocm_arch()}")
-    if a_dtype == "fp8":
-        pytest.skip("fp8-A not yet supported with MXFP4 preshuffle kernel (op_sel_a overflow)")
 
     print("=" * 80)
     print(f"MFMA MXFP4 GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k})")

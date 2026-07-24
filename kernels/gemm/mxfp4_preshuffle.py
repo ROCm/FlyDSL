@@ -8,7 +8,8 @@ matches the host preshuffle (shuffle_weight_w4(.,16) + shuffle_scale_w4)."""
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import fly
-from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import math as fx_math
 from flydsl.expr.typing import (
     BFloat16,
     Constexpr,
@@ -61,6 +62,7 @@ def launch_gemm(
     arg_b: fx.Pointer,
     arg_scale_a: fx.Pointer,
     arg_scale_b: fx.Pointer,
+    arg_bias: fx.Pointer,
     i32_m: fx.Int32,
     i32_n: fx.Int32,
     stream: fx.Stream,
@@ -81,6 +83,7 @@ def launch_gemm(
     c_batch_stride: Constexpr[int],
     waves_per_eu: Constexpr[int],
     xcd_swizzle: Constexpr[int] = 0,
+    epilogue: Constexpr[str] = "none",
 ):
     """Direct @flyc.jit launcher. Operands are fx.Pointer (pass ptr_arg(t): raw data_ptr, no
     per-launch DLPack). Compile once with flyc.compile, then cf(*runtime). a_dtype fp4/fp6/fp8
@@ -94,6 +97,13 @@ def launch_gemm(
         out_elem = BFloat16
     else:
         out_elem = Float16
+
+    # Fused epilogue: per-N bias add (+ optional activation) folded into the C store.
+    # "none"/"bias"/"bias_relu"/"bias_silu"/"bias_gelu" (tanh-approx GELU).
+    _has_bias = epilogue in ("bias", "bias_relu", "bias_silu", "bias_gelu")
+    _has_relu = epilogue == "bias_relu"
+    _has_silu = epilogue == "bias_silu"
+    _has_gelu = epilogue == "bias_gelu"
 
     # Row sizes + read_a fragment layout (i32 units): fp6/fp8 read two b128 halves -> i32[A_NDW], fp4 one -> i32[4].
     if const_expr(a_dtype == "fp4"):  # 2 codes/byte
@@ -149,6 +159,7 @@ def launch_gemm(
         arg_b: fx.Int64,
         arg_scale_a: fx.Int64,
         arg_scale_b: fx.Int64,
+        arg_bias: fx.Int64,
         i32_m: fx.Int32,
         i32_n: fx.Int32,
     ):
@@ -454,11 +465,41 @@ def launch_gemm(
         c_copy = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), out_elem)
         c_rstride = fx.Int32(c_stride)
         col_w = by_n + wave * (BN // 4) + lane_mod_16
+        # Per-N bias resource (out_elem dtype, length N) for the fused epilogue.
+        bias_rsrc = None
+        if const_expr(_has_bias):
+            bias_ptr_ty = fx.PointerType.get(out_elem.ir_type, address_space=fx.AddressSpace.Global, alignment=2)
+            bias_view = fx.Tensor(fx.make_view(fx.inttoptr(bias_ptr_ty, arg_bias), fx.make_layout(N, 1)))
+            bias_rsrc = buffer_ops.create_buffer_resource(bias_view, max_size=True)
         for mi in range_constexpr(m_chunks):
             row_m = bx_m + mi * 16 + lane_div_16 * 4
             for ni in range_constexpr(num_acc_n):
                 col = col_w + ni * 16
-                acc = Vec(accs[mi * num_acc_n + ni]).to(out_elem)
+                if const_expr(_has_bias):
+                    # bias is per output column (N); apply + activation in f32.
+                    acc_f = Vec(accs[mi * num_acc_n + ni])  # f32 accumulator
+                    bval = fx.Float32(buffer_ops.buffer_load(bias_rsrc, col, vec_width=1, dtype=out_elem.ir_type))
+                    outs = []
+                    for ii in range_constexpr(4):
+                        v = fx.Float32(acc_f[ii]) + bval
+                        if const_expr(_has_relu):
+                            v = fx.Float32(v).maximumf(fx.Float32(0.0))
+                        elif const_expr(_has_silu):
+                            v = v * (fx.Float32(1.0) / (fx.Float32(1.0) + fx_math.exp(v * fx.Float32(-1.0))))
+                        elif const_expr(_has_gelu):
+                            # tanh-approx GELU, overflow-safe (non-positive exponent).
+                            x3 = v * v * v
+                            y = fx.Float32(0.7978845608) * (v + fx.Float32(0.044715) * x3)
+                            abs_y = fx.Float32(y).maximumf(fx.Float32(0.0) - y)
+                            e = fx_math.exp(fx.Float32(-2.0) * abs_y)
+                            denom = fx.Float32(1.0) + e
+                            one_plus_tanh = (y >= fx.Float32(0.0)).select(
+                                fx.Float32(2.0) / denom, (fx.Float32(2.0) * e) / denom)
+                            v = fx.Float32(0.5) * v * one_plus_tanh
+                        outs.append(v)
+                    acc = Vec.from_elements(outs, fx.Float32).to(out_elem)
+                else:
+                    acc = Vec(accs[mi * num_acc_n + ni]).to(out_elem)
                 for ii in range_constexpr(4):
                     cf = fx.make_rmem_tensor(1, out_elem)
                     cf.store(Vec.from_elements([acc[ii]], out_elem))
@@ -470,6 +511,7 @@ def launch_gemm(
     b_addr = fx.Int64(fx.ptrtoint(arg_b))
     sa_addr = fx.Int64(fx.ptrtoint(arg_scale_a))
     sb_addr = fx.Int64(fx.ptrtoint(arg_scale_b))
+    bias_addr = fx.Int64(fx.ptrtoint(arg_bias))
     if const_expr(waves_per_eu > 0):
         wpe = waves_per_eu
     else:
@@ -482,6 +524,7 @@ def launch_gemm(
         b_addr,
         sa_addr,
         sb_addr,
+        bias_addr,
         i32_m,
         i32_n,
         value_attrs={"rocdl.waves_per_eu": wpe},
