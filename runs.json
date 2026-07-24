@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-24T22:19:19Z",
+ "updated": "2026-07-24T22:36:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "perf/rmsnorm-fx-cleanup",
    "event": "pull_request",
    "title": "[Refactor] Align RMSNorm with current FlyDSL kernel style",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30124059807",
    "created_at": "2026-07-24T20:26:13Z",
-   "updated_at": "2026-07-24T21:07:20Z",
+   "updated_at": "2026-07-24T22:33:26Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -38,10 +38,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-24T20:34:28Z",
-     "completed_at": null,
+     "completed_at": "2026-07-24T22:33:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30124059807/job/89584726896"
     }
    ]
