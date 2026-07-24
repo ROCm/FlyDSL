@@ -174,6 +174,23 @@ def _run_if_nested(Out: fx.Tensor, flag: fx.Int32, stream: fx.Stream = fx.Stream
     _kernel_if_nested(Out, flag).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
 
 
+# ── bare python scalar initializer carried through a loop / branch ──────────
+
+
+@flyc.kernel
+def _kernel_for_bare_acc(Out: fx.Tensor, n: fx.Int32):
+    acc = 0  # bare python int, promoted to an MLIR constant, carried as a DSL numeric
+    for i in range(n):
+        acc = acc + fx.Int32(1)
+    rsrc = fx.buffer_ops.create_buffer_resource(Out)
+    fx.buffer_ops.buffer_store(acc, rsrc, fx.Int32(0))
+
+
+@flyc.jit
+def _run_for_bare_acc(Out: fx.Tensor, n: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+    _kernel_for_bare_acc(Out, n).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
+
+
 # ── Tests ───────────────────────────────────────────────────────────────────
 
 
@@ -249,3 +266,9 @@ class TestDynamicControlFlowListCarryE2E:
         _run_if_nested(t_out, fx.Int32(0))  # else keeps (1, {"v": 2})
         torch.cuda.synchronize()
         assert out[0].item() == 1 and out[1].item() == 2, out.tolist()
+
+    def test_for_bare_scalar_accumulator(self):
+        out, t_out = _out(1)
+        _run_for_bare_acc(t_out, fx.Int32(5))  # acc = 0; +1 x5 -> 5
+        torch.cuda.synchronize()
+        assert out[0].item() == 5, out.tolist()

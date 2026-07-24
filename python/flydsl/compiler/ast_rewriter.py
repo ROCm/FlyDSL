@@ -16,7 +16,7 @@ from .._mlir import ir
 from .._mlir.dialects import arith, scf
 from ..expr import const_expr
 from ..expr.meta import capture_user_location, file_location
-from ..expr.typing import as_ir_value
+from ..expr.typing import as_dsl_value, as_ir_value
 from ..utils import env, log
 from .protocol import construct_from_ir_values, extract_to_ir_values, get_ir_types
 
@@ -70,28 +70,53 @@ def _unwrap_constexpr(node):
 # ---------------------------------------------------------------------------
 
 
+def _promote_scalars(values):
+    """Promote bare python scalars (e.g. ``0``, ``0.0``) to DSL numerics so they
+    carry like any other leaf. Wrapping to a DSL value -- not a raw ir.Value --
+    keeps the exemplar reconstructable by :func:`_pack_states` (a raw ir.Value has
+    no __construct_from_ir_values__). DSL values and containers pass through.
+    """
+    return [as_dsl_value(as_ir_value(v)) if isinstance(v, (bool, int, float)) else v for v in values]
+
+
+def _tree_structure(v):
+    """Canonical structural key of a carried value: container kind + keys/length +
+    order (recursively) with leaf ir.Types. Used to check a branch output matches
+    the region entry exactly -- shape, dict/namespace key order, and dtypes -- not
+    just the flattened leaf types (reordered dict keys would otherwise miscompile).
+    """
+    if isinstance(v, dict):
+        return ("dict", tuple((k, _tree_structure(x)) for k, x in v.items()))
+    if isinstance(v, types.SimpleNamespace):
+        return ("ns", tuple((k, _tree_structure(x)) for k, x in vars(v).items()))
+    if isinstance(v, (list, tuple)):
+        return (type(v).__name__, tuple(_tree_structure(x) for x in v))
+    return ("leaf", tuple(str(t) for t in get_ir_types(v)))
+
+
 def _unpack_states(values):
     """Promote bare scalars, then flatten the carried-state pytree ``values`` to a
     flat ir.Value list + its ir.Types. Returns ``(exemplar, state_raw, result_types)``;
     ``exemplar`` (scalars promoted) is the template :func:`_pack_states` rebuilds from.
     """
-    exemplar = [as_ir_value(v) if isinstance(v, (bool, int, float)) else v for v in values]
+    exemplar = _promote_scalars(values)
     return exemplar, extract_to_ir_values(exemplar), get_ir_types(exemplar)
 
 
 def _unpack_branch_outputs(names, values, exemplar, ctx_label):
     """Flatten a branch/body output for scf.yield, checking each carried variable
-    keeps the ir.Types it entered with (``names``/``exemplar`` are the entry side).
+    keeps the exact structure it entered with (container shape, dict/namespace key
+    order, and dtypes). ``names``/``exemplar`` are the entry side.
     """
     out_raw = []
-    for name, entry_v, out_v in zip(names, exemplar, values):
-        out_v = as_ir_value(out_v) if isinstance(out_v, (bool, int, float)) else out_v
-        in_types, out_types = get_ir_types(entry_v), get_ir_types(out_v)
-        if out_types != in_types:
+    for name, entry_v, out_v in zip(names, exemplar, _promote_scalars(values)):
+        in_struct, out_struct = _tree_structure(entry_v), _tree_structure(out_v)
+        if in_struct != out_struct:
             raise TypeError(
-                f"{ctx_label}: carried variable '{name}' changed type across the region "
-                f"(entered as {in_types}, produced {out_types}); it must keep the same "
-                "container shape and element dtypes on entry and exit."
+                f"{ctx_label}: carried variable '{name}' changed structure across the "
+                f"region (entered as {in_struct}, produced {out_struct}); its container "
+                "shape, dict/namespace key order, and element dtypes must match on entry "
+                "and exit."
             )
         out_raw.extend(extract_to_ir_values(out_v))
     return out_raw
