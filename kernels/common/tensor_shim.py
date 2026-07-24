@@ -19,13 +19,23 @@ from kernels.common import buffer_ops
 def _run_compiled(exe, *args):
     """First call: ``flyc.compile(exe, *args)`` compiles **and** executes the kernel.
     Subsequent calls: fast dispatch via the cached ``CompiledFunction``.
+
+    A failed cold compile can leave an MLIR ``Context`` open on the stack; unwind
+    it before re-raising so the next attempt starts clean.
     """
     cf = getattr(exe, "_cf", None)
-    if cf is None:
-        cf = flyc.compile(exe, *args)
-        exe._cf = cf
-    else:
+    if cf is not None:
         cf(*args)
+        return
+    try:
+        exe._cf = flyc.compile(exe, *args)
+    except Exception:
+        try:
+            while ir.Context.current is not None:
+                ir.Context.current.__exit__(None, None, None)
+        except Exception:
+            pass
+        raise
 
 
 def _to_raw(v):

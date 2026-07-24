@@ -69,7 +69,6 @@ Full end-to-end tests: compile FlyDSL kernels, execute on GPU, validate against 
 | `test_preshuffle_gemm.py` | GEMM | Preshuffle MFMA GEMM (fp8/int8/fp16/bf16) |
 | `test_blockscale_preshuffle_gemm.py` | GEMM | Block-scale (MXFP4) preshuffle GEMM |
 | `test_moe_gemm.py` | MoE GEMM | Mixture-of-Experts GEMM |
-| `test_moe_blockscale.py` | MoE | MoE with block-scale quantization |
 | `test_moe_reduce.py` | MoE Reduce | MoE reduction kernel |
 | `test_pa.py` | Paged Attn | Paged attention decode |
 | `test_quant.py` | Quantization | Quantization ops |

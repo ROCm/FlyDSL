@@ -1,7 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""MoE GEMM stage1 (MFMA) kernel builder."""
+"""MoE GEMM stage1 (MFMA) kernel builder.
+
+Legacy authoring API (SmemAllocator/SmemPtr + raw buffer_ops); slated for
+deprecation -- refactor to the current fx.* surface (make_buffer_tensor +
+SharedAllocator + fx.copy/fx.gemm). See kernels/moe/mxfp_moe and the
+kernel-code-cleanup skill.
+"""
 
 import functools
 import os
@@ -462,7 +468,8 @@ def compile_moe_gemm1(
                         x_load_bytes = 4
                     else:
                         raise ValueError(
-                            f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 4 to use the dword-indexed load mapping."
+                            f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible "
+                            "by 4 to use the dword-indexed load mapping."
                         )
                 num_x_loads = bytes_per_thread_x // x_load_bytes
                 chunk_i32 = x_load_bytes // 4  # dwords per chunk (1/2/4)
