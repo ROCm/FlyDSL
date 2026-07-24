@@ -6,7 +6,7 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
-from flydsl.expr.typing import T
+from flydsl.expr.typing import Float4E2M1FN, Float8E4M3FN, T
 
 from . import dpp_utils
 from .mxfp4_gemm_common import (
@@ -32,6 +32,22 @@ from .mxfp4_gemm_common import (
     lds_acc_bytes_for,
     num_n_blocks_for,
 )
+
+# A elem selects the f8f6f4 cbsz for the scaled MFMA atom: fp4 (e2m1) -> cbsz 4,
+# fp8 (e4m3) -> cbsz 0. B (blgp) is always mxfp4.
+_A_ELEM = {"fp4": Float4E2M1FN, "fp8": Float8E4M3FN}
+
+
+def _scale_mma_atoms(a_dtype):
+    """16 (opsel_a, opsel_b) scaled 16x16x128 MFMA atoms; A elem = fp4/fp8, B = fp4."""
+    elem_a = _A_ELEM[a_dtype]
+    return {
+        (osa, osb): fx.make_mma_atom(
+            fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, elem_a, Float4E2M1FN, opsel_a=osa, opsel_b=osb)
+        )
+        for osa in range(4)
+        for osb in range(4)
+    }
 
 
 def _udiv(a, c):
@@ -273,7 +289,13 @@ def _gemm1_body(
         b_scale_s_base.append(base)
         b_scale_s_base_hi.append(base + fx.Int32(16 * kBS_stride_k0_dw * 4))
 
-    accm = [[None] * 4 for _ in range(kMChunks)]
+    # f32 accumulator fragments (one i32[4]->f32[4] per (mchunk, J)); seeded to 0
+    # so the first K-iter's fx.gemm computes A*B+0 (matches the raw init path).
+    scale_atoms = _scale_mma_atoms(a_dtype)
+    accm = [[fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Float32) for _ in range(4)] for _ in range(kMChunks)]
+    for i in range_constexpr(kMChunks):
+        for J in range_constexpr(4):
+            accm[i][J].store(fx.Vector.filled(4, 0.0, fx.Float32))
     b = [[[None, None] for _ in range(4)] for _ in range(kStages)]
     b_scale_v = [[None, None] for _ in range(kStages)]
 
@@ -310,10 +332,12 @@ def _gemm1_body(
                     soffset=fx.Int32(kt * KH_TILE) // fx.Int32(4),
                 )
 
-    def _lds_i32x4_load(tile_idx):
+    def _lds_i32x4_frag(tile_idx):
+        # ds_read_b128 straight into an i32[4] register fragment (kept as a tensor
+        # so it can feed fx.gemm directly).
         r = fx.make_rmem_tensor(i32x4_reg_lay, fx.Int32)
         fx.copy_atom_call(i32x4_copy_atom, fx.slice(s_aq_i32x4_tiles, (None, tile_idx)), r)
-        return r.load()
+        return r
 
     def issue_a_ds_read(slot):
         mask = _lds_swizzle_mask(lane_mod_16)
@@ -328,15 +352,17 @@ def _gemm1_body(
                 for i in range_constexpr(kMChunks):
                     lds_row = lane_mod_16 + fx.Int32(i * 16)
                     boff = fx.Int32(slot * (BM * KH_TILE)) + lds_row * fx.Int32(KH_TILE)
-                    lo = fx.Vector(_lds_i32x4_load((boff + lo_col) // fx.Int32(16)))
-                    hi = fx.Vector(_lds_i32x4_load((boff + hi_col) // fx.Int32(16)))
-                    a[i][k] = _raw(lo.shuffle(hi, list(range(8))))
+                    lo = fx.Vector(fx.memref_load_vec(_lds_i32x4_frag((boff + lo_col) // fx.Int32(16))))
+                    hi = fx.Vector(fx.memref_load_vec(_lds_i32x4_frag((boff + hi_col) // fx.Int32(16))))
+                    t = fx.make_rmem_tensor(fx.make_layout(8, 1), fx.Int32)
+                    t.store(lo.shuffle(hi, list(range(8))))
+                    a[i][k] = t
             else:
                 lds_col = (lane_div_16 * fx.Int32(16) + fx.Int32(k * 64)) ^ mask
                 for i in range_constexpr(kMChunks):
                     lds_row = lane_mod_16 + fx.Int32(i * 16)
                     off = fx.Int32(slot * (BM * KH_TILE)) + lds_row * fx.Int32(KH_TILE) + lds_col
-                    a[i][k] = _lds_i32x4_load(off // fx.Int32(16))
+                    a[i][k] = _lds_i32x4_frag(off // fx.Int32(16))
         return a
 
     def issue_a_scale_load():
@@ -485,7 +511,7 @@ def _gemm1_body(
                 r,
                 soffset=b_load_s_base[j] // fx.Int32(4),
             )
-            b_slot[j][half] = r.load()
+            b_slot[j][half] = r
 
     def issue_b_scale_load(bs_slot, K_C):
         v = ((lane_div_16 * fx.Int32(16)) + lane_mod_16) * fx.Int32(4)
@@ -503,12 +529,16 @@ def _gemm1_body(
             )
             bs_slot[mw] = r.load()[0]
 
-    mfma_ty = T.f32x4
-    zero4 = fx.Vector.filled(4, 0.0, fx.Float32)
-    # f8f6f4 cbsz for the A operand: 0 = fp8 (e4m3), 4 = fp4 (e2m1). B (blgp) stays fp4.
-    a_cbsz = 0 if a_dtype == "fp8" else 4
+    def _mma(ci, opsel_a, opsel_b, a_frag, b_frag, sa, sb):
+        # Scaled 16x16x128 MFMA via fx.gemm; accumulate in place (d == c == ci).
+        # opsel_a/opsel_b select the e8m0 scale byte in the shared 256-K word and are
+        # baked into the atom, exactly mirroring the raw intrinsic's opsel operands.
+        fx.gemm(scale_atoms[(opsel_a, opsel_b)], ci, a_frag, b_frag, ci, scale_a=sa, scale_b=sb)
 
     def mfma_cluster(b_slot, a, a_scale, bs_slot, J, init):
+        # init is unused: the accumulators are pre-seeded to 0, so every issue
+        # accumulates (A*B + C). Kept in the signature to avoid churning call sites.
+        del init
         if const_expr(interleave):
             mni = J // 2
             in_b = J % 2
@@ -519,42 +549,17 @@ def _gemm1_body(
         bJ0, bJ1 = b_slot[J][0], b_slot[J][1]
         if const_expr(kMChunks == 1):
             sa = a_scale[0]
-            if const_expr(init):
-                accm[0][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                    mfma_ty, [a[0][0], bJ0, zero4, a_cbsz, 4, 0, sa, 0 + in_b, sb]
-                )
-            else:
-                accm[0][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                    mfma_ty, [a[0][0], bJ0, accm[0][J], a_cbsz, 4, 0, sa, 0 + in_b, sb]
-                )
-            accm[0][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                mfma_ty, [a[0][1], bJ1, accm[0][J], a_cbsz, 4, 2, sa, 2 + in_b, sb]
-            )
+            _mma(accm[0][J], 0, 0 + in_b, a[0][0], bJ0, sa, sb)
+            _mma(accm[0][J], 2, 2 + in_b, a[0][1], bJ1, sa, sb)
         else:
             for sub in range_constexpr(kSubBlocks):
                 i0 = sub * 2 + 0
                 i1 = sub * 2 + 1
                 sa = a_scale[sub]
-                if const_expr(init):
-                    accm[i0][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                        mfma_ty, [a[i0][0], bJ0, zero4, a_cbsz, 4, 0, sa, 0 + in_b, sb]
-                    )
-                    accm[i1][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                        mfma_ty, [a[i1][0], bJ0, zero4, a_cbsz, 4, 1, sa, 0 + in_b, sb]
-                    )
-                else:
-                    accm[i0][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                        mfma_ty, [a[i0][0], bJ0, accm[i0][J], a_cbsz, 4, 0, sa, 0 + in_b, sb]
-                    )
-                    accm[i1][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                        mfma_ty, [a[i1][0], bJ0, accm[i1][J], a_cbsz, 4, 1, sa, 0 + in_b, sb]
-                    )
-                accm[i0][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                    mfma_ty, [a[i0][1], bJ1, accm[i0][J], a_cbsz, 4, 2, sa, 2 + in_b, sb]
-                )
-                accm[i1][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                    mfma_ty, [a[i1][1], bJ1, accm[i1][J], a_cbsz, 4, 3, sa, 2 + in_b, sb]
-                )
+                _mma(accm[i0][J], 0, 0 + in_b, a[i0][0], bJ0, sa, sb)
+                _mma(accm[i1][J], 1, 0 + in_b, a[i1][0], bJ0, sa, sb)
+                _mma(accm[i0][J], 2, 2 + in_b, a[i0][1], bJ1, sa, sb)
+                _mma(accm[i1][J], 3, 2 + in_b, a[i1][1], bJ1, sa, sb)
 
     _relax_prologue = (BM == 128) and not inline_quant
     if const_expr(not inline_quant):
@@ -658,7 +663,7 @@ def _gemm1_body(
             J_local = J // 2
             col_local = wave * fx.Int32(32) + fx.Int32(J_local * 16) + lane_mod_16
             lds_col = (fx.Int32(128) + col_local) if is_up else col_local
-            vec = fx.Vector(accm[i][J])
+            vec = fx.Vector(fx.memref_load_vec(accm[i][J]))
             for v in range_constexpr(4):
                 idx = acc_idx(row_base + fx.Int32(v), lds_col)
                 acc_store(idx, vec[v])
