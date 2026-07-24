@@ -845,6 +845,7 @@ class MlirCompiler:
                 dump_fragments = pre_binary_fragments if external_binary else fragments
                 for idx, frag in enumerate(dump_fragments):
                     if frag.strip().startswith("gpu-module-to-binary"):
+                        backend.finalize_llvm_compile_hints(module, compile_hints=compile_hints)
                         llir = _extract_llvm_ir(module)
 
                     stage_num = stage_num_base + idx
@@ -868,6 +869,7 @@ class MlirCompiler:
                 if external_binary:
                     from .external_llvm import run_external_binary_codegen
 
+                    backend.finalize_llvm_compile_hints(module, compile_hints=compile_hints)
                     llir = _extract_llvm_ir(module)
                     stage_name = f"{next_stage:02d}_external_binary"
                     run_external_binary_codegen(
@@ -916,6 +918,7 @@ class MlirCompiler:
                         verifier=env.debug.enable_verifier,
                         print_after_all=env.debug.print_after_all,
                     )
+                    backend.finalize_llvm_compile_hints(module, compile_hints=compile_hints)
 
                     if env.debug.dump_asm:
                         raise RuntimeError(
@@ -931,12 +934,27 @@ class MlirCompiler:
                     )
                     module.operation.verify()
                 else:
-                    _run_pipeline(
-                        module,
-                        fragments,
-                        verifier=env.debug.enable_verifier,
-                        print_after_all=env.debug.print_after_all,
-                    )
+                    if compile_hints.get("waves_per_eu"):
+                        _run_pipeline(
+                            module,
+                            fragments[:-1],
+                            verifier=env.debug.enable_verifier,
+                            print_after_all=env.debug.print_after_all,
+                        )
+                        backend.finalize_llvm_compile_hints(module, compile_hints=compile_hints)
+                        _run_pipeline(
+                            module,
+                            fragments[-1:],
+                            verifier=env.debug.enable_verifier,
+                            print_after_all=env.debug.print_after_all,
+                        )
+                    else:
+                        _run_pipeline(
+                            module,
+                            fragments,
+                            verifier=env.debug.enable_verifier,
+                            print_after_all=env.debug.print_after_all,
+                        )
 
         return module
 

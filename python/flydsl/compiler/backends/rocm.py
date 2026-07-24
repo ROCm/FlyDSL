@@ -120,6 +120,14 @@ class RocmBackend(BaseBackend):
                     del func_op.attributes["rocdl.waves_per_eu"]
                 _set_passthrough(func_op, "amdgpu-waves-per-eu", f"{waves_per_eu},{waves_per_eu}")
 
+    def finalize_llvm_compile_hints(self, module, *, compile_hints: dict) -> None:
+        waves_per_eu = compile_hints.get("waves_per_eu")
+        if not waves_per_eu:
+            return
+        with module.context:
+            for func_op in _iter_llvm_kernel_funcs(module):
+                _set_passthrough(func_op, "amdgpu-waves-per-eu", f"{waves_per_eu},{waves_per_eu}")
+
     def gpu_module_targets(self) -> List[str]:
         chip = self.target.arch
         return [f'#rocdl.target<chip = "{chip}">']
@@ -148,7 +156,18 @@ def _iter_gpu_kernel_funcs(module):
         if top.operation.name != "gpu.module":
             continue
         for op in top.regions[0].blocks[0].operations:
-            if op.operation.name == "gpu.func" and "gpu.kernel" in op.attributes:
+            if op.operation.name == "gpu.func" and "kernel" in op.attributes:
+                yield op
+
+
+def _iter_llvm_kernel_funcs(module):
+    for top in module.body.operations:
+        if top.operation.name != "gpu.module":
+            continue
+        for op in top.regions[0].blocks[0].operations:
+            if op.operation.name == "llvm.func" and (
+                "rocdl.kernel" in op.attributes or "gpu.kernel" in op.attributes
+            ):
                 yield op
 
 

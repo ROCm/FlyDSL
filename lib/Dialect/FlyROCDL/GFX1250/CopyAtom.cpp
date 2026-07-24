@@ -503,7 +503,7 @@ LogicalResult CopyOpGFX1250TDMType::emitAtomCall(OpBuilder &builder, Location lo
       vector::FromElementsOp::create(builder, loc, VectorType::get({8}, builder.getI32Type()),
                                      ValueRange{zero, zero, zero, zero, zero, zero, zero, zero});
 
-  uint32_t cachePolicy = static_cast<uint32_t>(getCacheModifier());
+  auto cachePolicy = builder.getI32IntegerAttr(static_cast<uint32_t>(getCacheModifier()));
   ArrayAttr noAliasScopes;
   if (isLoad)
     ROCDL::TensorLoadToLDSOp::create(builder, loc, dgroup0, dgroup1, dg2, dg3, dg4, cachePolicy,

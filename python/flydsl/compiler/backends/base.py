@@ -73,6 +73,9 @@ class BaseBackend(metaclass=ABCMeta):
         """Optionally materialize backend-specific hints before the pipeline."""
         return None
 
+    def finalize_llvm_compile_hints(self, module, *, compile_hints: dict) -> None:
+        return None
+
     def external_binary_pipeline_fragments(self, *, compile_hints: dict) -> Tuple[List[str], str]:
         """Split the pipeline for external device binary code generation.
 

@@ -25,20 +25,6 @@
 using namespace mlir;
 using namespace mlir::fly;
 
-namespace llvm {
-
-template <> struct DenseMapInfo<mlir::fly::MakePtrOp> : DenseMapInfo<mlir::Operation *> {
-  using Base = DenseMapInfo<mlir::Operation *>;
-
-  static mlir::fly::MakePtrOp getEmptyKey() { return mlir::fly::MakePtrOp(Base::getEmptyKey()); }
-
-  static mlir::fly::MakePtrOp getTombstoneKey() {
-    return mlir::fly::MakePtrOp(Base::getTombstoneKey());
-  }
-};
-
-} // namespace llvm
-
 namespace mlir {
 namespace fly {
 #define GEN_PASS_DEF_FLYPROMOTEREGMEMTOVECTORSSAPASS

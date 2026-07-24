@@ -381,7 +381,7 @@ public:
       ArrayAttr noAttrs;
       Value loaded = ROCDL::RawPtrBufferLoadOp::create(
           rewriter, loc, loadTy, bp.bufferRsrc(rewriter, loc), bp.swizzleByteOffset(rewriter, loc),
-          zero, zero, noAttrs, noAttrs, noAttrs);
+          zero, rewriter.getI32IntegerAttr(0), noAttrs, noAttrs, noAttrs);
       rewriter.replaceOp(op, loaded);
       return success();
     } else {
@@ -425,7 +425,7 @@ public:
       Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
       ArrayAttr noAttrs;
       ROCDL::RawPtrBufferStoreOp::create(rewriter, loc, value, bp.bufferRsrc(rewriter, loc),
-                                         bp.swizzleByteOffset(rewriter, loc), zero, zero, noAttrs,
+                                         bp.swizzleByteOffset(rewriter, loc), zero, rewriter.getI32IntegerAttr(0), noAttrs,
                                          noAttrs, noAttrs);
       rewriter.eraseOp(op);
       return success();

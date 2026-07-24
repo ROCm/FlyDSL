@@ -20,6 +20,14 @@ from . import cdna4 as cdna4
 from . import cdna5 as cdna5
 from .enum import SyncScope as SyncScope
 
+from ._rocdl_enums import (
+    MFMAPermB as MFMAPermB,
+    MatrixFormat as MatrixFormat,
+    WMMACModifier as WMMACModifier,
+    WMMAMatrixScale as WMMAMatrixScale,
+    WMMAMatrixScaleFormat as WMMAMatrixScaleFormat,
+)
+
 # Keep references to ODS-generated builders so we can wrap them without losing access.
 _ods_wmma_scale_f32_16x16x128_f8f6f4 = globals().get("wmma_scale_f32_16x16x128_f8f6f4", None)
 _ods_wmma_scale_f32_32x16x128_f4 = globals().get("wmma_scale_f32_32x16x128_f4", None)
@@ -247,13 +255,13 @@ def wmma_scale_f32_16x16x128_f8f6f4(
         c_v,
         sA,
         sB,
-        fmtA=fmtA,
-        fmtB=fmtB,
-        modC=modC,
-        scaleAType=scaleAType,
-        fmtScaleA=fmtScaleA,
-        scaleBType=scaleBType,
-        fmtScaleB=fmtScaleB,
+        fmtA=MatrixFormat(fmtA),
+        fmtB=MatrixFormat(fmtB),
+        modC=WMMACModifier(modC),
+        scaleAType=WMMAMatrixScale(scaleAType),
+        fmtScaleA=WMMAMatrixScaleFormat(fmtScaleA),
+        scaleBType=WMMAMatrixScale(scaleBType),
+        fmtScaleB=WMMAMatrixScaleFormat(fmtScaleB),
         reuseA=reuseA,
         reuseB=reuseB,
     ).result
@@ -299,11 +307,11 @@ def wmma_scale_f32_32x16x128_f4(
         c_v,
         sA,
         sB,
-        modC=modC,
-        scaleAType=scaleAType,
-        fmtScaleA=fmtScaleA,
-        scaleBType=scaleBType,
-        fmtScaleB=fmtScaleB,
+        modC=WMMACModifier(modC),
+        scaleAType=WMMAMatrixScale(scaleAType),
+        fmtScaleA=WMMAMatrixScaleFormat(fmtScaleA),
+        scaleBType=WMMAMatrixScale(scaleBType),
+        fmtScaleB=WMMAMatrixScaleFormat(fmtScaleB),
         reuseA=reuseA,
         reuseB=reuseB,
     ).result
@@ -323,7 +331,9 @@ def wmma_f32_16x16x128_fp8_fp8(result_type, a, b, c, *, modC=0, reuseA=False, re
     a_v = _unwrap_mfma_operand(a)
     b_v = _unwrap_mfma_operand(b)
     c_v = _unwrap_mfma_operand(c)
-    return _ods_wmma_f32_16x16x128_fp8_fp8(result_type, a_v, b_v, c_v, modC=modC, reuseA=reuseA, reuseB=reuseB).result
+    return _ods_wmma_f32_16x16x128_fp8_fp8(
+        result_type, a_v, b_v, c_v, modC=WMMACModifier(modC), reuseA=reuseA, reuseB=reuseB
+    ).result
 
 
 @dsl_loc_tracing
@@ -480,18 +490,36 @@ def _to_ir(v):
     return v
 
 
+def _as_cache_policy_attr(aux):
+    from ..._mlir import ir as _ir
+
+    if isinstance(aux, _ir.Attribute):
+        return aux
+    if isinstance(aux, int):
+        return _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), aux)
+    v = _to_ir(aux)
+    try:  # legacy: a constant i32 Value (e.g. arith.constant 0) -> reuse its attr
+        return v.owner.attributes["value"]
+    except Exception:
+        return _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), 0)
+
+
 @dsl_loc_tracing
 def raw_ptr_buffer_atomic_fadd(vdata, rsrc, offset, soffset, aux, **kw):
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_atomic_fadd as _op
 
-    return _op(_to_ir(vdata), _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), _to_ir(aux), **kw)
+    vd = _to_ir(vdata)
+    return _op(vd.type, vd, _to_ir(rsrc), _to_ir(offset), _to_ir(soffset),
+               aux=_as_cache_policy_attr(aux), **kw)
 
 
 @dsl_loc_tracing
 def raw_ptr_buffer_atomic_fmax(vdata, rsrc, offset, soffset, aux, **kw):
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_atomic_fmax as _op
 
-    return _op(_to_ir(vdata), _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), _to_ir(aux), **kw)
+    vd = _to_ir(vdata)
+    return _op(vd.type, vd, _to_ir(rsrc), _to_ir(offset), _to_ir(soffset),
+               aux=_as_cache_policy_attr(aux), **kw)
 
 
 @dsl_loc_tracing

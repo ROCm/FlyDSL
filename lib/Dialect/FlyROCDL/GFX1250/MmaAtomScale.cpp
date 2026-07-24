@@ -244,15 +244,15 @@ FailureOr<Value> MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder,
     // fp4-only form; no fmtA/fmtB operands.
     if (block16)
       return ROCDL::wmma_scale16_f32_32x16x128_f4::create(
-                 builder, loc, accTy, a, b, /*modC=*/(uint16_t)getModC(), c,
-                 /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
-                 /*scaleBType=*/(uint32_t)getOpselB(), /*fmtScaleB=*/(uint32_t)0, scaleB,
+                 builder, loc, accTy, a, b, /*modC=*/static_cast<ROCDL::WMMACModifier>((uint16_t)getModC()), c,
+                 /*scaleAType=*/static_cast<ROCDL::WMMAMatrixScale>((uint32_t)getOpselA()), /*fmtScaleA=*/ROCDL::WMMAMatrixScaleFormat::e8, scaleA,
+                 /*scaleBType=*/static_cast<ROCDL::WMMAMatrixScale>((uint32_t)getOpselB()), /*fmtScaleB=*/ROCDL::WMMAMatrixScaleFormat::e8, scaleB,
                  /*reuseA=*/getReuseA(), /*reuseB=*/getReuseB())
           .getResult();
     return ROCDL::wmma_scale_f32_32x16x128_f4::create(
-               builder, loc, accTy, a, b, /*modC=*/(uint16_t)getModC(), c,
-               /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
-               /*scaleBType=*/(uint32_t)getOpselB(), /*fmtScaleB=*/(uint32_t)0, scaleB,
+               builder, loc, accTy, a, b, /*modC=*/static_cast<ROCDL::WMMACModifier>((uint16_t)getModC()), c,
+               /*scaleAType=*/static_cast<ROCDL::WMMAMatrixScale>((uint32_t)getOpselA()), /*fmtScaleA=*/ROCDL::WMMAMatrixScaleFormat::e8, scaleA,
+               /*scaleBType=*/static_cast<ROCDL::WMMAMatrixScale>((uint32_t)getOpselB()), /*fmtScaleB=*/ROCDL::WMMAMatrixScaleFormat::e8, scaleB,
                /*reuseA=*/getReuseA(), /*reuseB=*/getReuseB())
         .getResult();
   }
@@ -264,17 +264,17 @@ FailureOr<Value> MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder,
 
   if (block16)
     return ROCDL::wmma_scale16_f32_16x16x128_f8f6f4::create(
-               builder, loc, accTy, /*fmtA=*/*aFmt, a, /*fmtB=*/*bFmt, b,
-               /*modC=*/(uint16_t)getModC(), c,
-               /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
-               /*scaleBType=*/(uint32_t)getOpselB(), /*fmtScaleB=*/(uint32_t)0, scaleB,
+               builder, loc, accTy, /*fmtA=*/static_cast<ROCDL::MatrixFormat>(*aFmt), a, /*fmtB=*/static_cast<ROCDL::MatrixFormat>(*bFmt), b,
+               /*modC=*/static_cast<ROCDL::WMMACModifier>((uint16_t)getModC()), c,
+               /*scaleAType=*/static_cast<ROCDL::WMMAMatrixScale>((uint32_t)getOpselA()), /*fmtScaleA=*/ROCDL::WMMAMatrixScaleFormat::e8, scaleA,
+               /*scaleBType=*/static_cast<ROCDL::WMMAMatrixScale>((uint32_t)getOpselB()), /*fmtScaleB=*/ROCDL::WMMAMatrixScaleFormat::e8, scaleB,
                /*reuseA=*/getReuseA(), /*reuseB=*/getReuseB())
         .getResult();
   return ROCDL::wmma_scale_f32_16x16x128_f8f6f4::create(
-             builder, loc, accTy, /*fmtA=*/*aFmt, a, /*fmtB=*/*bFmt, b,
-             /*modC=*/(uint16_t)getModC(), c,
-             /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
-             /*scaleBType=*/(uint32_t)getOpselB(), /*fmtScaleB=*/(uint32_t)0, scaleB,
+             builder, loc, accTy, /*fmtA=*/static_cast<ROCDL::MatrixFormat>(*aFmt), a, /*fmtB=*/static_cast<ROCDL::MatrixFormat>(*bFmt), b,
+             /*modC=*/static_cast<ROCDL::WMMACModifier>((uint16_t)getModC()), c,
+             /*scaleAType=*/static_cast<ROCDL::WMMAMatrixScale>((uint32_t)getOpselA()), /*fmtScaleA=*/ROCDL::WMMAMatrixScaleFormat::e8, scaleA,
+             /*scaleBType=*/static_cast<ROCDL::WMMAMatrixScale>((uint32_t)getOpselB()), /*fmtScaleB=*/ROCDL::WMMAMatrixScaleFormat::e8, scaleB,
              /*reuseA=*/getReuseA(), /*reuseB=*/getReuseB())
       .getResult();
 }

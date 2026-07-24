@@ -239,14 +239,13 @@ static FailureOr<Value> emitWmmaSSA(OpBuilder &builder, Location loc, VectorType
   Value res;
   if constexpr (Variant == WmmaVariant::ModsAllReuse) {
     // Float path: no sign/clamp operands.
-    res = WmmaOp::create(builder, loc, accTy,
-                         /*signA=*/false, a, /*signB=*/false, b,
-                         /*modC=*/(uint16_t)0, c)
+    res = WmmaOp::create(builder, loc, accTy, a, b,
+                         /*modC=*/ROCDL::WMMACModifier::none, c)
               .getResult();
   } else if constexpr (Variant == WmmaVariant::ModsC) {
     // fp8 path: no sign/clamp operands.
     res = WmmaOp::create(builder, loc, accTy, a, b,
-                         /*modC=*/(uint16_t)0, c,
+                         /*modC=*/ROCDL::WMMACModifier::none, c,
                          /*reuseA=*/false, /*reuseB=*/false)
               .getResult();
   } else if constexpr (Variant == WmmaVariant::ModsABClamp) {

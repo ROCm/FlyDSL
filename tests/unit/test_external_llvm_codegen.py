@@ -144,6 +144,7 @@ def test_rocm_wpe_reaches_native_llvm_as_exact_constraint():
         backend.lower_compile_hints(module, compile_hints={"waves_per_eu": 2})
         pre_binary, _ = backend.external_binary_pipeline_fragments(compile_hints={})
         PassManager.parse(f"builtin.module({','.join(pre_binary)})", ctx).run(module.operation)
+        backend.finalize_llvm_compile_hints(module, compile_hints={"waves_per_eu": 2})
         llvm_ir = translate_module_to_llvmir(module.body.operations[0].operation)
 
     assert '"amdgpu-waves-per-eu"="2,2"' in llvm_ir
