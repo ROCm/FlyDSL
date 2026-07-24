@@ -1116,6 +1116,41 @@ def test_normal_accuracy(
     )
 
 
+@pytest.mark.parametrize(("query_length", "quant_mode"), [(1, "per_tensor"), (4, "per_token")])
+def test_metadata_accuracy(query_length: int, quant_mode: str) -> None:
+    """Exercise the block-1024 persistent worklist decode and split reducer."""
+    run_pa_decode_ps_test(
+        context_length=1027,
+        batch_size=3,
+        num_heads=(16, 1),
+        head_size=128,
+        block_size=1024,
+        compute_type=dtypes.d_dtypes["fp8"],
+        query_length=query_length,
+        quant_mode=quant_mode,
+        context_partition_size=256,
+        trans_v=True,
+        kv_varlen=False,
+        sliding_window=0,
+    )
+
+
+@pytest.mark.parametrize("block_size", [16, 64, 256, 2048])
+def test_metadata_rejects_non_1024_block_size(block_size: int) -> None:
+    from kernels.attention.pa_metadata import compile_pa_decode_metadata
+
+    with pytest.raises(ValueError, match="only supports block_size=1024"):
+        compile_pa_decode_metadata(block_size=block_size)
+
+
+@pytest.mark.parametrize("query_input_dtype", ["fp8", "f32"])
+def test_metadata_rejects_unsupported_query_dtype(query_input_dtype: str) -> None:
+    from kernels.attention.pa_metadata import compile_pa_decode_metadata
+
+    with pytest.raises(ValueError, match="only supports bf16/f16 queries"):
+        compile_pa_decode_metadata(query_input_dtype=query_input_dtype)
+
+
 @pytest.mark.parametrize("compute_type", ["fp8"])
 @pytest.mark.parametrize("context_partition_size", [256])
 @pytest.mark.parametrize("head_size", [128])

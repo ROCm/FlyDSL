@@ -30,16 +30,6 @@ KV_COMPUTE_BLOCK = 256  # tile size (matches SP3 kTileKV)
 _PA_METADATA_GRID_OVERSUB = 3
 MFMA_N = 16
 
-_PACKED_FP8_QUERY_DTYPES = tuple(
-    dtype
-    for dtype in (
-        torch.uint8,
-        getattr(torch, "float8_e4m3fnuz", None),
-        getattr(torch, "float8_e4m3fn", None),
-    )
-    if dtype is not None
-)
-
 
 # =====================================================================
 # Launch API — Persistent Scheduling mode
@@ -100,10 +90,7 @@ def get_pa_metadata(
     partition_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=dev)
     partition_indptr[1:] = torch.cumsum(_parts_per_batch, dim=0).to(torch.int32)
 
-    block_size = key_cache.shape[-2] if len(key_cache.shape) == 5 else key_cache.shape[-2]
-
     (
-        (work_meta_data_size, work_meta_data_type),
         (work_indptr_size, work_indptr_type),
         (work_info_set_size, work_info_set_type),
         (reduce_indptr_size, reduce_indptr_type),
@@ -111,7 +98,6 @@ def get_pa_metadata(
         (reduce_partial_map_size, reduce_partial_map_type),
     ) = get_pa_metadata_info_v1(batch_size, num_kv_heads, num_cu=num_sm)
 
-    work_metadata_ptrs = torch.empty(work_meta_data_size, dtype=work_meta_data_type, device=dev)
     work_indptr = torch.empty(work_indptr_size, dtype=work_indptr_type, device=dev)
     work_info = torch.empty(work_info_set_size, dtype=work_info_set_type, device=dev)
     reduce_indptr = torch.empty(reduce_indptr_size, dtype=reduce_indptr_type, device=dev)
@@ -120,24 +106,18 @@ def get_pa_metadata(
 
     get_pa_metadata_v1(
         seqlens_qo_indptr,
-        kv_indptr,
         context_lengths,
-        num_query_heads // num_kv_heads,
-        num_kv_heads,
-        True,
-        work_metadata_ptrs,
         work_indptr,
         work_info,
         reduce_indptr,
         reduce_final_map,
         reduce_partial_map,
+        query_group_size=num_query_heads // num_kv_heads,
+        num_kv_heads=num_kv_heads,
         kv_granularity=partition_size,
-        block_size=block_size,
-        max_seqlen_qo=query_length,
-        uni_seqlen_qo=query_length,
-        fast_mode=True,
-        max_split_per_batch=-1,
+        query_length=query_length,
         num_cu=num_sm,
+        stream=torch.cuda.current_stream(dev),
     )
 
     # The FlyDSL get_pa_metadata_v1 produces the reduce_* maps natively
@@ -216,15 +196,11 @@ def _prepare_scale_tensor(
 
 
 def _get_query_input_dtype(query: torch.Tensor) -> str:
-    if query.dtype in _PACKED_FP8_QUERY_DTYPES:
-        return "packed_fp8"
     if query.dtype == torch.bfloat16:
         return "bf16"
     if query.dtype == torch.float16:
         return "f16"
-    raise ValueError(
-        f"Unsupported query dtype for pa_decode_ps_launch: {query.dtype}. " "Expected packed FP8/uint8, bf16, or f16."
-    )
+    raise ValueError(f"Unsupported query dtype for pa_decode_ps_launch: {query.dtype}. Expected bf16 or f16.")
 
 
 def _get_output_dtype_str(output: torch.Tensor) -> str:
@@ -269,9 +245,8 @@ def get_recommended_splits(
     return max(4, min(n, 8))
 
 
-# Small block_size (16/64) is routed through the load-balanced worklist
-# (metadata) path: `compile_pa_decode_metadata` gathers 256//block_size physical
-# pages per 256-token partition, for both per-tensor and per-token KV quant.
+# Small block sizes use the standalone tile kernel; the metadata decode path
+# below is reserved for 1024-token physical pages.
 _PA_DECODE_PS_SMALL_BLOCK_SIZES = (16, 64)
 
 
@@ -322,12 +297,6 @@ def pa_decode_ps_launch(
         device=dev,
         is_graph_capturing=is_graph_capturing,
     )
-    if query_input_dtype == "packed_fp8":
-        raise ValueError(
-            "`pa_decode_ps_launch` no longer accepts host query_scale and only supports "
-            "bf16/f16 query inputs with kernel-internal query scale computation."
-        )
-
     # Detect per-token vs per-tensor quantization from scale tensor
     # dimensionality: a >1-D scale tensor carries one scale per (block, head,
     # token), which enables the per-token K/V path in the metadata kernel.
@@ -601,7 +570,7 @@ def pa_decode_ps_launch(
         max_seqlen_q=query_length,
         final_output=output,
         num_query_heads=num_query_heads,
-        head_size=int(query.shape[-1]),
+        head_dim=int(query.shape[-1]),
         stream=s,
     )
 
