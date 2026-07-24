@@ -18,13 +18,13 @@ from types import SimpleNamespace
 import pytest
 
 from flydsl._mlir.dialects import arith, func
-from flydsl._mlir.ir import Context, FunctionType, InsertionPoint, IntegerType, Location, Module
+from flydsl._mlir.ir import Context, F32Type, FunctionType, InsertionPoint, IntegerType, Location, Module
 from flydsl.compiler.ast_rewriter import (
     CanonicalizeWhile,
     InsertEmptyYieldForSCFFor,
     ReplaceIfWithDispatch,
 )
-from flydsl.expr.numeric import Int32, Int64
+from flydsl.expr.numeric import Float32, Int32, Int64
 
 
 def _i32(v):
@@ -33,6 +33,10 @@ def _i32(v):
 
 def _i64(v):
     return Int64(arith.ConstantOp(IntegerType.get_signless(64), v).result)
+
+
+def _f32(v):
+    return Float32(arith.ConstantOp(F32Type.get(), float(v)).result)
 
 
 # ─────────────────────────────── if ────────────────────────────────────────
@@ -286,6 +290,29 @@ def test_for_carries_bare_scalar_literal():
                     0, 5, 1, body_fn, result_names=("acc",), result_values=(acc,)
                 )
                 assert isinstance(out, Int32)
+                func.ReturnOp([out.ir_value()])
+        assert module.operation.verify()
+        assert "scf.for" in str(module)
+
+
+def test_for_carries_bare_float_literal():
+    """Same as above for a bare python float initializer (``acc = 0.0``)."""
+    with Context(), Location.unknown():
+        module = Module.create()
+        with InsertionPoint(module.body):
+            f = func.FuncOp("for_bare_float", FunctionType.get([], [F32Type.get()]))
+            entry = f.add_entry_block()
+            with InsertionPoint(entry):
+                acc = 0.0  # bare python float
+
+                def body_fn(iv, names, acc):
+                    assert isinstance(acc, Float32)
+                    return {"acc": acc + _f32(1.0)}
+
+                out = InsertEmptyYieldForSCFFor.scf_for_dispatch(
+                    0, 3, 1, body_fn, result_names=("acc",), result_values=(acc,)
+                )
+                assert isinstance(out, Float32)
                 func.ReturnOp([out.ir_value()])
         assert module.operation.verify()
         assert "scf.for" in str(module)
