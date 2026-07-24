@@ -16,6 +16,26 @@ from ..mega_moe import MegaMoE, Stage1Output
 
 __all__ = ["MegaMoEV2"]
 
+_I32_MAX = (1 << 31) - 1
+
+
+def _fold_i32_dim(t):
+    """FlyDSL packs each memref *shape* dim as signed int32 (jit_argument ``'i'``), so any dim
+    >= 2**31 overflows host-side arg packing. Reshape a contiguous 1-D buffer into 2-D so every
+    dim fits int32; base ptr + total byte size are unchanged, and the GEMM kernels address the
+    weight purely via base ptr + compile-time expert/n/k strides, so behaviour is identical.
+    (Hit at world=1 v4_flash: all 256 experts on one rank -> w1 is exactly 2 GiB = 2**31 bytes.)
+    """
+    if t is None or t.dim() != 1 or t.numel() <= _I32_MAX:
+        return t
+    n = int(t.numel())
+    rows = 2
+    while rows <= _I32_MAX and (n % rows != 0 or (n // rows) > _I32_MAX):
+        rows += 1
+    if rows > _I32_MAX:
+        raise ValueError(f"cannot fold 1-D tensor of numel={n} into int32-safe 2-D shape")
+    return t.view(rows, n // rows)
+
 
 class MegaMoEV2(MegaMoE):
     """Experimental fused dispatch/GEMM1 + GEMM2/combine implementation."""
@@ -36,8 +56,8 @@ class MegaMoEV2(MegaMoE):
         tc = get_config(16)  # decode tune (bs16); TODO per-bs recompile
         self.sort_block_m = int(tc["tile_m"])
         self._s1_tile_n = int(tc["tile_n"])
-        self._s1_w1 = w1.contiguous()
-        self._s1_w1_scale = w1_scale.contiguous()
+        self._s1_w1 = _fold_i32_dim(w1.contiguous())
+        self._s1_w1_scale = _fold_i32_dim(w1_scale.contiguous())
         op = self.comb_op._gm
         assert op is not None, "combine op was built without enable_group_major"
         self._s1_op = op
@@ -249,14 +269,26 @@ class MegaMoEV2(MegaMoE):
             rank=comb_cfg.rank,
             npes=comb_cfg.world_size,
             max_tok=comb_cfg.max_num_inp_token_per_rank,
+            # tok_id_to_src has effective_max_recv entries; the scatter guard must bound t by this to
+            # avoid an OOB tis read (which can alias output token 0 slot 0 and zero it out).
+            recv_cap=int(comb_cfg.effective_max_recv),
             a_dtype="fp8",
             doweight=True,
             num_cu=cu_num,
             grid_mult=1,
+            # SBM = stage-1 sort padding unit (fixed-slot tiles are sort_block_m rows). The gemm2 compute
+            # tile BM may be smaller (autotuned); expert-id / A-scale / srcmap decode must all index by
+            # SBM, not BM, or a BM<SBM tile reads the wrong sort tile's metadata.
+            SBM=int(self.sort_block_m),
         )
-        # Autotune candidates: BM in {16,32,64,128} that are valid (<= and divide sort_block_m).
+        # Autotune candidates: only BM == sort_block_m is correct today. BM < sort_block_m (e.g. 16)
+        # mis-decodes the per-SBM fixed-slot metadata in several places (gemm2 is-bm16 A-scale layout +
+        # MFMA output shuffle), producing large errors -> disabled pending a correct BM<SBM port.
         sbm = int(self.sort_block_m)
-        self._g2v2_bm_candidates = [b for b in (16, 32, 64, 128) if b <= sbm and sbm % b == 0] or [16]
+        self._g2v2_bm_candidates = [sbm]
+        _bm_force = os.environ.get("MEGA_V2_BM", "").strip()  # experimentation override (may be inaccurate for BM<SBM)
+        if _bm_force:
+            self._g2v2_bm_candidates = [int(_bm_force)]
         self._g2v2_by_bm = {}  # BM -> compiled launcher
         self._g2v2_best_bm = {}  # run_tokens bucket -> autotuned best BM
         self._g2v2_launch = self._g2v2_get_launch(min(32, self._g2v2_bm_candidates[-1]))

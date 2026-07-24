@@ -472,6 +472,25 @@ def _prepare(dev, *, quant, tokens, model_dim, inter_dim, experts, topk, seed, r
 
 _E2M1_LUT = None
 
+_I32_MAX = (1 << 31) - 1
+
+
+def _fold_i32_dim(t):
+    """FlyDSL packs each memref *shape* dim as signed int32, so any dim >= 2**31 overflows host-side
+    arg packing. Reshape a contiguous 1-D weight buffer into 2-D so every dim fits int32; base ptr +
+    total bytes are unchanged and the GEMM kernels address weights via base ptr + compile-time
+    expert/n/k strides. (world=1 v4_flash puts all 256 experts on one rank -> w1 is exactly 2 GiB.)
+    """
+    if t is None or t.dim() != 1 or t.numel() <= _I32_MAX:
+        return t
+    n = int(t.numel())
+    rows = 2
+    while rows <= _I32_MAX and (n % rows != 0 or (n // rows) > _I32_MAX):
+        rows += 1
+    if rows > _I32_MAX:
+        raise ValueError(f"cannot fold 1-D tensor of numel={n} into int32-safe 2-D shape")
+    return t.view(rows, n // rows)
+
 
 def _run_full_e2e(
     args,
@@ -509,7 +528,15 @@ def _run_full_e2e(
     import numpy as _np
     import torch.nn.functional as _F
 
-    from kernels.mega_moe.mega_moe_exp import MegaMoEV2 as MegaMoE
+    # MEGA_IMPL=v1 -> base MegaMoE (V1-fused stage2: compile_mixed_moe_gemm2 + combine);
+    # MEGA_IMPL=v2 (default) -> MegaMoEV2 (ported group_gemm2 scatter + combine_no_stage1).
+    # Both share the same _run_fused_stage2 timing hook (_mega_s2_body), so running the
+    # test once per impl yields an apples-to-apples STAGE2-only comparison.
+    _mega_impl = os.environ.get("MEGA_IMPL", "v2").lower()
+    if _mega_impl == "v1":
+        from kernels.mega_moe.mega_moe import MegaMoE
+    else:
+        from kernels.mega_moe.mega_moe_exp import MegaMoEV2 as MegaMoE
     from kernels.mega_moe.quant import mxfp4_moe_scale_sort, per_1x32_mx_quant
     from kernels.moe.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1, compile_mixed_moe_gemm2
     from kernels.moe.moe_sorting_kernel import moe_sorting_flydsl
@@ -536,7 +563,7 @@ def _run_full_e2e(
     )
     w2_fp4, w2_sr = _chunked_fp4_quant(w2_f32)
     _w2sl = slice(rank * epr * model_dim, (rank + 1) * epr * model_dim)
-    w2_kernel = shuffle_weight(w2_fp4[_w2sl]).view(torch.uint8).contiguous().view(-1)
+    w2_kernel = _fold_i32_dim(shuffle_weight(w2_fp4[_w2sl]).view(torch.uint8).contiguous().view(-1))
     w2_scale_1d = gemm_common_utils.e8m0_shuffle(w2_sr[_w2sl]).view(torch.uint8).contiguous().view(-1)
 
     # Pre-quant f32 oracle weights (w1 re-seeded to match _prepare). w1_all is large
@@ -587,7 +614,7 @@ def _run_full_e2e(
     # (Global w1 unsupported: >4GB weights truncate at the 32-bit buffer num_records cap.)
     _wpe = w_kernel.numel() // experts  # per-expert uint8 elems (weight)
     _spe = scale_w1_1d.numel() // experts  # per-expert uint8 elems (scale)
-    _w1_arg = w_kernel.reshape(-1)[rank * epr * _wpe : (rank + 1) * epr * _wpe].contiguous()
+    _w1_arg = _fold_i32_dim(w_kernel.reshape(-1)[rank * epr * _wpe : (rank + 1) * epr * _wpe].contiguous())
     _w1s_arg = scale_w1_1d.reshape(-1)[rank * epr * _spe : (rank + 1) * epr * _spe].contiguous()
     # MegaMoE gate-up mode: auto = a8w4->interleave / a4w4->separated (mirrors aiter). INTERLEAVE
     # feeds the gate_up-shuffled local w1/scale (w_kernel_gui/scale_gui); the ATOM baselines below
@@ -596,7 +623,7 @@ def _run_full_e2e(
     _mega_interleave = (args.quant == "a8w4") if _mgm == "auto" else (_mgm == "interleave")
     if _mega_interleave and w_kernel_gui is not None:
         _mega_gate_mode = "interleave"
-        _w1_arg_mega = w_kernel_gui.reshape(-1)[rank * epr * _wpe : (rank + 1) * epr * _wpe].contiguous()
+        _w1_arg_mega = _fold_i32_dim(w_kernel_gui.reshape(-1)[rank * epr * _wpe : (rank + 1) * epr * _wpe].contiguous())
         _w1s_arg_mega = scale_gui.reshape(-1)[rank * epr * _spe : (rank + 1) * epr * _spe].contiguous()
     else:
         _mega_gate_mode = "separated"
@@ -870,6 +897,7 @@ def _run_full_e2e(
             stream=fx.Stream(torch.cuda.current_stream()),
         )
         _run_gemm2_sep()  # FlyDSL gemm2 (separate) -> _g2out
+        _atom8_holder["oidx"] = _oidx  # stash for the stage2-only timing body below
         _r = dcf.combine(_g2out, None, _oidx)  # FlyDSL combine (separate, on fp8 dispatch op)
         _atom8_holder["o"] = _r[0] if isinstance(_r, (tuple, list)) else _r
 
@@ -962,6 +990,23 @@ def _run_full_e2e(
         _t_mega = _cg_time(_mega_body, moe.comb_op)  # megav1 e2e (stage1+stage2)
         _t_atom8 = _cg_time(_atom_fp8_body, dc)  # baseline e2e (fp8 dispatch)
         _t_atom = _cg_time(_atom_body, dc)  # reference e2e (bf16 dispatch)
+
+        # [temp] STAGE2-only (gemm2 + combine), V2 vs V1, reusing the warmed-up dispatch/stage1 state.
+        def _mega_s2_body():
+            moe._run_fused_stage2(moe._s1_output, run_tokens)  # V2: group_gemm2 scatter + combine_no_stage1
+
+        def _atom8_s2_body():
+            _run_gemm2_sep()  # V1: compile_mixed_moe_gemm2 (production) -> _g2out
+            dcf.combine(_g2out, None, _atom8_holder["oidx"])  # V1 combine (separate)
+
+        _t_mega_s2 = _cg_time(_mega_s2_body, moe.comb_op)
+        _t_atom8_s2 = _cg_time(_atom8_s2_body, dcf)
+        if rank == 0:
+            print(
+                f"  [perf STAGE2-only (gemm2+combine), ms]  V1(atom,mixed_gemm2)={_t_atom8_s2:.4f}  "
+                f"MegaMoE[{_mega_impl}]={_t_mega_s2:.4f}  ratio(mega/V1atom)={(_t_mega_s2/_t_atom8_s2) if _t_atom8_s2>0 else -1:.3f}",
+                flush=True,
+            )
     # _t_mega_s1 = _cg_time(_mega_s1_body, moe.comb_op)        # megav1 STAGE1-only
     # _t_atom_s1 = _cg_time(_atom_s1_body, dcf)                # baseline STAGE1-only (fp8 dispatch->gemm1)
 
@@ -1090,7 +1135,7 @@ def _run_mega_only(
     )
     w2_fp4, w2_sr = _chunked_fp4_quant(w2_f32)
     _w2sl = slice(rank * epr * model_dim, (rank + 1) * epr * model_dim)
-    w2_kernel = shuffle_weight(w2_fp4[_w2sl]).view(torch.uint8).contiguous().view(-1)
+    w2_kernel = _fold_i32_dim(shuffle_weight(w2_fp4[_w2sl]).view(torch.uint8).contiguous().view(-1))
     w2_scale_1d = gemm_common_utils.e8m0_shuffle(w2_sr[_w2sl]).view(torch.uint8).contiguous().view(-1)
     del w2_fp4, w2_sr
     torch.cuda.empty_cache()

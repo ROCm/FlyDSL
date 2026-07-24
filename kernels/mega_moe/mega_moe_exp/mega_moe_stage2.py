@@ -45,6 +45,8 @@ def p2p_scatter_epilog(
     topk,
     log2_max_tok,
     mask_max_tok,
+    recv_cap,
+    comb_inp_nbytes,
     doweight,
     BM=BM,
     BN=BN,
@@ -101,7 +103,11 @@ def p2p_scatter_epilog(
         p = packed[mr]
         t = p & fx.Int32(0x00FFFFFF)
         s = p >> fx.Int32(24)
-        valid = (t < fx.Int32(npes * (mask_max_tok + 1))) & (s < fx.Int32(topk))
+        # t indexes tok_id_to_src (r_tis), which has exactly `recv_cap` (== effective_max_recv) entries.
+        # Padding rows carry stale/garbage srcmap whose t can exceed the real recv count; bounding by
+        # recv_cap (not the looser npes*max_tok) stops an OOB tis read that decodes to (pe0,lid0,s0) and
+        # scatters a zero onto output token 0 slot 0.
+        valid = (t < fx.Int32(recv_cap)) & (s < fx.Int32(topk))
         t_safe = valid.select(t, fx.Int32(0))
         dest_enc = buffer_ops.buffer_load(r_tis, t_safe, vec_width=1, dtype=fx.Int32)
         dest_pe = dest_enc >> fx.Int32(log2_max_tok)
@@ -109,7 +115,9 @@ def p2p_scatter_epilog(
         valid = valid & (dest_pe < fx.Int32(npes))
         dest_pe_safe = valid.select(dest_pe, fx.Int32(0))
         peer_base = buffer_ops.buffer_load(r_p2p, dest_pe_safe, vec_width=1, dtype=fx.Int64)
-        rsrc_dst = buffer_ops.create_buffer_resource_from_addr(peer_base)
+        # Bound the destination to the peer's combine-input buffer so any redirected (invalid-row) store
+        # lands out of range and is dropped by hardware OOB, instead of aliasing a real token slot.
+        rsrc_dst = buffer_ops.create_buffer_resource_from_addr(peer_base, num_records_bytes=comb_inp_nbytes)
         slot = dest_lid * fx.Int32(topk) + s
         dest_row_byte = slot * fx.Int32(token_nbytes) + n_block_idx * fx.Int32(BN * out_elem_bytes)
         wmul = weight[mr] if const_expr(doweight) else fx.Float32(1.0)
@@ -122,7 +130,12 @@ def p2p_scatter_epilog(
                 lds_vec_load(lds_acc_base, idx0 * fx.Int32(4), Vec.make_type(8, fx.Float32), fx.Float32, align=16)
             )
             pk = Vec.from_elements([v8[i] * wmul for i in range(8)], fx.Float32).to(fx.BFloat16)
-            off_bytes = dest_row_byte + col8 * fx.Int32(out_elem_bytes)
+            # `if valid` is not a per-lane predicate here: invalid rows fall through with t_safe/dest_pe_safe
+            # == 0, which addresses (pe0, lid0, slot0) == output token 0 slot 0. Redirect them past the
+            # buffer end so the bounded rsrc drops the store rather than zeroing token 0.
+            off_bytes = valid.select(
+                dest_row_byte + col8 * fx.Int32(out_elem_bytes), fx.Int32(comb_inp_nbytes)
+            )
             buffer_ops.buffer_store(pk, rsrc_dst, off_bytes, offset_is_bytes=True, cache_modifier=2)
 
 
@@ -135,6 +148,8 @@ def compile_mega_moe_stage2(
     rank: int,
     npes: int,
     max_tok: int,
+    recv_cap: int = None,
+    comb_inp_nbytes: int = None,
     a_dtype: str = "fp8",
     aStages: int = 3,
     use_nt: bool = True,
@@ -156,6 +171,16 @@ def compile_mega_moe_stage2(
     mask_max_tok = max_tok - 1
     N_OUT = model_dim
     D_INTER = inter_dim
+    # SBM = sort padding unit (fixed-slot tile = sort_block_m rows). The gemm2 compute tile BM may be
+    # smaller; srcmap/weight/trb are laid out per SBM, so decode indexes by SBM (not BM).
+    _SBM = BM if SBM is None else SBM
+    assert _SBM % BM == 0, f"SBM ({_SBM}) must be a multiple of BM ({BM})"
+    # t (source-token id) indexes tok_id_to_src, sized effective_max_recv. Bound the scatter guard by
+    # it; default to the (looser, pre-fix) npes*max_tok when the caller doesn't pass the real capacity.
+    _recv_cap = npes * max_tok if recv_cap is None else int(recv_cap)
+    # Per-peer combine-input buffer size in bytes (dest_lid*topk+s rows, each N_OUT*2 bf16 bytes). Bounds
+    # the scatter dest so invalid/padding rows redirected to this offset are dropped (hardware OOB).
+    _comb_inp_nbytes = max_tok * topk * N_OUT * 2 if comb_inp_nbytes is None else int(comb_inp_nbytes)
     num_n_blocks = N_OUT // 256
     assert N_OUT % 256 == 0
     _spart = spart_group_m01(g2_spart)
@@ -222,8 +247,10 @@ def compile_mega_moe_stage2(
                 g2_ascale_pf=g2_ascale_pf,
             )
             # compact tile -> fixed-slot base for srcmap/weight (a2 DATA/SCALE are compact; srcmap_em/
-            # wts_em are fixed-slot). m_block_idx = m_row // BM (gemm2 returns m_row = m_block*BM).
-            trb_base = buffer_ops.buffer_load(trb_rsrc, m_row // fx.Int32(BM), vec_width=1, dtype=fx.Int32)
+            # wts_em are fixed-slot, laid out per SBM). trb is per-SBM sort tile, so index by m_row//SBM;
+            # a BM<SBM compute tile then offsets (m_row % SBM) rows into that sort tile's fixed slots.
+            trb_base = buffer_ops.buffer_load(trb_rsrc, m_row // fx.Int32(_SBM), vec_width=1, dtype=fx.Int32)
+            srcmap_intra = m_row - (m_row // fx.Int32(_SBM)) * fx.Int32(_SBM)
             p2p_scatter_epilog(
                 lds_base_i32,
                 accm_vecs,
@@ -231,7 +258,7 @@ def compile_mega_moe_stage2(
                 addr_sweights,
                 addr_tis,
                 addr_p2p_comb_inp,
-                trb_base,
+                trb_base + srcmap_intra,
                 n_block_idx,
                 wave,
                 lane,
@@ -240,6 +267,8 @@ def compile_mega_moe_stage2(
                 topk=topk,
                 log2_max_tok=log2_max_tok,
                 mask_max_tok=mask_max_tok,
+                recv_cap=_recv_cap,
+                comb_inp_nbytes=_comb_inp_nbytes,
                 doweight=doweight,
                 BM=BM,
                 BN=BN,
