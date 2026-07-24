@@ -12,6 +12,8 @@ CDNA_ONLY_TESTS = frozenset(
     {
         "test_preshuffle_gemm.py",
         "test_blockscale_preshuffle_gemm.py",
+        "test_grouped_gemm_blockscale_contiguous.py",
+        "test_grouped_gemm_blockscale_masked.py",
         "test_moe_gemm.py",
         "test_moe_blockscale.py",
         "test_moe_reduce.py",
