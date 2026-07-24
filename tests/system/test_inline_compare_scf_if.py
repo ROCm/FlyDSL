@@ -5,7 +5,7 @@
 
 """
 Inline Compare — AST rewriter generates scf.IfOp correctly for
-``if tid < threshold: buffer_ops.buffer_store(arith.constant(1), rsrc, tid)``.
+``if tid < threshold: Out[tid] = arith.constant(1)``.
 
 The compare ``tid < threshold`` is between two MLIR runtime values
 (threadIdx.x and a kernel argument), so visit_If rewrites it into
@@ -17,7 +17,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, buffer_ops
+from flydsl.expr import arith
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -40,10 +40,8 @@ def test_inline_compare_buffer_store_no_liveout(monkeypatch):
         bid = fx.block_idx.x
         gid = bid * block_dim + tid
 
-        rsrc = buffer_ops.create_buffer_resource(Out)
-
         if tid < threshold:
-            buffer_ops.buffer_store(arith.constant(1.0, type=fx.T.f32()), rsrc, gid)
+            Out[gid] = arith.constant(1.0, type=fx.T.f32())
 
     @flyc.jit
     def conditionalStore(

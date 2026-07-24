@@ -183,26 +183,6 @@ Vector Values (``flydsl.expr.typing.Vector``)
 - **Vec(value).to(dtype)** -- convert vector element type
 - **Vec(value).store(memref, indices)** -- store vector to memref
 
-Use direct ``flydsl.expr.vector`` only for low-level boundaries that ``Vector`` does not expose.
-
-Buffer Operations (``flydsl.expr.buffer_ops``)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-AMD CDNA3/CDNA4 buffer load/store with hardware bounds checking:
-
-.. code-block:: python
-
-   from flydsl.expr import buffer_ops
-
-   rsrc = buffer_ops.create_buffer_resource(tensor, max_size=True)
-   data = buffer_ops.buffer_load(rsrc, offset, vec_width=4, dtype=T.i32)
-   buffer_ops.buffer_store(data, rsrc, offset, mask=is_valid)
-
-- **create_buffer_resource(tensor, num_records=None, max_size=False)** -- create buffer descriptor
-- **buffer_load(rsrc, offset, vec_width=4, dtype=None, mask=None, cache_modifier=0, soffset_bytes=None, is_scalar=False)** -- vector buffer load; ``is_scalar=True`` emits the uniform/SGPR ``s.buffer.load`` (vec_width 1 or 4, i32 result, no mask/soffset)
-- **buffer_store(data, rsrc, offset, soffset_bytes, mask)** -- buffer store
-- **BufferResourceDescriptor** -- descriptor dataclass
-
 ROCDL Operations (``flydsl.expr.rocdl``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -213,7 +193,7 @@ AMD-specific operations for ROCm:
 - **fx.rocdl.MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None)** -- MFMA instruction atom constructor (CDNA3/CDNA4; 4th arg is the A/B element type; accumulator defaults to f32)
 - **fx.rocdl.WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, \*\*kwargs)** -- WMMA MMA atom constructor (arch-dispatched: gfx11 / gfx12 / gfx1250). gfx1250 supports f32(K4), f16/bf16(K32), fp8/bf8(K64/128), i8(K64), i4(K32); integer paths take ``sign_a`` / ``sign_b`` / ``clamp``
 - **fx.rocdl.WMMAScale(m, n, k, elem_ty_a, elem_ty_b=None, elem_ty_acc=None, \*, opsel_a=0, opsel_b=0, mod_c=0, reuse_a=False, reuse_b=False, block_size=32)** -- gfx1250 MX-scaled WMMA (E8M0 block scale, f8/f6/f4; ``16x16x128`` or ``32x16x128`` fp4-only). Per-operand scales are atom state (``scale_a`` / ``scale_b``)
-- **fx.rocdl.make_tdm_atom(tensor, tensor_extents, strides=None, \*, num_warps, ...)** -- build a gfx1250 TDM (Tensor Data Mover) async Global↔LDS whole-tile copy atom (rank 1-5); the tile descriptor is carried as atom state. ``fx.rocdl.TDM(rank, num_warps, ...)`` builds the atom type only; ``fx.rocdl.advance_tdm_atom(atom, byte_offset)`` bumps the K-loop tile offset
+- **fx.rocdl.make_tdm_atom(tensor, tensor_extents, strides=None, \*, num_warps, ...)** -- build a gfx1250 TDM (Tensor Data Mover) async Global↔LDS whole-tile copy atom (rank 1-5); the global base comes from the ``copy_atom_call`` operand pointer, while the per-dim extent (OOB), stride, ``imm_offset``, and MCAST ``workgroup_mask`` are atom state. ``fx.rocdl.TDM(rank, num_warps, ...)`` builds the atom type only. Advance the K-loop tile with ``fx.copy(atom, gt, dst, imm_offset=...)``
 - **fx.rocdl.sched_mfma(cnt)** -- insert MFMA scheduling barrier
 - **fx.rocdl.sched_vmem(cnt)** -- insert VMEM scheduling barrier
 - **fx.rocdl.sched_dsrd(cnt)** -- insert DS read scheduling barrier

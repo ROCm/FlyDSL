@@ -13,13 +13,21 @@ include "flydsl/Dialect/Fly/IR/FlyInterfaces.td"
 def FlyROCDL_Dialect : Dialect {
   let name = "fly_rocdl";
   let cppNamespace = "::mlir::fly_rocdl";
-  
+
   let dependentDialects = [
     "ROCDL::ROCDLDialect"
   ];
 
   let useDefaultTypePrinterParser = 1;
   let useDefaultAttributePrinterParser = 1;
+}
+
+// Marks a copy-atom op type that moves a whole N-D tile in one copy_atom_call
+// (e.g. gfx1250.tdm). The C++ trait `::mlir::fly::WholeTileCopy` lives in the Fly
+// dialect header so the target-neutral expand-copy lowering can query it via
+// `hasTrait` without a concrete cross-dialect cast.
+def Fly_WholeTileCopyTrait : NativeTypeTrait<"WholeTileCopy"> {
+  let cppNamespace = "::mlir::fly";
 }
 
 class FlyROCDL_I32EnumAttr<string enumName, string summary, list<I32EnumAttrCase> cases>
@@ -52,13 +60,9 @@ class FlyROCDL_CopyOp<string typeName, string typeMnemonic, list<Trait> traits =
   let mnemonic = typeMnemonic;
 }
 
-// `copyOverrides` lists CopyOpTypeInterface methods that have a default
-// implementation but are overridden by this type (e.g. `getCopyRank`); they
-// must be named so TableGen emits their declarations.
-class FlyROCDL_StatefulCopyOp<string typeName, string typeMnemonic, list<Trait> traits = [],
-                              list<string> copyOverrides = []>
+class FlyROCDL_StatefulCopyOp<string typeName, string typeMnemonic, list<Trait> traits = []>
     : TypeDef<FlyROCDL_Dialect, typeName, !listconcat(traits, [
-        DeclareTypeInterfaceMethods<Fly_CopyOpTypeInterface, copyOverrides>,
+        DeclareTypeInterfaceMethods<Fly_CopyOpTypeInterface>,
         DeclareTypeInterfaceMethods<Fly_StatefulOpTypeInterface>
       ])> {
   let mnemonic = typeMnemonic;

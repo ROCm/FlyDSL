@@ -386,7 +386,8 @@ def test_autotune_decorator_wraps_into_autotuner():
 
 # ── two-track default/search ─────────────────────────────────────────────
 def test_cache_hit_precedes_default_and_search(monkeypatch):
-    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    # The broad test runner uses the explicit off value; search stays opt-in.
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "0")
     default_calls = 0
 
     def fn(a, out, BLOCK):

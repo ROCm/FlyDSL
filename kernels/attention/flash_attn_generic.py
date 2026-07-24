@@ -61,6 +61,7 @@ def build_flash_attn_func_module_primary(
     varlen=False,
     paged=False,
     kv_cache_layout="linear",
+    skip_kv_pad_mask=None,
 ):
     """Build a generic f16/bf16 flash-attention launcher.
 
@@ -77,6 +78,69 @@ def build_flash_attn_func_module_primary(
     if dtype_str == "fp8":
         raise ValueError("generic flash_attn_func supports f16/bf16 only; fp8 is routed by flash_attn_interface")
 
+    if block_m is None and num_heads >= 32:
+        _launcher_m128 = build_flash_attn_func_module_primary(
+            num_heads,
+            head_dim,
+            causal,
+            dtype_str,
+            sm_scale,
+            waves_per_eu,
+            flat_work_group_size=256,
+            block_m=128,
+            unsafe_fp_math=unsafe_fp_math,
+            fast_fp_math=fast_fp_math,
+            daz=daz,
+            path_tag=path_tag,
+            num_kv_heads=num_kv_heads,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            cross_seqlen=cross_seqlen,
+            varlen=varlen,
+            paged=paged,
+            kv_cache_layout=kv_cache_layout,
+            skip_kv_pad_mask=skip_kv_pad_mask,
+        )
+        _launcher_m256 = build_flash_attn_func_module_primary(
+            num_heads,
+            head_dim,
+            causal,
+            dtype_str,
+            sm_scale,
+            waves_per_eu,
+            flat_work_group_size=512,
+            block_m=256,
+            unsafe_fp_math=unsafe_fp_math,
+            fast_fp_math=fast_fp_math,
+            daz=daz,
+            path_tag=path_tag,
+            num_kv_heads=num_kv_heads,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            cross_seqlen=cross_seqlen,
+            varlen=varlen,
+            paged=paged,
+            kv_cache_layout=kv_cache_layout,
+            skip_kv_pad_mask=skip_kv_pad_mask,
+        )
+        _bs_threshold = 2048 * num_heads if gpu_arch.startswith("gfx942") else 4096 * num_heads
+
+        def _extract_batch(args, kwargs):
+            B = args[4] if len(args) > 4 else kwargs.get("batch_size", None)
+            return B if isinstance(B, int) else 1
+
+        def _auto_launch(*args, **kwargs):
+            B = _extract_batch(args, kwargs)
+            S = args[5] if len(args) > 5 else kwargs.get("seq_len", 128)
+            bs = (B if isinstance(B, int) else 1) * (S if isinstance(S, int) else 128)
+            if bs * num_heads >= _bs_threshold:
+                return _launcher_m256(*args, **kwargs)
+            return _launcher_m128(*args, **kwargs)
+
+        if hasattr(_launcher_m128, "compile"):
+            _auto_launch.compile = _launcher_m256.compile
+        return _auto_launch
+
     _validate_block_m = 128 if block_m is None else block_m
     _validate_fwg = flat_work_group_size
     if _validate_fwg is None:
@@ -91,8 +155,12 @@ def build_flash_attn_func_module_primary(
         _validate_path = "N32"
     _validate_block_n_out = 128 if _validate_path == "N128" else 64
     _validate_has_lds_load_b128 = not gpu_arch.startswith("gfx942")
-    _validate_enable_dma = _validate_has_lds_load_b128 and (
-        _validate_path == "N128" or (os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_DMA", "0") == "1")
+    _validate_enable_gfx942_dma = gpu_arch.startswith("gfx942") and (
+        os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_GFX942_DMA", "0") == "1"
+    )
+    _validate_enable_dma = _validate_enable_gfx942_dma or (
+        _validate_has_lds_load_b128
+        and (_validate_path == "N128" or (os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_DMA", "0") == "1"))
     )
 
     assert _validate_rows_per_wave == 32, f"BLOCK_M/NUM_WAVES must be 32, got {_validate_rows_per_wave}"
@@ -135,6 +203,7 @@ def build_flash_attn_func_module_primary(
         fast_fp_math=fast_fp_math,
         unsafe_fp_math=unsafe_fp_math,
         sm_scale=sm_scale,
+        skip_kv_pad_mask=skip_kv_pad_mask,
     )
     _flash_attn_generic_cache_tag = traits.cache_tag
 
@@ -224,12 +293,23 @@ def build_flash_attn_func_module_primary(
 
         # Loop-carried: [m_old, l_old, o_acc_chunks..., (buf_id if DMA dbuf)]
         _use_dma_dbuf = traits.ENABLE_DMA and not traits.ENABLE_PREFETCH_3BUF
+        _pipe_k = (
+            traits.ENABLE_GFX942_KV_GPFETCH
+            and not _use_dma_dbuf
+            and not traits.ENABLE_PREFETCH_3BUF
+            and traits.N_SUBTILES == 1
+        )
         init_args = [ctx.c_neg_inf, ctx.c_zero_f]
         for _ in range_constexpr(traits.D_CHUNKS):
             init_args.append(ctx.c_zero_v16f32)
         if const_expr(_use_dma_dbuf):
             init_args.append(fx.Index(0))
             kv_gmem_to_lds.coop_dma_k(fx.Index(0), buf_id=0)
+            rocdl.s_waitcnt(0)
+        if const_expr(_pipe_k):
+            _k0_vecs = kv_gmem_to_lds.coop_load_k_global(fx.Index(0))
+            for _kb in range_constexpr(traits.NUM_BATCHES_KV):
+                init_args.append(_k0_vecs[_kb])
 
         loop_results = init_args
         for kv_block_start, inner_iter_args in range(0, kv_upper, traits.BLOCK_N_OUT, init=init_args):
@@ -237,6 +317,11 @@ def build_flash_attn_func_module_primary(
             l_running = inner_iter_args[1]
             o_accs = [inner_iter_args[2 + i] for i in range_constexpr(traits.D_CHUNKS)]
             _cur_buf_id = inner_iter_args[2 + traits.D_CHUNKS] if _use_dma_dbuf else None
+            _carried_k_vecs = (
+                [inner_iter_args[2 + traits.D_CHUNKS + _kb] for _kb in range_constexpr(traits.NUM_BATCHES_KV)]
+                if _pipe_k
+                else None
+            )
             preload_k_count = traits.NUM_PREFETCH_K if traits.NUM_PREFETCH_K < traits.N_SUBTILES else traits.N_SUBTILES
 
             if const_expr(traits.ENABLE_PREFETCH_3BUF):
@@ -283,32 +368,69 @@ def build_flash_attn_func_module_primary(
                     k_base = kv_gmem_to_lds.k_buf_base(_k_buf_id)
                 else:
                     k_slot = 0
-                    kv_gmem_to_lds.coop_load_k(kv_start, k_slot)
+                    if const_expr(_pipe_k):
+                        _waitcnt_vm_n(0)
+                        kv_gmem_to_lds.coop_store_k_lds(_carried_k_vecs, k_slot)
+                        rocdl.sched_group_barrier(rocdl.mask_dswr, 1, 0)
+                        _next_kv_start = kv_block_start + fx.Index(traits.BLOCK_N_OUT)
+                        _next_k_vecs = kv_gmem_to_lds.coop_load_k_global(_next_kv_start)
+                    elif const_expr(traits.ENABLE_GFX942_KV_GPFETCH):
+                        _kv_k_vecs = kv_gmem_to_lds.coop_load_k_global(kv_start)
+                        kv_gmem_to_lds.coop_store_k_lds(_kv_k_vecs, k_slot)
+                        rocdl.sched_group_barrier(rocdl.mask_dswr, 1, 0)
+                    elif const_expr(traits.ENABLE_GFX942_DMA):
+                        kv_gmem_to_lds.coop_dma_k(kv_start, k_slot)
+                        rocdl.s_waitcnt(0)
+                    else:
+                        kv_gmem_to_lds.coop_load_k(kv_start, k_slot)
                     gpu.barrier()
                 if const_expr(not _use_dma_dbuf):
                     k_base = kv_gmem_to_lds.k_buf_base(k_slot)
 
                 if const_expr(traits.KV_VECTORIZED and traits.V_NOMAJOR_DMA):
                     kv_gmem_to_lds.coop_dma_v_nomajor(kv_start, 0)
-                elif const_expr(not traits.USE_HW_TR or (not traits.ENABLE_DMA and not traits.ENABLE_PREFETCH_3BUF)):
+                elif const_expr(
+                    not traits.ENABLE_GFX942_KV_GPFETCH
+                    and (not traits.USE_HW_TR or (not traits.ENABLE_DMA and not traits.ENABLE_PREFETCH_3BUF))
+                ):
                     _v_vecs_prefetch = kv_gmem_to_lds.coop_load_v_global(kv_start)
 
                 # ==== GEMM1: S = K @ Q^T. Bulk-read K packs, DMA-prefetch V, pipeline MFMAs ====
                 _k_lo, _k_hi = kv_lds_to_vgpr.load_k_packs(k_base)
-                if const_expr(traits.ENABLE_DMA and not traits.ENABLE_PREFETCH_3BUF):
-                    kv_gmem_to_lds.coop_dma_v(kv_start, 0)
-                    rocdl.sched_barrier(0)
-                s_acc_lo, s_acc_hi = gemm_helper.gemm1_accumulate(kv_lds_to_vgpr, _k_lo, _k_hi, q_b_packs)
+                if const_expr(traits.ENABLE_GFX942_KV_GPFETCH):
+                    s_acc_lo = ctx.c_zero_v16f32
+                    s_acc_hi = ctx.c_zero_v16f32
+                    for ks in range_constexpr(traits.K_STEPS_QK):
+                        if const_expr(ks == 0):
+                            if const_expr(traits.V_PERM_TR):
+                                _v_vecs_prefetch = kv_gmem_to_lds.coop_load_v_global_perm(kv_start)
+                            else:
+                                _v_vecs_prefetch = kv_gmem_to_lds.coop_load_v_global(kv_start)
+                        s_acc_lo = gemm_helper.mfma_acc(_k_lo[ks], q_b_packs[ks], s_acc_lo)
+                        s_acc_hi = gemm_helper.mfma_acc(_k_hi[ks], q_b_packs[ks], s_acc_hi)
+                        if const_expr(ks + traits.QK_PREFETCH_DEPTH < traits.K_STEPS_QK):
+                            _k_lo[ks + traits.QK_PREFETCH_DEPTH], _k_hi[ks + traits.QK_PREFETCH_DEPTH] = (
+                                kv_lds_to_vgpr.load_k_pack_at(ks + traits.QK_PREFETCH_DEPTH)
+                            )
+                else:
+                    if const_expr(traits.ENABLE_DMA and not traits.ENABLE_PREFETCH_3BUF and not traits.USE_HW_TR):
+                        kv_gmem_to_lds.coop_dma_v(kv_start, 0)
+                        rocdl.sched_barrier(0)
+                    s_acc_lo, s_acc_hi = gemm_helper.gemm1_accumulate(
+                        kv_lds_to_vgpr, _k_lo, _k_hi, q_b_packs, kv_gmem_to_lds, kv_start
+                    )
 
                 # ==== Online softmax over 64 KV positions ====
                 s_raw_lo, s_raw_hi = softmax_helper.split_scores(s_acc_lo, s_acc_hi)
                 s_raw_lo, s_raw_hi = softmax_helper.apply_kv_mask(s_raw_lo, s_raw_hi, kv_start)
-                m_new_raw, l_new, corr, p_vals_lo, p_vals_hi = softmax_helper.online_softmax(
-                    m_running, l_running, s_raw_lo, s_raw_hi
-                )
-
-                # ==== Rescale O accumulators ====
-                o_accs, corr_vec = softmax_helper.rescale_o_accs(o_accs, corr)
+                if const_expr(traits.ENABLE_GFX942_KV_GPFETCH and traits.DTYPE_STR == "bf16" and not traits.USE_K16):
+                    m_new_raw, corr, neg_scaled_max = softmax_helper.online_softmax_stats(m_running, s_raw_lo, s_raw_hi)
+                    o_accs, corr_vec = softmax_helper.rescale_o_accs(o_accs, corr)
+                else:
+                    m_new_raw, l_new, corr, p_vals_lo, p_vals_hi = softmax_helper.online_softmax(
+                        m_running, l_running, s_raw_lo, s_raw_hi
+                    )
+                    o_accs, corr_vec = softmax_helper.rescale_o_accs(o_accs, corr)
 
                 if const_expr(traits.ENABLE_PREFETCH_3BUF and (kv_sub + preload_k_count) < traits.N_SUBTILES):
                     next_k_sub = kv_sub + preload_k_count
@@ -338,14 +460,31 @@ def build_flash_attn_func_module_primary(
                     v_slot = 0
                     v_base = kv_gmem_to_lds.v_buf_base(v_slot)
                     _waitcnt_vm_n(0)
-                    kv_gmem_to_lds.coop_store_v_lds(_v_vecs_prefetch, v_slot)
+                    if const_expr(traits.V_PERM_TR):
+                        kv_gmem_to_lds.coop_store_v_lds_perm(_v_vecs_prefetch, v_slot)
+                    else:
+                        kv_gmem_to_lds.coop_store_v_lds(_v_vecs_prefetch, v_slot)
                     rocdl.sched_group_barrier(rocdl.mask_dswr, 1, 0)
                     gpu.barrier()
 
                 # ==== Build P packs, then GEMM2: O += V^T_lo @ P_lo + V^T_hi @ P_hi ====
-                p_packs_lo = softmax_helper.build_p_packs(p_vals_lo)
-                p_packs_hi = softmax_helper.build_p_packs(p_vals_hi)
-                o_accs = gemm_helper.gemm2_pv(kv_lds_to_vgpr, o_accs, p_packs_lo, p_packs_hi, v_base, corr_vec)
+                if const_expr(traits.ENABLE_GFX942_KV_GPFETCH and traits.DTYPE_STR == "bf16" and not traits.USE_K16):
+                    o_accs, l_new = softmax_helper.gemm2_gpfetch_fused(
+                        gemm_helper,
+                        kv_lds_to_vgpr,
+                        o_accs,
+                        corr_vec,
+                        corr,
+                        l_running,
+                        s_raw_lo,
+                        s_raw_hi,
+                        neg_scaled_max,
+                        v_base,
+                    )
+                else:
+                    p_packs_lo = softmax_helper.build_p_packs(p_vals_lo)
+                    p_packs_hi = softmax_helper.build_p_packs(p_vals_hi)
+                    o_accs = gemm_helper.gemm2_pv(kv_lds_to_vgpr, o_accs, p_packs_lo, p_packs_hi, v_base, corr_vec)
 
                 m_running = m_new_raw
                 l_running = l_new
@@ -356,6 +495,9 @@ def build_flash_attn_func_module_primary(
                     _yield_args.append(fx.Index(1) - _cur_buf_id)
                 else:
                     _yield_args.append(_cur_buf_id)
+            if const_expr(_pipe_k):
+                for _kb in range_constexpr(traits.NUM_BATCHES_KV):
+                    _yield_args.append(_next_k_vecs[_kb])
             loop_results = yield _yield_args
 
         # ---- Normalize and store O (128-bit buffer_store_dwordx4) ----
@@ -423,13 +565,18 @@ def build_flash_attn_func_module_primary(
 
     # Best MI355X FMHA numbers were measured with ROCm/llvm-project `felix/tune_fmha`;
     # other LLVM revisions usually leave a few percent of peak throughput on the table.
+    _llvm_opts = {
+        "enable-post-misched": os.getenv("FLYDSL_LLVM_ENABLE_POST_MISChed", "0") == "1",
+        "lsr-drop-solution": True,
+    }
+    if gpu_arch.startswith("gfx942"):
+        _llvm_opts["amdgpu-expert-scheduling-mode"] = os.getenv("FLYDSL_LLVM_EXPERT_SCHED", "1") == "1"
+        if os.getenv("FLYDSL_LLVM_SCHEDULE_REGION", "0") == "1":
+            _llvm_opts["amdgpu-schedule-regions"] = True
     _fmha_compile_hints = {
         "fast_fp_math": fast_fp_math,
         "unsafe_fp_math": unsafe_fp_math,
-        "llvm_options": {
-            "enable-post-misched": False,
-            "lsr-drop-solution": True,
-        },
+        "llvm_options": _llvm_opts,
     }
 
     def _launch(
@@ -467,6 +614,67 @@ def build_flash_attn_func_module_primary(
             )
 
     _launch.compile = _compile
+
+    def _wrap_pad_mask_dispatch(_inner):
+        if skip_kv_pad_mask is not None or varlen or paged or causal:
+            return _inner
+
+        _launch_skip = build_flash_attn_func_module_primary(
+            num_heads,
+            head_dim,
+            causal,
+            dtype_str,
+            sm_scale,
+            waves_per_eu,
+            flat_work_group_size=flat_work_group_size,
+            block_m=block_m,
+            unsafe_fp_math=unsafe_fp_math,
+            fast_fp_math=fast_fp_math,
+            daz=daz,
+            path_tag=path_tag,
+            num_kv_heads=num_kv_heads,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            cross_seqlen=cross_seqlen,
+            varlen=varlen,
+            paged=paged,
+            kv_cache_layout=kv_cache_layout,
+            skip_kv_pad_mask=True,
+        )
+        _launch_mask = build_flash_attn_func_module_primary(
+            num_heads,
+            head_dim,
+            causal,
+            dtype_str,
+            sm_scale,
+            waves_per_eu,
+            flat_work_group_size=flat_work_group_size,
+            block_m=block_m,
+            unsafe_fp_math=unsafe_fp_math,
+            fast_fp_math=fast_fp_math,
+            daz=daz,
+            path_tag=path_tag,
+            num_kv_heads=num_kv_heads,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            cross_seqlen=cross_seqlen,
+            varlen=varlen,
+            paged=paged,
+            kv_cache_layout=kv_cache_layout,
+            skip_kv_pad_mask=False,
+        )
+
+        def _pad_dispatch(*args, **kwargs):
+            S_int = _extract_seq_len(args, kwargs)
+            if S_int is not None and S_int % 64 == 0:
+                return _launch_skip(*args, **kwargs)
+            return _launch_mask(*args, **kwargs)
+
+        if hasattr(_inner, "compile"):
+            _pad_dispatch.compile = _inner.compile
+        return _pad_dispatch
+
+    _launch = _wrap_pad_mask_dispatch(_launch)
 
     if block_m is None:
         return _guard_seqlen(_launch)

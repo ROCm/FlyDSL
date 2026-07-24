@@ -29,8 +29,7 @@ from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, gpu, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.numeric import Float16, Float32, Int8
-from flydsl.expr.typing import Int32, T
-from flydsl.expr.vector import ReductionOp, Vector, full
+from flydsl.expr.typing import Int32, ReductionOp, T, Vector, full
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from tests.test_common import run_perftest

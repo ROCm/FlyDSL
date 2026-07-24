@@ -1843,6 +1843,11 @@ class Vector(ArithValue):
         if idx is None:
             return self
         if isinstance(idx, int):
+            orig_idx = idx
+            if idx < 0:
+                idx += self.numel
+            if not 0 <= idx < self.numel:
+                raise IndexError(f"vector index {orig_idx} out of range for numel {self.numel}")
             res = _vector.ExtractOp(self, static_position=[idx], dynamic_position=[]).result
             return self._dtype(res)
         if isinstance(idx, (Numeric, ArithValue, ir.Value)):
@@ -1879,6 +1884,16 @@ class Vector(ArithValue):
             res_shape = self._slice_shape(self._shape, coord)
             return self._build_result(res, res_shape, row_major=True)
         raise TypeError(f"unsupported index type: {type(idx)}")
+
+    def __len__(self) -> int:
+        return self.numel
+
+    def __iter__(self):
+        # Without this, list()/unpacking falls back to the legacy sequence
+        # protocol (self[0], self[1], ...), which spins forever because the
+        # int branch of __getitem__ used to never raise IndexError (see #793).
+        for i in range(self.numel):
+            yield self[i]
 
     def _build_result(self, value, shape, *, row_major=False) -> "Vector":
         shape = self._canonical_shape(shape)
