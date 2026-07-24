@@ -450,6 +450,9 @@ def run_moe_stage1(
             routing=routing,
             a_dtype="fp8" if is_a8w4 else "fp4",
             skip_ref=bool(skip_ref),
+            num_iters=num_iters,
+            num_warmup=num_warmup,
+            in_dtype_label=in_dtype,
         )
         return (None, None) if return_outputs else None
     use_packed_int4 = is_int4 or is_int4_bf16
@@ -993,6 +996,9 @@ def run_moe_stage2(
             routing=routing,
             a_dtype="fp8" if is_a8w4 else "fp4",
             skip_ref=bool(skip_ref),
+            num_iters=num_iters,
+            num_warmup=num_warmup,
+            in_dtype_label=in_dtype,
         )
         return (None, None) if return_outputs else None
     use_packed_int4 = is_int4 or is_int4_bf16
@@ -1437,6 +1443,45 @@ def run_moe_stage2(
     return None
 
 
+def _print_mxfp_moe_perf(
+    stage, us, label, tokens, topk, model_dim, inter_dim, experts, *, a_dtype="fp4", use_reduce=False
+):
+    """Emit the stage1/stage2 timing line the benchmark harness (run_benchmark.sh) greps for.
+
+    Mirrors the inline ``FlyDSL MoE stage{1,2}`` prints in run_moe_stage1/run_moe_stage2 so
+    the fused a4w4/a8w4 path reports through the same table rows.
+    """
+    active = min(experts, tokens * topk)  # only routed experts move weights/scales
+    if stage == 1:
+        flops = 2 * tokens * topk * (2 * inter_dim) * model_dim
+        a_bits = 8 if a_dtype == "fp8" else 4  # MX-FP8 activation for a8w4, else MX-FP4
+        x_elems = tokens * model_dim
+        w_elems = active * (2 * inter_dim) * model_dim
+        # A + W1 (MX-FP4) + per-1x32 E8M0 scales + sorted fp4 intermediate out.
+        nbytes = (x_elems * a_bits) // 8 + (w_elems * 4) // 8 + x_elems // 32 + w_elems // 32
+        nbytes += tokens * topk * inter_dim // 2
+    else:
+        flops = 2 * tokens * topk * model_dim * inter_dim
+        a2_elems = tokens * topk * inter_dim
+        w2_elems = active * model_dim * inter_dim
+        # A2 (MX-FP4) + W2 (MX-FP4) + per-1x32 E8M0 scales + bf16 out.
+        nbytes = a2_elems // 2 + (w2_elems * 4) // 8 + a2_elems // 32 + w2_elems // 32
+        nbytes += tokens * model_dim * 2
+    tflops = float("nan") if us <= 0 else flops / (us / 1e6) / 1e12
+    tbps = float("nan") if us <= 0 else nbytes / 1e12 / (us / 1e6)
+    if stage == 1:
+        print(
+            f"FlyDSL MoE stage1[{label}]: "
+            f"{us:.1f} us, {tflops:.2f} TFLOPS(logical, M={tokens*topk}), {tbps:.3f} TB/s"
+        )
+    else:
+        print(
+            f"FlyDSL MoE stage2 [mxfp_moe] {label} {'reduce' if use_reduce else 'atomic'} | "
+            f"{model_dim}x{inter_dim}, E={experts}, K={topk}, M_eff={tokens*topk} | "
+            f"{us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s"
+        )
+
+
 def _run_mxfp_moe_e2e(
     *,
     tokens: int,
@@ -1456,6 +1501,9 @@ def _run_mxfp_moe_e2e(
     inline_quant: bool = False,
     interleave: bool = False,
     skip_ref: bool = False,
+    num_iters: int = 0,
+    num_warmup: int = 0,
+    in_dtype_label: Optional[str] = None,
 ):
     """End-to-end a4w4 / a8w4 correctness via the fused mxfp_moe pipeline.
 
@@ -1527,28 +1575,39 @@ def _run_mxfp_moe_e2e(
     # gemm1 uses the non-temporal weight load at BM == 32 and for inline (BM == 16);
     # larger cached tiles reuse weights across m-blocks.
     g1_use_nt = True if inline_quant else (BM == 32)
-    flydsl_mxfp4_gemm1(
-        a_quant=x_q.view(torch.uint8).contiguous(),
-        a_scale_sorted_shuffled=x_scale_sort,
-        w1_u8=w1_shuf,
-        w1_scale_u8=w1_scale_1d,
-        sorted_expert_ids=sorted_expert_ids,
-        cumsum_tensor=cumsum,
-        m_indices=m_indices,
-        inter_sorted_quant=aqout,
-        inter_sorted_shuffled_scale=ascaleout,
-        hidden_states=hidden,
-        n_tokens=tokens,
-        BM=BM,
-        use_nt=g1_use_nt,
-        inline_quant=inline_quant,
-        interleave=interleave,
-        NE=experts,
-        D_HIDDEN=model_dim,
-        D_INTER=inter_dim,
-        topk=topk,
-        a_dtype=a_dtype,
-    )
+
+    def _g1_launch():
+        flydsl_mxfp4_gemm1(
+            a_quant=x_q.view(torch.uint8).contiguous(),
+            a_scale_sorted_shuffled=x_scale_sort,
+            w1_u8=w1_shuf,
+            w1_scale_u8=w1_scale_1d,
+            sorted_expert_ids=sorted_expert_ids,
+            cumsum_tensor=cumsum,
+            m_indices=m_indices,
+            inter_sorted_quant=aqout,
+            inter_sorted_shuffled_scale=ascaleout,
+            hidden_states=hidden,
+            n_tokens=tokens,
+            BM=BM,
+            use_nt=g1_use_nt,
+            inline_quant=inline_quant,
+            interleave=interleave,
+            NE=experts,
+            D_HIDDEN=model_dim,
+            D_INTER=inter_dim,
+            topk=topk,
+            a_dtype=a_dtype,
+        )
+
+    # gemm1 writes (not accumulates) the sorted fp4 intermediate, so repeated
+    # timed launches leave a valid `aqout`/`ascaleout` for stage2 below.
+    label = in_dtype_label or ("a8w4" if a_dtype == "fp8" else "fp4")
+    if num_iters > 0:
+        _, us1 = run_perftest(_g1_launch, num_iters=int(num_iters), num_warmup=int(num_warmup))
+        _print_mxfp_moe_perf(1, us1, label, tokens, topk, model_dim, inter_dim, experts, a_dtype=a_dtype)
+    else:
+        _g1_launch()
     torch.cuda.synchronize()
 
     # --- stage2 ---------------------------------------------------------------
@@ -1563,26 +1622,35 @@ def _run_mxfp_moe_e2e(
         if BM != 128:
             pytest.skip(f"fused mxfp_moe reduce (nonatomic) epilog requires tile_m == 128, got {BM}")
         flat = torch.zeros(sorted_size * model_dim, dtype=torch.bfloat16, device=dev)
-        flydsl_mxfp4_gemm2(
-            inter_sorted_quant=aqout,
-            inter_sorted_shuffled_scale=ascaleout,
-            w2_u8=w2_shuf,
-            w2_scale_u8=w2_scale_1d,
-            sorted_expert_ids=sorted_expert_ids,
-            cumsum_tensor=cumsum,
-            sorted_token_ids=sorted_token_ids,
-            sorted_weights=sorted_weights,
-            flat_out=flat,
-            M_logical=tokens,
-            max_sorted=sorted_size,
-            BM=BM,
-            use_nt=False,
-            epilog="nonatomic",
-            NE=experts,
-            D_HIDDEN=model_dim,
-            D_INTER=inter_dim,
-            topk=topk,
-        )
+
+        def _g2_launch():
+            flydsl_mxfp4_gemm2(
+                inter_sorted_quant=aqout,
+                inter_sorted_shuffled_scale=ascaleout,
+                w2_u8=w2_shuf,
+                w2_scale_u8=w2_scale_1d,
+                sorted_expert_ids=sorted_expert_ids,
+                cumsum_tensor=cumsum,
+                sorted_token_ids=sorted_token_ids,
+                sorted_weights=sorted_weights,
+                flat_out=flat,
+                M_logical=tokens,
+                max_sorted=sorted_size,
+                BM=BM,
+                use_nt=False,
+                epilog="nonatomic",
+                NE=experts,
+                D_HIDDEN=model_dim,
+                D_INTER=inter_dim,
+                topk=topk,
+            )
+
+        # nonatomic overwrites `flat`, so a timed loop leaves a valid result.
+        if num_iters > 0:
+            _, us2 = run_perftest(_g2_launch, num_iters=int(num_iters), num_warmup=int(num_warmup))
+            _print_mxfp_moe_perf(2, us2, label, tokens, topk, model_dim, inter_dim, experts, use_reduce=True)
+        else:
+            _g2_launch()
         torch.cuda.synchronize()
         flat = flat.view(sorted_size, model_dim).float()
         tok = (sorted_token_ids & 0x00FFFFFF).long()
@@ -1595,26 +1663,36 @@ def _run_mxfp_moe_e2e(
         if BM == 128:
             pytest.skip("fused mxfp_moe atomic epilog unsupported at tile_m == 128; use reduce mode")
         out_buf = torch.zeros(tokens * model_dim, dtype=torch.bfloat16, device=dev)
-        flydsl_mxfp4_gemm2(
-            inter_sorted_quant=aqout,
-            inter_sorted_shuffled_scale=ascaleout,
-            w2_u8=w2_shuf,
-            w2_scale_u8=w2_scale_1d,
-            sorted_expert_ids=sorted_expert_ids,
-            cumsum_tensor=cumsum,
-            sorted_token_ids=sorted_token_ids,
-            sorted_weights=sorted_weights,
-            flat_out=out_buf,
-            M_logical=tokens,
-            max_sorted=sorted_size,
-            BM=BM,
-            use_nt=True,
-            epilog="atomic",
-            NE=experts,
-            D_HIDDEN=model_dim,
-            D_INTER=inter_dim,
-            topk=topk,
-        )
+
+        def _g2_launch():
+            flydsl_mxfp4_gemm2(
+                inter_sorted_quant=aqout,
+                inter_sorted_shuffled_scale=ascaleout,
+                w2_u8=w2_shuf,
+                w2_scale_u8=w2_scale_1d,
+                sorted_expert_ids=sorted_expert_ids,
+                cumsum_tensor=cumsum,
+                sorted_token_ids=sorted_token_ids,
+                sorted_weights=sorted_weights,
+                flat_out=out_buf,
+                M_logical=tokens,
+                max_sorted=sorted_size,
+                BM=BM,
+                use_nt=True,
+                epilog="atomic",
+                NE=experts,
+                D_HIDDEN=model_dim,
+                D_INTER=inter_dim,
+                topk=topk,
+            )
+
+        # atomic accumulates into out_buf; time into it, then zero + one clean
+        # launch for the correctness check below.
+        if num_iters > 0:
+            _, us2 = run_perftest(_g2_launch, num_iters=int(num_iters), num_warmup=int(num_warmup))
+            _print_mxfp_moe_perf(2, us2, label, tokens, topk, model_dim, inter_dim, experts, use_reduce=False)
+            out_buf.zero_()
+        _g2_launch()
         torch.cuda.synchronize()
         out = out_buf.view(tokens, model_dim).float()
 
@@ -1899,6 +1977,9 @@ def test_moe_gemm_2stage(
             routing=routing,
             a_dtype="fp8" if in_dtype == "a8w4" else "fp4",
             skip_ref=bool(skip_ref),
+            num_iters=num_iters,
+            num_warmup=num_warmup,
+            in_dtype_label=in_dtype,
         )
         return
 

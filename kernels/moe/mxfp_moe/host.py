@@ -12,7 +12,7 @@ import functools
 
 import torch
 
-import flydsl.compiler as flyc
+from kernels.common.tensor_shim import _run_compiled
 from kernels.moe.mxfp_moe.gemm1 import compile_gemm1_a4w4_port, gemm1_grid
 from kernels.moe.mxfp_moe.gemm2 import compile_gemm2_a4w4_port
 
@@ -45,26 +45,6 @@ _G2_SUPPORTED = {
     (64, False, "nonatomic_cshuffle"),
     (128, False, "nonatomic_cshuffle"),
 }
-
-
-def _run_compiled(exe, args):
-    """JIT-compile on first call, then dispatch via the cached CompiledFunction."""
-    cf = getattr(exe, "_cf", None)
-    if cf is not None:
-        cf(*args)
-        return
-    try:
-        cf = flyc.compile(exe, *args)
-        exe._cf = cf
-    except Exception:
-        try:
-            from flydsl._mlir import ir
-
-            while ir.Context.current is not None:
-                ir.Context.current.__exit__(None, None, None)
-        except Exception:
-            pass
-        raise
 
 
 @functools.cache
@@ -167,21 +147,19 @@ def flydsl_mxfp4_gemm1(
     grid = gemm1_grid(n_tokens, BM, NE=NE, TOPK=topk, INTER=D_INTER, BN=BN)
     _run_compiled(
         launch,
-        (
-            a_quant.data_ptr(),
-            a_scale_sorted_shuffled.data_ptr(),
-            w1_u8.data_ptr(),
-            w1_scale_u8.data_ptr(),
-            sorted_expert_ids.data_ptr(),
-            cumsum_tensor.data_ptr(),
-            m_indices.data_ptr(),
-            int(n_tokens),
-            int(grid),
-            inter_sorted_quant.data_ptr(),
-            inter_sorted_shuffled_scale.data_ptr(),
-            hidden_states.data_ptr(),
-            torch.cuda.current_stream() if stream is None else stream,
-        ),
+        a_quant.data_ptr(),
+        a_scale_sorted_shuffled.data_ptr(),
+        w1_u8.data_ptr(),
+        w1_scale_u8.data_ptr(),
+        sorted_expert_ids.data_ptr(),
+        cumsum_tensor.data_ptr(),
+        m_indices.data_ptr(),
+        int(n_tokens),
+        int(grid),
+        inter_sorted_quant.data_ptr(),
+        inter_sorted_shuffled_scale.data_ptr(),
+        hidden_states.data_ptr(),
+        torch.cuda.current_stream() if stream is None else stream,
     )
     return inter_sorted_quant, inter_sorted_shuffled_scale
 
@@ -230,20 +208,18 @@ def flydsl_mxfp4_gemm2(
 
     _run_compiled(
         launch,
-        (
-            inter_sorted_quant.data_ptr(),
-            inter_sorted_shuffled_scale.data_ptr(),
-            w2_u8.data_ptr(),
-            w2_scale_u8.data_ptr(),
-            sorted_expert_ids.data_ptr(),
-            cumsum_tensor.data_ptr(),
-            sorted_token_ids.data_ptr(),
-            sorted_weights.data_ptr(),
-            int(M_logical),
-            int(max_m_blocks),
-            flat_out.data_ptr(),
-            flat_out_scale.data_ptr(),
-            torch.cuda.current_stream() if stream is None else stream,
-        ),
+        inter_sorted_quant.data_ptr(),
+        inter_sorted_shuffled_scale.data_ptr(),
+        w2_u8.data_ptr(),
+        w2_scale_u8.data_ptr(),
+        sorted_expert_ids.data_ptr(),
+        cumsum_tensor.data_ptr(),
+        sorted_token_ids.data_ptr(),
+        sorted_weights.data_ptr(),
+        int(M_logical),
+        int(max_m_blocks),
+        flat_out.data_ptr(),
+        flat_out_scale.data_ptr(),
+        torch.cuda.current_stream() if stream is None else stream,
     )
     return flat_out
