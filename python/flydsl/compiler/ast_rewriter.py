@@ -79,19 +79,41 @@ def _promote_scalars(values):
     return [as_dsl_value(as_ir_value(v)) if isinstance(v, (bool, int, float)) else v for v in values]
 
 
-def _tree_structure(v):
-    """Canonical structural key of a carried value: container kind + keys/length +
-    order (recursively) with leaf ir.Types. Used to check a branch output matches
-    the region entry exactly -- shape, dict/namespace key order, and dtypes -- not
-    just the flattened leaf types (reordered dict keys would otherwise miscompile).
+def _flatten_like(entry, out, path, ctx_label):
+    """Flatten a branch output ``out`` into ir.Values ordered to match the entry
+    template ``entry``: dict/namespace are aligned by key (order-insensitive, since
+    a mapping's key order is not semantic), list/tuple by position. Raises a clear
+    error if ``out`` does not match the entry (different keys, length, or dtype).
+    Reordering to the entry's order is what keeps yielded values in the same slots
+    on every branch, so the scf results pack back correctly.
     """
-    if isinstance(v, dict):
-        return ("dict", tuple((k, _tree_structure(x)) for k, x in v.items()))
-    if isinstance(v, types.SimpleNamespace):
-        return ("ns", tuple((k, _tree_structure(x)) for k, x in vars(v).items()))
-    if isinstance(v, (list, tuple)):
-        return (type(v).__name__, tuple(_tree_structure(x) for x in v))
-    return ("leaf", tuple(str(t) for t in get_ir_types(v)))
+
+    def bad(detail):
+        return TypeError(f"{ctx_label}: carried variable '{path}' does not match the region entry: {detail}")
+
+    if isinstance(entry, dict):
+        if not isinstance(out, dict) or set(out) != set(entry):
+            got = sorted(out) if isinstance(out, dict) else type(out).__name__
+            raise bad(f"expected dict with keys {sorted(entry)}, got {got}")
+        return [v for k in entry for v in _flatten_like(entry[k], out[k], f"{path}[{k!r}]", ctx_label)]
+    if isinstance(entry, types.SimpleNamespace):
+        if not isinstance(out, types.SimpleNamespace) or set(vars(out)) != set(vars(entry)):
+            got = sorted(vars(out)) if isinstance(out, types.SimpleNamespace) else type(out).__name__
+            raise bad(f"expected SimpleNamespace with attrs {sorted(vars(entry))}, got {got}")
+        return [
+            v for k in vars(entry) for v in _flatten_like(getattr(entry, k), getattr(out, k), f"{path}.{k}", ctx_label)
+        ]
+    if isinstance(entry, (list, tuple)):
+        if not isinstance(out, (list, tuple)) or len(out) != len(entry):
+            got = f"{type(out).__name__} of length {len(out)}" if isinstance(out, (list, tuple)) else type(out).__name__
+            raise bad(f"expected {type(entry).__name__} of length {len(entry)}, got {got}")
+        return [v for i, (e, o) in enumerate(zip(entry, out)) for v in _flatten_like(e, o, f"{path}[{i}]", ctx_label)]
+    # leaf: promote a bare scalar, then require the same ir.Type(s) as on entry
+    out = as_dsl_value(as_ir_value(out)) if isinstance(out, (bool, int, float)) else out
+    in_types, out_types = get_ir_types(entry), get_ir_types(out)
+    if in_types != out_types:
+        raise bad(f"expected dtype {in_types}, produced {out_types}")
+    return extract_to_ir_values(out)
 
 
 def _unpack_states(values):
@@ -104,21 +126,13 @@ def _unpack_states(values):
 
 
 def _unpack_branch_outputs(names, values, exemplar, ctx_label):
-    """Flatten a branch/body output for scf.yield, checking each carried variable
-    keeps the exact structure it entered with (container shape, dict/namespace key
-    order, and dtypes). ``names``/``exemplar`` are the entry side.
+    """Flatten a branch/body output for scf.yield, aligning each carried variable to
+    its entry structure (``names``/``exemplar`` are the entry side) so reordered
+    dict/namespace keys still land in the right slots, and mismatches error.
     """
     out_raw = []
-    for name, entry_v, out_v in zip(names, exemplar, _promote_scalars(values)):
-        in_struct, out_struct = _tree_structure(entry_v), _tree_structure(out_v)
-        if in_struct != out_struct:
-            raise TypeError(
-                f"{ctx_label}: carried variable '{name}' changed structure across the "
-                f"region (entered as {in_struct}, produced {out_struct}); its container "
-                "shape, dict/namespace key order, and element dtypes must match on entry "
-                "and exit."
-            )
-        out_raw.extend(extract_to_ir_values(out_v))
+    for name, entry_v, out_v in zip(names, exemplar, values):
+        out_raw.extend(_flatten_like(entry_v, out_v, name, ctx_label))
     return out_raw
 
 

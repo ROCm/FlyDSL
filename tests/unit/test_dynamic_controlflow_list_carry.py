@@ -189,7 +189,7 @@ def test_if_list_length_change_errors():
             with InsertionPoint(entry):
                 cond = entry.arguments[0]
                 lst = [_i32(0), _i32(1)]
-                with pytest.raises(TypeError, match="changed structure across the region"):
+                with pytest.raises(TypeError, match="does not match the region entry"):
                     ReplaceIfWithDispatch.scf_if_dispatch(
                         cond,
                         lambda names, lst: {"lst": [_i32(10)]},  # length 1 != 2
@@ -210,7 +210,7 @@ def test_if_list_dtype_change_errors():
             with InsertionPoint(entry):
                 cond = entry.arguments[0]
                 lst = [_i32(0)]
-                with pytest.raises(TypeError, match="changed structure across the region"):
+                with pytest.raises(TypeError, match="does not match the region entry"):
                     ReplaceIfWithDispatch.scf_if_dispatch(
                         cond,
                         lambda names, lst: {"lst": [_i64(10)]},  # i64 != i32
@@ -220,9 +220,9 @@ def test_if_list_dtype_change_errors():
                     )
 
 
-def test_if_dict_key_reorder_errors():
-    """A branch reordering dict keys must error, not silently map values to the
-    wrong slots (guards a silent miscompile)."""
+def test_if_dict_key_reorder_ok():
+    """A branch may list dict keys in a different order (a dict's key order is not
+    semantic); the values are aligned by key to the entry, not silently swapped."""
     with Context(), Location.unknown():
         module = Module.create()
         i1 = IntegerType.get_signless(1)
@@ -232,11 +232,35 @@ def test_if_dict_key_reorder_errors():
             with InsertionPoint(entry):
                 cond = entry.arguments[0]
                 d = {"a": _i32(1), "b": _i32(2)}
-                with pytest.raises(TypeError, match="changed structure across the region"):
+                out = ReplaceIfWithDispatch.scf_if_dispatch(
+                    cond,
+                    lambda names, d: {"d": {"a": _i32(10), "b": _i32(20)}},
+                    lambda names, d: {"d": {"b": _i32(200), "a": _i32(100)}},  # keys reordered
+                    result_names=("d",),
+                    result_values=(d,),
+                )
+                # rebuilt in the entry's key order regardless of the branch's order
+                assert isinstance(out, dict) and list(out) == ["a", "b"]
+                func.ReturnOp([])
+        assert module.operation.verify()
+
+
+def test_if_dict_key_set_mismatch_errors():
+    """A branch with a different key set (not just reordered) must still error."""
+    with Context(), Location.unknown():
+        module = Module.create()
+        i1 = IntegerType.get_signless(1)
+        with InsertionPoint(module.body):
+            f = func.FuncOp("if_badkeys", FunctionType.get([i1], []))
+            entry = f.add_entry_block()
+            with InsertionPoint(entry):
+                cond = entry.arguments[0]
+                d = {"a": _i32(1), "b": _i32(2)}
+                with pytest.raises(TypeError, match="does not match the region entry"):
                     ReplaceIfWithDispatch.scf_if_dispatch(
                         cond,
                         lambda names, d: {"d": {"a": _i32(10), "b": _i32(20)}},
-                        lambda names, d: {"d": {"b": _i32(200), "a": _i32(100)}},  # keys reordered
+                        lambda names, d: {"d": {"a": _i32(100), "c": _i32(200)}},  # 'c' not in entry
                         result_names=("d",),
                         result_values=(d,),
                     )
@@ -452,7 +476,7 @@ def test_ifexp_shape_mismatch_errors():
             entry = f.add_entry_block()
             with InsertionPoint(entry):
                 cond = entry.arguments[0]
-                with pytest.raises(TypeError, match="changed structure across the region"):
+                with pytest.raises(TypeError, match="does not match the region entry"):
                     ReplaceIfWithDispatch.scf_ifexp_dispatch(
                         cond, lambda: [_i32(1), _i32(2)], lambda: [_i32(3)]  # len 1 != 2
                     )
