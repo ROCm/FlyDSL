@@ -8,7 +8,6 @@ import inspect
 import os
 import pickle
 import pkgutil
-import tempfile
 import threading
 import time
 import types
@@ -26,6 +25,7 @@ from ..expr.meta import tracing_context
 from ..expr.typing import Constexpr, Stream
 from ..expr.utils.arith import fastmath as fastmath_ctx
 from ..utils import env, log
+from ..utils.file import atomic_write
 from .ast_rewriter import ASTRewriter
 from .backends import compile_backend_name, get_backend
 from .diagnostics import (
@@ -950,7 +950,7 @@ class JitCacheManager:
             {cache_key}.lock - per-key advisory lock file
 
     All disk reads use shared (reader) locks; writes use exclusive locks
-    with atomic ``tempfile`` + ``os.rename`` to prevent partial reads.
+    and same-directory atomic replacement to prevent partial reads.
     """
 
     def __init__(self, cache_dir: Path):
@@ -970,20 +970,9 @@ class JitCacheManager:
         return self.cache_dir / f"{self._safe_key(cache_key)}.lock"
 
     @staticmethod
-    def _atomic_write(cache_file: Path, value: Any) -> None:
-        """Write *value* atomically via tempfile + rename."""
-        cache_file.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(cache_file.parent), suffix=".tmp")
-        try:
-            with os.fdopen(fd, "wb") as f:
-                pickle.dump(value, f)
-            os.rename(tmp, str(cache_file))
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+    def _write_cache_file(cache_file: Path, value: Any) -> None:
+        with atomic_write(cache_file, mode="wb") as output:
+            pickle.dump(value, output)
 
     def get(self, cache_key: str) -> Optional[Any]:
         if cache_key in self.memory_cache:
@@ -1019,7 +1008,7 @@ class JitCacheManager:
                 if cache_file.exists():
                     log().debug(f"Cache already exists, skipping write: {cache_file.name}")
                     return
-                self._atomic_write(cache_file, value)
+                self._write_cache_file(cache_file, value)
             log().debug(f"Cache saved: {cache_file.name}")
         except Exception as e:
             log().warning(f"Failed to save cache {cache_file}: {e}")
@@ -1055,7 +1044,7 @@ class JitCacheManager:
 
             # Cache miss — provide a writer that writes under the already-held lock.
             def _writer(value):
-                self._atomic_write(cache_file, value)
+                self._write_cache_file(cache_file, value)
                 self.memory_cache[cache_key] = value
 
             yield (None, _writer)

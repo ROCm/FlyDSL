@@ -216,6 +216,14 @@ class EnvManager(metaclass=EnvManagerMeta):
         return self.help()
 
 
+class AutotuneEnvManager(EnvManager):
+    """Autotuning options (``FLYDSL_AUTOTUNE_*`` environment variables)."""
+
+    env_prefix = "AUTOTUNE"
+
+    config_dir = OptStr("", description="Directory for offline config artifacts; empty disables artifacts")
+
+
 class CompileEnvManager(EnvManager):
     """Compile-time options (``FLYDSL_COMPILE_*`` environment variables)."""
 
@@ -292,11 +300,13 @@ class RuntimeEnvManager(EnvManager):
     )
 
 
+autotune = AutotuneEnvManager()
 compile = CompileEnvManager()
 debug = DebugEnvManager()
 runtime = RuntimeEnvManager()
 
 __all__ = [
+    "autotune",
     "compile",
     "debug",
     "runtime",

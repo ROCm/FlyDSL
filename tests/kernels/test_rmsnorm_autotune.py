@@ -3,7 +3,10 @@
 
 """GPU contracts for the direct RMSNorm autotune adopter."""
 
+import json
+import os
 import re
+from pathlib import Path
 
 import pytest
 
@@ -26,10 +29,13 @@ EPS = 1e-5
 @pytest.fixture(autouse=True)
 def _isolated_tuner(tmp_path, monkeypatch):
     _rmsnorm_tuner.cache.clear()
+    _rmsnorm_tuner._artifact_cache.clear()
     monkeypatch.setattr(_rmsnorm_tuner, "_cache_file", tmp_path / "rmsnorm.json")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(tmp_path / "artifacts"))
     monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
     yield
     _rmsnorm_tuner.cache.clear()
+    _rmsnorm_tuner._artifact_cache.clear()
 
 
 def _reference(x, g):
@@ -98,6 +104,11 @@ def test_rmsnorm_autotuned_default_uses_current_stream_and_skips_search(monkeypa
 
 def test_rmsnorm_autotuned_search_then_cache_hit(monkeypatch):
     completed = 0
+    target = next(
+        index
+        for index, config in enumerate(_SEARCH_CONFIGS, start=1)
+        if config.kwargs["BLOCK_THREADS"] == 128 and config.waves_per_eu == 2
+    )
     x, g, ref = _inputs(M=8)
     out = torch.empty_like(x)
     stream = torch.cuda.Stream()
@@ -110,7 +121,7 @@ def test_rmsnorm_autotuned_search_then_cache_hit(monkeypatch):
         call()
         stream.synchronize()
         completed += 1
-        return float(completed)
+        return 0.0 if completed == target else float(completed)
 
     monkeypatch.setattr(_rmsnorm_tuner, "_do_bench", bench_once)
     monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
@@ -119,6 +130,15 @@ def test_rmsnorm_autotuned_search_then_cache_hit(monkeypatch):
 
     assert completed == len(_SEARCH_CONFIGS)
     _assert_close(out, ref)
+
+
+    artifacts = list(Path(os.environ["FLYDSL_AUTOTUNE_CONFIG_DIR"]).glob("*.json"))
+    assert len(artifacts) == 1
+    payload = json.loads(artifacts[0].read_text())
+    assert payload["identity"]["key"] == {"m_in": x.shape[0], "N": x.shape[1], "dtype_str": "bf16"}
+    assert payload["identity"]["device"]["name"] == torch.cuda.get_device_name(x.device)
+    assert payload["config"]["BLOCK_THREADS"] == 128
+    assert payload["config"]["waves_per_eu"] == 2
 
     call_kwargs = {
         "N": x.shape[1],
@@ -144,6 +164,26 @@ def test_rmsnorm_autotuned_search_then_cache_hit(monkeypatch):
     assert completed == len(_SEARCH_CONFIGS)
     _assert_close(cached, ref)
 
+    # A fresh serving decision with no winner cache must load the emitted
+    # artifact without evaluating the default or search space.
+    _rmsnorm_tuner.cache.clear()
+    _rmsnorm_tuner._artifact_cache.clear()
+    monkeypatch.setattr(
+        _rmsnorm_tuner,
+        "default",
+        lambda *args, **kwargs: pytest.fail("offline artifact should take precedence over default"),
+    )
+    monkeypatch.setattr(
+        _rmsnorm_tuner,
+        "configs",
+        lambda *args, **kwargs: pytest.fail("offline hit should not construct search configs"),
+    )
+    offline = torch.empty_like(x)
+    rmsnorm_autotuned(x, g, offline, x.shape[0], stream=raw_stream)
+    stream.synchronize()
+
+    assert completed == len(_SEARCH_CONFIGS)
+    _assert_close(offline, ref)
 
 def test_rmsnorm_weight_dtype_has_distinct_tuning_identity():
     x, g, _ = _inputs(M=1)
