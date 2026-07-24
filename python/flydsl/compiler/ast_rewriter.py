@@ -16,9 +16,9 @@ from .._mlir import ir
 from .._mlir.dialects import arith, scf
 from ..expr import const_expr
 from ..expr.meta import capture_user_location, file_location
-from ..expr.typing import as_dsl_value, as_ir_value
+from ..expr.typing import as_ir_value
 from ..utils import env, log
-from .protocol import construct_from_ir_values
+from .protocol import construct_from_ir_values, extract_to_ir_values
 
 
 def _set_lineno(node, n=1):
@@ -60,123 +60,47 @@ def _unwrap_constexpr(node):
 
 
 # ---------------------------------------------------------------------------
-# Explode / assemble Python containers for control-flow carried state.
+# Unpack / pack Python containers for control-flow carried state.
 #
 # A dynamic scf.if / scf.for / scf.while can only carry a *flat* list of
 # ir.Value as its results / iter_args / block_args. A carried Python variable,
 # however, may be a *container* (list / tuple / dict / SimpleNamespace, possibly
-# nested) whose elements are DSL values. These helpers explode such a container
-# into the flat ir.Value list the scf op needs, and assemble the original
-# container shape back on the way out.
+# nested) whose elements are DSL values. Following a pytree-style flatten /
+# unflatten, we unpack such a container into a flat ir.Value list before
+# building the scf op, and pack it back (during body tracing and on the results)
+# so user code and downstream see the original container shape.
 #
-# The structural template used for assembly is the *pre-region value* itself:
-# it already records the container nesting and each element's dtype. Elements
-# reuse the existing DSL<->ir.Value protocol (as_ir_value / as_dsl_value /
-# protocol.construct_from_ir_values), so scalars, Vectors and @fx.struct values
-# all keep working; a bare scalar is just the degenerate single-slot case, so
-# previous (scalar-only) behaviour is preserved.
+# There is no separate treedef object: the *pre-region value* itself is the
+# structural template. The 3 helpers below are the only shared pieces; they are
+# reused by all four control-flow dispatchers (if / for / while / ifexp) and
+# delegate the actual flatten/rebuild to the existing DSL<->ir.Value protocol
+# (protocol.extract_to_ir_values / construct_from_ir_values). Per-construct logic
+# (building the specific scf op, then/else vs before/after wiring) stays inline
+# in each dispatcher.
 # ---------------------------------------------------------------------------
 
 
-def _carried_slot_count(element):
-    """Number of ir.Value slots a single (non-container) carried element occupies.
-
-    Pure: it must never materialize new IR (so it is safe to call for slicing).
-    """
-    if isinstance(element, ir.Value):
-        return 1
-    if hasattr(element, "__get_ir_types__"):
-        return len(element.__get_ir_types__())
-    if hasattr(element, "__extract_to_ir_values__"):
-        # extract returns the element's *existing* ir.Values, no new ops are built
-        return len(element.__extract_to_ir_values__())
-    # bare python scalar -> as_ir_value would coerce it to a single constant
-    return 1
-
-
-def _explode_carried(value, out):
-    """Depth-first explode ``value`` into ``out`` (a list of ir.Value slots).
-
-    Containers (list/tuple/dict/SimpleNamespace) are recursed; every other
-    object is treated as a single element and lowered with ``as_ir_value`` so
-    that the exact per-element coercion (e.g. python int -> constant, multi-value
-    struct -> several ir.Values) matches the rest of the codebase.
-    """
-    if isinstance(value, (list, tuple)):
-        for v in value:
-            _explode_carried(v, out)
-    elif isinstance(value, dict):
-        for v in value.values():
-            _explode_carried(v, out)
-    elif isinstance(value, types.SimpleNamespace):
-        for v in vars(value).values():
-            _explode_carried(v, out)
-    else:
-        raw = as_ir_value(value)
-        # a multi-value element (e.g. an @fx.struct) extracts to a python list
-        if isinstance(raw, list):
-            out.extend(raw)
-        else:
-            out.append(raw)
-
-
-def _assemble_carried(exemplar, slots, cursor):
-    """Inverse of :func:`_explode_carried`.
-
-    Assemble the container shape of ``exemplar`` consuming ``slots[cursor:]``;
-    returns ``(value, next_cursor)``. ``exemplar`` supplies both the nesting and,
-    at the elements, the DSL type to wrap each ir.Value slot back into.
-    """
-    if isinstance(exemplar, (list, tuple)):
-        items = []
-        for ex in exemplar:
-            v, cursor = _assemble_carried(ex, slots, cursor)
-            items.append(v)
-        return type(exemplar)(items), cursor
-    if isinstance(exemplar, dict):
-        built = {}
-        for k, ex in exemplar.items():
-            built[k], cursor = _assemble_carried(ex, slots, cursor)
-        return built, cursor
-    if isinstance(exemplar, types.SimpleNamespace):
-        built = {}
-        for k, ex in vars(exemplar).items():
-            built[k], cursor = _assemble_carried(ex, slots, cursor)
-        return types.SimpleNamespace(**built), cursor
-    # single element
-    n = _carried_slot_count(exemplar)
-    seg = list(slots[cursor : cursor + n])
-    cursor += n
-    if n == 1:
-        # scalar element: identical to the previous per-name packing
-        element = as_dsl_value(seg[0], exemplar)
-    else:
-        # multi-value element (e.g. @fx.struct): rebuild via the DSL protocol
-        element = construct_from_ir_values(type(exemplar), exemplar, seg)
-    return element, cursor
-
-
 def _explode_states(names, values, ctx_label):
-    """Explode every carried ``value`` into a shared flat ir.Value slot list.
+    """UNPACK. Flatten every carried ``value`` (scalar or nested container) into
+    one shared flat ir.Value list via ``protocol.extract_to_ir_values``.
 
-    Returns ``(state_raw, counts, exemplars, result_types)`` where
-    ``counts[i]`` is how many flat ir.Value slots ``names[i]`` contributed and
-    ``exemplars[i]`` is its pre-region value (the assembly template).
+    Returns ``(state_raw, counts, exemplars, result_types)`` where ``counts[i]``
+    is how many ir.Values ``names[i]`` contributed and ``exemplars[i]`` is its
+    pre-region value (the template used later to pack the flat values back).
+    Called by every dispatcher before building the scf op.
     """
     state_raw = []
     counts = []
     exemplars = []
     for name, value in zip(names, values):
-        slots = []
-        _explode_carried(value, slots)
-        for slot in slots:
-            if not isinstance(slot, ir.Value):
-                raise TypeError(
-                    f"{ctx_label} variable '{name}' contains a {type(slot).__name__} "
-                    "that is not an MLIR Value; only MLIR-backed elements can be carried "
-                    "through dynamic control flow. Initialize the element with a DSL value "
-                    "(e.g. fx.Int32(0), fx.Float32(0.0))."
-                )
+        try:
+            slots = extract_to_ir_values(value)
+        except TypeError as exc:
+            raise TypeError(
+                f"{ctx_label} variable '{name}' of type {type(value).__name__} cannot be "
+                f"carried through dynamic control flow ({exc}). Its elements must be "
+                "MLIR-backed DSL values (e.g. fx.Int32(0), fx.Float32(0.0))."
+            ) from exc
         counts.append(len(slots))
         exemplars.append(value)
         state_raw.extend(slots)
@@ -185,37 +109,39 @@ def _explode_states(names, values, ctx_label):
 
 
 def _assemble_states(slots, counts, exemplars):
-    """Split ``slots`` per carried name (by ``counts``) and rebuild each value
-    from its ``exemplar`` template. Inverse of :func:`_explode_states`."""
+    """PACK (inverse of :func:`_explode_states`). Split flat ``slots`` per carried
+    name (by ``counts``) and rebuild each value from its ``exemplar`` template via
+    ``protocol.construct_from_ir_values``. Used to hand the region body its
+    containers (from block args) and to rebuild the final scf results.
+    """
     out = []
     cursor = 0
     for count, exemplar in zip(counts, exemplars):
         seg = list(slots[cursor : cursor + count])
         cursor += count
-        value, _ = _assemble_carried(exemplar, seg, 0)
-        out.append(value)
+        out.append(construct_from_ir_values(type(exemplar), exemplar, seg))
     return out
 
 
 def _explode_branch_outputs(names, values, counts, result_types, ctx_label):
-    """Explode a branch/body's produced values and verify they match the region
-    boundary exactly (same slot count and same per-slot dtype), so scf.if/for/
-    while operand/result unification stays legal and user mistakes fail early."""
+    """UNPACK + VERIFY. Flatten a region body/branch's produced values and check
+    their structure matches the region entry: same per-name ir.Value count AND
+    same per-slot dtype (a pytree-style structural equality check).
+    Returns the flat list to ``scf.yield``. Used by every dispatcher.
+    """
     out_raw, out_counts, _exemplars, out_types = _explode_states(names, values, ctx_label)
     for name, c_in, c_out in zip(names, counts, out_counts):
         if c_in != c_out:
             raise TypeError(
                 f"{ctx_label} variable '{name}' changed container shape across the "
-                f"region boundary: entered with {c_in} MLIR value slot(s) but the "
-                f"branch/body produced {c_out}. A carried container's length/nesting "
-                "must be identical on entry and exit."
+                f"region: entered with {c_in} MLIR value(s) but the branch/body produced "
+                f"{c_out}. A carried container's length/nesting must match on entry and exit."
             )
     for slot, (t_in, t_out) in enumerate(zip(result_types, out_types)):
         if t_in != t_out:
             raise TypeError(
-                f"{ctx_label}: carried element type mismatch at slot {slot}: "
-                f"expected {t_in}, got {t_out}. A carried element's dtype must match on "
-                "entry and exit."
+                f"{ctx_label}: carried element dtype mismatch at slot {slot}: expected "
+                f"{t_in}, got {t_out}. A carried element's dtype must match on entry and exit."
             )
     return out_raw
 
@@ -708,28 +634,6 @@ class ReplaceIfWithDispatch(Transformer):
                     f"variable '{name}' is not available before if/else and is not assigned in {branch_label}"
                 )
         return values
-
-    @staticmethod
-    def _unwrap_mlir_values(values, state_names, branch_label):
-        raw_values = []
-        for name, value in zip(state_names, values):
-            raw = as_ir_value(value)
-            if not isinstance(raw, ir.Value):
-                raise TypeError(
-                    f"if/else variable '{name}' in {branch_label} is {type(raw).__name__}, "
-                    "not an MLIR Value. Only MLIR Values can be yielded from dynamic if/else branches."
-                )
-            raw_values.append(raw)
-        return raw_values
-
-    @staticmethod
-    def _pack_dispatch_results(results, state_values):
-        if not results:
-            return None
-        wrapped = [as_dsl_value(v, exemplar) for v, exemplar in zip(results, state_values)]
-        if len(wrapped) == 1:
-            return wrapped[0]
-        return tuple(wrapped)
 
     @staticmethod
     def _collect_result_dict(result_names, local_vars):
