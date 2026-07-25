@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-24T22:36:06Z",
+ "updated": "2026-07-25T00:58:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30137282167,
+   "pr": null,
+   "commit": "a83412bfffbfe339fe0ecaaced0b3a3043952457",
+   "branch": "main",
+   "event": "push",
+   "title": "Refactor mxmoe (#892)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30137282167",
+   "created_at": "2026-07-25T00:52:18Z",
+   "updated_at": "2026-07-25T00:55:08Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 30124059807,
    "pr": 902,
@@ -495,7 +510,7 @@
   },
   {
    "run_id": 30088428867,
-   "pr": 892,
+   "pr": null,
    "commit": "f7bd438c14b1a4a8c8a320f1a340a705b0e80fed",
    "branch": "worktree-mxmoe-a8w4",
    "event": "pull_request",
@@ -1114,7 +1129,7 @@
   },
   {
    "run_id": 30076185312,
-   "pr": 892,
+   "pr": null,
    "commit": "83f4a4b975cfb05f28ea3a961a4cb8ed01a07724",
    "branch": "worktree-mxmoe-a8w4",
    "event": "pull_request",
@@ -1673,7 +1688,7 @@
   },
   {
    "run_id": 30067303523,
-   "pr": 892,
+   "pr": null,
    "commit": "fb1aa67791bb2eca49df4d43ea0cc8cbd59c8ff7",
    "branch": "worktree-mxmoe-a8w4",
    "event": "pull_request",
@@ -1716,7 +1731,7 @@
   },
   {
    "run_id": 30065420068,
-   "pr": 892,
+   "pr": null,
    "commit": "b6b0f5d2d3d3b752843acae31315f01909f1e753",
    "branch": "worktree-mxmoe-a8w4",
    "event": "pull_request",
@@ -1759,7 +1774,7 @@
   },
   {
    "run_id": 30065289974,
-   "pr": 892,
+   "pr": null,
    "commit": "49d968436b8ebe82cfc629d9b4576e0652150902",
    "branch": "worktree-mxmoe-a8w4",
    "event": "pull_request",
@@ -1989,7 +2004,7 @@
   },
   {
    "run_id": 30058023371,
-   "pr": 892,
+   "pr": null,
    "commit": "6ebcda9c4efebf1c07f082a01a07604d15ed3f06",
    "branch": "worktree-mxmoe-a8w4",
    "event": "pull_request",
@@ -2032,7 +2047,7 @@
   },
   {
    "run_id": 30057210758,
-   "pr": 892,
+   "pr": null,
    "commit": "ca62ee3d006edf38aac1c2178dd9b5173217eae8",
    "branch": "worktree-mxmoe-a8w4",
    "event": "pull_request",
@@ -2075,7 +2090,7 @@
   },
   {
    "run_id": 30056225987,
-   "pr": 892,
+   "pr": null,
    "commit": "d96476e329fd1e29932a31f9b0d71dc5ce17c898",
    "branch": "worktree-mxmoe-a8w4",
    "event": "pull_request",
@@ -2259,49 +2274,6 @@
    "updated_at": "2026-07-23T16:23:04Z",
    "actor": "amd-nprotaso",
    "jobs": []
-  },
-  {
-   "run_id": 30023289075,
-   "pr": 892,
-   "commit": "8fa1ac188d84388bdc48885e97ed16fedf1c31c7",
-   "branch": "worktree-mxmoe-a8w4",
-   "event": "pull_request",
-   "title": "Refactor mxmoe",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30023289075",
-   "created_at": "2026-07-23T16:02:11Z",
-   "updated_at": "2026-07-23T18:51:03Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-23T18:30:33Z",
-     "completed_at": "2026-07-23T18:51:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30023289075/job/89261599530"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-23T17:23:52Z",
-     "completed_at": "2026-07-23T17:45:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30023289075/job/89261599545"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-23T16:21:34Z",
-     "completed_at": "2026-07-23T17:03:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30023289075/job/89261599562"
-    }
-   ]
   }
  ]
 }
