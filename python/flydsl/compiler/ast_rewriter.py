@@ -71,14 +71,16 @@ def _unwrap_constexpr(node):
 
 
 def _promote(v):
-    """Promote a bare python scalar (e.g. ``0``, ``0.0``) to a DSL numeric, at any
-    depth. Wrapping to a DSL value -- not a raw ir.Value -- keeps the exemplar
-    reconstructable by :func:`_pack_states` (a raw ir.Value has no
-    __construct_from_ir_values__). Containers are rebuilt with promoted leaves;
-    DSL values pass through unchanged.
+    """Wrap a bare python scalar (``0``, ``0.0``) or a raw ``ir.Value`` (e.g. an
+    ``ArithValue`` a kernel carries directly) into a DSL numeric, at any depth. A
+    DSL value -- not a raw ir.Value -- keeps the exemplar reconstructable by
+    :func:`_pack_states` (a raw ir.Value has no __construct_from_ir_values__).
+    Containers are rebuilt with promoted leaves; DSL values pass through.
     """
     if isinstance(v, (bool, int, float)):
         return as_dsl_value(as_ir_value(v))
+    if isinstance(v, ir.Value):
+        return as_dsl_value(v)
     if isinstance(v, dict):
         return {k: _promote(x) for k, x in v.items()}
     if isinstance(v, types.SimpleNamespace):

@@ -321,6 +321,34 @@ def test_for_carries_nested_bare_scalar():
         assert "scf.for" in str(module)
 
 
+def test_if_carries_raw_ir_value():
+    """A kernel may carry a raw ir.Value (e.g. an ArithValue) as state, not a DSL
+    numeric. It must be wrapped back like the old dispatcher did, not crash in
+    construct (regression: flash-attn's lazy_rescale_o carries raw ir.Values)."""
+    with Context(), Location.unknown():
+        module = Module.create()
+        i32 = IntegerType.get_signless(32)
+        i1 = IntegerType.get_signless(1)
+        with InsertionPoint(module.body):
+            f = func.FuncOp("if_raw_ir", FunctionType.get([i1], []))
+            entry = f.add_entry_block()
+            with InsertionPoint(entry):
+                cond = entry.arguments[0]
+                raw = arith.ConstantOp(i32, 5).result  # raw ir.Value, not fx.Int32
+
+                out = ReplaceIfWithDispatch.scf_if_dispatch(
+                    cond,
+                    lambda names, v: {"v": v + _i32(1)},
+                    lambda names, v: {"v": v},
+                    result_names=("v",),
+                    result_values=(raw,),
+                )
+                # packed back into a DSL numeric (has an ir_value()), not left raw
+                assert hasattr(out, "ir_value")
+                func.ReturnOp([])
+        assert module.operation.verify()
+
+
 def test_for_carries_bare_float_literal():
     """Same as above for a bare python float initializer (``acc = 0.0``)."""
     with Context(), Location.unknown():
