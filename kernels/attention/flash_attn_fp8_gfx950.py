@@ -447,8 +447,10 @@ def build_flash_attn_dualwave_swp_fp8_module(
             l_row = softmax_helper.reduce_sum(l_row, v_p_0)
             v_p_0 = softmax_helper.cast_p(v_p_0)
             v_p_0 = softmax_helper.anchor_v_p(v_p_0)
-            _sched_barrier_exp_pairs(traits, 6, 3, 5)
-            _sched_barrier_pairs(traits, 10, 5, 5)
+            # QK epilogue cluster: only 4 wide fp8 MFMA (see main-loop C1). Request
+            # 4 MFMA groups, not 16, so softmax VALU packs behind the real MFMAs.
+            _sched_barrier_exp_pairs(traits, 2, 9, 5)
+            _sched_barrier_pairs(traits, 2, 25, 5)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
@@ -508,8 +510,9 @@ def build_flash_attn_dualwave_swp_fp8_module(
             l_row = softmax_helper.reduce_sum(l_row, v_p_1)
             v_p_1 = softmax_helper.cast_p(v_p_1)
             v_p_1 = softmax_helper.anchor_v_p(v_p_1)
-            _sched_barrier_exp_pairs(traits, 6, 3, 7)
-            _sched_barrier_pairs(traits, 10, 5, 7)
+            # QK epilogue cluster: 4 MFMA (see main-loop C1).
+            _sched_barrier_exp_pairs(traits, 2, 9, 7)
+            _sched_barrier_pairs(traits, 2, 25, 7)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
@@ -567,8 +570,9 @@ def build_flash_attn_dualwave_swp_fp8_module(
             l_row = softmax_helper.reduce_sum(l_row, v_p_0)
             v_p_0 = softmax_helper.cast_p(v_p_0)
             v_p_0 = softmax_helper.anchor_v_p(v_p_0)
-            _sched_barrier_exp_pairs(traits, 6, 3, 9)
-            _sched_barrier_pairs(traits, 10, 5, 9)
+            # QK epilogue cluster: 4 MFMA (see main-loop C1).
+            _sched_barrier_exp_pairs(traits, 2, 9, 9)
+            _sched_barrier_pairs(traits, 2, 25, 9)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
