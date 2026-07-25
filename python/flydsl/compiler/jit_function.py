@@ -58,6 +58,33 @@ from .protocol import (
 
 EXTRA_SOURCE_DIRS: List[str] = []
 
+# ``JitArgument`` is a ``@runtime_checkable`` Protocol; ``isinstance(x, JitArgument)``
+# and ``issubclass(t, JitArgument)`` recompute the protocol member set on every call
+# (typing._get_protocol_attrs), which dominates the per-launch dispatch cost. The
+# result depends only on the object's type, so memoize it by type. This is the hot
+# path for short kernels where CPU dispatch, not GPU time, is the bottleneck.
+_JIT_ARG_ISINSTANCE_CACHE: Dict[type, bool] = {}
+_JIT_ARG_ISSUBCLASS_CACHE: Dict[type, bool] = {}
+
+
+def _is_jit_argument_instance(arg) -> bool:
+    t = type(arg)
+    cached = _JIT_ARG_ISINSTANCE_CACHE.get(t)
+    if cached is None:
+        cached = isinstance(arg, JitArgument)
+        _JIT_ARG_ISINSTANCE_CACHE[t] = cached
+    return cached
+
+
+def _is_jit_argument_subclass(ann) -> bool:
+    if not isinstance(ann, type):
+        return False
+    cached = _JIT_ARG_ISSUBCLASS_CACHE.get(ann)
+    if cached is None:
+        cached = issubclass(ann, JitArgument)
+        _JIT_ARG_ISSUBCLASS_CACHE[ann] = cached
+    return cached
+
 CacheInfo = namedtuple("CacheInfo", ["hits", "misses", "currsize", "disk_size"])
 
 
@@ -1325,9 +1352,9 @@ class JitFunction:
                     key_parts.append((name, arg))
                     continue
 
-            if isinstance(arg, JitArgument):
+            if _is_jit_argument_instance(arg):
                 jit_arg = arg
-            elif isinstance(ann, type) and issubclass(ann, JitArgument):
+            elif _is_jit_argument_subclass(ann):
                 jit_arg = ann(arg)
             else:
                 ctor, _ = JitArgumentRegistry.get(type(arg))

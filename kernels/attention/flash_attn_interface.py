@@ -606,7 +606,13 @@ def flydsl_flash_attn_func(
     waves_per_eu: int = 2,
     daz: bool = True,
     dualwave_swp_lazy_rescale: bool = True,
-    dualwave_swp_setprio: bool = True,
+    # s_setprio scheduling hint. Empirically the *off* setting is faster for the
+    # gfx950 dualwave fp8/bf16 pipeline: setprio=1 raises the priority of the
+    # compute clusters, but the binding constraint is the long VALU (softmax)
+    # stretch, so boosting compute-cluster priority starves the memory/DMA
+    # clusters and slows the loop. A/B (fp8, B4 H32 D128): setprio=0 is
+    # consistently +1-2% across seqlens. Default off.
+    dualwave_swp_setprio: bool = False,
     dualwave_swp_enable_stagger: bool = True,
     # Debug: pass a pre-allocated float32[2] tensor to enable the lazy-rescale
     # branch counter (dualwave_swp_debug_lazy_counts=True). Only for dense mode.

@@ -112,6 +112,9 @@ def build_flash_attn_dualwave_swp_fp8_module(
     class SharedStorage:
         kv: fx.Array[_lds_elem_dtype, traits.LDS_KV_TOTAL_SIZE, 16]
         vt: fx.Array[fx.BFloat16, traits.VT_BF16_TOTAL, 16]
+        # Q tile (BLOCK_M x HEAD_DIM fp8, row-major). Staged once at prologue so QK
+        # reads Q from LDS instead of pinning ~16 VGPR/lane live across the whole loop.
+        q: fx.Array[_lds_elem_dtype, BLOCK_M * HEAD_DIM, 16]
 
     @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1])
     def flash_attn_dualwave_swp_fp8_gfx950_kernel(
@@ -183,18 +186,18 @@ def build_flash_attn_dualwave_swp_fp8_module(
         else:
             _split_guard = contextlib.nullcontext()
         with _split_guard:
-            # Prologue: load K tile split_t0 -> LDS buf0, wait, and sync the workgroup.
+            # Prologue: load K tile split_t0 -> LDS buf0 and stage the whole Q tile to
+            # LDS (once), then wait and sync the workgroup so Q is visible to all waves.
             kv_gmem_to_lds.load_k(ctx.split_t0 * traits.BLOCK_N, 0)
+            q_loader.stage_q_to_lds()
             rocdl.s_waitcnt(0)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
 
-            # Load this wave's raw fp8 Q rows for wide QK; q/k descale is applied to
-            # the fp32 logits after the MFMA. init_q_row sets q_row/q_row_i32/
-            # q_start_pos_i32 on ctx for the causal-mask helpers.
+            # Q is read from LDS inside qk() (short-lived registers). init_q_row sets
+            # q_row/q_row_i32/q_start_pos_i32 on ctx for the causal-mask helpers.
             ctx.init_q_row()
             q_row = ctx.q_row
-            q_all_wide = q_loader.load_all_wide(ctx.q_row_in_block)
 
             # Pipeline ahead: prefetch K tile1 (buf1) + V tile0 (buf0) as background
             kv_gmem_to_lds.load_k((ctx.split_t0 + 1) * traits.BLOCK_N, 1)
@@ -212,7 +215,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
                 rocdl.s_barrier()
 
             # Prologue scores + first softmax pass for KV tile 0
-            v_s_0 = gemm_helper.qk(v_k, q_all_wide)
+            v_s_0 = gemm_helper.qk(v_k)
             rocdl.sched_barrier(0)
             if const_expr(traits.CAUSAL):
                 if const_expr(SPLITK):
@@ -280,7 +283,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
 
                 # Cluster 1 (compute): MMA0 -> v_s_1; finish v_p_0's 2nd-half exp2,
                 # sum into l_row, cast to bf16 for P*V.
-                v_s_1 = gemm_helper.qk(v_k, q_all_wide)
+                v_s_1 = gemm_helper.qk(v_k)
                 v_p_0 = softmax_helper.exp2(v_p_0, 16, 16)
                 l_row = softmax_helper.reduce_sum(l_row, v_p_0)
                 v_p_0 = softmax_helper.cast_p(v_p_0)
@@ -353,7 +356,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
 
                 # Cluster 5 (compute, mirror of C1): MMA0 -> v_s_0; finish v_p_1's
                 # 2nd-half exp2, sum into l_row, cast to bf16.
-                v_s_0 = gemm_helper.qk(v_k, q_all_wide)
+                v_s_0 = gemm_helper.qk(v_k)
                 v_p_1 = softmax_helper.exp2(v_p_1, 16, 16)
                 l_row = softmax_helper.reduce_sum(l_row, v_p_1)
                 v_p_1 = softmax_helper.cast_p(v_p_1)
@@ -435,7 +438,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
             rocdl.sched_barrier(0)
 
             # Epilogue C1 (compute): MMA0 -> v_s_1; finish v_p_0 softmax (like C1).
-            v_s_1 = gemm_helper.qk(v_k, q_all_wide)
+            v_s_1 = gemm_helper.qk(v_k)
             v_p_0 = softmax_helper.exp2(v_p_0, 16, 16)
             l_row = softmax_helper.reduce_sum(l_row, v_p_0)
             v_p_0 = softmax_helper.cast_p(v_p_0)
@@ -495,7 +498,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
 
             # Epilogue C5 (compute): MMA0 -> v_s_0; fold rescale_e3 into l_row, finish
             # v_p_1 softmax.
-            v_s_0 = gemm_helper.qk(v_k, q_all_wide)
+            v_s_0 = gemm_helper.qk(v_k)
             l_row = softmax_helper.apply_l_rescale(l_row, rescale_e3)
             v_p_1 = softmax_helper.exp2(v_p_1, 16, 16)
             l_row = softmax_helper.reduce_sum(l_row, v_p_1)
@@ -554,7 +557,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
 
             # Epilogue C9 (compute): MMA0 -> v_s_1 (last tile); fold rescale_e7 into
             # l_row, finish v_p_0 softmax.
-            v_s_1 = gemm_helper.qk(v_k, q_all_wide)
+            v_s_1 = gemm_helper.qk(v_k)
             l_row = softmax_helper.apply_l_rescale(l_row, rescale_e7)
             v_p_0 = softmax_helper.exp2(v_p_0, 16, 16)
             l_row = softmax_helper.reduce_sum(l_row, v_p_0)
@@ -623,6 +626,10 @@ def build_flash_attn_dualwave_swp_fp8_module(
             # the 1/l normalization here.
             inv_l_rcp = rocdl.rcp(T.f32, _raw(l_row))
             inv_l = ArithValue(fx.Float32(l_row) > ctx.c_zero_f).select(inv_l_rcp, ctx.c_zero_f)
+            # FP8_PV stores raw fp8 V (no per-load dequant), so fold v_descale into the
+            # final 1/l normalization here (HIPREC bf16 path already folded it in LDS).
+            if const_expr(traits.FP8_PV):
+                inv_l = ArithValue(inv_l) * ctx.vd_fp8
             softmax_helper.scale_o(v_o, inv_l)
 
             # CLOSE the phase shift: one extra s_barrier on group A (complement of

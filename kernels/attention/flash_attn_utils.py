@@ -25,6 +25,7 @@ from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, roc
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
+from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 from flydsl.utils.smem_allocator import SmemPtr
 from kernels.common.kernels_common import dtype_to_elem_type
@@ -419,6 +420,22 @@ def _sub_score_pair(v_s, row_max, fm_fast):
     for r in range_constexpr(16):
         hi_sub.append(_fsub(s_hi[r], row_max, fm_fast))
     return Vec.from_elements(lo_sub, fx.Float32).ir_value(), Vec.from_elements(hi_sub, fx.Float32).ir_value()
+
+
+def _scale_sub_score_pair(v_s, row_max_raw, scale, zero_f, fm_fast):
+    """Fused softmax-scale + row-max subtraction (optimization 1-A).
+
+    Returns ``scale * (v_s - row_max_raw)`` per element via a single FMA
+    (``fma(s, scale, -scale*row_max_raw)``), so the fp8 QK MMA can emit raw
+    (un-scaled) logits and reduce_max can run in the raw domain (scale > 0 is
+    order-preserving). Replaces the separate post-QK scale multiply + subtract.
+    ``-inf`` masked lanes stay ``-inf`` (scale > 0), matching the un-fused path.
+    """
+    s_lo, s_hi = v_s
+    neg_scaled_max = _fsub(zero_f, _fmul(scale, row_max_raw, fm_fast), fm_fast)
+    lo = [fmath.fma(s_lo[r], scale, neg_scaled_max, fastmath=fm_fast) for r in range_constexpr(16)]
+    hi = [fmath.fma(s_hi[r], scale, neg_scaled_max, fastmath=fm_fast) for r in range_constexpr(16)]
+    return Vec.from_elements(lo, fx.Float32).ir_value(), Vec.from_elements(hi, fx.Float32).ir_value()
 
 
 def _exp2_score_slice(v_s, start, length):
@@ -1665,6 +1682,7 @@ class DualwaveSwpFp8Traits:
     SPLITK: bool
     VARLEN: bool
     CROSS_SEQLEN: bool
+    FP8_PV: bool
     DEFAULT_STRIDE_Q_N: int
     DEFAULT_STRIDE_KV_N: int
     DMA_BYTES: int
@@ -1731,6 +1749,7 @@ class DualwaveSwpFp8Traits:
             self.LANE_SPLIT_KV,
             self.VT_BF16_ELEMS,
             self.VT_BF16_TOTAL,
+            self.FP8_PV,
         )
 
 
@@ -1807,6 +1826,11 @@ def _make_dualwave_swp_fp8_traits(
 
     splitk = num_kv_splits > 1
 
+    # Experimental fp8 PV path: compress P and V to fp8 and run the PV matmul as a
+    # 32x32x64 f8f6f4 MMA (K=64, 1 MMA/d-chunk) instead of the HIPREC bf16 path
+    # (32x32x16, 4 steps/d-chunk). Off by default; opt in via FLYDSL_FA_FP8_PV=1.
+    fp8_pv = os.getenv("FLYDSL_FA_FP8_PV", "0") == "1"
+
     return DualwaveSwpFp8Traits(
         BLOCK_M=block_m,
         BLOCK_N=block_n,
@@ -1834,6 +1858,7 @@ def _make_dualwave_swp_fp8_traits(
         SPLITK=splitk,
         VARLEN=bool(varlen),
         CROSS_SEQLEN=bool(cross_seqlen),
+        FP8_PV=fp8_pv,
         DEFAULT_STRIDE_Q_N=default_stride_q_n,
         DEFAULT_STRIDE_KV_N=default_stride_kv_n,
         DMA_BYTES=16,
@@ -4210,6 +4235,8 @@ class DualwaveFp8KernelContext:
         self.lds_kv_base_ptr = buffer_ops.create_llvm_ptr(self.lds_kv_base_idx, address_space=3)
         self.lds_vt_base_idx = fx.Index(fx.ptrtoint(lds.vt.ptr))
         self.lds_vt_base_ptr = buffer_ops.create_llvm_ptr(self.lds_vt_base_idx, address_space=3)
+        self.lds_q_base_idx = fx.Index(fx.ptrtoint(lds.q.ptr))
+        self.lds_q_base_ptr = buffer_ops.create_llvm_ptr(self.lds_q_base_idx, address_space=3)
 
     def init_thread_mapping(self):
         _init_dualwave_thread_mapping(self)
@@ -4425,19 +4452,34 @@ class DualwaveFp8QLoader(DualwaveFp8KernelContext):
     def __init__(self, ctx):
         super().__init__(ctx)
 
+    def stage_q_to_lds(self):
+        # DMA the workgroup's BLOCK_M x HEAD_DIM fp8 Q tile into LDS, row-major
+        # (byte layout: row*HEAD_DIM + d). Done once at the prologue via global->LDS
+        # DMA (no register round-trip); QK then reads Q wide from LDS, so the ~16
+        # VGPR/lane the register-resident Q pack used to pin across the whole loop
+        # are freed for softmax/PV. OOB rows (row >= seqlen_q) read 0 via q_div's
+        # num_records guard, matching the old buffer_load_128 behavior.
+        traits = self.traits
+        chunks_per_row = traits.HEAD_DIM // 16  # 16-byte DMA chunks per Q row
+        total_chunks = (traits.BLOCK_M * traits.HEAD_DIM) // 16
+        for p in range_constexpr(total_chunks // traits.BLOCK_SIZE):
+            c = self.tid + fx.Index(p * traits.BLOCK_SIZE)
+            row = c // fx.Index(chunks_per_row)
+            dchunk = c % fx.Index(chunks_per_row)
+            src_elem = self.q_gmem_elem_offset + row * self.stride_q_n_v + dchunk * fx.Index(16)
+            lds_addr = self.lds_q_base_idx + c * fx.Index(16)
+            self.buffer_load_lds_128(self.q_div, lds_addr, src_elem, 0)
+
     def load_all_wide(self, q_row_in_block):
-        # Wide QK Q reads 32 contiguous fp8 D values per lane and wide step.
-        # head_dim=128 gives two K=64 steps, selected by ws and lane//32.
+        # Read Q wide (i32x8 per head-dim half) from the LDS Q tile: per lane, 32
+        # contiguous fp8 D-values for query row q_row_in_block, at d = ws*64 +
+        # (lane//32)*32. Mirrors the K wide read (read_i32x8_lds).
         traits = self.traits
         d_base = self.lane_div_32 * 32
         packs = []
         for ws in range_constexpr(traits.HEAD_DIM // 64):
-            q_col = ws * 64 + d_base
-            g_idx = self.q_gmem_elem_offset + q_row_in_block * self.stride_q_n_v + q_col
-            # 32 contiguous fp8 = 256 bits = two 128-bit loads (i32x4 each) -> i32x8.
-            lo = Vec(self.buffer_load_128(g_idx), (4,), fx.Int32)
-            hi = Vec(self.buffer_load_128(g_idx + 16), (4,), fx.Int32)
-            packs.append(lo.shuffle(hi, [0, 1, 2, 3, 4, 5, 6, 7]).ir_value())
+            byte_row = q_row_in_block * fx.Index(traits.HEAD_DIM) + fx.Index(ws * 64) + d_base
+            packs.append(self.read_i32x8_lds(self.lds_q_base_ptr, fx.Int32(byte_row)))
         return packs
 
 
@@ -4463,22 +4505,100 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
     def _mfma_acc_bf16(self, a_v8, b_v8, c_v16):
         return fly.mma_atom_call_ssa([self.v16f32_type], self.bf16_mma_atom, a_v8, b_v8, c_v16)
 
-    def qk(self, v_k, q_all_wide):
-        # Wide QK: two 32x32x64 MFMAs (one per head-dim half). A=K, B=Q.
+    def _v8bf16_to_f32(self, v8):
+        # Extend a v8 bf16 pack to 8 f32 values.
+        f32 = Vec(llvm.FPExtOp(Vec.make_type(8, fx.Float32), as_mlir_value(v8)).result, (8,), fx.Float32)
+        return [f32[i] for i in range_constexpr(8)]
+
+    def _pack_fp8_i32x8(self, f32_vals):
+        # Pack 32 f32 -> i32x8 (32 fp8 e4m3), two cvt_pk_fp8_f32 per output dword.
+        c0 = as_mlir_value(fx.Int32(0))
+        words = []
+        for g in range_constexpr(8):
+            base = g * 4
+            w = rocdl.cvt_pk_fp8_f32(T.i32, as_mlir_value(f32_vals[base]), as_mlir_value(f32_vals[base + 1]), c0, 0)
+            w = rocdl.cvt_pk_fp8_f32(T.i32, as_mlir_value(f32_vals[base + 2]), as_mlir_value(f32_vals[base + 3]), w, 1)
+            words.append(fx.Int32(w))
+        return Vec.from_elements(words, fx.Int32).ir_value()
+
+    def _p_to_fp8_i32x8(self, v_p):
+        # Concat 4 bf16 P packs (p_lo[0],p_lo[1],p_hi[0],p_hi[1]) -> fp8 K=64 operand.
+        p_lo, p_hi = v_p
+        f32 = []
+        for pk in (p_lo[0], p_lo[1], p_hi[0], p_hi[1]):
+            f32 += self._v8bf16_to_f32(pk)
+        return self._pack_fp8_i32x8(f32)
+
+    def _v_concat_i32x8(self, v_v, dc):
+        # Concat the 4 tr8 V packs (i64 = 8 fp8 each) for chunk dc -> fp8 K=64 operand.
+        words = []
+        for ks in range_constexpr(4):
+            v2 = Vec(llvm.bitcast(self.v2i32_type, as_mlir_value(v_v[ks][dc])), (2,), fx.Int32)
+            words.append(fx.Int32(v2[0]))
+            words.append(fx.Int32(v2[1]))
+        return Vec.from_elements(words, fx.Int32).ir_value()
+
+    def _v_to_fp8_i32x8(self, v_v, dc):
+        # Concatenate the 4 bf16 V step packs for chunk dc into one fp8 K=64 operand.
+        f32 = []
+        for step in range_constexpr(4):
+            f32 += self._v8bf16_to_f32(v_v[step][dc])
+        return self._pack_fp8_i32x8(f32)
+
+    def _pv_fp8(self, v_p, v_v, v_o):
+        # Wide fp8 PV: one 32x32x64 f8f6f4 MMA per d-chunk (4 total). V from tr8 (raw
+        # fp8, no dequant), P from the bf16 packs cast to fp8; same K=64 operand order
+        # as the (validated) HIPREC concat, so v_o layout is unchanged.
+        p_fp8 = self._p_to_fp8_i32x8(v_p)
+        for dc in range_constexpr(self.traits.D_CHUNKS):
+            v_op = self._v_concat_i32x8(v_v, dc)
+            v_o[dc] = self._mfma_acc_fp8_wide(v_op, p_fp8, v_o[dc])
+        return v_o
+
+    def _pv_step_fp8(self, step, v_p, v_v, v_o):
+        # The pipeline calls pv_step_k 4x (step 0..3); repurpose step as the d-chunk so
+        # each call issues one wide 32x32x64 MMA. Cache the fp8 P operand at step 0.
+        if const_expr(step == 0):
+            self._pv_p_fp8_cache = self._p_to_fp8_i32x8(v_p)
+        v_op = self._v_concat_i32x8(v_v, step)
+        v_o[step] = self._mfma_acc_fp8_wide(v_op, self._pv_p_fp8_cache, v_o[step])
+        return v_o
+
+    def _load_q_wide_lds(self):
+        # Read Q wide (i32x8 per head-dim half) from the LDS Q tile, right before the
+        # QK MMA, so the Q registers are short-lived instead of loop-resident. Uses the
+        # live ctx q_row_in_block (set by init_q_row after helper construction).
+        traits = self.traits
+        q_row_in_block = self.ctx_ref.q_row_in_block
+        d_base = self.lane_div_32 * 32
+        packs = []
+        for ws in range_constexpr(traits.HEAD_DIM // 64):
+            byte_row = q_row_in_block * fx.Index(traits.HEAD_DIM) + fx.Index(ws * 64) + d_base
+            packs.append(self.read_i32x8_lds(self.lds_q_base_ptr, fx.Int32(byte_row)))
+        return packs
+
+    def qk(self, v_k):
+        # Wide QK: two 32x32x64 MFMAs (one per head-dim half). A=K, B=Q. Q is read
+        # from LDS here so its registers do not stay live across the whole loop.
         traits = self.traits
         k_lo, k_hi = v_k
+        q_all_wide = self._load_q_wide_lds()
         v_s_lo = self.c_zero_v16f32
         v_s_hi = self.c_zero_v16f32
         for ws in range_constexpr(traits.HEAD_DIM // 64):
             q_w = q_all_wide[ws]
             v_s_lo = self._mfma_acc_fp8_wide(k_lo[ws], q_w, v_s_lo)
             v_s_hi = self._mfma_acc_fp8_wide(k_hi[ws], q_w, v_s_hi)
-        scale_vec = Vec.from_elements([self.c_logit_scale], fx.Float32).broadcast_to(16)
-        v_s_lo = _fmul(Vec(v_s_lo), scale_vec, self.fm_fast)
-        v_s_hi = _fmul(Vec(v_s_hi), scale_vec, self.fm_fast)
+        # Optimization 1-A: leave the logits un-scaled here. softmax_scale
+        # (c_logit_scale = rsqrt(D)*log2e*q_descale*k_descale) is folded into the
+        # row-max subtraction via a fused FMA (see _scale_sub_score_pair), which
+        # removes 32 post-QK v_mul_f32 per KV tile. reduce_max runs in the raw
+        # domain: scale > 0 is order-preserving so the arg-max is unchanged.
         return (v_s_lo, v_s_hi)
 
     def pv_step_k(self, step, v_p, v_v, v_o):
+        if const_expr(self.traits.FP8_PV):
+            return self._pv_step_fp8(step, v_p, v_v, v_o)
         # HIPREC PV: P and V are both v8 bf16, accumulated by a bf16 MMA.
         v_p_lo, v_p_hi = v_p
         v_pk = v_v[step]
@@ -4491,6 +4611,8 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
         return v_o
 
     def pv(self, v_p, v_v, v_o):
+        if const_expr(self.traits.FP8_PV):
+            return self._pv_fp8(v_p, v_v, v_o)
         for step in range_constexpr(4):
             v_o = self.pv_step_k(step, v_p, v_v, v_o)
         return v_o
@@ -4516,8 +4638,48 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
             self.buffer_load_lds_128(self.k_div, lds_addr, src_elem, tile_start * self.stride_kv_n_v)
 
     def load_v(self, tile_start, buf_id):
-        # HIPREC dequantizes fp8 V into the bf16 vt scratch under the K DMA schedule.
-        self._stage_vt_dequant_fp8(tile_start, buf_id)
+        if const_expr(self.traits.FP8_PV):
+            # Raw fp8 V into the tr8-transpose block layout (no dequant). vd folds to O.
+            self._stage_v_fp8_block(tile_start, buf_id)
+        else:
+            # HIPREC dequantizes fp8 V into the bf16 vt scratch under the K DMA schedule.
+            self._stage_vt_dequant_fp8(tile_start, buf_id)
+
+    def zero_v_fp8_lds(self):
+        # DEBUG: zero the entire fp8 V LDS region (2 buffers) so any uninitialized-read
+        # shows as V=0 (finite) instead of fp8-NaN.
+        traits = self.traits
+        v_tile_bytes = (traits.BLOCK_N // 8) * (traits.HEAD_DIM // 16) * 128
+        total = 2 * v_tile_bytes
+        aligned_base = ((self.lds_vt_base_idx + fx.Index(127)) // fx.Index(128)) * fx.Index(128)
+        zero = Vec.from_elements([fx.Int32(0) for _ in range_constexpr(4)], fx.Int32)
+        per = total // (traits.BLOCK_SIZE)  # bytes per thread
+        for i in range_constexpr(per // 16):
+            off = aligned_base + self.tid * fx.Index(per) + fx.Index(i * 16)
+            p = buffer_ops.create_llvm_ptr(off, address_space=3)
+            llvm.StoreOp(as_mlir_value(zero), p, alignment=16)
+
+    def _stage_v_fp8_block(self, tile_start, buf_id):
+        # Store raw fp8 V into 8-row(d)x16-col(n) tr8 tiles. copy_atom load (consumed by
+        # the StoreOp via data-dep so the load completes) + ds_write. Thread (wave,lane)
+        # -> n = wave*8 + lane//8, d_block = lane%8 (16 contiguous d). LDS block =
+        # (n//8)*8 + d_block = wave*8 + lane%8; byte = 16*(n%8) = 16*(lane//8).
+        traits = self.traits
+        v_tile_bytes = (traits.BLOCK_N // 8) * (traits.HEAD_DIM // 16) * 128
+        buf_off = buf_id * v_tile_bytes
+        n = self.wave_id * fx.Index(8) + self.lane // fx.Index(8)
+        d_block = self.lane % fx.Index(8)
+        src_elem = self.kv_gmem_elem_offset + n * self.stride_kv_n_v + d_block * fx.Index(16) + tile_start * self.stride_kv_n_v
+        v16 = fly.copy_atom_call_ssa(
+            [Vec.make_type(4, fx.Int32)], self.load_atom_128, fx.slice(self.v_div, (None, fx.Int32(src_elem)))
+        )
+        block = self.wave_id * fx.Index(8) + self.lane % fx.Index(8)
+        # tr8 gather block-aligns the read address (& ~127), so the block base MUST be
+        # 128B aligned; the vt Array is only 16B aligned -> round the base up to 128.
+        aligned_base = ((self.lds_vt_base_idx + fx.Index(127)) // fx.Index(128)) * fx.Index(128)
+        byte_off = aligned_base + fx.Index(buf_off) + block * fx.Index(128) + fx.Index(16) * (self.lane // fx.Index(8))
+        lds_ptr = buffer_ops.create_llvm_ptr(byte_off, address_space=3)
+        llvm.StoreOp(as_mlir_value(Vec(v16)), lds_ptr, alignment=16)
 
     def _stage_vt_dequant_fp8(self, tile_start, buf_id):
         # Dequantize fp8 V into the exact bf16 V staging positions. The two d-iters
@@ -4575,6 +4737,8 @@ class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
         return (_read_strip(n_lo), _read_strip(n_hi))
 
     def load_v(self, buf_id):
+        if const_expr(self.traits.FP8_PV):
+            return self._load_v_fp8_block(buf_id)
         # Read all V packs from the bf16 vt scratch for buffer `buf_id`.
         traits = self.traits
         urv = (
@@ -4592,6 +4756,39 @@ class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
                 a = _ds_read_tr16_b64_imm(self.v4bf16_type, fx.Int32(byte0), imm_lo)
                 b = _ds_read_tr16_b64_imm(self.v4bf16_type, fx.Int32(byte0), imm_lo + traits.URV_I5_BF * traits.EB_BF)
                 packs[k_substep][dc] = Vec(a).shuffle(Vec(b), [0, 1, 2, 3, 4, 5, 6, 7]).ir_value()
+        return packs
+
+    def _load_v_fp8_block(self, buf_id):
+        # Read fp8 V B-operands (i64 = 8 fp8) per (k-step, d-chunk) from the tr8 block
+        # layout. The two lane-halves (lane//32) want the kh=2ks and kh=2ks+1 blocks,
+        # which are exactly nbands*128 bytes apart. Rather than issue BOTH tr8 reads
+        # and select by lane-half (2 LDS reads/operand, 50% wasted on gfx950 where V
+        # LDS reads dominate the pipeline), fold the lane-half offset into the per-lane
+        # base so a SINGLE tr8(imm0) lands each lane on its own block: lanes 0-31 read
+        # the kh=2ks block, lanes 32-63 read kh=2ks+1. The +nbands*128 is a multiple of
+        # 128, so tr8's block-align (& ~127) and the intra-group transpose are
+        # unchanged. Halves the V LDS-read count in the fp8-PV inner loop.
+        traits = self.traits
+        v_tile_bytes = (traits.BLOCK_N // 8) * (traits.HEAD_DIM // 16) * 128
+        buf_off = buf_id * v_tile_bytes
+        nbands = traits.HEAD_DIM // 16  # 8
+        rh = (self.lane % fx.Index(32)) // fx.Index(16)
+        l16 = self.lane % fx.Index(16)
+        lane_hi = self.lane // fx.Index(32)  # 0 for lanes 0-31, 1 for lanes 32-63
+        # Match the 128B-aligned base used by the store so tr8's block-align (& ~127) hits
+        # the intended blocks.
+        aligned_base = ((self.lds_vt_base_idx + fx.Index(127)) // fx.Index(128)) * fx.Index(128)
+        base = fx.Int32(aligned_base + rh * fx.Index(128) + l16 * fx.Index(8) + lane_hi * fx.Index(nbands * 128))
+
+        def _tr8(imm):
+            r = _ds_read_tr8_b64_imm(self.v2i32_type, base, imm)
+            return llvm.bitcast(T.i64, as_mlir_value(Vec(r)))
+
+        packs = [[None] * traits.D_CHUNKS for _ in range(4)]
+        for dc in range_constexpr(traits.D_CHUNKS):
+            for ks in range_constexpr(4):
+                imm0 = buf_off + (2 * ks * nbands + dc * 2) * 128
+                packs[ks][dc] = _tr8(imm0)
         return packs
 
 
@@ -4672,7 +4869,10 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         return _fmax(row_max, self.c_neg_floor, self.fm_fast)
 
     def sub_m(self, v_s, row_max):
-        return _sub_score_pair(v_s, row_max, self.fm_fast)
+        # Optimization 1-A: fused softmax-scale + raw row-max subtraction. row_max
+        # is now the RAW (un-scaled) tile max from reduce_max; this returns
+        # scale*(v_s - row_max) via one FMA per element (exp2 input unchanged).
+        return _scale_sub_score_pair(v_s, row_max, self.c_logit_scale, self.c_zero_f, self.fm_fast)
 
     def exp2(self, v_s, start, length):
         return _exp2_score_slice(v_s, start, length)
@@ -4714,7 +4914,13 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         return _safe_l_inv(l_row, self.c_zero_f)
 
     def rescale_from_tile_max(self, m_row, m_tile_max):
-        return _rescale_from_tile_max(m_row, m_tile_max, self.fm_fast)
+        # Optimization 1-A: m_row / m_tile_max are RAW (un-scaled). The online
+        # rescale factor is exp2(scale*(m_row - row_max)); apply c_logit_scale to
+        # the max difference here (the QK MMA no longer pre-scales the logits).
+        row_max = _fmax(m_row, m_tile_max, self.fm_fast)
+        diff_scaled = _fmul(_fsub(m_row, row_max, self.fm_fast), self.c_logit_scale, self.fm_fast)
+        rescale = rocdl.exp2(T.f32, as_mlir_value(diff_scaled))
+        return row_max, rescale
 
     def apply_l_rescale(self, l_row, rescale):
         return _fmul(l_row, rescale, self.fm_fast)
@@ -4738,8 +4944,14 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
     def lazy_rescale_o(self, v_o, m_row, l_row, m_tile_max, v_p):
         @flyc.jit
         def _run(v_o, m_row, l_row, m_tile_max, v_p):
+            # Optimization 1-A: m_row / m_tile_max are RAW (un-scaled). Fold
+            # c_logit_scale into the max difference so the lazy-skip threshold and
+            # the correction factor stay in the scaled (base-2 exponent) domain:
+            #   below-threshold: scale*(m_tile_max - m_row) <= RESCALE_THRESHOLD
+            #   corr = exp2(scale*(m_row - m_tile_max)) = exp2(-diff_scaled)
             m_diff = _fsub(m_tile_max, m_row, self.fm_fast)
-            below = fx.Float32(m_diff) <= self.c_eight_f
+            m_diff_scaled = _fmul(m_diff, self.c_logit_scale, self.fm_fast)
+            below = fx.Float32(m_diff_scaled) <= self.c_eight_f
             ballot = rocdl.ballot(T.i64, as_mlir_value(below))
             all_below = arith.cmpi(arith.CmpIPredicate.eq, as_mlir_value(ballot), _read_exec_i64())
             all_below = llvm.intr_expect(all_below, arith.constant(1, type=ir.IntegerType.get_signless(1)))
@@ -4756,7 +4968,7 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
             if fx.Boolean(all_below):
                 pass
             else:
-                corr = rocdl.exp2(T.f32, as_mlir_value(_fsub(m_row, m_tile_max, self.fm_fast)))
+                corr = rocdl.exp2(T.f32, as_mlir_value(_fsub(self.c_zero_f, m_diff_scaled, self.fm_fast)))
                 scaled_accs = list(v_o)
                 self.scale_o(scaled_accs, corr)
                 o0, o1, o2, o3 = (

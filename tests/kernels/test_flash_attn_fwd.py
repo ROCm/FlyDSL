@@ -46,7 +46,7 @@ FLASH_ATTN_FUNC_KERNEL_CONFIG: dict = {
     "waves_per_eu": 2,
     "daz": True,
     "dualwave_swp_lazy_rescale": True,
-    "dualwave_swp_setprio": True,
+    "dualwave_swp_setprio": False,
     "dualwave_swp_debug_lazy_counts": False,
     "dualwave_swp_enable_stagger": True,
 }
@@ -115,6 +115,14 @@ DEFAULT_CONFIGS = [
     (1, 257, 4, 4, 1),
     (1, 511, 4, 4, 1),
     (1, 513, 4, 4, 1),
+    # bench_flydsl_fa3.py fp8-forward shape cases (batch=4, H=Hkv=32, D=128 swept
+    # separately; fp8 forward requires D=128). Exercised by run_fp8_config.
+    (4, 1024, 32, 32, 1),
+    (4, 2048, 32, 32, 1),
+    (4, 4096, 32, 32, 1),
+    (4, 8192, 32, 32, 1),
+    (4, 16384, 32, 32, 1),
+    (4, 32768, 32, 32, 1),
 ]
 
 # Additional dense/varlen/cross-length cases.
@@ -1859,8 +1867,18 @@ def _fmt_cmp_values(cmp_r):
 
 
 def _gpu_short_name():
-    """Extract short GPU name, e.g. 'AMD Instinct MI308X' -> 'MI308X'."""
-    return torch.cuda.get_device_name(0).split()[-1]
+    """Extract short GPU name, e.g. 'AMD Instinct MI308X' -> 'MI308X'.
+
+    Some GPUs (e.g. gfx950) report an empty marketing name; fall back to the
+    gcnArchName (or 'gpu') so callers never hit an empty split().
+    """
+    parts = torch.cuda.get_device_name(0).split()
+    if parts:
+        return parts[-1]
+    try:
+        return torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] or "gpu"
+    except Exception:
+        return "gpu"
 
 
 def _csv_val(r, key):
