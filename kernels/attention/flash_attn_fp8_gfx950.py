@@ -658,6 +658,166 @@ def build_flash_attn_dualwave_swp_fp8_module(
         if const_expr(SPLITK):
             output_store.store_empty_split()
 
+    # ======================================================================
+    # Stage-3 experimental: pure 2-phase (matrix-phase || vector-phase) kernel.
+    # Gated to dense non-causal self-attention (TWO_PHASE trait). Separate kernel
+    # so the proven 8-cluster kernel above stays byte-for-byte unchanged.
+    #
+    #   Phase M (pure matrix): PV(j-1) [16 MFMA] + QK(j) [4 MFMA], async prefetch.
+    #   Phase V (pure vector): full softmax of S_j (reduce_max, rescale, sub_m,
+    #                          exp2, reduce_sum, cast_p). The prefetch DMA issued
+    #                          in Phase M is waited at the END of Phase V so it
+    #                          completes behind the long softmax VALU stretch.
+    # With the wave-group stagger, group A's Phase M overlaps group B's Phase V,
+    # saturating both the matrix and vector pipelines. 2 barriers/tile (vs 4).
+    # ======================================================================
+    @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1])
+    def flash_attn_dualwave_swp_fp8_2phase_kernel(
+        Q: fx.Tensor,
+        K: fx.Tensor,
+        V: fx.Tensor,
+        O: fx.Tensor,  # noqa: E741
+        DebugCounts: fx.Tensor,
+        CuSeqQ: fx.Tensor,
+        CuSeqKv: fx.Tensor,
+        QDescale: fx.Tensor,
+        KDescale: fx.Tensor,
+        VDescale: fx.Tensor,
+        seq_len: fx.Int32,
+        seq_len_kv: fx.Int32,
+        stride_q_n: fx.Int32,
+        stride_kv_n: fx.Int32,
+        head_dim_runtime: fx.Int32,
+    ):
+        ctx = DualwaveFp8KernelContext(
+            traits, Q, K, V, O, DebugCounts, CuSeqQ, CuSeqKv,
+            QDescale, KDescale, VDescale, seq_len, seq_len_kv,
+            stride_q_n, stride_kv_n, head_dim_runtime,
+        )
+        ctx.init_types_and_constants()
+        ctx.init_runtime_indices()
+        ctx.init_lds(SharedStorage)
+        ctx.init_thread_mapping()
+        ctx.init_sequence_lengths()
+        ctx.init_descriptors()
+        ctx.init_atoms_and_lds_ptrs()
+        ctx.init_dma_thread_offsets()
+        ctx.init_descale()
+        ctx.init_tile_bounds()
+        ctx.init_workspace_io()
+
+        q_loader = DualwaveFp8QLoader(ctx)
+        gemm_helper = DualwaveFp8GemmHelper(ctx)
+        softmax_helper = DualwaveFp8SoftmaxHelper(ctx)
+        kv_gmem_to_lds = DualwaveFp8KvGmemToLdsLoader(ctx)
+        kv_lds_to_regs = DualwaveFp8KvLdsToVgprLoader(ctx)
+        output_store = DualwaveFp8StoreHelper(ctx)
+
+        BN = traits.BLOCK_N
+        D_CHUNKS = traits.D_CHUNKS
+        t0 = ctx.split_t0
+        t_end = ctx.split_t_end
+
+        # ---- Prologue: stage Q + K0/K1/V0, softmax(tile t0) -> P0 ----
+        kv_gmem_to_lds.load_k(t0 * BN, 0)
+        q_loader.stage_q_to_lds()
+        rocdl.s_waitcnt(0)
+        rocdl.sched_barrier(0)
+        rocdl.s_barrier()
+
+        ctx.init_q_row()
+        q_row = ctx.q_row
+
+        kv_gmem_to_lds.load_k((t0 + 1) * BN, 1)
+        kv_gmem_to_lds.load_v(t0 * BN, 0)
+        rocdl.s_waitcnt(0)
+        if const_expr(traits.DUALWAVE_SWP_ENABLE_STAGGER):
+            _stagger_extra_barrier_if_one(ctx.stagger_i32)
+        else:
+            rocdl.sched_barrier(0)
+            rocdl.s_barrier()
+
+        v_k = kv_lds_to_regs.load_k(0)
+        v_s = gemm_helper.qk(v_k)
+        v_s = softmax_helper.seq_pad_mask_if_needed(v_s, t0)
+        m_row = softmax_helper.reduce_max(v_s)
+        v_s = softmax_helper.sub_m(v_s, m_row)
+        v_p = softmax_helper.exp2(v_s, 0, 16)
+        v_p = softmax_helper.exp2(v_p, 16, 16)
+        l_row = softmax_helper.reduce_sum(ctx.c_zero_f, v_p)
+        v_p = softmax_helper.cast_p(v_p)
+        v_p = softmax_helper.anchor_v_p(v_p)
+        v_o = [ctx.c_zero_v16f32 for _ in range_constexpr(D_CHUNKS)]
+        rocdl.sched_barrier(0)
+        rocdl.s_barrier()
+        rocdl.sched_barrier(0)
+
+        # ---- Loop: tiles t0+1 .. t_end-1. Each does PV(j-1) + QK(j) + softmax(j). ----
+        init_args = [m_row, l_row] + v_o + [softmax_helper.v_p_to_vec32(v_p)]
+        loop_results = init_args
+        for j, loop_args in range(t0 + fx.Index(1), t_end, fx.Index(1), init=init_args):
+            m_row = loop_args[0]
+            l_row = loop_args[1]
+            v_o = [loop_args[2 + i] for i in range_constexpr(D_CHUNKS)]
+            v_p = softmax_helper.v_vec32_to_p(loop_args[2 + D_CHUNKS])
+
+            buf_cur = j % fx.Index(2)
+            buf_oth = (j + fx.Index(1)) % fx.Index(2)
+
+            # ---------- Phase M (pure matrix) ----------
+            kv_gmem_to_lds.load_k((j + fx.Index(1)) * BN, buf_oth)  # prefetch K(j+1)
+            kv_gmem_to_lds.load_v(j * BN, buf_cur)                  # prefetch V(j)
+            v_k = kv_lds_to_regs.load_k(buf_cur)                    # K(j)
+            v_v = kv_lds_to_regs.load_v(buf_oth)                    # V(j-1)
+            v_o = gemm_helper.pv(v_p, v_v, v_o)                     # PV(j-1): 16 MFMA
+            v_o = softmax_helper.anchor_v_o(v_o)
+            v_s = gemm_helper.qk(v_k)                               # QK(j): 4 MFMA
+            rocdl.sched_barrier(0)
+            rocdl.s_barrier()
+            rocdl.sched_barrier(0)
+
+            # ---------- Phase V (pure vector) ----------
+            v_s = softmax_helper.seq_pad_mask_if_needed(v_s, j)
+            m_tile = softmax_helper.reduce_max(v_s)
+            m_new, corr = softmax_helper.rescale_from_tile_max(m_row, m_tile)
+            softmax_helper.scale_o(v_o, corr)
+            v_o = softmax_helper.anchor_v_o(v_o)
+            l_row = softmax_helper.apply_l_rescale(l_row, corr)
+            v_s = softmax_helper.sub_m(v_s, m_new)
+            v_p = softmax_helper.exp2(v_s, 0, 16)
+            v_p = softmax_helper.exp2(v_p, 16, 16)
+            l_row = softmax_helper.reduce_sum(l_row, v_p)
+            v_p = softmax_helper.cast_p(v_p)
+            v_p = softmax_helper.anchor_v_p(v_p)
+            m_row = m_new
+            # Deferred prefetch wait: the K(j+1)/V(j) DMA issued in Phase M lands
+            # behind this softmax stretch. wait + barrier publish it to all waves.
+            rocdl.s_waitcnt(0)
+            rocdl.sched_barrier(0)
+            rocdl.s_barrier()
+            rocdl.sched_barrier(0)
+
+            yield_args = [m_row, l_row] + v_o + [softmax_helper.v_p_to_vec32(v_p)]
+            loop_results = yield yield_args
+
+        # ---- Epilogue: one PV pending (P for tile t_end-1). ----
+        m_row = loop_results[0]
+        l_row = loop_results[1]
+        v_o = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
+        v_p = softmax_helper.v_vec32_to_p(loop_results[2 + D_CHUNKS])
+
+        v_v = kv_lds_to_regs.load_v((t_end - fx.Index(1)) % fx.Index(2))
+        v_o = gemm_helper.pv(v_p, v_v, v_o)
+
+        inv_l_rcp = rocdl.rcp(T.f32, _raw(l_row))
+        inv_l = ArithValue(fx.Float32(l_row) > ctx.c_zero_f).select(inv_l_rcp, ctx.c_zero_f)
+        softmax_helper.scale_o(v_o, inv_l)
+        if const_expr(traits.DUALWAVE_SWP_ENABLE_STAGGER):
+            _stagger_extra_barrier_if_zero(ctx.stagger_i32)
+        else:
+            rocdl.s_barrier()
+        output_store.store_final_o(v_o, q_row)
+
     # Combine kernel: out = sum_s w_s * O_s / sum_s w_s * l_s, w_s = exp2(m_s - m_max).
     # One wave row of 32 lanes covers a (b, h, s) row, 4 contiguous cols/lane.
     COMBINE_BLOCK = 256
@@ -725,7 +885,11 @@ def build_flash_attn_dualwave_swp_fp8_module(
             if const_expr(daz)
             else None
         )
-        flash_attn_dualwave_swp_fp8_gfx950_kernel(
+        if const_expr(traits.TWO_PHASE):
+            _fa_kernel = flash_attn_dualwave_swp_fp8_2phase_kernel
+        else:
+            _fa_kernel = flash_attn_dualwave_swp_fp8_gfx950_kernel
+        _fa_kernel(
             Q,
             K,
             V,

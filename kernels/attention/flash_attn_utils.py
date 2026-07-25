@@ -1683,6 +1683,7 @@ class DualwaveSwpFp8Traits:
     VARLEN: bool
     CROSS_SEQLEN: bool
     FP8_PV: bool
+    TWO_PHASE: bool
     DEFAULT_STRIDE_Q_N: int
     DEFAULT_STRIDE_KV_N: int
     DMA_BYTES: int
@@ -1750,6 +1751,7 @@ class DualwaveSwpFp8Traits:
             self.VT_BF16_ELEMS,
             self.VT_BF16_TOTAL,
             self.FP8_PV,
+            self.TWO_PHASE,
         )
 
 
@@ -1831,6 +1833,19 @@ def _make_dualwave_swp_fp8_traits(
     # (32x32x16, 4 steps/d-chunk). Off by default; opt in via FLYDSL_FA_FP8_PV=1.
     fp8_pv = os.getenv("FLYDSL_FA_FP8_PV", "0") == "1"
 
+    # Stage-3 experimental: pure 2-phase (matrix-phase || vector-phase) main loop that
+    # overlaps the softmax VALU with MFMA via the wave-group stagger, instead of the
+    # 8-cluster software pipeline. Off by default; opt in via FLYDSL_FA_2PHASE=1.
+    # Scoped to the dense non-causal self-attention path while it is validated; all
+    # other modes keep the proven 8-cluster kernel.
+    two_phase = (
+        (os.getenv("FLYDSL_FA_2PHASE", "0") == "1")
+        and (not causal)
+        and (num_kv_splits <= 1)
+        and (not varlen)
+        and (not fp8_pv)
+    )
+
     return DualwaveSwpFp8Traits(
         BLOCK_M=block_m,
         BLOCK_N=block_n,
@@ -1859,6 +1874,7 @@ def _make_dualwave_swp_fp8_traits(
         VARLEN=bool(varlen),
         CROSS_SEQLEN=bool(cross_seqlen),
         FP8_PV=fp8_pv,
+        TWO_PHASE=two_phase,
         DEFAULT_STRIDE_Q_N=default_stride_q_n,
         DEFAULT_STRIDE_KV_N=default_stride_kv_n,
         DMA_BYTES=16,
