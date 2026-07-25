@@ -66,6 +66,7 @@ def build_flash_attn_dualwave_swp_module(
     cross_seqlen=False,
     paged=False,
     kv_cache_layout="linear",
+    return_lse=False,
 ):
     """Build an DUALWAVE_SWP flash_attn launcher for D=64/128 bf16/f16 on gfx950.
 
@@ -116,6 +117,7 @@ def build_flash_attn_dualwave_swp_module(
         paged=paged,
         kv_cache_layout=kv_cache_layout,
         kv_vectorized=KV_VECTORIZED,
+        return_lse=return_lse,
     )
     traits.BLOCK_N_OUT // traits.BLOCK_N
     _dualwave_swp_cache_tag = traits.cache_tag
@@ -143,6 +145,7 @@ def build_flash_attn_dualwave_swp_module(
         V: fx.Tensor,
         O: fx.Tensor,  # noqa: E741
         DebugCounts: fx.Tensor,
+        LSE: fx.Tensor,
         CuSeqQ: fx.Tensor,
         CuSeqKv: fx.Tensor,
         BlockTable: fx.Tensor,
@@ -169,6 +172,7 @@ def build_flash_attn_dualwave_swp_module(
             stride_kv_n,
             head_dim_runtime,
             block_table_stride,
+            LSE=LSE,
         )
         ctx.init_types_and_constants()
         ctx.init_runtime_indices()
@@ -680,6 +684,8 @@ def build_flash_attn_dualwave_swp_module(
             # Store O as 128b writes by fusing each lane's half with its half-wave partner.
             if const_expr(not traits.SPLITK):
                 output_store.store_final_o(v_o, ctx.q_row)
+                if const_expr(traits.RETURN_LSE):
+                    output_store.store_lse_from_ml(m_row, l_row, ctx.q_row)
             else:
                 output_store.store_splitk_partial_o(v_o, m_row, l_row, ctx.q_row)
 
@@ -707,9 +713,14 @@ def build_flash_attn_dualwave_swp_module(
 
     @flyc.kernel(known_block_size=[COMBINE_BLOCK, 1, 1])
     def flash_attn_splitk_combine_kernel(
-        O: fx.Tensor, WS: fx.Tensor, batch_size: fx.Int32, seq_len: fx.Int32, stride_q_n: fx.Int32  # noqa: E741
+        O: fx.Tensor,  # noqa: E741
+        WS: fx.Tensor,
+        LSE: fx.Tensor,
+        batch_size: fx.Int32,
+        seq_len: fx.Int32,
+        stride_q_n: fx.Int32,
     ):
-        ctx = DualwaveSplitKCombineContext(traits, O, WS, batch_size, seq_len, stride_q_n)
+        ctx = DualwaveSplitKCombineContext(traits, O, WS, batch_size, seq_len, stride_q_n, LSE=LSE)
         ctx.init_types_and_constants()
         ctx.init_runtime_indices()
         ctx.init_thread_mapping(COMBINE_ROWS_PER_BLOCK, COMBINE_LANES_PER_ROW)
@@ -722,6 +733,8 @@ def build_flash_attn_dualwave_swp_module(
         acc, den = combine.accumulate_splits(m_s, l_s, m_max)
         o_pack = combine.pack_output(acc, den)
         combine.store_output(o_pack)
+        if const_expr(traits.RETURN_LSE):
+            combine.store_lse(m_max, den)
 
     @flyc.jit
     def launch_flash_attn_dualwave_swp(
@@ -730,6 +743,7 @@ def build_flash_attn_dualwave_swp_module(
         V: fx.Tensor,
         O: fx.Tensor,  # noqa: E741
         DebugCounts: fx.Tensor,
+        LSE: fx.Tensor,
         CuSeqQ: fx.Tensor,
         CuSeqKv: fx.Tensor,
         BlockTable: fx.Tensor,
@@ -767,6 +781,7 @@ def build_flash_attn_dualwave_swp_module(
             V,
             O,
             DebugCounts,
+            LSE,
             CuSeqQ,
             CuSeqKv,
             BlockTable,
@@ -788,7 +803,7 @@ def build_flash_attn_dualwave_swp_module(
         )
         if const_expr(traits.SPLITK):
             combine_rows = bs_idx * traits.NUM_HEADS_Q * sl_idx
-            flash_attn_splitk_combine_kernel(O, DebugCounts, batch_size, seq_len, stride_q_n).launch(
+            flash_attn_splitk_combine_kernel(O, DebugCounts, LSE, batch_size, seq_len, stride_q_n).launch(
                 grid=(combine_rows // COMBINE_ROWS_PER_BLOCK, 1, 1),
                 block=(COMBINE_BLOCK, 1, 1),
                 stream=stream,
@@ -815,6 +830,7 @@ def build_flash_attn_dualwave_swp_module(
         head_dim_runtime=None,
         debug_counts=None,
         *,
+        lse=None,
         seq_len_kv=None,
         workspace=None,
         cu_seqlens_q=None,
@@ -838,6 +854,9 @@ def build_flash_attn_dualwave_swp_module(
             debug_counts = workspace
         if debug_counts is None:
             debug_counts = O
+        if traits.RETURN_LSE and lse is None:
+            raise ValueError("return_lse=True requires an lse output tensor")
+        lse_t = lse if lse is not None else O
         # Dense launches still pass valid tensors for the (unused) cu_seqlens slots;
         # the kernel only reads them under const_expr(traits.VARLEN). Use O as a placeholder.
         if cu_seqlens_q is None:
@@ -858,6 +877,7 @@ def build_flash_attn_dualwave_swp_module(
                     V,
                     O,
                     debug_counts,
+                    lse_t,
                     cu_seqlens_q,
                     cu_seqlens_kv,
                     block_table,
@@ -875,6 +895,7 @@ def build_flash_attn_dualwave_swp_module(
                 V,
                 O,
                 debug_counts,
+                lse_t,
                 cu_seqlens_q,
                 cu_seqlens_kv,
                 block_table,
@@ -900,6 +921,7 @@ def build_flash_attn_dualwave_swp_module(
         head_dim_runtime=None,
         debug_counts=None,
         *,
+        lse=None,
         seq_len_kv=None,
         workspace=None,
         cu_seqlens_q=None,
@@ -922,6 +944,9 @@ def build_flash_attn_dualwave_swp_module(
             debug_counts = workspace
         if debug_counts is None:
             debug_counts = O
+        if traits.RETURN_LSE and lse is None:
+            raise ValueError("return_lse=True requires an lse output tensor")
+        lse_t = lse if lse is not None else O
         if cu_seqlens_q is None:
             cu_seqlens_q = O
         if cu_seqlens_kv is None:
@@ -938,6 +963,7 @@ def build_flash_attn_dualwave_swp_module(
                 V,
                 O,
                 debug_counts,
+                lse_t,
                 cu_seqlens_q,
                 cu_seqlens_kv,
                 block_table,
