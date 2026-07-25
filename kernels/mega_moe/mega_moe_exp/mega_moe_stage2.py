@@ -28,14 +28,31 @@ from .group_gemm2 import (
 )
 
 
+def p2p_scatter_prefetch(r_stids, r_sweights, r_tis, srcmap_row_base, m_lane, recv_cap, BM):
+    """Issue this tile's scatter-metadata global loads (srcmap, weight, and the dependent
+    tok_id_to_src -> dest_enc) BEFORE the gemm2 MFMA, so the chained VMEM latency is hidden behind the
+    matmul (V1 does the same via K-loop prefetch). Returns per-row register lists consumed by the epilog.
+    """
+    M_REPS = BM // 8
+    packed, weight, dest_enc = [], [], []
+    for mr in range_constexpr(M_REPS):
+        sorted_pos = srcmap_row_base + fx.Int32(mr * 8) + m_lane
+        p = buffer_ops.buffer_load(r_stids, sorted_pos, vec_width=1, dtype=fx.Int32)
+        packed.append(p)
+        weight.append(buffer_ops.buffer_load(r_sweights, sorted_pos, vec_width=1, dtype=fx.Float32))
+        t = p & fx.Int32(0x00FFFFFF)
+        t_safe = (t < fx.Int32(recv_cap)).select(t, fx.Int32(0))
+        dest_enc.append(buffer_ops.buffer_load(r_tis, t_safe, vec_width=1, dtype=fx.Int32))
+    return packed, weight, dest_enc
+
+
 def p2p_scatter_epilog(
     lds_acc_base,
     accm,
-    addr_stids,
-    addr_sweights,
-    addr_tis,
-    addr_p2p_comb_inp,
-    srcmap_row_base,
+    packed,
+    weight,
+    dest_enc,
+    peer_bases,
     n_block_idx,
     wave,
     lane,
@@ -54,8 +71,13 @@ def p2p_scatter_epilog(
     """cshuffle accm -> LDS -> weighted bf16 -> P2P store to dest rank's shmem_comb_inp_tok slot.
 
     dest slot = dest_lid*topk + s (s = stids>>24); dest_enc = shmem_tok_id_to_src[t]; token row is
-    N_OUT bf16 wide, this tile writes its n_block*BN..+BN column slice. Padding is dropped by the
-    global-source-token and top-k-slot bounds.
+    N_OUT bf16 wide, this tile writes its n_block*BN..+BN column slice.
+
+    Perf (V1-parity): scatter metadata (``packed`` srcmap / ``weight`` / ``dest_enc``) is PREFETCHED by
+    the caller before the MFMA (:func:`p2p_scatter_prefetch`), so the chained srcmap->tok_id_to_src load
+    latency is hidden behind the matmul; ``peer_bases`` are the npes P2P base ptrs pre-loaded into
+    registers (no per-row P2P-table VMEM load). The store loop is branchless -- invalid rows are
+    redirected past the (bounded) buffer end and dropped by hardware OOB.
     """
     M_REPS = BM // 8
     kMChunks = BM // 16
@@ -68,21 +90,8 @@ def p2p_scatter_epilog(
     n_lane = tx_i32 % 32
     out_elem_bytes = 2  # bf16
     token_nbytes = N_OUT * out_elem_bytes
-
-    r_stids = buffer_ops.create_buffer_resource_from_addr(addr_stids)
-    r_sweights = buffer_ops.create_buffer_resource_from_addr(addr_sweights)
-    r_tis = buffer_ops.create_buffer_resource_from_addr(addr_tis)
-    r_p2p = buffer_ops.create_buffer_resource_from_addr(addr_p2p_comb_inp)
-
-    # prefetch per-row sorted id + weight (invariant across the store loop).
-    packed = []
-    weight = []
-    # srcmap/weight live in the FIXED-SLOT arrays (srcmap_em/wts_em, written by dispatch at le*cap+off);
-    # this tile's compact rows map to fixed-slot rows via srcmap_row_base = trb[m_block] (+ intra-tile row).
-    for mr in range_constexpr(M_REPS):
-        sorted_pos = srcmap_row_base + fx.Int32(mr * 8) + m_lane
-        packed.append(buffer_ops.buffer_load(r_stids, sorted_pos, vec_width=1, dtype=fx.Int32))
-        weight.append(buffer_ops.buffer_load(r_sweights, sorted_pos, vec_width=1, dtype=fx.Float32))
+    col8 = n_lane * fx.Int32(8)
+    n_off = n_block_idx * fx.Int32(BN * out_elem_bytes) + col8 * fx.Int32(out_elem_bytes)
 
     gpu.barrier()
 
@@ -99,44 +108,31 @@ def p2p_scatter_epilog(
     gpu.barrier()
 
     for mr in range_constexpr(M_REPS):
-        row_in_block = fx.Int32(mr * 8) + m_lane
         p = packed[mr]
         t = p & fx.Int32(0x00FFFFFF)
         s = p >> fx.Int32(24)
-        # t indexes tok_id_to_src (r_tis), which has exactly `recv_cap` (== effective_max_recv) entries.
-        # Padding rows carry stale/garbage srcmap whose t can exceed the real recv count; bounding by
-        # recv_cap (not the looser npes*max_tok) stops an OOB tis read that decodes to (pe0,lid0,s0) and
-        # scatters a zero onto output token 0 slot 0.
-        valid = (t < fx.Int32(recv_cap)) & (s < fx.Int32(topk))
-        t_safe = valid.select(t, fx.Int32(0))
-        dest_enc = buffer_ops.buffer_load(r_tis, t_safe, vec_width=1, dtype=fx.Int32)
-        dest_pe = dest_enc >> fx.Int32(log2_max_tok)
-        dest_lid = dest_enc & fx.Int32(mask_max_tok)
-        valid = valid & (dest_pe < fx.Int32(npes))
+        de = dest_enc[mr]
+        dest_pe = de >> fx.Int32(log2_max_tok)
+        dest_lid = de & fx.Int32(mask_max_tok)
+        valid = (t < fx.Int32(recv_cap)) & (s < fx.Int32(topk)) & (dest_pe < fx.Int32(npes))
+        # peer base from caller-cached registers (no per-row P2P-table VMEM load): select by dest_pe.
         dest_pe_safe = valid.select(dest_pe, fx.Int32(0))
-        peer_base = buffer_ops.buffer_load(r_p2p, dest_pe_safe, vec_width=1, dtype=fx.Int64)
-        # Bound the destination to the peer's combine-input buffer so any redirected (invalid-row) store
-        # lands out of range and is dropped by hardware OOB, instead of aliasing a real token slot.
+        peer_base = peer_bases[0]
+        for pe in range(1, npes):
+            peer_base = (dest_pe_safe == fx.Int32(pe)).select(peer_bases[pe], peer_base)
         rsrc_dst = buffer_ops.create_buffer_resource_from_addr(peer_base, num_records_bytes=comb_inp_nbytes)
         slot = dest_lid * fx.Int32(topk) + s
-        dest_row_byte = slot * fx.Int32(token_nbytes) + n_block_idx * fx.Int32(BN * out_elem_bytes)
+        # invalid rows -> offset past the buffer end so the bounded rsrc drops the store (branchless),
+        # instead of aliasing a real slot (notably (pe0,lid0,s0) == output token 0 slot 0).
+        off_bytes = valid.select(slot * fx.Int32(token_nbytes) + n_off, fx.Int32(comb_inp_nbytes))
         wmul = weight[mr] if const_expr(doweight) else fx.Float32(1.0)
-        if valid:
-            # LDS-coalesced P2P: each lane owns 8 contiguous columns -> one b128 (8xbf16, 16B) store;
-            # the 32 n-lanes cover the full BN row slice at consecutive remote addrs -> coalesced.
-            col8 = n_lane * fx.Int32(8)
-            idx0 = row_in_block * BN + col8
-            v8 = Vec(
-                lds_vec_load(lds_acc_base, idx0 * fx.Int32(4), Vec.make_type(8, fx.Float32), fx.Float32, align=16)
-            )
-            pk = Vec.from_elements([v8[i] * wmul for i in range(8)], fx.Float32).to(fx.BFloat16)
-            # `if valid` is not a per-lane predicate here: invalid rows fall through with t_safe/dest_pe_safe
-            # == 0, which addresses (pe0, lid0, slot0) == output token 0 slot 0. Redirect them past the
-            # buffer end so the bounded rsrc drops the store rather than zeroing token 0.
-            off_bytes = valid.select(
-                dest_row_byte + col8 * fx.Int32(out_elem_bytes), fx.Int32(comb_inp_nbytes)
-            )
-            buffer_ops.buffer_store(pk, rsrc_dst, off_bytes, offset_is_bytes=True, cache_modifier=2)
+        row_in_block = fx.Int32(mr * 8) + m_lane
+        idx0 = row_in_block * BN + col8
+        v8 = Vec(
+            lds_vec_load(lds_acc_base, idx0 * fx.Int32(4), Vec.make_type(8, fx.Float32), fx.Float32, align=16)
+        )
+        pk = Vec.from_elements([v8[i] * wmul for i in range(8)], fx.Float32).to(fx.BFloat16)
+        buffer_ops.buffer_store(pk, rsrc_dst, off_bytes, offset_is_bytes=True, cache_modifier=2)
 
 
 def compile_mega_moe_stage2(
@@ -150,6 +146,7 @@ def compile_mega_moe_stage2(
     max_tok: int,
     recv_cap: int = None,
     comb_inp_nbytes: int = None,
+    bench_no_scatter: bool = False,
     a_dtype: str = "fp8",
     aStages: int = 3,
     use_nt: bool = True,
@@ -208,6 +205,20 @@ def compile_mega_moe_stage2(
         tid = fx.Int32(gpu.thread_id("x"))
         lane = tid % fx.Int32(64)
         wave = tid // fx.Int32(64)
+        # P2P peer-base table is kernel-invariant: load the npes shmem_comb_inp_tok base ptrs into
+        # registers ONCE (not per scatter row), so the epilog selects the dest peer base from registers.
+        if const_expr(not bench_no_scatter):
+            _r_p2p_tbl = buffer_ops.create_buffer_resource_from_addr(addr_p2p_comb_inp)
+            _peer_bases = [
+                buffer_ops.buffer_load(_r_p2p_tbl, fx.Int32(_pe), vec_width=1, dtype=fx.Int64)
+                for _pe in range(npes)
+            ]
+            # scatter-metadata buffer resources + this thread's m-lane, hoisted (used by the per-tile
+            # prefetch issued before each tile's MFMA).
+            _r_stids = buffer_ops.create_buffer_resource_from_addr(addr_stids)
+            _r_sweights = buffer_ops.create_buffer_resource_from_addr(addr_sweights)
+            _r_tis = buffer_ops.create_buffer_resource_from_addr(addr_tis)
+            _m_lane = fx.Int32(gpu.thread_id("x")) // fx.Int32(32)
 
         nv_rsrc = buffer_ops.create_buffer_resource_from_addr(addr_num_valid)
         num_valid = buffer_ops.buffer_load(nv_rsrc, fx.Int32(0), vec_width=1, dtype=fx.Int32)
@@ -221,6 +232,19 @@ def compile_mega_moe_stage2(
                 unit_bx = _mb * fx.Int32(num_n_blocks) + _nb
             else:
                 unit_bx = itv
+            # Prefetch this tile's scatter metadata BEFORE the MFMA (coords match gemm2_compute's own
+            # m_row/n_block derivation), so the srcmap->tok_id_to_src load chain overlaps the matmul.
+            if const_expr(not bench_no_scatter):
+                _m_block_idx = unit_bx // fx.Int32(num_n_blocks)
+                _n_block_pre = unit_bx - _m_block_idx * fx.Int32(num_n_blocks)
+                _m_row_pre = _m_block_idx * fx.Int32(BM)
+                _trb_base = buffer_ops.buffer_load(
+                    trb_rsrc, _m_row_pre // fx.Int32(_SBM), vec_width=1, dtype=fx.Int32
+                )
+                _srcmap_row_base = _trb_base + (_m_row_pre - (_m_row_pre // fx.Int32(_SBM)) * fx.Int32(_SBM))
+                _pf_packed, _pf_weight, _pf_dest_enc = p2p_scatter_prefetch(
+                    _r_stids, _r_sweights, _r_tis, _srcmap_row_base, _m_lane, _recv_cap, BM
+                )
             accm_vecs, m_row, n_block_idx = gemm2_compute(
                 lds_base_i32,
                 addr_ascale,
@@ -249,30 +273,38 @@ def compile_mega_moe_stage2(
             # compact tile -> fixed-slot base for srcmap/weight (a2 DATA/SCALE are compact; srcmap_em/
             # wts_em are fixed-slot, laid out per SBM). trb is per-SBM sort tile, so index by m_row//SBM;
             # a BM<SBM compute tile then offsets (m_row % SBM) rows into that sort tile's fixed slots.
-            trb_base = buffer_ops.buffer_load(trb_rsrc, m_row // fx.Int32(_SBM), vec_width=1, dtype=fx.Int32)
-            srcmap_intra = m_row - (m_row // fx.Int32(_SBM)) * fx.Int32(_SBM)
-            p2p_scatter_epilog(
-                lds_base_i32,
-                accm_vecs,
-                addr_stids,
-                addr_sweights,
-                addr_tis,
-                addr_p2p_comb_inp,
-                trb_base + srcmap_intra,
-                n_block_idx,
-                wave,
-                lane,
-                N_OUT=N_OUT,
-                npes=npes,
-                topk=topk,
-                log2_max_tok=log2_max_tok,
-                mask_max_tok=mask_max_tok,
-                recv_cap=_recv_cap,
-                comb_inp_nbytes=_comb_inp_nbytes,
-                doweight=doweight,
-                BM=BM,
-                BN=BN,
-            )
+            if const_expr(bench_no_scatter):
+                # Perf-attribution only: keep the gemm2 compute live (sink one accm element to the peer
+                # buffer) but skip the whole p2p_scatter_epilog, so this run times gemm2 compute alone.
+                _rp = buffer_ops.create_buffer_resource_from_addr(addr_p2p_comb_inp)
+                _pb = buffer_ops.buffer_load(_rp, fx.Int32(0), vec_width=1, dtype=fx.Int64)
+                _rs = buffer_ops.create_buffer_resource_from_addr(_pb, num_records_bytes=_comb_inp_nbytes)
+                _sv = Vec(accm_vecs[0][0])  # 4xf32 accumulator fragment -> one 16B b128 store keeps gemm2 live
+                buffer_ops.buffer_store(
+                    _sv, _rs, (unit_bx & fx.Int32(255)) * fx.Int32(16), offset_is_bytes=True
+                )
+            else:
+                p2p_scatter_epilog(
+                    lds_base_i32,
+                    accm_vecs,
+                    _pf_packed,
+                    _pf_weight,
+                    _pf_dest_enc,
+                    _peer_bases,
+                    _n_block_pre,
+                    wave,
+                    lane,
+                    N_OUT=N_OUT,
+                    npes=npes,
+                    topk=topk,
+                    log2_max_tok=log2_max_tok,
+                    mask_max_tok=mask_max_tok,
+                    recv_cap=_recv_cap,
+                    comb_inp_nbytes=_comb_inp_nbytes,
+                    doweight=doweight,
+                    BM=BM,
+                    BN=BN,
+                )
             # LDS-reuse sync across persistent iters (cshuffle acc unions the next tile's A-LDS region):
             # vmcnt=63 keeps P2P stores draining async (already the aiter "no release fence" win); the
             # lgkmcnt=0 + s_barrier guards the acc LDS from the next iter's A-load DMA. Not the vmem fence.

@@ -272,6 +272,8 @@ class MegaMoEV2(MegaMoE):
             # tok_id_to_src has effective_max_recv entries; the scatter guard must bound t by this to
             # avoid an OOB tis read (which can alias output token 0 slot 0 and zero it out).
             recv_cap=int(comb_cfg.effective_max_recv),
+            # perf attribution: skip the P2P scatter epilog (gemm2 compute only) to split the cost.
+            bench_no_scatter=os.environ.get("MEGA_V2_NOSCATTER", "0") == "1",
             a_dtype="fp8",
             doweight=True,
             num_cu=cu_num,
