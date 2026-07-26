@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-07-26T15:44:46Z",
+ "updated": "2026-07-26T18:41:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30215114476,
+   "pr": 907,
+   "commit": "cbc124dc542e17c76bfca087d065d7ba2f40ed76",
+   "branch": "stochastic-rounding",
+   "event": "pull_request",
+   "title": "Add stochastic rounding and philox RNG helpers",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30215114476",
+   "created_at": "2026-07-26T18:37:33Z",
+   "updated_at": "2026-07-26T18:37:33Z",
+   "actor": "kashif",
+   "jobs": []
+  },
+  {
+   "run_id": 30214379950,
+   "pr": 906,
+   "commit": "30412e742da46bd4d42c361c502ed6343fe13448",
+   "branch": "fast-divmod",
+   "event": "pull_request",
+   "title": "Add fast_divmod magic-number division helper",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30214379950",
+   "created_at": "2026-07-26T18:16:44Z",
+   "updated_at": "2026-07-26T18:16:44Z",
+   "actor": "kashif",
+   "jobs": []
+  },
   {
    "run_id": 30204287374,
    "pr": null,
@@ -2214,64 +2244,6 @@
      "started_at": "2026-07-24T03:39:05Z",
      "completed_at": "2026-07-24T03:40:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064697484/job/89393426809"
-    }
-   ]
-  },
-  {
-   "run_id": 30064646895,
-   "pr": 869,
-   "commit": "02838e59232df32f0fd3d787f9243ab9f571a5b1",
-   "branch": "kernel/sage-attention-cdna",
-   "event": "pull_request",
-   "title": "[Kernel] Add CDNA SageAttention kernel",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064646895",
-   "created_at": "2026-07-24T03:36:25Z",
-   "updated_at": "2026-07-24T03:37:58Z",
-   "actor": "LiuYinfeng01",
-   "jobs": []
-  },
-  {
-   "run_id": 30064578426,
-   "pr": 885,
-   "commit": "27da07872a1ba891859f6cf2fadafcec176cf8b3",
-   "branch": "gfx1250/gemm-refactor",
-   "event": "pull_request",
-   "title": "[gfx1250] Refactor MoE/GEMM kernels with layout/atom API",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064578426",
-   "created_at": "2026-07-24T03:34:47Z",
-   "updated_at": "2026-07-24T05:34:35Z",
-   "actor": "aoli26",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T03:37:25Z",
-     "completed_at": "2026-07-24T03:56:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064578426/job/89393170014"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T04:06:11Z",
-     "completed_at": "2026-07-24T05:34:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064578426/job/89393170022"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T03:54:13Z",
-     "completed_at": "2026-07-24T05:21:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064578426/job/89393170054"
     }
    ]
   }
