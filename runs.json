@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-26T14:14:42Z",
+ "updated": "2026-07-26T14:54:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,38 +10,38 @@
    "branch": "main",
    "event": "push",
    "title": "[3/5] autotune: add offline config artifacts (#770) (#786)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30204287374",
    "created_at": "2026-07-26T13:33:37Z",
-   "updated_at": "2026-07-26T13:42:50Z",
+   "updated_at": "2026-07-26T14:53:08Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-26T13:40:04Z",
-     "completed_at": null,
+     "completed_at": "2026-07-26T14:53:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30204287374/job/89800045130"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-26T13:42:50Z",
-     "completed_at": null,
+     "completed_at": "2026-07-26T14:28:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30204287374/job/89800045137"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-26T13:40:03Z",
-     "completed_at": null,
+     "completed_at": "2026-07-26T14:40:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30204287374/job/89800045138"
     }
    ]
