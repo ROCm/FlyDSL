@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-26T10:00:02Z",
+ "updated": "2026-07-26T10:33:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30198391090,
+   "pr": 904,
+   "commit": "fc5670e7b47b1befa00a71b2fc388eb9618c9b67",
+   "branch": "binding_fa_gfx950",
+   "event": "pull_request",
+   "title": "[perf]Optimize flash attention fp8 for gfx950",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30198391090",
+   "created_at": "2026-07-26T10:30:41Z",
+   "updated_at": "2026-07-26T10:31:28Z",
+   "actor": "binding7012",
+   "jobs": []
+  },
   {
    "run_id": 30189704473,
    "pr": 786,
@@ -2285,49 +2300,6 @@
      "started_at": "2026-07-24T00:29:26Z",
      "completed_at": "2026-07-24T00:39:21Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30056225987/job/89368602737"
-    }
-   ]
-  },
-  {
-   "run_id": 30035122856,
-   "pr": 820,
-   "commit": "cb5074880aecfab5a0f85078051829eb3935c900",
-   "branch": "jiacao/conv3d-multi-tile-autotune-v2",
-   "event": "pull_request",
-   "title": "[Kernel] conv3d: parameterize tile size + add autotuner",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30035122856",
-   "created_at": "2026-07-23T18:45:54Z",
-   "updated_at": "2026-07-23T21:05:56Z",
-   "actor": "jiacao-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T19:52:26Z",
-     "completed_at": "2026-07-23T21:05:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30035122856/job/89301373135"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T19:02:12Z",
-     "completed_at": "2026-07-23T19:18:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30035122856/job/89301373203"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T19:06:23Z",
-     "completed_at": "2026-07-23T19:59:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30035122856/job/89301373237"
     }
    ]
   }
