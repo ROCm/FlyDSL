@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-26T04:30:33Z",
+ "updated": "2026-07-26T07:15:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30189704473,
+   "pr": 786,
+   "commit": "c4da52c417393310b8faae132404566dc78a970a",
+   "branch": "feat/autotune-offline-configs",
+   "event": "pull_request",
+   "title": "[3/5] autotune: add offline config artifacts (#770)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30189704473",
+   "created_at": "2026-07-26T05:38:23Z",
+   "updated_at": "2026-07-26T05:54:18Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-26T05:54:47Z",
+     "completed_at": "2026-07-26T06:43:03Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30189704473/job/89761824444"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-26T05:54:56Z",
+     "completed_at": "2026-07-26T06:49:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30189704473/job/89761824452"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-26T05:54:18Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30189704473/job/89761824454"
+    }
+   ]
+  },
   {
    "run_id": 30154818975,
    "pr": 903,
@@ -265,7 +308,7 @@
   },
   {
    "run_id": 30117815364,
-   "pr": 786,
+   "pr": null,
    "commit": "ca10e438f6b4234a7245138407f4b2eb4797869e",
    "branch": "feat/autotune-offline-configs",
    "event": "pull_request",
@@ -2285,49 +2328,6 @@
      "started_at": "2026-07-23T19:06:23Z",
      "completed_at": "2026-07-23T19:59:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30035122856/job/89301373237"
-    }
-   ]
-  },
-  {
-   "run_id": 30025899976,
-   "pr": null,
-   "commit": "8aa5718d45ebea9ceecdb4acdb61447adf23a82c",
-   "branch": "main",
-   "event": "pull_request",
-   "title": "[Kernel][MI350] Add 8 wave GQA sliding-window attention kernel",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30025899976",
-   "created_at": "2026-07-23T16:37:19Z",
-   "updated_at": "2026-07-23T20:08:23Z",
-   "actor": "amd-nprotaso",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-23T17:02:56Z",
-     "completed_at": "2026-07-23T18:10:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30025899976/job/89270444604"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T18:52:26Z",
-     "completed_at": "2026-07-23T20:08:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30025899976/job/89270444650"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-23T18:44:58Z",
-     "completed_at": "2026-07-23T19:01:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30025899976/job/89270444687"
     }
    ]
   }
