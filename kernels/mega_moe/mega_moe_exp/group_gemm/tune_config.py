@@ -1,5 +1,7 @@
 """Online MegaMoE stage1 autotune search space."""
 
+import os
+
 from flydsl.autotune import Config
 
 _SHAPES = (
@@ -61,6 +63,16 @@ def _candidate_variants(shape):
 
 def get_stage1_autotune_configs(dispatch_cu=None, grid_mult=None, tile_m_values=(32,)):
     tile_m_values = {int(value) for value in tile_m_values}
+    if os.environ.get("MEGA_S1_NOTUNE") == "1":
+        # Fast path (perf-isolation only): pin stage1 to ONE default config -> skip the ~47-config
+        # autotune sweep. Only for measuring stage2 (gemm2+combine); NOT for best-stage1 perf.
+        return [Config(
+            sort_block_m=32, tile_n=256, tile_k=256, num_waves=4, wgm=2,
+            grid_mult=4 if grid_mult is None else int(grid_mult), sched_nmajor=False,
+            pipe_weights=True, mfma_amajor=True, swizzle_a=True,
+            num_dispatch_cu=64 if dispatch_cu is None else int(dispatch_cu),
+            tune_use_xcd=True, use_tile_resource=True, waves_per_eu_hint=2,
+        )]
     configs = []
     seen = set()
     for sort_block_m, tile_n, num_waves in _SHAPES:

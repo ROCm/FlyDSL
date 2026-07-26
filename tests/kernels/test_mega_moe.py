@@ -965,6 +965,19 @@ def _run_full_e2e(
     # _t_mega_s1 = _cg_time(_mega_s1_body, moe.comb_op)        # megav1 STAGE1-only
     # _t_atom_s1 = _cg_time(_atom_s1_body, dcf)                # baseline STAGE1-only (fp8 dispatch->gemm1)
 
+    # STAGE2-only isolation (gemm2 P2P-scatter + cross-rank combine): run stage1 ONCE -> s1, then time
+    # only _run_stage2 (multi-GPU, real xGMI scatter/combine). Fused stage1 only (needs the s1 handoff).
+    _t_mega_s2 = -1.0
+    if _s1_fused and not getattr(args, "profile", False):
+        _s1_iso = moe._run_fused_stage1(x_q, wc, x_sc, ic)
+        torch.cuda.synchronize()
+        ms.shmem_barrier_all()
+
+        def _mega_s2_body():
+            moe._run_stage2(_s1_iso, run_tokens, None, True)
+
+        _t_mega_s2 = _cg_time(_mega_s2_body, moe.comb_op)
+
     # ============================= 12. report + return metrics =============================
     if rank == 0:
         _e2e_warn = (
@@ -991,6 +1004,7 @@ def _run_full_e2e(
             f"| ref bf16-dispatch baseline={_t_atom:.4f}  (out=bf16)",
             flush=True,
         )
+        print(f"  [perf STAGE2 (gemm2_fused_p2p + combine), ms | cuda-event]  stage2={_t_mega_s2:.4f}", flush=True)
     return dict(
         network=args.network,
         quant=args.quant,

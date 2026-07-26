@@ -404,7 +404,7 @@ class MegaMoEV2(MegaMoE):
     __call__ = forward
 
     def _build_fused_stage2(self, **kw):
-        from .mega_moe_stage2 import compile_mega_moe_stage2
+        from .mega_moe_stage2 import make_gemm2_autotuner
 
         FlyDSLDispatchCombineIntraNodeOp._ENABLE_COMBINE_NO_STAGE1 = True
         comb_cfg = self.comb_cfg
@@ -412,11 +412,22 @@ class MegaMoEV2(MegaMoE):
         max_recv = comb_cfg.world_size * comb_cfg.max_num_inp_token_per_rank
         k = comb_cfg.num_experts_per_token
         cu_num = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
-        # fmt: off
-        self._g2v2_launch = compile_mega_moe_stage2(model_dim=comb_cfg.hidden_dim, inter_dim=self.inter_dim,
-            experts=comb_cfg.num_experts_per_rank, topk=k, rank=comb_cfg.rank, npes=comb_cfg.world_size,
-            max_tok=comb_cfg.max_num_inp_token_per_rank, num_cu=cu_num, grid_mult=1)
-        # fmt: on
+        BM = 32  # pinned to sort_block_m (BM<SBM fixed-slot srcmap decode not yet enabled)
+        self._g2v2_bm = BM
+        self._g2v2_inter = int(self.inter_dim)
+        self._g2v2_hidden = int(comb_cfg.hidden_dim)
+        self._g2v2_cu_num = int(cu_num)
+        # Full flydsl Autotuner (disk-cached best config, per-M key, collective bench). Invariants form
+        # the tuning key + compile params; the tuner varies BK/use_nt/g2_*/persist.
+        self._g2_tuner = make_gemm2_autotuner(a_dtype="fp8")
+        self._g2_invariants = dict(
+            model_dim=int(comb_cfg.hidden_dim), inter_dim=int(self.inter_dim),
+            experts=int(comb_cfg.num_experts_per_rank), topk=int(k), rank=int(comb_cfg.rank),
+            npes=int(comb_cfg.world_size), max_tok=int(comb_cfg.max_num_inp_token_per_rank),
+            recv_cap=int(comb_cfg.effective_max_recv),
+            comb_inp_nbytes=int(comb_cfg.max_num_inp_token_per_rank) * int(k) * int(comb_cfg.hidden_dim) * 2,
+            BM=BM, HIDDEN_MAX=int(comb_cfg.hidden_dim), INTER_MAX=int(self.inter_dim), cu_num=int(cu_num),
+        )
         self._g2_dummy_inp = torch.zeros(max_recv, comb_cfg.hidden_dim, dtype=comb_cfg.combine_dtype, device=dev)
 
     def _run_fused_stage2(self, s1, run_tokens, stream=None):
@@ -437,19 +448,27 @@ class MegaMoEV2(MegaMoE):
             stream = torch.cuda.current_stream()
         s_fx = fx.Stream(stream.cuda_stream)
         size_expert_ids = s1.sorted_expert_ids.numel()
-        args = (
+        # flydsl Autotuner: positional runner args (launch order matches _run_gemm2_config), then the
+        # per-M tuning key (tune_tokens + invariants). Tuner picks/compiles the best config, benches
+        # collectively, caches to disk, and launches it.
+        self._g2_tuner(
             fx.Int64(s1.a2.view(-1).data_ptr()),
             fx.Int64(s1.a2_scale.data_ptr()),
             fx.Int64(self.w2.data_ptr()),
             fx.Int64(self.w2_scale.data_ptr()),
             fx.Int64(s1.sorted_expert_ids.data_ptr()),
+            fx.Int64(s1.num_valid_ids.data_ptr()),
             fx.Int64(s1.sorted_token_ids.data_ptr()),
             fx.Int64(s1.sorted_weights.data_ptr()),
             fx.Int64(tile_row_base.data_ptr()),
-            fx.Int64(s1.num_valid_ids.data_ptr()),
             comb_op._fx_tis,
             comb_op._fx_p2p_comb_inp,
+            int(size_expert_ids),
+            self._g2v2_inter,
+            self._g2v2_hidden,
+            s_fx,
+            tune_tokens=int(run_tokens),
+            **self._g2_invariants,
         )
-        _run_compiled(self._g2v2_launch, *args, fx.Int32(size_expert_ids), s_fx)
         ret = comb_op.combine_no_stage1(self._g2_dummy_inp, None, None, cur_tok=run_tokens, enable_weights=False)
         return ret
