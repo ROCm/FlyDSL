@@ -18,6 +18,7 @@ from .meta import dsl_loc_tracing
 from .numeric import (
     BFloat16,
     Boolean,
+    FastDivmod,
     Float,
     Float4E2M1FN,
     Float6E2M3FN,
@@ -49,6 +50,8 @@ from .numeric import (
     _resolve_numeric_type,
     _result_numeric_type_for_op,
     as_numeric,
+    fast_divmod,
+    fastdivmod_magic,
 )
 from .primitive import *
 from .utils import lazy_classattr
@@ -359,6 +362,9 @@ __all__ = [
     # DSL value types
     "Numeric",
     "as_numeric",
+    "fast_divmod",
+    "fastdivmod_magic",
+    "FastDivmod",
     "Boolean",
     "Float",
     "BFloat16",

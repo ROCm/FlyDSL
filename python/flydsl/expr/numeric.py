@@ -894,3 +894,75 @@ class Index(Integer, metaclass=NumericMeta, width=64, signed=False, ir_type=lamb
         # x is now either: Python int, or index-typed ir.Value
         # Pass directly to Numeric.__init__ (bypass Integer conversion logic)
         Numeric.__init__(self, x)
+
+
+# ---------------------------------------------------------------------------
+# Magic-number unsigned division
+# ---------------------------------------------------------------------------
+# GPUs have no hardware integer divide, so a runtime `n // d` lowers to a long
+# instruction sequence. When the divisor is known on the host (e.g. a grid
+# dimension), the divide can be replaced by a widening multiply and two shifts
+# using a precomputed multiplier, the same trick as ``cutlass::FastDivmod``.
+
+
+def fastdivmod_magic(divisor: int):
+    """Precompute the ``(magic, shift)`` pair for magic-number division by
+    ``divisor``, to be passed to :func:`fast_divmod` as kernel arguments.
+
+    Runs on the host with plain Python ints. The identity is::
+
+        n // divisor == (n * magic) >> (32 + shift)
+
+    for every ``0 <= n < 2**31``, with ``shift = max(ceil_log2(divisor) - 1, 0)``
+    and ``magic = ceil(2**(32 + shift) / divisor)``. ``magic`` is at most
+    ``2**32`` so it fits in an ``i64`` kernel argument and needs no
+    ``divisor == 1`` correction. Same non-negative, ``< 2**31`` dividend
+    contract as ``cutlass::FastDivmod``.
+    """
+    if not 0 < divisor < (1 << 31):
+        raise ValueError(f"divisor must satisfy 0 < divisor < 2**31, got {divisor}")
+    ceil_log2 = (divisor - 1).bit_length()
+    shift = max(ceil_log2 - 1, 0)
+    magic = ((1 << (32 + shift)) + divisor - 1) // divisor
+    return magic, shift
+
+
+def fast_divmod(dividend, divisor, magic, shift):
+    """Magic-number ``divmod`` returning ``(quotient, remainder)``.
+
+    ``magic`` and ``shift`` come from :func:`fastdivmod_magic`. Every argument
+    may be a DSL Numeric value (e.g. a runtime kernel argument) or a Python int.
+    Valid for ``0 <= dividend < 2**31``.
+    """
+    prod = Uint64(dividend) * Uint64(magic)
+    quotient = Int32(prod >> (Uint64(32) + Uint64(shift)))
+    remainder = Int32(dividend) - quotient * Int32(divisor)
+    return quotient, remainder
+
+
+class FastDivmod:
+    """Magic-number divmod by a fixed ``divisor``.
+
+    Convenience wrapper for a compile-time-constant divisor: the
+    ``(magic, shift)`` pair is computed once at construction. For a runtime
+    divisor (a kernel argument) call :func:`fast_divmod` directly with a
+    ``(magic, shift)`` pair produced on the host by :func:`fastdivmod_magic`.
+
+    Example::
+
+        fdm = FastDivmod(768)
+        q, r = fdm.divmod(idx)
+    """
+
+    def __init__(self, divisor: int):
+        self.divisor = divisor
+        self.magic, self.shift = fastdivmod_magic(divisor)
+
+    def divmod(self, dividend):
+        return fast_divmod(dividend, self.divisor, self.magic, self.shift)
+
+    def div(self, dividend):
+        return self.divmod(dividend)[0]
+
+    def mod(self, dividend):
+        return self.divmod(dividend)[1]
