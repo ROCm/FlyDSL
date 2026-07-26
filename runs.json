@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-26T10:33:32Z",
+ "updated": "2026-07-26T10:43:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30198659003,
+   "pr": 905,
+   "commit": "8a65fd0a5c42c564332c43ff6aef57cf81a96b89",
+   "branch": "binding_fa_fp8_gfx950",
+   "event": "pull_request",
+   "title": "[perf]optimize flash attention fp8 for gfx950",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30198659003",
+   "created_at": "2026-07-26T10:39:39Z",
+   "updated_at": "2026-07-26T10:41:06Z",
+   "actor": "binding7012",
+   "jobs": []
+  },
   {
    "run_id": 30198391090,
    "pr": 904,
@@ -25,11 +40,11 @@
    "branch": "feat/autotune-offline-configs",
    "event": "pull_request",
    "title": "[3/5] autotune: add offline config artifacts (#770)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30189704473",
    "created_at": "2026-07-26T05:38:23Z",
-   "updated_at": "2026-07-26T09:26:42Z",
+   "updated_at": "2026-07-26T10:41:48Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -53,10 +68,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-26T09:26:42Z",
-     "completed_at": null,
+     "completed_at": "2026-07-26T10:41:47Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30189704473/job/89761824454"
     }
    ]
@@ -2257,49 +2272,6 @@
      "started_at": "2026-07-24T00:50:52Z",
      "completed_at": "2026-07-24T01:05:59Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30057210758/job/89371562819"
-    }
-   ]
-  },
-  {
-   "run_id": 30056225987,
-   "pr": null,
-   "commit": "d96476e329fd1e29932a31f9b0d71dc5ce17c898",
-   "branch": "worktree-mxmoe-a8w4",
-   "event": "pull_request",
-   "title": "Refactor mxmoe",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30056225987",
-   "created_at": "2026-07-24T00:27:14Z",
-   "updated_at": "2026-07-24T00:48:38Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T00:29:37Z",
-     "completed_at": "2026-07-24T00:44:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30056225987/job/89368602710"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T00:29:37Z",
-     "completed_at": "2026-07-24T00:48:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30056225987/job/89368602726"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T00:29:26Z",
-     "completed_at": "2026-07-24T00:39:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30056225987/job/89368602737"
     }
    ]
   }
