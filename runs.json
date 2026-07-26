@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-26T21:39:32Z",
+ "updated": "2026-07-26T23:28:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30222517993,
+   "pr": 903,
+   "commit": "17cad279c4b307a09698bad17a7e92f809085ad7",
+   "branch": "ci/mlir-cache-smoke-test",
+   "event": "pull_request",
+   "title": "[CI] Smoke test shared MLIR cache workflow",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30222517993",
+   "created_at": "2026-07-26T22:08:02Z",
+   "updated_at": "2026-07-26T23:26:22Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-26T22:12:41Z",
+     "completed_at": "2026-07-26T23:26:22Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30222517993/job/89847556611"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-26T22:12:32Z",
+     "completed_at": "2026-07-26T23:10:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30222517993/job/89847556628"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-26T22:12:41Z",
+     "completed_at": "2026-07-26T23:02:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30222517993/job/89847556641"
+    }
+   ]
+  },
   {
    "run_id": 30221449964,
    "pr": 907,
@@ -282,7 +325,7 @@
   },
   {
    "run_id": 30154818975,
-   "pr": 903,
+   "pr": null,
    "commit": "bba0761a3ef21b329a94792bc6dd43e194244f75",
    "branch": "ci/mlir-cache-smoke-test",
    "event": "pull_request",
@@ -2117,49 +2160,6 @@
      "started_at": "2026-07-24T06:10:52Z",
      "completed_at": "2026-07-24T07:25:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30067303523/job/89400848444"
-    }
-   ]
-  },
-  {
-   "run_id": 30065420068,
-   "pr": null,
-   "commit": "b6b0f5d2d3d3b752843acae31315f01909f1e753",
-   "branch": "worktree-mxmoe-a8w4",
-   "event": "pull_request",
-   "title": "Refactor mxmoe",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30065420068",
-   "created_at": "2026-07-24T03:54:47Z",
-   "updated_at": "2026-07-24T04:38:37Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T04:09:46Z",
-     "completed_at": "2026-07-24T04:38:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30065420068/job/89395421378"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T04:13:04Z",
-     "completed_at": "2026-07-24T04:23:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30065420068/job/89395421383"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T03:56:00Z",
-     "completed_at": "2026-07-24T04:38:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30065420068/job/89395421404"
     }
    ]
   }
