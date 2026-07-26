@@ -1,11 +1,56 @@
 {
  "schema": 1,
- "updated": "2026-07-26T18:41:16Z",
+ "updated": "2026-07-26T21:39:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 30215114476,
+   "run_id": 30221449964,
    "pr": 907,
+   "commit": "21d63078c8873eebf47379badd1e76e820226a8a",
+   "branch": "stochastic-rounding",
+   "event": "pull_request",
+   "title": "Add stochastic rounding and philox RNG helpers",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30221449964",
+   "created_at": "2026-07-26T21:37:06Z",
+   "updated_at": "2026-07-26T21:37:06Z",
+   "actor": "kashif",
+   "jobs": []
+  },
+  {
+   "run_id": 30217211424,
+   "pr": null,
+   "commit": "6e3cdad7a7da589691c10195c7cc1261ae29c8e9",
+   "branch": "stochastic-rounding",
+   "event": "pull_request",
+   "title": "Add stochastic rounding and philox RNG helpers",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30217211424",
+   "created_at": "2026-07-26T19:36:38Z",
+   "updated_at": "2026-07-26T19:36:38Z",
+   "actor": "kashif",
+   "jobs": []
+  },
+  {
+   "run_id": 30216030196,
+   "pr": null,
+   "commit": "b06aabed137689a6007f9a9641ab724f22e51178",
+   "branch": "stochastic-rounding",
+   "event": "pull_request",
+   "title": "Add stochastic rounding and philox RNG helpers",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30216030196",
+   "created_at": "2026-07-26T19:03:00Z",
+   "updated_at": "2026-07-26T19:03:00Z",
+   "actor": "kashif",
+   "jobs": []
+  },
+  {
+   "run_id": 30215114476,
+   "pr": null,
    "commit": "cbc124dc542e17c76bfca087d065d7ba2f40ed76",
    "branch": "stochastic-rounding",
    "event": "pull_request",
@@ -2115,135 +2160,6 @@
      "started_at": "2026-07-24T03:56:00Z",
      "completed_at": "2026-07-24T04:38:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30065420068/job/89395421404"
-    }
-   ]
-  },
-  {
-   "run_id": 30065289974,
-   "pr": null,
-   "commit": "49d968436b8ebe82cfc629d9b4576e0652150902",
-   "branch": "worktree-mxmoe-a8w4",
-   "event": "pull_request",
-   "title": "Refactor mxmoe",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30065289974",
-   "created_at": "2026-07-24T03:51:44Z",
-   "updated_at": "2026-07-24T03:54:49Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T03:52:55Z",
-     "completed_at": "2026-07-24T03:54:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30065289974/job/89395060642"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T03:52:55Z",
-     "completed_at": "2026-07-24T03:54:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30065289974/job/89395060650"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T03:52:55Z",
-     "completed_at": "2026-07-24T03:54:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30065289974/job/89395060651"
-    }
-   ]
-  },
-  {
-   "run_id": 30064817364,
-   "pr": 869,
-   "commit": "42aea08192f9c2c376d1cfb0b815e6e57df2d915",
-   "branch": "kernel/sage-attention-cdna",
-   "event": "pull_request",
-   "title": "[Kernel] Add CDNA SageAttention kernel",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064817364",
-   "created_at": "2026-07-24T03:40:31Z",
-   "updated_at": "2026-07-24T09:30:16Z",
-   "actor": "LiuYinfeng01",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T07:52:18Z",
-     "completed_at": "2026-07-24T09:30:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064817364/job/89429230809"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T05:22:36Z",
-     "completed_at": "2026-07-24T06:52:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064817364/job/89429231294"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T03:57:24Z",
-     "completed_at": "2026-07-24T04:12:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064817364/job/89429252571"
-    }
-   ]
-  },
-  {
-   "run_id": 30064697484,
-   "pr": 869,
-   "commit": "e29f0cc41ee1533f9c5c871366f0c3068ef4e2be",
-   "branch": "kernel/sage-attention-cdna",
-   "event": "pull_request",
-   "title": "[Kernel] Add CDNA SageAttention kernel",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064697484",
-   "created_at": "2026-07-24T03:37:41Z",
-   "updated_at": "2026-07-24T03:40:33Z",
-   "actor": "LiuYinfeng01",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T03:39:05Z",
-     "completed_at": "2026-07-24T03:40:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064697484/job/89393426773"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T03:39:05Z",
-     "completed_at": "2026-07-24T03:40:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064697484/job/89393426782"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T03:39:05Z",
-     "completed_at": "2026-07-24T03:40:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30064697484/job/89393426809"
     }
    ]
   }
