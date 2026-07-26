@@ -134,7 +134,12 @@ def test_rmsnorm_autotuned_search_then_cache_hit(monkeypatch):
     artifacts = list(Path(os.environ["FLYDSL_AUTOTUNE_CONFIG_DIR"]).glob("*.json"))
     assert len(artifacts) == 1
     payload = json.loads(artifacts[0].read_text())
-    assert payload["identity"]["key"] == {"m_in": x.shape[0], "N": x.shape[1], "dtype_str": "bf16"}
+    assert payload["identity"]["key"] == {
+        "m_in": x.shape[0],
+        "N": x.shape[1],
+        "dtype_str": "bf16",
+        "weight_dtype_str": "bf16",
+    }
     assert payload["identity"]["device"]["name"] == torch.cuda.get_device_name(x.device)
     assert payload["config"]["BLOCK_THREADS"] == 128
     assert payload["config"]["waves_per_eu"] == 2
