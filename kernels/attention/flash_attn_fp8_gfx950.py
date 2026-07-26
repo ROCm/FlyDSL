@@ -690,9 +690,22 @@ def build_flash_attn_dualwave_swp_fp8_module(
         head_dim_runtime: fx.Int32,
     ):
         ctx = DualwaveFp8KernelContext(
-            traits, Q, K, V, O, DebugCounts, CuSeqQ, CuSeqKv,
-            QDescale, KDescale, VDescale, seq_len, seq_len_kv,
-            stride_q_n, stride_kv_n, head_dim_runtime,
+            traits,
+            Q,
+            K,
+            V,
+            O,
+            DebugCounts,
+            CuSeqQ,
+            CuSeqKv,
+            QDescale,
+            KDescale,
+            VDescale,
+            seq_len,
+            seq_len_kv,
+            stride_q_n,
+            stride_kv_n,
+            head_dim_runtime,
         )
         ctx.init_types_and_constants()
         ctx.init_runtime_indices()
@@ -778,13 +791,13 @@ def build_flash_attn_dualwave_swp_fp8_module(
             # double-buffered KV LDS regions, and issuing it first lets a fast wave's
             # async gmem->LDS write land in a region a slow wave is still reading.
             # Reads-first orders this per-wave with no extra barriers.
-            v_k = kv_lds_to_regs.load_k(buf_cur)                    # K(j)
-            v_v = kv_lds_to_regs.load_v(buf_oth)                    # V(j-1)
+            v_k = kv_lds_to_regs.load_k(buf_cur)  # K(j)
+            v_v = kv_lds_to_regs.load_v(buf_oth)  # V(j-1)
             kv_gmem_to_lds.load_k((j + fx.Index(1)) * BN, buf_oth)  # prefetch K(j+1)
-            kv_gmem_to_lds.load_v(j * BN, buf_cur)                  # prefetch V(j)
-            v_o = gemm_helper.pv(v_p, v_v, v_o)                     # PV(j-1): 16 MFMA
+            kv_gmem_to_lds.load_v(j * BN, buf_cur)  # prefetch V(j)
+            v_o = gemm_helper.pv(v_p, v_v, v_o)  # PV(j-1): 16 MFMA
             v_o = softmax_helper.anchor_v_o(v_o)
-            v_s = gemm_helper.qk(v_k)                               # QK(j): 4 MFMA
+            v_s = gemm_helper.qk(v_k)  # QK(j): 4 MFMA
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
@@ -871,9 +884,22 @@ def build_flash_attn_dualwave_swp_fp8_module(
         head_dim_runtime: fx.Int32,
     ):
         ctx = DualwaveFp8KernelContext(
-            traits, Q, K, V, O, DebugCounts, CuSeqQ, CuSeqKv,
-            QDescale, KDescale, VDescale, seq_len, seq_len_kv,
-            stride_q_n, stride_kv_n, head_dim_runtime,
+            traits,
+            Q,
+            K,
+            V,
+            O,
+            DebugCounts,
+            CuSeqQ,
+            CuSeqKv,
+            QDescale,
+            KDescale,
+            VDescale,
+            seq_len,
+            seq_len_kv,
+            stride_q_n,
+            stride_kv_n,
+            head_dim_runtime,
         )
         ctx.init_types_and_constants()
         ctx.init_runtime_indices()
@@ -937,9 +963,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
             return v_s_a, v_s_b
 
         def _merge_tile_max(v_s_a, v_s_b):
-            m_tile = softmax_helper.max2(
-                softmax_helper.reduce_max(v_s_a), softmax_helper.reduce_max(v_s_b)
-            )
+            m_tile = softmax_helper.max2(softmax_helper.reduce_max(v_s_a), softmax_helper.reduce_max(v_s_b))
             if const_expr(traits.CAUSAL):
                 # A row can be fully masked in the first pair (any row above the
                 # diagonal when seqlen_kv < seqlen_q). Its tile max is -inf, and with

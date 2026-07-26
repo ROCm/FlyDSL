@@ -25,7 +25,6 @@ from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, roc
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
-from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 from flydsl.utils.smem_allocator import SmemPtr
 from kernels.common.kernels_common import dtype_to_elem_type
@@ -1833,13 +1832,8 @@ def _make_dualwave_swp_fp8_traits(
     else:
         dualwave_swp_kv_per_buffer = smem_k_tile_elems + smem_v_tile_elems
     lds_kv_total_size = num_prefetch_k * dualwave_swp_kv_per_buffer
-    dualwave_swp_k_buf_base = tuple(
-        i * dualwave_swp_kv_per_buffer for i in range(num_prefetch_k)
-    )
-    dualwave_swp_v_buf_base = tuple(
-        smem_k_tile_elems + i * dualwave_swp_kv_per_buffer
-        for i in range(num_prefetch_k)
-    )
+    dualwave_swp_k_buf_base = tuple(i * dualwave_swp_kv_per_buffer for i in range(num_prefetch_k))
+    dualwave_swp_v_buf_base = tuple(smem_k_tile_elems + i * dualwave_swp_kv_per_buffer for i in range(num_prefetch_k))
 
     # bf16 vt scratch layout: HIPREC dequantizes fp8 V into these positions so the
     # proven bf16 V transpose read (ds_read_tr16) + bf16 PV MMA are reused unchanged.
@@ -4791,7 +4785,9 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
         buf_off = buf_id * v_tile_bytes
         n = self.wave_id * fx.Index(8) + self.lane // fx.Index(8)
         d_block = self.lane % fx.Index(8)
-        src_elem = self.kv_gmem_elem_offset + n * self.stride_kv_n_v + d_block * fx.Index(16) + tile_start * self.stride_kv_n_v
+        src_elem = (
+            self.kv_gmem_elem_offset + n * self.stride_kv_n_v + d_block * fx.Index(16) + tile_start * self.stride_kv_n_v
+        )
         v16 = fly.copy_atom_call_ssa(
             [Vec.make_type(4, fx.Int32)], self.load_atom_128, fx.slice(self.v_div, (None, fx.Int32(src_elem)))
         )
