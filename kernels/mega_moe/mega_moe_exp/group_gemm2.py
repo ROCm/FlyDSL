@@ -1031,22 +1031,27 @@ def get_gemm2_autotune_configs(a_dtype="fp8"):
     cartesian product). Each dict overrides compile_mega_moe_stage2 defaults.
 
     Tuned axes: BK{128,256}, use_nt, g2_bhoist, g2_ascale_pf, g2_spart, persist. BM is pinned to
-    sort_block_m (=32) by the caller (BM<SBM fixed-slot srcmap decode not yet enabled); persist is
-    fp4-only (aiter marks a8w4/fp8-A persist known-broken: cos=0 at large M)."""
+    sort_block_m (=32) by the caller (BM<SBM fixed-slot srcmap decode not yet enabled).
+
+    persist (fixed cu_num m-slot grid, grid-stride over m-tiles) is included for BOTH fp4 and fp8:
+    aiter marks a8w4/fp8-A persist known-broken for THEIR mxmoe_gemm_v2, but our compile_mega_moe_stage2
+    persist branch is a separate impl -- verified correct (relL2 ~2.8e-3) and a large-M win (bs=1024
+    stage2 0.335->0.288ms, closing the gap to V1 from 19% to ~3%). The per-M autotune picks persist at
+    large M and non-persist at small M automatically."""
     cfgs = [
-        # (default) 2-stage B + A-scale prefetch + spatial-partition remap, f32 cshuffle.
+        # (default) 2-stage B + A-scale prefetch + spatial-partition remap, f32 cshuffle, non-persist.
         dict(BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=True, g2_spart=402, persist=False),
         dict(BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=True, g2_spart=0, persist=False),
         dict(BK=256, use_nt=False, g2_bhoist=True, g2_ascale_pf=True, g2_spart=402, persist=False),
         dict(BK=256, use_nt=True, g2_bhoist=False, g2_ascale_pf=True, g2_spart=402, persist=False),
         dict(BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=False, g2_spart=402, persist=False),
         dict(BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=True, g2_spart=202, persist=False),
+        # persist (fixed cu_num grid) -- large-M win, autotune picks it per token bucket.
+        dict(BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=True, g2_spart=402, persist=True),
+        dict(BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=True, g2_spart=0, persist=True),
     ]
     # NOTE: BK=128 excluded -- produces wrong results for this a8w4 down-proj shape (relL2~0.54);
     # its e8m0 scale-word shift (tilesPerScaleChunk=2) path is not correct here. Keep BK=256.
-    if a_dtype == "fp4":
-        # persist (fixed cu_num m-slot grid) helps large-M occupancy; fp4-only per aiter.
-        cfgs.append(dict(BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=True, g2_spart=402, persist=True))
     return cfgs
 
 
