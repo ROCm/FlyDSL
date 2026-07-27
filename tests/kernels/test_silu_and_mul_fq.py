@@ -41,7 +41,7 @@ from kernels.moe.silu_and_mul_fq import BLOCK_THREADS, build_silu_and_mul_fq_mod
 from tests.test_common import run_perftest, verify_output  # noqa: E402
 
 try:
-    from tests.kernels.utils import fp4_utils  # noqa: E402
+    from tests.kernels.utils import gemm_common_utils as fp4_utils  # noqa: E402
 
     _HAVE_FP4_UTILS = True
 except Exception:  # triton not installed, etc.

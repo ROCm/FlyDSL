@@ -27,6 +27,8 @@ def _isolate_disk_cache(tmp_path, monkeypatch):
     """Every test gets a private autotune disk cache so results don't leak
     across tests (a cached best-config would skip the benchmark loop)."""
     monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "autotune_cache"))
+    monkeypatch.delenv("FLYDSL_AUTOTUNE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
 
 
 # ── Fakes ────────────────────────────────────────────────────────────────
@@ -206,6 +208,21 @@ def test_key_insensitive_to_kwarg_order():
     assert k1 == k2
 
 
+def test_key_varies_with_effective_compile_hints():
+    hints = {"waves_per_eu": 1}
+
+    def fn(a, out, **kw):
+        pass
+
+    fn._effective_compile_hints = lambda: dict(hints)
+    tuner = _make_tuner(fn=fn)
+    args = (FakeTensor((8, 8)), FakeTensor((8, 8)))
+    first = tuner._make_key(args, {})
+    hints["waves_per_eu"] = 2
+
+    assert tuner._make_key(args, {}) != first
+
+
 # ── restore_value (in-place correctness) ────────────────────────────────
 def test_restore_value_restores_between_reps():
     """A kernel that mutates its input in place must see pristine inputs on
@@ -343,14 +360,22 @@ def test_disk_cache_roundtrip(tmp_path, monkeypatch):
 
 # ── decorator ────────────────────────────────────────────────────────────
 def test_autotune_decorator_wraps_into_autotuner():
-    """@autotune returns an Autotuner that forwards restore_value/reset_to_zero."""
+    """@autotune returns an Autotuner and forwards its options."""
 
     def fake_jit(a, out, **kw):
         pass
 
+    def configs(a, out):
+        return [Config(BLOCK=128)]
+
+    def default(a, out):
+        return Config(BLOCK=64)
+
     tuned = autotune(
-        configs=[Config(BLOCK=128)],
+        configs=configs,
         key=["a"],
+        default=default,
+        artifact_name="fake-kernel",
         restore_value=["a"],
         reset_to_zero=["out"],
     )(fake_jit)
@@ -358,7 +383,332 @@ def test_autotune_decorator_wraps_into_autotuner():
     assert isinstance(tuned, Autotuner)
     assert tuned.restore_value == ["a"]
     assert tuned.reset_to_zero == ["out"]
-    assert [c.kwargs["BLOCK"] for c in tuned.configs] == [128]
+    assert tuned.configs is configs
+    assert tuned.default is default
+    assert tuned.artifact_name == "fake-kernel"
+
+
+# ── two-track default/search ─────────────────────────────────────────────
+def test_cache_hit_precedes_default_and_search(monkeypatch):
+    # The broad test runner uses the explicit off value; search stays opt-in.
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "0")
+    default_calls = 0
+
+    def fn(a, out, BLOCK):
+        out._data[0] = float(BLOCK)
+
+    def default(a, out):
+        nonlocal default_calls
+        default_calls += 1
+        return Config(BLOCK=999)
+
+    def fail_bench(call, warmup, rep):
+        pytest.fail("normal path benchmarked configs")
+
+    tuner = _make_tuner(
+        fn=fn,
+        configs=[Config(BLOCK=64), Config(BLOCK=128)],
+        default=default,
+        do_bench_fn=fail_bench,
+    )
+    a = FakeTensor((8,))
+    out = FakeTensor((1,))
+    args = (a, out)
+    tuner.cache[tuner._make_key(args, {})] = Config(BLOCK=128)
+
+    tuner(*args)
+
+    assert out._data[0] == 128.0
+    assert default_calls == 0
+
+    tuner.cache.clear()
+    tuner(*args)
+
+    assert out._data[0] == 999.0
+    assert default_calls == 1
+
+
+def test_force_search_bypasses_cache_and_default(monkeypatch):
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    calls = {"configs": 0, "default": 0, "bench": 0}
+
+    def fn(a, out, BLOCK):
+        out._data[0] = float(BLOCK)
+
+    def configs(a, out):
+        calls["configs"] += 1
+        return [Config(BLOCK=64), Config(BLOCK=128)]
+
+    def default(a, out):
+        calls["default"] += 1
+        return Config(BLOCK=7)
+
+    def bench(call, warmup, rep):
+        calls["bench"] += 1
+        call()
+        return float(calls["bench"])
+
+    tuner = _make_tuner(fn=fn, configs=configs, default=default, do_bench_fn=bench)
+    args = (FakeTensor((8,)), FakeTensor((1,)))
+    tuner.cache[tuner._make_key(args, {})] = Config(BLOCK=999)
+
+    tuner(*args)
+
+    assert calls == {"configs": 1, "default": 0, "bench": 2}
+    assert args[1]._data[0] == 64.0
+
+
+# ── offline config artifacts ────────────────────────────────────────────
+class FakeConstexprInt:
+    @classmethod
+    def __coerce__(cls, value):
+        if type(value) is not int:
+            raise TypeError(f"expects int, got {type(value).__name__}")
+        return value
+
+
+def _artifact_kernel(a, out, m_in, N, dtype_str, BLOCK_THREADS: FakeConstexprInt, stream: int = 0):
+    out._data[0] = float(BLOCK_THREADS)
+
+
+def _artifact_default(a, out, m_in, N, dtype_str):
+    return Config(BLOCK_THREADS=7)
+
+
+def _make_artifact_tuner(**overrides):
+    options = {
+        "fn": _artifact_kernel,
+        "configs": [Config(BLOCK_THREADS=64)],
+        "key": ["m_in", "N", "dtype_str"],
+        "default": _artifact_default,
+        "artifact_name": "rmsnorm",
+        "do_bench_fn": lambda call, warmup, rep: (call(), 1.0)[1],
+    }
+    options.update(overrides)
+    return _make_tuner(**options)
+
+
+@pytest.fixture
+def artifact_dir(tmp_path, monkeypatch):
+    import importlib
+
+    at = importlib.import_module("flydsl.autotune")
+
+    path = tmp_path / "artifacts"
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(path))
+    monkeypatch.setattr(
+        at,
+        "_device_descriptor",
+        lambda device=None: {
+            "name": "Test GPU",
+            "arch": "gfx-test",
+            "compute_units": 1,
+        },
+        raising=False,
+    )
+    return path
+
+
+def _emit_artifact(monkeypatch, artifact_dir, *, args=None, config=None):
+    args = args or (FakeTensor((16, 512)), FakeTensor((1,)), 16, 512, "bf16")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    tuner = _make_artifact_tuner(configs=[config or Config(BLOCK_THREADS=64)])
+    tuner(*args)
+    files = list(artifact_dir.glob("*.json"))
+    assert len(files) == 1
+    return files[0], args
+
+
+def test_artifact_lifecycle(monkeypatch, tmp_path, artifact_dir):
+    path, args = _emit_artifact(monkeypatch, artifact_dir)
+    payload = json.loads(path.read_text())
+
+    assert payload["identity"]["key"] == {"m_in": 16, "N": 512, "dtype_str": "bf16"}
+    assert payload["config"] == {"BLOCK_THREADS": 64}
+
+    monkeypatch.delenv("FLYDSL_AUTOTUNE")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "fresh-cache"))
+
+    def fail_configs(*_args, **_kwargs):
+        pytest.fail("artifact lookup evaluated the search space")
+
+    def fail_default(*_args, **_kwargs):
+        pytest.fail("artifact lookup evaluated the heuristic default")
+
+    loaded = _make_artifact_tuner(
+        configs=fail_configs,
+        default=fail_default,
+        do_bench_fn=lambda *args, **kwargs: pytest.fail("artifact lookup benchmarked"),
+    )
+    out = FakeTensor((1,))
+    loaded(args[0], out, *args[2:])
+
+    assert out._data[0] == 64.0
+    assert loaded.cache == {}, "artifact decisions must not enter the searched-winner cache"
+
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    replacement = _make_artifact_tuner(configs=[Config(BLOCK_THREADS=128)])
+    replacement(*args)
+    assert json.loads(path.read_text())["config"] == {"BLOCK_THREADS": 128}
+
+
+def test_artifact_schema_partitions_searched_winner_cache(monkeypatch, artifact_dir):
+    args = (FakeTensor((16, 512)), FakeTensor((1,)), 16, 512, "bf16")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    old_schema = _make_artifact_tuner(
+        artifact_name="rmsnorm-v1",
+        configs=[Config(BLOCK_THREADS=64)],
+    )
+    old_schema(*args)
+
+    new_schema = _make_artifact_tuner(artifact_name="rmsnorm-v2")
+    ref = new_schema._artifact_ref(args, {}, required=True)
+    new_schema._emit_artifact(Config(BLOCK_THREADS=128), ref, args, {})
+
+    monkeypatch.delenv("FLYDSL_AUTOTUNE")
+    loaded = _make_artifact_tuner(artifact_name="rmsnorm-v2")
+    out = FakeTensor((1,))
+    loaded(args[0], out, *args[2:])
+
+    assert out._data[0] == 128.0
+
+
+def test_artifact_identity_uses_declared_key_and_device(artifact_dir, monkeypatch):
+    import importlib
+
+    at = importlib.import_module("flydsl.autotune")
+
+    def kernel(a, out, N, BLOCK_THREADS: int, dtype_str: str = "bf16"):
+        pass
+
+    tuner = _make_tuner(fn=kernel, key=["N", "dtype_str"], artifact_name="defaults")
+    args = (FakeTensor((8, 512)), FakeTensor((1,)), 512)
+    first = tuner._artifact_ref(args, {}, required=True)
+    scratch_key = tuner._make_key(args, {})
+
+    assert first == tuner._artifact_ref(args, {"dtype_str": "bf16"}, required=True)
+    assert first != tuner._artifact_ref((args[0], args[1], 1024), {}, required=True)
+
+    monkeypatch.setattr(
+        at,
+        "_device_descriptor",
+        lambda device=None: {"name": "Other GPU", "arch": "gfx-test", "compute_units": 2},
+    )
+    assert first != tuner._artifact_ref(args, {}, required=True)
+    assert scratch_key != tuner._make_key(args, {})
+
+
+def test_cached_artifact_is_revalidated_for_each_call(monkeypatch, tmp_path, artifact_dir):
+    _, args = _emit_artifact(monkeypatch, artifact_dir)
+    monkeypatch.delenv("FLYDSL_AUTOTUNE")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "fresh-cache"))
+    tuner = _make_artifact_tuner()
+    ref = tuner._artifact_ref(args, {}, required=True)
+
+    assert tuner._load_artifact(ref, args, {}).to_dict() == {"BLOCK_THREADS": 64}
+    assert tuner._load_artifact(ref, args, {"BLOCK_THREADS": 32}) is None
+    assert tuner._load_artifact(ref, args, {}).to_dict() == {"BLOCK_THREADS": 64}
+
+
+@pytest.mark.parametrize("case", ["corrupt", "version", "identity", "config", "override", "type"])
+def test_invalid_artifact_falls_back(monkeypatch, tmp_path, artifact_dir, case):
+    path, args = _emit_artifact(monkeypatch, artifact_dir)
+    payload = json.loads(path.read_text())
+    if case == "corrupt":
+        path.write_text("{")
+    else:
+        if case == "version":
+            payload["version"] = 2
+        elif case == "identity":
+            payload["identity"]["key"]["N"] = 1024
+        elif case == "config":
+            payload["config"] = {"UNKNOWN": 64}
+        elif case == "type":
+            payload["config"] = {"BLOCK_THREADS": "64"}
+        else:
+            payload["config"] = {"BLOCK_THREADS": 64, "N": 1024}
+        path.write_text(json.dumps(payload))
+    monkeypatch.delenv("FLYDSL_AUTOTUNE")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "fresh-cache"))
+
+    tuner = _make_artifact_tuner(
+        configs=lambda *_args, **_kwargs: pytest.fail("invalid artifact triggered search"),
+        do_bench_fn=lambda *args, **kwargs: pytest.fail("invalid artifact benchmarked"),
+    )
+    out = FakeTensor((1,))
+    tuner(args[0], out, *args[2:])
+
+    assert out._data[0] == 7.0
+
+
+def test_artifact_runtime_failure_is_not_masked_by_default(monkeypatch, tmp_path, artifact_dir):
+    _, args = _emit_artifact(monkeypatch, artifact_dir)
+    monkeypatch.delenv("FLYDSL_AUTOTUNE")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "fresh-cache"))
+    seen = []
+
+    def failing_kernel(a, out, m_in, N, dtype_str, BLOCK_THREADS: int):
+        seen.append(BLOCK_THREADS)
+        if BLOCK_THREADS == 64:
+            raise RuntimeError("kernel failed")
+        out._data[0] = float(BLOCK_THREADS)
+
+    tuner = _make_artifact_tuner(fn=failing_kernel)
+
+    with pytest.raises(RuntimeError, match="kernel failed"):
+        tuner(*args)
+
+    assert seen == [64]
+
+
+@pytest.mark.parametrize(
+    "config, message",
+    [
+        pytest.param(Config(BLOCK_THREADS=64, pre_hook=lambda kwargs: None), "pre_hook", id="pre-hook"),
+        pytest.param(Config(BLOCK_THREADS=(64,)), "preserve their types", id="json-type-change"),
+    ],
+)
+def test_unpersistable_artifact_config_blocks_generation(monkeypatch, artifact_dir, config, message):
+    def kernel(a, out, m_in, N, dtype_str, BLOCK_THREADS):
+        pass
+
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    tuner = _make_artifact_tuner(fn=kernel, configs=[config])
+    args = (FakeTensor((16, 512)), FakeTensor((1,)), 16, 512, "bf16")
+
+    with pytest.raises(ValueError, match=message):
+        tuner(*args)
+
+    assert tuner.cache == {}
+    assert not tuner._cache_file.exists()
+    assert not list(artifact_dir.glob("*.json"))
+
+
+def test_unavailable_device_identity_falls_back_but_blocks_generation(monkeypatch, artifact_dir):
+    import importlib
+
+    at = importlib.import_module("flydsl.autotune")
+    monkeypatch.setattr(at, "_device_descriptor", lambda device=None: None)
+    args = (FakeTensor((16, 512)), FakeTensor((1,)), 16, 512, "bf16")
+    tuner = _make_artifact_tuner()
+
+    tuner(*args)
+    assert args[1]._data[0] == 7.0
+
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    with pytest.raises(ValueError, match="cannot generate offline config identity"):
+        tuner(*args)
+
+
+@pytest.mark.parametrize("name", ["../rmsnorm", 123])
+def test_artifact_name_must_be_safe(name):
+    with pytest.raises((TypeError, ValueError), match="artifact_name"):
+        _make_artifact_tuner(artifact_name=name)
+
+
+def test_artifact_key_must_name_a_kernel_parameter():
+    with pytest.raises(ValueError, match="artifact keys"):
+        _make_artifact_tuner(key=["mni"])
 
 
 if __name__ == "__main__":

@@ -25,8 +25,8 @@ from flydsl.expr.numeric import (
     Numeric,
     Uint32,
 )
-from flydsl.expr.typing import Float32x4
-from flydsl.expr.vector import (
+from flydsl.expr.typing import (
+    Float32x4,
     ReductionOp,
     Vector,
     full,

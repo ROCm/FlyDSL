@@ -299,6 +299,10 @@ To update the code in your PR (e.g. in response to a code review discussion), yo
 
 ---
 
+## Project Status and Compatibility Notice
+
+FlyDSL is developed and maintained by Advanced Micro Devices, Inc. (AMD). AMD retains sole discretion over the project's roadmap, design, and release cadence. APIs, functionality, and behavior may change, be deprecated, or be removed at any time, with or without notice, and AMD makes no commitment to maintain backward compatibility or provide future updates. Neither use of nor contribution to FlyDSL confers any right to direct the project or any expectation of stability. FlyDSL is provided "AS IS", without warranties of any kind, and is distributed under the Apache License 2.0 (see below).
+
 ## License
 
 FlyDSL is an open source project licensed under the [Apache License 2.0](LICENSE). Because of this, we include the following license header at the top of every new source file. If you create new source files in the repository, please include this text in them as well (replacing "20xx" with the digits for the current year):

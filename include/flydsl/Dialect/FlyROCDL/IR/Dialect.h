@@ -27,6 +27,8 @@
 #include "flydsl/Dialect/FlyROCDL/IR/Atom.h.inc"
 #define GET_ATTRDEF_CLASSES
 #include "flydsl/Dialect/FlyROCDL/IR/AttrDefs.h.inc"
+#define GET_OP_CLASSES
+#include "flydsl/Dialect/FlyROCDL/IR/Ops.h.inc"
 
 namespace mlir::fly_rocdl {} // namespace mlir::fly_rocdl
 

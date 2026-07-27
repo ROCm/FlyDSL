@@ -15,4 +15,8 @@ mlir_tablegen(AttrDefs.cpp.inc -gen-attrdef-defs -attrdefs-dialect=fly_rocdl)
 mlir_tablegen(AttrEnums.h.inc -gen-enum-decls -attrdefs-dialect=fly_rocdl)
 mlir_tablegen(AttrEnums.cpp.inc -gen-enum-defs -attrdefs-dialect=fly_rocdl)
 
+set(LLVM_TARGET_DEFINITIONS Ops.td)
+mlir_tablegen(Ops.h.inc -gen-op-decls)
+mlir_tablegen(Ops.cpp.inc -gen-op-defs)
+
 add_public_tablegen_target(MLIRFlyROCDLIncGen)

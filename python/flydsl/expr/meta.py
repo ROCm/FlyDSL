@@ -6,9 +6,16 @@ import inspect
 import os
 import threading
 from functools import lru_cache, wraps
+from typing import TYPE_CHECKING, overload
 
 from .._mlir import ir
 from ..utils import env
+
+if TYPE_CHECKING:
+    from typing import Any, Callable, ParamSpec, TypeVar
+
+    _P = ParamSpec("_P")
+    _R = TypeVar("_R")
 
 __all__ = [
     "capture_user_location",
@@ -119,7 +126,7 @@ def capture_user_location() -> ir.Location:
     return ir.Location.callsite(callee, callers)
 
 
-def dsl_loc_tracing(fn):
+def dsl_loc_tracing(fn: "Callable[_P, _R]") -> "Callable[_P, _R]":
     """Attach a source ``Location`` to the op(s) a primitive builds.
 
     Location policy (single source of truth for the whole ``expr`` layer):
@@ -134,7 +141,7 @@ def dsl_loc_tracing(fn):
     """
 
     @wraps(fn)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: "_P.args", **kwargs: "_P.kwargs") -> "_R":
         if getattr(_tls, "active_loc", None) is not None:
             # Already inside a captured scope
             return fn(*args, **kwargs)
@@ -149,6 +156,10 @@ def dsl_loc_tracing(fn):
     return wrapper
 
 
+@overload
+def dsl_wrap_result(target: "Callable[_P, Any]") -> "Callable[_P, Any]": ...
+@overload
+def dsl_wrap_result(target: "type | None" = None) -> "Callable[[Callable[_P, Any]], Callable[_P, Any]]": ...
 def dsl_wrap_result(target=None):
     """Wrap the op result(s) back into DslType values.
 

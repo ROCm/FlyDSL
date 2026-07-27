@@ -29,7 +29,7 @@ import torch
 import torch.nn.functional as F  # noqa: F401  (imported for callers' convenience)
 
 # Re-export so callers only need to import from this module.
-from kernels.attention.flash_attn_gfx950 import dualwave_splitk_workspace_elems  # noqa: F401
+from kernels.attention.flash_attn_utils import dualwave_splitk_workspace_elems
 
 __all__ = ["flydsl_flash_attn_func", "dualwave_splitk_workspace_elems"]
 
@@ -763,8 +763,6 @@ def flydsl_flash_attn_func(
                 f"flydsl_flash_attn_func: split-K requires D=64/128, dtype bf16/f16, seq_len>=384; "
                 f"got D={D}, dtype={dtype_str}, seq_len={Sq}"
             )
-        from kernels.attention.flash_attn_gfx950 import dualwave_splitk_workspace_elems
-
         ws_elems = dualwave_splitk_workspace_elems(B, H, Sq, int(num_kv_splits), head_dim=D)
 
     # ── build (cached) ──────────────────────────────────────────────────────

@@ -5,5 +5,6 @@
 #define PYTHON_BINDINGS_FLYROCDL_OPS
 
 include "flydsl/Dialect/FlyROCDL/IR/Atom.td"
+include "flydsl/Dialect/FlyROCDL/IR/Ops.td"
 
 #endif // PYTHON_BINDINGS_FLYROCDL_OPS

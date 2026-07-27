@@ -69,6 +69,10 @@ class BaseBackend(metaclass=ABCMeta):
         """
         ...
 
+    def lower_compile_hints(self, module, *, compile_hints: dict) -> None:
+        """Optionally materialize backend-specific hints before the pipeline."""
+        return None
+
     def external_binary_pipeline_fragments(self, *, compile_hints: dict) -> Tuple[List[str], str]:
         """Split the pipeline for external device binary code generation.
 

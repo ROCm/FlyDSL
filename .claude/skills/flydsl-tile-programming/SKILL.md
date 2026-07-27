@@ -443,8 +443,10 @@ layout checks), use the **debug-flydsl-kernel** skill.
 
                   Atom (Hardware Instruction)
                   ==========================
-   CopyAtom  = one hardware copy instruction (32b/64b/128b)
-   MmaAtom   = one MFMA instruction (16x16x4, 16x16x16, etc.)
+   CopyAtom  = one hardware copy instruction (32b/64b/128b buffer copy;
+               or a gfx1250 TDM whole-tile async Global<->LDS DMA)
+   MmaAtom   = one matrix instruction (CDNA MFMA 16x16x4/16x16x16/...;
+               gfx1250 WMMA / MX-scaled WMMA, wave32)
 
                   Tiled Operation (Thread Cooperation)
                   ====================================
@@ -474,9 +476,11 @@ Key insight: **Layout is the glue**. Every operation (divide, partition, copy, g
 ## MFMA Instruction Reference (AMD CDNA3/4)
 
 For the table of available MFMA instruction shapes (`MFMA(16,16,4,Float32)`,
-`MFMA(16,16,16,Float32)`, FP8/BF16/CDNA4-scaled variants) and how `make_tiled_mma`'s
-`(M_rep, N_rep, K_rep)` atom_layout works, see the **flydsl-kernel-authoring** skill (§6 MFMA
-Integration). Use it when choosing the MMA atom for the Pattern C (GEMM) skeleton above.
+`MFMA(16,16,16,Float32)`, FP8/BF16/CDNA4-scaled variants), the **gfx1250 WMMA /
+MX-scaled WMMA** atoms (wave32, `rocdl.WMMA` / `rocdl.WMMAScale`), and how
+`make_tiled_mma`'s `(M_rep, N_rep, K_rep)` atom_layout works, see the
+**flydsl-kernel-authoring** skill (§6 MFMA Integration + gfx1250 WMMA). Use it when
+choosing the MMA atom for the Pattern C (GEMM) skeleton above.
 
 ---
 

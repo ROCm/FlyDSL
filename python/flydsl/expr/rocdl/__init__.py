@@ -17,6 +17,7 @@ This module provides access to ROCm-specific GPU operations including:
 from ..._mlir.dialects.rocdl import *  # noqa: F401,F403
 from ..meta import dsl_loc_tracing
 from . import cdna4 as cdna4
+from . import cdna5 as cdna5
 from .enum import SyncScope as SyncScope
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
@@ -458,6 +459,7 @@ def lds_transpose_load(result_type, lds_memref, elem_offset, elem_bytes):
 
 # ── New high-level helpers from universal.py ──────────────────────────
 from .universal import *  # noqa: E402,F401,F403,I001
+from .cdna5 import *  # noqa: E402,F401,F403,I001
 from .inline_asm import *  # noqa: E402,F401,F403,I001
 
 # ── Wrappers: accept DSL Numeric args (fx.Int32, fx.Float32, etc.) ─────────

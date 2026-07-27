@@ -100,6 +100,26 @@ class RocmBackend(BaseBackend):
     def external_binary_pipeline_fragments(self, *, compile_hints: dict) -> Tuple[List[str], str]:
         return self._pipeline_parts(compile_hints=compile_hints)
 
+    def lower_compile_hints(self, module, *, compile_hints: dict) -> None:
+        """Materialize a scalar waves-per-EU override on kernel entries."""
+        waves_per_eu = compile_hints.get("waves_per_eu")
+        if waves_per_eu is None:
+            return
+        if isinstance(waves_per_eu, bool) or not isinstance(waves_per_eu, int):
+            raise TypeError(f"waves_per_eu must be a non-negative int, got {waves_per_eu!r}")
+        if waves_per_eu < 0:
+            raise ValueError(f"waves_per_eu must be >= 0, got {waves_per_eu}")
+        if waves_per_eu == 0:
+            return
+
+        with module.context:
+            for func_op in _iter_gpu_kernel_funcs(module):
+                # rocdl.waves_per_eu expresses a minimum. Replace it with the exact
+                # min/max LLVM passthrough for an explicit compile-hint override.
+                if "rocdl.waves_per_eu" in func_op.attributes:
+                    del func_op.attributes["rocdl.waves_per_eu"]
+                _set_passthrough(func_op, "amdgpu-waves-per-eu", f"{waves_per_eu},{waves_per_eu}")
+
     def gpu_module_targets(self) -> List[str]:
         chip = self.target.arch
         return [f'#rocdl.target<chip = "{chip}">']
@@ -120,3 +140,30 @@ class RocmBackend(BaseBackend):
             "libfly_jit_runtime.so",
             "libmlir_c_runner_utils.so",
         ]
+
+
+def _iter_gpu_kernel_funcs(module):
+    """Yield entry ``gpu.func`` ops, excluding device helpers."""
+    for top in module.body.operations:
+        if top.operation.name != "gpu.module":
+            continue
+        for op in top.regions[0].blocks[0].operations:
+            if op.operation.name == "gpu.func" and "gpu.kernel" in op.attributes:
+                yield op
+
+
+def _set_passthrough(func_op, key: str, value: str) -> None:
+    """Replace one LLVM passthrough key while preserving unrelated entries."""
+    from ..._mlir import ir
+
+    def _entry_key(entry):
+        try:
+            pair = ir.ArrayAttr(entry)
+            return ir.StringAttr(pair[0]).value if len(pair) else None
+        except (TypeError, ValueError):
+            return None
+
+    new_entry = ir.ArrayAttr.get([ir.StringAttr.get(key), ir.StringAttr.get(value)])
+    existing = func_op.attributes["passthrough"] if "passthrough" in func_op.attributes else None
+    kept = [entry for entry in existing if _entry_key(entry) != key] if existing is not None else []
+    func_op.attributes["passthrough"] = ir.ArrayAttr.get([*kept, new_entry])

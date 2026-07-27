@@ -1048,7 +1048,14 @@ def run_attn_config(
     if verbose:
         o_flat = o_t.reshape(-1)
         ref_flat = ref_t.reshape(-1)
-        tag = f"B={B} Sq={Sq} H={H} D={D}"
+        _mask = "causal" if causal else "noncausal"
+        _hkv = num_kv_heads if num_kv_heads is not None else H
+        if varlen:
+            tag = f"varlen Sq={list(vl_q)} Skv={list(vl_kv)} H={H} Hkv={_hkv} D={D} {_mask} splits={num_kv_splits}"
+        else:
+            tag = f"B={B} Sq={Sq} Skv={Skv} H={H} Hkv={_hkv} D={D} {_mask} splits={num_kv_splits}"
+        if use_block_table:
+            tag += f" BT page{page_size} {kv_cache_layout}"
         rm = compute_md5(o_flat)
         rm2 = compute_md5(ref_flat)
         print(f"  [{tag}] result_md5 = {rm}")
@@ -2023,7 +2030,7 @@ def _write_normal_csv(csv_path, data_rows, avg_rows):
             )
 
 
-def _write_varlen_cmp_csv(csv_path, data_rows):
+def _write_varlen_cmp_csv(csv_path, data_rows, avg_rows=None):
     """Write compare-mode varlen / cross-length results to CSV."""
     header = [
         "Sq",
@@ -2076,9 +2083,34 @@ def _write_varlen_cmp_csv(csv_path, data_rows):
                     fck[1],
                 ]
             )
+        for label, fly_r, ck_r, fly_ck_cmp in avg_rows or []:
+            w.writerow(
+                [
+                    label,
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    _csv_val(fly_r, "us"),
+                    _csv_val(fly_r, "tflops"),
+                    _csv_val(fly_r, "max_err"),
+                    _csv_val(fly_r, "min_cos"),
+                    "--",
+                    _csv_val(ck_r, "us"),
+                    _csv_val(ck_r, "tflops"),
+                    _csv_val(ck_r, "max_err"),
+                    _csv_val(ck_r, "min_cos"),
+                    "--",
+                    _csv_cmp_values(fly_ck_cmp)[0],
+                    _csv_cmp_values(fly_ck_cmp)[1],
+                ]
+            )
 
 
-def _write_varlen_normal_csv(csv_path, data_rows):
+def _write_varlen_normal_csv(csv_path, data_rows, avg_rows=None):
     """Write normal-mode varlen / cross-length results to CSV."""
     header = [
         "Sq",
@@ -2110,6 +2142,24 @@ def _write_varlen_normal_csv(csv_path, data_rows):
                     causal_tag,
                     path,
                     status,
+                    _csv_val(r, "max_err"),
+                    _csv_val(r, "min_cos"),
+                    _csv_val(r, "us"),
+                    _csv_val(r, "tflops"),
+                ]
+            )
+        for label, r in avg_rows or []:
+            w.writerow(
+                [
+                    label,
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "--",
                     _csv_val(r, "max_err"),
                     _csv_val(r, "min_cos"),
                     _csv_val(r, "us"),
@@ -2314,6 +2364,11 @@ def main():
         "--extra",
         action="store_true",
         help="Run additional varlen/cross-length configs from EXTRA_CONFIGS",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print per-config result_md5 / ref_md5 and bit-identical check (also enabled in --compare mode)",
     )
     parser.add_argument(
         "--block-table",
@@ -2577,6 +2632,7 @@ def main():
                                     num_kv_splits=kv_splits,
                                     seed=args.seed,
                                     dtype_str=dtype_str,
+                                    verbose=args.verbose,
                                     trigger_lazy_else=args.trigger_lazy_else,
                                     compare_mode=True,
                                     precomputed_ref=shared_ref,
@@ -2790,6 +2846,7 @@ def main():
                                     num_kv_splits=kv_splits,
                                     seed=args.seed,
                                     dtype_str=dtype_str,
+                                    verbose=args.verbose,
                                     compare_mode=True,
                                     precomputed_ref=shared_ref,
                                     precomputed_inputs=precomputed_inputs,
@@ -2854,16 +2911,19 @@ def main():
                 print(_fmt_extra_cmp_row(sq, skv, nh, nh_kv_eff, hd, dtype_key, ctag, path, fly_r, ck_r))
             print("  " + "-" * (len(xhdr2) - 2))
 
+            varlen_cmp_avg_rows = []
+
             def _extra_cmp_avg(label, subset):
                 fly_avg = _avg_results([row[8] for row in subset])
                 ck_avg = _avg_results([row[9] for row in subset])
                 fly_ck_cmp = _avg_cmp_values(subset, 8, 9)
                 print(_fmt_extra_cmp_avg_row(label, fly_avg, ck_avg, fly_ck_cmp))
+                varlen_cmp_avg_rows.append((label, fly_avg, ck_avg, fly_ck_cmp))
 
             _print_grouped_avgs(varlen_cmp_rows, lambda r: (r[5], r[6]), _extra_cmp_avg)
             print("=" * len(xhdr2))
             varlen_csv_path = f"fmha_varlen_perf_compare_{_gpu_short_name()}.csv"
-            _write_varlen_cmp_csv(varlen_csv_path, varlen_cmp_rows)
+            _write_varlen_cmp_csv(varlen_csv_path, varlen_cmp_rows, varlen_cmp_avg_rows)
             print(f"Varlen results saved to: {varlen_csv_path}")
 
     else:
@@ -3199,6 +3259,8 @@ def main():
                 print(_fmt_extra_normal_row(sq, skv, nh, nh_kv_eff, hd, dtype_key, ctag, status, r, path=path))
             print("  " + "-" * (len(xhdr) - 2))
 
+            varlen_avg_rows = []
+
             def _extra_normal_avg(label, subset):
                 avg = _avg_results(
                     [row[9] for row in subset],
@@ -3207,11 +3269,12 @@ def main():
                 avg_row = _fmt_extra_normal_avg_row(label, avg)
                 if avg_row is not None:
                     print(avg_row)
+                    varlen_avg_rows.append((label, avg))
 
             _print_grouped_avgs(varlen_rows, lambda r: (r[5], r[6]), _extra_normal_avg)
             print("=" * len(xhdr))
             varlen_csv_path = f"fmha_varlen_perf_{_gpu_short_name()}.csv"
-            _write_varlen_normal_csv(varlen_csv_path, varlen_rows)
+            _write_varlen_normal_csv(varlen_csv_path, varlen_rows, varlen_avg_rows)
             print(f"Varlen results saved to: {varlen_csv_path}")
 
         if all_passed and extra_ok:

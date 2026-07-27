@@ -253,6 +253,24 @@ public:
   }
 };
 
+class GetBufferRsrcOpLowering : public OpConversionPattern<fly_rocdl::GetBufferRsrcOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(fly_rocdl::GetBufferRsrcOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto flyPtrTy = dyn_cast<fly::PointerType>(op.getPtr().getType());
+    if (!flyPtrTy || !isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace()))
+      return rewriter.notifyMatchFailure(op, "expected a buffer_desc address space pointer");
+
+    // adaptor.getPtr() is the already-converted BufferFatPtr struct; extract the
+    // buffer resource (element 0, an !llvm.ptr<8>).
+    BufferFatPtr bp(flyPtrTy, adaptor.getPtr());
+    rewriter.replaceOp(op, bp.bufferRsrc(rewriter, op.getLoc()));
+    return success();
+  }
+};
+
 class RecastIterOpLowering : public OpConversionPattern<RecastIterOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -852,6 +870,7 @@ public:
     patterns.add<MakePtrOpLowering, GetDynSharedOpLowering>(typeConverter, context);
     patterns.add<IntToPtrOpLowering, PtrToIntOpLowering>(typeConverter, context);
     patterns.add<ApplySwizzleOpLowering, RecastIterOpLowering>(typeConverter, context);
+    patterns.add<GetBufferRsrcOpLowering>(typeConverter, context);
     patterns.add<AddOffsetOpLowering>(typeConverter, context);
     patterns.add<MakeViewOpLowering>(typeConverter, context);
     patterns.add<PtrLoadOpLowering, PtrStoreOpLowering>(typeConverter, context);

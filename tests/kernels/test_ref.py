@@ -41,15 +41,15 @@ def _logical_k(x: torch.Tensor, kind: str) -> int:
 
 def _dequant_mxfp4_per_1x32(x_fp4: torch.Tensor, scale_e8m0: torch.Tensor) -> torch.Tensor:
     """Dequantize packed MXFP4 with per-1x32 e8m0 block scales to fp32."""
-    from tests.kernels.utils import fp4_utils
+    from tests.kernels.utils import gemm_common_utils
 
     x_u8 = x_fp4.view(torch.uint8)
     logical_k = int(x_u8.shape[-1]) * 2
     if logical_k % 32 != 0:
         raise ValueError(f"FP4 logical K must be divisible by 32, got {logical_k}")
 
-    x_f32 = fp4_utils.mxfp4_to_f32(x_u8.reshape(-1, logical_k // 2))
-    scales_f32 = fp4_utils.e8m0_to_f32(scale_e8m0.view(torch.uint8).reshape(-1, logical_k // 32))
+    x_f32 = gemm_common_utils.mxfp4_to_f32(x_u8.reshape(-1, logical_k // 2))
+    scales_f32 = gemm_common_utils.e8m0_to_f32(scale_e8m0.view(torch.uint8).reshape(-1, logical_k // 32))
     x_f32 = x_f32 * scales_f32.repeat_interleave(32, dim=1)
     return x_f32.view(*x_u8.shape[:-1], logical_k)
 
@@ -61,14 +61,14 @@ def _dequant_mxfp8_per_1x32(x_fp8: torch.Tensor, scale_e8m0: torch.Tensor) -> to
     reads the raw fp8 byte, casts to fp32, and multiplies by the 8-bit exponent
     scale (E8M0 = 2^(byte-127)) for every 32-element K block.
     """
-    from tests.kernels.utils import fp4_utils
+    from tests.kernels.utils import gemm_common_utils
 
     logical_k = int(x_fp8.shape[-1])
     if logical_k % 32 != 0:
         raise ValueError(f"MX-FP8 logical K must be divisible by 32, got {logical_k}")
 
     x_f32 = x_fp8.reshape(-1, logical_k).to(torch.float32)
-    scales_f32 = fp4_utils.e8m0_to_f32(scale_e8m0.view(torch.uint8).reshape(-1, logical_k // 32))
+    scales_f32 = gemm_common_utils.e8m0_to_f32(scale_e8m0.view(torch.uint8).reshape(-1, logical_k // 32))
     x_f32 = x_f32 * scales_f32.repeat_interleave(32, dim=1)
     return x_f32.view(*x_fp8.shape[:-1], logical_k)
 

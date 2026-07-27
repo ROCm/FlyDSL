@@ -196,15 +196,31 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
         return bench_gpu_us_torch(lambda: exe(x, y, M), warmup=warmup, iters=iters)
 
     if op == "layernorm":
+        import flydsl.compiler as flyc
+        import flydsl.expr as fx
         from kernels.norm.layernorm_kernel import build_layernorm_module
 
         m = build_layernorm_module(N, dtype)
-        exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
         gamma = torch.randn((N,), device="cuda", dtype=torch_dtype)
         beta = torch.randn((N,), device="cuda", dtype=torch_dtype)
         y = torch.empty((M, N), device="cuda", dtype=torch_dtype)
-        return bench_gpu_us_torch(lambda: exe(x, gamma, beta, y, M), warmup=warmup, iters=iters)
+        elem_dtype = {"f32": fx.Float32, "f16": fx.Float16, "bf16": fx.BFloat16}[dtype]
+        stream = torch.cuda.current_stream()
+        exe = flyc.compile(
+            m,
+            flyc.from_c_void_p(elem_dtype, x.data_ptr()),
+            flyc.from_c_void_p(elem_dtype, gamma.data_ptr()),
+            flyc.from_c_void_p(elem_dtype, beta.data_ptr()),
+            flyc.from_c_void_p(elem_dtype, y.data_ptr()),
+            M,
+            stream,
+        )
+        return bench_gpu_us_torch(
+            lambda: exe(x.data_ptr(), gamma.data_ptr(), beta.data_ptr(), y.data_ptr(), M, stream),
+            warmup=warmup,
+            iters=iters,
+        )
 
     if op == "rmsnorm":
         from kernels.norm.rmsnorm_kernel import build_rmsnorm_module

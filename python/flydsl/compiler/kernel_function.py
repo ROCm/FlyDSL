@@ -171,6 +171,15 @@ def _normalize_dim(dim: DimType) -> Tuple[DimValueType, DimValueType, DimValueTy
 # =============================================================================
 
 
+def merge_compile_hints(*layers) -> dict:
+    """Shallow-merge hint layers; later non-None values win."""
+    merged = {}
+    for layer in layers:
+        if layer:
+            merged.update((key, value) for key, value in layer.items() if value is not None)
+    return merged
+
+
 class CompilationContext:
     """Context for tracking compilation state within a @jit function.
 
@@ -188,14 +197,14 @@ class CompilationContext:
     @classmethod
     @contextmanager
     def compile_hints(cls, hints: dict):
-        """Context manager for setting compiler hints (thread-safe).
+        """Set thread-local hints, shallow-merging nested contexts.
 
         Usage:
             with CompilationContext.compile_hints({"waves_per_eu": 2}):
                 fn(*args, **kwargs)
         """
         prev = getattr(cls._compile_hints, "data", None)
-        cls._compile_hints.data = hints
+        cls._compile_hints.data = merge_compile_hints(prev, hints)
         try:
             yield
         finally:

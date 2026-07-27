@@ -46,6 +46,7 @@ from .numeric import (
     Uint64,
     Uint128,
     _common_numeric_type_for_op,
+    _resolve_numeric_type,
     _result_numeric_type_for_op,
     as_numeric,
 )
@@ -357,6 +358,7 @@ __all__ = [
     "is_target_address_space",
     # DSL value types
     "Numeric",
+    "as_numeric",
     "Boolean",
     "Float",
     "BFloat16",
@@ -961,8 +963,8 @@ class Pointer(BuiltinDslType):
         return self.type.alignment
 
     @dsl_loc_tracing
-    def load(self):
-        return ptr_load(self)
+    def load(self, dtype=None):
+        return ptr_load(self, result_type=dtype)
 
     @dsl_loc_tracing
     def store(self, value):
@@ -1704,6 +1706,36 @@ class Vector(ArithValue):
     def __rpow__(self, other):
         return self.apply_op(operator.pow, other, flip=True)
 
+    def __pos__(self):
+        return self
+
+    def __neg__(self):
+        result = ArithValue.__neg__(self.with_signedness(getattr(self._dtype, "signed", None)))
+        return self._wrap_op_result(result, self._shape, self._dtype)
+
+    def __invert__(self):
+        if getattr(self._dtype, "is_float", False):
+            raise TypeError(f"bitwise NOT requires an integer element type, got {self._dtype.__name__}")
+        result = ArithValue.__invert__(self.with_signedness(getattr(self._dtype, "signed", None)))
+        return self._wrap_op_result(result, self._shape, self._dtype)
+
+    def __abs__(self):
+        signed = getattr(self._dtype, "signed", None)
+        result = abs(self.with_signedness(signed))
+        return self._wrap_op_result(result, self._shape, self._dtype)
+
+    def __divmod__(self, other):
+        quotient = self.__floordiv__(other)
+        if quotient is NotImplemented:
+            return NotImplemented
+        return (quotient, self.__mod__(other))
+
+    def __rdivmod__(self, other):
+        quotient = self.__rfloordiv__(other)
+        if quotient is NotImplemented:
+            return NotImplemented
+        return (quotient, self.__rmod__(other))
+
     def __lshift__(self, other):
         return self.apply_op(operator.lshift, other)
 
@@ -1753,6 +1785,30 @@ class Vector(ArithValue):
         return self.apply_op(operator.ne, other)
 
     @dsl_loc_tracing
+    def select(self, true_value, false_value) -> "Vector":
+        """Lane-wise ternary select driven by this vector condition."""
+        cond = self if self._dtype is Boolean else (self != 0)
+        dtypes = [
+            dtype
+            for dtype in (self._operand_element_dtype(true_value), self._operand_element_dtype(false_value))
+            if dtype is not None
+        ]
+        if not dtypes:
+            raise TypeError("Vector.select branches must be Vector, Numeric, or numeric literals")
+        common_dtype = dtypes[0]
+        for dtype in dtypes[1:]:
+            common_dtype = _resolve_numeric_type(common_dtype, dtype)
+
+        def _prepare(value):
+            if isinstance(value, Vector):
+                vec = value if value.shape == self.shape else value.broadcast_to(self.shape)
+                return vec if vec.dtype is common_dtype else vec.to(common_dtype)
+            return Vector.filled(self.shape, value, common_dtype)
+
+        result = ArithValue.select(cond, _prepare(true_value), _prepare(false_value))
+        return Vector(result, self.shape, common_dtype)
+
+    @dsl_loc_tracing
     def reduce(self, op, init_val=None, reduction_profile=None, *, fastmath=None):
         is_fp = self._dtype.is_float
         signed = getattr(self._dtype, "signed", True)
@@ -1787,6 +1843,11 @@ class Vector(ArithValue):
         if idx is None:
             return self
         if isinstance(idx, int):
+            orig_idx = idx
+            if idx < 0:
+                idx += self.numel
+            if not 0 <= idx < self.numel:
+                raise IndexError(f"vector index {orig_idx} out of range for numel {self.numel}")
             res = _vector.ExtractOp(self, static_position=[idx], dynamic_position=[]).result
             return self._dtype(res)
         if isinstance(idx, (Numeric, ArithValue, ir.Value)):
@@ -1823,6 +1884,16 @@ class Vector(ArithValue):
             res_shape = self._slice_shape(self._shape, coord)
             return self._build_result(res, res_shape, row_major=True)
         raise TypeError(f"unsupported index type: {type(idx)}")
+
+    def __len__(self) -> int:
+        return self.numel
+
+    def __iter__(self):
+        # Without this, list()/unpacking falls back to the legacy sequence
+        # protocol (self[0], self[1], ...), which spins forever because the
+        # int branch of __getitem__ used to never raise IndexError (see #793).
+        for i in range(self.numel):
+            yield self[i]
 
     def _build_result(self, value, shape, *, row_major=False) -> "Vector":
         shape = self._canonical_shape(shape)

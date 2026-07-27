@@ -96,7 +96,7 @@ _FP4_LUT_F32_CACHE: dict = {}
 def _fp4_to_f32(t):
     """Unpack ``float4_e2m1fn_x2`` to ``float32``.
 
-    Mirrors ``utils.fp4_utils.mxfp4_to_f32`` but caches the 16-entry LUT
+    Mirrors ``utils.gemm_common_utils.mxfp4_to_f32`` but caches the 16-entry LUT
     on each device so the repeated cast does NOT allocate fresh tensors
     under CUDA graph capture (``torch.tensor(...)`` inside a captured
     region raises "operation not permitted when stream is capturing").
@@ -110,7 +110,7 @@ def _fp4_to_f32(t):
     if lut is None:
         # mxfp4 e2m1 nibble decode table; entries 0..7 are positive,
         # 8..15 are the sign-bit-set negatives.  Identical to
-        # ``utils.fp4_utils.mxfp4_to_f32``'s in-line list.
+        # ``utils.gemm_common_utils.mxfp4_to_f32``'s in-line list.
         _vals = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
         lut = torch.tensor(_vals, dtype=torch.float32, device=dev)
         _FP4_LUT_F32_CACHE[dev] = lut

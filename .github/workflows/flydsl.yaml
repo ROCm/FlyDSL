@@ -21,8 +21,13 @@ concurrency:
 
 env:
   DOCKER_IMAGE: "rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_release_2.9.1"
+  # Bump when the container or LLVM build environment changes incompatibly.
+  MLIR_CACHE_VERSION: "rocm7.2-ubuntu24.04-py3.12-v1"
   GITHUB_REPO_NAME: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
   GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.event.head_commit.id || github.sha }}
+  # PRs compare against their exact base; main pushes compare against the previous commit.
+  BASE_REPO_NAME: ${{ github.event.pull_request.base.repo.full_name || github.repository }}
+  BASE_COMMIT_SHA: ${{ github.event.pull_request.base.sha || github.event.before || 'main' }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -47,9 +52,10 @@ jobs:
         id: filter
         uses: dorny/paths-filter@v3
         with:
-          # code is true when any changed file is NOT one of the non-code paths
-          # below (everything under '**' minus the negated docs / markdown /
-          # image / non-workflow .github patterns).
+          # 'every': a file is code only if it matches all patterns, so
+          # docs-only changes yield code=false. The default 'some' would match
+          # any file via '**' and make 'code' always true.
+          predicate-quantifier: 'every'
           filters: |
             code:
               - '**'
@@ -81,18 +87,143 @@ jobs:
           MAX_RETRIES: 5
           RETRY_INTERVAL_SECONDS: 30
 
+  # Reports the required 'test (<runner>)' checks when the GPU 'test' job is
+  # skipped for a non-code change (a skipped matrix job emits no per-runner
+  # checks, which would leave branch protection waiting forever). Fails them if
+  # check-signal failed/was cancelled, since check-signal is not itself required.
+  test-skip:
+    needs: [check-signal, detect-changes]
+    if: >-
+      ${{ always()
+          && needs.detect-changes.result == 'success'
+          && needs.detect-changes.outputs.code_changed != 'true' }}
+    name: test
+    strategy:
+      matrix:
+        runners: [
+          'linux-flydsl-mi325-1',
+          'linux-flydsl-mi355-1',
+          'linux-flydsl-navi-2',
+        ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report skipped GPU tests (green) or fail if pre-checks failed (red)
+        env:
+          CHECK_SIGNAL_RESULT: ${{ needs.check-signal.result }}
+        run: |
+          if [ "$CHECK_SIGNAL_RESULT" = "failure" ] || [ "$CHECK_SIGNAL_RESULT" = "cancelled" ]; then
+            echo "::error::check-signal ${CHECK_SIGNAL_RESULT}; failing 'test (${{ matrix.runners }})' for this docs-only change."
+            exit 1
+          fi
+          echo "Docs-only change: GPU tests skipped (check-signal=${CHECK_SIGNAL_RESULT}); reporting 'test (${{ matrix.runners }})' as passed."
+
+  # ---------------------------------------------------------------------------
+  # Prepare one shared MLIR install before GPU jobs. Restore or build LLVM once,
+  # then publish a short-lived artifact for every GPU job in the current run.
+  # Only main persists rebuilt installs in the cross-run cache.
+  # ---------------------------------------------------------------------------
+  prepare-mlir:
+    needs: [check-signal, detect-changes]
+    if: >-
+      ${{ !cancelled()
+          && needs.check-signal.result == 'success'
+          && (needs.detect-changes.result != 'success'
+              || needs.detect-changes.outputs.code_changed == 'true') }}
+    runs-on: linux-flydsl-mi325-1
+    timeout-minutes: 90
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/flydsl-gitconfig
+          GIT_CONFIG_NOSYSTEM: "1"
+        with:
+          repository: ${{ env.GITHUB_REPO_NAME }}
+          ref: ${{ env.GITHUB_COMMIT_SHA }}
+          path: flydsl-test
+
+      - name: Restore shared MLIR cache
+        id: mlir-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: mlir_install.tgz
+          key: mlir-install-${{ runner.os }}-${{ runner.arch }}-${{ env.MLIR_CACHE_VERSION }}-${{ hashFiles('flydsl-test/thirdparty/llvm-hash.txt', 'flydsl-test/scripts/build_llvm.sh') }}
+
+      - name: Start MLIR build container
+        if: steps.mlir-cache.outputs.cache-hit != 'true'
+        run: |
+          docker ps -aq -f name=flydsl_mlir_cache | xargs -r docker stop | xargs -r docker rm || true
+          docker run -dt --network=host --user root \
+            -v "${GITHUB_WORKSPACE:-$PWD}/flydsl-test:/flydsl-test" \
+            --ipc=host --shm-size 16g \
+            --cap-add=SYS_PTRACE \
+            --security-opt seccomp=unconfined \
+            -w /flydsl-test \
+            --name flydsl_mlir_cache \
+            ${{ env.DOCKER_IMAGE }}
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+
+      - name: Install MLIR build dependencies
+        if: steps.mlir-cache.outputs.cache-hit != 'true'
+        run: |
+          docker exec flydsl_mlir_cache bash -c "apt-get update && apt-get install -y cmake build-essential patchelf"
+          docker exec flydsl_mlir_cache bash -c "python3 -m pip install -U pip setuptools wheel"
+          docker exec flydsl_mlir_cache bash -c "python3 -m pip install ninja>=1.11.1"
+          docker exec flydsl_mlir_cache bash -c "git config --global --add safe.directory /flydsl-test"
+
+      - name: Build LLVM once
+        if: steps.mlir-cache.outputs.cache-hit != 'true'
+        run: |
+          set -ex
+          docker exec flydsl_mlir_cache bash -c "cd /flydsl-test && bash scripts/build_llvm.sh"
+          docker exec flydsl_mlir_cache bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
+          docker cp flydsl_mlir_cache:/llvm-project/mlir_install.tgz ./mlir_install.tgz
+          test -s ./mlir_install.tgz
+
+      - name: Validate MLIR with FlyDSL build
+        if: steps.mlir-cache.outputs.cache-hit != 'true'
+        run: |
+          docker exec flydsl_mlir_cache bash -c "export MLIR_PATH=/llvm-project/mlir_install && cd /flydsl-test && python3 -m pip install -e . --use-pep517"
+
+      - name: Save shared MLIR cache from main
+        if: >-
+          steps.mlir-cache.outputs.cache-hit != 'true' &&
+          github.ref == 'refs/heads/main' &&
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        uses: actions/cache/save@v4
+        with:
+          path: mlir_install.tgz
+          key: ${{ steps.mlir-cache.outputs.cache-primary-key }}
+
+      - name: Upload prepared MLIR tarball for this run
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlir-install-${{ github.run_id }}
+          path: mlir_install.tgz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Clean up MLIR build container
+        if: always() && steps.mlir-cache.outputs.cache-hit != 'true'
+        run: |
+          docker stop flydsl_mlir_cache || true
+          docker rm flydsl_mlir_cache || true
+
   # ---------------------------------------------------------------------------
   # Single-GPU tests: kernels, unit, examples, MLIR FileCheck, benchmarks.
   # Runs on 1-GPU and Navi runners only.
   # ---------------------------------------------------------------------------
   test:
-    needs: [check-signal, detect-changes]
+    needs: [check-signal, detect-changes, prepare-mlir]
     # Run only when check-signal passed AND the change touched code. Docs-only
     # changes (code_changed == 'false') skip this job entirely, so no GPU runner
     # is used; a detect-changes failure falls back to running.
     if: >-
-      ${{ always()
+      ${{ !cancelled()
           && needs.check-signal.result == 'success'
+          && needs.prepare-mlir.result == 'success'
           && (needs.detect-changes.result != 'success'
               || needs.detect-changes.outputs.code_changed == 'true') }}
     env:
@@ -100,6 +231,8 @@ jobs:
       # If that cache is unavailable, checkout fails before the tests start.
       GIT_CONFIG_GLOBAL: /dev/null
       GIT_CONFIG_NOSYSTEM: "1"
+      # Temporary quarantine for linux-flydsl-navi-2 GPU 1; see #858.
+      CI_HIP_VISIBLE_DEVICES: ${{ contains(matrix.runners, 'navi') && '3' || '' }}
     strategy:
       matrix:
         runners: [
@@ -134,8 +267,13 @@ jobs:
             DEVICE_FLAG="--device /dev/dri"
           fi
 
+          GPU_ENV_ARGS=()
+          if [ -n "${CI_HIP_VISIBLE_DEVICES}" ]; then
+            GPU_ENV_ARGS=(--env "HIP_VISIBLE_DEVICES=${CI_HIP_VISIBLE_DEVICES}")
+          fi
+
           echo "Starting container: flydsl_test:ci"
-          docker run -dt --network=host --user root --device=/dev/kfd $DEVICE_FLAG \
+          docker run -dt --network=host --user root --device=/dev/kfd $DEVICE_FLAG "${GPU_ENV_ARGS[@]}" \
           -v "${GITHUB_WORKSPACE:-$PWD}/flydsl-test:/flydsl-test" \
           --ipc=host --group-add video \
           --shm-size 16g \
@@ -155,66 +293,22 @@ jobs:
           docker exec flydsl_test bash -c "python3 -m pip install -U 'hypothesis>=6.82.0'"
           docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl-test && cd /flydsl-test && git log"
     
-      # Cache MLIR install tarball across workflow runs.
-      - name: Restore cached MLIR install tarball (if available)
-        id: mlir-cache
-        uses: actions/cache@v4
+      - name: Download prepared MLIR tarball
+        uses: actions/download-artifact@v4
         with:
-          path: mlir_install.tgz
-          # Key includes LLVM commit and hashes of build scripts/workflow.
-          # Repo is checked out under `flydsl-test/` (see actions/checkout path), so hash paths must include it.
-          key: mlir-install-${{ matrix.runners }}-${{ hashFiles('flydsl-test/thirdparty/llvm-hash.txt', 'flydsl-test/scripts/build_llvm.sh', 'flydsl-test/CMakeLists.txt', 'flydsl-test/.github/workflows/flydsl.yaml') }}
+          name: mlir-install-${{ github.run_id }}
 
-      - name: Use cached MLIR install tarball (skip LLVM build)
-        if: steps.mlir-cache.outputs.cache-hit == 'true'
+      - name: Use prepared MLIR install tarball
         run: |
           ls -lh mlir_install.tgz
           docker cp mlir_install.tgz flydsl_test:/tmp/mlir_install.tgz
           docker exec flydsl_test bash -c "rm -rf /llvm-project/mlir_install && mkdir -p /llvm-project && tar -xzf /tmp/mlir_install.tgz -C /llvm-project"
           docker exec flydsl_test bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
 
-      - name: Build LLVM
-        if: steps.mlir-cache.outputs.cache-hit != 'true'
-        run: |
-          set -ex
-          docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/build_llvm.sh"
-          docker exec flydsl_test bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
-          docker cp flydsl_test:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
-          ls -lh ./mlir_install.tgz || true
-
       - name: Build FlyDSL (uses MLIR install prefix)
         run: |
           docker exec flydsl_test bash -c "export MLIR_PATH=/llvm-project/mlir_install && cd /flydsl-test && python3 -m pip install -e . --use-pep517"
 
-      - name: MLIR tarball artifact status
-        run: |
-          echo "cache-hit: ${{ steps.mlir-cache.outputs.cache-hit }}"
-          echo "event:     ${{ github.event_name }}"
-          echo "ref:       ${{ github.ref }}"
-          if [[ "${{ steps.mlir-cache.outputs.cache-hit }}" == "true" ]]; then
-            echo "artifact:  skipped (MLIR restored from cache; no rebuild)"
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "artifact:  will upload (workflow_dispatch + rebuilt)"
-          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "artifact:  will upload (push to main + rebuilt, e.g. PR merged)"
-          else
-            echo "artifact:  skipped (PR runs do not upload)"
-          fi
-
-      - name: Export MLIR install tarball (workflow_dispatch OR push-to-main)
-        if: steps.mlir-cache.outputs.cache-hit != 'true' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
-        run: |
-          ls -lh ./mlir_install.tgz || true
-
-      - name: Upload MLIR install tarball artifact (workflow_dispatch OR push-to-main)
-        if: steps.mlir-cache.outputs.cache-hit != 'true' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
-        uses: actions/upload-artifact@v4
-        with:
-          name: mlir_install-${{ matrix.runners }}-${{ hashFiles('flydsl-test/thirdparty/llvm-hash.txt') }}
-          path: mlir_install.tgz
-          if-no-files-found: ignore
-          retention-days: 7
-        
       - name: Prepare aiter
         if: ${{ !contains(matrix.runners, 'navi') }}
         run: |
@@ -225,6 +319,7 @@ jobs:
           docker exec flydsl_test bash -c "python3 -c 'import triton; assert tuple(map(int, triton.__version__.split(\"+\", 1)[0].split(\".\")[:3])) >= (3, 6, 0), triton.__version__; print(\"Installed triton\", triton.__version__)'"
 
       - name: Run tests
+        timeout-minutes: 60
         run: |
           docker exec flydsl_test bash -c "export PYTHONPATH=/tmp/aiter:\${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /flydsl-test && RUN_TESTS_FULL=1 bash scripts/run_tests.sh"
 
@@ -254,63 +349,59 @@ jobs:
 
       - name: Run benchmark baselines
         id: bench-baselines
-        timeout-minutes: 180
+        timeout-minutes: 45
         continue-on-error: true
         run: |
-          docker exec -i flydsl_test bash <<'BASH'
+          docker exec -i \
+            -e BASE_REPO_NAME \
+            -e BASE_COMMIT_SHA \
+            flydsl_test bash <<'BASH'
           set -u
           cd /flydsl-test
-          rm -rf /tmp/flydsl-bench-main-* /tmp/flydsl-bench-tag
+          rm -rf /tmp/flydsl-bench-main /tmp/flydsl-bench-tag
           rm -f /tmp/bench_main.csv /tmp/bench_latest_tag.csv /tmp/bench_main_label /tmp/bench_latest_tag_label
           git worktree prune || true
-          git fetch origin main --depth=8
+          base_repo_url="https://github.com/${BASE_REPO_NAME}.git"
 
-          found_main=0
-          idx=0
-          for commit in $(git rev-list --max-count=8 FETCH_HEAD); do
+          if git fetch "${base_repo_url}" "${BASE_COMMIT_SHA}" --no-tags --depth=1; then
+            commit="$(git rev-parse FETCH_HEAD)"
             label="main"
-            if [ "${idx}" -gt 0 ]; then
-              label="main~${idx}"
-            fi
-            worktree="/tmp/flydsl-bench-main-${idx}"
-            csv="/tmp/bench_candidate_${idx}.csv"
-            output="/tmp/bench_candidate_${idx}.out"
+            worktree="/tmp/flydsl-bench-main"
+            csv="/tmp/bench_main_candidate.csv"
+            output="/tmp/bench_main.out"
             log_dir="/tmp/flydsl_bench_${label}"
-            echo "Trying benchmark baseline ${label} (${commit})"
+            echo "Trying exact benchmark baseline ${BASE_REPO_NAME}@${commit}"
 
             if ! git worktree add --detach "${worktree}" "${commit}"; then
-              echo "Failed to create worktree for ${label}; trying older main commit."
-              idx=$((idx + 1))
-              continue
-            fi
-
-            (
-              set -e -o pipefail
-              cd "${worktree}"
-              export MLIR_PATH=/llvm-project/mlir_install
-              python3 -m pip install -e . --use-pep517 2>&1 | tail -5
-              export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-}
-              export AITER_REPO=/tmp/aiter
-              BENCH_LOG_DIR="${log_dir}" bash scripts/run_benchmark.sh 2>&1 | tee "${output}"
-              python3 /flydsl-test/scripts/benchmark_output_to_csv.py "${output}" "${csv}"
-            )
-            status=$?
-            if [ "${status}" -eq 0 ] && [ -s "${csv}" ]; then
-              cp "${csv}" /tmp/bench_main.csv
-              echo "${label}" >/tmp/bench_main_label
-              found_main=1
-              break
+              echo "Failed to create worktree for exact main baseline."
             else
-              echo "Benchmark baseline ${label} failed; trying older main commit."
+              (
+                set -e -o pipefail
+                cd "${worktree}"
+                export MLIR_PATH=/llvm-project/mlir_install
+                python3 -m pip install -e . --use-pep517 2>&1 | tail -5
+                export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-}
+                export AITER_REPO=/tmp/aiter
+                BENCH_LOG_DIR="${log_dir}" bash scripts/run_benchmark.sh 2>&1 | tee "${output}"
+                python3 /flydsl-test/scripts/benchmark_output_to_csv.py "${output}" "${csv}"
+              )
+              status=$?
+              if [ "${status}" -eq 0 ] && [ -s "${csv}" ]; then
+                cp "${csv}" /tmp/bench_main.csv
+                echo "${label}" >/tmp/bench_main_label
+              else
+                echo "Exact main benchmark baseline failed; not retrying older commits."
+              fi
             fi
-            idx=$((idx + 1))
-          done
-
-          if [ "${found_main}" -eq 0 ]; then
-            echo "No usable main benchmark baseline found."
+          else
+            echo "Failed to fetch exact main baseline ${BASE_REPO_NAME}@${BASE_COMMIT_SHA}."
           fi
 
-          if git fetch origin 'refs/tags/v*:refs/tags/v*' --force --depth=1; then
+          if [ ! -s /tmp/bench_main.csv ]; then
+            echo "::warning title=Benchmark baseline unavailable::No usable exact main baseline found; skipping main comparison."
+          fi
+
+          if git fetch "${base_repo_url}" 'refs/tags/v*:refs/tags/v*' --force --depth=1; then
             latest_tag="$(git tag --list 'v*' --sort=-v:refname | sed -n '1p')"
             if [ -n "${latest_tag}" ]; then
               worktree="/tmp/flydsl-bench-tag"
@@ -341,10 +432,10 @@ jobs:
                 echo "Failed to create worktree for ${latest_tag}; skipping latest-tag comparison."
               fi
             else
-              echo "No v* tags found; skipping latest-tag comparison."
+              echo "::warning title=Tag baseline unavailable::No v* tags found; skipping latest-tag comparison."
             fi
           else
-            echo "Failed to fetch tags; skipping latest-tag comparison."
+            echo "::warning title=Tag baseline unavailable::Failed to fetch tags; skipping latest-tag comparison."
           fi
           BASH
 
@@ -354,7 +445,7 @@ jobs:
         run: |
           docker exec flydsl_test bash -c "
             if [ ! -f /tmp/bench_main.csv ]; then
-              echo 'No usable main benchmark baseline found; skipping main comparison.'
+              echo '::warning title=Benchmark comparison skipped::No usable main benchmark baseline found.'
               exit 0
             fi
             cd /flydsl-test
@@ -369,7 +460,7 @@ jobs:
         run: |
           docker exec flydsl_test bash -c "
             if [ ! -f /tmp/bench_latest_tag.csv ]; then
-              echo 'No usable latest-tag benchmark baseline found; skipping latest-tag comparison.'
+              echo '::warning title=Benchmark comparison skipped::No usable latest-tag benchmark baseline found.'
               exit 0
             fi
             cd /flydsl-test
@@ -415,7 +506,7 @@ jobs:
     # Also gated on code_changed: docs-only changes skip this job (a
     # detect-changes failure falls back to running).
     if: |
-      always() &&
+      !cancelled() &&
       (needs.detect-changes.result != 'success' ||
        needs.detect-changes.outputs.code_changed == 'true') && (
         (github.event_name == 'pull_request' &&
@@ -474,28 +565,17 @@ jobs:
           docker exec flydsl_test bash -c "python3 -m pip install -U 'hypothesis>=6.82.0'"
           docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl-test && cd /flydsl-test && git log"
 
-      - name: Restore cached MLIR install tarball (if available)
-        id: mlir-cache
-        uses: actions/cache@v4
+      - name: Download prepared MLIR tarball
+        uses: actions/download-artifact@v4
         with:
-          path: mlir_install.tgz
-          key: mlir-install-${{ matrix.runners }}-${{ hashFiles('flydsl-test/thirdparty/llvm-hash.txt', 'flydsl-test/scripts/build_llvm.sh', 'flydsl-test/CMakeLists.txt', 'flydsl-test/.github/workflows/flydsl.yaml') }}
+          name: mlir-install-${{ github.run_id }}
 
-      - name: Use cached MLIR install tarball (skip LLVM build)
-        if: steps.mlir-cache.outputs.cache-hit == 'true'
+      - name: Use prepared MLIR install tarball
         run: |
           ls -lh mlir_install.tgz
           docker cp mlir_install.tgz flydsl_test:/tmp/mlir_install.tgz
           docker exec flydsl_test bash -c "rm -rf /llvm-project/mlir_install && mkdir -p /llvm-project && tar -xzf /tmp/mlir_install.tgz -C /llvm-project"
           docker exec flydsl_test bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
-
-      - name: Build LLVM
-        if: steps.mlir-cache.outputs.cache-hit != 'true'
-        run: |
-          set -ex
-          docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/build_llvm.sh"
-          docker exec flydsl_test bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
-          docker cp flydsl_test:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
 
       - name: Build FlyDSL (uses MLIR install prefix)
         run: |
@@ -557,10 +637,13 @@ jobs:
         timeout-minutes: 20
         continue-on-error: true
         run: |
-          docker exec flydsl_test bash -c "
+          docker exec \
+            -e BASE_REPO_NAME \
+            -e BASE_COMMIT_SHA \
+            flydsl_test bash -c "
             cd /flydsl-test
-            git fetch origin main --depth=1
-            git worktree add /tmp/flydsl-main origin/main
+            git fetch \"https://github.com/\${BASE_REPO_NAME}.git\" \"\${BASE_COMMIT_SHA}\" --no-tags --depth=1
+            git worktree add --detach /tmp/flydsl-main FETCH_HEAD
             cd /tmp/flydsl-main
             export MLIR_PATH=/llvm-project/mlir_install
             python3 -m pip install -e . --use-pep517 2>&1 | tail -5

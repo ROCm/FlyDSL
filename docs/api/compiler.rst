@@ -96,22 +96,16 @@ descriptors with layout metadata:
    )
    launch(tA, B, n, stream=torch.cuda.Stream())
 
-Buffer Operations
------------------
-
-The ``flydsl.expr.buffer_ops`` module provides high-level Python wrappers for
-AMD CDNA3/CDNA4 buffer load/store operations. Buffer operations use a scalar
-base pointer (SGPRs) and per-thread offsets for efficient global memory access
-with hardware bounds checking.
-
 ROCDL Operations
 -----------------
 
 The ``flydsl.expr.rocdl`` module provides AMD-specific operations:
 
-- **fx.rocdl.make_buffer_tensor** -- create buffer resource descriptor from tensor
+- **fx.rocdl.make_buffer_tensor** -- create buffer resource descriptor from tensor (CDNA buffer copy)
 - **fx.rocdl.BufferCopy32b** / **BufferCopy128b** -- buffer copy atoms
-- **fx.rocdl.MFMA** -- MFMA instruction atoms (e.g., ``MFMA(16, 16, 4, fx.Float32)``)
+- **fx.rocdl.MFMA** -- MFMA instruction atoms (CDNA3/CDNA4; e.g., ``MFMA(16, 16, 4, fx.Float32)``)
+- **fx.rocdl.WMMA** / **fx.rocdl.WMMAScale** -- gfx1250 (wave32) WMMA and E8M0 MX-scaled WMMA MMA atoms
+- **fx.rocdl.make_tdm_atom** / **fx.rocdl.TDM** -- gfx1250 TDM async Global↔LDS whole-tile copy atom (1–5D; base from the copy operand, per-dim extent/stride/imm_offset/mask as atom state)
 
 fly-opt CLI
 ------------

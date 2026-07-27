@@ -21,7 +21,7 @@ to GPU/ROCDL.
    :maxdepth: 2
    :caption: Language Specification
 
-   arithmetic_types
+   language/arithmetic_types
 
 .. toctree::
    :maxdepth: 2
@@ -31,6 +31,7 @@ to GPU/ROCDL.
    layout_system_guide
    kernel_authoring_guide
    kernel_tuning_guide
+   autotune_guide
    prebuilt_kernels_guide
    testing_benchmarking_guide
    cute_layout_algebra_guide

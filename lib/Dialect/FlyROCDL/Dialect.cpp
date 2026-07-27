@@ -20,6 +20,8 @@ using namespace mlir::fly_rocdl;
 #include "flydsl/Dialect/FlyROCDL/IR/Atom.cpp.inc"
 #define GET_ATTRDEF_CLASSES
 #include "flydsl/Dialect/FlyROCDL/IR/AttrDefs.cpp.inc"
+#define GET_OP_CLASSES
+#include "flydsl/Dialect/FlyROCDL/IR/Ops.cpp.inc"
 
 void FlyROCDLDialect::initialize() {
   addTypes<
@@ -29,5 +31,9 @@ void FlyROCDLDialect::initialize() {
   addAttributes<
 #define GET_ATTRDEF_LIST
 #include "flydsl/Dialect/FlyROCDL/IR/AttrDefs.cpp.inc"
+      >();
+  addOperations<
+#define GET_OP_LIST
+#include "flydsl/Dialect/FlyROCDL/IR/Ops.cpp.inc"
       >();
 }

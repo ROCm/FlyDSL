@@ -168,7 +168,7 @@ bash scripts/build.sh -j64
 |---|---|---|
 | Architecture | Compilation pipeline, project structure, environment config | [Architecture Guide](docs/architecture_guide.md) |
 | Layout System | FlyDSL layout algebra — Shape, Stride, Layout, Coord, all operations | [Layout Guide](docs/layout_system_guide.md) |
-| Kernel Authoring | Writing GPU kernels — MlirModule, tiled copies, MFMA, shared memory | [Kernel Guide](docs/kernel_authoring_guide.md) |
+| Kernel Authoring | Writing GPU kernels — `@flyc.kernel`, `@flyc.jit`, expression API, MlirModule, tiled copies, MFMA, shared memory | [Kernel Guide](docs/kernel_authoring_guide.md) |
 | Kernel Tuning | Performance tuning — tiling, LDS swizzle, prefetch, MFMA scheduling, profiling | [Tuning Guide](docs/kernel_tuning_guide.md) |
 | Pre-built Kernels | Available kernels — GEMM, MoE, Softmax, Norm — config and usage | [Kernels Reference](docs/prebuilt_kernels_guide.md) |
 | Testing & Benchmarks | Test infrastructure, benchmarking, performance comparison | [Testing Guide](docs/testing_benchmarking_guide.md) |
@@ -200,17 +200,6 @@ Formula: `Index = dot(Coord, Stride) = sum(c_i * s_i)`
     *   `composition(A, B)`: Compose layouts (A ∘ B).
     *   `product(A, B)`: Combine layouts (Logical, Tiled, Blocked, etc.).
     *   `divide(A, B)`: Partition layout A by B (Logical, Tiled, etc.).
-
-## Documentation
-
-| **Topic** | **Description** | **Guide** |
-|---|---|---|
-| Architecture | Compilation pipeline, project structure, environment config | [Architecture Guide](docs/architecture_guide.md) |
-| Layout System | Fly layout algebra — Shape, Stride, Layout, Coord, all operations | [Layout Guide](docs/layout_system_guide.md) |
-| Kernel Authoring | Writing GPU kernels — `@flyc.kernel`, `@flyc.jit`, expression API | [Kernel Guide](docs/kernel_authoring_guide.md) |
-| Kernel Tuning | Performance tuning — tiling, LDS swizzle, prefetch, MFMA scheduling, profiling | [Tuning Guide](docs/kernel_tuning_guide.md) |
-| Pre-built Kernels | Available kernels — GEMM, Softmax, Norm — config and usage | [Kernels Reference](docs/prebuilt_kernels_guide.md) |
-| Testing & Benchmarks | Test infrastructure, benchmarking, performance comparison | [Testing Guide](docs/testing_benchmarking_guide.md) |
 
 ## 🐍 Python API (`flydsl`)
 
@@ -379,7 +368,6 @@ See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tile
 | **Blockscale GEMM** | `test_blockscale_preshuffle_gemm.py` | Blockscale preshuffle GEMM |
 | **HGEMM Split-K** | `test_hgemm_splitk.py` | FP16 GEMM split-K |
 | **MoE GEMM** | `test_moe_gemm.py` | MoE 2-stage (gate/up + reduce) |
-| **MoE Blockscale** | `test_moe_blockscale.py` | MoE blockscale 2-stage |
 | **MoE Reduce** | `test_moe_reduce.py` | MoE reduce kernel |
 | **PagedAttention** | `test_pa.py` | Paged attention decode (FP8) — *WIP perf tuning* |
 | **FlashAttention** | `test_flash_attn_fwd.py` | Flash attention — *WIP perf tuning* |

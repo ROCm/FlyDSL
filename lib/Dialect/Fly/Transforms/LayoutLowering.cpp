@@ -2192,6 +2192,19 @@ public:
     if (srcRank != dstRank)
       return rewriter.notifyMatchFailure(op, "src/dst ranks mismatch");
 
+    // A whole-tile copy atom (e.g. the gfx1250 TDM DMA) moves the entire N-D tile
+    // in one call and reads its geometry from the operand memref layout, so emit a
+    // single call on the tile instead of decomposing it per element. The atom's own
+    // emitAtomCall verifies the operand rank matches the tile. Detected via a
+    // boundary-safe type trait rather than a concrete cross-dialect cast.
+    if (auto copyAtomTy = dyn_cast<CopyAtomType>(copyAtomVal.getType())) {
+      if (copyAtomTy.getCopyOp().hasTrait<WholeTileCopy>()) {
+        CopyAtomCall::create(rewriter, loc, copyAtomVal, src, dst, pred);
+        rewriter.eraseOp(op);
+        return success();
+      }
+    }
+
     if (pred && predLayoutAttr.rank() == srcRank - 1) {
       LayoutBuilder<LayoutValueAdaptor> builder(rewriter, loc);
       LayoutAttr unitAttr = LayoutAttr::get(ctx, IntTupleAttr::getLeafStatic(ctx, 1),

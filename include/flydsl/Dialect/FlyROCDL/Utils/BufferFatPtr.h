@@ -26,9 +26,14 @@ public:
     assert(fly::isTargetAddressSpace<BufferDescAddressAttr>(ptrTy.getAddressSpace()));
   }
 
+  // The bare ROCDL buffer resource pointer type (address space 8).
+  static LLVM::LLVMPointerType getRsrcPtrType(MLIRContext *ctx) {
+    return LLVM::LLVMPointerType::get(ctx, kRsrcAddrSpace);
+  }
+
   static LLVM::LLVMStructType getType(MLIRContext *ctx) {
-    return LLVM::LLVMStructType::getLiteral(ctx, {LLVM::LLVMPointerType::get(ctx, kRsrcAddrSpace),
-                                                  IntegerType::get(ctx, kOffsetBitWidth)});
+    return LLVM::LLVMStructType::getLiteral(
+        ctx, {getRsrcPtrType(ctx), IntegerType::get(ctx, kOffsetBitWidth)});
   }
   static Value pack(OpBuilder &b, Location loc, Value bufferRsrc, Value valOffset = nullptr) {
     auto structTy = getType(b.getContext());

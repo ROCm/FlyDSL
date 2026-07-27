@@ -13,6 +13,9 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
+# Broad test runs must be deterministic; dedicated autotune tests opt in per test.
+export FLYDSL_AUTOTUNE=0
+
 # Auto-select GPU with the most free VRAM (skip if HIP_VISIBLE_DEVICES is already set).
 if [[ -z "${HIP_VISIBLE_DEVICES:-}" ]] && command -v python3 &>/dev/null; then
     _best_gpu=$(python3 -c "
@@ -42,14 +45,15 @@ if [ "${RUN_TESTS_FULL:-0}" != "1" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 1. All pytest-based tests (kernels + unit + system + examples)
+# 1. All pytest-based tests (kernels + language + unit + system + examples)
 # ---------------------------------------------------------------------------
 echo "========================================================================"
-echo "Pytest: kernels + unit + system + examples"
+echo "Pytest: kernels + language + unit + system + examples"
 echo "========================================================================"
 
 python3 -m pytest \
     tests/kernels/ \
+    tests/language/ \
     tests/unit/ \
     tests/system/ \
     tests/python/examples/ \

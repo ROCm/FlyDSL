@@ -236,24 +236,7 @@ as_i32 = vec.bitcast(fx.Int32)
 as_bf16 = vec.to(fx.BFloat16)
 ```
 
-### 4.3 Buffer Operations (`fx.buffer_ops`)
-
-AMD buffer load/store intrinsics for efficient global memory access:
-
-```python
-from flydsl.expr import buffer_ops
-
-# Create buffer resource descriptor from memref
-rsrc = buffer_ops.create_buffer_resource(memref_value)
-
-# Buffer load (vectorized)
-data = buffer_ops.buffer_load(rsrc, byte_offset, vec_width=4)
-
-# Buffer store
-buffer_ops.buffer_store(data, rsrc, byte_offset)
-```
-
-### 4.4 ROCm Intrinsics (`fx.rocdl`)
+### 4.3 ROCm Intrinsics (`fx.rocdl`)
 
 #### High-Level Helpers
 
@@ -263,7 +246,7 @@ from flydsl.expr import rocdl
 # Buffer tensor — wraps a Tensor with AMD buffer resource descriptor
 A_buf = rocdl.make_buffer_tensor(A)
 
-# MFMA MMA atom constructor — returns MmaAtomCDNA3_MFMAType
+# MFMA MMA atom constructor (CDNA3/CDNA4) — returns MmaAtomCDNA3_MFMAType
 atom_type = rocdl.MFMA(m=16, n=16, k=32, elem_ty_ab=fx.Float8E4M3FNUZ)
 
 # Buffer copy atom types
@@ -271,6 +254,9 @@ copy_op = rocdl.BufferCopy128b()   # 128-bit buffer copy
 copy_op = rocdl.BufferCopy64b()    # 64-bit buffer copy
 copy_op = rocdl.BufferCopy32b()    # 32-bit buffer copy
 ```
+
+See [gfx1250 WMMA & TDM atoms](#gfx1250-wmma--tdm-atoms-wave32) below for the
+gfx1250 WMMA (incl. MX-scaled) MMA atoms and the TDM async copy atom.
 
 #### MFMA Instructions
 
@@ -322,7 +308,74 @@ data = rocdl.raw_ptr_buffer_load(rsrc, offset, soffset, aux)
 rocdl.raw_ptr_buffer_store(data, rsrc, offset, soffset, aux)
 ```
 
-### 4.5 GPU Operations (`fx.gpu`)
+#### gfx1250 WMMA & TDM atoms (wave32)
+
+gfx1250 kernels run **wave32** and use WMMA (not MFMA) for matrix math and the
+TDM (Tensor Data Mover) engine for async whole-tile Global↔LDS copies. All of the
+factories below live in `flydsl.expr.rocdl` (`from flydsl.expr import rocdl`).
+
+**WMMA MMA atom** — `rocdl.WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs)`
+is arch-dispatched (gfx11 v16 ABI; gfx12 / gfx1250 v8 ABI). On gfx1250 it builds
+`MmaOpGFX1250_WMMAType` (M=N=16). Supported K / dtypes:
+
+| dtype (A,B → Acc) | K | notes |
+|---|---|---|
+| f32 → f32 | 4 | |
+| f16/bf16 → f32 or same | 32 | |
+| fp8/bf8 (E4M3FN / E5M2, any mix) → f32 or f16 | 64, 128 | native OCP fp8 |
+| i8 → i32 | 64 | `sign_a` / `sign_b` / `clamp` kwargs |
+| i4 → i32 | 32 | `sign_a` / `sign_b` / `clamp` kwargs |
+
+```python
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 32, fx.Float16))          # f16 → f32
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 128, fx.Float8E4M3FN))    # fp8 → f32
+# signed int4 with accumulator clamp:
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 32, T.i4, T.i32, sign_a=True, sign_b=True, clamp=True))
+```
+
+**MX-scaled WMMA** — `rocdl.WMMAScale(m, n, k, elem_ty_a, elem_ty_b=None,
+elem_ty_acc=None, *, opsel_a=0, opsel_b=0, mod_c=0, reuse_a=False, reuse_b=False,
+block_size=32)` builds the E8M0 block-scaled WMMA (`V_WMMA_SCALE` /
+`V_WMMA_SCALE16`) for the unified f8/f6/f4 operand format. Shapes: `16x16x128`
+(f8/f6/f4) and `32x16x128` (fp4-only). Per-operand E8M0 scales are **atom state**
+(`scale_a` / `scale_b`); `block_size` 32 → i32 scale state, 16 → i64.
+
+```python
+mma = fx.make_mma_atom(rocdl.WMMAScale(16, 16, 128, fx.Float8E4M3FN))
+mma = fx.atom_set_value(mma, "scale_a", fx.Int32(scale_a))   # E8M0 scales
+mma = fx.atom_set_value(mma, "scale_b", fx.Int32(scale_b))
+fx.gemm(mma, frag_C, frag_A, frag_B, frag_C)
+```
+
+**TDM async copy atom** — the **base pointer comes from the `copy_atom_call` global
+operand** (its pointer); the per-dim extent (HW out-of-bounds handling), per-dim
+stride, `imm_offset` (K-loop tile bump), and MCAST `workgroup_mask` are runtime
+**atom state**. The global operand's address space also picks load vs store. Build
+it with `rocdl.make_tdm_atom`:
+
+```python
+# make_tdm_atom(tensor, tensor_extents, strides=None, *, num_warps,
+#               pad_interval=0, pad_amount=0, cache_modifier=0,
+#               atomic_barrier=False, early_timeout=False)
+lds = fx.SharedAllocator().allocate(fx.Array[fx.Float16, M * N]).peek()
+lds2d = fx.make_view(lds.ptr, fx.make_layout((M, N), (N, 1)))       # note: lds.ptr
+g2d = fx.make_view(fx.get_iter(A), fx.make_layout((M, N), (N, 1)))  # raw VA, not make_buffer_tensor
+
+atom = rocdl.make_tdm_atom(g2d, [M, N], num_warps=4)  # rank = len(extents), 1–5D
+fx.copy_atom_call(atom, g2d, lds2d)                   # Global → LDS (base from g2d)
+rocdl.tdm_ops.tensor_wait(0)                          # await the async DMA (s_wait_tensorcnt)
+
+# K-loop: bump one scalar (imm_offset, carry-safe i64) instead of re-deriving base:
+fx.copy(atom, g2d, lds2d, imm_offset=k_tile * k_stride_bytes)
+```
+
+`rocdl.TDM(rank, num_warps, ...)` (in `rocdl.cdna5`) builds just the atom *type*
+when you want to set the descriptor state manually. Pass `tensor_extents` smaller
+than the tile for ragged edges (HW OOB clamp) and `strides=` for a dynamic/true
+global stride that differs from the packed tile stride. Unlike the CDNA buffer copy,
+TDM needs a **raw VA** — do not wrap the global tensor in `make_buffer_tensor`.
+
+### 4.4 GPU Operations (`fx.gpu`)
 
 ```python
 from flydsl.expr import gpu
@@ -640,9 +693,7 @@ Writing a new kernel?
 | `python/flydsl/compiler/ast_rewriter.py` | `ASTRewriter` — Python AST → MLIR control flow |
 | `python/flydsl/expr/typing.py` | `Types` (`T`), `Tensor`, `Stream`, `Constexpr` |
 | `python/flydsl/expr/arith.py` | Arithmetic operations |
-| `python/flydsl/expr/vector.py` | Vector dialect operations |
 | `python/flydsl/expr/gpu.py` | GPU operations (thread_id, barrier, ...) |
-| `python/flydsl/expr/buffer_ops.py` | AMD buffer load/store operations |
 | `python/flydsl/expr/rocdl/` | ROCm dialect intrinsics (MFMA/WMMA, buffer, TDM, cluster) |
 | `python/flydsl/expr/primitive.py` | Layout algebra primitives (make_shape, crd2idx, etc.) |
 | `python/flydsl/expr/gpu.py` | `SharedAllocator`, GPU ops (thread_id, barrier, ...) |

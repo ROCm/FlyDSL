@@ -14,7 +14,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import buffer_ops, range_constexpr
+from flydsl.expr import range_constexpr
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -37,8 +37,7 @@ def _k_single_acc(Out: fx.Tensor, n: fx.Int32):
     acc = fx.Int32(0)
     for i in range(n):
         acc = acc + fx.Int32(1)
-    rsrc = buffer_ops.create_buffer_resource(Out)
-    buffer_ops.buffer_store(acc, rsrc, fx.Int32(0))
+    Out[0] = acc
 
 
 @flyc.jit
@@ -64,10 +63,8 @@ def _k_multi_vars(OutA: fx.Tensor, OutB: fx.Tensor, n: fx.Int32):
     for i in range(n):
         a = a + fx.Int32(1)
         b = b - fx.Int32(1)
-    rsrc_a = buffer_ops.create_buffer_resource(OutA)
-    rsrc_b = buffer_ops.create_buffer_resource(OutB)
-    buffer_ops.buffer_store(a, rsrc_a, fx.Int32(0))
-    buffer_ops.buffer_store(b, rsrc_b, fx.Int32(0))
+    OutA[0] = a
+    OutB[0] = b
 
 
 @flyc.jit
@@ -93,8 +90,7 @@ def _k_range_step(Out: fx.Tensor, n: fx.Int32):
     acc = fx.Int32(0)
     for i in range(fx.Int32(0), n, fx.Int32(2)):
         acc = acc + fx.Int32(1)
-    rsrc = buffer_ops.create_buffer_resource(Out)
-    buffer_ops.buffer_store(acc, rsrc, fx.Int32(0))
+    Out[0] = acc
 
 
 @flyc.jit
@@ -118,8 +114,7 @@ def _k_acc_expr(Out: fx.Tensor, n: fx.Int32):
     acc = fx.Int32(1)
     for i in range(n):
         acc = acc * fx.Int32(2)
-    rsrc = buffer_ops.create_buffer_resource(Out)
-    buffer_ops.buffer_store(acc, rsrc, fx.Int32(0))
+    Out[0] = acc
 
 
 @flyc.jit
@@ -157,8 +152,7 @@ def _k_per_thread_acc(Out: fx.Tensor, n: fx.Int32, block_dim: fx.Constexpr[int])
     acc = fx.Int32(0)
     for i in range(n):
         acc = acc + fx.Int32(1)
-    rsrc = buffer_ops.create_buffer_resource(Out)
-    buffer_ops.buffer_store(acc, rsrc, tid)
+    Out[tid] = acc
 
 
 @flyc.jit
@@ -186,9 +180,8 @@ def _k_iv_liveout(Out: fx.Tensor, n: fx.Int32):
     acc = fx.Int32(0)
     for i in range(n):
         acc = acc + fx.Int32(1)
-    rsrc = buffer_ops.create_buffer_resource(Out)
-    buffer_ops.buffer_store(i, rsrc, fx.Int32(0))
-    buffer_ops.buffer_store(acc, rsrc, fx.Int32(1))
+    Out[0] = i
+    Out[1] = acc
 
 
 @flyc.jit
@@ -235,8 +228,7 @@ def test_comprehension_target_constexpr_not_leaked():
             values = [fx.Int32(1) for ni in range_constexpr(1)]
             acc = acc + values[0]
 
-        rsrc = buffer_ops.create_buffer_resource(Out)
-        buffer_ops.buffer_store(acc, rsrc, fx.Int32(0))
+        Out[0] = acc
 
     @flyc.jit
     def launch(Out: fx.Tensor, n: fx.Int32, stream: fx.Stream = fx.Stream(None)):
@@ -262,8 +254,7 @@ def test_comprehension_target_dynamic_range_not_leaked():
             values = [fx.Int32(1) for ni in range(1)]
             acc = acc + values[0]
 
-        rsrc = buffer_ops.create_buffer_resource(Out)
-        buffer_ops.buffer_store(acc, rsrc, fx.Int32(0))
+        Out[0] = acc
 
     @flyc.jit
     def launch(Out: fx.Tensor, n: fx.Int32, stream: fx.Stream = fx.Stream(None)):

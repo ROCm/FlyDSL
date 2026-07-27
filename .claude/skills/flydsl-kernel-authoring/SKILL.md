@@ -172,7 +172,7 @@ fx.slice(src, coord)                       # Slice at coordinate (None = keep mo
 ```python
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 
 @flyc.kernel
 def my_kernel(
@@ -227,11 +227,12 @@ acc = Vec.filled(4, 0.0, fx.Float32)
 v_i64 = Vec(raw_vec).bitcast(fx.Int64)
 elem0 = v_i64[0]
 
-rsrc = buffer_ops.create_buffer_resource(tensor, max_size=True)
-word = buffer_ops.buffer_load(rsrc, fx.Int32(offset), vec_width=4, dtype=fx.Int32)
+buf = fx.rocdl.make_buffer_tensor(tensor)          # preferred buffer-resource view
+tA  = fx.make_view(fx.get_iter(buf), fx.make_layout((M, N), (N, 1)))
+# load/store tA via copy atoms (fx.copy_atom_call); raw buffer_ops is legacy
 ```
 
-Older code may use `gpu.thread_idx.x`, `gpu.block_idx.x`, `arith.constant(...)`, `T.i32`, and raw `vector.*` helpers. Keep those when editing existing code that already uses them heavily, but prefer `gpu.thread_id/block_id`, `fx.Int64`/`fx.Int32`/`fx.Float32`, and `fx.Vector` for new code.
+Older code may use `gpu.thread_idx.x`, `gpu.block_idx.x`, `arith.constant(...)`, `T.i32`, raw `vector.*` helpers, the `ArithValue` wrapper, and `buffer_ops`. Keep those when editing existing code that already uses them heavily, but prefer `gpu.thread_id/block_id`, `fx.Int64`/`fx.Int32`/`fx.Float32`, `fx.Vector`, and `fx.rocdl.make_buffer_tensor` for new code. `ArithValue`, `fx.Index`, and `buffer_ops` are deprecated/legacy — for migrating an existing kernel see the **flydsl-kernel-code-cleanup** skill.
 
 ### Parameter Types
 | Type | Description | At host boundary |
@@ -573,15 +574,20 @@ fx.copy(copy_atom, partition_src, frag)
 fx.copy(copy_atom, frag, partition_dst)
 ```
 
-### Buffer Load/Store (AMD Intrinsics)
-```python
-from flydsl.expr import buffer_ops
+### Buffer Load/Store
 
-rsrc = buffer_ops.create_buffer_resource(tensor)
-# offset is in ELEMENTS (not bytes)
-data = buffer_ops.buffer_load(rsrc, offset, vec_width=4)
-buffer_ops.buffer_store(data, rsrc, offset)
+Preferred: build a buffer-resource view with `make_buffer_tensor` and move data
+through copy atoms — the OOB-checked V# descriptor is built for you.
+```python
+buf = fx.rocdl.make_buffer_tensor(tensor)
+tA  = fx.make_view(fx.get_iter(buf), fx.make_layout((M, N), (N, 1)))
+copy = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
+fx.copy_atom_call(copy, fx.slice(tA, (None, tid)), rA)   # after partitioning tA
 ```
+
+Legacy raw intrinsics (`buffer_ops.create_buffer_resource` / `buffer_load` /
+`buffer_store`, `offset` in **elements**) remain for un-migrated kernels; see the
+**flydsl-kernel-code-cleanup** skill to migrate them.
 
 ### Copy Atom Types
 | Type | Bits | Usage |
@@ -589,7 +595,25 @@ buffer_ops.buffer_store(data, rsrc, offset)
 | `fx.UniversalCopy32b()` | 32 | 1x f32 element copy |
 | `fx.UniversalCopy(64)` | 64 | 2x f32 elements |
 | `fx.UniversalCopy(128)` | 128 | 4x f32 elements |
-| `fx.rocdl.BufferCopy128b()` | 128 | AMD buffer load 4xf32 |
+| `fx.rocdl.BufferCopy128b()` | 128 | AMD buffer load 4xf32 (CDNA) |
+| `fx.rocdl.make_tdm_atom(...)` | whole tile | gfx1250 TDM async Global↔LDS DMA (1–5D) — see below |
+
+**gfx1250 TDM async copy** (`fx.rocdl.make_tdm_atom`): a whole-tile DMA whose
+descriptor (base pointer, per-dim extent for HW OOB handling, per-dim stride) is
+carried as **atom state**. The global operand of `copy_atom_call` is a
+shape/direction token only — its layout gives the compile-time N-D tile shape and
+its address space picks load vs store; its *pointer is unused* (base comes from
+state). Needs a **raw VA** (not `make_buffer_tensor`).
+
+```python
+lds = fx.SharedAllocator().allocate(fx.Array[fx.Float16, M * N]).peek()
+lds2d = fx.make_view(lds.ptr, fx.make_layout((M, N), (N, 1)))       # note: lds.ptr
+g2d = fx.make_view(fx.get_iter(A), fx.make_layout((M, N), (N, 1)))
+atom = fx.rocdl.make_tdm_atom(g2d, [M, N], num_warps=4)            # rank = len(extents), 1–5D
+fx.copy_atom_call(atom, g2d, lds2d)                               # Global → LDS
+fx.rocdl.tdm_ops.tensor_wait(0)                                  # await async DMA
+atom = fx.rocdl.advance_tdm_atom(atom, k_tile * k_stride_bytes)  # K-loop tile bump (imm_offset)
+```
 
 ---
 
@@ -651,6 +675,36 @@ result = rocdl.mfma_f32_16x16x32_fp8(a, b, acc)
 result = rocdl.mfma_i32_16x16x32i8(a, b, acc)
 ```
 
+### gfx1250 WMMA (wave32)
+
+gfx1250 uses **WMMA** (not MFMA), M=N=16. Build the atom with `rocdl.WMMA` (arch
+dispatched: gfx11 v16 ABI, gfx12 / gfx1250 v8 ABI) and issue it via
+`fx.make_mma_atom` + `fx.gemm` / `fx.mma_atom_call`:
+
+| dtype (A,B → Acc) | K | notes |
+|---|---|---|
+| f32 → f32 | 4 | |
+| f16 / bf16 → f32 or same | 32 | |
+| fp8 / bf8 (OCP E4M3FN / E5M2, any mix) → f32 or f16 | 64, 128 | |
+| i8 → i32 | 64 | `sign_a` / `sign_b` / `clamp` kwargs |
+| i4 → i32 | 32 | `sign_a` / `sign_b` / `clamp` kwargs |
+
+```python
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 128, fx.Float8E4M3FN))       # fp8 → f32
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 32, T.i4, T.i32, sign_a=True, sign_b=True, clamp=True))
+```
+
+**MX-scaled WMMA** — `rocdl.WMMAScale(m, n, k, elem_ty_a, ..., block_size=32)` for
+the E8M0 block-scaled f8/f6/f4 format (`16x16x128`, or `32x16x128` fp4-only).
+Per-operand scales are atom state; `block_size` 32 → i32 scale (i64 for 16):
+
+```python
+mma = fx.make_mma_atom(rocdl.WMMAScale(16, 16, 128, fx.Float8E4M3FN))
+mma = fx.atom_set_value(mma, "scale_a", fx.Int32(scale_a))
+mma = fx.atom_set_value(mma, "scale_b", fx.Int32(scale_b))
+fx.gemm(mma, frag_C, frag_A, frag_B, frag_C)
+```
+
 ### GEMM Pattern (Preshuffle)
 The preshuffle GEMM pattern in `kernels/gemm/preshuffle_gemm.py`:
 1. B matrix is pre-shuffled to layout: (N/16, K/64, 4, 16, kpack_bytes)
@@ -667,10 +721,10 @@ The preshuffle GEMM pattern in `kernels/gemm/preshuffle_gemm.py`:
 XOR-shuffle-based intra-wave reduction:
 ```python
 width_i32 = fx.Int32(64)
+val = fx.Float32(val)                                        # typed once, not per-iter
 for sh in [32, 16, 8, 4, 2, 1]:
-    off = fx.Int32(sh)
-    peer = gpu.ShuffleOp(val, off, width_i32, mode="xor").shuffleResult
-    val = ArithValue(val) + peer  # use explicit FOp only if fastmath flags are needed
+    peer = gpu.ShuffleOp(val.ir_value(), fx.Int32(sh), width_i32, mode="xor").shuffleResult
+    val = val + fx.Float32(peer)  # typed add; explicit FOp only for fastmath flags
 ```
 
 ### Block Reduction
@@ -749,15 +803,23 @@ def naive_gemm(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor,
     bm, bn = bid // (N // BN), bid % (N // BN)
     tm, tn = tid // BN, tid % BN
     row, col = bm * BM + tm, bn * BN + tn
-    rsrc_a = buffer_ops.create_buffer_resource(A)
-    rsrc_b = buffer_ops.create_buffer_resource(B)
-    rsrc_c = buffer_ops.create_buffer_resource(C)
+
+    # Buffer-resource views with logical row-major layouts
+    tA = fx.make_view(fx.get_iter(fx.rocdl.make_buffer_tensor(A)), fx.make_layout((M, K), (K, 1)))
+    tB = fx.make_view(fx.get_iter(fx.rocdl.make_buffer_tensor(B)), fx.make_layout((K, N), (N, 1)))
+    tC = fx.make_view(fx.get_iter(fx.rocdl.make_buffer_tensor(C)), fx.make_layout((M, N), (N, 1)))
+
+    copy = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
+    rA, rB, rC = (fx.make_rmem_tensor(1, fx.Float32) for _ in range(3))
+
     acc = fx.Float32(0.0)
     for k in range_constexpr(K):
-        a = buffer_ops.buffer_load(rsrc_a, row * K + k, vec_width=1)
-        b = buffer_ops.buffer_load(rsrc_b, k * N + col, vec_width=1)
-        acc = acc + a * b
-    buffer_ops.buffer_store(acc, rsrc_c, row * N + col)
+        fx.copy(copy, fx.slice(tA, (row, k)), rA)
+        fx.copy(copy, fx.slice(tB, (k, col)), rB)
+        acc = acc + fx.Vector(fx.memref_load_vec(rA))[0] * fx.Vector(fx.memref_load_vec(rB))[0]
+
+    fx.memref_store_vec(fx.Vector.from_elements([acc], fx.Float32), rC)
+    fx.copy(copy, rC, fx.slice(tC, (row, col)))
 ```
 
 ---
@@ -874,7 +936,7 @@ Pass raw `torch.Tensor` objects instead.
 
 10. **INT4 (W4A8)**: A matrix is int8, B matrix is packed int4 (2 values/byte), unpacked to int8 in-kernel.
 
-11. **`arith.absf` does not exist**: Prefer `Vector`/`ArithValue` operators: `neg = -v`, `is_neg = v < zero`, `out = is_neg.select(neg, v)`.
+11. **`arith.absf` does not exist**: Prefer `fx.Vector` / typed `fx` operators (not the deprecated `ArithValue`): `neg = -v`, `is_neg = v < zero`, `out = is_neg.select(neg, v)`.
 
 12. **Scalar broadcast to vector**: Use `Vec.filled(width, value, fx.Float32)` to create a splat constant vector. Do NOT use raw vector ops for ordinary arithmetic.
 

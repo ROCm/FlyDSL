@@ -43,6 +43,14 @@ template <class TargetAddressSpace> bool isTargetAddressSpace(Attribute attr) {
   return llvm::isa_and_nonnull<TargetAddressSpace>(attr);
 }
 
+/// Type trait marking a copy-atom op type that moves a whole N-D tile in a single
+/// copy_atom_call (e.g. the gfx1250 TDM DMA). The expand-copy lowering checks this
+/// to emit one whole-tile call instead of decomposing the tiled memref per
+/// element. Defined here (single shared TypeID) so a target-neutral pass can query
+/// it via `hasTrait` — boundary-safe, unlike a concrete cross-dialect dyn_cast.
+template <typename ConcreteType>
+class WholeTileCopy : public TypeTrait::TraitBase<ConcreteType, WholeTileCopy> {};
+
 ParseResult parseMNKDimensionList(AsmParser &parser, int32_t &m, int32_t &n, int32_t &k);
 void printMNKDimensionList(AsmPrinter &printer, int32_t m, int32_t n, int32_t k);
 
