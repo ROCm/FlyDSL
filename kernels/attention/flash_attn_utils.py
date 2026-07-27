@@ -1683,7 +1683,6 @@ class DualwaveSwpFp8Traits:
     VARLEN: bool
     CROSS_SEQLEN: bool
     FP8_PV: bool
-    TWO_PHASE: bool
     FP8_PV_DIRECT: bool
     BN128: bool
     BN128_PF: bool
@@ -1757,7 +1756,6 @@ class DualwaveSwpFp8Traits:
             self.VT_BF16_ELEMS,
             self.VT_BF16_TOTAL,
             self.FP8_PV,
-            self.TWO_PHASE,
             self.FP8_PV_DIRECT,
             self.NUM_PREFETCH_K,
             self.BN128,
@@ -1854,13 +1852,6 @@ def _make_dualwave_swp_fp8_traits(
     if fp8_pv_direct:
         fp8_pv = True
 
-    two_phase = (
-        ((os.getenv("FLYDSL_FA_2PHASE", "0") == "1" and (not causal)) or fp8_pv_direct)
-        and (num_kv_splits <= 1)
-        and (not varlen)
-        and ((not fp8_pv) or fp8_pv_direct)
-    )
-
     return DualwaveSwpFp8Traits(
         BLOCK_M=block_m,
         BLOCK_N=block_n,
@@ -1889,7 +1880,6 @@ def _make_dualwave_swp_fp8_traits(
         VARLEN=bool(varlen),
         CROSS_SEQLEN=bool(cross_seqlen),
         FP8_PV=fp8_pv,
-        TWO_PHASE=two_phase,
         FP8_PV_DIRECT=bool(fp8_pv_direct),
         BN128=bool(bn128),
         BN128_PF=bool(bn128_pf),
