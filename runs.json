@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-07-27T06:05:42Z",
+ "updated": "2026-07-27T07:21:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30244516279,
+   "pr": 906,
+   "commit": "f53cb3c23f9e5ed23ea283e4cdf29e656f66878b",
+   "branch": "fast-divmod",
+   "event": "pull_request",
+   "title": "Add fast_divmod magic-number division helper",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30244516279",
+   "created_at": "2026-07-27T06:59:19Z",
+   "updated_at": "2026-07-27T06:59:19Z",
+   "actor": "kashif",
+   "jobs": []
+  },
+  {
+   "run_id": 30244468674,
+   "pr": 907,
+   "commit": "344778c1ce53f9e627e2cc9edeb46d48f278790d",
+   "branch": "stochastic-rounding",
+   "event": "pull_request",
+   "title": "Add stochastic rounding and philox RNG helpers",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30244468674",
+   "created_at": "2026-07-27T06:58:24Z",
+   "updated_at": "2026-07-27T06:58:24Z",
+   "actor": "kashif",
+   "jobs": []
+  },
   {
    "run_id": 30241516517,
    "pr": null,
@@ -10,13 +40,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Prune] Move arch-specific FP8 type selection to kernels_common (#908)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30241516517",
    "created_at": "2026-07-27T06:03:32Z",
-   "updated_at": "2026-07-27T06:04:49Z",
+   "updated_at": "2026-07-27T06:07:51Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-27T06:07:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30241516517/job/89900240190"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-27T06:08:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30241516517/job/89900240208"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-27T06:08:38Z",
+     "completed_at": "2026-07-27T07:04:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30241516517/job/89900240212"
+    }
+   ]
   },
   {
    "run_id": 30241407310,
@@ -25,13 +83,41 @@
    "branch": "refactor/pa-metadata-tile-programming",
    "event": "pull_request",
    "title": "[Kernel][Perf] Optimize paged-attention metadata decode",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30241407310",
    "created_at": "2026-07-27T06:01:22Z",
-   "updated_at": "2026-07-27T06:03:26Z",
+   "updated_at": "2026-07-27T06:06:52Z",
    "actor": "fsx950223",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-27T06:07:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30241407310/job/89900092512"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-27T06:07:41Z",
+     "completed_at": "2026-07-27T07:10:20Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30241407310/job/89900092532"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-27T06:06:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30241407310/job/89900092535"
+    }
+   ]
   },
   {
    "run_id": 30239601239,
@@ -83,37 +169,37 @@
    "branch": "refactor/pa-decode-swa-tile-programming",
    "event": "pull_request",
    "title": "[Kernel] Migrate SWA decode to tile programming",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30238169184",
    "created_at": "2026-07-27T04:50:46Z",
-   "updated_at": "2026-07-27T04:55:16Z",
+   "updated_at": "2026-07-27T07:19:26Z",
    "actor": "fsx950223",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-27T04:55:37Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T06:11:56Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30238169184/job/89890381271"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-27T04:55:38Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T06:13:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30238169184/job/89890381272"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-27T04:55:16Z",
+     "started_at": "2026-07-27T07:19:25Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30238169184/job/89890381288"
     }
@@ -184,11 +270,11 @@
    "branch": "binding_fa_fp8_gfx950",
    "event": "pull_request",
    "title": "[perf]optimize flash attention fp8 for gfx950",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30234607950",
    "created_at": "2026-07-27T03:26:22Z",
-   "updated_at": "2026-07-27T06:04:39Z",
+   "updated_at": "2026-07-27T07:18:53Z",
    "actor": "binding7012",
    "jobs": [
     {
@@ -203,10 +289,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-27T06:04:38Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T07:18:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30234607950/job/89880272723"
     },
     {
@@ -437,7 +523,7 @@
   },
   {
    "run_id": 30221449964,
-   "pr": 907,
+   "pr": null,
    "commit": "21d63078c8873eebf47379badd1e76e820226a8a",
    "branch": "stochastic-rounding",
    "event": "pull_request",
@@ -497,7 +583,7 @@
   },
   {
    "run_id": 30214379950,
-   "pr": 906,
+   "pr": null,
    "commit": "30412e742da46bd4d42c361c502ed6343fe13448",
    "branch": "fast-divmod",
    "event": "pull_request",
@@ -1990,92 +2076,6 @@
      "started_at": "2026-07-24T09:17:39Z",
      "completed_at": "2026-07-24T10:24:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30076185312/job/89428075337"
-    }
-   ]
-  },
-  {
-   "run_id": 30075703232,
-   "pr": 874,
-   "commit": "56188f8f310f2007036bc29a9de97856d5549d1a",
-   "branch": "xudoyuan/dyn-cf-list-carry",
-   "event": "pull_request",
-   "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30075703232",
-   "created_at": "2026-07-24T07:30:41Z",
-   "updated_at": "2026-07-24T08:11:14Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T07:34:04Z",
-     "completed_at": "2026-07-24T07:34:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30075703232/job/89426289186"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T07:34:36Z",
-     "completed_at": "2026-07-24T08:02:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30075703232/job/89426289218"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T07:33:20Z",
-     "completed_at": "2026-07-24T08:11:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30075703232/job/89426289220"
-    }
-   ]
-  },
-  {
-   "run_id": 30074744255,
-   "pr": null,
-   "commit": "a145958b28145138acab2146fdae106350e270cd",
-   "branch": "main",
-   "event": "push",
-   "title": "[Kernel] conv3d: parameterize tile size + add autotuner (#820)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30074744255",
-   "created_at": "2026-07-24T07:13:21Z",
-   "updated_at": "2026-07-24T08:43:31Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T07:17:16Z",
-     "completed_at": "2026-07-24T07:18:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30074744255/job/89423463494"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T07:18:02Z",
-     "completed_at": "2026-07-24T08:43:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30074744255/job/89423463499"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T07:18:00Z",
-     "completed_at": "2026-07-24T08:34:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30074744255/job/89423463500"
     }
    ]
   }
