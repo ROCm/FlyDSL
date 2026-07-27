@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-27T03:28:43Z",
+ "updated": "2026-07-27T03:36:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30234916880,
+   "pr": null,
+   "commit": "cc141e854f7ac156a6eaa53dc2ed8ed088767aee",
+   "branch": "main",
+   "event": "push",
+   "title": "Add forward LSE output to FlyDSL flash attention kernels (#844)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30234916880",
+   "created_at": "2026-07-27T03:34:26Z",
+   "updated_at": "2026-07-27T03:35:06Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 30234607950,
    "pr": 905,
@@ -10,13 +25,41 @@
    "branch": "binding_fa_fp8_gfx950",
    "event": "pull_request",
    "title": "[perf]optimize flash attention fp8 for gfx950",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30234607950",
    "created_at": "2026-07-27T03:26:22Z",
-   "updated_at": "2026-07-27T03:27:30Z",
+   "updated_at": "2026-07-27T03:29:36Z",
    "actor": "binding7012",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-27T03:29:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30234607950/job/89880272710"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-27T03:29:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30234607950/job/89880272723"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-27T03:29:57Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30234607950/job/89880272734"
+    }
+   ]
   },
   {
    "run_id": 30234134743,
@@ -68,11 +111,11 @@
    "branch": "pr/refactor-centralize-fp8-types",
    "event": "pull_request",
    "title": "[Prune] Move arch-specific FP8 type selection to kernels_common",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30233121494",
    "created_at": "2026-07-27T02:50:17Z",
-   "updated_at": "2026-07-27T02:53:17Z",
+   "updated_at": "2026-07-27T03:35:05Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -87,9 +130,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-27T02:53:17Z",
+     "started_at": "2026-07-27T03:35:05Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30233121494/job/89875909925"
     },
@@ -111,11 +154,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Refactor] Align RMSNorm with current FlyDSL kernel style (#902)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30230351277",
    "created_at": "2026-07-27T01:40:31Z",
-   "updated_at": "2026-07-27T02:36:41Z",
+   "updated_at": "2026-07-27T03:34:45Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -130,10 +173,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-27T02:36:41Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T03:34:44Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30230351277/job/89868231295"
     },
     {
@@ -2089,49 +2132,6 @@
      "started_at": "2026-07-24T05:27:23Z",
      "completed_at": "2026-07-24T05:34:21Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30069413711/job/89407069395"
-    }
-   ]
-  },
-  {
-   "run_id": 30068933144,
-   "pr": 874,
-   "commit": "2d412416d2878d32ec7a2b9b9d4d13c530a6d901",
-   "branch": "xudoyuan/dyn-cf-list-carry",
-   "event": "pull_request",
-   "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30068933144",
-   "created_at": "2026-07-24T05:15:10Z",
-   "updated_at": "2026-07-24T05:26:01Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T05:16:19Z",
-     "completed_at": "2026-07-24T05:26:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30068933144/job/89405559164"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T05:16:19Z",
-     "completed_at": "2026-07-24T05:26:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30068933144/job/89405559179"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T05:16:19Z",
-     "completed_at": "2026-07-24T05:26:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30068933144/job/89405559182"
     }
    ]
   }
