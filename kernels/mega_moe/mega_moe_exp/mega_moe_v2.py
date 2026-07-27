@@ -52,7 +52,7 @@ class MegaMoEV2:
         gemm2_tile_m: int = -1, gemm2_tile_n: int = -1, gemm2_tile_k: int = -1,
         enable_fused_stage1: bool = True, enable_fused_stage2: bool = True, gate_mode=None,
         stage1_dispatch_cu: int | None = None, stage1_grid_mult: int | None = None,
-        stage1_tile_m_values: tuple[int, ...] | None = None, stage2_p2p_quant: str = "auto"):
+        stage1_tile_m_values: tuple[int, ...] | None = None, stage2_p2p_quant: str = "none"):
     # fmt: on
         if not enable_fused_stage1 or not enable_fused_stage2:
             raise ValueError("MegaMoEV2 requires enable_fused_stage1=True and enable_fused_stage2=True")

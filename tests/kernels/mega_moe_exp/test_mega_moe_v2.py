@@ -652,6 +652,8 @@ def _run_full_e2e(
         gate_mode=_mega_gate_mode,
         stage1_dispatch_cu=None if args.v2_dispatch_cu <= 0 else args.v2_dispatch_cu,
         stage1_grid_mult=None if args.v2_grid_mult <= 0 else args.v2_grid_mult,
+        stage1_tile_m_values=None if args.v2_tile_m <= 0 else (args.v2_tile_m,),
+        stage2_p2p_quant=args.stage2_p2p_quant,
     )
     torch.cuda.synchronize()
     ms.shmem_barrier_all()
@@ -1157,6 +1159,7 @@ def _run_mega_only(
         gate_mode=_gate_mode,
         stage1_dispatch_cu=None if args.v2_dispatch_cu <= 0 else args.v2_dispatch_cu,
         stage1_grid_mult=None if args.v2_grid_mult <= 0 else args.v2_grid_mult,
+        stage1_tile_m_values=None if args.v2_tile_m <= 0 else (args.v2_tile_m,),
         stage2_p2p_quant=args.stage2_p2p_quant,
     )
     torch.cuda.synchronize()
@@ -1534,11 +1537,18 @@ def main():
     p.add_argument("--v2-dispatch-cu", type=int, default=0, help="<=0 lets stage1 autotune")
     p.add_argument("--v2-grid-mult", type=int, default=-1, help="<=0 lets stage1 autotune")
     p.add_argument(
+        "--v2-tile-m",
+        type=int,
+        choices=(32, 64, 128),
+        default=-1,
+        help="override v2 Stage1/Stage2 M tile",
+    )
+    p.add_argument(
         "--stage2-p2p-quant",
         type=str,
-        default="auto",
+        default="none",
         choices=["auto", "none", "fp8_blockwise_1x32"],
-        help="Stage2 P2P transport: auto uses FP8 only when batch size is greater than 2048.",
+        help="Stage2 P2P transport; disabled by default. 'auto' uses FP8 when batch size is greater than 2048.",
     )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--rank-skew-ms", type=float, default=0.0, help="delay rank r by r*N ms before first forward")
