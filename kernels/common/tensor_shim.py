@@ -9,22 +9,33 @@ import torch
 
 import flydsl.compiler as flyc
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import fly, llvm
+from flydsl._mlir.dialects import fly, llvm, vector
 from flydsl.compiler.protocol import extract_to_ir_values
-from flydsl.expr import arith, buffer_ops, range_constexpr, vector
+from flydsl.expr import arith, as_ir_value, range_constexpr
 from flydsl.expr.typing import T
+from kernels.common import buffer_ops
 
 
 def _run_compiled(exe, *args):
     """First call: ``flyc.compile(exe, *args)`` compiles **and** executes the kernel.
     Subsequent calls: fast dispatch via the cached ``CompiledFunction``.
+
+    A failed cold compile can leave an MLIR ``Context`` open on the stack; unwind
+    it before re-raising so the next attempt starts clean.
     """
     cf = getattr(exe, "_cf", None)
-    if cf is None:
-        cf = flyc.compile(exe, *args)
-        exe._cf = cf
-    else:
+    if cf is not None:
         cf(*args)
+        return
+    try:
+        exe._cf = flyc.compile(exe, *args)
+    except Exception:
+        try:
+            while ir.Context.current is not None:
+                ir.Context.current.__exit__(None, None, None)
+        except Exception:
+            pass
+        raise
 
 
 def _to_raw(v):
@@ -314,17 +325,17 @@ class STensor(TensorBase):
 
     def load(self, offset, vec_size=1):
         vec_t = T.vec(vec_size, self.dtype)
-        x = vector.load_op(vec_t, self.memptr, [offset])
+        x = vector.load(vec_t, as_ir_value(self.memptr), [as_ir_value(offset)])
         if vec_size > 1:
             return x
         else:
-            x = vector.extract(x, static_position=[0], dynamic_position=[])
+            x = vector.extract(as_ir_value(x), dynamic_position=[], static_position=[0])
             return x
 
     def store(self, offset, value, vec_size=1):
         if vec_size > 1:
-            vector.store(value, self.memptr, [offset], alignment=16)
+            vector.store(as_ir_value(value), as_ir_value(self.memptr), [as_ir_value(offset)], alignment=16)
         else:
             vec_t = T.vec(1, self.dtype)
-            vec = vector.from_elements(vec_t, [value])
-            vector.store(vec, self.memptr, [offset], alignment=16)
+            vec = vector.from_elements(vec_t, [as_ir_value(value)])
+            vector.store(as_ir_value(vec), as_ir_value(self.memptr), [as_ir_value(offset)], alignment=16)

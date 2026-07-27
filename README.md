@@ -368,7 +368,6 @@ See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tile
 | **Blockscale GEMM** | `test_blockscale_preshuffle_gemm.py` | Blockscale preshuffle GEMM |
 | **HGEMM Split-K** | `test_hgemm_splitk.py` | FP16 GEMM split-K |
 | **MoE GEMM** | `test_moe_gemm.py` | MoE 2-stage (gate/up + reduce) |
-| **MoE Blockscale** | `test_moe_blockscale.py` | MoE blockscale 2-stage |
 | **MoE Reduce** | `test_moe_reduce.py` | MoE reduce kernel |
 | **PagedAttention** | `test_pa.py` | Paged attention decode (FP8) — *WIP perf tuning* |
 | **FlashAttention** | `test_flash_attn_fwd.py` | Flash attention — *WIP perf tuning* |

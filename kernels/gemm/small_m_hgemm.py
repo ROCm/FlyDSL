@@ -40,9 +40,9 @@ import functools
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import fly, llvm, scf
+from flydsl._mlir.dialects import fly, llvm, scf, vector
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl, vector
+from flydsl.expr import arith, as_ir_value, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import get_llvm_ptr
@@ -560,7 +560,7 @@ def compile_small_m_hgemm_kernel(
                 vec = arith._to_raw(fx.ptr_load(ptr, result_type=fx.Vector.make_type(vec_size, elem_dtype)))
                 if vec_size > 1:
                     return vec
-                return vector.extract(vec, static_position=[0], dynamic_position=[])
+                return vector.extract(as_ir_value(vec), static_position=[0], dynamic_position=[])
 
             return _load
 
@@ -572,7 +572,7 @@ def compile_small_m_hgemm_kernel(
                 if vec_size > 1:
                     fx.ptr_store(arith._to_raw(value), ptr)
                 else:
-                    vec = vector.from_elements(T.vec(1, elem_ir_ty), [value])
+                    vec = vector.from_elements(T.vec(1, elem_ir_ty), [as_ir_value(value)])
                     fx.ptr_store(vec, ptr)
 
             return _store
@@ -932,16 +932,16 @@ def compile_small_m_hgemm_kernel(
                     vec2_ty = T.vec(2, dtype_)
                     for vec_idx in range_constexpr(LDG_VEC_SIZE // 2):
                         e0 = vector.extract(
-                            pk_val,
+                            as_ir_value(pk_val),
                             static_position=[vec_idx * 2],
                             dynamic_position=[],
                         )
                         e1 = vector.extract(
-                            pk_val,
+                            as_ir_value(pk_val),
                             static_position=[vec_idx * 2 + 1],
                             dynamic_position=[],
                         )
-                        pair = vector.from_elements(vec2_ty, [e0, e1])
+                        pair = vector.from_elements(vec2_ty, [as_ir_value(e0), as_ir_value(e1)])
                         pair_byte_offset = arith.index_cast(
                             T.i64,
                             linear_bytes_offset + fx.Index(vec_idx * 2 * DTYPE_BYTES),
@@ -992,7 +992,7 @@ def compile_small_m_hgemm_kernel(
                         lds_m_idx = fx.Index(warp_atom_m_idx + stmatrix_c_m_vec_idx + kk)
                         lds_n_idx = fx.Index(warp_atom_n_idx + stmatrix_c_n_idx)
                         val = vector.extract(
-                            tile_c_frags_[ii * WARP_N_STEPS + jj],
+                            as_ir_value(tile_c_frags_[ii * WARP_N_STEPS + jj]),
                             static_position=[kk],
                             dynamic_position=[],
                         )

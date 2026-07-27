@@ -7,13 +7,14 @@ import functools
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
-from flydsl.expr import math as fly_math
+from flydsl._mlir.dialects import vector
+from flydsl.expr import arith, as_ir_value, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, T
 from kernels.attention.pa_common import _compute_block_base_dw_i64, _prefetch_q_chunks
-from kernels.common import dpp_utils
+from kernels.common import buffer_ops, dpp_utils
 from kernels.common.utils import (
     cdiv,
+    exp2_f32_fast,
     global_load_i32,
     global_load_i64x2,
     global_ptr_from_addr,
@@ -63,10 +64,6 @@ def _get_sw_mtp_group_count(query_length: int, query_group_size: int) -> int:
 
 def _get_sw_mtp_pair_offset(mtp_group_idx: int, mtp_subgroup_idx: int = 0) -> int:
     return mtp_group_idx * MFMA_N + mtp_subgroup_idx * MFMA_N
-
-
-def _exp2_f32_fast(value):
-    return fly_math.exp2(value, fastmath=arith.FastMathFlags.fast)
 
 
 def _load_k_flat(
@@ -494,7 +491,7 @@ def _make_pa_phase_helpers(
                 for i in range_constexpr(4):
                     if const_expr(kv_tok_base is not None):
                         kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
-                        vs_i = vector.extract(vs, static_position=[i], dynamic_position=[])
+                        vs_i = vector.extract(as_ir_value(vs), static_position=[i], dynamic_position=[])
                         vs_i = arith.select(kv_tok < seq_end, vs_i, zero_f)
                         vs = vector.insert(vs_i, vs, static_position=[i], dynamic_position=[])
                 v_max_warp = v_max_warp.maximumf(fx.Vector(vs).reduce("max"))
@@ -574,7 +571,7 @@ def _make_pa_phase_helpers(
         safe_qk_max = arith.select(qk_max > neg_inf, qk_max, zero_f) if const_expr(kv_tok_base is not None) else qk_max
         for td in range_constexpr(TLOOP):
             diff_vec = fx.Vector(d_out[td]) - vector.broadcast(T.f32x4, arith.unwrap(safe_qk_max))
-            p_vec = _exp2_f32_fast(diff_vec * vector.broadcast(T.f32x4, arith.unwrap(fx.Float32(LOG2E))))
+            p_vec = exp2_f32_fast(diff_vec * vector.broadcast(T.f32x4, arith.unwrap(fx.Float32(LOG2E))))
             exp_sum = exp_sum + fx.Vector(p_vec).reduce("add")
             d_out[td] = p_vec
         for sh in [32, 16]:
@@ -600,7 +597,7 @@ def _make_pa_phase_helpers(
             diff_w = warp_rescale_factors[w] - partition_max
             if const_expr(needs_mask):
                 diff_w = arith.select(partition_max > neg_inf, diff_w, zero_f)
-            wf = _exp2_f32_fast(diff_w * fx.Float32(LOG2E).ir_value())
+            wf = exp2_f32_fast(diff_w * fx.Float32(LOG2E).ir_value())
             w_sum = sum_vec[w]
             wf_sum = arith.mulf(arith.unwrap(w_sum), arith.unwrap(wf), fastmath=arith.FastMathFlags.contract)
             partition_sum = arith.addf(arith.unwrap(partition_sum), wf_sum, fastmath=arith.FastMathFlags.contract)
@@ -618,17 +615,17 @@ def _make_pa_phase_helpers(
         if const_expr(needs_mask):
             accum_scale = arith.select(
                 rmax > neg_inf,
-                _exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value()),
+                exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value()),
                 zero_f,
             )
             part_to_new = arith.select(
                 partition_max > neg_inf,
-                _exp2_f32_fast((partition_max - new_rmax) * fx.Float32(LOG2E).ir_value()),
+                exp2_f32_fast((partition_max - new_rmax) * fx.Float32(LOG2E).ir_value()),
                 zero_f,
             )
         else:
-            accum_scale = _exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value())
-            part_to_new = _exp2_f32_fast((partition_max - new_rmax) * fx.Float32(LOG2E).ir_value())
+            accum_scale = exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value())
+            part_to_new = exp2_f32_fast((partition_max - new_rmax) * fx.Float32(LOG2E).ir_value())
 
         accum_sum = arith.mulf(arith.unwrap(accum_scale), arith.unwrap(rsum), fastmath=arith.FastMathFlags.contract)
         partition_sum_scaled = arith.mulf(
@@ -664,12 +661,9 @@ def _make_pa_phase_helpers(
                 d_out[td] = d_out[td] * vector.broadcast(T.f32x4, arith.unwrap(prob_scale))
 
         for td in range_constexpr(TLOOP):
-            p0 = vector.extract(d_out[td], static_position=[0], dynamic_position=[])
-            p1 = vector.extract(d_out[td], static_position=[1], dynamic_position=[])
-            p2 = vector.extract(d_out[td], static_position=[2], dynamic_position=[])
-            p3 = vector.extract(d_out[td], static_position=[3], dynamic_position=[])
-            lo = rocdl.cvt_pk_fp8_f32(T.i32, p0, p1, arith.constant(0, type=T.i32), False)
-            pk = rocdl.cvt_pk_fp8_f32(T.i32, p2, p3, lo, True)
+            pv = fx.Vector(d_out[td])
+            lo = rocdl.cvt_pk_fp8_f32(T.i32, pv[0], pv[1], arith.constant(0, type=T.i32), False)
+            pk = rocdl.cvt_pk_fp8_f32(T.i32, pv[2], pv[3], lo, True)
             elem_base = prob_wr_thread_base + arith.constant(td * MFMA_N * (PROB_ROW_STRIDE_BYTES // 4), type=T.i32)
             pk_vec = fx.Vector.from_elements([pk], dtype=fx.Int32)
             fx.ptr_store(pk_vec, logits_base + elem_base)
@@ -736,7 +730,19 @@ def compile_pa_decode_sw_reduce(
     query_group_size: int,
     head_size: int,
     output_dtype_str: str,
+    logits_dtype_str: str = "bf16",
 ):
+    # Partition partials (`logits`) are read at this dtype; defaults to bf16
+    # (this kernel's original, still-default behavior for existing callers).
+    # Callers with an fp8 query should still keep this at bf16 (fp8 has too
+    # little precision for a re-accumulated intermediate) -- only real f16/f32
+    # queries should pick a matching non-bf16 value here.
+    if logits_dtype_str == "f32":
+        LOGITS_DTYPE = fx.Float32
+    elif logits_dtype_str == "f16":
+        LOGITS_DTYPE = fx.Float16
+    else:
+        LOGITS_DTYPE = fx.BFloat16
     block_threads = head_size
     assert block_threads > 0, "head_size must be positive"
     assert block_threads <= 1024, "head_size must fit in one workgroup"
@@ -876,7 +882,7 @@ def compile_pa_decode_sw_reduce(
             global_max = _wave_reduce_max(part_max)
             part_scale = arith.select(
                 lane_in_range,
-                _exp2_f32_fast((part_max - global_max) * c_log2e),
+                exp2_f32_fast((part_max - global_max) * c_log2e),
                 c_zero_f,
             )
             scaled_sum = part_sum * part_scale
@@ -903,8 +909,8 @@ def compile_pa_decode_sw_reduce(
                     + eqgs_idx * stride_logits_group
                     + tid
                 )
-                part_logits_bf16 = buffer_ops.buffer_load(logits_rsrc, logits_off, vec_width=1, dtype=fx.BFloat16)
-                part_logits = fx.Float32(part_logits_bf16)
+                part_logits_raw = buffer_ops.buffer_load(logits_rsrc, logits_off, vec_width=1, dtype=LOGITS_DTYPE)
+                part_logits = fx.Float32(part_logits_raw)
                 acc = acc + part_logits * weight
         else:
             # Fallback for unusually large sliding-window partition counts.
@@ -945,7 +951,7 @@ def compile_pa_decode_sw_reduce(
                 part_max = arith.select(in_chunk, part_max_raw, c_neg_inf)
                 part_scale = arith.select(
                     in_chunk,
-                    _exp2_f32_fast((part_max - global_max) * c_log2e),
+                    exp2_f32_fast((part_max - global_max) * c_log2e),
                     c_zero_f,
                 )
                 chunk_sum = _block_reduce(part_sum * part_scale, "sum")
@@ -975,7 +981,7 @@ def compile_pa_decode_sw_reduce(
                 if in_chunk:
                     part_sum = part_sum_raw
                     part_max = part_max_raw
-                    part_scale = _exp2_f32_fast((part_max - global_max) * c_log2e)
+                    part_scale = exp2_f32_fast((part_max - global_max) * c_log2e)
                     weight = part_sum * part_scale * inv_global_exp_sum
                     part_idx_idx = fx.Int32(part_i32)
                     fx.memref_store(weight, part_weights_lds, part_idx_idx)
@@ -994,8 +1000,8 @@ def compile_pa_decode_sw_reduce(
                     + eqgs_idx * stride_logits_group
                     + tid
                 )
-                part_logits_bf16 = buffer_ops.buffer_load(logits_rsrc, logits_off, vec_width=1, dtype=fx.BFloat16)
-                part_logits = fx.Float32(part_logits_bf16)
+                part_logits_raw = buffer_ops.buffer_load(logits_rsrc, logits_off, vec_width=1, dtype=LOGITS_DTYPE)
+                part_logits = fx.Float32(part_logits_raw)
                 acc = acc + part_logits * weight
 
         query_idx = udiv_const(eqgs_idx, query_group_size)
