@@ -167,11 +167,10 @@ compile-time result is folded on the host and emits no op.
 
 ### Flags and their meanings
 
-`expr.FastMathFlags` provides the following flags:
+`fx.FastMathFlags` provides the following flags:
 
 - `none` — preserve the default floating-point semantics; enable no relaxation.
-- `reassoc` — allow reassociation, such as changing `(a + b) + c` to `a + (b +
-  c)`.
+- `reassoc` — allow reassociation, such as changing `(a + b) + c` to `a + (b + c)`.
 - `nnan` — assume that NaN values do not occur.
 - `ninf` — assume that positive and negative infinity do not occur.
 - `nsz` — allow positive and negative zero to be treated as equivalent.
