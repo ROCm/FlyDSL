@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-27T09:27:43Z",
+ "updated": "2026-07-27T09:33:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -11,38 +11,38 @@
    "event": "pull_request",
    "title": "[Doc] document fast-math flags in the arithmetic_types",
    "status": "completed",
-   "conclusion": "failure",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30253658111",
    "created_at": "2026-07-27T09:22:14Z",
-   "updated_at": "2026-07-27T09:25:29Z",
+   "updated_at": "2026-07-27T09:30:23Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
      "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-27T09:25:23Z",
-     "completed_at": "2026-07-27T09:25:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30253658111/job/89937853112"
+     "conclusion": "success",
+     "started_at": "2026-07-27T09:30:19Z",
+     "completed_at": "2026-07-27T09:30:21Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30253658111/job/89938850764"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
      "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-27T09:25:24Z",
-     "completed_at": "2026-07-27T09:25:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30253658111/job/89937853120"
+     "conclusion": "success",
+     "started_at": "2026-07-27T09:30:19Z",
+     "completed_at": "2026-07-27T09:30:22Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30253658111/job/89938850799"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
      "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-27T09:25:23Z",
-     "completed_at": "2026-07-27T09:25:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30253658111/job/89937853212"
+     "conclusion": "success",
+     "started_at": "2026-07-27T09:30:18Z",
+     "completed_at": "2026-07-27T09:30:21Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30253658111/job/89938850816"
     }
    ]
   },
