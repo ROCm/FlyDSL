@@ -57,6 +57,7 @@ __all__ = [
     "tensor_store_gather",
     "tensor_store_2d",
     "tensor_wait",
+    "update_tensor_descriptor_2d_lds_addr",
     "update_tensor_descriptor_2d_addr_lo",
     "update_tensor_gather_descriptor_addr_lo",
     "update_tensor_descriptor_2d_addr_lo_hi",
@@ -193,6 +194,24 @@ def _i32_const(v: int) -> ir.Value:
     if v > 0x7FFFFFFF:
         v = int(v - 2**32)
     return _unwrap(std_arith.ConstantOp(i32, ir.IntegerAttr.get(i32, v)).result)
+
+
+def _extract_lds_base_index(value) -> ir.Value:
+    """Extract a builtin memref or Fly shared view as an LDS byte index."""
+    raw = _unwrap(as_ir_value(value))
+    try:
+        ir.MemRefType(raw.type)
+        return _unwrap(memref_dialect.extract_aligned_pointer_as_index(raw))
+    except ValueError:
+        pass
+
+    from ..._mlir.dialects import fly as _fly_d
+
+    ptr_type = ir.Type.parse("!llvm.ptr<3>")
+    ptr = _fly_d.extract_aligned_pointer_as_index(ptr_type, raw)
+    i64 = ir.IntegerType.get_signless(64)
+    ptr_i64 = llvm_dialect.ptrtoint(i64, ptr)
+    return _unwrap(std_arith.IndexCastOp(ir.IndexType.get(), ptr_i64).result)
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +368,7 @@ def make_tensor_descriptor_2d(
     glb_addr_i64 = glb_base_i64 + glb_byte_off_i64
 
     # -- LDS address (byte address within shared memory) --
-    lds_base_idx = _ArithValue(memref_dialect.extract_aligned_pointer_as_index(lds_memref))
+    lds_base_idx = _ArithValue(_extract_lds_base_index(lds_memref))
     # Compute padded LDS stride (elements) for the outer dim
     if pad_interval > 0 and pad_amount > 0:
         lds_inner_stride = inner_tile + pad_amount  # padded row width
@@ -808,6 +827,25 @@ def tensor_store_gather(
 # the loop and patching only lane 2 inside the loop, we cut the per-iteration
 # work to a single vector.insert plus the addr_lo SGPR add.
 # ---------------------------------------------------------------------------
+
+
+@dsl_loc_tracing
+def update_tensor_descriptor_2d_lds_addr(
+    desc: TDMDescriptor2D,
+    new_lds_addr,
+) -> TDMDescriptor2D:
+    """Return a 2-D descriptor with its LDS address replaced."""
+    from ..._mlir.dialects import vector as _vector_dialect
+
+    return TDMDescriptor2D(
+        dgroup0=_vector_dialect.InsertOp(
+            _raw(new_lds_addr),
+            _raw(desc.dgroup0),
+            static_position=[1],
+            dynamic_position=[],
+        ).result,
+        dgroup1=desc.dgroup1,
+    )
 
 
 def _replace_dgroup0_addr_lo(dgroup0, new_addr_lo):

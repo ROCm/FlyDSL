@@ -5,9 +5,12 @@
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir import ir
+from flydsl._mlir.dialects import llvm as llvm_dialect
+from flydsl._mlir.dialects import scf
 from flydsl.expr import const_expr, range_constexpr, rocdl, tdm_ops
 from flydsl.expr.rocdl import cluster
-from flydsl.expr.typing import Constexpr, T
+from flydsl.expr.typing import Constexpr, Index, T, as_ir_value
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import check_smem_capacity
@@ -17,6 +20,8 @@ from .gemm_common_gfx1250 import (
     lds_load_b32_raw,
     lds_load_b128_raw,
     pipeline_fence,
+    pipeline_fence_signal,
+    pipeline_fence_wait,
     workgroup_barrier,
 )
 
@@ -44,13 +49,18 @@ def launch_gemm_a8w4_mxscale(
     cluster_m: Constexpr[int],
     cluster_n: Constexpr[int],
 ):
-    """A: [M, K] uint8 (FP8 E4M3). B: [N, K//2] uint8, 16x16-preshuffled FP4 (E2M1)."""
+    """Launch the 1x2-cluster kernel; N and K must be divisible by 512, with K >= 512."""
 
-    use_cluster = cluster_m > 1 or cluster_n > 1
+    assert (
+        tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, cluster_m, cluster_n
+    ) == (256, 256, 128, 2, 2, 4, 1, 2), (
+        "only the tuned 256x256x128, 2x2-wave, 4-buffer, "
+        "1x2-cluster profile is supported"
+    )
+    cluster_sync_revs = 8
     WMMA_M = WMMA_N = 16
     WMMA_K = 128
     WAVE = 32
-    K_WS = tile_k // WMMA_K
     PACK_TK = tile_k // 2  # B row bytes per K-tile (FP4 packed 2/byte)
     SC_WORDS = tile_k // 4  # scale i32 words per super-row per K-tile
     SA_SUPERS = tile_m // 32
@@ -59,23 +69,25 @@ def launch_gemm_a8w4_mxscale(
     warp_tile_n = tile_n // n_warp
     wmma_m_rep = warp_tile_m // WMMA_M
     wmma_n_rep = warp_tile_n // WMMA_N
+    half_m, half_n = wmma_m_rep // 2, wmma_n_rep // 2
     n_acc = wmma_m_rep * wmma_n_rep
     num_waves = m_warp * n_warp
     block = num_waves * WAVE
-
     LDS_PAD_A = 16
     A_LDS_ROW = tile_k + LDS_PAD_A
     B_LDS_ROW = PACK_TK * 16
-    STAGE_A = ((tile_m * A_LDS_ROW + 15) // 16) * 16
-    STAGE_B = (((tile_n // 16) * B_LDS_ROW + 15) // 16) * 16
-    STAGE_SA = ((SA_SUPERS * tile_k + 15) // 16) * 16
-    STAGE_SB = ((SB_SUPERS * tile_k + 15) // 16) * 16
-    SA_OFF = STAGE_A + STAGE_B
-    SB_OFF = STAGE_A + STAGE_B + STAGE_SA
-    PITCH = ((STAGE_A + STAGE_B + STAGE_SA + STAGE_SB + 1023) // 1024) * 1024
+    STAGE_A = tile_m * A_LDS_ROW
+    STAGE_B = (tile_n // 16) * B_LDS_ROW
+    STAGE_SA = SA_SUPERS * tile_k
+    STAGE_SB = SB_SUPERS * tile_k
+    # Operand-major planes keep scale storage compact and B 64-KiB aligned.
+    PLANAR_SA_BASE = 0
+    PLANAR_A_BASE = PLANAR_SA_BASE + num_buffers * STAGE_SA
+    PLANAR_SB_BASE = PLANAR_A_BASE + num_buffers * STAGE_A
+    PLANAR_B_BASE = 3 * 65536
+    PLANAR_END = PLANAR_B_BASE + num_buffers * STAGE_B
 
-    C_STORE_B = ((tile_m * tile_n * 2 + 127) // 128) * 128
-    ARENA_B = max(num_buffers * PITCH, C_STORE_B)
+    ARENA_B = PLANAR_END
     check_smem_capacity(ARENA_B, str(get_hip_arch()))
 
     @flyc.kernel(known_block_size=[block, 1, 1])
@@ -107,11 +119,8 @@ def launch_gemm_a8w4_mxscale(
         kgrp = lane // 16
         wave_m = wave // n_warp
         wave_n = wave % n_warp
-        if const_expr(use_cluster):
-            local_x, local_y = cluster.compute_cluster_position()
-            a_mask, b_mask = compute_mcast_masks(local_x, local_y, cluster_m, cluster_n)
-        else:
-            a_mask, b_mask = 0, 0
+        local_x, local_y = cluster.compute_cluster_position()
+        a_mask, b_mask = compute_mcast_masks(local_x, local_y, cluster_m, cluster_n)
         blk_m = bid_x * tile_m
         blk_n = bid_y * tile_n
         blk_m64 = fx.Int64(blk_m)
@@ -121,11 +130,9 @@ def launch_gemm_a8w4_mxscale(
 
         base_ptr = fx.SharedAllocator(static=False).allocate(ARENA_B)._ptr
 
-        def _bidx(p):
-            return fx.index_cast(T.index, fx.ptrtoint(p))
-
-        def _buf_ptr(s):
-            return fx.add_offset(base_ptr, s * PITCH)
+        def _planar_base(offset, stride, stage):
+            ptr = fx.add_offset(base_ptr, offset + stage * stride)
+            return fx.index_cast(T.index, fx.ptrtoint(ptr))
 
         def _gv(base, off, shape, stride):
             return fx.Tensor(fx.make_view(fx.add_offset(base, off), fx.make_layout(shape, stride)))
@@ -133,112 +140,123 @@ def launch_gemm_a8w4_mxscale(
         def _lv(ptr, shape, stride):
             return fx.Tensor(fx.make_view(ptr, fx.make_layout(shape, stride)))
 
-        def _tdm1(gt, outer, stride, mask=0):  # single-warp 2-D atom, dim0 clamped
-            atom = fx.rocdl.make_tdm_atom(
-                gt,
-                [outer, None],
-                strides=[stride, None],
-                num_warps=1,
-                early_timeout=True,
-            )
-            return fx.atom_set_value(atom, "workgroup_mask", mask)
-
         gA_base = fx.recast_iter(fx.Int8, arg_a)
         gB_base = fx.recast_iter(fx.Int8, arg_b)
         gSA_base, gSB_base = fx.get_iter(arg_scale_a), fx.get_iter(arg_scale_b)
 
-        W_A, W_B, W_SA, W_SB = 0, 1, 2 % num_waves, 3 % num_waves
         a_off0 = blk_m64 * lda64
         b_off0 = (blk_n64 // 16) * Kp16
         sa_off0 = (blk_m64 // 32) * k64
         sb_off0 = (blk_n64 // 32) * k64
 
         gA = _gv(gA_base, a_off0, (tile_m, tile_k), (tile_k, 1))
-        atomA = fx.atom_set_value(
-            fx.rocdl.make_tdm_atom(
-                gA,
-                [mn_oob, None],
-                strides=[lda64, None],
-                num_warps=1,
-                pad_interval=tile_k,
-                pad_amount=LDS_PAD_A,
-                early_timeout=True,
-            ),
-            "workgroup_mask",
-            a_mask,
-        )
         gB = _gv(gB_base, b_off0, (tile_n // 16, PACK_TK * 16), (PACK_TK * 16, 1))
-        atomB = fx.atom_set_value(
-            fx.rocdl.make_tdm_atom(gB, [None, None], strides=[Kp16, None], num_warps=1, early_timeout=True),
-            "workgroup_mask",
-            b_mask,
-        )
         gSA = _gv(gSA_base, sa_off0, (SA_SUPERS, tile_k), (tile_k, 1))
-        atomSA = _tdm1(gSA, sa_oob, k64, a_mask)
         gSB = _gv(gSB_base, sb_off0, (SB_SUPERS, tile_k), (tile_k, 1))
-        atomSB = _tdm1(gSB, None, k64, b_mask)
 
-        def _wcopy(w, atom, gt, lv, imm_offset):
-            if wave == w:
-                fx.copy(atom, gt, lv, imm_offset=imm_offset)
+        def _build_tdm_desc(owner):
+            if const_expr(owner == 0):
+                tensor, offset, shape, lds_stride = gA, PLANAR_A_BASE, (tile_m, tile_k), A_LDS_ROW
+                stride, mask, bound, pad, early = i32_lda, a_mask, mn_oob, LDS_PAD_A, False
+            elif const_expr(owner == 1):
+                tensor, offset, shape, lds_stride = gB, PLANAR_B_BASE, (tile_n // 16, PACK_TK * 16), B_LDS_ROW
+                stride, mask, bound, pad, early = i32_k * 8, b_mask, None, 0, False
+            elif const_expr(owner == 2):
+                tensor, offset, shape, lds_stride = gSA, PLANAR_SA_BASE, (SA_SUPERS, tile_k), tile_k
+                stride, mask, bound, pad, early = i32_k, a_mask, sa_oob, 0, True
+            else:
+                tensor, offset, shape, lds_stride = gSB, PLANAR_SB_BASE, (SB_SUPERS, tile_k), tile_k
+                stride, mask, bound, pad, early = i32_k, b_mask, None, 0, False
+            desc = tdm_ops.make_tensor_descriptor_2d(
+                global_ptr=tensor,
+                lds_memref=_lv(fx.add_offset(base_ptr, offset), shape, (lds_stride, 1)),
+                global_offset=(Index(0), Index(0)),
+                tensor_shape=shape,
+                strides=(stride, 1),
+                tile_shape=shape,
+                elem_bytes=1,
+                pad_interval=shape[1] if pad else 0,
+                pad_amount=pad,
+                num_warps=1,
+                workgroup_mask=mask,
+                early_timeout=early,
+                oob_outer_bound=bound,
+            )
+            return desc, shape[0] * lds_stride, shape[1]
 
-        def issue(s, kt):
-            pa = _buf_ptr(s)
-            kt64 = fx.Int64(kt)
-            _wcopy(W_A, atomA, gA, _lv(pa, (tile_m, tile_k), (A_LDS_ROW, 1)), kt64 * fx.Int64(tile_k))
-            _wcopy(
-                W_B,
-                atomB,
-                gB,
-                _lv(fx.add_offset(pa, STAGE_A), (tile_n // 16, PACK_TK * 16), (B_LDS_ROW, 1)),
-                kt64 * fx.Int64(PACK_TK * 16),
+        result_types = [T.vec(4, T.i32), T.vec(8, T.i32), T.i32, T.i32]
+
+        def _select_tdm_desc(owner):
+            op = scf.IfOp(as_ir_value(wave == owner), result_types, has_else=True)
+            with ir.InsertionPoint(op.then_block):
+                desc, lds_step, global_step = _build_tdm_desc(owner)
+                scf.YieldOp(
+                    [
+                        desc.dgroup0,
+                        desc.dgroup1,
+                        as_ir_value(fx.Int32(lds_step)),
+                        as_ir_value(fx.Int32(global_step)),
+                    ]
+                )
+            with ir.InsertionPoint(op.else_block):
+                if const_expr(owner == 2):
+                    desc, lds_step, global_step = _build_tdm_desc(3)
+                    scf.YieldOp(
+                        [
+                            desc.dgroup0,
+                            desc.dgroup1,
+                            as_ir_value(fx.Int32(lds_step)),
+                            as_ir_value(fx.Int32(global_step)),
+                        ]
+                    )
+                else:
+                    child = _select_tdm_desc(owner + 1)
+                    scf.YieldOp(list(child.results))
+            return op
+
+        selected_tdm = _select_tdm_desc(0)
+        tdm_desc = tdm_ops.TDMDescriptor2D(selected_tdm.results[0], selected_tdm.results[1])
+        tdm_words = Vec(tdm_desc.dgroup0)
+        tdm_base_lds, tdm_base_lo, tdm_base_hi = (
+            fx.Int32(tdm_words[1]),
+            fx.Int32(tdm_words[2]),
+            fx.Int32(tdm_words[3]),
+        )
+        tdm_lds_step = fx.Int32(selected_tdm.results[2])
+        tdm_global_step = fx.Int32(selected_tdm.results[3])
+
+        def _prepare_tdm(slot, tile):
+            desc = tdm_ops.update_tensor_descriptor_2d_lds_addr(
+                tdm_desc, tdm_base_lds + tdm_lds_step * fx.Int32(slot)
             )
-            _wcopy(
-                W_SA,
-                atomSA,
-                gSA,
-                _lv(fx.add_offset(pa, SA_OFF), (SA_SUPERS, tile_k), (tile_k, 1)),
-                kt64 * fx.Int64(tile_k),
-            )
-            _wcopy(
-                W_SB,
-                atomSB,
-                gSB,
-                _lv(fx.add_offset(pa, SB_OFF), (SB_SUPERS, tile_k), (tile_k, 1)),
-                kt64 * fx.Int64(tile_k),
+            return tdm_ops.update_tensor_descriptor_2d_addr64(
+                desc,
+                tdm_base_lo,
+                tdm_base_hi,
+                fx.Int32(tile) * tdm_global_step,
             )
 
         wmb = wave_m * warp_tile_m
         wnb = wave_n * warp_tile_n
 
-        def load_a(buf, wm, ks):
-            row = wmb + wm * 16 + lane16
-            b0 = fx.index_cast(T.index, row * A_LDS_ROW + ks * WMMA_K + kgrp * 16)
-            v = [Vec(lds_load_b128_raw(buf, b0 + 32 * j)) for j in range_constexpr(4)]
-            v01 = v[0].shuffle(v[1], list(range(8)))
-            v23 = v[2].shuffle(v[3], list(range(8)))
-            return v01.shuffle(v23, list(range(16)))
-
-        def load_b(buf, wn, ks):
-            nbl = wnb // 16 + wn
-            b0 = fx.index_cast(T.index, STAGE_A + nbl * B_LDS_ROW + ks * 1024 + kgrp * 256 + lane16 * 16)
-            v0 = Vec(lds_load_b128_raw(buf, b0))
-            v1 = Vec(lds_load_b128_raw(buf, b0 + 512))
-            return v0.shuffle(v1, list(range(8)))
-
-        def load_sa(buf, wm, ks):
-            row = wmb + wm * 16 + lane16
-            word = (row // 32) * SC_WORDS + ks * 32 + (row % 32)
-            return lds_load_b32_raw(buf, fx.index_cast(T.index, SA_OFF + word * 4))
-
-        def load_sb(buf, wn, ks):
-            col = wnb + wn * 16 + lane16
-            word = (col // 32) * SC_WORDS + ks * 32 + (col % 32)
-            return lds_load_b32_raw(buf, fx.index_cast(T.index, SB_OFF + word * 4))
-
-        wmma_atom = fx.make_mma_atom(
-            fx.rocdl.WMMAScale(WMMA_M, WMMA_N, WMMA_K, fx.Float4E2M1FN, fx.Float8E4M3FN, fx.Float32)
-        )
+        wmma_atoms = [
+            [
+                fx.make_mma_atom(
+                    fx.rocdl.WMMAScale(
+                        WMMA_M,
+                        WMMA_N,
+                        WMMA_K,
+                        fx.Float4E2M1FN,
+                        fx.Float8E4M3FN,
+                        fx.Float32,
+                        opsel_a=sb_sel,
+                        opsel_b=sa_sel,
+                    )
+                )
+                for sa_sel in range_constexpr(2)
+            ]
+            for sb_sel in range_constexpr(2)
+        ]
         c_frags = [fx.make_rmem_tensor(8, fx.Float32) for _ in range_constexpr(n_acc)]
         for cf in c_frags:
             cf.store(fx.constant_vector(0.0, T.vec(8, T.f32)))
@@ -248,82 +266,662 @@ def launch_gemm_a8w4_mxscale(
             t.store(v)
             return t
 
-        front_wm = (wmma_m_rep + 1) // 2
-        _FRONT = list(range(front_wm))
-        _BACK = list(range(front_wm, wmma_m_rep))
+        def _mma_one(wm, wn, act, wt, sa_k, sb_k):
+            idx = wm * wmma_n_rep + wn
+            sa_idx = wm // 2
+            sb_idx = wn // 2
+            sa_sel = wm % 2
+            sb_sel = wn % 2
+            scale_a = sb_k[sb_idx]
+            scale_b = sa_k[sa_idx]
+            fx.gemm(
+                wmma_atoms[sb_sel][sa_sel],
+                c_frags[idx],
+                wt,
+                act,
+                c_frags[idx],
+                scale_a=scale_a,
+                scale_b=scale_b,
+            )
 
-        def _mma_rows(wm_list, act, wt, sa_k, sb_k):
-            for i in range_constexpr(len(wm_list)):
-                wm = wm_list[i]
-                for wn_raw in range_constexpr(wmma_n_rep):
-                    wn = (wmma_n_rep - 1 - wn_raw) if (wm % 2 == 1) else wn_raw
-                    idx = wm * wmma_n_rep + wn
-                    fx.gemm(wmma_atom, c_frags[idx], wt[wn], act[i], c_frags[idx], scale_a=sb_k[wn], scale_b=sa_k[wm])
+        def _mma_block(wm0, wn0, act, wt, sa_k, sb_k):
+            for j in range_constexpr(len(wt)):
+                for i in range_constexpr(len(act)):
+                    wm = wm0 + i
+                    _mma_one(wm, wn0 + j, act[i], wt[j], sa_k, sb_k)
 
-        DS_A, DS_B = 4, 2
-        _BS_DS = wmma_n_rep * DS_B + wmma_n_rep + wmma_m_rep
-
-        def _load_b_scales(buf, ks):
-            wt = [_rmem(8, load_b(buf, wn, ks)) for wn in range_constexpr(wmma_n_rep)]
-            sb_k = [load_sb(buf, wn, ks) for wn in range_constexpr(wmma_n_rep)]
-            sa_k = [load_sa(buf, wm, ks) for wm in range_constexpr(wmma_m_rep)]
-            return wt, sb_k, sa_k
-
-        def _kstep(buf, ks, wt, sb_k, sa_k, nxt_ks, prefetch_kt=None):
-            act_f = [_rmem(16, load_a(buf, wm, ks)) for wm in _FRONT]
-            if const_expr(len(_BACK) > 0):
-                act_b = [_rmem(16, load_a(buf, wm, ks)) for wm in _BACK]
-                rocdl.s_wait_dscnt(len(_BACK) * DS_A)
+        def _mma_block_range(
+            wm0,
+            wn0,
+            act,
+            wt,
+            sa_k,
+            sb_k,
+            start,
+            count,
+            n_index_fast=False,
+        ):
+            if const_expr(n_index_fast):
+                for linear in range_constexpr(count):
+                    pos = start + linear
+                    i = pos // len(wt)
+                    j = pos % len(wt)
+                    wm = wm0 + i
+                    _mma_one(wm, wn0 + j, act[i], wt[j], sa_k, sb_k)
             else:
-                rocdl.s_wait_dscnt(0)
-            _mma_rows(_FRONT, act_f, wt, sa_k, sb_k)
-            if const_expr(prefetch_kt is not None):
-                rocdl.sched_barrier(0)
-                issue(prefetch_kt % num_buffers, prefetch_kt)
-                rocdl.sched_barrier(0)
-            if const_expr(len(_BACK) > 0):
-                rocdl.s_wait_dscnt(0)
-                _mma_rows(_BACK, act_b, wt, sa_k, sb_k)
-            return _load_b_scales(buf, nxt_ks) if const_expr(nxt_ks is not None) else None
+                for linear in range_constexpr(count):
+                    pos = start + linear
+                    j = pos // len(act)
+                    i = pos % len(act)
+                    wm = wm0 + i
+                    _mma_one(wm, wn0 + j, act[i], wt[j], sa_k, sb_k)
 
-        def compute_ktile(buf, prefetch_kt):
-            prev = _load_b_scales(buf, 0)
-            for ks in range_constexpr(K_WS):
-                nxt_ks = ks + 1 if const_expr(ks + 1 < K_WS) else None
-                pk = prefetch_kt if const_expr(ks == 0) else None
-                prev = _kstep(buf, ks, prev[0], prev[1], prev[2], nxt_ks, prefetch_kt=pk)
-            _fr, _bk = front_wm * wmma_n_rep, len(_BACK) * wmma_n_rep
-            for _ks in range_constexpr(K_WS):
-                rocdl.sched_dsrd((_BS_DS if _ks == 0 else 0) + front_wm * DS_A)
-                rocdl.sched_mfma(_fr)
-                rocdl.sched_dsrd(len(_BACK) * DS_A)
-                rocdl.sched_mfma(_bk)
-                if const_expr(_ks < K_WS - 1):
-                    rocdl.sched_dsrd(_BS_DS)
+        cluster.cluster_barrier()
+        # Keep fragment displacements as DS immediates inside the K loop.
+        stage_a_addr, stage_b_addr, stage_sa_addr, stage_sb_addr = [], [], [], []
+        for addr_stage in range_constexpr(num_buffers):
+            a_base = _planar_base(PLANAR_A_BASE, STAGE_A, addr_stage)
+            b_base = _planar_base(PLANAR_B_BASE, STAGE_B, addr_stage)
+            sa_base = _planar_base(PLANAR_SA_BASE, STAGE_SA, addr_stage)
+            sb_base = _planar_base(PLANAR_SB_BASE, STAGE_SB, addr_stage)
+            a_byte = (wmb + lane16) * A_LDS_ROW + kgrp * 16
+            b_byte = (wnb // 16) * B_LDS_ROW + kgrp * 256 + lane16 * 16
+            sa_row = wmb + lane
+            sa_word = (sa_row // 32) * SC_WORDS + (sa_row % 32)
+            sb_col = wnb + lane
+            sb_word = (sb_col // 32) * SC_WORDS + (sb_col % 32)
+            stage_a_addr.append(a_base + fx.index_cast(T.index, a_byte))
+            stage_b_addr.append(b_base + fx.index_cast(T.index, b_byte))
+            stage_sa_addr.append(sa_base + fx.index_cast(T.index, sa_word * 4))
+            stage_sb_addr.append(sb_base + fx.index_cast(T.index, sb_word * 4))
+
+        def _idx_imm(value):
+            return fx.index_cast(T.index, fx.Int32(value))
+
+        def _stage_load_a(stage, wm):
+            row_off = wm * 16 * A_LDS_ROW
+            v = [
+                Vec(lds_load_b128_raw(stage_a_addr[stage], _idx_imm(row_off + 32 * j)))
+                for j in range_constexpr(4)
+            ]
+            return v[0].shuffle(v[1], list(range(8))).shuffle(
+                v[2].shuffle(v[3], list(range(8))), list(range(16))
+            )
+
+        def _stage_load_b(stage, wn):
+            col_off = wn * B_LDS_ROW
+            v0 = Vec(lds_load_b128_raw(stage_b_addr[stage], _idx_imm(col_off)))
+            v1 = Vec(lds_load_b128_raw(stage_b_addr[stage], _idx_imm(col_off + 512)))
+            return v0.shuffle(v1, list(range(8)))
+
+        def _stage_load_sa(stage, sm):
+            return lds_load_b32_raw(stage_sa_addr[stage], _idx_imm(sm * SC_WORDS * 4))
+
+        def _stage_load_sb(stage, sn):
+            return lds_load_b32_raw(stage_sb_addr[stage], _idx_imm(sn * SC_WORDS * 4))
+
+        # Separate seed banks prevent WMMA source/address register coalescing.
+        pipe_a = [
+            [fx.make_rmem_tensor(16, fx.Int32) for _ in range_constexpr(half_m)]
+            for _ in range_constexpr(2)
+        ]
+        pipe_b = [
+            [fx.make_rmem_tensor(8, fx.Int32) for _ in range_constexpr(half_n)]
+            for _ in range_constexpr(2)
+        ]
+        pipe_sa = [
+            [fx.make_rmem_tensor(1, fx.Int32) for _ in range_constexpr(half_m // 2)]
+            for _ in range_constexpr(2)
+        ]
+        pipe_sb = [
+            [fx.make_rmem_tensor(1, fx.Int32) for _ in range_constexpr(half_n // 2)]
+            for _ in range_constexpr(2)
+        ]
+
+        def _store_scale(reg, value):
+            reg.store(Vec.from_elements([value], fx.Int32))
+
+        def _load_seed_a_scales(stage, bank):
+            for sm in range_constexpr(half_m // 2):
+                _store_scale(pipe_sa[bank][sm], _stage_load_sa(stage, sm))
+
+        def _load_seed_a_fragment(stage, bank, wm):
+            pipe_a[bank][wm].store(_stage_load_a(stage, wm))
+
+        def _load_seed_a(stage, bank):
+            _load_seed_a_scales(stage, bank)
+            for wm in range_constexpr(half_m):
+                _load_seed_a_fragment(stage, bank, wm)
+
+        def _load_seed_b_scales(stage, bank):
+            for sn in range_constexpr(half_n // 2):
+                _store_scale(pipe_sb[bank][sn], _stage_load_sb(stage, sn))
+
+        def _load_seed_b_fragment(stage, bank, wn):
+            pipe_b[bank][wn].store(_stage_load_b(stage, wn))
+
+        def _load_seed_b(stage, bank):
+            _load_seed_b_scales(stage, bank)
+            for wn in range_constexpr(half_n):
+                _load_seed_b_fragment(stage, bank, wn)
+
+        def _pipe_scale(regs):
+            return [reg.load()[0] for reg in regs]
+
+        def _load_current_quadrants(stage):
+            a_bottom = [
+                _rmem(16, _stage_load_a(stage, half_m + wm))
+                for wm in range_constexpr(half_m)
+            ]
+            sa_bottom = [
+                _stage_load_sa(stage, half_m // 2 + sm)
+                for sm in range_constexpr(half_m // 2)
+            ]
+            b_right = [
+                _rmem(8, _stage_load_b(stage, half_n + wn))
+                for wn in range_constexpr(half_n)
+            ]
+            sb_right = [
+                _stage_load_sb(stage, half_n // 2 + sn)
+                for sn in range_constexpr(half_n // 2)
+            ]
+            return a_bottom, sa_bottom, b_right, sb_right
+
+        def _compute_even_stage(
+            stage,
+            next_stage,
+            bank,
+            next_bank,
+            future_slot,
+            future_kt,
+            fence_outstanding,
+        ):
+            """Even-wave stage ordered to align sibling READY arrival."""
+            a_top = pipe_a[bank]
+            b_left = pipe_b[bank]
+            sa_top = _pipe_scale(pipe_sa[bank])
+            sb_left = _pipe_scale(pipe_sb[bank])
+
+            # q00: produce current B while admitting four older reads.
+            rocdl.sched_barrier(0)
+            rocdl.s_wait_dscnt(4)
+            rocdl.sched_barrier(0)
+            _mma_block_range(0, 0, a_top, b_left, sa_top, sb_left, 0, 1)
+            sb_right = [
+                _stage_load_sb(stage, half_n // 2 + sn)
+                for sn in range_constexpr(half_n // 2)
+            ]
+            _mma_block_range(0, 0, a_top, b_left, sa_top, sb_left, 1, 1)
+            b_right_0 = _rmem(8, _stage_load_b(stage, half_n + 0))
+            b_right_1 = _rmem(8, _stage_load_b(stage, half_n + 1))
+            _mma_block_range(0, 0, a_top, b_left, sa_top, sb_left, 2, 1)
+            b_right_2 = _rmem(8, _stage_load_b(stage, half_n + 2))
+            b_right_3 = _rmem(8, _stage_load_b(stage, half_n + 3))
+            b_right = [b_right_0, b_right_1, b_right_2, b_right_3]
+            sb_k = sb_left + sb_right
+
+            rocdl.sched_mfma(1)
+            rocdl.sched_dsrd(2)
+            for _ in range_constexpr(2):
+                rocdl.sched_mfma(1)
+                rocdl.sched_dsrd(4)
+            rocdl.sched_barrier(0)
+            _mma_block_range(0, 0, a_top, b_left, sa_top, sb_left, 3, 5)
+            rocdl.sched_barrier(0)
+            rocdl.s_wait_dscnt(10)
+            rocdl.sched_barrier(0)
+            _mma_block_range(0, 0, a_top, b_left, sa_top, sb_left, 8, 8)
+
+            # q01: produce current A and signal READY.
+            rocdl.sched_barrier(0)
+            rocdl.s_wait_dscnt(4)
+            rocdl.sched_barrier(0)
+            _mma_block_range(
+                0, half_n, a_top, b_right, sa_top, sb_k, 0, 1
+            )
+            sa_bottom = [
+                _stage_load_sa(stage, half_m // 2 + sm)
+                for sm in range_constexpr(half_m // 2)
+            ]
+            _mma_block_range(
+                0, half_n, a_top, b_right, sa_top, sb_k, 1, 1
+            )
+            a_bottom_0 = _rmem(16, _stage_load_a(stage, half_m + 0))
+            _mma_block_range(
+                0, half_n, a_top, b_right, sa_top, sb_k, 2, 1
+            )
+            a_bottom_1 = _rmem(16, _stage_load_a(stage, half_m + 1))
+            _mma_block_range(
+                0, half_n, a_top, b_right, sa_top, sb_k, 3, 1
+            )
+            a_bottom_2 = _rmem(16, _stage_load_a(stage, half_m + 2))
+            _mma_block_range(
+                0, half_n, a_top, b_right, sa_top, sb_k, 4, 1
+            )
+            a_bottom_3 = _rmem(16, _stage_load_a(stage, half_m + 3))
+            a_bottom = [a_bottom_0, a_bottom_1, a_bottom_2, a_bottom_3]
+            sa_k = sa_top + sa_bottom
+
+            rocdl.sched_mfma(1)
+            rocdl.sched_dsrd(2)
+            for _ in range_constexpr(4):
+                rocdl.sched_mfma(1)
+                rocdl.sched_dsrd(4)
+            rocdl.sched_barrier(0)
+            _mma_block_range(
+                0, half_n, a_top, b_right, sa_k, sb_k, 5, 3
+            )
+            rocdl.sched_barrier(0)
+            rocdl.s_wait_dscnt(17)
+            rocdl.sched_barrier(0)
+            _mma_block_range(
+                0, half_n, a_top, b_right, sa_k, sb_k, 8, 5
+            )
+            rocdl.sched_barrier(0)
+            pipeline_fence_signal(
+                outstanding=fence_outstanding, use_cluster=False
+            )
+            rocdl.sched_barrier(0)
+            _mma_block_range(
+                0, half_n, a_top, b_right, sa_k, sb_k, 13, 3
+            )
+            rocdl.sched_barrier(0)
+            pipeline_fence_wait(use_cluster=False)
+            rocdl.sched_barrier(0)
+            rocdl.s_wait_dscnt(0)
             rocdl.sched_barrier(0)
 
-        if const_expr(use_cluster):
-            cluster.cluster_barrier()
-        for i in range_constexpr(num_buffers - 1):
-            issue(i, i)
-        n_steady = K_TILES - (num_buffers - 1)
-        for kt in range(n_steady):
-            s = kt % num_buffers
-            buf = _bidx(_buf_ptr(s))
-            pipeline_fence(outstanding=(num_buffers - 2), use_cluster=False)
-            compute_ktile(buf, kt + (num_buffers - 1))
-            if const_expr(use_cluster) and kt % num_buffers == num_buffers - 1:
-                cluster.cluster_barrier()
-        for j in range_constexpr(num_buffers - 1):
-            kt = n_steady + j
-            s = kt % num_buffers
-            buf = _bidx(_buf_ptr(s))
-            pipeline_fence(outstanding=(num_buffers - 2 - j), use_cluster=False)
-            compute_ktile(buf, None)
+            # q10: produce next A and issue TDM at W3.
+            prepared_refill_desc = _prepare_tdm(future_slot, future_kt)
+            _mma_block_range(
+                half_m, 0, a_bottom, b_left, sa_k, sb_left, 0, 1
+            )
+            _load_seed_a_scales(next_stage, next_bank)
+            for pos in range_constexpr(1, 3):
+                _mma_block_range(
+                    half_m, 0, a_bottom, b_left, sa_k, sb_left, pos, 1
+                )
+                _load_seed_a_fragment(next_stage, next_bank, pos - 1)
+            rocdl.sched_mfma(1)
+            rocdl.sched_dsrd(2)
+            for _ in range_constexpr(2):
+                rocdl.sched_mfma(1)
+                rocdl.sched_dsrd(4)
+            rocdl.sched_barrier(0)
+            tdm_ops.tensor_load_2d(prepared_refill_desc)
+            rocdl.sched_barrier(0)
+            for pos in range_constexpr(3, 5):
+                _mma_block_range(
+                    half_m, 0, a_bottom, b_left, sa_k, sb_left, pos, 1
+                )
+                _load_seed_a_fragment(next_stage, next_bank, pos - 1)
+            for _ in range_constexpr(2):
+                rocdl.sched_mfma(1)
+                rocdl.sched_dsrd(4)
+            rocdl.sched_barrier(0)
+            _mma_block_range(
+                half_m, 0, a_bottom, b_left, sa_k, sb_left, 5, 11
+            )
 
+            # q11: leave the next B tail in flight.
+            rocdl.sched_barrier(0)
+            _mma_block_range(
+                half_m,
+                half_n,
+                a_bottom,
+                b_right,
+                sa_k,
+                sb_k,
+                0,
+                1,
+            )
+            _load_seed_b_scales(next_stage, next_bank)
+            _mma_block_range(
+                half_m,
+                half_n,
+                a_bottom,
+                b_right,
+                sa_k,
+                sb_k,
+                1,
+                1,
+            )
+            _load_seed_b_fragment(next_stage, next_bank, 0)
+            _load_seed_b_fragment(next_stage, next_bank, 1)
+            _mma_block_range(
+                half_m,
+                half_n,
+                a_bottom,
+                b_right,
+                sa_k,
+                sb_k,
+                2,
+                1,
+            )
+            _load_seed_b_fragment(next_stage, next_bank, 2)
+            _load_seed_b_fragment(next_stage, next_bank, 3)
+            rocdl.sched_mfma(1)
+            rocdl.sched_dsrd(2)
+            for _ in range_constexpr(2):
+                rocdl.sched_mfma(1)
+                rocdl.sched_dsrd(4)
+            rocdl.sched_barrier(0)
+            _mma_block_range(
+                half_m,
+                half_n,
+                a_bottom,
+                b_right,
+                sa_k,
+                sb_k,
+                3,
+                13,
+            )
+
+        def _compute_stage(
+            stage,
+            next_stage,
+            bank,
+            next_bank,
+            future_slot,
+            future_kt,
+            fence_outstanding,
+            has_next,
+            steady=False,
+        ):
+            """Odd-wave steady stage or shared drain stage."""
+
+            a_top = pipe_a[bank]
+            b_left = pipe_b[bank]
+            sa_top = _pipe_scale(pipe_sa[bank])
+            sb_left = _pipe_scale(pipe_sb[bank])
+
+            if const_expr(steady):
+                # q00: produce current A while retiring the prior A tail.
+                rocdl.sched_barrier(0)
+                rocdl.s_wait_dscnt(8)
+                rocdl.sched_barrier(0)
+                _mma_block_range(
+                    0, 0, a_top, b_left, sa_top, sb_left, 0, 1, True
+                )
+                sa_bottom = [
+                    _stage_load_sa(stage, half_m // 2 + sm)
+                    for sm in range_constexpr(half_m // 2)
+                ]
+                _mma_block_range(
+                    0, 0, a_top, b_left, sa_top, sb_left, 1, 1, True
+                )
+                a_bottom_0 = _rmem(16, _stage_load_a(stage, half_m + 0))
+                _mma_block_range(
+                    0, 0, a_top, b_left, sa_top, sb_left, 2, 1, True
+                )
+                a_bottom_1 = _rmem(16, _stage_load_a(stage, half_m + 1))
+                _mma_block_range(
+                    0, 0, a_top, b_left, sa_top, sb_left, 3, 1, True
+                )
+                a_bottom_2 = _rmem(16, _stage_load_a(stage, half_m + 2))
+                _mma_block_range(
+                    0, 0, a_top, b_left, sa_top, sb_left, 4, 1, True
+                )
+                a_bottom_3 = _rmem(16, _stage_load_a(stage, half_m + 3))
+                a_bottom = [a_bottom_0, a_bottom_1, a_bottom_2, a_bottom_3]
+
+                rocdl.sched_mfma(1)
+                rocdl.sched_dsrd(2)
+                for _ in range_constexpr(4):
+                    rocdl.sched_mfma(1)
+                    rocdl.sched_dsrd(4)
+                rocdl.sched_barrier(0)
+                _mma_block_range(
+                    0, 0, a_top, b_left, sa_top, sb_left, 5, 3, True
+                )
+                rocdl.sched_barrier(0)
+                rocdl.s_wait_dscnt(17)
+                rocdl.sched_barrier(0)
+                _mma_block_range(
+                    0, 0, a_top, b_left, sa_top, sb_left, 8, 8, True
+                )
+                rocdl.sched_barrier(0)
+                sb_k = sb_left
+            else:
+                # K512 reaches this drain without a steady iteration.
+                rocdl.s_wait_dscnt(4)
+                _mma_block(0, 0, a_top, b_left, sa_top, sb_left)
+                a_bottom, sa_bottom, b_right, sb_right = (
+                    _load_current_quadrants(stage)
+                )
+                sb_k = sb_left + sb_right
+
+            sa_k = sa_top + sa_bottom
+
+            if const_expr(steady):
+                # q10: produce current B and retire the older A tail.
+                rocdl.s_wait_dscnt(8)
+                rocdl.sched_barrier(0)
+                _mma_block_range(
+                    half_m, 0, a_bottom, b_left, sa_k, sb_left, 0, 1, True
+                )
+                sb_right = [
+                    _stage_load_sb(stage, half_n // 2 + sn)
+                    for sn in range_constexpr(half_n // 2)
+                ]
+                _mma_block_range(
+                    half_m, 0, a_bottom, b_left, sa_k, sb_left, 1, 1, True
+                )
+                b_right_0 = _rmem(8, _stage_load_b(stage, half_n + 0))
+                b_right_1 = _rmem(8, _stage_load_b(stage, half_n + 1))
+                _mma_block_range(
+                    half_m, 0, a_bottom, b_left, sa_k, sb_left, 2, 1, True
+                )
+                b_right_2 = _rmem(8, _stage_load_b(stage, half_n + 2))
+                b_right_3 = _rmem(8, _stage_load_b(stage, half_n + 3))
+                b_right = [b_right_0, b_right_1, b_right_2, b_right_3]
+                sb_k = sb_left + sb_right
+
+                rocdl.sched_mfma(1)
+                rocdl.sched_dsrd(2)
+                for _ in range_constexpr(2):
+                    rocdl.sched_mfma(1)
+                    rocdl.sched_dsrd(4)
+                rocdl.sched_barrier(0)
+                _mma_block_range(
+                    half_m, 0, a_bottom, b_left, sa_k, sb_k, 3, 5, True
+                )
+                rocdl.sched_barrier(0)
+                rocdl.s_wait_dscnt(10)
+                rocdl.sched_barrier(0)
+                _mma_block_range(
+                    half_m, 0, a_bottom, b_left, sa_k, sb_k, 8, 5, True
+                )
+
+                # Signal READY before W13 and wait after W15.
+                pipeline_fence_signal(
+                    outstanding=fence_outstanding, use_cluster=False
+                )
+                rocdl.sched_barrier(0)
+                _mma_block_range(
+                    half_m, 0, a_bottom, b_left, sa_k, sb_k, 13, 3, True
+                )
+                rocdl.sched_barrier(0)
+                pipeline_fence_wait(use_cluster=False)
+                rocdl.s_wait_dscnt(0)
+                rocdl.sched_barrier(0)
+                rocdl.sched_barrier(0)
+
+                # q01: produce next B and issue TDM after five WMMAs.
+                prepared_refill_desc = _prepare_tdm(future_slot, future_kt)
+                _mma_block_range(
+                    0, half_n, a_top, b_right, sa_k, sb_k, 0, 1, True
+                )
+                _load_seed_b_scales(next_stage, next_bank)
+                _mma_block_range(
+                    0, half_n, a_top, b_right, sa_k, sb_k, 1, 1, True
+                )
+                _load_seed_b_fragment(next_stage, next_bank, 0)
+                _load_seed_b_fragment(next_stage, next_bank, 1)
+                _mma_block_range(
+                    0, half_n, a_top, b_right, sa_k, sb_k, 2, 1, True
+                )
+                _load_seed_b_fragment(next_stage, next_bank, 2)
+                _load_seed_b_fragment(next_stage, next_bank, 3)
+                _mma_block_range(
+                    0, half_n, a_top, b_right, sa_k, sb_k, 3, 2, True
+                )
+                rocdl.sched_mfma(1)
+                rocdl.sched_dsrd(2)
+                for _ in range_constexpr(2):
+                    rocdl.sched_mfma(1)
+                    rocdl.sched_dsrd(4)
+                rocdl.sched_mfma(2)
+                rocdl.sched_barrier(0)
+                tdm_ops.tensor_load_2d(prepared_refill_desc)
+                _mma_block_range(
+                    0, half_n, a_top, b_right, sa_k, sb_k, 5, 2, True
+                )
+                _mma_block_range(
+                    0, half_n, a_top, b_right, sa_k, sb_k, 7, 9, True
+                )
+
+                # q11: leave the next A tail in flight.
+                _mma_block_range(
+                    half_m,
+                    half_n,
+                    a_bottom,
+                    b_right,
+                    sa_k,
+                    sb_k,
+                    0,
+                    1,
+                    True,
+                )
+                _load_seed_a_scales(next_stage, next_bank)
+                for pos in range_constexpr(1, 5):
+                    _mma_block_range(
+                        half_m,
+                        half_n,
+                        a_bottom,
+                        b_right,
+                        sa_k,
+                        sb_k,
+                        pos,
+                        1,
+                        True,
+                    )
+                    _load_seed_a_fragment(next_stage, next_bank, pos - 1)
+                rocdl.sched_mfma(1)
+                rocdl.sched_dsrd(1)
+                for _ in range_constexpr(4):
+                    rocdl.sched_mfma(1)
+                    rocdl.sched_dsrd(4)
+                rocdl.sched_barrier(0)
+                _mma_block_range(
+                    half_m,
+                    half_n,
+                    a_bottom,
+                    b_right,
+                    sa_k,
+                    sb_k,
+                    5,
+                    11,
+                    True,
+                )
+                return
+
+            if const_expr(has_next):
+                rocdl.s_wait_dscnt(9)
+                _mma_block_range(
+                    half_m, 0, a_bottom, b_left, sa_k, sb_k, 0, 13
+                )
+                pipeline_fence_signal(
+                    outstanding=fence_outstanding, use_cluster=False
+                )
+                rocdl.sched_barrier(0)
+                _mma_block_range(
+                    half_m, 0, a_bottom, b_left, sa_k, sb_k, 13, 3
+                )
+                pipeline_fence_wait(use_cluster=False)
+                rocdl.s_wait_dscnt(0)
+                rocdl.sched_barrier(0)
+                _load_seed_a(next_stage, next_bank)
+                _load_seed_b(next_stage, next_bank)
+            else:
+                rocdl.s_wait_dscnt(0)
+                _mma_block(half_m, 0, a_bottom, b_left, sa_k, sb_k)
+
+            _mma_block(0, half_n, a_top, b_right, sa_k, sb_k)
+            _mma_block(
+                half_m, half_n, a_bottom, b_right, sa_k, sb_k
+            )
+
+        # Keep all four slots in flight and statically expand one revolution.
+        for i in range_constexpr(num_buffers):
+            tdm_ops.tensor_load_2d(_prepare_tdm(i, i))
+        pipeline_fence(outstanding=num_buffers - 1, use_cluster=False)
+        _load_seed_a(0, 0)
+        _load_seed_b(0, 0)
+        rocdl.s_wait_dscnt(0)
+
+        n_steady = K_TILES - num_buffers
+
+        def _run_steady(owner_parity):
+            for rev in range(n_steady // num_buffers):
+                for s in range_constexpr(num_buffers):
+                    kt = rev * num_buffers + s
+                    if const_expr(owner_parity == 0):
+                        _compute_even_stage(
+                            s,
+                            (s + 1) % num_buffers,
+                            s % 2,
+                            (s + 1) % 2,
+                            s,
+                            kt + num_buffers,
+                            num_buffers - 2,
+                        )
+                    else:
+                        _compute_stage(
+                            s,
+                            (s + 1) % num_buffers,
+                            s % 2,
+                            (s + 1) % 2,
+                            s,
+                            kt + num_buffers,
+                            num_buffers - 2,
+                            True,
+                            True,
+                        )
+                if rev % cluster_sync_revs == cluster_sync_revs - 1:
+                    cluster.cluster_barrier()
+
+        wave_parity = fx.Int32(
+            llvm_dialect.inline_asm(
+                T.i32,
+                [as_ir_value(rocdl.wave_id())],
+                "s_and_b32 $0, $1, 1",
+                "=s,s,~{scc}",
+                has_side_effects=True,
+            )
+        )
+        if wave_parity == 0:
+            _run_steady(0)
+        else:
+            _run_steady(1)
+
+        # Retire the last steady producer before the shared drain.
+        rocdl.s_wait_dscnt(0)
+        rocdl.sched_barrier(0)
+        for j in range_constexpr(num_buffers):
+            _compute_stage(
+                j,
+                (j + 1) % num_buffers,
+                j % 2,
+                (j + 1) % 2,
+                j,
+                None,
+                num_buffers - 2 - j,
+                j < num_buffers - 1,
+            )
         accs = [c_frags[idx].load().ir_value() for idx in range_constexpr(n_acc)]
 
-        pipeline_fence(outstanding=0, use_cluster=use_cluster)
+        pipeline_fence(outstanding=0, use_cluster=True)
         oc = fx.Float16 if out_is_f16 else fx.BFloat16
         for wm in range_constexpr(wmma_m_rep):
             row_rel = wmb + wm * 16 + lane16
@@ -339,16 +937,14 @@ def launch_gemm_a8w4_mxscale(
             [mn_oob, None],
             strides=[ldc64, None],
             num_warps=num_waves,
-            early_timeout=False,
         )
         fx.copy(atomC, _lv(fx.recast_iter(oc, base_ptr), (tile_m, tile_n), (tile_n, 1)), gtC)
         tdm_ops.tensor_wait(0)
 
     gx = (i32_m + (tile_m - 1)) // tile_m
     gy = (N + (tile_n - 1)) // tile_n
-    if use_cluster:
-        gx = ((gx + (cluster_m - 1)) // cluster_m) * cluster_m
-    cluster_arg = (cluster_m, cluster_n, 1) if use_cluster else None
+    # Runtime N/K shape checks belong to the caller.
+    cluster_arg = (cluster_m, cluster_n, 1)
     kernel_gemm_a8w4_mxscale(
         arg_c,
         arg_a,
@@ -360,7 +956,7 @@ def launch_gemm_a8w4_mxscale(
         K,
         i32_lda,
         i32_ldc,
-        value_attrs={"rocdl.cluster_dims": f"{cluster_m},{cluster_n},1" if use_cluster else None},
+        value_attrs={"rocdl.cluster_dims": f"{cluster_m},{cluster_n},1"},
     ).launch(grid=(gx, gy, 1), block=(block, 1, 1), stream=stream, cluster=cluster_arg)
 
 
