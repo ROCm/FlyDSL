@@ -88,6 +88,7 @@ def get_pa_metadata(
             num_kv_heads=num_kv_heads,
             head_dim=head_size,
             block_size=key_cache.shape[-2],
+            device_tensor=query,
         )
     if grid_multiplier is None:
         grid_multiplier = 1

@@ -1022,6 +1022,7 @@ class FlashAttnGenericTraits:
     K_VEC_N_STRIDE: int
     K_VEC_HI_N_OFFSET: int
     QK_PREFETCH_DEPTH: int
+    RETURN_LSE: bool = False
 
     @property
     def cache_tag(self):
@@ -1107,6 +1108,7 @@ class FlashAttnGenericTraits:
             self.K_VEC_N_STRIDE,
             self.K_VEC_HI_N_OFFSET,
             self.QK_PREFETCH_DEPTH,
+            self.RETURN_LSE,
         )
 
 
@@ -1130,6 +1132,7 @@ def _make_flash_attn_generic_traits(
     unsafe_fp_math=True,
     sm_scale=None,
     skip_kv_pad_mask=None,
+    return_lse=False,
 ):
     """Build compile-time traits for ``flash_attn_generic``."""
     block_n = 64
@@ -1354,6 +1357,7 @@ def _make_flash_attn_generic_traits(
         K_VEC_N_STRIDE=k_vec_n_stride,
         K_VEC_HI_N_OFFSET=k_vec_hi_n_offset,
         QK_PREFETCH_DEPTH=qk_prefetch_depth,
+        RETURN_LSE=bool(return_lse),
     )
 
 
@@ -1437,6 +1441,7 @@ class DualwaveSwpTraits:
     LDS_SCOPE_NAMES: tuple[str, str, str, str]
     NEG_INF_F32_BITS: int
     LGKMCNT_0_ONLY: int
+    RETURN_LSE: bool = False
 
     @property
     def cache_tag(self):
@@ -1459,6 +1464,7 @@ class DualwaveSwpTraits:
             self.CROSS_SEQLEN,
             self.KV_CACHE_LAYOUT,
             self.KV_VECTORIZED,
+            self.RETURN_LSE,
         )
 
 
@@ -1480,6 +1486,7 @@ def _make_dualwave_swp_traits(
     paged=False,
     kv_cache_layout="linear",
     kv_vectorized=None,
+    return_lse=False,
 ):
     """Build gfx950 DUALWAVE_SWP compile-time layout traits."""
     # Tile shape and wave geometry follow the gfx950 dual-wave 8-wave CTA.
@@ -1629,6 +1636,7 @@ def _make_dualwave_swp_traits(
         LDS_SCOPE_NAMES=("lds_k0", "lds_k1", "lds_v0", "lds_v1"),
         NEG_INF_F32_BITS=0xFF800000,
         LGKMCNT_0_ONLY=0xC07F,
+        RETURN_LSE=bool(return_lse),
     )
 
 
@@ -1971,6 +1979,7 @@ class GenericFlashAttnContext:
         self.c_neg_floor = fx.Float32(-3.0e38)
         self.c_zero_f = fx.Float32(0.0)
         self.c_zero_i32 = fx.Int32(0)
+        self.c_sm_scale = fx.Float32(sm_scale)
         self.c_sm_scale_log2e = fx.Float32(sm_scale * _LOG2E)
         self.c_zero_v16f32 = Vec.filled(16, 0.0, fx.Float32)
         self.width_i32 = fx.Int32(traits.WARP_SIZE)
@@ -2004,7 +2013,7 @@ class GenericFlashAttnContext:
             self.k_ptr = buffer_ops.get_element_ptr(self.k_ptr, off, elem_type=self.elem_type)
             self.v_ptr = buffer_ops.get_element_ptr(self.v_ptr, off, elem_type=self.elem_type)
 
-    def init_descriptors(self, Q, O):  # noqa: E741
+    def init_descriptors(self, Q, O, LSE=None):  # noqa: E741
         # Per-batch descriptors keep global indices 0-based and bounded to one batch,
         # keeping 32-bit offsets small while preserving arbitrary-seqlen OOB behavior.
         traits = self.traits
@@ -2018,6 +2027,16 @@ class GenericFlashAttnContext:
         self.o_rsrc = buffer_ops.create_buffer_resource(
             O, max_size=False, num_records_bytes=q_nrec_bytes, base_byte_offset=q_batch_byte_off
         )
+        # LSE output: fp32 [batch, num_heads, seq_len], per-batch descriptor.
+        if const_expr(traits.RETURN_LSE):
+            self.lse_per_batch_elems = fx.Index(traits.NUM_HEADS_Q) * self.seq_len_v
+            # OOB sentinel (== num records) the buffer bound drops; predicates the store.
+            self.lse_oob_off = self.lse_per_batch_elems
+            _lse_nrec_bytes = as_mlir_value(self.lse_per_batch_elems * fx.Index(4))
+            _lse_batch_byte_off = as_mlir_value(self.batch_idx * self.lse_per_batch_elems * fx.Index(4))
+            self.lse_rsrc = buffer_ops.create_buffer_resource(
+                LSE, max_size=False, num_records_bytes=_lse_nrec_bytes, base_byte_offset=_lse_batch_byte_off
+            )
 
     def init_q_row(self):
         # B operand: j = lane_mod_32, k-subblock = lane_div_32*MFMA_LANE_K. Q is
@@ -2975,6 +2994,22 @@ class GenericStoreHelper:
                     o_global = ctx.global_idx_q(q_row, d_col)
                     buffer_ops.buffer_store(zero_pack, o_rsrc, o_global * fx.Index(2), offset_is_bytes=True)
 
+    def store_lse(self, m_final, l_final, q_row):
+        # LSE = sm_scale * m_raw + ln(l); natural log, softmax scale folded in
+        # (fully-masked row has l == 0 -> -inf).
+        ctx = self.ctx
+        lse_val = _fadd(
+            _fmul(m_final, ctx.c_sm_scale, ctx.fm_fast),
+            fmath.log(as_mlir_value(l_final), fastmath=ctx.fm_fast),
+            ctx.fm_fast,
+        )
+        lse_local = ctx.q_head_idx * ctx.seq_len_v + q_row
+        # One writer per row: low half-wave + in-bounds q_row; else redirect to the
+        # dropped OOB sentinel.
+        off_row = (q_row < ctx.seqlen_q_b).select(lse_local, ctx.lse_oob_off)
+        off = fx.Index((ctx.lane_div_32 == fx.Index(0)).select(off_row, ctx.lse_oob_off))
+        buffer_ops.buffer_store(as_mlir_value(fx.Float32(lse_val)), ctx.lse_rsrc, as_mlir_value(fx.Int32(off)))
+
     def finalize_o(self, loop_results):
         # Normalize and store O (128-bit buffer_store_dwordx4); cross-seqlen zeroes
         # fully-masked q-blocks (causal_end_raw <= 0) instead of dividing by l==0.
@@ -2986,6 +3021,9 @@ class GenericStoreHelper:
             def _store_cross_o():
                 if ctx.causal_end_raw_i32 <= ctx.c_zero_i32:
                     self.zero_o_block(ctx.o_rsrc, ctx.q_row)
+                    if const_expr(traits.RETURN_LSE):
+                        # No valid keys for this q-tile: LSE = ln(0) = -inf per row.
+                        self.store_lse(loop_results[0], loop_results[1], ctx.q_row)
                 else:
                     self.normalize_and_store_o(loop_results, ctx.o_rsrc, ctx.q_row)
 
@@ -2998,6 +3036,9 @@ class GenericStoreHelper:
         traits = ctx.traits
         l_final = loop_results[1]
         o_finals = [loop_results[2 + dc] for dc in range_constexpr(traits.D_CHUNKS)]
+
+        if const_expr(traits.RETURN_LSE):
+            self.store_lse(loop_results[0], l_final, q_row)
 
         inv_l_rcp = rocdl.rcp(T.f32, l_final)
         if const_expr(traits.CAUSAL):
@@ -3083,6 +3124,7 @@ class DualwaveKernelContext:
         stride_kv_n=None,
         head_dim_runtime=None,
         block_table_stride=None,
+        LSE=None,
     ):
         if isinstance(traits_or_ctx, DualwaveKernelContext):
             self.__dict__.update(traits_or_ctx.__dict__)
@@ -3095,6 +3137,7 @@ class DualwaveKernelContext:
         self.K = K
         self.V = V
         self.O = O
+        self.LSE = LSE
         self.DebugCounts = DebugCounts
         self.CuSeqQ = CuSeqQ
         self.CuSeqKv = CuSeqKv
@@ -3126,6 +3169,8 @@ class DualwaveKernelContext:
         self.c_zero_v16f32 = Vec.filled(16, 0.0, fx.Float32)
         head_dim_f32 = fx.Float32(fx.Int32(head_dim_runtime))
         c_log2e_f = fx.Float32(_LOG2E)
+        # LSE store folds the log2->ln conversion (m_row is sm_scale*log2e-scaled).
+        self.c_ln2_f = fx.Float32(1.0 / _LOG2E)
         self.c_sm_scale_log2e = fx.Float32(
             arith.mulf(
                 as_mlir_value(fmath.rsqrt(head_dim_f32, fastmath=self.fm_fast)),
@@ -4112,8 +4157,29 @@ class DualwaveStoreHelper(DualwaveKernelContext):
 
         _store_empty_split()
 
-    def store_final_o(self, v_o, q_row):
+    def _store_lse_row(self, m_row, l_row, q_row):
+        # LSE = m_row * ln2 + ln(l_row); natural log, scale folded (m_row is
+        # sm_scale*log2e-scaled). Fully-masked row has l_row == 0 -> -inf.
+        traits = self.traits
+        lse_base_i64 = fx.Int64(fx.ptrtoint(fx.get_iter(self.LSE)))
+        lse_per_batch_elems = fx.Index(traits.NUM_HEADS_Q) * self.seq_len_v
+        lse_per_batch_bytes = lse_per_batch_elems * fx.Index(4)
+        lse_rsrc = _make_ws_rsrc(lse_base_i64, self.batch_idx * lse_per_batch_bytes, lse_per_batch_bytes)
+        lse_val = _fadd(
+            _fmul(m_row, self.c_ln2_f, self.fm_fast),
+            fmath.log(as_mlir_value(l_row), fastmath=self.fm_fast),
+            self.fm_fast,
+        )
+        lse_local = self.q_head_idx * self.seq_len_v + q_row
+        # One writer per row: low half-wave + in-bounds q_row; else the dropped OOB sentinel.
+        lse_off_row = (q_row < self.seqlen_q_v).select(lse_local, lse_per_batch_elems)
+        lse_off = fx.Index((self.lane < fx.Index(32)).select(lse_off_row, lse_per_batch_elems))
+        _ws_store_f32(lse_val, lse_off, lse_rsrc)
+
+    def store_final_o(self, v_o, q_row, m_row=None, l_row=None):
         self._store_final_o_row(v_o, q_row)
+        if const_expr(self.traits.RETURN_LSE):
+            self._store_lse_row(m_row, l_row, q_row)
 
     def store_splitk_partial_o(self, v_o, m_row, l_row, q_row):
         _opart_rsrc, _mrow_rsrc, _lrow_rsrc = self._splitk_workspace_resources()
@@ -4874,6 +4940,7 @@ class DualwaveSplitKCombineContext:
         batch_size=None,
         seq_len=None,
         stride_q_n=None,
+        LSE=None,
     ):
         if isinstance(traits_or_ctx, DualwaveSplitKCombineContext):
             self.__dict__.update(traits_or_ctx.__dict__)
@@ -4884,6 +4951,7 @@ class DualwaveSplitKCombineContext:
         self.traits = traits_or_ctx
         self.O = O
         self.WS = WS
+        self.LSE = LSE
         self.batch_size = batch_size
         self.seq_len = seq_len
         self.stride_q_n = stride_q_n
@@ -4893,6 +4961,8 @@ class DualwaveSplitKCombineContext:
         self.fm_fast = fx.arith.FastMathFlags.fast
         self.c_zero_f = fx.Float32(0.0)
         self.c_zero_v4f32 = Vec.filled(4, 0.0, fx.Float32)
+        # LSE store folds the log2->ln conversion (m_max is sm_scale*log2e-scaled).
+        self.c_ln2_f = fx.Float32(1.0 / _LOG2E)
 
     def init_runtime_indices(self):
         self.seq_len_v = fx.Index(self.seq_len)
@@ -5034,6 +5104,21 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
             pack = Vec.from_elements(o_f16, self.elem_dtype).bitcast(fx.Int32)
             lo, hi = as_mlir_value(pack[0]), as_mlir_value(pack[1])
         return Vec.from_elements([fx.Int32(lo), fx.Int32(hi)], fx.Int32)
+
+    def store_lse(self, m_max, den):
+        # Combined LSE = m_max * ln2 + ln(den); den = sum_s 2^(m_s - m_max) * l_s
+        # completes the natural-log, scale-folded LSE. One lane (col == 0) writes.
+        lse_base_i64 = fx.Int64(fx.ptrtoint(fx.get_iter(self.LSE)))
+        lse_per_batch_elems = fx.Index(self.traits.NUM_HEADS_Q) * self.seq_len_v
+        lse_per_batch_bytes = lse_per_batch_elems * fx.Index(4)
+        lse_rsrc = _make_ws_rsrc(lse_base_i64, self.batch_idx * lse_per_batch_bytes, lse_per_batch_bytes)
+        lse_val = _fadd(
+            _fmul(m_max, self.c_ln2_f, self.fm_fast),
+            fmath.log(as_mlir_value(den), fastmath=self.fm_fast),
+            self.fm_fast,
+        )
+        lse_off = fx.Index((self.col == fx.Index(0)).select(self.local_ml_idx, lse_per_batch_elems))
+        buffer_ops.buffer_store(as_mlir_value(fx.Float32(lse_val)), lse_rsrc, as_mlir_value(fx.Int32(lse_off)))
 
     def store_output(self, o_pack):
         o_global = self.seq_idx * self.stride_q_n_v + self.q_head_idx * self.traits.HEAD_DIM + self.col

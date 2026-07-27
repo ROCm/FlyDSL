@@ -4,13 +4,15 @@
 """Runtime lookup and offline tuning for PA metadata grid multipliers.
 
 Run a fresh search with:
-  FLYDSL_AUTOTUNE=1 python3 -m kernels.attention.pa_metadata_tuning \
+  FLYDSL_AUTOTUNE=1 FLYDSL_AUTOTUNE_CONFIG_DIR=/path/to/configs \
+    python3 -m kernels.attention.pa_metadata_tuning \
     --shape 81,8192,4,per_token
 """
 
 from __future__ import annotations
 
 import argparse
+import inspect
 import statistics
 from collections.abc import Callable, Iterable
 
@@ -39,9 +41,11 @@ def run_pa_metadata_grid_config(
     num_kv_heads,
     head_dim,
     block_size,
+    device_tensor,
     runner,
     grid_multiplier,
 ):
+    del device_tensor
     if runner is None:
         raise RuntimeError("runner is required when benchmarking a grid config")
     return runner(grid_multiplier)
@@ -54,13 +58,18 @@ def make_pa_metadata_grid_autotuner(
     rep: int = 3,
     do_bench: Callable | None = None,
 ) -> Autotuner:
+    kwargs = {
+        "fn": run_pa_metadata_grid_config,
+        "configs": [Config(grid_multiplier=int(candidate)) for candidate in candidates],
+        "key": PA_METADATA_GRID_KEY,
+        "warmup": warmup,
+        "rep": rep,
+        "do_bench_fn": do_bench,
+    }
+    if "artifact_name" in inspect.signature(Autotuner).parameters:
+        kwargs["artifact_name"] = "pa_metadata_grid"
     return Autotuner(
-        fn=run_pa_metadata_grid_config,
-        configs=[Config(grid_multiplier=int(candidate)) for candidate in candidates],
-        key=PA_METADATA_GRID_KEY,
-        warmup=warmup,
-        rep=rep,
-        do_bench_fn=do_bench,
+        **kwargs,
     )
 
 
@@ -78,6 +87,7 @@ def lookup_pa_metadata_grid_multiplier(
     num_kv_heads: int,
     head_dim: int,
     block_size: int,
+    device_tensor,
 ) -> int | None:
     args = (
         batch_size,
@@ -89,6 +99,7 @@ def lookup_pa_metadata_grid_multiplier(
         num_kv_heads,
         head_dim,
         block_size,
+        device_tensor,
         None,
     )
     get_cached_config = getattr(_RUNTIME_TUNER, "get_cached_config", None)
@@ -249,6 +260,7 @@ def _tune_shape(
         num_kv_heads,
         head_dim,
         block_size,
+        query,
         replay_grid,
     )
     tuner(*tuner_args)
@@ -267,7 +279,9 @@ def _tune_shape(
         rtol=2e-2,
     ):
         raise RuntimeError(f"grid_multiplier={best_grid} failed correctness")
-    return best_grid, timings_us.get(best_grid), tuner.cache_file
+    persistent_config_path = getattr(tuner, "persistent_config_path", None)
+    config_path = persistent_config_path(*tuner_args) if persistent_config_path is not None else tuner._cache_file
+    return best_grid, timings_us.get(best_grid), config_path
 
 
 def main() -> None:
@@ -291,10 +305,10 @@ def main() -> None:
 
     torch.cuda.set_device(args.device)
     device = torch.device("cuda", args.device)
-    cache_file = None
+    config_path = None
 
     for batch_size, context_length, query_length, per_token_kv in args.shape:
-        best_grid, best_latency, cache_file = _tune_shape(
+        best_grid, best_latency, config_path = _tune_shape(
             batch_size=batch_size,
             context_length=context_length,
             query_length=query_length,
@@ -315,7 +329,7 @@ def main() -> None:
             print(f"  winner: grid={best_grid}, {best_latency:.3f} us")
         torch.cuda.empty_cache()
 
-    print(f"Autotune cache: {cache_file}")
+    print(f"Autotune config: {config_path}")
 
 
 if __name__ == "__main__":

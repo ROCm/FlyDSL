@@ -21,8 +21,7 @@ MoE (Mixture-of-Experts) Kernels
 - ``kernels.moe.moe_gemm_2stage`` -- MoE GEMM with 2-stage pipeline (stage1 + stage2). Also
   provides the MoE reduction (sum over the topk dimension, ``Y[t, d] = sum(X[t, :, d])``),
   compiled via ``compile_moe_reduction()``.
-- ``kernels.moe.mixed_moe_gemm_2stage`` -- Mixed-precision MoE GEMM
-- ``kernels.moe.moe_blockscale_2stage`` -- MoE with block-scale quantization (MXFP4)
+- ``kernels.moe.mxfp_moe`` -- Fused a4w4 / a8w4 MoE 2-stage GEMM (device-side fp4 re-quant)
 
 Paged Attention
 ----------------

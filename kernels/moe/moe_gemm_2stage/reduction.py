@@ -1,7 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""MoE stage2 reduction kernel builder."""
+"""MoE stage2 reduction kernel builder.
+
+Legacy authoring API (SmemAllocator/SmemPtr + raw buffer_ops); slated for
+deprecation -- refactor to the current fx.* surface. See kernels/moe/mxfp_moe and
+the kernel-code-cleanup skill.
+"""
 
 import functools
 

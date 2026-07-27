@@ -17,6 +17,7 @@ def _lookup(**overrides):
         "num_kv_heads": 1,
         "head_dim": 128,
         "block_size": 1024,
+        "device_tensor": None,
     }
     kwargs.update(overrides)
     return tuning.lookup_pa_metadata_grid_multiplier(**kwargs)
@@ -41,12 +42,13 @@ def test_pa_metadata_tuner_persists_and_runtime_reads(tmp_path, monkeypatch):
         rep=1,
         do_bench=bench,
     )
-    tuner_args = (81, 648, 4, True, 80, 16, 1, 128, 1024, runner)
+    tuner_args = (81, 648, 4, True, 80, 16, 1, 128, 1024, None, runner)
     tuner(*tuner_args)
 
     assert tuner.get_cached_config(*tuner_args).kwargs["grid_multiplier"] == 2
-    assert tuner.cache_file == tmp_path / "run_pa_metadata_grid_config.json"
-    assert tuner.cache_file.is_file()
+    config_path = tuner.persistent_config_path(*tuner_args)
+    assert config_path == tmp_path / "run_pa_metadata_grid_config.json"
+    assert config_path.is_file()
 
     importlib.reload(tuning)
     assert _lookup() == 2
