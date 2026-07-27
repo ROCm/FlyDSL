@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-27T16:13:27Z",
+ "updated": "2026-07-27T16:15:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "main",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add 8 wave GQA sliding-window attention kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30283576180",
    "created_at": "2026-07-27T16:11:27Z",
-   "updated_at": "2026-07-27T16:12:17Z",
+   "updated_at": "2026-07-27T16:12:24Z",
    "actor": "amd-nprotaso",
    "jobs": []
   },
