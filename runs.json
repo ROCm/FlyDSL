@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-27T15:08:20Z",
+ "updated": "2026-07-27T15:10:03Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30278396093,
+   "pr": null,
+   "commit": "05d785e5e672ba87bc43e14f91fc6860be462d01",
+   "branch": "main",
+   "event": "push",
+   "title": "[perf]optimize flash attention fp8 for gfx950 (#905)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278396093",
+   "created_at": "2026-07-27T15:06:44Z",
+   "updated_at": "2026-07-27T15:07:46Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 30278291932,
    "pr": null,
@@ -10,13 +25,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Doc] document fast-math flags in the arithmetic_types (#911)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278291932",
    "created_at": "2026-07-27T15:05:29Z",
-   "updated_at": "2026-07-27T15:05:43Z",
+   "updated_at": "2026-07-27T15:06:40Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-27T15:06:28Z",
+     "completed_at": "2026-07-27T15:06:30Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278291932/job/90018097452"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-27T15:06:37Z",
+     "completed_at": "2026-07-27T15:06:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278291932/job/90018097489"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-27T15:06:28Z",
+     "completed_at": "2026-07-27T15:06:30Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278291932/job/90018097688"
+    }
+   ]
   },
   {
    "run_id": 30278250653,
@@ -29,7 +72,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278250653",
    "created_at": "2026-07-27T15:05:01Z",
-   "updated_at": "2026-07-27T15:05:43Z",
+   "updated_at": "2026-07-27T15:07:16Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -2089,49 +2132,6 @@
      "started_at": "2026-07-24T10:37:49Z",
      "completed_at": "2026-07-24T10:38:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30086641137/job/89460760374"
-    }
-   ]
-  },
-  {
-   "run_id": 30085793803,
-   "pr": 874,
-   "commit": "f8b16452d3a5082a5212aef4a03b3204b066d3f0",
-   "branch": "xudoyuan/dyn-cf-list-carry",
-   "event": "pull_request",
-   "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30085793803",
-   "created_at": "2026-07-24T10:20:01Z",
-   "updated_at": "2026-07-24T10:34:46Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T10:26:25Z",
-     "completed_at": "2026-07-24T10:34:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30085793803/job/89458740799"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T10:27:52Z",
-     "completed_at": "2026-07-24T10:29:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30085793803/job/89458740844"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T10:27:09Z",
-     "completed_at": "2026-07-24T10:34:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30085793803/job/89458740864"
     }
    ]
   }
