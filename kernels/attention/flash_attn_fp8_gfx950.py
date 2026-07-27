@@ -113,8 +113,6 @@ def build_flash_attn_dualwave_swp_fp8_module(
     class SharedStorage:
         kv: fx.Array[_lds_elem_dtype, traits.LDS_KV_TOTAL_SIZE, 16]
         vt: fx.Array[fx.BFloat16, traits.VT_BF16_TOTAL, 16]
-        # Q tile (BLOCK_M x HEAD_DIM fp8, row-major). Staged once at prologue so QK
-        # reads Q from LDS instead of pinning ~16 VGPR/lane live across the whole loop.
         q: fx.Array[_lds_elem_dtype, BLOCK_M * HEAD_DIM, 16]
 
     @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1])
@@ -187,16 +185,14 @@ def build_flash_attn_dualwave_swp_fp8_module(
         else:
             _split_guard = contextlib.nullcontext()
         with _split_guard:
-            # Prologue: load K tile split_t0 -> LDS buf0 and stage the whole Q tile to
-            # LDS (once), then wait and sync the workgroup so Q is visible to all waves.
+            # Prologue: load K tile split_t0 -> LDS buf0, stage Q to LDS, wait, and sync.
             kv_gmem_to_lds.load_k(ctx.split_t0 * traits.BLOCK_N, 0)
             q_loader.stage_q_to_lds()
             rocdl.s_waitcnt(0)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
 
-            # Q is read from LDS inside qk() (short-lived registers). init_q_row sets
-            # q_row/q_row_i32/q_start_pos_i32 on ctx for the causal-mask helpers.
+            # init_q_row sets q_row/q_row_i32/q_start_pos_i32 on ctx for the causal-mask helpers.
             ctx.init_q_row()
             q_row = ctx.q_row
 
@@ -289,9 +285,6 @@ def build_flash_attn_dualwave_swp_fp8_module(
                 l_row = softmax_helper.reduce_sum(l_row, v_p_0)
                 v_p_0 = softmax_helper.cast_p(v_p_0)
                 v_p_0 = softmax_helper.anchor_v_p(v_p_0)
-                # QK cluster has only 4 wide fp8 MFMA (HEAD_DIM//64 * {lo,hi}); request
-                # 4 MFMA groups (not 16) so the scheduler packs VALU behind the real
-                # MFMAs instead of leaving gaps for non-existent ones.
                 _sched_barrier_exp_pairs(traits, 2, 9, 1)
                 _sched_barrier_pairs(traits, 2, 25, 1)
                 rocdl.sched_barrier(0)
@@ -365,7 +358,6 @@ def build_flash_attn_dualwave_swp_fp8_module(
                 l_row = softmax_helper.reduce_sum(l_row, v_p_1)
                 v_p_1 = softmax_helper.cast_p(v_p_1)
                 v_p_1 = softmax_helper.anchor_v_p(v_p_1)
-                # Mirror of C1: 4 QK MFMA, pack VALU behind them (see C1).
                 _sched_barrier_exp_pairs(traits, 2, 9, 3)
                 _sched_barrier_pairs(traits, 2, 25, 3)
                 rocdl.sched_barrier(0)
@@ -448,8 +440,6 @@ def build_flash_attn_dualwave_swp_fp8_module(
             l_row = softmax_helper.reduce_sum(l_row, v_p_0)
             v_p_0 = softmax_helper.cast_p(v_p_0)
             v_p_0 = softmax_helper.anchor_v_p(v_p_0)
-            # QK epilogue cluster: only 4 wide fp8 MFMA (see main-loop C1). Request
-            # 4 MFMA groups, not 16, so softmax VALU packs behind the real MFMAs.
             _sched_barrier_exp_pairs(traits, 2, 9, 5)
             _sched_barrier_pairs(traits, 2, 25, 5)
             rocdl.sched_barrier(0)
@@ -511,7 +501,6 @@ def build_flash_attn_dualwave_swp_fp8_module(
             l_row = softmax_helper.reduce_sum(l_row, v_p_1)
             v_p_1 = softmax_helper.cast_p(v_p_1)
             v_p_1 = softmax_helper.anchor_v_p(v_p_1)
-            # QK epilogue cluster: 4 MFMA (see main-loop C1).
             _sched_barrier_exp_pairs(traits, 2, 9, 7)
             _sched_barrier_pairs(traits, 2, 25, 7)
             rocdl.sched_barrier(0)
@@ -571,7 +560,6 @@ def build_flash_attn_dualwave_swp_fp8_module(
             l_row = softmax_helper.reduce_sum(l_row, v_p_0)
             v_p_0 = softmax_helper.cast_p(v_p_0)
             v_p_0 = softmax_helper.anchor_v_p(v_p_0)
-            # QK epilogue cluster: 4 MFMA (see main-loop C1).
             _sched_barrier_exp_pairs(traits, 2, 9, 9)
             _sched_barrier_pairs(traits, 2, 25, 9)
             rocdl.sched_barrier(0)
@@ -635,8 +623,6 @@ def build_flash_attn_dualwave_swp_fp8_module(
             # the 1/l normalization here.
             inv_l_rcp = rocdl.rcp(T.f32, _raw(l_row))
             inv_l = ArithValue(fx.Float32(l_row) > ctx.c_zero_f).select(inv_l_rcp, ctx.c_zero_f)
-            # FP8_PV stores raw fp8 V (no per-load dequant), so fold v_descale into the
-            # final 1/l normalization here (HIPREC bf16 path already folded it in LDS).
             if const_expr(traits.FP8_PV):
                 inv_l = ArithValue(inv_l) * ctx.vd_fp8
             softmax_helper.scale_o(v_o, inv_l)
@@ -659,19 +645,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
         if const_expr(SPLITK):
             output_store.store_empty_split()
 
-    # ======================================================================
-    # Stage-3 experimental: pure 2-phase (matrix-phase || vector-phase) kernel.
-    # Gated to dense non-causal self-attention (TWO_PHASE trait). Separate kernel
-    # so the proven 8-cluster kernel above stays byte-for-byte unchanged.
-    #
-    #   Phase M (pure matrix): PV(j-1) [16 MFMA] + QK(j) [4 MFMA], async prefetch.
-    #   Phase V (pure vector): full softmax of S_j (reduce_max, rescale, sub_m,
-    #                          exp2, reduce_sum, cast_p). The prefetch DMA issued
-    #                          in Phase M is waited at the END of Phase V so it
-    #                          completes behind the long softmax VALU stretch.
-    # With the wave-group stagger, group A's Phase M overlaps group B's Phase V,
-    # saturating both the matrix and vector pipelines. 2 barriers/tile (vs 4).
-    # ======================================================================
+    # 2-phase kernel (TWO_PHASE): matrix phase || vector phase with wave-group stagger.
     @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1])
     def flash_attn_dualwave_swp_fp8_2phase_kernel(
         Q: fx.Tensor,
@@ -733,7 +707,6 @@ def build_flash_attn_dualwave_swp_fp8_module(
         t_end = ctx.split_t_end
         NPF = const_expr(traits.NUM_PREFETCH_K)
 
-        # ---- Prologue: stage Q + K0/K1/V0, softmax(tile t0) -> P0 ----
         kv_gmem_to_lds.load_k(t0 * BN, 0)
         q_loader.stage_q_to_lds()
         rocdl.s_waitcnt(0)
@@ -770,7 +743,6 @@ def build_flash_attn_dualwave_swp_fp8_module(
         rocdl.s_barrier()
         rocdl.sched_barrier(0)
 
-        # ---- Loop: tiles t0+1 .. t_end-1. Each does PV(j-1) + QK(j) + softmax(j). ----
         p_carry = v_p if const_expr(traits.FP8_PV_DIRECT) else softmax_helper.v_p_to_vec32(v_p)
         init_args = [m_row, l_row] + v_o + [p_carry]
         loop_results = init_args
@@ -787,23 +759,17 @@ def build_flash_attn_dualwave_swp_fp8_module(
             buf_cur = j % fx.Index(2)
             buf_oth = (j + fx.Index(1)) % fx.Index(2)
 
-            # ---------- Phase M (pure matrix) ----------
-            # LDS reads must precede the prefetch DMA issue: the prefetch writes the
-            # double-buffered KV LDS regions, and issuing it first lets a fast wave's
-            # async gmem->LDS write land in a region a slow wave is still reading.
-            # Reads-first orders this per-wave with no extra barriers.
-            v_k = kv_lds_to_regs.load_k(buf_cur)  # K(j)
-            v_v = kv_lds_to_regs.load_v(buf_oth)  # V(j-1)
-            kv_gmem_to_lds.load_k((j + fx.Index(1)) * BN, buf_oth)  # prefetch K(j+1)
-            kv_gmem_to_lds.load_v(j * BN, buf_cur)  # prefetch V(j)
-            v_o = gemm_helper.pv(v_p, v_v, v_o)  # PV(j-1): 16 MFMA
+            v_k = kv_lds_to_regs.load_k(buf_cur)
+            v_v = kv_lds_to_regs.load_v(buf_oth)
+            kv_gmem_to_lds.load_k((j + fx.Index(1)) * BN, buf_oth)
+            kv_gmem_to_lds.load_v(j * BN, buf_cur)
+            v_o = gemm_helper.pv(v_p, v_v, v_o)
             v_o = softmax_helper.anchor_v_o(v_o)
-            v_s = gemm_helper.qk(v_k)  # QK(j): 4 MFMA
+            v_s = gemm_helper.qk(v_k)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-            # ---------- Phase V (pure vector) ----------
             v_s = softmax_helper.seq_pad_mask_if_needed(v_s, j)
             m_tile = softmax_helper.reduce_max(v_s)
             m_new, corr = softmax_helper.rescale_from_tile_max(m_row, m_tile)
@@ -820,8 +786,6 @@ def build_flash_attn_dualwave_swp_fp8_module(
                 v_p = softmax_helper.cast_p(v_p)
                 v_p = softmax_helper.anchor_v_p(v_p)
             m_row = m_new
-            # Deferred prefetch wait: the K(j+1)/V(j) DMA issued in Phase M lands
-            # behind this softmax stretch. wait + barrier publish it to all waves.
             rocdl.s_waitcnt(0)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
@@ -831,7 +795,6 @@ def build_flash_attn_dualwave_swp_fp8_module(
             yield_args = [m_row, l_row] + v_o + [p_carry]
             loop_results = yield yield_args
 
-        # ---- Epilogue: one PV pending (P for tile t_end-1). ----
         m_row = loop_results[0]
         l_row = loop_results[1]
         v_o = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
@@ -846,8 +809,6 @@ def build_flash_attn_dualwave_swp_fp8_module(
 
         inv_l_rcp = rocdl.rcp(T.f32, _raw(l_row))
         inv_l = ArithValue(fx.Float32(l_row) > ctx.c_zero_f).select(inv_l_rcp, ctx.c_zero_f)
-        # FP8_PV stores raw fp8 V (no per-load dequant), so fold v_descale into the
-        # final 1/l normalization here; the bf16 path already folded it in LDS.
         if const_expr(traits.FP8_PV):
             inv_l = ArithValue(inv_l) * ctx.vd_fp8
         softmax_helper.scale_o(v_o, inv_l)
@@ -857,15 +818,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
             rocdl.s_barrier()
         output_store.store_final_o(v_o, q_row)
 
-    # ======================================================================
-    # BN128: two BLOCK_N=64 KV tiles per loop iteration under one merged softmax
-    # correction -- mathematically a 128-key tile, reusing the 64-wide QK/PV/softmax
-    # register machinery. This halves the fixed per-tile overhead (scale_o over the
-    # whole O accumulator, the rescale/apply_l correction, barriers, loop
-    # bookkeeping). Non-pipelined: PV runs in-iteration with no P-carry. Requires an
-    # even tile count, which init_tile_bounds guarantees in both causal and
-    # non-causal modes.
-    # ======================================================================
+    # BN128: two BLOCK_N=64 KV tiles per iteration, one merged softmax correction.
     @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1])
     def flash_attn_dualwave_swp_fp8_bn128_kernel(
         Q: fx.Tensor,
@@ -930,17 +883,9 @@ def build_flash_attn_dualwave_swp_fp8_module(
         t_end = ctx.split_t_end
 
         def _subtile_tail(v_s, v_v, v_o, l_row, m_new):
-            # Finish softmax for one 64-key sub-tile at the merged max m_new, then
-            # accumulate its PV. reduce_sum folds into the shared l_row.
             v_s = softmax_helper.sub_m(v_s, m_new)
             v_p = softmax_helper.exp2(v_s, 0, 16)
             v_p = softmax_helper.exp2(v_p, 16, 16)
-            # Ask for the scale-sub FMAs as two blocks of 8 ahead of their 16 consuming
-            # v_exp_f32 instead of letting the scheduler interleave {1 fma, 2 exp}.
-            # Interleaved, the allocator reuses one destination pair for the whole
-            # block, serialising the region into an fma->exp->fma chain with an s_nop
-            # per pair for the VALU->trans hazard. Split 8/16 rather than 16/32 to cap
-            # the extra live range at 16 VGPRs -- the kernel sits at 230 of 256.
             for _ in range_constexpr(2):
                 rocdl.sched_group_barrier(traits.SCHED_VALU_MASK, 8, 13)
                 rocdl.sched_group_barrier(traits.SCHED_EXP_MASK, 16, 13)
@@ -950,9 +895,6 @@ def build_flash_attn_dualwave_swp_fp8_module(
             v_o = softmax_helper.anchor_v_o(v_o)
             return v_o, l_row
 
-        # Non-causal masks each sub-tile right after its own QK; causal masks the pair
-        # under one branch after both QKs and needs no pad mask at all (causal subsumes
-        # it). Exactly one of the two is live, so neither mode pays for the other.
         def _mask_sub(v_s, tile_idx):
             if const_expr(traits.CAUSAL):
                 return v_s
@@ -966,19 +908,9 @@ def build_flash_attn_dualwave_swp_fp8_module(
         def _merge_tile_max(v_s_a, v_s_b):
             m_tile = softmax_helper.max2(softmax_helper.reduce_max(v_s_a), softmax_helper.reduce_max(v_s_b))
             if const_expr(traits.CAUSAL):
-                # A row can be fully masked in the first pair (any row above the
-                # diagonal when seqlen_kv < seqlen_q). Its tile max is -inf, and with
-                # m_row still -inf the merged max stays -inf, so sub_m would compute
-                # -inf - -inf = NaN. Flooring to a finite sentinel makes exp2 return 0
-                # and lets the epilogue's `l > 0` select zero the row. From pair 1 on
-                # the running max is finite, so this only matters at the loop top.
                 m_tile = softmax_helper.floor_masked_max(m_tile)
             return m_tile
 
-        # The NPF=6 K-only ring lets us DMA two pairs ahead and issue the next pair's K
-        # LDS-reads during this iteration's softmax/PV, hiding the lgkmcnt stall that
-        # dominates the gap to aiter. QK must consume a FRESH read (short live range);
-        # carrying the prefetched K into QK instead serializes on the yield and spills.
         kv_gmem_to_lds.load_k(t0 * BN, t0 % fx.Index(NPF))
         q_loader.stage_q_to_lds()
         rocdl.s_waitcnt(0)
@@ -988,14 +920,8 @@ def build_flash_attn_dualwave_swp_fp8_module(
         ctx.init_q_row()
         q_row = ctx.q_row
 
-        # Read the Q operand packs once here (Q's LDS tile is final after the barrier
-        # above and never rewritten). Captured by the scf.for body as a loop-invariant
-        # value, not a yielded carry, so it costs 16 VGPRs of residency and no yield
-        # traffic, and removes 4 of the loop's 20 ds_read_b128.
         q_wide = gemm_helper.load_q_wide() if const_expr(traits.QREG) else None
 
-        # Prologue stages TWO pairs ({t0,t0+1} and {t0+2,t0+3}) so the 2-ahead DMA
-        # cadence is primed before the loop body's first read.
         kv_gmem_to_lds.load_k((t0 + 1) * BN, (t0 + 1) % fx.Index(NPF))
         kv_gmem_to_lds.load_v(t0 * BN, t0 % fx.Index(NPF))
         kv_gmem_to_lds.load_v((t0 + 1) * BN, (t0 + 1) % fx.Index(NPF))
@@ -1015,17 +941,8 @@ def build_flash_attn_dualwave_swp_fp8_module(
         NPF_I = const_expr(fx.Index(NPF))
 
         def _ring_wrap(x):
-            """Reduce x in [0, 2*NPF) back into [0, NPF).
-
-            One compare + select in place of a `% NPF`, whose 64-bit magic-multiply
-            expansion otherwise sits on this loop's critical path. Keep the compare
-            on `index`: folding it to i32 shrinks the loop but moves the arithmetic
-            onto the SALU chain feeding the ds_read addresses, costing 1.5%.
-            """
             return (x >= NPF_I).select(x - NPF_I, x)
 
-        # The ring slot rides the loop-carry, so the first ds_read address at
-        # the top of the body needs no scalar work at all.
         init_args = [m_row, l_row] + v_o + [t0 % fx.Index(NPF)]
         loop_results = init_args
         for j, loop_args in range(fx.Index(t0), t_end, fx.Index(2), init=init_args):
@@ -1033,18 +950,12 @@ def build_flash_attn_dualwave_swp_fp8_module(
             l_row = loop_args[1]
             v_o = [loop_args[2 + i] for i in range_constexpr(D_CHUNKS)]
 
-            # a_buf IS the carry, so the first ds_read's address needs no scalar
-            # work at the loop top. Recomputing `j % NPF` instead costs ~19 SALU
-            # with a ~16-deep serial chain per index (NPF=6 is not a power of two,
-            # so `%` lowers to a 64-bit magic-multiply), landing squarely on the
-            # LDS-stall critical path. Carried, each index is add + cmp + cselect.
             a_buf = loop_args[2 + D_CHUNKS]
             b_buf = _ring_wrap(a_buf + fx.Index(1))
             nn_a_buf = _ring_wrap(a_buf + fx.Index(2))
             f_a_buf = _ring_wrap(a_buf + fx.Index(4))
             f_b_buf = _ring_wrap(a_buf + fx.Index(5))
 
-            # Fresh K read for QK (short live range; does not use the carry).
             v_k_a = kv_lds_to_regs.load_k(a_buf)
             v_k_b = kv_lds_to_regs.load_k(b_buf)
 
@@ -1054,19 +965,8 @@ def build_flash_attn_dualwave_swp_fp8_module(
             v_s_b = _mask_sub(v_s_b, j + fx.Index(1))
             v_s_a, v_s_b = _mask_pair(v_s_a, v_s_b, j)
 
-            # V reads for the current pair, issued AFTER the QK MFMAs so their
-            # latency hides behind the softmax. With the V reads first, their 64 live
-            # VGPRs push the QK region over the register limit and the scheduler
-            # sinks every K ds_read_b128 to sit immediately before its consuming
-            # MFMA, forcing `lgkmcnt(0)` before all 8 QK MFMAs. Only the a-tile's 16
-            # ds_read_b64_tr_b8 issue here; the b-tile's are deferred to just before
-            # its own sub-tile, which breaks up the largest LDS burst in the loop and
-            # keeps v_v_b's 32 VGPRs out of the a-sub-tile's live range.
             v_v_a = kv_lds_to_regs.load_v(a_buf)
 
-            # DMA pair {j+4,j+5} (2 pairs ahead) into the far ring buffers. Keep this
-            # last: hoisting it to the top of the body measured -1.5%, since the DMAs
-            # compete with the QK ds_reads for the same memory-issue slots.
             kv_gmem_to_lds.load_k((j + fx.Index(4)) * BN, f_a_buf)
             kv_gmem_to_lds.load_k((j + fx.Index(5)) * BN, f_b_buf)
             kv_gmem_to_lds.load_v((j + fx.Index(4)) * BN, f_a_buf)
@@ -1088,9 +988,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-            # r_next == nn_a_buf ((r+2) mod NPF), already materialised above.
             loop_results = yield [m_row, l_row] + v_o + [nn_a_buf]
-        # ---- Epilogue: all PV already accumulated in-loop; just normalize + store. ----
         m_row = loop_results[0]
         l_row = loop_results[1]
         v_o = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
