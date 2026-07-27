@@ -6,17 +6,25 @@
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import fly
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as _raw
+from flydsl.expr.utils.arith import current_fastmath
 
 MFMA_MASK = 0x08
 VALU_MASK = 0x02
 EXP_MASK = 0x400
 RESCALE_THRESHOLD = 8.0
+
+# Fast math is the kernel-wide default, set once as a compile hint instead of
+# threading `fastmath=arith.FastMathFlags.fast` through every arith call. The
+# hint is consumed twice: `effective_fastmath_hint` wraps the traced kernel body
+# in the ambient `fastmath("fast")` scope (so plain `a + b` / `a * b` on DSL
+# values emit fast-math arith ops), and the ROCDL backend turns it into
+# `rocdl-attach-target{fast=true}` for the LLVM device-code pipeline.
+SWA_COMPILE_HINTS = {"fast_fp_math": True}
 
 
 def build_gqa_attn(
@@ -86,10 +94,6 @@ def build_gqa_attn(
         f32 = fx.Float32
         bf16 = fx.BFloat16
         i32 = fx.Int32
-        v8bf16_t = Vec.make_type(8, bf16)
-        v4bf16_t = Vec.make_type(4, bf16)
-        v16f32_t = Vec.make_type(16, f32)
-        fm = arith.FastMathFlags.fast
 
         NEG_INF = f32(float("-inf"))
         NEG_FLOOR = f32(-30.0)
@@ -98,67 +102,98 @@ def build_gqa_attn(
             # Hoist a wave-uniform value into an SGPR (readfirstlane).
             return i32(rocdl.readfirstlane(T.i32, _raw(i32(x))))
 
-        def fadd(a, b):
-            return arith.addf(_raw(a), _raw(b), fastmath=fm)
-
-        def fsub(a, b):
-            return arith.subf(_raw(a), _raw(b), fastmath=fm)
-
-        def fmul(a, b):
-            return arith.mulf(_raw(a), _raw(b), fastmath=fm)
-
-        def fmaxf(a, b):
-            return arith.MaxNumFOp(_raw(a), _raw(b), fastmath=fm).result
+        def fmax(a, b):
+            # fx.maxnumf takes fastmath explicitly instead of reading the ambient
+            # scope the way the arith operators do, so hand it the ambient flags:
+            # without nnan LLVM emits a `v_max_f32 v, v` canonicalisation in front
+            # of every max in the column-max reduction (~30 extra VALU ops).
+            return fx.maxnumf(a, b, fastmath=current_fastmath())
 
         def bcast16(scalar):
-            return Vec.from_elements([fx.Float32(scalar)], f32).broadcast_to(16)
+            return Vec.from_elements([f32(scalar)], f32).broadcast_to(16)
 
         def hw_exp2_scalar(x):
-            return rocdl.exp2(f32.ir_type, _raw(x))
+            # v_exp_f32 (transcendental unit), wrapped as a DSL Float32 so callers
+            # can keep using plain `+` / `*` on the result.
+            return f32(rocdl.exp2(f32.ir_type, _raw(x)))
 
         def hw_exp2_v16(v16):
             src = Vec(v16)
             outs = [hw_exp2_scalar(src[k]) for k in range_constexpr(16)]
             return Vec.from_elements(outs, f32)
 
-        # of the raw rocdl.mfma intrinsic. The atom call is lowered by the fly
-        # atom->SSA passes, which the backend scheduler can reason about and
-
+        # One MFMA 32x32x16 bf16 step, expressed as fx.gemm over register
+        # fragments (the same shape as kernels/gemm/fp8_gemm_utils.py). The
+        # operands live in SSA vectors here, so they are wrapped in rmem
+        # fragments and unwrapped again; `fly-promote-regmem-to-vectorssa` folds
+        # the alloca/store/load away, leaving a bare v_mfma_f32_32x32x16_bf16
+        # that the backend scheduler can reason about.
         _mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(32, 32, 16, bf16))
 
+        def _frag(value, n, dtype):
+            frag = fx.make_rmem_tensor(n, dtype)
+            frag.store(Vec(value))
+            return frag
+
         def mfma(a_v8, b_v8, c_v16):
-            return fly.mma_atom_call_ssa([v16f32_t], _mma_atom, _raw(a_v8), _raw(b_v8), _raw(c_v16))
+            a_frag = _frag(a_v8, 8, bf16)
+            b_frag = _frag(b_v8, 8, bf16)
+            d_frag = _frag(c_v16, 16, f32)
+            fx.gemm(_mma_atom, d_frag, a_frag, b_frag, d_frag)
+            return d_frag.load()
+
+        # ---------------- LDS tile layouts (layout algebra) ----------------
+        # A staged K/V tile is KV_BLOCK_SIZE x ATTN_D bf16, tiled into ST_ROWS x 32
+        # subtiles (32 rows for K, 8 for V) laid out row-major across the tile. In
+        # element units the linear LDS index of a tile therefore decomposes as
+        #   e = col + row*32 + subtile_col*(32*ST_ROWS) + subtile_row*(128*ST_ROWS)
+        # i.e. the coordinate of a compact layout with shape
+        # (32, ST_ROWS, 4, KV_BLOCK_SIZE // ST_ROWS).
+        #
+        # K subtiles are XOR-swizzled to keep ds_read_b128 bank-conflict free.
+        # `Swizzle(mask=B, base=M, shift=S)` computes
+        #     i ^ ((i & (((1 << B) - 1) << (M + S))) >> S)
+        # so bits [M+S, M+S+B) fold into bits [M, M+B). The kernel's swizzle maps
+        # element bit 8 (row bit 3) onto col bit 4 and element bit 9 (row bit 4)
+        # onto col bit 3 -- a bit-reversed pair, hence two single-bit swizzles
+        # rather than one two-bit swizzle. Chained through a composed layout they
+        # reproduce the byte-domain
+        #     off ^ (((off % 1024) >> 9) << 5) ^ (((off % 2048) >> 10) << 4)
+        # exactly (both halved, since these indices are elements not bytes).
+        _sw_hi = fx.static(fx.SwizzleType.get(1, 4, 4))  # elem bit 8 -> bit 4
+        _sw_lo = fx.static(fx.SwizzleType.get(1, 3, 6))  # elem bit 9 -> bit 3
+
+        def _k_swizzled(layout):
+            """Pre-compose `layout` with the K subtile swizzle."""
+            return fx.make_composed_layout(_sw_hi, fx.make_composed_layout(_sw_lo, layout))
+
+        # Linear-index form of the swizzle, used to permute a tile-linear element
+        # index before it is decomposed by the global source layout below.
+        _k_swizzle_idx = _k_swizzled(fx.make_layout(_LDS_TILE_ELEMS, 1))
+
+        def _tile_src_layout(is_k, row_stride):
+            """LDS-linear element index -> global element offset of its source."""
+            st_rows = 32 if is_k else 8
+            layout = fx.make_layout(
+                (32, st_rows, 4, KV_BLOCK_SIZE // st_rows),
+                (1, row_stride, 32, st_rows * row_stride),
+            )
+            # For K the lane's LDS slot holds the swizzled element, so the source
+            # coordinate is the swizzled index (the swizzle is an involution).
+            return fx.make_composed_layout(layout, _k_swizzle_idx) if const_expr(is_k) else layout
 
         # ---------------- prefill offsets ----------------
         def prefill_offsets(is_k, row_stride):
-            ST_ROWS = 32 if is_k else 8
-            ST_COLS = 32
-            ST_ROW_BYTES = ST_COLS * 2
-            ST_BYTES = ST_ROWS * ST_ROW_BYTES
-            ST_PER_ROW = 128 // ST_COLS
+            # Each lane DMAs a fixed 16B slot of the LDS tile; walking that slot's
+            # linear element index through the source layout yields the global
+            # element offset to fetch (voffset -- the BufferCopyLDS128b atom scales
+            # by the bf16 element width to bytes).
+            layout = _tile_src_layout(is_k, row_stride)
             offs = []
             for i in range_constexpr(2):
                 lane_byte_off = lid * BYTES_PER_THREAD + wid * BYTES_PER_WARP + i * NUM_WARPS * BYTES_PER_WARP
-                subtile_id = lane_byte_off // ST_BYTES
-                subtile_row = subtile_id // ST_PER_ROW
-                subtile_col = subtile_id % ST_PER_ROW
-                sub_off = lane_byte_off % ST_BYTES
-                row = sub_off // ST_ROW_BYTES
-                col = (sub_off % ST_ROW_BYTES) // 2
-                if const_expr(is_k):
-                    offset = (row * 32 + col) * 2
-                    s1 = ((offset % 1024) >> 9) << 5
-                    s2 = ((offset % 2048) >> 10) << 4
-                    sw = offset ^ s1 ^ s2
-                else:
-                    sw = (row * 32 + col) * 2
-                sw_row = sw // ST_ROW_BYTES
-                sw_col = (sw % ST_ROW_BYTES) // 2
-                global_row = sw_row + subtile_row * ST_ROWS
-                global_col = sw_col + subtile_col * ST_COLS
-                # Element offsets (voffset); the BufferCopyLDS128b atom scales by
-                # the bf16 element width to bytes.
-                offs.append(global_row * row_stride + global_col)
+                lane_elem_off = i32(lane_byte_off) // i32(2)
+                offs.append(i32(fx.get_scalar(fx.crd2idx(fx.make_int_tuple(lane_elem_off), layout))))
             return offs
 
         # ---------------- group_load: global -> LDS ----------------
@@ -190,30 +225,29 @@ def build_gqa_attn(
         # alias analysis proves k0/k1/v0/v1 don't alias and the AMDGPU waitcnt
         # pass drops the conservative vmcnt(0) drains between double-buffered
         # DMAs and LDS reads (the job the alias-scope metadata did in v1).
-        def _read_v8bf16(smem_ptr, byte_off):
-            elem_off = i32(byte_off) // i32(2)  # bf16 elems; byte_off always even
-            off = fx.add_offset(smem_ptr, fx.make_int_tuple(elem_off))
+        def _read_v8bf16(smem_ptr, elem_off):
+            off = fx.add_offset(smem_ptr, fx.make_int_tuple(i32(elem_off)))
             return fx.make_view(off, fx.make_layout(8, 1)).load()
 
-        def swizzle_k_expr(row, col):
-            offset = (row * 32 + col) * 2
-            s1 = ((offset % 1024) >> 9) << 5
-            s2 = ((offset % 2048) >> 10) << 4
-            return offset ^ s1 ^ s2
+        # Swizzled K subtile as a composed layout: (row, col) -> LDS element
+        # offset. Same `_sw_hi`/`_sw_lo` the DMA source offsets are built from, so
+        # writer and reader cannot drift apart.
+        _k_smem_layout = _k_swizzled(fx.make_layout((32, 32), (32, 1)))
 
         def load_k_regs(buf):
             smem_ptr = k_smem[buf]
             row_offset = lid % 32
             col_offset = 8 * (lid // 32)
-            ST_BYTES = 32 * 32 * 2
+            ST_ELEMS = 32 * 32
             kreg = [[None] * 8 for _ in range_constexpr(2)]
             for ii in range_constexpr(2):
                 for jj in range_constexpr(4):
-                    off_imm = (ii * 4 + jj) * ST_BYTES
+                    off_imm = (ii * 4 + jj) * ST_ELEMS
                     for j in range_constexpr(2):
                         col = j * 16 + col_offset
-                        byte_off = swizzle_k_expr(row_offset, col) + off_imm
-                        kreg[ii][jj * 2 + j] = _read_v8bf16(smem_ptr, byte_off)
+                        crd = fx.make_int_tuple((i32(row_offset), i32(col)))
+                        elem_off = i32(fx.get_scalar(fx.crd2idx(crd, _k_smem_layout))) + i32(off_imm)
+                        kreg[ii][jj * 2 + j] = _read_v8bf16(smem_ptr, elem_off)
             return kreg  # [n=2][k=8] v8bf16
 
         # Transposing LDS read via the CDNA4 ds_read_tr16 copy atom, provenance-
@@ -228,28 +262,33 @@ def build_gqa_attn(
         # scatter, no spilling (the naive add_offset form spills 44 VGPRs).
         _v_tr_atom = fx.make_copy_atom(rocdl.cdna4.LDSReadTrans16_64b(), bf16)
         _v_tr_layout = fx.make_layout(4, 1)
+        # V subtiles are staged unswizzled, so a subtile is the plain compact
+        # (row, col) -> element map.
+        _v_smem_layout = fx.make_layout((8, 32), (32, 1))
 
         def load_v_regs(buf):
             smem_ptr = v_smem[buf]
             row_offset = ((lid % 16) // 4) + ((lid // 32) * 4)
             col_offset = ((lid % 4) * 4) + (16 * ((lid % 32) // 16))
             col_in_sub = col_offset % 32
-            ST_BYTES = 8 * 32 * 2
+            ST_ELEMS = 8 * 32
             ST_PER_ROW = 4
-            sw_elems = i32(row_offset * 32 + col_in_sub)  # sw/2, runtime
-            base_ptr = fx.recast_iter(bf16, fx.add_offset(smem_ptr, fx.make_int_tuple(sw_elems)))
+            crd = fx.make_int_tuple((i32(row_offset), i32(col_in_sub)))
+            lane_elems = i32(fx.get_scalar(fx.crd2idx(crd, _v_smem_layout)))
+            base_ptr = fx.recast_iter(bf16, fx.add_offset(smem_ptr, fx.make_int_tuple(lane_elems)))
             vreg = [[None] * 4 for _ in range_constexpr(4)]
             for i in range_constexpr(4):
                 for j in range_constexpr(4):
                     halves = []
                     for k in range_constexpr(2):
-                        off = (i * 2 * ST_PER_ROW + j) * ST_BYTES + k * ST_PER_ROW * ST_BYTES
-                        view = fx.make_view(
-                            fx.add_offset(base_ptr, fx.make_int_tuple(off // 2)),
+                        off = ((i * 2 + k) * ST_PER_ROW + j) * ST_ELEMS
+                        src = fx.make_view(
+                            fx.add_offset(base_ptr, fx.make_int_tuple(off)),
                             _v_tr_layout,
                         )
-                        res = fly.copy_atom_call_ssa([v4bf16_t], _v_tr_atom, view)
-                        halves.append(Vec(res))
+                        dst = fx.make_rmem_tensor(_v_tr_layout, bf16)
+                        fx.copy(_v_tr_atom, src, dst)
+                        halves.append(Vec(dst.load()))
                     vreg[i][j] = halves[0].shuffle(halves[1], list(range(8)))
             return vreg
 
@@ -312,8 +351,8 @@ def build_gqa_attn(
             swapped = rocdl.permlane32_swap(pair_ty, v_i32, v_i32, False, True)
             lhs_i32 = _llvm.extractvalue(T.i32, swapped, [0])
             rhs_i32 = _llvm.extractvalue(T.i32, swapped, [1])
-            lhs = i32(lhs_i32).bitcast(f32)
-            rhs = i32(rhs_i32).bitcast(f32)
+            lhs = f32(i32(lhs_i32).bitcast(f32))
+            rhs = f32(i32(rhs_i32).bitcast(f32))
             return lhs, rhs
 
         def col_max(att):
@@ -321,19 +360,19 @@ def build_gqa_attn(
             hi = Vec(att[1])
             mx = lo[0]
             for r in range_constexpr(1, 16):
-                mx = fmaxf(mx, lo[r])
+                mx = fmax(mx, lo[r])
             for r in range_constexpr(16):
-                mx = fmaxf(mx, hi[r])
-            lhs, rhs = _permlane32_pair(fx.Float32(mx))
-            return fmaxf(lhs, rhs)
+                mx = fmax(mx, hi[r])
+            lhs, rhs = _permlane32_pair(mx)
+            return fmax(lhs, rhs)
 
         def mul_o(o_reg, scal):
             b = bcast16(scal)
-            return [arith.mulf(_raw(o_reg[n]), _raw(b), fastmath=fm) for n in range_constexpr(4)]
+            return [Vec(o_reg[n]) * b for n in range_constexpr(4)]
 
         def sub_col(att, mx):
             b = bcast16(mx)
-            return [arith.subf(_raw(att[n]), _raw(b), fastmath=fm) for n in range_constexpr(2)]
+            return [Vec(att[n]) - b for n in range_constexpr(2)]
 
         def exp2_one(v16):
             return hw_exp2_v16(v16)
@@ -343,11 +382,11 @@ def build_gqa_attn(
             h1 = [hw_exp2_scalar(Vec(h1_sub_v16)[r]) for r in range_constexpr(16)]
             sm = h0[0]
             for r in range_constexpr(1, 16):
-                sm = fadd(sm, h0[r])
+                sm = sm + h0[r]
             for r in range_constexpr(16):
-                sm = fadd(sm, h1[r])
-            lhs, rhs = _permlane32_pair(fx.Float32(sm))
-            norm = fadd(norm, fadd(lhs, rhs))
+                sm = sm + h1[r]
+            lhs, rhs = _permlane32_pair(sm)
+            norm = norm + (lhs + rhs)
             packs = [
                 Vec.from_elements([h0[e] for e in range_constexpr(0, 8)], f32).to(bf16),
                 Vec.from_elements([h0[e] for e in range_constexpr(8, 16)], f32).to(bf16),
@@ -432,7 +471,7 @@ def build_gqa_attn(
         tid = fx.thread_idx.x
         # (wave, lane) decomposition: layout (NUM_WARPS, WARP_SIZE):(WARP_SIZE, 1)
         # maps tid -> (tid // WARP_SIZE, tid % WARP_SIZE).
-        coord_wave_lane = fx.idx2crd(fx.Int32(tid), fx.make_layout((NUM_WARPS, WARP_SIZE), (WARP_SIZE, 1)))
+        coord_wave_lane = fx.idx2crd(i32(tid), fx.make_layout((NUM_WARPS, WARP_SIZE), (WARP_SIZE, 1)))
         wid = i32(fx.get(coord_wave_lane, 0))
         lid = i32(fx.get(coord_wave_lane, 1))
 
@@ -506,7 +545,7 @@ def build_gqa_attn(
                     c = 8 * (r // 4) + (r % 4)
                     shifted = (rel_base + i32(c)).bitcast(fx.Uint32)
                     keep = shifted <= width
-                    elems.append(keep.select(fx.Float32(src[r]), NEG_INF))
+                    elems.append(keep.select(f32(src[r]), NEG_INF))
 
                 out[h] = Vec.from_elements(elems, f32)
             return out
@@ -521,6 +560,7 @@ def build_gqa_attn(
         # Q global->register load via a 128b buffer copy atom (v8bf16 per lane).
         q_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(Q), fx.make_layout(1, 1))
         _q_load_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), bf16)
+        _q_load_layout = fx.make_layout(8, 1)  # v8bf16 per lane
         # O register->global store via a 64b buffer copy atom (4 bf16 = b64 store).
         o_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(O), fx.make_layout(1, 1))
         _o_store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), bf16)
@@ -571,7 +611,9 @@ def build_gqa_attn(
         for j in range_constexpr(8):
             col = 16 * j + q_col_offset
             elem_off = q_base + q_row_offset * Q_stride1 + col
-            q_raw[j] = fly.copy_atom_call_ssa([v8bf16_t], _q_load_atom, fx.slice(q_div, (None, i32(elem_off))))
+            q_frag = fx.make_rmem_tensor(_q_load_layout, bf16)
+            fx.copy(_q_load_atom, fx.slice(q_div, (None, i32(elem_off))), q_frag)
+            q_raw[j] = q_frag.load()
 
         rocdl.sched_barrier(0)
         wait_vmcnt(0)
@@ -581,7 +623,7 @@ def build_gqa_attn(
         q32 = [_concat(q16[2 * p], q16[2 * p + 1]) for p in range_constexpr(2)]
         q_all = _concat(q32[0], q32[1])
         q_sc64 = Vec.from_elements([TEMPERATURE_SCALE], f32).broadcast_to(64)
-        q_all_scaled = arith.mulf(q_all.to(f32), q_sc64, fastmath=fm)
+        q_all_scaled = Vec(q_all.to(f32)) * q_sc64
         q_all_bf = Vec(Vec(q_all_scaled).to(bf16))
         for j in range_constexpr(8):
             qbf = q_all_bf.shuffle(q_all_bf, [j * 8 + e for e in range(8)])
@@ -612,11 +654,7 @@ def build_gqa_attn(
         att_block[0] = mask_band(att_block[0], 0)
 
         # ---------------- Partial softmax for QK[0] ----------------
-        max_vec = (
-            fx.Float32(fmaxf(col_max(att_block[0]), NEG_FLOOR))
-            if const_expr(NT_BAND is not None)
-            else fx.Float32(col_max(att_block[0]))
-        )
+        max_vec = fmax(col_max(att_block[0]), NEG_FLOOR) if const_expr(NT_BAND is not None) else col_max(att_block[0])
         max_vec_prev = max_vec
         att_block[0] = sub_col(att_block[0], max_vec)
         att_block[0][0] = exp2_one(att_block[0][0])
@@ -645,11 +683,10 @@ def build_gqa_attn(
 
         # Scale the 4 bf16 P packs (att_block_bf16) by a scalar corr
         def scale_packs(packs, corr_scalar):
-            corr8 = Vec.from_elements([fx.Float32(corr_scalar)], f32).broadcast_to(8)
+            corr8 = Vec.from_elements([f32(corr_scalar)], f32).broadcast_to(8)
             out = []
             for p in range_constexpr(4):
-                pf = Vec(packs[p]).to(f32)
-                ps = arith.mulf(pf, corr8, fastmath=fm)
+                ps = Vec(Vec(packs[p]).to(f32)) * corr8
                 out.append(Vec(ps).to(bf16))
             return out
 
@@ -657,29 +694,27 @@ def build_gqa_attn(
         def rescale_defer(att_buf, o_reg, max_prev, scale_old, packs):
             m_cur = col_max(att_buf)
             if const_expr(NT_BAND is not None):
-                m_cur = fmaxf(m_cur, NEG_FLOOR)  # tile fully out of band -> -inf
-            m_new = fmaxf(m_cur, max_prev)
-            with arith.fastmath(fm):
-                delta = fx.Float32(m_new) - fx.Float32(max_prev)
-            not_ok = fx.Float32(delta) > RESCALE_THRESHOLD
+                m_cur = fmax(m_cur, NEG_FLOOR)  # tile fully out of band -> -inf
+            m_new = fmax(m_cur, max_prev)
+            delta = m_new - max_prev
+            not_ok = delta > RESCALE_THRESHOLD
             mask = rocdl.ballot(T.i64, not_ok)
             needs_rescale = fx.Int64(mask) != 0
-            kept_max = needs_rescale.select(fx.Float32(m_new), fx.Float32(max_prev))
+            kept_max = needs_rescale.select(m_new, max_prev)
 
             o0, o1, o2, o3 = o_reg
             p0, p1, p2, p3 = packs
             scale_new = scale_old
             if needs_rescale:
-                with arith.fastmath(fm):
-                    scale_s = hw_exp2_scalar(fx.Float32(max_prev) - fx.Float32(m_new))
-                    corr_v = bcast16(fx.Float32(scale_s))
-                    o0 = Vec(o_reg[0]) * Vec(corr_v)
-                    o1 = Vec(o_reg[1]) * Vec(corr_v)
-                    o2 = Vec(o_reg[2]) * Vec(corr_v)
-                    o3 = Vec(o_reg[3]) * Vec(corr_v)
+                scale_s = hw_exp2_scalar(max_prev - m_new)
+                corr_v = bcast16(scale_s)
+                o0 = Vec(o_reg[0]) * corr_v
+                o1 = Vec(o_reg[1]) * corr_v
+                o2 = Vec(o_reg[2]) * corr_v
+                o3 = Vec(o_reg[3]) * corr_v
 
-                p0, p1, p2, p3 = scale_packs(packs, fx.Float32(scale_s))
-                scale_new = fx.Float32(scale_s)
+                p0, p1, p2, p3 = scale_packs(packs, scale_s)
+                scale_new = scale_s
             o_new = [o0, o1, o2, o3]
             p_new = [p0, p1, p2, p3]
             return o_new, scale_new, needs_rescale, kept_max, p_new
@@ -719,11 +754,11 @@ def build_gqa_attn(
             p += 2
             o_reg = [flat[p + n] for n in range_constexpr(4)]
             p += 4
-            max_vec_prev = fx.Float32(flat[p])
+            max_vec_prev = f32(flat[p])
             p += 1
-            norm_vec = fx.Float32(flat[p])
+            norm_vec = f32(flat[p])
             p += 1
-            scale_vec = fx.Float32(flat[p])
+            scale_vec = f32(flat[p])
             p += 1
             pending_scale = flat[p]
             p += 1
@@ -888,10 +923,9 @@ def build_gqa_attn(
         def rescale_uncond(att_buf, max_prev):
             m_cur = col_max(att_buf)
             if const_expr(NT_BAND is not None):
-                m_cur = fmaxf(m_cur, NEG_FLOOR)
-            m_new = fmaxf(m_cur, max_prev)
-            scale_s = hw_exp2_scalar(arith.subf(_raw(max_prev), _raw(m_new), fastmath=fm))
-            return fx.Float32(scale_s), fx.Float32(m_new)
+                m_cur = fmax(m_cur, NEG_FLOOR)
+            m_new = fmax(m_cur, max_prev)
+            return hw_exp2_scalar(max_prev - m_new), m_new
 
         nt = nt_rt
 
@@ -903,7 +937,7 @@ def build_gqa_attn(
         att_block[1] = mma_AtB_QK(k_reg_t, q_reg_t, att_block[1])
 
         if pending_scale:
-            norm_vec = fmul(norm_vec, scale_vec)
+            norm_vec = norm_vec * scale_vec
         att_block_bf16, norm_vec = finish_scalar(att_block[0][0], att_block[0][1], norm_vec)
         sched_exp_pairs(6, 3, 5)
         sched_pairs(10, 5, 5)
@@ -957,7 +991,7 @@ def build_gqa_attn(
                 k_reg_t[jj][i] = k_reg[i][jj]
         att_block[0] = mma_AtB_QK(k_reg_t, q_reg_t, att_block[0])
         # mask_band deferred to loading block 5 (consumed in block 6).
-        norm_vec = fmul(norm_vec, scale_vec)
+        norm_vec = norm_vec * scale_vec
         att_block_bf16, norm_vec = finish_scalar(att_block[1][0], att_block[1][1], norm_vec)
         sched_exp_pairs(6, 3, 7)
         sched_pairs(10, 5, 7)
@@ -1009,7 +1043,7 @@ def build_gqa_attn(
                 k_reg_t[jj][i] = k_reg[i][jj]
         att_block[1] = mma_AtB_QK(k_reg_t, q_reg_t, att_block[1])
         # mask_band deferred to loading block 9 (consumed in block 10).
-        norm_vec = fmul(norm_vec, scale_vec)
+        norm_vec = norm_vec * scale_vec
         att_block_bf16, norm_vec = finish_scalar(att_block[0][0], att_block[0][1], norm_vec)
         sched_exp_pairs(6, 3, 9)
         sched_pairs(10, 5, 9)
@@ -1037,7 +1071,7 @@ def build_gqa_attn(
         sched_pairs(10, 5, 10)
         sched_exp_pairs(6, 3, 10)
         rocdl.sched_barrier(0)
-        norm_vec = fmul(norm_vec, scale_vec)
+        norm_vec = norm_vec * scale_vec
         att_block_bf16, norm_vec = finish_scalar(att_block[1][0], att_block[1][1], norm_vec)
         rocdl.sched_barrier(0)
         o_reg = mul_o(o_reg, scale_vec)
@@ -1059,7 +1093,7 @@ def build_gqa_attn(
         inv = rocdl.rcp(T.f32, norm_vec)
         # Guard against a fully-masked row (norm == 0 -> rcp == inf).
         if const_expr(NT_BAND is not None):
-            inv = arith.select(fx.Float32(norm_vec) > 0.0, inv, 0.0)
+            inv = arith.select(f32(norm_vec) > 0.0, inv, 0.0)
         o_reg = mul_o(o_reg, inv)
         rocdl.sched_barrier(0)
         rocdl.s_barrier()
@@ -1087,7 +1121,7 @@ def build_gqa_attn(
     ):
         grid_x = ATTN_H
         # grid_y from the runtime seq_len_q arg (ceil-div over the Q tile x wave fan-out).
-        grid_y = (fx.Int32(seq_len_q) // fx.Int32(Q_BLOCK_SIZE) + fx.Int32(NUM_WARPS - 1)) // fx.Int32(NUM_WARPS)
+        grid_y = (i32(seq_len_q) // i32(Q_BLOCK_SIZE) + i32(NUM_WARPS - 1)) // i32(NUM_WARPS)
         grid_z = ATTN_B
         attend_ker(
             Q,
@@ -1105,5 +1139,10 @@ def build_gqa_attn(
                 "rocdl.flat_work_group_size": f"{NUM_THREADS},{NUM_THREADS}",
             },
         ).launch(grid=(grid_x, grid_y, grid_z), block=(NUM_THREADS, 1, 1), stream=stream)
+
+    # Carried on the JitFunction so a plain `flyc.compile(launch, *args)` from the
+    # caller still traces the body under the ambient fast-math scope; no
+    # `CompilationContext.compile_hints(...)` wrapper needed at the call site.
+    launch.compile_hints.update(SWA_COMPILE_HINTS)
 
     return launch
