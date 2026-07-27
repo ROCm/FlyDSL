@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-27T17:03:07Z",
+ "updated": "2026-07-27T18:08:37Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30288167103,
+   "pr": 901,
+   "commit": "580df68d5ec456f0bf3d89f9e2811359062b3bb7",
+   "branch": "moe_sorting_optimization",
+   "event": "pull_request",
+   "title": "Add Optimized MoE Routing Path",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30288167103",
+   "created_at": "2026-07-27T17:11:51Z",
+   "updated_at": "2026-07-27T17:21:43Z",
+   "actor": "amd-wsung102",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-27T17:22:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30288167103/job/90053471917"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-27T17:21:43Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30288167103/job/90053471996"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-27T17:21:43Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30288167103/job/90053472003"
+    }
+   ]
+  },
   {
    "run_id": 30283974617,
    "pr": 894,
@@ -10,37 +53,37 @@
    "branch": "main",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add 8 wave GQA sliding-window attention kernel",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30283974617",
    "created_at": "2026-07-27T16:16:33Z",
-   "updated_at": "2026-07-27T16:50:03Z",
+   "updated_at": "2026-07-27T18:06:51Z",
    "actor": "amd-nprotaso",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-27T16:51:30Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T17:52:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30283974617/job/90045506503"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-27T16:50:02Z",
+     "started_at": "2026-07-27T17:26:19Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30283974617/job/90045506515"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-27T16:50:02Z",
+     "started_at": "2026-07-27T18:06:50Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30283974617/job/90045506537"
     }
@@ -154,29 +197,29 @@
    "branch": "port/layout-api-ports",
    "event": "pull_request",
    "title": "Port GEMM/MoE/conv kernels to the layout API",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278250653",
    "created_at": "2026-07-27T15:05:01Z",
-   "updated_at": "2026-07-27T17:01:44Z",
+   "updated_at": "2026-07-27T18:06:11Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-27T15:26:39Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T17:25:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278250653/job/90018862556"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-27T17:01:43Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T18:06:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278250653/job/90018862557"
     },
     {
@@ -1662,7 +1705,7 @@
   },
   {
    "run_id": 30122482034,
-   "pr": 901,
+   "pr": null,
    "commit": "5bac48f7f314c5c4c554ee6af25fd4e410b2f83a",
    "branch": "moe_sorting_optimization",
    "event": "pull_request",
@@ -2117,49 +2160,6 @@
      "started_at": "2026-07-24T11:15:36Z",
      "completed_at": "2026-07-24T12:07:47Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30088428867/job/89467375355"
-    }
-   ]
-  },
-  {
-   "run_id": 30088415445,
-   "pr": null,
-   "commit": "ddaa507f56aa3fe9c08ebe6161a717b755540248",
-   "branch": "main",
-   "event": "push",
-   "title": "[CI] Make MLIR cache fallback reliable (#897)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30088415445",
-   "created_at": "2026-07-24T11:06:01Z",
-   "updated_at": "2026-07-24T12:56:07Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T11:15:44Z",
-     "completed_at": "2026-07-24T12:07:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30088415445/job/89467511761"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T12:07:00Z",
-     "completed_at": "2026-07-24T12:56:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30088415445/job/89467511773"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T11:24:07Z",
-     "completed_at": "2026-07-24T12:39:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30088415445/job/89467511803"
     }
    ]
   }
