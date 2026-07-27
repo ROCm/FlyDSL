@@ -3,54 +3,42 @@
 """MegaMoE v2 fused dispatch, GEMM1, GEMM2, and combine implementation."""
 
 import functools
-from dataclasses import dataclass
 
 import mori.shmem as ms
 import torch
 
 import flydsl.expr as fx
-from flydsl.autotune import Config
+from flydsl.autotune import Config, autotune, do_bench_collective
 from kernels.comm.flydsl_dispatch_combine_intranode_op import (
     FlyDSLDispatchCombineConfig,
     FlyDSLDispatchCombineIntraNodeOp,
 )
 
 from ..quant import per_1x32_mx_quant
-from .autotune import CollectiveAutotuner, collective_bench
 from .dispatch import DISPATCH_TABLE_SIZE, DispatchSlot
 
 __all__ = ["MegaMoEV2"]
-_JOINT_AUTOTUNE_SCHEMA = 1
-
-
-@dataclass(frozen=True)
-class Stage1Output:
-    a2: torch.Tensor
-    a2_scale: torch.Tensor
-    sorted_token_ids: torch.Tensor
-    sorted_expert_ids: torch.Tensor
-    sorted_weights: torch.Tensor
-    num_valid_ids: torch.Tensor
+_JOINT_AUTOTUNE_SCHEMA = 3
 
 
 # fmt: off
 def _run_joint_sbm_config(owner, x, scales, wts, topk_ids, stream, slice_output, *, SBM, tune_tokens,
     model_dim, inter_dim, experts, topk, rank, npes, max_tok, sbm_candidates, autotune_schema):
     del model_dim, inter_dim, experts, topk, rank, npes, max_tok, sbm_candidates, autotune_schema
-    s1 = owner._run_fused_stage1(x, wts, scales, topk_ids, stream=stream, tile_m=SBM)
-    owner._joint_output = owner._run_stage2(s1, int(tune_tokens), stream, slice_output)
+    owner._run_fused_stage1(x, wts, scales, topk_ids, stream=stream, tile_m=SBM)
+    owner._joint_output = owner._run_stage2(int(tune_tokens), stream, slice_output)
 
 
 @functools.lru_cache(maxsize=None)
 def _make_joint_sbm_autotuner(tile_m_values):
     configs = [Config(SBM=int(tile_m)) for tile_m in tile_m_values]
     key = [
-        "tune_tokens", "model_dim", "inter_dim", "experts", "topk", "rank", "npes", "max_tok",
+        "tune_tokens", "model_dim", "inter_dim", "experts", "topk", "npes", "max_tok",
         "sbm_candidates", "autotune_schema",
     ]
-    return CollectiveAutotuner(
-        _run_joint_sbm_config, configs=configs, key=key, warmup=2, rep=7, do_bench_fn=collective_bench
-    )
+    return autotune(
+        configs=configs, key=key, warmup=2, rep=7, do_bench=do_bench_collective
+    )(_run_joint_sbm_config)
 # fmt: on
 
 
@@ -116,7 +104,7 @@ class MegaMoEV2:
             num_experts_per_token=self.topk, combine_dtype=torch.bfloat16,
             dispatch_dtype=torch.float8_e4m3fn, scale_dim=self._s1_scale_dim, scale_type_size=1,
             enable_std_moe=False, enable_group_major=True, gm_unit_size=capacity_tile_m,
-            gm_scheme=mega_scheme, gm_compact=compact)
+            gm_scheme=mega_scheme, gm_compact=compact, max_total_recv_tokens=self.world_size)
         # fmt: on
         self.comb_op = FlyDSLDispatchCombineIntraNodeOp(self.comb_cfg)
         torch.cuda.synchronize()
@@ -124,13 +112,6 @@ class MegaMoEV2:
         self.w2 = w2 if w2.is_contiguous() else w2.contiguous()
         self.w2_scale = w2_scale if w2_scale.is_contiguous() else w2_scale.contiguous()
         self._build_fused_stage1(w1, w1_scale)
-        self.comb_op.shmem_tok_id_to_src.copy_(torch.arange(self.max_recv, device=self.dev, dtype=torch.int32))
-        torch.cuda.synchronize()
-        ms.shmem_barrier_all()
-        self._gemm2_gate_bound = torch.tensor([self.max_recv], dtype=torch.int32, device=self.dev)
-        self.comb_op._fx_out_total_recv = fx.Int64(self._gemm2_gate_bound.data_ptr())
-        torch.cuda.synchronize()
-        ms.shmem_barrier_all()
         self._build_fused_stage2()
         self._joint_sbm_tuner = _make_joint_sbm_autotuner(self._v2_tile_m_values)
 
@@ -172,12 +153,6 @@ class MegaMoEV2:
         pcols = (((inter_dim // 32) + 7) // 8) * 8
         self._s1_osd = torch.zeros(prows * pcols + inter_dim, dtype=torch.uint8, device=self.dev)
         self._build_v2_disp_table()
-
-        # fmt: off
-        self._s1_output = Stage1Output(a2=self._s1_out, a2_scale=self._s1_osd,
-            sorted_token_ids=op.srcmap_em, sorted_expert_ids=op.sorted_expert_ids,
-            sorted_weights=op.wts_em.view(torch.float32), num_valid_ids=op.num_valid)
-        # fmt: on
 
     def _allocate_dispatch_workspace(self, op):
         total_experts = self.world_size * self.epr
@@ -247,7 +222,7 @@ class MegaMoEV2:
         table[DispatchSlot.P2P_RUNNING] = op.p2p_running.data_ptr()
         self._s1_disp = torch.tensor(table, dtype=torch.int64, device=self.dev)
 
-    def _run_fused_stage1(self, x, wts, scales, topk_ids, stream=None, tile_m=None) -> "Stage1Output":
+    def _run_fused_stage1(self, x, wts, scales, topk_ids, stream=None, tile_m=None):
         if stream is None:
             stream = fx.Stream(torch.cuda.current_stream())
         cur_tok = int(x.shape[0])
@@ -268,6 +243,9 @@ class MegaMoEV2:
         if not scales.is_contiguous():
             raise ValueError("scales must be contiguous")
         op = self._s1_op
+        joint_config = self._joint_sbm_tuner.last_config
+        if tile_m is None and joint_config is not None:
+            tile_m = int(joint_config.kwargs["SBM"])
         tuner = self._s1_mega if tile_m is None else self._s1_mega_by_tile[int(tile_m)]
         tile_m_values = self._v2_tile_m_values if tile_m is None else (int(tile_m),)
         # fmt: off
@@ -285,7 +263,6 @@ class MegaMoEV2:
             tile_m_constraint=",".join(str(v) for v in tile_m_values), autotune_schema=tuner.schema)
         # fmt: on
         self._s1_active_tile_m = int(tuner.last_config.kwargs["sort_block_m"])
-        return self._s1_output
 
     def quantize(self, x_bf16):
         return per_1x32_mx_quant(x_bf16, quant_mode="fp8")
@@ -301,8 +278,8 @@ class MegaMoEV2:
         # fmt: on
         return self._joint_output
 
-    def _run_stage2(self, s1, run_tokens, stream, slice_output):
-        ret = self._run_fused_stage2(s1, run_tokens, stream)
+    def _run_stage2(self, run_tokens, stream, slice_output):
+        ret = self._run_fused_stage2(run_tokens, stream)
         out_tok = ret[0] if isinstance(ret, (tuple, list)) else ret
         if out_tok is None:
             cfg = self.comb_cfg
@@ -341,7 +318,6 @@ class MegaMoEV2:
         FlyDSLDispatchCombineIntraNodeOp._ENABLE_COMBINE_NO_STAGE1 = True
         comb_cfg = self.comb_cfg
         dev = torch.device("cuda", comb_cfg.rank)
-        max_recv = comb_cfg.world_size * comb_cfg.max_num_inp_token_per_rank
         k = comb_cfg.num_experts_per_token
         cu_num = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
         self._g2v2_inter = int(self.inter_dim)
@@ -351,27 +327,32 @@ class MegaMoEV2:
             "model_dim": int(comb_cfg.hidden_dim), "inter_dim": int(self.inter_dim),
             "experts": int(comb_cfg.num_experts_per_rank), "topk": int(k), "rank": int(comb_cfg.rank),
             "npes": int(comb_cfg.world_size), "max_tok": int(comb_cfg.max_num_inp_token_per_rank),
-            "recv_cap": int(comb_cfg.effective_max_recv),
+            "recv_cap": int(self.max_recv),
             "comb_inp_nbytes": int(comb_cfg.max_num_inp_token_per_rank) * int(k) * int(comb_cfg.hidden_dim) * 2,
             "HIDDEN_MAX": int(comb_cfg.hidden_dim), "INTER_MAX": int(self.inter_dim), "cu_num": int(cu_num),
+            "autotune_schema": self._g2_tuner.schema,
         }
-        self._g2_dummy_inp = torch.zeros(max_recv, comb_cfg.hidden_dim, dtype=comb_cfg.combine_dtype, device=dev)
+        self._g2_combine_placeholder = torch.empty(
+            1, comb_cfg.hidden_dim, dtype=comb_cfg.combine_dtype, device=dev
+        )
 
-    def _run_fused_stage2(self, s1, run_tokens, stream=None):
+    def _run_fused_stage2(self, run_tokens, stream=None):
         comb_op = self.comb_op
-        tile_row_base = self._s1_op.tile_row_base
+        op = self._s1_op
         active_tile_m = self._s1_active_tile_m
         if stream is None:
             stream = torch.cuda.current_stream()
         s_fx = fx.Stream(stream.cuda_stream)
-        size_expert_ids = s1.sorted_expert_ids.numel()
         # fmt: off
         self._g2_tuner(
-            fx.Int64(s1.a2.view(-1).data_ptr()), fx.Int64(s1.a2_scale.data_ptr()), fx.Int64(self.w2.data_ptr()),
-            fx.Int64(self.w2_scale.data_ptr()), fx.Int64(s1.sorted_expert_ids.data_ptr()),
-            fx.Int64(s1.num_valid_ids.data_ptr()), fx.Int64(s1.sorted_token_ids.data_ptr()),
-            fx.Int64(s1.sorted_weights.data_ptr()), fx.Int64(tile_row_base.data_ptr()), comb_op._fx_tis,
-            comb_op._fx_p2p_comb_inp, int(size_expert_ids), self._g2v2_inter, self._g2v2_hidden, s_fx,
+            fx.Int64(self._s1_out.view(-1).data_ptr()), fx.Int64(self._s1_osd.data_ptr()),
+            fx.Int64(self.w2.data_ptr()), fx.Int64(self.w2_scale.data_ptr()),
+            fx.Int64(op.sorted_expert_ids.data_ptr()), fx.Int64(op.num_valid.data_ptr()),
+            fx.Int64(op.srcmap_em.data_ptr()), fx.Int64(op.wts_em.data_ptr()),
+            fx.Int64(op.tile_row_base.data_ptr()), comb_op._fx_p2p_comb_inp, self._s1_nvm,
+            self._g2v2_inter, self._g2v2_hidden, s_fx,
             tune_tokens=int(run_tokens), SBM=active_tile_m, **self._g2_invariants)
         # fmt: on
-        return comb_op.combine_no_stage1(self._g2_dummy_inp, None, None, cur_tok=run_tokens, enable_weights=False)
+        return comb_op.combine_no_stage1(
+            self._g2_combine_placeholder, None, None, cur_tok=run_tokens, enable_weights=False
+        )

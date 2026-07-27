@@ -19,7 +19,7 @@ import json
 
 import pytest
 
-from flydsl.autotune import Autotuner, Config, _normalize_strides, autotune
+from flydsl.autotune import Autotuner, Config, _normalize_strides, autotune, do_bench_collective
 
 
 @pytest.fixture(autouse=True)
@@ -356,6 +356,90 @@ def test_disk_cache_roundtrip(tmp_path, monkeypatch):
     assert files, "no disk cache file written"
     data = json.loads(files[0].read_text())
     assert data, "empty disk cache"
+
+
+def test_collective_autotune_uses_rank0_decision(monkeypatch):
+    import importlib
+
+    at = importlib.import_module("flydsl.autotune")
+
+    class FakeCuda:
+        @staticmethod
+        def current_device():
+            return 0
+
+        @staticmethod
+        def is_current_stream_capturing():
+            return False
+
+    class FakeDistributed:
+        rank = 0
+        messages = []
+        read_index = 0
+
+        @staticmethod
+        def is_initialized():
+            return True
+
+        @classmethod
+        def get_rank(cls):
+            return cls.rank
+
+        @classmethod
+        def broadcast_object_list(cls, payload, src, device):
+            del src, device
+            if cls.rank == 0:
+                cls.messages.append(payload[0])
+            else:
+                payload[0] = cls.messages[cls.read_index]
+                cls.read_index += 1
+
+    class FakeTorch:
+        cuda = FakeCuda()
+        distributed = FakeDistributed()
+
+        @staticmethod
+        def device(device_type, index):
+            return device_type, index
+
+    monkeypatch.setattr(at, "torch", FakeTorch())
+    calls = {0: [], 1: []}
+
+    def kernel(a, out, **kwargs):
+        del a, out
+        calls[FakeDistributed.rank].append(kwargs["BLOCK"])
+
+    root = _make_tuner(
+        fn=kernel,
+        configs=[Config(BLOCK=128), Config(BLOCK=256)],
+        do_bench_fn=do_bench_collective,
+    )
+    follower = _make_tuner(
+        fn=kernel,
+        configs=[Config(BLOCK=128), Config(BLOCK=256)],
+        do_bench_fn=do_bench_collective,
+    )
+    root._bench_one = lambda config, args, kwargs: float(config.kwargs["BLOCK"])
+    follower._bench_one = lambda config, args, kwargs: -float(config.kwargs["BLOCK"])
+    saves = {0: 0, 1: 0}
+    root._save_disk_cache = lambda: saves.__setitem__(0, saves[0] + 1)
+    follower._save_disk_cache = lambda: saves.__setitem__(1, saves[1] + 1)
+    a, out = FakeTensor((4,)), FakeTensor((4,))
+
+    FakeDistributed.rank = 0
+    root(a, out)
+    FakeDistributed.rank = 1
+    follower(a, out)
+    FakeDistributed.rank = 0
+    root(a, out)
+    FakeDistributed.rank = 1
+    follower(a, out)
+
+    assert root.last_config.kwargs["BLOCK"] == 128
+    assert follower.last_config.kwargs["BLOCK"] == 128
+    assert saves == {0: 1, 1: 0}
+    assert len(FakeDistributed.messages) == 2
+    assert calls == {0: [128, 128], 1: [128, 128]}
 
 
 # ── decorator ────────────────────────────────────────────────────────────

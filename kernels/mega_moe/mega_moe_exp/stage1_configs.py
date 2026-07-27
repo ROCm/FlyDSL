@@ -1,13 +1,8 @@
-"""Collective autotuning for MegaMoE v2 stage1."""
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+"""MegaMoE v2 Stage1 autotune candidates and pruning."""
 
-import fcntl
-import json
-import os
-
-import torch
-import torch.distributed as dist
-
-from flydsl.autotune import Autotuner, Config, do_bench
+from flydsl.autotune import Config
 
 _SHAPES = (
     (32, 128, 2),
@@ -334,87 +329,3 @@ def prune_stage1_autotune_configs(configs, sig_args):
     if not out:
         raise ValueError(f"no valid stage1 configs for tokens={tokens}")
     return out
-
-
-def collective_bench(fn, warmup, rep, quantiles=None):
-    elapsed = do_bench(fn, warmup=warmup, rep=rep, quantiles=quantiles)
-    if not dist.is_initialized():
-        return elapsed
-    value = torch.tensor(float(elapsed), dtype=torch.float32, device=torch.cuda.current_device())
-    dist.all_reduce(value, op=dist.ReduceOp.MAX)
-    return float(value.item())
-
-
-class CollectiveAutotuner(Autotuner):
-    @staticmethod
-    def _config_signature(config):
-        return tuple(sorted(config.to_dict().items()))
-
-    def _is_allowed_config(self, config):
-        allowed = getattr(self, "_allowed_config_signatures", None)
-        if allowed is None:
-            allowed = {self._config_signature(candidate) for candidate in self.configs}
-            self._allowed_config_signatures = allowed
-        return self._config_signature(config) in allowed
-
-    def _load_disk_cache(self):
-        super()._load_disk_cache()
-        self.cache = {key: config for key, config in self.cache.items() if self._is_allowed_config(config)}
-
-    def __call__(self, *args, **kwargs):
-        key = self._make_key(args, kwargs)
-        if not dist.is_initialized():
-            result = super().__call__(*args, **kwargs)
-            self.last_config = self.cache[key]
-            return result
-        ready = getattr(self, "_collective_ready", set())
-        if key in ready:
-            if key in self.cache and self._is_allowed_config(self.cache[key]):
-                self.last_config = self.cache[key]
-                return self._run_config(self.cache[key], args, kwargs)
-            ready.discard(key)
-            self.cache.pop(key, None)
-        payload = [self.cache[key].to_dict() if dist.get_rank() == 0 and key in self.cache else None]
-        dist.broadcast_object_list(payload, src=0)
-        if payload[0] is not None:
-            config = Config.from_dict(payload[0])
-            if self._is_allowed_config(config):
-                self.cache[key] = config
-                ready.add(key)
-                self._collective_ready = ready
-                self.last_config = config
-                return self._run_config(config, args, kwargs)
-        self.cache.pop(key, None)
-        result = super().__call__(*args, **kwargs)
-        ready.add(key)
-        self._collective_ready = ready
-        self.last_config = self.cache[key]
-        return result
-
-    def _save_disk_cache(self):
-        distributed = dist.is_initialized()
-        error = None
-        if not distributed or dist.get_rank() == 0:
-            try:
-                self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-                lock_path = self._cache_file.with_suffix(".lock")
-                with lock_path.open("w") as lock:
-                    fcntl.flock(lock, fcntl.LOCK_EX)
-                    data = {}
-                    if self._cache_file.exists():
-                        try:
-                            data = json.loads(self._cache_file.read_text())
-                        except (OSError, ValueError):
-                            data = {}
-                    for key, config in self.cache.items():
-                        if self._is_allowed_config(config):
-                            data[json.dumps(list(key))] = config.to_dict()
-                    tmp = self._cache_file.with_suffix(f".{os.getpid()}.tmp")
-                    tmp.write_text(json.dumps(data, indent=2))
-                    os.replace(tmp, self._cache_file)
-            except Exception as exc:
-                error = exc
-        if distributed:
-            dist.barrier()
-        if error is not None:
-            raise error

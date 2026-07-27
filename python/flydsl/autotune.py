@@ -4,6 +4,7 @@
 """FlyDSL autotuner - benchmark multiple kernel configs, pick the fastest."""
 
 import hashlib
+import fcntl
 import inspect
 import json
 import os
@@ -194,6 +195,18 @@ def do_bench(fn, warmup=5, rep=25, quantiles=None):
     return times[len(times) // 2]
 
 
+def do_bench_collective(fn, warmup=5, rep=25, quantiles=None):
+    """Benchmark on every rank and reduce the maximum latency to rank 0."""
+    elapsed = do_bench(fn, warmup=warmup, rep=rep, quantiles=quantiles)
+    if torch is None or not torch.distributed.is_initialized():
+        return elapsed
+    if quantiles:
+        raise ValueError("collective autotune does not support quantile results")
+    value = torch.tensor(float(elapsed), dtype=torch.float32, device=torch.cuda.current_device())
+    torch.distributed.reduce(value, dst=0, op=torch.distributed.ReduceOp.MAX)
+    return float(value.item()) if torch.distributed.get_rank() == 0 else float(elapsed)
+
+
 class Autotuner:
     """Wraps a @jit function, benchmarks configs, caches best."""
 
@@ -224,8 +237,11 @@ class Autotuner:
         self.pre_hook = pre_hook
         self.post_hook = post_hook
         self._do_bench = do_bench_fn or do_bench
+        self._rank0_authoritative = do_bench_fn is do_bench_collective
+        self._collective_synced_keys = set()
         self.cache: Dict[tuple, Config] = {}
         self.default = default
+        self.last_config = None
 
         # Infer arg names from the underlying function.
         source = fn.func if hasattr(fn, "func") else fn
@@ -413,6 +429,7 @@ class Autotuner:
         """Run the chosen config as a real (non-benchmark) call. Re-applies
         reset_to_zero so cache hits and the post-tune run behave like a single
         clean run (restore_value tensors are already restored by _bench_one)."""
+        self.last_config = config
         merged = dict(kwargs)
         merged.update(config.all_kwargs())
         with self._stream_context(args, merged):
@@ -562,44 +579,101 @@ class Autotuner:
         self._artifact_cache[str(path)] = body
         log().info(f"Wrote offline config {path}")
 
+    def _collective_active(self):
+        return self._rank0_authoritative and torch is not None and torch.distributed.is_initialized()
+
+    @staticmethod
+    def _broadcast_from_rank0(value):
+        payload = [value if torch.distributed.get_rank() == 0 else None]
+        device = torch.device("cuda", torch.cuda.current_device())
+        torch.distributed.broadcast_object_list(payload, src=0, device=device)
+        return payload[0]
+
     def __call__(self, *args, **kwargs):
         key = self._make_key(args, kwargs)
         force = _tuning_enabled()
+        collective = self._collective_active()
+        rank0 = not collective or torch.distributed.get_rank() == 0
 
-        if not force and key in self.cache:
+        if collective:
+            if not force and key in self._collective_synced_keys:
+                return self._run_config(self.cache[key], args, kwargs)
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError("collective autotune must be warmed up before CUDA Graph capture")
+            cached = self.cache.get(key) if rank0 and not force else None
+            cached_dict = self._broadcast_from_rank0(cached.to_dict() if cached is not None else None)
+            if cached_dict is not None:
+                cached = Config.from_dict(cached_dict)
+                self.cache[key] = cached
+                self._collective_synced_keys.add(key)
+                return self._run_config(cached, args, kwargs)
+        elif not force and key in self.cache:
             return self._run_config(self.cache[key], args, kwargs)
 
         artifact = self._artifact_ref(args, kwargs, required=force)
         if not force:
-            artifact_config = self._load_artifact(artifact, args, kwargs)
+            artifact_config = self._load_artifact(artifact, args, kwargs) if rank0 else None
+            if collective:
+                artifact_dict = self._broadcast_from_rank0(
+                    artifact_config.to_dict() if artifact_config is not None else None
+                )
+                artifact_config = Config.from_dict(artifact_dict) if artifact_dict is not None else None
             if artifact_config is not None:
+                if collective:
+                    self.cache[key] = artifact_config
+                    self._collective_synced_keys.add(key)
                 return self._run_config(artifact_config, args, kwargs)
 
         if not force and self.default is not None:
-            return self._run_config(self.default(*args, **kwargs), args, kwargs)
+            default_config = self.default(*args, **kwargs) if rank0 else None
+            if collective:
+                default_dict = self._broadcast_from_rank0(default_config.to_dict() if default_config is not None else None)
+                default_config = Config.from_dict(default_dict) if default_dict is not None else None
+                self.cache[key] = default_config
+                self._collective_synced_keys.add(key)
+            return self._run_config(default_config, args, kwargs)
 
         configs = self.configs(*args, **kwargs) if callable(self.configs) else self.configs
         configs = self._prune(configs, args, kwargs)
-        print(f"[autotune] tuning {len(configs)} configs...")
+        if rank0:
+            print(f"[autotune] tuning {len(configs)} configs...")
         results = []
         for i, config in enumerate(configs):
             try:
                 t = self._bench_one(config, args, kwargs)
-                results.append((config, t))
-                print(f"  [{i+1}/{len(configs)}] {config} -> {t:.3f} ms")
+                if rank0:
+                    results.append((config, t))
+                    print(f"  [{i+1}/{len(configs)}] {config} -> {t:.3f} ms")
             except Exception as e:
-                print(f"  [{i+1}/{len(configs)}] {config} -> FAILED: {e}")
+                if rank0:
+                    print(f"  [{i+1}/{len(configs)}] {config} -> FAILED: {e}")
 
-        if not results:
-            raise RuntimeError("All autotune configs failed")
-
-        best_config, best_time = min(results, key=lambda x: x[1])
-        print(f"[autotune] best: {best_config} ({best_time:.3f} ms)")
+        if collective:
+            decision = None
+            if rank0:
+                if results:
+                    best_config, best_time = min(results, key=lambda x: x[1])
+                    decision = {"config": best_config.to_dict(), "time": best_time}
+                    print(f"[autotune] best: {best_config} ({best_time:.3f} ms)")
+                else:
+                    decision = {"error": "All autotune configs failed"}
+            decision = self._broadcast_from_rank0(decision)
+            if "error" in decision:
+                raise RuntimeError(decision["error"])
+            best_config = Config.from_dict(decision["config"])
+        else:
+            if not results:
+                raise RuntimeError("All autotune configs failed")
+            best_config, best_time = min(results, key=lambda x: x[1])
+            print(f"[autotune] best: {best_config} ({best_time:.3f} ms)")
 
         if force and artifact is not None:
             self._emit_artifact(best_config, artifact, args, kwargs)
         self.cache[key] = best_config
-        self._save_disk_cache()
+        if collective:
+            self._collective_synced_keys.add(key)
+        if rank0:
+            self._save_disk_cache()
 
         return self._run_config(best_config, args, kwargs)
 
@@ -616,10 +690,20 @@ class Autotuner:
 
     def _save_disk_cache(self):
         self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-        data = {}
-        for key, config in self.cache.items():
-            data[json.dumps(list(key))] = config.to_dict()
-        self._cache_file.write_text(json.dumps(data, indent=2))
+        lock_path = self._cache_file.with_suffix(".lock")
+        with lock_path.open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            data = {}
+            if self._cache_file.exists():
+                try:
+                    data = json.loads(self._cache_file.read_text())
+                except (OSError, ValueError):
+                    pass
+            for key, config in self.cache.items():
+                data[json.dumps(list(key))] = config.to_dict()
+            tmp = self._cache_file.with_suffix(f".{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(data, indent=2))
+            os.replace(tmp, self._cache_file)
 
 
 def autotune(

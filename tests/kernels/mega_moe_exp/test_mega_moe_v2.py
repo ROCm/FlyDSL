@@ -968,16 +968,16 @@ def _run_full_e2e(
         _t_mega = _cg_time(_mega_body, moe.comb_op)  # megav2 e2e (stage1+stage2)
         _t_atom8 = _cg_time(_atom_fp8_body, dc)  # baseline e2e (fp8 dispatch)
         _t_atom = _cg_time(_atom_body, dc)  # reference e2e (bf16 dispatch)
-    # STAGE2-only isolation (gemm2 P2P-scatter + cross-rank combine): run stage1 ONCE -> s1, then time
-    # only _run_stage2 (multi-GPU, real xGMI scatter/combine). Fused stage1 only (needs the s1 handoff).
+    # STAGE2-only isolation: run stage1 once to populate V2-owned buffers, then time GEMM2,
+    # P2P scatter, and combine.
     _t_mega_s2 = -1.0
     if _s1_fused and not getattr(args, "profile", False):
-        _s1_iso = moe._run_fused_stage1(x_q, wc, x_sc, ic)
+        moe._run_fused_stage1(x_q, wc, x_sc, ic)
         torch.cuda.synchronize()
         ms.shmem_barrier_all()
 
         def _mega_s2_body():
-            moe._run_stage2(_s1_iso, run_tokens, None, True)
+            moe._run_stage2(run_tokens, None, True)
 
         _t_mega_s2 = _cg_time(_mega_s2_body, moe.comb_op)
 
@@ -1174,7 +1174,7 @@ def _run_mega_only(
 
     def _body():
         if stage1_only:
-            _out["s1"] = moe._run_fused_stage1(x_s1, wc, scale_s1, ic)
+            moe._run_fused_stage1(x_s1, wc, scale_s1, ic)
         else:
             _out["o"] = moe.forward(x_in, wc, ic)
 
@@ -1185,7 +1185,6 @@ def _run_mega_only(
 
     stage1_rel = -1.0
     if stage1_only and w_ref_local is not None:
-        s1 = _out["s1"]
         op, tile_m = moe._s1_op, int(moe._s1_active_tile_m)
         nvalid = int(op.num_valid.view(-1)[0].item())
         tiles = nvalid // tile_m
@@ -1216,9 +1215,9 @@ def _run_mega_only(
             + d4[None, :] * 2
             + d1[:, None]
         )
-        e8 = s1.a2_scale[scale_offsets]
+        e8 = moe._s1_osd[scale_offsets]
         got_s1 = (
-            s1.a2.view(-1, inter_dim)[compact_rows]
+            moe._s1_out.view(-1, inter_dim)[compact_rows]
             .float()
             .view(-1, inter_dim // 32, 32)
             .mul(torch.pow(2.0, e8.float() - 127.0)[:, :, None])
@@ -1356,12 +1355,12 @@ def _run_mega_only(
             _out["o"] = moe.forward_prequant(x_s1, scale_s1, wc, ic)
 
         stage1_ms, stage1_max_ms = _time_graph(_stage1_body)
-        s1_iso = moe._run_fused_stage1(x_s1, wc, scale_s1, ic)
+        moe._run_fused_stage1(x_s1, wc, scale_s1, ic)
         torch.cuda.synchronize()
         ms.shmem_barrier_all()
 
         def _stage2_body():
-            _out["o"] = moe._run_stage2(s1_iso, run_tokens, None, True)
+            _out["o"] = moe._run_stage2(run_tokens, None, True)
 
         stage2_ms, stage2_max_ms = _time_graph(_stage2_body)
         prequant_ms, prequant_max_ms = _time_graph(_prequant_body)

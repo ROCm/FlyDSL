@@ -959,7 +959,8 @@ def get_gemm2_autotune_configs(a_dtype="fp8"):
     ]
     # NOTE: BK=128 excluded -- produces wrong results for this a8w4 down-proj shape (relL2~0.54);
     # its e8m0 scale-word shift (tilesPerScaleChunk=2) path is not correct here. Keep BK=256.
-    return [dict(config, BM=BM) for BM in (32, 64, 128) for config in cfgs]
+    # BM=128 needs a 128 KiB f32 cshuffle slab at BN=256, beyond one workgroup's LDS capacity.
+    return [dict(config, BM=BM) for BM in (32, 64) for config in cfgs]
 
 
 # ---- gemm2 (down-proj) compile + launch driver (ported from aiter mxmoe_dispatcher.py) ----

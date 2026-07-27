@@ -8,6 +8,7 @@ import mori.ir.flydsl as mori_shmem
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl.autotune import autotune, do_bench_collective
 from flydsl.expr import buffer_ops as _buffer_ops
 from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import Vector as Vec
@@ -15,12 +16,6 @@ from kernels.comm import communication_ops_utils as comm_ops
 from kernels.common.tensor_shim import _run_compiled
 from kernels.gemm.fp8_gemm_utils import ceildiv
 
-from .autotune import (
-    CollectiveAutotuner,
-    collective_bench,
-    get_stage1_autotune_configs,
-    prune_stage1_autotune_configs,
-)
 from .dispatch import (
     DispatchSlot,
     emit_direct_fixed_slot_finalize,
@@ -30,6 +25,7 @@ from .dispatch import (
     emit_dispatch_plan,
 )
 from .gemm1 import build_fused_gemm1
+from .stage1_configs import get_stage1_autotune_configs, prune_stage1_autotune_configs
 
 _AUTOTUNE_SCHEMA = 12
 _SC0_CACHE = 1
@@ -421,10 +417,10 @@ def make_stage1_autotuner(dispatch_cu=None, grid_mult=None, tile_m_values=(32,))
         "fuse_scale_dim", "sort_block_m", "num_cu", "tune_tokens", "dispatch_constraint",
         "grid_constraint", "tile_m_constraint", "autotune_schema",
     ]
-    tuner = CollectiveAutotuner(
-        _run_stage1_config, configs=configs, key=key, warmup=2, rep=7,
-        prune_configs_by=prune_stage1_autotune_configs, do_bench_fn=collective_bench
-    )
+    tuner = autotune(
+        configs=configs, key=key, warmup=2, rep=7,
+        prune_configs_by=prune_stage1_autotune_configs, do_bench=do_bench_collective
+    )(_run_stage1_config)
     tuner.schema = _AUTOTUNE_SCHEMA
     return tuner
 # fmt: on
