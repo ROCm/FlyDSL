@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-27T09:18:45Z",
+ "updated": "2026-07-27T09:27:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30253658111,
+   "pr": 911,
+   "commit": "86b5f1ef23bb89be7ed10bb4fd367f533337d9bb",
+   "branch": "pr/docs-fastmath-flags",
+   "event": "pull_request",
+   "title": "[Doc] document fast-math flags in the arithmetic_types",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30253658111",
+   "created_at": "2026-07-27T09:22:14Z",
+   "updated_at": "2026-07-27T09:25:29Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-27T09:25:23Z",
+     "completed_at": "2026-07-27T09:25:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30253658111/job/89937853112"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-27T09:25:24Z",
+     "completed_at": "2026-07-27T09:25:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30253658111/job/89937853120"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-27T09:25:23Z",
+     "completed_at": "2026-07-27T09:25:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30253658111/job/89937853212"
+    }
+   ]
+  },
   {
    "run_id": 30253085837,
    "pr": 911,
@@ -139,13 +182,41 @@
    "branch": "fast-divmod",
    "event": "pull_request",
    "title": "Add fast_divmod magic-number division helper",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30246726470",
    "created_at": "2026-07-27T07:35:54Z",
-   "updated_at": "2026-07-27T08:56:11Z",
+   "updated_at": "2026-07-27T09:24:32Z",
    "actor": "kashif",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-27T09:25:16Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30246726470/job/89937690132"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-27T09:24:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30246726470/job/89937690148"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-27T09:24:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30246726470/job/89937690180"
+    }
+   ]
   },
   {
    "run_id": 30244516279,
@@ -169,13 +240,41 @@
    "branch": "stochastic-rounding",
    "event": "pull_request",
    "title": "Add stochastic rounding and philox RNG helpers",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30244468674",
    "created_at": "2026-07-27T06:58:24Z",
-   "updated_at": "2026-07-27T08:54:58Z",
+   "updated_at": "2026-07-27T09:24:20Z",
    "actor": "kashif",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-27T09:25:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30244468674/job/89937644878"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-27T09:24:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30244468674/job/89937644898"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-27T09:24:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30244468674/job/89937644899"
+    }
+   ]
   },
   {
    "run_id": 30241516517,
@@ -2061,49 +2160,6 @@
      "started_at": "2026-07-24T08:28:09Z",
      "completed_at": "2026-07-24T08:45:03Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30078037558/job/89434346170"
-    }
-   ]
-  },
-  {
-   "run_id": 30077196279,
-   "pr": 894,
-   "commit": "8563859d6228be605794ae3bb9684cc96326414f",
-   "branch": "main",
-   "event": "pull_request",
-   "title": "[Kernel][MI350] Add 8 wave GQA sliding-window attention kernel",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30077196279",
-   "created_at": "2026-07-24T07:57:12Z",
-   "updated_at": "2026-07-24T10:24:45Z",
-   "actor": "amd-nprotaso",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T08:08:19Z",
-     "completed_at": "2026-07-24T08:27:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30077196279/job/89432142397"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T08:07:11Z",
-     "completed_at": "2026-07-24T08:09:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30077196279/job/89432142415"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T09:17:51Z",
-     "completed_at": "2026-07-24T10:24:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30077196279/job/89432142418"
     }
    ]
   }
