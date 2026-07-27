@@ -12,8 +12,12 @@ def : Pat<(Fly_PtrLoadOp Fly_IntTuple:$int_tuple),
 
 def : Pat<(Fly_AddOffsetOp Fly_IntTuple:$int_tuple, Fly_IntTuple:$offset),
           (Fly_IntTupleAddOp $int_tuple, $offset)>;
+// Merging a compile-time offset into a runtime one hides the constant inside a dynamic
+// getelementptr index, which costs an LDS access its `ds_read ... offset:` immediate and a
+// shared base register. Leave mixed chains on a shared pointer nested; see #898.
 def : Pat<(Fly_AddOffsetOp (Fly_AddOffsetOp Fly_Pointer:$ptr, Fly_IntTuple:$offset1), Fly_IntTuple:$offset2),
-          (Fly_AddOffsetOp $ptr, (Fly_IntTupleAddOp $offset1, $offset2))>;
+          (Fly_AddOffsetOp $ptr, (Fly_IntTupleAddOp $offset1, $offset2)),
+          [(Fly_MergeableOffsetChain $ptr, $offset1, $offset2)]>;
 
 def : Pat<(Fly_DecompositionOp Fly_MemRef:$memref),
           (replaceWithValue $memref),

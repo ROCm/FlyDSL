@@ -35,6 +35,15 @@ def Fly_SimpleLayoutCoordTensor : Constraint<
 def Fly_ComposedLayoutMemRef : Constraint<Neg<Fly_SimpleLayoutMemRef.predicate>>;
 def Fly_ComposedLayoutCoordTensor : Constraint<Neg<Fly_SimpleLayoutCoordTensor.predicate>>;
 
+// The offsets of `add_offset(add_offset($0, $1), $2)` may be merged: either $0 is not a
+// shared (LDS) pointer, or $1 and $2 are both compile-time or both runtime.
+def Fly_MergeableOffsetChain : Constraint<CPred<[{
+  !fly::isGenericAddressSpace<fly::AddressSpace::Shared>(
+      cast<fly::PointerType>($0.getType()).getAddressSpace()) ||
+  cast<fly::IntTupleType>($1.getType()).getAttr().isStatic() ==
+      cast<fly::IntTupleType>($2.getType()).getAttr().isStatic()
+}]>>;
+
 //===----------------------------------------------------------------------===//
 // Constructors
 //===----------------------------------------------------------------------===//

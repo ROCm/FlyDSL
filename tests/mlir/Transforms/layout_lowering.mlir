@@ -446,3 +446,96 @@ func.func @test_load_vec_coord_tensor() -> vector<6xi32> {
   %vec = fly.memref.load_vec(%ct) : (!fly.coord_tensor<0, (2, 3) : (0, 1)>) -> vector<6xi32>
   return %vec : vector<6xi32>
 }
+
+// -----
+
+// === Nested add_offset merging ===
+
+// A pointer add_offset becomes a getelementptr index, and an LDS access only keeps its
+// `ds_read ... offset:` immediate while the backend still sees that part of the index as a
+// constant. Nested offsets on a shared pointer are therefore merged only when both are of
+// the same kind; a mixed chain is left nested, in either order. Every other address space
+// merges unconditionally, as before.
+// See tests/mlir/Conversion/add_offset_reassociation.mlir for the lowered form, and
+// tests/kernels/test_lds_offset_chain.py for both mixed orders running on device.
+
+// Two compile-time offsets fold into a single constant offset.
+// CHECK-LABEL: @test_add_offset_shared_merge_static
+// CHECK-SAME: (%[[PTR:.*]]: !fly.ptr<bf16, shared>)
+func.func @test_add_offset_shared_merge_static(%ptr: !fly.ptr<bf16, shared>) -> !fly.ptr<bf16, shared> {
+  %o1 = fly.make_int_tuple() : () -> !fly.int_tuple<4>
+  %o2 = fly.make_int_tuple() : () -> !fly.int_tuple<8>
+  // CHECK: %[[C12:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<12>
+  // CHECK: fly.add_offset(%[[PTR]], %[[C12]])
+  // CHECK-NOT: fly.add_offset
+  %p1 = fly.add_offset(%ptr, %o1) : (!fly.ptr<bf16, shared>, !fly.int_tuple<4>) -> !fly.ptr<bf16, shared>
+  %p2 = fly.add_offset(%p1, %o2) : (!fly.ptr<bf16, shared>, !fly.int_tuple<8>) -> !fly.ptr<bf16, shared>
+  return %p2 : !fly.ptr<bf16, shared>
+}
+
+// Two runtime offsets merge into a single runtime offset: no constant is lost.
+// CHECK-LABEL: @test_add_offset_shared_merge_dynamic
+// CHECK-SAME: (%[[PTR:.*]]: !fly.ptr<bf16, shared>, %[[A:.*]]: i32, %[[B:.*]]: i32)
+func.func @test_add_offset_shared_merge_dynamic(%ptr: !fly.ptr<bf16, shared>, %a: i32, %b: i32) -> !fly.ptr<bf16, shared> {
+  %o1 = fly.make_int_tuple(%a) : (i32) -> !fly.int_tuple<?>
+  %o2 = fly.make_int_tuple(%b) : (i32) -> !fly.int_tuple<?>
+  // CHECK: %[[SUM:.*]] = arith.addi %[[A]], %[[B]]
+  // CHECK: %[[OFF:.*]] = fly.make_int_tuple(%[[SUM]])
+  // CHECK: fly.add_offset(%[[PTR]], %[[OFF]])
+  // CHECK-NOT: fly.add_offset
+  %p1 = fly.add_offset(%ptr, %o1) : (!fly.ptr<bf16, shared>, !fly.int_tuple<?>) -> !fly.ptr<bf16, shared>
+  %p2 = fly.add_offset(%p1, %o2) : (!fly.ptr<bf16, shared>, !fly.int_tuple<?>) -> !fly.ptr<bf16, shared>
+  return %p2 : !fly.ptr<bf16, shared>
+}
+
+// A compile-time offset on top of a runtime one is left alone: merging it would hide the
+// constant inside a dynamic LDS index and cost every access its own base address.
+// CHECK-LABEL: @test_add_offset_shared_mixed_stays_nested
+// CHECK-SAME: (%[[PTR:.*]]: !fly.ptr<bf16, shared>, %[[OFF:.*]]: i32)
+func.func @test_add_offset_shared_mixed_stays_nested(%ptr: !fly.ptr<bf16, shared>, %off: i32) -> !fly.ptr<bf16, shared> {
+  %o1 = fly.make_int_tuple(%off) : (i32) -> !fly.int_tuple<?>
+  %o2 = fly.make_int_tuple() : () -> !fly.int_tuple<8>
+  // CHECK-NOT: arith.addi
+  // CHECK: %[[DYN:.*]] = fly.make_int_tuple(%[[OFF]]) : (i32) -> !fly.int_tuple<?>
+  // CHECK: %[[C8:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<8>
+  // CHECK: %[[BASE:.*]] = fly.add_offset(%[[PTR]], %[[DYN]])
+  // CHECK: fly.add_offset(%[[BASE]], %[[C8]])
+  %p1 = fly.add_offset(%ptr, %o1) : (!fly.ptr<bf16, shared>, !fly.int_tuple<?>) -> !fly.ptr<bf16, shared>
+  %p2 = fly.add_offset(%p1, %o2) : (!fly.ptr<bf16, shared>, !fly.int_tuple<8>) -> !fly.ptr<bf16, shared>
+  return %p2 : !fly.ptr<bf16, shared>
+}
+
+// The mirrored chain is likewise left alone, in the order it was written: the constant stays
+// a getelementptr index of its own, which LLVM folds into a constant expression on the LDS
+// symbol rather than into a dynamic index.
+// CHECK-LABEL: @test_add_offset_shared_mixed_stays_nested_const_first
+// CHECK-SAME: (%[[PTR:.*]]: !fly.ptr<bf16, shared>, %[[OFF:.*]]: i32)
+func.func @test_add_offset_shared_mixed_stays_nested_const_first(%ptr: !fly.ptr<bf16, shared>, %off: i32) -> !fly.ptr<bf16, shared> {
+  %o1 = fly.make_int_tuple() : () -> !fly.int_tuple<8>
+  %o2 = fly.make_int_tuple(%off) : (i32) -> !fly.int_tuple<?>
+  // CHECK-NOT: arith.addi
+  // CHECK: %[[C8:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<8>
+  // CHECK: %[[DYN:.*]] = fly.make_int_tuple(%[[OFF]]) : (i32) -> !fly.int_tuple<?>
+  // CHECK: %[[BASE:.*]] = fly.add_offset(%[[PTR]], %[[C8]])
+  // CHECK: fly.add_offset(%[[BASE]], %[[DYN]])
+  %p1 = fly.add_offset(%ptr, %o1) : (!fly.ptr<bf16, shared>, !fly.int_tuple<8>) -> !fly.ptr<bf16, shared>
+  %p2 = fly.add_offset(%p1, %o2) : (!fly.ptr<bf16, shared>, !fly.int_tuple<?>) -> !fly.ptr<bf16, shared>
+  return %p2 : !fly.ptr<bf16, shared>
+}
+
+// A pointer outside shared memory keeps the plain merged form for a mixed chain: it never
+// reaches an LDS instruction offset, so one index expression is the canonical shape.
+// CHECK-LABEL: @test_add_offset_global_merges_mixed
+// CHECK-SAME: (%[[PTR:.*]]: !fly.ptr<f32, global>, %[[OFF:.*]]: i32)
+func.func @test_add_offset_global_merges_mixed(%ptr: !fly.ptr<f32, global>, %off: i32) -> !fly.ptr<f32, global> {
+  %o1 = fly.make_int_tuple(%off) : (i32) -> !fly.int_tuple<?>
+  %o2 = fly.make_int_tuple() : () -> !fly.int_tuple<8>
+  // CHECK: %[[C8:.*]] = arith.constant 8 : i32
+  // CHECK: %[[SUM:.*]] = arith.addi %[[OFF]], %[[C8]]
+  // CHECK: %[[MERGED:.*]] = fly.make_int_tuple(%[[SUM]])
+  // CHECK: fly.add_offset(%[[PTR]], %[[MERGED]])
+  // CHECK-NOT: fly.add_offset
+  %p1 = fly.add_offset(%ptr, %o1) : (!fly.ptr<f32, global>, !fly.int_tuple<?>) -> !fly.ptr<f32, global>
+  %p2 = fly.add_offset(%p1, %o2) : (!fly.ptr<f32, global>, !fly.int_tuple<8>) -> !fly.ptr<f32, global>
+  return %p2 : !fly.ptr<f32, global>
+}
