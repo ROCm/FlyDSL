@@ -4,7 +4,7 @@
 """Fused stage2: ported aiter mxmoe gemm2 (runtime-dim K-loop + 2-stage B pipeline + carry + spart/
 persist) with a weighted cross-rank P2P scatter epilog.
 
-The gemm2 compute is `group_gemm2.gemm2_compute_v2` (faithful aiter port); this module supplies the
+The gemm2 compute is `gemm2.gemm2_compute_v2` (faithful aiter port); this module supplies the
 fused P2P scatter epilog (b128 LDS-coalesced store, recv_cap bounded-rsrc invalid-row redirect,
 register-cached peer bases, metadata hoisted off the MFMA critical path) and the stage2 driver that
 mirrors aiter's compile_gemm2_a4w4_port (naive / spatial-partition / persistent-m grids)."""
@@ -18,7 +18,7 @@ from flydsl.expr.typing import Int8, T
 from flydsl.expr.typing import Vector as Vec
 from kernels.common.tensor_shim import _run_compiled
 
-from .group_gemm2 import (
+from .gemm2 import (
     _resolve_g2_knobs,
     _spart_output_tile_index,
     gemm2_compute_v2,
@@ -202,9 +202,16 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
                     is_f8, KH_TILE_A, k_bytes, BM=BM)
 
         def run_unit(unit_bx, m_block_idx):
-            # Hoist scatter metadata (srcmap/weight/dest_enc) ahead of the MFMA (fixed-slot srcmap via
-            # tile_row_base; A2/scales are compact so gemm2 indexes by m_row).
-            srcmap_row_base = buffer_ops.buffer_load(trb_rsrc, m_block_idx, vec_width=1, dtype=fx.Int32)
+            # Compact stage1 metadata has one tile_row_base per SBM-padded sort tile. Stage2 may
+            # compute a smaller BM sub-tile, so map the compute row back to its sort tile and add
+            # the within-tile row offset before prefetching srcmap/weight metadata.
+            m_row = m_block_idx * fx.Int32(BM)
+            sort_block_idx = m_row // fx.Int32(SBM)
+            row_in_sort_block = m_row - sort_block_idx * fx.Int32(SBM)
+            srcmap_row_base = (
+                buffer_ops.buffer_load(trb_rsrc, sort_block_idx, vec_width=1, dtype=fx.Int32)
+                + row_in_sort_block
+            )
             pf_packed, pf_weight, pf_dest_enc = p2p_scatter_prefetch(
                 r_stids, r_sweights, r_tis, srcmap_row_base, m_lane, _recv_cap, BM
             )
@@ -273,8 +280,6 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
     return launch
 
 
-# ---- fused-stage2 gemm2 autotune (full flydsl.autotune Autotuner: disk-cached best config,
-#      per-M key, collective cross-rank bench). Mirrors stage1's make_stage1_autotuner. ----
 _G2_LAUNCH_CACHE = {}
 
 
@@ -290,26 +295,37 @@ def _get_g2_launch(**compile_kw):
 
 # fmt: off
 def _run_gemm2_config(arg_aq, arg_ascale, arg_bq, arg_bscale, arg_eids, arg_cumsum, arg_stids,
-    arg_sweights, arg_trb, arg_tis, arg_p2p, size_expert_ids, i32_inter, i32_hidden, stream, *,
-    model_dim, inter_dim, experts, topk, rank, npes, max_tok, recv_cap, comb_inp_nbytes, BM,
+    arg_sweights, arg_trb, arg_tis, arg_p2p, size_sort_blocks, i32_inter, i32_hidden, stream, *,
+    model_dim, inter_dim, experts, topk, rank, npes, max_tok, recv_cap, comb_inp_nbytes, BM, SBM,
     HIDDEN_MAX, INTER_MAX, cu_num, tune_tokens, BK=256, use_nt=True, g2_bhoist=True,
     g2_ascale_pf=True, g2_spart=402, persist=False):
     # fmt: on
     """Autotuner runner: compile-or-cache the fused stage2 for one config, then launch. tune_tokens is
-    key-only (deleted). persist selects the fixed cu_num grid (non-persist -> size_expert_ids)."""
+    key-only (deleted). persist selects the fixed cu_num grid. Non-persistent launch capacity is the
+    number of BM compute tiles covered by the SBM-sized stage1 metadata arrays."""
     del tune_tokens
     launch = _get_g2_launch(
         model_dim=model_dim, inter_dim=inter_dim, experts=experts, topk=topk, rank=rank, npes=npes,
         max_tok=max_tok, recv_cap=recv_cap, comb_inp_nbytes=comb_inp_nbytes, BM=BM, BK=BK, use_nt=use_nt,
-        HIDDEN_MAX=HIDDEN_MAX, INTER_MAX=INTER_MAX, persist=persist, cu_num=cu_num, g2_bhoist=g2_bhoist,
-        g2_ascale_pf=g2_ascale_pf, g2_spart=g2_spart,
+        HIDDEN_MAX=HIDDEN_MAX, INTER_MAX=INTER_MAX, SBM=SBM, persist=persist, cu_num=cu_num,
+        g2_bhoist=g2_bhoist, g2_ascale_pf=g2_ascale_pf, g2_spart=g2_spart,
     )
-    grid_blocks = cu_num if persist else size_expert_ids
+    max_m_blocks = size_sort_blocks * SBM // BM
+    grid_blocks = cu_num if persist else max_m_blocks
     _run_compiled(
         launch, arg_aq, arg_ascale, arg_bq, arg_bscale, arg_eids, arg_cumsum, arg_stids, arg_sweights,
-        arg_trb, arg_tis, arg_p2p, fx.Int32(size_expert_ids), fx.Int32(grid_blocks), fx.Int32(i32_inter),
+        arg_trb, arg_tis, arg_p2p, fx.Int32(max_m_blocks), fx.Int32(grid_blocks), fx.Int32(i32_inter),
         fx.Int32(i32_hidden), fx.Int32(0), fx.Int32(0), stream,
     )
+
+
+def _prune_gemm2_configs(configs, sig_args):
+    SBM = int(sig_args["SBM"])
+    return [
+        config
+        for config in configs
+        if int(config.kwargs["BM"]) <= SBM and SBM % int(config.kwargs["BM"]) == 0
+    ]
 
 
 @functools.lru_cache(maxsize=None)
@@ -318,13 +334,14 @@ def make_gemm2_autotuner(a_dtype: str = "fp8"):
     {fn}.json best-config cache, per-M key incl. tune_tokens, MAX-reduced cross-rank bench)."""
     from flydsl.autotune import Config
 
-    from .mega_moe_stage1 import _CollectiveAutotuner, _collective_bench
+    from .autotune import collective_bench, CollectiveAutotuner
 
     configs = [Config(**c) for c in get_gemm2_autotune_configs(a_dtype=a_dtype)]
     key = [
         "tune_tokens", "model_dim", "inter_dim", "experts", "topk", "rank", "npes", "max_tok",
-        "recv_cap", "comb_inp_nbytes", "BM", "HIDDEN_MAX", "INTER_MAX", "cu_num",
+        "recv_cap", "comb_inp_nbytes", "SBM", "HIDDEN_MAX", "INTER_MAX", "cu_num",
     ]
-    return _CollectiveAutotuner(
-        _run_gemm2_config, configs=configs, key=key, warmup=3, rep=10, do_bench_fn=_collective_bench
+    return CollectiveAutotuner(
+        _run_gemm2_config, configs=configs, key=key, warmup=3, rep=10,
+        prune_configs_by=_prune_gemm2_configs, do_bench_fn=collective_bench
     )

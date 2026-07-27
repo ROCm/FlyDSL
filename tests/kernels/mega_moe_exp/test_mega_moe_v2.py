@@ -6,7 +6,7 @@
 Single production-equivalent comparison (`_run_full_e2e`), per batch size.  Fully aiter-free: the
 ATOM baseline is built entirely from FlyDSL ops (sort/quant/scale-sort/gemm1/gemm2/dispatch/combine).
 
-  * megav1   : fp8/fp4 act -> MegaMoE.forward -> bf16   (single-op, Plan-A zero-bridge dispatch).
+  * megav2   : fp8 act -> MegaMoEV2.forward -> bf16 (quant + fused stage1 + fused stage2/combine).
   * atom-fp8 : PRODUCTION fp8-dispatch -> moe_sorting_flydsl -> mxfp4_moe_scale_sort (FlyDSL) ->
                mixed_moe_gemm1 -> fused GEMM2+combine -> bf16   (primary baseline).
   * atom-bf16: bf16-dispatch reference (most accurate path; used as an oracle-sanity check).
@@ -386,7 +386,21 @@ class RefModel:
         return x.to(torch.bfloat16)
 
 
-def _prepare(dev, *, quant, tokens, model_dim, inter_dim, experts, topk, seed, rank=0, world=1, keep_ref=False):
+def _prepare(
+    dev,
+    *,
+    quant,
+    tokens,
+    model_dim,
+    inter_dim,
+    experts,
+    topk,
+    seed,
+    rank=0,
+    world=1,
+    keep_ref=False,
+    local_experts_only=False,
+):
     """Generate inputs + pack weights/scales for A8W4 (mxfp8 act) or A4W4 (mxfp4 act).
 
     Returns dict with x (token payload in the dispatch dtype), scale_mx_u8 (e8m0 act scale),
@@ -398,7 +412,9 @@ def _prepare(dev, *, quant, tokens, model_dim, inter_dim, experts, topk, seed, r
     # sx=sw -> s = (md)^-0.25.  init_scale=0.01 made stage1 output ~3e-4 (accuracy oracle was a no-op).
     init_scale = float(model_dim) ** -0.25
     x_fp32 = torch.randn((tokens, model_dim), device=dev, dtype=torch.float32) * init_scale
-    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=dev, dtype=torch.float32) * init_scale
+    weight_experts = experts // world if local_experts_only else experts
+    w1_fp32 = torch.randn((weight_experts, 2 * inter_dim, model_dim), device=dev, dtype=torch.float32)
+    w1_fp32.mul_(init_scale)
 
     if quant == "a8w4":
         # activation: MX-FP8 (fp8_e4m3fn, 1 byte/elem) + e8m0 block scale
@@ -418,7 +434,7 @@ def _prepare(dev, *, quant, tokens, model_dim, inter_dim, experts, topk, seed, r
         raise SystemExit(f"unknown quant {quant!r} (use a8w4|a4w4)")
 
     # weight: MX-FP4 + shuffle for the GEMM (shared across a8w4/a4w4)
-    w1_flat = w1_fp32.view(experts * (2 * inter_dim), model_dim)
+    w1_flat = w1_fp32.view(weight_experts * (2 * inter_dim), model_dim)
     w1_fp4, w1_scale_raw = _chunked_fp4_quant(w1_flat)
     w_kernel = shuffle_weight(w1_fp4.view(torch.float4_e2m1fn_x2)).view(torch.uint8).contiguous()
     scale_w1_1d = gemm_common_utils.e8m0_shuffle(w1_scale_raw).view(torch.uint8).contiguous()
@@ -426,14 +442,16 @@ def _prepare(dev, *, quant, tokens, model_dim, inter_dim, experts, topk, seed, r
     # consume them while the ATOM baselines keep the SEPARATED w_kernel/scale above (same byte size).
     w_kernel_gui = (
         gemm_common_utils.shuffle_weight_w4(
-            w1_fp4.view(experts, 2 * inter_dim, model_dim // 2), NLane=16, gate_up=True, moe_gemm=True
+            w1_fp4.view(weight_experts, 2 * inter_dim, model_dim // 2), NLane=16, gate_up=True, moe_gemm=True
         )
         .view(torch.uint8)
         .contiguous()
     )
     scale_gui = (
         gemm_common_utils.shuffle_scale_w4(
-            w1_scale_raw.view(experts * 2 * inter_dim, model_dim // 32), experts_cnt=experts, gate_up=True
+            w1_scale_raw.view(weight_experts * 2 * inter_dim, model_dim // 32),
+            experts_cnt=weight_experts,
+            gate_up=True,
         )
         .view(torch.uint8)
         .contiguous()
@@ -441,7 +459,9 @@ def _prepare(dev, *, quant, tokens, model_dim, inter_dim, experts, topk, seed, r
     w_ref_local = None
     if keep_ref:
         epr = experts // world
-        w_ref_local = w1_fp32[rank * epr : (rank + 1) * epr].contiguous()
+        w_ref_local = (
+            w1_fp32.contiguous() if local_experts_only else w1_fp32[rank * epr : (rank + 1) * epr].contiguous()
+        )
     del w1_fp32, w1_flat, w1_fp4, w1_scale_raw
     torch.cuda.empty_cache()
 
@@ -459,6 +479,7 @@ def _prepare(dev, *, quant, tokens, model_dim, inter_dim, experts, topk, seed, r
         w_kernel_gui=w_kernel_gui,
         scale_gui=scale_gui,
         w_ref_local=w_ref_local,
+        local_experts_only=bool(local_experts_only),
         topk_ids=topk_ids,
         wts=wts,
         token_dtype=token_dtype,
@@ -497,7 +518,7 @@ def _run_full_e2e(
     """End-to-end correctness + perf for one (network, quant, bs).
 
     Compares three pipelines (all fused stage-2, bf16 output):
-      * megav1    : fp8/fp4 act -> MegaMoE -> bf16 (single op, Plan-A zero-bridge).
+      * megav2    : fp8 act -> MegaMoEV2 -> bf16.
       * atom-fp8  : fp8 dispatch -> sort -> gemm1 -> fused GEMM2+combine (primary baseline).
       * atom-bf16 : bf16 dispatch -> recv-quant -> ... (accuracy reference / oracle sanity).
 
@@ -579,7 +600,7 @@ def _run_full_e2e(
         torch.cuda.synchronize()
         return _all_mean(dev, _s.elapsed_time(_e) / _n)
 
-    # ============================= 5. megav1 (MegaMoE single op) =============================
+    # ============================= 5. megav2 =============================
     # MegaMoE consumes LOCAL w1: this rank's `epr` expert rows only (gemm1 indexes by local
     # expert id). w_kernel/scale are expert-major contiguous -> slice the flat byte range.
     # (Global w1 unsupported: >4GB weights truncate at the 32-bit buffer num_records cap.)
@@ -814,9 +835,9 @@ def _run_full_e2e(
     out_atom = _ao[:run_tokens].float().cpu().numpy().copy()
 
     # ============ 7. ATOM-fp8 baseline (PRODUCTION): fp8 dispatch -> sort -> gemm1 -> fused stage2 ============
-    # fp8 dispatch carries the e8m0 scale (NO recv-quant), 1B/elem -> fair vs megav1. combine still
+    # fp8 dispatch carries the e8m0 scale (NO recv-quant), 1B/elem -> fair vs megav2. combine still
     # needs a bf16 op (gemm2 emits bf16): reuse `dc` with total_recv/tis bridged from the fp8 op
-    # (atom's bridge; megav1 removes it via Plan A).
+    # (the ATOM path's bridge is fused in megav2).
     _scale_mx_blocks = model_dim // 32
     cfg_fp8 = FlyDSLDispatchCombineConfig(
         rank=rank,
@@ -930,25 +951,7 @@ def _run_full_e2e(
     _rma_max = _all_max(dev, _rma)
     _all_ok = _all_max(dev, 0.0 if ok else 1.0) < 0.5  # any failing rank -> all_ok False
 
-    # ===================== 10. stage1-only bodies (dispatch+GEMM1) [DISABLED] =====================
-    # def _mega_s1_body():
-    #     moe.stage1.forward(x_q, wc, x_sc, ic)   # megav1 single-launch dispatch ⊕ GEMM1 -> a2
-    # def _atom_s1_body():
-    #     a2_e.zero_(); dcf.total_recv.zero_()
-    #     _rx, _, _rs, _oidx, _ = dcf.dispatch(x_q, wc, x_sc, ic)   # fp8 dispatch
-    #     _oi = _oidx[:trc].to(torch.int32)
-    #     _loc = (_oi >= rank * epr) & (_oi < (rank + 1) * epr)
-    #     recv_topk[:trc].copy_(torch.where(_loc, _oi, _sentinel))
-    #     moe_sorting_flydsl(recv_topk[:trc], recv_wts[:trc], a_st, a_sw, a_se, a_nv, a_mbuf[:trc],
-    #                        int(experts), int(tm))
-    #     mxfp4_moe_scale_sort(a1s, _rs[:trc].contiguous(), a_st, a_nv, int(trc), int(model_dim))
-    #     a_se_local.copy_(a_se - rank * epr)
-    #     gemm1(a2_e.view(max_recv, topk, a2_e.shape[-1]), _agv(_rx[:trc]), _w1_arg, a1s.view(torch.uint8),
-    #           _w1s_arg, a_st, a_se_local, a_sw, a_nv, bias_d, a2s_e, fx.Int32(trc),
-    #           fx.Int32(inter_dim * 2), fx.Int32(model_dim), fx.Int32(int(_max_blocks)),
-    #           stream=fx.Stream(torch.cuda.current_stream()))
-
-    # ============================= 11. perf (CUDAGraph) =============================
+    # ============================= 10. perf (CUDAGraph) =============================
     # Measurement is EITHER torch.profiler OR cuda-event, mutually exclusive (mirrors
     # test_profiler_moe_gemm2_combine.py's `--mode profile` vs `--mode bench`). --profile dumps
     # per-kernel GPU tables + chrome traces (E2E from the profiler trace); default uses the
@@ -962,12 +965,9 @@ def _run_full_e2e(
         _pa = _profile_body(_atom_body, dc, f"atombf16_{_tag}", args, rank, world, dev, _pdir, _pmeta)
         _t_mega, _t_atom8, _t_atom = (_pm["e2e_us_avg"] / 1e3, _pa8["e2e_us_avg"] / 1e3, _pa["e2e_us_avg"] / 1e3)
     else:
-        _t_mega = _cg_time(_mega_body, moe.comb_op)  # megav1 e2e (stage1+stage2)
+        _t_mega = _cg_time(_mega_body, moe.comb_op)  # megav2 e2e (stage1+stage2)
         _t_atom8 = _cg_time(_atom_fp8_body, dc)  # baseline e2e (fp8 dispatch)
         _t_atom = _cg_time(_atom_body, dc)  # reference e2e (bf16 dispatch)
-    # _t_mega_s1 = _cg_time(_mega_s1_body, moe.comb_op)        # megav1 STAGE1-only
-    # _t_atom_s1 = _cg_time(_atom_s1_body, dcf)                # baseline STAGE1-only (fp8 dispatch->gemm1)
-
     # STAGE2-only isolation (gemm2 P2P-scatter + cross-rank combine): run stage1 ONCE -> s1, then time
     # only _run_stage2 (multi-GPU, real xGMI scatter/combine). Fused stage1 only (needs the s1 handoff).
     _t_mega_s2 = -1.0
@@ -981,7 +981,7 @@ def _run_full_e2e(
 
         _t_mega_s2 = _cg_time(_mega_s2_body, moe.comb_op)
 
-    # ============================= 12. report + return metrics =============================
+    # ============================= 11. report + return metrics =============================
     if rank == 0:
         _e2e_warn = (
             "  [WARN torch-oracle unreliable for this shape: gated on mega-vs-baseline]" if _oracle_broken else ""
@@ -996,14 +996,10 @@ def _run_full_e2e(
             f"mega-vs-baseline={_rma_max:.3e}  (floor~{_floor})",
             flush=True,
         )
-        # [perf STAGE1-only] disabled
-        # print(f"  [perf STAGE1-only, ms]  baseline-fp8(dispatch->gemm1)={_t_atom_s1:.4f}  "
-        #       f"megav1(dispatch+gemm1)={_t_mega_s1:.4f}  "
-        #       f"speedup={(_t_atom_s1 / _t_mega_s1) if _t_mega_s1 > 0 else -1:.3f}", flush=True)
         _timer = "profiler-e2e" if getattr(args, "profile", False) else "cuda-event"
         print(
             f"  [perf E2E (stage1+fused-stage2), ms | {_timer}]  baseline-fp8={_t_atom8:.4f}  "
-            f"megav1={_t_mega:.4f}  speedup={(_t_atom8 / _t_mega) if _t_mega > 0 else -1:.3f}  "
+            f"megav2={_t_mega:.4f}  speedup={(_t_atom8 / _t_mega) if _t_mega > 0 else -1:.3f}  "
             f"| ref bf16-dispatch baseline={_t_atom:.4f}  (out=bf16)",
             flush=True,
         )
@@ -1016,7 +1012,6 @@ def _run_full_e2e(
         full_e2e_atom_fp8_relL2=_ra8_w,
         full_e2e_atom_bf16_relL2=_ra_w,
         full_e2e_mega_vs_baseline=_rma,
-        # s1_baseline_ms=_t_atom_s1, s1_mega_ms=_t_mega_s1,  # stage1-only disabled
         full_e2e_baseline_fp8_ms=_t_atom8,
         full_e2e_baseline_bf16_ms=_t_atom,
         full_e2e_mega_ms=_t_mega,
@@ -1069,6 +1064,7 @@ def _run_mega_only(
     w_kernel_gui=None,
     scale_gui=None,
     w_ref_local=None,
+    local_experts_only=False,
     check_acc=True,
     measure_perf=False,
     stage1_only=False,
@@ -1078,7 +1074,7 @@ def _run_mega_only(
     This is what the multi-gpu CI exercises: NO ATOM baseline and NO aiter (weight prep is pure
     torch, activation quant is MegaMoE's own FlyDSL MX kernel inside ``moe.forward``).
 
-      * accuracy : relL2(megav1, routing-weighted torch f32 oracle) < the MX-FP4 quant floor.
+      * accuracy : relL2(megav2, routing-weighted torch f32 oracle) < the MX-FP4 quant floor.
       * perf     : CUDAGraph device time of ``moe.forward`` (mean across ranks), gated against a
                    committed golden baseline -- pass if within ``args.perf_tol`` (match) or faster
                    (better).  A missing baseline entry only warns (used when capturing the golden).
@@ -1108,29 +1104,36 @@ def _run_mega_only(
         w2_kernel = torch.empty(1, dtype=torch.uint8, device=dev)
         w2_scale_1d = torch.empty(1, dtype=torch.uint8, device=dev)
     else:
-        torch.manual_seed(args.seed + 4242)
-        w2_f32 = torch.randn((experts * model_dim, inter_dim), device=dev, dtype=torch.float32) * (
-            float(inter_dim) ** -0.25
-        )
+        torch.manual_seed(args.seed + 4242 + (rank if local_experts_only else 0))
+        w2_experts = epr if local_experts_only else experts
+        w2_f32 = torch.randn((w2_experts * model_dim, inter_dim), device=dev, dtype=torch.float32)
+        w2_f32.mul_(float(inter_dim) ** -0.25)
         w2_fp4, w2_sr = _chunked_fp4_quant(w2_f32)
-        _w2sl = slice(rank * epr * model_dim, (rank + 1) * epr * model_dim)
+        _w2sl = (
+            slice(0, epr * model_dim)
+            if local_experts_only
+            else slice(rank * epr * model_dim, (rank + 1) * epr * model_dim)
+        )
         w2_kernel = shuffle_weight(w2_fp4[_w2sl]).view(torch.uint8).contiguous().view(-1)
         w2_scale_1d = gemm_common_utils.e8m0_shuffle(w2_sr[_w2sl]).view(torch.uint8).contiguous().view(-1)
         del w2_fp4, w2_sr
         torch.cuda.empty_cache()
 
     # ---- MegaMoE local weights: this rank's epr experts (gemm1 indexes by local expert id) ----
-    _wpe = w_kernel.numel() // experts
-    _spe = scale_w1_1d.numel() // experts
+    _weight_experts = epr if local_experts_only else experts
+    _wpe = w_kernel.numel() // _weight_experts
+    _spe = scale_w1_1d.numel() // _weight_experts
+    _w1sl = slice(0, epr * _wpe) if local_experts_only else slice(rank * epr * _wpe, (rank + 1) * epr * _wpe)
+    _w1ssl = slice(0, epr * _spe) if local_experts_only else slice(rank * epr * _spe, (rank + 1) * epr * _spe)
     # gate-up INTERLEAVE(g1u1) for a8w4 (mirrors aiter), SEPARATED otherwise; feed the matching w1.
     if quant == "a8w4" and w_kernel_gui is not None:
         _gate_mode = "interleave"
-        _w1 = w_kernel_gui.reshape(-1)[rank * epr * _wpe : (rank + 1) * epr * _wpe].contiguous()
-        _w1s = scale_gui.reshape(-1)[rank * epr * _spe : (rank + 1) * epr * _spe].contiguous()
+        _w1 = w_kernel_gui.reshape(-1)[_w1sl].contiguous()
+        _w1s = scale_gui.reshape(-1)[_w1ssl].contiguous()
     else:
         _gate_mode = "separated"
-        _w1 = w_kernel.reshape(-1)[rank * epr * _wpe : (rank + 1) * epr * _wpe].contiguous()
-        _w1s = scale_w1_1d.reshape(-1)[rank * epr * _spe : (rank + 1) * epr * _spe].contiguous()
+        _w1 = w_kernel.reshape(-1)[_w1sl].contiguous()
+        _w1s = scale_w1_1d.reshape(-1)[_w1ssl].contiguous()
 
     moe = MegaMoE(
         rank=rank,
@@ -1145,6 +1148,7 @@ def _run_mega_only(
         w2=w2_kernel,
         w2_scale=w2_scale_1d,
         max_tok_per_rank=mtpr,
+        tune_tokens=run_tokens,
         gemm2_tile_m=tm2,
         gemm2_tile_n=tn2,
         gemm2_tile_k=tk2,
@@ -1182,10 +1186,7 @@ def _run_mega_only(
     stage1_rel = -1.0
     if stage1_only and w_ref_local is not None:
         s1 = _out["s1"]
-        if s1 is moe._s1_small_output:
-            op, tile_m = moe._s1_small_op, 32
-        else:
-            op, tile_m = moe._s1_op, int(moe._s1_active_tile_m)
+        op, tile_m = moe._s1_op, int(moe._s1_active_tile_m)
         nvalid = int(op.num_valid.view(-1)[0].item())
         tiles = nvalid // tile_m
         trb = op.tile_row_base[:tiles].to(torch.int64)
@@ -1312,7 +1313,13 @@ def _run_mega_only(
 
     # ---- perf: CUDAGraph device time (mean across ranks) ----
     mega_ms = -1.0
+    mega_max_ms = -1.0
+    prequant_ms = -1.0
+    prequant_max_ms = -1.0
     stage1_ms = -1.0
+    stage1_max_ms = -1.0
+    stage2_ms = -1.0
+    stage2_max_ms = -1.0
     perf_ok = True
     perf_note = ""
     if measure_perf:
@@ -1337,15 +1344,40 @@ def _run_mega_only(
                 graph.replay()
             end.record()
             torch.cuda.synchronize()
-            return _all_mean(dev, start.elapsed_time(end) / _n)
+            local_ms = start.elapsed_time(end) / _n
+            return _all_mean(dev, local_ms), _all_max(dev, local_ms)
 
         x_s1, scale_s1 = moe.quantize(x_in)
 
         def _stage1_body():
             moe._run_fused_stage1(x_s1, wc, scale_s1, ic)
 
-        stage1_ms = _time_graph(_stage1_body)
-        mega_ms = _time_graph(_body)
+        def _prequant_body():
+            _out["o"] = moe.forward_prequant(x_s1, scale_s1, wc, ic)
+
+        stage1_ms, stage1_max_ms = _time_graph(_stage1_body)
+        s1_iso = moe._run_fused_stage1(x_s1, wc, scale_s1, ic)
+        torch.cuda.synchronize()
+        ms.shmem_barrier_all()
+
+        def _stage2_body():
+            _out["o"] = moe._run_stage2(s1_iso, run_tokens, None, True)
+
+        stage2_ms, stage2_max_ms = _time_graph(_stage2_body)
+        prequant_ms, prequant_max_ms = _time_graph(_prequant_body)
+        mega_ms, mega_max_ms = _time_graph(_body)
+        if args.profile:
+            _profile_body(
+                _body,
+                moe.comb_op,
+                f"mega_only_{args.network}_{quant}_bs{run_tokens}",
+                args,
+                rank,
+                world,
+                dev,
+                args.profile_dir,
+                dict(tokens=run_tokens, network=args.network, quant=quant),
+            )
         _base = _perf_baseline_lookup(getattr(args, "perf_baseline", ""), args.network, quant, run_tokens)
         if _base is not None and _base > 0:
             _tol = float(args.perf_tol)
@@ -1357,11 +1389,23 @@ def _run_mega_only(
     ok = acc_ok and perf_ok
     _all_ok = _all_max(dev, 0.0 if ok else 1.0) < 0.5
     _relL2_max = _all_max(dev, relL2 if relL2 >= 0 else 0.0)
-    _ms_max = _all_max(dev, mega_ms if mega_ms >= 0 else 0.0)
-    _s1_ms_max = _all_max(dev, stage1_ms if stage1_ms >= 0 else 0.0)
+    _ms_max = max(0.0, mega_max_ms)
+    _prequant_ms_max = max(0.0, prequant_max_ms)
+    _s1_ms_max = max(0.0, stage1_max_ms)
+    _s2_ms_max = max(0.0, stage2_max_ms)
+    _active_sbm = int(getattr(moe, "_s1_active_tile_m", -1))
+    _active_g2_bm = int(moe._g2_tuner.last_config.kwargs["BM"]) if not stage1_only else -1
     if rank == 0:
         _acc_s = f"{_acc_label}={_relL2_max:.3e} (floor~{_acc_floor})" if check_acc else "acc:skip"
-        _perf_s = f"stage1={_s1_ms_max:.4f}ms e2e={_ms_max:.4f}ms  {perf_note}" if measure_perf else "perf:skip"
+        _perf_s = (
+            f"SBM={_active_sbm} G2_BM={_active_g2_bm} "
+            f"stage1={stage1_ms:.4f}/{_s1_ms_max:.4f}ms "
+            f"stage2={stage2_ms:.4f}/{_s2_ms_max:.4f}ms "
+            f"prequant_e2e={prequant_ms:.4f}/{_prequant_ms_max:.4f}ms "
+            f"bf16_e2e={mega_ms:.4f}/{_ms_max:.4f}ms(mean/max)  {perf_note}"
+            if measure_perf
+            else "perf:skip"
+        )
         print(
             f"[MEGA-ONLY] {args.network} {quant} bs={run_tokens} seed={args.seed} -> "
             f"{'PASS' if _all_ok else 'FAIL'} (all {world} ranks)  [{_acc_s}]  [{_perf_s}]",
@@ -1372,8 +1416,16 @@ def _run_mega_only(
         quant=quant,
         tokens=run_tokens,
         mega_only_relL2=relL2,
+        mega_sorted_block_m=_active_sbm,
+        mega_gemm2_block_m=_active_g2_bm,
         mega_stage1_ms=stage1_ms,
+        mega_stage1_max_ms=stage1_max_ms,
+        mega_stage2_ms=stage2_ms,
+        mega_stage2_max_ms=stage2_max_ms,
+        mega_prequant_ms=prequant_ms,
+        mega_prequant_max_ms=prequant_max_ms,
         mega_only_ms=mega_ms,
+        mega_only_max_ms=mega_max_ms,
         full_e2e_pass=bool(_all_ok),
     )
 
@@ -1389,6 +1441,7 @@ def run_one(args, rank, world, dev):
     epr = experts // world
 
     mtpr = max(16, run_tokens)
+    local_experts_only = bool(getattr(args, "mega_only", False) and (args.skip_acc or args.stage1_only))
     T = _prepare(
         dev,
         quant=args.quant,
@@ -1401,6 +1454,7 @@ def run_one(args, rank, world, dev):
         rank=rank,
         world=world,
         keep_ref=bool(args.stage1_only),
+        local_experts_only=local_experts_only,
     )
     w_kernel, scale_w1_1d = T["w_kernel"], T["scale_w1_1d"]
     topk_ids, wts = T["topk_ids"], T["wts"]
@@ -1430,12 +1484,13 @@ def run_one(args, rank, world, dev):
             w_kernel_gui=T.get("w_kernel_gui"),
             scale_gui=T.get("scale_gui"),
             w_ref_local=T.get("w_ref_local"),
+            local_experts_only=bool(T.get("local_experts_only", False)),
             check_acc=not bool(args.skip_acc),
             measure_perf=bool(args.measure_perf),
             stage1_only=bool(args.stage1_only),
         )
 
-    # Manual/dev path: production end-to-end comparison megav1 vs a fully-FlyDSL ATOM baseline
+    # Manual/dev path: production end-to-end comparison megav2 vs a fully-FlyDSL ATOM baseline
     # (dispatch -> FlyDSL sort/quant/scale-sort -> mixed_moe_gemm1 -> FlyDSL gemm2 -> combine),
     # BOTH with the real routing weights + fused stage-2, gated on the weighted torch oracle.
     return _run_full_e2e(
@@ -1476,8 +1531,8 @@ def main():
     p.add_argument("--waves-per-eu", type=int, default=4)
     p.add_argument("--async-copy", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--iters", type=int, default=30)
-    p.add_argument("--v2-dispatch-cu", type=int, default=0, help="<=0 uses the MegaMoE v2 launch table")
-    p.add_argument("--v2-grid-mult", type=int, default=-1, help="<=0 uses the GEMM1 tune table")
+    p.add_argument("--v2-dispatch-cu", type=int, default=0, help="<=0 lets stage1 autotune")
+    p.add_argument("--v2-grid-mult", type=int, default=-1, help="<=0 lets stage1 autotune")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--rank-skew-ms", type=float, default=0.0, help="delay rank r by r*N ms before first forward")
     p.add_argument(
@@ -1560,7 +1615,7 @@ def main():
         "--min-speedup",
         type=float,
         default=0.0,
-        help="CI perf gate for the ATOM path (only meaningful with --strict): require the megav1 E2E "
+        help="CI perf gate for the ATOM path (only meaningful with --strict): require the megav2 E2E "
         "speedup vs the atom-fp8 production baseline to be >= this value for every case (0 = disabled).",
     )
     p.add_argument(
