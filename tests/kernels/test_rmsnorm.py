@@ -161,6 +161,19 @@ def _get_rmsnorm_large_configs():
     ]
 
 
+def _quant_test_eps(N: int) -> float:
+    """Use one non-default value to verify every quant builder forwards eps."""
+    return 1e-2 if N == 256 else EPS
+
+
+def _assert_rmsnorm_forward_copy_width(compiled_fn, N: int, dtype: str):
+    if dtype not in ("f16", "bf16"):
+        return
+    expects_vec8 = N >= 8 and (N <= rmsnorm_kernel_impl.SMALL_N_THRESHOLD or N % 8 == 0)
+    has_128b_io = "buffer_copy<128>, 16>" in compiled_fn._keepalive.source_ir
+    assert has_128b_io == expects_vec8, f"unexpected RMSNorm copy width for N={N}, dtype={dtype}"
+
+
 def run_test(M: int, N: int, dtype: str = "f32", weight_dtype: str | None = None):
     weight_dtype = dtype if weight_dtype is None else weight_dtype
     print(f"\nTesting RMSNorm (M={M}, N={N}, dtype={dtype}, weight_dtype={weight_dtype})")
@@ -243,21 +256,24 @@ def run_test(M: int, N: int, dtype: str = "f32", weight_dtype: str | None = None
     return ok, flydsl_gpu_us
 
 
-def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
+def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool, eps: float = EPS):
     mode = "smoothquant" if is_smooth else "dynamicquant"
     print(f"\nTesting RMSNorm {mode} (M={M}, N={N}, dtype={dtype})")
 
     try:
         if is_smooth:
-            launch_fn = build_rmsnorm_smoothquant_module(N, dtype)
+            launch_fn = build_rmsnorm_smoothquant_module(N, dtype, eps=eps)
         else:
-            launch_fn = build_rmsnorm_dynamicquant_module(N, dtype)
+            launch_fn = build_rmsnorm_dynamicquant_module(N, dtype, eps=eps)
     except Exception as e:
         print(f"[FAIL] Compile failed for {mode} (M={M}, N={N}, dtype={dtype}): " f"{type(e).__name__}: {e}")
         return False, None
 
     torch.manual_seed(42)
     input_t = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32)
+    if eps != EPS:
+        # Keep mean(x^2) below eps so a hardcoded default is visible in YScale.
+        input_t = input_t * 1e-3
     gamma_t = torch.rand((N,), device="cuda", dtype=DTYPE_FP32)
 
     torch_dtype = _torch_dtype(dtype)
@@ -317,6 +333,7 @@ def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
         input_dev,
         gamma_dev,
         xscale_dev=xscale_dev,
+        eps=eps,
     )
     q_out = output_dev.to(torch.int16)
     q_expected = q_ref.to(torch.int16)
@@ -442,15 +459,15 @@ def run_fused_add_test(M: int, N: int, dtype: str):
     return ok, flydsl_gpu_us
 
 
-def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
+def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool, eps: float = EPS):
     mode = "smoothquant" if is_smooth else "dynamicquant"
     print(f"\nTesting FusedAdd RMSNorm {mode} (M={M}, N={N}, dtype={dtype})")
 
     try:
         if is_smooth:
-            launch_fn = build_fused_add_rmsnorm_smoothquant_module(N, dtype)
+            launch_fn = build_fused_add_rmsnorm_smoothquant_module(N, dtype, eps=eps)
         else:
-            launch_fn = build_fused_add_rmsnorm_dynamicquant_module(N, dtype)
+            launch_fn = build_fused_add_rmsnorm_dynamicquant_module(N, dtype, eps=eps)
     except Exception as e:
         print(
             f"[FAIL] Compile failed for fused_add rmsnorm {mode} "
@@ -461,6 +478,10 @@ def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     torch.manual_seed(42)
     input_t = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32)
     residual_t = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32)
+    if eps != EPS:
+        # Keep mean((x + residual)^2) below eps so YScale distinguishes eps.
+        input_t = input_t * 1e-3
+        residual_t = residual_t * 1e-3
     gamma_t = torch.rand((N,), device="cuda", dtype=DTYPE_FP32)
 
     torch_dtype = _torch_dtype(dtype)
@@ -568,6 +589,7 @@ def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
         residual_in_dev,
         gamma_dev,
         xscale_dev=xscale_dev,
+        eps=eps,
     )
     residual_out_ref = residual_out_dev.to(DTYPE_FP32)
     q_out = output_dev.to(torch.int16)
@@ -603,14 +625,14 @@ def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     return ok, flydsl_gpu_us
 
 
-def _reference_rmsnorm(input_dev, gamma_dev):
+def _reference_rmsnorm(input_dev, gamma_dev, *, eps: float = EPS):
     x = input_dev.to(DTYPE_FP32)
     gamma = gamma_dev.to(DTYPE_FP32)
-    return ((x / torch.sqrt((x * x).mean(dim=1, keepdim=True) + EPS)) * gamma).to(DTYPE_FP32)
+    return ((x / torch.sqrt((x * x).mean(dim=1, keepdim=True) + eps)) * gamma).to(DTYPE_FP32)
 
 
-def _reference_rmsnorm_quant(input_dev, gamma_dev, *, xscale_dev=None):
-    normalized = _reference_rmsnorm(input_dev, gamma_dev)
+def _reference_rmsnorm_quant(input_dev, gamma_dev, *, xscale_dev=None, eps: float = EPS):
+    normalized = _reference_rmsnorm(input_dev, gamma_dev, eps=eps)
     if xscale_dev is not None:
         normalized = normalized * xscale_dev.to(DTYPE_FP32)
 
@@ -634,6 +656,7 @@ def _reference_fused_add_rmsnorm_quant(
     gamma_dev,
     *,
     xscale_dev=None,
+    eps: float = EPS,
 ):
     added = input_dev + residual_in_dev
     residual_expected = added.to(DTYPE_FP32)
@@ -641,6 +664,7 @@ def _reference_fused_add_rmsnorm_quant(
         added,
         gamma_dev,
         xscale_dev=xscale_dev,
+        eps=eps,
     )
     return residual_expected, q, yscale
 
@@ -1865,7 +1889,7 @@ def test_rmsnorm_dynamicquant():
 
     failures = 0
     for M, N, dtype in configs:
-        ok, flydsl_gpu_us = run_quant_test(M, N, dtype, is_smooth=False)
+        ok, flydsl_gpu_us = run_quant_test(M, N, dtype, is_smooth=False, eps=_quant_test_eps(N))
         if not ok:
             failures += 1
 
@@ -1913,7 +1937,7 @@ def test_rmsnorm_smoothquant():
 
     failures = 0
     for M, N, dtype in configs:
-        ok, flydsl_gpu_us = run_quant_test(M, N, dtype, is_smooth=True)
+        ok, flydsl_gpu_us = run_quant_test(M, N, dtype, is_smooth=True, eps=_quant_test_eps(N))
         if not ok:
             failures += 1
 
@@ -2000,7 +2024,13 @@ def test_fused_add_rmsnorm_dynamicquant():
 
     failures = 0
     for M, N, dtype in configs:
-        ok, flydsl_gpu_us = run_fused_add_quant_test(M, N, dtype, is_smooth=False)
+        ok, flydsl_gpu_us = run_fused_add_quant_test(
+            M,
+            N,
+            dtype,
+            is_smooth=False,
+            eps=_quant_test_eps(N),
+        )
         if not ok:
             failures += 1
 
@@ -2046,7 +2076,13 @@ def test_fused_add_rmsnorm_smoothquant():
 
     failures = 0
     for M, N, dtype in configs:
-        ok, flydsl_gpu_us = run_fused_add_quant_test(M, N, dtype, is_smooth=True)
+        ok, flydsl_gpu_us = run_fused_add_quant_test(
+            M,
+            N,
+            dtype,
+            is_smooth=True,
+            eps=_quant_test_eps(N),
+        )
         if not ok:
             failures += 1
 
