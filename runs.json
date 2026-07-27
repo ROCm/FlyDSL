@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-27T09:57:42Z",
+ "updated": "2026-07-27T10:06:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30256652524,
+   "pr": 909,
+   "commit": "1389b352aeb628af7426165f7b7dd2187d2e4f83",
+   "branch": "refactor/pa-decode-swa-tile-programming",
+   "event": "pull_request",
+   "title": "[Kernel] Migrate SWA decode to tile programming",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30256652524",
+   "created_at": "2026-07-27T10:05:28Z",
+   "updated_at": "2026-07-27T10:05:53Z",
+   "actor": "fsx950223",
+   "jobs": []
+  },
   {
    "run_id": 30255750360,
    "pr": 909,
@@ -10,38 +25,38 @@
    "branch": "refactor/pa-decode-swa-tile-programming",
    "event": "pull_request",
    "title": "[Kernel] Migrate SWA decode to tile programming",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30255750360",
    "created_at": "2026-07-27T09:52:28Z",
-   "updated_at": "2026-07-27T09:55:54Z",
+   "updated_at": "2026-07-27T10:05:46Z",
    "actor": "fsx950223",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-27T09:55:54Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T10:05:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30255750360/job/89944590654"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-27T09:55:54Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-27T09:56:33Z",
+     "completed_at": "2026-07-27T10:05:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30255750360/job/89944590663"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-27T09:55:54Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T10:05:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30255750360/job/89944590726"
     }
    ]
@@ -2117,49 +2132,6 @@
      "started_at": "2026-07-24T09:09:14Z",
      "completed_at": "2026-07-24T10:07:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30081175435/job/89443733207"
-    }
-   ]
-  },
-  {
-   "run_id": 30079547971,
-   "pr": 896,
-   "commit": "0c64ae31cb6c62001d8b90f7f31ff6bfad63690f",
-   "branch": "revert-890-ci/main-only-mlir-cache",
-   "event": "pull_request",
-   "title": "Revert \"[CI] Share MLIR cache across GPU jobs\"",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30079547971",
-   "created_at": "2026-07-24T08:36:50Z",
-   "updated_at": "2026-07-24T10:41:25Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T08:38:21Z",
-     "completed_at": "2026-07-24T08:58:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30079547971/job/89437946056"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T09:17:51Z",
-     "completed_at": "2026-07-24T10:41:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30079547971/job/89437946069"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T08:39:35Z",
-     "completed_at": "2026-07-24T09:43:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30079547971/job/89437946085"
     }
    ]
   }
