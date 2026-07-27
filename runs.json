@@ -1,11 +1,41 @@
 {
  "schema": 1,
- "updated": "2026-07-27T07:31:29Z",
+ "updated": "2026-07-27T07:42:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 30244516279,
+   "run_id": 30247017287,
+   "pr": 910,
+   "commit": "f67dd2f9eb61306c7ac6d07521a271d028db1b3c",
+   "branch": "refactor/pa-metadata-tile-programming",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Optimize paged-attention metadata decode",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30247017287",
+   "created_at": "2026-07-27T07:40:50Z",
+   "updated_at": "2026-07-27T07:40:58Z",
+   "actor": "fsx950223",
+   "jobs": []
+  },
+  {
+   "run_id": 30246726470,
    "pr": 906,
+   "commit": "87e0bc31ebeb391eff5522321870ef9af2c7f681",
+   "branch": "fast-divmod",
+   "event": "pull_request",
+   "title": "Add fast_divmod magic-number division helper",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30246726470",
+   "created_at": "2026-07-27T07:35:54Z",
+   "updated_at": "2026-07-27T07:35:54Z",
+   "actor": "kashif",
+   "jobs": []
+  },
+  {
+   "run_id": 30244516279,
+   "pr": null,
    "commit": "f53cb3c23f9e5ed23ea283e4cdf29e656f66878b",
    "branch": "fast-divmod",
    "event": "pull_request",
@@ -83,11 +113,11 @@
    "branch": "refactor/pa-metadata-tile-programming",
    "event": "pull_request",
    "title": "[Kernel][Perf] Optimize paged-attention metadata decode",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30241407310",
    "created_at": "2026-07-27T06:01:22Z",
-   "updated_at": "2026-07-27T06:06:52Z",
+   "updated_at": "2026-07-27T07:40:52Z",
    "actor": "fsx950223",
    "jobs": [
     {
@@ -111,10 +141,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-27T06:06:52Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T07:40:50Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30241407310/job/89900092535"
     }
    ]
@@ -2020,64 +2050,6 @@
    "updated_at": "2026-07-24T07:51:34Z",
    "actor": "amd-nprotaso",
    "jobs": []
-  },
-  {
-   "run_id": 30076548384,
-   "pr": null,
-   "commit": "478c639f7af5be2662e4802af4bd4413ca04b2e6",
-   "branch": "fix/skip_rmsnorm_sq",
-   "event": "pull_request",
-   "title": "[fix] Temporarily quarantine rmsnorm smoothquant on gfx1201",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30076548384",
-   "created_at": "2026-07-24T07:45:50Z",
-   "updated_at": "2026-07-24T07:47:17Z",
-   "actor": "cschenjunlin",
-   "jobs": []
-  },
-  {
-   "run_id": 30076185312,
-   "pr": null,
-   "commit": "83f4a4b975cfb05f28ea3a961a4cb8ed01a07724",
-   "branch": "worktree-mxmoe-a8w4",
-   "event": "pull_request",
-   "title": "Refactor mxmoe",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30076185312",
-   "created_at": "2026-07-24T07:39:25Z",
-   "updated_at": "2026-07-24T10:24:23Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T07:44:36Z",
-     "completed_at": "2026-07-24T07:47:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30076185312/job/89428075306"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T07:45:19Z",
-     "completed_at": "2026-07-24T08:06:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30076185312/job/89428075324"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T09:17:39Z",
-     "completed_at": "2026-07-24T10:24:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30076185312/job/89428075337"
-    }
-   ]
   }
  ]
 }
