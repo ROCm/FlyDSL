@@ -19,12 +19,7 @@ VALU_MASK = 0x02
 EXP_MASK = 0x400
 RESCALE_THRESHOLD = 8.0
 
-# Fast math is the kernel-wide default, set once as a compile hint instead of
-# threading `fastmath=arith.FastMathFlags.fast` through every arith call. The
-# hint is consumed twice: `effective_fastmath_hint` wraps the traced kernel body
-# in the ambient `fastmath("fast")` scope (so plain `a + b` / `a * b` on DSL
-# values emit fast-math arith ops), and the ROCDL backend turns it into
-# `rocdl-attach-target{fast=true}` for the LLVM device-code pipeline.
+# Fast math is the kernel-wide default, set once as a compile hint instead of threading
 SWA_COMPILE_HINTS = {"fast_fp_math": True}
 
 
@@ -105,17 +100,12 @@ def build_gqa_attn(
 
         def fmax(a, b):
             # fx.maxnumf takes fastmath explicitly instead of reading the ambient
-            # scope the way the arith operators do, so hand it the ambient flags:
-            # without nnan LLVM emits a `v_max_f32 v, v` canonicalisation in front
-            # of every max in the column-max reduction (~30 extra VALU ops).
             return fx.maxnumf(a, b, fastmath=current_fastmath())
 
         def bcast16(scalar):
             return Vec.from_elements([f32(scalar)], f32).broadcast_to(16)
 
         def hw_exp2_scalar(x):
-            # v_exp_f32 (transcendental unit), wrapped as a DSL Float32 so callers
-            # can keep using plain `+` / `*` on the result.
             return f32(rocdl.exp2(f32.ir_type, _raw(x)))
 
         def hw_exp2_v16(v16):
@@ -179,16 +169,10 @@ def build_gqa_attn(
                 (32, st_rows, 4, KV_BLOCK_SIZE // st_rows),
                 (1, row_stride, 32, st_rows * row_stride),
             )
-            # For K the lane's LDS slot holds the swizzled element, so the source
-            # coordinate is the swizzled index (the swizzle is an involution).
+
             return fx.make_composed_layout(layout, _k_swizzle_idx) if const_expr(is_k) else layout
 
-        # ---------------- prefill offsets ----------------
         def prefill_offsets(is_k, row_stride):
-            # Each lane DMAs a fixed 16B slot of the LDS tile; walking that slot's
-            # linear element index through the source layout yields the global
-            # element offset to fetch (voffset -- the BufferCopyLDS128b atom scales
-            # by the bf16 element width to bytes).
             layout = _tile_src_layout(is_k, row_stride)
             offs = []
             for i in range_constexpr(2):
@@ -198,10 +182,7 @@ def build_gqa_attn(
             return offs
 
         # ---------------- group_load: global -> LDS ----------------
-        # High-level DMA: a BufferCopyLDS128b copy atom + fx.copy lowers to the
-        # same rocdl.raw_ptr_buffer_load_lds as the raw path, but the atom scales
-        # element-indexed src/soffset by the bf16 element width. voffset/soffset
-        # are therefore ELEMENTS here (raw path used bytes = elems * 2).
+        # High-level DMA: a BufferCopyLDS128b copy atom + fx.copy
         _dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
         _lds_dma_ptr_ty = fx.PointerType.get(bf16.ir_type, 2, BYTES_PER_THREAD)
 
@@ -221,18 +202,10 @@ def build_gqa_attn(
             group_load(v_lds_base[buf], tile, off_V, v_src_div[buf], v_base_elems, V_stride1)
 
         # ---------------- LDS -> registers ----------------
-        # Provenance-preserving LDS read: add_offset off the per-buffer smem
-        # iterator lowers to a getelementptr (not ptrtoint->inttoptr), so LLVM
-        # alias analysis proves k0/k1/v0/v1 don't alias and the AMDGPU waitcnt
-        # pass drops the conservative vmcnt(0) drains between double-buffered
-        # DMAs and LDS reads (the job the alias-scope metadata did in v1).
         def _read_v8bf16(smem_ptr, elem_off):
             off = fx.add_offset(smem_ptr, fx.make_int_tuple(i32(elem_off)))
             return fx.make_view(off, fx.make_layout(8, 1)).load()
 
-        # Swizzled K subtile as a composed layout: (row, col) -> LDS element
-        # offset. Same `_sw_hi`/`_sw_lo` the DMA source offsets are built from, so
-        # writer and reader cannot drift apart.
         _k_smem_layout = _k_swizzled(fx.make_layout((32, 32), (32, 1)))
 
         def load_k_regs(buf):
@@ -251,16 +224,7 @@ def build_gqa_attn(
                         kreg[ii][jj * 2 + j] = _read_v8bf16(smem_ptr, elem_off)
             return kreg  # [n=2][k=8] v8bf16
 
-        # Transposing LDS read via the CDNA4 ds_read_tr16 copy atom, provenance-
-        # preserving (getelementptr, no ptrtoint->inttoptr) so LLVM alias analysis
-        # keeps k0/k1/v0/v1 disjoint and drops conservative vmcnt(0) drains.
-        #
-        # recast_iter the sw-shifted per-lane base ONCE: the RecastIterOp is a
-        # fusion barrier that stops the nested-add_offset rewrite (MemrefLowering
-        # .td) from merging the runtime sw into each per-read index. LLVM then
-        # sees gep(gep(@sym, sw), const), so every per-read constant folds into
-        # the ds_read offset: immediate off a single base VGPR -- no register
-        # scatter, no spilling (the naive add_offset form spills 44 VGPRs).
+        # Transposing LDS read via the CDNA4 ds_read_tr16 copy atom
         _v_tr_atom = fx.make_copy_atom(rocdl.cdna4.LDSReadTrans16_64b(), bf16)
         _v_tr_layout = fx.make_layout(4, 1)
         # V subtiles are staged unswizzled, so a subtile is the plain compact
@@ -309,8 +273,6 @@ def build_gqa_attn(
                     col = 32 * j + col_offset + k * 8
                     elem0 = k * 4  # (idx=k*2 float2) -> 4 f32 per k
                     elems = [ov[elem0 + e] for e in range_constexpr(4)]
-                    # Vectorized store: 4 bf16 as one buffer_store_b64 (mirrors HIP
-                    # store_o_global's buffer_store_b64), instead of 4 scalar shorts.
                     vbf = Vec.from_elements(elems, f32).to(bf16)
                     off = base + row_offset * O_stride1 + col
                     fx.memref_store_vec(vbf, o_store_reg)
@@ -391,12 +353,6 @@ def build_gqa_attn(
         def nop_anchor():
             _llvm.inline_asm(ir.Type.parse("!llvm.void"), [], "s_nop 7", "", has_side_effects=True)
 
-        # Value anchors (mirror flash_attn_gfx950.py _anchor_v_o / _anchor_v_p): a
-        # no-op inline-asm that reads and re-defines the values in place (identity
-        # "=v,...,0,1,..." tie), pinning them at this source position. The scheduler
-        # cannot hoist a later ds_read/DMA above the anchor, which stops the compiler
-        # from inserting conservative vmcnt(3/5/6) partial drains around the O
-        # accumulator and P packs.
         def _anchor_vals(vals):
             n = len(vals)
             raws = [_raw(v) for v in vals]
@@ -429,11 +385,6 @@ def build_gqa_attn(
                 rocdl.sched_group_barrier(MFMA_MASK, 1, group)
                 rocdl.sched_group_barrier(EXP_MASK, exp_cnt, group)
 
-        # s_waitcnt via the ROCDL intrinsic (not inline asm). The AMDGPU
-        # SIInsertWaitcnts backend pass understands rocdl.s_waitcnt and folds it
-        # into its own analysis, so it does NOT re-insert conservative waits on
-        # top (vmcnt(0) full-drains / extra partial lgkmcnt) the way it does for
-        # an opaque inline-asm blob. gfx950 s_waitcnt bitfield encoding, matching
         _VMCNT_LO_MASK = 0xF
         _LGKMCNT_EXPCNT_BASE = 0x3F70  # vmcnt=0, expcnt=7(max), lgkmcnt=63(max)
         _VMCNT_HI_SHIFT = 14
@@ -539,18 +490,16 @@ def build_gqa_attn(
                 out[h] = Vec.from_elements(elems, f32)
             return out
 
-        # Divided buffer-tensor views for the G->LDS DMA copy atom. logical_divide
-        # by (1,1) yields the ((1),(N)) shape fx.copy expects; slicing the second
-        # mode selects the per-lane element voffset.
+        # Divided buffer-tensor views for the G->LDS DMA copy atom.
         k_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(K), fx.make_layout(1, 1))
         v_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(V), fx.make_layout(1, 1))
         k_src_div = [k_div, k_div]
         v_src_div = [v_div, v_div]
-        # Q global->register load via a 128b buffer copy atom (v8bf16 per lane).
+
         q_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(Q), fx.make_layout(1, 1))
         _q_load_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), bf16)
         _q_load_layout = fx.make_layout(8, 1)  # v8bf16 per lane
-        # O register->global store via a 64b buffer copy atom (4 bf16 = b64 store).
+
         o_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(O), fx.make_layout(1, 1))
         _o_store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), bf16)
 
@@ -607,7 +556,7 @@ def build_gqa_attn(
         rocdl.sched_barrier(0)
         wait_vmcnt(0)
         rocdl.sched_barrier(0)
-        # tree-concat 8 x v8 -> v64
+
         q16 = [_concat(q_raw[2 * p], q_raw[2 * p + 1]) for p in range_constexpr(4)]
         q32 = [_concat(q16[2 * p], q16[2 * p + 1]) for p in range_constexpr(2)]
         q_all = _concat(q32[0], q32[1])
@@ -617,7 +566,6 @@ def build_gqa_attn(
         for j in range_constexpr(8):
             qbf = q_all_bf.shuffle(q_all_bf, [j * 8 + e for e in range(8)])
             q_reg[0][j] = qbf
-            # transpose_q (q_reg[0][j] -> q_reg_t[j][0]): identity relabel
             q_reg_t[j][0] = qbf
 
         # ---------------- Load K[1] into shared, V[0] into shared ----------------
@@ -667,7 +615,6 @@ def build_gqa_attn(
         rocdl.sched_barrier(0)
         rocdl.s_barrier()
 
-        # pending_scale: i1, deferred norm rescale flag (reference's int pending_scale).
         pending_scale = fx.Boolean(False)
 
         # Scale the 4 bf16 P packs (att_block_bf16) by a scalar corr
@@ -708,15 +655,6 @@ def build_gqa_attn(
             p_new = [p0, p1, p2, p3]
             return o_new, scale_new, needs_rescale, kept_max, p_new
 
-        # ========================================================================
-        # Body inlined directly in the rolled runtime loop, reading carried state
-        # via _unflatten at the top and yielding new state via _flatten at the
-        # bottom. A rolled loop keeps o_reg/k_reg as loop-carried phis (fixed registers across
-        # the back-edge) instead of one giant unrolled live range that spills.
-        # Buffer parities: odd tiles use buf1 for K-shared/V-store, even use buf0.
-        # ========================================================================
-        # Flatten/unflatten the carried state to/from a flat list of raw ir.Values,
-        # as required by the runtime range(..., init=) loop-carried phi mechanism.
         def _flatten(k_reg, att0, o_reg, max_vec_prev, norm_vec, scale_vec, pending_scale):
             flat = []
             for i in range_constexpr(2):
@@ -886,10 +824,7 @@ def build_gqa_attn(
             return (k_reg, att0, o_reg, max_vec_prev, norm_vec, scale_vec, pending_scale)
 
         init_flat = _flatten(k_reg, att_block[0], o_reg, max_vec_prev, norm_vec, scale_vec, pending_scale)
-        # Unroll x2 over a runtime range(..., init=) loop: driver steps j by 4,
-        # body runs tiles (j, j+1) then (j+2, j+3). The i32 DSL bounds keep this a
-        # runtime scf.for (Python-int bounds would trigger constexpr unrolling), and
-        # loop-carried state flows through init=/yield instead of raw iter_args.
+
         UNROLL = 2
         for jv, iter_args in range(3, nt_rt - 1, 2 * UNROLL, init=init_flat):
             j0 = i32(jv)
@@ -900,10 +835,6 @@ def build_gqa_attn(
             loop_results = yield _flatten(*state)
         k_reg, att_block[0], o_reg, max_vec_prev, norm_vec, scale_vec, pending_scale = _unflatten(loop_results)
 
-        # ====================================================================
-        # (no lazy-threshold vote): every tile rescales o_reg/norm by exp2(prev-new).
-        # ====================================================================
-        # full OV: o_reg[n] += sum_kk v_reg[kk][n] * att_bf[kk] (4 contraction slices)
         def full_ov(o_reg, vreg, packs):
             for kk in range_constexpr(4):
                 o_reg = ov_slice(o_reg, [vreg[kk][n] for n in range_constexpr(4)], packs[kk])
@@ -1109,8 +1040,6 @@ def build_gqa_attn(
         stream: fx.Stream = fx.Stream(None),
     ):
         grid_x = ATTN_H
-        # grid_y from the runtime seq_len_q arg (ceil-div over the Q tile x wave fan-out).
-        # `i32` is a local alias inside attend_ker; use the qualified name here.
         grid_y = (fx.Int32(seq_len_q) // fx.Int32(Q_BLOCK_SIZE) + fx.Int32(NUM_WARPS - 1)) // fx.Int32(NUM_WARPS)
         grid_z = ATTN_B
         attend_ker(
@@ -1130,9 +1059,6 @@ def build_gqa_attn(
             },
         ).launch(grid=(grid_x, grid_y, grid_z), block=(NUM_THREADS, 1, 1), stream=stream)
 
-    # Carried on the JitFunction so a plain `flyc.compile(launch, *args)` from the
-    # caller still traces the body under the ambient fast-math scope; no
-    # `CompilationContext.compile_hints(...)` wrapper needed at the call site.
     launch.compile_hints.update(SWA_COMPILE_HINTS)
 
     return launch
