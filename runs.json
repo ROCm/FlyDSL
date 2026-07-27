@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-27T15:35:19Z",
+ "updated": "2026-07-27T15:37:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -124,10 +124,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-27T15:09:35Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T15:34:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278250653/job/90018862579"
     }
    ]
@@ -182,11 +182,11 @@
    "branch": "main",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add 8 wave GQA sliding-window attention kernel",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276467830",
    "created_at": "2026-07-27T14:43:37Z",
-   "updated_at": "2026-07-27T14:47:43Z",
+   "updated_at": "2026-07-27T15:35:17Z",
    "actor": "amd-nprotaso",
    "jobs": [
     {
@@ -201,9 +201,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-27T14:47:43Z",
+     "started_at": "2026-07-27T15:35:17Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276467830/job/90012815069"
     },
@@ -283,20 +283,20 @@
    "branch": "refactor/pa-decode-swa-tile-programming",
    "event": "pull_request",
    "title": "[Kernel] Migrate SWA decode to tile programming",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30256652524",
    "created_at": "2026-07-27T10:05:28Z",
-   "updated_at": "2026-07-27T15:01:45Z",
+   "updated_at": "2026-07-27T15:34:55Z",
    "actor": "fsx950223",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-27T15:01:44Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T15:34:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30256652524/job/89954886690"
     },
     {
