@@ -7,6 +7,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as _llvm
+from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
@@ -21,6 +22,10 @@ RESCALE_THRESHOLD = 8.0
 
 # Fast math is the kernel-wide default, set once as a compile hint instead of threading
 SWA_COMPILE_HINTS = {"fast_fp_math": True}
+
+
+def _as_stream(stream):
+    return stream if hasattr(stream, "_is_stream_param") else fx.Stream(stream)
 
 
 def build_gqa_attn(
@@ -1059,6 +1064,63 @@ def build_gqa_attn(
             },
         ).launch(grid=(grid_x, grid_y, grid_z), block=(NUM_THREADS, 1, 1), stream=stream)
 
-    launch.compile_hints.update(SWA_COMPILE_HINTS)
+    def _launch(
+        Q,
+        K,
+        V,
+        O,
+        Q_stride1,
+        K_stride1,
+        V_stride1,
+        O_stride1,
+        seq_len_q,
+        seq_len_kv,
+        stream=None,
+    ):
+        with CompilationContext.compile_hints(SWA_COMPILE_HINTS):
+            return launch(
+                Q,
+                K,
+                V,
+                O,
+                Q_stride1,
+                K_stride1,
+                V_stride1,
+                O_stride1,
+                seq_len_q,
+                seq_len_kv,
+                stream=_as_stream(stream),
+            )
 
-    return launch
+    def _compile(
+        Q,
+        K,
+        V,
+        O,
+        Q_stride1,
+        K_stride1,
+        V_stride1,
+        O_stride1,
+        seq_len_q,
+        seq_len_kv,
+        stream=None,
+    ):
+        with CompilationContext.compile_hints(SWA_COMPILE_HINTS):
+            return flyc.compile(
+                launch,
+                Q,
+                K,
+                V,
+                O,
+                Q_stride1,
+                K_stride1,
+                V_stride1,
+                O_stride1,
+                seq_len_q,
+                seq_len_kv,
+                _as_stream(stream),
+            )
+
+    _launch.compile = _compile
+
+    return _launch

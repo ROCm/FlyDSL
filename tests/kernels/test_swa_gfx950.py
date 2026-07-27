@@ -21,7 +21,6 @@ import sys
 import pytest
 import torch
 
-import flydsl.compiler as flyc
 import flydsl.expr as fx
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
@@ -92,7 +91,7 @@ def _run_swa(B, N, left, right, seed=0):
         N,  # seq_len_kv
         fx.Stream(stream),
     )
-    compiled = flyc.compile(launch, *args)
+    compiled = launch.compile(*args)
     compiled(*args)
     torch.cuda.synchronize()
 
