@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-27T18:51:17Z",
+ "updated": "2026-07-27T18:52:52Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "moe_sorting_optimization",
    "event": "pull_request",
    "title": "Add Optimized MoE Routing Path",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30288167103",
    "created_at": "2026-07-27T17:11:51Z",
-   "updated_at": "2026-07-27T17:21:43Z",
+   "updated_at": "2026-07-27T18:50:14Z",
    "actor": "amd-wsung102",
    "jobs": [
     {
@@ -29,9 +29,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-27T17:21:43Z",
+     "started_at": "2026-07-27T18:50:13Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30288167103/job/90053471996"
     },
@@ -53,11 +53,11 @@
    "branch": "main",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add 8 wave GQA sliding-window attention kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30283974617",
    "created_at": "2026-07-27T16:16:33Z",
-   "updated_at": "2026-07-27T18:06:51Z",
+   "updated_at": "2026-07-27T18:50:08Z",
    "actor": "amd-nprotaso",
    "jobs": [
     {
@@ -81,10 +81,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-27T18:06:50Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T18:50:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30283974617/job/90045506537"
     }
    ]
