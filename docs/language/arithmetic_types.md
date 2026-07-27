@@ -29,7 +29,7 @@ Common to `Numeric` and `Vector`, elementwise for `Vector`:
 | Method | Meaning | Example |
 |--------|---------|---------|
 | `Type(x)` | construct or cast — the type class is its own constructor. A `Vector` alias type (`Float32x4`, …) broadcasts a scalar across every lane | `Int32(5)`, `Float32(thread_idx.x)`; `Float32x4(1.0)` → all four lanes `1.0` |
-| Arithmetic — `+` `-` `*` `/` `//` `%` `**`, unary `+x` `-x` `abs(x)`, `divmod(x, y)` | result type follows *Type interoperability*; elementwise with scalar broadcast for `Vector` | `Int32(3) + Int32(4)` → `Int32(7)`; `vec * 2.0` |
+| Arithmetic — `+` `-` `*` `/` `//` `%` `**`, unary `+x` `-x` `abs(x)`, `divmod(x, y)` | result type follows *Type interoperability* | `Int32(3) + Int32(4)` → `Int32(7)`; `vec * 2.0` |
 | Bitwise/shift — `&` `\|` `^` `<<` `>>`, unary `~x` | integer-only | `Int32(6) & Int32(3)` → `Int32(2)` |
 | Comparison — `<` `<=` `>` `>=` `==` `!=` | result is `Boolean` | `a < b` |
 | `x.bitcast(dtype)` | reinterpret the bits: `Numeric` equal width; `Vector` equal *total* width, recomputing the lane count | `Float32(1.0).bitcast(Int32)`; `Float32x4(0.0).bitcast(Int8)` → `Int8x16` |
@@ -157,3 +157,85 @@ Given the common type `C` from the table above:
 | `/` | `C` if `C` is a `Float`; if `C` is an `Integer`, `Float32` when its width is at most 32 bits, otherwise `Float64` |
 | `<`  `<=`  `>`  `>=`  `==`  `!=` | `Boolean` (operands are compared as `C`) |
 | `&`  `\|`  `^`  `<<`  `>>` | `C`; operands must be `Integer` (a `Float` operand raises `TypeError`) |
+
+## Fast-math control
+
+*Fast-math* flags relax IEEE-754 semantics so the compiler may reorder,
+contract, or approximate eligible operations. Consequently, they affect only
+runtime, a.k.a. MLIR, operations with floating-point semantics. An all
+compile-time result is folded on the host and emits no op.
+
+### Flags and their meanings
+
+`expr.FastMathFlags` provides the following flags:
+
+- `none` — preserve the default floating-point semantics; enable no relaxation.
+- `reassoc` — allow reassociation, such as changing `(a + b) + c` to `a + (b +
+  c)`.
+- `nnan` — assume that NaN values do not occur.
+- `ninf` — assume that positive and negative infinity do not occur.
+- `nsz` — allow positive and negative zero to be treated as equivalent.
+- `arcp` — allow division to be replaced with multiplication by an approximate
+  reciprocal.
+- `contract` — allow operations to contract, for example multiply and add into
+  an FMA.
+- `afn` — allow approximate implementations of functions such as `exp`, `log`,
+  and `sqrt`.
+- `fast` — enable every non-`none` relaxation above.
+
+Several flags may be combined with `|`, or supplied as a `list`, `tuple`, or
+`set`. The string forms `"fast"`, `"none"`, and comma-separated combinations
+such as `"nnan,ninf"` are also accepted.
+
+### Explicit `fastmath=` keyword
+
+Named math operations such as `fx.exp`, `fx.sqrt`, `fx.rsqrt`, and `fx.exp2`
+accept an explicit `fastmath=` keyword for operation-local control:
+
+```python
+y = fx.sqrt(x, fastmath=fx.FastMathFlags.afn)
+z = fx.exp(x, fastmath="fast")
+```
+
+### `with fx.fastmath(...)` context
+
+Use `fx.fastmath(flags)` to establish an ambient setting for every eligible
+floating-point operation built inside a lexical scope. This form also controls
+operators, which do not take a per-operation keyword:
+
+```python
+with fx.fastmath(fx.FastMathFlags.reassoc | fx.FastMathFlags.contract):
+    acc = a * b + c          # may contract into an FMA
+    total = acc + partial    # may be reassociated
+
+with fx.fastmath("fast"):
+    y = fx.sqrt(x)
+```
+
+Contexts may be nested; leaving an inner context restores the enclosing setting.
+
+### Compilation-wide default
+
+`flyc.compile` accepts two related hints for establishing the ambient fast-math
+setting while DSL traces the compiled `@flyc.jit` and `@flyc.kernel` bodies:
+
+- `fastmath` sets the ambient context to the supplied flag specification, using
+  the same forms accepted by `fx.fastmath(...)`.
+- `fast_fp_math=True` provides `"fast"` as a fallback when the `fastmath` key is
+  absent. It also enables the corresponding fast floating-point setting in the
+  ROCm backend.
+
+```python
+contract_jit = flyc.compile[{"fastmath": "contract"}](jit_fn)
+fast_jit = flyc.compile[{"fast_fp_math": True}](jit_fn)
+```
+
+The three controls have the following precedence, from highest to lowest:
+
+1. An explicit operation-level `fastmath=` keyword.
+2. The innermost enclosing `with fx.fastmath(...)` context.
+3. The resolved `flyc.compile` default: `fastmath` when that key is present,
+   otherwise `"fast"` when `fast_fp_math=True`, otherwise no ambient setting.
+
+Thus an explicit keyword overrides a context, and a context overrides the
+resolved compilation default.
