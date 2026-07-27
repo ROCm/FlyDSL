@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-27T15:26:07Z",
+ "updated": "2026-07-27T15:35:19Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -106,9 +106,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-27T15:09:01Z",
+     "started_at": "2026-07-27T15:26:39Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278250653/job/90018862556"
     },
@@ -192,9 +192,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-27T14:47:42Z",
+     "started_at": "2026-07-27T15:32:16Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276467830/job/90012814896"
     },
@@ -210,10 +210,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-27T14:49:04Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T15:26:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276467830/job/90012815210"
     }
    ]
@@ -302,10 +302,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-27T14:30:22Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T15:31:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30256652524/job/89954886691"
     },
     {
@@ -541,11 +541,11 @@
    "branch": "fast-divmod",
    "event": "pull_request",
    "title": "Add fast_divmod magic-number division helper",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30246726470",
    "created_at": "2026-07-27T07:35:54Z",
-   "updated_at": "2026-07-27T14:15:21Z",
+   "updated_at": "2026-07-27T15:32:36Z",
    "actor": "kashif",
    "jobs": [
     {
@@ -560,10 +560,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-27T14:15:21Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T15:32:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30246726470/job/89937690148"
     },
     {
