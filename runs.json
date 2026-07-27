@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-27T04:32:59Z",
+ "updated": "2026-07-27T05:12:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30238169184,
+   "pr": 909,
+   "commit": "ff9e88ac0d3ce632ae925e2a909e6d915e582fce",
+   "branch": "refactor/pa-decode-swa-tile-programming",
+   "event": "pull_request",
+   "title": "[Kernel] Migrate SWA decode to tile programming",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30238169184",
+   "created_at": "2026-07-27T04:50:46Z",
+   "updated_at": "2026-07-27T04:55:16Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-27T04:55:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30238169184/job/89890381271"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-27T04:55:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30238169184/job/89890381272"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-27T04:55:16Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30238169184/job/89890381288"
+    }
+   ]
+  },
   {
    "run_id": 30235257324,
    "pr": 891,
@@ -25,11 +68,11 @@
    "branch": "main",
    "event": "push",
    "title": "Add forward LSE output to FlyDSL flash attention kernels (#844)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30234916880",
    "created_at": "2026-07-27T03:34:26Z",
-   "updated_at": "2026-07-27T03:40:44Z",
+   "updated_at": "2026-07-27T05:10:26Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -44,18 +87,18 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-27T03:41:19Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T05:01:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30234916880/job/89881514404"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-27T03:40:44Z",
+     "started_at": "2026-07-27T05:10:25Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30234916880/job/89881514430"
     }
@@ -96,10 +139,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-27T03:29:57Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T04:47:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30234607950/job/89880272734"
     }
    ]
@@ -154,11 +197,11 @@
    "branch": "pr/refactor-centralize-fp8-types",
    "event": "pull_request",
    "title": "[Prune] Move arch-specific FP8 type selection to kernels_common",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30233121494",
    "created_at": "2026-07-27T02:50:17Z",
-   "updated_at": "2026-07-27T03:35:05Z",
+   "updated_at": "2026-07-27T05:09:39Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -173,10 +216,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-27T03:35:05Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T05:09:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30233121494/job/89875909925"
     },
     {
@@ -2089,49 +2132,6 @@
      "started_at": "2026-07-24T06:12:31Z",
      "completed_at": "2026-07-24T06:18:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30069792875/job/89413436240"
-    }
-   ]
-  },
-  {
-   "run_id": 30069691161,
-   "pr": null,
-   "commit": "6e935ee07087a1f13e26b67c70cc6c7afa90a3e5",
-   "branch": "main",
-   "event": "push",
-   "title": "[CI] Share MLIR cache across GPU jobs (#890)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30069691161",
-   "created_at": "2026-07-24T05:32:13Z",
-   "updated_at": "2026-07-24T07:13:56Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T06:02:34Z",
-     "completed_at": "2026-07-24T06:43:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30069691161/job/89411944199"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T06:37:12Z",
-     "completed_at": "2026-07-24T07:13:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30069691161/job/89411944209"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T06:02:51Z",
-     "completed_at": "2026-07-24T07:03:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30069691161/job/89411944225"
     }
    ]
   }
