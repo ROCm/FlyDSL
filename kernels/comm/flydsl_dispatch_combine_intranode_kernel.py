@@ -18,6 +18,7 @@ from flydsl.expr.rocdl import (
     cvt_pk_fp8_f32,
     cvt_scalef32_pk_f32_fp4,
     cvt_scalef32_pk_fp4_f32,
+    ds_bpermute,
     readfirstlane,
     readlane,
 )
@@ -38,7 +39,7 @@ from .communication_ops_utils import (
 )
 
 # Bump when generated kernel shape changes.
-_DISPATCH_COMBINE_JIT_SCHEMA_VERSION = "v6-combine-batched-kload"
+_DISPATCH_COMBINE_JIT_SCHEMA_VERSION = "v10-stage2-blockwise-fp8-scale-prefetch"
 
 # Stage-3 switches from narrow step=64 to wide step=128/256 above this threshold.
 _S3_WIDE_PATH_THRESHOLD_I32 = 895
@@ -374,6 +375,7 @@ def make_combine_kernel(
     zero_copy: bool = False,
     skip_stage1: bool = False,
     fp8_direct_cast: bool = False,
+    blockwise_fp8_transport: bool = False,
     max_recv: int = None,
 ):
     """Build the intranode combine ``@flyc.kernel``.
@@ -392,13 +394,20 @@ def make_combine_kernel(
     """
     # Contract (op-layer _check_config): fp8_direct_cast => data_type==bf16 and
     # not enable_std_moe. skip_stage1 and zero_copy are independent switches.
+    if blockwise_fp8_transport and (not skip_stage1 or data_type != torch.bfloat16):
+        raise ValueError("blockwise_fp8_transport requires skip_stage1=True and external bf16")
+    if blockwise_fp8_transport and fp8_direct_cast:
+        raise ValueError("blockwise_fp8_transport and fp8_direct_cast are mutually exclusive")
     _xfer_bf16_to_fp8 = fp8_direct_cast
     _transport_dtype = torch.float8_e4m3fn if _xfer_bf16_to_fp8 else data_type
 
     if max_recv is None:
         max_recv = npes * max_tok_per_rank
     _is_fp4 = _transport_dtype == torch.float4_e2m1fn_x2
-    if _is_fp4:
+    if blockwise_fp8_transport:
+        n_i32 = hidden_dim // 4
+        nbytes = hidden_dim + hidden_dim // 32
+    elif _is_fp4:
         n_i32 = hidden_dim // 8
         nbytes = hidden_dim // 2
     else:
@@ -407,13 +416,30 @@ def make_combine_kernel(
 
     # Stage 1/3 strides diverge only under ``fp8_direct_cast``: external
     # bf16 reads/writes vs fp8 staging. Other modes keep transport == external.
-    if _xfer_bf16_to_fp8:
+    if blockwise_fp8_transport:
+        inp_nbytes = hidden_dim * 2
+        out_n_i32 = (hidden_dim * 2) // 4
+    elif _xfer_bf16_to_fp8:
         inp_nbytes = hidden_dim * 2
         out_n_i32 = (hidden_dim * 2) // 4
     else:
         inp_nbytes = nbytes
         out_n_i32 = n_i32
-    if _is_fp4:
+    if blockwise_fp8_transport:
+
+        def _to_accum(i32_val):
+            _v2f32_fp8 = T.VectorType.get([2], T.f32())
+            lo = cvt_pk_f32_fp8(res=_v2f32_fp8, src=i32_val, word_sel=False)
+            hi = cvt_pk_f32_fp8(res=_v2f32_fp8, src=i32_val, word_sel=True)
+            return lo.shuffle(hi, [0, 1, 2, 3])
+
+        def _from_accum(accum_val):
+            return accum_val.to(fx.BFloat16).bitcast(fx.Int32)
+
+        def _zero_accum():
+            return Vec.filled(4, 0.0, fx.Float32)
+
+    elif _is_fp4:
 
         def _to_accum(i32_val):
             _v2f32_fp4 = T.VectorType.get([2], T.f32())
@@ -784,7 +810,14 @@ def make_combine_kernel(
         # Clamp denom to 1 when cur_rank_num_token == 0 (loop won't execute anyway).
         safe_token_count = (cur_rank_num_token == 0).select(1, cur_rank_num_token)
         warps_per_tok = (global_warp_num + safe_token_count - 1) // safe_token_count
-        hdim_per_warp = (n_elems + warps_per_tok - 1) // warps_per_tok
+        if const_expr(blockwise_fp8_transport):
+            # One e8m0 byte covers 8 packed i32 payload words (32 FP8 values). Keep every
+            # warp partition block-aligned so an 8-lane scale broadcast never crosses blocks.
+            scale_blocks = n_elems // 8
+            warps_per_tok = (warps_per_tok > scale_blocks).select(scale_blocks, warps_per_tok)
+            hdim_per_warp = ((scale_blocks + warps_per_tok - 1) // warps_per_tok) * 8
+        else:
+            hdim_per_warp = (n_elems + warps_per_tok - 1) // warps_per_tok
         s3_total_work = cur_rank_num_token * warps_per_tok
 
         for s3_work_idx in range(global_warp_id, s3_total_work, global_warp_num):
@@ -793,6 +826,7 @@ def make_combine_kernel(
             hdim_off = part_id * hdim_per_warp
 
             expert_rsrcs = []
+            expert_scale_rsrcs = []
             expert_vlds = []
 
             if const_expr(skip_stage1 and not zero_copy):
@@ -803,7 +837,12 @@ def make_combine_kernel(
                     expert_tok_off = fx.Int64(slot_idx) * nbytes
                     expert_tok_addr = as_ir_value(addr_shmem_tok + expert_tok_off)
                     # Warp-uniform base -> SGPR (avoids per-lane waterfall).
-                    expert_rsrcs.append(create_buffer_resource_from_addr(_wave_uniform_i64(expert_tok_addr)))
+                    expert_tok_addr = _wave_uniform_i64(expert_tok_addr)
+                    expert_rsrcs.append(create_buffer_resource_from_addr(expert_tok_addr))
+                    if const_expr(blockwise_fp8_transport):
+                        expert_scale_rsrcs.append(
+                            create_buffer_resource_from_addr(expert_tok_addr + fx.Int64(hidden_dim))
+                        )
                     expert_vlds.append(fx.Boolean(1))
             else:
                 # Baseline Stage 3: decode (peer_pe, dest_lid) from dest_tok_map and
@@ -832,6 +871,8 @@ def make_combine_kernel(
 
             def _accum_step(ec_abs, U):
                 vals = [[] for _ in range(U)]
+                scales = [[] for _ in range(U)]
+                scale_raws = [[] for _ in range(U)]
                 for k_slot in range_constexpr(experts_per_token):
                     rsrc_k = expert_rsrcs[k_slot]
                     vld_k = expert_vlds[k_slot]
@@ -840,8 +881,44 @@ def make_combine_kernel(
                         if u > 0:
                             kw["soffset_bytes"] = u * 256
                         vals[u].append(_maybe_load(rsrc_k, ec_abs, vld_k, **kw))
+                        if const_expr(blockwise_fp8_transport):
+                            scale_idx = (ec_abs + u * 64) // 8
+                            sc_i32 = fx.Int32(0)
+                            if (lane & 7) == 0:
+                                sc_raw = _maybe_load(
+                                    expert_scale_rsrcs[k_slot],
+                                    scale_idx,
+                                    vld_k,
+                                    vec_width=1,
+                                    dtype=T.i8(),
+                                    cache_modifier=SLC_CACHE,
+                                )
+                                sc_i32 = fx.Int32(arith.extui(T.i32(), arith.unwrap(sc_raw)))
+                            scale_raws[u].append(sc_i32)
 
-                if const_expr(_xfer_bf16_to_fp8):
+                if const_expr(blockwise_fp8_transport):
+                    # Keep all payload and scale VMEM loads in flight before consuming any
+                    # scale. Broadcasting inside the load loop makes LLVM insert one
+                    # vmcnt(1) per (unroll, expert) pair, serializing remote scale latency.
+                    for u in range_constexpr(U):
+                        for k_slot in range_constexpr(experts_per_token):
+                            sc_i32 = fx.Int32(
+                                ds_bpermute(
+                                    T.i32(),
+                                    (lane & fx.Int32(~7)) * fx.Int32(4),
+                                    scale_raws[u][k_slot],
+                                )
+                            )
+                            scales[u].append(
+                                fx.Float32(
+                                    arith.bitcast(
+                                        T.f32(),
+                                        arith.unwrap(sc_i32 << fx.Int32(23)),
+                                    )
+                                )
+                            )
+
+                if const_expr(_xfer_bf16_to_fp8 or blockwise_fp8_transport):
                     out_off = tok_id * out_n_i32 + ec_abs * 2
                     out_step = 512  # bf16 store on fp8-stride buffer: 2x
                 else:
@@ -849,7 +926,13 @@ def make_combine_kernel(
                     out_step = 256
 
                 for u in range_constexpr(U):
-                    acc = _accum_experts(vals[u])
+                    if const_expr(blockwise_fp8_transport):
+                        fp32_acc = _zero_accum()
+                        for k_slot in range_constexpr(experts_per_token):
+                            fp32_acc = fp32_acc + _to_accum(vals[u][k_slot]) * scales[u][k_slot]
+                        acc = _from_accum(fp32_acc)
+                    else:
+                        acc = _accum_experts(vals[u])
                     kw = dict(cache_modifier=SLC_CACHE)
                     if u > 0:
                         kw["soffset_bytes"] = u * out_step
@@ -1071,6 +1154,7 @@ def make_combine_jit(
     zero_copy=False,
     skip_stage1=False,
     fp8_direct_cast: bool = False,
+    blockwise_fp8_transport: bool = False,
     max_recv=None,
 ):
     """Build the JIT launcher for ``make_combine_kernel``. ``data_type`` is the
@@ -1094,6 +1178,7 @@ def make_combine_jit(
         zero_copy=zero_copy,
         skip_stage1=skip_stage1,
         fp8_direct_cast=fp8_direct_cast,
+        blockwise_fp8_transport=blockwise_fp8_transport,
         max_recv=max_recv,
     )
 
@@ -1106,6 +1191,7 @@ def make_combine_jit(
     _key_zero_copy = zero_copy
     _key_skip_s1 = skip_stage1
     _key_fp8_direct_cast = bool(fp8_direct_cast)
+    _key_blockwise_fp8_transport = bool(blockwise_fp8_transport)
     _key_max_recv = max_recv if max_recv is not None else npes * max_tok_per_rank
     # See dispatch launcher for the ``str(torch.dtype)`` rationale.
     _key_data_type = str(data_type)
@@ -1145,6 +1231,7 @@ def make_combine_jit(
             _key_zero_copy,
             _key_skip_s1,
             _key_fp8_direct_cast,
+            _key_blockwise_fp8_transport,
             _key_max_recv,
             _key_data_type,
             _key_schema_version,

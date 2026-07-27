@@ -1157,6 +1157,7 @@ def _run_mega_only(
         gate_mode=_gate_mode,
         stage1_dispatch_cu=None if args.v2_dispatch_cu <= 0 else args.v2_dispatch_cu,
         stage1_grid_mult=None if args.v2_grid_mult <= 0 else args.v2_grid_mult,
+        stage2_p2p_quant=args.stage2_p2p_quant,
     )
     torch.cuda.synchronize()
     ms.shmem_barrier_all()
@@ -1532,6 +1533,13 @@ def main():
     p.add_argument("--iters", type=int, default=30)
     p.add_argument("--v2-dispatch-cu", type=int, default=0, help="<=0 lets stage1 autotune")
     p.add_argument("--v2-grid-mult", type=int, default=-1, help="<=0 lets stage1 autotune")
+    p.add_argument(
+        "--stage2-p2p-quant",
+        type=str,
+        default="auto",
+        choices=["auto", "none", "fp8_blockwise_1x32"],
+        help="Stage2 P2P transport: auto uses FP8 only when batch size is greater than 2048.",
+    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--rank-skew-ms", type=float, default=0.0, help="delay rank r by r*N ms before first forward")
     p.add_argument(

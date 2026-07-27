@@ -7,7 +7,7 @@ import os
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import _to_raw as _raw
-from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import (
     BFloat16,
     Float4E2M1FN,
@@ -324,7 +324,7 @@ def gemm2_compute_v2(
                     a_frags[i][k].store(Vec(vec))
 
     # The shared e8m0 scale layout bounds each A-scale view to its remaining bytes.
-    sc_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(0), 32)
+    sc_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
 
     asc_per_mb = fx.Int32(kScaleSubBlocks) * kAS_per_chunk_dw * fx.Int32(4)
     asc_num = fx.Int64(i32_max_m_blocks) * fx.Int64(asc_per_mb)
@@ -358,8 +358,9 @@ def gemm2_compute_v2(
             out.append(_raw(Vec(saf.load())[0]))
         return out
 
-    # Stream B weights/scales through registers; cache modifier 2 is non-temporal and 0 is default.
-    b_catom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(2 if use_nt else 0), 32)
+    # B-weight + B-scale: global->register, streamed per K-tile (not LDS-staged).
+    # Use the explicit buffer-load path so use_nt reaches the ISA cache-policy operand.
+    bq_rsrc = buffer_ops.create_buffer_resource_from_addr(arg_bq)
 
     def make_bq_view(j):
         col = n_block_idx * BN + wave * (BN // 4) + j * 16
@@ -376,7 +377,13 @@ def gemm2_compute_v2(
             num_records_bytes=nrec,
         )
 
-    bq_views = [make_bq_view(j) for j in range_constexpr(numAccN)]
+    bq_base_dw = [
+        rocdl.readfirstlane(
+            T.i32,
+            (e * N_OUT_rt + n_block_idx * BN + wave * (BN // 4) + j * 16) * KH4,
+        )
+        for j in range_constexpr(numAccN)
+    ]
 
     mni_base = n_block_idx * (BN // 16 // 2) + wave * (BN // 64 // 2)
     bscale_views = [
@@ -389,18 +396,33 @@ def gemm2_compute_v2(
         for mw in range_constexpr(nPairs)
     ]
 
-    frag_tmpl = bq_views[0][0, 0, 0, 0, None]  # i32<4:1> (16B = 32 fp4)
+    frag_tmpl = make_bq_view(0)[0, 0, 0, 0, None]  # i32<4:1> (16B = 32 fp4)
     # B-scale word template shares the A-scale layout (sc_frag_tmpl).
 
     def issue_b_load_into(bqf, bsf, kt_rt):
         # Issue B-weight + B-scale vmem loads for K-tile kt_rt into the given (per-stage) fragments.
         for j in range_constexpr(numAccN):
             for half in range_constexpr(kHalves):
-                fx.copy(
-                    b_catom,
-                    bq_views[j][lane_div_16, lane_mod_16, kt_rt, half, None],
-                    bqf[j][half],
+                bq_off_dw = (
+                    bq_base_dw[j]
+                    + lane_div_16 * fx.Int32(64)
+                    + lane_mod_16 * fx.Int32(4)
+                    + kt_rt * fx.Int32(kHalves * 256)
+                    + fx.Int32(half * 256)
                 )
+                load_mask = None
+                if const_expr(has_pad):
+                    col = n_block_idx * BN + wave * (BN // 4) + j * 16
+                    load_mask = (col < N_real) & (kt_rt * fx.Int32(kHalves) + fx.Int32(half) < halves_real)
+                bq_vec = buffer_ops.buffer_load(
+                    bq_rsrc,
+                    bq_off_dw,
+                    vec_width=4,
+                    dtype=T.i32,
+                    mask=load_mask,
+                    cache_modifier=2 if use_nt else 0,
+                )
+                bqf[j][half].store(Vec(bq_vec))
         chunk_kt = kt_rt if const_expr(tilesPerScaleChunk == 1) else kt_rt // fx.Int32(tilesPerScaleChunk)
         for mw in range_constexpr(nPairs):
             fx.copy(
@@ -771,9 +793,9 @@ def atomic_bf16_epilog(
 
     load_i32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), Int32)
     load_f32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), Float32)
-    store_bf16x2 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(2), BFloat16)
+    store_bf16x2 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), BFloat16)
     atomic_bf16x2 = fx.make_copy_atom(fx.rocdl.BufferAtomicPkAdd(BFloat16), BFloat16)
-    store_i32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(2), Int32)
+    store_i32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), Int32)
     store_i8 = fx.make_copy_atom(fx.rocdl.BufferCopy8b(2), Int8)
 
     def load_scalar(atom, src, index, elem_ty):
@@ -847,12 +869,12 @@ def atomic_bf16_epilog(
                     local_max = fabs_f32(vals[0])
                     for q in range_constexpr(1, route_vec):
                         local_max = local_max.maximumf(fabs_f32(vals[q]))
-                    amax_bits = fx.Int32(_raw(local_max).bitcast(T.i32))
+                    amax_bits = local_max.bitcast(fx.Int32)
                     ax_e = (amax_bits >> fx.Int32(23)) & fx.Int32(0xFF)
                     e8m0 = ax_e - fx.Int32(7)
                     e8m0 = (e8m0 < fx.Int32(1)).select(fx.Int32(1), e8m0)
                     e8m0 = (amax_bits == fx.Int32(0)).select(fx.Int32(0), e8m0)
-                    block_scale = fx.Float32(_raw(e8m0 << fx.Int32(23)).bitcast(T.f32))
+                    block_scale = (e8m0 << fx.Int32(23)).bitcast(fx.Float32)
                     bs_raw = _raw(block_scale)
                     pk_ty = T.vec(2, T.i16)
                     packed_lo = _raw(Vec.filled([2], 0, fx.Int16))
@@ -926,16 +948,106 @@ def get_gemm2_autotune_configs(a_dtype="fp8"):
     """Return the pruned Stage2 autotune space."""
     cfgs = [
         # (default) 2-stage B + A-scale prefetch + spatial-partition remap, f32 cshuffle, non-persist.
-        dict(BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=True, g2_spart=402, persist=False),
-        dict(BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=True, g2_spart=0, persist=False),
-        dict(BK=256, use_nt=False, g2_bhoist=True, g2_ascale_pf=True, g2_spart=402, persist=False),
-        dict(BK=256, use_nt=True, g2_bhoist=False, g2_ascale_pf=True, g2_spart=402, persist=False),
-        dict(BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=False, g2_spart=402, persist=False),
-        dict(BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=True, g2_spart=202, persist=False),
-        # persist (fixed cu_num grid) -- large-M win, autotune picks it per token bucket.
-        dict(BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=True, g2_spart=402, persist=True),
-        dict(BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=True, g2_spart=0, persist=True),
+        dict(BN=256, BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=True, g2_spart=402, persist=False),
+        dict(BN=128, BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=True, g2_spart=402, persist=False),
+        dict(BN=256, BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=True, g2_spart=0, persist=False),
+        dict(BN=128, BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=True, g2_spart=0, persist=False),
+        dict(BN=256, BK=256, use_nt=False, g2_bhoist=True, g2_ascale_pf=True, g2_spart=402, persist=False),
+        dict(BN=256, BK=256, use_nt=True, g2_bhoist=False, g2_ascale_pf=True, g2_spart=402, persist=False),
+        dict(BN=256, BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=False, g2_spart=402, persist=False),
+        dict(BN=256, BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=True, g2_spart=202, persist=False),
     ]
+    bn_values = (128, 256)
+    bn_env = os.environ.get("MEGA_G2_BN_VALUES")
+    if bn_env:
+        bn_values = tuple(int(value) for value in bn_env.split(","))
+        if not bn_values or any(value not in (128, 256) for value in bn_values):
+            raise ValueError("MEGA_G2_BN_VALUES must contain comma-separated values from {128, 256}")
+    persist_cu_values = (8, 16, 32, 64, 128, 240, 256)
+    persist_cu_env = os.environ.get("MEGA_G2_PERSIST_CU_VALUES")
+    if persist_cu_env:
+        persist_cu_values = tuple(int(value) for value in persist_cu_env.split(","))
+        if not persist_cu_values or any(value <= 0 or value > 256 for value in persist_cu_values):
+            raise ValueError("MEGA_G2_PERSIST_CU_VALUES must contain comma-separated values in [1, 256]")
+    persist_strided_values = (False,)
+    persist_strided_env = os.environ.get("MEGA_G2_PERSIST_STRIDED")
+    if persist_strided_env is not None:
+        if persist_strided_env not in ("0", "1"):
+            raise ValueError("MEGA_G2_PERSIST_STRIDED must be '0' or '1'")
+        persist_strided_values = (persist_strided_env == "1",)
+    bf16_lds_values = (False,)
+    bf16_lds_env = os.environ.get("MEGA_G2_BF16_LDS")
+    if bf16_lds_env is not None:
+        if bf16_lds_env not in ("0", "1"):
+            raise ValueError("MEGA_G2_BF16_LDS must be '0' or '1'")
+        bf16_lds_values = (bf16_lds_env == "1",)
+    cfgs.extend(
+        dict(
+            BN=bn,
+            BK=256,
+            use_nt=use_nt,
+            g2_bhoist=True,
+            g2_ascale_pf=True,
+            g2_spart=402,
+            persist=True,
+            persist_cu=slots,
+            **({"persist_strided": True} if persist_strided else {}),
+            **({"g2_bf16_lds": True} if g2_bf16_lds else {}),
+        )
+        for bn in bn_values
+        for use_nt in (True, False)
+        for slots in persist_cu_values
+        for persist_strided in persist_strided_values
+        for g2_bf16_lds in bf16_lds_values
+    )
+    if persist_strided_env is None and bf16_lds_env is None and 240 in persist_cu_values:
+        cfgs.extend(
+            dict(
+                BN=bn,
+                BK=256,
+                use_nt=use_nt,
+                g2_bhoist=True,
+                g2_ascale_pf=True,
+                g2_spart=402,
+                persist=True,
+                persist_cu=240,
+                persist_strided=True,
+            )
+            for bn in bn_values
+            for use_nt in (True, False)
+        )
+    if bf16_lds_env is None and 128 in bn_values:
+        cfgs.extend(
+            dict(
+                BN=128,
+                BK=256,
+                use_nt=use_nt,
+                g2_bhoist=True,
+                g2_ascale_pf=True,
+                g2_spart=402,
+                persist=True,
+                persist_cu=slots,
+                persist_strided=persist_strided_values[0],
+                g2_bf16_lds=True,
+            )
+            for use_nt in (True, False)
+            for slots in persist_cu_values
+            if slots in (64, 128, 240, 256)
+        )
+    no_persist = os.environ.get("MEGA_G2_NO_PERSIST") == "1"
+    force_persist = os.environ.get("MEGA_G2_FORCE_PERSIST") == "1"
+    if no_persist and force_persist:
+        raise ValueError("MEGA_G2_NO_PERSIST and MEGA_G2_FORCE_PERSIST cannot both be enabled")
+    if no_persist:
+        cfgs = [config for config in cfgs if not config["persist"]]
+    elif force_persist:
+        cfgs = [config for config in cfgs if config["persist"]]
+    force_use_nt = os.environ.get("MEGA_G2_FORCE_USE_NT")
+    if force_use_nt is not None:
+        if force_use_nt not in ("0", "1"):
+            raise ValueError("MEGA_G2_FORCE_USE_NT must be '0' or '1'")
+        use_nt = force_use_nt == "1"
+        cfgs = [config for config in cfgs if config["use_nt"] == use_nt]
     # BK128 is inaccurate here; BM128 at BN256 fits gfx950's 160 KiB block LDS.
     return [dict(config, BM=BM) for BM in (16, 32, 64, 128) for config in cfgs]
 
@@ -1068,12 +1180,6 @@ def compile_gemm2_a4w4_port(
     sbm_tag = "" if SBM == BM else f"_sbm{SBM}"
     if persist and cu_num <= 0:
         raise AssertionError(f"persist=True requires cu_num>0, got {cu_num}")
-    if persist and is_f8:
-        # fp8-A gemm2 persist is a known-broken F2 combo (cos=0 at large M); fail fast.
-        raise AssertionError(
-            "a8w4/fp8-A gemm2 persist is not supported (known-broken F2 path: cos=0 at large M). "
-            "Use persist only with a_dtype='fp4', or run a8w4 with persist=False."
-        )
     persist_tag = "" if not persist else f"_persist_cu{cu_num}"
     pad_tag = "_pad" if has_pad else ""  # has_pad adds the runtime pad kernarg + weight-OOB pad-skip
     bh_tag = "_bhoist" if g2_bhoist else ""

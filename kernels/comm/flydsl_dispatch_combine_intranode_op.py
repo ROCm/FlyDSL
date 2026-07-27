@@ -34,6 +34,7 @@ _SUPPORTED_TOK_DTYPES = (
 )
 
 _SUPPORTED_QUANT_TYPES = ("none", "fp8_direct_cast")
+_SUPPORTED_STAGE2_P2P_QUANT_TYPES = ("none", "fp8_blockwise_1x32")
 
 _MAX_INTRANODE_NPES = 8
 
@@ -245,6 +246,7 @@ class FlyDSLDispatchCombineConfig:
     enable_std_moe: bool = False
     zero_copy: bool = False
     combine_quant_type: str = "none"
+    stage2_p2p_quant: str = "none"
     max_total_recv_tokens: int = 0
     # enable_group_major: also own the expert-major dispatch buffers (FlyDSLDispatchGroupMajorOp
     # self._gm) the fused stage-1 megakernel reads/writes. Default False = token-major only.
@@ -679,6 +681,15 @@ class FlyDSLDispatchCombineIntraNodeOp:
             raise ValueError(
                 f"combine_quant_type={cfg.combine_quant_type!r} not supported. Supported: {_SUPPORTED_QUANT_TYPES}"
             )
+        if cfg.stage2_p2p_quant not in _SUPPORTED_STAGE2_P2P_QUANT_TYPES:
+            raise ValueError(
+                f"stage2_p2p_quant={cfg.stage2_p2p_quant!r} not supported. "
+                f"Supported: {_SUPPORTED_STAGE2_P2P_QUANT_TYPES}"
+            )
+        if cfg.stage2_p2p_quant != "none" and cfg.combine_dtype != torch.bfloat16:
+            raise ValueError("stage2_p2p_quant requires combine_dtype=torch.bfloat16")
+        if cfg.stage2_p2p_quant != "none" and cfg.combine_quant_type != "none":
+            raise ValueError("stage2_p2p_quant and combine_quant_type are mutually exclusive")
         if cfg.combine_quant_type == "fp8_direct_cast" and cfg.combine_dtype != torch.bfloat16:
             raise ValueError(
                 f"combine_quant_type='fp8_direct_cast' requires combine_dtype=bfloat16 "
@@ -1118,7 +1129,17 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 stream,
             )
 
-    def _launch_combine(self, input, weights, indices, packed_recv_x, cur_tok, enable_weights, skip_stage1):
+    def _launch_combine(
+        self,
+        input,
+        weights,
+        indices,
+        packed_recv_x,
+        cur_tok,
+        enable_weights,
+        skip_stage1,
+        stage2_p2p_quant=None,
+    ):
         """Shared driver for ``combine`` (skip_stage1=False) and ``combine_no_stage1``
         (skip_stage1=True). Resolves dtype/geometry, jits, launches, returns (out_tok, out_wts).
         Launch geometry is resolved from cfg (combine pin > tuning table > default)."""
@@ -1129,6 +1150,12 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
         # fp8_direct_cast fires only when cfg asks AND launch dtype is bf16.
         fp8_dc = cfg.combine_quant_type == "fp8_direct_cast" and input.dtype == torch.bfloat16
+        p2p_quant = cfg.stage2_p2p_quant if stage2_p2p_quant is None else stage2_p2p_quant
+        if p2p_quant not in _SUPPORTED_STAGE2_P2P_QUANT_TYPES:
+            raise ValueError(
+                f"stage2_p2p_quant={p2p_quant!r} not supported. " f"Supported: {_SUPPORTED_STAGE2_P2P_QUANT_TYPES}"
+            )
+        blockwise_fp8 = skip_stage1 and p2p_quant == "fp8_blockwise_1x32"
         if skip_stage1:
             # placeholder input: pre-cast to fp8 so the kernel dtype + out view match.
             if fp8_dc and input.dtype != torch.float8_e4m3fn:
@@ -1172,7 +1199,16 @@ class FlyDSLDispatchCombineIntraNodeOp:
         else:
             prx_ptr = packed_recv_x.data_ptr() if packed_recv_x is not None else 0
 
-        key = (c_dtype, bool(cfg.zero_copy), bool(enable_weights), bool(fp8_dc), bn, wpb, bool(skip_stage1))
+        key = (
+            c_dtype,
+            bool(cfg.zero_copy),
+            bool(enable_weights),
+            bool(fp8_dc),
+            bool(blockwise_fp8),
+            bn,
+            wpb,
+            bool(skip_stage1),
+        )
         fn = self._comb_jit_cache.get(key)
         if fn is None:
             fn = make_combine_jit(
@@ -1189,6 +1225,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 zero_copy=cfg.zero_copy,
                 skip_stage1=bool(skip_stage1),
                 fp8_direct_cast=bool(fp8_dc),
+                blockwise_fp8_transport=bool(blockwise_fp8),
                 # Must match dispatch's encoding stride so tok_map decode lines up.
                 max_recv=self._effective_max_recv,
             )
@@ -1231,6 +1268,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
         packed_recv_x=None,
         cur_tok=None,
         enable_weights: bool = True,
+        stage2_p2p_quant=None,
     ):
         """Skip-Stage1 combine (fused GEMM2+combine only; gated by ``_ENABLE_COMBINE_NO_STAGE1``).
         Runs Stage 2+3; caller pre-populated ``shmem_comb_inp[_wts]`` and passes ``cur_tok``."""
@@ -1242,7 +1280,14 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 "after auditing the upstream IPC-ordering contract."
             )
         return self._launch_combine(
-            input, weights, indices, packed_recv_x, cur_tok, enable_weights=enable_weights, skip_stage1=True
+            input,
+            weights,
+            indices,
+            packed_recv_x,
+            cur_tok,
+            enable_weights=enable_weights,
+            skip_stage1=True,
+            stage2_p2p_quant=stage2_p2p_quant,
         )
 
     def get_dispatch_src_token_pos(self):

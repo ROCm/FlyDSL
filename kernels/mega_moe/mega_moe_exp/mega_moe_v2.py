@@ -52,12 +52,17 @@ class MegaMoEV2:
         gemm2_tile_m: int = -1, gemm2_tile_n: int = -1, gemm2_tile_k: int = -1,
         enable_fused_stage1: bool = True, enable_fused_stage2: bool = True, gate_mode=None,
         stage1_dispatch_cu: int | None = None, stage1_grid_mult: int | None = None,
-        stage1_tile_m_values: tuple[int, ...] | None = None):
+        stage1_tile_m_values: tuple[int, ...] | None = None, stage2_p2p_quant: str = "auto"):
     # fmt: on
         if not enable_fused_stage1 or not enable_fused_stage2:
             raise ValueError("MegaMoEV2 requires enable_fused_stage1=True and enable_fused_stage2=True")
         if quant != "a8w4":
             raise ValueError("MegaMoEV2 currently supports quant='a8w4' only")
+        if stage2_p2p_quant not in ("auto", "none", "fp8_blockwise_1x32"):
+            raise ValueError(
+                "stage2_p2p_quant must be 'auto', 'none', or 'fp8_blockwise_1x32', "
+                f"got {stage2_p2p_quant!r}"
+            )
         if experts % world_size != 0:
             raise ValueError(f"experts={experts} must be divisible by world_size={world_size}")
         if max_tok_per_rank <= 0 or max_tok_per_rank & (max_tok_per_rank - 1):
@@ -81,6 +86,7 @@ class MegaMoEV2:
         self.enable_fused_stage2 = True
         self.gate_mode = "interleave"
         self.mega_scheme = mega_scheme
+        self._stage2_p2p_quant = stage2_p2p_quant
         self._v2_dispatch_cu = None if stage1_dispatch_cu is None else int(stage1_dispatch_cu)
         self._v2_grid_mult = None if stage1_grid_mult is None else int(stage1_grid_mult)
         if stage1_tile_m_values is None:
@@ -319,16 +325,34 @@ class MegaMoEV2:
         cu_num = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
         self._g2v2_inter = int(self.inter_dim)
         self._g2v2_hidden = int(comb_cfg.hidden_dim)
-        self._g2_tuner = make_gemm2_autotuner(a_dtype="fp8")
-        self._g2_invariants = {
-            "model_dim": int(comb_cfg.hidden_dim), "inter_dim": int(self.inter_dim),
-            "experts": int(comb_cfg.num_experts_per_rank), "topk": int(k), "rank": int(comb_cfg.rank),
-            "npes": int(comb_cfg.world_size), "max_tok": int(comb_cfg.max_num_inp_token_per_rank),
-            "recv_cap": int(self.max_recv),
-            "comb_inp_nbytes": int(comb_cfg.max_num_inp_token_per_rank) * int(k) * int(comb_cfg.hidden_dim) * 2,
-            "HIDDEN_MAX": int(comb_cfg.hidden_dim), "INTER_MAX": int(self.inter_dim), "cu_num": int(cu_num),
-            "autotune_schema": self._g2_tuner.schema,
-        }
+        quant_modes = (
+            ("none", "fp8_blockwise_1x32")
+            if self._stage2_p2p_quant == "auto"
+            else (self._stage2_p2p_quant,)
+        )
+        self._g2_tuners = {}
+        self._g2_invariants_by_quant = {}
+        for p2p_quant in quant_modes:
+            tuner = make_gemm2_autotuner(a_dtype="fp8", p2p_quant_type=p2p_quant)
+            p2p_row_nbytes = (
+                int(comb_cfg.hidden_dim) + int(comb_cfg.hidden_dim) // 32
+                if p2p_quant == "fp8_blockwise_1x32"
+                else int(comb_cfg.hidden_dim) * 2
+            )
+            self._g2_tuners[p2p_quant] = tuner
+            self._g2_invariants_by_quant[p2p_quant] = {
+                "model_dim": int(comb_cfg.hidden_dim), "inter_dim": int(self.inter_dim),
+                "experts": int(comb_cfg.num_experts_per_rank), "topk": int(k), "rank": int(comb_cfg.rank),
+                "npes": int(comb_cfg.world_size), "max_tok": int(comb_cfg.max_num_inp_token_per_rank),
+                "recv_cap": int(self.max_recv),
+                "comb_inp_nbytes": int(comb_cfg.max_num_inp_token_per_rank) * int(k) * p2p_row_nbytes,
+                "HIDDEN_MAX": int(comb_cfg.hidden_dim), "INTER_MAX": int(self.inter_dim), "cu_num": int(cu_num),
+                "autotune_schema": tuner.schema, "p2p_quant_type": p2p_quant,
+            }
+        self._g2_tuner = self._g2_tuners["none" if self._stage2_p2p_quant == "auto" else self._stage2_p2p_quant]
+        self._g2_invariants = self._g2_invariants_by_quant[
+            "none" if self._stage2_p2p_quant == "auto" else self._stage2_p2p_quant
+        ]
         self._g2_combine_placeholder = torch.empty(
             1, comb_cfg.hidden_dim, dtype=comb_cfg.combine_dtype, device=dev
         )
@@ -340,6 +364,13 @@ class MegaMoEV2:
         if stream is None:
             stream = torch.cuda.current_stream()
         s_fx = fx.Stream(stream.cuda_stream)
+        p2p_quant = (
+            "fp8_blockwise_1x32"
+            if self._stage2_p2p_quant == "auto" and run_tokens > 2048
+            else ("none" if self._stage2_p2p_quant == "auto" else self._stage2_p2p_quant)
+        )
+        self._g2_tuner = self._g2_tuners[p2p_quant]
+        self._g2_invariants = self._g2_invariants_by_quant[p2p_quant]
         # fmt: off
         self._g2_tuner(
             fx.Int64(self._s1_out.view(-1).data_ptr()), fx.Int64(self._s1_osd.data_ptr()),
@@ -351,5 +382,6 @@ class MegaMoEV2:
             tune_tokens=int(run_tokens), SBM=active_tile_m, **self._g2_invariants)
         # fmt: on
         return comb_op.combine_no_stage1(
-            self._g2_combine_placeholder, None, None, cur_tok=run_tokens, enable_weights=False
+            self._g2_combine_placeholder, None, None, cur_tok=run_tokens, enable_weights=False,
+            stage2_p2p_quant=p2p_quant,
         )
