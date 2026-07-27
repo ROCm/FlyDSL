@@ -359,12 +359,12 @@ __all__ = [
     "as_dsl_value",
     "is_generic_address_space",
     "is_target_address_space",
-    # DSL value types
-    "Numeric",
-    "as_numeric",
     "fast_divmod",
     "fastdivmod_magic",
     "FastDivmod",
+    # DSL value types
+    "Numeric",
+    "as_numeric",
     "Boolean",
     "Float",
     "BFloat16",
