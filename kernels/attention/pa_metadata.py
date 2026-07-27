@@ -28,8 +28,12 @@ from kernels.common import dpp_utils
 from kernels.common.kernels_common import get_warp_size
 from kernels.common.tensor_shim import _run_compiled
 from kernels.common.utils import (
+    copy_load,
+    copy_store,
     exp2_f32_fast,
+    global_pointer_from_addr,
     is_pow2,
+    load_global_16b,
     rcp_f32,
     udiv_const,
     unflatten_k,
@@ -43,26 +47,6 @@ _PA_OUTPUT_DTYPES = {
     "f16": fx.Float16,
     "bf16": fx.BFloat16,
 }
-
-
-def _global_pointer_from_addr(addr, dtype, *, alignment: int):
-    ptr_type = fx.PointerType.get(
-        elem_ty=dtype.ir_type,
-        address_space=fx.AddressSpace.Global,
-        alignment=alignment,
-    )
-    return fx.inttoptr(ptr_type, addr)
-
-
-def _copy_load(source, offset, copy_atom, register):
-    fx.copy(copy_atom, fx.slice(source, (None, fx.Int32(offset))), register)
-    return fx.memref_load_vec(register)
-
-
-def _load_global_16b(global_ptr, byte_offset, copy_atom, reg):
-    src = fx.make_view(global_ptr + byte_offset, fx.make_layout(16, 1))
-    fx.copy(copy_atom, src, reg)
-    return fx.memref_load_vec(reg).bitcast(fx.Int64)
 
 
 def get_pa_metadata_info_v1(batch_size: int, num_head_k: int = 1, num_cu: int = None):
@@ -154,7 +138,7 @@ def _load_k_flat(
         kbo_dw = kbo * c_tok_stride_dw
         for qkhe in range_constexpr(qkhe_loop):
             ka_dw = k_block_base_dw_i64 + fx.Int64(kbo_dw + k_he_off_dw[qkhe])
-            k2 = _load_global_16b(k_global_ptr, ka_dw * fx.Int64(4), k_copy_atom, k_reg)
+            k2 = load_global_16b(k_global_ptr, ka_dw * fx.Int64(4), k_copy_atom, k_reg)
             k2_words = fx.Vector(k2)
             k_flat.append(k2_words[0])
             k_flat.append(k2_words[1])
@@ -312,7 +296,7 @@ def _prefetch_mtp_group_query(
     q_tile = q_elem // fx.Int32(4)
     q_chunks = []
     for qwi in range_constexpr(Q_CHUNKS_PER_LANE):
-        q_chunks.append(_copy_load(q_tiles, q_tile + fx.Int32(qwi), q_copy_atom, q_reg))
+        q_chunks.append(copy_load(q_tiles, q_tile + fx.Int32(qwi), q_copy_atom, q_reg))
     return qi_val, qhi_pos, q_chunks
 
 
@@ -401,8 +385,8 @@ def _make_pa_phase_helpers(
             scale_stage_token = warp_id * fx.Int32(WARP_SIZE) + rowid * fx.Int32(MFMA_N) + lane16id
             scale_global_token = tile_token_offset_i32 + scale_stage_token
             scale_offset = fx.Int32(scale_block_base + scale_global_token)
-            k_scale_scalar = _copy_load(ks_tiles, scale_offset, scale_copy_atom, scale_reg)[0]
-            v_scale_scalar = _copy_load(vs_tiles, scale_offset, scale_copy_atom, scale_reg)[0]
+            k_scale_scalar = copy_load(ks_tiles, scale_offset, scale_copy_atom, scale_reg)[0]
+            v_scale_scalar = copy_load(vs_tiles, scale_offset, scale_copy_atom, scale_reg)[0]
             return k_scale_scalar, v_scale_scalar
         return ()
 
@@ -422,7 +406,7 @@ def _make_pa_phase_helpers(
                 else:
                     va_dw_delta = vhead_elem_dw[vhe] + (v_token_in_block >> fx.Int32(2))
                 va_byte = (v_block_base_dw + fx.Int64(va_dw_delta)) * fx.Int64(4)
-                v_i64x2 = _load_global_16b(v_global_ptr, va_byte, v_copy_atom, v_reg)
+                v_i64x2 = load_global_16b(v_global_ptr, va_byte, v_copy_atom, v_reg)
                 vhe_data.append(v_i64x2)
             v_results.append(vhe_data)
 
@@ -707,15 +691,23 @@ def compile_pa_metadata_v1(
         lane = fx.Int32(gpu.thread_id("x"))
 
         def _num_part(batch_idx):
-            ctxv = _copy_load(context_lens, batch_idx, copy_i32, load_reg)[0]
+            ctxv = copy_load(context_lens, batch_idx, copy_i32, load_reg)[0]
             return fx.Int32(arith.ceildivui(ctxv.ir_value(), c_kvg.ir_value()))
 
-        def _store(divided, off, val):
-            fx.memref_store_vec(fx.Vector.from_elements([fx.Int32(val)], dtype=fx.Int32), store_reg)
-            fx.copy(copy_i32, store_reg, fx.slice(divided, (None, off)))
-
-        _store(work_indptr, 0, 0)
-        _store(reduce_indptr, 0, 0)
+        copy_store(
+            work_indptr,
+            0,
+            copy_i32,
+            store_reg,
+            fx.Vector.from_elements([fx.Int32(0)], dtype=fx.Int32),
+        )
+        copy_store(
+            reduce_indptr,
+            0,
+            copy_i32,
+            store_reg,
+            fx.Vector.from_elements([fx.Int32(0)], dtype=fx.Int32),
+        )
 
         # Lane-strided partition count followed by a wave reduction.
         b = lane
@@ -762,8 +754,8 @@ def compile_pa_metadata_v1(
                 remain_kv = pages - kvblk_
                 do_finish = remain_ >= remain_kv  # fx bool
 
-                qo_start = _copy_load(sq, batch_, copy_i32, load_reg)[0]
-                qo_end = _copy_load(sq, batch_ + c1, copy_i32, load_reg)[0]
+                qo_start = copy_load(sq, batch_, copy_i32, load_reg)[0]
+                qo_end = copy_load(sq, batch_ + c1, copy_i32, load_reg)[0]
                 kv_start = kvbeg_ + kvblk_  # same for both branches
 
                 f_kv_end = kvend_  # min(kv_start + remain_kv, kvend_) == kvend_
@@ -820,7 +812,13 @@ def compile_pa_metadata_v1(
                 do_reduce = do_finish & nsplit_pos
                 num_splits = nsplit_ + c1
                 # Non-reduce writes are overwritten before their slots become visible.
-                _store(reduce_indptr, grt_ + c1, lri_ + num_splits)
+                copy_store(
+                    reduce_indptr,
+                    grt_ + c1,
+                    copy_i32,
+                    store_reg,
+                    fx.Vector.from_elements([fx.Int32(lri_ + num_splits)], dtype=fx.Int32),
+                )
                 fx.memref_store_vec(
                     fx.Vector.from_elements([qo_start, qo_end], dtype=fx.Int32),
                     store_reg2,
@@ -830,12 +828,24 @@ def compile_pa_metadata_v1(
                 sidx = c0
                 while sidx < rcount:
                     val = pidx_ - (nsplit_ - sidx) * c_qlen
-                    _store(reduce_partial_map, lri_ + sidx, val)
+                    copy_store(
+                        reduce_partial_map,
+                        lri_ + sidx,
+                        copy_i32,
+                        store_reg,
+                        fx.Vector.from_elements([fx.Int32(val)], dtype=fx.Int32),
+                    )
                     sidx = sidx + c1
                 next_num_works = do_finish.select(f_nworks2, s_nworks2)
 
                 # The last same-value-race write before advancing cid is authoritative.
-                _store(work_indptr, cid_ + c1, next_num_works)
+                copy_store(
+                    work_indptr,
+                    cid_ + c1,
+                    copy_i32,
+                    store_reg,
+                    fx.Vector.from_elements([fx.Int32(next_num_works)], dtype=fx.Int32),
+                )
 
                 (
                     cid_,
@@ -873,13 +883,25 @@ def compile_pa_metadata_v1(
 
         it_t = cid
         while it_t <= c_numcu:
-            _store(work_indptr, it_t, num_works)
+            copy_store(
+                work_indptr,
+                it_t,
+                copy_i32,
+                store_reg,
+                fx.Vector.from_elements([fx.Int32(num_works)], dtype=fx.Int32),
+            )
             it_t = it_t + c1
 
         c_rip_size = c_nb + c1  # reduce_indptr length = num_batches + 1
         it_r = global_reduce_tile_idx
         while it_r < c_rip_size:
-            _store(reduce_indptr, it_r, last_reduce_indptr)
+            copy_store(
+                reduce_indptr,
+                it_r,
+                copy_i32,
+                store_reg,
+                fx.Vector.from_elements([fx.Int32(last_reduce_indptr)], dtype=fx.Int32),
+            )
             it_r = it_r + c1
 
     @flyc.jit
@@ -1054,7 +1076,7 @@ def compile_pa_decode_metadata(
         warp_id = tid >> fx.Int32(6)
 
         def _divide_addr(addr, dtype, width):
-            ptr = _global_pointer_from_addr(addr, dtype, alignment=width * dtype.width // 8)
+            ptr = global_pointer_from_addr(addr, dtype, alignment=width * dtype.width // 8)
             flat = fx.make_view(ptr, fx.make_layout(_FLAT_BUFFER_ELEMENTS, 1))
             return fx.logical_divide(
                 fx.rocdl.make_buffer_tensor(flat),
@@ -1092,8 +1114,8 @@ def compile_pa_decode_metadata(
         partial_out_reg = fx.make_rmem_tensor(4, fx.Float32)
         partial_lse_reg = fx.make_rmem_tensor(1, fx.Float32)
 
-        k_global_ptr = _global_pointer_from_addr(key_cache_ptr, fx.Uint8, alignment=16)
-        v_global_ptr = _global_pointer_from_addr(value_cache_ptr, fx.Uint8, alignment=16)
+        k_global_ptr = global_pointer_from_addr(key_cache_ptr, fx.Uint8, alignment=16)
+        v_global_ptr = global_pointer_from_addr(value_cache_ptr, fx.Uint8, alignment=16)
         global_copy_16b = fx.make_copy_atom(fx.UniversalCopy128b(), fx.Uint8)
         global_reg_16b = fx.make_rmem_tensor(16, fx.Uint8)
 
@@ -1101,8 +1123,8 @@ def compile_pa_decode_metadata(
             k_scale_val = fx.Float32(1.0)
             v_scale_val = fx.Float32(1.0)
         else:
-            k_scale_val = _copy_load(key_scales, 0, copy_f32, scale_reg)[0]
-            v_scale_val = _copy_load(value_scales, 0, copy_f32, scale_reg)[0]
+            k_scale_val = copy_load(key_scales, 0, copy_f32, scale_reg)[0]
+            v_scale_val = copy_load(value_scales, 0, copy_f32, scale_reg)[0]
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         logits_base = lds.buf.ptr
@@ -1119,30 +1141,30 @@ def compile_pa_decode_metadata(
             qkhe_loop=_QKHELOOP,
         )
 
-        work_start = _copy_load(work_indptr, cu_id, copy_i32, i32_reg)[0]
-        work_end = _copy_load(work_indptr, cu_id + fx.Int32(1), copy_i32, i32_reg)[0]
+        work_start = copy_load(work_indptr, cu_id, copy_i32, i32_reg)[0]
+        work_end = copy_load(work_indptr, cu_id + fx.Int32(1), copy_i32, i32_reg)[0]
 
         for work_idx in range(work_start, work_end, fx.Int32(1)):
             # Two naturally aligned dwordx4 loads cover the eight work fields.
             info_tile = work_idx * fx.Int32(2)
-            wi_lo_v = _copy_load(work_info, info_tile, copy_i32x4, i32x4_reg)
+            wi_lo_v = copy_load(work_info, info_tile, copy_i32x4, i32x4_reg)
             batch_idx = wi_lo_v[0]
             partial_idx = wi_lo_v[1]
             qo_start = wi_lo_v[2]
-            wi_hi_v = _copy_load(work_info, info_tile + fx.Int32(1), copy_i32x4, i32x4_reg)
+            wi_hi_v = copy_load(work_info, info_tile + fx.Int32(1), copy_i32x4, i32x4_reg)
             kv_start = wi_hi_v[0]
             kv_end = wi_hi_v[1]
             q_head_range = wi_hi_v[3]
 
             # Convert cumulative partition indices to sequence-local page indices.
-            kv_part_base = _copy_load(partition_indptr, batch_idx, copy_i32, i32_reg)[0]
-            kv_page_base = _copy_load(kv_indptr, batch_idx, copy_i32, i32_reg)[0]
+            kv_part_base = copy_load(partition_indptr, batch_idx, copy_i32, i32_reg)[0]
+            kv_page_base = copy_load(kv_indptr, batch_idx, copy_i32, i32_reg)[0]
             local_part_start = kv_start - kv_part_base
 
             q_head_start = q_head_range & fx.Int32(0xFFFF)
             kv_h = udiv_const(q_head_start, query_group_size)
 
-            context_len = _copy_load(context_lengths, batch_idx, copy_i32, i32_reg)[0]
+            context_len = copy_load(context_lengths, batch_idx, copy_i32, i32_reg)[0]
             _k_head_off = kv_h * stride_k_head
             _v_head_off = kv_h * stride_v_head
 
@@ -1260,7 +1282,7 @@ def compile_pa_decode_metadata(
                 lp = local_part_start + rel_part
                 partition_start = lp * fx.Int32(KV_COMPUTE_BLOCK)
 
-                phys_block = _copy_load(
+                phys_block = copy_load(
                     kv_page_indices,
                     kv_page_base + udiv_const(lp, parts_per_block),
                     copy_i32,
@@ -1519,11 +1541,11 @@ def compile_pa_metadata_reduce(
         reg_f32_vec = fx.make_rmem_tensor(vec_width, fx.Float32)
         reg_output = fx.make_rmem_tensor(vec_width, output_dtype)
 
-        lo = _copy_load(reduce_indptr, g, copy_i32, reg_i32)[0]
-        hi = _copy_load(reduce_indptr, g + fx.Int32(1), copy_i32, reg_i32)[0]
+        lo = copy_load(reduce_indptr, g, copy_i32, reg_i32)[0]
+        hi = copy_load(reduce_indptr, g + fx.Int32(1), copy_i32, reg_i32)[0]
 
         if hi > lo:
-            qo_start = _copy_load(reduce_final_map, g * fx.Int32(2), copy_i32, reg_i32)[0]
+            qo_start = copy_load(reduce_final_map, g * fx.Int32(2), copy_i32, reg_i32)[0]
             out_row = qo_start + qi
 
             for slot, st in range(
@@ -1539,9 +1561,9 @@ def compile_pa_metadata_reduce(
                 m = fx.Float32(st[0])
                 denom = fx.Float32(st[1])
                 acc = fx.Vector(st[2])
-                prow = _copy_load(reduce_partial_map, slot, copy_i32, reg_i32)[0] + qi
-                lse = _copy_load(partial_lse, prow * stride_pl_row + qhead, copy_f32, reg_f32)[0]
-                v = _copy_load(
+                prow = copy_load(reduce_partial_map, slot, copy_i32, reg_i32)[0] + qi
+                lse = copy_load(partial_lse, prow * stride_pl_row + qhead, copy_f32, reg_f32)[0]
+                v = copy_load(
                     partial_output,
                     prow * stride_po_row + qhead * fx.Int32(head_dim) + tid * fx.Int32(vec_width),
                     copy_f32_vec,
