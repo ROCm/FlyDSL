@@ -751,6 +751,7 @@ def run_pa_decode_ps_test(
         kv_indptr,
         num_query_heads,
         num_kv_heads,
+        per_token_kv=quant_mode == "per_token",
     )
     ps_key_scale: torch.Tensor = key_scale_original
     ps_value_scale: torch.Tensor = value_scale_original

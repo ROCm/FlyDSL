@@ -21,7 +21,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
-from flydsl.expr.typing import Int32, T
+from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from kernels.attention.pa_common import _compute_block_base_dw_i64
 from kernels.common import dpp_utils
@@ -126,9 +126,7 @@ LDS_LOGITS_BYTES = NUM_WARPS * 4 * MFMA_N * PROB_ROW_STRIDE_BYTES  # 10240
 LDS_SOFTMAX_BYTES = 2 * NUM_WARPS * MFMA_N * 4  # 512
 
 LDS_SCALE_V_PADDING = 4  # break K/V same-bank paired writes
-
 LDS_SCALE_V_OFFSET = KV_COMPUTE_BLOCK + LDS_SCALE_V_PADDING
-
 LDS_SCALE_BYTES = (LDS_SCALE_V_OFFSET + KV_COMPUTE_BLOCK) * 4  # K/V per-token scale staging
 
 FP8_MAX = 240.0
@@ -413,19 +411,6 @@ def _make_pa_phase_helpers(
         tile_token_offset_i32,
         scale_scalars,
     ):
-        if const_expr(per_token_kv):
-            scale_stage_token = warp_id * fx.Int32(WARP_SIZE) + rowid * fx.Int32(MFMA_N) + lane16id
-            k_scale_scalar, v_scale_scalar = scale_scalars
-            fx.ptr_store(
-                fx.Vector.from_elements([k_scale_scalar], dtype=fx.Float32),
-                scale_base + scale_stage_token,
-            )
-            fx.ptr_store(
-                fx.Vector.from_elements([v_scale_scalar], dtype=fx.Float32),
-                scale_base + (fx.Int32(LDS_SCALE_V_OFFSET) + scale_stage_token),
-            )
-            rocdl.sched_barrier(0)
-
         v_results = []
         for vt in range_constexpr(VTLOOP):
             vhe_data = []
@@ -442,13 +427,24 @@ def _make_pa_phase_helpers(
             v_results.append(vhe_data)
 
         if const_expr(per_token_kv):
+            scale_stage_token = warp_id * fx.Int32(WARP_SIZE) + rowid * fx.Int32(MFMA_N) + lane16id
+            k_scale_scalar, v_scale_scalar = scale_scalars
+            fx.ptr_store(
+                fx.Vector.from_elements([k_scale_scalar], dtype=fx.Float32),
+                scale_base + scale_stage_token,
+            )
+            fx.ptr_store(
+                fx.Vector.from_elements([v_scale_scalar], dtype=fx.Float32),
+                scale_base + (fx.Int32(LDS_SCALE_V_OFFSET) + scale_stage_token),
+            )
+            rocdl.sched_barrier(0)
             gpu.barrier()
             k_scale_vecs = []
             v_scale_vecs = []
             for td in range_constexpr(TLOOP):
                 scale_row_base = kv_tok_thread_base + fx.Int32(td * MFMA_N)
                 k_scale_vecs.append(
-                    fx.ptr_load(scale_base + (scale_row_base), result_type=fx.Vector.make_type(4, fx.Float32))
+                    fx.ptr_load(scale_base + scale_row_base, result_type=fx.Vector.make_type(4, fx.Float32))
                 )
                 v_scale_vecs.append(
                     fx.ptr_load(
@@ -500,7 +496,10 @@ def _make_pa_phase_helpers(
         for td in range_constexpr(TLOOP):
             acc = fx.Vector.filled(4, 0.0, fx.Float32)
             for k_step in range_constexpr(qkhe_loop * 2):
-                acc = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k_ops[td][k_step], q_frags[k_step], acc, 0, 0, 0])
+                acc = rocdl.mfma_f32_16x16x32_fp8_fp8(
+                    T.f32x4,
+                    [k_ops[td][k_step], q_frags[k_step], acc, 0, 0, 0],
+                )
             if const_expr(per_token_kv):
                 d_out.append(fx.Vector(acc) * (k_scale_vecs[td] * query_scale))
             else:
@@ -523,7 +522,7 @@ def _make_pa_phase_helpers(
             return d_out, v_scale_vecs
         return d_out
 
-    def _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, outs, v_scale_vecs):
+    def _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, outs, v_scale_vecs, *, v_normalization=None):
         partition_max = neg_inf
         partition_sum = zero_f
         max_vec = fx.ptr_load(softmax_base + (sm_rd_max_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
@@ -557,26 +556,27 @@ def _make_pa_phase_helpers(
                 arith.unwrap(partition_sum), arith.unwrap(sum_vec[w]), fastmath=arith.FastMathFlags.contract
             )
 
-        accum_sum = arith.mulf(arith.unwrap(accum_scale), arith.unwrap(rsum), fastmath=arith.FastMathFlags.contract)
-        rsum = arith.addf(accum_sum, arith.unwrap(partition_sum), fastmath=arith.FastMathFlags.contract)
-        rmax = new_rmax
-        for vhe in range_constexpr(vhe_loop):
-            outs[vhe] = outs[vhe] * fx.Float32(accum_scale)
-
         if const_expr(per_token_kv):
-            v_max_global = zero_f
-            vmax_vec = fx.ptr_load(softmax_base + (sm_vmax_rd_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
-            for w in range_constexpr(NUM_WARPS):
-                w_vmax = vmax_vec[w]
-                v_max_global = fx.maxnumf(v_max_global, w_vmax)
-            v_max_scaled = v_max_global * fx.Float32(1.0 / FP8_MAX).ir_value()
-            v_max_safe_scaled = v_max_scaled + fx.Float32(1e-8 / FP8_MAX).ir_value()
-            norm_factor = rcp_f32(v_max_safe_scaled)
-            v_correction = v_max_scaled
+            if const_expr(v_normalization is None):
+                v_max_global = zero_f
+                vmax_vec = fx.ptr_load(
+                    softmax_base + (sm_vmax_rd_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32)
+                )
+                for w in range_constexpr(NUM_WARPS):
+                    w_vmax = vmax_vec[w]
+                    v_max_global = fx.maxnumf(v_max_global, w_vmax)
+                v_correction = v_max_global * fx.Float32(1.0 / FP8_MAX).ir_value()
+                norm_factor = rcp_f32(v_correction + fx.Float32(1e-8 / FP8_MAX).ir_value())
+                normalized_v_scales = [
+                    fx.Vector(v_scale_vecs[td]) * fx.Float32(norm_factor) for td in range_constexpr(TLOOP)
+                ]
+            else:
+                v_correction, normalized_v_scales = v_normalization
             for td in range_constexpr(TLOOP):
-                d_out[td] = d_out[td] * (v_scale_vecs[td] * fx.Float32(norm_factor))
+                d_out[td] = d_out[td] * normalized_v_scales[td]
         else:
             v_correction = v_scale_val
+            normalized_v_scales = []
 
         for td in range_constexpr(TLOOP):
             pv = fx.Vector(d_out[td])
@@ -585,7 +585,13 @@ def _make_pa_phase_helpers(
             elem_base = prob_wr_thread_base + fx.Int32(td * MFMA_N * (PROB_ROW_STRIDE_BYTES // 4))
             pk_vec = fx.Vector.from_elements([pk], dtype=fx.Int32)
             fx.ptr_store(pk_vec, logits_base + elem_base)
-        return rmax, rsum, outs, v_correction
+
+        accum_sum = arith.mulf(arith.unwrap(accum_scale), arith.unwrap(rsum), fastmath=arith.FastMathFlags.contract)
+        rsum = arith.addf(accum_sum, arith.unwrap(partition_sum), fastmath=arith.FastMathFlags.contract)
+        rmax = new_rmax
+        for vhe in range_constexpr(vhe_loop):
+            outs[vhe] = outs[vhe] * fx.Float32(accum_scale)
+        return rmax, rsum, outs, v_correction, normalized_v_scales
 
     def _pv_mfma(v_ops, outs, v_correction):
         fm_contract = arith.FastMathFlags.contract
@@ -665,7 +671,7 @@ def compile_pa_metadata_v1(
         reduce_indptr_ptr: fx.Tensor,  # [num_batches + 1] i32 (output)
         reduce_final_map_ptr: fx.Tensor,  # [num_batches * 2] i32 (output, flattened)
         reduce_partial_map_ptr: fx.Tensor,  # [max_split_tiles] i32 (output)
-        num_batches: Int32,
+        num_batches: fx.Int32,
     ):
         scalar_layout = fx.make_layout(1, 1)
         work_layout = fx.make_layout(4, 1)
@@ -693,7 +699,7 @@ def compile_pa_metadata_v1(
         c0 = fx.Int32(0)
         c1 = fx.Int32(1)
         c_qlen = fx.Int32(query_length)
-        c_nb = num_batches  # Int32 runtime
+        c_nb = num_batches  # fx.Int32 runtime
         c_nspk = fx.Int32(num_splits_per_khead)
         c_numcu = fx.Int32(num_cu)
         c_ws = fx.Int32(warp_size)
@@ -885,7 +891,7 @@ def compile_pa_metadata_v1(
         reduce_indptr: fx.Tensor,
         reduce_final_map: fx.Tensor,
         reduce_partial_map: fx.Tensor,
-        num_batches: Int32,
+        num_batches: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
         pa_metadata_v1_kernel(
@@ -988,7 +994,6 @@ def compile_pa_decode_metadata(
     _QKHELOOP = head_dim // QKHE_PER_FETCH
     _VHELOOP = head_dim // MFMA_N // NUM_WARPS
     _Q_LANES_PER_HEAD = head_dim // Q_ELEMS_PER_LANE
-    _N_K_h = TLOOP * _QKHELOOP * 2
     if query_input_dtype not in ("bf16", "f16"):
         raise ValueError(f"`compile_pa_decode_metadata` only supports bf16/f16 queries, got {query_input_dtype!r}")
     _QUERY_DTYPE = fx.BFloat16 if query_input_dtype == "bf16" else fx.Float16
@@ -1011,7 +1016,7 @@ def compile_pa_decode_metadata(
         buf: fx.Array[fx.Int32, _LDS_TOTAL_BYTES // 4, 16]
 
     @flyc.kernel(known_block_size=(BLOCK_THREADS, 1, 1))
-    def pa_decode_metadata_kenrel(
+    def pa_decode_metadata_kernel(
         out_ptr: fx.Int64,  # output [batch, num_q_heads, head_dim]
         partial_out_ptr: fx.Int64,  # partial output [num_partials, 1, nhead, head_dim] fp32
         partial_lse_ptr: fx.Int64,  # partial LSE [num_partials, 1, nhead, 1] fp32
@@ -1026,20 +1031,20 @@ def compile_pa_decode_metadata(
         kv_page_indices_ptr: fx.Int64,  # [total_pages] int32
         kv_indptr_ptr: fx.Int64,  # [num_seqs + 1] int32 — prefix sum of pages per seq
         partition_indptr_ptr: fx.Int64,  # [num_seqs + 1] int32 — prefix sum of partitions per seq
-        stride_q_seq: Int32,
-        stride_q_head: Int32,
-        stride_k_block: Int32,
-        stride_k_head: Int32,
-        stride_v_block: Int32,
-        stride_v_head: Int32,
-        stride_out_seq: Int32,
-        stride_out_head: Int32,
-        stride_po_partial: Int32,  # stride for partial_output partial dim (nhead * head_dim)
-        stride_pl_partial: Int32,  # stride for partial_lse partial dim (nhead)
-        stride_ks_block: Int32,  # key_scale stride for block dim (num_kv_heads * KV_BLOCK_SIZE); 0 for per-tensor
-        stride_ks_head: Int32,  # key_scale stride for head dim (KV_BLOCK_SIZE); 0 for per-tensor
-        stride_po_ql: Int32,  # stride for partial_output query-length dim (num_query_heads * head_dim)
-        stride_pl_ql: Int32,  # stride for partial_lse query-length dim (num_query_heads)
+        stride_q_seq: fx.Int32,
+        stride_q_head: fx.Int32,
+        stride_k_block: fx.Int32,
+        stride_k_head: fx.Int32,
+        stride_v_block: fx.Int32,
+        stride_v_head: fx.Int32,
+        stride_out_seq: fx.Int32,
+        stride_out_head: fx.Int32,
+        stride_po_partial: fx.Int32,  # stride for partial_output partial dim (nhead * head_dim)
+        stride_pl_partial: fx.Int32,  # stride for partial_lse partial dim (nhead)
+        stride_ks_block: fx.Int32,  # key_scale stride for block dim (num_kv_heads * KV_BLOCK_SIZE); 0 for per-tensor
+        stride_ks_head: fx.Int32,  # key_scale stride for head dim (KV_BLOCK_SIZE); 0 for per-tensor
+        stride_po_ql: fx.Int32,  # stride for partial_output query-length dim (num_query_heads * head_dim)
+        stride_pl_ql: fx.Int32,  # stride for partial_lse query-length dim (num_query_heads)
     ):
         tid = fx.Int32(gpu.thread_id("x"))
         cu_id = fx.Int32(gpu.block_id("x"))  # CU index (0..num_sm-1)
@@ -1227,41 +1232,13 @@ def compile_pa_decode_metadata(
                 context_len + fx.Int32(1 - query_length) + qi_per_mtp[_mtp_g] for _mtp_g in range(_mtp_groups)
             ]
 
-            local_last_part = local_part_start + last_part_idx_val
-            first_phys_block = _copy_load(
-                kv_page_indices,
-                kv_page_base + udiv_const(local_last_part, parts_per_block),
-                copy_i32,
-                i32_reg,
-            )[0]
-            first_tile_tok = urem_const(local_last_part, parts_per_block) * fx.Int32(KV_COMPUTE_BLOCK)
-            first_k_base = _compute_block_base_dw_i64(first_phys_block, stride_k_block, _k_head_off)
-            scale_scalars0 = _load_kv_scale_scalars(first_tile_tok, first_phys_block)
-            k_flat0 = _load_k_flat(
-                k_global_ptr,
-                global_copy_16b,
-                global_reg_16b,
-                first_k_base,
-                first_tile_tok,
-                _k_tok_thread_base,
-                _c_tok_stride_dw,
-                _k_he_off_dw,
-                qkhe_loop=_QKHELOOP,
-            )
-
             state_width = 2 + _VHELOOP
 
-            def _pack_states_kv(states, k_flat, scale_scalars):
-                flat = [_unwrap(value) for state in states for value in state]
-                flat.extend(_unwrap(v) for v in k_flat)
-                flat.extend(_unwrap(v) for v in scale_scalars)
-                return flat
+            def _pack_states(states):
+                return [_unwrap(value) for state in states for value in state]
 
-            def _unpack_states_kv(flat):
-                state_end = state_width * _mtp_groups
-                k_end = state_end + _N_K_h
-                states = [tuple(flat[state_width * i : state_width * (i + 1)]) for i in range(_mtp_groups)]
-                return states, list(flat[state_end:k_end]), tuple(flat[k_end:])
+            def _unpack_states(flat):
+                return [tuple(flat[state_width * i : state_width * (i + 1)]) for i in range(_mtp_groups)]
 
             init_states = [
                 tuple(
@@ -1275,17 +1252,12 @@ def compile_pa_decode_metadata(
                 fx.Int32(0),
                 num_parts_in_work,
                 fx.Int32(1),
-                init=_pack_states_kv(init_states, k_flat0, scale_scalars0),
+                init=_pack_states(init_states),
             ):
-                cur_states, k_flat, scale_scalars = _unpack_states_kv(state)
+                cur_states = _unpack_states(state)
                 # Process partition zero last for online-softmax stability.
                 rel_part = last_part_idx_val - ib
                 lp = local_part_start + rel_part
-                next_rel = rel_part - fx.Int32(1)
-                next_rel_clamped = (next_rel >= fx.Int32(0)).select(next_rel, fx.Int32(0))
-                next_lp = local_part_start + next_rel_clamped
-
-                k_ops = unflatten_k(k_flat, qkhe_loop=_QKHELOOP)
                 partition_start = lp * fx.Int32(KV_COMPUTE_BLOCK)
 
                 phys_block = _copy_load(
@@ -1295,6 +1267,22 @@ def compile_pa_decode_metadata(
                     i32_reg,
                 )[0]
                 tile_token_offset = urem_const(lp, parts_per_block) * fx.Int32(KV_COMPUTE_BLOCK)
+                k_base = _compute_block_base_dw_i64(phys_block, stride_k_block, _k_head_off)
+                scale_scalars = _load_kv_scale_scalars(tile_token_offset, phys_block)
+                if const_expr(per_token_kv):
+                    rocdl.sched_barrier(0)
+                k_flat = _load_k_flat(
+                    k_global_ptr,
+                    global_copy_16b,
+                    global_reg_16b,
+                    k_base,
+                    tile_token_offset,
+                    _k_tok_thread_base,
+                    _c_tok_stride_dw,
+                    _k_he_off_dw,
+                    qkhe_loop=_QKHELOOP,
+                )
+                k_ops = unflatten_k(k_flat, qkhe_loop=_QKHELOOP)
                 v_base = _compute_block_base_dw_i64(phys_block, stride_v_block, _v_head_off)
                 if const_expr(per_token_kv):
                     v_ops, k_scale_vecs, v_scale_vecs = _load_v_and_scales(
@@ -1308,10 +1296,10 @@ def compile_pa_decode_metadata(
                         tile_token_offset,
                         scale_scalars,
                     )
+
+                v_normalization = None
                 new_states = []
                 for _mtp_g in range_constexpr(_mtp_groups):
-                    if const_expr(_mtp_g > 0):
-                        gpu.barrier()
                     state = cur_states[_mtp_g]
                     rmax, rsum = state[0], state[1]
                     outs = [state[2 + vhe] for vhe in range_constexpr(_VHELOOP)]
@@ -1335,42 +1323,27 @@ def compile_pa_decode_metadata(
                         )
                         v_scales = None
 
-                    # Stage vmax before the cross-wave normalization reads it.
-                    if const_expr(per_token_kv):
+                    if const_expr(per_token_kv and _mtp_g == 0):
                         _store_vmax_warp(partition_start, seq_end=context_len, v_scale_vecs=v_scales)
 
                     gpu.barrier()
-                    rmax, rsum, outs, v_correction = _cross_warp_softmax_and_prob_pack(
-                        d_out, rmax, rsum, outs, v_scales
+                    rmax, rsum, outs, v_correction, normalized_v_scales = _cross_warp_softmax_and_prob_pack(
+                        d_out,
+                        rmax,
+                        rsum,
+                        outs,
+                        v_scales,
+                        v_normalization=v_normalization,
                     )
+                    if const_expr(per_token_kv and _mtp_g == 0):
+                        v_normalization = (v_correction, normalized_v_scales)
                     gpu.barrier()
                     outs = _pv_mfma(v_ops, outs, v_correction)
                     new_states.append(tuple([rmax, rsum] + outs))
 
-                next_phys_block = _copy_load(
-                    kv_page_indices,
-                    kv_page_base + udiv_const(next_lp, parts_per_block),
-                    copy_i32,
-                    i32_reg,
-                )[0]
-                next_tile_tok = urem_const(next_lp, parts_per_block) * fx.Int32(KV_COMPUTE_BLOCK)
-                next_k_base = _compute_block_base_dw_i64(next_phys_block, stride_k_block, _k_head_off)
-                next_scale_scalars = _load_kv_scale_scalars(next_tile_tok, next_phys_block)
-                k_next_flat = _load_k_flat(
-                    k_global_ptr,
-                    global_copy_16b,
-                    global_reg_16b,
-                    next_k_base,
-                    next_tile_tok,
-                    _k_tok_thread_base,
-                    _c_tok_stride_dw,
-                    _k_he_off_dw,
-                    qkhe_loop=_QKHELOOP,
-                )
+                results = yield _pack_states(new_states)
 
-                results = yield _pack_states_kv(new_states, k_next_flat, next_scale_scalars)
-
-            final_states, _, _ = _unpack_states_kv(results)
+            final_states = _unpack_states(results)
 
             for _mtp_g in range_constexpr(_mtp_groups):
                 final_state = final_states[_mtp_g]
@@ -1443,7 +1416,7 @@ def compile_pa_decode_metadata(
         num_sm,
         stream: fx.Stream = fx.Stream(None),
     ):
-        pa_decode_metadata_kenrel(
+        pa_decode_metadata_kernel(
             out,
             po,
             pl,
@@ -1476,7 +1449,7 @@ def compile_pa_decode_metadata(
 
     return {
         "launch": launch_pa_decode_metadata,
-        "kernel": pa_decode_metadata_kenrel,
+        "kernel": pa_decode_metadata_kernel,
     }
 
 
@@ -1489,7 +1462,8 @@ def compile_pa_metadata_reduce(
     head_dim: int,
     output_dtype_str: str,
 ):
-    block_threads = head_dim
+    vec_width = 2 if head_dim % 2 == 0 else 1
+    block_threads = head_dim // vec_width
     assert 0 < block_threads <= 1024, "head_dim must fit in one workgroup"
     output_dtype = _PA_OUTPUT_DTYPES[output_dtype_str]
 
@@ -1501,10 +1475,10 @@ def compile_pa_metadata_reduce(
         reduce_indptr_ptr: fx.Tensor,
         reduce_final_map_ptr: fx.Tensor,
         reduce_partial_map_ptr: fx.Tensor,
-        stride_out_seq: Int32,
-        stride_out_head: Int32,
-        stride_po_row: Int32,  # num_query_heads * head_dim
-        stride_pl_row: Int32,  # num_query_heads
+        stride_out_seq: fx.Int32,
+        stride_out_head: fx.Int32,
+        stride_po_row: fx.Int32,  # num_query_heads * head_dim
+        stride_pl_row: fx.Int32,  # num_query_heads
     ):
         tid = fx.Int32(gpu.thread_id("x"))
         g = fx.Int32(gpu.block_id("x"))
@@ -1528,13 +1502,22 @@ def compile_pa_metadata_reduce(
 
         copy_i32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
         copy_f32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+        copy_f32_vec = fx.make_copy_atom(
+            fx.rocdl.BufferCopy64b() if vec_width == 2 else fx.rocdl.BufferCopy32b(),
+            fx.Float32,
+        )
         copy_output = fx.make_copy_atom(
-            fx.rocdl.BufferCopy32b() if output_dtype.width == 32 else fx.rocdl.BufferCopy16b(),
+            (
+                fx.rocdl.BufferCopy64b()
+                if output_dtype.width * vec_width == 64
+                else fx.rocdl.BufferCopy32b() if output_dtype.width * vec_width == 32 else fx.rocdl.BufferCopy16b()
+            ),
             output_dtype,
         )
         reg_i32 = fx.make_rmem_tensor(1, fx.Int32)
         reg_f32 = fx.make_rmem_tensor(1, fx.Float32)
-        reg_output = fx.make_rmem_tensor(1, output_dtype)
+        reg_f32_vec = fx.make_rmem_tensor(vec_width, fx.Float32)
+        reg_output = fx.make_rmem_tensor(vec_width, output_dtype)
 
         lo = _copy_load(reduce_indptr, g, copy_i32, reg_i32)[0]
         hi = _copy_load(reduce_indptr, g + fx.Int32(1), copy_i32, reg_i32)[0]
@@ -1547,34 +1530,38 @@ def compile_pa_metadata_reduce(
                 lo,
                 hi,
                 fx.Int32(1),
-                init=[fx.Float32(float("-inf")), fx.Float32(0.0), fx.Float32(0.0)],
+                init=[
+                    fx.Float32(float("-inf")),
+                    fx.Float32(0.0),
+                    fx.Vector.filled(vec_width, 0.0, fx.Float32),
+                ],
             ):
                 m = fx.Float32(st[0])
                 denom = fx.Float32(st[1])
-                acc = fx.Float32(st[2])
+                acc = fx.Vector(st[2])
                 prow = _copy_load(reduce_partial_map, slot, copy_i32, reg_i32)[0] + qi
                 lse = _copy_load(partial_lse, prow * stride_pl_row + qhead, copy_f32, reg_f32)[0]
                 v = _copy_load(
                     partial_output,
-                    prow * stride_po_row + qhead * fx.Int32(head_dim) + tid,
-                    copy_f32,
-                    reg_f32,
-                )[0]
+                    prow * stride_po_row + qhead * fx.Int32(head_dim) + tid * fx.Int32(vec_width),
+                    copy_f32_vec,
+                    reg_f32_vec,
+                )
                 m_new = m.maximumf(lse)
                 scale_old = exp2_f32_fast((m - m_new) * fx.Float32(LOG2E))
                 w = exp2_f32_fast((lse - m_new) * fx.Float32(LOG2E))
                 denom_new = denom * scale_old + w
-                acc_new = acc * scale_old + v * w
+                acc_new = acc * fx.Float32(scale_old) + fx.Vector(v) * fx.Float32(w)
                 results = yield [m_new, denom_new, acc_new]
 
             denom_f = fx.Float32(results[1])
-            acc_f = fx.Float32(results[2])
+            acc_f = fx.Vector(results[2])
             safe_denom = (denom_f > fx.Float32(0.0)).select(denom_f, fx.Float32(1.0))
             out_acc = acc_f * rcp_f32(safe_denom)
 
-            out_off = out_row * stride_out_seq + qhead * stride_out_head + tid
-            output_val = fx.Float32(out_acc).to(output_dtype)
-            fx.memref_store_vec(fx.Vector.from_elements([output_val], dtype=output_dtype), reg_output)
+            out_off = out_row * stride_out_seq + qhead * stride_out_head + tid * fx.Int32(vec_width)
+            output_val = fx.Vector(out_acc).to(output_dtype)
+            fx.memref_store_vec(output_val, reg_output)
             fx.copy(copy_output, reg_output, fx.slice(final_output, (None, out_off)))
 
     @flyc.jit

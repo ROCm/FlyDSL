@@ -16,18 +16,16 @@ from __future__ import annotations
 
 import torch
 
+from flydsl.runtime.device import get_rocm_arch
 from kernels.attention.pa_decode_swa import compile_pa_decode_sw, compile_pa_decode_sw_reduce
 from kernels.attention.pa_decode_tile import pa_decode_tile
 from kernels.attention.pa_metadata import compile_pa_decode_metadata
+from kernels.attention.pa_metadata_tuning import lookup_pa_metadata_grid_multiplier
 from kernels.common.tensor_shim import _run_compiled
 from kernels.common.utils import cdiv
 
 # ── Kernel geometry constants ────────────────────────────────────────
 KV_COMPUTE_BLOCK = 256  # tile size (matches SP3 kTileKV)
-# Persistent-grid oversubscription for the metadata decode path: launch
-# CU_count * this many workgroups so the HW keeps multiple workgroups resident
-# per CU (memory-latency hiding).  1 = original (1 wg/CU).
-_PA_METADATA_GRID_OVERSUB = 3
 MFMA_N = 16
 
 
@@ -44,6 +42,9 @@ def get_pa_metadata(
     num_query_heads: int,
     num_kv_heads: int,
     partition_size: int = KV_COMPUTE_BLOCK,
+    *,
+    per_token_kv: bool | None = None,
+    grid_multiplier: int | None = None,
 ):
     """Compute PA metadata (worklist, reduce maps) via get_pa_metadata_v1.
 
@@ -59,6 +60,11 @@ def get_pa_metadata(
     NOTE: the consuming decode kernel must interpret kv_start/kv_end as partition
     indices accordingly.
 
+    Exact shape/device matches are loaded from ``pa_metadata_grid_tuning.csv``.
+    Missing entries default to ``grid_multiplier=1``. ``per_token_kv`` selects
+    scale-mode-specific tuning, and ``grid_multiplier`` is the tuner's explicit
+    candidate override.
+
     Returns a dict with: work_indptr, work_info_flat, reduce_indptr,
     reduce_final_map, reduce_partial_map, num_sm, partial_output,
     partial_lse, stride_po_partial, stride_pl_partial.
@@ -71,13 +77,25 @@ def get_pa_metadata(
     head_size = query.shape[-1]
 
     props = torch.cuda.get_device_properties(dev)
-    # Oversubscribe the persistent grid: the decode kernel is memory-latency-bound
-    # and only ~3 workgroups/CU fit by VGPR, but the worklist defaults to 1 wg/CU
-    # (grid = CU count).  Distributing work across num_cu = CU_count * OVERSUB bins
-    # (and launching that many workgroups) lets the HW keep multiple workgroups
-    # resident per CU → more waves in flight → better latency hiding.
-    base_cu = props.multi_processor_count
-    num_sm = base_cu * _PA_METADATA_GRID_OVERSUB
+    num_blocks = key_cache.shape[0]
+    if grid_multiplier is None and per_token_kv is not None:
+        grid_multiplier = lookup_pa_metadata_grid_multiplier(
+            arch=get_rocm_arch(),
+            num_cu=props.multi_processor_count,
+            batch_size=batch_size,
+            num_blocks=num_blocks,
+            query_length=query_length,
+            per_token_kv=per_token_kv,
+            num_query_heads=num_query_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_size,
+            block_size=key_cache.shape[-2],
+        )
+    if grid_multiplier is None:
+        grid_multiplier = 1
+    if grid_multiplier < 1:
+        raise ValueError("grid_multiplier must be positive")
+    num_sm = props.multi_processor_count * grid_multiplier
     num_sm = (num_sm // num_kv_heads) * num_kv_heads  # keep divisible by num_kv_heads
 
     seqlens_qo_indptr = torch.arange(batch_size + 1, dtype=torch.int32, device=dev) * query_length
@@ -496,7 +514,15 @@ def pa_decode_ps_launch(
                 "CUDA graph capture requires precomputed `metadata`; "
                 "call `get_pa_metadata()` before capture and pass it via `metadata=`."
             )
-        metadata = get_pa_metadata(query, key_cache, context_lengths, kv_indptr, num_query_heads, num_kv_heads)
+        metadata = get_pa_metadata(
+            query,
+            key_cache,
+            context_lengths,
+            kv_indptr,
+            num_query_heads,
+            num_kv_heads,
+            per_token_kv=per_token_kv,
+        )
 
     work_indptr = metadata["work_indptr"]
     work_info_flat = metadata["work_info_flat"]
