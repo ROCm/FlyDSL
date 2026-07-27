@@ -12,6 +12,7 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as _raw
 from flydsl.expr.utils.arith import current_fastmath
+from kernels.attention.flash_attn_utils import _reduction_pair
 
 MFMA_MASK = 0x08
 VALU_MASK = 0x02
@@ -343,18 +344,6 @@ def build_gqa_attn(
                 D[n] = acc
             return D
 
-        # ---------------- softmax helpers ----------------
-        # Cross-32-lane reduction peer via permlane32_swap
-        def _permlane32_pair(scalar_f32):
-            v_i32 = _raw(f32(scalar_f32).bitcast(i32))
-            pair_ty = ir.Type.parse("!llvm.struct<(i32, i32)>")
-            swapped = rocdl.permlane32_swap(pair_ty, v_i32, v_i32, False, True)
-            lhs_i32 = _llvm.extractvalue(T.i32, swapped, [0])
-            rhs_i32 = _llvm.extractvalue(T.i32, swapped, [1])
-            lhs = f32(i32(lhs_i32).bitcast(f32))
-            rhs = f32(i32(rhs_i32).bitcast(f32))
-            return lhs, rhs
-
         def col_max(att):
             lo = Vec(att[0])
             hi = Vec(att[1])
@@ -363,7 +352,7 @@ def build_gqa_attn(
                 mx = fmax(mx, lo[r])
             for r in range_constexpr(16):
                 mx = fmax(mx, hi[r])
-            lhs, rhs = _permlane32_pair(mx)
+            lhs, rhs = _reduction_pair(mx)
             return fmax(lhs, rhs)
 
         def mul_o(o_reg, scal):
@@ -385,7 +374,7 @@ def build_gqa_attn(
                 sm = sm + h0[r]
             for r in range_constexpr(16):
                 sm = sm + h1[r]
-            lhs, rhs = _permlane32_pair(sm)
+            lhs, rhs = _reduction_pair(sm)
             norm = norm + (lhs + rhs)
             packs = [
                 Vec.from_elements([h0[e] for e in range_constexpr(0, 8)], f32).to(bf16),
@@ -1121,7 +1110,8 @@ def build_gqa_attn(
     ):
         grid_x = ATTN_H
         # grid_y from the runtime seq_len_q arg (ceil-div over the Q tile x wave fan-out).
-        grid_y = (i32(seq_len_q) // i32(Q_BLOCK_SIZE) + i32(NUM_WARPS - 1)) // i32(NUM_WARPS)
+        # `i32` is a local alias inside attend_ker; use the qualified name here.
+        grid_y = (fx.Int32(seq_len_q) // fx.Int32(Q_BLOCK_SIZE) + fx.Int32(NUM_WARPS - 1)) // fx.Int32(NUM_WARPS)
         grid_z = ATTN_B
         attend_ker(
             Q,
