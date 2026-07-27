@@ -58,6 +58,76 @@ class Mfma16x16x128AGPR(Mfma16x16x128):
         )
 
 
+def _make_swz_layout():
+    """Composed layout carrying the XOR bank-avoidance swizzle.
+
+    ``swizzle_128`` (BLOCK_K == 128) was verified byte-identical to
+    ``SwizzleType.get(3, 4, 4)`` and to ``crd2idx`` over this layout, so offsets
+    computed here match ``compute_global_swizzle`` / ``_compute_lds_swizzle`` /
+    ``S2RLoader`` exactly and the emitted addressing is unchanged.
+    """
+    return fx.make_composed_layout(
+        fx.static(fx.SwizzleType.get(3, 4, 4)),
+        fx.make_ordered_layout((128, 128), (1, 0)),
+    )
+
+
+def _layout_global_swizzle(lane_id, wave_id, K, n_rounds, block_dim_x):
+    """Layout-API form of ``compute_global_swizzle(preshuffled=False)``.
+
+    swizzle_128 keeps r == row (the XOR only permutes columns), so the global
+    element is ``row * K + swizzled_col``. Reads the swizzled column with
+    ``crd2idx`` on concrete coords (``get_scalar`` -> compile-time constant).
+    """
+    swz_layout = _make_swz_layout()
+    n_waves = block_dim_x // 64
+    offsets = []
+    for rnd in range_constexpr(n_rounds):
+        row = lane_id // 8 + wave_id * 8 + rnd * (n_waves * 8)
+        col = (lane_id % 8) * 16
+        swz_col = fx.get_scalar(fx.crd2idx((row % 16, col), swz_layout)) % 128
+        offsets.append(row * K + swz_col)
+    return offsets
+
+
+class LayoutS2R:
+    """Shared->register reader with the XOR swizzle carried in a composed layout.
+
+    Mirrors ``S2RLoader.load(preshuffled=False)`` but computes the swizzled LDS
+    byte offset with ``crd2idx`` over ``_make_swz_layout`` instead of the
+    hand-written ``swizzle_128`` math. The split-16@64 ``pack_i32x4_i32x8``
+    packing is kept -- it is the MFMA operand ABI. Preshuffled B stays on
+    ``S2RLoader`` (a different affine, non-XOR LDS map).
+    """
+
+    def __init__(self, wave_idx, n_tiles):
+        self.lane_id = fx.thread_idx.x % 64
+        self.wave_idx = wave_idx
+        self.n_tiles = n_tiles
+        self.swz_layout = _make_swz_layout()
+
+    def _vec_load_16xf8(self, lds_src, offset):
+        ptr_off = fx.add_offset(lds_src.ptr, fx.make_int_tuple(offset))
+        i8_iter = fx.recast_iter(fx.Uint8, ptr_off)
+        return fx.make_view(i8_iter, fx.make_layout(16, 1)).load()
+
+    def load(self, lds_src, preshuffled=False):
+        assert not preshuffled, "LayoutS2R only handles the non-preshuffled (XOR) LDS layout"
+        frag = []
+        for i in range_constexpr(self.n_tiles):
+            halves = []
+            row = self.wave_idx * (self.n_tiles * 16) + i * 16 + self.lane_id % 16
+            for step in range_constexpr(2):
+                col = (self.lane_id // 16) * 16 + step * 64
+                offset = fx.get_scalar(fx.crd2idx((row, col), self.swz_layout))
+                halves.append(self._vec_load_16xf8(lds_src, offset).bitcast(fx.Int32))
+            frag.append(pack_i32x4_i32x8(halves[0], halves[1]))
+        return frag
+
+    def load_one(self, lds_src, lds_offset):
+        return self._vec_load_16xf8(lds_src, lds_offset).bitcast(fx.Int32)
+
+
 def _min(a, b):
     return arith.select(a < b, a, b)
 
@@ -170,6 +240,13 @@ def compile_fp8_gemm_4w(
         gb_div = fx.logical_divide(gB, fx.make_layout(1, 1))
 
         def _compute_lds_swizzle(s2r, preshuffled=False):
+            # NOTE: kept on the manual swizzle_128 XOR (NOT crd2idx). This runs on
+            # the interleaved-cluster path whose MMA uses the AGPR inline-asm
+            # accumulator (Mfma16x16x128AGPR); crd2idx here materializes the
+            # swizzle constants slightly differently and perturbs the
+            # AGPR-sensitive register schedule (~1.3% regression on 256x256).
+            # swizzle_128 == SwizzleType.get(3,4,4) is proven, so this is purely a
+            # codegen-parity choice, documented per the no-regression gate.
             lds_swz = []
             for row_offset in range_constexpr(s2r.n_tiles):
                 row = s2r.wave_idx * (s2r.n_tiles * 16) + row_offset * 16 + lane_id % 16
@@ -309,13 +386,24 @@ def compile_fp8_gemm_4w(
         c10_frag = [mfma.zero_value] * N_ACCUMS
         c11_frag = [mfma.zero_value] * N_ACCUMS
 
-        gl_off_a = compute_global_swizzle(lane_id, wave_id, K, N_LDS_ROUNDS, preshuffled=False)
-        gl_off_b = compute_global_swizzle(lane_id, wave_id, K, N_LDS_ROUNDS, preshuffled=b_preshuffled)
+        gl_off_a = _layout_global_swizzle(lane_id, wave_id, K, N_LDS_ROUNDS, fx.block_dim.x)
+        if const_expr(b_preshuffled):
+            gl_off_b = compute_global_swizzle(lane_id, wave_id, K, N_LDS_ROUNDS, preshuffled=True)
+        else:
+            gl_off_b = _layout_global_swizzle(lane_id, wave_id, K, N_LDS_ROUNDS, fx.block_dim.x)
 
         a_g2s = G2SLoader(ga_div, gl_off_a, N_TILES_A, F8_IR_t, wave_id)
         b_g2s = G2SLoader(gb_div, gl_off_b, N_TILES_B, F8_IR_t, wave_id)
-        a_s2r = S2RLoader(wave_i, N_TILES_A)
-        b_s2r = S2RLoader(wave_j, N_TILES_B)
+        # LayoutS2R (crd2idx swizzle) is used only on the non-interleaved,
+        # non-preshuffled path. The interleaved 256x256 cluster keeps S2RLoader:
+        # its MMA is the AGPR inline-asm accumulator, and the crd2idx constant
+        # materialization perturbs that stall-sensitive register schedule (~1.3%).
+        if const_expr(_use_interleaved_block):
+            a_s2r = S2RLoader(wave_i, N_TILES_A)
+            b_s2r = S2RLoader(wave_j, N_TILES_B)
+        else:
+            a_s2r = LayoutS2R(wave_i, N_TILES_A)
+            b_s2r = S2RLoader(wave_j, N_TILES_B) if b_preshuffled else LayoutS2R(wave_j, N_TILES_B)
         store_c = StoreC(A_scale, B_scale, C, c_m, c_n, mfma.idx, N_TILES_A, N_TILES_B)
 
         # Prologue: 8-buffer LDS pipeline pre-fill.
