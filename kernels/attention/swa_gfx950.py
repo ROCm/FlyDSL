@@ -1068,7 +1068,7 @@ def build_gqa_attn(
         Q,
         K,
         V,
-        O,
+        O,  # noqa: E741
         Q_stride1,
         K_stride1,
         V_stride1,
@@ -1096,7 +1096,7 @@ def build_gqa_attn(
         Q,
         K,
         V,
-        O,
+        O,  # noqa: E741
         Q_stride1,
         K_stride1,
         V_stride1,
