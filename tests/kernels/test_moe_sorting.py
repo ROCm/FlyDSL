@@ -28,10 +28,15 @@ except ImportError:
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available.", allow_module_level=True)
 
-from flydsl.runtime.device import is_rdna_arch  # noqa: E402
+from flydsl.runtime.device import get_rocm_arch, is_rdna_arch  # noqa: E402
 
 if is_rdna_arch():
     pytest.skip("MoE sorting kernel requires CDNA (MI300X/MI350X).", allow_module_level=True)
+
+requires_wide_fused_arch = pytest.mark.skipif(
+    not str(get_rocm_arch()).startswith("gfx95"),
+    reason="Wide MoE routing path is only available on gfx95 (MI350X).",
+)
 
 from kernels.moe.moe_sorting_kernel import (  # noqa: E402
     UNIT_SIZE,
@@ -888,17 +893,20 @@ WIDE_FUSED_CONFIGS = [
 ]
 
 
+@requires_wide_fused_arch
 @pytest.mark.parametrize("T,E,topk,dtype_str", WIDE_FUSED_CONFIGS)
 def test_moe_softmax_sort_wide(T, E, topk, dtype_str):
     assert _moe_softmax_sort_path(T, E, topk, dtype_str) == "wide"
     assert _run_softmax_sort_fused_test(T, E, topk, dtype_str)
 
 
+@requires_wide_fused_arch
 @pytest.mark.parametrize("E,topk", [(256, 8), (128, 4)])
 def test_moe_softmax_sort_wide_no_renormalize(E, topk):
     assert _run_softmax_sort_fused_test(33, E, topk, "bf16", renormalize=False)
 
 
+@requires_wide_fused_arch
 @pytest.mark.parametrize("E,topk", [(256, 8), (128, 4)])
 def test_moe_softmax_sort_wide_expert_mask(E, topk):
     expert_mask = torch.zeros(E, dtype=torch.int32, device="cuda")
