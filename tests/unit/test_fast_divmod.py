@@ -112,3 +112,72 @@ def test_fastdivmod_class_constant_divisor():
     n = ((g * 2654435761) & 0x7FFFFFFF).to(torch.int64)
     assert torch.equal(q.to(torch.int64), n // DIV)
     assert torch.equal(r.to(torch.int64), n % DIV)
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize("divisor", [1, 3, 768, 128256])
+def test_fastdivmod_dynamic_divisor(divisor):
+    """FastDivmod built from a runtime (dynamic) divisor, magic derived on device."""
+    BLOCK = 256
+    P = BLOCK * 32
+
+    @flyc.kernel(known_block_size=[BLOCK, 1, 1])
+    def kernel(Q: fx.Tensor, R: fx.Tensor, d: fx.Int32):
+        g = fx.block_idx.x * BLOCK + fx.thread_idx.x
+        n = fx.Int32(fx.Uint32(g) * fx.Uint32(2654435761) & fx.Uint32(0x7FFFFFFF))
+        q, r = FastDivmod(d).divmod(n)
+        fx.memref_store(q, Q, g)
+        fx.memref_store(r, R, g)
+
+    @flyc.jit
+    def launch(Q: fx.Tensor, R: fx.Tensor, d: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+        kernel(Q, R, d).launch(grid=(P // BLOCK, 1, 1), block=(BLOCK, 1, 1), stream=stream)
+
+    q = torch.zeros(P, dtype=torch.int32, device="cuda")
+    r = torch.zeros(P, dtype=torch.int32, device="cuda")
+    launch(q, r, divisor, stream=torch.cuda.Stream())
+    torch.cuda.synchronize()
+
+    g = torch.arange(P, dtype=torch.int64, device="cuda")
+    n = ((g * 2654435761) & 0x7FFFFFFF).to(torch.int64)
+    assert torch.equal(q.to(torch.int64), n // divisor)
+    assert torch.equal(r.to(torch.int64), n % divisor)
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
+def test_fastdivmod_value_protocol_kernel_arg():
+    """FastDivmod crosses the host/device boundary as a kernel argument.
+
+    The launch wrapper builds it from a runtime divisor and passes the instance
+    itself; the (magic, shift, divisor) leaves are extracted/reconstructed by the
+    value protocol.
+    """
+    BLOCK = 256
+    P = BLOCK * 32
+    DIV = 768
+
+    @flyc.kernel(known_block_size=[BLOCK, 1, 1])
+    def kernel(Q: fx.Tensor, R: fx.Tensor, fdm: FastDivmod):
+        g = fx.block_idx.x * BLOCK + fx.thread_idx.x
+        n = fx.Int32(fx.Uint32(g) * fx.Uint32(2654435761) & fx.Uint32(0x7FFFFFFF))
+        q, r = fdm.divmod(n)
+        fx.memref_store(q, Q, g)
+        fx.memref_store(r, R, g)
+
+    @flyc.jit
+    def launch(Q: fx.Tensor, R: fx.Tensor, d: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+        kernel(Q, R, FastDivmod(d)).launch(grid=(P // BLOCK, 1, 1), block=(BLOCK, 1, 1), stream=stream)
+
+    q = torch.zeros(P, dtype=torch.int32, device="cuda")
+    r = torch.zeros(P, dtype=torch.int32, device="cuda")
+    launch(q, r, DIV, stream=torch.cuda.Stream())
+    torch.cuda.synchronize()
+
+    g = torch.arange(P, dtype=torch.int64, device="cuda")
+    n = ((g * 2654435761) & 0x7FFFFFFF).to(torch.int64)
+    assert torch.equal(q.to(torch.int64), n // DIV)
+    assert torch.equal(r.to(torch.int64), n % DIV)

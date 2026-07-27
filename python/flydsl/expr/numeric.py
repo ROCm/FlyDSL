@@ -940,23 +940,49 @@ def fast_divmod(dividend, divisor, magic, shift):
     return quotient, remainder
 
 
-class FastDivmod:
-    """Magic-number divmod by a fixed ``divisor``.
+def _ceil_log2_i32(x):
+    """``ceil(log2(x))`` for ``1 <= x < 2**31`` as ``32 - ctlz(x - 1)``.
 
-    Convenience wrapper for a compile-time-constant divisor: the
-    ``(magic, shift)`` pair is computed once at construction. For a runtime
-    divisor (a kernel argument) call :func:`fast_divmod` directly with a
-    ``(magic, shift)`` pair produced on the host by :func:`fastdivmod_magic`.
+    Works on a Python int (folds) or a runtime ``Int32``. ``ctlz(0) == 32`` makes
+    ``x == 1`` yield 0.
+    """
+    from .math import ctlz
+
+    return Int32(32) - Int32(ctlz(Int32(x) - Int32(1)))
+
+
+class FastDivmod:
+    """Magic-number unsigned divmod by a fixed ``divisor``.
+
+    ``divisor`` may be a Python ``int`` (folds to constants) or a runtime
+    ``Int32`` such as a grid dimension known only at launch. The ``(magic,
+    shift)`` pair is derived once at construction via ``ceil_log2`` and a single
+    divide; the quotient is then ``(dividend * magic) >> (32 + shift)`` with no
+    runtime division. Valid for non-negative dividends below ``2**31``, the same
+    contract as ``cutlass::FastDivmod``.
+
+    It implements the DSL value protocol -- ``magic``, ``shift`` and ``divisor``
+    are the carried leaves -- so an instance can cross the host/device boundary
+    as a kernel argument or sit inside a ``@fx.struct`` / coordinate tuple.
 
     Example::
 
-        fdm = FastDivmod(768)
+        fdm = FastDivmod(768)      # or FastDivmod(grid_n) with a runtime Int32
         q, r = fdm.divmod(idx)
     """
 
-    def __init__(self, divisor: int):
-        self.divisor = divisor
-        self.magic, self.shift = fastdivmod_magic(divisor)
+    def __init__(self, divisor):
+        if isinstance(divisor, int):
+            if not 0 < divisor < (1 << 31):
+                raise ValueError(f"divisor must satisfy 0 < divisor < 2**31, got {divisor}")
+            divisor = Int32(divisor)
+        self.divisor = Int32(divisor)
+        shift = _ceil_log2_i32(self.divisor) - Int32(1)
+        shift = (shift < Int32(0)).select(Int32(0), shift)  # max(shift, 0)
+        d64 = Uint64(self.divisor)
+        numer = Uint64(0x100000000) * (Uint64(1) << Uint64(shift))
+        self.magic = (numer + d64 - Uint64(1)) // d64  # <= 2**32, exact for n < 2**31
+        self.shift = Uint32(shift)
 
     def divmod(self, dividend):
         return fast_divmod(dividend, self.divisor, self.magic, self.shift)
@@ -966,3 +992,14 @@ class FastDivmod:
 
     def mod(self, dividend):
         return self.divmod(dividend)[1]
+
+    def __extract_to_ir_values__(self):
+        return [self.magic.ir_value(), self.shift.ir_value(), self.divisor.ir_value()]
+
+    @classmethod
+    def __construct_from_ir_values__(cls, values, exemplar=None):
+        obj = object.__new__(cls)
+        obj.magic = Uint64(values[0])
+        obj.shift = Uint32(values[1])
+        obj.divisor = Int32(values[2])
+        return obj
