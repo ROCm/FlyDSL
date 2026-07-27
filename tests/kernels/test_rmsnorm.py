@@ -135,11 +135,23 @@ def _get_rmsnorm_configs():
     if override is not None:
         return override
     return [
-        (64, 256, "f32"),  # f32 aligned
-        (32, 128, "f16"),  # f16 aligned
-        (64, 2000, "f32"),  # unaligned tail handling
-        (16, 512, "bf16"),  # bf16 small shape
-        (64, 8192, "bf16"),  # bf16 fast-path N with small M
+        (64, 256, "f32"),  # small-N scalar path
+        (32, 128, "f16"),  # small-N aligned vec8 path
+        (64, 2001, "f32"),  # small-N scalar path with an unaligned tail
+        (16, 512, "bf16"),  # small-N multi-row vec8 path
+        (64, 8192, "bf16"),  # large-N aligned vec8 path
+    ]
+
+
+def _get_rmsnorm_forward_configs():
+    override = _get_rmsnorm_shape_override()
+    if override is not None:
+        return override
+    return _get_rmsnorm_configs() + [
+        (1, 511, "bf16"),  # small M plus vec8 prefix/scalar tail
+        (9, 2048, "f16"),  # small-N dispatch boundary
+        (33, 3072, "bf16"),  # vec8 row not divisible by BLOCK_THREADS * VEC_WIDTH
+        (7, 3073, "f16"),  # large-N scalar fallback for an unaligned row
     ]
 
 
@@ -212,6 +224,7 @@ def run_test(M: int, N: int, dtype: str = "f32", weight_dtype: str | None = None
     print("Launching kernel...")
     stream = torch.cuda.current_stream()
     compiled_fn = flyc.compile(launch_fn, input_dev, gamma_dev, output_dev, M, stream)
+    _assert_rmsnorm_forward_copy_width(compiled_fn, N, dtype)
 
     def kernel_launch():
         compiled_fn(input_dev, gamma_dev, output_dev, M, stream)
@@ -1392,7 +1405,7 @@ def test_rmsnorm():
     print("Running RMSNorm Tests")
     print("=" * 80)
 
-    configs = _get_rmsnorm_configs()
+    configs = _get_rmsnorm_forward_configs()
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
@@ -1545,6 +1558,36 @@ def test_rmsnorm_eps_honored():
         print(f"  N={N} eps 1e-2 vs 1e-6 output diff = {diff:.3e} (must be > 0)")
         assert diff > 0, f"N={N}: eps appears to be ignored"
     print("  -> PASSED")
+
+
+def test_rmsnorm_small_n_mixed_weight_tail_and_rstd():
+    """The small-N vec8 tail path preserves FP32 weights and training rstd."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    M, N = 3, 511
+    torch.manual_seed(0)
+    x = torch.randn((M, N), device=device, dtype=DTYPE_BF16)
+    weight = torch.rand((N,), device=device, dtype=DTYPE_FP32)
+    output = torch.empty_like(x)
+    rstd = torch.empty((M,), device=device, dtype=DTYPE_FP32)
+    stream = torch.cuda.current_stream(device)
+
+    launcher = build_rmsnorm_module(
+        N,
+        "bf16",
+        store_rstd=True,
+        weight_dtype_str="f32",
+    )
+    compiled = flyc.compile(launcher, x, weight, output, rstd, M, stream)
+    _assert_rmsnorm_forward_copy_width(compiled, N, "bf16")
+    assert "buffer_copy<128>, 32>" in compiled._keepalive.source_ir
+    compiled(x, weight, output, rstd, M, stream)
+    torch.cuda.synchronize(device)
+
+    x_f32 = x.to(DTYPE_FP32)
+    expected_rstd = torch.rsqrt(x_f32.square().mean(dim=1) + EPS)
+    expected = x_f32 * expected_rstd.unsqueeze(1) * weight
+    torch.testing.assert_close(output.to(DTYPE_FP32), expected, rtol=1e-2, atol=2e-2)
+    torch.testing.assert_close(rstd, expected_rstd, rtol=1e-4, atol=1e-4)
 
 
 def test_rmsnorm_bwd_dispatch_boundary():
@@ -2117,6 +2160,7 @@ if __name__ == "__main__":
     test_rmsnorm_backward()
     test_rmsnorm_autograd()
     test_rmsnorm_eps_honored()
+    test_rmsnorm_small_n_mixed_weight_tail_and_rstd()
     if torch.cuda.device_count() >= 2:
         test_rmsnorm_multi_gpu()
     test_rmsnorm_dynamicquant()

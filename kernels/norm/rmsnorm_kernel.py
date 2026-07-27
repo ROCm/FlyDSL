@@ -39,6 +39,7 @@ from kernels.norm.rmsnorm_common import load_scalar as _load_scalar
 from kernels.norm.rmsnorm_common import load_vec as _load_vec
 from kernels.norm.rmsnorm_common import load_weight_vec as _load_weight_vec
 from kernels.norm.rmsnorm_common import make_reduction_storage as _make_reduction_storage
+from kernels.norm.rmsnorm_common import make_single_reduction_storage as _make_single_reduction_storage
 from kernels.norm.rmsnorm_common import resolve_rmsnorm_weight_dtype as _resolve_rmsnorm_weight_dtype
 from kernels.norm.rmsnorm_common import store_scalar as _store_scalar
 from kernels.norm.rmsnorm_common import store_vec as _store_vec
@@ -85,13 +86,15 @@ def build_rmsnorm_module(
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
     # BLOCK_THREADS controls storage, tiling, and launch geometry.
-    tile_cols = BLOCK_THREADS * VEC_WIDTH
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
     weight_elem_bits = 32 if weight_dtype_str == "f32" else 16
+    USE_VEC_N = elem_bits <= 16 and N % VEC_WIDTH == 0
+    VEC_TILES = N // VEC_WIDTH if USE_VEC_N else 0
+    NUM_VEC_ITERS = (VEC_TILES + BLOCK_THREADS - 1) // BLOCK_THREADS if USE_VEC_N else 0
     _kernel_kwargs = {} if BLOCK_THREADS <= 256 else {"known_block_size": [BLOCK_THREADS, 1, 1]}
 
-    SharedStorage = _make_reduction_storage(RED_SLOTS)
+    SharedStorage = _make_single_reduction_storage(RED_SLOTS)
 
     @flyc.kernel(**_kernel_kwargs)
     def rmsnorm_kernel(
@@ -111,7 +114,6 @@ def build_rmsnorm_module(
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         s_red = lds.s_red.view(fx.make_layout(RED_SLOTS, 1))
-        s_red2 = lds.s_red2.view(fx.make_layout(RED_SLOTS, 1))
 
         if const_expr(store_rstd):
             Rstd_buf = fx.rocdl.make_buffer_tensor(Rstd)
@@ -127,45 +129,30 @@ def build_rmsnorm_module(
             return w
 
         def block_reduce_add(val):
-            dummy = fx.Float32(0.0)
-            r0, _ = block_reduce_add2(val, dummy)
-            return r0
-
-        def block_reduce_add2(val0, val1):
             if const_expr(RED_SLOTS == 1):
-                return wave_reduce_add(val0), wave_reduce_add(val1)
+                return wave_reduce_add(val)
 
             lane = tid % WARP_SIZE
             wave = tid // WARP_SIZE
-
-            w0 = wave_reduce_add(val0)
-            w1 = wave_reduce_add(val1)
-
+            w = wave_reduce_add(val)
             if lane == 0:
-                fx.memref_store(w0, s_red, wave)
-                fx.memref_store(w1, s_red2, wave)
+                fx.memref_store(w, s_red, wave)
             gpu.barrier()
 
             if wave == 0:
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, 0)
-                v0 = fx.memref_load(s_red, lane_safe)
-                v1 = fx.memref_load(s_red2, lane_safe)
-                ww0 = in_range.select(v0, 0.0)
-                ww1 = in_range.select(v1, 0.0)
-                ww0 = wave_reduce_add(ww0)
-                ww1 = wave_reduce_add(ww1)
-
+                v = fx.memref_load(s_red, lane_safe)
+                ww = in_range.select(v, 0.0)
+                ww = wave_reduce_add(ww)
                 if lane == 0:
-                    fx.memref_store(ww0, s_red, 0)
-                    fx.memref_store(ww1, s_red2, 0)
+                    fx.memref_store(ww, s_red, 0)
             gpu.barrier()
 
-            return fx.memref_load(s_red, 0), fx.memref_load(s_red2, 0)
+            return fx.memref_load(s_red, 0)
 
-        # Fast path for complete 128-bit tiles.
-        if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
-            num_tiles = N // tile_cols
+        # Vector path for every complete f16/bf16 vec8 row.
+        if const_expr(USE_VEC_N):
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -182,21 +169,22 @@ def build_rmsnorm_module(
 
             c_zero_f = fx.Float32(0.0)
             thread_sumsq = c_zero_f
-            thread_dummy = c_zero_f
             in_local = []
 
             # Pass 1: load + cache + sumsq
-            for tile_i in range_constexpr(num_tiles):
+            for tile_i in range_constexpr(NUM_VEC_ITERS):
                 idx = tid + tile_i * BLOCK_THREADS
-                vec = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx)
+                is_valid = idx < VEC_TILES
+                idx_safe = is_valid.select(idx, 0)
+                vec = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx_safe)
                 in_local.append(vec)
                 x = vec.to(fx.Float32)
 
                 x2 = x * x
                 red2 = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
-                thread_sumsq = thread_sumsq + red2
+                thread_sumsq = thread_sumsq + is_valid.select(red2, c_zero_f)
 
-            _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
+            sum_sq = block_reduce_add(thread_sumsq)
             mean_sq = sum_sq / n_float
             ms_eps = mean_sq + eps_c
             rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
@@ -206,17 +194,15 @@ def build_rmsnorm_module(
                     _store_scalar(rstd_copy_atom, fx.Float32, rstd_div, bid, rrms)
 
             # Pass 2: normalize + gamma + store (reuse cached input)
-            for tile_i in range_constexpr(num_tiles):
+            for tile_i in range_constexpr(NUM_VEC_ITERS):
                 idx = tid + tile_i * BLOCK_THREADS
+                if idx < VEC_TILES:
+                    g = _load_weight_vec(gamma_copy_atom, weight_dtype_str, weight_elem_dtype, gamma_div, idx)
+                    x = in_local[tile_i].to(fx.Float32)
 
-                g = _load_weight_vec(gamma_copy_atom, weight_dtype_str, weight_elem_dtype, gamma_div, idx)
-                x = in_local[tile_i].to(fx.Float32)
-
-                y = (x * rrms) * g
-                out_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
-
-                out_idx = tid + tile_i * BLOCK_THREADS
-                _store_vec(copy_atom, VEC_WIDTH, elem_dtype, out_e, out_div, out_idx)
+                    y = (x * rrms) * g
+                    out_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
+                    _store_vec(copy_atom, VEC_WIDTH, elem_dtype, out_e, out_div, idx)
 
         else:
             # Scalar fallback for arbitrary N.
@@ -351,6 +337,13 @@ def _build_rmsnorm_large_m_small_n_module(
     BLOCK_THREADS_SPECIAL = BLOCK_M * THREADS_PER_ROW
     elem_bits = 32 if dtype_str == "f32" else 16
     weight_elem_bits = 32 if weight_dtype_str == "f32" else 16
+    USE_VEC_SMALL_N = elem_bits <= 16 and N >= VEC_WIDTH
+    VEC_TILES = N // VEC_WIDTH if USE_VEC_SMALL_N else 0
+    VEC_ELEMS = VEC_TILES * VEC_WIDTH
+    TAIL_ELEMS = N - VEC_ELEMS
+    NUM_VEC_ROW_ITERS = (VEC_TILES + THREADS_PER_ROW - 1) // THREADS_PER_ROW if USE_VEC_SMALL_N else 0
+    arch = get_rocm_arch()
+    USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
     @flyc.kernel(known_block_size=[BLOCK_THREADS_SPECIAL, 1, 1])
     def rmsnorm_large_m_small_n_kernel(
@@ -385,19 +378,6 @@ def _build_rmsnorm_large_m_small_n_module(
             row_in = fx.slice(Input_buf, (row, None))
             row_out = fx.slice(Output_buf, (row, None))
 
-            copy_atom_s = fx.make_copy_atom(
-                fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
-                elem_bits,
-            )
-            gamma_copy_atom_s = fx.make_copy_atom(
-                fx.rocdl.BufferCopy16b() if weight_elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
-                weight_elem_bits,
-            )
-
-            row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
-            gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
-            out_div = fx.logical_divide(row_out, fx.make_layout(1, 1))
-
             def group_reduce_add(x):
                 w = x
                 for _sh_exp in range_constexpr(int(math.log2(THREADS_PER_ROW))):
@@ -409,34 +389,118 @@ def _build_rmsnorm_large_m_small_n_module(
             c_zero_f = fx.Float32(0.0)
             thread_sumsq = c_zero_f
 
-            for base_idx_int in range_constexpr(0, BLOCK_N, THREADS_PER_ROW):
-                idx = lane + base_idx_int
-                is_valid = idx < N
-                idx_safe = is_valid.select(idx, 0)
-                x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx_safe)
-                x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
-                x2 = x * x
-                thread_sumsq = thread_sumsq + is_valid.select(x2, c_zero_f)
+            if const_expr(USE_VEC_SMALL_N):
+                in_div = fx.logical_divide(row_in, fx.make_layout(VEC_WIDTH, 1))
+                gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(_weight_vec_width(weight_dtype_str), 1))
+                out_div = fx.logical_divide(row_out, fx.make_layout(VEC_WIDTH, 1))
 
-            sum_sq = group_reduce_add(thread_sumsq)
-            mean_sq = sum_sq / n_float
-            ms_eps = mean_sq + eps_c
-            rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
+                copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
+                gamma_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), weight_elem_bits)
+                if const_expr(TAIL_ELEMS > 0):
+                    row_div_s = fx.logical_divide(row_in, fx.make_layout(1, 1))
+                    gamma_div_s = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
+                    out_div_s = fx.logical_divide(row_out, fx.make_layout(1, 1))
+                    copy_atom_s = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), elem_bits)
+                    gamma_copy_atom_s = fx.make_copy_atom(
+                        fx.rocdl.BufferCopy16b() if weight_elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
+                        weight_elem_bits,
+                    )
 
-            if const_expr(store_rstd):
-                if lane == 0:
-                    _store_scalar(rstd_copy_atom, fx.Float32, rstd_div, row, rrms)
+                in_local = []
+                for tile_i in range_constexpr(NUM_VEC_ROW_ITERS):
+                    idx = lane + tile_i * THREADS_PER_ROW
+                    is_valid = idx < VEC_TILES
+                    idx_safe = is_valid.select(idx, 0)
+                    vec = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx_safe)
+                    in_local.append(vec)
+                    x = vec.to(fx.Float32)
+                    x2 = x * x
+                    red2 = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
+                    thread_sumsq = thread_sumsq + is_valid.select(red2, c_zero_f)
 
-            for base_idx_int in range_constexpr(0, BLOCK_N, THREADS_PER_ROW):
-                idx = lane + base_idx_int
-                if idx < N:
-                    x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx)
-                    g_e = _load_scalar(gamma_copy_atom_s, weight_elem_dtype, gamma_div, idx)
+                if const_expr(TAIL_ELEMS > 0):
+                    if lane < TAIL_ELEMS:
+                        tail_idx = lane + VEC_ELEMS
+                        x_tail_e = _load_scalar(copy_atom_s, elem_dtype, row_div_s, tail_idx)
+                        x_tail = x_tail_e.to(fx.Float32)
+                        thread_sumsq = thread_sumsq + x_tail * x_tail
+
+                sum_sq = group_reduce_add(thread_sumsq)
+                mean_sq = sum_sq / n_float
+                ms_eps = mean_sq + eps_c
+                rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
+
+                if const_expr(store_rstd):
+                    if lane == 0:
+                        _store_scalar(rstd_copy_atom, fx.Float32, rstd_div, row, rrms)
+
+                for tile_i in range_constexpr(NUM_VEC_ROW_ITERS):
+                    idx = lane + tile_i * THREADS_PER_ROW
+                    if idx < VEC_TILES:
+                        g = _load_weight_vec(
+                            gamma_copy_atom,
+                            weight_dtype_str,
+                            weight_elem_dtype,
+                            gamma_div,
+                            idx,
+                        )
+                        x = in_local[tile_i].to(fx.Float32)
+                        y = (x * rrms) * g
+                        y_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
+                        _store_vec(copy_atom, VEC_WIDTH, elem_dtype, y_e, out_div, idx)
+
+                if const_expr(TAIL_ELEMS > 0):
+                    if lane < TAIL_ELEMS:
+                        tail_idx = lane + VEC_ELEMS
+                        x_tail_e = _load_scalar(copy_atom_s, elem_dtype, row_div_s, tail_idx)
+                        g_tail_e = _load_scalar(gamma_copy_atom_s, weight_elem_dtype, gamma_div_s, tail_idx)
+                        x_tail = x_tail_e.to(fx.Float32)
+                        g_tail = g_tail_e if weight_dtype_str == "f32" else g_tail_e.to(fx.Float32)
+                        y_tail = (x_tail * rrms) * g_tail
+                        y_tail_e = _to_elem_scalar(dtype_str, elem_dtype, y_tail)
+                        _store_scalar(copy_atom_s, elem_dtype, out_div_s, tail_idx, y_tail_e)
+            else:
+                copy_atom_s = fx.make_copy_atom(
+                    fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
+                    elem_bits,
+                )
+                gamma_copy_atom_s = fx.make_copy_atom(
+                    fx.rocdl.BufferCopy16b() if weight_elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
+                    weight_elem_bits,
+                )
+
+                row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
+                gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
+                out_div = fx.logical_divide(row_out, fx.make_layout(1, 1))
+
+                for base_idx_int in range_constexpr(0, BLOCK_N, THREADS_PER_ROW):
+                    idx = lane + base_idx_int
+                    is_valid = idx < N
+                    idx_safe = is_valid.select(idx, 0)
+                    x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx_safe)
                     x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
-                    g = g_e if weight_dtype_str == "f32" else g_e.to(fx.Float32)
-                    y = (x * rrms) * g
-                    y_e = _to_elem_scalar(dtype_str, elem_dtype, y)
-                    _store_scalar(copy_atom_s, elem_dtype, out_div, idx, y_e)
+                    x2 = x * x
+                    thread_sumsq = thread_sumsq + is_valid.select(x2, c_zero_f)
+
+                sum_sq = group_reduce_add(thread_sumsq)
+                mean_sq = sum_sq / n_float
+                ms_eps = mean_sq + eps_c
+                rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
+
+                if const_expr(store_rstd):
+                    if lane == 0:
+                        _store_scalar(rstd_copy_atom, fx.Float32, rstd_div, row, rrms)
+
+                for base_idx_int in range_constexpr(0, BLOCK_N, THREADS_PER_ROW):
+                    idx = lane + base_idx_int
+                    if idx < N:
+                        x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx)
+                        g_e = _load_scalar(gamma_copy_atom_s, weight_elem_dtype, gamma_div, idx)
+                        x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
+                        g = g_e if weight_dtype_str == "f32" else g_e.to(fx.Float32)
+                        y = (x * rrms) * g
+                        y_e = _to_elem_scalar(dtype_str, elem_dtype, y)
+                        _store_scalar(copy_atom_s, elem_dtype, out_div, idx, y_e)
 
     if store_rstd:
 
