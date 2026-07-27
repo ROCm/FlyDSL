@@ -1392,11 +1392,9 @@ def compile_pa_decode_sw(
                 query_group_size=query_group_size,
                 q_lanes_per_head=_Q_LANES_PER_HEAD,
             )
-            if const_expr(fuse_partitions):
-                tile_valid = fx.Int32(0) < visible_tile_count
-                prefetched_tile_metadata = _get_tile_metadata(tail_start_tile, tile_valid)
-            else:
-                prefetched_tile_metadata = _get_tile_metadata(tile_partition_idx_raw, True)
+            tile_valid = fx.Int32(0) < visible_tile_count if const_expr(fuse_partitions) else True
+            tile_partition_idx = tail_start_tile if const_expr(fuse_partitions) else tile_partition_idx_raw
+            prefetched_tile_metadata = _get_tile_metadata(tile_partition_idx, tile_valid)
             prefetched_tile_scale_scalars = _load_kv_scale_scalars(
                 prefetched_tile_metadata[0],
                 prefetched_tile_metadata[3],
@@ -1413,53 +1411,31 @@ def compile_pa_decode_sw(
                 qkhe_loop=_QKHELOOP,
                 q_lanes_per_head=_Q_LANES_PER_HEAD,
             )
+            (
+                tile_k_ops,
+                tile_v_and_scales,
+                tile_kv_seq_start,
+                tile_context_len,
+            ) = _load_tile(prefetched_tile_metadata, prefetched_tile_scale_scalars)
+            attention_context_len = tile_context_len if const_expr(fuse_partitions) else context_len
+            causal_bound = attention_context_len + fx.Int32(1 - query_length) + qi_val
+            seq_start = attention_context_len - fx.Int32(query_length + sliding_window) + qi_val
+            outs = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in range_constexpr(_VHELOOP)]
+            running_max, running_sum, outs = _process_block_split(
+                NEG_INF,
+                ZERO_F,
+                outs,
+                tile_k_ops,
+                tile_v_and_scales,
+                q_frags,
+                causal_bound,
+                query_scale_lane,
+                seq_start,
+                tile_kv_seq_start,
+            )
             if const_expr(fuse_partitions):
-                running_max = NEG_INF
-                running_sum = ZERO_F
-                outs = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in range_constexpr(_VHELOOP)]
-                (
-                    tile_k_ops,
-                    tile_v_and_scales,
-                    tile_kv_seq_start,
-                    tile_context_len,
-                ) = _load_tile(prefetched_tile_metadata, prefetched_tile_scale_scalars)
-                causal_bound = tile_context_len + fx.Int32(1 - query_length) + qi_val
-                seq_start = tile_context_len - fx.Int32(query_length + sliding_window) + qi_val
-                running_max, running_sum, outs = _process_block_split(
-                    running_max,
-                    running_sum,
-                    outs,
-                    tile_k_ops,
-                    tile_v_and_scales,
-                    q_frags,
-                    causal_bound,
-                    query_scale_lane,
-                    seq_start,
-                    tile_kv_seq_start,
-                )
                 _store_fused_group_results(qi_val, qhi_pos, running_sum, outs)
             else:
-                (
-                    k_ops,
-                    preloaded_v_and_scales,
-                    tile_kv_seq_start,
-                    _,
-                ) = _load_tile(prefetched_tile_metadata, prefetched_tile_scale_scalars)
-                causal_bound = context_len + fx.Int32(1 - query_length) + qi_val
-                seq_start = context_len - fx.Int32(query_length + sliding_window) + qi_val
-                outs = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in range_constexpr(_VHELOOP)]
-                running_max, running_sum, outs = _process_block_split(
-                    NEG_INF,
-                    ZERO_F,
-                    outs,
-                    k_ops,
-                    preloaded_v_and_scales,
-                    q_frags,
-                    causal_bound,
-                    query_scale_lane,
-                    seq_start,
-                    tile_kv_seq_start,
-                )
                 _store_group_results(qi_val, qhi_pos, running_sum, running_max, outs)
 
         if const_expr(fuse_partitions):
