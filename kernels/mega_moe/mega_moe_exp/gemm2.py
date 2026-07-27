@@ -42,13 +42,12 @@ def bq_view(
     K_HALVES,
     num_records_bytes=None,
 ):
-    """Layout view over preshuffled B for one N-row tile; slice -> i32<4:1> (16B=32 fp4). num_records_bytes (has_pad pad-skip) sizes to REAL K; None -> max_size=False byte-identical default."""
+    """View one preshuffled B N-tile as i32<4:1>, optionally bounded to real K."""
     col_base = rocdl.readfirstlane(T.i32, _raw(row_elems) * fx.Int32(KH4))
     i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=16)
     off_i64 = fx.Int64(col_base)
     base_iter = fx.inttoptr(i32_ptr_ty, fx.Int64(arg_bq) + off_i64 * fx.Int64(4))
-    # i32 strides: klane[0,4)->64, nlane[0,16)->4,
-    # K_tile->K_HALVES*256, half->256, kpack4->1.
+    # i32 strides: klane 64, nlane 4, K-tile K_HALVES*256, half 256, kpack4 1.
     shape = (4, 16, K_TILES_TOTAL, K_HALVES, 4)
     view = fx.Tensor(
         fx.make_view(
@@ -62,7 +61,7 @@ def bq_view(
 
 
 def scale_view(arg_scale, base_dw, K_TILES_TOTAL, k0_stride_dw=64, num_records_bytes=None):
-    """Layout view over an e8m0 scale buffer (A-scale per 32-row chunk / B-scale per n-pack); slice -> i32<1:1> scale word. num_records_bytes (has_pad pad-skip) sizes to real extent; None -> max_size=False byte-identical default."""
+    """View one e8m0 scale word, optionally bounded to the real buffer extent."""
     base_dw = rocdl.readfirstlane(T.i32, _raw(base_dw))
     i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=4)
     off_i64 = fx.Int64(base_dw)
@@ -101,10 +100,7 @@ def mma_one_j(
     rg_off=0,
     k_halves=2,
 ):
-    """One J-cluster of scaled MFMAs over a 32-row A-scale group (row-groups i0, i0+1); each is
-    an fx.gemm on i32 A/B frags (fp8 A = i32<8:1>, fp4 A = i32<4:1>), e8m0 words on scale_a/scale_b.
-    sa: 32-row A-scale reg. single_rg (BM16): one 16-row group, rg_off picks its byte.
-    """
+    """Run one scaled-MFMA cluster over a 32-row A-scale group."""
     if const_expr(single_rg):
         steps = tuple((2 * k + rg_off, k, i0, bq_frags_kt[J][k]) for k in range(k_halves))
     else:
@@ -204,12 +200,8 @@ def gemm2_compute_v2(
     g2_ascale_pf=True,
     expert_offset=0,
 ):
-    """aiter gemm2_body_v2 K-loop (runtime inter_dim, 2-stage B pipeline + C/B/A-scale carry) factored
-    to RETURN the C accumulators (accm_vecs, m_row, n_block_idx, N_OUT_rt) for a pluggable epilog.
-
-    expert_offset: mega_moe sorted_expert_ids are GLOBAL (rank*experts + local); subtract to index the
-    per-rank w2/w2_scale (aiter's own harness passes local ids -> default 0, byte-identical)."""
-    # gemm2 K-loop perf knobs (default ON): 2-stage B pipeline double-buffers B weight+scale one tile ahead; bhoist issues that prefetch above the LDS barrier; ascale_pf prefetches A-scale one tile ahead.
+    """Run the GEMM2 K-loop and return accumulators for the selected epilogue."""
+    # K-loop knobs control two-stage B, hoisted B, and one-tile-ahead A-scale prefetch.
     # SBM (sort padding unit) >= BM (compute tile); SBM==BM default byte-identical.
     if SBM is None:
         SBM = BM
@@ -241,7 +233,7 @@ def gemm2_compute_v2(
     K_TILES_MAX = INTER_MAX // BK
     K_SCALE_CHUNKS_MAX = INTER_MAX // 256
 
-    # has_pad OOB pad-skip (const_expr-gated): K-skip sizes 16N B-weight buffer to REAL K; N-skip zeros fully-pad-N w2 tiles (col >= N_real=N_OUT-npad; PERF-ONLY). B-scale NOT shrunk.
+    # Padded shapes bound B to real K and zero weight tiles beyond real N.
     bq_num_records = None
     N_real = None
     if const_expr(has_pad):
@@ -250,7 +242,7 @@ def gemm2_compute_v2(
         bq_num_records = halves_real * fx.Int32(1024)
         N_real = N_OUT_rt - fx.Int32(i32_npad)
 
-    # block -> (m_block_idx, n_block_idx); e = sorted_expert_ids[SBM-padded sort block] (SBM==BM: sort_block==m_block_idx).
+    # Map each compute block to its SBM-padded expert metadata row.
     m_block_idx = bx_i32 // num_n_blocks
     n_block_idx = bx_i32 - m_block_idx * num_n_blocks
     eids_ptr = global_typed_ptr(arg_eids, T.i32)
@@ -331,8 +323,7 @@ def gemm2_compute_v2(
                     )
                     a_frags[i][k].store(Vec(vec))
 
-    # Scale words (e8m0): shared scale_view / copy atom for both A and B. A-scale is one
-    # word per 32-row chunk, each view bounded to bytes remaining after its baked base.
+    # The shared e8m0 scale layout bounds each A-scale view to its remaining bytes.
     sc_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(0), 32)
 
     asc_per_mb = fx.Int32(kScaleSubBlocks) * kAS_per_chunk_dw * fx.Int32(4)
@@ -367,8 +358,7 @@ def gemm2_compute_v2(
             out.append(_raw(Vec(saf.load())[0]))
         return out
 
-    # B-weight + B-scale: global->register, streamed per K-tile (not LDS-staged).
-    # b128 weight copy atom; cache modifier 2=nontemporal, 0=default.
+    # Stream B weights/scales through registers; cache modifier 2 is non-temporal and 0 is default.
     b_catom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(2 if use_nt else 0), 32)
 
     def make_bq_view(j):
@@ -829,7 +819,7 @@ def atomic_bf16_epilog(
         row_in_block = fx.Int32(mr * 8) + m_lane
         token_id = packed[mr] & fx.Int32(0x00FFFFFF)
         if const_expr(use_reduce):
-            # reduce out_row can reach tokens*topk (large-M) so compute the element base in i64 (atomic i32 path byte-identical).
+            # Use i64 for large token*topk output offsets.
             out_row = fx.Int64(token_id * fx.Int32(topk) + (packed[mr] >> fx.Int32(24)))
             if const_expr(route_out_fp8):
                 row_base_addr = out_row * fx.Int64(N_OUT + (N_OUT // fx.Int32(8)))
@@ -933,18 +923,7 @@ def atomic_bf16_epilog(
 
 
 def get_gemm2_autotune_configs(a_dtype="fp8"):
-    """Curated multi-knob config space for the fused stage2 gemm2 autotune (per-M, pruned, NOT a full
-    cartesian product). Each dict overrides compile_mega_moe_stage2 defaults.
-
-    Tuned axes: BM, BK, use_nt, g2_bhoist, g2_ascale_pf, g2_spart, persist. The caller passes the
-    stage1 metadata tile as SBM; the stage2 compute BM is an independent divisor of SBM.
-    Compact and fixed-slot use the same handoff and pass their active stage1 SBM.
-
-    persist (fixed cu_num m-slot grid, grid-stride over m-tiles) is included for BOTH fp4 and fp8:
-    aiter marks a8w4/fp8-A persist known-broken for THEIR mxmoe_gemm_v2, but our compile_mega_moe_stage2
-    persist branch is a separate impl -- verified correct (relL2 ~2.8e-3) and a large-M win (bs=1024
-    stage2 0.335->0.288ms, closing the gap to V1 from 19% to ~3%). The per-M autotune picks persist at
-    large M and non-persist at small M automatically."""
+    """Return the pruned Stage2 autotune space."""
     cfgs = [
         # (default) 2-stage B + A-scale prefetch + spatial-partition remap, f32 cshuffle, non-persist.
         dict(BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=True, g2_spart=402, persist=False),
@@ -957,10 +936,8 @@ def get_gemm2_autotune_configs(a_dtype="fp8"):
         dict(BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=True, g2_spart=402, persist=True),
         dict(BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=True, g2_spart=0, persist=True),
     ]
-    # NOTE: BK=128 excluded -- produces wrong results for this a8w4 down-proj shape (relL2~0.54);
-    # its e8m0 scale-word shift (tilesPerScaleChunk=2) path is not correct here. Keep BK=256.
-    # BM=128 needs a 128 KiB f32 cshuffle slab at BN=256, beyond one workgroup's LDS capacity.
-    return [dict(config, BM=BM) for BM in (32, 64) for config in cfgs]
+    # BK128 is inaccurate here; BM128 at BN256 fits gfx950's 160 KiB block LDS.
+    return [dict(config, BM=BM) for BM in (16, 32, 64, 128) for config in cfgs]
 
 
 # ---- gemm2 (down-proj) compile + launch driver (ported from aiter mxmoe_dispatcher.py) ----
@@ -970,7 +947,7 @@ def _norm_sbm(SBM, BM):
 
 
 def _spart_output_tile_index(block_1d_id, M0, N0, group_num, m01):
-    """ck_tile GemmSpatiallyLocalTilePartitioner::GetOutputTileIndex: 1D block id -> spatially-local (m_block_idx, n_block_idx). block_1d_id/M0 runtime; N0/group_num/m01 compile-time."""
+    """Map a 1D block ID to a spatially local output tile."""
     gn = fx.Int32(group_num)
     n0 = fx.Int32(N0)
     m01c = fx.Int32(m01)
@@ -1049,7 +1026,7 @@ def compile_gemm2_a4w4_port(
     g2_bf16_lds=None,
     out_dtype="bf16",
 ):
-    """Compile gemm2 a4w4 down-proj; epilog 'atomic' (weighted atomic-fadd) or 'reduce' (store into out[token_id*topk+slot]). inter_dim runtime; SBM None -> SBM==BM byte-identical."""
+    """Compile A4W4 GEMM2 with atomic or per-route reduction output."""
     SBM = _norm_sbm(SBM, BM)
     if BM not in (16, 32, 64, 128) or epilog not in ("atomic", "reduce"):
         raise AssertionError(
@@ -1082,8 +1059,7 @@ def compile_gemm2_a4w4_port(
     aStages = 2 if g2_bf16_lds else 3
     c_lds_bytes = BM * BN * (2 if g2_bf16_lds else 4)
     lds_bytes = max(c_lds_bytes, aStages * slot_bytes)
-    # N_OUT = model_dim/hidden is runtime; HIDDEN_MAX is a compile/cache bucket
-    # so different runtime hidden sizes can reuse one compiled launcher.
+    # HIDDEN_MAX buckets compiled launchers while the output width remains runtime.
     assert HIDDEN_MAX % BN == 0, f"HIDDEN_MAX must be a multiple of {BN}, got {HIDDEN_MAX}"
 
     # Kernel-name tags empty on the default so its name/IR stays byte-identical (each variant distinct).
@@ -1105,7 +1081,10 @@ def compile_gemm2_a4w4_port(
     spart_tag = f"_spart{g2_group_num}x{g2_m01}" if g2_spart > 0 else ""
     bf16lds_tag = "_bf16lds" if g2_bf16_lds else ""
     out_tag = "_fp8out" if route_out_fp8 else ""
-    tag = f"hmax{HIDDEN_MAX}_imax{INTER_MAX}_bm{BM}{'_nt' if use_nt else ''}_{etag}{atag}{sbm_tag}{persist_tag}{pad_tag}{bh_tag}{apf_tag}{spart_tag}{bf16lds_tag}{out_tag}_v2"
+    tag = (
+        f"hmax{HIDDEN_MAX}_imax{INTER_MAX}_bm{BM}{'_nt' if use_nt else ''}_{etag}{atag}{sbm_tag}"
+        f"{persist_tag}{pad_tag}{bh_tag}{apf_tag}{spart_tag}{bf16lds_tag}{out_tag}_v2"
+    )
     name = f"gemm2_a4w4_port_{tag}"
 
     @fx.struct
@@ -1133,7 +1112,7 @@ def compile_gemm2_a4w4_port(
         i32_kpad,
         i32_npad,
     ):
-        # Shared body for both has_pad variants (@flyc.jit -> rewriter recurses scf if / grid-stride); default passes i32_kpad/i32_npad=0 (no kernarg), folding pad math away.
+        # Share the JIT body while the default variant folds zero padding away.
         num_n_blocks = fx.Int32(i32_hidden) // fx.Int32(BN)  # N_OUT//BN runtime (i32_hidden = model_dim)
         k_bytes = fx.Int32(i32_inter) // fx.Int32(1 if is_f8 else 2)  # A row stride bytes (runtime)
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
@@ -1220,7 +1199,7 @@ def compile_gemm2_a4w4_port(
                 rocdl.sched_barrier(0)
                 run_unit(unit_bx)
         else:
-            # Persistent-m: fixed cu_num*num_n_blocks grid; each block grid-strides m-tiles by cu_num (aiter `_persist`).
+            # Persistent blocks grid-stride M tiles by cu_num.
             m_tile0 = bx_i32 // fx.Int32(num_n_blocks)
             n_block = bx_i32 - m_tile0 * fx.Int32(num_n_blocks)
             c_stride = fx.Int32(cu_num)
@@ -1238,7 +1217,7 @@ def compile_gemm2_a4w4_port(
             ):
                 m_block = m_tile0 + fx.Int32(_it) * c_stride
                 unit_bx = m_block * fx.Int32(num_n_blocks) + n_block
-                gpu.barrier()  # persist: separate prev-iter epilog C-slab LDS reads from this iter's A-load into the shared LDS union
+                gpu.barrier()  # Separate persistent iterations sharing LDS.
                 issue_all_a_loads(m_block * fx.Int32(BM))
                 rocdl.sched_barrier(0)
                 if fx.Int32(m_block) < total_m_blocks:

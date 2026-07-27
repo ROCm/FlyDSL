@@ -18,7 +18,7 @@ from ..quant import per_1x32_mx_quant
 from .dispatch import DISPATCH_TABLE_SIZE, DispatchSlot
 
 __all__ = ["MegaMoEV2"]
-_JOINT_AUTOTUNE_SCHEMA = 3
+_JOINT_AUTOTUNE_SCHEMA = 6
 
 
 # fmt: off
@@ -43,12 +43,7 @@ def _make_joint_sbm_autotuner(tile_m_values):
 
 
 class MegaMoEV2:
-    """Fused dispatch/GEMM1 + GEMM2/combine implementation.
-
-    All EP ranks must invoke an instance with the same token count and routing
-    mode. One instance supports one in-flight stage1 launch at a time because
-    its epoch counters, workspaces, and outputs are reused.
-    """
+    """Fused dispatch, GEMM1, GEMM2, and combine with one in-flight launch per instance."""
 
     # fmt: off
     def __init__(self, *, rank: int, world_size: int, model_dim: int, inter_dim: int, experts: int, topk: int,
@@ -90,13 +85,14 @@ class MegaMoEV2:
         self._v2_grid_mult = None if stage1_grid_mult is None else int(stage1_grid_mult)
         if stage1_tile_m_values is None:
             token_capacity = int(max_tok_per_rank if tune_tokens is None else tune_tokens)
-            stage1_tile_m_values = (32,) if token_capacity <= 256 else (64, 128)
+            stage1_tile_m_values = (32,) if token_capacity <= 256 else (32, 64, 128)
         self._v2_tile_m_values = tuple(sorted({int(tile_m) for tile_m in stage1_tile_m_values}))
         if not self._v2_tile_m_values or any(tile_m not in (32, 64, 128) for tile_m in self._v2_tile_m_values):
             raise ValueError("stage1_tile_m_values must contain only 32, 64, and/or 128")
         capacity_tile_m = max(self._v2_tile_m_values)
         max_buffer_bytes = self.epr * self.world_size * self.mtpr * max(self.model_dim, self.inter_dim * 2)
         compact = max_buffer_bytes >= 3_000_000_000 or self.epr > 64
+        self._s1_fixed_slot = not compact
         self._s1_scale_dim = self.model_dim // 32
         # fmt: off
         self.comb_cfg = FlyDSLDispatchCombineConfig(rank=self.rank, world_size=self.world_size,
@@ -257,7 +253,8 @@ class MegaMoEV2:
             stream, model_dim=self.model_dim, inter_dim=self.inter_dim,
             rank=self.rank, experts_per_rank=self.epr, fuse_npes=self.world_size, fuse_topk=self.topk,
             fuse_cap=self._s1_cap, fuse_mtpr=self.mtpr, fuse_scale_dim=self._s1_scale_dim,
-            sort_block_m=self.sort_block_m, num_cu=self._s1_num_cu,
+            fixed_slot_dispatch=self._s1_fixed_slot, sort_block_m=self.sort_block_m,
+            num_cu=self._s1_num_cu,
             tune_tokens=cur_tok, dispatch_constraint=-1 if self._v2_dispatch_cu is None else self._v2_dispatch_cu,
             grid_constraint=-1 if self._v2_grid_mult is None else self._v2_grid_mult,
             tile_m_constraint=",".join(str(v) for v in tile_m_values), autotune_schema=tuner.schema)

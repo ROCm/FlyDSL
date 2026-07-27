@@ -29,7 +29,16 @@ _ANCHORS = {
     (128, 512, 8),
 }
 _GRID_MULT_VALUES = (1, 2, 3, 4, 6, 8, 12, 16)
-_DISPATCH_CU_VALUES = (8, 16, 24, 32, 48, 64, 96, 128)
+_DISPATCH_CU_VALUES = (8, 16, 24, 32, 48, 64, 96, 128, 160, 192, 224)
+_GEOMETRY_SHAPES = {(32, 128, 4), (32, 256, 4), (32, 512, 8), (64, 256, 4), (64, 512, 8), (128, 512, 8)}
+_GEOMETRY_GRIDS = (1, 2, 3, 4)
+_GEOMETRY_DISPATCH = (64, 96, 128, 160, 192, 224)
+_INTERACTION_SHAPES = {(32, 256, 4), (32, 512, 8), (64, 512, 8), (128, 512, 8)}
+_INTERACTION_GRIDS = (1, 2, 3)
+_INTERACTION_DISPATCH = (160, 192, 224)
+_B_INTERACTIONS = tuple((True, False, b_nt) for b_nt in (0, 3))
+_ASYNC_INTERACTIONS = tuple((resource, True, b_nt) for resource in (True, False) for b_nt in (-1, 0, 3))
+_INTERACTIONS = _B_INTERACTIONS + _ASYNC_INTERACTIONS
 _CALIBRATED_VARIANTS = {
     (32, 256, 4): (
         {
@@ -204,6 +213,27 @@ def _candidate_variants(shape):
         variants.append({"mfma_amajor": True})
     if shape == (128, 512, 8):
         variants.append({"async_a_copy": True})
+    if shape in _GEOMETRY_SHAPES:
+        for grid_mult in _GEOMETRY_GRIDS:
+            for num_dispatch_cu in _GEOMETRY_DISPATCH:
+                geometry = {"grid_mult": grid_mult, "num_dispatch_cu": num_dispatch_cu}
+                variants += [geometry, dict(geometry, use_tile_resource=False)]
+                if num_dispatch_cu >= 128:
+                    variants += [
+                        dict(geometry, use_tile_resource=False, b_nt=0),
+                        dict(geometry, use_tile_resource=False, b_nt=3),
+                    ]
+                    if shape[0] >= 64 and shape[1] == 512:
+                        variants.append(dict(geometry, use_tile_resource=False, async_a_copy=True))
+                if (
+                    shape in _INTERACTION_SHAPES
+                    and grid_mult in _INTERACTION_GRIDS
+                    and num_dispatch_cu in _INTERACTION_DISPATCH
+                ):
+                    variants += [
+                        dict(geometry, use_tile_resource=resource, async_a_copy=async_copy, b_nt=b_nt)
+                        for resource, async_copy, b_nt in _INTERACTIONS
+                    ]
     if shape not in _ANCHORS:
         return variants
     variants += [{"grid_mult": value} for value in _GRID_MULT_VALUES if value != 4]
@@ -268,6 +298,7 @@ def prune_stage1_autotune_configs(configs, sig_args):
     fuse_cap = int(sig_args["fuse_cap"])
     fuse_mtpr = int(sig_args["fuse_mtpr"])
     experts_per_rank = int(sig_args["experts_per_rank"])
+    fixed_slot_dispatch = bool(sig_args["fixed_slot_dispatch"])
     out = []
     for config in configs:
         values = config.kwargs
@@ -280,11 +311,13 @@ def prune_stage1_autotune_configs(configs, sig_args):
         b_nt = int(values["b_nt"])
         use_tile_resource = bool(values["use_tile_resource"])
         direct_fixed_slot = (
-            fuse_npes == 8
+            fixed_slot_dispatch
+            and fuse_npes == 8
             and experts_per_rank == 48
-            and fuse_mtpr <= 256
             and fuse_cap == ((fuse_npes * fuse_mtpr + block_m - 1) // block_m) * block_m
         )
+        if b_nt == (3 if fuse_mtpr <= 512 else 0):
+            continue
         if direct_fixed_slot and (values["active_expert_producer"] or values["cooperative_payload_copy"]):
             continue
         num_acc_n = tile_n // num_waves // 16
@@ -301,28 +334,23 @@ def prune_stage1_autotune_configs(configs, sig_args):
             or block_m % 32
             or m_repeat * num_acc_n * 4 > 256
             or lds_pool + lds_scale > 160 * 1024
-            or not 0 < dispatch_cu <= num_cu
+            or not 0 < dispatch_cu < num_cu
+            or num_cu * grid_mult - 1 - dispatch_cu <= 0
             or (payload_bytes >= 1 << 32 and not use_tile_resource)
             or (output_bytes >= 1 << 32 and not use_tile_resource)
         ):
             continue
         if tokens <= 64:
-            # The production default uses M32 here, but an explicit joint SBM sweep must also be
-            # able to evaluate M64/M128 instead of being pruned to an empty candidate set.
+            # Keep explicit M64/M128 joint-SBM sweeps valid for small batches.
             keep = tile_n <= 512 and grid_mult <= 4 and dispatch_cu >= 32 and not (block_m > 32 and b_nt == 0)
         elif tokens <= 1024:
             keep = tile_n <= 512 and grid_mult <= 8 and dispatch_cu >= 24
         else:
-            # Large compact batches normally use M64/M128. A forced M32 joint sweep is still
-            # useful at bucket boundaries, but only its known-progress wide-N/high-wave family is
-            # safe; narrower M32 candidates have stalled this workload on gfx950.
+            # Limit large-batch M32 to the gfx950-safe N512/w8 family.
             keep = (
                 tile_n == 512
                 and num_waves == 8
-                and (
-                    (block_m == 32 and grid_mult == 1 and dispatch_cu >= 32)
-                    or (block_m >= 64 and grid_mult <= 3 and dispatch_cu <= 96)
-                )
+                and ((block_m == 32 and grid_mult == 1 and dispatch_cu >= 32) or (block_m >= 64 and grid_mult <= 3))
             )
         if keep:
             out.append(config)

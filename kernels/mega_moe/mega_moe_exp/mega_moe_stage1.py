@@ -27,16 +27,16 @@ from .dispatch import (
 from .gemm1 import build_fused_gemm1
 from .stage1_configs import get_stage1_autotune_configs, prune_stage1_autotune_configs
 
-_AUTOTUNE_SCHEMA = 12
+_AUTOTUNE_SCHEMA = 15
 _SC0_CACHE = 1
 _BUFFER_OFFSET_ABI_BYTES = 1 << 32
 
 
-def _use_direct_fixed_slot(npes, experts_per_rank, max_tokens_per_rank, cap, tile_m):
-    if tile_m <= 0 or max_tokens_per_rank <= 0:
+def _use_direct_fixed_slot(enabled, npes, experts_per_rank, max_tokens_per_rank, cap, tile_m):
+    if not enabled or tile_m <= 0 or max_tokens_per_rank <= 0:
         return False
     required_cap = ((npes * max_tokens_per_rank + tile_m - 1) // tile_m) * tile_m
-    return npes == 8 and experts_per_rank == 48 and max_tokens_per_rank <= 256 and cap == required_cap
+    return npes == 8 and experts_per_rank == 48 and cap == required_cap
 
 
 def _validate_dispatch_capacity(
@@ -60,11 +60,12 @@ class _LdsF32View:
 @functools.lru_cache(maxsize=None)
 def compile_mega_moe_stage1(
     *, model_dim: int, inter_dim: int, rank: int, experts_per_rank: int, fuse_npes: int, fuse_topk: int,
-    fuse_cap: int, fuse_mtpr: int, fuse_scale_dim: int, sort_block_m: int = 32, tile_n: int = 256, tile_k: int = 256,
-    num_waves: int = 4, grid_mult: int = 8, pipe_weights: bool = True, mfma_amajor: bool = False,
-    swizzle_a: bool = True, async_a_copy: bool = False, active_expert_producer: bool = False,
-    cooperative_payload_copy: bool = False, use_tile_resource: bool = True, waves_per_eu_hint: int = 2,
-    num_cu: int = 256, num_dispatch_cu: int = 32, b_nt: int = -1,
+    fuse_cap: int, fuse_mtpr: int, fuse_scale_dim: int, fixed_slot_dispatch: bool, sort_block_m: int = 32,
+    tile_n: int = 256, tile_k: int = 256, num_waves: int = 4, grid_mult: int = 8,
+    pipe_weights: bool = True, mfma_amajor: bool = False, swizzle_a: bool = True,
+    async_a_copy: bool = False, active_expert_producer: bool = False,
+    cooperative_payload_copy: bool = False, use_tile_resource: bool = True,
+    waves_per_eu_hint: int = 2, num_cu: int = 256, num_dispatch_cu: int = 32, b_nt: int = -1,
 ):
     NUM_WAVES = int(num_waves)
     assert NUM_WAVES > 1, "planner needs one communication wave and at least one grouping wave"
@@ -77,7 +78,7 @@ def compile_mega_moe_stage1(
     assert grid_mult in GRID_MULT_VALUES, "grid_mult out of range"
     grid_epoch_slot = GRID_MULT_VALUES.index(grid_mult)
     dispatch_blocks = int(num_dispatch_cu)
-    assert 0 < dispatch_blocks <= num_cu, "num_dispatch_cu must be in [1, num_cu]"
+    assert 0 < dispatch_blocks < num_cu, "num_dispatch_cu must be in [1, num_cu)"
     planner_blocks = 1
     # Keep the fused grid on an exact CU multiple instead of appending control/producer CTAs as a tail.
     grid_x = num_cu * grid_mult - planner_blocks - dispatch_blocks
@@ -110,7 +111,9 @@ def compile_mega_moe_stage1(
     external_counting = external_grouping and fz_mtpr >= 8192
     fz_tile_m = int(sort_block_m)
     assert fz_cap % fz_tile_m == 0, f"fuse_cap({fz_cap}) % tile_m({fz_tile_m}) != 0"
-    direct_fixed_slot = _use_direct_fixed_slot(fz_npes, fz_epr, fz_mtpr, fz_cap, fz_tile_m)
+    direct_fixed_slot = _use_direct_fixed_slot(
+        fixed_slot_dispatch, fz_npes, fz_epr, fz_mtpr, fz_cap, fz_tile_m
+    )
     fz_total_experts = fz_npes * fz_epr
     # Small batches stream B; large batches cache it across M tiles.
     b_cache_modifier = int(b_nt) if int(b_nt) >= 0 else (3 if fz_mtpr <= 512 else 0)
@@ -383,20 +386,23 @@ def compile_mega_moe_stage1(
 def _run_stage1_config(out, x, w, scale_x, scale_w, sorted_token_ids, expert_ids, num_valid_ids, out_scale,
     tokens, addr_disp, i32_cur_tok, addr_in_tok, addr_in_idx, addr_in_wts, addr_in_sc,
     addr_parity, addr_expected, stream, *, model_dim, inter_dim, rank, experts_per_rank, fuse_npes,
-    fuse_topk, fuse_cap, fuse_mtpr, fuse_scale_dim, sort_block_m, num_cu, tune_tokens,
-    dispatch_constraint, grid_constraint, tile_m_constraint, autotune_schema, tile_n=256, tile_k=256, num_waves=4,
-    grid_mult=4, pipe_weights=True, mfma_amajor=False, swizzle_a=True, async_a_copy=False,
-    active_expert_producer=False, cooperative_payload_copy=False, num_dispatch_cu=32,
-    use_tile_resource=True, waves_per_eu_hint=2, b_nt=-1):
+    fuse_topk, fuse_cap, fuse_mtpr, fuse_scale_dim, fixed_slot_dispatch, sort_block_m, num_cu,
+    tune_tokens, dispatch_constraint, grid_constraint, tile_m_constraint, autotune_schema,
+    tile_n=256, tile_k=256, num_waves=4, grid_mult=4, pipe_weights=True, mfma_amajor=False,
+    swizzle_a=True, async_a_copy=False, active_expert_producer=False,
+    cooperative_payload_copy=False, num_dispatch_cu=32, use_tile_resource=True,
+    waves_per_eu_hint=2, b_nt=-1):
     del tune_tokens, dispatch_constraint, grid_constraint, tile_m_constraint, autotune_schema
     launch = compile_mega_moe_stage1(
         model_dim=model_dim, inter_dim=inter_dim, rank=rank, experts_per_rank=experts_per_rank,
         fuse_npes=fuse_npes, fuse_topk=fuse_topk, fuse_cap=fuse_cap, fuse_mtpr=fuse_mtpr,
-        fuse_scale_dim=fuse_scale_dim, sort_block_m=sort_block_m, tile_n=tile_n, tile_k=tile_k,
-        num_waves=num_waves, grid_mult=grid_mult, pipe_weights=pipe_weights, mfma_amajor=mfma_amajor,
-        swizzle_a=swizzle_a, async_a_copy=async_a_copy, active_expert_producer=active_expert_producer,
+        fuse_scale_dim=fuse_scale_dim, fixed_slot_dispatch=fixed_slot_dispatch,
+        sort_block_m=sort_block_m, tile_n=tile_n, tile_k=tile_k, num_waves=num_waves,
+        grid_mult=grid_mult, pipe_weights=pipe_weights, mfma_amajor=mfma_amajor, swizzle_a=swizzle_a,
+        async_a_copy=async_a_copy, active_expert_producer=active_expert_producer,
         cooperative_payload_copy=cooperative_payload_copy, use_tile_resource=use_tile_resource,
-        waves_per_eu_hint=waves_per_eu_hint, num_cu=num_cu, num_dispatch_cu=num_dispatch_cu, b_nt=b_nt,
+        waves_per_eu_hint=waves_per_eu_hint, num_cu=num_cu, num_dispatch_cu=num_dispatch_cu,
+        b_nt=b_nt,
     )
     _run_compiled(
         launch, out, x, w, scale_x, scale_w, sorted_token_ids, expert_ids, num_valid_ids, out_scale,
@@ -414,8 +420,8 @@ def make_stage1_autotuner(dispatch_cu=None, grid_mult=None, tile_m_values=(32,))
     )
     key = [
         "model_dim", "inter_dim", "experts_per_rank", "fuse_npes", "fuse_topk", "fuse_cap", "fuse_mtpr",
-        "fuse_scale_dim", "sort_block_m", "num_cu", "tune_tokens", "dispatch_constraint",
-        "grid_constraint", "tile_m_constraint", "autotune_schema",
+        "fuse_scale_dim", "fixed_slot_dispatch", "sort_block_m", "num_cu", "tune_tokens",
+        "dispatch_constraint", "grid_constraint", "tile_m_constraint", "autotune_schema",
     ]
     tuner = autotune(
         configs=configs, key=key, warmup=2, rep=7,

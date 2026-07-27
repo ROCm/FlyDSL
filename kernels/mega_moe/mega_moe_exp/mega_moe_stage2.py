@@ -1,13 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 # ruff: noqa: I001
-"""Fused stage2: ported aiter mxmoe gemm2 (runtime-dim K-loop + 2-stage B pipeline + carry + spart/
-persist) with a weighted cross-rank P2P scatter epilog.
-
-The gemm2 compute is `gemm2.gemm2_compute_v2` (faithful aiter port); this module supplies the
-fused P2P scatter epilog (b128 LDS-coalesced store, recv_cap bounded-rsrc invalid-row redirect,
-register-cached peer bases, metadata hoisted off the MFMA critical path) and the stage2 driver that
-mirrors aiter's compile_gemm2_a4w4_port (naive / spatial-partition / persistent-m grids)."""
+"""Fused GEMM2 and weighted cross-rank P2P scatter."""
 
 import functools
 
@@ -31,7 +25,7 @@ from .gemm2 import (
     lds_vec_load,
 )
 
-_AUTOTUNE_SCHEMA = 3
+_AUTOTUNE_SCHEMA = 4
 
 
 def p2p_scatter_prefetch(r_stids, r_sweights, srcmap_row_base, m_lane, BM):
@@ -50,11 +44,7 @@ def p2p_scatter_prefetch(r_stids, r_sweights, srcmap_row_base, m_lane, BM):
 def p2p_scatter_epilog(lds_acc_base, accm, packed, weight, peer_bases, n_block_idx, wave, lane,
     *, N_OUT, BM, BN, npes, topk, log2_max_tok, mask_max_tok, recv_cap, comb_inp_nbytes):
 # fmt: on
-    """CShuffle -> weighted bf16 -> P2P store one GEMM2 tile.
-
-    The packed source map directly contains ``source_rank * max_tok + source_token`` and the top-k
-    slot, so no V1-style token-id remap is needed. Invalid rows are redirected past the bounded
-    buffer and dropped by hardware OOB."""
+    """Store one weighted BF16 GEMM2 tile to its peer."""
     M_REPS = BM // 8
     kMChunks = BM // 16
     numAccN = (BN // 4) // 16
@@ -126,9 +116,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
     persist: bool = False, cu_num: int = 0, has_pad: bool = False, g2_bhoist=None, g2_ascale_pf=None,
     g2_spart=None):
 # fmt: on
-    """Fused stage2 = aiter gemm2_compute_v2 (runtime inter_dim/model_dim, 2-stage B pipeline, spart/
-    persist) + weighted cross-rank P2P scatter. recv_cap bounds the packed source-token range;
-    comb_inp_nbytes bounds the per-peer combine-input buffer (invalid rows are redirected past it)."""
+    """Compile fused GEMM2 and weighted cross-rank P2P scatter."""
     assert max_tok > 0 and (max_tok & (max_tok - 1)) == 0, "max_tok must be power of two"
     assert model_dim % BN == 0 and HIDDEN_MAX % BN == 0
     assert INTER_MAX % BK == 0, f"INTER_MAX must be a multiple of {BK}"
@@ -194,9 +182,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
                     is_f8, KH_TILE_A, k_bytes, BM=BM)
 
         def run_unit(unit_bx, m_block_idx):
-            # Compact stage1 metadata has one tile_row_base per SBM-padded sort tile. Stage2 may
-            # compute a smaller BM sub-tile, so map the compute row back to its sort tile and add
-            # the within-tile row offset before prefetching srcmap/weight metadata.
+            # Map each Stage2 BM sub-tile to its Stage1 SBM metadata row.
             m_row = m_block_idx * fx.Int32(BM)
             sort_block_idx = m_row // fx.Int32(SBM)
             row_in_sort_block = m_row - sort_block_idx * fx.Int32(SBM)
@@ -290,9 +276,7 @@ def _run_gemm2_config(arg_aq, arg_ascale, arg_bq, arg_bscale, arg_eids, arg_cums
     HIDDEN_MAX, INTER_MAX, cu_num, tune_tokens, autotune_schema, BK=256, use_nt=True, g2_bhoist=True,
     g2_ascale_pf=True, g2_spart=402, persist=False):
     # fmt: on
-    """Autotuner runner: compile-or-cache the fused stage2 for one config, then launch. tune_tokens is
-    key-only (deleted). persist selects the fixed cu_num grid. Non-persistent launch capacity is the
-    number of BM compute tiles covered by the SBM-sized stage1 metadata arrays."""
+    """Compile or reuse one Stage2 autotune candidate and launch it."""
     del tune_tokens, autotune_schema
     launch = _get_g2_launch(
         model_dim=model_dim, inter_dim=inter_dim, experts=experts, topk=topk, rank=rank, npes=npes,
