@@ -11,10 +11,10 @@ import flydsl.expr as fx
 from flydsl.expr import buffer_ops as _buffer_ops
 from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import Vector as Vec
+from kernels.comm import communication_ops_utils as comm_ops
 from kernels.common.tensor_shim import _run_compiled
 from kernels.gemm.fp8_gemm_utils import ceildiv
 
-from ..utils import epk
 from .autotune import (
     CollectiveAutotuner,
     collective_bench,
@@ -161,7 +161,9 @@ def compile_mega_moe_stage1(
         ticket_scratch = fx.recast_iter(fx.Int64, a_buf.ptr)
         ticket_view = fx.make_view(ticket_scratch, fx.make_layout(1, 1))
         if tid == fx.Int32(0):
-            ticket64 = fx.Int64(epk.atomic_add_agent(a_entry_count + fx.Int64(grid_epoch_slot * 8), fx.Int64(1)))
+            ticket64 = fx.Int64(
+                comm_ops.atomic_add_agent(a_entry_count + fx.Int64(grid_epoch_slot * 8), fx.Int64(1))
+            )
             fx.ptr_store(Vec.from_elements([ticket64], fx.Int64), ticket_scratch)
         fx.barrier()
         ticket64 = Vec(ticket_view.load())[0]
@@ -181,7 +183,7 @@ def compile_mega_moe_stage1(
                 next_expected = previous_expected + fx.Int32(fz_npes)
                 _buffer_ops.buffer_store(next_expected, expected_rsrc, next_parity)
                 fx.rocdl.s_waitcnt(0)
-                epk.fence_agent_release()
+                comm_ops.fence_agent_release()
                 _buffer_ops.buffer_store(next_parity, parity_rsrc, fx.Int32(0))
                 work_head_rsrc = _buffer_ops.create_buffer_resource_from_addr(a_work_head)
                 for shard in range_constexpr(8):
@@ -192,14 +194,14 @@ def compile_mega_moe_stage1(
                     _buffer_ops.buffer_store(fx.Int32(0), _buffer_ops.create_buffer_resource_from_addr(a_group_done),
                                              fx.Int32(0))
                 fx.rocdl.s_waitcnt(0)
-                epk.fence_agent_release()
-                epk.store_i32_system(gate_addr, fx.Int32(0), gate_epoch)
+                comm_ops.fence_agent_release()
+                comm_ops.store_i32_system(gate_addr, fx.Int32(0), gate_epoch)
             fx.rocdl.s_waitcnt(0)
             fx.barrier()
         else:
             if tid == fx.Int32(0):
                 mori_shmem.int32_wait_until_equals(gate_addr, gate_epoch)
-                epk.fence_agent_acquire()
+                comm_ops.fence_agent_acquire()
             fx.barrier()
 
         payload_parity = _buffer_ops.buffer_load(
@@ -241,7 +243,7 @@ def compile_mega_moe_stage1(
                     if tid == fx.Int32(0):
                         mori_shmem.int32_wait_until_equals(
                             a_pair_order_ready + fx.Int64(payload_parity) * fx.Int64(4), payload_expected)
-                        epk.fence_agent_acquire()
+                        comm_ops.fence_agent_acquire()
                     fx.barrier()
                 emit_dispatch_payload(
                     num_waves=NUM_WAVES, fz_epr=fz_epr, fz_k=fz_k, fz_mtpr=fz_mtpr, fz_rank=fz_rank,
@@ -273,7 +275,7 @@ def compile_mega_moe_stage1(
             mori_shmem.int32_wait_until_equals(
                 local_plan_ready + fx.Int64(ready_index) * fx.Int64(4), payload_expected)
             # Payload readiness has a separate system-scope acquire.
-            epk.fence_agent_acquire()
+            comm_ops.fence_agent_acquire()
         fx.barrier()
         if const_expr(direct_fixed_slot):
             if compact_owner:
@@ -283,7 +285,7 @@ def compile_mega_moe_stage1(
                         ready_index = payload_parity * fx.Int32(fz_npes) + fx.Int32(destination)
                         mori_shmem.int32_wait_until_equals(
                             local_plan_ready + fx.Int64(ready_index) * fx.Int64(4), payload_expected)
-                    epk.fence_system_acquire()
+                    comm_ops.fence_system_acquire()
                 fx.barrier()
 
         wave_id = fx.thread_idx.x // 64
@@ -328,7 +330,7 @@ def compile_mega_moe_stage1(
             pe = expert_of_flat(flat)
             pe_index = payload_parity * fx.Int32(fz_epr) + pe
             mori_shmem.int32_wait_until_equals(addr_payload_ready + fx.Int64(pe_index) * fx.Int64(4), payload_expected)
-            epk.fence_system_acquire()
+            comm_ops.fence_system_acquire()
 
         # Control CTAs join the work pool after dispatch.
         consumer_active = fx.Int32(1) == fx.Int32(1)
@@ -338,7 +340,10 @@ def compile_mega_moe_stage1(
         while consumer_active:
             if tid == fx.Int32(0):
                 local_work = fx.Int32(
-                    epk.atomic_add_agent(a_work_head + fx.Int64(work_shard) * fx.Int64(64), fx.Int32(1)))
+                    comm_ops.atomic_add_agent(
+                        a_work_head + fx.Int64(work_shard) * fx.Int64(64), fx.Int32(1)
+                    )
+                )
                 work = work_shard + local_work * fx.Int32(WORK_SHARDS)
                 fx.ptr_store(Vec.from_elements([work], fx.Int32), work_scratch)
             fx.barrier()
@@ -348,7 +353,7 @@ def compile_mega_moe_stage1(
                 if has_work != fx.Int32(0):
                     if const_expr(direct_fixed_slot):
                         mori_shmem.int32_wait_until_greater_than(a_work_tail, work)
-                        epk.fence_agent_acquire()
+                        comm_ops.fence_agent_acquire()
                     else:
                         # Per-expert readiness avoids head-of-line blocking.
                         _wait_tile_payload(work)

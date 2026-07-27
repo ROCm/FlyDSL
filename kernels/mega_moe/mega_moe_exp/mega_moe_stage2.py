@@ -183,8 +183,6 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
 
         num_n_blocks = fx.Int32(i32_hidden) // fx.Int32(BN)
         k_bytes = fx.Int32(i32_inter) // fx.Int32(1 if is_f8 else 2)
-        aq_num = fx.Int64(i32_max_m_blocks) * fx.Int64(fx.Int32(BM) * k_bytes)
-
         # kernel-invariant scatter resources + peer-base table (loaded into registers once).
         trb_rsrc = buffer_ops.create_buffer_resource_from_addr(arg_trb)
         r_stids = buffer_ops.create_buffer_resource_from_addr(arg_stids)
@@ -198,7 +196,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
 
         def issue_all_a_loads(m_row0):
             for slot in range_constexpr(kStages):
-                issue_a_load_lds_dt(arg_aq, aq_num, lds_base_i32, slot, slot, m_row0, wave, lane,
+                issue_a_load_lds_dt(arg_aq, lds_base_i32, slot, slot, m_row0, wave, lane,
                     is_f8, KH_TILE_A, k_bytes, BM=BM)
 
         def run_unit(unit_bx, m_block_idx):

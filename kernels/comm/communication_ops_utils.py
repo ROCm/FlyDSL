@@ -17,6 +17,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Dict, Tuple
 
+import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as _llvm_d
 from flydsl.expr import arith
@@ -25,8 +26,13 @@ __all__ = [
     "store_i32_system",
     "store_i64_global_system",
     "fence_system_acquire",
+    "fence_system_release",
+    "fence_agent_acquire",
+    "fence_agent_release",
     "load_i64_global",
     "atomic_add_global_at",
+    "atomic_add_agent",
+    "atomic_add_system",
     "atomic_xchg_global_at",
     "GeometryTuningTable",
 ]
@@ -60,7 +66,22 @@ def store_i64_global_system(addr_i64, val):
 
 def fence_system_acquire():
     """System-scope acquire fence."""
-    _llvm_d.FenceOp(_llvm_d.AtomicOrdering.acquire, syncscope="one-as")
+    fx.rocdl.fence_acquire(fx.rocdl.SyncScope.OneAs)
+
+
+def fence_system_release():
+    """System-scope release fence."""
+    fx.rocdl.fence_release(fx.rocdl.SyncScope.OneAs)
+
+
+def fence_agent_acquire():
+    """Agent-scope acquire fence."""
+    fx.rocdl.fence_acquire(fx.rocdl.SyncScope.AgentOneAs)
+
+
+def fence_agent_release():
+    """Agent-scope release fence."""
+    fx.rocdl.fence_release(fx.rocdl.SyncScope.AgentOneAs)
 
 
 def load_i64_global(addr_i64):
@@ -108,6 +129,16 @@ def atomic_add_global_at(addr_i64, val, syncscope="one-as"):
         _llvm_d.AtomicOrdering.monotonic,
         **kwargs,
     ).res
+
+
+def atomic_add_agent(addr_i64, val):
+    """Agent-scope monotonic global fetch-and-add."""
+    return atomic_add_global_at(addr_i64, val, syncscope=fx.rocdl.SyncScope.Agent)
+
+
+def atomic_add_system(addr_i64, val):
+    """System-scope monotonic global fetch-and-add."""
+    return atomic_add_global_at(addr_i64, val)
 
 
 def atomic_xchg_global_at(addr_i64, val, syncscope="agent"):

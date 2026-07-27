@@ -124,7 +124,6 @@ def mma_one_j(
 
 def issue_a_load_lds_dt(
     arg_aq,
-    aq_num_records,
     s_aq_base,
     slot,
     kt,
@@ -136,7 +135,7 @@ def issue_a_load_lds_dt(
     K_BYTES,
     BM=32,
 ):
-    """A->LDS DMA for one K-tile; gemm2 A is the already-sorted row, OOB-zero via the flat buffer view bounds."""
+    """Load one A tile through a tile-local descriptor so allocations may span the 4 GiB buffer ABI."""
     lanes_per_row = KH_TILE_A // 16  # 8 (fp4) / 16 (fp8)
     rows_per_call = 64 // lanes_per_row  # 8 (fp4) / 4 (fp8)
     a_lane_row = lane // lanes_per_row
@@ -153,22 +152,23 @@ def issue_a_load_lds_dt(
     lane_col = (lane % lanes_per_row) * 16
     base_i32 = s_aq_base
     atom = lds_dma_atom_128()
+    tile_base = fx.Int64(arg_aq) + fx.Int64(m_row) * fx.Int64(K_BYTES)
     src = flat_buffer_view(
-        arg_aq,
+        tile_base,
         None,
         T.i32,
         align=16,
         elem_bytes=4,
         fold=False,
-        num_records_bytes=aq_num_records,
+        num_records_bytes=fx.Int64(BM) * fx.Int64(K_BYTES),
     )
     for g in range_constexpr(n_row_groups):
         lds_row = gather_base_row + g * rows_per_call
         mask = (
             lds_swizzle_mask_f8(lds_row + a_lane_row) if const_expr(is_f8) else lds_swizzle_mask(lds_row + a_lane_row)
         )
-        car = m_row + lds_row + a_lane_row  # direct sorted row
-        voffset = (lane_col ^ mask) + car * K_BYTES
+        tile_row = lds_row + a_lane_row
+        voffset = (lane_col ^ mask) + tile_row * K_BYTES
         off = fx.Int32(slot * (BM * KH_TILE_A)) + lds_row * KH_TILE_A
         v_e = (voffset + kt * KH_TILE_A) // 4  # per-lane i32-elem index
         fx.copy(atom, src[v_e, None], lds_dma_dst(base_i32, off, elem_ty=T.i32, align=16))
@@ -270,14 +270,12 @@ def gemm2_compute_v2(
     mma_atoms = scale_mma_atoms(a_dtype)
 
     # A activation: global->LDS DMA (issue_a_load_lds), then LDS->reg ds-read (issue_a_ds_read).
-    aq_num_records = fx.Int64(i32_max_m_blocks) * fx.Int64(fx.Int32(BM) * K_BYTES)
     A_NDW = 8 if is_f8_a else 4  # fp8 packs two 128-K halves -> i32<8:1>; fp4 -> i32<4:1>
     a_frags = [[fx.make_rmem_tensor(A_NDW, Int32) for _ in range_constexpr(kHalves)] for _ in range_constexpr(kMChunks)]
 
     def issue_a_load_lds(slot, kt):
         issue_a_load_lds_dt(
             arg_aq,
-            aq_num_records,
             s_aq_base,
             slot,
             kt,
@@ -940,7 +938,7 @@ def get_gemm2_autotune_configs(a_dtype="fp8"):
 
     Tuned axes: BM, BK, use_nt, g2_bhoist, g2_ascale_pf, g2_spart, persist. The caller passes the
     stage1 metadata tile as SBM; the stage2 compute BM is an independent divisor of SBM.
-    Compact and fixed-slot use the same handoff (fixed-slot currently emits SBM=32).
+    Compact and fixed-slot use the same handoff and pass their active stage1 SBM.
 
     persist (fixed cu_num m-slot grid, grid-stride over m-tiles) is included for BOTH fp4 and fp8:
     aiter marks a8w4/fp8-A persist known-broken for THEIR mxmoe_gemm_v2, but our compile_mega_moe_stage2
@@ -1137,7 +1135,6 @@ def compile_gemm2_a4w4_port(
         # Shared body for both has_pad variants (@flyc.jit -> rewriter recurses scf if / grid-stride); default passes i32_kpad/i32_npad=0 (no kernarg), folding pad math away.
         num_n_blocks = fx.Int32(i32_hidden) // fx.Int32(BN)  # N_OUT//BN runtime (i32_hidden = model_dim)
         k_bytes = fx.Int32(i32_inter) // fx.Int32(1 if is_f8 else 2)  # A row stride bytes (runtime)
-        aq_num = fx.Int64(i32_max_m_blocks) * fx.Int64(fx.Int32(BM) * k_bytes)
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_base_i32 = fx.Int32(fx.ptrtoint(lds.buf.ptr))
 
@@ -1146,7 +1143,6 @@ def compile_gemm2_a4w4_port(
             for slot in range_constexpr(kStages):
                 issue_a_load_lds_dt(
                     arg_aq,
-                    aq_num,
                     lds_base_i32,
                     slot,
                     slot,
