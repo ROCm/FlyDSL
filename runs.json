@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-27T07:42:31Z",
+ "updated": "2026-07-27T08:08:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "refactor/pa-metadata-tile-programming",
    "event": "pull_request",
    "title": "[Kernel][Perf] Optimize paged-attention metadata decode",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30247017287",
    "created_at": "2026-07-27T07:40:50Z",
-   "updated_at": "2026-07-27T07:40:58Z",
+   "updated_at": "2026-07-27T07:46:53Z",
    "actor": "fsx950223",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-27T07:46:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30247017287/job/89917388767"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-27T07:48:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30247017287/job/89917388778"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-27T07:46:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30247017287/job/89917388779"
+    }
+   ]
   },
   {
    "run_id": 30246726470,
@@ -70,19 +98,19 @@
    "branch": "main",
    "event": "push",
    "title": "[Prune] Move arch-specific FP8 type selection to kernels_common (#908)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30241516517",
    "created_at": "2026-07-27T06:03:32Z",
-   "updated_at": "2026-07-27T06:07:51Z",
+   "updated_at": "2026-07-27T08:06:49Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-27T06:07:51Z",
+     "started_at": "2026-07-27T08:06:49Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30241516517/job/89900240190"
     },
@@ -199,11 +227,11 @@
    "branch": "refactor/pa-decode-swa-tile-programming",
    "event": "pull_request",
    "title": "[Kernel] Migrate SWA decode to tile programming",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30238169184",
    "created_at": "2026-07-27T04:50:46Z",
-   "updated_at": "2026-07-27T07:19:26Z",
+   "updated_at": "2026-07-27T08:06:14Z",
    "actor": "fsx950223",
    "jobs": [
     {
@@ -227,10 +255,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-27T07:19:25Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T08:06:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30238169184/job/89890381288"
     }
    ]
