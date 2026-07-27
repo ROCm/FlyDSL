@@ -1,8 +1,81 @@
 {
  "schema": 1,
- "updated": "2026-07-27T14:45:49Z",
+ "updated": "2026-07-27T15:08:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30278291932,
+   "pr": null,
+   "commit": "ef30cf4f973c0226df1d4dcc84367a4eba6710df",
+   "branch": "main",
+   "event": "push",
+   "title": "[Doc] document fast-math flags in the arithmetic_types (#911)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278291932",
+   "created_at": "2026-07-27T15:05:29Z",
+   "updated_at": "2026-07-27T15:05:43Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 30278250653,
+   "pr": 913,
+   "commit": "2bc1b8334651f1e981709e4fca88b0130e3c8888",
+   "branch": "port/layout-api-ports",
+   "event": "pull_request",
+   "title": "Port GEMM/MoE/conv kernels to the layout API",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278250653",
+   "created_at": "2026-07-27T15:05:01Z",
+   "updated_at": "2026-07-27T15:05:43Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 30276956977,
+   "pr": 913,
+   "commit": "a6629dc18f5c2f4a2a809c0938b0feb440d62b76",
+   "branch": "port/layout-api-ports",
+   "event": "pull_request",
+   "title": "Port GEMM/MoE/conv kernels to the layout API",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276956977",
+   "created_at": "2026-07-27T14:49:35Z",
+   "updated_at": "2026-07-27T15:05:33Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-27T14:53:44Z",
+     "completed_at": "2026-07-27T15:05:32Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276956977/job/90014147273"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-27T14:52:32Z",
+     "completed_at": "2026-07-27T15:05:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276956977/job/90014147298"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-27T14:52:32Z",
+     "completed_at": "2026-07-27T15:05:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276956977/job/90014147333"
+    }
+   ]
+  },
   {
    "run_id": 30276467830,
    "pr": 894,
@@ -14,9 +87,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276467830",
    "created_at": "2026-07-27T14:43:37Z",
-   "updated_at": "2026-07-27T14:44:19Z",
+   "updated_at": "2026-07-27T14:47:43Z",
    "actor": "amd-nprotaso",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-27T14:47:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276467830/job/90012814896"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-27T14:47:43Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276467830/job/90012815069"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-27T14:49:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276467830/job/90012815210"
+    }
+   ]
   },
   {
    "run_id": 30268470776,
@@ -83,19 +184,19 @@
    "branch": "refactor/pa-decode-swa-tile-programming",
    "event": "pull_request",
    "title": "[Kernel] Migrate SWA decode to tile programming",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30256652524",
    "created_at": "2026-07-27T10:05:28Z",
-   "updated_at": "2026-07-27T10:44:15Z",
+   "updated_at": "2026-07-27T15:01:45Z",
    "actor": "fsx950223",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-27T10:44:15Z",
+     "started_at": "2026-07-27T15:01:44Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30256652524/job/89954886690"
     },
@@ -207,7 +308,7 @@
   },
   {
    "run_id": 30253085837,
-   "pr": 911,
+   "pr": null,
    "commit": "b54cdb2676375733161bed5b88d42483e58d18e7",
    "branch": "pr/docs-fastmath-flags",
    "event": "pull_request",
@@ -2031,107 +2132,6 @@
      "started_at": "2026-07-24T10:27:09Z",
      "completed_at": "2026-07-24T10:34:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30085793803/job/89458740864"
-    }
-   ]
-  },
-  {
-   "run_id": 30084773290,
-   "pr": 874,
-   "commit": "d94c0f67a8bb29692cbdfed289538b0e6dcf8713",
-   "branch": "xudoyuan/dyn-cf-list-carry",
-   "event": "pull_request",
-   "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30084773290",
-   "created_at": "2026-07-24T10:02:37Z",
-   "updated_at": "2026-07-24T10:20:29Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T10:06:54Z",
-     "completed_at": "2026-07-24T10:20:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30084773290/job/89455093528"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T10:06:54Z",
-     "completed_at": "2026-07-24T10:20:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30084773290/job/89455093562"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T10:08:02Z",
-     "completed_at": "2026-07-24T10:20:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30084773290/job/89455093569"
-    }
-   ]
-  },
-  {
-   "run_id": 30083553786,
-   "pr": null,
-   "commit": "9ded54ebf45d82ace9dae1f21e2bd576d7395814",
-   "branch": "feat/autotune-offline-configs",
-   "event": "pull_request",
-   "title": "[3/5] autotune: add offline config artifacts (#770)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30083553786",
-   "created_at": "2026-07-24T09:42:37Z",
-   "updated_at": "2026-07-24T09:43:23Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 30082085462,
-   "pr": null,
-   "commit": "0fd4518e207f7ef47a27749f2e70751589acf64c",
-   "branch": "main",
-   "event": "push",
-   "title": "feat(rmsnorm): support mixed weight dtypes (#884)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30082085462",
-   "created_at": "2026-07-24T09:18:24Z",
-   "updated_at": "2026-07-24T11:06:32Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T09:32:57Z",
-     "completed_at": "2026-07-24T10:23:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30082085462/job/89448271717"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T10:25:40Z",
-     "completed_at": "2026-07-24T10:26:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30082085462/job/89448271747"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T10:25:52Z",
-     "completed_at": "2026-07-24T11:06:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30082085462/job/89448271750"
     }
    ]
   }
