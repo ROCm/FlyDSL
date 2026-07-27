@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-27T03:36:29Z",
+ "updated": "2026-07-27T04:32:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30235257324,
+   "pr": 891,
+   "commit": "e7c1fafea32e3f4d2a2e376590911a4fc24b7bab",
+   "branch": "add-wmma-tests-gfx1250",
+   "event": "pull_request",
+   "title": "[Test] Add gfx1250 WMMA lowering tests for additional dtypes",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30235257324",
+   "created_at": "2026-07-27T03:43:02Z",
+   "updated_at": "2026-07-27T03:43:02Z",
+   "actor": "AiyyappanMR",
+   "jobs": []
+  },
   {
    "run_id": 30234916880,
    "pr": null,
@@ -10,13 +25,41 @@
    "branch": "main",
    "event": "push",
    "title": "Add forward LSE output to FlyDSL flash attention kernels (#844)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30234916880",
    "created_at": "2026-07-27T03:34:26Z",
-   "updated_at": "2026-07-27T03:35:06Z",
+   "updated_at": "2026-07-27T03:40:44Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-27T03:41:18Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30234916880/job/89881514399"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-27T03:41:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30234916880/job/89881514404"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-27T03:40:44Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30234916880/job/89881514430"
+    }
+   ]
   },
   {
    "run_id": 30234607950,
@@ -35,10 +78,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-27T03:29:58Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T04:28:24Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30234607950/job/89880272710"
     },
     {
@@ -121,10 +164,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-27T02:53:45Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T04:09:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30233121494/job/89875909920"
     },
     {
@@ -139,10 +182,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-27T02:53:40Z",
-     "completed_at": null,
+     "completed_at": "2026-07-27T03:42:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30233121494/job/89875909931"
     }
    ]
@@ -2089,49 +2132,6 @@
      "started_at": "2026-07-24T06:02:51Z",
      "completed_at": "2026-07-24T07:03:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30069691161/job/89411944225"
-    }
-   ]
-  },
-  {
-   "run_id": 30069413711,
-   "pr": 874,
-   "commit": "d2a9f61f4d85b2c2e81c2791bfc7869a0fd2da46",
-   "branch": "xudoyuan/dyn-cf-list-carry",
-   "event": "pull_request",
-   "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30069413711",
-   "created_at": "2026-07-24T05:26:00Z",
-   "updated_at": "2026-07-24T05:34:52Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T05:27:23Z",
-     "completed_at": "2026-07-24T05:34:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30069413711/job/89407069355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T05:32:46Z",
-     "completed_at": "2026-07-24T05:34:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30069413711/job/89407069369"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T05:27:23Z",
-     "completed_at": "2026-07-24T05:34:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30069413711/job/89407069395"
     }
    ]
   }
