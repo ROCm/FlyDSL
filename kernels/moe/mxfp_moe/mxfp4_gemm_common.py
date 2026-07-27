@@ -137,13 +137,8 @@ def _lds_swizzle_mask(row):
     return (row & fx.Int32(14)) << fx.Int32(3)
 
 
-# The A-LDS bank-conflict swizzle expressed as layout algebra. Each 128-byte A row is
-# 8 contiguous 16-byte blocks; the manual code XORs (row&14)<<3 into the byte column,
-# i.e. block_col ^= (row>>1)&7. Over the flat 16-byte-block index `row*8 + block_col`
-# this is exactly SwizzleType(mask=3, base=0, shift=4) (verified bit-for-bit against
-# `_lds_swizzle_mask`: XORs block index bits [0,3) with bits [4,7)). Building the LDS
-# slot as a composed (swizzle o ordered-layout) view lets crd2idx((row, block_col))
-# produce the swizzled 16-byte-block index directly, replacing the hand XOR + //16.
+# A-LDS bank-conflict swizzle as layout algebra: over the flat 16-byte-block index
+# (row*8 + block_col) the manual XOR mask equals SwizzleType(3, 0, 4) (verified bit-for-bit).
 _A_LDS_BLOCKS_PER_ROW = 8  # 128-byte fp4 row / 16-byte block
 
 

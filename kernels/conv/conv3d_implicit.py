@@ -247,13 +247,8 @@ def compile_conv3d_implicit(
     @flyc.kernel(known_block_size=[BLOCK_THREADS, 1, 1])
     def conv3d_implicit_kernel(y: fx.Tensor, x: fx.Tensor, weight: fx.Tensor, bias: fx.Tensor):
         y_rsrc = buffer_ops.create_buffer_resource(y)
-        # Layout-API buffer tensors for the global->LDS im2col gather. The weight
-        # tensor and the common (non-BIG) input tensor are wrapped as buffer
-        # tensors, flattened to a 1-D element view, and logical-divided so the
-        # per-thread im2col gather offset (already a flat element index) can be
-        # expressed through fx.copy(BufferCopyLDS128b). Flattening is required:
-        # the source tensors are multi-dimensional (weight 2-D, x_ndhwc 5-D) and
-        # slicing a multi-dim divided view would not index a flat element.
+        # Buffer tensors for the im2col gather, flattened to a 1-D element view so the
+        # per-thread flat gather offset indexes elements (multi-dim views would not).
         w_buf0 = fx.rocdl.make_buffer_tensor(weight, max_size=False)
         w_buf = fx.Tensor(fx.make_view(fx.get_iter(w_buf0), fx.make_layout(k * crs, 1)))
         w_div = fx.logical_divide(w_buf, fx.make_layout(1, 1))
@@ -287,11 +282,8 @@ def compile_conv3d_implicit(
         else:
             k_off = 0
 
-        # Layout-API flat buffer tensor from a rebased device address. Same
-        # mechanism as the non-BIG x_div path (make_buffer_* + logical_divide),
-        # but the base is advanced per the BIG_IN rebase arithmetic and an
-        # explicit ~2 GB num_records is set, matching the raw
-        # create_buffer_resource_from_addr(..., num_records_bytes=BIG_IN_NR).
+        # BIG_IN (>2GB): flat buffer tensor from a rebased address with explicit ~2GB
+        # num_records (same mechanism as x_div, replacing create_buffer_resource_from_addr).
         GXPtrTy = fx.PointerType.get(elem_ty.ir_type, 1, BF16_BYTES) if const_expr(BIG_IN) else None
 
         def _x_div_from_addr(addr_i64):
@@ -445,24 +437,14 @@ def compile_conv3d_implicit(
             return g_off, col_valid
 
         # ---- global -> LDS DMA copy, masking via OOB routing ----
-        # Element-index OOB sentinels for the layout-API buffer tensors. Routing a
-        # gather to an element index whose byte offset is >= the descriptor's
-        # num_records makes the buffer hardware return 0, reproducing the raw
-        # path's padding/halo zeroing. For the adaptive (non-BIG) descriptors the
-        # tensor-end element index suffices; for the BIG_IN rebased descriptors
-        # (fixed BIG_IN_NR bytes) an index of num_records/BF16_BYTES lands exactly
-        # at the byte limit and is out of bounds.
+        # OOB sentinel element indices: a gather past num_records makes the buffer
+        # hardware return 0, reproducing the padding/halo zeroing.
         X_ELEMS = fx.Int32(n * c * d * h * w)
         W_ELEMS = fx.Int32(k * c * kt * kh * kw)
         BIG_OOB_ELEM = fx.Int32(BIG_IN_NR // BF16_BYTES)
 
-        # Layout-API global->LDS DMA (BufferCopyLDS128b). The per-thread im2col
-        # gather offset is expressed as an element index into the flat
-        # logical-divided buffer tensor; OOB padding routes to a past-end element
-        # index so the buffer hardware returns 0. This mirrors
-        # kernels/conv/conv3d_implicit_fp8.py's copy_g2s and the flash-attn
-        # _buffer_load_lds_128 idiom, and is used for both the non-BIG and the
-        # BIG_IN (rebased buffer tensor) input/weight gathers.
+        # global->LDS DMA (BufferCopyLDS128b): gather offset as a flat element index;
+        # OOB padding routes past-end. Used for both non-BIG and BIG_IN gathers.
         g2s_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
         LdsPtrTy = fx.PointerType.get(elem_ty.ir_type, 2, 512)
 
@@ -483,8 +465,7 @@ def compile_conv3d_implicit(
             stage_tile = fx.Index(stage) * TILE_M * TILE_K
             for i in range_constexpr(LDG_A_COUNT):
                 if const_expr(BIG_IN_NM):
-                    # Rebase the buffer tensor per load to the sample base, then
-                    # gather through the same layout-API BufferCopyLDS path.
+                    # Rebase the buffer tensor per load to the sample base.
                     addr_ret = _a_addr(i, kbase_i, cc_base, ckk_base)
                     g_off_i, valid, n_idx_i = addr_ret
                     sample_addr = x_base_addr + fx.Int64(n_idx_i) * fx.Int64(X_SAMPLE_BYTES)

@@ -562,10 +562,8 @@ def compile_preshuffle_gemm(
         lane_div_16 = lane_id // 16
         lane_mod_16 = lane_id % 16
 
-        # Epilogue operands are per-thread scalar/vec4 gathers; index in element units
-        # (idx == the old buffer_load element offset). Layout-API buffer_copy atoms
-        # (BufferCopy16b/32b/128b) over a make_buffer_tensor read the same OOB-checked
-        # descriptor the legacy buffer_load did (max_size=True).
+        # Epilogue scalar/vec4 gathers via buffer_copy atoms over a make_buffer_tensor
+        # (element-index addressing; same OOB-checked descriptor as the legacy buffer_load).
         epi_copy_32b = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), Float32)
         epi_copy_128b = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), Float32)
         epi_copy_16b = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), out_elem_cls)
@@ -574,8 +572,6 @@ def compile_preshuffle_gemm(
             s_a = s_b = bias = None
             if const_expr(is_8bit):
                 # Per-row(scale_a) × per-col(scale_b) scaling, applied in the epilogue.
-                # scale_b: one f32 per N-block (BufferCopy32b); logical_divide(.,1) gives a
-                # (1, N) view so [None, idx] reads a single f32 at element index idx.
                 sb_buf = fx.logical_divide(
                     fx.rocdl.make_buffer_tensor(arg_scale_b, max_size=True), fx.make_layout(1, 1)
                 )
@@ -588,8 +584,7 @@ def compile_preshuffle_gemm(
                         f,
                     )
                     s_b.append(fx.Float32(f.load()[0]))
-                # scale_a: vec4 f32 per m-block (BufferCopy128b); logical_divide(.,4) tiles
-                # into 4-element windows so [None, grp] reads the 4 contiguous f32 at grp*4.
+                # scale_a: vec4 f32 per m-block (BufferCopy128b).
                 sa_buf = fx.logical_divide(
                     fx.rocdl.make_buffer_tensor(arg_scale_a, max_size=True), fx.make_layout(4, 1)
                 )

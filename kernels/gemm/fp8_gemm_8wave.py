@@ -43,9 +43,7 @@ def _layout_global_swizzle(lane_id, wave_id, K, n_rounds, block_dim_x):
     for rnd in range_constexpr(n_rounds):
         row = lane_id // 8 + wave_id * 8 + rnd * (n_waves * 8)
         col = (lane_id % 8) * 16
-        # swizzle_128 keeps r == row (the XOR only permutes columns), so the
-        # global element is row*K + swizzled_col, with swizzled_col periodic in
-        # 16 rows -> take (row % 16, col) through the composed layout.
+        # swizzle_128 permutes only columns (r == row), periodic in 16 rows.
         swz_col = fx.get_scalar(fx.crd2idx((row % 16, col), swz_layout)) % 128
         offsets.append(row * K + swz_col)
     return offsets
@@ -194,12 +192,8 @@ def compile_fp8_gemm_8w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, b_pre
     ):
         F8_IR_t = fx.Float8E4M3FN.ir_type
 
-        # Layout-API MMA construction (example-04 idiom): a single 16x16x128 fp8
-        # atom, one MFMA per wave sub-tile call (no wave/permutation
-        # replication). Built in-kernel because the operands are the raw
-        # split-16@64-packed i32x8 register fragments from ``S2RLoader`` rather
-        # than TV-partitioned ``make_fragment_*`` tensors, so ``fx.gemm`` needs
-        # the concrete ``tiled_mma`` value to take the tiled lowering path.
+        # Single 16x16x128 fp8 atom, built in-kernel (raw i32x8 operands need the
+        # concrete tiled_mma; a tiled_mma kernel-arg fails cold-compile).
         tiled_mma = fx.make_tiled_mma(
             fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN)),
             fx.make_layout((1, 1, 1), (0, 0, 0)),

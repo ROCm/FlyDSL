@@ -254,10 +254,8 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
         c_m_vec = lane_div_16 * MFMA_C_VALUES
         c_n = lane_mod_16
 
-        # 16x16x128 FP8 MFMA built concretely in-kernel via the layout API
-        # (make_mma_atom + make_fragment + fx.gemm). Building the tiled_mma atom
-        # in-kernel (rather than passing it as a kernel arg) is required: a
-        # tiled_mma kernel argument compiles warm but fails cold-compile.
+        # 16x16x128 FP8 MFMA via the layout API, built in-kernel (a tiled_mma
+        # kernel-arg compiles warm but fails cold-compile).
         mma_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, elem_ty))
         Vec = fx.Vector
         mfma_zero = Vec.filled(MFMA_C_VALUES, 0.0, fx.Float32)
@@ -363,9 +361,7 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
             llvm.InlineAsmOp(None, [], f"s_setprio {level}", "", has_side_effects=True)
 
         def _do_mma(a, b, c):
-            # One 16x16x128 FP8 MFMA over the layout API. The A/B K-operands are
-            # the split-16@64 packed i32x8 fragments produced by lds_load_pack;
-            # they feed the MFMA_Scale atom directly through fx.gemm.
+            # split-16@64 packed i32x8 fragments feed the MFMA_Scale atom via fx.gemm.
             a_frag = fx.make_rmem_tensor(8, fx.Int32)
             a_frag.store(Vec(a))
             b_frag = fx.make_rmem_tensor(8, fx.Int32)

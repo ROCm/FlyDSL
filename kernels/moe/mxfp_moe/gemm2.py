@@ -501,9 +501,7 @@ def _gemm2_body(
                 k_half=_K_HALF,
             )
 
-    # A-LDS read block-swizzle via layout algebra (composed swizzle o ordered layout).
-    # Rows span the whole s_aq region (_aStages slots * BM rows); crd2idx applies the
-    # S<3,0,4> bank-conflict swizzle, replacing the manual (col_bytes ^ mask)//16.
+    # A-LDS read block-swizzle via layout algebra (crd2idx over composed swizzle).
     _a_lds_swz = _a_lds_swz_block_layout(_aStages * BM)
 
     def issue_a_ds_read(slot):

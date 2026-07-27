@@ -268,19 +268,8 @@ def _gemm1_body(
                     t.store(lo.shuffle(hi, list(range(8))))
                     a[i][k] = t
             else:
-                # NOTE: kept as the manual (col_bytes ^ mask)//16 index rather than the
-                # composed-layout crd2idx used in gemm2 (see mxfp4_gemm_common._a_lds_swz_*).
-                # The layout form is bit-for-bit identical and folds to prologue constants
-                # (the swizzle is lane/i/k-invariant; the slot base is separable, so the
-                # crd2idx can even be fully hoisted out of the k-loop). Verified via ISA diff:
-                # the hoisted-crd2idx build emits *identical* hot-loop op counts (ds_read_b128
-                # 240, ds_write 32, buffer_load_dwordx4 282, v_mfma 896) and 8 FEWER total
-                # instructions -- yet reproducibly runs ~5.5% slower on large compute-bound
-                # fp4 (same-session median t8192: 1032 us manual vs 1090 us layout). The cause
-                # is instruction *scheduling* sensitivity in this hand-tuned loop (the two
-                # forms schedule the same ops differently: ds_read2st64 merging, v_bitop3/v_or
-                # ordering, dropped s_nop/s_waitcnt), not extra address math. gemm2's simpler
-                # loop is immune (perf-neutral there). Left manual as a bucket-2 site.
+                # Manual XOR swizzle kept: the crd2idx form (see gemm2) is ISA-identical
+                # but ~5% slower here from scheduling sensitivity in this tuned loop.
                 lds_col = (lane_div_16 * fx.Int32(16) + fx.Int32(k * 64)) ^ mask
                 for i in range_constexpr(kMChunks):
                     lds_row = lane_mod_16 + fx.Int32(i * 16)

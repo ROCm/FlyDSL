@@ -240,13 +240,8 @@ def compile_fp8_gemm_4w(
         gb_div = fx.logical_divide(gB, fx.make_layout(1, 1))
 
         def _compute_lds_swizzle(s2r, preshuffled=False):
-            # NOTE: kept on the manual swizzle_128 XOR (NOT crd2idx). This runs on
-            # the interleaved-cluster path whose MMA uses the AGPR inline-asm
-            # accumulator (Mfma16x16x128AGPR); crd2idx here materializes the
-            # swizzle constants slightly differently and perturbs the
-            # AGPR-sensitive register schedule (~1.3% regression on 256x256).
-            # swizzle_128 == SwizzleType.get(3,4,4) is proven, so this is purely a
-            # codegen-parity choice, documented per the no-regression gate.
+            # Manual swizzle_128 XOR kept (not crd2idx): the interleaved AGPR MMA path
+            # is register-schedule sensitive; crd2idx regresses it ~1.3%.
             lds_swz = []
             for row_offset in range_constexpr(s2r.n_tiles):
                 row = s2r.wave_idx * (s2r.n_tiles * 16) + row_offset * 16 + lane_id % 16
@@ -394,10 +389,8 @@ def compile_fp8_gemm_4w(
 
         a_g2s = G2SLoader(ga_div, gl_off_a, N_TILES_A, F8_IR_t, wave_id)
         b_g2s = G2SLoader(gb_div, gl_off_b, N_TILES_B, F8_IR_t, wave_id)
-        # LayoutS2R (crd2idx swizzle) is used only on the non-interleaved,
-        # non-preshuffled path. The interleaved 256x256 cluster keeps S2RLoader:
-        # its MMA is the AGPR inline-asm accumulator, and the crd2idx constant
-        # materialization perturbs that stall-sensitive register schedule (~1.3%).
+        # crd2idx s2r on the non-interleaved path only; interleaved keeps S2RLoader
+        # (AGPR accumulator is register-schedule sensitive, ~1.3%).
         if const_expr(_use_interleaved_block):
             a_s2r = S2RLoader(wave_i, N_TILES_A)
             b_s2r = S2RLoader(wave_j, N_TILES_B)
