@@ -364,6 +364,14 @@ class Autotuner:
             self._reset_tensors(args, merged)
             return self._run_with_hints(config.compiler_opts(), args, merged)
 
+    def get_cached_config(self, *args, **kwargs):
+        """Return the persisted/in-memory config for these arguments, if any."""
+        return self.cache.get(self._make_key(args, kwargs))
+
+    @property
+    def cache_file(self):
+        return self._cache_file
+
     def __call__(self, *args, **kwargs):
         key = self._make_key(args, kwargs)
         force = _tuning_enabled()

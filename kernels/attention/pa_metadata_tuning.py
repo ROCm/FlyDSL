@@ -1,95 +1,74 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+"""Runtime lookup and offline tuning for PA metadata grid multipliers.
+
+Run a fresh search with:
+  FLYDSL_AUTOTUNE=1 python3 -m kernels.attention.pa_metadata_tuning \
+    --shape 81,8192,4,per_token
+"""
+
 from __future__ import annotations
 
-import csv
-import functools
-from pathlib import Path
-from typing import Iterable, Mapping
+import argparse
+import statistics
+from collections.abc import Callable, Iterable
 
-PA_METADATA_TUNING_CSV = Path(__file__).with_name("pa_metadata_grid_tuning.csv")
+from flydsl.autotune import Autotuner, Config
 
-PA_METADATA_TUNING_FIELDS = (
-    "arch",
-    "num_cu",
-    "batch_size",
-    "num_blocks",
-    "context_length",
-    "query_length",
-    "per_token_kv",
-    "num_query_heads",
-    "num_kv_heads",
-    "head_dim",
-    "block_size",
-    "grid_multiplier",
-    "latency_us",
-)
-
-_KEY_FIELDS = (
-    "arch",
-    "num_cu",
+PA_METADATA_GRID_KEY = [
     "batch_size",
     "num_blocks",
     "query_length",
     "per_token_kv",
+    "num_cu",
     "num_query_heads",
     "num_kv_heads",
     "head_dim",
     "block_size",
-)
-
-_INT_FIELDS = set(_KEY_FIELDS) - {"arch", "per_token_kv"} | {
-    "context_length",
-    "grid_multiplier",
-}
+]
 
 
-def _normalize_row(row: Mapping) -> dict:
-    normalized = {field: row[field] for field in PA_METADATA_TUNING_FIELDS}
-    normalized["arch"] = str(normalized["arch"])
-    for field in _INT_FIELDS:
-        normalized[field] = int(normalized[field])
-    per_token_kv = normalized["per_token_kv"]
-    if isinstance(per_token_kv, str):
-        if per_token_kv not in {"0", "1"}:
-            raise ValueError(f"per_token_kv must be 0 or 1, got {per_token_kv!r}")
-        per_token_kv = per_token_kv == "1"
-    normalized["per_token_kv"] = bool(per_token_kv)
-    normalized["latency_us"] = float(normalized["latency_us"])
-    if normalized["grid_multiplier"] < 1:
-        raise ValueError("grid_multiplier must be positive")
-    return normalized
+def run_pa_metadata_grid_config(
+    batch_size,
+    num_blocks,
+    query_length,
+    per_token_kv,
+    num_cu,
+    num_query_heads,
+    num_kv_heads,
+    head_dim,
+    block_size,
+    runner,
+    grid_multiplier,
+):
+    if runner is None:
+        raise RuntimeError("runner is required when benchmarking a grid config")
+    return runner(grid_multiplier)
 
 
-def _row_key(row: Mapping) -> tuple:
-    return tuple(row[field] for field in _KEY_FIELDS)
+def make_pa_metadata_grid_autotuner(
+    *,
+    candidates: Iterable[int] = (1, 2, 3),
+    warmup: int = 5,
+    rep: int = 3,
+    do_bench: Callable | None = None,
+) -> Autotuner:
+    return Autotuner(
+        fn=run_pa_metadata_grid_config,
+        configs=[Config(grid_multiplier=int(candidate)) for candidate in candidates],
+        key=PA_METADATA_GRID_KEY,
+        warmup=warmup,
+        rep=rep,
+        do_bench_fn=do_bench,
+    )
 
 
-def read_pa_metadata_tuning_rows(path: Path = PA_METADATA_TUNING_CSV) -> list[dict]:
-    path = Path(path)
-    if not path.is_file():
-        return []
-    with path.open(newline="") as handle:
-        reader = csv.DictReader(handle)
-        missing = set(PA_METADATA_TUNING_FIELDS) - set(reader.fieldnames or ())
-        if missing:
-            raise ValueError(f"{path} is missing columns: {sorted(missing)}")
-        rows = [_normalize_row(row) for row in reader]
-    keys = [_row_key(row) for row in rows]
-    if len(keys) != len(set(keys)):
-        raise ValueError(f"{path} contains duplicate tuning keys")
-    return rows
-
-
-@functools.lru_cache(maxsize=None)
-def _load_pa_metadata_tuning(path: Path) -> dict[tuple, int]:
-    return {_row_key(row): row["grid_multiplier"] for row in read_pa_metadata_tuning_rows(path)}
+_RUNTIME_TUNER = make_pa_metadata_grid_autotuner(warmup=0, rep=1)
 
 
 def lookup_pa_metadata_grid_multiplier(
     *,
-    arch: str,
     num_cu: int,
     batch_size: int,
     num_blocks: int,
@@ -99,41 +78,245 @@ def lookup_pa_metadata_grid_multiplier(
     num_kv_heads: int,
     head_dim: int,
     block_size: int,
-    path: Path = PA_METADATA_TUNING_CSV,
 ) -> int | None:
-    key = (
-        str(arch),
-        int(num_cu),
-        int(batch_size),
-        int(num_blocks),
-        int(query_length),
-        bool(per_token_kv),
-        int(num_query_heads),
-        int(num_kv_heads),
-        int(head_dim),
-        int(block_size),
+    args = (
+        batch_size,
+        num_blocks,
+        query_length,
+        per_token_kv,
+        num_cu,
+        num_query_heads,
+        num_kv_heads,
+        head_dim,
+        block_size,
+        None,
     )
-    return _load_pa_metadata_tuning(Path(path)).get(key)
+    get_cached_config = getattr(_RUNTIME_TUNER, "get_cached_config", None)
+    if get_cached_config is not None:
+        config = get_cached_config(*args)
+    else:
+        config = _RUNTIME_TUNER.cache.get(_RUNTIME_TUNER._make_key(args, {}))
+    if config is None:
+        return None
+    return int(config.kwargs["grid_multiplier"])
 
 
-def write_pa_metadata_tuning_rows(
-    rows: Iterable[Mapping],
-    path: Path = PA_METADATA_TUNING_CSV,
-) -> None:
-    path = Path(path)
-    merged = {_row_key(row): row for row in read_pa_metadata_tuning_rows(path)}
-    for row in rows:
-        normalized = _normalize_row(row)
-        merged[_row_key(normalized)] = normalized
+def _parse_int_list(value: str) -> list[int]:
+    values = [int(item) for item in value.split(",")]
+    if not values or any(item < 1 for item in values):
+        raise argparse.ArgumentTypeError("expected comma-separated positive integers")
+    return values
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(f"{path.suffix}.tmp")
-    with temporary.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=PA_METADATA_TUNING_FIELDS)
-        writer.writeheader()
-        for key in sorted(merged):
-            row = dict(merged[key])
-            row["per_token_kv"] = int(row["per_token_kv"])
-            writer.writerow(row)
-    temporary.replace(path)
-    _load_pa_metadata_tuning.cache_clear()
+
+def _parse_shape(value: str) -> tuple[int, int, int, bool]:
+    try:
+        batch_size, context_length, query_length, quant_mode = value.split(",")
+        per_token_kv = {"per_tensor": False, "per_token": True}[quant_mode]
+        parsed = (int(batch_size), int(context_length), int(query_length), per_token_kv)
+    except (KeyError, TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError("shape must be BATCH,CONTEXT,QUERY_LENGTH,per_tensor|per_token") from error
+    if any(item < 1 for item in parsed[:3]):
+        raise argparse.ArgumentTypeError("shape dimensions must be positive")
+    return parsed
+
+
+def _tune_shape(
+    *,
+    batch_size: int,
+    context_length: int,
+    query_length: int,
+    per_token_kv: bool,
+    candidates: list[int],
+    num_query_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    block_size: int,
+    warmup: int,
+    iterations: int,
+    rounds: int,
+    device,
+):
+    import torch
+
+    from kernels.attention.pa_decode_fp8 import get_pa_metadata, pa_decode_ps_launch
+
+    pages_per_sequence = (context_length + block_size - 1) // block_size
+    num_blocks = batch_size * pages_per_sequence
+    num_cu = torch.cuda.get_device_properties(device).multi_processor_count
+    context_lengths = torch.full((batch_size,), context_length, dtype=torch.int32, device=device)
+    query = torch.zeros(
+        (batch_size * query_length, num_query_heads, head_dim),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    kv_indptr = torch.arange(batch_size + 1, dtype=torch.int32, device=device) * pages_per_sequence
+    kv_page_indices = torch.arange(num_blocks, dtype=torch.int32, device=device)
+    key = torch.zeros(
+        (num_blocks, num_kv_heads, head_dim // 16, block_size, 16),
+        dtype=torch.float8_e4m3fnuz,
+        device=device,
+    )
+    value = torch.ones(
+        (num_blocks, num_kv_heads, block_size // 16, head_dim, 16),
+        dtype=torch.float8_e4m3fnuz,
+        device=device,
+    )
+    if per_token_kv:
+        key_scale = torch.ones((num_blocks, num_kv_heads, block_size), dtype=torch.float32, device=device)
+        value_scale = torch.ones_like(key_scale)
+    else:
+        key_scale = torch.ones((1,), dtype=torch.float32, device=device)
+        value_scale = torch.ones((1,), dtype=torch.float32, device=device)
+
+    output = torch.empty_like(query)
+    graphs = {}
+    metadata_resources = []
+    for grid_multiplier in candidates:
+        metadata = get_pa_metadata(
+            query,
+            key,
+            context_lengths,
+            kv_indptr,
+            num_query_heads,
+            num_kv_heads,
+            per_token_kv=per_token_kv,
+            grid_multiplier=grid_multiplier,
+        )
+        metadata_resources.append(metadata)
+
+        def launch(metadata=metadata):
+            pa_decode_ps_launch(
+                output,
+                query,
+                key,
+                value,
+                context_lengths,
+                kv_page_indices,
+                kv_indptr,
+                1.0 / head_dim**0.5,
+                key_scale=key_scale,
+                value_scale=value_scale,
+                metadata=metadata,
+            )
+
+        launch()
+        torch.cuda.synchronize(device)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            for _ in range(iterations):
+                launch()
+        graphs[grid_multiplier] = graph
+    torch.cuda.synchronize(device)
+
+    active_grid = {"value": None}
+    timings_us = {}
+
+    def replay_grid(grid_multiplier):
+        active_grid["value"] = grid_multiplier
+        graphs[grid_multiplier].replay()
+        return grid_multiplier
+
+    def graph_bench(call, warmup, rep):
+        for _ in range(warmup):
+            call()
+        torch.cuda.synchronize(device)
+        samples_ms = []
+        for _ in range(rep):
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            call()
+            end.record()
+            end.synchronize()
+            samples_ms.append(start.elapsed_time(end) / iterations)
+        latency_ms = statistics.median(samples_ms)
+        timings_us[active_grid["value"]] = latency_ms * 1000.0
+        return latency_ms
+
+    tuner = make_pa_metadata_grid_autotuner(
+        candidates=candidates,
+        warmup=warmup,
+        rep=rounds,
+        do_bench=graph_bench,
+    )
+    tuner_args = (
+        batch_size,
+        num_blocks,
+        query_length,
+        per_token_kv,
+        num_cu,
+        num_query_heads,
+        num_kv_heads,
+        head_dim,
+        block_size,
+        replay_grid,
+    )
+    tuner(*tuner_args)
+    get_cached_config = getattr(tuner, "get_cached_config", None)
+    if get_cached_config is not None:
+        best_config = get_cached_config(*tuner_args)
+    else:
+        best_config = tuner.cache.get(tuner._make_key(tuner_args, {}))
+    best_grid = int(best_config.kwargs["grid_multiplier"])
+    torch.cuda.synchronize(device)
+
+    if not torch.allclose(
+        output.float(),
+        torch.ones_like(output, dtype=torch.float32),
+        atol=2e-2,
+        rtol=2e-2,
+    ):
+        raise RuntimeError(f"grid_multiplier={best_grid} failed correctness")
+    return best_grid, timings_us.get(best_grid), tuner.cache_file
+
+
+def main() -> None:
+    import torch
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--shape", action="append", type=_parse_shape, required=True)
+    parser.add_argument("--candidates", type=_parse_int_list, default=[1, 2, 3])
+    parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--iterations", type=int, default=100)
+    parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument("--device", type=int, default=0)
+    parser.add_argument("--num-query-heads", type=int, default=16)
+    parser.add_argument("--num-kv-heads", type=int, default=1)
+    parser.add_argument("--head-dim", type=int, default=128)
+    parser.add_argument("--block-size", type=int, default=1024)
+    args = parser.parse_args()
+
+    if args.warmup < 0 or args.iterations < 1 or args.rounds < 1:
+        parser.error("warmup must be non-negative; iterations and rounds must be positive")
+
+    torch.cuda.set_device(args.device)
+    device = torch.device("cuda", args.device)
+    cache_file = None
+
+    for batch_size, context_length, query_length, per_token_kv in args.shape:
+        best_grid, best_latency, cache_file = _tune_shape(
+            batch_size=batch_size,
+            context_length=context_length,
+            query_length=query_length,
+            per_token_kv=per_token_kv,
+            candidates=args.candidates,
+            num_query_heads=args.num_query_heads,
+            num_kv_heads=args.num_kv_heads,
+            head_dim=args.head_dim,
+            block_size=args.block_size,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            rounds=args.rounds,
+            device=device,
+        )
+        if best_latency is None:
+            print(f"  cached winner: grid={best_grid}")
+        else:
+            print(f"  winner: grid={best_grid}, {best_latency:.3f} us")
+        torch.cuda.empty_cache()
+
+    print(f"Autotune cache: {cache_file}")
+
+
+if __name__ == "__main__":
+    main()

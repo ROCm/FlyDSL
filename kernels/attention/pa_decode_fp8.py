@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import torch
 
-from flydsl.runtime.device import get_rocm_arch
 from kernels.attention.pa_decode_swa import compile_pa_decode_sw, compile_pa_decode_sw_reduce
 from kernels.attention.pa_decode_tile import pa_decode_tile
 from kernels.attention.pa_metadata import compile_pa_decode_metadata
@@ -60,10 +59,10 @@ def get_pa_metadata(
     NOTE: the consuming decode kernel must interpret kv_start/kv_end as partition
     indices accordingly.
 
-    Exact shape/device matches are loaded from ``pa_metadata_grid_tuning.csv``.
-    Missing entries default to ``grid_multiplier=1``. ``per_token_kv`` selects
-    scale-mode-specific tuning, and ``grid_multiplier`` is the tuner's explicit
-    candidate override.
+    Exact shape/device matches are loaded from FlyDSL's persistent Autotuner
+    cache. Missing entries default to ``grid_multiplier=1``. ``per_token_kv``
+    selects scale-mode-specific tuning, and ``grid_multiplier`` is the tuner's
+    explicit candidate override.
 
     Returns a dict with: work_indptr, work_info_flat, reduce_indptr,
     reduce_final_map, reduce_partial_map, num_sm, partial_output,
@@ -80,7 +79,6 @@ def get_pa_metadata(
     num_blocks = key_cache.shape[0]
     if grid_multiplier is None and per_token_kv is not None:
         grid_multiplier = lookup_pa_metadata_grid_multiplier(
-            arch=get_rocm_arch(),
             num_cu=props.multi_processor_count,
             batch_size=batch_size,
             num_blocks=num_blocks,
