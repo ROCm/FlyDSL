@@ -24,6 +24,10 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm, rocdl
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
 from flydsl.compiler.ast_rewriter import ASTRewriter
+from flydsl.expr import const_expr, range_constexpr
+from flydsl.expr.typing import T
+from flydsl.expr.typing import Vector as Vec
+from flydsl.expr.utils.arith import _to_raw as _raw
 
 
 def div_up(x, y):
@@ -538,3 +542,190 @@ def asm_mark(mark: str):
         has_side_effects=True,
     )
     rocdl.sched_barrier(0)
+
+
+# ── Native-fp8 (MFMA 16x16x32) gate-up building blocks ───────────────────────
+# Ported from the aiter reference kernel's native-fp8 prefill_1x4 gate-up path,
+# with the compile-time closures (N, K, TOPK, BLOCK_M, weight_dtype) made
+# explicit args so the helpers are reusable across tile configs.
+
+
+def atomic_add_bf16(ptr_base, reg_vec):
+    """Pairwise global atomic-add of a bf16 vector (global_atomic_pk_add_bf16)."""
+    for i in range_constexpr(reg_vec.numel // 2):
+        pair = Vec.from_elements([reg_vec[i * 2], reg_vec[i * 2 + 1]], fx.BFloat16)
+        addr = fx.ptrtoint(ptr_base + i * 2)
+        llvm_ptr = llvm.IntToPtrOp(ir.Type.parse("!llvm.ptr<1>"), addr.ir_value())
+        llvm.AtomicRMWOp(
+            llvm.AtomicBinOp.fadd,
+            llvm_ptr,
+            pair,
+            llvm.AtomicOrdering.monotonic,
+            syncscope="agent",
+            alignment=4,
+        )
+
+
+def make_1x4_tiled_mma(weight_dtype):
+    """B-first 1x4 tiled_mma: weight is the MFMA A-operand, activation the B-operand.
+
+    The 4 waves tile the channel(M) dim. bf16 -> MFMA(16,16,16); fp8 -> MFMA(16,16,32).
+    """
+    if const_expr(weight_dtype == fx.BFloat16):
+        mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.BFloat16))
+        k_perm = fx.make_layout((4, 4, 2), (1, 8, 4))
+    else:
+        mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, weight_dtype))
+        k_perm = fx.make_layout((8, 4, 2), (1, 16, 8))
+    tiled_mma = fx.make_tiled_mma(
+        mma_atom,
+        fx.make_layout((4, 1, 1), (1, 0, 0)),
+        fx.make_tile(None, None, k_perm),
+    )
+    return mma_atom, tiled_mma
+
+
+def make_gateup_weight_view(p_weight, expert_id, contiguous_n, N, K):
+    """Preshuffle weight view [16, (element_num, K//element_num)] composed with the
+    gate/up silu grouping. ``p_weight`` is an iterator into the shuffle_weight-ordered
+    weight; the returned view presents a logical (N, K) tensor for this expert.
+    """
+    group_layout_silu = fx.make_layout(
+        ((contiguous_n, 2, N // (contiguous_n * 2)), K),
+        ((1, N // 2, contiguous_n), N),
+    )
+    element_num = 16 // (p_weight.dtype.width // 8)
+    return fx.make_view(
+        p_weight + fx.Int64(expert_id * N * K),
+        fx.composition(
+            fx.make_layout(
+                ((16, N // 16), (element_num, K // element_num)),
+                ((element_num, 16 * K), (1, 16 * element_num)),
+            ),
+            group_layout_silu,
+        ),
+    )
+
+
+def read_sorted_index(tiled_copy_index, tid, lds_index, index_size, index_offset=0):
+    """Read the sorted M-row index from LDS into a per-thread register fragment.
+
+    Kept explicit so the read happens before the caller reuses the LDS region (the
+    CShuffle epilogue overwrites sorted_lds).
+    """
+    lds = fx.make_view(lds_index.ptr + index_offset, fx.make_layout(index_size, 1))
+    cp_atom_lds = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Int32)
+    lds_thr = tiled_copy_index.get_slice(tid).partition_S(lds)
+    index_frag = fx.make_fragment_like(lds_thr)
+    fx.copy(cp_atom_lds, lds_thr, index_frag)
+    return index_frag
+
+
+def silu_pair_bf16(gate_frag, up_frag, gate_scale=None, up_scale=None, a_scale=None):
+    """silu(gate) * up over identically-laid-out gate/up fragments, -> bf16.
+
+    Optional per-N-channel fp8 weight scales (gate_scale/up_scale, [value, rep_n])
+    and an optional per-row fp8 activation scale (a_scale[m]) are folded into the
+    read so native-fp8 dequant happens before the non-linear silu.
+    """
+    log2_exp1 = -1.4426950408889634
+    round_bit = fx.Uint32(0x8000)
+    out_bf16 = fx.make_fragment_like(gate_frag, dtype=fx.BFloat16)
+    m_reps = fx.size(fx.get_shape(gate_frag)[1]).to_py_value()
+    n_reps = fx.size(fx.get_shape(gate_frag)[2]).to_py_value()
+    for m in range_constexpr(m_reps):
+        if const_expr(a_scale is not None):
+            a_sc = a_scale[m]
+        for n in range_constexpr(n_reps):
+            gate = gate_frag[None, m, n].load()
+            up = up_frag[None, m, n].load()
+            if const_expr(gate_scale is not None):
+                sc_g = gate_scale[None, n].load()
+                sc_u = up_scale[None, n].load()
+            acc = []
+            for j in range_constexpr(gate.numel):
+                g = gate[j]
+                u = up[j]
+                if const_expr(gate_scale is not None):
+                    g = g * sc_g[j]
+                    u = u * sc_u[j]
+                if const_expr(a_scale is not None):
+                    g = g * a_sc
+                    u = u * a_sc
+                tmp = rocdl.exp2(T.f32, _raw(g * log2_exp1))
+                acc.append((g * rocdl.rcp(T.f32, 1.0 + tmp)) * u)
+            acc = Vec.from_elements(acc, fx.Float32)
+            acc = ((acc.bitcast(fx.Uint32) + round_bit) >> 16).to(fx.Uint16).bitcast(fx.BFloat16)
+            out_bf16[None, m, n].store(acc)
+    return out_bf16
+
+
+def make_tensor_with_index(view, tile_m, tile_k, index_frag, tiled_copy, tid, topk, is_read_from_mem=True):
+    """Build a TensorWithIndex-style gather helper (MoE A-row / output-row scatter).
+
+    Returns an object exposing ``.copy(copy_atom, k_idx, frag)`` that gathers (or
+    scatters) per-thread tiles using ``index_frag`` (packed token|slot ids).
+    """
+    return _TensorWithIndex(view, tile_m, tile_k, index_frag, tiled_copy, tid, topk, is_read_from_mem)
+
+
+class _TensorWithIndex:
+    def __init__(self, view, tile_m, tile_k, index_frag, tiled_copy, tid, topk, is_read_from_mem=True):
+        self.view = view
+        self.tile_m = tile_m
+        self.tile_k = tile_k
+        self.is_read_from_mem = is_read_from_mem
+        self.TOPK = topk
+        self.index_frag = index_frag
+
+        rank = fx.get_shape(self.view).rank
+        dims = [1] * (rank - 1)
+        self.tensor_blocks_in_k = fx.zipped_divide(view, fx.make_tile(*dims, tile_k))
+
+        dtype = fx.PointerType.get(fx.Int8.ir_type, 1, 512)
+        ptr = fx.inttoptr(dtype, fx.Int32(0))
+        self.fake_tensor = fx.make_view(ptr, fx.make_layout((tile_m, tile_k), (1, tile_m)))
+        self.fake_tensor_thr = (
+            tiled_copy.get_slice(tid).partition_S(self.fake_tensor)
+            if is_read_from_mem
+            else tiled_copy.get_slice(tid).partition_D(self.fake_tensor)
+        )
+        offset_thread = fx.Int32(fx.ptrtoint(fx.get_iter(self.fake_tensor_thr)))
+        self.offset_thread_k = offset_thread // tile_m
+
+    def copy(self, copy_atom, k_idx, frag):
+        layout = fx.get_layout(self.fake_tensor_thr)
+        shape = fx.get_shape(self.fake_tensor_thr)
+        rep_m = fx.size(shape[1]).to_py_value()
+        rep_k = fx.size(shape[2]).to_py_value()
+        value_size = fx.get_shape(frag)[0].to_py_value()
+        stride_size = fx.get_stride(frag)[0].to_py_value()
+
+        rank = fx.get_shape(self.view).rank
+        block_cord = [None] * (rank - 1) + [k_idx]
+        tensor_block = self.tensor_blocks_in_k[None, (*block_cord,)]
+        for m in range_constexpr(rep_m):
+            if const_expr(rank == 2):
+                tensor_sub_block = tensor_block[None, self.index_frag[0, m] & 0xFFFFFF]
+            else:
+                tensor_sub_block = tensor_block[
+                    None,
+                    self.index_frag[0, m] & 0xFFFFFF,
+                    (self.index_frag[0, m] >> 24),
+                ]
+            for k in range_constexpr(rep_k):
+                offset_block = fx.crd2idx((0, m, k), layout).to_py_value()
+                offset_block_k = offset_block // self.tile_m
+                offset_k_in_tile = offset_block_k + self.offset_thread_k
+                reg = frag[None, m, k]
+                mem = fx.make_view(
+                    fx.get_iter(tensor_sub_block) + offset_k_in_tile,
+                    fx.make_layout(value_size, stride_size),
+                )
+                if const_expr(self.is_read_from_mem):
+                    fx.copy(copy_atom, mem, reg)
+                else:
+                    fx.copy(copy_atom, reg, mem)
+
+
+_TensorWithIndex.copy = ASTRewriter.transform(_TensorWithIndex.copy)
