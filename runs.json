@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-07-28T03:12:58Z",
+ "updated": "2026-07-28T04:13:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30327993228,
+   "pr": 915,
+   "commit": "c865ab91ff8d728b15d72b9b957791398dea354b",
+   "branch": "pr/enh-arch-aware-waitcnt",
+   "event": "pull_request",
+   "title": "[ROCDL] Add arch-aware universal s_waitcnt",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30327993228",
+   "created_at": "2026-07-28T04:10:26Z",
+   "updated_at": "2026-07-28T04:11:00Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 30327511063,
+   "pr": 915,
+   "commit": "7fcfa698c0e63ee6a00313e2c6b25d737612ee23",
+   "branch": "pr/enh-arch-aware-waitcnt",
+   "event": "pull_request",
+   "title": "[ROCDL] Add arch-aware universal s_waitcnt",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30327511063",
+   "created_at": "2026-07-28T04:00:37Z",
+   "updated_at": "2026-07-28T04:10:27Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 30314824246,
    "pr": 914,
@@ -2074,92 +2104,6 @@
      "started_at": "2026-07-24T15:07:44Z",
      "completed_at": "2026-07-24T15:14:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30103511781/job/89516361625"
-    }
-   ]
-  },
-  {
-   "run_id": 30102793085,
-   "pr": 899,
-   "commit": "54fa88064ea76b3e9abe5b2da7dc54b67e98ac0c",
-   "branch": "aryaman/fix-autotune-return-value",
-   "event": "pull_request",
-   "title": "[fix] Autotuner: propagate the tuned function's return value",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30102793085",
-   "created_at": "2026-07-24T14:51:29Z",
-   "updated_at": "2026-07-24T15:04:10Z",
-   "actor": "aryaman-gupta",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T14:56:53Z",
-     "completed_at": "2026-07-24T15:04:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30102793085/job/89513944158"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T14:57:04Z",
-     "completed_at": "2026-07-24T15:04:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30102793085/job/89513944164"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-24T14:57:03Z",
-     "completed_at": "2026-07-24T15:04:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30102793085/job/89513944186"
-    }
-   ]
-  },
-  {
-   "run_id": 30094457874,
-   "pr": 892,
-   "commit": "40301b78ae710ed3e805cd11aa136ea03bcb0b19",
-   "branch": "worktree-mxmoe-a8w4",
-   "event": "pull_request",
-   "title": "Refactor mxmoe",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30094457874",
-   "created_at": "2026-07-24T12:48:46Z",
-   "updated_at": "2026-07-24T14:16:19Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T12:56:33Z",
-     "completed_at": "2026-07-24T13:43:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30094457874/job/89485710928"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T12:52:52Z",
-     "completed_at": "2026-07-24T14:16:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30094457874/job/89485710950"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T12:52:53Z",
-     "completed_at": "2026-07-24T13:44:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30094457874/job/89485710953"
     }
    ]
   }
