@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-28T18:42:30Z",
+ "updated": "2026-07-28T18:51:54Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30388619215,
+   "pr": 919,
+   "commit": "aeb6d543b3537348b5a7d4c6c4907edf9672900a",
+   "branch": "perf/dualwave-xcd-head-first-mapping",
+   "event": "pull_request",
+   "title": "perf(attention): keep a head's Q-blocks on one XCD in the dualwave mapping",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30388619215",
+   "created_at": "2026-07-28T18:42:02Z",
+   "updated_at": "2026-07-28T18:49:44Z",
+   "actor": "JohnQinAMD",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-28T18:49:44Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30388619215/job/90376122524"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-28T18:50:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30388619215/job/90376122555"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-28T18:49:44Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30388619215/job/90376122561"
+    }
+   ]
+  },
   {
    "run_id": 30380903200,
    "pr": 914,
@@ -2173,49 +2216,6 @@
      "started_at": "2026-07-25T03:30:00Z",
      "completed_at": "2026-07-25T04:40:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30141903366/job/89637295755"
-    }
-   ]
-  },
-  {
-   "run_id": 30137282167,
-   "pr": null,
-   "commit": "a83412bfffbfe339fe0ecaaced0b3a3043952457",
-   "branch": "main",
-   "event": "push",
-   "title": "Refactor mxmoe (#892)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30137282167",
-   "created_at": "2026-07-25T00:52:18Z",
-   "updated_at": "2026-07-25T13:01:28Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-25T00:58:49Z",
-     "completed_at": "2026-07-25T01:58:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30137282167/job/89624281444"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-25T11:35:16Z",
-     "completed_at": "2026-07-25T13:01:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30137282167/job/89624281448"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-25T00:58:40Z",
-     "completed_at": "2026-07-25T03:29:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30137282167/job/89624281455"
     }
    ]
   }
