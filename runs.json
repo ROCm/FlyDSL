@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-28T19:35:25Z",
+ "updated": "2026-07-28T20:35:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30392424855,
+   "pr": 920,
+   "commit": "de526e0aeafdf4d42896bbf635d2dc14fa599233",
+   "branch": "fix/701-unsigned-signedness",
+   "event": "pull_request",
+   "title": "[DSL] Preserve logical signedness of unsigned integer dtypes",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30392424855",
+   "created_at": "2026-07-28T19:33:01Z",
+   "updated_at": "2026-07-28T19:36:25Z",
+   "actor": "Arist12",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-28T20:02:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30392424855/job/90387897385"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-28T19:36:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30392424855/job/90387897402"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-28T19:36:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30392424855/job/90387897410"
+    }
+   ]
+  },
   {
    "run_id": 30392295163,
    "pr": 823,
@@ -40,38 +83,38 @@
    "branch": "perf/dualwave-xcd-head-first-mapping",
    "event": "pull_request",
    "title": "perf(attention): keep a head's Q-blocks on one XCD in the dualwave mapping",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30388619215",
    "created_at": "2026-07-28T18:42:02Z",
-   "updated_at": "2026-07-28T19:07:31Z",
+   "updated_at": "2026-07-28T20:32:07Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-28T19:07:31Z",
-     "completed_at": null,
+     "completed_at": "2026-07-28T20:02:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30388619215/job/90376122524"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-28T18:50:06Z",
-     "completed_at": null,
+     "completed_at": "2026-07-28T19:45:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30388619215/job/90376122555"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-28T18:57:05Z",
-     "completed_at": null,
+     "completed_at": "2026-07-28T20:32:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30388619215/job/90376122561"
     }
    ]
@@ -2119,49 +2162,6 @@
    "updated_at": "2026-07-26T10:31:28Z",
    "actor": "binding7012",
    "jobs": []
-  },
-  {
-   "run_id": 30189704473,
-   "pr": 786,
-   "commit": "c4da52c417393310b8faae132404566dc78a970a",
-   "branch": "feat/autotune-offline-configs",
-   "event": "pull_request",
-   "title": "[3/5] autotune: add offline config artifacts (#770)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30189704473",
-   "created_at": "2026-07-26T05:38:23Z",
-   "updated_at": "2026-07-26T10:41:48Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-26T05:54:47Z",
-     "completed_at": "2026-07-26T06:43:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30189704473/job/89761824444"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-26T05:54:56Z",
-     "completed_at": "2026-07-26T06:49:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30189704473/job/89761824452"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-26T09:26:42Z",
-     "completed_at": "2026-07-26T10:41:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30189704473/job/89761824454"
-    }
-   ]
   }
  ]
 }
