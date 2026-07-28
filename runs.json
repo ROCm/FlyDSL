@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-28T16:14:34Z",
+ "updated": "2026-07-28T16:16:54Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30377335890,
+   "pr": 919,
+   "commit": "2149ef8b40cf3e416e753528aa3f154d900c759f",
+   "branch": "perf/dualwave-xcd-head-first-mapping",
+   "event": "pull_request",
+   "title": "perf(attention): keep a head's Q-blocks on one XCD in the dualwave mapping",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30377335890",
+   "created_at": "2026-07-28T16:15:00Z",
+   "updated_at": "2026-07-28T16:15:44Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 30376989962,
    "pr": 919,
@@ -10,11 +25,11 @@
    "branch": "perf/dualwave-xcd-head-first-mapping",
    "event": "pull_request",
    "title": "perf(attention): keep a head's Q-blocks on one XCD in the dualwave mapping",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30376989962",
    "created_at": "2026-07-28T16:10:40Z",
-   "updated_at": "2026-07-28T16:11:45Z",
+   "updated_at": "2026-07-28T16:15:04Z",
    "actor": "JohnQinAMD",
    "jobs": []
   },
@@ -44,9 +59,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-28T16:08:45Z",
+     "started_at": "2026-07-28T16:11:56Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30376530274/job/90334562403"
     },
@@ -2175,21 +2190,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30124059807/job/89584726896"
     }
    ]
-  },
-  {
-   "run_id": 30123651903,
-   "pr": null,
-   "commit": "b1e6c0f4e59db92a0b13c03565541f740c33e34e",
-   "branch": "perf/rmsnorm-fx-cleanup",
-   "event": "pull_request",
-   "title": "[Refactor] Align RMSNorm with current FlyDSL kernel style",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30123651903",
-   "created_at": "2026-07-24T20:19:34Z",
-   "updated_at": "2026-07-24T20:26:15Z",
-   "actor": "jhinpan",
-   "jobs": []
   }
  ]
 }
