@@ -33,30 +33,6 @@ from ..typing import (
 from . import cdna3, rdna3, rdna4
 from .utils import normalize_s_waitcnt_field
 
-__all__ = [
-    "s_waitcnt",
-    "BufferCopy",
-    "BufferCopy8b",
-    "BufferCopy16b",
-    "BufferCopy32b",
-    "BufferCopy64b",
-    "BufferCopy128b",
-    "BufferCopyLDS",
-    "BufferCopyLDS32b",
-    "BufferCopyLDS64b",
-    "BufferCopyLDS128b",
-    "BufferAtomic",
-    "BufferAtomicAdd",
-    "BufferAtomicMax",
-    "BufferAtomicMin",
-    "BufferAtomicPkAdd",
-    "MFMA",
-    "WMMA",
-    "make_buffer_ptr",
-    "make_buffer_tensor",
-    "get_buffer_rsrc",
-]
-
 
 @dsl_loc_tracing
 def s_waitcnt(bitfield=None, *, vmcnt=None, lgkmcnt=None, expcnt=None):
@@ -67,7 +43,7 @@ def s_waitcnt(bitfield=None, *, vmcnt=None, lgkmcnt=None, expcnt=None):
         return mlir_rocdl.s_waitcnt(normalize_s_waitcnt_field("bitfield", bitfield, 0xFFFF))
 
     arch = get_rocm_arch()
-    if arch.startswith("gfx942", "gfx950"):
+    if arch.startswith(("gfx942", "gfx950")):
         return cdna3.s_waitcnt(vmcnt=vmcnt, lgkmcnt=lgkmcnt, expcnt=expcnt)
     if arch.startswith("gfx11"):
         return rdna3.s_waitcnt(vmcnt=vmcnt, lgkmcnt=lgkmcnt, expcnt=expcnt)
