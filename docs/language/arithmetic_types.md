@@ -36,7 +36,7 @@ Common to `Numeric` and `Vector`, elementwise for `Vector`:
 | `x.dtype` | the scalar type (`Numeric`) / element type (`Vector`) | `Int32(5).dtype` / `Int32x4(0).dtype` → `Int32` |
 | `x.ir_value()` | the underlying `ir.Value`, materializing a constant for a compile-time value | `Int32(5).ir_value()` |
 | `cond.select(true_value, false_value)` | ternary select; a non-`Boolean` `cond` is converted by truthiness (nonzero) | `(a < b).select(a, b)` → min |
-| `x.to(dtype)` | value-preserving conversion to another type | `Int32(5).to(Float32)` → `Float32(5.0)` |
+| `x.to(dtype, *, rounding_mode=None)` | value-preserving conversion; the optional `rounding_mode=` applies to float-to-float casts | `Int32(5).to(Float32)` → `Float32(5.0)` |
 
 `Numeric`-only methods:
 
@@ -157,6 +157,27 @@ Given the common type `C` from the table above:
 | `/` | `C` if `C` is a `Float`; if `C` is an `Integer`, `Float32` when its width is at most 32 bits, otherwise `Float64` |
 | `<`  `<=`  `>`  `>=`  `==`  `!=` | `Boolean` (operands are compared as `C`) |
 | `&`  `\|`  `^`  `<<`  `>>` | `C`; operands must be `Integer` (a `Float` operand raises `TypeError`) |
+
+## Rounding-mode control
+
+`fx.RoundingMode` provides the IEEE-754 modes:
+
+- `to_nearest_even` — round to the nearest representable value; ties to even.
+- `downward` — round toward negative infinity.
+- `upward` — round toward positive infinity.
+- `toward_zero` — truncate toward zero.
+- `to_nearest_away` — round to the nearest representable value; ties away from zero.
+
+Only float-to-float casts accept a mode and any cast involving an integer raises
+`TypeError`. A compile-time constant is narrowed on the host, so passing a mode
+for one raises `ValueError`. The value must be a run-time value.
+
+```python
+lo = x.to(fx.Float16, rounding_mode=fx.RoundingMode.downward)
+hi = x.to(fx.Float16, rounding_mode=fx.RoundingMode.upward)
+```
+
+The keyword applies elementwise to a `Vector` as well.
 
 ## Fast-math control
 
