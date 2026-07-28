@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-28T07:20:49Z",
+ "updated": "2026-07-28T07:22:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30337911023",
    "created_at": "2026-07-28T07:18:31Z",
-   "updated_at": "2026-07-28T07:19:21Z",
+   "updated_at": "2026-07-28T07:20:03Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -25,11 +25,11 @@
    "branch": "refactor/pa-metadata-tile-programming",
    "event": "pull_request",
    "title": "[Kernel][Perf] Optimize paged-attention metadata decode",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30337904345",
    "created_at": "2026-07-28T07:18:24Z",
-   "updated_at": "2026-07-28T07:19:25Z",
+   "updated_at": "2026-07-28T07:20:09Z",
    "actor": "fsx950223",
    "jobs": []
   },
