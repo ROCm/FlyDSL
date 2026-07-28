@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-28T04:13:47Z",
+ "updated": "2026-07-28T04:26:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "pr/enh-arch-aware-waitcnt",
    "event": "pull_request",
    "title": "[ROCDL] Add arch-aware universal s_waitcnt",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30327993228",
    "created_at": "2026-07-28T04:10:26Z",
-   "updated_at": "2026-07-28T04:11:00Z",
+   "updated_at": "2026-07-28T04:11:35Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
