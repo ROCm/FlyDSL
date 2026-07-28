@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-28T13:48:39Z",
+ "updated": "2026-07-28T15:23:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "main",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add 8 wave GQA sliding-window attention kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30363444768",
    "created_at": "2026-07-28T13:25:56Z",
-   "updated_at": "2026-07-28T13:45:58Z",
+   "updated_at": "2026-07-28T15:20:32Z",
    "actor": "amd-nprotaso",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-28T13:58:04Z",
+     "completed_at": "2026-07-28T14:48:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30363444768/job/90297018568"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-28T13:57:14Z",
+     "completed_at": "2026-07-28T15:00:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30363444768/job/90297018578"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-28T13:58:18Z",
+     "completed_at": "2026-07-28T15:20:31Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30363444768/job/90297018731"
+    }
+   ]
   },
   {
    "run_id": 30363367823,
