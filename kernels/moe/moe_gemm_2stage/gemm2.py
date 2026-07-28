@@ -1,7 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""MoE GEMM stage2 (MFMA) kernel builder + reduce-mode dispatch."""
+"""MoE GEMM stage2 (MFMA) kernel builder + reduce-mode dispatch.
+
+Legacy authoring API (SmemAllocator/SmemPtr + raw buffer_ops); slated for
+deprecation -- refactor to the current fx.* surface (make_buffer_tensor +
+SharedAllocator + fx.copy/fx.gemm). See kernels/moe/mxfp_moe and the
+kernel-code-cleanup skill.
+"""
 
 import functools
 import logging
@@ -32,7 +38,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm, scf, vector
 from flydsl.expr.typing import T
 from kernels.common import buffer_ops
-from kernels.common.kernels_common import _if_then
+from kernels.common.kernels_common import _if_then, default_f8_type
 from kernels.common.mem_ops import buffer_atomic_add
 from kernels.common.mma.mfma_epilogues import c_shuffle_epilog, default_epilog
 from kernels.common.mma.mfma_preshuffle_pipeline import (
@@ -215,7 +221,8 @@ def compile_moe_gemm2(
     if out_is_bf16:
         if not supports_bf16_global_atomics(gpu_arch):
             raise ValueError(
-                f"out_dtype='bf16' requires bf16 global atomics ({bf16_global_atomics_arch_description()}), got arch={gpu_arch!r}"
+                f"out_dtype='bf16' requires bf16 global atomics "
+                f"({bf16_global_atomics_arch_description()}), got arch={gpu_arch!r}"
             )
 
     if out_is_f32:
@@ -304,9 +311,13 @@ def compile_moe_gemm2(
             size_expert_ids_in = arith.index_cast(T.index, i32_size_expert_ids_in)
             # i32 versions for layout construction (fly.make_shape requires i32/i64)
             k_i32_v = i32_k_in
-            x_elem = T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8))
+            x_elem = T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else default_f8_type()))
             # For int4/int4_bf16, weights are stored as packed bytes (i8) and unpacked in-kernel.
-            w_elem = T.i8 if w_is_int4 else (T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)))
+            w_elem = (
+                T.i8
+                if w_is_int4
+                else (T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else default_f8_type())))
+            )
             scale_dtype = T.bf16 if _scale_is_bf16 else T.f32
             vec16_elems = 16 if elem_bytes == 1 else 8
             vec8_elems = 8 if elem_bytes == 1 else 4
@@ -358,7 +369,7 @@ def compile_moe_gemm2(
             lds_x_ptr = SmemPtr(
                 base_ptr,
                 lds_alloc_offset,
-                (T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8))),
+                (T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else default_f8_type()))),
                 shape=(lds_total_elems,),
             )
             lds_x = lds_x_ptr.get()
@@ -459,7 +470,8 @@ def compile_moe_gemm2(
                         x_load_bytes = 4
                     else:
                         raise ValueError(
-                            f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 4 to use the dword-indexed load mapping."
+                            f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible "
+                            "by 4 to use the dword-indexed load mapping."
                         )
                 num_x_loads = bytes_per_thread_x // x_load_bytes
                 chunk_i32 = x_load_bytes // 4  # dwords per chunk (1/2/4)

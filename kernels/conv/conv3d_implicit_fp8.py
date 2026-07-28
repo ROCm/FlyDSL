@@ -194,9 +194,7 @@ def compile_pack_weight_kctrs_bf16_to_ktrsc_fp8(k, c, kt, kh, kw):
 
 
 @functools.lru_cache(maxsize=64)
-def compile_conv3d_implicit_8wave_fp8(
-    n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias=False, splitk=1
-):
+def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias=False, splitk=1):
     """Compile the FP8 conv: x is NDHWC FP8 bytes, weight is KTRSC FP8 bytes."""
     do = (d + 2 * pt - kt) // st + 1
     ho = (h + 2 * ph - kh) // sh + 1
@@ -421,9 +419,6 @@ def compile_conv3d_implicit_8wave_fp8(
                     for wn in range_constexpr(QN_STEPS):
                         col = n_offset + fx.Index(n_half * HALF_N + wave_n * (HALF_N // WAVE_N) + wn * MFMA_N) + c_n
                         col_valid = col < fx.Index(k)
-                        # Under split-K the partial sums accumulate atomically into
-                        # FP32; bias is a single per-output add left to the host
-                        # post-pass (adding it per z-slice would scale it by splitk).
                         if const_expr(has_bias and not use_splitk):
                             bias_val = fx.Float32(buffer_ops.buffer_load(bias_rsrc, col, vec_width=1, dtype=fx.Float32))
                         acc_vec = Vec(acc[wm * QN_STEPS + wn])
@@ -440,14 +435,14 @@ def compile_conv3d_implicit_8wave_fp8(
                             else:
                                 if const_expr(has_bias):
                                     out = out + bias_val
-                                # NCDHW output[ni, col, sp]: ni*(k*dhw) + col*dhw + sp.
-                                # n==1 fast path: ni=0, sp=row, no integer division.
+                                # NCDHW output[n_idx, col, sp]: n_idx*(k*dhw) + col*dhw + sp.
+                                # n==1 fast path: n_idx=0, sp=row, no integer division.
                                 if const_expr(n == 1):
                                     off_ncdhw = col * dhw + row
                                 else:
-                                    ni = row // dhw
+                                    n_idx = row // dhw
                                     sp = row % dhw
-                                    off_ncdhw = ni * (k * dhw) + col * dhw + sp
+                                    off_ncdhw = n_idx * (k * dhw) + col * dhw + sp
                                 buffer_ops.buffer_store(out.to(fx.BFloat16), y_rsrc, off_ncdhw, mask=col_valid)
 
         store_half_pair(acc00, acc01, 0)
@@ -554,7 +549,7 @@ def _prep_weight_fp8(weight: torch.Tensor, stream=None) -> torch.Tensor:
     return out
 
 
-def conv3d_implicit_8wave_fp8(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=None):
+def conv3d_implicit_fp8(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=None):
     """FP8 (E4M3FN) implicit conv3d. Same interface as the BF16 v6mb kernel.
 
     x: (N, C, D, H, W) bf16, weight: (K, C, T, R, S) bf16. Inputs are packed once
@@ -594,7 +589,7 @@ def conv3d_implicit_8wave_fp8(x, weight, bias=None, stride=1, padding=0, splitk=
         y = torch.zeros((npq, k), device=x.device, dtype=torch.float32)
     else:
         y = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
-    exe = compile_conv3d_implicit_8wave_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, sk)
+    exe = compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, sk)
     exe(
         flyc.from_torch_tensor(y.view(-1)),
         flyc.from_torch_tensor(x_arg),
@@ -610,4 +605,4 @@ def conv3d_implicit_8wave_fp8(x, weight, bias=None, stride=1, padding=0, splitk=
     return y
 
 
-__all__ = ["conv3d_implicit_8wave_fp8"]
+__all__ = ["conv3d_implicit_fp8"]
