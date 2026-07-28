@@ -20,8 +20,9 @@ VALU_MASK = 0x02
 EXP_MASK = 0x400
 RESCALE_THRESHOLD = 8.0
 
-# Fast math is the kernel-wide default, set once as a compile hint instead of threading
-SWA_COMPILE_HINTS = {"fast_fp_math": True}
+SWA_COMPILE_HINTS = {
+    "fast_fp_math": True,
+}
 
 
 def _as_stream(stream):
@@ -263,25 +264,25 @@ def build_gqa_attn(
             return vreg
 
         # ---------------- O store ----------------
-        def store_o(o_reg):
-            row_offset = lid % 32
-            col_offset = 4 * (lid // 32)
-            base = (
+        def _store_o_base():
+            return (
                 batch_idx * (i32(seq_len_q) * (ATTN_H * ATTN_D))
                 + tile_idx * (Q_BLOCK_SIZE * ATTN_H * ATTN_D)
                 + head_idx * ATTN_D
             )
-            o_store_reg = fx.make_rmem_tensor(fx.make_layout(4, 1), bf16)
-            for j in range_constexpr(4):
-                ov = Vec(o_reg[j])
-                for k in range_constexpr(4):
-                    col = 32 * j + col_offset + k * 8
-                    elem0 = k * 4  # (idx=k*2 float2) -> 4 f32 per k
-                    elems = [ov[elem0 + e] for e in range_constexpr(4)]
-                    vbf = Vec.from_elements(elems, f32).to(bf16)
-                    off = base + row_offset * O_stride1 + col
-                    fx.memref_store_vec(vbf, o_store_reg)
-                    fx.copy(_o_store_atom, o_store_reg, fx.slice(o_div, (None, i32(off))))
+
+        def store_o_one(o_reg_j, j, base, o_store_reg):
+            row_offset = lid % 32
+            col_offset = 4 * (lid // 32)
+            ov = Vec(o_reg_j)
+            for k in range_constexpr(4):
+                col = 32 * j + col_offset + k * 8
+                elem0 = k * 4  # (idx=k*2 float2) -> 4 f32 per k
+                elems = [ov[elem0 + e] for e in range_constexpr(4)]
+                vbf = Vec.from_elements(elems, f32).to(bf16)
+                off = base + row_offset * O_stride1 + col
+                fx.memref_store_vec(vbf, o_store_reg)
+                fx.copy(_o_store_atom, o_store_reg, fx.slice(o_div, (None, i32(off))))
 
         def mma_AtB_QK(A, B, C):
             D = [None, None]
@@ -470,30 +471,49 @@ def build_gqa_attn(
         v_base_elems = batch_idx * (i32(seq_len_kv) * (ATTN_H_KV * ATTN_D)) + head_idx_kv * ATTN_D + swa_row_off
 
         # ---------------- per-query band mask (aiter window_size) ----------------
-        def mask_band(att, band_tile):
-            if const_expr(NT_BAND is None):
-                return att
-
+        def _mask_band_half(att_h, band_tile, h):
             q_row = i32(tile_idx * i32(Q_BLOCK_SIZE)) + i32(lid % 32)
 
             kcol_base = base_kv_row + i32(band_tile) * i32(KV_BLOCK_SIZE) + i32((lid // 32) * 4)
 
             width = fx.Uint32(swa_left + swa_right)
-            out = [None, None]
+            src = Vec(att_h)
+            elems = []
+            rel_base = kcol_base + i32(32 * h) - q_row + i32(swa_left)
 
-            for h in range_constexpr(2):
-                src = Vec(att[h])
-                elems = []
-                rel_base = kcol_base + i32(32 * h) - q_row + i32(swa_left)
+            for r in range_constexpr(16):
+                c = 8 * (r // 4) + (r % 4)
+                shifted = (rel_base + i32(c)).bitcast(fx.Uint32)
+                keep = shifted <= width
+                elems.append(keep.select(f32(src[r]), NEG_INF))
 
-                for r in range_constexpr(16):
-                    c = 8 * (r // 4) + (r % 4)
-                    shifted = (rel_base + i32(c)).bitcast(fx.Uint32)
-                    keep = shifted <= width
-                    elems.append(keep.select(f32(src[r]), NEG_INF))
+            return Vec.from_elements(elems, f32)
 
-                out[h] = Vec.from_elements(elems, f32)
-            return out
+        def _need_mask_pred(band_tile):
+            # A band tile covers key columns [K0, K0+63] and the wave's query rows span [Q0, Q0+31].
+            q0 = i32(tile_idx * i32(Q_BLOCK_SIZE))
+            k0 = base_kv_row + i32(band_tile) * i32(KV_BLOCK_SIZE)
+            return (k0 < q0 + i32(31 - swa_left)) | (k0 > q0 + i32(swa_right - 63))
+
+        def mask_band(att, band_tile, half=None):
+            if const_expr(NT_BAND is None):
+                # No band -> nothing to mask, but still honour `half`: callers doing
+                # att[h] = mask_band(att, t, half=h) expect a single v16f32 back.
+                return att if const_expr(half is None) else att[half]
+
+            need_mask = _need_mask_pred(band_tile)
+
+            if const_expr(half is not None):
+                out_h = att[half]
+                if need_mask:
+                    out_h = _mask_band_half(att[half], band_tile, half)
+                return out_h
+
+            out0, out1 = att[0], att[1]
+            if need_mask:
+                out0 = _mask_band_half(att[0], band_tile, 0)
+                out1 = _mask_band_half(att[1], band_tile, 1)
+            return [out0, out1]
 
         # Divided buffer-tensor views for the G->LDS DMA copy atom.
         k_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(K), fx.make_layout(1, 1))
@@ -724,7 +744,8 @@ def build_gqa_attn(
             rocdl.sched_barrier(0)
             load_k(j, 1)
             v_reg = load_v_regs(0)
-            att1 = mask_band(att1, jm1 - 1)  # k_reg held band tile j-2 in block 0
+
+            att1[0] = mask_band(att1, jm1 - 1, half=0)
             wait_lgkmcnt0()
             wait_vmcnt(4)
             rocdl.sched_barrier(0)
@@ -733,6 +754,7 @@ def build_gqa_attn(
 
             # ---- Block 2: A[even]*V, partial softmax for QK[odd] ----
             rocdl.s_setprio(1)
+            att1[1] = mask_band(att1, jm1 - 1, half=1)
             o_reg = mma_AtB_OV_slice(o_reg, v_reg[0], att_block_bf16[0])
             o_reg, scale_vec, pending_scale, max_vec, att_block_bf16 = rescale_defer(
                 att1, o_reg, max_vec_prev, scale_vec, att_block_bf16
@@ -787,7 +809,8 @@ def build_gqa_attn(
             rocdl.sched_barrier(0)
             load_k(jp1, 0)
             v_reg = load_v_regs(1)
-            att0 = mask_band(att0, jm1)  # k_reg held band tile j-1 in block 4
+
+            att0[0] = mask_band(att0, jm1, half=0)
             wait_lgkmcnt0()
             wait_vmcnt(4)
             rocdl.sched_barrier(0)
@@ -796,6 +819,7 @@ def build_gqa_attn(
 
             # ---- Block 6: A[odd]*V, partial softmax for QK[even] ----
             rocdl.s_setprio(1)
+            att0[1] = mask_band(att0, jm1, half=1)
             mma_AtB_OV_slice(o_reg, v_reg[0], att_block_bf16[0])
             o_reg, scale_vec, pending_scale, max_vec, att_block_bf16 = rescale_defer(
                 att0, o_reg, max_vec_prev, scale_vec, att_block_bf16
@@ -915,7 +939,7 @@ def build_gqa_attn(
             for jj in range_constexpr(8):
                 k_reg_t[jj][i] = k_reg[i][jj]
         att_block[0] = mma_AtB_QK(k_reg_t, q_reg_t, att_block[0])
-        # mask_band deferred to loading block 5 (consumed in block 6).
+
         norm_vec = norm_vec * scale_vec
         att_block_bf16, norm_vec = finish_scalar(att_block[1][0], att_block[1][1], norm_vec)
         sched_exp_pairs(6, 3, 7)
@@ -1009,26 +1033,30 @@ def build_gqa_attn(
         v_reg = load_v_regs(1)
         wait_lgkmcnt0()
         rocdl.sched_barrier(0)
-        rocdl.s_barrier()
         rocdl.sched_barrier(0)
 
-        # ---- Block 12: Final A*V and normalize ----
-        o_reg = mma_AtB_OV(o_reg, v_reg, att_block_bf16)
-
+        # ---- Block 12: Final A*V, normalize, and store (pipelined) ----
         inv = rocdl.rcp(T.f32, norm_vec)
         # Guard against a fully-masked row (norm == 0 -> rcp == inf).
         if const_expr(NT_BAND is not None):
             inv = arith.select(f32(norm_vec) > 0.0, inv, 0.0)
-        o_reg = mul_o(o_reg, inv)
+        inv_b = bcast16(f32(inv))
+
+        o_base = _store_o_base()
+        o_store_reg = fx.make_rmem_tensor(fx.make_layout(4, 1), bf16)
+        for n in range_constexpr(4):
+            acc = mfma(v_reg[0][n], att_block_bf16[0], o_reg[n])
+            for k in range_constexpr(1, 4):
+                acc = mfma(v_reg[k][n], att_block_bf16[k], acc)
+            store_o_one(Vec(acc) * inv_b, n, o_base, o_store_reg)
+
         rocdl.sched_barrier(0)
         rocdl.s_barrier()
         rocdl.sched_barrier(0)
 
-        # ---- Conclusion: store O and LSE ----
+        # ---- Conclusion ----
         if stagger == 0:
             rocdl.s_barrier()
-
-        store_o(o_reg)
 
     @flyc.jit
     def launch(
