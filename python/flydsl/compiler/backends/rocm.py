@@ -26,6 +26,21 @@ class RocmBackend(BaseBackend):
         warp_size = 32 if is_rdna_arch(arch) else 64
         return GPUTarget(backend="rocm", arch=arch, warp_size=warp_size)
 
+    @classmethod
+    def llvm_address_space(cls, address_space) -> int:
+        """Map an address space to its AMDGPU LLVM representation."""
+        from ..._mlir.dialects.fly import AddressSpace
+
+        mapping = {
+            AddressSpace.Generic: 0,
+            AddressSpace.Global: 1,
+            AddressSpace.Shared: 3,
+            AddressSpace.Register: 5,
+        }
+        try:
+            return mapping[address_space]
+        except KeyError:
+            raise ValueError(f"ROCm address space {address_space} does not lower to a bare LLVM pointer") from None
     # -- compile pipeline ------------------------------------------------
 
     @staticmethod

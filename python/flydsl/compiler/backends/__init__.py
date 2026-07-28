@@ -44,6 +44,17 @@ def compile_backend_name() -> str:
     """Return the active backend id from env (default ``'rocm'``)."""
     return (env.compile.backend or "rocm").lower()
 
+def resolve_llvm_address_space(address_space) -> int:
+    """Map a Fly pointer address space using the active compile backend."""
+    name = compile_backend_name()
+    backend_cls = _registry.get(name)
+    if backend_cls is None:
+        if name in _import_errors:
+            raise ImportError(f"Compile backend '{name}' failed to import") from _import_errors[name]
+        available = ", ".join(sorted(_registry)) or "(none)"
+        raise ValueError(f"Unknown compile backend '{name}'. Registered backends: {available}")
+    return backend_cls.llvm_address_space(address_space)
+
 
 @lru_cache(maxsize=4)
 def _make_backend(name: str, arch: str) -> BaseBackend:
@@ -164,4 +175,5 @@ __all__ = [
     "compile_backend_name",
     "get_backend",
     "register_backend",
+    "resolve_llvm_address_space",
 ]
