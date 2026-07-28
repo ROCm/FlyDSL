@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-28T16:07:07Z",
+ "updated": "2026-07-28T16:14:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30376989962,
+   "pr": 919,
+   "commit": "177caf54b3fdd03c32617e1eb5dd3de816544ca2",
+   "branch": "perf/dualwave-xcd-head-first-mapping",
+   "event": "pull_request",
+   "title": "perf(attention): keep a head's Q-blocks on one XCD in the dualwave mapping",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30376989962",
+   "created_at": "2026-07-28T16:10:40Z",
+   "updated_at": "2026-07-28T16:11:45Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 30376530274,
    "pr": null,
@@ -10,13 +25,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Enh] Add rounding-mode control for float-to-float casts (#916)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30376530274",
    "created_at": "2026-07-28T16:04:53Z",
-   "updated_at": "2026-07-28T16:05:50Z",
+   "updated_at": "2026-07-28T16:08:45Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-28T16:09:47Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30376530274/job/90334562387"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-28T16:08:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30376530274/job/90334562403"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-28T16:08:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30376530274/job/90334562442"
+    }
+   ]
   },
   {
    "run_id": 30376455924,
@@ -40,38 +83,38 @@
    "branch": "perf/dualwave-xcd-head-first-mapping",
    "event": "pull_request",
    "title": "perf(attention): keep a head's Q-blocks on one XCD in the dualwave mapping",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30375504656",
    "created_at": "2026-07-28T15:52:32Z",
-   "updated_at": "2026-07-28T15:56:39Z",
+   "updated_at": "2026-07-28T16:11:00Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-28T15:57:03Z",
-     "completed_at": null,
+     "completed_at": "2026-07-28T16:10:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30375504656/job/90331187570"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-28T15:56:55Z",
-     "completed_at": null,
+     "completed_at": "2026-07-28T16:10:59Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30375504656/job/90331187599"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-28T15:56:39Z",
-     "completed_at": null,
+     "completed_at": "2026-07-28T16:10:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30375504656/job/90331187650"
     }
    ]
@@ -2145,21 +2188,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30123651903",
    "created_at": "2026-07-24T20:19:34Z",
    "updated_at": "2026-07-24T20:26:15Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 30123000735,
-   "pr": null,
-   "commit": "5c4c551fd8aa40714cc424a9b53f5814ef08fbbf",
-   "branch": "perf/rmsnorm-fx-cleanup",
-   "event": "pull_request",
-   "title": "[Refactor] Align RMSNorm with current FlyDSL kernel style",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30123000735",
-   "created_at": "2026-07-24T20:09:32Z",
-   "updated_at": "2026-07-24T20:19:36Z",
    "actor": "jhinpan",
    "jobs": []
   }
