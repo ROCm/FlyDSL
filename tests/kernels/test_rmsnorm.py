@@ -1605,6 +1605,53 @@ def test_rmsnorm_bwd_mixed_weight_keeps_vector_io(fused_add):
 
 
 @pytest.mark.parametrize("fused_add", (False, True), ids=("plain", "fused_add"))
+def test_rmsnorm_fwd_cache_reuses_compiled_launcher(monkeypatch, fused_add):
+    """Forward hot calls use the shared _run_compiled fast path."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    M, N = 8, 512
+    x = torch.randn((M, N), device=device, dtype=DTYPE_BF16)
+    weight = torch.rand((N,), device=device, dtype=DTYPE_BF16)
+    residual = torch.randn_like(x) if fused_add else None
+    builder_name = "build_fused_add_rmsnorm_module" if fused_add else "build_rmsnorm_module"
+    cache = rmsnorm_kernel_impl._FUSED_ADD_FWD_CACHE if fused_add else rmsnorm_kernel_impl._FWD_CACHE
+    original_builder = getattr(rmsnorm_kernel_impl, builder_name)
+    build_count = 0
+    run_compiled_count = 0
+
+    def counted_builder(*args, **kwargs):
+        nonlocal build_count
+        build_count += 1
+        return original_builder(*args, **kwargs)
+
+    def counted_run_compiled(*args, **kwargs):
+        nonlocal run_compiled_count
+        run_compiled_count += 1
+        return _run_compiled(*args, **kwargs)
+
+    monkeypatch.setattr(rmsnorm_kernel_impl, builder_name, counted_builder)
+    monkeypatch.setattr(rmsnorm_kernel_impl, "_run_compiled", counted_run_compiled)
+    saved_cache = cache.copy()
+    cache.clear()
+
+    try:
+        if fused_add:
+            rmsnorm_kernel_impl.fused_add_rmsnorm_fwd(x, residual, weight, store_rstd=True)
+            rmsnorm_kernel_impl.fused_add_rmsnorm_fwd(x, residual, weight, store_rstd=True)
+        else:
+            rmsnorm_kernel_impl.rmsnorm_fwd(x, weight, store_rstd=True)
+            rmsnorm_kernel_impl.rmsnorm_fwd(x, weight, store_rstd=True)
+        torch.cuda.synchronize(device)
+
+        launcher = cache[(N, "bf16", "bf16", True, float(EPS), device)]
+        assert build_count == 1
+        assert run_compiled_count == 2
+        assert launcher._cf is not None
+    finally:
+        cache.clear()
+        cache.update(saved_cache)
+
+
+@pytest.mark.parametrize("fused_add", (False, True), ids=("plain", "fused_add"))
 def test_rmsnorm_bwd_two_stage_cache_reuse_across_m(monkeypatch, fused_add):
     """One staged compiled callable must serve multiple runtime row counts."""
     device = torch.device("cuda", torch.cuda.current_device())

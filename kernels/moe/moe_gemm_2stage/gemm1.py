@@ -22,7 +22,7 @@ from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.common import buffer_ops
-from kernels.common.kernels_common import _if_then
+from kernels.common.kernels_common import _if_then, default_f8_type
 from kernels.common.mem_ops import buffer_atomic_add
 from kernels.common.mma.mfma_epilogues import c_shuffle_epilog, mfma_epilog
 from kernels.common.mma.mfma_preshuffle_pipeline import (
@@ -306,9 +306,13 @@ def compile_moe_gemm1(
             # i32 versions for layout construction (fly.make_shape requires i32/i64)
             tokens_i32_v = i32_tokens_in
             k_i32_v = i32_k_in
-            x_elem = T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8))
+            x_elem = T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else default_f8_type()))
             # For int4/int4_bf16, weights are stored as packed bytes (i8) and unpacked in-kernel.
-            w_elem = T.i8 if w_is_int4 else (T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)))
+            w_elem = (
+                T.i8
+                if w_is_int4
+                else (T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else default_f8_type())))
+            )
             scale_dtype = T.bf16 if _scale_is_bf16 else T.f32
             vec16_elems = 16 if elem_bytes == 1 else 8
             vec8_elems = 8 if elem_bytes == 1 else 4
@@ -409,7 +413,7 @@ def compile_moe_gemm1(
                 lds_x_ptr = SmemPtr(
                     base_ptr,
                     lds_alloc_offset,
-                    (T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8))),
+                    (T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else default_f8_type()))),
                     shape=(lds_total_elems,),
                 )
                 lds_x = lds_x_ptr.get()

@@ -12,7 +12,6 @@ have to import from each other. Keeping these here follows the topical
 
 import flydsl.expr as fx
 from flydsl.expr import const_expr
-from flydsl.expr.typing import full
 from kernels.common.kernels_common import get_warp_size
 
 KERNEL_NAME = "rmsnorm"
@@ -60,9 +59,9 @@ def load_scalar(copy_atom, elem_dtype, divided_tensor, index):
     return fx.memref_load_vec(r)[0]
 
 
-def store_scalar(copy_atom, elem_dtype, store_dtype, divided_tensor, index, val):
+def store_scalar(copy_atom, elem_dtype, divided_tensor, index, val):
     r = fx.make_rmem_tensor(1, elem_dtype)
-    ts = full(1, store_dtype(val), store_dtype)
+    ts = fx.Vector.filled(1, val, elem_dtype)
     fx.memref_store_vec(ts, r)
     view = fx.slice(divided_tensor, (None, index))
     fx.copy_atom_call(copy_atom, r, view)
