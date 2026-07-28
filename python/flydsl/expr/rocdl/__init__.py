@@ -461,6 +461,7 @@ def lds_transpose_load(result_type, lds_memref, elem_offset, elem_bytes):
 from .universal import *  # noqa: E402,F401,F403,I001
 from .cdna5 import *  # noqa: E402,F401,F403,I001
 from .inline_asm import *  # noqa: E402,F401,F403,I001
+from .random import *  # noqa: E402,F401,F403,I001
 
 # ── Wrappers: accept DSL Numeric args (fx.Int32, fx.Float32, etc.) ─────────
 # ODS-generated ops require raw ir.Value. These wrappers auto-convert.
