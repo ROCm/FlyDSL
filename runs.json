@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-28T16:16:54Z",
+ "updated": "2026-07-28T18:38:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30380903200,
+   "pr": 914,
+   "commit": "6184abd7e3c7251cdb9714b226627b4e7a086b53",
+   "branch": "fix/898-lds-offset-merge",
+   "event": "pull_request",
+   "title": "[Dialect][Perf] Don't merge mixed static/runtime offsets on LDS pointers",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30380903200",
+   "created_at": "2026-07-28T17:00:27Z",
+   "updated_at": "2026-07-28T18:22:05Z",
+   "actor": "Arist12",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-28T17:21:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30380903200/job/90350068346"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-28T17:07:54Z",
+     "completed_at": "2026-07-28T17:59:03Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30380903200/job/90350068347"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-28T18:22:05Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30380903200/job/90350068350"
+    }
+   ]
+  },
   {
    "run_id": 30377335890,
    "pr": 919,
@@ -14,9 +57,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30377335890",
    "created_at": "2026-07-28T16:15:00Z",
-   "updated_at": "2026-07-28T16:15:44Z",
+   "updated_at": "2026-07-28T17:19:27Z",
    "actor": "JohnQinAMD",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-28T17:19:26Z",
+     "completed_at": "2026-07-28T18:21:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30377335890/job/90337217954"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-28T16:19:04Z",
+     "completed_at": "2026-07-28T17:41:17Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30377335890/job/90337217972"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-28T16:54:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30377335890/job/90337218006"
+    }
+   ]
   },
   {
    "run_id": 30376989962,
@@ -40,38 +111,38 @@
    "branch": "main",
    "event": "push",
    "title": "[Enh] Add rounding-mode control for float-to-float casts (#916)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30376530274",
    "created_at": "2026-07-28T16:04:53Z",
-   "updated_at": "2026-07-28T16:08:45Z",
+   "updated_at": "2026-07-28T18:34:55Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-28T16:09:47Z",
-     "completed_at": null,
+     "completed_at": "2026-07-28T17:06:57Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30376530274/job/90334562387"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-28T16:11:56Z",
-     "completed_at": null,
+     "completed_at": "2026-07-28T17:19:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30376530274/job/90334562403"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-28T16:08:45Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-28T16:54:39Z",
+     "completed_at": "2026-07-28T18:34:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30376530274/job/90334562442"
     }
    ]
@@ -439,7 +510,7 @@
   },
   {
    "run_id": 30329388118,
-   "pr": 914,
+   "pr": null,
    "commit": "87424b73e60ea6328a72ff7712a93ae2ebfb7b5e",
    "branch": "fix/898-lds-offset-merge",
    "event": "pull_request",
@@ -2145,49 +2216,6 @@
      "started_at": "2026-07-25T00:58:40Z",
      "completed_at": "2026-07-25T03:29:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30137282167/job/89624281455"
-    }
-   ]
-  },
-  {
-   "run_id": 30124059807,
-   "pr": 902,
-   "commit": "5e76ed078b922186bd5abe224b9a7c5f89870414",
-   "branch": "perf/rmsnorm-fx-cleanup",
-   "event": "pull_request",
-   "title": "[Refactor] Align RMSNorm with current FlyDSL kernel style",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30124059807",
-   "created_at": "2026-07-24T20:26:13Z",
-   "updated_at": "2026-07-24T22:33:26Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T21:07:19Z",
-     "completed_at": "2026-07-24T21:57:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30124059807/job/89584726824"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T20:34:26Z",
-     "completed_at": "2026-07-24T22:07:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30124059807/job/89584726831"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T20:34:28Z",
-     "completed_at": "2026-07-24T22:33:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30124059807/job/89584726896"
     }
    ]
   }
