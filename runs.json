@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-28T07:22:12Z",
+ "updated": "2026-07-28T08:37:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30341663905,
+   "pr": 848,
+   "commit": "0f2d86c8e5a38a95f86891578adc03c418b217d8",
+   "branch": "cjl/norm_perf",
+   "event": "pull_request",
+   "title": "[Perf] Optimize rmsnorm/layernorm",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30341663905",
+   "created_at": "2026-07-28T08:15:39Z",
+   "updated_at": "2026-07-28T08:18:15Z",
+   "actor": "cschenjunlin",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-28T08:18:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30341663905/job/90218965505"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-28T08:18:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30341663905/job/90218965540"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-28T08:18:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30341663905/job/90218965543"
+    }
+   ]
+  },
   {
    "run_id": 30337911023,
    "pr": 915,
@@ -10,13 +53,41 @@
    "branch": "pr/enh-arch-aware-waitcnt",
    "event": "pull_request",
    "title": "[ROCDL] Add arch-aware universal s_waitcnt",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30337911023",
    "created_at": "2026-07-28T07:18:31Z",
-   "updated_at": "2026-07-28T07:20:03Z",
+   "updated_at": "2026-07-28T08:34:33Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-28T07:21:59Z",
+     "completed_at": "2026-07-28T08:14:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30337911023/job/90207312711"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-28T07:21:52Z",
+     "completed_at": "2026-07-28T08:34:32Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30337911023/job/90207312718"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-28T07:21:59Z",
+     "completed_at": "2026-07-28T08:33:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30337911023/job/90207312726"
+    }
+   ]
   },
   {
    "run_id": 30337904345,
@@ -29,9 +100,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30337904345",
    "created_at": "2026-07-28T07:18:24Z",
-   "updated_at": "2026-07-28T07:20:09Z",
+   "updated_at": "2026-07-28T08:35:00Z",
    "actor": "fsx950223",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-28T07:24:29Z",
+     "completed_at": "2026-07-28T08:12:43Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30337904345/job/90207406034"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-28T07:36:16Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30337904345/job/90207406065"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-28T08:35:00Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30337904345/job/90207406124"
+    }
+   ]
   },
   {
    "run_id": 30334710901,
@@ -2061,49 +2160,6 @@
      "started_at": "2026-07-24T17:43:20Z",
      "completed_at": "2026-07-24T18:46:21Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30113835020/job/89550350632"
-    }
-   ]
-  },
-  {
-   "run_id": 30109422592,
-   "pr": 874,
-   "commit": "70b0af7781b6d304a850beab92c23efbd9527da8",
-   "branch": "xudoyuan/dyn-cf-list-carry",
-   "event": "pull_request",
-   "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30109422592",
-   "created_at": "2026-07-24T16:31:48Z",
-   "updated_at": "2026-07-24T17:37:17Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T16:39:55Z",
-     "completed_at": "2026-07-24T17:31:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30109422592/job/89536450002"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T16:39:27Z",
-     "completed_at": "2026-07-24T17:27:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30109422592/job/89536450064"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T16:39:47Z",
-     "completed_at": "2026-07-24T17:37:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30109422592/job/89536450089"
     }
    ]
   }
