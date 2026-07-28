@@ -45,6 +45,7 @@ def create_wmma_gemm_module(
     in_dtype="bf16",
     out_dtype="bf16",
     *,
+    rounding="rn",  # "rn" (round to nearest) or "rs" (stochastic rounding)
     reg_m=4,
     reg_n=4,
     reg_k=2,
@@ -69,6 +70,9 @@ def create_wmma_gemm_module(
     THREADS_PER_BLOCK = NUM_WAVES * WAVE_SIZE  # 128
 
     assert reg_k >= 2 and reg_k % 2 == 0
+    assert rounding in ("rn", "rs"), f"rounding must be 'rn' or 'rs', got {rounding!r}"
+    if rounding == "rs":
+        assert out_dtype == "bf16", "stochastic rounding currently supports bf16 output only"
 
     LOAD_VEC = 8  # 8 bf16 = 128-bit GMEM/LDS load
     A_TILE_ELEMS = BLOCK_M * BLOCK_K
@@ -119,6 +123,7 @@ def create_wmma_gemm_module(
         arg_c: fx.Tensor,
         arg_a: fx.Tensor,
         arg_bt: fx.Tensor,
+        sr_seed: fx.Int32,  # runtime seed; only read on the stochastic-rounding path
     ):
         lds_storage = fx.SharedAllocator().allocate(_SharedStorage).peek()
         lds_ptr = lds_storage.lds.ptr  # i8-base aliased as elem_dtype*
@@ -331,11 +336,17 @@ def create_wmma_gemm_module(
                     g_row = tile_m0 + wmma_m_off + 2 * si + klane
                     g_col = tile_n0 + wmma_n_off + lane16
                     val = accs[idx][si]
-                    if const_expr(out_dtype == "bf16"):
+                    elem_off = g_row * N + g_col
+                    if const_expr(rounding == "rs"):
+                        # Stochastic rounding: perturb the discarded bits with a
+                        # per-element Philox draw keyed by the element index, so
+                        # the f32 -> bf16 store is unbiased in expectation.
+                        rbits = fx.rocdl.philox_4x32(fx.Uint32(elem_off), fx.Uint32(sr_seed))[0]
+                        val = fx.rocdl.stochastic_round_bf16(val, rbits)
+                    elif const_expr(out_dtype == "bf16"):
                         val = val.to(fx.BFloat16)
                     elif const_expr(out_dtype == "f16"):
                         val = val.to(fx.Float16)
-                    elem_off = g_row * N + g_col
                     buffer_ops.buffer_store(val, c_rsrc, elem_off)
 
     @flyc.jit
@@ -344,12 +355,13 @@ def create_wmma_gemm_module(
         arg_a: fx.Tensor,
         arg_bt: fx.Tensor,
         stream: fx.Stream,
+        sr_seed: fx.Int32 = 0,
     ):
         c1 = 1
         total_blocks = grid_m * grid_n
         bk = THREADS_PER_BLOCK
 
-        launcher = wmma_gemm_kernel(arg_c, arg_a, arg_bt)
+        launcher = wmma_gemm_kernel(arg_c, arg_a, arg_bt, sr_seed)
         launcher.launch(
             grid=(total_blocks, c1, c1),
             block=(bk, c1, c1),
