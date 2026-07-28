@@ -916,7 +916,9 @@ def _init_dualwave_thread_mapping(ctx):
     # head's q-blocks scatter across all XCDs and each re-streams its K/V. Re-derive
     # (head, q_block) with head as the slow axis to keep them on one XCD. Bijective,
     # so output is bit-identical; split-K's third grid axis would not survive it.
-    if const_expr(not traits.SPLITK and traits.NUM_HEADS_Q % NUM_XCD_GFX950 == 0):
+    # Non-causal only: under a causal mask q-block i does work proportional to i, so
+    # making q_block the fast axis clusters unequal work and costs 7% (measured).
+    if const_expr(not traits.SPLITK and not traits.CAUSAL and traits.NUM_HEADS_Q % NUM_XCD_GFX950 == 0):
         num_q_blocks = fx.Index(gpu.grid_dim.y)
         linear_wg = fx.Index(gpu.block_idx.x) + fx.Index(gpu.block_idx.y) * fx.Index(traits.NUM_HEADS_Q)
         ctx.h_idx = linear_wg // num_q_blocks
