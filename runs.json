@@ -1,11 +1,26 @@
 {
  "schema": 1,
- "updated": "2026-07-28T19:08:12Z",
+ "updated": "2026-07-28T19:35:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 30390005545,
+   "run_id": 30392295163,
    "pr": 823,
+   "commit": "aeb331a719041c7f41e4e7417f815705c0213a8b",
+   "branch": "add-gelu-tanh-moe-stage1",
+   "event": "pull_request",
+   "title": "[MoE] Add gelu_tanh activation to MoE stage1 GEMM kernels",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30392295163",
+   "created_at": "2026-07-28T19:31:13Z",
+   "updated_at": "2026-07-28T19:32:16Z",
+   "actor": "jonahbernard",
+   "jobs": []
+  },
+  {
+   "run_id": 30390005545,
+   "pr": null,
    "commit": "bc0e0294de05a213f4ed60cf48eb8672cad350ef",
    "branch": "add-gelu-tanh-moe-stage1",
    "event": "pull_request",
@@ -25,19 +40,19 @@
    "branch": "perf/dualwave-xcd-head-first-mapping",
    "event": "pull_request",
    "title": "perf(attention): keep a head's Q-blocks on one XCD in the dualwave mapping",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30388619215",
    "created_at": "2026-07-28T18:42:02Z",
-   "updated_at": "2026-07-28T18:49:44Z",
+   "updated_at": "2026-07-28T19:07:31Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-28T18:49:44Z",
+     "started_at": "2026-07-28T19:07:31Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30388619215/job/90376122524"
     },
@@ -2145,49 +2160,6 @@
      "started_at": "2026-07-26T09:26:42Z",
      "completed_at": "2026-07-26T10:41:47Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30189704473/job/89761824454"
-    }
-   ]
-  },
-  {
-   "run_id": 30154818975,
-   "pr": null,
-   "commit": "bba0761a3ef21b329a94792bc6dd43e194244f75",
-   "branch": "ci/mlir-cache-smoke-test",
-   "event": "pull_request",
-   "title": "[CI] Smoke test shared MLIR cache workflow",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30154818975",
-   "created_at": "2026-07-25T10:38:20Z",
-   "updated_at": "2026-07-25T14:50:28Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-25T13:03:40Z",
-     "completed_at": "2026-07-25T14:50:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30154818975/job/89671349942"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-25T10:43:18Z",
-     "completed_at": "2026-07-25T10:59:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30154818975/job/89671349953"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-25T10:43:07Z",
-     "completed_at": "2026-07-25T12:00:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30154818975/job/89671349954"
     }
    ]
   }
