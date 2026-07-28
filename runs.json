@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-28T00:54:14Z",
+ "updated": "2026-07-28T02:46:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,38 +10,38 @@
    "branch": "fix/898-lds-offset-merge",
    "event": "pull_request",
    "title": "[Dialect][Perf] Don't merge mixed static/runtime offsets on LDS pointers",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30314824246",
    "created_at": "2026-07-27T23:39:11Z",
-   "updated_at": "2026-07-28T00:47:08Z",
+   "updated_at": "2026-07-28T02:44:37Z",
    "actor": "Arist12",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-28T00:47:50Z",
-     "completed_at": null,
+     "completed_at": "2026-07-28T01:55:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30314824246/job/90148735989"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-28T00:49:05Z",
-     "completed_at": null,
+     "completed_at": "2026-07-28T02:44:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30314824246/job/90148735992"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-28T00:47:08Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-28T01:25:08Z",
+     "completed_at": "2026-07-28T02:39:56Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30314824246/job/90148736000"
     }
    ]
@@ -154,30 +154,30 @@
    "branch": "main",
    "event": "push",
    "title": "[perf]optimize flash attention fp8 for gfx950 (#905)",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278396093",
    "created_at": "2026-07-27T15:06:44Z",
-   "updated_at": "2026-07-27T17:01:20Z",
+   "updated_at": "2026-07-28T01:55:42Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-27T16:12:11Z",
-     "completed_at": "2026-07-27T17:01:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278396093/job/90019410865"
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-28T01:55:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278396093/job/90154089009"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-27T15:36:59Z",
-     "completed_at": "2026-07-27T16:21:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278396093/job/90019410873"
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-28T01:25:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278396093/job/90154089011"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -186,7 +186,7 @@
      "conclusion": "success",
      "started_at": "2026-07-27T15:13:38Z",
      "completed_at": "2026-07-27T16:55:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278396093/job/90019411184"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278396093/job/90154089420"
     }
    ]
   },
