@@ -361,7 +361,7 @@ class Numeric(metaclass=NumericMeta):
         if rounding_mode is not None:
             src = type(self)
             if not isinstance(rounding_mode, arith.RoundingMode):
-                raise TypeError(f"rounding_mode must be an arith.RoundingMode, got {type(rounding_mode).__name__}")
+                raise TypeError(f"rounding_mode must be an RoundingMode, got {type(rounding_mode).__name__}")
             if not (isinstance(dtype, type) and issubclass(dtype, Numeric)):
                 raise TypeError(f"rounding_mode requires a Numeric target type, got {dtype!r}")
             if not (src.is_float and dtype.is_float):

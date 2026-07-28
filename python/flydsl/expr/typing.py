@@ -1524,7 +1524,7 @@ class Vector(ArithValue):
         dst_float = getattr(dtype, "is_float", False)
         if rounding_mode is not None:
             if not isinstance(rounding_mode, arith.RoundingMode):
-                raise TypeError(f"rounding_mode must be an arith.RoundingMode, got {type(rounding_mode).__name__}")
+                raise TypeError(f"rounding_mode must be an RoundingMode, got {type(rounding_mode).__name__}")
             if not (src_float and dst_float):
                 raise TypeError(
                     f"rounding_mode is only supported for float-to-float casts, "

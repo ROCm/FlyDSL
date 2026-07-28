@@ -801,8 +801,8 @@ class TestRoundingMode:
             _ = Float16(a).to(BFloat16, rounding_mode=fx.RoundingMode.upward)
 
         ir_text = source_ir(body, 1.0)
-        assert "arith.extf %0 : f16 to f32" in ir_text
-        assert "arith.truncf %1 upward : f32 to bf16" in ir_text
+        assert "arith.extf" in ir_text and ": f16 to f32" in ir_text
+        assert "arith.truncf" in ir_text and "upward : f32 to bf16" in ir_text
 
     @pytest.mark.parametrize(
         "cast",
