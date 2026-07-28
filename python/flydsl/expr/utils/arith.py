@@ -400,6 +400,8 @@ class ArithValue(ir.Value):
         super().__init__(v)
         elem_ty = element_type(self.type)
         self.is_float = not is_integer_like_type(elem_ty)
+        # ``i1`` has no sign bit to spare, so reading it as signed makes ``true`` compare
+        # as -1 and inverts every ordering. Width-1 integers are always unsigned {0, 1}.
         self.signed = signed and elem_ty.width > 1
 
     def with_signedness(self, signed):

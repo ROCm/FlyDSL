@@ -24,6 +24,28 @@ from .utils.arith import (
 )
 
 
+def _ssa_value_ir_type(ir_type):
+    """Value type produced by loading the unsigned storage element type *ir_type*.
+
+    An unsigned integer storage type spells its logical signedness (``ui8``), but the SSA
+    value read out of it is signless, since ``arith`` accepts only signless integers. This
+    is the inverse of :attr:`NumericMeta.storage_ir_type`. Vectors are mapped element-wise,
+    preserving scalable dimensions; everything else is returned unchanged.
+
+    ``siN`` is deliberately left alone: no DSL dtype spells storage that way, so mapping it
+    here would silently accept an input the type system never produces. The C++
+    ``mlir::fly::toSSAValueType`` applies the same rule on the dialect side.
+    """
+    if isinstance(ir_type, ir.VectorType):
+        elem = _ssa_value_ir_type(ir_type.element_type)
+        if elem == ir_type.element_type:
+            return ir_type
+        return ir.VectorType.get(list(ir_type.shape), elem, scalable=list(ir_type.scalable_dims))
+    if isinstance(ir_type, ir.IntegerType) and ir_type.is_unsigned:
+        return ir.IntegerType.get_signless(ir_type.width)
+    return ir_type
+
+
 def _infer_np_dtype(width, signed, name):
     if signed is not None:
         if width == 1:
@@ -285,6 +307,28 @@ class NumericMeta(type):
         if cls._ir_type is not None:
             return cls._ir_type()
         return None
+
+    @property
+    def storage_ir_type(cls):
+        """MLIR type to use when this dtype is a *storage* element type.
+
+        A signless ``i8`` cannot say whether the bytes behind it are ``uint8`` or
+        ``int8``, so unsigned integers carry their signedness in the element type of
+        the storage descriptor (``!fly.memref<ui8, ...>``, ``!fly.ptr<ui8, ...>``).
+        That is what lets :attr:`Tensor.element_type` reconstruct ``Uint8`` rather
+        than ``Int8`` after a round trip through IR.
+
+        SSA values stay signless (:attr:`ir_type`): ``arith`` only accepts signless
+        integers and encodes signedness in the opcode (``divui`` vs ``divsi``).
+        Signed integers keep the signless spelling as their canonical storage form,
+        so existing IR is unchanged. Dtypes whose ``ir_type`` is not a builtin integer
+        keep it as well -- notably :class:`Index`, which is flagged unsigned but is
+        ``index``, a type that has no signed and unsigned spellings.
+        """
+        ir_type = cls.ir_type
+        if cls.signed is False and isinstance(ir_type, ir.IntegerType):
+            return ir.IntegerType.get_unsigned(cls.width)
+        return ir_type
 
     @property
     def is_integer(cls) -> bool:

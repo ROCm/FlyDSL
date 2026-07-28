@@ -539,7 +539,11 @@ def make_fragment_layout_like(tensor):
 
 @dsl_loc_tracing
 def make_fragment_like(tensor, dtype=None):
-    if hasattr(dtype, "ir_type"):
+    # A Numeric dtype becomes the fragment's *storage* element type, which keeps unsigned
+    # signedness; other dtype-like objects keep the previous ``ir_type`` contract.
+    if hasattr(dtype, "storage_ir_type"):
+        dtype = dtype.storage_ir_type
+    elif hasattr(dtype, "ir_type"):
         dtype = dtype.ir_type
     return fly.make_fragment_like(tensor, dtype=dtype)
 
@@ -1203,18 +1207,39 @@ def apply_swizzle(ptr, swizzle):
 
 
 @dsl_loc_tracing
-@dsl_wrap_result
 def ptr_load(ptr, result_type=None):
     """Load one value (scalar or vector) from *ptr*; dtype defaults to ptr's element type.
 
     Examples:
         v = ptr_load(ptr)
     """
+    from .numeric import Numeric, _ssa_value_ir_type
+    from .typing import Vector, as_dsl_value
+
     if result_type is None:
         result_type = ptr.element_type
+    dtype = None
     if not isinstance(result_type, ir.Type):
+        # The loaded SSA value is signless, so wrap it as the dtype we asked for instead of
+        # re-deriving one from the result type -- otherwise ``Uint8`` comes back as ``Int8``.
+        # Other dtype-like objects only promise ``ir_type``, so they keep dispatching on it.
+        if isinstance(result_type, type) and issubclass(result_type, Numeric):
+            dtype = result_type
         result_type = result_type.ir_type
-    return fly.ptr_load(result_type, ptr)
+    else:
+        # A raw MLIR type may still spell its signedness (``ui8``, ``vector<4xui8>``), because
+        # that is how a storage element type is written. Take the dtype it names, but load it
+        # as the signless SSA form -- ``arith`` accepts nothing else.
+        signless = _ssa_value_ir_type(result_type)
+        if signless != result_type:
+            elem = result_type.element_type if isinstance(result_type, ir.VectorType) else result_type
+            dtype = Numeric.from_ir_type(elem)
+            result_type = signless
+
+    value = fly.ptr_load(result_type, ptr)
+    if dtype is not None and isinstance(result_type, ir.VectorType):
+        return Vector(value, dtype=dtype)
+    return as_dsl_value(value, dtype)
 
 
 @dsl_loc_tracing
@@ -1244,7 +1269,7 @@ def recast_iter(result_type, src):
 
     if isinstance(result_type, type):
         if issubclass(result_type, Numeric):
-            result_type = result_type.ir_type
+            result_type = result_type.storage_ir_type
         else:
             raise TypeError(
                 f"result_type must be a Numeric subclass or a fly Pointer, got unsupported class {result_type!r}"
@@ -1273,16 +1298,21 @@ def memref_store_vec(vector, memref):
 
 
 @dsl_loc_tracing
-@dsl_wrap_result
 def memref_load(memref, indices):
+    from .typing import as_dsl_value
+
+    # As in :func:`ptr_load`: the loaded value is signless, so the memref's own element type
+    # is what says whether it is unsigned. A CoordTensor has none, so it keeps dispatching
+    # on the result type.
+    dtype = None if isinstance(memref.type, CoordTensorType) else memref.dtype
     if isinstance(indices, ir.Value):
         if not _is_int_tuple_value(indices):
             indices = make_int_tuple(indices)
-        return fly.memref_load(memref, indices)
+        return as_dsl_value(fly.memref_load(memref, indices), dtype)
 
     indices = make_int_tuple(indices)
     _check_profile(is_profile_weakly_congruent, indices, memref)
-    return fly.memref_load(memref, indices)
+    return as_dsl_value(fly.memref_load(memref, indices), dtype)
 
 
 @dsl_loc_tracing

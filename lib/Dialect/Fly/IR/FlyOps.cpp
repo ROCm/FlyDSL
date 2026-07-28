@@ -10,6 +10,7 @@
 #include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
 #include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
 #include "flydsl/Dialect/Fly/Utils/TiledOpUtils.h"
+#include "flydsl/Dialect/Fly/Utils/TypeUtils.h"
 
 #include <mlir/IR/Attributes.h>
 #include <mlir/IR/BuiltinAttributes.h>
@@ -1913,7 +1914,8 @@ FLY_INFER_RETURN_TYPES(DecompositionOp) {
 
 FLY_INFER_RETURN_TYPES(MemRefLoadOp) {
   if (auto memrefTy = dyn_cast<MemRefType>(operands[0].getType())) {
-    inferredReturnTypes.push_back(memrefTy.getElemTy());
+    // Signedness lives in the storage element type; the loaded SSA value is signless.
+    inferredReturnTypes.push_back(toSSAValueType(memrefTy.getElemTy()));
     return success();
   }
   if (auto coordTensorTy = dyn_cast<CoordTensorType>(operands[0].getType())) {
@@ -1989,7 +1991,7 @@ FLY_INFER_RETURN_TYPES(MemRefLoadVecOp) {
         location, "MemRefLoadVecOp: layout size must be static and leaf int, got ", size);
 
   inferredReturnTypes.push_back(
-      VectorType::get({size.getLeafAsInt().getValue()}, memrefTy.getElemTy()));
+      VectorType::get({size.getLeafAsInt().getValue()}, toSSAValueType(memrefTy.getElemTy())));
   return success();
 }
 

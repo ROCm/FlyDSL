@@ -6,6 +6,7 @@
 
 #include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
 #include "flydsl/Dialect/Fly/Utils/PointerUtils.h"
+#include "flydsl/Dialect/Fly/Utils/TypeUtils.h"
 
 namespace mlir::fly {
 
@@ -34,7 +35,9 @@ Type projectToLLVMCompatibleElemTy(Type elemTy) {
     if (width < 16)
       return IntegerType::get(elemTy.getContext(), width);
   }
-  return elemTy;
+  // A storage element type may carry logical signedness (`ui8`); LLVM and `arith` only
+  // know signless integers, so drop it once we are past the DSL type system.
+  return toSSAValueType(elemTy);
 }
 
 Type RegMem2SSAType(fly::MemRefType memRefTy, bool llvmCompatibleType) {
