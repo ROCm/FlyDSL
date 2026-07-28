@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-28T02:46:45Z",
+ "updated": "2026-07-28T03:12:58Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -154,29 +154,29 @@
    "branch": "main",
    "event": "push",
    "title": "[perf]optimize flash attention fp8 for gfx950 (#905)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278396093",
    "created_at": "2026-07-27T15:06:44Z",
-   "updated_at": "2026-07-28T01:55:42Z",
+   "updated_at": "2026-07-28T03:11:27Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-28T01:55:42Z",
-     "completed_at": null,
+     "completed_at": "2026-07-28T03:11:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278396093/job/90154089009"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-28T01:25:20Z",
-     "completed_at": null,
+     "completed_at": "2026-07-28T02:46:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278396093/job/90154089011"
     },
     {
