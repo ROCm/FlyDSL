@@ -67,14 +67,14 @@ def s_waitcnt(bitfield=None, *, vmcnt=None, lgkmcnt=None, expcnt=None):
         return mlir_rocdl.s_waitcnt(normalize_s_waitcnt_field("bitfield", bitfield, 0xFFFF))
 
     arch = get_rocm_arch()
-    if arch.startswith("gfx9"):  # 942, 950
+    if arch.startswith("gfx942", "gfx950"):
         return cdna3.s_waitcnt(vmcnt=vmcnt, lgkmcnt=lgkmcnt, expcnt=expcnt)
     if arch.startswith("gfx11"):
         return rdna3.s_waitcnt(vmcnt=vmcnt, lgkmcnt=lgkmcnt, expcnt=expcnt)
     if arch.startswith("gfx120"):
         return rdna4.s_waitcnt(vmcnt=vmcnt, lgkmcnt=lgkmcnt, expcnt=expcnt)
     raise ValueError(
-        f"s_waitcnt is not supported on target arch {arch!r}; supported: gfx942 (CDNA3), gfx950 (CDNA4), gfx11xx (RDNA3 / RDNA3.5), and gfx1200 (RDNA4). "
+        f"s_waitcnt is not supported on target arch {arch!r}; supported: gfx942 (CDNA3), gfx950 (CDNA4), gfx11xx (RDNA3 / RDNA3.5), and gfx120x (RDNA4). "
     )
 
 
@@ -165,7 +165,7 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
     arch = get_rocm_arch() or ""
     if arch.startswith("gfx11"):
         return MmaOpGFX11_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc, **kwargs)
-    if arch.startswith("gfx125"):
+    if arch.startswith("gfx12"):
         return MmaOpGFX1250_WMMAType.get(
             m,
             n,

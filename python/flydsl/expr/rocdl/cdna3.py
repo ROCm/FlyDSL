@@ -17,4 +17,4 @@ def s_waitcnt(vmcnt=None, lgkmcnt=None, expcnt=None):
     expcnt = normalize_s_waitcnt_field("expcnt", expcnt, 7)
     lgkmcnt = normalize_s_waitcnt_field("lgkmcnt", lgkmcnt, 15)
     encoded_vmcnt = (vmcnt & 0xF) | ((vmcnt & 0x30) << 10)
-    mlir_rocdl.s_waitcnt(encoded_vmcnt | (lgkmcnt << 8) | (expcnt << 4))
+    return mlir_rocdl.s_waitcnt(encoded_vmcnt | (lgkmcnt << 8) | (expcnt << 4))

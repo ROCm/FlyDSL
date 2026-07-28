@@ -17,4 +17,4 @@ def s_waitcnt(vmcnt=None, lgkmcnt=None, expcnt=None):
     vmcnt = normalize_s_waitcnt_field("vmcnt", vmcnt, 63)
     lgkmcnt = normalize_s_waitcnt_field("lgkmcnt", lgkmcnt, 63)
     expcnt = normalize_s_waitcnt_field("expcnt", expcnt, 7)
-    mlir_rocdl.s_waitcnt((vmcnt << 10) | (lgkmcnt << 4) | expcnt)
+    return mlir_rocdl.s_waitcnt((vmcnt << 10) | (lgkmcnt << 4) | expcnt)
