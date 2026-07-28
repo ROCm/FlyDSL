@@ -10,7 +10,7 @@ from inspect import isclass
 from typing import Any, Callable, List, Type, get_origin, overload
 
 from .._mlir import ir
-from .._mlir.dialects import gpu, vector
+from .._mlir.dialects import arith, gpu, vector
 from .meta import dsl_loc_tracing
 from .numeric import (
     BFloat16,
@@ -1510,8 +1510,10 @@ class Vector(ArithValue):
             return cls(values[0], exemplar._shape, exemplar._dtype)
         return cls(values[0])
 
-    def to(self, dtype: Type[Numeric]) -> "Vector":
+    def to(self, dtype: Type[Numeric], *, rounding_mode=None) -> "Vector":
         if dtype is ir.Value:
+            if rounding_mode is not None:
+                raise TypeError("rounding_mode is only supported for float-to-float casts")
             return self
         if not isclass(dtype) or not issubclass(dtype, Numeric):
             raise TypeError(f"dtype must be a Numeric type, got {type(dtype)}")
@@ -1520,8 +1522,17 @@ class Vector(ArithValue):
             return self
         src_float = getattr(src_dtype, "is_float", False)
         dst_float = getattr(dtype, "is_float", False)
+        if rounding_mode is not None:
+            if not isinstance(rounding_mode, arith.RoundingMode):
+                raise TypeError(f"rounding_mode must be an arith.RoundingMode, got {type(rounding_mode).__name__}")
+            if not (src_float and dst_float):
+                raise TypeError(
+                    f"rounding_mode is only supported for float-to-float casts, "
+                    f"got {src_dtype.__name__} -> {dtype.__name__}"
+                )
+            rounding_mode = rounding_mode if dtype.width <= src_dtype.width else None
         if src_float and dst_float:
-            res = fp_to_fp(self, dtype.ir_type)
+            res = fp_to_fp(self, dtype.ir_type, rounding_mode=rounding_mode)
         elif src_float:
             res = fp_to_int(self, dtype.signed, dtype.ir_type)
         elif dst_float:

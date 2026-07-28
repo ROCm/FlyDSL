@@ -726,6 +726,20 @@ class TestToConversion:
 
         assert "arith.extsi" in source_ir(body)
 
+    def test_same_width_float_to_float_goes_through_f32(self):
+        """``arith`` has no op for a same-width float cast: ``truncf`` needs a
+        strictly narrower and ``extf`` a strictly wider result type. f32 holds
+        every sub-32-bit float value exactly, so the detour rounds once."""
+
+        def body():
+            result = vec(Float16).to(BFloat16)
+            assert result.dtype is BFloat16
+            assert result.shape == (8,)
+
+        ir_text = source_ir(body)
+        assert "arith.extf" in ir_text and "vector<8xf32>" in ir_text
+        assert "arith.truncf" in ir_text
+
     def test_to_ir_value_returns_self(self):
         """to(ir.Value) should return self unchanged."""
 
@@ -740,6 +754,76 @@ class TestToConversion:
             result = vec(Float32).to(BFloat16)
             assert result.shape == (8,)
             assert result.dtype is BFloat16
+
+        run(body)
+
+
+class TestRoundingMode:
+    """``x.to(dtype, rounding_mode=...)`` — narrowing float-to-float casts only
+    (spec: ## Rounding-mode control)."""
+
+    def test_scalar_narrowing_carries_the_attribute(self):
+        def body(a: Float32):
+            _ = a.to(Float16, rounding_mode=fx.RoundingMode.upward)
+
+        assert "arith.truncf %arg0 upward : f32 to f16" in source_ir(body, 1.0)
+
+    def test_vector_narrowing_carries_the_attribute(self):
+        def body():
+            _ = vec(Float32).to(Float16, rounding_mode=fx.RoundingMode.to_nearest_away)
+
+        assert "to_nearest_away : vector<8xf32> to vector<8xf16>" in source_ir(body)
+
+    def test_omitted_mode_emits_no_attribute(self):
+        def body(a: Float32):
+            _ = a.to(Float16)
+
+        assert "arith.truncf %arg0 : f32 to f16" in source_ir(body, 1.0)
+
+    def test_same_type_is_a_noop(self):
+        def body(a: Float32):
+            assert a.to(Float32, rounding_mode=fx.RoundingMode.downward) is a
+
+        run(body, 1.0)
+
+    def test_widening_is_exact_so_the_mode_is_dropped(self):
+        def body(a: Float32):
+            _ = Float16(a).to(Float32, rounding_mode=fx.RoundingMode.downward)
+
+        ir_text = source_ir(body, 1.0)
+        assert "arith.extf" in ir_text
+        assert "downward" not in ir_text
+
+    def test_same_width_cast_rounds_on_the_truncf_step(self):
+        """The f32 detour is exact, so the mode belongs to the second step."""
+
+        def body(a: Float32):
+            _ = Float16(a).to(BFloat16, rounding_mode=fx.RoundingMode.upward)
+
+        ir_text = source_ir(body, 1.0)
+        assert "arith.extf %0 : f16 to f32" in ir_text
+        assert "arith.truncf %1 upward : f32 to bf16" in ir_text
+
+    @pytest.mark.parametrize(
+        "cast",
+        [
+            lambda a: a.to(Int32, rounding_mode=fx.RoundingMode.upward),
+            lambda a: Int32(a).to(Float32, rounding_mode=fx.RoundingMode.upward),
+            lambda a: vec(Float32).to(Int32, rounding_mode=fx.RoundingMode.upward),
+        ],
+        ids=["float_to_int", "int_to_float", "vector_float_to_int"],
+    )
+    def test_non_float_cast_is_rejected(self, cast):
+        def body(a: Float32):
+            with pytest.raises(TypeError, match="float-to-float"):
+                cast(a)
+
+        run(body, 1.0)
+
+    def test_compile_time_value_is_rejected(self):
+        def body():
+            with pytest.raises(ValueError, match="run-time value"):
+                _ = Float32(1.5).to(Float16, rounding_mode=fx.RoundingMode.upward)
 
         run(body)
 
