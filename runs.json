@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-28T18:38:30Z",
+ "updated": "2026-07-28T18:42:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -53,11 +53,11 @@
    "branch": "perf/dualwave-xcd-head-first-mapping",
    "event": "pull_request",
    "title": "perf(attention): keep a head's Q-blocks on one XCD in the dualwave mapping",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30377335890",
    "created_at": "2026-07-28T16:15:00Z",
-   "updated_at": "2026-07-28T17:19:27Z",
+   "updated_at": "2026-07-28T18:37:36Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
@@ -81,10 +81,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-28T16:54:39Z",
-     "completed_at": null,
+     "completed_at": "2026-07-28T18:37:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30377335890/job/90337218006"
     }
    ]
