@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-07-28T08:37:45Z",
+ "updated": "2026-07-28T09:27:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30346434612,
+   "pr": 916,
+   "commit": "db3d1687ef7cdd997addbba78f69e1bb97498648",
+   "branch": "pr/enh-cast-rounding-mode",
+   "event": "pull_request",
+   "title": "[Enh] Add rounding-mode control for float-to-float casts",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30346434612",
+   "created_at": "2026-07-28T09:24:10Z",
+   "updated_at": "2026-07-28T09:25:03Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 30344340407,
+   "pr": 916,
+   "commit": "d920d565d88535f458577cfac31237c76fe93010",
+   "branch": "pr/enh-cast-rounding-mode",
+   "event": "pull_request",
+   "title": "[Enh] Add rounding-mode control for float-to-float casts",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30344340407",
+   "created_at": "2026-07-28T08:54:57Z",
+   "updated_at": "2026-07-28T09:24:38Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 30341663905,
    "pr": 848,
@@ -38,10 +68,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-28T08:18:53Z",
-     "completed_at": null,
+     "completed_at": "2026-07-28T09:16:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30341663905/job/90218965543"
     }
    ]
@@ -115,10 +145,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-28T07:36:16Z",
-     "completed_at": null,
+     "completed_at": "2026-07-28T08:46:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30337904345/job/90207406065"
     },
     {
@@ -2076,92 +2106,6 @@
    "updated_at": "2026-07-24T19:57:08Z",
    "actor": "amd-wsung102",
    "jobs": []
-  },
-  {
-   "run_id": 30117815364,
-   "pr": null,
-   "commit": "ca10e438f6b4234a7245138407f4b2eb4797869e",
-   "branch": "feat/autotune-offline-configs",
-   "event": "pull_request",
-   "title": "[3/5] autotune: add offline config artifacts (#770)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30117815364",
-   "created_at": "2026-07-24T18:40:03Z",
-   "updated_at": "2026-07-24T20:38:19Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T19:22:41Z",
-     "completed_at": "2026-07-24T20:06:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30117815364/job/89571463744"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T19:22:56Z",
-     "completed_at": "2026-07-24T20:38:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30117815364/job/89571463762"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T19:22:50Z",
-     "completed_at": "2026-07-24T20:02:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30117815364/job/89571463777"
-    }
-   ]
-  },
-  {
-   "run_id": 30113835020,
-   "pr": 874,
-   "commit": "11629cc74fa56c0675693e77a53361253a38e305",
-   "branch": "xudoyuan/dyn-cf-list-carry",
-   "event": "pull_request",
-   "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30113835020",
-   "created_at": "2026-07-24T17:39:10Z",
-   "updated_at": "2026-07-24T18:51:03Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T17:43:08Z",
-     "completed_at": "2026-07-24T18:31:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30113835020/job/89550350579"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T17:43:20Z",
-     "completed_at": "2026-07-24T18:51:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30113835020/job/89550350605"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T17:43:20Z",
-     "completed_at": "2026-07-24T18:46:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30113835020/job/89550350632"
-    }
-   ]
   }
  ]
 }
