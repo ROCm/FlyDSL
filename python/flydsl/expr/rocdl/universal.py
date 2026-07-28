@@ -7,6 +7,7 @@ from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import (
     MmaOpGFX1250_WMMAType,
 )
 from ..._mlir.dialects import fly_rocdl
+from ..._mlir.dialects import rocdl as mlir_rocdl
 from ..._mlir.dialects.fly import AtomicOp, PointerType
 from ..._mlir.dialects.fly_rocdl import (
     CopyOpCDNA3BufferAtomicType,
@@ -16,6 +17,7 @@ from ..._mlir.dialects.fly_rocdl import (
     TargetAddressSpace,
 )
 from ..._mlir.extras import types as T
+from ...runtime.device import get_rocm_arch
 from ..meta import dsl_loc_tracing
 from ..primitive import cosize, get_iter, get_layout, get_scalar, make_ptr, make_view
 from ..typing import (
@@ -28,6 +30,52 @@ from ..typing import (
     is_generic_address_space,
     is_target_address_space,
 )
+from . import cdna3, rdna3, rdna4
+from .utils import normalize_s_waitcnt_field
+
+__all__ = [
+    "s_waitcnt",
+    "BufferCopy",
+    "BufferCopy8b",
+    "BufferCopy16b",
+    "BufferCopy32b",
+    "BufferCopy64b",
+    "BufferCopy128b",
+    "BufferCopyLDS",
+    "BufferCopyLDS32b",
+    "BufferCopyLDS64b",
+    "BufferCopyLDS128b",
+    "BufferAtomic",
+    "BufferAtomicAdd",
+    "BufferAtomicMax",
+    "BufferAtomicMin",
+    "BufferAtomicPkAdd",
+    "MFMA",
+    "WMMA",
+    "make_buffer_ptr",
+    "make_buffer_tensor",
+    "get_buffer_rsrc",
+]
+
+
+@dsl_loc_tracing
+def s_waitcnt(bitfield=None, *, vmcnt=None, lgkmcnt=None, expcnt=None):
+    """Wait for named counters, or emit a legacy raw wait-counter bitfield."""
+    if bitfield is not None:
+        if vmcnt is not None or lgkmcnt is not None or expcnt is not None:
+            raise TypeError("legacy raw s_waitcnt bitfield cannot be combined with non-None keyword arguments")
+        return mlir_rocdl.s_waitcnt(normalize_s_waitcnt_field("bitfield", bitfield, 0xFFFF))
+
+    arch = get_rocm_arch()
+    if arch.startswith("gfx9"):  # 942, 950
+        return cdna3.s_waitcnt(vmcnt=vmcnt, lgkmcnt=lgkmcnt, expcnt=expcnt)
+    if arch.startswith("gfx11"):
+        return rdna3.s_waitcnt(vmcnt=vmcnt, lgkmcnt=lgkmcnt, expcnt=expcnt)
+    if arch.startswith("gfx120"):
+        return rdna4.s_waitcnt(vmcnt=vmcnt, lgkmcnt=lgkmcnt, expcnt=expcnt)
+    raise ValueError(
+        f"s_waitcnt is not supported on target arch {arch!r}; supported: gfx942 (CDNA3), gfx950 (CDNA4), gfx11xx (RDNA3 / RDNA3.5), and gfx1200 (RDNA4). "
+    )
 
 
 def BufferCopy(bit_size, cache_modifier=0):
@@ -113,12 +161,11 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
     #   * RDNA4 (gfx12xx, e.g. gfx1201) and gfx1250 use the new v8-operand ABI;
     #     both route through MmaOpGFX1250_WMMAType via the gfx12 prefix below.
     #     (gfx1250 is its own arch, not RDNA4, but shares this WMMA atom.)
-    from ...runtime.device import get_rocm_arch
 
-    arch = (get_rocm_arch() or "").lower()
+    arch = get_rocm_arch() or ""
     if arch.startswith("gfx11"):
         return MmaOpGFX11_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc, **kwargs)
-    if arch.startswith("gfx12"):
+    if arch.startswith("gfx125"):
         return MmaOpGFX1250_WMMAType.get(
             m,
             n,
@@ -153,7 +200,7 @@ def make_buffer_ptr(ptr: Pointer, num_records_bytes=None):
         # Coerce to i64: ROCDL make.buffer.rsrc requires an i64 num_records operand.
         num_records_bytes = Int64(num_records_bytes)
 
-    from ...runtime.device import get_rocm_arch, is_rdna_arch
+    from ...runtime.device import is_rdna_arch
 
     arch = get_rocm_arch()
     flags = (7 << 12) | (4 << 15)
