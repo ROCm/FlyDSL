@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-07-28T16:02:48Z",
+ "updated": "2026-07-28T16:07:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30376530274,
+   "pr": null,
+   "commit": "9a5c08e77355f915ad35965bea8ea88f0af33bf3",
+   "branch": "main",
+   "event": "push",
+   "title": "[Enh] Add rounding-mode control for float-to-float casts (#916)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30376530274",
+   "created_at": "2026-07-28T16:04:53Z",
+   "updated_at": "2026-07-28T16:05:50Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 30376455924,
+   "pr": null,
+   "commit": "592d568a125f45562cb2315cbf3aeea132e546ff",
+   "branch": "main",
+   "event": "push",
+   "title": "[ROCDL] Add arch-aware universal s_waitcnt (#915)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30376455924",
+   "created_at": "2026-07-28T16:04:00Z",
+   "updated_at": "2026-07-28T16:05:09Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 30375504656,
    "pr": 919,
@@ -164,7 +194,7 @@
   },
   {
    "run_id": 30344340407,
-   "pr": 916,
+   "pr": null,
    "commit": "d920d565d88535f458577cfac31237c76fe93010",
    "branch": "pr/enh-cast-rounding-mode",
    "event": "pull_request",
@@ -394,7 +424,7 @@
   },
   {
    "run_id": 30327993228,
-   "pr": 915,
+   "pr": null,
    "commit": "c865ab91ff8d728b15d72b9b957791398dea354b",
    "branch": "pr/enh-arch-aware-waitcnt",
    "event": "pull_request",
@@ -437,7 +467,7 @@
   },
   {
    "run_id": 30327511063,
-   "pr": 915,
+   "pr": null,
    "commit": "7fcfa698c0e63ee6a00313e2c6b25d737612ee23",
    "branch": "pr/enh-arch-aware-waitcnt",
    "event": "pull_request",
@@ -2131,64 +2161,6 @@
    "created_at": "2026-07-24T20:09:32Z",
    "updated_at": "2026-07-24T20:19:36Z",
    "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 30122482034,
-   "pr": null,
-   "commit": "5bac48f7f314c5c4c554ee6af25fd4e410b2f83a",
-   "branch": "moe_sorting_optimization",
-   "event": "pull_request",
-   "title": "Add Optimized MoE Routing Path",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30122482034",
-   "created_at": "2026-07-24T20:02:03Z",
-   "updated_at": "2026-07-24T22:17:21Z",
-   "actor": "amd-wsung102",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T20:07:01Z",
-     "completed_at": "2026-07-24T21:06:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30122482034/job/89579042811"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T20:07:10Z",
-     "completed_at": "2026-07-24T20:49:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30122482034/job/89579042850"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T20:20:51Z",
-     "completed_at": "2026-07-24T22:17:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30122482034/job/89579042875"
-    }
-   ]
-  },
-  {
-   "run_id": 30122026550,
-   "pr": null,
-   "commit": "f80da765e8de042d17f430f1005a1a9531b82f30",
-   "branch": "moe_sorting_optimization",
-   "event": "pull_request",
-   "title": "Add Optimized MoE Routing Path",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30122026550",
-   "created_at": "2026-07-24T19:56:09Z",
-   "updated_at": "2026-07-24T19:57:08Z",
-   "actor": "amd-wsung102",
    "jobs": []
   }
  ]
