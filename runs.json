@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-07-28T12:59:22Z",
+ "updated": "2026-07-28T13:48:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30363444768,
+   "pr": 894,
+   "commit": "a31b058f4a7f878877a1ce5f3bc2c57a2a40797d",
+   "branch": "main",
+   "event": "pull_request",
+   "title": "[Kernel][MI350] Add 8 wave GQA sliding-window attention kernel",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30363444768",
+   "created_at": "2026-07-28T13:25:56Z",
+   "updated_at": "2026-07-28T13:45:58Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
+  {
+   "run_id": 30363367823,
+   "pr": null,
+   "commit": "b51e1a9ddc7226c22d75c724242b1b7b9429d18e",
+   "branch": "main",
+   "event": "pull_request",
+   "title": "[Kernel][MI350] Add 8 wave GQA sliding-window attention kernel",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30363367823",
+   "created_at": "2026-07-28T13:24:59Z",
+   "updated_at": "2026-07-28T13:25:58Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
   {
    "run_id": 30360666241,
    "pr": 918,
@@ -437,7 +467,7 @@
   },
   {
    "run_id": 30283974617,
-   "pr": 894,
+   "pr": null,
    "commit": "a036cd3af3214c3eab0a0ef89a73e9e91e7473ca",
    "branch": "main",
    "event": "pull_request",
@@ -2130,92 +2160,6 @@
      "started_at": "2026-07-24T19:22:50Z",
      "completed_at": "2026-07-24T20:02:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30117815364/job/89571463777"
-    }
-   ]
-  },
-  {
-   "run_id": 30113835020,
-   "pr": 874,
-   "commit": "11629cc74fa56c0675693e77a53361253a38e305",
-   "branch": "xudoyuan/dyn-cf-list-carry",
-   "event": "pull_request",
-   "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30113835020",
-   "created_at": "2026-07-24T17:39:10Z",
-   "updated_at": "2026-07-24T18:51:03Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T17:43:08Z",
-     "completed_at": "2026-07-24T18:31:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30113835020/job/89550350579"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T17:43:20Z",
-     "completed_at": "2026-07-24T18:51:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30113835020/job/89550350605"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T17:43:20Z",
-     "completed_at": "2026-07-24T18:46:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30113835020/job/89550350632"
-    }
-   ]
-  },
-  {
-   "run_id": 30109422592,
-   "pr": 874,
-   "commit": "70b0af7781b6d304a850beab92c23efbd9527da8",
-   "branch": "xudoyuan/dyn-cf-list-carry",
-   "event": "pull_request",
-   "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30109422592",
-   "created_at": "2026-07-24T16:31:48Z",
-   "updated_at": "2026-07-24T17:37:17Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T16:39:55Z",
-     "completed_at": "2026-07-24T17:31:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30109422592/job/89536450002"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-24T16:39:27Z",
-     "completed_at": "2026-07-24T17:27:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30109422592/job/89536450064"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-24T16:39:47Z",
-     "completed_at": "2026-07-24T17:37:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30109422592/job/89536450089"
     }
    ]
   }
