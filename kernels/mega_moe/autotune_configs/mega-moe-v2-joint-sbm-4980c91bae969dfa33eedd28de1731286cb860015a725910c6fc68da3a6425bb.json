@@ -12,12 +12,12 @@
       "autotune_schema": 7,
       "experts": 384,
       "inter_dim": 3072,
-      "max_tok": 512,
+      "max_tok": 256,
       "model_dim": 7168,
       "npes": 8,
       "sbm_candidates": "32,64,128",
       "topk": 6,
-      "tune_tokens": 512
+      "tune_tokens": 256
     },
     "name": "mega-moe-v2-joint-sbm"
   },

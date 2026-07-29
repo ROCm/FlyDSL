@@ -6,7 +6,7 @@
     "cooperative_payload_copy": false,
     "grid_mult": 4,
     "mfma_amajor": false,
-    "num_dispatch_cu": 64,
+    "num_dispatch_cu": 96,
     "num_waves": 4,
     "pipe_weights": true,
     "sort_block_m": 32,

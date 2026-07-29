@@ -1,6 +1,6 @@
 {
   "config": {
-    "SBM": 32
+    "SBM": 64
   },
   "identity": {
     "device": {
