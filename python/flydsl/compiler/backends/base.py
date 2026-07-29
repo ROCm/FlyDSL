@@ -62,6 +62,7 @@ class BaseBackend(metaclass=ABCMeta):
     def llvm_address_space(cls, address_space) -> int:
         """Map a semantic pointer address space to this backend's LLVM number."""
         raise NotImplementedError(f"{cls.__name__} does not expose !fly.ptr as !llvm.ptr")
+
     # -- compile pipeline ------------------------------------------------
 
     @abstractmethod

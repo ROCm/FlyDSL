@@ -44,6 +44,7 @@ def compile_backend_name() -> str:
     """Return the active backend id from env (default ``'rocm'``)."""
     return (env.compile.backend or "rocm").lower()
 
+
 def resolve_llvm_address_space(address_space) -> int:
     """Map a Fly pointer address space using the active compile backend."""
     name = compile_backend_name()

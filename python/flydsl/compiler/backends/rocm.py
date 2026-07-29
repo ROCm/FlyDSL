@@ -41,6 +41,7 @@ class RocmBackend(BaseBackend):
             return mapping[address_space]
         except KeyError:
             raise ValueError(f"ROCm address space {address_space} does not lower to a bare LLVM pointer") from None
+
     # -- compile pipeline ------------------------------------------------
 
     @staticmethod
