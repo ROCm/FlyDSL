@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-29T10:13:28Z",
+ "updated": "2026-07-29T10:21:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30443243584,
+   "pr": 876,
+   "commit": "b954a4f13513af870cbe92dea48d601a1579288b",
+   "branch": "mega_moe_v1",
+   "event": "pull_request",
+   "title": "MegaMoE on Gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30443243584",
+   "created_at": "2026-07-29T10:19:53Z",
+   "updated_at": "2026-07-29T10:20:19Z",
+   "actor": "yanboshao",
+   "jobs": []
+  },
   {
    "run_id": 30442263043,
    "pr": 876,
@@ -10,29 +25,29 @@
    "branch": "mega_moe_v1",
    "event": "pull_request",
    "title": "MegaMoE on Gfx950",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30442263043",
    "created_at": "2026-07-29T10:05:08Z",
-   "updated_at": "2026-07-29T10:06:03Z",
+   "updated_at": "2026-07-29T10:19:55Z",
    "actor": "yanboshao",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-29T10:06:38Z",
-     "completed_at": null,
+     "completed_at": "2026-07-29T10:14:24Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30442263043/job/90544310570"
     },
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-29T10:06:03Z",
-     "completed_at": null,
+     "completed_at": "2026-07-29T10:19:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30442263043/job/90544310640"
     }
    ]
@@ -2100,49 +2115,6 @@
      "started_at": "2026-07-27T06:08:38Z",
      "completed_at": "2026-07-27T07:04:23Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30241516517/job/89900240212"
-    }
-   ]
-  },
-  {
-   "run_id": 30241407310,
-   "pr": 910,
-   "commit": "67cfd4c1584a050a12e6930e0bccf1521beb123b",
-   "branch": "refactor/pa-metadata-tile-programming",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Optimize paged-attention metadata decode",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30241407310",
-   "created_at": "2026-07-27T06:01:22Z",
-   "updated_at": "2026-07-27T07:40:52Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-27T06:07:36Z",
-     "completed_at": "2026-07-27T07:21:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30241407310/job/89900092512"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-27T06:07:41Z",
-     "completed_at": "2026-07-27T07:10:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30241407310/job/89900092532"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-27T06:06:52Z",
-     "completed_at": "2026-07-27T07:40:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30241407310/job/89900092535"
     }
    ]
   }
