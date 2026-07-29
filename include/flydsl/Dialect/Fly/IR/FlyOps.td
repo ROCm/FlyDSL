@@ -5,6 +5,7 @@
 #define FLY_OPS
 
 include "mlir/IR/OpBase.td"
+include "mlir/Dialect/LLVMIR/LLVMOpBase.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Bytecode/BytecodeOpInterface.td"
@@ -449,8 +450,7 @@ def Fly_PtrToIntOp : Fly_Op<"ptrtoint", [Pure, DeclareOpInterfaceMethods<InferTy
 }
 def Fly_ToLLVMPtrOp : Fly_Op<"to_llvm_ptr", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let arguments = (ins Fly_Pointer:$ptr, I32Attr:$llvm_address_space);
-  let results = (outs AnyType:$result);
-  let hasVerifier = 1;
+  let results = (outs LLVM_AnyPointer:$result);
 }
 def Fly_AddOffsetOp : Fly_Op<"add_offset", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let arguments = (ins Fly_IteratorLikeType:$ptr, Fly_IntTuple:$offset);
