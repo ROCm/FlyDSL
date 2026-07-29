@@ -3,6 +3,8 @@
 """MegaMoE v2 fused dispatch, GEMM1, GEMM2, and combine implementation."""
 
 import functools
+import os
+from pathlib import Path
 
 import mori.shmem as ms
 import torch
@@ -21,6 +23,9 @@ __all__ = ["MegaMoEV2"]
 _JOINT_AUTOTUNE_SCHEMA = 7
 _STAGE2_P2P_QUANT_TYPES = ("auto", "none", "fp8_blockwise_1x32")
 _AUTO_FP8_MIN_TOKENS = 1024
+_AUTOTUNE_CONFIG_DIR = Path(__file__).with_name("autotune_configs")
+if _AUTOTUNE_CONFIG_DIR.is_dir():
+    os.environ.setdefault("FLYDSL_AUTOTUNE_CONFIG_DIR", str(_AUTOTUNE_CONFIG_DIR))
 
 
 def _resolve_stage2_p2p_quant(mode, run_tokens):
@@ -46,7 +51,7 @@ def _make_joint_sbm_autotuner(tile_m_values):
     ]
     return autotune(
         configs=configs, key=key, warmup=2, rep=7, do_bench=do_bench_collective,
-        artifact_name="mega-moe-v2-joint-sbm",
+        default=configs[0], artifact_name="mega-moe-v2-joint-sbm",
     )(_run_joint_sbm_config)
 # fmt: on
 

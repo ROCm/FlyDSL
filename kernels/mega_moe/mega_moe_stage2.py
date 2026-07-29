@@ -12,20 +12,21 @@ from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import Int8, T
 from kernels.common import buffer_ops
 from kernels.common.tensor_shim import _run_compiled
+from kernels.moe.mxfp_moe.mxfp4_gemm_common import (
+    fabs_f32,
+    global_typed_ptr,
+    lds_typed_ptr,
+    lds_vec_load,
+)
 
 from .gemm2 import (
     _resolve_g2_knobs,
     _spart_output_tile_index,
     gemm2_compute_v2,
     get_gemm2_autotune_configs,
-    global_typed_ptr,
     issue_a_load_lds_dt,
     kStages,
-    lds_typed_ptr,
-    lds_vec_load,
 )
-
-from .mxfp4_gemm_common import _fabs_f32 as fabs_f32
 
 _AUTOTUNE_SCHEMA = 7
 
@@ -534,6 +535,11 @@ def make_gemm2_autotuner(a_dtype: str = "fp8", p2p_quant_type: str = "none"):
     elif p2p_quant_type != "none":
         raise ValueError(f"unsupported p2p_quant_type={p2p_quant_type!r}")
     configs = [Config(**config) for config in raw_configs]
+    def default(*args, **kwargs):
+        sig_args = dict(zip(tuner.arg_names, args))
+        sig_args.update(kwargs)
+        return _prune_gemm2_configs(configs, sig_args)[0]
+
     key = [
         "tune_tokens", "model_dim", "inter_dim", "experts", "topk", "npes", "max_tok",
         "recv_cap", "comb_inp_nbytes", "SBM", "HIDDEN_MAX", "INTER_MAX", "cu_num",
@@ -542,7 +548,7 @@ def make_gemm2_autotuner(a_dtype: str = "fp8", p2p_quant_type: str = "none"):
     tuner = autotune(
         configs=configs, key=key, warmup=3, rep=10,
         prune_configs_by=_prune_gemm2_configs, do_bench=do_bench_collective,
-        artifact_name="mega-moe-v2-stage2",
+        default=default, artifact_name="mega-moe-v2-stage2",
     )(_run_gemm2_config)
     tuner.schema = _AUTOTUNE_SCHEMA
     return tuner

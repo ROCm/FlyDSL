@@ -6,6 +6,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl._mlir.dialects import memref as memref_dialect
 from flydsl.expr import arith, rocdl
+from flydsl.expr import math as fmath
 from flydsl.expr.typing import Float4E2M1FN, Float8E4M3FN, T
 from kernels.common import buffer_ops
 from kernels.common.layout_utils import crd2idx
@@ -137,8 +138,59 @@ def _lds_swizzle_mask(row):
     return (row & fx.Int32(14)) << fx.Int32(3)
 
 
+lds_swizzle_mask = _lds_swizzle_mask
+
+
+def lds_swizzle_mask_f8(row):
+    return (row & 15) << 4
+
+
+def lds_dma_dst(base_i32, byte_off_i32, elem_ty=None, align=16):
+    elem_ty = T.i32 if elem_ty is None else elem_ty
+    ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Shared, align)
+    ptr = fx.inttoptr(ptr_ty, fx.Int32(base_i32 + byte_off_i32))
+    return fx.make_view(ptr, fx.make_layout(1, 1))
+
+
+def global_typed_ptr(arg, elem_ty, align=4):
+    ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Global, align)
+    return fx.inttoptr(ptr_ty, fx.Int64(arg))
+
+
+def lds_typed_ptr(base_i32, elem_ty, align=4):
+    ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Shared, align)
+    return fx.inttoptr(ptr_ty, fx.Int32(base_i32))
+
+
+def lds_vec_load(base_i32, byte_off_i32, result_type, elem_ty, align=4):
+    elem_ir_ty = elem_ty.ir_type if hasattr(elem_ty, "ir_type") else elem_ty
+    ptr = lds_typed_ptr(fx.Int32(base_i32) + byte_off_i32, elem_ir_ty, align=align)
+    return fx.ptr_load(ptr, result_type=result_type)
+
+
+def lds_dma_atom_128():
+    return fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
+
+
+def flat_buffer_view(arg, base_elems, elem_ty, *, align, elem_bytes, fold=True, num_records_bytes=None):
+    ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Global, align)
+    if fold:
+        base = fx.Int32(fx.rocdl.readfirstlane(T.i32, base_elems))
+        off_i64 = fx.Uint32(base).to(fx.Uint64).bitcast(fx.Int64)
+        base_iter = fx.inttoptr(ptr_ty, fx.Int64(arg) + off_i64 * fx.Int64(elem_bytes))
+    else:
+        base_iter = fx.inttoptr(ptr_ty, fx.Int64(arg))
+    view = fx.Tensor(fx.make_view(base_iter, fx.make_layout((1, 1), (1, 1))))
+    if num_records_bytes is not None:
+        return fx.rocdl.make_buffer_tensor(view, num_records_bytes=num_records_bytes)
+    return fx.rocdl.make_buffer_tensor(view, max_size=True)
+
+
 def _fabs_f32(x):
-    return fx.Float32(llvm.call_intrinsic(T.f32, "llvm.fabs.f32", [_raw(x)], [], []))
+    return fmath.absf(x)
+
+
+fabs_f32 = _fabs_f32
 
 
 def _e8m0_roundup(amax_f32):

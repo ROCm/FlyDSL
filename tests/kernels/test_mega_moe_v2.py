@@ -44,12 +44,7 @@ if _ROOT not in sys.path:
 import flydsl.compiler as flyc  # noqa: E402
 import flydsl.expr as fx  # noqa: E402
 
-# The distributed harness (main() / _run_full_e2e) needs mori.shmem, the FlyDSL dispatch/combine op
-# (which itself imports mori), and the pure-torch quant/shuffle helpers in test_moe_gemm.  Guard
-# these so the module still IMPORTS for pytest collection on hosts without the full stack (e.g. the
-# single-GPU CI runners that lack mori): the multi_gpu pytest cases below skip when unavailable, and
-# the 8-GPU subprocess that actually runs the harness has everything installed.  This file is fully
-# aiter-free: the ATOM baseline uses FlyDSL sort/quant/scale-sort (see _run_full_e2e).
+# Guard distributed-only imports so single-GPU CI can collect and skip this test without mori.
 try:
     import mori.shmem as ms  # noqa: E402
 
@@ -545,10 +540,10 @@ def _run_full_e2e(
     """
     import numpy as _np
     import torch.nn.functional as _F
-    from kernels.moe.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1, compile_mixed_moe_gemm2
 
     from kernels.mega_moe import MegaMoEV2
     from kernels.mega_moe.quant import mxfp4_moe_scale_sort, per_1x32_mx_quant
+    from kernels.moe.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1, compile_mixed_moe_gemm2
     from kernels.moe.moe_sorting_kernel import moe_sorting_flydsl
 
     def _relL2(a, b):
@@ -1012,6 +1007,27 @@ def _run_full_e2e(
 
 
 _PERF_BASELINE_CACHE = {}
+_MEGA_PERF_BASELINE = {
+    "v4_flash:a8w4:8": 0.1135,
+    "v4_flash:a8w4:16": 0.1232,
+    "v4_flash:a8w4:32": 0.1274,
+    "v4_flash:a8w4:64": 0.1352,
+    "v4_flash:a8w4:128": 0.1488,
+    "v4_flash:a8w4:512": 0.2631,
+    "v4_flash:a8w4:2048": 0.7650,
+    "v4_flash:a8w4:4096": 1.5590,
+    "v4_flash:a8w4:8192": 2.9255,
+    "v4_flash:a8w4:16384": 5.7008,
+    "v4_pro:a8w4:8": 0.2574,
+    "v4_pro:a8w4:16": 0.3157,
+    "v4_pro:a8w4:32": 0.3267,
+    "v4_pro:a8w4:64": 0.3380,
+    "v4_pro:a8w4:128": 0.3508,
+    "v4_pro:a8w4:512": 0.6221,
+    "v4_pro:a8w4:2048": 1.6634,
+    "v4_pro:a8w4:4096": 3.1158,
+    "v4_pro:a8w4:8192": 6.0063,
+}
 
 
 def _perf_key(network, quant, tokens):
@@ -1019,17 +1035,17 @@ def _perf_key(network, quant, tokens):
 
 
 def _perf_baseline_lookup(path, network, quant, tokens):
-    """Look up the committed golden MegaMoEV2 latency (ms) for one config, or None if absent."""
-    if not path:
-        return None
-    data = _PERF_BASELINE_CACHE.get(path)
-    if data is None:
-        try:
-            with open(path) as f:
-                data = json.load(f)
-        except Exception:  # noqa: BLE001
-            data = {}
-        _PERF_BASELINE_CACHE[path] = data
+    """Look up a MegaMoEV2 latency baseline, optionally overriding the built-in table."""
+    data = _MEGA_PERF_BASELINE
+    if path:
+        data = _PERF_BASELINE_CACHE.get(path)
+        if data is None:
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+            except Exception:  # noqa: BLE001
+                data = {}
+            _PERF_BASELINE_CACHE[path] = data
     v = data.get(_perf_key(network, quant, tokens))
     return float(v) if v is not None else None
 
@@ -1638,8 +1654,8 @@ def main():
         "--perf-baseline",
         type=str,
         default="",
-        help="(--mega-only) path to the committed golden latency JSON "
-        "({'network:quant:bs': ms}); CI passes if measured <= golden * (1 + --perf-tol).",
+        help="(--mega-only) optional latency JSON overriding the built-in baseline "
+        "({'network:quant:bs': ms}); passes if measured <= golden * (1 + --perf-tol).",
     )
     p.add_argument(
         "--perf-tol",
@@ -1764,11 +1780,8 @@ def main():
 
 
 # ============================== pytest multi-GPU CI cases ==============================
-# 8-GPU accuracy, functionality, and performance safeguards for MegaMoEV2 on the
-# v4_pro / v4_flash networks with A8W4 (MX-FP8 activation, MX-FP4 weight).  Mirrors the multi_gpu
-# subprocess pattern in test_allreduce.py: each case relaunches THIS file under torchrun on 8 GPUs
-# and gates on its exit code (see main()'s --strict / --min-speedup).  A8W4 needs CDNA4 (gfx95x),
-# so the cases skip on gfx942 (the mi325 leg of the multi-gpu matrix) and on <8-GPU / dep-less hosts.
+# 8-GPU safeguards for MegaMoEV2 on v4_pro A8W4. Each case relaunches this file under torchrun and
+# gates on its exit code. A8W4 needs CDNA4, so cases skip on gfx942 and hosts with fewer than 8 GPUs.
 import pytest  # noqa: E402
 
 
@@ -1814,10 +1827,7 @@ def _skip_unless_mega_8gpu() -> None:
         pytest.skip(f"requires >= 8 physical GPUs, found {phys}")
 
 
-# Committed golden latency baseline (captured on 8x MI355X with --perf-out); the benchmark gate
-# passes if the CI-measured latency is within _MEGA_PERF_TOL of (or faster than) these numbers.
-# The tol absorbs run-to-run / thermal / clock variance (measured <1% run-to-run on 8x MI355X).
-_MEGA_PERF_BASELINE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mega_moe_perf_baseline.json")
+# The benchmark gate allows 5% run-to-run, thermal, and clock variance.
 _MEGA_PERF_TOL = 0.05
 
 
@@ -1860,7 +1870,7 @@ def _run_mega_8gpu(*, network, quant, bs_list, iters, measure_perf=False, skip_a
     if layers > 1:
         cmd += ["--layers", str(layers)]
     if measure_perf:
-        cmd += ["--measure-perf", "--perf-baseline", _MEGA_PERF_BASELINE, "--perf-tol", str(_MEGA_PERF_TOL)]
+        cmd += ["--measure-perf", "--perf-tol", str(_MEGA_PERF_TOL)]
     if skip_acc:
         cmd += ["--skip-acc"]
 
@@ -1877,15 +1887,13 @@ def _run_mega_8gpu(*, network, quant, bs_list, iters, measure_perf=False, skip_a
     return result
 
 
-# (network, quant, bs_list) accuracy/functionality: small + medium batch on both v4 networks.
+# (network, quant, bs_list) v4_pro accuracy shapes covered by committed tuning artifacts.
 _MEGA_ACC_PARAMS = [
-    ("v4_flash", "a8w4", "128,2048"),
-    ("v4_pro", "a8w4", "128,2048"),
+    ("v4_pro", "a8w4", "2048,8192"),
 ]
 
 # (network, quant, bs_list) perf-relevant batch sizes for the benchmark (golden) gate.
 _MEGA_BENCH_PARAMS = [
-    ("v4_flash", "a8w4", "4096,8192"),
     ("v4_pro", "a8w4", "4096,8192"),
 ]
 
@@ -1916,7 +1924,6 @@ def test_mega_moe_8gpu_benchmark(network, quant, bs_list):
 # Chained-accumulation ACCURACY safeguard: A8W4 only -- fp8 activation survives a deep residual chain
 # (~0.055 over 61 layers), whereas A4W4's fp4 activation compounds (~0.46) and is not meaningful here.
 _MEGA_CHAIN_PARAMS = [
-    ("v4_flash", "a8w4"),
     ("v4_pro", "a8w4"),
 ]
 

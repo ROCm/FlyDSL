@@ -170,7 +170,7 @@ def c_shuffle_epilog(
 
         def _write_row_split(mi: int, ii: int, row_in_tile, row):
             row_base_lds = row_in_tile * _half_n_idx
-            _if_g = scf.IfOp(_is_group_b, has_else=True)
+            _if_g = scf.IfOp(_is_group_b)
             with ir.InsertionPoint(_if_g.then_block):
                 write_row_to_lds(
                     mi=mi,
@@ -242,7 +242,7 @@ def c_shuffle_epilog(
                     col_pair0_local = col_base_nr + (n_lane_s * c_evec)
                     lds_idx = row_base_lds + col_pair0_local
 
-                    _if_ld = scf.IfOp(_is_group_b, [vec_frag], has_else=True)
+                    _if_ld = scf.IfOp(_is_group_b, [vec_frag])
                     with ir.InsertionPoint(_if_ld.then_block):
                         fb = vector.load(vec_frag, fx.as_ir_value(lds_out_split), [fx.as_ir_value(lds_idx)])
                         scf.YieldOp([fb])

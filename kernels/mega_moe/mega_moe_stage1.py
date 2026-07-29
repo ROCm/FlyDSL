@@ -418,6 +418,11 @@ def make_stage1_autotuner(dispatch_cu=None, grid_mult=None, tile_m_values=(32,))
     configs = get_stage1_autotune_configs(
         dispatch_cu=dispatch_cu, grid_mult=grid_mult, tile_m_values=tile_m_values
     )
+    def default(*args, **kwargs):
+        sig_args = dict(zip(tuner.arg_names, args))
+        sig_args.update(kwargs)
+        return prune_stage1_autotune_configs(configs, sig_args)[0]
+
     key = [
         "model_dim", "inter_dim", "experts_per_rank", "fuse_npes", "fuse_topk", "fuse_cap", "fuse_mtpr",
         "fuse_scale_dim", "fixed_slot_dispatch", "metadata_block_m", "num_cu", "tune_tokens",
@@ -426,7 +431,7 @@ def make_stage1_autotuner(dispatch_cu=None, grid_mult=None, tile_m_values=(32,))
     tuner = autotune(
         configs=configs, key=key, warmup=2, rep=7,
         prune_configs_by=prune_stage1_autotune_configs, do_bench=do_bench_collective,
-        artifact_name="mega-moe-v2-stage1",
+        default=default, artifact_name="mega-moe-v2-stage1",
     )(_run_stage1_config)
     tuner.schema = _AUTOTUNE_SCHEMA
     return tuner
