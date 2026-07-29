@@ -24,9 +24,11 @@ except ImportError:
 _ARTIFACT_VERSION = 1
 
 
-def _tuning_enabled() -> bool:
+def _tuning_enabled(artifact_name=None) -> bool:
     """Whether to bypass cached/default configs and run a fresh search."""
-    return os.environ.get("FLYDSL_AUTOTUNE", "").strip().lower() in ("1", "true", "yes", "on")
+    enabled = os.environ.get("FLYDSL_AUTOTUNE", "").strip().lower() in ("1", "true", "yes", "on")
+    target = os.environ.get("FLYDSL_AUTOTUNE_TARGET", "").strip()
+    return enabled and (not target or target == artifact_name)
 
 
 def _env_fingerprint() -> tuple:
@@ -592,7 +594,7 @@ class Autotuner:
 
     def __call__(self, *args, **kwargs):
         key = self._make_key(args, kwargs)
-        force = _tuning_enabled()
+        force = _tuning_enabled(self.artifact_name)
         collective = self._collective_active()
         rank0 = not collective or torch.distributed.get_rank() == 0
 
@@ -626,7 +628,9 @@ class Autotuner:
                 return self._run_config(artifact_config, args, kwargs)
 
         if not force and self.default is not None:
-            default_config = self.default(*args, **kwargs) if rank0 else None
+            default_config = None
+            if rank0:
+                default_config = self.default(*args, **kwargs) if callable(self.default) else self.default
             if collective:
                 default_dict = self._broadcast_from_rank0(
                     default_config.to_dict() if default_config is not None else None
