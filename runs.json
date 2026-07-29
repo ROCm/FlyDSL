@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-29T13:01:33Z",
+ "updated": "2026-07-29T14:47:36Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30462409326,
+   "pr": 876,
+   "commit": "aaeecb596bc0284eac916ce6367a49c85b8bd9af",
+   "branch": "mega_moe_v1",
+   "event": "pull_request",
+   "title": "MegaMoE on Gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30462409326",
+   "created_at": "2026-07-29T14:44:55Z",
+   "updated_at": "2026-07-29T14:45:17Z",
+   "actor": "yanboshao",
+   "jobs": []
+  },
   {
    "run_id": 30444503772,
    "pr": 876,
@@ -10,11 +25,11 @@
    "branch": "mega_moe_v1",
    "event": "pull_request",
    "title": "MegaMoE on Gfx950",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30444503772",
    "created_at": "2026-07-29T10:39:17Z",
-   "updated_at": "2026-07-29T12:45:23Z",
+   "updated_at": "2026-07-29T14:44:56Z",
    "actor": "yanboshao",
    "jobs": [
     {
@@ -47,19 +62,19 @@
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-29T12:45:23Z",
-     "completed_at": null,
+     "completed_at": "2026-07-29T14:44:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30444503772/job/90579195111"
     },
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-29T12:45:40Z",
-     "completed_at": null,
+     "completed_at": "2026-07-29T13:31:19Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30444503772/job/90579195138"
     }
    ]
@@ -2120,49 +2135,6 @@
    "updated_at": "2026-07-27T06:59:19Z",
    "actor": "kashif",
    "jobs": []
-  },
-  {
-   "run_id": 30244468674,
-   "pr": 907,
-   "commit": "344778c1ce53f9e627e2cc9edeb46d48f278790d",
-   "branch": "stochastic-rounding",
-   "event": "pull_request",
-   "title": "Add stochastic rounding and philox RNG helpers",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30244468674",
-   "created_at": "2026-07-27T06:58:24Z",
-   "updated_at": "2026-07-27T15:24:18Z",
-   "actor": "kashif",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-27T09:25:36Z",
-     "completed_at": "2026-07-27T10:26:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30244468674/job/89937644878"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-27T11:54:42Z",
-     "completed_at": "2026-07-27T13:06:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30244468674/job/89937644898"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-27T13:59:48Z",
-     "completed_at": "2026-07-27T15:24:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30244468674/job/89937644899"
-    }
-   ]
   }
  ]
 }
