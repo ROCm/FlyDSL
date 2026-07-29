@@ -543,7 +543,6 @@ def _run_full_e2e(
 
     from kernels.mega_moe import MegaMoEV2
     from kernels.mega_moe.quant import mxfp4_moe_scale_sort, per_1x32_mx_quant
-    from kernels.moe.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1, compile_mixed_moe_gemm2
     from kernels.moe.moe_sorting_kernel import moe_sorting_flydsl
 
     def _relL2(a, b):
@@ -710,6 +709,8 @@ def _run_full_e2e(
     _pc = (((inter_dim // 32) + 7) // 8) * 8
     a2s_e = torch.zeros(_pr * _pc + inter_dim, dtype=torch.uint8, device=dev)
     bias_d = torch.empty((0,), device=dev, dtype=torch.float32)
+    from kernels.moe.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1, compile_mixed_moe_gemm2
+
     # ATOM gemm1 indexes w1 by LOCAL expert id (epr experts), matching its gemm2 (local w2 +
     # a_se_local). Global w1 would truncate at the 4GB buffer cap for >4GB weights.
     gemm1 = compile_mixed_moe_gemm1(
