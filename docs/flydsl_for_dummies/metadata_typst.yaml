@@ -1,0 +1,10 @@
+---
+# Typst-engine overrides. Pandoc's typst template reads link colors as hex
+# strings via rgb(), so the LaTeX color names in metadata.yaml (RoyalBlue, ...)
+# must be replaced. Pass this file AFTER metadata.yaml so these keys win.
+linkcolor: "#1A56DB"
+urlcolor: "#1A56DB"
+citecolor: "#1A56DB"
+filecolor: "#1A56DB"
+toccolor: "#000000"
+...

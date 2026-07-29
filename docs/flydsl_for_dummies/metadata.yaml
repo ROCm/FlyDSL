@@ -1,0 +1,19 @@
+---
+title: "FlyDSL for Dummies"
+subtitle: "A hands-on guide for HIP C++ / CK-Tile developers"
+author: "FlyDSL Project"
+date: "2026"
+lang: en-US
+documentclass: report
+geometry:
+  - margin=1in
+fontsize: 11pt
+colorlinks: true
+linkcolor: RoyalBlue
+urlcolor: RoyalBlue
+toccolor: black
+toc: true
+toc-depth: 2
+numbersections: true
+highlight-style: tango
+...

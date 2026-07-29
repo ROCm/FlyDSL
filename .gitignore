@@ -73,3 +73,5 @@ run_pa_decode_ps_test.*.csv
 
 # rocprofv3 raw counter/trace output
 .rocprofv3/
+
+docs/**/*.pdf
