@@ -1835,6 +1835,13 @@ FLY_INFER_RETURN_TYPES(ToLLVMPtrOp) {
   return success();
 }
 
+LogicalResult ToLLVMPtrOp::verify() {
+  auto resultTy = dyn_cast<LLVM::LLVMPointerType>(getResult().getType());
+  if (!resultTy)
+    return emitOpError("expected an LLVM pointer result, got ") << getResult().getType();
+  return success();
+}
+
 FLY_INFER_RETURN_TYPES(AddOffsetOp) {
   auto offsetTy = dyn_cast<IntTupleType>(operands[1].getType());
   if (!offsetTy)

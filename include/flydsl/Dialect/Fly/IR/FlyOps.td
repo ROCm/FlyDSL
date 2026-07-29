@@ -450,6 +450,7 @@ def Fly_PtrToIntOp : Fly_Op<"ptrtoint", [Pure, DeclareOpInterfaceMethods<InferTy
 def Fly_ToLLVMPtrOp : Fly_Op<"to_llvm_ptr", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let arguments = (ins Fly_Pointer:$ptr, I32Attr:$llvm_address_space);
   let results = (outs AnyType:$result);
+  let hasVerifier = 1;
 }
 def Fly_AddOffsetOp : Fly_Op<"add_offset", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let arguments = (ins Fly_IteratorLikeType:$ptr, Fly_IntTuple:$offset);
