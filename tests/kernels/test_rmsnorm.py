@@ -2056,10 +2056,6 @@ def test_rmsnorm_smoothquant_gfx1201_scale_paths(N, dtype, route):
     assert not failures, f"gfx1201 SmoothQuant {route} failed: {'; '.join(failures)}"
 
 
-@pytest.mark.skipif(
-    GPU_ARCH == "gfx1201",
-    reason="RMSNorm SmoothQuant is temporarily quarantined on gfx1201 pending correctness investigation",
-)
 def test_rmsnorm_smoothquant():
     print("=" * 80)
     print("Running RMSNorm SmoothQuant Tests")
