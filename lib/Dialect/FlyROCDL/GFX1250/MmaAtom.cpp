@@ -238,24 +238,20 @@ static FailureOr<Value> emitWmmaSSA(OpBuilder &builder, Location loc, VectorType
                                     bool clamp = false) {
   Value res;
   if constexpr (Variant == WmmaVariant::ModsAllReuse) {
-    // Float path: no sign/clamp operands.
-    res = WmmaOp::create(builder, loc, accTy,
-                         /*signA=*/false, a, /*signB=*/false, b,
-                         /*modC=*/(uint16_t)0, c)
+    res = WmmaOp::create(builder, loc, accTy, a, b,
+                         ROCDL::WMMACModifier::none, c,
+                         /*reuseA=*/false, /*reuseB=*/false)
               .getResult();
   } else if constexpr (Variant == WmmaVariant::ModsC) {
-    // fp8 path: no sign/clamp operands.
     res = WmmaOp::create(builder, loc, accTy, a, b,
-                         /*modC=*/(uint16_t)0, c,
+                         ROCDL::WMMACModifier::none, c,
                          /*reuseA=*/false, /*reuseB=*/false)
               .getResult();
   } else if constexpr (Variant == WmmaVariant::ModsABClamp) {
-    // iu8: sign + reuse + clamp controls.
     res = WmmaOp::create(builder, loc, accTy, signA, a, signB, b, c,
                          /*reuseA=*/false, /*reuseB=*/false, clamp)
               .getResult();
   } else {
-    // IU form (e.g. iu4): sign/clamp controls but no reuseA/reuseB operands.
     static_assert(Variant == WmmaVariant::ModsIUClamp);
     res = WmmaOp::create(builder, loc, accTy, signA, a, signB, b, c, clamp).getResult();
   }
