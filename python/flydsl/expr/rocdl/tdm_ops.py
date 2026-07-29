@@ -1224,4 +1224,4 @@ def l2_prefetch_tile(
     # NOTE: rocdl.global_prefetch lowers to llvm.amdgcn.global.prefetch, which
     # requires LLVM ISel support for gfx1250 global_prefetch_b8. If the LLVM
     # build lacks this pattern, the instruction will be silently dropped.
-    rocdl.global_prefetch(ptr_val, scope)
+    rocdl.global_prefetch(ptr_val, cache_policy=_cache_policy_attr(scope))
