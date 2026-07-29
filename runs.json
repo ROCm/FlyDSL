@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-29T15:57:15Z",
+ "updated": "2026-07-29T17:50:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30472049143,
+   "pr": 848,
+   "commit": "2ab9c0016a55a37994bc2f2071b5e8731c19354e",
+   "branch": "cjl/norm_perf",
+   "event": "pull_request",
+   "title": "[Perf] Optimize rmsnorm/layernorm",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30472049143",
+   "created_at": "2026-07-29T16:43:25Z",
+   "updated_at": "2026-07-29T17:47:41Z",
+   "actor": "cschenjunlin",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-29T16:53:35Z",
+     "completed_at": "2026-07-29T17:47:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30472049143/job/90646884783"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-29T16:53:28Z",
+     "completed_at": "2026-07-29T17:33:20Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30472049143/job/90646884845"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-29T16:53:37Z",
+     "completed_at": "2026-07-29T17:47:41Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30472049143/job/90646884998"
+    }
+   ]
+  },
   {
    "run_id": 30462409326,
    "pr": 876,
@@ -14,35 +57,53 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30462409326",
    "created_at": "2026-07-29T14:44:55Z",
-   "updated_at": "2026-07-29T14:48:54Z",
+   "updated_at": "2026-07-29T17:47:06Z",
    "actor": "yanboshao",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-29T14:48:54Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-29T16:22:59Z",
+     "completed_at": "2026-07-29T17:47:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30462409326/job/90612740752"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-29T14:49:40Z",
-     "completed_at": null,
+     "completed_at": "2026-07-29T16:11:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30462409326/job/90612740775"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-29T14:49:08Z",
-     "completed_at": null,
+     "completed_at": "2026-07-29T15:59:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30462409326/job/90612740832"
+    },
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-29T17:47:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30462409326/job/90660787696"
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-29T17:47:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30462409326/job/90660787710"
     }
    ]
   },
@@ -2148,21 +2209,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30246726470/job/89937690180"
     }
    ]
-  },
-  {
-   "run_id": 30244516279,
-   "pr": null,
-   "commit": "f53cb3c23f9e5ed23ea283e4cdf29e656f66878b",
-   "branch": "fast-divmod",
-   "event": "pull_request",
-   "title": "Add fast_divmod magic-number division helper",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30244516279",
-   "created_at": "2026-07-27T06:59:19Z",
-   "updated_at": "2026-07-27T06:59:19Z",
-   "actor": "kashif",
-   "jobs": []
   }
  ]
 }
