@@ -811,8 +811,7 @@ def make_combine_kernel(
         safe_token_count = (cur_rank_num_token == 0).select(1, cur_rank_num_token)
         warps_per_tok = (global_warp_num + safe_token_count - 1) // safe_token_count
         if const_expr(blockwise_fp8_transport):
-            # One e8m0 byte covers 8 packed i32 payload words (32 FP8 values). Keep every
-            # warp partition block-aligned so an 8-lane scale broadcast never crosses blocks.
+            # Align warp partitions to the 32-value blockwise FP8 scale.
             scale_blocks = n_elems // 8
             warps_per_tok = (warps_per_tok > scale_blocks).select(scale_blocks, warps_per_tok)
             hdim_per_warp = ((scale_blocks + warps_per_tok - 1) // warps_per_tok) * 8
@@ -897,9 +896,7 @@ def make_combine_kernel(
                             scale_raws[u].append(sc_i32)
 
                 if const_expr(blockwise_fp8_transport):
-                    # Keep all payload and scale VMEM loads in flight before consuming any
-                    # scale. Broadcasting inside the load loop makes LLVM insert one
-                    # vmcnt(1) per (unroll, expert) pair, serializing remote scale latency.
+                    # Broadcast after issuing all VMEM loads to avoid serial vmcnt waits.
                     for u in range_constexpr(U):
                         for k_slot in range_constexpr(experts_per_token):
                             sc_i32 = fx.Int32(

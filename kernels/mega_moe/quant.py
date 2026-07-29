@@ -1,11 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
-"""FlyDSL 1x32 per-group MX quant (MXFP4 / MXFP8 + e8m0 byte scale).
-
-Drop-in for aiter per_1x32_mx_quant_hip in the MegaMoE config (group=32, e8m0
-scale, no shuffle): one thread quantizes one contiguous 32-element group.
-"""
+"""FlyDSL 1x32 MXFP4/MXFP8 quantization with E8M0 scales."""
 
 import torch
 
@@ -137,12 +133,7 @@ def _get_launcher(n: int, quant_mode: str):
 
 
 def per_1x32_mx_quant(x, quant_mode="fp4", stream=None):
-    """Drop-in for aiter per_1x32_mx_quant_hip: bf16 [m, n] -> (payload, e8m0 u8 scale).
-
-    fp4 -> y [m, n//2] float4_e2m1fn_x2 (2 fp4/byte); fp8 -> y [m, n] float8_e4m3fn.
-    The fp4 payload dtype mirrors aiter's (quant_dtype=fp4x2) so downstream dispatch ops that pin
-    dispatch_dtype=float4_e2m1fn_x2 consume it directly (no re-view at the call site).
-    """
+    """Quantize BF16 rows to MXFP4 or MXFP8 payloads with E8M0 scales."""
     assert x.dtype == torch.bfloat16, f"x must be bf16, got {x.dtype}"
     x = x.contiguous()
     m, n = x.shape
@@ -157,30 +148,18 @@ def per_1x32_mx_quant(x, quant_mode="fp4", stream=None):
     scale = torch.empty((m, scale_n), dtype=torch.uint8, device=x.device)
     grid_blocks = (m * scale_n + BLOCK - 1) // BLOCK
     fx_stream = fx.Stream(stream if stream is not None else torch.cuda.current_stream().cuda_stream)
-    # The kernel writes raw bytes via dwordx4 buffer stores; allocate the fp4 payload as uint8 for the
-    # store, then return it viewed as float4_e2m1fn_x2 to match aiter's output dtype exactly.
+    # Store FP4 as bytes and return the payload with aiter's packed FP4 dtype.
     _get_launcher(n, quant_mode)(x, y, scale, int(m), int(grid_blocks), stream=fx_stream)
     if quant_mode == "fp4":
         y = y.view(torch.float4_e2m1fn_x2)
     return y, scale
 
 
-# ---------------------------------------------------------------------------
-# Sorted-scale scatter (drop-in for aiter mxfp4_moe_sort_hip)
-# ---------------------------------------------------------------------------
 SCALE_SORT_BLOCK = 256
 
 
 def build_mxfp4_moe_scale_sort_module(cols: int):
-    """@flyc.jit launcher scattering a per-token e8m0 scale [T, cols//32] into the
-    sorted MXFP4/MXFP8 preshuffle layout consumed by mixed_moe_gemm1.
-
-    The layout (make_preshuffle_scale_layout == silu_and_mul_fq's sorted-scale write)
-    packs 4 e8m0 bytes into one 4-byte word: 2 rows (m, m+16) x 2 cols (c, c+4), at
-    byte (((c>>2)&1)<<1 | ((m>>4)&1)) inside word offset
-        (m>>5)*cols + (c>>3)*256 + (c&3)*64 + (m&15)*4.
-    One block per 32-row tile; each thread emits one aligned word (coalesced stores).
-    """
+    """Build the sorted E8M0 scale-scatter launcher."""
     assert cols % GROUP == 0, f"cols={cols} must be divisible by {GROUP}"
     scale_cols = cols // GROUP
     assert scale_cols % 8 == 0, f"cols//32={scale_cols} must be a multiple of 8 (preshuffle pack)"
@@ -272,13 +251,7 @@ _SCALE_SORT_CACHE = {}
 
 
 def mxfp4_moe_scale_sort(out_scale, scale, sorted_ids, num_valid, token_num, cols, stream=None):
-    """Drop-in for aiter mxfp4_moe_sort_hip: scatter per-token e8m0 scale into the
-    sorted preshuffle layout read by mixed_moe_gemm1.
-
-    out_scale : [pad32(sorted_len), pad8(cols//32)] e8m0 (written).
-    scale     : [token_num, cols//32] per-token e8m0 (uint8/e8m0).
-    sorted_ids: [sorted_len] i32 packed (slot<<24 | token); num_valid[0] = sorted_len.
-    """
+    """Scatter per-token E8M0 scales into the sorted GEMM1 layout."""
     launcher = _SCALE_SORT_CACHE.get(int(cols))
     if launcher is None:
         launcher = build_mxfp4_moe_scale_sort_module(int(cols))

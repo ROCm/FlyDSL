@@ -271,11 +271,7 @@ def build_fused_gemm1(*, x_rsrc, x_base_addr, x_tensor, w_rsrc, sw_rsrc, sx_rsrc
     expert_offset, b_cache_modifier, swizzle_a, pipe_weights, mfma_amajor, async_a_copy,
     use_tile_resource):
     # fmt: on
-    """Build the GEMM1 atoms and return (expert_of_flat, do_scheduled_tile).
-
-    do_scheduled_tile(flat) runs one (m_tile, n_tile) tile; sched is returned so
-    the caller can resolve a tile's expert for dispatch-side payload waits.
-    """
+    """Build the GEMM1 atoms and return its expert resolver and tile runner."""
     sched = TileScheduler(
         expert_rsrc=expert_rsrc,
         inter_dim=inter_dim,
@@ -345,11 +341,7 @@ def compile_gemm1(
     use_tile_resource: bool = True, waves_per_eu_hint: int = 2, b_cache_modifier: int = 0,
 ):
     # fmt: on
-    """Compile the standalone group GEMM1 using the fused Stage1 compute body.
-
-    ``num_valid`` is the padded group-major row count and must be divisible by
-    ``sort_block_m``. ``tile_row_base`` and ``expert_ids`` contain one entry per M block.
-    """
+    """Compile standalone group GEMM1 from the fused Stage1 compute body."""
     num_waves = int(num_waves)
     assert num_waves > 1
     assert 1 <= waves_per_eu_hint <= 4

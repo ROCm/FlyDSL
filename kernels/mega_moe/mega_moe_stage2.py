@@ -50,10 +50,7 @@ def p2p_scatter_epilog(lds_acc_base, accm, n_block_idx, wave, lane, *, N_OUT, BM
     log2_max_tok, mask_max_tok, recv_cap, comb_inp_nbytes, lds_packed_off, lds_weight_off,
     lds_peer_off, g2_bf16_lds=False, p2p_quant_type="none"):
 # fmt: on
-    """CShuffle -> weighted bf16 -> P2P store one GEMM2 tile.
-
-    Row metadata and peer bases are cached in LDS. One row is processed by one whole wave at a time,
-    making the AMD buffer-resource descriptor wave-uniform while retaining O(1) peer lookup."""
+    """CShuffle one GEMM2 tile into weighted BF16 rows and scatter them to peers."""
     kMChunks = BM // 16
     numAccN = (BN // 4) // 16
     wave_n = BN // 4
@@ -131,8 +128,7 @@ def p2p_scatter_epilog(lds_acc_base, accm, n_block_idx, wave, lane, *, N_OUT, BM
         row_base = slot * fx.Int32(token_nbytes)
         row_off = row_base + n_block_idx * fx.Int32(BN * out_elem_bytes)
 
-        # One aligned store per active lane. Inactive lanes read a safe LDS address and issue a
-        # bounded OOB store.
+        # Inactive lanes read safe LDS and issue a bounded OOB store.
         active = lane < fx.Int32(BN // 8)
         col = active.select(lane * fx.Int32(8), fx.Int32(0))
         idx0 = row * fx.Int32(BN) + col
@@ -219,8 +215,7 @@ def p2p_scatter_epilog(lds_acc_base, accm, n_block_idx, wave, lane, *, N_OUT, BM
                 row_off + col,
                 fx.Int32(comb_inp_nbytes),
             )
-            # Direct per-lane 8-byte stores avoid gathering four lanes through eight
-            # ds_bpermutes. Adjacent active lanes still write a contiguous 32-byte block.
+            # Adjacent active lanes issue contiguous 8-byte stores without ds_bpermute gathers.
             buffer_ops.buffer_store(
                 payload.ir_value(),
                 rsrc_dst,

@@ -599,8 +599,7 @@ def build_mori_ref(rank, world_size, cfg, block_num: int = None, warp_per_block:
         )
     from mori.ops.dispatch_combine import EpDispatchCombineConfig, EpDispatchCombineOp
 
-    # mori sizes its byte-pool by max_token_type_size (dtype inferred per-call at
-    # runtime); cover whichever of dispatch/combine dtype is the largest per-elem.
+    # Size mori's byte pool for the larger dispatch/combine element type.
     _disp_es = 1 if cfg.dispatch_is_fp4 else torch.tensor([], dtype=cfg.dispatch_dtype).element_size()
     _comb_es = 1 if cfg.combine_is_fp4 else torch.tensor([], dtype=cfg.combine_dtype).element_size()
     mcfg = EpDispatchCombineConfig(
@@ -1840,10 +1839,7 @@ def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg,
         scale_factor = k
         check_label = "out_tok vs k*inp"
 
-    # Symmetric I/O contract: ``f_tok`` is in ``cfg.dispatch_dtype`` (matches
-    # dispatch input dtype).  mori parity -- caller dtype is symmetric;
-    # the only wire-format divergence is ``fp8_direct_cast`` (bf16
-    # caller / fp8 wire), which still writes back bf16 to ``f_tok``.
+    # Symmetric I/O keeps ``f_tok`` in ``cfg.dispatch_dtype``.
 
     if rank == 0:
         print(f"\n  ── Self-check: combine output vs {'inp' if scale_factor == 1 else 'k*input'} ──")

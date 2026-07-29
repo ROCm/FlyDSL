@@ -264,8 +264,7 @@ def _candidate_variants(shape):
 def get_stage1_autotune_configs(dispatch_cu=None, grid_mult=None, tile_m_values=(32,)):
     tile_m_values = {int(value) for value in tile_m_values}
     if os.environ.get("MEGA_S1_NOTUNE") == "1":
-        # Performance-isolation fast path: pin Stage1 to one valid config while
-        # measuring Stage2. This is not intended to select the best Stage1 config.
+        # Pin one valid Stage1 config when isolating Stage2 performance.
         return [
             Config(
                 sort_block_m=max(tile_m_values),

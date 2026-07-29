@@ -197,8 +197,7 @@ def gemm2_compute_v2(
     expert_offset=0,
 ):
     """Run the GEMM2 K-loop and return accumulators for the selected epilogue."""
-    # K-loop knobs control two-stage B, hoisted B, and one-tile-ahead A-scale prefetch.
-    # SBM (sort padding unit) >= BM (compute tile); SBM==BM default byte-identical.
+    # SBM is the sort padding unit; BM is the compute tile and must divide SBM.
     if SBM is None:
         SBM = BM
     kMChunks = BM // 16  # 16-row MFMA row-groups
@@ -354,8 +353,7 @@ def gemm2_compute_v2(
             out.append(_raw(Vec(saf.load())[0]))
         return out
 
-    # B-weight + B-scale: global->register, streamed per K-tile (not LDS-staged).
-    # Use the explicit buffer-load path so use_nt reaches the ISA cache-policy operand.
+    # Stream B weights and scales through registers so use_nt reaches the ISA cache policy.
     bq_rsrc = buffer_ops.create_buffer_resource_from_addr(arg_bq)
 
     def make_bq_view(j):
