@@ -1,5 +1,14 @@
 {
-  "llvm_hash": "7f77ca0dbda4abbf9af06537b2c475f20ccd6007",
-  "repository": "https://github.com/llvm/llvm-project.git"
+  "upstream": {
+    "repository": "https://github.com/llvm/llvm-project.git",
+    "llvm_hash": "e2a39f504fee836e4def9581bed817ecc327b9dc"
+  },
+  "internal": {
+    "repository": "https://github.com/AMD-Lightning-Internal/llvm-project.git",
+    "llvm_hash": "bb14ae08181afd90001877331f5515aa844e647e"
+  },
+  "custom1" :{
+    "repository": "https://github.com/AMD-Lightning-Internal/llvm-project.git",
+    "branch": "" 
+  }
 }
-
