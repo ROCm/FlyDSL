@@ -169,7 +169,7 @@ FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Locati
 
 #define DISPATCH_MFMA_SSA(M_, K_, PRED, OP)                                                        \
   if (m == M_ && n == M_ && k == K_ && (PRED)) {                                                   \
-    return ROCDL::OP::create(builder, loc, accTy, a, b, c, (uint32_t)0, (uint32_t)0,              \
+    return ROCDL::OP::create(builder, loc, accTy, a, b, c, (uint32_t)0, (uint32_t)0,               \
                              ROCDL::MFMAPermB::none)                                               \
         .getResult();                                                                              \
   }

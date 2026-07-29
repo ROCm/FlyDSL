@@ -238,13 +238,11 @@ static FailureOr<Value> emitWmmaSSA(OpBuilder &builder, Location loc, VectorType
                                     bool clamp = false) {
   Value res;
   if constexpr (Variant == WmmaVariant::ModsAllReuse) {
-    res = WmmaOp::create(builder, loc, accTy, a, b,
-                         ROCDL::WMMACModifier::none, c,
+    res = WmmaOp::create(builder, loc, accTy, a, b, ROCDL::WMMACModifier::none, c,
                          /*reuseA=*/false, /*reuseB=*/false)
               .getResult();
   } else if constexpr (Variant == WmmaVariant::ModsC) {
-    res = WmmaOp::create(builder, loc, accTy, a, b,
-                         ROCDL::WMMACModifier::none, c,
+    res = WmmaOp::create(builder, loc, accTy, a, b, ROCDL::WMMACModifier::none, c,
                          /*reuseA=*/false, /*reuseB=*/false)
               .getResult();
   } else if constexpr (Variant == WmmaVariant::ModsABClamp) {

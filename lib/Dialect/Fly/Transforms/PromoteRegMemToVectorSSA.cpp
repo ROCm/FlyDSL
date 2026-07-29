@@ -32,9 +32,7 @@ template <> struct DenseMapInfo<mlir::fly::MakePtrOp> {
     return DenseMapInfo<void *>::getHashValue(op.getAsOpaquePointer());
   }
 
-  static bool isEqual(mlir::fly::MakePtrOp lhs, mlir::fly::MakePtrOp rhs) {
-    return lhs == rhs;
-  }
+  static bool isEqual(mlir::fly::MakePtrOp lhs, mlir::fly::MakePtrOp rhs) { return lhs == rhs; }
 };
 
 } // namespace llvm

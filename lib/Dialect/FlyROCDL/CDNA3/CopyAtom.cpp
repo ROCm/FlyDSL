@@ -444,10 +444,10 @@ FailureOr<Value> CopyOpCDNA3BufferAtomicType::emitAtomCallSSA(OpBuilder &builder
   case AtomicOp::Max:
     if (isFloat)
       ROCDL::RawPtrBufferAtomicFmaxOp::create(builder, loc, src.getType(), src, dstRsrc, dstOff,
-                                               soffset, auxAttr, noAttrs, noAttrs, noAttrs);
+                                              soffset, auxAttr, noAttrs, noAttrs, noAttrs);
     else
       ROCDL::RawPtrBufferAtomicSmaxOp::create(builder, loc, src.getType(), src, dstRsrc, dstOff,
-                                               soffset, auxAttr, noAttrs, noAttrs, noAttrs);
+                                              soffset, auxAttr, noAttrs, noAttrs, noAttrs);
     break;
   case AtomicOp::Min:
     if (isFloat)
