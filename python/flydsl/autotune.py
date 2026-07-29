@@ -370,7 +370,8 @@ class Autotuner:
         sig_args = dict(zip(self.arg_names, args))
         sig_args.update(kwargs)
         stream = sig_args.get("stream")
-        if isinstance(stream, torch.cuda.Stream):
+        stream_type = getattr(torch.cuda, "Stream", ())
+        if isinstance(stream, stream_type):
             return torch.cuda.stream(stream)
         if isinstance(stream, int):
             device = next(
@@ -611,7 +612,7 @@ class Autotuner:
             return self._run_config(self.cache[key], args, kwargs)
 
         artifact = self._artifact_ref(args, kwargs, required=force)
-        if not force:
+        if not force and artifact is not None:
             artifact_config = self._load_artifact(artifact, args, kwargs) if rank0 else None
             if collective:
                 artifact_dict = self._broadcast_from_rank0(
@@ -627,7 +628,9 @@ class Autotuner:
         if not force and self.default is not None:
             default_config = self.default(*args, **kwargs) if rank0 else None
             if collective:
-                default_dict = self._broadcast_from_rank0(default_config.to_dict() if default_config is not None else None)
+                default_dict = self._broadcast_from_rank0(
+                    default_config.to_dict() if default_config is not None else None
+                )
                 default_config = Config.from_dict(default_dict) if default_dict is not None else None
                 self.cache[key] = default_config
                 self._collective_synced_keys.add(key)

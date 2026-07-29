@@ -52,7 +52,6 @@ import flydsl.expr as fx  # noqa: E402
 try:
     import mori.shmem as ms  # noqa: E402
 
-    import tests.kernels.test_moe_gemm as tmg  # noqa: E402
     from kernels.comm.flydsl_dispatch_combine_intranode_op import (  # noqa: E402
         FlyDSLDispatchCombineConfig,
         FlyDSLDispatchCombineIntraNodeOp,
@@ -64,7 +63,7 @@ try:
 except Exception as _exc:  # noqa: BLE001
     ms = None
     FlyDSLDispatchCombineConfig = FlyDSLDispatchCombineIntraNodeOp = None
-    tmg = gemm_common_utils = shuffle_weight = None
+    gemm_common_utils = shuffle_weight = None
     _HARNESS_DEPS_ERROR = f"{type(_exc).__name__}: {_exc}"
 
 
@@ -77,6 +76,27 @@ NETWORKS = {
 # batch-size sweeps for --matrix / --full-bs.
 CLASSIC_BS = [1, 8, 64, 512, 8192, 32768]
 FULL_BS = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+
+
+def _per_1x32_fp4_quant(x):
+    shape = x.shape
+    rows = x.reshape(-1, 32).float()
+    scale_e8m0 = gemm_common_utils.f32_to_e8m0(rows.abs().amax(dim=1) / 4.0)
+    scale_f32 = gemm_common_utils.e8m0_to_f32(scale_e8m0)
+    quantized = gemm_common_utils.f32_to_mxfp4(rows / scale_f32[:, None])
+    return quantized.view(*shape[:-1], -1), scale_e8m0.view(*shape[:-1], shape[-1] // 32).view(torch.uint8)
+
+
+def _per_1x32_mxfp8_quant(x):
+    fp8_max = float(torch.finfo(torch.float8_e4m3fn).max)
+    shape = x.shape
+    rows = x.contiguous().view(-1, 32).float()
+    scale_e8m0 = gemm_common_utils.f32_to_e8m0(rows.abs().amax(dim=1).clamp_min(1e-30) / fp8_max)
+    scale_f32 = gemm_common_utils.e8m0_to_f32(scale_e8m0).clamp_min(1e-30)
+    quantized = (rows / scale_f32[:, None]).clamp(-fp8_max, fp8_max).to(torch.float8_e4m3fn)
+    scales = scale_e8m0.view(*shape[:-1], shape[-1] // 32).view(torch.uint8)
+    return quantized.view(shape).contiguous(), scales.contiguous()
+
 
 # Gate for the chained N-layer accumulation check (--layers>1): 1-cosine of the device vs the
 # pure-torch dequant-weights RefModel, end-to-end after N residual layers. This is an A8W4 (fp8
@@ -253,14 +273,14 @@ def _chunked_fp4_quant(x):
     n = int(x.shape[1])
     chunk_rows = max(4096, ((2 << 30) // max(1, n * 4 * 8)) // 4096 * 4096)
     if x.ndim != 2 or x.shape[0] <= chunk_rows:
-        return tmg._per_1x32_fp4_quant(x)
+        return _per_1x32_fp4_quant(x)
     m = int(x.shape[0])
     fp4_dtype = getattr(torch, "float4_e2m1fn_x2", torch.uint8)
     y = torch.empty((m, n // 2), device=x.device, dtype=fp4_dtype)
     s = torch.empty((m, n // 32), device=x.device, dtype=torch.uint8)
     for st in range(0, m, chunk_rows):
         en = min(st + chunk_rows, m)
-        yc, sc = tmg._per_1x32_fp4_quant(x[st:en])
+        yc, sc = _per_1x32_fp4_quant(x[st:en])
         y[st:en].copy_(yc)
         s[st:en].copy_(sc)
         del yc, sc
@@ -278,7 +298,7 @@ def _dequant_mx_to_f32(t_f32, quant_mode):
     orig = tuple(t_f32.shape)
     t2d = t_f32.reshape(-1, orig[-1])
     if quant_mode == "fp8":
-        q, s = tmg._per_1x32_mxfp8_quant(t2d)  # q: fp8_e4m3fn [., K]; s: e8m0 u8 [., K//32]
+        q, s = _per_1x32_mxfp8_quant(t2d)  # q: fp8_e4m3fn [., K]; s: e8m0 u8 [., K//32]
         vf = q.float()
     else:
         q, s = _chunked_fp4_quant(t2d)  # q: fp4x2 [., K//2]; s: e8m0 u8 [., K//32]
@@ -418,14 +438,14 @@ def _prepare(
 
     if quant == "a8w4":
         # activation: MX-FP8 (fp8_e4m3fn, 1 byte/elem) + e8m0 block scale
-        x_q, scale_x_mx = tmg._per_1x32_mxfp8_quant(x_fp32)
+        x_q, scale_x_mx = _per_1x32_mxfp8_quant(x_fp32)
         x_payload = x_q.contiguous()  # [tokens, model_dim] fp8_e4m3fn
         token_dtype = torch.float8_e4m3fn
         a_dtype = "fp8"
         row_view_dim = model_dim
     elif quant == "a4w4":
         # activation: MX-FP4 (packed 2/byte) + e8m0 block scale
-        x_q, scale_x_mx = tmg._per_1x32_fp4_quant(x_fp32)
+        x_q, scale_x_mx = _per_1x32_fp4_quant(x_fp32)
         x_payload = x_q.view(torch.float4_e2m1fn_x2).contiguous()  # [tokens, model_dim//2]
         token_dtype = torch.float4_e2m1fn_x2
         a_dtype = "fp4"
@@ -1546,9 +1566,9 @@ def main():
     p.add_argument(
         "--stage2-p2p-quant",
         type=str,
-        default="none",
+        default="auto",
         choices=["auto", "none", "fp8_blockwise_1x32"],
-        help="Stage2 P2P transport; disabled by default. 'auto' uses FP8 when batch size is greater than 2048.",
+        help="Stage2 P2P transport; 'auto' uses FP8 only when batch size is greater than 1024.",
     )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--rank-skew-ms", type=float, default=0.0, help="delay rank r by r*N ms before first forward")

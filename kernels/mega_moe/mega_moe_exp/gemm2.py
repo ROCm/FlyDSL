@@ -773,7 +773,7 @@ def atomic_bf16_epilog(
     lds_base_fptr = lds_typed_ptr(lds_acc_base, T.f32)
     lds_base_bf16 = lds_typed_ptr(lds_acc_base, T.bf16, align=2) if const_expr(g2_bf16_lds) else None
 
-    tx_i32 = fx.Int32(gpu.thread_id("x"))
+    tx_i32 = fx.thread_idx.x
     m_lane = tx_i32 // 32
     n_lane = tx_i32 % 32
     store_vec = 2
@@ -1348,10 +1348,8 @@ def compile_gemm2_a4w4_port(
         arg_out: fx.Int64,
         arg_out_scale: fx.Int64,  # unused (atomic epilog); kept for signature parity
     ):
-        tx = gpu.thread_id("x")
-        bx = gpu.block_id("x")
-        tx_i32 = fx.Int32(tx)
-        bx_i32 = fx.Int32(bx)
+        tx_i32 = fx.thread_idx.x
+        bx_i32 = fx.block_idx.x
         lane = tx_i32 % fx.Int32(64)
         wave = rocdl.readfirstlane(T.i32, tx_i32 // fx.Int32(64))
         _gemm2_kernel_body(

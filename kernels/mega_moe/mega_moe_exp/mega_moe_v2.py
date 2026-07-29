@@ -19,6 +19,14 @@ from .dispatch import DISPATCH_TABLE_SIZE, DispatchSlot
 
 __all__ = ["MegaMoEV2"]
 _JOINT_AUTOTUNE_SCHEMA = 6
+_STAGE2_P2P_QUANT_TYPES = ("auto", "none", "fp8_blockwise_1x32")
+_AUTO_FP8_MIN_TOKENS = 1024
+
+
+def _resolve_stage2_p2p_quant(mode, run_tokens):
+    if mode == "auto":
+        return "fp8_blockwise_1x32" if run_tokens > _AUTO_FP8_MIN_TOKENS else "none"
+    return mode
 
 
 # fmt: off
@@ -52,13 +60,13 @@ class MegaMoEV2:
         gemm2_tile_m: int = -1, gemm2_tile_n: int = -1, gemm2_tile_k: int = -1,
         enable_fused_stage1: bool = True, enable_fused_stage2: bool = True, gate_mode=None,
         stage1_dispatch_cu: int | None = None, stage1_grid_mult: int | None = None,
-        stage1_tile_m_values: tuple[int, ...] | None = None, stage2_p2p_quant: str = "none"):
+        stage1_tile_m_values: tuple[int, ...] | None = None, stage2_p2p_quant: str = "auto"):
     # fmt: on
         if not enable_fused_stage1 or not enable_fused_stage2:
             raise ValueError("MegaMoEV2 requires enable_fused_stage1=True and enable_fused_stage2=True")
         if quant != "a8w4":
             raise ValueError("MegaMoEV2 currently supports quant='a8w4' only")
-        if stage2_p2p_quant not in ("auto", "none", "fp8_blockwise_1x32"):
+        if stage2_p2p_quant not in _STAGE2_P2P_QUANT_TYPES:
             raise ValueError(
                 "stage2_p2p_quant must be 'auto', 'none', or 'fp8_blockwise_1x32', "
                 f"got {stage2_p2p_quant!r}"
@@ -349,10 +357,9 @@ class MegaMoEV2:
                 "HIDDEN_MAX": int(comb_cfg.hidden_dim), "INTER_MAX": int(self.inter_dim), "cu_num": int(cu_num),
                 "autotune_schema": tuner.schema, "p2p_quant_type": p2p_quant,
             }
-        self._g2_tuner = self._g2_tuners["none" if self._stage2_p2p_quant == "auto" else self._stage2_p2p_quant]
-        self._g2_invariants = self._g2_invariants_by_quant[
-            "none" if self._stage2_p2p_quant == "auto" else self._stage2_p2p_quant
-        ]
+        initial_quant = _resolve_stage2_p2p_quant(self._stage2_p2p_quant, 0)
+        self._g2_tuner = self._g2_tuners[initial_quant]
+        self._g2_invariants = self._g2_invariants_by_quant[initial_quant]
         self._g2_combine_placeholder = torch.empty(
             1, comb_cfg.hidden_dim, dtype=comb_cfg.combine_dtype, device=dev
         )
@@ -364,11 +371,7 @@ class MegaMoEV2:
         if stream is None:
             stream = torch.cuda.current_stream()
         s_fx = fx.Stream(stream.cuda_stream)
-        p2p_quant = (
-            "fp8_blockwise_1x32"
-            if self._stage2_p2p_quant == "auto" and run_tokens > 2048
-            else ("none" if self._stage2_p2p_quant == "auto" else self._stage2_p2p_quant)
-        )
+        p2p_quant = _resolve_stage2_p2p_quant(self._stage2_p2p_quant, run_tokens)
         self._g2_tuner = self._g2_tuners[p2p_quant]
         self._g2_invariants = self._g2_invariants_by_quant[p2p_quant]
         # fmt: off

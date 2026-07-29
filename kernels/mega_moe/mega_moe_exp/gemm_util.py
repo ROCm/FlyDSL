@@ -8,14 +8,14 @@ from flydsl.expr import buffer_ops as _buffer_ops
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
-from kernels.moe.mixed_moe_gemm_2stage.common import _barrier
 
 _PACK = 2  # fp4 micro-scale pack (per-32 E8M0): pack_M = pack_N = pack_K = 2
 
 
 def wait_lds_barrier(vmcnt=63):
     """Drain LDS writes and optionally older VMEM while preserving newer loads."""
-    _barrier(vmcnt=vmcnt, lgkmcnt=0)
+    fx.rocdl.s_waitcnt(vmcnt=vmcnt, lgkmcnt=0)
+    fx.barrier()
 
 
 class TileScheduler:
