@@ -289,6 +289,42 @@ def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands):
     ).result
 
 
+_WMMA_FMT_INT_TO_KW = {0: "fp8_e4m3", 1: "fp8_e5m2", 2: "fp6_e2m3", 3: "fp6_e3m2", 4: "fp4_e2m1"}
+_WMMA_MODC_INT_TO_KW = {0: "none", 1: "neg", 2: "abs", 3: "neg_abs"}
+_WMMA_SCALE_TYPE_INT_TO_KW = {0: "row0", 1: "row1"}
+_WMMA_SCALE_FMT_INT_TO_KW = {0: "e8", 1: "e5m3", 2: "e4m3"}
+
+
+def _wmma_attr(val, mapping, attr_name):
+    """Convert an int to a parsed ROCDL enum attribute for WMMA ops."""
+    from ..._mlir import ir as _ir
+
+    if val is None or isinstance(val, _ir.Attribute):
+        return val
+    if isinstance(val, bool):
+        return val
+    kw = mapping.get(int(val))
+    if kw is None:
+        return val
+    return _ir.Attribute.parse(f"#rocdl<{attr_name} {kw}>")
+
+
+def _wmma_fmt(val):
+    return _wmma_attr(val, _WMMA_FMT_INT_TO_KW, "matrix_format")
+
+
+def _wmma_modc(val):
+    return _wmma_attr(val, _WMMA_MODC_INT_TO_KW, "wmma_c_modifier")
+
+
+def _wmma_scale_type(val):
+    return _wmma_attr(val, _WMMA_SCALE_TYPE_INT_TO_KW, "wmma_matrix_scale")
+
+
+def _wmma_scale_fmt(val):
+    return _wmma_attr(val, _WMMA_SCALE_FMT_INT_TO_KW, "wmma_matrix_scale_format")
+
+
 @dsl_loc_tracing
 def wmma_scale_f32_16x16x128_f8f6f4(
     result_type,
@@ -335,13 +371,13 @@ def wmma_scale_f32_16x16x128_f8f6f4(
         c_v,
         sA,
         sB,
-        fmtA=fmtA,
-        fmtB=fmtB,
-        modC=modC,
-        scaleAType=scaleAType,
-        fmtScaleA=fmtScaleA,
-        scaleBType=scaleBType,
-        fmtScaleB=fmtScaleB,
+        fmtA=_wmma_fmt(fmtA),
+        fmtB=_wmma_fmt(fmtB),
+        modC=_wmma_modc(modC),
+        scaleAType=_wmma_scale_type(scaleAType),
+        fmtScaleA=_wmma_scale_fmt(fmtScaleA),
+        scaleBType=_wmma_scale_type(scaleBType),
+        fmtScaleB=_wmma_scale_fmt(fmtScaleB),
         reuseA=reuseA,
         reuseB=reuseB,
     ).result
@@ -387,11 +423,11 @@ def wmma_scale_f32_32x16x128_f4(
         c_v,
         sA,
         sB,
-        modC=modC,
-        scaleAType=scaleAType,
-        fmtScaleA=fmtScaleA,
-        scaleBType=scaleBType,
-        fmtScaleB=fmtScaleB,
+        modC=_wmma_modc(modC),
+        scaleAType=_wmma_scale_type(scaleAType),
+        fmtScaleA=_wmma_scale_fmt(fmtScaleA),
+        scaleBType=_wmma_scale_type(scaleBType),
+        fmtScaleB=_wmma_scale_fmt(fmtScaleB),
         reuseA=reuseA,
         reuseB=reuseB,
     ).result
@@ -411,7 +447,7 @@ def wmma_f32_16x16x128_fp8_fp8(result_type, a, b, c, *, modC=0, reuseA=False, re
     a_v = _unwrap_mfma_operand(a)
     b_v = _unwrap_mfma_operand(b)
     c_v = _unwrap_mfma_operand(c)
-    return _ods_wmma_f32_16x16x128_fp8_fp8(result_type, a_v, b_v, c_v, modC=modC, reuseA=reuseA, reuseB=reuseB).result
+    return _ods_wmma_f32_16x16x128_fp8_fp8(result_type, a_v, b_v, c_v, modC=_wmma_modc(modC), reuseA=reuseA, reuseB=reuseB).result
 
 
 @dsl_loc_tracing
