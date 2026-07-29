@@ -1,8 +1,81 @@
 {
  "schema": 1,
- "updated": "2026-07-29T00:54:51Z",
+ "updated": "2026-07-29T03:27:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30419524850,
+   "pr": 921,
+   "commit": "ef62bfeb4dc54b6853d36fef01224b912fe12665",
+   "branch": "pr/feat-to-llvm-ptr",
+   "event": "pull_request",
+   "title": "[Feat] Add to_llvm_ptr op to convert fly.ptr to llvm.ptr ",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30419524850",
+   "created_at": "2026-07-29T03:25:12Z",
+   "updated_at": "2026-07-29T03:25:40Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 30418640127,
+   "pr": 907,
+   "commit": "344778c1ce53f9e627e2cc9edeb46d48f278790d",
+   "branch": "stochastic-rounding",
+   "event": "pull_request",
+   "title": "Add stochastic rounding and philox RNG helpers",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30418640127",
+   "created_at": "2026-07-29T03:06:08Z",
+   "updated_at": "2026-07-29T03:06:08Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 30418320456,
+   "pr": 921,
+   "commit": "d421a6c744ac8535ced56d93240fa5517dce416d",
+   "branch": "pr/feat-to-llvm-ptr",
+   "event": "pull_request",
+   "title": "[Feat] Add to_llvm_ptr op to convert fly.ptr to llvm.ptr ",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30418320456",
+   "created_at": "2026-07-29T02:59:43Z",
+   "updated_at": "2026-07-29T03:25:40Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-29T03:03:33Z",
+     "completed_at": "2026-07-29T03:25:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30418320456/job/90470037093"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-29T03:03:02Z",
+     "completed_at": "2026-07-29T03:25:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30418320456/job/90470037121"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-29T03:03:26Z",
+     "completed_at": "2026-07-29T03:25:30Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30418320456/job/90470037139"
+    }
+   ]
+  },
   {
    "run_id": 30392424855,
    "pr": 920,
@@ -2089,79 +2162,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30203060297/job/89796565348"
     }
    ]
-  },
-  {
-   "run_id": 30201159526,
-   "pr": null,
-   "commit": "70b9244c1dd65dab02173aa14b6e1f6e987cc607",
-   "branch": "binding_fa_fp8_gfx950",
-   "event": "pull_request",
-   "title": "[perf]optimize flash attention fp8 for gfx950",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30201159526",
-   "created_at": "2026-07-26T11:58:51Z",
-   "updated_at": "2026-07-26T12:57:03Z",
-   "actor": "binding7012",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-26T12:02:49Z",
-     "completed_at": "2026-07-26T12:24:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30201159526/job/89791490206"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-26T12:02:44Z",
-     "completed_at": "2026-07-26T12:24:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30201159526/job/89791490212"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-26T12:02:06Z",
-     "completed_at": "2026-07-26T12:57:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30201159526/job/89791490214"
-    }
-   ]
-  },
-  {
-   "run_id": 30198659003,
-   "pr": null,
-   "commit": "8a65fd0a5c42c564332c43ff6aef57cf81a96b89",
-   "branch": "binding_fa_fp8_gfx950",
-   "event": "pull_request",
-   "title": "[perf]optimize flash attention fp8 for gfx950",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30198659003",
-   "created_at": "2026-07-26T10:39:39Z",
-   "updated_at": "2026-07-26T10:41:06Z",
-   "actor": "binding7012",
-   "jobs": []
-  },
-  {
-   "run_id": 30198391090,
-   "pr": 904,
-   "commit": "fc5670e7b47b1befa00a71b2fc388eb9618c9b67",
-   "branch": "binding_fa_gfx950",
-   "event": "pull_request",
-   "title": "close",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30198391090",
-   "created_at": "2026-07-26T10:30:41Z",
-   "updated_at": "2026-07-26T10:31:28Z",
-   "actor": "binding7012",
-   "jobs": []
   }
  ]
 }
