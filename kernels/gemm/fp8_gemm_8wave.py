@@ -10,6 +10,7 @@ Algorithm derived from HipKittens FP8_8wave
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import range_constexpr, rocdl
+from kernels.common.workgroup_mapping import remap_xcd_grouped_pid
 from kernels.gemm.fp8_gemm_utils import (
     G2SLoader,
     Mfma16x16x128,
@@ -17,17 +18,25 @@ from kernels.gemm.fp8_gemm_utils import (
     StoreC,
     ceildiv,
     compute_global_swizzle,
-    divmod,
     make_fp8_buffer_tensor,
     wait_barrier,
 )
 
 
-def compile_fp8_gemm_8w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, b_preshuffled: bool = False):
+def compile_fp8_gemm_8w(
+    *,
+    K: int,
+    BLOCK_M: int = 256,
+    BLOCK_N: int = 256,
+    b_preshuffled: bool = False,
+    num_xcds: int = 8,
+    group_size_m: int = 4,
+):
     BLOCK_K = 128
 
     assert BLOCK_M >= 128 and BLOCK_N >= 256 and BLOCK_M % 128 == 0 and BLOCK_N % 256 == 0
     assert K % BLOCK_K == 0
+    assert num_xcds > 0 and group_size_m > 0
 
     K_ITERS = K // BLOCK_K
 
@@ -70,7 +79,8 @@ def compile_fp8_gemm_8w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, b_pre
     ):
         F8_IR_t = fx.Float8E4M3FN.ir_type
 
-        n_blocks = ceildiv(c_n, BLOCK_N)
+        num_pid_m = ceildiv(c_m, BLOCK_M)
+        num_pid_n = ceildiv(c_n, BLOCK_N)
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         a_cur0 = lds.A_lds_cur_0
@@ -86,7 +96,13 @@ def compile_fp8_gemm_8w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, b_pre
         wave_id = fx.thread_idx.x // 64
         wave_m = wave_id // 4
         wave_n = wave_id % 4
-        block_m, block_n = divmod(fx.block_idx.x, n_blocks)
+        block_m, block_n = remap_xcd_grouped_pid(
+            fx.block_idx.x,
+            num_pid_m,
+            num_pid_n,
+            num_xcds=num_xcds,
+            group_size_m=group_size_m,
+        )
 
         A0_gl_offset = (block_m * BLOCK_M) * K
         A1_gl_offset = (block_m * BLOCK_M + LDS_BLOCK_M) * K

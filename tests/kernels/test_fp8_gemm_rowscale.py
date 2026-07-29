@@ -79,6 +79,8 @@ def _bench_fp8_gemm(
     vs_torch: bool = False,
     b_preshuffled: bool = False,
     static_weight_scale: bool = True,
+    num_xcds: int = 8,
+    group_size_m: int = 4,
 ):
     """Run + verify a single (M, N, K, tile) configuration. Returns TFLOPS."""
     if "gfx95" not in ARCH:
@@ -107,10 +109,13 @@ def _bench_fp8_gemm(
             BLOCK_M=tile_m,
             BLOCK_N=tile_n,
             b_preshuffled=b_preshuffled,
+            num_xcds=num_xcds,
+            group_size_m=group_size_m,
         )
         print(
             f"\n[fp8_gemm_8wave] M={M} N={N} K={K} BLOCK_M={tile_m} BLOCK_N={tile_n} "
-            f"preshuffle_b={b_preshuffled} static_weight_scale={static_weight_scale}"
+            f"preshuffle_b={b_preshuffled} static_weight_scale={static_weight_scale} "
+            f"num_xcds={num_xcds} group_size_m={group_size_m}"
         )
     else:
         launch_fn = compile_fp8_gemm_4w(
@@ -253,6 +258,8 @@ if __name__ == "__main__":
     parser.add_argument("--tile_m", type=int, default=256)
     parser.add_argument("--tile_n", type=int, default=256)
     parser.add_argument("--disable_xcd_remap", action="store_true", default=False)
+    parser.add_argument("--num_xcds", type=int, default=8, help="XCD count for the 8-wave PID remapping.")
+    parser.add_argument("--group_size_m", type=int, default=4, help="M grouping for the 8-wave PID traversal.")
     parser.add_argument(
         "--num_iters",
         type=int,
@@ -307,6 +314,8 @@ if __name__ == "__main__":
             vs_torch=args.vs_torch,
             b_preshuffled=args.preshuffle_b,
             static_weight_scale=not args.dynamic_weight_scale,
+            num_xcds=args.num_xcds,
+            group_size_m=args.group_size_m,
         )
     except pytest.skip.Exception as e:
         print(f"Skipped: {e}")
