@@ -96,6 +96,52 @@ mask_vmem_rd = 0x020
 mask_dsrd = 0x100
 mask_dswr = 0x200
 
+_ods_sched_barrier = globals().get("sched_barrier")
+_ods_sched_group_barrier = globals().get("sched_group_barrier")
+
+_SCHED_MASK_INT_TO_KW = {
+    0x000: "none",
+    0x001: "non_mem_non_sideeffect",
+    0x002: "valu",
+    0x004: "salu",
+    0x008: "mfma_wmma",
+    0x010: "all_vmem",
+    0x020: "vmem_read",
+    0x040: "vmem_write",
+    0x080: "all_ds",
+    0x100: "ds_read",
+    0x200: "ds_write",
+    0x400: "transcendental",
+    0x800: "ldsdma",
+}
+
+
+def _mask_to_attr(mask):
+    """Convert an int or keyword mask to a SchedGroupMask attribute."""
+    from ..._mlir import ir as _ir
+
+    if isinstance(mask, _ir.Attribute):
+        return mask
+    if isinstance(mask, str):
+        return _ir.Attribute.parse(f"#rocdl<sched_group_mask {mask}>")
+    val = int(mask)
+    if val == 0:
+        return _ir.Attribute.parse("#rocdl<sched_group_mask none>")
+    parts = [kw for bit, kw in _SCHED_MASK_INT_TO_KW.items() if bit and val & bit]
+    if not parts:
+        return _ir.Attribute.parse("#rocdl<sched_group_mask none>")
+    return _ir.Attribute.parse(f"#rocdl<sched_group_mask {'|'.join(parts)}>")
+
+
+@dsl_loc_tracing
+def sched_barrier(mask, **kw):
+    return _ods_sched_barrier(_mask_to_attr(mask), **kw)
+
+
+@dsl_loc_tracing
+def sched_group_barrier(mask, size, group_id, **kw):
+    return _ods_sched_group_barrier(_mask_to_attr(mask), size, group_id, **kw)
+
 
 @dsl_loc_tracing
 def sched_mfma(cnt):
@@ -629,11 +675,30 @@ def perm_b32(src_hi, src_lo, sel, **kw):
 
 
 @dsl_loc_tracing
-def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, **kw):
+def raw_ptr_buffer_load(res, rsrc, offset, soffset, aux=None, **kw):
+    from ..._mlir import ir as _ir
+    from ..._mlir.dialects.rocdl import raw_ptr_buffer_load as _op
+
+    if aux is not None and not isinstance(aux, _ir.Attribute):
+        if isinstance(aux, int):
+            aux = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), aux)
+        else:
+            aux = None
+    return _op(res=res, rsrc=_to_ir(rsrc), offset=_to_ir(offset), soffset=_to_ir(soffset), aux=aux, **kw)
+
+
+@dsl_loc_tracing
+def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux=None, **kw):
+    from ..._mlir import ir as _ir
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_load_lds as _op
 
+    if aux is not None and not isinstance(aux, _ir.Attribute):
+        if isinstance(aux, int):
+            aux = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), aux)
+        else:
+            aux = None
     return _op(
-        _to_ir(rsrc), _to_ir(lds_ptr), _to_ir(size), _to_ir(voffset), _to_ir(soffset), _to_ir(offset), _to_ir(aux), **kw
+        _to_ir(rsrc), _to_ir(lds_ptr), _to_ir(size), _to_ir(voffset), _to_ir(soffset), _to_ir(offset), aux=aux, **kw
     )
 
 
@@ -646,6 +711,32 @@ def buffer_load_to_lds(rsrc, lds_ptr, voffset, size_bytes=4, soffset=0, offset=0
     Python int arguments are auto-materialised as i32 constants.
     """
     return raw_ptr_buffer_load_lds(rsrc, lds_ptr, size_bytes, voffset, soffset, offset, 0, **kw)
+
+
+@dsl_loc_tracing
+def tensor_load_to_lds(dgroup0, dgroup1, dgroup2, dgroup3, dgroup4, cache_policy=None, **kw):
+    from ..._mlir import ir as _ir
+    from ..._mlir.dialects.rocdl import tensor_load_to_lds as _op
+
+    if cache_policy is not None and not isinstance(cache_policy, _ir.Attribute):
+        if isinstance(cache_policy, int):
+            cache_policy = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), cache_policy)
+        else:
+            cache_policy = None
+    return _op(dgroup0, dgroup1, dgroup2, dgroup3, dgroup4, cache_policy=cache_policy, **kw)
+
+
+@dsl_loc_tracing
+def tensor_store_from_lds(dgroup0, dgroup1, dgroup2, dgroup3, dgroup4, cache_policy=None, **kw):
+    from ..._mlir import ir as _ir
+    from ..._mlir.dialects.rocdl import tensor_store_from_lds as _op
+
+    if cache_policy is not None and not isinstance(cache_policy, _ir.Attribute):
+        if isinstance(cache_policy, int):
+            cache_policy = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), cache_policy)
+        else:
+            cache_policy = None
+    return _op(dgroup0, dgroup1, dgroup2, dgroup3, dgroup4, cache_policy=cache_policy, **kw)
 
 
 @dsl_loc_tracing

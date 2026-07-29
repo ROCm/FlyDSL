@@ -70,6 +70,13 @@ __all__ = [
 ]
 
 
+def _cache_policy_attr(val):
+    """Convert an int cache-policy to an IntegerAttr for TDM ops."""
+    if val is None or isinstance(val, ir.Attribute):
+        return val
+    return ir.IntegerAttr.get(ir.IntegerType.get_signless(32), int(val))
+
+
 # ---------------------------------------------------------------------------
 # Pure-Python helpers (compile-time, no IR emission)
 # ---------------------------------------------------------------------------
@@ -769,7 +776,7 @@ def tensor_load_gather(
         _raw(desc.dgroup2),
         _raw(desc.dgroup3),
         dg4,
-        cache_policy,
+        cache_policy=_cache_policy_attr(cache_policy),
     )
 
 
@@ -794,7 +801,7 @@ def tensor_store_gather(
         _raw(desc.dgroup2),
         _raw(desc.dgroup3),
         dg4,
-        cache_policy,
+        cache_policy=_cache_policy_attr(cache_policy),
     )
 
 
@@ -1110,7 +1117,7 @@ def tensor_load_2d(
     dg2 = _raw(_zero_dgroup_v4i32())
     dg3 = _raw(_zero_dgroup_v4i32())
     dg4 = _raw(_zero_dgroup_v8i32())
-    rocdl.tensor_load_to_lds(_raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, dg4, cache_policy)
+    rocdl.tensor_load_to_lds(_raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, dg4, cache_policy=_cache_policy_attr(cache_policy))
 
 
 @dsl_loc_tracing
@@ -1130,7 +1137,7 @@ def tensor_store_2d(
     dg2 = _raw(_zero_dgroup_v4i32())
     dg3 = _raw(_zero_dgroup_v4i32())
     dg4 = _raw(_zero_dgroup_v8i32())
-    rocdl.tensor_store_from_lds(_raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, dg4, cache_policy)
+    rocdl.tensor_store_from_lds(_raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, dg4, cache_policy=_cache_policy_attr(cache_policy))
 
 
 @dsl_loc_tracing
