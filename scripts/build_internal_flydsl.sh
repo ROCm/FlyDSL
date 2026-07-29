@@ -29,8 +29,8 @@ done
 # Discover MLIR_PATH
 # ---------------------------------------------------------------------------
 # Read LLVM commit short hash for internal build path matching
-LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/internal-llvm-build-info.json"
-LLVM_SHORT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['llvm_hash'][:8])")
+LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/llvm-build-info.json"
+LLVM_SHORT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['internal']['llvm_hash'][:8])")
 
 if [ -z "${MLIR_PATH:-}" ]; then
   candidates=(

@@ -147,7 +147,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: mlir_install.tgz
-          key: mlir-install-${{ runner.os }}-${{ runner.arch }}-${{ env.MLIR_CACHE_VERSION }}-${{ hashFiles('flydsl-test/thirdparty/llvm-hash.txt', 'flydsl-test/scripts/build_llvm.sh') }}
+          key: mlir-install-${{ runner.os }}-${{ runner.arch }}-${{ env.MLIR_CACHE_VERSION }}-${{ hashFiles('flydsl-test/thirdparty/llvm-build-info.json', 'flydsl-test/scripts/build_llvm.sh') }}
 
       - name: Start MLIR build container
         if: steps.mlir-cache.outputs.cache-hit != 'true'

@@ -86,7 +86,7 @@ jobs:
             REF="$(python3 -c "import json; print(json.load(open('${CONFIG}'))['llvm_ref'])")"
             LLVM_REMOTE="$(python3 -c "import json; print(json.load(open('${CONFIG}')).get('llvm_remote', '${LLVM_REMOTE}'))")"
           else
-            REF="$(tr -d '[:space:]' < flydsl/thirdparty/llvm-hash.txt)"
+            REF="$(python3 -c "import json; print(json.load(open('flydsl/thirdparty/llvm-build-info.json'))['upstream']['llvm_hash'])")"
           fi
 
           # Resolve branch/tag to commit SHA for stable cache key
