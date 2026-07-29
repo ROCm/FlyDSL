@@ -89,7 +89,7 @@ FailureOr<Value> CopyOpCDNA3BufferCopyType::emitAtomCallSSA(OpBuilder &builder, 
   };
 
   // raw buffer load/store cachepolicy (0=cached, 2=nt)
-  Value aux = arith::ConstantIntOp::create(builder, loc, getCacheModifier(), 32);
+  auto aux = builder.getI32IntegerAttr(getCacheModifier());
   ArrayAttr noAttrs;
 
   auto srcMemTy = srcTyArg ? dyn_cast<fly::MemRefType>(srcTyArg) : fly::MemRefType();
@@ -321,8 +321,9 @@ LogicalResult CopyOpCDNA3BufferCopyLDSType::emitAtomCall(OpBuilder &builder, Loc
   Value srcOff = bp.swizzleByteOffset(builder, loc);
 
   ArrayAttr noAttrs;
+  auto auxAttr = builder.getI32IntegerAttr(0);
   ROCDL::RawPtrBufferLoadLdsOp::create(builder, loc, srcRsrc, dst, size, srcOff, soffset, immOffset,
-                                       zero, noAttrs, noAttrs, noAttrs);
+                                       auxAttr, noAttrs, noAttrs, noAttrs);
   return success();
 }
 
@@ -428,7 +429,7 @@ FailureOr<Value> CopyOpCDNA3BufferAtomicType::emitAtomCallSSA(OpBuilder &builder
     soffset = arith::DivUIOp::create(builder, loc, bits, eight);
   }
 
-  Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
+  auto auxAttr = builder.getI32IntegerAttr(0);
   ArrayAttr noAttrs;
 
   AtomicOp op = getAtomicOp().getValue();
@@ -437,22 +438,22 @@ FailureOr<Value> CopyOpCDNA3BufferAtomicType::emitAtomCallSSA(OpBuilder &builder
   case AtomicOp::Add:
     if (!isFloat)
       return failure();
-    ROCDL::RawPtrBufferAtomicFaddOp::create(builder, loc, src, dstRsrc, dstOff, soffset, zero,
-                                            noAttrs, noAttrs, noAttrs);
+    ROCDL::RawPtrBufferAtomicFaddOp::create(builder, loc, src.getType(), src, dstRsrc, dstOff,
+                                            soffset, auxAttr, noAttrs, noAttrs, noAttrs);
     break;
   case AtomicOp::Max:
     if (isFloat)
-      ROCDL::RawPtrBufferAtomicFmaxOp::create(builder, loc, src, dstRsrc, dstOff, soffset, zero,
-                                              noAttrs, noAttrs, noAttrs);
+      ROCDL::RawPtrBufferAtomicFmaxOp::create(builder, loc, src.getType(), src, dstRsrc, dstOff,
+                                               soffset, auxAttr, noAttrs, noAttrs, noAttrs);
     else
-      ROCDL::RawPtrBufferAtomicSmaxOp::create(builder, loc, src, dstRsrc, dstOff, soffset, zero,
-                                              noAttrs, noAttrs, noAttrs);
+      ROCDL::RawPtrBufferAtomicSmaxOp::create(builder, loc, src.getType(), src, dstRsrc, dstOff,
+                                               soffset, auxAttr, noAttrs, noAttrs, noAttrs);
     break;
   case AtomicOp::Min:
     if (isFloat)
       return failure();
-    ROCDL::RawPtrBufferAtomicUminOp::create(builder, loc, src, dstRsrc, dstOff, soffset, zero,
-                                            noAttrs, noAttrs, noAttrs);
+    ROCDL::RawPtrBufferAtomicUminOp::create(builder, loc, src.getType(), src, dstRsrc, dstOff,
+                                            soffset, auxAttr, noAttrs, noAttrs, noAttrs);
     break;
   default:
     return failure();
