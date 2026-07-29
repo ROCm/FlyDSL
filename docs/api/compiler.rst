@@ -96,14 +96,6 @@ descriptors with layout metadata:
    )
    launch(tA, B, n, stream=torch.cuda.Stream())
 
-Buffer Operations
------------------
-
-The ``flydsl.expr.buffer_ops`` module provides high-level Python wrappers for
-AMD CDNA3/CDNA4 buffer load/store operations. Buffer operations use a scalar
-base pointer (SGPRs) and per-thread offsets for efficient global memory access
-with hardware bounds checking.
-
 ROCDL Operations
 -----------------
 

@@ -10,11 +10,13 @@ Scale layouts: scale_a [scale_k, M] transposed, scale_b [scale_n, scale_k] row-m
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
+from flydsl._mlir.dialects import llvm, vector
+from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch
+from kernels.common import buffer_ops
+from kernels.common.kernels_common import default_f8_type
 from kernels.common.mma.mfma_epilogues import mfma_epilog
 from kernels.common.mma.mfma_preshuffle_pipeline import (
     _buffer_load_vec,
@@ -226,7 +228,7 @@ def compile_blockscale_preshuffle_gemm(
                 n_blk=n_blk_list[ni],
                 n_intra=n_intra_list[ni],
                 lane_div_16=lane_div_16,
-                elem_type=T.f8,
+                elem_type=default_f8_type(),
                 kpack_bytes=kpack_bytes,
                 elem_bytes=elem_bytes,
             )
@@ -246,7 +248,7 @@ def compile_blockscale_preshuffle_gemm(
                 vector,
                 b_rsrc,
                 idx_pack,
-                elem_type=T.f8,
+                elem_type=default_f8_type(),
                 vec_elems=16,
                 elem_bytes=elem_bytes,
                 offset_in_bytes=True,
@@ -294,7 +296,7 @@ def compile_blockscale_preshuffle_gemm(
                 return buffer_copy_gmem16_dwordx4(
                     buffer_ops,
                     vector,
-                    elem_type=T.f8,
+                    elem_type=default_f8_type(),
                     idx_i32=idx_i32,
                     rsrc=a_rsrc,
                     vec_elems=16,

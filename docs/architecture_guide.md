@@ -60,9 +60,7 @@ FlyDSL/
 │   │   ├── primitive.py              # Primitive operations (layout algebra, copy, gemm)
 │   │   ├── derived.py                # Derived types (CopyAtom, MmaAtom, TiledCopy)
 │   │   ├── arith.py                  # Arithmetic dialect ops
-│   │   ├── vector.py                 # Vector dialect ops
 │   │   ├── gpu.py                    # GPU dialect ops (thread_idx, block_idx, barrier)
-│   │   ├── buffer_ops.py             # Buffer / memory operations
 │   │   └── rocdl/                    # ROCm-specific intrinsics (MFMA/WMMA, buffer, TDM, cluster)
 │   ├── runtime/
 │   │   └── device.py                 # get_rocm_arch() — GPU architecture detection
@@ -105,8 +103,7 @@ FlyDSL/
 │   │   └── fused_rope_cache_kernel.py # Fused RoPE + KV cache
 │   ├── moe/                          # Mixture-of-experts kernels
 │   │   ├── moe_gemm_2stage.py        # MoE GEMM (2-stage gate/up + reduce)
-│   │   ├── moe_blockscale_2stage.py  # MoE Blockscale GEMM
-│   │   ├── mixed_moe_gemm_2stage.py  # Mixed-precision MoE GEMM
+│   │   ├── mxfp_moe/               # Fused a4w4/a8w4 MoE 2-stage (device fp4 re-quant)
 │   │   ├── moe_sorting_kernel.py     # MoE token sorting
 │   │   └── topk_gating_softmax_kernel.py # Top-k gating softmax
 │   ├── mma/                          # Shared MMA pipeline helpers

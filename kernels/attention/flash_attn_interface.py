@@ -97,6 +97,7 @@ def _build_dense(
     path_tag: str,
     waves_per_eu: int,
     daz: bool,
+    return_lse: bool = False,
 ):
     """Build (and cache) one dense generic launcher variant."""
     from kernels.attention.flash_attn_generic import build_flash_attn_func_module
@@ -113,6 +114,7 @@ def _build_dense(
         path_tag=path_tag,
         waves_per_eu=waves_per_eu,
         daz=daz,
+        return_lse=return_lse,
     )
 
 
@@ -130,6 +132,7 @@ def _build_dense_dualwave(
     setprio: bool,
     debug_lazy_counts: bool,
     enable_stagger: bool,
+    return_lse: bool = False,
 ):
     """Build (and cache) the dense gfx950 DUALWAVE_SWP launcher."""
     from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
@@ -147,6 +150,7 @@ def _build_dense_dualwave(
         dualwave_swp_setprio=setprio,
         dualwave_swp_debug_lazy_counts=debug_lazy_counts,
         dualwave_swp_enable_stagger=enable_stagger,
+        return_lse=return_lse,
     )
 
 
@@ -192,6 +196,7 @@ def _build_varlen(
     setprio: bool,
     debug_lazy_counts: bool,
     enable_stagger: bool,
+    return_lse: bool = False,
 ):
     """Build (and cache) a varlen-mode launcher (gfx950 DUALWAVE_SWP, varlen=True)."""
     from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
@@ -210,6 +215,7 @@ def _build_varlen(
         dualwave_swp_setprio=setprio,
         dualwave_swp_debug_lazy_counts=debug_lazy_counts,
         dualwave_swp_enable_stagger=enable_stagger,
+        return_lse=return_lse,
     )
 
 
@@ -227,6 +233,7 @@ def _build_varlen_light(
     setprio: bool,
     debug_lazy_counts: bool,
     enable_stagger: bool,
+    return_lse: bool = False,
 ):
     """Build a lightweight packed-varlen launcher for short attention."""
     from kernels.attention.flash_attn_generic import build_flash_attn_func_module
@@ -243,6 +250,7 @@ def _build_varlen_light(
         flat_work_group_size=128,
         waves_per_eu=waves_per_eu,
         daz=daz,
+        return_lse=return_lse,
     )
 
 
@@ -259,6 +267,7 @@ def _build_splitk(
     lazy_rescale: bool,
     setprio: bool,
     enable_stagger: bool,
+    return_lse: bool = False,
 ):
     """Build (and cache) a split-K launcher (gfx950 DUALWAVE_SWP, num_kv_splits>1)."""
     from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
@@ -275,6 +284,7 @@ def _build_splitk(
         dualwave_swp_lazy_rescale=lazy_rescale,
         dualwave_swp_setprio=setprio,
         dualwave_swp_enable_stagger=enable_stagger,
+        return_lse=return_lse,
     )
 
 
@@ -294,6 +304,7 @@ def _build_paged(
     num_kv_splits: int = 1,
     varlen: bool = False,
     kv_cache_layout: str = "linear",
+    return_lse: bool = False,
 ):
     """Build (and cache) a paged-KV launcher (gfx950 DUALWAVE_SWP, paged=True).
 
@@ -326,6 +337,7 @@ def _build_paged(
         dualwave_swp_lazy_rescale=lazy_rescale,
         dualwave_swp_setprio=setprio,
         dualwave_swp_enable_stagger=enable_stagger,
+        return_lse=return_lse,
     )
 
 
@@ -546,6 +558,7 @@ def _build_paged_light(
     setprio: bool,
     debug_lazy_counts: bool,
     enable_stagger: bool,
+    return_lse: bool = False,
 ):
     """Build a lightweight paged-varlen launcher for short attention."""
     from kernels.attention.flash_attn_generic import build_flash_attn_func_module
@@ -565,6 +578,7 @@ def _build_paged_light(
         path_tag="N32",
         waves_per_eu=waves_per_eu,
         daz=daz,
+        return_lse=return_lse,
     )
 
 
@@ -602,6 +616,9 @@ def flydsl_flash_attn_func(
     v_descale: Optional[torch.Tensor] = None,
     # Output tensor; allocated if None.
     out: Optional[torch.Tensor] = None,
+    # Also return per-row LSE = ln(sum_j exp(sm_scale * q_i.k_j)); fp32
+    # [B, num_heads, Sq]. Needed by backward; not supported for fp8.
+    return_lse: bool = False,
     # Kernel build options.
     waves_per_eu: int = 2,
     daz: bool = True,
@@ -659,7 +676,10 @@ def flydsl_flash_attn_func(
 
     Returns:
         Output tensor with the same shape as q. The dtype is bf16 for fp8
-        inputs, otherwise the same dtype as q.
+        inputs, otherwise the same dtype as q. When ``return_lse=True`` returns
+        ``(out, lse)`` where ``lse`` is fp32 ``[B, num_heads, Sq]`` (varlen:
+        ``[B, num_heads, max_seqlen_q]``, padded) holding the per-row
+        natural-log, scale-folded log-sum-exp.
     """
     # ── validation ──────────────────────────────────────────────────────────
     if not (q.is_cuda and k.is_cuda and v.is_cuda):
@@ -670,9 +690,13 @@ def flydsl_flash_attn_func(
         raise ValueError(f"flydsl_flash_attn_func: q/k/v must share dtype; got {q.dtype}/{k.dtype}/{v.dtype}")
 
     dtype_str = _dtype_str(q)
+    if return_lse and dtype_str == "fp8":
+        raise NotImplementedError("flydsl_flash_attn_func: return_lse is not supported for fp8")
     paged_kv = any(x is not None for x in (block_table, seqlen_k))
     if dtype_str == "fp8" and paged_kv:
         raise NotImplementedError("flydsl_flash_attn_func: fp8 flash_attn does not support paged KV")
+    if return_lse and paged_kv:
+        raise NotImplementedError("flydsl_flash_attn_func: return_lse is not supported for paged KV")
     if paged_kv:
         return _flydsl_flash_attn_paged(
             q,
@@ -784,6 +808,7 @@ def flydsl_flash_attn_func(
                 lazy_rescale=dualwave_swp_lazy_rescale,
                 setprio=dualwave_swp_setprio,
                 enable_stagger=dualwave_swp_enable_stagger,
+                return_lse=return_lse,
             )
         elif varlen:
             # Short varlen attention uses generic light; long/debug stays on dualwave.
@@ -808,6 +833,7 @@ def flydsl_flash_attn_func(
                     setprio=dualwave_swp_setprio,
                     debug_lazy_counts=debug_lazy,
                     enable_stagger=dualwave_swp_enable_stagger,
+                    return_lse=return_lse,
                 )
             else:
                 exe = _build_varlen(
@@ -823,6 +849,7 @@ def flydsl_flash_attn_func(
                     setprio=dualwave_swp_setprio,
                     debug_lazy_counts=debug_lazy,
                     enable_stagger=dualwave_swp_enable_stagger,
+                    return_lse=return_lse,
                 )
         else:
             _arch = _gpu_arch(q.device)
@@ -859,6 +886,7 @@ def flydsl_flash_attn_func(
                         setprio=dualwave_swp_setprio,
                         debug_lazy_counts=debug_lazy,
                         enable_stagger=dualwave_swp_enable_stagger,
+                        return_lse=return_lse,
                     )
                 else:
                     block_m, flat_work_group_size, path_tag = _dense_generic_tile(B, Sq, H, D, dtype_str, q.device)
@@ -874,6 +902,7 @@ def flydsl_flash_attn_func(
                         path_tag=path_tag,
                         waves_per_eu=waves_per_eu,
                         daz=daz,
+                        return_lse=return_lse,
                     )
 
         # ── allocate output ─────────────────────────────────────────────────
@@ -899,12 +928,15 @@ def flydsl_flash_attn_func(
             v_flat = v.contiguous()
             o_flat = out.contiguous()
 
+        # ── allocate LSE (fp32 [B, num_heads, Sq]) ───────────────────────────
+        lse = torch.empty((B, H, Sq), dtype=torch.float32, device=q.device) if return_lse else None
+
         # ── launch ──────────────────────────────────────────────────────────
         if splitk:
             _ws = torch.empty(ws_elems, dtype=torch.float32, device=q.device)
-            exe(q_flat, k_flat, v_flat, o_flat, B, Sq, workspace=_ws, stream=launch_stream)
+            exe(q_flat, k_flat, v_flat, o_flat, B, Sq, workspace=_ws, lse=lse, stream=launch_stream)
         elif varlen:
-            kwargs = dict(cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv, stream=launch_stream)
+            kwargs = dict(cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv, lse=lse, stream=launch_stream)
             if cross:
                 kwargs["seq_len_kv"] = int(max_seqlen_kv)
             if debug_lazy:
@@ -913,6 +945,9 @@ def flydsl_flash_attn_func(
                 exe(q_flat, k_flat, v_flat, o_flat, B, Sq, **kwargs)
         else:
             kwargs: dict = dict(stream=launch_stream)
+            # fp8 has no LSE path (guarded above) and its launcher takes no `lse` arg.
+            if dtype_str != "fp8":
+                kwargs["lse"] = lse
             if cross:
                 kwargs["seq_len_kv"] = Skv
             if debug_lazy:
@@ -921,4 +956,6 @@ def flydsl_flash_attn_func(
                 kwargs.update(q_descale=q_descale, k_descale=k_descale, v_descale=v_descale)
             exe(q_flat, k_flat, v_flat, o_flat, B, Sq, **kwargs)
 
+    if return_lse:
+        return out, lse
     return out

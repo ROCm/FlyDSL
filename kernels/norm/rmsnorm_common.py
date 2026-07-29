@@ -12,7 +12,6 @@ have to import from each other. Keeping these here follows the topical
 
 import flydsl.expr as fx
 from flydsl.expr import const_expr
-from flydsl.expr.vector import full
 from kernels.common.kernels_common import get_warp_size
 
 KERNEL_NAME = "rmsnorm"
@@ -60,9 +59,9 @@ def load_scalar(copy_atom, elem_dtype, divided_tensor, index):
     return fx.memref_load_vec(r)[0]
 
 
-def store_scalar(copy_atom, elem_dtype, store_dtype, divided_tensor, index, val):
+def store_scalar(copy_atom, elem_dtype, divided_tensor, index, val):
     r = fx.make_rmem_tensor(1, elem_dtype)
-    ts = full(1, store_dtype(val), store_dtype)
+    ts = fx.Vector.filled(1, val, elem_dtype)
     fx.memref_store_vec(ts, r)
     view = fx.slice(divided_tensor, (None, index))
     fx.copy_atom_call(copy_atom, r, view)
@@ -72,6 +71,18 @@ def load_vec(copy_atom, vec_width, elem_dtype, div_tensor, idx):
     r = fx.make_rmem_tensor(vec_width, elem_dtype)
     fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
     return fx.memref_load_vec(r)
+
+
+def load_weight_vec(copy_atom, weight_dtype_str, weight_elem_dtype, div_tensor, idx):
+    """Load eight weights as fp32 using one 128-bit load per source vector."""
+    if const_expr(weight_dtype_str == "f32"):
+        lo = load_vec(copy_atom, VEC_WIDTH // 2, weight_elem_dtype, div_tensor, idx * 2)
+        hi = load_vec(copy_atom, VEC_WIDTH // 2, weight_elem_dtype, div_tensor, idx * 2 + 1)
+        return fx.Vector.from_elements(
+            [lo[0], lo[1], lo[2], lo[3], hi[0], hi[1], hi[2], hi[3]],
+            fx.Float32,
+        )
+    return load_vec(copy_atom, VEC_WIDTH, weight_elem_dtype, div_tensor, idx).to(fx.Float32)
 
 
 def store_vec(copy_atom, vec_width, elem_dtype, val, div_tensor, idx):
@@ -104,6 +115,25 @@ def to_elem_vec(dtype_str: str, elem_dtype, use_hw_cvt_bf16: bool, y):
     if const_expr(dtype_str == "f32"):
         return y
     return y.to(elem_dtype)
+
+
+def resolve_rmsnorm_weight_dtype(dtype_str: str, weight_dtype_str: str | None = None) -> str:
+    """Return the supported weight dtype for an activation specialization."""
+    weight_dtype_str = dtype_str if weight_dtype_str is None else weight_dtype_str
+    supported = dtype_str in ("f16", "bf16", "f32") and (
+        weight_dtype_str == dtype_str or (dtype_str in ("f16", "bf16") and weight_dtype_str == "f32")
+    )
+    if not supported:
+        raise ValueError(
+            "RMSNorm supports matching activation/weight dtypes or "
+            f"FP16/BF16 activations with FP32 weights, got {dtype_str}/{weight_dtype_str}"
+        )
+    return weight_dtype_str
+
+
+def weight_vec_width(weight_dtype_str: str) -> int:
+    """Number of weight elements transferred by one 128-bit copy."""
+    return VEC_WIDTH // 2 if weight_dtype_str == "f32" else VEC_WIDTH
 
 
 if torch is not None:

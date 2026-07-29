@@ -9,7 +9,8 @@ carried byte-identical copies.
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr
+from flydsl.expr import arith, const_expr, range_constexpr
+from kernels.common import buffer_ops
 
 # PA Q-tiling constants (identical across all PA decode kernels).
 MFMA_N = 16

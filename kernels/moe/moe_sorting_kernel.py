@@ -26,12 +26,13 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import buffer_ops, gpu, range_constexpr
+from flydsl.expr import gpu, range_constexpr
 from flydsl.expr import rocdl as fly_rocdl
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch
+from kernels.common import buffer_ops
 from kernels.common.kernels_common import get_warp_size
 from kernels.moe.topk_gating_softmax_kernel import (
     _compute_topk_gating_layout,

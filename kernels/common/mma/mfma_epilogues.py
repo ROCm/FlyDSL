@@ -244,10 +244,10 @@ def c_shuffle_epilog(
 
                     _if_ld = scf.IfOp(_is_group_b, [vec_frag])
                     with ir.InsertionPoint(_if_ld.then_block):
-                        fb = vector.load_op(vec_frag, lds_out_split, [lds_idx])
+                        fb = vector.load(vec_frag, fx.as_ir_value(lds_out_split), [fx.as_ir_value(lds_idx)])
                         scf.YieldOp([fb])
                     with ir.InsertionPoint(_if_ld.else_block):
-                        fa = vector.load_op(vec_frag, lds_out, [lds_idx])
+                        fa = vector.load(vec_frag, fx.as_ir_value(lds_out), [fx.as_ir_value(lds_idx)])
                         scf.YieldOp([fa])
                     frag = _if_ld.results[0]
 
@@ -360,7 +360,7 @@ def c_shuffle_epilog(
                 col_pair0 = col_base_nr + (n_lane * c_evec)  # even col within tile
 
                 lds_idx_pair = row_base_lds + col_pair0
-                frag = vector.load_op(vec_frag, lds_out, [lds_idx_pair])
+                frag = vector.load(vec_frag, fx.as_ir_value(lds_out), [fx.as_ir_value(lds_idx_pair)])
 
                 store_pair(
                     row_local=row_local,

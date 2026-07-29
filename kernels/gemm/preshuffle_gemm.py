@@ -7,11 +7,13 @@ from typing import Optional
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir.dialects import vector
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import const_expr, gpu, math, range_constexpr, rocdl, vector
+from flydsl.expr import as_ir_value, const_expr, gpu, math, range_constexpr, rocdl
 from flydsl.expr.typing import BFloat16, Float8E4M3FN, Float8E4M3FNUZ, Float16, Float32, Int8, Int32, T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch
+from kernels.common import buffer_ops
 from kernels.common.mma.mfma_preshuffle_pipeline import xcd_remap_bx_by
 
 # (dsrd_preload, dvmem_preload) per (tile_m, tile_n, tile_k).
@@ -565,9 +567,9 @@ def compile_preshuffle_gemm(
             s_a = s_b = bias = None
             if const_expr(is_8bit):
                 # Per-row(scale_a) × per-col(scale_b) scaling, applied in the epilogue.
-                scale_b_rsrc = fx.buffer_ops.create_buffer_resource(arg_scale_b, max_size=True)
+                scale_b_rsrc = buffer_ops.create_buffer_resource(arg_scale_b, max_size=True)
                 s_b = [
-                    fx.buffer_ops.buffer_load(
+                    buffer_ops.buffer_load(
                         scale_b_rsrc,
                         fx.Int32(by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16),
                         vec_width=1,
@@ -575,10 +577,10 @@ def compile_preshuffle_gemm(
                     )
                     for ni in range_constexpr(num_acc_n)
                 ]
-                scale_a_rsrc = fx.buffer_ops.create_buffer_resource(arg_scale_a, max_size=True)
+                scale_a_rsrc = buffer_ops.create_buffer_resource(arg_scale_a, max_size=True)
                 s_a = [
                     Vec(
-                        fx.buffer_ops.buffer_load(
+                        buffer_ops.buffer_load(
                             scale_a_rsrc, fx.Int32(bx_m + mi * 16 + lane_div_16 * 4), vec_width=4, dtype=T.f32
                         )
                     ).bitcast(fx.Float32)
@@ -586,11 +588,11 @@ def compile_preshuffle_gemm(
                 ]
             if const_expr(_has_bias):
                 # Per-column bias (out_dtype), one scalar per N-block, shared across rows.
-                bias_rsrc = fx.buffer_ops.create_buffer_resource(arg_bias, max_size=True)
+                bias_rsrc = buffer_ops.create_buffer_resource(arg_bias, max_size=True)
                 bias_elem_ty = T.bf16 if out_dtype == "bf16" else T.f16
                 bias = [
                     fx.Float32(
-                        fx.buffer_ops.buffer_load(
+                        buffer_ops.buffer_load(
                             bias_rsrc,
                             fx.Int32(by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16),
                             vec_width=1,
@@ -660,7 +662,7 @@ def compile_preshuffle_gemm(
                 val_s = apply_activation(val_s)
                 out_elems.append(val_s.to(out_elem_cls))
 
-            out_vec = vector.from_elements(T.vec(acc_size, out_elem_cls.ir_type), out_elems)
+            out_vec = vector.from_elements(T.vec(acc_size, out_elem_cls.ir_type), [as_ir_value(_e) for _e in out_elems])
             frag_C_out.store(out_vec)
             fx.copy(buf_copy_out, frag_C_retile, pC_g)
 
