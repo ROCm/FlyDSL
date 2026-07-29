@@ -2893,6 +2893,66 @@ public:
   }
 };
 
+/// Canonicalize an add_offset chain to `add_offset(add_offset(ptr, dyn), static)`
+/// -- at most one dynamic layer plus one static tail.
+///
+/// Fusing a runtime offset with a compile-time constant makes every access
+/// compute its own address off the runtime base, so the backend materializes
+/// one base register per access instead of sharing one (issue #898).  Keeping
+/// the static part as a separate outer offset preserves the shared base.
+///
+/// Convergence: each rewrite either drops a level from the chain (fuse) or
+/// moves the static offset strictly outward (swap), and the resulting
+/// `dyn -> static` form is rejected below, so the pattern cannot loop.
+class AddOffsetCanonicalization : public OpRewritePattern<AddOffsetOp> {
+public:
+  using OpRewritePattern<AddOffsetOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(AddOffsetOp op, PatternRewriter &rewriter) const override {
+    auto inner = op.getPtr().getDefiningOp<AddOffsetOp>();
+    if (!inner)
+      return failure();
+    // Keep the shape the old TableGen rule matched: the chain bottoms out in a
+    // pointer.  IntTuple bases are handled by the int_tuple_add rule.
+    if (!isa<PointerType>(inner.getPtr().getType()))
+      return failure();
+    auto innerTy = dyn_cast<IntTupleType>(inner.getOffset().getType());
+    auto outerTy = dyn_cast<IntTupleType>(op.getOffset().getType());
+    if (!innerTy || !outerTy)
+      return failure();
+    if (!innerTy.getAttr().isLeafInt() || !outerTy.getAttr().isLeafInt())
+      return failure();
+
+    bool innerStatic = innerTy.getAttr().getLeafAsInt().isStatic();
+    bool outerStatic = outerTy.getAttr().getLeafAsInt().isStatic();
+
+    // Already canonical.
+    if (!innerStatic && outerStatic)
+      return failure();
+
+    Location loc = op.getLoc();
+
+    // static -> dynamic: swap so the static offset becomes the outer tail.
+    if (innerStatic && !outerStatic) {
+      // The swap rebuilds the inner op, so with other users the old one
+      // survives and we would add an add_offset instead of replacing one.
+      // Fusion below has no such problem: it rewrites only the outer op, which
+      // is what the original TableGen rule did unconditionally.
+      if (!inner->hasOneUse())
+        return failure();
+      Value dynBase = AddOffsetOp::create(rewriter, loc, inner.getPtr(), op.getOffset());
+      rewriter.replaceOpWithNewOp<AddOffsetOp>(op, dynBase, inner.getOffset());
+      return success();
+    }
+
+    // static -> static and dynamic -> dynamic both fuse: no runtime value is
+    // merged with a constant, so the shared base is unaffected.
+    Value sum = IntTupleAddOp::create(rewriter, loc, inner.getOffset(), op.getOffset());
+    rewriter.replaceOpWithNewOp<AddOffsetOp>(op, inner.getPtr(), sum);
+    return success();
+  }
+};
+
 class MemRefAllocaOpLowering : public OpRewritePattern<MemRefAllocaOp> {
 public:
   using OpRewritePattern<MemRefAllocaOp>::OpRewritePattern;
@@ -2997,6 +3057,7 @@ public:
     // MemRef/Ptr operations
     patterns.add<MemRefLoadVecOpLowering, MemRefStoreVecOpLowering>(context);
     patterns.add<MemRefAllocaOpLowering>(context);
+    patterns.add<AddOffsetCanonicalization>(context);
 
     // Utility ops
     patterns.add<PrintOpLowering>(context);
