@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-29T10:42:23Z",
+ "updated": "2026-07-29T11:17:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "mega_moe_v1",
    "event": "pull_request",
    "title": "MegaMoE on Gfx950",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30444503772",
    "created_at": "2026-07-29T10:39:17Z",
-   "updated_at": "2026-07-29T10:39:54Z",
+   "updated_at": "2026-07-29T11:12:53Z",
    "actor": "yanboshao",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-29T11:12:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30444503772/job/90558704666"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-29T11:13:11Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30444503772/job/90558704697"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-29T11:13:00Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30444503772/job/90558704791"
+    }
+   ]
   },
   {
    "run_id": 30443243584,
@@ -130,10 +158,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-29T09:49:15Z",
-     "completed_at": null,
+     "completed_at": "2026-07-29T11:12:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30440874976/job/90540505142"
     }
    ]
@@ -290,11 +318,11 @@
    "branch": "jli/update-internal-llvm",
    "event": "pull_request",
    "title": "[llvm] bump up llvm and adapt FlyDSL to new api",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30422872699",
    "created_at": "2026-07-29T04:39:39Z",
-   "updated_at": "2026-07-29T05:23:45Z",
+   "updated_at": "2026-07-29T10:40:10Z",
    "actor": "jli-melchior",
    "jobs": [
     {
@@ -318,9 +346,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-29T05:23:45Z",
+     "started_at": "2026-07-29T10:40:10Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30422872699/job/90489260313"
     }
@@ -333,11 +361,11 @@
    "branch": "port/layout-api-ports",
    "event": "pull_request",
    "title": "Port GEMM/MoE/conv kernels to the layout API",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30422854508",
    "created_at": "2026-07-29T04:39:13Z",
-   "updated_at": "2026-07-29T09:46:05Z",
+   "updated_at": "2026-07-29T11:15:15Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -361,10 +389,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-29T09:46:05Z",
-     "completed_at": null,
+     "completed_at": "2026-07-29T11:15:14Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30422854508/job/90484114900"
     }
    ]
