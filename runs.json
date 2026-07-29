@@ -1,8 +1,57 @@
 {
  "schema": 1,
- "updated": "2026-07-29T03:37:10Z",
+ "updated": "2026-07-29T04:02:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30420990189,
+   "pr": 922,
+   "commit": "83f3185b2b26fad07e46fd903e448eef310f4bae",
+   "branch": "jli/update-internal-llvm",
+   "event": "pull_request",
+   "title": "[WIP] [llvm] bump up llvm and adapt FlyDSL to new api",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30420990189",
+   "created_at": "2026-07-29T03:58:27Z",
+   "updated_at": "2026-07-29T03:59:14Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 30420268563,
+   "pr": 876,
+   "commit": "e4f0ed4f56823972f3cbda0d68f34851f0018c01",
+   "branch": "mega_moe_v1",
+   "event": "pull_request",
+   "title": "MegaMoEV1 on Gfx950",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30420268563",
+   "created_at": "2026-07-29T03:42:06Z",
+   "updated_at": "2026-07-29T03:43:20Z",
+   "actor": "Yaowu-Xiong",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-29T03:43:55Z",
+     "completed_at": "2026-07-29T03:50:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30420268563/job/90475608759"
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-29T03:43:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30420268563/job/90475609009"
+    }
+   ]
+  },
   {
    "run_id": 30419977457,
    "pr": 921,
@@ -10,13 +59,41 @@
    "branch": "pr/feat-to-llvm-ptr",
    "event": "pull_request",
    "title": "[Feat] Add to_llvm_ptr op to convert fly.ptr to llvm.ptr ",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30419977457",
    "created_at": "2026-07-29T03:35:25Z",
-   "updated_at": "2026-07-29T03:36:08Z",
+   "updated_at": "2026-07-29T03:39:43Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-29T03:39:43Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30419977457/job/90475140442"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-29T03:40:01Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30419977457/job/90475140456"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-29T03:39:49Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30419977457/job/90475140462"
+    }
+   ]
   },
   {
    "run_id": 30419778865,
@@ -1121,13 +1198,22 @@
    "branch": "port/layout-api-ports",
    "event": "pull_request",
    "title": "Port GEMM/MoE/conv kernels to the layout API",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278250653",
    "created_at": "2026-07-27T15:05:01Z",
-   "updated_at": "2026-07-27T18:06:11Z",
+   "updated_at": "2026-07-29T03:59:13Z",
    "actor": "coderfeli",
    "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-29T04:00:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278250653/job/90477662301"
+    },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
@@ -1135,7 +1221,7 @@
      "conclusion": "success",
      "started_at": "2026-07-27T15:26:39Z",
      "completed_at": "2026-07-27T17:25:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278250653/job/90018862556"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278250653/job/90477662691"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -1144,16 +1230,7 @@
      "conclusion": "success",
      "started_at": "2026-07-27T17:01:43Z",
      "completed_at": "2026-07-27T18:06:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278250653/job/90018862557"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-27T15:09:35Z",
-     "completed_at": "2026-07-27T15:34:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278250653/job/90018862579"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278250653/job/90477662705"
     }
    ]
   },
@@ -2104,64 +2181,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30230276970/job/89868083994"
     }
    ]
-  },
-  {
-   "run_id": 30222517993,
-   "pr": 903,
-   "commit": "17cad279c4b307a09698bad17a7e92f809085ad7",
-   "branch": "ci/mlir-cache-smoke-test",
-   "event": "pull_request",
-   "title": "[CI] Smoke test shared MLIR cache workflow",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30222517993",
-   "created_at": "2026-07-26T22:08:02Z",
-   "updated_at": "2026-07-26T23:26:22Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-26T22:12:41Z",
-     "completed_at": "2026-07-26T23:26:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30222517993/job/89847556611"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-26T22:12:32Z",
-     "completed_at": "2026-07-26T23:10:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30222517993/job/89847556628"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-26T22:12:41Z",
-     "completed_at": "2026-07-26T23:02:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30222517993/job/89847556641"
-    }
-   ]
-  },
-  {
-   "run_id": 30214379950,
-   "pr": null,
-   "commit": "30412e742da46bd4d42c361c502ed6343fe13448",
-   "branch": "fast-divmod",
-   "event": "pull_request",
-   "title": "Add fast_divmod magic-number division helper",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30214379950",
-   "created_at": "2026-07-26T18:16:44Z",
-   "updated_at": "2026-07-26T18:16:44Z",
-   "actor": "kashif",
-   "jobs": []
   }
  ]
 }
