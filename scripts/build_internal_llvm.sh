@@ -7,10 +7,10 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BASE_DIR="$(cd "${REPO_ROOT}/.." && pwd)"
-# Read LLVM commit hash and repository from thirdparty/internal-llvm-build-info.json
-LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/internal-llvm-build-info.json"
-LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['llvm_hash'])")
-LLVM_REMOTE_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['repository'])")
+# Read LLVM commit hash and repository from thirdparty/llvm-build-info.json (internal entry)
+LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/llvm-build-info.json"
+LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['internal']['llvm_hash'])")
+LLVM_REMOTE_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['internal']['repository'])")
 LLVM_REF="${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}"
 LLVM_SHORT="${LLVM_REF:0:8}"
 

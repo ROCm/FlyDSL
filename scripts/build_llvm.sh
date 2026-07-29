@@ -13,9 +13,9 @@ LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
 LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
 LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 
-# Read LLVM commit hash from thirdparty/llvm-hash.txt
-LLVM_HASH_FILE="${REPO_ROOT}/thirdparty/llvm-hash.txt"
-LLVM_COMMIT_DEFAULT=$(cat "${LLVM_HASH_FILE}" | tr -d '[:space:]')
+# Read LLVM commit hash from thirdparty/llvm-build-info.json (upstream entry)
+LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/llvm-build-info.json"
+LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['upstream']['llvm_hash'])")
 LLVM_REF="${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}"
 
 echo "Base directory: $BASE_DIR"

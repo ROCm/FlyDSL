@@ -81,6 +81,130 @@ jobs:
           MAX_RETRIES: 5
           RETRY_INTERVAL_SECONDS: 30
 
+  # Reports the required 'test (<runner>)' checks when the GPU 'test' job is
+  # skipped for a non-code change (a skipped matrix job emits no per-runner
+  # checks, which would leave branch protection waiting forever). Fails them if
+  # check-signal failed/was cancelled, since check-signal is not itself required.
+  test-skip:
+    needs: [check-signal, detect-changes]
+    if: >-
+      ${{ always()
+          && needs.detect-changes.result == 'success'
+          && needs.detect-changes.outputs.code_changed != 'true' }}
+    name: test
+    strategy:
+      matrix:
+        runners: [
+          'linux-flydsl-mi325-1',
+          'linux-flydsl-mi355-1',
+          'linux-flydsl-navi-2',
+        ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report skipped GPU tests (green) or fail if pre-checks failed (red)
+        env:
+          CHECK_SIGNAL_RESULT: ${{ needs.check-signal.result }}
+        run: |
+          if [ "$CHECK_SIGNAL_RESULT" = "failure" ] || [ "$CHECK_SIGNAL_RESULT" = "cancelled" ]; then
+            echo "::error::check-signal ${CHECK_SIGNAL_RESULT}; failing 'test (${{ matrix.runners }})' for this docs-only change."
+            exit 1
+          fi
+          echo "Docs-only change: GPU tests skipped (check-signal=${CHECK_SIGNAL_RESULT}); reporting 'test (${{ matrix.runners }})' as passed."
+
+  # ---------------------------------------------------------------------------
+  # Prepare one shared MLIR install before GPU jobs. Restore or build LLVM once,
+  # then publish a short-lived artifact for every GPU job in the current run.
+  # Only main persists rebuilt installs in the cross-run cache.
+  # ---------------------------------------------------------------------------
+  prepare-mlir:
+    needs: [check-signal, detect-changes]
+    if: >-
+      ${{ !cancelled()
+          && needs.check-signal.result == 'success'
+          && (needs.detect-changes.result != 'success'
+              || needs.detect-changes.outputs.code_changed == 'true') }}
+    runs-on: linux-flydsl-mi325-1
+    timeout-minutes: 90
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/flydsl-gitconfig
+          GIT_CONFIG_NOSYSTEM: "1"
+        with:
+          repository: ${{ env.GITHUB_REPO_NAME }}
+          ref: ${{ env.GITHUB_COMMIT_SHA }}
+          path: flydsl-test
+
+      - name: Restore shared MLIR cache
+        id: mlir-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: mlir_install.tgz
+          key: mlir-install-${{ runner.os }}-${{ runner.arch }}-${{ env.MLIR_CACHE_VERSION }}-${{ hashFiles('flydsl-test/thirdparty/llvm-build-info.json', 'flydsl-test/scripts/build_llvm.sh') }}
+
+      - name: Start MLIR build container
+        if: steps.mlir-cache.outputs.cache-hit != 'true'
+        run: |
+          docker ps -aq -f name=flydsl_mlir_cache | xargs -r docker stop | xargs -r docker rm || true
+          docker run -dt --network=host --user root \
+            -v "${GITHUB_WORKSPACE:-$PWD}/flydsl-test:/flydsl-test" \
+            --ipc=host --shm-size 16g \
+            --cap-add=SYS_PTRACE \
+            --security-opt seccomp=unconfined \
+            -w /flydsl-test \
+            --name flydsl_mlir_cache \
+            ${{ env.DOCKER_IMAGE }}
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+
+      - name: Install MLIR build dependencies
+        if: steps.mlir-cache.outputs.cache-hit != 'true'
+        run: |
+          docker exec flydsl_mlir_cache bash -c "apt-get update && apt-get install -y cmake build-essential patchelf"
+          docker exec flydsl_mlir_cache bash -c "python3 -m pip install -U pip setuptools wheel"
+          docker exec flydsl_mlir_cache bash -c "python3 -m pip install ninja>=1.11.1"
+          docker exec flydsl_mlir_cache bash -c "git config --global --add safe.directory /flydsl-test"
+
+      - name: Build LLVM once
+        if: steps.mlir-cache.outputs.cache-hit != 'true'
+        run: |
+          set -ex
+          docker exec flydsl_mlir_cache bash -c "cd /flydsl-test && bash scripts/build_llvm.sh"
+          docker exec flydsl_mlir_cache bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
+          docker cp flydsl_mlir_cache:/llvm-project/mlir_install.tgz ./mlir_install.tgz
+          test -s ./mlir_install.tgz
+
+      - name: Validate MLIR with FlyDSL build
+        if: steps.mlir-cache.outputs.cache-hit != 'true'
+        run: |
+          docker exec flydsl_mlir_cache bash -c "export MLIR_PATH=/llvm-project/mlir_install && cd /flydsl-test && python3 -m pip install -e . --use-pep517"
+
+      - name: Save shared MLIR cache from main
+        if: >-
+          steps.mlir-cache.outputs.cache-hit != 'true' &&
+          github.ref == 'refs/heads/main' &&
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        uses: actions/cache/save@v4
+        with:
+          path: mlir_install.tgz
+          key: ${{ steps.mlir-cache.outputs.cache-primary-key }}
+
+      - name: Upload prepared MLIR tarball for this run
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlir-install-${{ github.run_id }}
+          path: mlir_install.tgz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Clean up MLIR build container
+        if: always() && steps.mlir-cache.outputs.cache-hit != 'true'
+        run: |
+          docker stop flydsl_mlir_cache || true
+          docker rm flydsl_mlir_cache || true
+
   # ---------------------------------------------------------------------------
   # Single-GPU tests: kernels, unit, examples, MLIR FileCheck, benchmarks.
   # Runs on 1-GPU and Navi runners only.
