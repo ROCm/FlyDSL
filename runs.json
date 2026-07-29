@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-29T03:32:48Z",
+ "updated": "2026-07-29T03:37:10Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30419977457,
+   "pr": 921,
+   "commit": "24c5e9c9fce935684065f4c290864f056f84cbd1",
+   "branch": "pr/feat-to-llvm-ptr",
+   "event": "pull_request",
+   "title": "[Feat] Add to_llvm_ptr op to convert fly.ptr to llvm.ptr ",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30419977457",
+   "created_at": "2026-07-29T03:35:25Z",
+   "updated_at": "2026-07-29T03:36:08Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 30419778865,
    "pr": 921,
@@ -10,13 +25,41 @@
    "branch": "pr/feat-to-llvm-ptr",
    "event": "pull_request",
    "title": "[Feat] Add to_llvm_ptr op to convert fly.ptr to llvm.ptr ",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30419778865",
    "created_at": "2026-07-29T03:31:00Z",
-   "updated_at": "2026-07-29T03:31:42Z",
+   "updated_at": "2026-07-29T03:35:44Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-29T03:34:23Z",
+     "completed_at": "2026-07-29T03:35:43Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30419778865/job/90474437822"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-29T03:34:35Z",
+     "completed_at": "2026-07-29T03:35:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30419778865/job/90474437824"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-29T03:34:18Z",
+     "completed_at": "2026-07-29T03:35:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30419778865/job/90474437835"
+    }
+   ]
   },
   {
    "run_id": 30419524850,
@@ -2119,49 +2162,6 @@
    "updated_at": "2026-07-26T18:16:44Z",
    "actor": "kashif",
    "jobs": []
-  },
-  {
-   "run_id": 30204287374,
-   "pr": null,
-   "commit": "9d80c1336b3761f2a5511af3e06b4c748702f118",
-   "branch": "main",
-   "event": "push",
-   "title": "[3/5] autotune: add offline config artifacts (#770) (#786)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30204287374",
-   "created_at": "2026-07-26T13:33:37Z",
-   "updated_at": "2026-07-26T14:53:08Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-26T13:40:04Z",
-     "completed_at": "2026-07-26T14:53:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30204287374/job/89800045130"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-26T13:42:50Z",
-     "completed_at": "2026-07-26T14:28:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30204287374/job/89800045137"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-26T13:40:03Z",
-     "completed_at": "2026-07-26T14:40:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30204287374/job/89800045138"
-    }
-   ]
   }
  ]
 }
