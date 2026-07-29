@@ -955,6 +955,13 @@ def _init_dualwave_q_row(ctx):
 # Traits and factory
 
 
+def _mod_cache_tag(mod):
+    """Stable JIT-cache tag for a score/mask mod callable (None -> None)."""
+    if mod is None:
+        return None
+    return (getattr(mod, "__module__", ""), getattr(mod, "__qualname__", ""), id(mod))
+
+
 @dataclass(frozen=True)
 class FlashAttnGenericTraits:
     """Compile-time constants for the generic flash-attention kernel."""
@@ -1039,6 +1046,8 @@ class FlashAttnGenericTraits:
     K_VEC_HI_N_OFFSET: int
     QK_PREFETCH_DEPTH: int
     RETURN_LSE: bool = False
+    SCORE_MOD: object = None
+    MASK_MOD: object = None
 
     @property
     def cache_tag(self):
@@ -1125,6 +1134,8 @@ class FlashAttnGenericTraits:
             self.K_VEC_HI_N_OFFSET,
             self.QK_PREFETCH_DEPTH,
             self.RETURN_LSE,
+            _mod_cache_tag(self.SCORE_MOD),
+            _mod_cache_tag(self.MASK_MOD),
         )
 
 
@@ -1149,6 +1160,8 @@ def _make_flash_attn_generic_traits(
     sm_scale=None,
     skip_kv_pad_mask=None,
     return_lse=False,
+    score_mod=None,
+    mask_mod=None,
 ):
     """Build compile-time traits for ``flash_attn_generic``."""
     block_n = 64
@@ -1374,6 +1387,8 @@ def _make_flash_attn_generic_traits(
         K_VEC_HI_N_OFFSET=k_vec_hi_n_offset,
         QK_PREFETCH_DEPTH=qk_prefetch_depth,
         RETURN_LSE=bool(return_lse),
+        SCORE_MOD=score_mod,
+        MASK_MOD=mask_mod,
     )
 
 
@@ -2031,6 +2046,7 @@ class GenericFlashAttnContext:
         self.c_zero_f = fx.Float32(0.0)
         self.c_zero_i32 = fx.Int32(0)
         self.c_sm_scale = fx.Float32(sm_scale)
+        self.c_sm_scale_rcp = fx.Float32(1.0 / sm_scale)
         self.c_sm_scale_log2e = fx.Float32(sm_scale * _LOG2E)
         self.c_zero_v16f32 = Vec.filled(16, 0.0, fx.Float32)
         self.width_i32 = fx.Int32(traits.WARP_SIZE)
@@ -2813,6 +2829,36 @@ class GenericSoftmaxHelper:
             moff = (0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 24, 25, 26, 27)
         return kv_start_i32 + lane_off, moff
 
+    def apply_score_mod(self, s_raw_lo, s_raw_hi, kv_start):
+        # flex_attention score_mod hook: transform each logit in place using the
+        # per-fragment (b, h, q_idx, kv_idx) context. Runs before apply_kv_mask so a
+        # non-additive mod can never resurrect a masked -inf (PyTorch order).
+        #
+        # PyTorch applies sm_scale BEFORE score_mod (qk *= SM_SCALE; then score_mod),
+        # while online_softmax re-applies sm_scale*log2e to the raw score. So scale
+        # in, run the mod, then unscale: the later *sm_scale*log2e cancels the /sm_scale
+        # and yields score_mod(qk*sm_scale)*log2e, matching flex_attention exactly.
+        ctx = self.ctx
+        traits = ctx.traits
+        if const_expr(traits.SCORE_MOD is None):
+            return s_raw_lo, s_raw_hi
+        kv_start_i32 = fx.Int32(kv_start)
+        b_i32 = fx.Int32(ctx.batch_idx)
+        h_i32 = fx.Int32(ctx.q_head_idx)
+        q_idx = ctx.q_row_i32
+        col_base_i32, moff = self._kv_mask_lane_off(kv_start_i32)
+        fm_fast = ctx.fm_fast
+        for r in range_constexpr(16):
+            kv_col_lo = col_base_i32 + fx.Int32(moff[r])
+            kv_col_hi = kv_col_lo + fx.Int32(traits.K_SUB_N)
+            s_lo = _fmul(s_raw_lo[r], ctx.c_sm_scale, fm_fast)
+            s_hi = _fmul(s_raw_hi[r], ctx.c_sm_scale, fm_fast)
+            s_lo = traits.SCORE_MOD(s_lo, b_i32, h_i32, q_idx, kv_col_lo)
+            s_hi = traits.SCORE_MOD(s_hi, b_i32, h_i32, q_idx, kv_col_hi)
+            s_raw_lo[r] = _fmul(fx.Float32(s_lo), ctx.c_sm_scale_rcp, fm_fast)
+            s_raw_hi[r] = _fmul(fx.Float32(s_hi), ctx.c_sm_scale_rcp, fm_fast)
+        return s_raw_lo, s_raw_hi
+
     def apply_kv_mask(self, s_raw_lo, s_raw_hi, kv_start):
         ctx = self.ctx
         traits = ctx.traits
@@ -2858,6 +2904,20 @@ class GenericSoftmaxHelper:
                 masked_hi = (kv_col + fx.Int32(traits.K_SUB_N) >= seq_len_i32).select(ctx.c_neg_inf, s_raw_hi[r])
                 s_raw_lo[r] = (needs_pad_mask).select(masked_lo, s_raw_lo[r])
                 s_raw_hi[r] = (needs_pad_mask).select(masked_hi, s_raw_hi[r])
+        if const_expr(traits.MASK_MOD is not None):
+            # flex_attention mask_mod hook: keep score where the predicate is true,
+            # else drop to -inf (where(mask, score, -inf)).
+            b_i32 = fx.Int32(ctx.batch_idx)
+            h_i32 = fx.Int32(ctx.q_head_idx)
+            q_idx = ctx.q_row_i32
+            col_base_i32, moff = self._kv_mask_lane_off(kv_start_i32)
+            for r in range_constexpr(16):
+                kv_col_lo = col_base_i32 + fx.Int32(moff[r])
+                kv_col_hi = kv_col_lo + fx.Int32(traits.K_SUB_N)
+                keep_lo = traits.MASK_MOD(b_i32, h_i32, q_idx, kv_col_lo)
+                keep_hi = traits.MASK_MOD(b_i32, h_i32, q_idx, kv_col_hi)
+                s_raw_lo[r] = keep_lo.select(s_raw_lo[r], ctx.c_neg_inf)
+                s_raw_hi[r] = keep_hi.select(s_raw_hi[r], ctx.c_neg_inf)
         return s_raw_lo, s_raw_hi
 
     def _exp2(self, x):
@@ -2885,7 +2945,9 @@ class GenericSoftmaxHelper:
                 local_max = _fmax(local_max, s_raw_hi[r], fm_fast)
         row_max = _fmax(local_max, self.reduction_peer(local_max), fm_fast)
         m_new_raw = _fmax(m_running, row_max, fm_fast)
-        if const_expr(traits.CAUSAL):
+        # A mask_mod (like causal) can fully mask a tile/row to -inf; clamp the
+        # running max off -inf so neg_scaled_max stays finite and exp2 avoids NaN.
+        if const_expr(traits.CAUSAL or traits.MASK_MOD is not None):
             m_new_raw = _fmax(m_new_raw, ctx.c_neg_floor, fm_fast)
 
         diff_m_scaled = _fmul(_fsub(m_running, m_new_raw, fm_fast), ctx.c_sm_scale_log2e, fm_fast)
@@ -3092,7 +3154,9 @@ class GenericStoreHelper:
             self.store_lse(loop_results[0], l_final, q_row)
 
         inv_l_rcp = rocdl.rcp(T.f32, l_final)
-        if const_expr(traits.CAUSAL):
+        # A mask_mod (like causal) can fully mask a q-row (l_final == 0); guard the
+        # reciprocal so the row stores 0 instead of acc*inf == NaN.
+        if const_expr(traits.CAUSAL or traits.MASK_MOD is not None):
             inv_l = (fx.Float32(l_final) > ctx.c_zero_f).select(inv_l_rcp, ctx.c_zero_f)
         else:
             inv_l = inv_l_rcp
