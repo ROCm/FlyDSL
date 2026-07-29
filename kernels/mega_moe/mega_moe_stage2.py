@@ -8,8 +8,9 @@ import functools
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.autotune import Config, autotune, do_bench_collective
-from flydsl.expr import buffer_ops, const_expr, range_constexpr, rocdl
+from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import Int8, T
+from kernels.common import buffer_ops
 from kernels.common.tensor_shim import _run_compiled
 
 from .gemm2 import (
@@ -316,7 +317,14 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
     class SharedStorage:
         buf: fx.Array[Int8, lds_bytes, 16]
 
-    @flyc.kernel(known_block_size=[256, 1, 1])
+    kernel_name = (
+        f"megamoe_stage2_t{BM}x{BN}x{BK}_sbm{SBM}_{a_dtype}_nt{int(use_nt)}"
+        f"_p{int(persist)}cu{cu_num}s{int(persist_strided)}_pad{int(has_pad)}"
+        f"_bh{int(g2_bhoist)}apf{int(g2_ascale_pf)}sp{g2_group_num}x{g2_m01}"
+        f"_bf16lds{int(g2_bf16_lds)}_{p2p_quant_type}"
+    )
+
+    @flyc.kernel(name=kernel_name, known_block_size=[256, 1, 1])
     # fmt: off
     def kernel_epilog_v2(arg_aq: fx.Int64, arg_ascale: fx.Int64, arg_bq: fx.Int64, arg_bscale: fx.Int64,
         arg_eids: fx.Int64, arg_cumsum: fx.Int64, arg_stids: fx.Int64, arg_sweights: fx.Int64,
@@ -533,7 +541,8 @@ def make_gemm2_autotuner(a_dtype: str = "fp8", p2p_quant_type: str = "none"):
     ]
     tuner = autotune(
         configs=configs, key=key, warmup=3, rep=10,
-        prune_configs_by=_prune_gemm2_configs, do_bench=do_bench_collective
+        prune_configs_by=_prune_gemm2_configs, do_bench=do_bench_collective,
+        artifact_name="mega-moe-v2-stage2",
     )(_run_gemm2_config)
     tuner.schema = _AUTOTUNE_SCHEMA
     return tuner

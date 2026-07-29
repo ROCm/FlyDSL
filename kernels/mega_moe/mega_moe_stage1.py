@@ -9,10 +9,10 @@ import mori.ir.flydsl as mori_shmem
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.autotune import autotune, do_bench_collective
-from flydsl.expr import buffer_ops as _buffer_ops
 from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import Vector as Vec
 from kernels.comm import communication_ops_utils as comm_ops
+from kernels.common import buffer_ops as _buffer_ops
 from kernels.common.tensor_shim import _run_compiled
 from kernels.gemm.fp8_gemm_utils import ceildiv
 
@@ -24,7 +24,7 @@ from .dispatch import (
     emit_dispatch_payload,
     emit_dispatch_plan,
 )
-from .gemm1 import build_fused_gemm1
+from .gemm1 import _LdsF32View, build_fused_gemm1
 from .stage1_configs import get_stage1_autotune_configs, prune_stage1_autotune_configs
 
 _AUTOTUNE_SCHEMA = 19
@@ -47,13 +47,6 @@ def _validate_dispatch_capacity(
         raise ValueError("MegaMoE v2 stage1 payload exceeds the 32-bit buffer-resource ABI")
     if not use_tile_resource and max_rows * output_row_bytes >= _BUFFER_OFFSET_ABI_BYTES:
         raise ValueError("MegaMoE v2 stage1 output exceeds the 32-bit buffer-resource ABI")
-
-
-class _LdsF32View:
-    """Float32 LDS view (.ptr) over the Int8 A_buf pool, for the epilogue cshuffle staging."""
-
-    def __init__(self, ptr):
-        self.ptr = ptr
 
 
 # fmt: off
@@ -131,7 +124,14 @@ def compile_mega_moe_stage1(
         pool: fx.Array[fx.Int8, lds_pool_bytes, 16]
         A_scale: fx.Array[fx.Int8, n_scale_bytes, 16]
 
-    @flyc.kernel(known_block_size=[TOTAL_THREADS, 1, 1])
+    kernel_name = (
+        f"megamoe_stage1_t{sort_block_m}x{tile_n}x{tile_k}_w{NUM_WAVES}_gm{grid_mult}"
+        f"_dcu{dispatch_blocks}_pw{int(pipe_weights)}ma{int(mfma_amajor)}sw{int(swizzle_a)}"
+        f"aa{int(async_a_copy)}_aep{int(active_expert_producer)}cpc{int(cooperative_payload_copy)}"
+        f"_tr{int(use_tile_resource)}wpe{waves_per_eu_hint}_bnt{b_cache_modifier}"
+    )
+
+    @flyc.kernel(name=kernel_name, known_block_size=[TOTAL_THREADS, 1, 1])
     def kernel(
         out: fx.Tensor, x: fx.Tensor, w: fx.Tensor, scale_x: fx.Tensor, scale_w: fx.Tensor,
         sorted_token_ids: fx.Tensor, expert_ids: fx.Tensor, num_valid_ids: fx.Tensor, out_scale: fx.Tensor,
@@ -386,13 +386,13 @@ def compile_mega_moe_stage1(
 def _run_stage1_config(out, x, w, scale_x, scale_w, sorted_token_ids, expert_ids, num_valid_ids, out_scale,
     tokens, addr_disp, i32_cur_tok, addr_in_tok, addr_in_idx, addr_in_wts, addr_in_sc,
     addr_parity, addr_expected, stream, *, model_dim, inter_dim, rank, experts_per_rank, fuse_npes,
-    fuse_topk, fuse_cap, fuse_mtpr, fuse_scale_dim, fixed_slot_dispatch, sort_block_m, num_cu,
+    fuse_topk, fuse_cap, fuse_mtpr, fuse_scale_dim, fixed_slot_dispatch, metadata_block_m, num_cu,
     tune_tokens, dispatch_constraint, grid_constraint, tile_m_constraint, autotune_schema,
-    tile_n=256, tile_k=256, num_waves=4, grid_mult=4, pipe_weights=True, mfma_amajor=False,
+    sort_block_m=32, tile_n=256, tile_k=256, num_waves=4, grid_mult=4, pipe_weights=True, mfma_amajor=False,
     swizzle_a=True, async_a_copy=False, active_expert_producer=False,
     cooperative_payload_copy=False, num_dispatch_cu=32, use_tile_resource=True,
     waves_per_eu_hint=2, b_nt=-1):
-    del tune_tokens, dispatch_constraint, grid_constraint, tile_m_constraint, autotune_schema
+    del metadata_block_m, tune_tokens, dispatch_constraint, grid_constraint, tile_m_constraint, autotune_schema
     launch = compile_mega_moe_stage1(
         model_dim=model_dim, inter_dim=inter_dim, rank=rank, experts_per_rank=experts_per_rank,
         fuse_npes=fuse_npes, fuse_topk=fuse_topk, fuse_cap=fuse_cap, fuse_mtpr=fuse_mtpr,
@@ -420,12 +420,13 @@ def make_stage1_autotuner(dispatch_cu=None, grid_mult=None, tile_m_values=(32,))
     )
     key = [
         "model_dim", "inter_dim", "experts_per_rank", "fuse_npes", "fuse_topk", "fuse_cap", "fuse_mtpr",
-        "fuse_scale_dim", "fixed_slot_dispatch", "sort_block_m", "num_cu", "tune_tokens",
+        "fuse_scale_dim", "fixed_slot_dispatch", "metadata_block_m", "num_cu", "tune_tokens",
         "dispatch_constraint", "grid_constraint", "tile_m_constraint", "autotune_schema",
     ]
     tuner = autotune(
         configs=configs, key=key, warmup=2, rep=7,
-        prune_configs_by=prune_stage1_autotune_configs, do_bench=do_bench_collective
+        prune_configs_by=prune_stage1_autotune_configs, do_bench=do_bench_collective,
+        artifact_name="mega-moe-v2-stage1",
     )(_run_stage1_config)
     tuner.schema = _AUTOTUNE_SCHEMA
     return tuner

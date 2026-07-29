@@ -3,8 +3,8 @@
 
 """FlyDSL autotuner - benchmark multiple kernel configs, pick the fastest."""
 
-import hashlib
 import fcntl
+import hashlib
 import inspect
 import json
 import os
@@ -646,10 +646,10 @@ class Autotuner:
                 t = self._bench_one(config, args, kwargs)
                 if rank0:
                     results.append((config, t))
-                    print(f"  [{i+1}/{len(configs)}] {config} -> {t:.3f} ms")
+                    print(f"  [{i + 1}/{len(configs)}] {config} -> {t:.3f} ms")
             except Exception as e:
                 if rank0:
-                    print(f"  [{i+1}/{len(configs)}] {config} -> FAILED: {e}")
+                    print(f"  [{i + 1}/{len(configs)}] {config} -> FAILED: {e}")
 
         if collective:
             decision = None

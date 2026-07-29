@@ -11,11 +11,11 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, rocdl, vector
+from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.arith import ArithValue, CmpIPredicate
-from flydsl.expr.typing import Int32, T
-from flydsl.expr.vector import ReductionOp
+from flydsl.expr.typing import Int32, ReductionOp, T, Vector
+from kernels.common import buffer_ops
 
 BLOCK = 64
 GROUP = 32
@@ -59,17 +59,15 @@ def build_per_1x32_mx_quant_module(n: int, quant_mode: str):
         if arith.cmpi(CmpIPredicate.ult, group_id, num_groups):
             # 32 bf16 = 16 dwords: 4x dwordx4 loads, abs-max reduced per vec<8> chunk.
             in_dw = group_id * arith.constant(GROUP * 2 // 4, type=i32)
-            vec8_bf16 = T.vec(8, T.bf16)
-            vec8_f32 = T.vec(8, f32)
             act = []
             local_max = c_amax_floor
             for c in range_constexpr(GROUP // 8):
                 raw = buffer_ops.buffer_load(in_rsrc, in_dw + arith.constant(c * 4, type=i32), vec_width=4, dtype=i32)
-                ff = vector.bitcast(vec8_bf16, raw).extf(vec8_f32)
+                ff = Vector(raw).bitcast(fx.BFloat16).to(fx.Float32)
                 cmax = ArithValue(fmath.absf(ff).reduce(ReductionOp.MAX).ir_value())
                 local_max = arith.maximumf(local_max, cmax)
                 for j in range_constexpr(8):
-                    act.append(vector.extract(ff, static_position=[j], dynamic_position=[]))
+                    act.append(ff[j])
 
             # e8m0 RoundUp = ceil_pow2(amax/max_pos): biased exp, +1 if any mantissa bit.
             working_i32 = (local_max * c_inv_max_pos).bitcast(i32)
@@ -81,7 +79,6 @@ def build_per_1x32_mx_quant_module(n: int, quant_mode: str):
 
             buffer_ops.buffer_store(arith.TruncIOp(T.i8, e8m0), scale_rsrc, group_id, offset_is_bytes=True)
 
-            vec4_i32 = T.vec(4, i32)
             if const_expr(need_fp4):
                 # HW cvt divides by dequant 2^(e8m0-127); 32 fp4 -> one dwordx4 store.
                 dequant_scale = (e8m0 << c23_i32).bitcast(f32)
@@ -93,7 +90,7 @@ def build_per_1x32_mx_quant_module(n: int, quant_mode: str):
                         idx = w * 8 + p * 2
                         pw = rocdl.cvt_scalef32_pk_fp4_f32(i32, pw, act[idx], act[idx + 1], dequant_scale, p)
                     words.append(pw)
-                buffer_ops.buffer_store(vector.from_elements(vec4_i32, words), out_rsrc, out_dw)
+                buffer_ops.buffer_store(Vector.from_elements(words, fx.Int32), out_rsrc, out_dw)
             else:
                 # scale by 2^(127-e8m0), HW cast to e4m3fn; 32 fp8 -> two dwordx4 stores.
                 quant_scale = ((c254_i32 - e8m0) << c23_i32).bitcast(f32)
@@ -108,7 +105,7 @@ def build_per_1x32_mx_quant_module(n: int, quant_mode: str):
                         pw = rocdl.cvt_pk_fp8_f32(i32, scaled[b + 2], scaled[b + 3], pw, 1)
                         words.append(pw)
                     buffer_ops.buffer_store(
-                        vector.from_elements(vec4_i32, words), out_rsrc, out_dw + arith.constant(h * 4, type=i32)
+                        Vector.from_elements(words, fx.Int32), out_rsrc, out_dw + arith.constant(h * 4, type=i32)
                     )
 
     @flyc.jit

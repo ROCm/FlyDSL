@@ -12,6 +12,8 @@ import importlib
 
 _LAZY = {
     "MegaMoEV2": "mega_moe",
+    "compile_gemm1": "gemm1",
+    "gemm1_kernel": "gemm1",
 }
 
 __all__ = list(_LAZY)

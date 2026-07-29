@@ -45,7 +45,8 @@ def _make_joint_sbm_autotuner(tile_m_values):
         "sbm_candidates", "autotune_schema",
     ]
     return autotune(
-        configs=configs, key=key, warmup=2, rep=7, do_bench=do_bench_collective
+        configs=configs, key=key, warmup=2, rep=7, do_bench=do_bench_collective,
+        artifact_name="mega-moe-v2-joint-sbm",
     )(_run_joint_sbm_config)
 # fmt: on
 
@@ -254,7 +255,7 @@ class MegaMoEV2:
             stream, model_dim=self.model_dim, inter_dim=self.inter_dim,
             rank=self.rank, experts_per_rank=self.epr, fuse_npes=self.world_size, fuse_topk=self.topk,
             fuse_cap=self._s1_cap, fuse_mtpr=self.mtpr, fuse_scale_dim=self._s1_scale_dim,
-            fixed_slot_dispatch=self._s1_fixed_slot, sort_block_m=self.sort_block_m,
+            fixed_slot_dispatch=self._s1_fixed_slot, metadata_block_m=self.sort_block_m,
             num_cu=self._s1_num_cu,
             tune_tokens=cur_tok, dispatch_constraint=-1 if self._v2_dispatch_cu is None else self._v2_dispatch_cu,
             grid_constraint=-1 if self._v2_grid_mult is None else self._v2_grid_mult,
