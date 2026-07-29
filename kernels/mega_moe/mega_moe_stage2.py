@@ -26,7 +26,7 @@ from .gemm2 import (
 
 from .mxfp4_gemm_common import _fabs_f32 as fabs_f32
 
-_AUTOTUNE_SCHEMA = 6
+_AUTOTUNE_SCHEMA = 7
 
 
 @flyc.jit

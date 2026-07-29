@@ -893,7 +893,7 @@ def make_combine_kernel(
                                     dtype=T.i8(),
                                     cache_modifier=SLC_CACHE,
                                 )
-                                sc_i32 = fx.Int32(arith.extui(T.i32(), arith.unwrap(sc_raw)))
+                                sc_i32 = fx.Uint8(sc_raw).to(fx.Uint32).bitcast(fx.Int32)
                             scale_raws[u].append(sc_i32)
 
                 if const_expr(blockwise_fp8_transport):

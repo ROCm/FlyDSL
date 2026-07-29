@@ -14,7 +14,8 @@ _PACK = 2  # fp4 micro-scale pack (per-32 E8M0): pack_M = pack_N = pack_K = 2
 
 def wait_lds_barrier(vmcnt=63):
     """Drain LDS writes and optionally older VMEM while preserving newer loads."""
-    fx.rocdl.s_waitcnt(vmcnt=vmcnt, lgkmcnt=0)
+    waitcnt = (vmcnt & 0xF) | ((vmcnt & 0x30) << 10) | (7 << 4)
+    fx.rocdl.s_waitcnt(waitcnt)
     fx.barrier()
 
 

@@ -212,7 +212,16 @@ _CALIBRATED_VARIANTS = {
 def _candidate_variants(shape):
     variants = [{}, *_CALIBRATED_VARIANTS.get(shape, ())]
     if shape[0] == 32:
-        variants.append({"mfma_amajor": True})
+        variants += [
+            {"mfma_amajor": True},
+            {
+                "grid_mult": 1,
+                "num_dispatch_cu": 64,
+                "mfma_amajor": True,
+                "async_a_copy": True,
+                "use_tile_resource": False,
+            },
+        ]
     if shape == (128, 512, 8):
         variants.append({"async_a_copy": True})
     if shape in _GEOMETRY_SHAPES:

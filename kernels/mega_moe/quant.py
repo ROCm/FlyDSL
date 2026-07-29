@@ -11,7 +11,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, vector
+from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, rocdl, vector
 from flydsl.expr import math as fmath
 from flydsl.expr.arith import ArithValue, CmpIPredicate
 from flydsl.expr.typing import Int32, T
@@ -34,7 +34,6 @@ def build_per_1x32_mx_quant_module(n: int, quant_mode: str):
 
     scale_n = n // GROUP
     inv_max_pos_bits = _FP4_INV_MAX_POS_BITS if need_fp4 else _FP8_E4M3_INV_MAX_POS_BITS
-    from flydsl._mlir.dialects import rocdl
 
     @flyc.kernel(name=f"per_1x32_mx_quant_{quant_mode}_n{n}")
     def quant_kernel(x: fx.Tensor, y: fx.Tensor, scale: fx.Tensor, m: Int32):

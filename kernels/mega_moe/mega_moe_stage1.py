@@ -27,7 +27,7 @@ from .dispatch import (
 from .gemm1 import build_fused_gemm1
 from .stage1_configs import get_stage1_autotune_configs, prune_stage1_autotune_configs
 
-_AUTOTUNE_SCHEMA = 15
+_AUTOTUNE_SCHEMA = 19
 _SC0_CACHE = 1
 _BUFFER_OFFSET_ABI_BYTES = 1 << 32
 

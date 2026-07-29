@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""MegaMoE fused MoE operator (packaged).
+"""MegaMoEV2 fused MoE operator.
 
 Public symbols are lazy-loaded so that importing a light submodule
 (e.g. ``kernels.mega_moe.gemm1``) does not pull in the full operator's
@@ -10,12 +10,8 @@ heavy dependencies (``mori.shmem`` / ``torch.distributed``) via the package.
 
 import importlib
 
-# Public name -> submodule that defines it.
 _LAZY = {
-    "MegaMoE": "mega_moe",
-    "Stage1Output": "mega_moe",
-    "compile_fused_moe_gemm1": "gemm1",
-    "GateMode": "gemm1",
+    "MegaMoEV2": "mega_moe",
 }
 
 __all__ = list(_LAZY)
