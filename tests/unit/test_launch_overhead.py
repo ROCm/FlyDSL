@@ -112,10 +112,27 @@ def bench_wallclock(fn, n_warmup=20, n_iters=1000):
     t0 = time.perf_counter()
     for _ in range(n_iters):
         fn()
-    torch.cuda.synchronize()
     t1 = time.perf_counter()
+    torch.cuda.synchronize()
 
     return (t1 - t0) / n_iters * 1e6  # µs
+
+
+def test_bench_wallclock_excludes_final_gpu_drain(monkeypatch):
+    """The final drain must not be part of the host-dispatch window."""
+    sync_count = 0
+
+    def fake_synchronize():
+        nonlocal sync_count
+        sync_count += 1
+
+    monkeypatch.setattr(torch.cuda, "synchronize", fake_synchronize)
+    monkeypatch.setattr(time, "perf_counter", lambda: float(sync_count))
+
+    measured_us = bench_wallclock(lambda: None, n_warmup=0, n_iters=1)
+
+    assert measured_us == 0.0
+    assert sync_count == 2
 
 
 def main():
