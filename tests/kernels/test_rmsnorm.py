@@ -1964,6 +1964,98 @@ def test_rmsnorm_dynamicquant():
         raise SystemExit(1)
 
 
+@pytest.mark.skipif(GPU_ARCH != "gfx1201", reason="gfx1201-specific RMSNorm SmoothQuant diagnostics")
+@pytest.mark.parametrize(
+    "N,dtype,route",
+    [
+        pytest.param(256, "f32", "scalar", id="f32-scalar"),
+        pytest.param(128, "f16", "scalar", id="f16-scalar"),
+        pytest.param(512, "bf16", "scalar", id="bf16-scalar"),
+        pytest.param(2048, "bf16", "vec8-single-tile", id="bf16-vec1"),
+        pytest.param(8192, "bf16", "vec8-multi-tile", id="bf16-vec4"),
+    ],
+)
+def test_rmsnorm_smoothquant_gfx1201_scale_paths(N, dtype, route):
+    """Distinguish scalar, vec8, and non-uniform XScale failures on gfx1201."""
+    M = 2
+    scale_tol = 1e-3
+    torch.manual_seed(1201)
+
+    torch_dtype = _torch_dtype(dtype)
+    input_dev = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32).to(torch_dtype).contiguous()
+    gamma_dev = torch.rand((N,), device="cuda", dtype=DTYPE_FP32).to(torch_dtype).contiguous()
+    random_xscale = (torch.rand((N,), device="cuda", dtype=DTYPE_FP32) + 0.5).to(torch_dtype).contiguous()
+    xscale_dev = torch.ones((N,), device="cuda", dtype=torch_dtype)
+    output_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_INT8)
+    yscale_dev = torch.empty((M,), device="cuda", dtype=DTYPE_FP32)
+
+    launch_fn = build_rmsnorm_smoothquant_module(N, dtype)
+    stream = torch.cuda.current_stream()
+    compiled_fn = flyc.compile(
+        launch_fn,
+        input_dev,
+        gamma_dev,
+        xscale_dev,
+        output_dev,
+        yscale_dev,
+        M,
+        stream,
+    )
+
+    failures = []
+    for scale_mode in ("ones", "random"):
+        if scale_mode == "ones":
+            xscale_dev.fill_(1.0)
+        else:
+            xscale_dev.copy_(random_xscale)
+
+        # flyc.compile may execute the kernel once, so poison outputs before
+        # every measured launch to expose missing writes.
+        output_dev.fill_(-128)
+        yscale_dev.fill_(float("nan"))
+        compiled_fn(input_dev, gamma_dev, xscale_dev, output_dev, yscale_dev, M, stream)
+        torch.cuda.synchronize()
+
+        q_expected, yscale_expected = _reference_rmsnorm_quant(
+            input_dev,
+            gamma_dev,
+            xscale_dev=xscale_dev,
+        )
+        q_out = output_dev.to(torch.int16)
+        q_ref = q_expected.to(torch.int16)
+        quant_diff = (q_out - q_ref).abs()
+        scale_diff = (yscale_dev - yscale_expected).abs()
+        quant_error = quant_diff.max().item()
+        scale_error = scale_diff.max().item()
+        finite_yscale = torch.isfinite(yscale_dev).all().item()
+        mismatch_count = (quant_diff > 1).sum().item()
+
+        print(
+            f"gfx1201 SmoothQuant route={route}, dtype={dtype}, N={N}, "
+            f"xscale={scale_mode}: quant_error={quant_error}, "
+            f"scale_error={scale_error:.3e}, mismatches={mismatch_count}, "
+            f"finite_yscale={finite_yscale}"
+        )
+
+        bad_indices = (quant_diff > 1).nonzero()
+        if bad_indices.numel() != 0:
+            row, col = bad_indices[0].tolist()
+            print(
+                f"first mismatch at ({row}, {col}): "
+                f"expected={q_ref[row, col].item()}, actual={q_out[row, col].item()}, "
+                f"xscale={xscale_dev[col].item()}"
+            )
+
+        if not finite_yscale or quant_error > 1 or not scale_error < scale_tol:
+            failures.append(
+                f"xscale={scale_mode}: quant_error={quant_error}, "
+                f"scale_error={scale_error:.3e}, mismatches={mismatch_count}, "
+                f"finite_yscale={finite_yscale}"
+            )
+
+    assert not failures, f"gfx1201 SmoothQuant {route} failed: {'; '.join(failures)}"
+
+
 @pytest.mark.skipif(
     GPU_ARCH == "gfx1201",
     reason="RMSNorm SmoothQuant is temporarily quarantined on gfx1201 pending correctness investigation",
