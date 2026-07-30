@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-30T15:18:22Z",
+ "updated": "2026-07-30T15:32:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -138,9 +138,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-30T12:20:36Z",
+     "started_at": "2026-07-30T15:17:30Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30541972428/job/90869229428"
     },
@@ -532,20 +532,20 @@
    "branch": "moe/gemm1-fp4-crd2idx",
    "event": "pull_request",
    "title": "moe: mxfp_moe gemm1 fp4 A-LDS read -> crd2idx (fp8 kept manual)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30530160479",
    "created_at": "2026-07-30T09:18:27Z",
-   "updated_at": "2026-07-30T13:53:09Z",
+   "updated_at": "2026-07-30T15:29:19Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-30T13:53:08Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T15:29:19Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30530160479/job/90832699900"
     },
     {
