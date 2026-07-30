@@ -158,6 +158,7 @@ excluded from the catalog above.
 
 | API | Replacement or required work before removal | Declared removal release |
 |---|---|---|
+| `fx.get` | `fx.get_().unpack()` or `IntTuple[].unpack()` | v0.4 |
 | `fx.index_cast` | `fx.Index(x)` | v0.4 |
 | `fx.constant_vector` | `Numeric` and `Vector` member functions | v0.4 |
 | `fx.tdm_ops` and content reached through this alias | `fx.rocdl.tdm_ops`; the latter is a target-specific unstable path | v0.4 |
