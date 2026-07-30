@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-07-30T07:15:26Z",
+ "updated": "2026-07-30T08:04:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30524768390,
+   "pr": null,
+   "commit": "e07991f8bd093f5cddf730ffd2339726cb034ceb",
+   "branch": "main",
+   "event": "push",
+   "title": "Port GEMM/MoE/conv kernels to the layout API (#913)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30524768390",
+   "created_at": "2026-07-30T07:58:06Z",
+   "updated_at": "2026-07-30T07:59:31Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 30523108262,
+   "pr": 925,
+   "commit": "b494574b87c42817345ce4782f8ae683ca7c4ee0",
+   "branch": "pr/docs-api-stability",
+   "event": "pull_request",
+   "title": "[Doc] Define API stability contract",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30523108262",
+   "created_at": "2026-07-30T07:29:04Z",
+   "updated_at": "2026-07-30T07:32:52Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-30T08:02:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30523108262/job/90808433110"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-30T07:34:19Z",
+     "completed_at": "2026-07-30T08:01:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30523108262/job/90808433111"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T07:32:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30523108262/job/90808433158"
+    }
+   ]
+  },
   {
    "run_id": 30519090826,
    "pr": 891,
@@ -25,20 +83,20 @@
    "branch": "feat/timing-umbrella",
    "event": "pull_request",
    "title": "Unify benchmark timing contracts and add calibrated CI gates",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30513078964",
    "created_at": "2026-07-30T04:09:01Z",
-   "updated_at": "2026-07-30T06:14:34Z",
+   "updated_at": "2026-07-30T08:01:54Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-30T06:14:33Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T08:01:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30513078964/job/90777506086"
     },
     {
@@ -114,10 +172,10 @@
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-30T06:19:24Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T07:28:49Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30512551718/job/90794908369"
     }
    ]
@@ -2048,92 +2106,6 @@
    "updated_at": "2026-07-27T16:12:24Z",
    "actor": "amd-nprotaso",
    "jobs": []
-  },
-  {
-   "run_id": 30278396093,
-   "pr": null,
-   "commit": "05d785e5e672ba87bc43e14f91fc6860be462d01",
-   "branch": "main",
-   "event": "push",
-   "title": "[perf]optimize flash attention fp8 for gfx950 (#905)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278396093",
-   "created_at": "2026-07-27T15:06:44Z",
-   "updated_at": "2026-07-28T03:11:27Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T01:55:42Z",
-     "completed_at": "2026-07-28T03:11:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278396093/job/90154089009"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T01:25:20Z",
-     "completed_at": "2026-07-28T02:46:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278396093/job/90154089011"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-27T15:13:38Z",
-     "completed_at": "2026-07-27T16:55:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278396093/job/90154089420"
-    }
-   ]
-  },
-  {
-   "run_id": 30278291932,
-   "pr": null,
-   "commit": "ef30cf4f973c0226df1d4dcc84367a4eba6710df",
-   "branch": "main",
-   "event": "push",
-   "title": "[Doc] document fast-math flags in the arithmetic_types (#911)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278291932",
-   "created_at": "2026-07-27T15:05:29Z",
-   "updated_at": "2026-07-27T15:06:40Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-27T15:06:28Z",
-     "completed_at": "2026-07-27T15:06:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278291932/job/90018097452"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-27T15:06:37Z",
-     "completed_at": "2026-07-27T15:06:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278291932/job/90018097489"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-27T15:06:28Z",
-     "completed_at": "2026-07-27T15:06:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278291932/job/90018097688"
-    }
-   ]
   }
  ]
 }
