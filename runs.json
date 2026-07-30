@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-30T01:51:55Z",
+ "updated": "2026-07-30T03:14:52Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30507697705,
+   "pr": 876,
+   "commit": "c00df7dd535ad870e07e05aaf776cf10c2057627",
+   "branch": "mega_moe_v1",
+   "event": "pull_request",
+   "title": "MegaMoE on Gfx950",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30507697705",
+   "created_at": "2026-07-30T02:10:00Z",
+   "updated_at": "2026-07-30T02:13:51Z",
+   "actor": "yanboshao",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T02:13:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30507697705/job/90761468616"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-30T02:14:35Z",
+     "completed_at": "2026-07-30T02:44:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30507697705/job/90761468636"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-30T02:14:42Z",
+     "completed_at": "2026-07-30T03:02:20Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30507697705/job/90761468655"
+    }
+   ]
+  },
   {
    "run_id": 30506777108,
    "pr": 874,
@@ -14,9 +57,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30506777108",
    "created_at": "2026-07-30T01:50:33Z",
-   "updated_at": "2026-07-30T01:50:50Z",
+   "updated_at": "2026-07-30T03:13:09Z",
    "actor": "xudoyuan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-30T01:53:45Z",
+     "completed_at": "2026-07-30T02:58:19Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30506777108/job/90758568215"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-30T01:53:44Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30506777108/job/90758568223"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-30T03:13:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30506777108/job/90758568224"
+    }
+   ]
   },
   {
    "run_id": 30503508068,
@@ -25,29 +96,29 @@
    "branch": "feat/timing-umbrella",
    "event": "pull_request",
    "title": "Unify benchmark timing contracts and add calibrated CI gates",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30503508068",
    "created_at": "2026-07-30T00:42:44Z",
-   "updated_at": "2026-07-30T01:50:19Z",
+   "updated_at": "2026-07-30T03:12:49Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-30T00:45:56Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T02:07:56Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30503508068/job/90748579245"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-30T01:50:18Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T03:12:47Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30503508068/job/90748579246"
     },
     {
@@ -2073,21 +2144,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276467830/job/90012815210"
     }
    ]
-  },
-  {
-   "run_id": 30268470776,
-   "pr": 912,
-   "commit": "a0699e07ad4573f3b72ad7b5e60a153b6a2db36f",
-   "branch": "fix_predicate",
-   "event": "pull_request",
-   "title": "Fix hierarchical reduced predicates in copy layout lowering",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30268470776",
-   "created_at": "2026-07-27T13:02:47Z",
-   "updated_at": "2026-07-27T13:02:47Z",
-   "actor": "HydraQYH",
-   "jobs": []
   }
  ]
 }
