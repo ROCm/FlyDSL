@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-30T03:14:52Z",
+ "updated": "2026-07-30T03:59:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30512551718,
+   "pr": 876,
+   "commit": "4821432500f199f198c705a33e4eddc7a7d7048b",
+   "branch": "mega_moe_v1",
+   "event": "pull_request",
+   "title": "MegaMoE on Gfx950",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30512551718",
+   "created_at": "2026-07-30T03:57:35Z",
+   "updated_at": "2026-07-30T03:57:36Z",
+   "actor": "yanboshao",
+   "jobs": []
+  },
   {
    "run_id": 30507697705,
    "pr": 876,
@@ -10,20 +25,20 @@
    "branch": "mega_moe_v1",
    "event": "pull_request",
    "title": "MegaMoE on Gfx950",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30507697705",
    "created_at": "2026-07-30T02:10:00Z",
-   "updated_at": "2026-07-30T02:13:51Z",
+   "updated_at": "2026-07-30T03:57:36Z",
    "actor": "yanboshao",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-30T02:13:51Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T03:57:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30507697705/job/90761468616"
     },
     {
@@ -72,10 +87,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-30T01:53:44Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T03:26:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30506777108/job/90758568223"
     },
     {
@@ -2099,49 +2114,6 @@
      "started_at": "2026-07-27T14:52:32Z",
      "completed_at": "2026-07-27T15:05:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276956977/job/90014147333"
-    }
-   ]
-  },
-  {
-   "run_id": 30276467830,
-   "pr": null,
-   "commit": "bee509209fc4d49070cfd1c608036e765d2ffa20",
-   "branch": "main",
-   "event": "pull_request",
-   "title": "[Kernel][MI350] Add 8 wave GQA sliding-window attention kernel",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276467830",
-   "created_at": "2026-07-27T14:43:37Z",
-   "updated_at": "2026-07-27T16:11:46Z",
-   "actor": "amd-nprotaso",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-27T15:32:16Z",
-     "completed_at": "2026-07-27T16:11:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276467830/job/90012814896"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-27T15:35:17Z",
-     "completed_at": "2026-07-27T16:11:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276467830/job/90012815069"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-27T14:49:04Z",
-     "completed_at": "2026-07-27T15:26:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276467830/job/90012815210"
     }
    ]
   }
