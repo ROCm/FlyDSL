@@ -1,11 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-07-30T00:38:09Z",
+ "updated": "2026-07-30T00:52:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 30503108344,
+   "run_id": 30503508068,
    "pr": 924,
+   "commit": "0d4aa3d9aff764be9328066258422da0e1620459",
+   "branch": "feat/timing-umbrella",
+   "event": "pull_request",
+   "title": "Unify benchmark timing contracts and add calibrated CI gates",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30503508068",
+   "created_at": "2026-07-30T00:42:44Z",
+   "updated_at": "2026-07-30T00:45:25Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-30T00:45:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30503508068/job/90748579245"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T00:45:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30503508068/job/90748579246"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-30T00:45:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30503508068/job/90748579272"
+    }
+   ]
+  },
+  {
+   "run_id": 30503108344,
+   "pr": null,
    "commit": "056cdeaae7e0b4cb413a41f6c56e5500b933632b",
    "branch": "feat/timing-umbrella",
    "event": "pull_request",
@@ -98,20 +141,20 @@
    "branch": "fix/dispatch-benchmark-timing",
    "event": "pull_request",
    "title": "Fix host dispatch benchmark timing window",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30498213283",
    "created_at": "2026-07-29T23:02:38Z",
-   "updated_at": "2026-07-29T23:06:39Z",
+   "updated_at": "2026-07-30T00:49:53Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-29T23:06:38Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T00:49:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30498213283/job/90732394320"
     },
     {
@@ -2071,49 +2114,6 @@
      "started_at": "2026-07-27T14:10:36Z",
      "completed_at": "2026-07-27T14:30:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30265629078/job/89978139059"
-    }
-   ]
-  },
-  {
-   "run_id": 30256652524,
-   "pr": 909,
-   "commit": "1389b352aeb628af7426165f7b7dd2187d2e4f83",
-   "branch": "refactor/pa-decode-swa-tile-programming",
-   "event": "pull_request",
-   "title": "[Kernel] Migrate SWA decode to tile programming",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30256652524",
-   "created_at": "2026-07-27T10:05:28Z",
-   "updated_at": "2026-07-27T15:34:55Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-27T15:01:44Z",
-     "completed_at": "2026-07-27T15:34:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30256652524/job/89954886690"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-27T14:30:22Z",
-     "completed_at": "2026-07-27T15:31:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30256652524/job/89954886691"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-27T10:45:38Z",
-     "completed_at": "2026-07-27T12:13:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30256652524/job/89954886699"
     }
    ]
   }
