@@ -38,11 +38,12 @@ from ..._mlir.dialects import (
 )
 from ..._mlir.dialects import (
     rocdl,
+    vector,
 )
-from .. import arith, vector
+from .. import arith
 from ..arith import _to_raw as _raw
 from ..meta import dsl_loc_tracing
-from ..typing import T
+from ..typing import T, as_ir_value
 from ..utils.arith import ArithValue as _ArithValue
 
 __all__ = [
@@ -372,7 +373,9 @@ def make_tensor_descriptor_2d(
     g0_s3 = _ArithValue(std_arith.TruncIOp(i32, _raw(hi_raw)).result) | arith.constant(
         1 << 31, type=T.i32
     )  # type field = 2 in [31:30]
-    dgroup0 = vector.from_elements(T.vec(4, T.i32), [g0_s0, g0_s1, g0_s2, g0_s3])
+    dgroup0 = vector.from_elements(
+        T.vec(4, T.i32), [as_ir_value(g0_s0), as_ir_value(g0_s1), as_ir_value(g0_s2), as_ir_value(g0_s3)]
+    )
 
     # ================================================================
     # GROUP1 (vector<8xi32>): config + tensor dims + strides + tile
@@ -490,7 +493,7 @@ def make_tensor_descriptor_2d(
 
     dgroup1 = vector.from_elements(
         T.vec(8, T.i32),
-        [g1_s0, g1_s1, g1_s2, g1_s3, g1_s4, g1_s5, g1_s6, g1_s7],
+        [as_ir_value(v) for v in [g1_s0, g1_s1, g1_s2, g1_s3, g1_s4, g1_s5, g1_s6, g1_s7]],
     )
 
     return TDMDescriptor2D(dgroup0=dgroup0, dgroup1=dgroup1)
@@ -651,7 +654,7 @@ def make_tensor_gather_descriptor(
 
     dgroup1 = vector.from_elements(
         T.vec(8, T.i32),
-        [g1_s0, g1_s1, g1_s2, g1_s3, g1_s4, g1_s5, g1_s6, g1_s7],
+        [as_ir_value(v) for v in [g1_s0, g1_s1, g1_s2, g1_s3, g1_s4, g1_s5, g1_s6, g1_s7]],
     )
 
     # ================================================================
@@ -686,8 +689,8 @@ def make_tensor_gather_descriptor(
             hi_shifted = arith.shli(arith.andi(hi, arith.constant(0xFFFF, type=T.i32)), arith.constant(16, type=T.i32))
             g3_vals.append(arith.ori(lo_masked, hi_shifted))
 
-    dgroup2 = vector.from_elements(T.vec(4, T.i32), g2_vals)
-    dgroup3 = vector.from_elements(T.vec(4, T.i32), g3_vals)
+    dgroup2 = vector.from_elements(T.vec(4, T.i32), [as_ir_value(v) for v in g2_vals])
+    dgroup3 = vector.from_elements(T.vec(4, T.i32), [as_ir_value(v) for v in g3_vals])
 
     return TDMGatherDescriptor(
         dgroup0=dgroup0,
@@ -740,7 +743,9 @@ def make_tensor_gather_dgroup0(
     g0_s2 = _ArithValue(std_arith.TruncIOp(i32, _raw(glb_base_i64)).result)
     hi_raw = _ArithValue(_raw(glb_base_i64)).shrui(arith.constant(32, type=T.i64))
     g0_s3 = _ArithValue(std_arith.TruncIOp(i32, _raw(hi_raw)).result) | arith.constant(1 << 31, type=T.i32)
-    return vector.from_elements(T.vec(4, T.i32), [g0_s0, g0_s1, g0_s2, g0_s3])
+    return vector.from_elements(
+        T.vec(4, T.i32), [as_ir_value(g0_s0), as_ir_value(g0_s1), as_ir_value(g0_s2), as_ir_value(g0_s3)]
+    )
 
 
 @dsl_loc_tracing
@@ -1073,12 +1078,14 @@ def update_tensor_gather_descriptor_addr64(
 def _zero_dgroup_v4i32():
     """Create a zero vector<4xi32> for unused descriptor groups."""
     z = arith.constant(0, type=T.i32)
+    z = as_ir_value(z)
     return vector.from_elements(T.vec(4, T.i32), [z, z, z, z])
 
 
 def _zero_dgroup_v8i32():
     """Create a zero vector<8xi32> for unused descriptor groups."""
     z = arith.constant(0, type=T.i32)
+    z = as_ir_value(z)
     return vector.from_elements(T.vec(8, T.i32), [z, z, z, z, z, z, z, z])
 
 

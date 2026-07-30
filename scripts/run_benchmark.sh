@@ -70,6 +70,10 @@ LAYERNORM_SHAPES='
 RMSNORM_SHAPES='
 32768,8192,bf16
 '
+RMSNORM_MIXED_WEIGHT_SHAPES='
+4096,4096,bf16
+512,4096,f16
+'
 # FlashAttention shapes:
 #   preferred: "batch,seq_len,num_heads,num_kv_heads,head_dim,dtype,causal"
 #   legacy:    "batch,seq_len,num_heads,head_dim,dtype,causal" (num_kv_heads=num_heads)
@@ -620,6 +624,51 @@ if [ "${RUN_RMSNORM}" -eq 1 ]; then
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
   done
+
+  # Training contract: FP16/BF16 activations with FP32 weights. These focused
+  # pytest entries avoid rerunning the full RMSNorm correctness matrix for each
+  # benchmark row while keeping gfx942/gfx950 dashboard coverage symmetric.
+  for shape in $RMSNORM_MIXED_WEIGHT_SHAPES; do
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    M=$1; N=$2; activation_dtype=$3
+    export ROCDSL_RMSNORM_MIXED_WEIGHT_BENCH_SHAPE="$shape"
+
+    log="${BENCH_LOG_DIR}/rmsnorm_mixed_weight_${M}x${N}_${activation_dtype}.log"
+    if python3 -m pytest \
+      tests/kernels/test_rmsnorm.py::test_rmsnorm_mixed_weight_forward_benchmark \
+      -m benchmark -q -s >"${log}" 2>&1; then
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+      _fail_or_skip "${log}" "rmsnorm_mixed_weight"
+    fi
+    row="$(_py_parse_and_emit rmsnorm_mixed_weight "${M}x${N}" "${activation_dtype}+f32w" "${log}")"
+    set -- $row
+    _emit_row "$1" "$2" "$3" "$4" "$5"
+
+    for mode in plain fused_add; do
+      export ROCDSL_RMSNORM_MIXED_WEIGHT_BWD_MODE="$mode"
+      op="rmsnorm_mixed_w_bwd"
+      if [ "$mode" = "fused_add" ]; then
+        op="rmsnorm_add_mixed_bwd"
+      fi
+      log="${BENCH_LOG_DIR}/${op}_${M}x${N}_${activation_dtype}.log"
+      if python3 -m pytest \
+        tests/kernels/test_rmsnorm.py::test_rmsnorm_mixed_weight_backward_benchmark \
+        -m benchmark -q -s >"${log}" 2>&1; then
+        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+      else
+        _fail_or_skip "${log}" "$op"
+      fi
+      row="$(_py_parse_and_emit "$op" "${M}x${N}" "${activation_dtype}+f32w" "${log}")"
+      set -- $row
+      _emit_row "$1" "$2" "$3" "$4" "$5"
+    done
+  done
+  unset ROCDSL_RMSNORM_MIXED_WEIGHT_BENCH_SHAPE ROCDSL_RMSNORM_MIXED_WEIGHT_BWD_MODE
 fi
 
 # FlashAttention / FMHA (CDNA only)

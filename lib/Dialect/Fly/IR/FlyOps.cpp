@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpImplementation.h"
@@ -1815,6 +1816,22 @@ FLY_INFER_RETURN_TYPES(PtrToIntOp) {
   }
 
   inferredReturnTypes.assign({IntegerType::get(context, width)});
+  return success();
+}
+
+FLY_INFER_RETURN_TYPES(ToLLVMPtrOp) {
+  auto ptrTy = dyn_cast<PointerType>(operands[0].getType());
+  if (!ptrTy)
+    return emitOptionalError(location, "ToLLVMPtrOp: expected PointerType, got ",
+                             operands[0].getType());
+  if (!properties)
+    return emitOptionalError(location, "ToLLVMPtrOp: missing llvm_address_space");
+  int64_t addressSpace = properties.as<Properties *>()->llvm_address_space.getInt();
+  if (addressSpace < 0)
+    return emitOptionalError(location, "ToLLVMPtrOp: llvm_address_space must be non-negative, got ",
+                             addressSpace);
+  inferredReturnTypes.assign(
+      {LLVM::LLVMPointerType::get(context, static_cast<unsigned>(addressSpace))});
   return success();
 }
 

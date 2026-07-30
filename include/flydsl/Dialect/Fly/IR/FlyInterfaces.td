@@ -132,19 +132,7 @@ def Fly_CopyOpTypeInterface : TypeInterface<"CopyOpTypeInterface"> {
            "::mlir::Value":$atomVal,
            "::mlir::Value":$src,
            "::mlir::Value":$dst,
-           "::mlir::Value":$pred)>,
-    InterfaceMethod<
-      "Number of memref dimensions this atom transfers in a single "
-      "copy_atom_call. Default 1: the expand-copy lowering peels the tiled "
-      "memref down to a rank-1 leaf and emits one call per element/fragment. An "
-      "atom that moves a whole N-D tile in one instruction (e.g. the gfx1250 "
-      "TDM 2D DMA) returns N, and the lowering emits a single call on the "
-      "rank-N memref instead of decomposing it.",
-      "unsigned",
-      "getCopyRank",
-      (ins),
-      /*methodBody=*/[{}],
-      /*defaultImplementation=*/[{ return 1; }]>
+           "::mlir::Value":$pred)>
   ];
 }
 

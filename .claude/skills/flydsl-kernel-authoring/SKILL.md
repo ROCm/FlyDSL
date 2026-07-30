@@ -172,7 +172,7 @@ fx.slice(src, coord)                       # Slice at coordinate (None = keep mo
 ```python
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 
 @flyc.kernel
 def my_kernel(
@@ -227,11 +227,12 @@ acc = Vec.filled(4, 0.0, fx.Float32)
 v_i64 = Vec(raw_vec).bitcast(fx.Int64)
 elem0 = v_i64[0]
 
-rsrc = buffer_ops.create_buffer_resource(tensor, max_size=True)
-word = buffer_ops.buffer_load(rsrc, fx.Int32(offset), vec_width=4, dtype=fx.Int32)
+buf = fx.rocdl.make_buffer_tensor(tensor)          # preferred buffer-resource view
+tA  = fx.make_view(fx.get_iter(buf), fx.make_layout((M, N), (N, 1)))
+# load/store tA via copy atoms (fx.copy_atom_call); raw buffer_ops is legacy
 ```
 
-Older code may use `gpu.thread_idx.x`, `gpu.block_idx.x`, `arith.constant(...)`, `T.i32`, and raw `vector.*` helpers. Keep those when editing existing code that already uses them heavily, but prefer `gpu.thread_id/block_id`, `fx.Int64`/`fx.Int32`/`fx.Float32`, and `fx.Vector` for new code.
+Older code may use `gpu.thread_idx.x`, `gpu.block_idx.x`, `arith.constant(...)`, `T.i32`, raw `vector.*` helpers, the `ArithValue` wrapper, and `buffer_ops`. Keep those when editing existing code that already uses them heavily, but prefer `gpu.thread_id/block_id`, `fx.Int64`/`fx.Int32`/`fx.Float32`, `fx.Vector`, and `fx.rocdl.make_buffer_tensor` for new code. `ArithValue`, `fx.Index`, and `buffer_ops` are deprecated/legacy — for migrating an existing kernel see the **flydsl-kernel-code-cleanup** skill.
 
 ### Parameter Types
 | Type | Description | At host boundary |
@@ -573,15 +574,20 @@ fx.copy(copy_atom, partition_src, frag)
 fx.copy(copy_atom, frag, partition_dst)
 ```
 
-### Buffer Load/Store (AMD Intrinsics)
-```python
-from flydsl.expr import buffer_ops
+### Buffer Load/Store
 
-rsrc = buffer_ops.create_buffer_resource(tensor)
-# offset is in ELEMENTS (not bytes)
-data = buffer_ops.buffer_load(rsrc, offset, vec_width=4)
-buffer_ops.buffer_store(data, rsrc, offset)
+Preferred: build a buffer-resource view with `make_buffer_tensor` and move data
+through copy atoms — the OOB-checked V# descriptor is built for you.
+```python
+buf = fx.rocdl.make_buffer_tensor(tensor)
+tA  = fx.make_view(fx.get_iter(buf), fx.make_layout((M, N), (N, 1)))
+copy = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
+fx.copy_atom_call(copy, fx.slice(tA, (None, tid)), rA)   # after partitioning tA
 ```
+
+Legacy raw intrinsics (`buffer_ops.create_buffer_resource` / `buffer_load` /
+`buffer_store`, `offset` in **elements**) remain for un-migrated kernels; see the
+**flydsl-kernel-code-cleanup** skill to migrate them.
 
 ### Copy Atom Types
 | Type | Bits | Usage |
@@ -715,10 +721,10 @@ The preshuffle GEMM pattern in `kernels/gemm/preshuffle_gemm.py`:
 XOR-shuffle-based intra-wave reduction:
 ```python
 width_i32 = fx.Int32(64)
+val = fx.Float32(val)                                        # typed once, not per-iter
 for sh in [32, 16, 8, 4, 2, 1]:
-    off = fx.Int32(sh)
-    peer = gpu.ShuffleOp(val, off, width_i32, mode="xor").shuffleResult
-    val = ArithValue(val) + peer  # use explicit FOp only if fastmath flags are needed
+    peer = gpu.ShuffleOp(val.ir_value(), fx.Int32(sh), width_i32, mode="xor").shuffleResult
+    val = val + fx.Float32(peer)  # typed add; explicit FOp only for fastmath flags
 ```
 
 ### Block Reduction
@@ -797,15 +803,23 @@ def naive_gemm(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor,
     bm, bn = bid // (N // BN), bid % (N // BN)
     tm, tn = tid // BN, tid % BN
     row, col = bm * BM + tm, bn * BN + tn
-    rsrc_a = buffer_ops.create_buffer_resource(A)
-    rsrc_b = buffer_ops.create_buffer_resource(B)
-    rsrc_c = buffer_ops.create_buffer_resource(C)
+
+    # Buffer-resource views with logical row-major layouts
+    tA = fx.make_view(fx.get_iter(fx.rocdl.make_buffer_tensor(A)), fx.make_layout((M, K), (K, 1)))
+    tB = fx.make_view(fx.get_iter(fx.rocdl.make_buffer_tensor(B)), fx.make_layout((K, N), (N, 1)))
+    tC = fx.make_view(fx.get_iter(fx.rocdl.make_buffer_tensor(C)), fx.make_layout((M, N), (N, 1)))
+
+    copy = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
+    rA, rB, rC = (fx.make_rmem_tensor(1, fx.Float32) for _ in range(3))
+
     acc = fx.Float32(0.0)
     for k in range_constexpr(K):
-        a = buffer_ops.buffer_load(rsrc_a, row * K + k, vec_width=1)
-        b = buffer_ops.buffer_load(rsrc_b, k * N + col, vec_width=1)
-        acc = acc + a * b
-    buffer_ops.buffer_store(acc, rsrc_c, row * N + col)
+        fx.copy(copy, fx.slice(tA, (row, k)), rA)
+        fx.copy(copy, fx.slice(tB, (k, col)), rB)
+        acc = acc + fx.Vector(fx.memref_load_vec(rA))[0] * fx.Vector(fx.memref_load_vec(rB))[0]
+
+    fx.memref_store_vec(fx.Vector.from_elements([acc], fx.Float32), rC)
+    fx.copy(copy, rC, fx.slice(tC, (row, col)))
 ```
 
 ---
@@ -922,7 +936,7 @@ Pass raw `torch.Tensor` objects instead.
 
 10. **INT4 (W4A8)**: A matrix is int8, B matrix is packed int4 (2 values/byte), unpacked to int8 in-kernel.
 
-11. **`arith.absf` does not exist**: Prefer `Vector`/`ArithValue` operators: `neg = -v`, `is_neg = v < zero`, `out = is_neg.select(neg, v)`.
+11. **`arith.absf` does not exist**: Prefer `fx.Vector` / typed `fx` operators (not the deprecated `ArithValue`): `neg = -v`, `is_neg = v < zero`, `out = is_neg.select(neg, v)`.
 
 12. **Scalar broadcast to vector**: Use `Vec.filled(width, value, fx.Float32)` to create a splat constant vector. Do NOT use raw vector ops for ordinary arithmetic.
 

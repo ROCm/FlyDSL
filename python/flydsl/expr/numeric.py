@@ -354,10 +354,29 @@ class Numeric(metaclass=NumericMeta):
     def dtype(self) -> Type["Numeric"]:
         return type(self)
 
-    def to(self, dtype):
+    def to(self, dtype, *, rounding_mode=None):
         if dtype is type(self):
             return self
-        elif isinstance(dtype, type) and issubclass(dtype, Numeric):
+
+        if rounding_mode is not None:
+            src = type(self)
+            if not isinstance(rounding_mode, arith.RoundingMode):
+                raise TypeError(f"rounding_mode must be an RoundingMode, got {type(rounding_mode).__name__}")
+            if not (isinstance(dtype, type) and issubclass(dtype, Numeric)):
+                raise TypeError(f"rounding_mode requires a Numeric target type, got {dtype!r}")
+            if not (src.is_float and dtype.is_float):
+                raise TypeError(
+                    f"rounding_mode is only supported for float-to-float casts, got {src.__name__} -> {dtype.__name__}"
+                )
+            if self.is_static():
+                raise ValueError(
+                    f"rounding_mode requires a run-time value, but this {src.__name__} holds the "
+                    f"compile-time constant {self.value!r}"
+                )
+            rounding_mode = rounding_mode if dtype.width <= src.width else None
+            return dtype(fp_to_fp(self.ir_value(), dtype.ir_type, rounding_mode=rounding_mode))
+
+        if isinstance(dtype, type) and issubclass(dtype, Numeric):
             return dtype(self)
         elif dtype is ir.Value:
             if isinstance(self.value, (int, float, bool)):

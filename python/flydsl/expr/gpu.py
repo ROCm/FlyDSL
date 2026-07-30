@@ -20,8 +20,9 @@ from .._mlir import ir
 from .._mlir.dialects import gpu
 from .._mlir.dialects._fly_enum_gen import AddressSpace
 from ..compiler.protocol import dsl_align_of, dsl_size_of
+from .math import dsl_math_wrap_result
 from .meta import dsl_loc_tracing
-from .numeric import Numeric, Uint8
+from .numeric import Int32, Numeric, Uint8
 from .primitive import get_dyn_shared, make_ptr
 from .struct import (
     Arena,
@@ -32,7 +33,7 @@ from .struct import (
     is_composite_type,
     is_struct_type,
 )
-from .typing import Array, PointerType, Tuple3D
+from .typing import Array, PointerType, Tuple3D, as_ir_value
 
 
 @dsl_loc_tracing
@@ -48,6 +49,45 @@ def block_id(*args, **kwargs):
 @dsl_loc_tracing
 def barrier(*args, **kwargs):
     return gpu.barrier(*args, **kwargs)
+
+
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def shuffle(value, offset, width, mode="xor"):
+    """Move ``value`` across lanes of a subgroup (warp) via ``gpu.shuffle``.
+
+    ``width`` is the number of participating lanes and must be uniform across
+    the subgroup.
+    """
+    if mode not in ("xor", "up", "down", "idx"):
+        raise ValueError(f"invalid shuffle mode {mode!r}; expected one of (xor, up, down, idx)")
+
+    return gpu.ShuffleOp(
+        as_ir_value(value),
+        Int32(offset).ir_value(),
+        Int32(width).ir_value(),
+        mode=mode,
+    ).shuffleResult
+
+
+def shuffle_xor(value, offset, width):
+    """``shuffle`` in ``"xor"`` mode: lane ``k`` reads lane ``k ^ offset``."""
+    return shuffle(value, offset, width, mode="xor")
+
+
+def shuffle_up(value, offset, width):
+    """``shuffle`` in ``"up"`` mode: lane ``k`` reads lane ``k - offset``."""
+    return shuffle(value, offset, width, mode="up")
+
+
+def shuffle_down(value, offset, width):
+    """``shuffle`` in ``"down"`` mode: lane ``k`` reads lane ``k + offset``."""
+    return shuffle(value, offset, width, mode="down")
+
+
+def shuffle_idx(value, lane, width):
+    """``shuffle`` in ``"idx"`` mode: every lane reads lane ``lane``."""
+    return shuffle(value, lane, width, mode="idx")
 
 
 thread_idx = Tuple3D(gpu.thread_id)
@@ -199,6 +239,10 @@ __all__ = [
     "block_dim",
     "grid_dim",
     "barrier",
+    "shuffle_xor",
+    "shuffle_up",
+    "shuffle_down",
+    "shuffle_idx",
     "smem_space",
     "lds_space",
     "SharedAllocator",

@@ -7,18 +7,18 @@ from abc import ABC, abstractmethod
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import fly, llvm, scf
+from flydsl._mlir.dialects import fly, llvm, scf, vector
 from flydsl.expr import (
     arith,
-    buffer_ops,
+    as_ir_value,
     const_expr,
     gpu,
     range_constexpr,
     rocdl,
-    vector,
 )
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
+from kernels.common import buffer_ops
 from kernels.common.kernels_common import get_llvm_ptr
 from kernels.common.tensor_shim import GTensor, get_dtype_in_kernel
 
@@ -52,8 +52,8 @@ class WmmaHalf_m16n16k16(WmmaHalfBase):
 
     def __call__(self, a_frag, b_frag, c_frag):
         if self.dtype == "bf16":
-            a_frag_vi16 = vector.bitcast(T.vec(self.WMMA_A_FRAG_VALUES, T.i16), a_frag)
-            b_frag_vi16 = vector.bitcast(T.vec(self.WMMA_B_FRAG_VALUES, T.i16), b_frag)
+            a_frag_vi16 = vector.bitcast(T.vec(self.WMMA_A_FRAG_VALUES, T.i16), as_ir_value(a_frag))
+            b_frag_vi16 = vector.bitcast(T.vec(self.WMMA_B_FRAG_VALUES, T.i16), as_ir_value(b_frag))
             return rocdl.mfma_f32_16x16x16bf16_1k(T.f32x4, [a_frag_vi16, b_frag_vi16, c_frag, 0, 0, 0])
         return rocdl.mfma_f32_16x16x16f16(T.vec(self.WMMA_C_FRAG_VALUES, T.f32), [a_frag, b_frag, c_frag, 0, 0, 0])
 
@@ -609,17 +609,25 @@ def compile_hgemm_kernel(
                         b_frag = b_frags[kk * WARP_N_STEPS + jj]
                         if const_expr(MFMA_PER_WARP_K == 2):
                             # split a
-                            a_i64x2 = vector.bitcast(T.i64x2, a_frag)
-                            a0_i64 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
-                            a1_i64 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
-                            a_v0 = vector.bitcast(T.f16x4, vector.from_elements(T.vec(1, T.i64), [a0_i64]))
-                            a_v1 = vector.bitcast(T.f16x4, vector.from_elements(T.vec(1, T.i64), [a1_i64]))
+                            a_i64x2 = vector.bitcast(T.i64x2, as_ir_value(a_frag))
+                            a0_i64 = vector.extract(as_ir_value(a_i64x2), static_position=[0], dynamic_position=[])
+                            a1_i64 = vector.extract(as_ir_value(a_i64x2), static_position=[1], dynamic_position=[])
+                            a_v0 = vector.bitcast(
+                                T.f16x4, as_ir_value(vector.from_elements(T.vec(1, T.i64), [as_ir_value(a0_i64)]))
+                            )
+                            a_v1 = vector.bitcast(
+                                T.f16x4, as_ir_value(vector.from_elements(T.vec(1, T.i64), [as_ir_value(a1_i64)]))
+                            )
                             # split b
-                            b_i64x2 = vector.bitcast(T.i64x2, b_frag)
-                            b0_i64 = vector.extract(b_i64x2, static_position=[0], dynamic_position=[])
-                            b1_i64 = vector.extract(b_i64x2, static_position=[1], dynamic_position=[])
-                            b_v0 = vector.bitcast(T.f16x4, vector.from_elements(T.vec(1, T.i64), [b0_i64]))
-                            b_v1 = vector.bitcast(T.f16x4, vector.from_elements(T.vec(1, T.i64), [b1_i64]))
+                            b_i64x2 = vector.bitcast(T.i64x2, as_ir_value(b_frag))
+                            b0_i64 = vector.extract(as_ir_value(b_i64x2), static_position=[0], dynamic_position=[])
+                            b1_i64 = vector.extract(as_ir_value(b_i64x2), static_position=[1], dynamic_position=[])
+                            b_v0 = vector.bitcast(
+                                T.f16x4, as_ir_value(vector.from_elements(T.vec(1, T.i64), [as_ir_value(b0_i64)]))
+                            )
+                            b_v1 = vector.bitcast(
+                                T.f16x4, as_ir_value(vector.from_elements(T.vec(1, T.i64), [as_ir_value(b1_i64)]))
+                            )
                             # wmma
                             c_idx = ii * WARP_N_STEPS + jj
                             acc_in = c_frags_new[c_idx]
@@ -764,7 +772,7 @@ def compile_hgemm_kernel(
                     lds_m_idx = fx.Index(warp_atom_m_idx + stmatrix_c_m_vec_idx + kk)
                     lds_n_idx = fx.Index(warp_atom_n_idx + stmatrix_c_n_idx)
                     val = vector.extract(
-                        c_frags[ii * WARP_N_STEPS + jj],
+                        as_ir_value(c_frags[ii * WARP_N_STEPS + jj]),
                         static_position=[kk],
                         dynamic_position=[],
                     )
@@ -790,13 +798,13 @@ def compile_hgemm_kernel(
                     # split to vec2s
                     vec2_ty = T.vec(2, dtype_)
                     for vec_idx in range_constexpr(LDG_VEC_SIZE // 2):
-                        e0 = vector.extract(pk_val, static_position=[vec_idx * 2], dynamic_position=[])
+                        e0 = vector.extract(as_ir_value(pk_val), static_position=[vec_idx * 2], dynamic_position=[])
                         e1 = vector.extract(
-                            pk_val,
+                            as_ir_value(pk_val),
                             static_position=[vec_idx * 2 + 1],
                             dynamic_position=[],
                         )
-                        pair = vector.from_elements(vec2_ty, [e0, e1])
+                        pair = vector.from_elements(vec2_ty, [as_ir_value(e0), as_ir_value(e1)])
                         pair_byte_offset = arith.index_cast(
                             T.i64,
                             linear_bytes_offset + fx.Index(vec_idx * 2 * DTYPE_BYTES),

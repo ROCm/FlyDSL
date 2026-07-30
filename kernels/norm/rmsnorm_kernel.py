@@ -6,8 +6,8 @@
 RMSNorm(x) = x / sqrt(mean(x^2) + eps) * gamma
 
 Two paths:
-  - Fast path (N % tile_cols == 0): buffer_load/store vectorised access.
-  - Generic path (arbitrary N): scalar copy_atom_call.
+  - Fast path (N % tile_cols == 0): 128-bit buffer copies.
+  - Generic path (arbitrary N): scalar guarded copies.
 """
 
 import math
@@ -16,7 +16,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
-from flydsl.expr.vector import ReductionOp, full
+from flydsl.expr.typing import ReductionOp
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import dtype_to_elem_type
 
@@ -24,7 +24,10 @@ from kernels.common.kernels_common import dtype_to_elem_type
 # here so existing importers (tests, callers) keep working unchanged.
 from kernels.norm.rmsnorm_bwd_kernel import (  # noqa: E402,F401
     build_fused_add_rmsnorm_bwd_module,
+    build_fused_add_rmsnorm_bwd_two_stage_module,
     build_rmsnorm_bwd_module,
+    build_rmsnorm_bwd_two_stage_module,
+    is_rmsnorm_bwd_two_stage_vec_config,
 )
 from kernels.norm.rmsnorm_common import (
     BLOCK_THREADS,
@@ -34,11 +37,14 @@ from kernels.norm.rmsnorm_common import (
 )
 from kernels.norm.rmsnorm_common import load_scalar as _load_scalar
 from kernels.norm.rmsnorm_common import load_vec as _load_vec
+from kernels.norm.rmsnorm_common import load_weight_vec as _load_weight_vec
 from kernels.norm.rmsnorm_common import make_reduction_storage as _make_reduction_storage
+from kernels.norm.rmsnorm_common import resolve_rmsnorm_weight_dtype as _resolve_rmsnorm_weight_dtype
 from kernels.norm.rmsnorm_common import store_scalar as _store_scalar
 from kernels.norm.rmsnorm_common import store_vec as _store_vec
 from kernels.norm.rmsnorm_common import to_elem_scalar as _to_elem_scalar
 from kernels.norm.rmsnorm_common import to_elem_vec as _to_elem_vec
+from kernels.norm.rmsnorm_common import weight_vec_width as _weight_vec_width
 
 try:
     import torch
@@ -49,13 +55,6 @@ KERNEL_NAME = "rmsnorm"
 
 # The small-N path derives its own block geometry and is not tuned.
 SMALL_N_THRESHOLD = 2048
-
-
-def _store_yscale(scale_copy_atom, yscale_div, index, val):
-    r = fx.make_rmem_tensor(1, fx.Float32)
-    ts = full(1, fx.Float32(val), fx.Float32)
-    fx.memref_store_vec(ts, r)
-    fx.copy_atom_call(scale_copy_atom, r, fx.slice(yscale_div, (None, index)))
 
 
 def _quant_dtype_to_elem_type(dtype_str: str):
@@ -71,10 +70,16 @@ def _quant_dtype_max(dtype_str: str) -> float:
 
 
 def build_rmsnorm_module(
-    N: int, dtype_str: str, store_rstd: bool = False, eps: float = EPS, BLOCK_THREADS: int = BLOCK_THREADS
+    N: int,
+    dtype_str: str,
+    store_rstd: bool = False,
+    eps: float = EPS,
+    BLOCK_THREADS: int = BLOCK_THREADS,
+    weight_dtype_str: str | None = None,
 ):
+    weight_dtype_str = _resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
     if N <= SMALL_N_THRESHOLD:
-        return _build_rmsnorm_large_m_small_n_module(N, dtype_str, store_rstd, eps)
+        return _build_rmsnorm_large_m_small_n_module(N, dtype_str, store_rstd, eps, weight_dtype_str)
 
     arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
@@ -83,6 +88,7 @@ def build_rmsnorm_module(
     tile_cols = BLOCK_THREADS * VEC_WIDTH
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
+    weight_elem_bits = 32 if weight_dtype_str == "f32" else 16
     _kernel_kwargs = {} if BLOCK_THREADS <= 256 else {"known_block_size": [BLOCK_THREADS, 1, 1]}
 
     SharedStorage = _make_reduction_storage(RED_SLOTS)
@@ -98,6 +104,7 @@ def build_rmsnorm_module(
         tid = fx.thread_idx.x
 
         elem_dtype = dtype_to_elem_type(dtype_str)
+        weight_elem_dtype = dtype_to_elem_type(weight_dtype_str)
         fm_fast = arith.FastMathFlags.fast
         eps_c = eps
         n_float = float(N)
@@ -156,12 +163,9 @@ def build_rmsnorm_module(
 
             return fx.memref_load(s_red, 0), fx.memref_load(s_red2, 0)
 
-        # ==================================================================
-        # Fast path: N is a multiple of tile_cols
-        # ==================================================================
+        # Fast path for complete 128-bit tiles.
         if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
             num_tiles = N // tile_cols
-            # ── Layout API: buffer-backed tensors + tiled access ─────
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -171,9 +175,10 @@ def build_rmsnorm_module(
 
             in_div = fx.logical_divide(row_in, fx.make_layout(VEC_WIDTH, 1))
             out_div = fx.logical_divide(row_out, fx.make_layout(VEC_WIDTH, 1))
-            gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(VEC_WIDTH, 1))
+            gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(_weight_vec_width(weight_dtype_str), 1))
 
             copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
+            gamma_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), weight_elem_bits)
 
             c_zero_f = fx.Float32(0.0)
             thread_sumsq = c_zero_f
@@ -198,13 +203,13 @@ def build_rmsnorm_module(
 
             if const_expr(store_rstd):
                 if tid == 0:
-                    _store_scalar(rstd_copy_atom, fx.Float32, fx.Float32, rstd_div, bid, rrms)
+                    _store_scalar(rstd_copy_atom, fx.Float32, rstd_div, bid, rrms)
 
             # Pass 2: normalize + gamma + store (reuse cached input)
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
 
-                g = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, gamma_div, idx).to(fx.Float32)
+                g = _load_weight_vec(gamma_copy_atom, weight_dtype_str, weight_elem_dtype, gamma_div, idx)
                 x = in_local[tile_i].to(fx.Float32)
 
                 y = (x * rrms) * g
@@ -214,9 +219,7 @@ def build_rmsnorm_module(
                 _store_vec(copy_atom, VEC_WIDTH, elem_dtype, out_e, out_div, out_idx)
 
         else:
-            # ==============================================================
-            # Generic path: scalar 2-pass for arbitrary N
-            # ==============================================================
+            # Scalar fallback for arbitrary N.
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -227,6 +230,10 @@ def build_rmsnorm_module(
             copy_atom_s = fx.make_copy_atom(
                 fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
                 elem_bits,
+            )
+            gamma_copy_atom_s = fx.make_copy_atom(
+                fx.rocdl.BufferCopy16b() if weight_elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
+                weight_elem_bits,
             )
 
             row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
@@ -253,19 +260,19 @@ def build_rmsnorm_module(
 
             if const_expr(store_rstd):
                 if tid == 0:
-                    _store_scalar(rstd_copy_atom, fx.Float32, fx.Float32, rstd_div, bid, rrms)
+                    _store_scalar(rstd_copy_atom, fx.Float32, rstd_div, bid, rrms)
 
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 if idx < N:
                     x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx)
-                    g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx)
+                    g_e = _load_scalar(gamma_copy_atom_s, weight_elem_dtype, gamma_div, idx)
                     x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
-                    g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
+                    g = g_e if weight_dtype_str == "f32" else g_e.to(fx.Float32)
                     norm = x * rrms
                     y = norm * g
                     y_e = _to_elem_scalar(dtype_str, elem_dtype, y)
-                    _store_scalar(copy_atom_s, elem_dtype, elem_dtype, out_div, idx, y_e)
+                    _store_scalar(copy_atom_s, elem_dtype, out_div, idx, y_e)
 
     if store_rstd:
 
@@ -317,18 +324,33 @@ def rmsnorm_direct(
     dtype_str: fx.Constexpr[str],
     BLOCK_THREADS: fx.Constexpr[int],
     stream: fx.Stream = fx.Stream(None),
+    weight_dtype_str: fx.Constexpr[str] = "",
 ):
     """Specialize the existing RMSNorm factory through JIT Constexpr inputs."""
-    launch = build_rmsnorm_module(N, dtype_str, BLOCK_THREADS=BLOCK_THREADS)
+    resolved_weight_dtype_str = dtype_str if weight_dtype_str == "" else weight_dtype_str
+    launch = build_rmsnorm_module(
+        N,
+        dtype_str,
+        BLOCK_THREADS=BLOCK_THREADS,
+        weight_dtype_str=resolved_weight_dtype_str,
+    )
     launch(Input, Gamma, Output, m_in, stream)
 
 
-def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, store_rstd: bool = False, eps: float = EPS):
+def _build_rmsnorm_large_m_small_n_module(
+    N: int,
+    dtype_str: str,
+    store_rstd: bool = False,
+    eps: float = EPS,
+    weight_dtype_str: str | None = None,
+):
+    weight_dtype_str = _resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
     BLOCK_N = 1 << (N - 1).bit_length()
     BLOCK_M = max(min(16384 // BLOCK_N, 32), 8)
     THREADS_PER_ROW = min(WARP_SIZE, 1024 // BLOCK_M)
     BLOCK_THREADS_SPECIAL = BLOCK_M * THREADS_PER_ROW
     elem_bits = 32 if dtype_str == "f32" else 16
+    weight_elem_bits = 32 if weight_dtype_str == "f32" else 16
 
     @flyc.kernel(known_block_size=[BLOCK_THREADS_SPECIAL, 1, 1])
     def rmsnorm_large_m_small_n_kernel(
@@ -343,10 +365,11 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, store_rstd: bo
 
         lane = tid % THREADS_PER_ROW
         row_local = tid // THREADS_PER_ROW
-        row = bid * fx.Int32(BLOCK_M) + row_local
+        row = bid * BLOCK_M + row_local
 
         if row < MIn:
             elem_dtype = dtype_to_elem_type(dtype_str)
+            weight_elem_dtype = dtype_to_elem_type(weight_dtype_str)
             fm_fast = arith.FastMathFlags.fast
             eps_c = eps
             n_float = float(N)
@@ -366,6 +389,10 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, store_rstd: bo
                 fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
                 elem_bits,
             )
+            gamma_copy_atom_s = fx.make_copy_atom(
+                fx.rocdl.BufferCopy16b() if weight_elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
+                weight_elem_bits,
+            )
 
             row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
@@ -375,7 +402,7 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, store_rstd: bo
                 w = x
                 for _sh_exp in range_constexpr(int(math.log2(THREADS_PER_ROW))):
                     off = THREADS_PER_ROW // (2 << _sh_exp)
-                    peer = w.shuffle_xor(off, fx.Int32(THREADS_PER_ROW))
+                    peer = w.shuffle_xor(off, THREADS_PER_ROW)
                     w = w.addf(peer, fastmath=fm_fast)
                 return w
 
@@ -398,18 +425,18 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, store_rstd: bo
 
             if const_expr(store_rstd):
                 if lane == 0:
-                    _store_scalar(rstd_copy_atom, fx.Float32, fx.Float32, rstd_div, row, rrms)
+                    _store_scalar(rstd_copy_atom, fx.Float32, rstd_div, row, rrms)
 
             for base_idx_int in range_constexpr(0, BLOCK_N, THREADS_PER_ROW):
                 idx = lane + base_idx_int
                 if idx < N:
                     x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx)
-                    g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx)
+                    g_e = _load_scalar(gamma_copy_atom_s, weight_elem_dtype, gamma_div, idx)
                     x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
-                    g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
+                    g = g_e if weight_dtype_str == "f32" else g_e.to(fx.Float32)
                     y = (x * rrms) * g
                     y_e = _to_elem_scalar(dtype_str, elem_dtype, y)
-                    _store_scalar(copy_atom_s, elem_dtype, elem_dtype, out_div, idx, y_e)
+                    _store_scalar(copy_atom_s, elem_dtype, out_div, idx, y_e)
 
     if store_rstd:
 
@@ -424,7 +451,7 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, store_rstd: bo
         ):
             launcher = rmsnorm_large_m_small_n_kernel(Input, Gamma, Rstd, Output, m_in)
             launcher.launch(
-                grid=((m_in + fx.Int32(BLOCK_M - 1)) // fx.Int32(BLOCK_M), 1, 1),
+                grid=((m_in + BLOCK_M - 1) // BLOCK_M, 1, 1),
                 block=(BLOCK_THREADS_SPECIAL, 1, 1),
                 stream=stream,
             )
@@ -443,7 +470,7 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, store_rstd: bo
         # we pass Gamma to fill the argument (it is never dereferenced in-kernel).
         launcher = rmsnorm_large_m_small_n_kernel(Input, Gamma, Gamma, Output, m_in)
         launcher.launch(
-            grid=((m_in + fx.Int32(BLOCK_M - 1)) // fx.Int32(BLOCK_M), 1, 1),
+            grid=((m_in + BLOCK_M - 1) // BLOCK_M, 1, 1),
             block=(BLOCK_THREADS_SPECIAL, 1, 1),
             stream=stream,
         )
@@ -451,13 +478,21 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, store_rstd: bo
     return launch_rmsnorm_large_m_small_n
 
 
-def build_fused_add_rmsnorm_module(N: int, dtype_str: str, store_rstd: bool = False, eps: float = EPS):
+def build_fused_add_rmsnorm_module(
+    N: int,
+    dtype_str: str,
+    store_rstd: bool = False,
+    eps: float = EPS,
+    weight_dtype_str: str | None = None,
+):
+    weight_dtype_str = _resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
     arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
     tile_cols = BLOCK_THREADS * VEC_WIDTH
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
+    weight_elem_bits = 32 if weight_dtype_str == "f32" else 16
 
     SharedStorage = _make_reduction_storage(RED_SLOTS)
 
@@ -474,6 +509,7 @@ def build_fused_add_rmsnorm_module(N: int, dtype_str: str, store_rstd: bool = Fa
         tid = fx.thread_idx.x
 
         elem_dtype = dtype_to_elem_type(dtype_str)
+        weight_elem_dtype = dtype_to_elem_type(weight_dtype_str)
         fm_fast = arith.FastMathFlags.fast
         eps_c = eps
         n_float = float(N)
@@ -532,12 +568,9 @@ def build_fused_add_rmsnorm_module(N: int, dtype_str: str, store_rstd: bool = Fa
 
             return fx.memref_load(s_red, 0), fx.memref_load(s_red2, 0)
 
-        # ==================================================================
-        # Fast path: N is a multiple of tile_cols
-        # ==================================================================
+        # Fast path for complete 128-bit tiles.
         if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
             num_tiles = N // tile_cols
-            # ── Layout API: buffer-backed tensors + tiled access ─────
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             ResidualIn_buf = fx.rocdl.make_buffer_tensor(ResidualIn)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -553,9 +586,10 @@ def build_fused_add_rmsnorm_module(N: int, dtype_str: str, store_rstd: bool = Fa
             residual_in_div = fx.logical_divide(row_residual_in, fx.make_layout(VEC_WIDTH, 1))
             out_div = fx.logical_divide(row_out, fx.make_layout(VEC_WIDTH, 1))
             residual_out_div = fx.logical_divide(row_residual_out, fx.make_layout(VEC_WIDTH, 1))
-            gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(VEC_WIDTH, 1))
+            gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(_weight_vec_width(weight_dtype_str), 1))
 
             copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
+            gamma_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), weight_elem_bits)
 
             c_zero_f = fx.Float32(0.0)
             thread_sumsq = c_zero_f
@@ -584,21 +618,19 @@ def build_fused_add_rmsnorm_module(N: int, dtype_str: str, store_rstd: bool = Fa
 
             if const_expr(store_rstd):
                 if tid == 0:
-                    _store_scalar(rstd_copy_atom, fx.Float32, fx.Float32, rstd_div, bid, rrms)
+                    _store_scalar(rstd_copy_atom, fx.Float32, rstd_div, bid, rrms)
 
             # Pass 2: normalize + gamma + store (reuse cached added values)
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
-                g = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, gamma_div, idx).to(fx.Float32)
+                g = _load_weight_vec(gamma_copy_atom, weight_dtype_str, weight_elem_dtype, gamma_div, idx)
                 added = add_local[tile_i] if dtype_str == "f32" else add_local[tile_i].to(fx.Float32)
                 y = (added * rrms) * g
                 y_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
                 _store_vec(copy_atom, VEC_WIDTH, elem_dtype, y_e, out_div, idx)
 
         else:
-            # ==============================================================
-            # Generic path: scalar 2-pass for arbitrary N
-            # ==============================================================
+            # Scalar fallback for arbitrary N.
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             ResidualIn_buf = fx.rocdl.make_buffer_tensor(ResidualIn)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -613,6 +645,10 @@ def build_fused_add_rmsnorm_module(N: int, dtype_str: str, store_rstd: bool = Fa
             copy_atom_s = fx.make_copy_atom(
                 fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
                 elem_bits,
+            )
+            gamma_copy_atom_s = fx.make_copy_atom(
+                fx.rocdl.BufferCopy16b() if weight_elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
+                weight_elem_bits,
             )
 
             row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
@@ -634,7 +670,7 @@ def build_fused_add_rmsnorm_module(N: int, dtype_str: str, store_rstd: bool = Fa
                 residual = residual_e if dtype_str == "f32" else residual_e.to(fx.Float32)
                 added_e = _to_elem_scalar(dtype_str, elem_dtype, x + residual)
                 if idx < N:
-                    _store_scalar(copy_atom_s, elem_dtype, elem_dtype, residual_out_div, idx, added_e)
+                    _store_scalar(copy_atom_s, elem_dtype, residual_out_div, idx, added_e)
                 added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                 added2 = added * added
                 thread_sumsq = thread_sumsq + is_valid.select(added2, c_zero_f)
@@ -646,18 +682,18 @@ def build_fused_add_rmsnorm_module(N: int, dtype_str: str, store_rstd: bool = Fa
 
             if const_expr(store_rstd):
                 if tid == 0:
-                    _store_scalar(rstd_copy_atom, fx.Float32, fx.Float32, rstd_div, bid, rrms)
+                    _store_scalar(rstd_copy_atom, fx.Float32, rstd_div, bid, rrms)
 
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 if idx < N:
-                    g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx)
+                    g_e = _load_scalar(gamma_copy_atom_s, weight_elem_dtype, gamma_div, idx)
                     added_e = _load_scalar(copy_atom_s, elem_dtype, residual_out_div, idx)
-                    g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
+                    g = g_e if weight_dtype_str == "f32" else g_e.to(fx.Float32)
                     added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                     y = (added * rrms) * g
                     y_e = _to_elem_scalar(dtype_str, elem_dtype, y)
-                    _store_scalar(copy_atom_s, elem_dtype, elem_dtype, out_div, idx, y_e)
+                    _store_scalar(copy_atom_s, elem_dtype, out_div, idx, y_e)
 
     if store_rstd:
 
@@ -822,14 +858,11 @@ def _build_rmsnorm_quant_module(
 
             return fx.memref_load(s_red, 0)
 
-        # ==================================================================
-        # Fast path: N is a multiple of tile_cols
-        # ==================================================================
+        # Fast path for complete 128-bit tiles.
         if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
             num_tiles = N // tile_cols
             quant_half_width = VEC_WIDTH // 2
-            abs_mask = full(VEC_WIDTH, fx.Uint32(0x7FFFFFFF), fx.Uint32)
-            # ── Layout API: buffer-backed tensors + tiled access ─────
+            abs_mask = fx.Vector.filled(VEC_WIDTH, 0x7FFFFFFF, fx.Uint32)
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
@@ -893,7 +926,7 @@ def _build_rmsnorm_quant_module(
             final_scale = (scale == c_zero_f).select(c_one_f, scale)
 
             if tid == 0:
-                _store_yscale(scale_copy_atom, yscale_div, bid, final_scale)
+                _store_scalar(scale_copy_atom, fx.Float32, yscale_div, bid, final_scale)
 
             inv_scale = c_one_f / final_scale
 
@@ -908,9 +941,7 @@ def _build_rmsnorm_quant_module(
                 _store_vec(copy_atom_q, quant_half_width, quant_dtype, q_hi, out_div_q, out_idx + 1)
 
         else:
-            # ==============================================================
-            # Generic path: scalar 3-pass for arbitrary N
-            # ==============================================================
+            # Scalar fallback for arbitrary N.
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
@@ -981,7 +1012,7 @@ def _build_rmsnorm_quant_module(
             final_scale = (scale == c_zero_f).select(c_one_f, scale)
 
             if tid == 0:
-                _store_yscale(scale_copy_atom, yscale_div, bid, final_scale)
+                _store_scalar(scale_copy_atom, fx.Float32, yscale_div, bid, final_scale)
 
             inv_scale = c_one_f / final_scale
 
@@ -1000,7 +1031,7 @@ def _build_rmsnorm_quant_module(
                         y = y * s
                     q = y * inv_scale
                     q_i8 = q.to(quant_dtype)
-                    _store_scalar(copy_atom_qs, quant_dtype, quant_dtype, out_div, idx, q_i8)
+                    _store_scalar(copy_atom_qs, quant_dtype, out_div, idx, q_i8)
 
     if is_smooth:
 
@@ -1196,14 +1227,11 @@ def _build_fused_add_rmsnorm_quant_module(
 
             return fx.memref_load(s_red, 0)
 
-        # ==================================================================
-        # Fast path: N is a multiple of tile_cols
-        # ==================================================================
+        # Fast path for complete 128-bit tiles.
         if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
             num_tiles = N // tile_cols
             quant_half_width = VEC_WIDTH // 2
-            abs_mask = full(VEC_WIDTH, fx.Uint32(0x7FFFFFFF), fx.Uint32)
-            # ── Layout API: buffer-backed tensors + tiled access ─────
+            abs_mask = fx.Vector.filled(VEC_WIDTH, 0x7FFFFFFF, fx.Uint32)
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             ResidualIn_buf = fx.rocdl.make_buffer_tensor(ResidualIn)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -1275,7 +1303,7 @@ def _build_fused_add_rmsnorm_quant_module(
             final_scale = (scale == c_zero_f).select(c_one_f, scale)
 
             if tid == 0:
-                _store_yscale(scale_copy_atom, yscale_div, bid, final_scale)
+                _store_scalar(scale_copy_atom, fx.Float32, yscale_div, bid, final_scale)
 
             inv_scale = c_one_f / final_scale
 
@@ -1290,9 +1318,7 @@ def _build_fused_add_rmsnorm_quant_module(
                 _store_vec(copy_atom_q, quant_half_width, quant_dtype, q_hi, out_div_q, out_idx + 1)
 
         else:
-            # ==============================================================
-            # Generic path: scalar 3-pass for arbitrary N
-            # ==============================================================
+            # Scalar fallback for arbitrary N.
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             ResidualIn_buf = fx.rocdl.make_buffer_tensor(ResidualIn)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -1343,7 +1369,7 @@ def _build_fused_add_rmsnorm_quant_module(
                 residual = residual_e if dtype_str == "f32" else residual_e.to(fx.Float32)
                 added_e = _to_elem_scalar(dtype_str, elem_dtype, x + residual)
                 if idx < N:
-                    _store_scalar(copy_atom_s, elem_dtype, elem_dtype, residual_out_div, idx, added_e)
+                    _store_scalar(copy_atom_s, elem_dtype, residual_out_div, idx, added_e)
                 added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                 added2 = added * added
                 thread_sumsq = thread_sumsq + is_valid.select(added2, c_zero_f)
@@ -1376,7 +1402,7 @@ def _build_fused_add_rmsnorm_quant_module(
             final_scale = (scale == c_zero_f).select(c_one_f, scale)
 
             if tid == 0:
-                _store_yscale(scale_copy_atom, yscale_div, bid, final_scale)
+                _store_scalar(scale_copy_atom, fx.Float32, yscale_div, bid, final_scale)
 
             inv_scale = c_one_f / final_scale
 
@@ -1395,7 +1421,7 @@ def _build_fused_add_rmsnorm_quant_module(
                         y = y * s
                     q = y * inv_scale
                     q_i8 = q.to(quant_dtype)
-                    _store_scalar(copy_atom_qs, quant_dtype, quant_dtype, out_div, idx, q_i8)
+                    _store_scalar(copy_atom_qs, quant_dtype, out_div, idx, q_i8)
 
     if is_smooth:
 
@@ -1469,84 +1495,178 @@ def build_fused_add_rmsnorm_smoothquant_module(
     )
 
 
-# =====================================================================
-# Python wrappers + autograd (quack-aligned). PR 1: plain rmsnorm.
-# =====================================================================
+# Python wrappers and autograd.
 if torch is not None:
+    from kernels.common.tensor_shim import _run_compiled
     from kernels.norm.rmsnorm_common import torch_dtype_to_str as _torch_dtype_to_str
 
-    # Compiled-fn caches. Keys include device: a compiled function is bound to
-    # the device/context it was built on, so reusing it on another GPU faults.
-    # eps is a compile-time kernel constant, so it is part of the fwd key too.
+    # Each cache retains one JitFunction launcher per specialization and device;
+    # _run_compiled owns the launcher's CompiledFunction in ``._cf``. eps is a
+    # compile-time forward constant, so it remains part of those cache keys.
     _FWD_CACHE: dict = {}
     _BWD_CACHE: dict = {}
 
-    def _get_fwd_compiled(x, weight, out, rstd, M, N, dtype_str, store_rstd, eps, stream):
-        key = (N, dtype_str, store_rstd, float(eps), x.device)
-        entry = _FWD_CACHE.get(key)
-        if entry is None:
-            launch_fn = build_rmsnorm_module(N, dtype_str, store_rstd=store_rstd, eps=eps)
-            if store_rstd:
-                compiled = flyc.compile(launch_fn, x, weight, out, rstd, M, stream)
+    # A cached FlyDSL callable accepts the raw cudaStream_t directly.  Avoid
+    # constructing a Python Stream wrapper or entering a no-op device guard on
+    # the hot same-device path, while retaining the guard when tensors belong
+    # to a non-current device.
+    _get_current_raw_stream = getattr(
+        torch._C,
+        "_cuda_getCurrentRawStream",
+        lambda device_index: torch.cuda.current_stream(device_index).cuda_stream,
+    )
+
+    def _run_compiled_on_device(launcher, device, args):
+        device_index = device.index
+        if torch.cuda.current_device() == device_index:
+            _run_compiled(launcher, *args, _get_current_raw_stream(device_index))
+        else:
+            with torch.cuda.device(device_index):
+                _run_compiled(launcher, *args, _get_current_raw_stream(device_index))
+
+    # The staged path needs enough rows to amortize its second launch.  Its
+    # 512-thread vec8 kernel needs fewer persistent programs than the scalar
+    # fallback, which trades more programs for latency hiding.  Keep this
+    # selector as the single source of truth shared by plain and fused wrappers.
+    _BWD_TWO_STAGE_MIN_ROWS = 512
+    _BWD_TWO_STAGE_MAX_N = 8192
+    _BWD_CU_COUNT_CACHE: dict = {}
+
+    def _get_rmsnorm_bwd_cu_count(device):
+        num_cus = _BWD_CU_COUNT_CACHE.get(device)
+        if num_cus is None:
+            num_cus = torch.cuda.get_device_properties(device).multi_processor_count
+            _BWD_CU_COUNT_CACHE[device] = num_cus
+        return num_cus
+
+    def _select_rmsnorm_bwd_config(M, N, dtype_str, device):
+        if M >= _BWD_TWO_STAGE_MIN_ROWS and N <= _BWD_TWO_STAGE_MAX_N:
+            num_cus = _get_rmsnorm_bwd_cu_count(device)
+            if is_rmsnorm_bwd_two_stage_vec_config(N, dtype_str):
+                num_programs = num_cus if M < 2048 else (3 * num_cus) // 2
             else:
-                compiled = flyc.compile(launch_fn, x, weight, out, M, stream)
-            _FWD_CACHE[key] = compiled
-            entry = compiled
-        return entry
+                num_programs = num_cus if M < 1024 else 2 * num_cus
+            return ("two_stage", min(M, num_programs))
+        return ("atomic", None)
+
+    def _get_fwd_launcher(
+        N,
+        dtype_str,
+        weight_dtype_str,
+        store_rstd,
+        eps,
+        device,
+    ):
+        key = (N, dtype_str, weight_dtype_str, store_rstd, float(eps), device)
+        launcher = _FWD_CACHE.get(key)
+        if launcher is None:
+            with torch.cuda.device(device):
+                launcher = build_rmsnorm_module(
+                    N,
+                    dtype_str,
+                    store_rstd=store_rstd,
+                    eps=eps,
+                    weight_dtype_str=weight_dtype_str,
+                )
+            _FWD_CACHE[key] = launcher
+        return launcher
 
     def rmsnorm_fwd(x, weight, eps=EPS, store_rstd=False):
         """Forward RMSNorm. Returns (out, rstd). eps is baked into the kernel."""
         assert x.dim() == 2, "rmsnorm_fwd expects a 2D (M, N) input"
         assert x.is_contiguous() and weight.is_contiguous(), "rmsnorm_fwd expects contiguous inputs"
-        # gamma is read at x's element width and the kernel launches on x's device,
-        # so a mismatched weight would silently corrupt output (or read out of bounds).
         assert weight.device == x.device, "rmsnorm_fwd: weight and x must be on the same device"
-        assert weight.dtype == x.dtype, "rmsnorm_fwd: weight dtype must match x dtype"
+        device = x.device
         M, N = x.shape
         out = torch.empty_like(x)
-        rstd = torch.empty((M,), device=x.device, dtype=torch.float32) if store_rstd else None
+        rstd = torch.empty((M,), device=device, dtype=torch.float32) if store_rstd else None
         dtype_str = _torch_dtype_to_str(x.dtype)
-        # Bind compile + launch to the tensors' device so the compiled kernel and
-        # the stream belong to the right GPU/context (multi-GPU correctness).
-        with torch.cuda.device(x.device):
-            stream = torch.cuda.current_stream()
-            compiled = _get_fwd_compiled(x, weight, out, rstd, M, N, dtype_str, store_rstd, eps, stream)
-            if store_rstd:
-                compiled(x, weight, out, rstd, M, stream)
-            else:
-                compiled(x, weight, out, M, stream)
+        weight_dtype_str = _resolve_rmsnorm_weight_dtype(dtype_str, _torch_dtype_to_str(weight.dtype))
+        launcher = _get_fwd_launcher(
+            N,
+            dtype_str,
+            weight_dtype_str,
+            store_rstd,
+            eps,
+            device,
+        )
+        args = (x, weight, out, rstd, M) if store_rstd else (x, weight, out, M)
+        _run_compiled_on_device(launcher, device, args)
         return out, rstd
 
     def rmsnorm_bwd(x, weight, dout, rstd, eps=EPS):
-        """Backward RMSNorm. Returns (dx, dw) with dw cast to weight dtype.
+        """Backward RMSNorm. Returns (dx, dw) with dw in weight dtype.
 
         eps is not used directly here — it is already baked into `rstd` by the
         forward — but is accepted so callers can pass it symmetrically.
         """
+        device = x.device
+        dtype = x.dtype
         assert x.dim() == 2, "rmsnorm_bwd expects a 2D (M, N) input"
         assert x.is_contiguous() and dout.is_contiguous(), "rmsnorm_bwd expects contiguous inputs"
         assert weight.is_contiguous(), "rmsnorm_bwd: weight must be contiguous"
-        # Same-device/same-dtype contract as the forward: gamma and dy are read at
-        # x's element width and the kernel launches on x's device (multi-GPU correctness).
-        assert weight.device == x.device == dout.device == rstd.device, "rmsnorm_bwd: inputs must share a device"
-        assert weight.dtype == x.dtype and dout.dtype == x.dtype, "rmsnorm_bwd: weight/dout dtype must match x"
+        assert weight.device == device == dout.device == rstd.device, "rmsnorm_bwd: inputs must share a device"
+        assert dout.dtype == dtype, "rmsnorm_bwd: dout dtype must match x"
         M, N = x.shape
-        dtype_str = _torch_dtype_to_str(x.dtype)
+        dtype_str = _torch_dtype_to_str(dtype)
+        weight_dtype_str = _resolve_rmsnorm_weight_dtype(dtype_str, _torch_dtype_to_str(weight.dtype))
         dx = torch.empty_like(x)
-        dweight = torch.zeros((N,), device=x.device, dtype=torch.float32)
-        key = (N, dtype_str, x.device)
-        # Bind compile + launch to the tensors' device (multi-GPU correctness).
-        with torch.cuda.device(x.device):
-            stream = torch.cuda.current_stream()
-            compiled = _BWD_CACHE.get(key)
-            if compiled is None:
-                launch_fn = build_rmsnorm_bwd_module(N, dtype_str)
-                # flyc.compile executes the kernel once during tracing, which would
-                # accumulate into DWeight; zero it AFTER compiling.
-                compiled = flyc.compile(launch_fn, x, weight, dout, rstd, dx, dweight, M, stream)
-                _BWD_CACHE[key] = compiled
-            dweight.zero_()
-            compiled(x, weight, dout, rstd, dx, dweight, M, stream)
+        path, num_programs = _select_rmsnorm_bwd_config(M, N, dtype_str, device)
+        if path == "two_stage":
+            dweight = torch.empty_like(weight)
+            partial = torch.empty((num_programs * N,), device=device, dtype=torch.float32)
+            key = (path, N, dtype_str, weight_dtype_str, num_programs, device)
+            launcher = _BWD_CACHE.get(key)
+            if launcher is None:
+                # The builder has an arch-dependent vec conversion choice, and
+                # compilation/code-object loading are device-context bound.
+                with torch.cuda.device(device):
+                    device_index = device.index
+                    launcher = build_rmsnorm_bwd_two_stage_module(
+                        N,
+                        dtype_str,
+                        num_programs,
+                        weight_dtype_str=weight_dtype_str,
+                    )
+                    _run_compiled(
+                        launcher,
+                        x,
+                        weight,
+                        dout,
+                        rstd,
+                        dx,
+                        dweight,
+                        partial,
+                        M,
+                        _get_current_raw_stream(device_index),
+                    )
+                _BWD_CACHE[key] = launcher
+            else:
+                _run_compiled_on_device(launcher, device, (x, weight, dout, rstd, dx, dweight, partial, M))
+            return dx, dweight
+
+        dweight = torch.empty((N,), device=device, dtype=torch.float32)
+        key = (path, N, dtype_str, weight_dtype_str, num_programs, device)
+        launcher = _BWD_CACHE.get(key)
+        dweight.zero_()
+        if launcher is None:
+            with torch.cuda.device(device):
+                device_index = device.index
+                launcher = build_rmsnorm_bwd_module(N, dtype_str, weight_dtype_str=weight_dtype_str)
+                _run_compiled(
+                    launcher,
+                    x,
+                    weight,
+                    dout,
+                    rstd,
+                    dx,
+                    dweight,
+                    M,
+                    _get_current_raw_stream(device_index),
+                )
+            _BWD_CACHE[key] = launcher
+        else:
+            _run_compiled_on_device(launcher, device, (x, weight, dout, rstd, dx, dweight, M))
         return dx, dweight.to(weight.dtype)
 
     class RMSNormFunction(torch.autograd.Function):
@@ -1576,26 +1696,31 @@ if torch is not None:
         out_flat = RMSNormFunction.apply(x_flat, weight, eps)
         return out_flat.reshape(x.shape)
 
-    # -----------------------------------------------------------------
-    # Fused-add / prenorm RMSNorm wrappers + autograd (PR 2).
-    # -----------------------------------------------------------------
+    # Fused-add / prenorm wrappers and autograd.
     _FUSED_ADD_FWD_CACHE: dict = {}
     _FUSED_ADD_BWD_CACHE: dict = {}
 
-    def _get_fused_add_fwd_compiled(
-        x, residual, weight, out, residual_out, rstd, M, N, dtype_str, store_rstd, eps, stream
+    def _get_fused_add_fwd_launcher(
+        N,
+        dtype_str,
+        weight_dtype_str,
+        store_rstd,
+        eps,
+        device,
     ):
-        key = (N, dtype_str, store_rstd, float(eps), x.device)
-        entry = _FUSED_ADD_FWD_CACHE.get(key)
-        if entry is None:
-            launch_fn = build_fused_add_rmsnorm_module(N, dtype_str, store_rstd=store_rstd, eps=eps)
-            if store_rstd:
-                compiled = flyc.compile(launch_fn, x, residual, weight, out, residual_out, rstd, M, stream)
-            else:
-                compiled = flyc.compile(launch_fn, x, residual, weight, out, residual_out, M, stream)
-            _FUSED_ADD_FWD_CACHE[key] = compiled
-            entry = compiled
-        return entry
+        key = (N, dtype_str, weight_dtype_str, store_rstd, float(eps), device)
+        launcher = _FUSED_ADD_FWD_CACHE.get(key)
+        if launcher is None:
+            with torch.cuda.device(device):
+                launcher = build_fused_add_rmsnorm_module(
+                    N,
+                    dtype_str,
+                    store_rstd=store_rstd,
+                    eps=eps,
+                    weight_dtype_str=weight_dtype_str,
+                )
+            _FUSED_ADD_FWD_CACHE[key] = launcher
+        return launcher
 
     def fused_add_rmsnorm_fwd(x, residual, weight, eps=EPS, store_rstd=False):
         """Forward fused-add RMSNorm. Returns (out, residual_out, rstd).
@@ -1608,11 +1733,7 @@ if torch is not None:
             x.is_contiguous() and residual.is_contiguous() and weight.is_contiguous()
         ), "fused_add_rmsnorm_fwd expects contiguous inputs"
         assert x.shape == residual.shape, "x and residual must have the same shape"
-        # The kernel reads x/residual/weight with a single elem dtype derived from x;
-        # a mismatch would silently bit-reinterpret residual/weight bytes.
-        assert (
-            x.dtype == residual.dtype == weight.dtype
-        ), f"x/residual/weight dtypes must match, got {x.dtype}/{residual.dtype}/{weight.dtype}"
+        assert x.dtype == residual.dtype, f"x/residual dtypes must match, got {x.dtype}/{residual.dtype}"
         # Only x.device gates compile/stream/cache; all operands must co-reside.
         assert (
             x.device == residual.device == weight.device
@@ -1620,17 +1741,24 @@ if torch is not None:
         M, N = x.shape
         out = torch.empty_like(x)
         residual_out = torch.empty_like(x)
-        rstd = torch.empty((M,), device=x.device, dtype=torch.float32) if store_rstd else None
+        device = x.device
+        rstd = torch.empty((M,), device=device, dtype=torch.float32) if store_rstd else None
         dtype_str = _torch_dtype_to_str(x.dtype)
-        with torch.cuda.device(x.device):
-            stream = torch.cuda.current_stream()
-            compiled = _get_fused_add_fwd_compiled(
-                x, residual, weight, out, residual_out, rstd, M, N, dtype_str, store_rstd, eps, stream
-            )
-            if store_rstd:
-                compiled(x, residual, weight, out, residual_out, rstd, M, stream)
-            else:
-                compiled(x, residual, weight, out, residual_out, M, stream)
+        weight_dtype_str = _resolve_rmsnorm_weight_dtype(dtype_str, _torch_dtype_to_str(weight.dtype))
+        launcher = _get_fused_add_fwd_launcher(
+            N,
+            dtype_str,
+            weight_dtype_str,
+            store_rstd,
+            eps,
+            device,
+        )
+        args = (
+            (x, residual, weight, out, residual_out, rstd, M)
+            if store_rstd
+            else (x, residual, weight, out, residual_out, M)
+        )
+        _run_compiled_on_device(launcher, device, args)
         return out, residual_out, rstd
 
     def fused_add_rmsnorm_bwd(added, weight, dout, rstd, dresidual_out=None, eps=EPS):
@@ -1643,36 +1771,92 @@ if torch is not None:
         it is treated as zero (a zero tensor is passed to the branch-free
         kernel). eps is already baked into `rstd`.
         """
+        device = added.device
+        dtype = added.dtype
         assert added.dim() == 2, "fused_add_rmsnorm_bwd expects a 2D (M, N) input"
         assert added.is_contiguous() and dout.is_contiguous(), "fused_add_rmsnorm_bwd expects contiguous inputs"
+        assert dtype == dout.dtype, f"added/dout dtypes must match, got {dtype}/{dout.dtype}"
         assert (
-            added.dtype == weight.dtype == dout.dtype
-        ), f"added/weight/dout dtypes must match, got {added.dtype}/{weight.dtype}/{dout.dtype}"
-        assert (
-            added.device == weight.device == dout.device == rstd.device
+            device == weight.device == dout.device == rstd.device
         ), "fused_add_rmsnorm_bwd expects all tensors on the same device"
         if dresidual_out is not None:
             assert dresidual_out.is_contiguous(), "fused_add_rmsnorm_bwd expects contiguous dresidual_out"
-            assert dresidual_out.dtype == added.dtype, "dresidual_out dtype must match added"
-            assert dresidual_out.device == added.device, "dresidual_out must be on the same device as added"
+            assert dresidual_out.dtype == dtype, "dresidual_out dtype must match added"
+            assert dresidual_out.device == device, "dresidual_out must be on the same device as added"
         M, N = added.shape
-        dtype_str = _torch_dtype_to_str(added.dtype)
+        dtype_str = _torch_dtype_to_str(dtype)
+        weight_dtype_str = _resolve_rmsnorm_weight_dtype(dtype_str, _torch_dtype_to_str(weight.dtype))
         if dresidual_out is None:
             dresidual_out = torch.zeros_like(added)
         dx = torch.empty_like(added)
-        dweight = torch.zeros((N,), device=added.device, dtype=torch.float32)
-        key = (N, dtype_str, added.device)
-        with torch.cuda.device(added.device):
-            stream = torch.cuda.current_stream()
-            compiled = _FUSED_ADD_BWD_CACHE.get(key)
-            if compiled is None:
-                launch_fn = build_fused_add_rmsnorm_bwd_module(N, dtype_str)
-                # flyc.compile executes the kernel once during tracing, which would
-                # accumulate into DWeight; zero it AFTER compiling.
-                compiled = flyc.compile(launch_fn, added, weight, dout, dresidual_out, rstd, dx, dweight, M, stream)
-                _FUSED_ADD_BWD_CACHE[key] = compiled
-            dweight.zero_()
-            compiled(added, weight, dout, dresidual_out, rstd, dx, dweight, M, stream)
+        path, num_programs = _select_rmsnorm_bwd_config(M, N, dtype_str, device)
+        if path == "two_stage":
+            dweight = torch.empty_like(weight)
+            partial = torch.empty((num_programs * N,), device=device, dtype=torch.float32)
+            key = (path, N, dtype_str, weight_dtype_str, num_programs, device)
+            launcher = _FUSED_ADD_BWD_CACHE.get(key)
+            if launcher is None:
+                with torch.cuda.device(device):
+                    device_index = device.index
+                    launcher = build_fused_add_rmsnorm_bwd_two_stage_module(
+                        N,
+                        dtype_str,
+                        num_programs,
+                        weight_dtype_str=weight_dtype_str,
+                    )
+                    _run_compiled(
+                        launcher,
+                        added,
+                        weight,
+                        dout,
+                        dresidual_out,
+                        rstd,
+                        dx,
+                        dweight,
+                        partial,
+                        M,
+                        _get_current_raw_stream(device_index),
+                    )
+                _FUSED_ADD_BWD_CACHE[key] = launcher
+            else:
+                _run_compiled_on_device(
+                    launcher,
+                    device,
+                    (added, weight, dout, dresidual_out, rstd, dx, dweight, partial, M),
+                )
+            return dx, dx, dweight
+
+        dweight = torch.empty((N,), device=device, dtype=torch.float32)
+        key = (path, N, dtype_str, weight_dtype_str, num_programs, device)
+        launcher = _FUSED_ADD_BWD_CACHE.get(key)
+        dweight.zero_()
+        if launcher is None:
+            with torch.cuda.device(device):
+                device_index = device.index
+                launcher = build_fused_add_rmsnorm_bwd_module(
+                    N,
+                    dtype_str,
+                    weight_dtype_str=weight_dtype_str,
+                )
+                _run_compiled(
+                    launcher,
+                    added,
+                    weight,
+                    dout,
+                    dresidual_out,
+                    rstd,
+                    dx,
+                    dweight,
+                    M,
+                    _get_current_raw_stream(device_index),
+                )
+            _FUSED_ADD_BWD_CACHE[key] = launcher
+        else:
+            _run_compiled_on_device(
+                launcher,
+                device,
+                (added, weight, dout, dresidual_out, rstd, dx, dweight, M),
+            )
         # dx == dresidual by construction; return dx as both (aliased).
         return dx, dx, dweight.to(weight.dtype)
 

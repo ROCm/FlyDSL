@@ -115,16 +115,23 @@ def arith_const(value, ty=None):
 
 
 @dsl_loc_tracing
-def fp_to_fp(src, res_elem_type):
+def fp_to_fp(src, res_elem_type, *, rounding_mode=None):
     if not isinstance(src, ir.Value) and hasattr(src, "ir_value"):
         src = src.ir_value()
     src_elem_type = element_type(src.type)
     if res_elem_type == src_elem_type:
         return src
-    res_type = recast_type(src.type, res_elem_type)
     if res_elem_type.width > src_elem_type.width:
-        return arith.extf(res_type, src, fastmath=current_fastmath())
-    return arith.truncf(res_type, src, fastmath=current_fastmath())
+        return arith.extf(recast_type(src.type, res_elem_type), src, fastmath=current_fastmath())
+    if res_elem_type.width == src_elem_type.width and src_elem_type.width < 32:
+        # use float32 as the intermediate type
+        src = arith.extf(recast_type(src.type, T.f32()), src, fastmath=current_fastmath())
+    return arith.truncf(
+        recast_type(src.type, res_elem_type),
+        src,
+        roundingmode=rounding_mode,
+        fastmath=current_fastmath(),
+    )
 
 
 @dsl_loc_tracing
