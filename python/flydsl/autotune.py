@@ -100,6 +100,14 @@ def _canonical_json(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def _artifact_value(value):
+    if hasattr(value, "shape"):
+        return tuple(value.shape)
+    if hasattr(value, "dtype"):
+        return str(value.dtype)
+    return value
+
+
 def _normalize_strides(t) -> tuple:
     """Bucket strides to {0, 1, other}: the layout *pattern* (broadcast /
     contiguous / strided) affects the best config, the exact numbers don't."""
@@ -198,14 +206,34 @@ def do_bench(fn, warmup=5, rep=25, quantiles=None):
     return times[len(times) // 2]
 
 
+def _raise_if_collective_failed(error, message):
+    device = torch.device("cuda", torch.cuda.current_device())
+    success = torch.tensor(error is None, dtype=torch.int32, device=device)
+    torch.distributed.all_reduce(success, op=torch.distributed.ReduceOp.MIN)
+    if bool(success.item()):
+        return
+    if error is not None:
+        raise error
+    raise RuntimeError(message)
+
+
 def do_bench_collective(fn, warmup=5, rep=25, quantiles=None):
     """Benchmark on every rank and reduce the maximum latency to rank 0."""
-    elapsed = do_bench(fn, warmup=warmup, rep=rep, quantiles=quantiles)
+    error = None
+    try:
+        elapsed = do_bench(fn, warmup=warmup, rep=rep, quantiles=quantiles)
+    except Exception as caught:
+        elapsed = 0.0
+        error = caught
     if torch is None or not torch.distributed.is_initialized():
+        if error is not None:
+            raise error
         return elapsed
     if quantiles:
         raise ValueError("collective autotune does not support quantile results")
-    value = torch.tensor(float(elapsed), dtype=torch.float32, device=torch.cuda.current_device())
+    _raise_if_collective_failed(error, "autotune config failed on another rank")
+    device = torch.device("cuda", torch.cuda.current_device())
+    value = torch.tensor(float(elapsed), dtype=torch.float32, device=device)
     torch.distributed.reduce(value, dst=0, op=torch.distributed.ReduceOp.MAX)
     return float(value.item()) if torch.distributed.get_rank() == 0 else float(elapsed)
 
@@ -229,6 +257,9 @@ class Autotuner:
         default=None,
         artifact_name=None,
         artifact_bundle=False,
+        artifact_key=None,
+        artifact_nearest_key=None,
+        artifact_validator=None,
     ):
         self.fn = fn  # JitFunction instance
         self.configs = configs
@@ -243,6 +274,7 @@ class Autotuner:
         self._do_bench = do_bench_fn or do_bench
         self._rank0_authoritative = do_bench_fn is do_bench_collective
         self._collective_synced_keys = set()
+        self._forced_tuned_keys = set()
         self.cache: Dict[tuple, Config] = {}
         self.default = default
         self.last_config = None
@@ -261,12 +293,35 @@ class Autotuner:
                 raise ValueError("artifact_name must use 1-64 letters, digits, '.', '_' or '-'")
             if len(set(self.key)) != len(self.key) or any(name not in self._signature.parameters for name in self.key):
                 raise ValueError("artifact keys must be unique kernel parameter names")
+        if artifact_key is None:
+            artifact_key = list(self.key)
+        elif artifact_name is None:
+            raise ValueError("artifact_key requires artifact_name")
+        elif not isinstance(artifact_key, (list, tuple)):
+            raise TypeError("artifact_key must be a list or tuple")
+        artifact_key = list(artifact_key)
+        if len(set(artifact_key)) != len(artifact_key) or any(name not in self.key for name in artifact_key):
+            raise ValueError("artifact_key must contain unique names from key")
+        if artifact_nearest_key is not None:
+            if artifact_name is None:
+                raise ValueError("artifact_nearest_key requires artifact_name")
+            if not isinstance(artifact_nearest_key, str):
+                raise TypeError("artifact_nearest_key must be a string")
+            if artifact_nearest_key not in artifact_key:
+                raise ValueError("artifact_nearest_key must be present in artifact_key")
         if type(artifact_bundle) is not bool:
             raise TypeError("artifact_bundle must be a bool")
         if artifact_bundle and artifact_name is None:
             raise ValueError("artifact_bundle requires artifact_name")
+        if (artifact_key != self.key or artifact_nearest_key is not None) and not artifact_bundle:
+            raise ValueError("projected or nearest artifact matching requires artifact_bundle")
+        if artifact_validator is not None and not callable(artifact_validator):
+            raise TypeError("artifact_validator must be callable")
         self.artifact_name = artifact_name
         self.artifact_bundle = artifact_bundle
+        self.artifact_key = artifact_key
+        self.artifact_nearest_key = artifact_nearest_key
+        self.artifact_validator = artifact_validator
         self._artifact_cache = {}
 
         # Disk cache
@@ -463,15 +518,10 @@ class Autotuner:
             bound = self._signature.bind_partial(*args, **kwargs)
             bound.apply_defaults()
             key = {}
-            for name in self.key:
+            for name in self.artifact_key:
                 if name not in bound.arguments:
                     raise ValueError(f"artifact key {name!r} is missing from the call")
-                value = bound.arguments[name]
-                if hasattr(value, "shape"):
-                    value = tuple(value.shape)
-                elif hasattr(value, "dtype"):
-                    value = str(value.dtype)
-                key[name] = value
+                key[name] = _artifact_value(bound.arguments[name])
             device = _device_descriptor(self._call_device(args, kwargs))
             if device is None:
                 raise ValueError("call device identity is unavailable")
@@ -486,6 +536,80 @@ class Autotuner:
                 raise ValueError(f"cannot generate offline config identity: {error}") from error
             log().warning(f"Offline config identity is unavailable: {error}")
             return None
+
+    def _artifact_cache_key(self, path, digest, args, kwargs):
+        bound = self._signature.bind_partial(*args, **kwargs)
+        bound.apply_defaults()
+        runtime_key = tuple((name, _canonical_json(_artifact_value(bound.arguments.get(name)))) for name in self.key)
+        return str(path), digest, runtime_key
+
+    def _nearest_bundle_entries(self, entries, identity, args, kwargs):
+        nearest_key = self.artifact_nearest_key
+        if nearest_key is None:
+            return []
+        target_key = identity["key"]
+        target_value = target_key.get(nearest_key)
+        if isinstance(target_value, bool) or not isinstance(target_value, (int, float)):
+            return []
+        bound = self._signature.bind_partial(*args, **kwargs)
+        bound.apply_defaults()
+        full_key = {name: _artifact_value(bound.arguments.get(name)) for name in self.key}
+        candidates = []
+        for digest, entry in entries.items():
+            if not isinstance(entry, dict):
+                continue
+            candidate_identity = entry.get("identity")
+            if not isinstance(candidate_identity, dict):
+                continue
+            if (
+                candidate_identity.get("name") != identity["name"]
+                or candidate_identity.get("device") != identity["device"]
+            ):
+                continue
+            candidate_key = candidate_identity.get("key")
+            if not isinstance(candidate_key, dict):
+                continue
+            if any(
+                name != nearest_key
+                and (name not in candidate_key or _canonical_json(candidate_key[name]) != _canonical_json(value))
+                for name, value in target_key.items()
+            ):
+                continue
+            candidate_value = candidate_key.get(nearest_key)
+            if isinstance(candidate_value, bool) or not isinstance(candidate_value, (int, float)):
+                continue
+            mismatches = 0
+            numeric_distance = 0.0
+            for name, value in full_key.items():
+                if name in target_key or name not in candidate_key:
+                    continue
+                candidate_extra = candidate_key[name]
+                if _canonical_json(candidate_extra) == _canonical_json(value):
+                    continue
+                mismatches += 1
+                if (
+                    not isinstance(value, bool)
+                    and not isinstance(candidate_extra, bool)
+                    and isinstance(value, (int, float))
+                    and isinstance(candidate_extra, (int, float))
+                ):
+                    numeric_distance += abs(float(candidate_extra) - float(value))
+            score = (
+                abs(float(candidate_value) - float(target_value)),
+                -float(candidate_value),
+                mismatches,
+                numeric_distance,
+                digest,
+            )
+            candidates.append((score, entry, candidate_value))
+        return [(entry, value) for _, entry, value in sorted(candidates)]
+
+    def _artifact_config_allowed(self, config, args, kwargs):
+        if self.artifact_validator is None:
+            return True
+        sig_args = dict(zip(self.arg_names, args))
+        sig_args.update(kwargs)
+        return bool(self.artifact_validator(config, sig_args))
 
     def _validate_artifact_config_types(self, injected):
         for name, value in injected.items():
@@ -537,9 +661,9 @@ class Autotuner:
         if ref is None:
             return None
         path, legacy_path, digest, identity = ref
-        cache_key = (str(path), digest)
+        cache_key = self._artifact_cache_key(path, digest, args, kwargs)
         if cache_key not in self._artifact_cache:
-            body = None
+            candidates = []
             try:
                 if path.is_file():
                     data = json.loads(path.read_text(encoding="utf-8"))
@@ -556,17 +680,22 @@ class Autotuner:
                             raise ValueError("artifact entry must be an object")
                         if _canonical_json(entry.get("identity")) != _canonical_json(identity):
                             raise ValueError("artifact identity does not match")
-                        body = entry["config"]
-                if body is None and legacy_path.is_file():
+                        candidates.append((entry["config"], None))
+                    candidates.extend(
+                        (candidate["config"], matched_value)
+                        for candidate, matched_value in self._nearest_bundle_entries(
+                            data["entries"], identity, args, kwargs
+                        )
+                        if candidate is not entry
+                    )
+                if legacy_path.is_file():
                     data = json.loads(legacy_path.read_text(encoding="utf-8"))
                     _canonical_json(data)
                     if not isinstance(data, dict) or data.get("version") != _ARTIFACT_VERSION:
                         raise ValueError("unsupported legacy artifact version")
                     if _canonical_json(data.get("identity")) != _canonical_json(identity):
                         raise ValueError("legacy artifact identity does not match")
-                    body = data["config"]
-                if body is not None and not isinstance(body, dict):
-                    raise ValueError("config must be an object")
+                    candidates.append((data["config"], None))
             except (
                 KeyError,
                 OSError,
@@ -577,7 +706,22 @@ class Autotuner:
                 RecursionError,
             ) as error:
                 log().warning(f"Ignoring offline config {path.name}: {error}")
-                body = None
+                candidates = []
+            body = None
+            for candidate, matched_value in candidates:
+                try:
+                    config = self._decode_artifact_config(candidate, args, kwargs)
+                    if not self._artifact_config_allowed(config, args, kwargs):
+                        continue
+                except (TypeError, ValueError, OverflowError, RecursionError):
+                    continue
+                body = candidate
+                if matched_value is not None:
+                    log().info(
+                        f"Using {self.artifact_name} offline config with "
+                        f"{self.artifact_nearest_key}={matched_value}"
+                    )
+                break
             self._artifact_cache[cache_key] = body
 
         body = self._artifact_cache[cache_key]
@@ -603,7 +747,7 @@ class Autotuner:
             with atomic_write(legacy_path, mode="w", encoding="utf-8") as output:
                 json.dump(payload, output, indent=2, sort_keys=True, allow_nan=False)
                 output.write("\n")
-            self._artifact_cache[(str(path), digest)] = body
+            self._artifact_cache[self._artifact_cache_key(path, digest, args, kwargs)] = body
             log().info(f"Wrote offline config {legacy_path}")
             return
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -632,7 +776,7 @@ class Autotuner:
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)
-        self._artifact_cache[(str(path), digest)] = body
+        self._artifact_cache[self._artifact_cache_key(path, digest, args, kwargs)] = body
         log().info(f"Wrote offline config {path}")
 
     def _collective_active(self):
@@ -647,7 +791,7 @@ class Autotuner:
 
     def __call__(self, *args, **kwargs):
         key = self._make_key(args, kwargs)
-        force = _tuning_enabled(self.artifact_name)
+        force = _tuning_enabled(self.artifact_name) and key not in self._forced_tuned_keys
         collective = self._collective_active()
         rank0 = not collective or torch.distributed.get_rank() == 0
 
@@ -693,20 +837,45 @@ class Autotuner:
                 self._collective_synced_keys.add(key)
             return self._run_config(default_config, args, kwargs)
 
-        configs = self.configs(*args, **kwargs) if callable(self.configs) else self.configs
-        configs = self._prune(configs, args, kwargs)
+        config_error = None
+        try:
+            all_configs = self.configs(*args, **kwargs) if callable(self.configs) else self.configs
+            configs = self._prune(all_configs, args, kwargs)
+        except Exception as caught:
+            all_configs = configs = []
+            config_error = caught
+        if collective:
+            _raise_if_collective_failed(config_error, "autotune config generation failed on another rank")
+            config_dicts = self._broadcast_from_rank0([config.to_dict() for config in configs] if rank0 else None)
+            local_configs = {_canonical_json(config.to_dict()): config for config in all_configs}
+            configs = [
+                local_configs.get(_canonical_json(config_dict), Config.from_dict(config_dict))
+                for config_dict in config_dicts
+            ]
+        elif config_error is not None:
+            raise config_error
         if rank0:
             print(f"[autotune] tuning {len(configs)} configs...")
         results = []
         for i, config in enumerate(configs):
+            config_error = None
             try:
                 t = self._bench_one(config, args, kwargs)
+            except Exception as caught:
+                t = None
+                config_error = caught
+            if collective:
+                try:
+                    _raise_if_collective_failed(config_error, "autotune config failed on another rank")
+                except Exception as caught:
+                    config_error = caught
+            if config_error is not None:
                 if rank0:
-                    results.append((config, t))
-                    print(f"  [{i + 1}/{len(configs)}] {config} -> {t:.3f} ms")
-            except Exception as e:
-                if rank0:
-                    print(f"  [{i + 1}/{len(configs)}] {config} -> FAILED: {e}")
+                    print(f"  [{i + 1}/{len(configs)}] {config} -> FAILED: {config_error}")
+                continue
+            if rank0:
+                results.append((config, t))
+                print(f"  [{i + 1}/{len(configs)}] {config} -> {t:.3f} ms")
 
         if collective:
             decision = None
@@ -727,9 +896,11 @@ class Autotuner:
             best_config, best_time = min(results, key=lambda x: x[1])
             print(f"[autotune] best: {best_config} ({best_time:.3f} ms)")
 
-        if force and artifact is not None:
+        if force and artifact is not None and rank0:
             self._emit_artifact(best_config, artifact, args, kwargs)
         self.cache[key] = best_config
+        if force:
+            self._forced_tuned_keys.add(key)
         if collective:
             self._collective_synced_keys.add(key)
         if rank0:
@@ -780,6 +951,9 @@ def autotune(
     default: Callable = None,
     artifact_name: str = None,
     artifact_bundle: bool = False,
+    artifact_key: List[str] = None,
+    artifact_nearest_key: str = None,
+    artifact_validator: Callable = None,
 ):
     """Autotune decorator for @jit functions.
 
@@ -799,6 +973,11 @@ def autotune(
             portable call axes; forced tuning emits a matching artifact.
         artifact_bundle: write all identities for ``artifact_name`` to one
             bundle. Disabled by default to preserve the legacy artifact format.
+        artifact_key: optional projection of ``key`` used for artifact identity.
+        artifact_nearest_key: numeric artifact key used for nearest-value bundle
+            fallback after an exact miss.
+        artifact_validator: optional call-specific safety predicate for a loaded
+            artifact config.
         restore_value: tensor args the kernel mutates in place (output overlaps
             input, or accumulation). Snapshotted and restored before each bench
             rep so every config is measured on identical inputs. Required when
@@ -823,6 +1002,9 @@ def autotune(
             default=default,
             artifact_name=artifact_name,
             artifact_bundle=artifact_bundle,
+            artifact_key=artifact_key,
+            artifact_nearest_key=artifact_nearest_key,
+            artifact_validator=artifact_validator,
         )
 
     return decorator

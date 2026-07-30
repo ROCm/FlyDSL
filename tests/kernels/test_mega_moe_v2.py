@@ -1263,7 +1263,7 @@ def _run_mega_only(
         ms.shmem_barrier_all()
 
         def _stage2_body():
-            _out["o"] = moe._run_stage2(run_tokens, None, True)
+            _out["o"] = moe._run_stage2(run_tokens, None, True, moe._s1_active_tile_m)
 
         stage2_ms, stage2_max_ms = _time_graph(_stage2_body)
         prequant_ms, prequant_max_ms = _time_graph(_prequant_body)

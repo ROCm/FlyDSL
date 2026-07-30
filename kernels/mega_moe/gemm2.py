@@ -30,32 +30,6 @@ from kernels.moe.mxfp_moe.mxfp4_gemm_common import (
 )
 
 
-def bq_view(
-    arg_bq,
-    row_elems,
-    KH4,
-    K_TILES_TOTAL,
-    K_HALVES,
-    num_records_bytes=None,
-):
-    """View one preshuffled B N-tile as i32<4:1>, optionally bounded to real K."""
-    col_base = rocdl.readfirstlane(T.i32, _raw(row_elems) * fx.Int32(KH4))
-    i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=16)
-    off_i64 = fx.Int64(col_base)
-    base_iter = fx.inttoptr(i32_ptr_ty, fx.Int64(arg_bq) + off_i64 * fx.Int64(4))
-    # i32 strides: klane 64, nlane 4, K-tile K_HALVES*256, half 256, kpack4 1.
-    shape = (4, 16, K_TILES_TOTAL, K_HALVES, 4)
-    view = fx.Tensor(
-        fx.make_view(
-            base_iter,
-            fx.make_layout(shape, (64, 4, K_HALVES * 256, 256, 1)),
-        )
-    )
-    if num_records_bytes is not None:
-        return fx.rocdl.make_buffer_tensor(view, num_records_bytes=num_records_bytes)
-    return fx.rocdl.make_buffer_tensor(view, max_size=False)
-
-
 def scale_view(arg_scale, base_dw, K_TILES_TOTAL, k0_stride_dw=64, num_records_bytes=None):
     """View one e8m0 scale word, optionally bounded to the real buffer extent."""
     base_dw = rocdl.readfirstlane(T.i32, _raw(base_dw))
@@ -225,16 +199,13 @@ def gemm2_compute_v2(
     kbs_per_expert_dw = (N_OUT_rt // fx.Int32(32)) * kBS_stride_n0_dw  # (N_OUT//16//2)*stride
     num_n_blocks = N_OUT_rt // fx.Int32(BN)
     KH4 = K_rt // fx.Int32(8)  # i32 col stride (= K_HALF//4)
-    K_TILES_MAX = INTER_MAX // BK
     K_SCALE_CHUNKS_MAX = INTER_MAX // 256
 
-    # Padded shapes bound B to real K and zero weight tiles beyond real N.
-    bq_num_records = None
+    # Padded shapes mask weight tiles beyond the real K/N extents.
     N_real = None
     if const_expr(has_pad):
         K_real = K_rt - fx.Int32(i32_kpad)
         halves_real = (K_real + fx.Int32(127)) // fx.Int32(128)
-        bq_num_records = halves_real * fx.Int32(1024)
         N_real = N_OUT_rt - fx.Int32(i32_npad)
 
     # Map each compute block to its SBM-padded expert metadata row.
@@ -356,21 +327,6 @@ def gemm2_compute_v2(
     # Stream B weights and scales through registers so use_nt reaches the ISA cache policy.
     bq_rsrc = buffer_ops.create_buffer_resource_from_addr(arg_bq)
 
-    def make_bq_view(j):
-        col = n_block_idx * BN + wave * (BN // 4) + j * 16
-        nrec = bq_num_records
-        if const_expr(has_pad):
-            # N-skip: fully-pad-N tile (col >= 16-aligned N_real) -> 0 records so weight loads OOB -> 0.
-            nrec = (col < N_real).select(bq_num_records, fx.Int32(0))
-        return bq_view(
-            arg_bq,
-            e * N_OUT_rt + col,
-            KH4,
-            K_TILES_MAX,
-            kHalves,
-            num_records_bytes=nrec,
-        )
-
     bq_base_dw = [
         rocdl.readfirstlane(
             T.i32,
@@ -390,7 +346,7 @@ def gemm2_compute_v2(
         for mw in range_constexpr(nPairs)
     ]
 
-    frag_tmpl = make_bq_view(0)[0, 0, 0, 0, None]  # i32<4:1> (16B = 32 fp4)
+    frag_tmpl = fx.make_rmem_tensor(4, Int32)
     # B-scale word template shares the A-scale layout (sc_frag_tmpl).
 
     def issue_b_load_into(bqf, bsf, kt_rt):
