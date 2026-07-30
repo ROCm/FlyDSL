@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-30T03:59:04Z",
+ "updated": "2026-07-30T04:22:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30513078964,
+   "pr": 924,
+   "commit": "36fe6e9fc710734f4afa43cbb8bb81889433f73f",
+   "branch": "feat/timing-umbrella",
+   "event": "pull_request",
+   "title": "Unify benchmark timing contracts and add calibrated CI gates",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30513078964",
+   "created_at": "2026-07-30T04:09:01Z",
+   "updated_at": "2026-07-30T04:12:02Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T04:12:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30513078964/job/90777506086"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-30T04:12:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30513078964/job/90777506107"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-30T04:12:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30513078964/job/90777506128"
+    }
+   ]
+  },
   {
    "run_id": 30512551718,
    "pr": 876,
@@ -14,9 +57,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30512551718",
    "created_at": "2026-07-30T03:57:35Z",
-   "updated_at": "2026-07-30T03:57:36Z",
+   "updated_at": "2026-07-30T04:02:06Z",
    "actor": "yanboshao",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-30T04:02:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30512551718/job/90776121318"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-30T04:02:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30512551718/job/90776121323"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T04:02:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30512551718/job/90776121331"
+    }
+   ]
   },
   {
    "run_id": 30507697705,
@@ -106,7 +177,7 @@
   },
   {
    "run_id": 30503508068,
-   "pr": 924,
+   "pr": null,
    "commit": "0d4aa3d9aff764be9328066258422da0e1620459",
    "branch": "feat/timing-umbrella",
    "event": "pull_request",
@@ -2071,49 +2142,6 @@
      "started_at": "2026-07-27T17:01:43Z",
      "completed_at": "2026-07-27T18:06:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30278250653/job/90477662705"
-    }
-   ]
-  },
-  {
-   "run_id": 30276956977,
-   "pr": 913,
-   "commit": "a6629dc18f5c2f4a2a809c0938b0feb440d62b76",
-   "branch": "port/layout-api-ports",
-   "event": "pull_request",
-   "title": "Port GEMM/MoE/conv kernels to the layout API",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276956977",
-   "created_at": "2026-07-27T14:49:35Z",
-   "updated_at": "2026-07-27T15:05:33Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-27T14:53:44Z",
-     "completed_at": "2026-07-27T15:05:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276956977/job/90014147273"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-27T14:52:32Z",
-     "completed_at": "2026-07-27T15:05:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276956977/job/90014147298"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-27T14:52:32Z",
-     "completed_at": "2026-07-27T15:05:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30276956977/job/90014147333"
     }
    ]
   }
