@@ -9,11 +9,8 @@ from collections.abc import Callable as AbcCallable
 from inspect import isclass
 from typing import Any, Callable, List, Type, get_origin, overload
 
-from flydsl.runtime.device import get_rocm_arch
-
 from .._mlir import ir
-from .._mlir.dialects import gpu
-from .._mlir.dialects import vector as _vector
+from .._mlir.dialects import arith, gpu, vector
 from .meta import dsl_loc_tracing
 from .numeric import (
     BFloat16,
@@ -155,44 +152,8 @@ def as_dsl_value(value, exemplar=None):
         raise TypeError(f"as_dsl_value cannot wrap ir.Value of type {value.type!s} into a DSL value") from e
 
 
-def _vec(n: int, elem: ir.Type) -> ir.Type:
-    return ir.VectorType.get([int(n)], elem)
-
-
-def default_f8_type() -> ir.Type:
-    """Select E4M3 f8 type compatible with the current GPU arch.
-
-    - gfx95* (MI350): FP8 E4M3FN (OCP)
-    - gfx12*: FP8 E4M3FN (OCP)
-    - gfx94* (MI300): FP8 E4M3FNUZ
-
-    Raises ``RuntimeError`` on gfx11* (RDNA3/RDNA3.5): these chips have no
-    native FP8 instructions, so FP8 compute would surface as a late LLVM
-    "cannot select" error. Fail early with a clear message instead.
-    """
-    arch = ""
-    try:
-        arch = str(get_rocm_arch())
-    except Exception:
-        arch = ""
-    if "gfx95" in arch or "gfx12" in arch:
-        return Float8E4M3FN.ir_type
-    if arch.startswith("gfx11"):
-        raise RuntimeError(
-            f"default_f8_type(): no native FP8 support on {arch}; "
-            "FP8 instructions are available on gfx94*, gfx95*, and gfx12*. "
-            "Use bf16/f16 GEMM via "
-            "`rdna3_f16_gemm.create_wmma_gemm_module` on gfx11* targets."
-        )
-    return Float8E4M3FNUZ.ir_type
-
-
 class Types:
     """Property-based MLIR type constructors backed by DSL numeric classes.
-
-    Scalar properties delegate to ``<DslClass>.ir_type`` (single source of
-    truth in ``numeric.py``).  Vector shortcuts and ``vec()`` use
-    ``ir.VectorType`` directly.
 
     Usage::
 
@@ -208,25 +169,28 @@ class Types:
         return ir.IndexType.get()
 
     # ---- Integer scalars & vectors ----
+    def vec(self, n: int, elem: ir.Type) -> ir.Type:
+        return ir.VectorType.get([int(n)], elem)
+
     @property
     def i8(self) -> ir.Type:
         return Int8.ir_type
 
     @property
     def i8x2(self) -> ir.Type:
-        return _vec(2, Int8.ir_type)
+        return self.vec(2, Int8.ir_type)
 
     @property
     def i8x4(self) -> ir.Type:
-        return _vec(4, Int8.ir_type)
+        return self.vec(4, Int8.ir_type)
 
     @property
     def i8x8(self) -> ir.Type:
-        return _vec(8, Int8.ir_type)
+        return self.vec(8, Int8.ir_type)
 
     @property
     def i8x16(self) -> ir.Type:
-        return _vec(16, Int8.ir_type)
+        return self.vec(16, Int8.ir_type)
 
     @property
     def i16(self) -> ir.Type:
@@ -234,15 +198,15 @@ class Types:
 
     @property
     def i16x2(self) -> ir.Type:
-        return _vec(2, Int16.ir_type)
+        return self.vec(2, Int16.ir_type)
 
     @property
     def i16x4(self) -> ir.Type:
-        return _vec(4, Int16.ir_type)
+        return self.vec(4, Int16.ir_type)
 
     @property
     def i16x8(self) -> ir.Type:
-        return _vec(8, Int16.ir_type)
+        return self.vec(8, Int16.ir_type)
 
     @property
     def i32(self) -> ir.Type:
@@ -250,11 +214,11 @@ class Types:
 
     @property
     def i32x2(self) -> ir.Type:
-        return _vec(2, Int32.ir_type)
+        return self.vec(2, Int32.ir_type)
 
     @property
     def i32x4(self) -> ir.Type:
-        return _vec(4, Int32.ir_type)
+        return self.vec(4, Int32.ir_type)
 
     @property
     def i64(self) -> ir.Type:
@@ -262,7 +226,7 @@ class Types:
 
     @property
     def i64x2(self) -> ir.Type:
-        return _vec(2, Int64.ir_type)
+        return self.vec(2, Int64.ir_type)
 
     @property
     def i128(self) -> ir.Type:
@@ -275,15 +239,15 @@ class Types:
 
     @property
     def f16x2(self) -> ir.Type:
-        return _vec(2, Float16.ir_type)
+        return self.vec(2, Float16.ir_type)
 
     @property
     def f16x4(self) -> ir.Type:
-        return _vec(4, Float16.ir_type)
+        return self.vec(4, Float16.ir_type)
 
     @property
     def f16x8(self) -> ir.Type:
-        return _vec(8, Float16.ir_type)
+        return self.vec(8, Float16.ir_type)
 
     @property
     def bf16(self) -> ir.Type:
@@ -291,15 +255,15 @@ class Types:
 
     @property
     def bf16x2(self) -> ir.Type:
-        return _vec(2, BFloat16.ir_type)
+        return self.vec(2, BFloat16.ir_type)
 
     @property
     def bf16x4(self) -> ir.Type:
-        return _vec(4, BFloat16.ir_type)
+        return self.vec(4, BFloat16.ir_type)
 
     @property
     def bf16x8(self) -> ir.Type:
-        return _vec(8, BFloat16.ir_type)
+        return self.vec(8, BFloat16.ir_type)
 
     @property
     def f32(self) -> ir.Type:
@@ -307,40 +271,15 @@ class Types:
 
     @property
     def f32x2(self) -> ir.Type:
-        return _vec(2, Float32.ir_type)
+        return self.vec(2, Float32.ir_type)
 
     @property
     def f32x4(self) -> ir.Type:
-        return _vec(4, Float32.ir_type)
+        return self.vec(4, Float32.ir_type)
 
     @property
     def f64(self) -> ir.Type:
         return Float64.ir_type
-
-    # ---- FP8 (arch-dependent shortcut) ----
-    @property
-    def f8(self) -> ir.Type:
-        return default_f8_type()
-
-    @property
-    def f8x2(self) -> ir.Type:
-        return _vec(2, default_f8_type())
-
-    @property
-    def f8x4(self) -> ir.Type:
-        return _vec(4, default_f8_type())
-
-    @property
-    def f8x8(self) -> ir.Type:
-        return _vec(8, default_f8_type())
-
-    @property
-    def f8x16(self) -> ir.Type:
-        return _vec(16, default_f8_type())
-
-    # ---- Dynamic vector constructor ----
-    def vec(self, n: int, elem: ir.Type) -> ir.Type:
-        return _vec(n, elem)
 
 
 T = Types()
@@ -350,7 +289,6 @@ __all__ = [
     # MLIR type helpers
     "Types",
     "T",
-    "default_f8_type",
     # DSL utilities
     "as_ir_value",
     "as_dsl_value",
@@ -1365,10 +1303,10 @@ class ReductionOp(enum.Enum):
 
 
 _REDUCE_KINDS = {
-    "add": (_vector.CombiningKind.ADD, _vector.CombiningKind.ADD, _vector.CombiningKind.ADD),
-    "mul": (_vector.CombiningKind.MUL, _vector.CombiningKind.MUL, _vector.CombiningKind.MUL),
-    "max": (_vector.CombiningKind.MAXNUMF, _vector.CombiningKind.MAXSI, _vector.CombiningKind.MAXUI),
-    "min": (_vector.CombiningKind.MINIMUMF, _vector.CombiningKind.MINSI, _vector.CombiningKind.MINUI),
+    "add": (vector.CombiningKind.ADD, vector.CombiningKind.ADD, vector.CombiningKind.ADD),
+    "mul": (vector.CombiningKind.MUL, vector.CombiningKind.MUL, vector.CombiningKind.MUL),
+    "max": (vector.CombiningKind.MAXNUMF, vector.CombiningKind.MAXSI, vector.CombiningKind.MAXUI),
+    "min": (vector.CombiningKind.MINIMUMF, vector.CombiningKind.MINSI, vector.CombiningKind.MINUI),
 }
 
 _VECTOR_OP_METHODS = {
@@ -1409,7 +1347,7 @@ _VECTOR_REVERSE_OP_METHODS = {
 
 
 def _resolve_combining_kind(op, is_float, signed):
-    if isinstance(op, _vector.CombiningKind):
+    if isinstance(op, vector.CombiningKind):
         return op
     if isinstance(op, ReductionOp):
         key = op.value
@@ -1572,8 +1510,10 @@ class Vector(ArithValue):
             return cls(values[0], exemplar._shape, exemplar._dtype)
         return cls(values[0])
 
-    def to(self, dtype: Type[Numeric]) -> "Vector":
+    def to(self, dtype: Type[Numeric], *, rounding_mode=None) -> "Vector":
         if dtype is ir.Value:
+            if rounding_mode is not None:
+                raise TypeError("rounding_mode is only supported for float-to-float casts")
             return self
         if not isclass(dtype) or not issubclass(dtype, Numeric):
             raise TypeError(f"dtype must be a Numeric type, got {type(dtype)}")
@@ -1582,8 +1522,17 @@ class Vector(ArithValue):
             return self
         src_float = getattr(src_dtype, "is_float", False)
         dst_float = getattr(dtype, "is_float", False)
+        if rounding_mode is not None:
+            if not isinstance(rounding_mode, arith.RoundingMode):
+                raise TypeError(f"rounding_mode must be an RoundingMode, got {type(rounding_mode).__name__}")
+            if not (src_float and dst_float):
+                raise TypeError(
+                    f"rounding_mode is only supported for float-to-float casts, "
+                    f"got {src_dtype.__name__} -> {dtype.__name__}"
+                )
+            rounding_mode = rounding_mode if dtype.width <= src_dtype.width else None
         if src_float and dst_float:
-            res = fp_to_fp(self, dtype.ir_type)
+            res = fp_to_fp(self, dtype.ir_type, rounding_mode=rounding_mode)
         elif src_float:
             res = fp_to_int(self, dtype.signed, dtype.ir_type)
         elif dst_float:
@@ -1822,7 +1771,7 @@ class Vector(ArithValue):
             if isinstance(init_val, Numeric):
                 init_val = init_val.ir_value()
             kwargs["acc"] = _to_raw(init_val)
-        res = _vector.reduction(et, kind, self, **kwargs)
+        res = vector.reduction(et, kind, self, **kwargs)
         return self._dtype(res)
 
     @staticmethod
@@ -1848,11 +1797,11 @@ class Vector(ArithValue):
                 idx += self.numel
             if not 0 <= idx < self.numel:
                 raise IndexError(f"vector index {orig_idx} out of range for numel {self.numel}")
-            res = _vector.ExtractOp(self, static_position=[idx], dynamic_position=[]).result
+            res = vector.ExtractOp(self, static_position=[idx], dynamic_position=[]).result
             return self._dtype(res)
         if isinstance(idx, (Numeric, ArithValue, ir.Value)):
             dyn_idx = _to_raw(Index(idx))
-            res = _vector.ExtractOp(
+            res = vector.ExtractOp(
                 self,
                 static_position=[ir.ShapedType.get_dynamic_size()],
                 dynamic_position=[dyn_idx],
@@ -1872,9 +1821,9 @@ class Vector(ArithValue):
             offsets = [0 if c is None else int(c) for c in flat_coord]
             sizes = [int(s) if c is None else 1 for s, c in zip(flat_shape, flat_coord, strict=True)]
             tmp_ty = ir.VectorType.get(list(flat_shape), self._dtype.ir_type)
-            tmp = _vector.shape_cast(tmp_ty, self)
+            tmp = vector.shape_cast(tmp_ty, self)
             res_ty = ir.VectorType.get(sizes, self._dtype.ir_type)
-            res = _vector.extract_strided_slice(
+            res = vector.extract_strided_slice(
                 res_ty,
                 tmp,
                 offsets=offsets,
@@ -1898,7 +1847,7 @@ class Vector(ArithValue):
     def _build_result(self, value, shape, *, row_major=False) -> "Vector":
         shape = self._canonical_shape(shape)
         flat_ty = self.make_type(shape, self._dtype)
-        flat_value = _vector.shape_cast(flat_ty, value)
+        flat_value = vector.shape_cast(flat_ty, value)
         return Vector(flat_value, shape, self._dtype)
 
     def reshape(self, shape) -> "Vector":
@@ -1917,7 +1866,7 @@ class Vector(ArithValue):
         if self.numel == 1:
             scalar = self[0].ir_value()
             target_ty = self.make_type(target_shape, self._dtype)
-            res = _vector.broadcast(target_ty, scalar)
+            res = vector.broadcast(target_ty, scalar)
             return Vector(res, target_shape, self._dtype)
         if len(src_flat_shape) > len(target_flat_shape):
             raise ValueError(f"cannot broadcast shape {self._shape} to {target_shape}")
@@ -1926,9 +1875,9 @@ class Vector(ArithValue):
             if src_dim != dst_dim and src_dim != 1:
                 raise ValueError(f"cannot broadcast shape {self._shape} to {target_shape}")
         src_ty = ir.VectorType.get(padded_src, self._dtype.ir_type)
-        src = _vector.shape_cast(src_ty, self)
+        src = vector.shape_cast(src_ty, self)
         target_ty_nd = ir.VectorType.get(target_flat_shape, self._dtype.ir_type)
-        res = _vector.broadcast(target_ty_nd, src)
+        res = vector.broadcast(target_ty_nd, src)
         return self._build_result(res, target_shape, row_major=True)
 
     @dsl_loc_tracing
@@ -1936,13 +1885,13 @@ class Vector(ArithValue):
         src_bits = self.numel * self._dtype.width
         dst_count = src_bits // dtype.width
         dst_vec_ty = ir.VectorType.get([dst_count], dtype.ir_type)
-        res = _vector.BitCastOp(dst_vec_ty, self).result
+        res = vector.BitCastOp(dst_vec_ty, self).result
         return Vector(res, (dst_count,), dtype)
 
     @dsl_loc_tracing
     def shuffle(self, other, mask) -> "Vector":
         other_val = other if not isinstance(other, Vector) else ir.Value(other)
-        res = _vector.shuffle(self, other_val, mask)
+        res = vector.shuffle(self, other_val, mask)
         return Vector(res, (len(mask),), self._dtype)
 
     @classmethod
@@ -1963,7 +1912,7 @@ class Vector(ArithValue):
                 dtype = type(Numeric.from_python_value(first))
         vec_ty = cls.make_type(len(elements), dtype)
         raw_elements = [_to_raw(cls._coerce_element(element, dtype)) for element in elements]
-        res = _vector.from_elements(vec_ty, raw_elements)
+        res = vector.from_elements(vec_ty, raw_elements)
         return cls(res, (len(elements),), dtype)
 
     @classmethod
@@ -1978,7 +1927,7 @@ class Vector(ArithValue):
             elif not isinstance(index, ir.Value) and not hasattr(index, "ir_value"):
                 index = Index(index)
             raw_indices.append(_to_raw(index))
-        res = _vector.LoadOp(result_type, _to_raw(memref), raw_indices).result
+        res = vector.LoadOp(result_type, _to_raw(memref), raw_indices).result
         return cls(res, tuple(vty.shape), dtype)
 
     @dsl_loc_tracing
@@ -1993,7 +1942,7 @@ class Vector(ArithValue):
         kwargs = {}
         if alignment is not None:
             kwargs["alignment"] = alignment
-        return _vector.store(_to_raw(self), _to_raw(memref), raw_indices, **kwargs)
+        return vector.store(_to_raw(self), _to_raw(memref), raw_indices, **kwargs)
 
     @classmethod
     @dsl_loc_tracing
@@ -2007,7 +1956,7 @@ class Vector(ArithValue):
         else:
             raise ValueError(f"expected numeric fill_value, got {type(fill_value)}")
         vec_ty = cls.make_type(n, dtype)
-        val = _vector.broadcast(vec_ty, fill_value.ir_value())
+        val = vector.broadcast(vec_ty, fill_value.ir_value())
         return cls(val, shape, dtype)
 
     @classmethod
