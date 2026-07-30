@@ -61,7 +61,7 @@ Compare with the two C++ worlds you know:
 | Specialization | Python trace + `Constexpr` | preprocessor + templates | heavy C++ templates |
 | Front-end | Python AST → MLIR (fly dialect) | Clang → LLVM IR | Clang → LLVM IR |
 | Mid-level tiling IR | **Fly dialect layout algebra** (explicit ops) | none (done in C++ by hand) | CK C++ tile abstractions (compiled away) |
-| Target lowering | MLIR passes → ROCDL → LLVM | Clang codegen → LLVM AMDGPU | same as HIP |
+| Target lowering | MLIR passes → ROCDL → LLVM AMDGPU | Clang codegen → LLVM AMDGPU | same as HIP |
 | Back-end | LLVM AMDGPU → HSACO | LLVM AMDGPU → HSACO | LLVM AMDGPU → HSACO |
 | When | **at first call (JIT), cached** | ahead of time | ahead of time |
 
@@ -73,7 +73,12 @@ passes optimize and lower. That is what makes the layout algebra in Chapters 3�
 
 ## Stage 1 — AST rewriting (host, before tracing)
 
-Before your function is ever traced, FlyDSL rewrites its **Python syntax tree** so
+**AST** stands for *Abstract Syntax Tree* — the tree-structured representation of
+your Python source code that the Python interpreter builds before executing it.
+Each node is a language construct: function definitions, `if` statements, `for`
+loops, binary operators, and so on.
+
+Before your function is ever traced, FlyDSL rewrites its **AST** so
 that ordinary Python control flow becomes DSL dispatch calls that can emit
 structured-control-flow ops. This happens once, when the decorator is applied, via
 `ASTRewriter.transform()` (`python/flydsl/compiler/ast_rewriter.py`). The
