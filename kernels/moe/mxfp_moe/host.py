@@ -13,8 +13,17 @@ import functools
 import torch
 
 from kernels.common.tensor_shim import _run_compiled
-from kernels.moe.mxfp_moe.gemm1 import compile_gemm1_a4w4_port, gemm1_grid
-from kernels.moe.mxfp_moe.gemm2 import compile_gemm2_a4w4_port
+from kernels.moe.mxfp_moe.gemm1 import (
+    compile_gemm1_a4w4_port,
+    compile_gemm1_a16w4_port,
+    gemm1_a16w4_grid,
+    gemm1_grid,
+)
+from kernels.moe.mxfp_moe.gemm2 import (
+    compile_gemm2_a4w4_port,
+    compile_gemm2_a16w4_port,
+    gemm2_a16w4_grid,
+)
 
 # gemm1 (BM, use_nt, inline_quant, a_dtype) variants the kernel supports.
 # a_dtype="fp4" is a4w4 (mxfp4 A); "fp8" is a8w4 (fp8 e4m3 A x mxfp4 W1).
@@ -220,6 +229,127 @@ def flydsl_mxfp4_gemm2(
         int(max_m_blocks),
         flat_out.data_ptr(),
         flat_out_scale.data_ptr(),
+        torch.cuda.current_stream() if stream is None else stream,
+    )
+    return flat_out
+
+
+# =============================================================================
+# a16w4 (bf16 A x mxfp4 W) fused MoE host glue. Separate from the a4w4/a8w4
+# arms above: bf16 A (no A-scale), bf16 [sorted_size, inter] intermediate (no
+# intermediate scale). Reuses the same sorting/cumsum/m_indices, grid, and
+# standard shuffle_weight+e8m0_shuffle W layout.
+# =============================================================================
+
+
+@functools.cache
+def _get_compiled_gemm1_a16w4(BM, D_HIDDEN, D_INTER, NE, topk, TILE_N, TILE_K):
+    return compile_gemm1_a16w4_port(
+        BM=BM, D_HIDDEN=D_HIDDEN, D_INTER=D_INTER, NE=NE, TOPK=topk, TILE_N=TILE_N, TILE_K=TILE_K
+    )
+
+
+@functools.cache
+def _get_compiled_gemm2_a16w4(BM, NE, N_OUT, D_INTER, TILE_N, TILE_K):
+    return compile_gemm2_a16w4_port(BM=BM, NE=NE, N_OUT=N_OUT, D_INTER=D_INTER, TILE_N=TILE_N, TILE_K=TILE_K)
+
+
+def flydsl_a16w4_gemm1(
+    *,
+    a_bf16,
+    w1_u8,
+    w1_scale_u8,
+    sorted_expert_ids,
+    cumsum_tensor,
+    m_indices,
+    inter_sorted_bf16,
+    n_tokens,
+    BM,
+    NE,
+    D_HIDDEN,
+    D_INTER,
+    topk,
+    TILE_N=256,
+    TILE_K=256,
+    stream=None,
+):
+    """a16w4 fused stage1: gate+up GEMM + SiLU -> bf16 intermediate.
+
+    ``a_bf16`` is the bf16 activation ``[n_tokens, D_HIDDEN]``. Writes the bf16
+    intermediate ``[sorted_size, D_INTER]`` (by sorted position) into
+    ``inter_sorted_bf16`` (pre-allocated). No A-scale, no intermediate scale.
+    """
+    if D_HIDDEN % TILE_K != 0:
+        raise NotImplementedError(f"a16w4 gemm1 requires D_HIDDEN (K) % {TILE_K} == 0, got H={D_HIDDEN}")
+    if (2 * D_INTER) % 256 != 0:
+        raise NotImplementedError(f"a16w4 gemm1 requires 2*D_INTER % 256 == 0, got D_INTER={D_INTER}")
+    if D_INTER % TILE_N != 0:
+        raise NotImplementedError(f"a16w4 gemm1 requires D_INTER % TILE_N({TILE_N}) == 0, got D_INTER={D_INTER}")
+
+    launch = _get_compiled_gemm1_a16w4(BM, D_HIDDEN, D_INTER, NE, topk, TILE_N, TILE_K)
+    max_m_blocks = int(sorted_expert_ids.numel())
+    grid = gemm1_a16w4_grid(BM, INTER=D_INTER, TILE_N=TILE_N, max_m_blocks=max_m_blocks)
+    _run_compiled(
+        launch,
+        a_bf16.data_ptr(),
+        w1_u8.data_ptr(),
+        w1_scale_u8.data_ptr(),
+        sorted_expert_ids.data_ptr(),
+        cumsum_tensor.data_ptr(),
+        m_indices.data_ptr(),
+        int(n_tokens),
+        int(grid),
+        inter_sorted_bf16.data_ptr(),
+        torch.cuda.current_stream() if stream is None else stream,
+    )
+    return inter_sorted_bf16
+
+
+def flydsl_a16w4_gemm2(
+    *,
+    inter_sorted_bf16,
+    w2_u8,
+    w2_scale_u8,
+    sorted_expert_ids,
+    cumsum_tensor,
+    sorted_token_ids,
+    sorted_weights,
+    flat_out,
+    M_logical,
+    max_sorted,
+    BM,
+    NE,
+    D_HIDDEN,
+    D_INTER,
+    topk,
+    TILE_N=256,
+    TILE_K=256,
+    stream=None,
+):
+    """a16w4 fused stage2 (down-proj). Consumes the bf16 [sorted_size, D_INTER]
+    intermediate; scatters routing-weighted bf16 into ``flat_out`` [tokens*model_dim].
+    """
+    if D_INTER % TILE_K != 0:
+        raise NotImplementedError(f"a16w4 gemm2 requires D_INTER (K) % {TILE_K} == 0, got D_INTER={D_INTER}")
+    if D_HIDDEN % TILE_N != 0:
+        raise NotImplementedError(f"a16w4 gemm2 requires D_HIDDEN (model_dim) % {TILE_N} == 0, got H={D_HIDDEN}")
+
+    launch = _get_compiled_gemm2_a16w4(BM, NE, D_HIDDEN, D_INTER, TILE_N, TILE_K)
+    max_m_blocks = int(sorted_expert_ids.numel())
+    grid = gemm2_a16w4_grid(BM, N_OUT=D_HIDDEN, TILE_N=TILE_N, max_m_blocks=max_m_blocks)
+    _run_compiled(
+        launch,
+        inter_sorted_bf16.data_ptr(),
+        w2_u8.data_ptr(),
+        w2_scale_u8.data_ptr(),
+        sorted_expert_ids.data_ptr(),
+        cumsum_tensor.data_ptr(),
+        sorted_token_ids.data_ptr(),
+        sorted_weights.data_ptr(),
+        int(M_logical),
+        int(max_m_blocks),
+        int(grid),
+        flat_out.data_ptr(),
         torch.cuda.current_stream() if stream is None else stream,
     )
     return flat_out

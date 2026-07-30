@@ -672,6 +672,7 @@ def _gemm1_body_a16w4(
     arg_bscale,
     arg_eids,
     arg_mind,
+    arg_cumsum,
     arg_out,
     bx_i32,
     lane,
@@ -691,8 +692,8 @@ def _gemm1_body_a16w4(
     A is native bf16 (no A-scale). W is mxfp4 (packed fp4) with per-1x32 e8m0
     scales, loaded raw (dwordx4) + upconverted to bf16 in-kernel via
     ``cvt_scalef32_pk_bf16_fp4`` (scale folded in). MMA is the non-scaled
-    ``MFMA(16,16,32,BFloat16)`` K=32. Epilogue = SiLU(gate)*up -> bf16 output
-    ``[tokens*topk, inter_dim]`` (row = decoded token*topk+slot, col = inter idx).
+    ``MFMA(16,16,32,BFloat16)`` K=32. Epilogue = SiLU(gate)*up -> bf16 intermediate
+    ``[sorted_size, inter_dim]`` stored by SORTED POSITION (drop-in for gemm2_a16w4).
     """
     N_OUT = 2 * INTER
     elem_bytes = 2  # bf16
@@ -744,10 +745,12 @@ def _gemm1_body_a16w4(
     # (A is loaded via the BufferCopyLDS atom over x_buf below, not a raw rsrc.)
     w_rsrc = _buffer_rsrc(arg_bq, num_records_bytes=min(NE * N_OUT * K_HALF, 0xFFFFFFFF))
     sw_rsrc = _buffer_rsrc(arg_bscale, num_records_bytes=min(NE * N_OUT * (scale_k_padded // 32), 0xFFFFFFFF))
-    # out num_records = exact bytes so masked (clamped-to-0x7FFFFFFF) stores land OOB.
+    # Intermediate is [sorted_size, inter] bf16. num_records = padded_sorted_rows *
+    # inter * 2 bytes (padded rows = cumsum0) so masked (clamped) stores land OOB.
+    _cumsum0 = _global_i32_at(arg_cumsum, fx.Int32(0))
     out_rsrc = buffer_ops.create_buffer_resource_from_addr(
         _raw(fx.Int64(arg_out)),
-        num_records_bytes=_raw(fx.Int64(i32_ntok) * fx.Int64(TOPK * INTER * 2)),
+        num_records_bytes=_raw(fx.Int64(_cumsum0) * fx.Int64(INTER * 2)),
     )
 
     # ---- A gather rows (per-thread) -------------------------------------------
@@ -943,24 +946,23 @@ def _gemm1_body_a16w4(
                     _mma(acc_up[mi][ni], a8, ub)
         gpu.barrier()
 
-    # ---- epilogue: SiLU(gate)*up -> bf16 out[tokens*topk, inter] --------------
+    # ---- epilogue: SiLU(gate)*up -> bf16 intermediate [sorted_size, inter] -----
+    # Stored by SORTED POSITION (row = bx_m + row_in_tile), matching the a4w4 fused
+    # `inter_sorted_*` contract so gemm2_a16w4 consumes it drop-in (no host gather).
+    # Padding rows (token >= tokens) are masked out.
     for mi in range_constexpr(m_repeat):
         for ii in range_constexpr(4):
             row_in_tile = fx.Int32(mi * 16) + lane_div_16 * fx.Int32(4) + fx.Int32(ii)
             sorted_row = bx_m + row_in_tile
             fused = fx.Int32(_global_i32_at(arg_mind, sorted_row))
             token = fused & fx.Int32(0x00FFFFFF)
-            slot = fused.shrui(fx.Int32(24))
-            t_ok = arith.cmpi(arith.CmpIPredicate.ult, _raw(token), _raw(i32_ntok))
-            s_ok = arith.cmpi(arith.CmpIPredicate.ult, _raw(slot), _raw(fx.Int32(TOPK)))
-            valid = arith.andi(t_ok, s_ok)
-            out_row = token * fx.Int32(TOPK) + slot
+            valid = arith.cmpi(arith.CmpIPredicate.ult, _raw(token), _raw(i32_ntok))
             for ni in range_constexpr(num_acc_n):
                 g = fx.Float32(fx.Vector(fx.memref_load_vec(acc_gate[mi][ni]))[ii])
                 u = fx.Float32(fx.Vector(fx.memref_load_vec(acc_up[mi][ni]))[ii])
                 y = _silu_mul_batch([g], [u])[0]
                 yb = arith.TruncFOp(T.bf16, _raw(y)).result
-                out_idx = out_row * inter_i32 + col_g_list[ni]
+                out_idx = sorted_row * inter_i32 + col_g_list[ni]
                 buffer_ops.buffer_store(yb, _raw(out_rsrc), _raw(out_idx), mask=valid)
 
 
@@ -1225,6 +1227,7 @@ def compile_gemm1_a16w4_port(
                 arg_bscale,
                 arg_eids,
                 arg_mind,
+                arg_cumsum,
                 arg_out,
                 bx_i32,
                 lane,
