@@ -177,7 +177,7 @@ def gemm2_compute_v2(
     tilesPerScaleChunk = 256 // BK  # K-tiles sharing one 256-K E8M0 word
     numAccN = (BN // 4) // 16  # 16-column MFMA subblocks per wave
     nPairs = max(1, numAccN // 2)  # one B-scale per two 16-column subblocks
-    # BM16: single 16-row block owning a 32-row scale chunk (chunk==m_block_idx, rg0-only).
+    # BM16: a single 16-row block is one row-group of a shared 32-row scale chunk.
     is_bm16 = BM < 32
     rg_off = 0
     kScaleSubBlocks = max(1, kMChunks // 2)
@@ -290,9 +290,13 @@ def gemm2_compute_v2(
     # The shared e8m0 scale layout bounds each A-scale view to its remaining bytes.
     sc_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
 
-    asc_per_mb = fx.Int32(kScaleSubBlocks) * kAS_per_chunk_dw * fx.Int32(4)
+    # BM16 blocks consume half a 32-row chunk each, so scale bytes per block halve too.
+    asc_per_mb = fx.Int32(kScaleSubBlocks) * kAS_per_chunk_dw * fx.Int32(2 if is_bm16 else 4)
     asc_num = fx.Int64(i32_max_m_blocks) * fx.Int64(asc_per_mb)
-    scale_chunk0 = m_block_idx if const_expr(is_bm16) else m_row // 32
+    scale_chunk0 = m_row // fx.Int32(32)
+    # Byte order inside one e8m0 word is [k0/rg0, k0/rg1, k1/rg0, k1/rg1]; opsel_a only reaches
+    # rg0, so odd BM16 blocks shift the word down one byte to land on their rg1 scales.
+    a_rg_shift = ((m_row // fx.Int32(16)) & fx.Int32(1)) * fx.Int32(8) if const_expr(is_bm16) else None
 
     def make_ascale_view(sub):
         base_dw = (scale_chunk0 + fx.Int32(sub)) * kAS_per_chunk_dw
@@ -396,6 +400,8 @@ def gemm2_compute_v2(
     def mfma_cluster(bqf, bsf, sa, kt_rt):
         # opsel (no gate/up split): mni=J//2, in_b=J%2; sa is a per-32-row-chunk list.
         sa = [shift_scale_word(sa[sub], kt_rt) for sub in range_constexpr(kScaleSubBlocks)]
+        if const_expr(is_bm16):
+            sa = [_raw(fx.Int32(word).shrui(a_rg_shift)) for word in sa]
         sb_words = [shift_scale_word(_raw(Vec(bsf[mni].load())[0]), kt_rt) for mni in range_constexpr(nPairs)]
         for J in range_constexpr(numAccN):
             mni, in_b = J // 2, J % 2
