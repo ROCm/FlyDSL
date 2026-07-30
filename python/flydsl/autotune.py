@@ -22,6 +22,7 @@ except ImportError:
 
 
 _ARTIFACT_VERSION = 1
+_ARTIFACT_BUNDLE_VERSION = 1
 
 
 def _tuning_enabled(artifact_name=None) -> bool:
@@ -470,7 +471,10 @@ class Autotuner:
                 raise ValueError("call device identity is unavailable")
             identity = {"name": self.artifact_name, "key": key, "device": device}
             digest = hashlib.sha256(_canonical_json(identity).encode()).hexdigest()
-            return _artifact_config_dir() / f"{self.artifact_name}-{digest}.json", identity
+            config_dir = _artifact_config_dir()
+            bundle = config_dir / f"{self.artifact_name}.json"
+            legacy = config_dir / f"{self.artifact_name}-{digest}.json"
+            return bundle, legacy, digest, identity
         except (OSError, RuntimeError, TypeError, ValueError, OverflowError, RecursionError) as error:
             if required:
                 raise ValueError(f"cannot generate offline config identity: {error}") from error
@@ -526,25 +530,37 @@ class Autotuner:
     def _load_artifact(self, ref, args, kwargs):
         if ref is None:
             return None
-        path, identity = ref
-        cache_key = str(path)
+        path, legacy_path, digest, identity = ref
+        cache_key = (str(path), digest)
         if cache_key not in self._artifact_cache:
+            body = None
             try:
-                if not path.is_file():
-                    self._artifact_cache[cache_key] = None
-                    return None
-                data = json.loads(path.read_text(encoding="utf-8"))
-                _canonical_json(data)
-                if not isinstance(data, dict):
-                    raise ValueError("artifact must be an object")
-                if type(data.get("version")) is not int or data["version"] != _ARTIFACT_VERSION:
-                    raise ValueError("unsupported artifact version")
-                if _canonical_json(data.get("identity")) != _canonical_json(identity):
-                    raise ValueError("artifact identity does not match")
-                body = data["config"]
-                if not isinstance(body, dict):
+                if path.is_file():
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    _canonical_json(data)
+                    if not isinstance(data, dict):
+                        raise ValueError("artifact bundle must be an object")
+                    if data.get("version") != _ARTIFACT_BUNDLE_VERSION:
+                        raise ValueError("unsupported artifact bundle version")
+                    if data.get("name") != self.artifact_name or not isinstance(data.get("entries"), dict):
+                        raise ValueError("artifact bundle identity does not match")
+                    entry = data["entries"].get(digest)
+                    if entry is not None:
+                        if not isinstance(entry, dict):
+                            raise ValueError("artifact entry must be an object")
+                        if _canonical_json(entry.get("identity")) != _canonical_json(identity):
+                            raise ValueError("artifact identity does not match")
+                        body = entry["config"]
+                if body is None and legacy_path.is_file():
+                    data = json.loads(legacy_path.read_text(encoding="utf-8"))
+                    _canonical_json(data)
+                    if not isinstance(data, dict) or data.get("version") != _ARTIFACT_VERSION:
+                        raise ValueError("unsupported legacy artifact version")
+                    if _canonical_json(data.get("identity")) != _canonical_json(identity):
+                        raise ValueError("legacy artifact identity does not match")
+                    body = data["config"]
+                if body is not None and not isinstance(body, dict):
                     raise ValueError("config must be an object")
-                self._artifact_cache[cache_key] = body
             except (
                 KeyError,
                 OSError,
@@ -555,8 +571,8 @@ class Autotuner:
                 RecursionError,
             ) as error:
                 log().warning(f"Ignoring offline config {path.name}: {error}")
-                self._artifact_cache[cache_key] = None
-                return None
+                body = None
+            self._artifact_cache[cache_key] = body
 
         body = self._artifact_cache[cache_key]
         if body is None:
@@ -570,16 +586,38 @@ class Autotuner:
     def _emit_artifact(self, config, ref, args, kwargs):
         if config.pre_hook is not None:
             raise ValueError("offline configs cannot serialize Config.pre_hook")
-        path, identity = ref
+        path, _legacy_path, digest, identity = ref
         body = config.to_dict()
         if json.loads(_canonical_json(body)) != body:
             raise ValueError("offline config values must preserve their types in JSON")
         self._decode_artifact_config(body, args, kwargs)
-        payload = {"version": _ARTIFACT_VERSION, "identity": identity, "config": body}
-        with atomic_write(path, mode="w", encoding="utf-8") as output:
-            json.dump(payload, output, indent=2, sort_keys=True, allow_nan=False)
-            output.write("\n")
-        self._artifact_cache[str(path)] = body
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            if path.is_file():
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if (
+                    not isinstance(payload, dict)
+                    or payload.get("version") != _ARTIFACT_BUNDLE_VERSION
+                    or payload.get("name") != self.artifact_name
+                    or not isinstance(payload.get("entries"), dict)
+                ):
+                    raise ValueError(f"cannot update invalid artifact bundle {path}")
+            else:
+                payload = {
+                    "version": _ARTIFACT_BUNDLE_VERSION,
+                    "name": self.artifact_name,
+                    "entries": {},
+                }
+            payload["entries"][digest] = {"identity": identity, "config": body}
+            with atomic_write(path, mode="w", encoding="utf-8") as output:
+                json.dump(payload, output, indent=2, sort_keys=True, allow_nan=False)
+                output.write("\n")
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+        self._artifact_cache[(str(path), digest)] = body
         log().info(f"Wrote offline config {path}")
 
     def _collective_active(self):

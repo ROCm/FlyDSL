@@ -606,9 +606,11 @@ def _emit_artifact(monkeypatch, artifact_dir, *, args=None, config=None):
 def test_artifact_lifecycle(monkeypatch, tmp_path, artifact_dir):
     path, args = _emit_artifact(monkeypatch, artifact_dir)
     payload = json.loads(path.read_text())
+    entry = next(iter(payload["entries"].values()))
 
-    assert payload["identity"]["key"] == {"m_in": 16, "N": 512, "dtype_str": "bf16"}
-    assert payload["config"] == {"BLOCK_THREADS": 64}
+    assert payload["name"] == "rmsnorm"
+    assert entry["identity"]["key"] == {"m_in": 16, "N": 512, "dtype_str": "bf16"}
+    assert entry["config"] == {"BLOCK_THREADS": 64}
 
     monkeypatch.delenv("FLYDSL_AUTOTUNE")
     monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "fresh-cache"))
@@ -633,7 +635,41 @@ def test_artifact_lifecycle(monkeypatch, tmp_path, artifact_dir):
     monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
     replacement = _make_artifact_tuner(configs=[Config(BLOCK_THREADS=128)])
     replacement(*args)
-    assert json.loads(path.read_text())["config"] == {"BLOCK_THREADS": 128}
+    payload = json.loads(path.read_text())
+    assert next(iter(payload["entries"].values()))["config"] == {"BLOCK_THREADS": 128}
+
+
+def test_artifact_bundle_holds_multiple_identities(monkeypatch, tmp_path, artifact_dir):
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    first = (FakeTensor((16, 512)), FakeTensor((1,)), 16, 512, "bf16")
+    second = (FakeTensor((32, 512)), FakeTensor((1,)), 32, 512, "bf16")
+    _make_artifact_tuner(configs=[Config(BLOCK_THREADS=64)])(*first)
+    _make_artifact_tuner(configs=[Config(BLOCK_THREADS=128)])(*second)
+
+    files = list(artifact_dir.glob("*.json"))
+    assert [path.name for path in files] == ["rmsnorm.json"]
+    payload = json.loads(files[0].read_text())
+    assert len(payload["entries"]) == 2
+
+    monkeypatch.delenv("FLYDSL_AUTOTUNE")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "fresh-cache"))
+    out_first, out_second = FakeTensor((1,)), FakeTensor((1,))
+    loaded = _make_artifact_tuner()
+    loaded(first[0], out_first, *first[2:])
+    loaded(second[0], out_second, *second[2:])
+    assert (out_first._data[0], out_second._data[0]) == (64.0, 128.0)
+
+
+def test_legacy_artifact_remains_readable(monkeypatch, tmp_path, artifact_dir):
+    args = (FakeTensor((16, 512)), FakeTensor((1,)), 16, 512, "bf16")
+    tuner = _make_artifact_tuner()
+    _bundle, legacy, _digest, identity = tuner._artifact_ref(args, {}, required=True)
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(json.dumps({"version": 1, "identity": identity, "config": {"BLOCK_THREADS": 64}}))
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "fresh-cache"))
+    out = FakeTensor((1,))
+    _make_artifact_tuner()(args[0], out, *args[2:])
+    assert out._data[0] == 64.0
 
 
 def test_artifact_schema_partitions_searched_winner_cache(monkeypatch, artifact_dir):
@@ -698,19 +734,20 @@ def test_cached_artifact_is_revalidated_for_each_call(monkeypatch, tmp_path, art
 def test_invalid_artifact_falls_back(monkeypatch, tmp_path, artifact_dir, case):
     path, args = _emit_artifact(monkeypatch, artifact_dir)
     payload = json.loads(path.read_text())
+    entry = next(iter(payload["entries"].values()))
     if case == "corrupt":
         path.write_text("{")
     else:
         if case == "version":
             payload["version"] = 2
         elif case == "identity":
-            payload["identity"]["key"]["N"] = 1024
+            entry["identity"]["key"]["N"] = 1024
         elif case == "config":
-            payload["config"] = {"UNKNOWN": 64}
+            entry["config"] = {"UNKNOWN": 64}
         elif case == "type":
-            payload["config"] = {"BLOCK_THREADS": "64"}
+            entry["config"] = {"BLOCK_THREADS": "64"}
         else:
-            payload["config"] = {"BLOCK_THREADS": 64, "N": 1024}
+            entry["config"] = {"BLOCK_THREADS": 64, "N": 1024}
         path.write_text(json.dumps(payload))
     monkeypatch.delenv("FLYDSL_AUTOTUNE")
     monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "fresh-cache"))
