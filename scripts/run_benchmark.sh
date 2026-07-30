@@ -103,8 +103,19 @@ FLASH_ATTN_FUNC_SHAPES="${FLASH_ATTN_FUNC_SHAPES:-${DEFAULT_FLASH_ATTN_FUNC_SHAP
 # flex_attention shapes: "batch,seq_len,num_heads,num_kv_heads,head_dim,dtype,case"
 #   case: alibi | sliding_window | causal_via_mask | no_mod
 DEFAULT_FLEX_ATTENTION_SHAPES='
+2,2048,32,32,128,bf16,no_mod
+2,2048,32,32,128,bf16,alibi
+2,2048,32,32,128,bf16,sliding_window
+2,2048,32,32,128,bf16,causal_via_mask
+2,4096,32,32,128,bf16,no_mod
 2,4096,32,32,128,bf16,alibi
 2,4096,32,32,128,bf16,sliding_window
+2,4096,32,32,128,bf16,causal_via_mask
+2,8192,32,32,128,bf16,no_mod
+2,8192,32,32,128,bf16,alibi
+2,8192,32,32,128,bf16,sliding_window
+2,8192,32,32,128,bf16,causal_via_mask
+2,4096,32,8,128,bf16,no_mod
 2,4096,32,8,128,bf16,causal_via_mask
 '
 FLEX_ATTENTION_SHAPES="${FLEX_ATTENTION_SHAPES:-${DEFAULT_FLEX_ATTENTION_SHAPES}}"

@@ -19,7 +19,6 @@ sys.path.insert(0, str(_repo))
 
 try:
     import torch
-    import torch.nn.functional as F
 except ImportError:
     print("PyTorch not available")
     sys.exit(1)
@@ -36,6 +35,7 @@ from kernels.attention.flex_attention import (  # noqa: E402
     flydsl_flex_attention,
     sliding_window_mask_mod,
 )
+from tests.kernels.test_flash_attn_fwd import _acc_metric, _flops  # noqa: E402
 from tests.test_common import run_perftest  # noqa: E402
 
 UNIFORM_RANGE = (-1, 1)
@@ -92,21 +92,6 @@ def _causal_mask(Sq, Skv, device):
     q_idx = torch.arange(Sq, device=device).view(Sq, 1)
     kv_idx = torch.arange(Skv, device=device).view(1, Skv)
     return kv_idx <= q_idx
-
-
-def _acc_metric(o_f32, ref_f32, D):
-    max_err = (o_f32 - ref_f32).abs().max().item()
-    res_rows = o_f32.reshape(-1, D)
-    ref_rows = ref_f32.reshape(-1, D)
-    nz = ref_rows.norm(dim=1) > 1e-6
-    if bool(nz.all()):
-        min_cos = F.cosine_similarity(res_rows, ref_rows, dim=1).min().item()
-        zero_ok = True
-    else:
-        min_cos = F.cosine_similarity(res_rows[nz], ref_rows[nz], dim=1).min().item() if bool(nz.any()) else 1.0
-        zero_ok = res_rows[~nz].abs().max().item() < 1e-2 if bool((~nz).any()) else True
-    passed = bool(max_err < 1e-2 and min_cos > 0.99 and zero_ok)
-    return max_err, min_cos, passed
 
 
 # ── mod cases: (name, build flydsl mods, build torch ref args) ───────────────
@@ -276,10 +261,26 @@ def main():
         args.dtype, warmup=args.warmup, iters=args.iters, bench=True,
     )
     if r["us"] is not None:
-        flops = 4.0 * args.batch * args.num_heads * args.seq_len * args.seq_len * args.head_dim
+        flops = _flops(args.seq_len, args.seq_len, args.num_heads, args.head_dim, args.batch, causal=False)
         tflops = flops / (r["us"] * 1e-6) / 1e12
-        # TFLOPS=/TB/s= format is parsed by scripts/run_benchmark.sh (_py_parse_and_emit).
-        print(f"case={args.case} latency={r['us']:.1f}us TFLOPS={tflops:.2f} TB/s=0.0 passed={r['passed']}")
+        # Column style mirrors test_flash_attn_fwd.py (_fmt_extra_normal_row / _fmt_result,
+        # :1809/:2296). The "| St | MaxErr MinCos | Time TFLOPS" row form is what
+        # scripts/run_benchmark.sh (_py_parse_and_emit) scrapes via its flash-attn table regex.
+        prefix = (
+            f"  {args.case:<16} B{args.batch:<3} S{args.seq_len:<6} "
+            f"H{args.num_heads:>3} Hkv{Hkv:>3} D{args.head_dim:>3} {args.dtype:>5}"
+        )
+        status = "PASS" if r["passed"] else "FAIL"
+        try:
+            gpu = torch.cuda.get_device_name(0)
+        except Exception:  # noqa: BLE001
+            gpu = "unknown"
+        print(f"GPU: {gpu}")
+        print(f"  {'config':<16} {'shape':<27} | {'St':>6} | {'MaxErr':>8} {'MinCos':>8} | {'Time(us)':>10} {'TFLOPS':>9}")
+        print(
+            f"{prefix} | {status:>6} | {r['max_err']:>8.2e} {r['min_cos']:>8.5f} | "
+            f"{r['us']:>10.1f} {tflops:>9.1f}"
+        )
 
 
 if __name__ == "__main__":
