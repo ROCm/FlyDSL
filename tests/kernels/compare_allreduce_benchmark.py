@@ -2,7 +2,7 @@
 """Compare two allreduce benchmark CSVs (main vs PR) and flag regressions.
 
 Usage:
-    python3 compare_benchmark.py <main.csv> <pr.csv>
+    python3 compare_allreduce_benchmark.py <main.csv> <pr.csv>
 
 Exit code 1 if any case regresses more than BOTH thresholds:
     - relative increase > MAX_REGRESSION_PCT  (default 15%)
@@ -10,11 +10,20 @@ Exit code 1 if any case regresses more than BOTH thresholds:
 """
 
 import sys
+from pathlib import Path
 
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+from benchmark_compare import Threshold, compare_values  # noqa: E402
+
 MAX_REGRESSION_PCT = 15.0
 MIN_ABS_REGRESSION_US = 10.0
+THRESHOLD = Threshold(
+    relative_pct=MAX_REGRESSION_PCT,
+    absolute=MIN_ABS_REGRESSION_US,
+    direction="lower_better",
+)
 
 
 def main():
@@ -55,7 +64,11 @@ def main():
 
         print("=== Allreduce Benchmark: PR vs main ===")
         for (shape, dtype), row in merged.iterrows():
-            regressed = row["delta_pct"] > MAX_REGRESSION_PCT and row["delta_us"] > MIN_ABS_REGRESSION_US
+            regressed = compare_values(
+                row["avg_time_us_main"],
+                row["avg_time_us_pr"],
+                THRESHOLD,
+            ).regressed
             tag = "REGRESSION" if regressed else "OK"
             if regressed:
                 fail_count += 1

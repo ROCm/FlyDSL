@@ -54,6 +54,7 @@ import sys
 import pytest
 import torch
 
+from flydsl.autotune import do_bench
 from flydsl.runtime.device import get_rocm_arch as _get_rocm_arch
 from kernels.attention.fused_rope_cache_kernel import build_fused_rope_cache_module
 
@@ -82,17 +83,14 @@ except ImportError:
 
 def _bench_gpu_us(fn, warmup: int = 20, iters: int = 200) -> float:
     """Measure GPU kernel time via CUDA events (true device time, no Python-loop overhead)."""
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    for _ in range(warmup):
-        fn()
-    torch.cuda.synchronize()
-    start.record()
-    for _ in range(iters):
-        fn()
-    end.record()
-    torch.cuda.synchronize()
-    return start.elapsed_time(end) * 1e3 / iters  # ms → µs
+    return do_bench(
+        fn,
+        warmup=warmup,
+        rep=iters,
+        schedule="pipelined",
+        statistic="mean",
+        unit="us",
+    )
 
 
 # ---------------------------------------------------------------------------

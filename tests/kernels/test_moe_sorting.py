@@ -28,6 +28,7 @@ except ImportError:
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available.", allow_module_level=True)
 
+from flydsl.autotune import do_bench  # noqa: E402
 from flydsl.runtime.device import is_rdna_arch  # noqa: E402
 
 if is_rdna_arch():
@@ -385,18 +386,21 @@ def run_test(T, E, topk, unit_size=UNIT_SIZE, max_tokens=None):
     # --- Benchmark (opt-in via MOE_SORTING_BENCH=1) ---
     gpu_time_us = None
     if passed and RUN_BENCH:
-        for _ in range(WARMUP_ITERS):
-            _call_flydsl(topk_ids, topk_weights, E, model_dim=4096, topk=topk, unit_size=unit_size)
-        torch.cuda.synchronize()
-
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        for _ in range(BENCH_ITERS):
-            _call_flydsl(topk_ids, topk_weights, E, model_dim=4096, topk=topk, unit_size=unit_size)
-        end.record()
-        torch.cuda.synchronize()
-        gpu_time_us = start.elapsed_time(end) * 1000.0 / BENCH_ITERS  # ms → us
+        gpu_time_us = do_bench(
+            lambda: _call_flydsl(
+                topk_ids,
+                topk_weights,
+                E,
+                model_dim=4096,
+                topk=topk,
+                unit_size=unit_size,
+            ),
+            warmup=WARMUP_ITERS,
+            rep=BENCH_ITERS,
+            schedule="pipelined",
+            statistic="mean",
+            unit="us",
+        )
         print(f"  [perf] {gpu_time_us:.2f} us/call ({path})")
 
     status = "PASSED" if passed else "FAILED"
@@ -883,40 +887,25 @@ def test_moe_softmax_sort_fallback(T, E, topk, dtype_str):
 # ---------------------------------------------------------------------------
 def bench_eager_us(fn, warmup=BENCH_WARMUP, iters=BENCH_MEASURE, flush_l2=True):
     """Per-iteration CUDA events timer with L2 flush and median latency."""
-    flush_buf = None
+    flush_bytes = 0
     if flush_l2:
         props = torch.cuda.get_device_properties(torch.cuda.current_device())
         l2_bytes = getattr(props, "L2_cache_size", 4 * 1024 * 1024)
-        flush_buf = torch.empty(max(l2_bytes * 2, 8 * 1024 * 1024), dtype=torch.uint8, device="cuda")
+        flush_bytes = max(l2_bytes * 2, 8 * 1024 * 1024)
 
-    for _ in range(warmup):
-        if flush_buf is not None:
-            flush_buf.zero_()
-        fn()
-    torch.cuda.synchronize()
-
-    starts = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-    ends = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-    for i in range(iters):
-        if flush_buf is not None:
-            flush_buf.zero_()
-        starts[i].record()
-        fn()
-        ends[i].record()
-    torch.cuda.synchronize()
-
-    latencies = sorted(starts[i].elapsed_time(ends[i]) * 1e3 for i in range(iters))
-    n = len(latencies)
-    if n >= 8:
-        q1, q3 = latencies[n // 4], latencies[3 * n // 4]
-        iqr = q3 - q1
-        lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-        latencies = [x for x in latencies if lo <= x <= hi] or latencies
-    del flush_buf
-    return latencies[len(latencies) // 2]
+    return do_bench(
+        fn,
+        warmup=warmup,
+        rep=iters,
+        schedule="per_iter",
+        statistic="median",
+        flush_bytes=flush_bytes,
+        iqr=True,
+        unit="us",
+    )
 
 
-def bench_kernel_us(fn, warmup=BENCH_WARMUP, iters=BENCH_MEASURE):
+def bench_profiled_device_us(fn, warmup=BENCH_WARMUP, iters=BENCH_MEASURE):
     """Pure on-device kernel time (per invocation, microseconds).
 
     Uses ``torch.profiler`` (CUPTI on CUDA, roctracer on ROCm) to capture
@@ -928,7 +917,7 @@ def bench_kernel_us(fn, warmup=BENCH_WARMUP, iters=BENCH_MEASURE):
       - ``bench_graph_us`` measures end-to-end CUDA-graph replay latency,
         which still includes graph-replay overhead and any inter-kernel
         dispatch gaps on the GPU command processor.
-      - ``bench_kernel_us`` measures only the wall time the GPU is actually
+      - ``bench_profiled_device_us`` measures only the wall time the GPU is actually
         executing kernels — i.e. the floor on kernel runtime, with launch
         and dispatch effects removed.
 
@@ -966,8 +955,48 @@ def bench_kernel_us(fn, warmup=BENCH_WARMUP, iters=BENCH_MEASURE):
     return total_us / iters
 
 
-def bench_graph_us(fn, warmup=BENCH_WARMUP, iters=BENCH_MEASURE):
-    """CUDA graph benchmark — amortizes kernel launch overhead."""
+def _make_moe_graph_verifier(outputs_fn, unit_size, extra_outputs_fn=None):
+    """Verify every meaningful MoE sorting output after graph replay."""
+    references = tuple(output.clone() for output in outputs_fn())
+    extra_references = (
+        tuple(output.clone() for output in extra_outputs_fn())
+        if extra_outputs_fn is not None
+        else ()
+    )
+    num_padded = int(references[3][0].item())
+    num_valid_blocks = num_padded // unit_size
+
+    def verify(replay):
+        outputs = outputs_fn()
+        extra_outputs = extra_outputs_fn() if extra_outputs_fn is not None else ()
+        for output in (*outputs, *extra_outputs):
+            output.fill_(1 if torch.is_floating_point(output) else -1)
+        torch.cuda.synchronize()
+        replay()
+        torch.cuda.synchronize()
+        ids, weights, expert_ids, nvalid, moe_buf = outputs
+        ref_ids, ref_weights, ref_expert_ids, ref_nvalid, ref_moe_buf = references
+        return (
+            torch.equal(nvalid, ref_nvalid)
+            and torch.equal(moe_buf, ref_moe_buf)
+            and torch.equal(ids[:num_padded], ref_ids[:num_padded])
+            and torch.equal(weights[:num_padded], ref_weights[:num_padded])
+            and torch.equal(expert_ids[:num_valid_blocks], ref_expert_ids[:num_valid_blocks])
+            and all(
+                torch.equal(output, reference)
+                for output, reference in zip(extra_outputs, extra_references)
+            )
+        )
+
+    return verify
+
+
+def bench_graph_us(fn, verify, warmup=BENCH_WARMUP, iters=BENCH_MEASURE, calls_per_replay=1):
+    """Measure verified CUDA graph replay latency in microseconds per call."""
+    if verify is None:
+        raise ValueError("graph benchmarks require an output verifier")
+    if calls_per_replay <= 0:
+        raise ValueError("calls_per_replay must be positive")
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
@@ -979,26 +1008,26 @@ def bench_graph_us(fn, warmup=BENCH_WARMUP, iters=BENCH_MEASURE):
             fn()
         torch.cuda.current_stream().wait_stream(stream)
         torch.cuda.synchronize()
-
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.stream(stream):
             with torch.cuda.graph(graph, stream=stream):
-                fn()
+                for _ in range(calls_per_replay):
+                    fn()
         torch.cuda.current_stream().wait_stream(stream)
-        for _ in range(warmup):
-            graph.replay()
-        torch.cuda.synchronize()
     except RuntimeError:
         return None  # graph capture not supported
+    if not verify(graph.replay):
+        raise AssertionError("graph replay did not reproduce the reference output")
 
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(iters):
-        graph.replay()
-    end.record()
-    torch.cuda.synchronize()
-    return start.elapsed_time(end) * 1e3 / iters
+    replay_us = do_bench(
+        graph.replay,
+        warmup=warmup,
+        rep=iters,
+        schedule="pipelined",
+        statistic="mean",
+        unit="us",
+    )
+    return replay_us / calls_per_replay
 
 
 def run_bench_comparison(token_sweep=None):
@@ -1064,22 +1093,42 @@ def run_bench_comparison(token_sweep=None):
                 E,
                 UNIT_SIZE,
             )
+            return fly_nvalid
 
+        fly_fn()
+        torch.cuda.synchronize()
+        fly_verify = _make_moe_graph_verifier(
+            lambda: (
+                fly_sorted_ids,
+                fly_sorted_w,
+                fly_sorted_eids,
+                fly_nvalid,
+                fly_moe_buf_2d,
+            ),
+            UNIT_SIZE,
+        )
         fly_eager = bench_eager_us(fly_fn)
-        fly_graph = bench_graph_us(fly_fn)
-        fly_kernel = bench_kernel_us(fly_fn)
+        fly_graph = bench_graph_us(fly_fn, fly_verify)
+        fly_kernel = bench_profiled_device_us(fly_fn)
 
         ck_eager, ck_graph, ck_kernel = None, None, None
         if aiter_moe_sorting is not None:
+            ck_state = {}
 
             def ck_fn():
-                aiter_moe_sorting(
+                outputs = aiter_moe_sorting(
                     topk_ids, topk_weights, E, model_dim=model_dim, moebuf_dtype=torch.bfloat16, block_size=UNIT_SIZE
                 )
+                ck_state["outputs"] = outputs
+                return outputs
+
+            ck_fn()
+            torch.cuda.synchronize()
+            ck_verify = _make_moe_graph_verifier(lambda: ck_state["outputs"], UNIT_SIZE)
 
             ck_eager = bench_eager_us(ck_fn)
-            ck_graph = bench_graph_us(ck_fn)
-            ck_kernel = bench_kernel_us(ck_fn)
+            ck_graph = bench_graph_us(ck_fn, ck_verify)
+            ck_kernel = bench_profiled_device_us(ck_fn)
 
         def fmt(v):
             return f"{v:8.1f}us" if v is not None else "       N/A"
@@ -1193,6 +1242,7 @@ def run_fused_bench_comparison(token_sweep=None, dtype_str="bf16", num_experts=2
                 E,
                 UNIT_SIZE,
             )
+            return nvalid
 
         def fused_fn():
             moe_softmax_sort_flydsl(
@@ -1207,18 +1257,27 @@ def run_fused_bench_comparison(token_sweep=None, dtype_str="bf16", num_experts=2
                 dtype_str,
                 unit_size=UNIT_SIZE,
             )
+            return nvalid
 
         # Warm up both paths once before measurement (covers compile cache).
         unfused_fn()
+        torch.cuda.synchronize()
+        outputs_fn = lambda: (sorted_ids, sorted_w, sorted_eids, nvalid, moe_buf_2d)
+        unfused_verify = _make_moe_graph_verifier(
+            outputs_fn,
+            UNIT_SIZE,
+            extra_outputs_fn=lambda: (u_topk_w, u_topk_ids, u_tei),
+        )
         fused_fn()
         torch.cuda.synchronize()
+        fused_verify = _make_moe_graph_verifier(outputs_fn, UNIT_SIZE)
 
         unfused_eager = bench_eager_us(unfused_fn)
         fused_eager = bench_eager_us(fused_fn)
-        unfused_graph = bench_graph_us(unfused_fn)
-        fused_graph = bench_graph_us(fused_fn)
-        unfused_kernel = bench_kernel_us(unfused_fn)
-        fused_kernel = bench_kernel_us(fused_fn)
+        unfused_graph = bench_graph_us(unfused_fn, unfused_verify)
+        fused_graph = bench_graph_us(fused_fn, fused_verify)
+        unfused_kernel = bench_profiled_device_us(unfused_fn)
+        fused_kernel = bench_profiled_device_us(fused_fn)
 
         path = "fused" if T <= 16 else "fallback"
 

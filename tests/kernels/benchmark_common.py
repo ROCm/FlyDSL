@@ -31,6 +31,8 @@ _EMBEDDED_FLYDSL = os.path.join(_REPO_ROOT, ".flydsl", "build", "python_packages
 if os.path.isdir(_EMBEDDED_FLYDSL) and _EMBEDDED_FLYDSL not in sys.path:
     sys.path.insert(0, _EMBEDDED_FLYDSL)
 
+from flydsl.autotune import do_bench  # noqa: E402
+
 
 @dataclass(frozen=True)
 class PerfRow:
@@ -67,19 +69,14 @@ def print_perf_table(rows: List[PerfRow]) -> None:
 
 def bench_gpu_us_torch(fn: Callable[[], None], *, warmup: int = 20, iters: int = 200) -> float:
     """Measure device time using torch CUDA events (works for torch-launched kernels, incl. Triton)."""
-    import torch
-
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    for _ in range(warmup):
-        fn()
-    torch.cuda.synchronize()
-    start.record()
-    for _ in range(iters):
-        fn()
-    end.record()
-    torch.cuda.synchronize()
-    return start.elapsed_time(end) * 1e3 / iters
+    return do_bench(
+        fn,
+        warmup=warmup,
+        rep=iters,
+        schedule="pipelined",
+        statistic="mean",
+        unit="us",
+    )
 
 
 def maybe_enable_aiter() -> bool:
@@ -468,59 +465,25 @@ def bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True, prep_fn=None):
     """Per-iteration CUDA events timer with optional L2 flush and median latency."""
     import torch
 
-    flush_buf = None
+    flush_bytes = 0
     if flush_l2:
         l2_bytes = getattr(
             torch.cuda.get_device_properties(torch.cuda.current_device()), "L2_cache_size", 4 * 1024 * 1024
         )
-        alloc_bytes = max(l2_bytes * 2, 8 * 1024 * 1024)
-        flush_buf = torch.empty(alloc_bytes, dtype=torch.uint8, device="cuda")
+        flush_bytes = max(l2_bytes * 2, 8 * 1024 * 1024)
 
-    for _ in range(warmup):
-        if flush_buf is not None:
-            flush_buf.zero_()
-        if prep_fn is not None:
-            prep_fn()
-        run_fn()
-    torch.cuda.synchronize()
-
-    if flush_buf is None and prep_fn is None:
-        # Single event pair preserves back-to-back launch pipelining (returns mean latency).
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        for _ in range(iters):
-            run_fn()
-        end.record()
-        torch.cuda.synchronize()
-        return start.elapsed_time(end) * 1e3 / iters
-
-    start_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-    end_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-
-    for i in range(iters):
-        if flush_buf is not None:
-            flush_buf.zero_()
-        if prep_fn is not None:
-            prep_fn()
-        start_ev[i].record()
-        run_fn()
-        end_ev[i].record()
-
-    torch.cuda.synchronize()
-    latencies = sorted(start_ev[i].elapsed_time(end_ev[i]) * 1e3 for i in range(iters))
-
-    n = len(latencies)
-    if n >= 8:
-        q1, q3 = latencies[n // 4], latencies[3 * n // 4]
-        iqr = q3 - q1
-        lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-        filtered = [x for x in latencies if lo <= x <= hi]
-        if filtered:
-            latencies = filtered
-
-    del flush_buf
-    return latencies[len(latencies) // 2]
+    per_iter = bool(flush_bytes or prep_fn is not None)
+    return do_bench(
+        run_fn,
+        warmup=warmup,
+        rep=iters,
+        schedule="per_iter" if per_iter else "pipelined",
+        statistic="median" if per_iter else "mean",
+        prep_fn=prep_fn,
+        flush_bytes=flush_bytes,
+        iqr=per_iter,
+        unit="us",
+    )
 
 
 def bench_best_tile(target, dim, align):

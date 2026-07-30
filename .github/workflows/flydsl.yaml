@@ -233,6 +233,7 @@ jobs:
       GIT_CONFIG_NOSYSTEM: "1"
       # Temporary quarantine for linux-flydsl-navi-2 GPU 1; see #858.
       CI_HIP_VISIBLE_DEVICES: ${{ contains(matrix.runners, 'navi') && '3' || '' }}
+      BENCHMARK_ARCH: ${{ contains(matrix.runners, 'mi355') && 'gfx950' || (contains(matrix.runners, 'mi325') && 'gfx942' || 'gfx1201') }}
     strategy:
       matrix:
         runners: [
@@ -342,9 +343,16 @@ jobs:
           set -e -o pipefail
           export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-}
           export AITER_REPO=/tmp/aiter
+          export FLYDSL_PERFTEST_USE_EVENTS=0
           cd /flydsl-test
-          BENCH_LOG_DIR=/tmp/flydsl_bench_current bash scripts/run_benchmark.sh 2>&1 | tee /tmp/bench_current.out
-          python3 scripts/benchmark_output_to_csv.py /tmp/bench_current.out /tmp/bench_current.csv
+          python3 -m pytest --collect-only -q -m benchmark \
+            tests/kernels/test_rmsnorm.py \
+            tests/kernels/test_allreduce.py \
+            tests/kernels/test_moe_a8w4_mxscale_gfx1250.py \
+            tests/unit/test_tdm_mcast_add_gfx1250.py
+          BENCH_LOG_DIR=/tmp/flydsl_bench_current \
+            BENCH_OUTPUT_CSV=/tmp/bench_current.csv \
+            bash scripts/run_benchmark.sh 2>&1 | tee /tmp/bench_current.out
           BASH
 
       - name: Run benchmark baselines
@@ -378,12 +386,15 @@ jobs:
               (
                 set -e -o pipefail
                 cd "${worktree}"
+                cp /flydsl-test/scripts/run_benchmark.sh scripts/run_benchmark.sh
+                cp /flydsl-test/scripts/benchmark_log_parser.py scripts/benchmark_log_parser.py
                 export MLIR_PATH=/llvm-project/mlir_install
                 python3 -m pip install -e . --use-pep517 2>&1 | tail -5
                 export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-}
                 export AITER_REPO=/tmp/aiter
-                BENCH_LOG_DIR="${log_dir}" bash scripts/run_benchmark.sh 2>&1 | tee "${output}"
-                python3 /flydsl-test/scripts/benchmark_output_to_csv.py "${output}" "${csv}"
+                export FLYDSL_PERFTEST_USE_EVENTS=0
+                BENCH_LOG_DIR="${log_dir}" BENCH_OUTPUT_CSV="${csv}" \
+                  bash scripts/run_benchmark.sh 2>&1 | tee "${output}"
               )
               status=$?
               if [ "${status}" -eq 0 ] && [ -s "${csv}" ]; then
@@ -418,8 +429,12 @@ jobs:
                   python3 -m pip install --only-binary=:all: "flydsl==${package_version}" 2>&1 | tail -5
                   export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-}
                   export AITER_REPO=/tmp/aiter
-                  BENCH_LOG_DIR="${log_dir}" bash scripts/run_benchmark.sh 2>&1 | tee "${output}"
-                  python3 /flydsl-test/scripts/benchmark_output_to_csv.py "${output}" "${csv}"
+                  export FLYDSL_PERFTEST_USE_EVENTS=0
+                  BENCH_LOG_DIR="${log_dir}" BENCH_OUTPUT_CSV="${csv}" \
+                    bash scripts/run_benchmark.sh 2>&1 | tee "${output}"
+                  if [ ! -s "${csv}" ]; then
+                    python3 /flydsl-test/scripts/benchmark_output_to_csv.py "${output}" "${csv}"
+                  fi
                 )
                 status=$?
                 if [ "${status}" -eq 0 ] && [ -s "${csv}" ]; then
@@ -451,11 +466,14 @@ jobs:
             cd /flydsl-test
             main_label=\$(cat /tmp/bench_main_label 2>/dev/null || echo main)
             python3 scripts/compare_benchmark.py /tmp/bench_main.csv /tmp/bench_current.csv \
-              --baseline-label \"\${main_label}\" --current-label current
+              --baseline-label \"\${main_label}\" --current-label current \
+              --arch '${{ env.BENCHMARK_ARCH }}' \
+              --threshold-config .github/benchmark_thresholds.json \
+              --fail-on-regression
           "
 
       - name: Check benchmark performance (current vs latest tag)
-        if: steps.bench-baselines.outcome != 'skipped'
+        if: always() && steps.bench-baselines.outcome != 'skipped'
         timeout-minutes: 5
         run: |
           docker exec flydsl_test bash -c "

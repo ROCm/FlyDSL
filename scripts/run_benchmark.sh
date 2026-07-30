@@ -272,15 +272,16 @@ print_bound_info() {
 
 # Print one-line perf row (like run_tests.sh style).
 _fmt_table_header() {
-  # Use fixed widths and truncate long strings to keep columns aligned.
-  # op column is wide enough to host "moe_<family>_s2_atomic" / "_reduce" suffixes.
-  printf "\n%-22.22s %-34.34s %-10.10s %10s %10s\n" "op" "shape" "dtype" "TB/s" "TFLOPS"
-  printf "%-22.22s %-34.34s %-10.10s %10s %10s\n" "----------------------" "----------------------------------" "----------" "----------" "----------"
+  # Widths are minimums, not truncation limits: full keys must survive the
+  # human-readable table because tag baselines and the dashboard parse it.
+  printf "\n%-22s %-34s %-10s %10s %10s\n" "op" "shape" "dtype" "TB/s" "TFLOPS"
+  printf "%-22s %-34s %-10s %10s %10s\n" "----------------------" "----------------------------------" "----------" "----------" "----------"
 }
 
 _emit_row() {
-  op="$1"; shape="$2"; dtype="$3"; tbps="$4"; tflops="$5"
-  printf "%-22.22s %-34.34s %-10.10s %10s %10s\n" "${op}" "${shape}" "${dtype}" "${tbps}" "${tflops}"
+  op="$1"; shape="$2"; dtype="$3"; tbps="$4"; tflops="$5"; avg_us="${6:--}"
+  statistic="${7:-reported}"
+  printf "%-22s %-34s %-10s %10s %10s\n" "${op}" "${shape}" "${dtype}" "${tbps}" "${tflops}"
   if [ -n "${BENCH_OUTPUT_CSV:-}" ]; then
     status="ok"
     if [ "${tbps}" = "skip" ] || [ "${tflops}" = "skip" ]; then
@@ -288,7 +289,12 @@ _emit_row() {
     elif [ "${tbps}" = "-" ] && [ "${tflops}" = "-" ]; then
       status="missing"
     fi
-    python3 - "${BENCH_OUTPUT_CSV}" "${op}" "${shape}" "${dtype}" "${tbps}" "${tflops}" "${status}" <<'PY'
+    min_us="${8:--}"; max_us="${9:--}"; sample_count="${10:--}"
+    warmup="${11:--}"; iters="${12:--}"; instrument="${13:-reported}"
+    schedule="${14:-unknown}"; cache_policy="${15:-unknown}"
+    python3 - "${BENCH_OUTPUT_CSV}" "${op}" "${shape}" "${dtype}" "${tbps}" "${tflops}" "${status}" \
+      "${avg_us}" "${statistic}" "${min_us}" "${max_us}" "${sample_count}" "${warmup}" "${iters}" \
+      "${instrument}" "${schedule}" "${cache_policy}" "${GPU_ARCH}" <<'PY'
 import csv
 import sys
 
@@ -428,81 +434,12 @@ fi
 
 if [ -n "${BENCH_OUTPUT_CSV}" ]; then
   mkdir -p "$(dirname "${BENCH_OUTPUT_CSV}")"
-  printf "op,shape,dtype,tbps,tflops,status\n" >"${BENCH_OUTPUT_CSV}"
+  printf "op,shape,dtype,tbps,tflops,status,avg_us,statistic,min_us,max_us,sample_count,warmup,iters,instrument,schedule,cache_policy,arch\n" >"${BENCH_OUTPUT_CSV}"
 fi
 
 _py_parse_and_emit() {
-  # Args: op shape dtype log_path [M N]
-  python3 - "$@" <<'PY'
-import re, sys
-
-op = sys.argv[1]
-shape = sys.argv[2]
-dtype = sys.argv[3]
-path = sys.argv[4]
-MN = sys.argv[5:]  # deprecated (kept for backward-compat)
-
-tbps = None
-tflops = None
-
-txt = ""
-try:
-    with open(path, "r", errors="ignore") as f:
-        txt = f.read()
-except Exception:
-    txt = ""
-
-# GEMM-style: "Throughput: ..., XX.XX TFLOPS, BW: Y.YYY TB/s"
-m = None
-for m in re.finditer(r"Throughput:.*?([0-9.]+)\s*TFLOPS.*?BW:\s*([0-9.]+)\s*TB/s", txt):
-    pass
-if m:
-    tflops = float(m.group(1))
-    tbps = float(m.group(2))
-
-# MoE-style: "FlyDSL MoE stageX[dt]: ... XX.XX TFLOPS ... Y.YYY TB/s"
-if tbps is None or tflops is None:
-    m = None
-    for m in re.finditer(r"FlyDSL MoE .*?\:\s*[0-9.]+\s*us,\s*([0-9.]+)\s*TFLOPS.*?([0-9.]+)\s*TB/s", txt):
-        pass
-    if m:
-        tflops = float(m.group(1))
-        tbps = float(m.group(2))
-
-# FlashAttention table: "| PASS | maxerr mincos | time_us tflops".
-if tflops is None:
-    m = None
-    for m in re.finditer(r"\|\s+(?:PASS|FAIL|--)\s+\|\s+[0-9.eE+-]+\s+[0-9.]+\s+\|\s+([0-9.]+)\s+([0-9.]+)", txt):
-        pass
-    if m:
-        tflops = float(m.group(2))
-
-# MLA decode: "TFLOPS=...  TB/s=..."
-if tbps is None or tflops is None:
-    m = None
-    for m in re.finditer(r"TFLOPS=([0-9.]+)\s+TB/s=([0-9.]+)", txt):
-        pass
-    if m:
-        tflops = float(m.group(1))
-        tbps = float(m.group(2))
-
-# Softmax/Norm-style: "Kernel avg time: X ms" + "Bandwidth: Y GB/s".
-# Use the FIRST match: the base op (softmax/layernorm/rmsnorm) is benchmarked
-# first, so any later "Bandwidth:" lines come from fused/quant variants printed
-# by the same test (e.g. test_layernorm.py also runs fused_add/dynamicquant/
-# smoothquant). Taking the last match reported the slow scalar smoothquant path
-# as "layernorm" (~1.69 vs the real ~5.6 TB/s base).
-if tbps is None:
-    m_bw = next(re.finditer(r"Bandwidth:\s*([0-9.]+)\s*GB/s", txt), None)
-    if m_bw:
-        tbps = float(m_bw.group(1)) / 1000.0
-
-
-def fmt(x):
-    return "-" if x is None else f"{x:.3f}"
-
-print(f"{op}\t{shape}\t{dtype}\t{fmt(tbps)}\t{fmt(tflops)}")
-PY
+  # Args: op shape dtype log_path
+  python3 "${SCRIPT_DIR}/benchmark_log_parser.py" row "$1" "$2" "$3" "$4"
 }
 
 _emit_moe_s2_rows() {
@@ -511,43 +448,7 @@ _emit_moe_s2_rows() {
   #   FlyDSL MoE stage2 [moe_gemm2] fp4 atomic | 7168x2048, ... | 1163.2 us, 1654.24 TFLOPS, 0.377 TB/s
   # Emit two table rows (op_prefix_atomic, op_prefix_reduce). Falls back to single row
   # tagged "mixed" if the log only has one mode (e.g., --gemm2_mode was overridden).
-  op_prefix="$1"; shape="$2"; log_path="$3"
-  python3 - "$op_prefix" "$shape" "$log_path" <<'PY'
-import re, sys
-
-op_prefix, shape, path = sys.argv[1], sys.argv[2], sys.argv[3]
-try:
-    with open(path, "r", errors="ignore") as f:
-        txt = f.read()
-except Exception:
-    txt = ""
-
-pat = re.compile(
-    r"FlyDSL MoE stage2 \[[^]]+\]\s+(\S+)\s+(atomic|reduce)\b.*?"
-    r"([0-9.]+)\s*TFLOPS.*?([0-9.]+)\s*TB/s"
-)
-# keep last occurrence per mode
-found = {}
-for m in pat.finditer(txt):
-    dtype, mode = m.group(1), m.group(2)
-    found[mode] = (dtype, float(m.group(3)), float(m.group(4)))
-
-def fmt(x):
-    return "-" if x is None else f"{x:.3f}"
-
-# Always emit atomic row first (if any), then reduce row.
-emitted = False
-for mode in ("atomic", "reduce"):
-    if mode not in found:
-        continue
-    dtype, tflops, tbps = found[mode]
-    print(f"{op_prefix}_{mode}\t{shape}\t{dtype}\t{fmt(tbps)}\t{fmt(tflops)}")
-    emitted = True
-
-if not emitted:
-    # Nothing parsed — emit empty row so caller knows.
-    print(f"{op_prefix}_atomic\t{shape}\t-\t-\t-")
-PY
+  python3 "${SCRIPT_DIR}/benchmark_log_parser.py" moe-stage2 "$1" "$2" "$3"
 }
 
 # ============================================================================
@@ -578,7 +479,7 @@ if [ "${RUN_SOFTMAX}" -eq 1 ]; then
     row="$(_py_parse_and_emit softmax "${M}x${N}" "${dtype}" "${log}")"
     # row is tab-separated; default IFS includes tabs.
     set -- $row
-    _emit_row "$1" "$2" "$3" "$4" "$5"
+    _emit_row "$1" "$2" "$3" "$4" "$5" "$6" "$7" "-" "-" "-" "$8" "$9" "${10}" "${11}" "${12}"
   done
 fi
 
@@ -600,7 +501,7 @@ if [ "${RUN_LAYERNORM}" -eq 1 ]; then
     fi
     row="$(_py_parse_and_emit layernorm "${M}x${N}" "${dtype}" "${log}")"
     set -- $row
-    _emit_row "$1" "$2" "$3" "$4" "$5"
+    _emit_row "$1" "$2" "$3" "$4" "$5" "$6" "$7" "-" "-" "-" "$8" "$9" "${10}" "${11}" "${12}"
   done
 fi
 
@@ -622,7 +523,7 @@ if [ "${RUN_RMSNORM}" -eq 1 ]; then
     fi
     row="$(_py_parse_and_emit rmsnorm "${M}x${N}" "${dtype}" "${log}")"
     set -- $row
-    _emit_row "$1" "$2" "$3" "$4" "$5"
+    _emit_row "$1" "$2" "$3" "$4" "$5" "$6" "$7" "-" "-" "-" "$8" "$9" "${10}" "${11}" "${12}"
   done
 
   # Training contract: FP16/BF16 activations with FP32 weights. These focused
@@ -647,7 +548,7 @@ if [ "${RUN_RMSNORM}" -eq 1 ]; then
     fi
     row="$(_py_parse_and_emit rmsnorm_mixed_weight "${M}x${N}" "${activation_dtype}+f32w" "${log}")"
     set -- $row
-    _emit_row "$1" "$2" "$3" "$4" "$5"
+    _emit_row "$1" "$2" "$3" "$4" "$5" "$6" "$7" "-" "-" "-" "$8" "$9" "${10}" "${11}" "${12}"
 
     for mode in plain fused_add; do
       export ROCDSL_RMSNORM_MIXED_WEIGHT_BWD_MODE="$mode"
@@ -665,7 +566,7 @@ if [ "${RUN_RMSNORM}" -eq 1 ]; then
       fi
       row="$(_py_parse_and_emit "$op" "${M}x${N}" "${activation_dtype}+f32w" "${log}")"
       set -- $row
-      _emit_row "$1" "$2" "$3" "$4" "$5"
+      _emit_row "$1" "$2" "$3" "$4" "$5" "$6" "$7" "-" "-" "-" "$8" "$9" "${10}" "${11}" "${12}"
     done
   done
   unset ROCDSL_RMSNORM_MIXED_WEIGHT_BENCH_SHAPE ROCDSL_RMSNORM_MIXED_WEIGHT_BWD_MODE
@@ -717,7 +618,7 @@ if [ "${RUN_FLASH_ATTN}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     shape_tag="B${batch}S${seq_len}H${heads}Hkv${kv_heads}D${head_dim}_${causal_tag}"
     row="$(_py_parse_and_emit flash_attn "${shape_tag}" "${dtype}" "${log}")"
     set -- $row
-    _emit_row "$1" "$2" "$3" "$4" "$5"
+    _emit_row "$1" "$2" "$3" "$4" "$5" "$6" "$7" "-" "-" "-" "$8" "$9" "${10}" "${11}" "${12}"
   done
 fi
 
@@ -742,7 +643,7 @@ if [ "${RUN_MLA}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     fi
     row="$(_py_parse_and_emit mla "${shape_tag}" "fp8" "${log}")"
     set -- $row
-    _emit_row "$1" "$2" "$3" "$4" "$5"
+    _emit_row "$1" "$2" "$3" "$4" "$5" "$6" "$7" "-" "-" "-" "$8" "$9" "${10}" "${11}" "${12}"
   done
 fi
 
@@ -773,7 +674,7 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
     row="$(_py_parse_and_emit gemm "${gemm_shape_tag}" "${dtype}" "${log}")"
     set -- $row
-    _emit_row "$1" "$2" "$3" "$4" "$5"
+    _emit_row "$1" "$2" "$3" "$4" "$5" "$6" "$7" "-" "-" "-" "$8" "$9" "${10}" "${11}" "${12}"
   done
 
   GEMM_USE_ASYNC_COPY="${GEMM_USE_ASYNC_COPY:-1}"
@@ -816,7 +717,7 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_${waves_per_eu}tg"
     row="$(_py_parse_and_emit gemm_async "${shape_tag}" "${dtype}" "${log}")"
     set -- $row
-    _emit_row "$1" "$2" "$3" "$4" "$5"
+    _emit_row "$1" "$2" "$3" "$4" "$5" "$6" "$7" "-" "-" "-" "$8" "$9" "${10}" "${11}" "${12}"
   done
 
   if [ -n "${HGEMM_SHAPES:-}" ]; then
@@ -860,7 +761,7 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
         shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_sk${split_k}"
         row="$(_py_parse_and_emit hgemm "${shape_tag}" "${dtype}" "${log}")"
         set -- $row
-        _emit_row "$1" "$2" "$3" "$4" "$5"
+        _emit_row "$1" "$2" "$3" "$4" "$5" "$6" "$7" "-" "-" "-" "$8" "$9" "${10}" "${11}" "${12}"
       fi
     else
       _fail_or_skip "${log}" "hgemm"
@@ -902,7 +803,7 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
           shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}_${preshuffle_tag}"
           row="$(_py_parse_and_emit fp8_8wave_rowscale "${shape_tag}" "${dtype}" "${log}")"
           set -- $row
-          _emit_row "$1" "$2" "$3" "$4" "$5"
+          _emit_row "$1" "$2" "$3" "$4" "$5" "$6" "$7" "-" "-" "-" "$8" "$9" "${10}" "${11}" "${12}"
         fi
       else
         if grep -q "requires CDNA4\|Skipped:" "${log}" 2>/dev/null; then
@@ -945,7 +846,7 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
         row="$(_py_parse_and_emit gemm_fp4 "${gemm_shape_tag}" "${dtype}" "${log}")"
         set -- $row
-        _emit_row "$1" "$2" "$3" "$4" "$5"
+        _emit_row "$1" "$2" "$3" "$4" "$5" "$6" "$7" "-" "-" "-" "$8" "$9" "${10}" "${11}" "${12}"
       fi
     else
       # Skip gracefully on unsupported architectures or missing features
@@ -995,14 +896,15 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
 
     dt_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
+    us_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:[[:space:]]*[0-9.]+[[:space:]]*us' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
     tf_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
     tb_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
     if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
-      _emit_row "moe_gemm1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
+      _emit_row "moe_gemm1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}" "${us_s1:--}" "reported"
     fi
 
-    _emit_moe_s2_rows "moe_gemm2" "${shape_moe}" "${log}" | while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf; do
-      _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}"
+    _emit_moe_s2_rows "moe_gemm2" "${shape_moe}" "${log}" | while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf _us _stat _warm _iters _instrument _schedule _cache; do
+      _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}" "${_us:--}" "${_stat:-reported}" "-" "-" "-" "${_warm:--}" "${_iters:--}" "${_instrument:-reported}" "${_schedule:-unknown}" "${_cache:-unknown}"
     done
   done
 
@@ -1041,14 +943,15 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
         shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
 
         dt_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
+        us_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:[[:space:]]*[0-9.]+[[:space:]]*us' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
         tf_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
         tb_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
         if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
-          _emit_row "moe_fp4_s1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
+          _emit_row "moe_fp4_s1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}" "${us_s1:--}" "reported"
         fi
 
-        _emit_moe_s2_rows "moe_fp4_s2" "${shape_moe}" "${log}" | while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf; do
-          _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}"
+        _emit_moe_s2_rows "moe_fp4_s2" "${shape_moe}" "${log}" | while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf _us _stat _warm _iters _instrument _schedule _cache; do
+          _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}" "${_us:--}" "${_stat:-reported}" "-" "-" "-" "${_warm:--}" "${_iters:--}" "${_instrument:-reported}" "${_schedule:-unknown}" "${_cache:-unknown}"
         done
       fi
     else
@@ -1096,14 +999,15 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
 
     dt_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
+    us_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:[[:space:]]*[0-9.]+[[:space:]]*us' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
     tf_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
     tb_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
     if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
-      _emit_row "moe_w4a16_s1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
+      _emit_row "moe_w4a16_s1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}" "${us_s1:--}" "reported"
     fi
 
-    _emit_moe_s2_rows "moe_w4a16_s2" "${shape_moe}" "${log}" | while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf; do
-      _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}"
+    _emit_moe_s2_rows "moe_w4a16_s2" "${shape_moe}" "${log}" | while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf _us _stat _warm _iters _instrument _schedule _cache; do
+      _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}" "${_us:--}" "${_stat:-reported}" "-" "-" "-" "${_warm:--}" "${_iters:--}" "${_instrument:-reported}" "${_schedule:-unknown}" "${_cache:-unknown}"
     done
   done
 
@@ -1142,14 +1046,15 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
 
         dt_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
+        us_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:[[:space:]]*[0-9.]+[[:space:]]*us' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
         tf_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
         tb_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
         if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
-          _emit_row "moe_a8w4_s1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
+          _emit_row "moe_a8w4_s1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}" "${us_s1:--}" "reported"
         fi
 
-        _emit_moe_s2_rows "moe_a8w4_s2" "${shape_moe}" "${log}" | while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf; do
-          _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}"
+        _emit_moe_s2_rows "moe_a8w4_s2" "${shape_moe}" "${log}" | while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf _us _stat _warm _iters _instrument _schedule _cache; do
+          _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}" "${_us:--}" "${_stat:-reported}" "-" "-" "-" "${_warm:--}" "${_iters:--}" "${_instrument:-reported}" "${_schedule:-unknown}" "${_cache:-unknown}"
         done
       fi
     else
