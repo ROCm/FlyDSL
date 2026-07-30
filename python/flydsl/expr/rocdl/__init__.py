@@ -24,6 +24,44 @@ from . import rdna4 as rdna4
 from .enum import SyncScope as SyncScope
 from .universal import *
 
+__all__ = [
+    # Targets
+    "cdna3",
+    "cdna4",
+    # "cdna5", unstable for now
+    "rdna3",
+    "rdna4",
+    # Enums
+    "SyncScope",
+    # Re-exported from .universal
+    "s_waitcnt",
+    "BufferCopy",
+    "BufferCopy8b",
+    "BufferCopy16b",
+    "BufferCopy32b",
+    "BufferCopy64b",
+    "BufferCopy128b",
+    "BufferCopyLDS",
+    "BufferCopyLDS32b",
+    "BufferCopyLDS64b",
+    "BufferCopyLDS128b",
+    "BufferAtomic",
+    "BufferAtomicAdd",
+    "BufferAtomicMax",
+    "BufferAtomicMin",
+    "BufferAtomicPkAdd",
+    "MFMA",
+    "WMMA",
+    "make_buffer_ptr",
+    "make_buffer_tensor",
+    "get_buffer_rsrc",
+    # Operations
+    "sched_mfma",
+    "sched_vmem",
+    "sched_dsrd",
+    "sched_dswr",
+]
+
 # Keep references to ODS-generated builders so we can wrap them without losing access.
 _ods_wmma_scale_f32_16x16x128_f8f6f4 = globals().get("wmma_scale_f32_16x16x128_f8f6f4", None)
 _ods_wmma_scale_f32_32x16x128_f4 = globals().get("wmma_scale_f32_32x16x128_f4", None)
