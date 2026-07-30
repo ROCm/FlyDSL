@@ -140,8 +140,14 @@ def run_flex_config(name, B, S, H, Hkv, D, dtype_str, *, S_kv=None, warmup=0, it
 
     def _kernel():
         return flydsl_flex_attention(
-            q, k, v, score_mod=score_mod, mask_mod=mask_mod, scale=scale,
-            num_kv_heads=Hkv, return_lse=return_lse,
+            q,
+            k,
+            v,
+            score_mod=score_mod,
+            mask_mod=mask_mod,
+            scale=scale,
+            num_kv_heads=Hkv,
+            return_lse=return_lse,
         )
 
     result = _kernel()
@@ -153,7 +159,17 @@ def run_flex_config(name, B, S, H, Hkv, D, dtype_str, *, S_kv=None, warmup=0, it
     max_err, min_cos, passed = _acc_metric(out.float(), ref_out.float(), D)
     logging.info(
         "[%s] B=%d S=%d Skv=%d H=%d Hkv=%d D=%d %s: max_err=%.4g min_cos=%.4g -> %s",
-        name, B, S, S_kv, H, Hkv, D, dtype_str, max_err, min_cos, "PASS" if passed else "FAIL",
+        name,
+        B,
+        S,
+        S_kv,
+        H,
+        Hkv,
+        D,
+        dtype_str,
+        max_err,
+        min_cos,
+        "PASS" if passed else "FAIL",
     )
 
     lse_err = None
@@ -177,7 +193,7 @@ _CASES = ["no_mod", "alibi", "sliding_window", "causal_via_mask"]
 _SHAPES = [
     (2, 256, 8, 8, 128),  # MHA
     (2, 256, 8, 2, 128),  # GQA
-    (1, 256, 4, 4, 64),   # D=64
+    (1, 256, 4, 4, 64),  # D=64
 ]
 
 
@@ -257,8 +273,16 @@ def main():
 
     Hkv = args.num_kv_heads or args.num_heads
     r = run_flex_config(
-        args.case, args.batch, args.seq_len, args.num_heads, Hkv, args.head_dim,
-        args.dtype, warmup=args.warmup, iters=args.iters, bench=True,
+        args.case,
+        args.batch,
+        args.seq_len,
+        args.num_heads,
+        Hkv,
+        args.head_dim,
+        args.dtype,
+        warmup=args.warmup,
+        iters=args.iters,
+        bench=True,
     )
     if r["us"] is not None:
         flops = _flops(args.seq_len, args.seq_len, args.num_heads, args.head_dim, args.batch, causal=False)
@@ -276,10 +300,11 @@ def main():
         except Exception:  # noqa: BLE001
             gpu = "unknown"
         print(f"GPU: {gpu}")
-        print(f"  {'config':<16} {'shape':<27} | {'St':>6} | {'MaxErr':>8} {'MinCos':>8} | {'Time(us)':>10} {'TFLOPS':>9}")
         print(
-            f"{prefix} | {status:>6} | {r['max_err']:>8.2e} {r['min_cos']:>8.5f} | "
-            f"{r['us']:>10.1f} {tflops:>9.1f}"
+            f"  {'config':<16} {'shape':<27} | {'St':>6} | {'MaxErr':>8} {'MinCos':>8} | {'Time(us)':>10} {'TFLOPS':>9}"
+        )
+        print(
+            f"{prefix} | {status:>6} | {r['max_err']:>8.2e} {r['min_cos']:>8.5f} | " f"{r['us']:>10.1f} {tflops:>9.1f}"
         )
 
 
