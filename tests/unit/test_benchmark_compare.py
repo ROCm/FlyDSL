@@ -175,10 +175,7 @@ def test_compare_benchmark_fails_when_allowlisted_row_disappears(tmp_path, monke
     current = tmp_path / "current.csv"
     thresholds = tmp_path / "thresholds.json"
     _write_csv(baseline, avg_us="100")
-    current.write_text(
-        "op,shape,dtype,tbps,tflops,status,avg_us,arch\n"
-        "gemm,1x1x1,bf16,-,1.0,ok,10,gfx950\n"
-    )
+    current.write_text("op,shape,dtype,tbps,tflops,status,avg_us,arch\n" "gemm,1x1x1,bf16,-,1.0,ok,10,gfx950\n")
     thresholds.write_text(
         json.dumps(
             {
@@ -335,10 +332,7 @@ def test_baseline_only_row_on_another_arch_is_not_gated(tmp_path, monkeypatch):
     current = tmp_path / "current.csv"
     thresholds = tmp_path / "thresholds.json"
     _write_csv(baseline, avg_us="100", arch="gfx942")
-    current.write_text(
-        "op,shape,dtype,tbps,tflops,status,avg_us,arch\n"
-        "gemm,1x1x1,bf16,-,1.0,ok,10,gfx950\n"
-    )
+    current.write_text("op,shape,dtype,tbps,tflops,status,avg_us,arch\n" "gemm,1x1x1,bf16,-,1.0,ok,10,gfx950\n")
     thresholds.write_text(
         json.dumps(
             {
@@ -440,9 +434,7 @@ def test_csv_arch_cannot_override_trusted_runner_arch(tmp_path, monkeypatch):
     thresholds = tmp_path / "thresholds.json"
     _write_csv(baseline, avg_us="100", arch="gfx950")
     _write_csv(current, avg_us="100", arch="gfx1201")
-    thresholds.write_text(
-        json.dumps({"version": 1, "architectures": {"gfx950": [], "gfx1201": []}})
-    )
+    thresholds.write_text(json.dumps({"version": 1, "architectures": {"gfx950": [], "gfx1201": []}}))
     monkeypatch.setattr(
         sys,
         "argv",
@@ -466,9 +458,7 @@ def test_baseline_arch_must_match_trusted_runner_arch(tmp_path, monkeypatch):
     thresholds = tmp_path / "thresholds.json"
     _write_csv(baseline, avg_us="100", arch="gfx1201")
     _write_csv(current, avg_us="100", arch="gfx950")
-    thresholds.write_text(
-        json.dumps({"version": 1, "architectures": {"gfx950": [], "gfx1201": []}})
-    )
+    thresholds.write_text(json.dumps({"version": 1, "architectures": {"gfx950": [], "gfx1201": []}}))
     monkeypatch.setattr(
         sys,
         "argv",

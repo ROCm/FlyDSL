@@ -958,11 +958,7 @@ def bench_profiled_device_us(fn, warmup=BENCH_WARMUP, iters=BENCH_MEASURE):
 def _make_moe_graph_verifier(outputs_fn, unit_size, extra_outputs_fn=None):
     """Verify every meaningful MoE sorting output after graph replay."""
     references = tuple(output.clone() for output in outputs_fn())
-    extra_references = (
-        tuple(output.clone() for output in extra_outputs_fn())
-        if extra_outputs_fn is not None
-        else ()
-    )
+    extra_references = tuple(output.clone() for output in extra_outputs_fn()) if extra_outputs_fn is not None else ()
     num_padded = int(references[3][0].item())
     num_valid_blocks = num_padded // unit_size
 
@@ -982,10 +978,7 @@ def _make_moe_graph_verifier(outputs_fn, unit_size, extra_outputs_fn=None):
             and torch.equal(ids[:num_padded], ref_ids[:num_padded])
             and torch.equal(weights[:num_padded], ref_weights[:num_padded])
             and torch.equal(expert_ids[:num_valid_blocks], ref_expert_ids[:num_valid_blocks])
-            and all(
-                torch.equal(output, reference)
-                for output, reference in zip(extra_outputs, extra_references)
-            )
+            and all(torch.equal(output, reference) for output, reference in zip(extra_outputs, extra_references))
         )
 
     return verify

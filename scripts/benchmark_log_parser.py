@@ -179,10 +179,7 @@ def main() -> int:
         )
         emitted = True
     if not emitted:
-        print(
-            f"{args.op_prefix}_atomic\t{args.shape}\t-\t-\t-\t-\treported\t"
-            "-\t-\treported\tunknown\tunknown"
-        )
+        print(f"{args.op_prefix}_atomic\t{args.shape}\t-\t-\t-\t-\treported\t" "-\t-\treported\tunknown\tunknown")
     return 0
 
 

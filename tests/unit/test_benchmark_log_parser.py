@@ -61,8 +61,7 @@ def test_parse_metrics_normalizes_raw_microseconds(
 
 def test_softmax_style_keeps_first_base_measurement():
     metrics = parse_metrics(
-        "Kernel avg time: 0.1000 ms\nBandwidth: 4000 GB/s\n"
-        "Kernel avg time: 0.5000 ms\nBandwidth: 1000 GB/s\n"
+        "Kernel avg time: 0.1000 ms\nBandwidth: 4000 GB/s\n" "Kernel avg time: 0.5000 ms\nBandwidth: 1000 GB/s\n"
     )
     assert metrics.avg_us == 100.0
     assert metrics.tbps == 4.0
@@ -98,10 +97,7 @@ def test_legacy_five_column_output_converts_to_enriched_csv(tmp_path, monkeypatc
     source = tmp_path / "benchmark.out"
     destination = tmp_path / "benchmark.csv"
     long_shape = "5120x5120x8320_tile128x256x128_2tg"
-    source.write_text(
-        "op shape dtype TB/s TFLOPS\n"
-        f"gemm {long_shape} bf16 4.000 -\n"
-    )
+    source.write_text("op shape dtype TB/s TFLOPS\n" f"gemm {long_shape} bf16 4.000 -\n")
     monkeypatch.setattr(
         sys,
         "argv",

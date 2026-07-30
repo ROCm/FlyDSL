@@ -209,10 +209,7 @@ def test_ingest_run_parses_completed_failure_logs(monkeypatch):
     monkeypatch.setattr(
         ingest,
         "gh_text",
-        lambda path: (
-            "op shape dtype TB/s TFLOPS\n"
-            "softmax 32768x8192 bf16 4.000 -\n"
-        ),
+        lambda path: ("op shape dtype TB/s TFLOPS\n" "softmax 32768x8192 bf16 4.000 -\n"),
     )
     run = {
         "id": 1,

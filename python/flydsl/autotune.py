@@ -283,11 +283,7 @@ def do_bench(
         raise ValueError("pipelined schedule cannot include prep_fn or cache flushing")
 
     flush_device = getattr(stream, "device", "cuda")
-    flush_buf = (
-        torch.empty(flush_bytes, dtype=torch.uint8, device=flush_device)
-        if flush_bytes
-        else None
-    )
+    flush_buf = torch.empty(flush_bytes, dtype=torch.uint8, device=flush_device) if flush_bytes else None
     stream_context = torch.cuda.stream(stream) if stream is not None else nullcontext()
 
     def prepare():
