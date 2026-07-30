@@ -688,6 +688,7 @@ def _gemm1_body_a16w4(
     NE,
     TOPK,
     act="silu",
+    b_cache_mod=2,
 ):
     """a16w4 (bf16 A x mxfp4 W) fused stage1 gemm1 body (aiter-aligned, un-pipelined).
 
@@ -843,7 +844,7 @@ def _gemm1_body_a16w4(
             )
             # dwordx4 load: idx_pack is a fp4-byte offset; convert to i32-dword index.
             v4 = buffer_ops.buffer_load(
-                _raw(w_rsrc), _raw(idx_pack // fx.Int32(4)), vec_width=4, dtype=T.i32, cache_modifier=2
+                _raw(w_rsrc), _raw(idx_pack // fx.Int32(4)), vec_width=4, dtype=T.i32, cache_modifier=b_cache_mod
             )
             v4 = fx.Vector(v4)
             raw.append([fx.Int32(v4[j]) for j in range(4)])
@@ -1181,6 +1182,7 @@ def compile_gemm1_a16w4_port(
     TILE_N=256,
     TILE_K=256,
     act="silu",
+    b_cache_mod=2,
 ):
     """a16w4 (bf16 A x mxfp4 W1) fused stage1 builder.
 
@@ -1202,7 +1204,8 @@ def compile_gemm1_a16w4_port(
 
     assert act in ("silu", "situv2"), f"a16w4 gemm1 act must be 'silu' or 'situv2', got {act!r}"
     _act_tag = "" if act == "silu" else f"_{act}"
-    name_suffix = f"a16w4_h{_K}_i{_INTER}_ne{NE}_bm{BM}_tn{TILE_N}{_act_tag}"
+    _bcm_tag = "" if b_cache_mod == 2 else f"_bcm{b_cache_mod}"
+    name_suffix = f"a16w4_h{_K}_i{_INTER}_ne{NE}_bm{BM}_tn{TILE_N}{_act_tag}{_bcm_tag}"
 
     @fx.struct
     class SharedStorage:
@@ -1249,6 +1252,7 @@ def compile_gemm1_a16w4_port(
                 NE=NE,
                 TOPK=TOPK,
                 act=act,
+                b_cache_mod=b_cache_mod,
             )
 
     @flyc.jit
