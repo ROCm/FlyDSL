@@ -336,13 +336,16 @@ def flydsl_a16w4_gemm2(
     if D_HIDDEN % TILE_N != 0:
         raise NotImplementedError(f"a16w4 gemm2 requires D_HIDDEN (model_dim) % {TILE_N} == 0, got H={D_HIDDEN}")
 
-    # B (mxfp4 weight) cache modifier: at small M the whole expert's B is reused
-    # across few M-blocks, so CACHED loads (nt off, cache_modifier=0) win on L2
-    # reuse; at larger M non-temporal streaming (cache_modifier=2) is better. This
-    # mirrors aiter's per-token bnt0 (cached, M<=~16) vs bnt2 (nt) gemm2 selection.
-    # Measured crossover (median-of-5, 3584x512): cached wins tok1/8/16, nt wins
-    # tok32+ (a16w4 gemm2 only; a4w4/a8w4 path unaffected).
-    _b_cache_mod = 0 if int(M_logical) <= 16 else 2
+    # B (mxfp4 weight) cache modifier, per-token (a16w4 gemm2 only; a4w4/a8w4
+    # unaffected). Measured (median-of-5, 3584x512) is a U-shape: CACHED loads
+    # (cache_modifier=0) win at BOTH ends -- small M (whole expert's B reused across
+    # few M-blocks) and large M (>=2048; high L2 residency, L2 hit ~65% -> streaming
+    # would bypass a reusable cache) -- while non-temporal streaming
+    # (cache_modifier=2) wins the middle band (32..1024, where streaming avoids L2
+    # pollution). Crossovers: cached<->nt between tok16/32, nt<->cached between
+    # tok1024/2048.
+    _m = int(M_logical)
+    _b_cache_mod = 0 if (_m <= 16 or _m >= 2048) else 2
     launch = _get_compiled_gemm2_a16w4(BM, NE, D_HIDDEN, D_INTER, TILE_N, TILE_K, _b_cache_mod)
     max_m_blocks = int(sorted_expert_ids.numel())
     grid = gemm2_a16w4_grid(BM, N_OUT=D_HIDDEN, TILE_N=TILE_N, max_m_blocks=max_m_blocks)
