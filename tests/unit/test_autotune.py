@@ -593,10 +593,13 @@ def artifact_dir(tmp_path, monkeypatch):
     return path
 
 
-def _emit_artifact(monkeypatch, artifact_dir, *, args=None, config=None):
+def _emit_artifact(monkeypatch, artifact_dir, *, args=None, config=None, artifact_bundle=False):
     args = args or (FakeTensor((16, 512)), FakeTensor((1,)), 16, 512, "bf16")
     monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
-    tuner = _make_artifact_tuner(configs=[config or Config(BLOCK_THREADS=64)])
+    tuner = _make_artifact_tuner(
+        configs=[config or Config(BLOCK_THREADS=64)],
+        artifact_bundle=artifact_bundle,
+    )
     tuner(*args)
     files = list(artifact_dir.glob("*.json"))
     assert len(files) == 1
@@ -606,11 +609,9 @@ def _emit_artifact(monkeypatch, artifact_dir, *, args=None, config=None):
 def test_artifact_lifecycle(monkeypatch, tmp_path, artifact_dir):
     path, args = _emit_artifact(monkeypatch, artifact_dir)
     payload = json.loads(path.read_text())
-    entry = next(iter(payload["entries"].values()))
 
-    assert payload["name"] == "rmsnorm"
-    assert entry["identity"]["key"] == {"m_in": 16, "N": 512, "dtype_str": "bf16"}
-    assert entry["config"] == {"BLOCK_THREADS": 64}
+    assert payload["identity"]["key"] == {"m_in": 16, "N": 512, "dtype_str": "bf16"}
+    assert payload["config"] == {"BLOCK_THREADS": 64}
 
     monkeypatch.delenv("FLYDSL_AUTOTUNE")
     monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "fresh-cache"))
@@ -635,16 +636,15 @@ def test_artifact_lifecycle(monkeypatch, tmp_path, artifact_dir):
     monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
     replacement = _make_artifact_tuner(configs=[Config(BLOCK_THREADS=128)])
     replacement(*args)
-    payload = json.loads(path.read_text())
-    assert next(iter(payload["entries"].values()))["config"] == {"BLOCK_THREADS": 128}
+    assert json.loads(path.read_text())["config"] == {"BLOCK_THREADS": 128}
 
 
 def test_artifact_bundle_holds_multiple_identities(monkeypatch, tmp_path, artifact_dir):
     monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
     first = (FakeTensor((16, 512)), FakeTensor((1,)), 16, 512, "bf16")
     second = (FakeTensor((32, 512)), FakeTensor((1,)), 32, 512, "bf16")
-    _make_artifact_tuner(configs=[Config(BLOCK_THREADS=64)])(*first)
-    _make_artifact_tuner(configs=[Config(BLOCK_THREADS=128)])(*second)
+    _make_artifact_tuner(configs=[Config(BLOCK_THREADS=64)], artifact_bundle=True)(*first)
+    _make_artifact_tuner(configs=[Config(BLOCK_THREADS=128)], artifact_bundle=True)(*second)
 
     files = list(artifact_dir.glob("*.json"))
     assert [path.name for path in files] == ["rmsnorm.json"]
@@ -730,11 +730,12 @@ def test_cached_artifact_is_revalidated_for_each_call(monkeypatch, tmp_path, art
     assert tuner._load_artifact(ref, args, {}).to_dict() == {"BLOCK_THREADS": 64}
 
 
+@pytest.mark.parametrize("artifact_bundle", [False, True], ids=["legacy", "bundle"])
 @pytest.mark.parametrize("case", ["corrupt", "version", "identity", "config", "override", "type"])
-def test_invalid_artifact_falls_back(monkeypatch, tmp_path, artifact_dir, case):
-    path, args = _emit_artifact(monkeypatch, artifact_dir)
+def test_invalid_artifact_falls_back(monkeypatch, tmp_path, artifact_dir, case, artifact_bundle):
+    path, args = _emit_artifact(monkeypatch, artifact_dir, artifact_bundle=artifact_bundle)
     payload = json.loads(path.read_text())
-    entry = next(iter(payload["entries"].values()))
+    entry = next(iter(payload["entries"].values())) if artifact_bundle else payload
     if case == "corrupt":
         path.write_text("{")
     else:
@@ -825,6 +826,16 @@ def test_unavailable_device_identity_falls_back_but_blocks_generation(monkeypatc
 def test_artifact_name_must_be_safe(name):
     with pytest.raises((TypeError, ValueError), match="artifact_name"):
         _make_artifact_tuner(artifact_name=name)
+
+
+def test_artifact_bundle_requires_name():
+    with pytest.raises(ValueError, match="artifact_bundle requires artifact_name"):
+        _make_tuner(artifact_bundle=True)
+
+
+def test_artifact_bundle_must_be_bool():
+    with pytest.raises(TypeError, match="artifact_bundle must be a bool"):
+        _make_artifact_tuner(artifact_bundle=1)
 
 
 def test_artifact_key_must_name_a_kernel_parameter():

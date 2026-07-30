@@ -228,6 +228,7 @@ class Autotuner:
         do_bench_fn=None,
         default=None,
         artifact_name=None,
+        artifact_bundle=False,
     ):
         self.fn = fn  # JitFunction instance
         self.configs = configs
@@ -260,7 +261,12 @@ class Autotuner:
                 raise ValueError("artifact_name must use 1-64 letters, digits, '.', '_' or '-'")
             if len(set(self.key)) != len(self.key) or any(name not in self._signature.parameters for name in self.key):
                 raise ValueError("artifact keys must be unique kernel parameter names")
+        if type(artifact_bundle) is not bool:
+            raise TypeError("artifact_bundle must be a bool")
+        if artifact_bundle and artifact_name is None:
+            raise ValueError("artifact_bundle requires artifact_name")
         self.artifact_name = artifact_name
+        self.artifact_bundle = artifact_bundle
         self._artifact_cache = {}
 
         # Disk cache
@@ -586,11 +592,20 @@ class Autotuner:
     def _emit_artifact(self, config, ref, args, kwargs):
         if config.pre_hook is not None:
             raise ValueError("offline configs cannot serialize Config.pre_hook")
-        path, _legacy_path, digest, identity = ref
+        path, legacy_path, digest, identity = ref
         body = config.to_dict()
         if json.loads(_canonical_json(body)) != body:
             raise ValueError("offline config values must preserve their types in JSON")
         self._decode_artifact_config(body, args, kwargs)
+        if not self.artifact_bundle and not path.is_file():
+            payload = {"version": _ARTIFACT_VERSION, "identity": identity, "config": body}
+            legacy_path.parent.mkdir(parents=True, exist_ok=True)
+            with atomic_write(legacy_path, mode="w", encoding="utf-8") as output:
+                json.dump(payload, output, indent=2, sort_keys=True, allow_nan=False)
+                output.write("\n")
+            self._artifact_cache[(str(path), digest)] = body
+            log().info(f"Wrote offline config {legacy_path}")
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
         lock_fd = os.open(path.parent, os.O_RDONLY)
         try:
@@ -764,6 +779,7 @@ def autotune(
     do_bench: Callable = None,
     default: Callable = None,
     artifact_name: str = None,
+    artifact_bundle: bool = False,
 ):
     """Autotune decorator for @jit functions.
 
@@ -781,6 +797,8 @@ def autotune(
         artifact_name: stable name for opt-in config lookup and emission through
             ``FLYDSL_AUTOTUNE_CONFIG_DIR``. The existing ``key`` defines the
             portable call axes; forced tuning emits a matching artifact.
+        artifact_bundle: write all identities for ``artifact_name`` to one
+            bundle. Disabled by default to preserve the legacy artifact format.
         restore_value: tensor args the kernel mutates in place (output overlaps
             input, or accumulation). Snapshotted and restored before each bench
             rep so every config is measured on identical inputs. Required when
@@ -804,6 +822,7 @@ def autotune(
             do_bench_fn=do_bench,
             default=default,
             artifact_name=artifact_name,
+            artifact_bundle=artifact_bundle,
         )
 
     return decorator
