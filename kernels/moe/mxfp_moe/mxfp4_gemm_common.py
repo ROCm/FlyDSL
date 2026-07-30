@@ -165,7 +165,7 @@ def _fabs_f32(x):
 def _e8m0_roundup(amax_f32):
     wi = fx.Int32(_raw(amax_f32 * fx.Float32(1.0 / 6.0)).bitcast(T.i32))
     bexp = (wi + fx.Int32(0x7FFFFF)).shrui(fx.Int32(23)) & fx.Int32(0xFF)
-    lt = arith.cmpi(arith.CmpIPredicate.ult, _raw(bexp), _raw(fx.Int32(254)))
+    lt = fx.as_ir_value((bexp) < (fx.Int32(254)))
     return fx.Int32(arith.select(lt, _raw(bexp), _raw(fx.Int32(254))))
 
 
@@ -196,7 +196,7 @@ def _silu_mul_batch(gs, us):
 
 
 def _umax_i32(a, b):
-    is_gt = arith.cmpi(arith.CmpIPredicate.ugt, _raw(a), _raw(b))
+    is_gt = fx.as_ir_value((a) > (b))
     return fx.Int32(arith.select(is_gt, _raw(a), _raw(b)))
 
 

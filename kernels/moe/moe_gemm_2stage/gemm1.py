@@ -372,7 +372,7 @@ def compile_moe_gemm1(
             )
             max_token_id_i32 = buffer_ops.buffer_load(maxids_rsrc, fx.Index(0), vec_width=1, dtype=T.i32)
             bx_m_i32 = arith.index_cast(T.i32, bx_m)
-            blk_valid = arith.cmpi(arith.CmpIPredicate.ult, bx_m_i32, max_token_id_i32)
+            blk_valid = bx_m_i32 < max_token_id_i32
             # Common constants/atoms (hoisted): keep IR small like GEMM.
             # XOR16 swizzle parameter (in bytes; constant, power-of-two in our configs).
             k_blocks16 = arith.index(tile_k_bytes // 16)
@@ -381,7 +381,7 @@ def compile_moe_gemm1(
 
             # Everything below is gated by `blk_valid` to avoid doing buffer-resource setup and
             # gmem work for padding blocks.
-            _if_blk = scf.IfOp(blk_valid)
+            _if_blk = scf.IfOp(as_ir_value(blk_valid))
             with _if_then(_if_blk):
                 base_ptr = allocator.get_base()
                 lds_x_ptr = SmemPtr(
@@ -515,7 +515,7 @@ def compile_moe_gemm1(
                     t_raw = fused_i & mask24
                     # NOTE: aiter moe_sorting uses sentinel token_id == tokens for padding.
                     # Do NOT rely on buffer OOB semantics for X loads; explicitly mask to a safe row.
-                    t_valid_i32 = arith.cmpi(arith.CmpIPredicate.ult, t_raw, tokens_i32)
+                    t_valid_i32 = t_raw < tokens_i32
                     if const_expr(x_is_token_slot):
                         s_raw = fused_i >> 24
                         # X is indexed by token-slot in **slot-major** order:
@@ -1304,7 +1304,7 @@ def compile_moe_gemm1(
                         # Load per-row scale_x (sx) — same logic as normal epilogue.
                         fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=T.i32)
                         t2 = fused2 & mask24_i32
-                        t_valid = arith.cmpi(arith.CmpIPredicate.ult, t2, tokens_i32_v)
+                        t_valid = as_ir_value(t2 < tokens_i32_v)
                         if const_expr(x_is_token_slot):
                             s2 = fused2 >> 24
                             ts2 = s2 * tokens_i32_v + t2
@@ -1349,7 +1349,7 @@ def compile_moe_gemm1(
                         fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=T.i32)
                         t2 = fused2 & mask24_i32
                         s2 = fused2 >> 24
-                        t_ok = arith.cmpi(arith.CmpIPredicate.ult, t2, tokens_i32_v)
+                        t_ok = as_ir_value(t2 < tokens_i32_v)
                         t_idx = arith.index_cast(T.index, t2)
                         s_idx = arith.index_cast(T.index, s2)
                         ts_idx = t_idx * arith.index(topk) + s_idx
@@ -1490,7 +1490,7 @@ def compile_moe_gemm1(
                         s2 = fused2 >> 24
                         # aiter moe_sorting uses sentinel token_id == tokens for padding.
                         # Do NOT rely on buffer OOB semantics for scale loads; explicitly mask.
-                        t_valid = arith.cmpi(arith.CmpIPredicate.ult, t2, tokens_i32_v)
+                        t_valid = as_ir_value(t2 < tokens_i32_v)
                         if const_expr(x_is_token_slot):
                             # slot-major: slot*tokens + token
                             ts2 = s2 * tokens_i32_v + t2
@@ -1566,7 +1566,7 @@ def compile_moe_gemm1(
                         # OOB buffer stores are not guaranteed to be safe on all paths, so predicate explicitly.
                         fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=T.i32)
                         t2 = fused2 & mask24_i32
-                        t_valid = arith.cmpi(arith.CmpIPredicate.ult, t2, tokens_i32_v)
+                        t_valid = as_ir_value(t2 < tokens_i32_v)
                         _if_valid = scf.IfOp(t_valid)
                         with _if_then(_if_valid):
                             idx0 = row_ctx
@@ -1609,7 +1609,7 @@ def compile_moe_gemm1(
                     s2_raw = fused2 >> 24
                     t2 = t2_raw
                     s2 = s2_raw
-                    t_valid = arith.cmpi(arith.CmpIPredicate.ult, t2, tokens_i32_v)
+                    t_valid = as_ir_value(t2 < tokens_i32_v)
 
                     # Do NOT rely on buffer OOB semantics for scale loads; explicitly mask.
                     if const_expr(x_is_token_slot):

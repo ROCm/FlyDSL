@@ -38,7 +38,7 @@ def swizzle_xor16(row, col, k_blocks16):
     from flydsl.expr import arith as _swz_arith
 
     mask = k_blocks16 - _swz_arith.index(1)
-    rem = _swz_arith.andi(row, mask)
+    rem = (row) & (mask)
     return col ^ (rem * 16)
 
 

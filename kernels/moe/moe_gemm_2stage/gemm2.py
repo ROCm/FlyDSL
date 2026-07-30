@@ -445,7 +445,7 @@ def compile_moe_gemm2(
             )
             num_valid_i32 = buffer_ops.buffer_load(numids_rsrc, fx.Index(0), vec_width=1, dtype=T.i32)
             bx_m_i32 = arith.index_cast(T.i32, bx_m)
-            blk_valid = arith.cmpi(arith.CmpIPredicate.ult, bx_m_i32, num_valid_i32)
+            blk_valid = bx_m_i32 < num_valid_i32
 
             def _moe_gemm2_then_body():
                 # Expert id for this M tile.
@@ -532,8 +532,8 @@ def compile_moe_gemm2(
                     s_i32 = fused_i >> 24
                     # aiter moe_sorting uses sentinel token_id == tokens for padding.
                     # Do NOT rely on buffer OOB semantics for A2/scale loads; explicitly mask.
-                    t_valid = arith.cmpi(arith.CmpIPredicate.ult, t_i32, tokens_i32)
-                    s_valid = arith.cmpi(arith.CmpIPredicate.ult, s_i32, topk_i32)
+                    t_valid = t_i32 < tokens_i32
+                    s_valid = s_i32 < topk_i32
                     ts_valid = t_valid & s_valid
                     t_safe = ts_valid.select(t_i32, fx.Int32(0))
                     s_safe = ts_valid.select(s_i32, fx.Int32(0))
@@ -1222,8 +1222,8 @@ def compile_moe_gemm2(
 
                         # Mask sentinel (token_id==tokens, slot==topk) to avoid OOB scale_x loads.
                         # For invalid rows, force sx=0 so they contribute exactly 0 to output.
-                        t_ok = arith.cmpi(arith.CmpIPredicate.ult, t2, tokens_i32)
-                        s_ok = arith.cmpi(arith.CmpIPredicate.ult, s2, topk_i32_v)
+                        t_ok = t2 < tokens_i32
+                        s_ok = s2 < topk_i32_v
                         ts_ok = t_ok & s_ok
                         t2_safe = ts_ok.select(t2, fx.Int32(0))
                         s2_safe = ts_ok.select(s2, fx.Int32(0))
@@ -1299,8 +1299,8 @@ def compile_moe_gemm2(
                         t2 = fused2 & mask24_i32
                         s2 = fused2 >> 24
                         # Explicitly mask sentinel token/slot to avoid OOB scale_x loads.
-                        t_ok = arith.cmpi(arith.CmpIPredicate.ult, t2, tokens_i32)
-                        s_ok = arith.cmpi(arith.CmpIPredicate.ult, s2, topk_i32_v)
+                        t_ok = t2 < tokens_i32
+                        s_ok = s2 < topk_i32_v
                         ts_ok = t_ok & s_ok
                         t2_safe = ts_ok.select(t2, fx.Int32(0))
                         s2_safe = ts_ok.select(s2, fx.Int32(0))
@@ -1350,13 +1350,13 @@ def compile_moe_gemm2(
                         # for invalid tail rows (CK-style), avoiding per-store branching.
                         fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=T.i32)
                         row_i32 = arith.index_cast(T.i32, row)
-                        row_valid0 = arith.cmpi(arith.CmpIPredicate.ult, row_i32, num_valid_i32)
+                        row_valid0 = row_i32 < num_valid_i32
                         t = fused2 & mask24_i32
                         s = fused2 >> 24
-                        t_ok = arith.cmpi(arith.CmpIPredicate.ult, t, tokens_i32)
-                        s_ok = arith.cmpi(arith.CmpIPredicate.ult, s, topk_i32_v)
+                        t_ok = t < tokens_i32
+                        s_ok = s < topk_i32_v
                         row_valid = row_valid0 & t_ok & s_ok
-                        return (fused2, row_valid)
+                        return (fused2, as_ir_value(row_valid))
 
                     def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
                         fused = row_ctx
@@ -1420,7 +1420,7 @@ def compile_moe_gemm2(
                         store_pair=store_pair,
                     )
 
-            _if_blk = scf.IfOp(blk_valid)
+            _if_blk = scf.IfOp(as_ir_value(blk_valid))
             with _if_then(_if_blk):
                 _moe_gemm2_then_body()
 

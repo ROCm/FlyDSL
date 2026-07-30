@@ -630,12 +630,7 @@ def compile_small_m_hgemm_kernel(
         ]
         tile_n_offsets = [tile_block_n_idx * fx.Index(BLOCK_N) for tile_block_n_idx in tile_block_n_indices]
         tile_actives = [
-            arith.cmpi(
-                arith.CmpIPredicate.ult,
-                tile_block_n_idx,
-                fx.Index(block_n_tiles),
-            )
-            for tile_block_n_idx in tile_block_n_indices
+            as_ir_value(tile_block_n_idx < fx.Index(block_n_tiles)) for tile_block_n_idx in tile_block_n_indices
         ]
         tile_signal_indices = [
             fx.block_idx.x * fx.Int32(block_n_tiles) + arith.index_cast(T.i32, tile_block_n_idx)
@@ -667,14 +662,14 @@ def compile_small_m_hgemm_kernel(
                 init_vec = zero_vec
                 if const_expr(HAS_BIAS):
                     init_vec = bias_g.vec_load((tile_n_offset + n_local_idx,), LDG_VEC_SIZE)
-                cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, row_idx, fx.Index(m))
+                cond_boundary = as_ir_value(row_idx < fx.Index(m))
                 cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
                 with ir.InsertionPoint(cond_boundary_if.then_block):
                     c_g.vec_store((row_idx, tile_n_offset + n_local_idx), init_vec, LDG_VEC_SIZE)
                     scf.YieldOp([])
 
         def prepare_split_k_tile(c_g, bias_g, tile_n_offset, tile_signal_idx):
-            is_t0_cond = arith.cmpi(arith.CmpIPredicate.eq, fx.Index(tid), fx.Index(0))
+            is_t0_cond = as_ir_value(fx.Index(tid) == fx.Index(0))
             is_t0_cond_if = scf.IfOp(is_t0_cond, results_=[], has_else=False)
             with ir.InsertionPoint(is_t0_cond_if.then_block):
                 semaphore_ptr = get_llvm_ptr(semaphore, tile_signal_idx, 4)
@@ -691,7 +686,7 @@ def compile_small_m_hgemm_kernel(
             gpu.barrier()
             arrive_idx = fx.Index(bc_[0])
 
-            first_arrival = arith.cmpi(arith.CmpIPredicate.eq, arrive_idx, fx.Index(0))
+            first_arrival = as_ir_value(arrive_idx == fx.Index(0))
             first_arrival_if = scf.IfOp(first_arrival, results_=[], has_else=False)
             with ir.InsertionPoint(first_arrival_if.then_block):
                 zero_c_tile(c_g, bias_g, tile_n_offset)
@@ -740,7 +735,7 @@ def compile_small_m_hgemm_kernel(
             rocdl.sched_barrier(0)
             gpu.barrier()
 
-            is_t0_cond = arith.cmpi(arith.CmpIPredicate.eq, fx.Index(tid), fx.Index(0))
+            is_t0_cond = as_ir_value(fx.Index(tid) == fx.Index(0))
             is_t0_cond_if = scf.IfOp(is_t0_cond, results_=[T.i32], has_else=True)
             with ir.InsertionPoint(is_t0_cond_if.then_block):
                 semaphore_ptr = get_llvm_ptr(semaphore, tile_signal_idx, 4)
@@ -776,13 +771,9 @@ def compile_small_m_hgemm_kernel(
                 k_local_idx = global_tid % LDG_A_X_THREADS * LDG_VEC_SIZE
                 row_idx = m_offset + fx.Index(m_local_idx)
                 col_idx = fx.Index(k_offset + k_local_idx)
-                slot_valid = arith.cmpi(
-                    arith.CmpIPredicate.ult,
-                    fx.Index(global_tid),
-                    fx.Index(LDG_A_TOTAL_VECS),
-                )
-                valid_row = arith.cmpi(arith.CmpIPredicate.ult, row_idx, fx.Index(m))
-                can_load = arith.andi(slot_valid, valid_row)
+                slot_valid = fx.Index(global_tid) < fx.Index(LDG_A_TOTAL_VECS)
+                valid_row = row_idx < fx.Index(m)
+                can_load = as_ir_value(slot_valid & valid_row)
                 load_if = scf.IfOp(
                     can_load,
                     results_=[T.vec(LDG_VEC_SIZE, dtype_)],
@@ -802,11 +793,7 @@ def compile_small_m_hgemm_kernel(
                 k_local_idx = global_tid % LDG_A_X_THREADS * LDG_VEC_SIZE
                 col_in_bytes = k_local_idx * DTYPE_BYTES
                 col_in_bytes = swizzle_xor16(m_local_idx, col_in_bytes, k_blocks16)
-                slot_valid = arith.cmpi(
-                    arith.CmpIPredicate.ult,
-                    fx.Index(global_tid),
-                    fx.Index(LDG_A_TOTAL_VECS),
-                )
+                slot_valid = as_ir_value(fx.Index(global_tid) < fx.Index(LDG_A_TOTAL_VECS))
                 store_if = scf.IfOp(slot_valid, results_=[], has_else=False)
                 with ir.InsertionPoint(store_if.then_block):
                     as_.vec_store(
@@ -825,14 +812,10 @@ def compile_small_m_hgemm_kernel(
                 col_in_bytes = swizzle_xor16(m_local_idx, col_in_bytes, k_blocks16)
                 row_idx = m_offset + fx.Index(m_local_idx)
                 col_idx = fx.Index(k_offset + col_in_bytes // DTYPE_BYTES)
-                slot_valid = arith.cmpi(
-                    arith.CmpIPredicate.ult,
-                    fx.Index(global_tid),
-                    fx.Index(LDG_A_TOTAL_VECS_AS),
-                )
+                slot_valid = as_ir_value(fx.Index(global_tid) < fx.Index(LDG_A_TOTAL_VECS_AS))
                 slot_if = scf.IfOp(slot_valid, results_=[], has_else=False)
                 with ir.InsertionPoint(slot_if.then_block):
-                    valid_row = arith.cmpi(arith.CmpIPredicate.ult, row_idx, fx.Index(m))
+                    valid_row = as_ir_value(row_idx < fx.Index(m))
                     cond_if = scf.IfOp(valid_row, results_=[], has_else=True)
                     with ir.InsertionPoint(cond_if.then_block):
                         global_offset = A_.linear_offset((row_idx, col_idx)) * DTYPE_BYTES
@@ -924,7 +907,7 @@ def compile_small_m_hgemm_kernel(
                 n_local_idx = fx.Index(global_tid % LDG_C_X_THREADS * LDG_VEC_SIZE)
                 m_global_idx = m_offset + m_local_idx
                 n_global_idx = tile_n_offset + n_local_idx
-                cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, m_global_idx, fx.Index(m))
+                cond_boundary = as_ir_value(m_global_idx < fx.Index(m))
                 cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
                 with ir.InsertionPoint(cond_boundary_if.then_block):
                     pk_val = c_s.vec_load((m_local_idx, n_local_idx), LDG_VEC_SIZE)
@@ -970,7 +953,7 @@ def compile_small_m_hgemm_kernel(
                 m_local_idx = fx.Index(global_tid // LDG_C_X_THREADS)
                 n_local_idx = fx.Index(global_tid % LDG_C_X_THREADS * LDG_VEC_SIZE)
                 m_global_idx = m_offset + m_local_idx
-                cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, m_global_idx, fx.Index(m))
+                cond_boundary = as_ir_value(m_global_idx < fx.Index(m))
                 cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
                 with ir.InsertionPoint(cond_boundary_if.then_block):
                     vec = c_s.vec_load((m_local_idx, n_local_idx), LDG_VEC_SIZE)
@@ -1020,11 +1003,7 @@ def compile_small_m_hgemm_kernel(
                     col_in_bytes = k_local_idx * DTYPE_BYTES
                     col_in_bytes = swizzle_xor16(n_local_idx, col_in_bytes, k_blocks16)
                     col_idx = fx.Index(k_offset + col_in_bytes // DTYPE_BYTES)
-                    slot_valid = arith.cmpi(
-                        arith.CmpIPredicate.ult,
-                        fx.Index(global_tid),
-                        fx.Index(LDG_B_TOTAL_VECS_AS),
-                    )
+                    slot_valid = as_ir_value(fx.Index(global_tid) < fx.Index(LDG_B_TOTAL_VECS_AS))
                     slot_if = scf.IfOp(slot_valid, results_=[], has_else=False)
                     with ir.InsertionPoint(slot_if.then_block):
                         global_offset = B_.linear_offset((tile_n_offset + fx.Index(n_local_idx), col_idx))
@@ -1107,11 +1086,7 @@ def compile_small_m_hgemm_kernel(
                     current_stage = fx.Index(state[1])
                     c_frags_local = state[2 : 2 + C_FRAGS_LEN]
                     for unroll_i in range_constexpr(UNROLL):
-                        cond = arith.cmpi(
-                            arith.CmpIPredicate.ult,
-                            fx.Index(bki + unroll_i),
-                            fx.Index(BLOCK_K_LOOPS - 1),
-                        )
+                        cond = as_ir_value(fx.Index(bki + unroll_i) < fx.Index(BLOCK_K_LOOPS - 1))
                         cond_if = scf.IfOp(
                             cond,
                             results_=[T.vec(WMMA_C_FRAG_VALUES, T.f32)] * C_FRAGS_LEN + [T.index, T.i32],

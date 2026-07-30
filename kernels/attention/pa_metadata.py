@@ -994,12 +994,12 @@ def compile_pa_metadata_v1(
         for sh in _shuffle_offsets:
             sum_blocks = sum_blocks + sum_blocks.shuffle_xor(arith.constant(sh, type=i32), c_ws.ir_value())
 
-        average = fx.Int32(arith.divui(sum_blocks.ir_value(), c_nspk.ir_value()))
-        reminder = fx.Int32(arith.remui(sum_blocks.ir_value(), c_nspk.ir_value()))
+        average = sum_blocks // c_nspk
+        reminder = sum_blocks % c_nspk
 
         def _remain_for_cid(cid_val):
             # remain = average + (1 if (cid % num_splits_per_khead) < reminder else 0)
-            mod = fx.Int32(arith.remui(cid_val.ir_value(), c_nspk.ir_value()))
+            mod = cid_val % c_nspk
             return average + _sel(mod < reminder, 1, 0)
 
         # ---- Phase 2: per khead, flattened CU x batch scheduler ----

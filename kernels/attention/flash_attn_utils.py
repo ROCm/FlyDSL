@@ -908,10 +908,10 @@ def _init_dualwave_thread_mapping(ctx):
     ctx.lane_mod_32 = ctx.lane % 32
     ctx.lane_div_32 = ctx.lane // 32
 
-    _tid_i32 = as_mlir_value(fx.Int32(ctx.tid))
+    _tid_i32 = fx.Int32(ctx.tid)
     _wave_id_uni_i32 = rocdl.readfirstlane(
         T.i32,
-        arith.divsi(_tid_i32, as_mlir_value(fx.Int32(traits.WARP_SIZE))),
+        (_tid_i32 // fx.Int32(traits.WARP_SIZE)).ir_value(),
     )
     ctx.stagger_i32 = arith.divsi(_wave_id_uni_i32, as_mlir_value(fx.Int32(4)))
     ctx.wave_id_uni = fx.Index(_wave_id_uni_i32)

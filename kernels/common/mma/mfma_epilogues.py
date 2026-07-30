@@ -37,7 +37,6 @@ from typing import Callable
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects.arith import CmpIPredicate
 from flydsl.expr.typing import T
 from kernels.common.kernels_common import _if_then
 
@@ -161,7 +160,7 @@ def c_shuffle_epilog(
         _half_thr_idx = arith.constant(_half_threads, index=True)
         _zero_idx = arith.constant(0, index=True)
 
-        _is_group_b = arith.cmpi(CmpIPredicate.uge, tx, _half_thr_idx)
+        _is_group_b = fx.as_ir_value((tx) >= (_half_thr_idx))
 
         # -- write phase (all waves, each to its group's LDS buffer) --
         n_tile_base_v = n_tile_base
