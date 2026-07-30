@@ -137,6 +137,27 @@ def _lds_swizzle_mask(row):
     return (row & fx.Int32(14)) << fx.Int32(3)
 
 
+# A-LDS bank-conflict swizzle as layout algebra: over the flat 16-byte-block index
+# (row*8 + block_col) the manual XOR mask equals SwizzleType(3, 0, 4) (verified bit-for-bit).
+_A_LDS_BLOCKS_PER_ROW = 8  # 128-byte fp4 row / 16-byte block
+
+
+def _a_lds_swz_block_layout(rows):
+    """Composed layout over 16-byte A-LDS blocks: (rows, 8) row-major, swizzled S<3,0,4>.
+
+    crd2idx((row, block_col), <this>) == the manual `(byte_off ^ mask) // 16` block index.
+    """
+    return fx.make_composed_layout(
+        fx.static(fx.SwizzleType.get(3, 0, 4)),
+        fx.make_layout((rows, _A_LDS_BLOCKS_PER_ROW), (_A_LDS_BLOCKS_PER_ROW, 1)),
+    )
+
+
+def _a_lds_swz_block_idx(swz_layout, row, block_col):
+    """Swizzled 16-byte-block index for (row, block_col) via layout algebra."""
+    return fx.Int32(crd2idx([fx.Int64(row), fx.Int64(block_col)], swz_layout))
+
+
 def _fabs_f32(x):
     return fx.Float32(llvm.call_intrinsic(T.f32, "llvm.fabs.f32", [_raw(x)], [], []))
 

@@ -16,7 +16,7 @@ from flydsl.expr import arith, const_expr, range_constexpr
 from flydsl.expr.typing import T
 from kernels.common import buffer_ops
 from kernels.common.mem_ops import buffer_atomic_add
-from kernels.gemm.fp8_gemm_utils import Mfma16x16x128, make_fp8_buffer_tensor, pack_i32x4_i32x8
+from kernels.gemm.fp8_gemm_utils import make_fp8_buffer_tensor, pack_i32x4_i32x8
 
 TILE_M = 128
 TILE_N = 128
@@ -254,13 +254,15 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
         c_m_vec = lane_div_16 * MFMA_C_VALUES
         c_n = lane_mod_16
 
-        mfma = Mfma16x16x128(QM_STEPS, QN_STEPS)
-        acc00 = [mfma.zero_value for _ in range_constexpr(N_SUB)]
-        acc01 = [mfma.zero_value for _ in range_constexpr(N_SUB)]
-        acc10 = [mfma.zero_value for _ in range_constexpr(N_SUB)]
-        acc11 = [mfma.zero_value for _ in range_constexpr(N_SUB)]
-
+        # 16x16x128 FP8 MFMA via the layout API, built in-kernel (a tiled_mma
+        # kernel-arg compiles warm but fails cold-compile).
+        mma_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, elem_ty))
         Vec = fx.Vector
+        mfma_zero = Vec.filled(MFMA_C_VALUES, 0.0, fx.Float32)
+        acc00 = [mfma_zero for _ in range_constexpr(N_SUB)]
+        acc01 = [mfma_zero for _ in range_constexpr(N_SUB)]
+        acc10 = [mfma_zero for _ in range_constexpr(N_SUB)]
+        acc11 = [mfma_zero for _ in range_constexpr(N_SUB)]
 
         class Vec16U8Ty:
             ir_type = Vec.make_type(16, fx.Uint8)
@@ -358,8 +360,19 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
         def setprio(level):
             llvm.InlineAsmOp(None, [], f"s_setprio {level}", "", has_side_effects=True)
 
+        def _do_mma(a, b, c):
+            # split-16@64 packed i32x8 fragments feed the MFMA_Scale atom via fx.gemm.
+            a_frag = fx.make_rmem_tensor(8, fx.Int32)
+            a_frag.store(Vec(a))
+            b_frag = fx.make_rmem_tensor(8, fx.Int32)
+            b_frag.store(Vec(b))
+            c_frag = fx.make_rmem_tensor(MFMA_C_VALUES, fx.Float32)
+            c_frag.store(Vec(c))
+            fx.gemm(mma_atom, c_frag, a_frag, b_frag, c_frag)
+            return c_frag.load().ir_value()
+
         def mfma_one(a, b, c_acc):
-            out = mfma._do_mma(a, b, c_acc)
+            out = _do_mma(a, b, c_acc)
             fx.rocdl.sched_mfma(1)
             return out
 

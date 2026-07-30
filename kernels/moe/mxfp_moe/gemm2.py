@@ -9,6 +9,8 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
 from .mxfp4_gemm_common import (
+    _a_lds_swz_block_idx,
+    _a_lds_swz_block_layout,
     _e8m0_from_amax,
     _fabs_f32,
     _gep1,
@@ -499,18 +501,20 @@ def _gemm2_body(
                 k_half=_K_HALF,
             )
 
+    # A-LDS read block-swizzle via layout algebra (crd2idx over composed swizzle).
+    _a_lds_swz = _a_lds_swz_block_layout(_aStages * BM)
+
     def issue_a_ds_read(slot):
         lane_row = lane_mod_16
-        lane_col = lane_div_16 * fx.Int32(16)
-        mask = _lds_swizzle_mask(lane_row)
+        lane_col_block = lane_div_16  # 16-byte block column within the 128-byte row
         a = [[None, None] for _ in range(_kMChunks)]
         for k in range_constexpr(2):
-            lds_col = (lane_col + fx.Int32(k * 64)) ^ mask
+            block_col = lane_col_block + fx.Int32(k * 4)  # +64 bytes == +4 blocks
             for i in range_constexpr(_kMChunks):
-                lds_row = lane_row + fx.Int32(i * 16)
-                byte_off = fx.Int32(slot * _slot_bytes) + lds_row * fx.Int32(KH_TILE) + lds_col
+                global_row = fx.Int32(slot * BM) + lane_row + fx.Int32(i * 16)
+                block_idx = _a_lds_swz_block_idx(_a_lds_swz, global_row, block_col)
                 r = fx.make_rmem_tensor(lds_a_read_lay, fx.Int32)
-                fx.copy_atom_call(lds_a_read_atom, fx.slice(s_aq_i32x4_tiles, (None, byte_off // fx.Int32(16))), r)
+                fx.copy_atom_call(lds_a_read_atom, fx.slice(s_aq_i32x4_tiles, (None, block_idx)), r)
                 a[i][k] = r
         return a
 
