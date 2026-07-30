@@ -69,6 +69,7 @@ class MfmaScale16x16x128AGPR(MfmaScale16x16x128):
             has_side_effects=True,
         )
 
+
 LDS_VECTOR_BYTES = 16
 
 
