@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-30T21:35:59Z",
+ "updated": "2026-07-30T21:41:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "amartin/mxfp8-4wave",
    "event": "pull_request",
    "title": "[Kernel] Add optimized 4-wave MXFP8 GEMM kernel for gfx950",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30583844060",
    "created_at": "2026-07-30T21:33:10Z",
-   "updated_at": "2026-07-30T21:33:12Z",
+   "updated_at": "2026-07-30T21:37:20Z",
    "actor": "aris134",
    "jobs": []
   },
@@ -315,11 +315,11 @@
    "branch": "rchamber/flex_attention",
    "event": "pull_request",
    "title": "Add flex_attention (score_mod / mask_mod) on the generic flash-attention kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30541972428",
    "created_at": "2026-07-30T12:18:05Z",
-   "updated_at": "2026-07-30T20:28:30Z",
+   "updated_at": "2026-07-30T21:39:09Z",
    "actor": "RichardChamberlain1",
    "jobs": [
     {
@@ -334,10 +334,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-30T20:28:30Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T21:39:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30541972428/job/90869229510"
     },
     {
