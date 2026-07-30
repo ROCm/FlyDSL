@@ -19,13 +19,13 @@ to preserve the intended ordering of memory and compute operations.
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-import flydsl.expr.buffer_ops as buffer_ops
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import vector as _vector
 from flydsl.expr import arith, as_ir_value, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import T as _T
 from flydsl.expr.typing import Vector as Vec
+from kernels.common import buffer_ops
 from kernels.gemm.fp8_gemm_utils import (
     G2SLoader,
     MfmaScale16x16x128,
