@@ -285,6 +285,43 @@ def test_gemm_a16w16_compute_bound(M, N, K, num_buffers, dtype):
     assert verify_output(out.cpu().to(torch.float32), ref.cpu(), rtol=3e-2, atol=3e-2)
 
 
+@pytest.mark.parametrize("M, N, K", get_x_vals())
+@pytest.mark.parametrize("num_buffers", [2, 3])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_gemm_a16w16_main_loop_unroll(M, N, K, num_buffers, dtype):
+    """bandwidth_bound with 2 K-tiles per trip (ping-pong two register banks).
+
+    Exercises TILES_PER_TRIP == 2 plus the odd-leftover tile when
+    main_loop_iters is not even.
+    """
+    _check_gfx1250()
+    _check_min_k(K, num_buffers=num_buffers)
+    torch.cuda.empty_cache()
+
+    x, w = _generate_inputs(M, N, K, dtype)
+    ref = torch.mm(x.float(), w.float().T).to(torch.float32)
+
+    out = gemm_a16w16(x, w, dtype=dtype, num_buffers=num_buffers, main_loop_unroll=True)
+
+    assert verify_output(out.cpu().to(torch.float32), ref.cpu(), rtol=3e-2, atol=3e-2)
+
+
+@pytest.mark.parametrize("M, N, K", [(128, 256, 512), (256, 256, 1024)])
+@pytest.mark.parametrize("split_k", [2, 4])
+def test_gemm_a16w16_split_k(M, N, K, split_k):
+    """split_k must agree with split_k=1 at f32 output (lossless accumulation)."""
+    _check_gfx1250()
+    _check_min_k(K // split_k, num_buffers=2)
+    torch.cuda.empty_cache()
+
+    x, w = _generate_inputs(M, N, K, torch.bfloat16)
+    common = {"dtype": torch.float32, "num_buffers": 2}
+    out_single = gemm_a16w16(x, w, split_k=1, **common).clone()
+    out_split = gemm_a16w16(x, w, split_k=split_k, **common).clone()
+
+    torch.testing.assert_close(out_split, out_single, atol=1e-2, rtol=1e-3)
+
+
 @pytest.mark.parametrize("M, N, K", get_x_vals_large())
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_gemm_a16w16_large(M, N, K, dtype):
