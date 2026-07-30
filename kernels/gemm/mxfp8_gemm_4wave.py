@@ -31,47 +31,8 @@ from kernels.gemm.fp8_gemm_utils import (
     make_fp8_buffer_tensor,
     pack_i32x4_i32x8,
     swizzle_128,
+    xcd_swizzle,
 )
-
-
-def _min(a, b):
-    return arith.select(a < b, a, b)
-
-
-def _xcd_swizzle(num_pid_m, num_pid_n):
-    """Map the linear workgroup ID to a GEMM tile coordinate.
-
-    Uses row-major ordering for small or uneven grids. Otherwise, partitions
-    workgroups evenly across XCDs and applies grouped-M ordering to improve
-    operand reuse and cache locality.
-    """
-    NUM_XCDS = 8
-    WGM = 4
-    NUM_CUS = 32 * NUM_XCDS
-    SWIZZLE_THRESHOLD = 4 * NUM_CUS
-
-    wgid = fx.block_idx.x
-    num_wg = num_pid_m * num_pid_n
-
-    # Simple row-major path.
-    simple_m, simple_n = divmod(wgid, num_pid_n)
-
-    # XCD-remapped grouped-M path.
-    intra_xcd, xcd = divmod(wgid, NUM_XCDS)
-    wgid_remap = xcd * (num_wg // NUM_XCDS) + intra_xcd
-    num_wgid_in_group = WGM * num_pid_n
-    group_id, intra_group = divmod(wgid_remap, num_wgid_in_group)
-    first_pid_m = group_id * WGM
-    group_size_m = _min(num_pid_m - first_pid_m, WGM)
-    pid_n, intra_group_m = divmod(intra_group, group_size_m)
-    pid_m = first_pid_m + intra_group_m
-
-    use_simple = (num_wg < SWIZZLE_THRESHOLD) | (num_wg % NUM_XCDS != 0)
-    return (
-        arith.select(use_simple, simple_m, pid_m),
-        arith.select(use_simple, simple_n, pid_n),
-    )
-
 
 LDS_VECTOR_BYTES = 16
 
@@ -198,7 +159,7 @@ def compile_mxfp8_gemm_4w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use
         num_blocks_n = c_n // BLOCK_N
 
         if const_expr(use_xcd_remap):
-            pid_m, pid_n = _xcd_swizzle(num_blocks_m, num_blocks_n)
+            pid_m, pid_n = xcd_swizzle(num_blocks_m, num_blocks_n)
         else:
             pid_m, pid_n = divmod(fx.block_idx.x, num_blocks_n)
 

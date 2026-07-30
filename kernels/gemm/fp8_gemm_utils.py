@@ -12,6 +12,10 @@ from flydsl.expr.typing import Vector as Vec
 from kernels.common.utils import cdiv as ceildiv  # noqa: F401
 
 
+def min(a, b):
+    return arith.select(a < b, a, b)
+
+
 def divmod(a, b):
     """Integer divmod that works on DSL values (e.g. ``Int32``).
 
@@ -19,6 +23,41 @@ def divmod(a, b):
     ``//`` / ``%`` operators to emit the corresponding ops.
     """
     return (a // b, a % b)
+
+
+def xcd_swizzle(num_pid_m, num_pid_n):
+    """Map the linear workgroup ID to a GEMM tile coordinate.
+
+    Uses row-major ordering for small or uneven grids. Otherwise, partitions
+    workgroups evenly across XCDs and applies grouped-M ordering to improve
+    operand reuse and cache locality.
+    """
+    NUM_XCDS = 8
+    WGM = 4
+    NUM_CUS = 32 * NUM_XCDS
+    SWIZZLE_THRESHOLD = 4 * NUM_CUS
+
+    wgid = fx.block_idx.x
+    num_wg = num_pid_m * num_pid_n
+
+    # Simple row-major path.
+    simple_m, simple_n = divmod(wgid, num_pid_n)
+
+    # XCD-remapped grouped-M path.
+    intra_xcd, xcd = divmod(wgid, NUM_XCDS)
+    wgid_remap = xcd * (num_wg // NUM_XCDS) + intra_xcd
+    num_wgid_in_group = WGM * num_pid_n
+    group_id, intra_group = divmod(wgid_remap, num_wgid_in_group)
+    first_pid_m = group_id * WGM
+    group_size_m = min(num_pid_m - first_pid_m, WGM)
+    pid_n, intra_group_m = divmod(intra_group, group_size_m)
+    pid_m = first_pid_m + intra_group_m
+
+    use_simple = (num_wg < SWIZZLE_THRESHOLD) | (num_wg % NUM_XCDS != 0)
+    return (
+        arith.select(use_simple, simple_m, pid_m),
+        arith.select(use_simple, simple_n, pid_n),
+    )
 
 
 def preshuffle_b(b_t):
