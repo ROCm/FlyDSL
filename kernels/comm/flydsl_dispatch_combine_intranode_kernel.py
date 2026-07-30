@@ -312,7 +312,7 @@ def make_dispatch_kernel(
                 # as local and trigger illegal global access in WarpCopy below.
                 # fx.Uint32 reinterprets the same bits as unsigned, so ``<``
                 # emits ``ult``.
-                is_local = as_ir_value(fx.Uint32(local_expert_id) < fx.Uint32(experts_per_rank))
+                is_local = fx.Uint32(local_expert_id) < fx.Uint32(experts_per_rank)
 
                 packed_slot_lane0 = fx.Int32(0)
                 if lane == 0:
