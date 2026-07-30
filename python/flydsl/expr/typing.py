@@ -900,6 +900,10 @@ class Pointer(BuiltinDslType):
     def alignment(self):
         return self.type.alignment
 
+    @property
+    def llvm_ptr(self):
+        return to_llvm_ptr(self)
+
     @dsl_loc_tracing
     def load(self, dtype=None):
         return ptr_load(self, result_type=dtype)
