@@ -164,6 +164,136 @@ only with it. The fix: **do not put `from __future__ import annotations` in a
 file that defines an `@fx.struct`** (kernel-signature annotations tolerate it;
 `@fx.struct` does not).
 
+## rocgdb and Python-line stepping
+
+If `fx.printf` and host-side bisection are not enough, `rocgdb` — AMD's GDB port
+for GPU code — can step through a running FlyDSL kernel at the Python source-line
+level. Two support scripts in `scripts/` make this practical.
+
+### What the debug info actually is
+
+`FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1` does three concrete things when the kernel
+is compiled:
+
+1. Preserves Python source locations (`FileLineColLoc`, recorded at trace time
+   by `capture_user_location()` in `expr/meta.py`) through the MLIR module
+   re-parse boundary.
+2. Appends `ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}`
+   to the pass pipeline — this emits DWARF **line tables only** (`.debug_line`
+   section): ISA-address → Python-file:line:col, but no variable names or types.
+3. Passes `-g` to the LLVM AMDGPU backend so those line tables reach the HSACO.
+
+The source locations point back to your **Python `fx.*` call sites**, not to
+MLIR ops or ISA addresses. The DWARF actually present in the binary was verified
+with `scripts/flydsl_dwarf_mapper.py` on a real gfx942 kernel:
+
+```
+Line   ISA start            ISA end              #entries  File
+----------------------------------------------------------------------
+  37   0x0000000000001608   0x00000000000016ac   3         test_kernel.py
+  40   0x0000000000001610   0x0000000000001610   1         test_kernel.py
+  48   0x0000000000001618   0x0000000000001618   1         test_kernel.py
+  52   0x000000000000162c   0x0000000000001734   2         test_kernel.py
+  53   0x0000000000001740   0x0000000000001740   1         test_kernel.py
+```
+
+Each Python source line maps to a range of ISA addresses. rocgdb reads this
+table and can therefore break *by Python line* and step *by Python line*.
+
+**Switching to `emission-kind=Full` adds nothing.** The investigation confirmed
+that `emission-kind=Full` changes only the DWARF flag — the MLIR pipeline
+emits no `llvm.dbg.value`/`llvm.dbg.declare` intrinsics, so there are no
+variable entries to describe regardless of the emission kind.
+
+### The rocgdb session workflow
+
+```bash
+FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 FLYDSL_RUNTIME_ENABLE_CACHE=0 \
+  /opt/rocm/bin/rocgdb -x scripts/flydsl_gdb.py --args python3 repro.py
+```
+
+```gdb
+(gdb) set breakpoint pending on
+(gdb) break my_kernel_0        # symbol = <func_name>_<sequential_id>
+(gdb) break repro.py:52        # OR: break on a specific Python source line
+(gdb) run
+
+# GPU wavefronts are now visible; one is halted at your breakpoint.
+(gdb) flydsl-where             # show current Python line + context
+(gdb) flydsl-step              # advance to next Python line (steps ISA internally)
+(gdb) flydsl-regs              # v0-v15, s0-s15, EXEC mask
+(gdb) flydsl-line-table        # full ISA ↔ Python line map for this kernel
+```
+
+rocgdb intercepts `hipModuleLoadData` via the HSA code-object notification
+mechanism and reads the DWARF from the **in-memory HSACO blob** — no file on
+disk is needed.
+
+### The flydsl_gdb.py extension
+
+`scripts/flydsl_gdb.py` adds four GDB commands that build on the DWARF line
+table. `flydsl-step` is the most useful: it issues `stepi` in a loop until
+`gdb.find_pc_line($pc)` returns a different Python source line, then prints
+the context. This gives a "step-by-Python-line" experience over what is
+actually ISA-level stepping.
+
+### The flydsl_dwarf_mapper.py line mapper
+
+`scripts/flydsl_dwarf_mapper.py` is a standalone offline tool. It extracts the
+HSACO binary from the MLIR dump produced by `FLYDSL_DUMP_IR=1` (the
+`gpu-module-to-binary` stage file contains the binary as an LLVM-escaped
+string in the `bin= "..."` attribute) and parses the DWARF with `pyelftools`:
+
+```bash
+pip install pyelftools
+
+# From the MLIR dump (FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=/tmp/dump ...):
+python3 scripts/flydsl_dwarf_mapper.py \
+    /tmp/dump/<kernel>/20_gpu_module_to_binary.mlir \
+    --save-hsaco kernel.hsaco
+
+# Or from an already-extracted HSACO:
+python3 scripts/flydsl_dwarf_mapper.py --hsaco kernel.hsaco
+```
+
+The output maps every Python source line to its ISA address range, which you
+can then look up in `final_isa.s` (also in the dump dir) to find which
+registers hold the values you care about before opening rocgdb.
+
+### What you can and cannot do
+
+| Capability | Available? |
+|---|---|
+| Break at kernel entry by symbol name | ✓ `break my_kernel_0` |
+| Break at a specific Python source line | ✓ `break repro.py:52` |
+| Step by Python source line | ✓ `flydsl-step` (wraps `stepi` in a loop) |
+| `list` / see source context at current PC | ✓ `flydsl-where` |
+| Read raw GPU registers (VGPRs/SGPRs/EXEC) | ✓ `flydsl-regs` |
+| Per-wavefront / per-lane control | ✓ `thread apply all ...` |
+| `print tid` — inspect by Python variable name | ✗ no variable DWARF |
+| `print acc` — typed DSL value | ✗ types are not in LineTablesOnly |
+
+To bridge the gap: use `flydsl_dwarf_mapper.py` to find which ISA address
+range corresponds to the Python line you care about, read the `final_isa.s`
+to see which registers are live there, then inspect those registers in rocgdb
+with `flydsl-regs`. It is a two-step manual correlation, not a single `print`.
+
+> **HIP/CK-Tile → FlyDSL.** `hipcc -g` gives source-level variable inspection
+> (full DWARF with `DW_TAG_variable` entries). FlyDSL gives Python-line stepping
+> with raw-register inspection (LineTablesOnly DWARF). Achieving named-variable
+> DWARF would require the tracing pipeline to emit `llvm.dbg.value` intrinsics
+> that associate SSA values with Python variable names — the infrastructure exists
+> in MLIR but is not yet wired in.
+
+### Practical ranking for wrong-results bugs
+
+1. **`fx.printf`** guarded by `bid == 0 and tid == 0` — fastest to add and remove.
+2. **Host-side bisection** — all-ones inputs, single tile, shrink grid.
+3. **`flydsl_dwarf_mapper.py` + `final_isa.s`** — offline: find which ISA range
+   corresponds to a suspect Python line, then read the registers manually.
+4. **rocgdb + `flydsl_gdb.py`** — interactive: set a breakpoint on the suspect
+   Python line, step through the GPU execution, inspect registers live.
+
 ## Can you debug the compiler *itself*?
 
 Yes — FlyDSL is not a black box, and every layer is inspectable in text:
