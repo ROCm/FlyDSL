@@ -338,7 +338,7 @@ def compile_hgemm_kernel(
                     cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
                     with ir.InsertionPoint(cond_boundary_if.then_block):
                         bytes_offset = C_.linear_offset((row_idx, n_offset + n_local_idx))
-                        bytes_offset_i32 = arith.index_cast(T.i32, bytes_offset)
+                        bytes_offset_i32 = as_ir_value(fx.Int32(bytes_offset))
                         c_ptr = get_llvm_ptr(C, bytes_offset_i32, DTYPE_BYTES)
                         llvm.InlineAsmOp(
                             None,
@@ -474,10 +474,7 @@ def compile_hgemm_kernel(
         def get_dma_copy_warp_offset():
             warp_offset = rocdl.readfirstlane(
                 T.i64,
-                arith.index_cast(
-                    T.i64,
-                    fx.Index(wid) * arith.constant(WARP_SIZE * DMA_BYTES, index=True),
-                ),
+                as_ir_value(fx.Int64(wid) * fx.Int64(WARP_SIZE * DMA_BYTES)),
             )
             return warp_offset
 
@@ -497,7 +494,7 @@ def compile_hgemm_kernel(
                 col_idx = fx.Index(k_offset + col_in_bytes // DTYPE_BYTES)
                 # get offset
                 global_offset = A_.linear_offset((safe_row_idx, col_idx)) * DTYPE_BYTES
-                global_offset = arith.index_cast(T.i32, global_offset)
+                global_offset = as_ir_value(fx.Int32(global_offset))
                 # get lds ptr
                 if const_expr(i == 0):
                     lds_ptr_base = _lds_a3_ptr(a_lds_i64, fx.Index(lds_stage) * (BLOCK_M * BLOCK_K))
@@ -534,7 +531,7 @@ def compile_hgemm_kernel(
                 col_idx = fx.Index(k_offset + col_in_bytes // DTYPE_BYTES)
                 # get offset
                 global_offset = B_.linear_offset((safe_row_idx, col_idx)) * DTYPE_BYTES
-                global_offset = arith.index_cast(T.i32, global_offset)
+                global_offset = as_ir_value(fx.Int32(global_offset))
                 # get lds ptr
                 if const_expr(i == 0):
                     lds_ptr_base = _lds_a3_ptr(b_lds_i64, fx.Index(lds_stage) * (BLOCK_N * BLOCK_K))
@@ -668,7 +665,7 @@ def compile_hgemm_kernel(
                 # ================ Reordered ================
                 rocdl.sched_barrier(0)
 
-            init_state = [ks_begin, arith.constant(0, index=True)] + c_frags + b_frags_next
+            init_state = [ks_begin, fx.Index(0)] + c_frags + b_frags_next
             for bki, state in range(0, BLOCK_K_LOOPS - 1, 1, init=init_state):
                 k_offset = state[0]
                 current_stage = fx.Index(state[1])
@@ -729,7 +726,7 @@ def compile_hgemm_kernel(
                         rocdl.sched_mfma(mfma_.consume(AVG_MFMA_COUNT))
                 rocdl.sched_barrier(0)
 
-            init_state = [ks_begin, arith.constant(0, index=True)] + c_frags + a_frags + b_frags
+            init_state = [ks_begin, fx.Index(0)] + c_frags + a_frags + b_frags
             for bki, state in range(1, BLOCK_K_LOOPS, init=init_state):
                 k_offset = state[0]
                 current_stage = fx.Index(state[1])

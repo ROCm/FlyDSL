@@ -1080,7 +1080,7 @@ def compile_small_m_hgemm_kernel(
                     rocdl.sched_barrier(0)
 
                 UNROLL = EFFECTIVE_B_TO_LDS_UNROLL
-                init_state = [ks_begin, arith.constant(0, index=True)] + c_frags_local
+                init_state = [ks_begin, fx.Index(0)] + c_frags_local
                 for bki, state in range(0, BLOCK_K_LOOPS - 1, UNROLL, init=init_state):
                     k_offset = state[0]
                     current_stage = fx.Index(state[1])
@@ -1158,7 +1158,7 @@ def compile_small_m_hgemm_kernel(
 
             TOTAL_C_FRAGS_LEN = C_FRAGS_LEN * N_TILE_REPEAT
             TOTAL_B_FRAGS_LEN = B_FRAGS_LEN * N_TILE_REPEAT
-            init_state = [ks_begin, arith.constant(0, index=True)] + c_frags + a_frags + b_frags
+            init_state = [ks_begin, fx.Index(0)] + c_frags + a_frags + b_frags
             for _, state in range(1, BLOCK_K_LOOPS, init=init_state):
                 k_offset = state[0]
                 current_stage = fx.Index(state[1])

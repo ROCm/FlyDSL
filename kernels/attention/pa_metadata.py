@@ -1498,10 +1498,10 @@ def compile_pa_decode_metadata(
         # Outer work loop — each work item = one (batch, kv_head_range, kv_page_range)
         _work_start_idx = fx.Index(arith.unwrap(work_start))
         _work_end_idx = fx.Index(arith.unwrap(work_end))
-        _work_step = arith.index(1)
+        _work_step = fx.Index(1)
 
         for _wi in range(_work_start_idx, _work_end_idx, _work_step):
-            work_idx = arith.index_cast(T.i32, _wi)
+            work_idx = fx.Int32(_wi)
 
             # ── Load work_info[work_idx] — 8 × int32, as 2 × vec4 loads ──
             # info_base is a multiple of 8, so both dwordx4 loads are naturally
@@ -1622,9 +1622,9 @@ def compile_pa_decode_metadata(
             # (sink-prone partition 0 processed last for online-softmax stability).
             num_parts_in_work = kv_end - kv_start
             last_part_idx_val = num_parts_in_work - c_one
-            _loop_start_g = arith.index(0)
+            _loop_start_g = fx.Index(0)
             _loop_stop_g = fx.Index(arith.unwrap(num_parts_in_work))
-            _loop_step_g = arith.index(1)
+            _loop_step_g = fx.Index(1)
 
             _mtp_groups = math.ceil(query_length * query_group_size / 16)
 
@@ -1800,7 +1800,7 @@ def compile_pa_decode_metadata(
                 # Reverse iteration: scf.for walks ib forward (0..N-1); remap to
                 # the local partition index lp = N-1..0 so the sink-prone first
                 # partition is processed last.
-                rel_part = last_part_idx_val - arith.index_cast(T.i32, ib)
+                rel_part = last_part_idx_val - as_ir_value(fx.Int32(ib))
                 lp = local_part_start + rel_part
                 next_rel = rel_part - c_one
                 next_rel_clamped = arith.select(next_rel >= c_zero_i32, next_rel, c_zero_i32)
