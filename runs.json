@@ -1,8 +1,253 @@
 {
  "schema": 1,
- "updated": "2026-07-30T08:34:42Z",
+ "updated": "2026-07-30T09:51:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30532116922,
+   "pr": null,
+   "commit": "6d412e756869b5856e950f0d14eea7b1c0204328",
+   "branch": "main",
+   "event": "push",
+   "title": "[Feat] Add to_llvm_ptr op to convert fly.ptr to llvm.ptr  (#921)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30532116922",
+   "created_at": "2026-07-30T09:47:49Z",
+   "updated_at": "2026-07-30T09:48:09Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 30531690204,
+   "pr": 930,
+   "commit": "e2510c7866e0033120a845f00bcbac3576f680a0",
+   "branch": "dsl-ify-arith",
+   "event": "pull_request",
+   "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30531690204",
+   "created_at": "2026-07-30T09:41:21Z",
+   "updated_at": "2026-07-30T09:45:12Z",
+   "actor": "xudoyuan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T09:45:12Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30531690204/job/90836076085"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-30T09:46:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30531690204/job/90836076093"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T09:45:12Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30531690204/job/90836076127"
+    }
+   ]
+  },
+  {
+   "run_id": 30531642345,
+   "pr": 433,
+   "commit": "13e3a8a9b7b4166731ed221b11a9b41bb4ebb853",
+   "branch": "aryaman/group-gemm",
+   "event": "pull_request",
+   "title": "Adds Grouped and Batched GEMM kernels with blockscaling matching DeepGEMM API",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30531642345",
+   "created_at": "2026-07-30T09:40:38Z",
+   "updated_at": "2026-07-30T09:44:41Z",
+   "actor": "aryaman-gupta",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-30T09:45:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30531642345/job/90835963008"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T09:44:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30531642345/job/90835963051"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T09:44:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30531642345/job/90835963140"
+    }
+   ]
+  },
+  {
+   "run_id": 30530160479,
+   "pr": 929,
+   "commit": "e68af17d0627424ef3aac104d6d9a97d58b20ab5",
+   "branch": "moe/gemm1-fp4-crd2idx",
+   "event": "pull_request",
+   "title": "moe: mxfp_moe gemm1 fp4 A-LDS read -> crd2idx (fp8 kept manual)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30530160479",
+   "created_at": "2026-07-30T09:18:27Z",
+   "updated_at": "2026-07-30T09:29:31Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T09:29:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30530160479/job/90832699900"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T09:29:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30530160479/job/90832699939"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-30T09:30:01Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30530160479/job/90832700003"
+    }
+   ]
+  },
+  {
+   "run_id": 30528339129,
+   "pr": null,
+   "commit": "1bf7b66703539b188afbdf27fa6c8e129ed13b9a",
+   "branch": "stochastic-rounding",
+   "event": "pull_request",
+   "title": "Add stochastic rounding and philox RNG under rocdl",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30528339129",
+   "created_at": "2026-07-30T08:51:35Z",
+   "updated_at": "2026-07-30T08:51:35Z",
+   "actor": "kashif",
+   "jobs": []
+  },
+  {
+   "run_id": 30528338638,
+   "pr": 928,
+   "commit": "fcc0d7e1e69c0c3b96ac456dd8b300b51dfbe501",
+   "branch": "phil/isa-resource-delta-table",
+   "event": "pull_request",
+   "title": "[Misc] Add per-kernel ISA resource delta table",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30528338638",
+   "created_at": "2026-07-30T08:51:35Z",
+   "updated_at": "2026-07-30T09:02:59Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T09:02:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30528338638/job/90826981742"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-30T09:03:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30528338638/job/90826981748"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T09:02:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30528338638/job/90826981864"
+    }
+   ]
+  },
+  {
+   "run_id": 30527535196,
+   "pr": 926,
+   "commit": "2161329a37c708c49e8c6f1c41dc004468e7a46d",
+   "branch": "phil/fix-reg-offset-dynamic-add-offset",
+   "event": "pull_request",
+   "title": "[Bugfix] Resolve reg offset on dynamic add_offset chains",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30527535196",
+   "created_at": "2026-07-30T08:39:14Z",
+   "updated_at": "2026-07-30T08:44:19Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T08:44:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30527535196/job/90822924710"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T08:44:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30527535196/job/90822924736"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-30T08:45:04Z",
+     "completed_at": "2026-07-30T09:38:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30527535196/job/90822924748"
+    }
+   ]
+  },
   {
    "run_id": 30527027523,
    "pr": 925,
@@ -10,13 +255,41 @@
    "branch": "pr/docs-api-stability",
    "event": "pull_request",
    "title": "[Doc] Define API stability contract",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30527027523",
    "created_at": "2026-07-30T08:31:24Z",
-   "updated_at": "2026-07-30T08:31:53Z",
+   "updated_at": "2026-07-30T08:37:10Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-30T08:37:41Z",
+     "completed_at": "2026-07-30T09:35:35Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30527027523/job/90821438325"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T08:37:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30527027523/job/90821438343"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T08:37:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30527027523/job/90821438345"
+    }
+   ]
   },
   {
    "run_id": 30524768390,
@@ -25,38 +298,38 @@
    "branch": "main",
    "event": "push",
    "title": "Port GEMM/MoE/conv kernels to the layout API (#913)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30524768390",
    "created_at": "2026-07-30T07:58:06Z",
-   "updated_at": "2026-07-30T08:03:28Z",
+   "updated_at": "2026-07-30T09:48:09Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-30T08:03:28Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T09:47:50Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30524768390/job/90814202722"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-30T08:04:06Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T09:00:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30524768390/job/90814202788"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-30T08:31:48Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T09:48:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30524768390/job/90814202806"
     }
    ]
@@ -273,13 +546,22 @@
    "branch": "xudoyuan/dyn-cf-list-carry",
    "event": "pull_request",
    "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30506777108",
    "created_at": "2026-07-30T01:50:33Z",
-   "updated_at": "2026-07-30T04:28:33Z",
+   "updated_at": "2026-07-30T09:48:36Z",
    "actor": "xudoyuan",
    "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-30T09:48:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30506777108/job/90824115130"
+    },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
@@ -287,7 +569,7 @@
      "conclusion": "success",
      "started_at": "2026-07-30T01:53:45Z",
      "completed_at": "2026-07-30T02:58:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30506777108/job/90758568215"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30506777108/job/90824115991"
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -296,16 +578,7 @@
      "conclusion": "success",
      "started_at": "2026-07-30T01:53:44Z",
      "completed_at": "2026-07-30T03:26:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30506777108/job/90758568223"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-30T03:13:09Z",
-     "completed_at": "2026-07-30T04:28:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30506777108/job/90758568224"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30506777108/job/90824116085"
     }
    ]
   },
@@ -1142,7 +1415,7 @@
   },
   {
    "run_id": 30419778865,
-   "pr": 921,
+   "pr": null,
    "commit": "176523c29625634598112e79b0853870a64bb586",
    "branch": "pr/feat-to-llvm-ptr",
    "event": "pull_request",
@@ -1185,7 +1458,7 @@
   },
   {
    "run_id": 30419524850,
-   "pr": 921,
+   "pr": null,
    "commit": "ef62bfeb4dc54b6853d36fef01224b912fe12665",
    "branch": "pr/feat-to-llvm-ptr",
    "event": "pull_request",
@@ -1227,23 +1500,8 @@
    ]
   },
   {
-   "run_id": 30418640127,
-   "pr": 907,
-   "commit": "344778c1ce53f9e627e2cc9edeb46d48f278790d",
-   "branch": "stochastic-rounding",
-   "event": "pull_request",
-   "title": "Add stochastic rounding and philox RNG helpers",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30418640127",
-   "created_at": "2026-07-29T03:06:08Z",
-   "updated_at": "2026-07-29T03:06:08Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
    "run_id": 30418320456,
-   "pr": 921,
+   "pr": null,
    "commit": "d421a6c744ac8535ced56d93240fa5517dce416d",
    "branch": "pr/feat-to-llvm-ptr",
    "event": "pull_request",
@@ -1902,236 +2160,6 @@
      "started_at": "2026-07-28T07:05:01Z",
      "completed_at": "2026-07-28T07:18:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30334710901/job/90197691061"
-    }
-   ]
-  },
-  {
-   "run_id": 30329388118,
-   "pr": null,
-   "commit": "87424b73e60ea6328a72ff7712a93ae2ebfb7b5e",
-   "branch": "fix/898-lds-offset-merge",
-   "event": "pull_request",
-   "title": "[Dialect][Perf] Don't merge mixed static/runtime offsets on LDS pointers",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30329388118",
-   "created_at": "2026-07-28T04:40:14Z",
-   "updated_at": "2026-07-28T06:24:30Z",
-   "actor": "Arist12",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T04:59:41Z",
-     "completed_at": "2026-07-28T06:18:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30329388118/job/90183806630"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T05:02:10Z",
-     "completed_at": "2026-07-28T06:02:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30329388118/job/90183806636"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T05:03:46Z",
-     "completed_at": "2026-07-28T06:24:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30329388118/job/90183806661"
-    }
-   ]
-  },
-  {
-   "run_id": 30327993228,
-   "pr": null,
-   "commit": "c865ab91ff8d728b15d72b9b957791398dea354b",
-   "branch": "pr/enh-arch-aware-waitcnt",
-   "event": "pull_request",
-   "title": "[ROCDL] Add arch-aware universal s_waitcnt",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30327993228",
-   "created_at": "2026-07-28T04:10:26Z",
-   "updated_at": "2026-07-28T07:18:50Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-28T06:18:33Z",
-     "completed_at": "2026-07-28T07:18:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30327993228/job/90185473570"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-28T06:40:21Z",
-     "completed_at": "2026-07-28T07:04:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30327993228/job/90185473590"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-28T05:20:56Z",
-     "completed_at": "2026-07-28T05:56:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30327993228/job/90185473603"
-    }
-   ]
-  },
-  {
-   "run_id": 30327511063,
-   "pr": null,
-   "commit": "7fcfa698c0e63ee6a00313e2c6b25d737612ee23",
-   "branch": "pr/enh-arch-aware-waitcnt",
-   "event": "pull_request",
-   "title": "[ROCDL] Add arch-aware universal s_waitcnt",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30327511063",
-   "created_at": "2026-07-28T04:00:37Z",
-   "updated_at": "2026-07-28T04:10:27Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 30314824246,
-   "pr": null,
-   "commit": "6f1353208ee8699da6b59c11024a2ebd60cd1469",
-   "branch": "fix/898-lds-offset-merge",
-   "event": "pull_request",
-   "title": "[Dialect][Perf] Don't merge mixed static/runtime offsets on LDS pointers",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30314824246",
-   "created_at": "2026-07-27T23:39:11Z",
-   "updated_at": "2026-07-28T02:44:37Z",
-   "actor": "Arist12",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T00:47:50Z",
-     "completed_at": "2026-07-28T01:55:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30314824246/job/90148735989"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T00:49:05Z",
-     "completed_at": "2026-07-28T02:44:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30314824246/job/90148735992"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T01:25:08Z",
-     "completed_at": "2026-07-28T02:39:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30314824246/job/90148736000"
-    }
-   ]
-  },
-  {
-   "run_id": 30288167103,
-   "pr": 901,
-   "commit": "580df68d5ec456f0bf3d89f9e2811359062b3bb7",
-   "branch": "moe_sorting_optimization",
-   "event": "pull_request",
-   "title": "Add Optimized MoE Routing Path",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30288167103",
-   "created_at": "2026-07-27T17:11:51Z",
-   "updated_at": "2026-07-27T22:51:52Z",
-   "actor": "amd-wsung102",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-27T17:22:24Z",
-     "completed_at": "2026-07-27T18:08:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30288167103/job/90053471917"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-27T18:50:13Z",
-     "completed_at": "2026-07-27T19:46:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30288167103/job/90053471996"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-27T18:32:27Z",
-     "completed_at": "2026-07-27T22:51:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30288167103/job/90053472003"
-    }
-   ]
-  },
-  {
-   "run_id": 30283974617,
-   "pr": null,
-   "commit": "a036cd3af3214c3eab0a0ef89a73e9e91e7473ca",
-   "branch": "main",
-   "event": "pull_request",
-   "title": "[Kernel][MI350] Add 8 wave GQA sliding-window attention kernel",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30283974617",
-   "created_at": "2026-07-27T16:16:33Z",
-   "updated_at": "2026-07-27T18:50:08Z",
-   "actor": "amd-nprotaso",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-27T16:51:30Z",
-     "completed_at": "2026-07-27T17:52:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30283974617/job/90045506503"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-27T17:26:19Z",
-     "completed_at": "2026-07-27T18:31:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30283974617/job/90045506515"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-27T18:06:50Z",
-     "completed_at": "2026-07-27T18:50:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30283974617/job/90045506537"
     }
    ]
   }
