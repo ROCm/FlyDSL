@@ -897,6 +897,7 @@ def _gemm2_body_a16w4(
     N_OUT,
     INTER,
     NE,
+    b_cache_mod=2,
 ):
     """a16w4 stage2 body. K=inter_dim (contraction), N=model_dim (N_OUT).
 
@@ -986,10 +987,16 @@ def _gemm2_body_a16w4(
         base_k_div4 = (base_k * fx.Int32(elem_bytes)) // fx.Int32(4)
         for i in range_constexpr(num_x_loads):
             col_bytes = x_col_dw[i] * fx.Int32(4)
-            col_sw = _a16w4_swizzle_xor16(x_row_local[i], col_bytes, fx.Int32(k_blocks16))
+            # A-LDS bank-conflict XOR swizzle: LDS dest stays LINEAR (the DMA
+            # buffer_load_lds hardware does not honor an arbitrary swizzled per-lane
+            # LDS dest -- the M1 NaN); instead swizzle the GMEM source column so
+            # linear LDS slot [row][col] holds A[row][swz(row,col)]. The LDS read
+            # (lds_load_a) applies the SAME swizzle to its offset, so it fetches the
+            # right logical K. Same convention as kernels/gemm/mxfp4_preshuffle.py.
+            col_sw = _a16w4_swizzle_xor16(x_row_local[i], col_bytes, fx.Int32(k_blocks16), enable=True)
             row_k_dw = x_row_base_div4[i] + base_k_div4
-            global_byte = row_k_dw * fx.Int32(4) + col_bytes
-            lds_byte = x_row_local[i] * fx.Int32(KH_TILE_BYTES) + col_sw
+            global_byte = row_k_dw * fx.Int32(4) + col_sw
+            lds_byte = x_row_local[i] * fx.Int32(KH_TILE_BYTES) + col_bytes
             fx.copy(
                 x_dma_atom,
                 fx.slice(x_dma_tiles4, (None, global_byte // fx.Int32(16))),
@@ -1006,7 +1013,10 @@ def _gemm2_body_a16w4(
 
     def lds_load_a(mi, ku):
         row = row_a_lds + fx.Int32(mi * 16)
-        col_swz_bytes = _a16w4_swizzle_xor16(row, _a_col_bytes_for_ku(ku), fx.Int32(k_blocks16))
+        # Same XOR swizzle as the write above (enable=True) -> read fetches logical
+        # (row, col) from its swizzled physical byte. Read cols are 16-byte-aligned
+        # multiples, and the mask XORs by multiples of 16, so alignment is preserved.
+        col_swz_bytes = _a16w4_swizzle_xor16(row, _a_col_bytes_for_ku(ku), fx.Int32(k_blocks16), enable=True)
         byte_off = row * fx.Int32(KH_TILE_BYTES) + col_swz_bytes
         r = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
         fx.copy_atom_call(a_copy_atom, fx.slice(s_x_i32x4_tiles, (None, byte_off // fx.Int32(16))), r)
@@ -1023,7 +1033,7 @@ def _gemm2_body_a16w4(
                 )
             )
             v4 = buffer_ops.buffer_load(
-                _raw(w_rsrc), _raw(idx_pack // fx.Int32(4)), vec_width=4, dtype=T.i32, cache_modifier=2
+                _raw(w_rsrc), _raw(idx_pack // fx.Int32(4)), vec_width=4, dtype=T.i32, cache_modifier=b_cache_mod
             )
             v4 = fx.Vector(v4)
             raw.append([fx.Int32(v4[j]) for j in range(4)])
@@ -1149,11 +1159,20 @@ def compile_gemm2_a16w4_port(
     D_INTER,
     TILE_N=256,
     TILE_K=256,
+    xcd_swizzle=1,
+    b_cache_mod=2,
 ):
     """a16w4 (bf16 intermediate A x mxfp4 W2) stage2 builder.
 
     N_OUT = model_dim (down-proj output width). D_INTER = inter_dim (contraction).
     Output is bf16 [tokens, model_dim] via the atomic (routing-weighted) scatter.
+
+    ``xcd_swizzle`` (>0) round-robins the launch index bijectively across the 8
+    XCDs (like the a4w4 gemm2 ``_xcd_np`` grid). a16w4 gemm2 is HBM-bandwidth-bound
+    (flyprof: L2 hit 14.9%, 2705/8000 GB/s, MFMA 4.6%); the plain m-major grid
+    clusters consecutive tiles onto the same XCD/HBM channels, so remapping balances
+    per-channel utilization. ``xcd_swizzle`` also enables an optional M-group swizzle
+    for per-XCD L2 locality (group size = xcd_swizzle m-blocks).
     """
     _K = D_INTER
     assert _K % TILE_K == 0, f"D_INTER (K) must be a multiple of {TILE_K}, got {_K}"
@@ -1168,6 +1187,10 @@ def compile_gemm2_a16w4_port(
     _lds_bytes = _a_bytes + _acc_bytes
 
     _name = f"gemm2_a16w4_port_ne{NE}_h{N_OUT}_i{_K}_bm{BM}_tn{TILE_N}"
+    if b_cache_mod != 2:
+        _name += f"_bcm{b_cache_mod}"
+    if xcd_swizzle > 0:
+        _name += f"_xcd{xcd_swizzle}"
 
     @fx.struct
     class SharedStorage:
@@ -1194,7 +1217,32 @@ def compile_gemm2_a16w4_port(
         cumsum0 = _global_i32_at(arg_cumsum, fx.Int32(0))
         total_m_blocks = cumsum0 // fx.Int32(BM)
         bound = total_m_blocks * fx.Int32(_num_n_blocks)
+
+        # Bijective XCD round-robin over the valid tiles [0, bound) to balance the
+        # per-XCD/HBM-channel weight-load traffic (a16w4 gemm2 is HBM-bound). With
+        # xcd_swizzle>0, additionally group-swizzle along M for per-XCD L2 locality.
+        _NXCD = 8
+        _xq = _udiv(bound, _NXCD)
+        _xr = _umod(bound, _NXCD)
+        _SW = xcd_swizzle
+
+        def _xcd_np(pid):
+            xc = _umod(pid, _NXCD)
+            wgid = xc * _xq + fx.Int32(arith.minsi(_raw(xc), _raw(_xr))) + _udiv(pid, _NXCD)
+            if const_expr(_SW <= 0):
+                return wgid
+            _ng = fx.Int32(_SW * _num_n_blocks)
+            group_id = wgid // _ng
+            first_pid_m = group_id * fx.Int32(_SW)
+            remaining_m = total_m_blocks - first_pid_m
+            group_size_m = fx.Int32(arith.minsi(_raw(remaining_m), _raw(fx.Int32(_SW))))
+            wig = wgid % _ng
+            m_block = first_pid_m + (wig % group_size_m)
+            n_block = wig // group_size_m
+            return m_block * fx.Int32(_num_n_blocks) + n_block
+
         if bx_i32 < bound:
+            tile = _xcd_np(bx_i32)
             _gemm2_body_a16w4(
                 lds_raw_ptr,
                 arg_a,
@@ -1204,7 +1252,7 @@ def compile_gemm2_a16w4_port(
                 arg_stids,
                 arg_sweights,
                 arg_out,
-                bx_i32,
+                tile,
                 lane,
                 wave,
                 i32_M,
@@ -1214,6 +1262,7 @@ def compile_gemm2_a16w4_port(
                 N_OUT=N_OUT,
                 INTER=_K,
                 NE=NE,
+                b_cache_mod=b_cache_mod,
             )
 
     @flyc.jit
