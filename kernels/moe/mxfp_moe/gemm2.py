@@ -986,10 +986,16 @@ def _gemm2_body_a16w4(
         base_k_div4 = (base_k * fx.Int32(elem_bytes)) // fx.Int32(4)
         for i in range_constexpr(num_x_loads):
             col_bytes = x_col_dw[i] * fx.Int32(4)
-            col_sw = _a16w4_swizzle_xor16(x_row_local[i], col_bytes, fx.Int32(k_blocks16))
+            # A-LDS bank-conflict XOR swizzle: LDS dest stays LINEAR (the DMA
+            # buffer_load_lds hardware does not honor an arbitrary swizzled per-lane
+            # LDS dest -- the M1 NaN); instead swizzle the GMEM source column so
+            # linear LDS slot [row][col] holds A[row][swz(row,col)]. The LDS read
+            # (lds_load_a) applies the SAME swizzle to its offset, so it fetches the
+            # right logical K. Same convention as kernels/gemm/mxfp4_preshuffle.py.
+            col_sw = _a16w4_swizzle_xor16(x_row_local[i], col_bytes, fx.Int32(k_blocks16), enable=True)
             row_k_dw = x_row_base_div4[i] + base_k_div4
-            global_byte = row_k_dw * fx.Int32(4) + col_bytes
-            lds_byte = x_row_local[i] * fx.Int32(KH_TILE_BYTES) + col_sw
+            global_byte = row_k_dw * fx.Int32(4) + col_sw
+            lds_byte = x_row_local[i] * fx.Int32(KH_TILE_BYTES) + col_bytes
             fx.copy(
                 x_dma_atom,
                 fx.slice(x_dma_tiles4, (None, global_byte // fx.Int32(16))),
@@ -1006,7 +1012,10 @@ def _gemm2_body_a16w4(
 
     def lds_load_a(mi, ku):
         row = row_a_lds + fx.Int32(mi * 16)
-        col_swz_bytes = _a16w4_swizzle_xor16(row, _a_col_bytes_for_ku(ku), fx.Int32(k_blocks16))
+        # Same XOR swizzle as the write above (enable=True) -> read fetches logical
+        # (row, col) from its swizzled physical byte. Read cols are 16-byte-aligned
+        # multiples, and the mask XORs by multiples of 16, so alignment is preserved.
+        col_swz_bytes = _a16w4_swizzle_xor16(row, _a_col_bytes_for_ku(ku), fx.Int32(k_blocks16), enable=True)
         byte_off = row * fx.Int32(KH_TILE_BYTES) + col_swz_bytes
         r = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
         fx.copy_atom_call(a_copy_atom, fx.slice(s_x_i32x4_tiles, (None, byte_off // fx.Int32(16))), r)
