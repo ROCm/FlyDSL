@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-30T14:36:52Z",
+ "updated": "2026-07-30T15:01:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30554139329,
+   "pr": 872,
+   "commit": "3f438f2549ad8b2d6cf6614a348b2231fba6b561",
+   "branch": "amartin/mxfp8-4wave",
+   "event": "pull_request",
+   "title": "[Kernel] Add optimized 4-wave MXFP8 GEMM kernel for gfx950",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30554139329",
+   "created_at": "2026-07-30T14:55:40Z",
+   "updated_at": "2026-07-30T14:58:37Z",
+   "actor": "aris134",
+   "jobs": []
+  },
   {
    "run_id": 30551549692,
    "pr": 872,
@@ -371,10 +386,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-30T13:48:06Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T14:43:49Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30532116922/job/90839920174"
     }
    ]
@@ -616,11 +631,11 @@
    "branch": "pr/docs-api-stability",
    "event": "pull_request",
    "title": "[Doc] Define API stability contract",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30527027523",
    "created_at": "2026-07-30T08:31:24Z",
-   "updated_at": "2026-07-30T08:37:10Z",
+   "updated_at": "2026-07-30T14:44:06Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -644,9 +659,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-30T08:37:10Z",
+     "started_at": "2026-07-30T14:44:05Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30527027523/job/90821438345"
     }
@@ -2119,49 +2134,6 @@
    "updated_at": "2026-07-28T16:15:04Z",
    "actor": "JohnQinAMD",
    "jobs": []
-  },
-  {
-   "run_id": 30376530274,
-   "pr": null,
-   "commit": "9a5c08e77355f915ad35965bea8ea88f0af33bf3",
-   "branch": "main",
-   "event": "push",
-   "title": "[Enh] Add rounding-mode control for float-to-float casts (#916)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30376530274",
-   "created_at": "2026-07-28T16:04:53Z",
-   "updated_at": "2026-07-28T18:34:55Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T16:09:47Z",
-     "completed_at": "2026-07-28T17:06:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30376530274/job/90334562387"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T16:11:56Z",
-     "completed_at": "2026-07-28T17:19:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30376530274/job/90334562403"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T16:54:39Z",
-     "completed_at": "2026-07-28T18:34:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30376530274/job/90334562442"
-    }
-   ]
   }
  ]
 }
