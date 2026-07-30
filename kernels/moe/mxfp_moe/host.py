@@ -243,9 +243,9 @@ def flydsl_mxfp4_gemm2(
 
 
 @functools.cache
-def _get_compiled_gemm1_a16w4(BM, D_HIDDEN, D_INTER, NE, topk, TILE_N, TILE_K):
+def _get_compiled_gemm1_a16w4(BM, D_HIDDEN, D_INTER, NE, topk, TILE_N, TILE_K, act):
     return compile_gemm1_a16w4_port(
-        BM=BM, D_HIDDEN=D_HIDDEN, D_INTER=D_INTER, NE=NE, TOPK=topk, TILE_N=TILE_N, TILE_K=TILE_K
+        BM=BM, D_HIDDEN=D_HIDDEN, D_INTER=D_INTER, NE=NE, TOPK=topk, TILE_N=TILE_N, TILE_K=TILE_K, act=act
     )
 
 
@@ -271,6 +271,7 @@ def flydsl_a16w4_gemm1(
     topk,
     TILE_N=64,
     TILE_K=256,
+    act="silu",
     stream=None,
 ):
     """a16w4 fused stage1: gate+up GEMM + SiLU -> bf16 intermediate.
@@ -286,7 +287,7 @@ def flydsl_a16w4_gemm1(
     if D_INTER % TILE_N != 0:
         raise NotImplementedError(f"a16w4 gemm1 requires D_INTER % TILE_N({TILE_N}) == 0, got D_INTER={D_INTER}")
 
-    launch = _get_compiled_gemm1_a16w4(BM, D_HIDDEN, D_INTER, NE, topk, TILE_N, TILE_K)
+    launch = _get_compiled_gemm1_a16w4(BM, D_HIDDEN, D_INTER, NE, topk, TILE_N, TILE_K, act)
     max_m_blocks = int(sorted_expert_ids.numel())
     grid = gemm1_a16w4_grid(BM, INTER=D_INTER, TILE_N=TILE_N, max_m_blocks=max_m_blocks)
     _run_compiled(

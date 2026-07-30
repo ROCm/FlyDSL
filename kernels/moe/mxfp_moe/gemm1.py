@@ -29,6 +29,7 @@ from .mxfp4_gemm_common import (
     _scalar_store,
     _scale_mma_atoms,
     _silu_mul_batch,
+    _situ_mul_batch,
     _udiv,
     _umax_i32,
     _umod,
@@ -686,6 +687,7 @@ def _gemm1_body_a16w4(
     INTER,
     NE,
     TOPK,
+    act="silu",
 ):
     """a16w4 (bf16 A x mxfp4 W) fused stage1 gemm1 body (aiter-aligned, un-pipelined).
 
@@ -960,7 +962,10 @@ def _gemm1_body_a16w4(
             for ni in range_constexpr(num_acc_n):
                 g = fx.Float32(fx.Vector(fx.memref_load_vec(acc_gate[mi][ni]))[ii])
                 u = fx.Float32(fx.Vector(fx.memref_load_vec(acc_up[mi][ni]))[ii])
-                y = _silu_mul_batch([g], [u])[0]
+                if const_expr(act == "situv2"):
+                    y = _situ_mul_batch([g], [u])[0]
+                else:
+                    y = _silu_mul_batch([g], [u])[0]
                 yb = arith.TruncFOp(T.bf16, _raw(y)).result
                 out_idx = sorted_row * inter_i32 + col_g_list[ni]
                 buffer_ops.buffer_store(yb, _raw(out_rsrc), _raw(out_idx), mask=valid)
@@ -1175,6 +1180,7 @@ def compile_gemm1_a16w4_port(
     TOPK,
     TILE_N=256,
     TILE_K=256,
+    act="silu",
 ):
     """a16w4 (bf16 A x mxfp4 W1) fused stage1 builder.
 
@@ -1194,7 +1200,9 @@ def compile_gemm1_a16w4_port(
     # A-LDS tile: BM rows x TILE_K bf16 (pad_k=0). Sized by the compiler.
     lds_bytes = BM * TILE_K * 2
 
-    name_suffix = f"a16w4_h{_K}_i{_INTER}_ne{NE}_bm{BM}_tn{TILE_N}"
+    assert act in ("silu", "situv2"), f"a16w4 gemm1 act must be 'silu' or 'situv2', got {act!r}"
+    _act_tag = "" if act == "silu" else f"_{act}"
+    name_suffix = f"a16w4_h{_K}_i{_INTER}_ne{NE}_bm{BM}_tn{TILE_N}{_act_tag}"
 
     @fx.struct
     class SharedStorage:
@@ -1240,6 +1248,7 @@ def compile_gemm1_a16w4_port(
                 INTER=_INTER,
                 NE=NE,
                 TOPK=TOPK,
+                act=act,
             )
 
     @flyc.jit
