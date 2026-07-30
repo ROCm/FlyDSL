@@ -709,6 +709,15 @@ def _gemm1_body_a16w4(
     _k0_count = TILE_K // 128
     num_acc_n = TILE_N // 16
     k_blocks16 = KH_TILE_BYTES // 16
+    # Software pipeline (ISA-aligned to aiter): A-LDS double-buffered so tile K+1's
+    # DMA writes the pong slot while tile K reads ping; B (mxfp4 W) + B-scale for
+    # K+1 are issued before tile K's MFMA so they stay in flight (vmcnt does NOT
+    # drain to 0 mid-loop). The A-DMA (buffer_load..lds) completes on lgkmcnt, so
+    # only a partial s_waitcnt(lgkmcnt=0) + ONE barrier gate the ds_read -- not the
+    # full vmcnt(0)/lgkmcnt(0) drain that serialized the earlier attempts.
+    _PIPE = K_TILES_TOTAL > 1
+    A_LDS_STAGES = 2 if _PIPE else 1
+    A_SLOT_BYTES = BM * KH_TILE_BYTES
     NUM_N_BLOCKS = INTER // TILE_N
 
     # W (mxfp4) preshuffle layout (aiter make_preshuffle_b_layout, N-major, fp4):
@@ -791,14 +800,15 @@ def _gemm1_body_a16w4(
     x_dma_tiles4 = fx.logical_divide(x_buf, fx.make_layout(4, 1))
     x_dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), fx.Int32)
 
-    def dma_x_tile_to_lds(base_k):
+    def dma_x_tile_to_lds(base_k, slot=0):
         base_k_div4 = (base_k * fx.Int32(elem_bytes)) // fx.Int32(4)
+        slot_byte = fx.Int32(slot * A_SLOT_BYTES)
         for i in range_constexpr(num_x_loads):
             col_bytes = x_col_dw[i] * fx.Int32(4)
             col_sw = _a16w4_swizzle_xor16(x_row_local[i], col_bytes, fx.Int32(k_blocks16))
             row_k_dw = x_row_base_div4[i] + base_k_div4
             global_byte = row_k_dw * fx.Int32(4) + col_bytes
-            lds_byte = x_row_local[i] * fx.Int32(KH_TILE_BYTES) + col_sw
+            lds_byte = slot_byte + x_row_local[i] * fx.Int32(KH_TILE_BYTES) + col_sw
             fx.copy(
                 x_dma_atom,
                 fx.slice(x_dma_tiles4, (None, global_byte // fx.Int32(16))),
@@ -811,7 +821,7 @@ def _gemm1_body_a16w4(
     col_base_bytes_L = lane_div_16 * fx.Int32(64)  # 32 bf16 * 2 B
     s_x_i32_flat = fx.make_view(
         fx.recast_iter(fx.Int32, lds_raw_ptr),
-        fx.make_layout(BM * LDS_STRIDE // 2, 1),
+        fx.make_layout(A_LDS_STAGES * BM * LDS_STRIDE // 2, 1),
     )
     s_x_i32x4_tiles = fx.logical_divide(s_x_i32_flat, fx.make_layout(4, 1))
     a_copy_atom = fx.make_copy_atom(fx.UniversalCopy128b(), fx.Int32)
@@ -821,11 +831,11 @@ def _gemm1_body_a16w4(
         _ku_in = ku % 4
         return col_base_bytes_L + fx.Int32(_ku_in * 16 + _k0_blk * 256)
 
-    def lds_load_a(mi, ku):
+    def lds_load_a(mi, ku, slot=0):
         row = row_a_lds + fx.Int32(mi * 16)
         col_swz_bytes = _a16w4_swizzle_xor16(row, _a_col_bytes_for_ku(ku), fx.Int32(k_blocks16))
-        # byte offset within the A-LDS tile -> 16-byte tile index.
-        byte_off = row * fx.Int32(KH_TILE_BYTES) + col_swz_bytes
+        # byte offset within the A-LDS slot -> 16-byte tile index.
+        byte_off = fx.Int32(slot * A_SLOT_BYTES) + row * fx.Int32(KH_TILE_BYTES) + col_swz_bytes
         r = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
         fx.copy_atom_call(a_copy_atom, fx.slice(s_x_i32x4_tiles, (None, byte_off // fx.Int32(16))), r)
         return fx.Vector(fx.memref_load_vec(r)).bitcast(fx.BFloat16)  # v8bf16
@@ -929,25 +939,54 @@ def _gemm1_body_a16w4(
     def _mma(acc, a8, b8):
         fx.gemm(mma_atom, acc, _bf16_frag(a8), _bf16_frag(b8), acc)
 
-    # ---- main K loop ----------------------------------------------------------
-    for kt in range_constexpr(K_TILES_TOTAL):
-        base_k = fx.Int32(kt * TILE_K)
-        dma_x_tile_to_lds(base_k)
-        g_raw = [load_b_raw(base_k, n_blk_gate[ni], n_intra_gate[ni]) for ni in range_constexpr(num_acc_n)]
-        u_raw = [load_b_raw(base_k, n_blk_up[ni], n_intra_up[ni]) for ni in range_constexpr(num_acc_n)]
-        g_sc = [load_b_scale(base_k, scale_mni_gate[ni], scale_np_gate[ni]) for ni in range_constexpr(num_acc_n)]
-        u_sc = [load_b_scale(base_k, scale_mni_up[ni], scale_np_up[ni]) for ni in range_constexpr(num_acc_n)]
-        rocdl.s_waitcnt(0)
-        gpu.barrier()
+    # ---- B tile load + compute helpers ----------------------------------------
+    def load_b_tile(base_k):
+        return (
+            [load_b_raw(base_k, n_blk_gate[ni], n_intra_gate[ni]) for ni in range_constexpr(num_acc_n)],
+            [load_b_raw(base_k, n_blk_up[ni], n_intra_up[ni]) for ni in range_constexpr(num_acc_n)],
+            [load_b_scale(base_k, scale_mni_gate[ni], scale_np_gate[ni]) for ni in range_constexpr(num_acc_n)],
+            [load_b_scale(base_k, scale_mni_up[ni], scale_np_up[ni]) for ni in range_constexpr(num_acc_n)],
+        )
+
+    def compute_tile(b_tile, read_slot):
+        g_raw, u_raw, g_sc, u_sc = b_tile
         for ni in range_constexpr(num_acc_n):
             for ku in range_constexpr(k_unroll):
                 gb = upconvert_b(g_raw[ni], ku, g_sc[ni][ku])
                 ub = upconvert_b(u_raw[ni], ku, u_sc[ni][ku])
                 for mi in range_constexpr(m_repeat):
-                    a8 = lds_load_a(mi, ku)
+                    a8 = lds_load_a(mi, ku, slot=read_slot)
                     _mma(acc_gate[mi][ni], a8, gb)
                     _mma(acc_up[mi][ni], a8, ub)
+
+    # ---- main K loop (ISA-aligned software pipeline) --------------------------
+    if const_expr(not _PIPE):
+        dma_x_tile_to_lds(fx.Int32(0), slot=0)
+        b0 = load_b_tile(fx.Int32(0))
+        rocdl.s_waitcnt(lgkmcnt=0)
         gpu.barrier()
+        compute_tile(b0, 0)
+        gpu.barrier()
+    else:
+        # prologue: tile-0 A DMA + B loads in flight.
+        dma_x_tile_to_lds(fx.Int32(0), slot=0)
+        b_cur = load_b_tile(fx.Int32(0))
+        for kt in range_constexpr(K_TILES_TOTAL):
+            cur_slot = kt % A_LDS_STAGES
+            # Wait ONLY the A DMA (buffer_load..lds -> lgkmcnt) for THIS tile, which
+            # was the last LDS-DMA issued (prologue or prev iter's prefetch); no
+            # kt+1 DMA in flight yet, so lgkmcnt(0) targets tile kt exactly. B's
+            # vmem stays in flight -- no vmcnt(0) drain.
+            rocdl.s_waitcnt(lgkmcnt=0)
+            gpu.barrier()  # single barrier: A(kt) visible before ds_read
+            # prefetch tile kt+1's A(->pong slot) + B/B-scale (->regs) so they
+            # overlap tile kt's MFMA cluster below (issued AFTER the wait/barrier).
+            if const_expr(kt + 1 < K_TILES_TOTAL):
+                dma_x_tile_to_lds(fx.Int32((kt + 1) * TILE_K), slot=(kt + 1) % A_LDS_STAGES)
+                b_nxt = load_b_tile(fx.Int32((kt + 1) * TILE_K))
+            compute_tile(b_cur, cur_slot)
+            if const_expr(kt + 1 < K_TILES_TOTAL):
+                b_cur = b_nxt
 
     # ---- epilogue: SiLU(gate)*up -> bf16 intermediate [sorted_size, inter] -----
     # Stored by SORTED POSITION (row = bx_m + row_in_tile), matching the a4w4 fused
@@ -1199,8 +1238,10 @@ def compile_gemm1_a16w4_port(
     assert BM % 16 == 0, f"BM must be a multiple of 16, got {BM}"
     NUM_N_BLOCKS = _INTER // TILE_N
 
-    # A-LDS tile: BM rows x TILE_K bf16 (pad_k=0). Sized by the compiler.
-    lds_bytes = BM * TILE_K * 2
+    # A-LDS tile: BM rows x TILE_K bf16 (pad_k=0), double-buffered (2 slots) for the
+    # software pipeline (must match A_LDS_STAGES in _gemm1_body_a16w4). 1 slot if 1 K-tile.
+    _a_lds_stages = 2 if (_K // TILE_K) > 1 else 1
+    lds_bytes = _a_lds_stages * BM * TILE_K * 2
 
     assert act in ("silu", "situv2"), f"a16w4 gemm1 act must be 'silu' or 'situv2', got {act!r}"
     _act_tag = "" if act == "silu" else f"_{act}"
