@@ -897,6 +897,7 @@ def _gemm2_body_a16w4(
     N_OUT,
     INTER,
     NE,
+    b_cache_mod=2,
 ):
     """a16w4 stage2 body. K=inter_dim (contraction), N=model_dim (N_OUT).
 
@@ -1032,7 +1033,7 @@ def _gemm2_body_a16w4(
                 )
             )
             v4 = buffer_ops.buffer_load(
-                _raw(w_rsrc), _raw(idx_pack // fx.Int32(4)), vec_width=4, dtype=T.i32, cache_modifier=2
+                _raw(w_rsrc), _raw(idx_pack // fx.Int32(4)), vec_width=4, dtype=T.i32, cache_modifier=b_cache_mod
             )
             v4 = fx.Vector(v4)
             raw.append([fx.Int32(v4[j]) for j in range(4)])
@@ -1159,6 +1160,7 @@ def compile_gemm2_a16w4_port(
     TILE_N=256,
     TILE_K=256,
     xcd_swizzle=1,
+    b_cache_mod=2,
 ):
     """a16w4 (bf16 intermediate A x mxfp4 W2) stage2 builder.
 
@@ -1185,6 +1187,8 @@ def compile_gemm2_a16w4_port(
     _lds_bytes = _a_bytes + _acc_bytes
 
     _name = f"gemm2_a16w4_port_ne{NE}_h{N_OUT}_i{_K}_bm{BM}_tn{TILE_N}"
+    if b_cache_mod != 2:
+        _name += f"_bcm{b_cache_mod}"
     if xcd_swizzle > 0:
         _name += f"_xcd{xcd_swizzle}"
 
@@ -1258,6 +1262,7 @@ def compile_gemm2_a16w4_port(
                 N_OUT=N_OUT,
                 INTER=_K,
                 NE=NE,
+                b_cache_mod=b_cache_mod,
             )
 
     @flyc.jit
