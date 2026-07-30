@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-30T08:04:15Z",
+ "updated": "2026-07-30T08:34:42Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30527027523,
+   "pr": 925,
+   "commit": "205c48a06393d2d26ed5dc3a2bc0921a467faefc",
+   "branch": "pr/docs-api-stability",
+   "event": "pull_request",
+   "title": "[Doc] Define API stability contract",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30527027523",
+   "created_at": "2026-07-30T08:31:24Z",
+   "updated_at": "2026-07-30T08:31:53Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 30524768390,
    "pr": null,
@@ -10,13 +25,41 @@
    "branch": "main",
    "event": "push",
    "title": "Port GEMM/MoE/conv kernels to the layout API (#913)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30524768390",
    "created_at": "2026-07-30T07:58:06Z",
-   "updated_at": "2026-07-30T07:59:31Z",
+   "updated_at": "2026-07-30T08:03:28Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T08:03:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30524768390/job/90814202722"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-30T08:04:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30524768390/job/90814202788"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-30T08:31:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30524768390/job/90814202806"
+    }
+   ]
   },
   {
    "run_id": 30523108262,
@@ -25,20 +68,20 @@
    "branch": "pr/docs-api-stability",
    "event": "pull_request",
    "title": "[Doc] Define API stability contract",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30523108262",
    "created_at": "2026-07-30T07:29:04Z",
-   "updated_at": "2026-07-30T07:32:52Z",
+   "updated_at": "2026-07-30T08:31:42Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-30T08:02:33Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T08:31:42Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30523108262/job/90808433110"
     },
     {
@@ -53,10 +96,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-30T07:32:52Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T08:31:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30523108262/job/90808433158"
     }
    ]
@@ -2091,21 +2134,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30283974617/job/90045506537"
     }
    ]
-  },
-  {
-   "run_id": 30283576180,
-   "pr": null,
-   "commit": "48e9d47ec9a8712738997388337340ff77add034",
-   "branch": "main",
-   "event": "pull_request",
-   "title": "[Kernel][MI350] Add 8 wave GQA sliding-window attention kernel",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30283576180",
-   "created_at": "2026-07-27T16:11:27Z",
-   "updated_at": "2026-07-27T16:12:24Z",
-   "actor": "amd-nprotaso",
-   "jobs": []
   }
  ]
 }
