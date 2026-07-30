@@ -427,7 +427,7 @@ def compile_hgemm_kernel(
                 k_local_idx = global_tid % LDG_A_X_THREADS * LDG_VEC_SIZE
                 row_idx = m_offset + fx.Index(m_local_idx)
                 safe_row_idx = arith.select(
-                    as_ir_value(row_idx < fx.Index(m)),
+                    row_idx < fx.Index(m),
                     row_idx,
                     fx.Index(0),
                 )
@@ -453,7 +453,7 @@ def compile_hgemm_kernel(
                 k_local_idx = global_tid % LDG_B_X_THREADS * LDG_VEC_SIZE
                 row_idx = n_offset + fx.Index(n_local_idx)
                 safe_row_idx = arith.select(
-                    as_ir_value(row_idx < fx.Index(n)),
+                    row_idx < fx.Index(n),
                     row_idx,
                     fx.Index(0),
                 )
@@ -487,7 +487,7 @@ def compile_hgemm_kernel(
                 col_in_bytes = swizzle_xor16(m_local_idx, col_in_bytes, k_blocks16)
                 row_idx = m_offset + fx.Index(m_local_idx)
                 safe_row_idx = arith.select(
-                    as_ir_value(row_idx < fx.Index(m)),
+                    row_idx < fx.Index(m),
                     row_idx,
                     fx.Index(0),
                 )
@@ -524,7 +524,7 @@ def compile_hgemm_kernel(
                 col_in_bytes = swizzle_xor16(n_local_idx, col_in_bytes, k_blocks16)
                 row_idx = n_offset + fx.Index(n_local_idx)
                 safe_row_idx = arith.select(
-                    as_ir_value(row_idx < fx.Index(n)),
+                    row_idx < fx.Index(n),
                     row_idx,
                     fx.Index(0),
                 )

@@ -174,8 +174,8 @@ def build_silu_and_mul_fq_module(
                 qx = qx_f32.bitcast(i32)
                 s = qx & c0x80000000_i32
                 qx_abs = qx & c0x7FFFFFFF_i32
-                denormal_mask = as_ir_value(qx_abs < c0x3F800000_i32)
-                normal_mask = as_ir_value((qx_abs < c0x40C00000_i32) & (qx_abs >= c0x3F800000_i32))
+                denormal_mask = qx_abs < c0x3F800000_i32
+                normal_mask = (qx_abs < c0x40C00000_i32) & (qx_abs >= c0x3F800000_i32)
 
                 denorm_f32 = qx_abs.bitcast(f32) + c0x4A800000_i32.bitcast(f32)
                 denormal_x = denorm_f32.bitcast(i32) - c0x4A800000_i32
