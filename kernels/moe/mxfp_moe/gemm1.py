@@ -10,6 +10,8 @@ from flydsl.expr.typing import T
 
 from . import dpp_utils
 from .mxfp4_gemm_common import (
+    _a_lds_swz_block_idx,
+    _a_lds_swz_block_layout,
     _e8m0_from_amax,
     _fabs_f32,
     _global_i32_at,
@@ -249,13 +251,19 @@ def _gemm1_body(
         fx.copy_atom_call(i32x4_copy_atom, fx.slice(s_aq_i32x4_tiles, (None, tile_idx)), r)
         return r
 
+    # fp4 A-LDS read swizzle via crd2idx over the composed SwizzleType(3,0,4) layout
+    # (bit-identical to the manual XOR, perf-neutral: -0.1% median-of-15). fp8 keeps the
+    # manual XOR below: crd2idx is bit-identical but ~10% slower (measured) from hot-loop
+    # scheduling, despite equal-or-leaner static ISA.
+    _a_lds_swz = _a_lds_swz_block_layout(kAStages * BM)
+
     def issue_a_ds_read(slot):
-        mask = _lds_swizzle_mask(lane_mod_16)
         a = [[None, None] for _ in range(kMChunks)]
         for k in range_constexpr(2):
             if const_expr(a_dtype == "fp8"):
                 # fp8 128-K operand (v8i32) = two 16 B halves 64 B apart in the row
                 # (f8f6f4 ABI), packed lo++hi. k selects the 128-K half (upper = +128 B).
+                mask = _lds_swizzle_mask(lane_mod_16)
                 kbase = fx.Int32(k * 128)
                 lo_col = (lane_div_16 * fx.Int32(16) + kbase) ^ mask
                 hi_col = (lane_div_16 * fx.Int32(16) + kbase + fx.Int32(64)) ^ mask
@@ -268,13 +276,11 @@ def _gemm1_body(
                     t.store(lo.shuffle(hi, list(range(8))))
                     a[i][k] = t
             else:
-                # Manual XOR swizzle kept: the crd2idx form (see gemm2) is ISA-identical
-                # but ~5% slower here from scheduling sensitivity in this tuned loop.
-                lds_col = (lane_div_16 * fx.Int32(16) + fx.Int32(k * 64)) ^ mask
+                block_col = lane_div_16 + fx.Int32(k * 4)  # +64 bytes == +4 blocks
                 for i in range_constexpr(kMChunks):
-                    lds_row = lane_mod_16 + fx.Int32(i * 16)
-                    off = fx.Int32(slot * (BM * KH_TILE)) + lds_row * fx.Int32(KH_TILE) + lds_col
-                    a[i][k] = _lds_i32x4_frag(off // fx.Int32(16))
+                    global_row = fx.Int32(slot * BM) + lane_mod_16 + fx.Int32(i * 16)
+                    block_idx = _a_lds_swz_block_idx(_a_lds_swz, global_row, block_col)
+                    a[i][k] = _lds_i32x4_frag(block_idx)
         return a
 
     def issue_a_scale_load():
