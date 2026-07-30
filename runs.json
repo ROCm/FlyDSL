@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-30T15:58:20Z",
+ "updated": "2026-07-30T16:27:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -29,10 +29,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-30T15:51:50Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T16:16:47Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30555020683/job/90925237487"
     },
     {
@@ -732,11 +732,11 @@
    "branch": "pr/docs-api-stability",
    "event": "pull_request",
    "title": "[Doc] Define API stability contract",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30527027523",
    "created_at": "2026-07-30T08:31:24Z",
-   "updated_at": "2026-07-30T14:44:06Z",
+   "updated_at": "2026-07-30T16:24:54Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -760,10 +760,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-30T14:44:05Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T16:24:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30527027523/job/90821438345"
     }
    ]
@@ -1274,11 +1274,11 @@
    "branch": "cjl/norm_perf",
    "event": "pull_request",
    "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30472049143",
    "created_at": "2026-07-29T16:43:25Z",
-   "updated_at": "2026-07-30T12:46:51Z",
+   "updated_at": "2026-07-30T16:25:23Z",
    "actor": "cschenjunlin",
    "jobs": [
     {
@@ -1302,9 +1302,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-30T12:46:52Z",
+     "started_at": "2026-07-30T16:25:23Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30472049143/job/90875381948"
     }
