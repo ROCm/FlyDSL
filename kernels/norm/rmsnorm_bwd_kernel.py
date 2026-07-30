@@ -1,13 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""RMSNorm backward kernel builders (plain + fused-add / prenorm).
-
-Split out of ``rmsnorm_kernel.py`` so the training-only backward path lives in
-its own module (per review on #800). Device-side helpers and constants are
-shared via ``rmsnorm_common.py``; the forward builders and the autograd glue
-that ties forward+backward together stay in ``rmsnorm_kernel.py``.
-"""
+"""RMSNorm backward kernel builders for plain and fused-add variants."""
 
 import math
 
@@ -48,17 +42,12 @@ def is_rmsnorm_bwd_two_stage_vec_config(N: int, dtype_str: str) -> bool:
 
 
 def build_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str: str | None = None):
-    """Fused RMSNorm backward: grid=(M,), one block per row.
+    """RMSNorm backward atomic fallback: one block per row.
 
     Pass 1: c1 = mean_N(x_hat * wdy), x_hat = x*rstd, wdy = dy*gamma.
     Pass 2: dx = (wdy - x_hat*c1) * rstd  -> DX (elem dtype);
             dw_elem = dy * x_hat (fp32)   -> atomicAdd into DWeight[idx] (fp32).
     eps is baked into Rstd by the forward, so it is not needed here.
-
-    Perf follow-ups (deferred; correctness-complete as-is): this is the generic
-    scalar path only — a vectorized fast path (mirroring the forward) and caching
-    x/dy/gamma between pass 1 and pass 2 (the forward caches `in_local`) would cut
-    global traffic. Left out of PR 1 to keep the first backward reviewable.
     """
     weight_dtype_str = resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
@@ -177,7 +166,7 @@ def build_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str: str | Non
                 wdy = dy * g
                 dx = (wdy - x_hat * c1) * rstd
                 dx_e = dx if dtype_str == "f32" else dx.to(elem_dtype)
-                store_scalar(copy_atom_s, elem_dtype, elem_dtype, dx_div, idx, dx_e)
+                store_scalar(copy_atom_s, elem_dtype, dx_div, idx, dx_e)
 
                 dw = dy * x_hat
                 atomic_add(DWeight, idx, dw, dtype_bytes=4)
@@ -214,12 +203,9 @@ def build_fused_add_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str:
 
     eps is baked into Rstd by the forward, so it is not needed here.
 
-    DResidualOut is ALWAYS a real tensor: the python wrapper passes a zero
+    DResidualOut is always a real tensor: the Python wrapper passes a zero
     tensor when the caller has no downstream residual grad (pure-norm case).
     This keeps the kernel branch-free wrt None.
-
-    Perf follow-ups (deferred; correctness-complete): generic scalar path only —
-    a vectorized fast path + caching between passes would cut global traffic.
     """
     weight_dtype_str = resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
@@ -347,7 +333,7 @@ def build_fused_add_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str:
                 d_added = (wdy - a_hat * c1) * rstd
                 total = d_added + dres_out
                 total_e = total if dtype_str == "f32" else total.to(elem_dtype)
-                store_scalar(copy_atom_s, elem_dtype, elem_dtype, dx_div, idx, total_e)
+                store_scalar(copy_atom_s, elem_dtype, dx_div, idx, total_e)
 
                 dw = dy * a_hat
                 atomic_add(DWeight, idx, dw, dtype_bytes=4)
@@ -508,7 +494,7 @@ def _build_rmsnorm_bwd_two_stage_module(
                 )
 
         dweight_partial = fx.Vector.filled(PARTIAL_ACC_SIZE, 0.0, fx.Float32)
-        for row in range(fx.Int32(bid), MIn, num_programs):
+        for row in range(bid, MIn, num_programs):
             row_source = fx.slice(Source_buf, (row, None))
             row_dy = fx.slice(DY_buf, (row, None))
             row_dx = fx.slice(DX_buf, (row, None))
@@ -588,7 +574,7 @@ def _build_rmsnorm_bwd_two_stage_module(
                         store_vec(copy_atom_io, IO_WIDTH, elem_dtype, dx_e, dx_div, io_idx)
                     else:
                         dx_e = dx if dtype_str == "f32" else dx.to(elem_dtype)
-                        store_scalar(copy_atom_io, elem_dtype, elem_dtype, dx_div, io_idx, dx_e)
+                        store_scalar(copy_atom_io, elem_dtype, dx_div, io_idx, dx_e)
 
                 dw = dy * source_hat
                 if const_expr(USE_VEC):
@@ -609,7 +595,6 @@ def _build_rmsnorm_bwd_two_stage_module(
                     partial_value = dweight_partial[tile_i * IO_WIDTH + lane]
                     store_scalar(
                         copy_atom_f32,
-                        fx.Float32,
                         fx.Float32,
                         partial_div,
                         partial_idx,
@@ -643,26 +628,26 @@ def _build_rmsnorm_bwd_two_stage_module(
         lds = fx.SharedAllocator().allocate(DWeightReduceStorage).peek()
         s_partial = lds.s_red.view(fx.make_layout(DWEIGHT_REDUCE_THREADS, 1))
 
-        acc = fx.Float32(0.0)
+        c_zero_f = fx.Float32(0.0)
+        acc = c_zero_f
         for partial_base in range(0, num_programs, DWEIGHT_REDUCE_ROW_LANES):
             partial_row = partial_base + partial_lane
             partial_valid = partial_row < num_programs
             partial_row_safe = partial_valid.select(partial_row, 0)
             partial_idx = partial_row_safe * N + col_safe
             value = load_scalar(copy_atom_f32, fx.Float32, partial_div, partial_idx)
-            acc = acc + partial_valid.select(value, fx.Float32(0.0))
+            acc = acc + partial_valid.select(value, c_zero_f)
         fx.memref_store(acc, s_partial, tid)
         gpu.barrier()
 
         if partial_lane == 0:
             if col < N:
-                total = fx.Float32(0.0)
+                total = c_zero_f
                 for lane in range_constexpr(DWEIGHT_REDUCE_ROW_LANES):
                     total = total + fx.memref_load(s_partial, lane * DWEIGHT_REDUCE_COLS + col_lane)
                 out = total if weight_dtype_str == "f32" else total.to(weight_elem_dtype)
                 store_scalar(
                     weight_copy_atom_s,
-                    weight_elem_dtype,
                     weight_elem_dtype,
                     dweight_div,
                     col,
