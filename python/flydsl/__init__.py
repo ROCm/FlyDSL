@@ -4,4 +4,9 @@
 
 __version__ = "0.3.0"
 
-from .autotune import Config as Config, autotune as autotune  # noqa: E402
+from .autotune import (  # noqa: E402
+    BenchResult as BenchResult,
+    Config as Config,
+    autotune as autotune,
+    do_bench as do_bench,
+)

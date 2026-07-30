@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import os
-import statistics
 import sys
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -22,6 +21,7 @@ pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
 import flydsl.compiler as flyc  # noqa: E402
 import flydsl.expr as fx  # noqa: E402
+from flydsl.autotune import do_bench  # noqa: E402
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.moe.moe_a8w4_mxscale_gfx1250 import launch_moe_gemm_a8w4  # noqa: E402
 from tests.kernels.utils import gemm_common_utils as gcu  # noqa: E402
@@ -400,17 +400,13 @@ def test_grouped_moe_perf():
             stage1_act=0,
         )
 
-    for _ in range(10):
-        kernels_only()
-    torch.cuda.synchronize()
-    iters = 50
-    starts = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-    ends = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-    for s, e in zip(starts, ends):
-        s.record()
-        kernels_only()
-        e.record()
-    torch.cuda.synchronize()
-    us = statistics.median(sorted(s.elapsed_time(e) * 1e3 for s, e in zip(starts, ends)))
+    us = do_bench(
+        kernels_only,
+        warmup=10,
+        rep=50,
+        schedule="per_iter",
+        statistic="median_average",
+        unit="us",
+    )
     print(f"\ngrouped MoE kernels (quant+gemm1+gemm2) E16 m768 i512 t256 topk4: {us:.2f} us")
     assert us > 0

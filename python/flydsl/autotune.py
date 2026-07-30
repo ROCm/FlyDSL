@@ -8,8 +8,10 @@ import inspect
 import json
 import os
 from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List
+from statistics import mean, median
+from typing import Callable, Dict, List, Literal
 
 from .utils import env, log
 from .utils.file import atomic_write
@@ -21,6 +23,39 @@ except ImportError:
 
 
 _ARTIFACT_VERSION = 1
+
+BenchSchedule = Literal["isolated", "pipelined", "per_iter"]
+BenchStatistic = Literal["median", "median_average", "mean", "min", "max"]
+
+
+@dataclass(frozen=True)
+class BenchResult:
+    """A self-describing CUDA/HIP event benchmark result.
+
+    Samples and the selected value are always stored in microseconds.  Legacy
+    ``do_bench`` callers can continue requesting scalar milliseconds.
+    """
+
+    value_us: float
+    samples_us: tuple[float, ...]
+    instrument: str
+    schedule: BenchSchedule
+    statistic: BenchStatistic
+    warmup: int
+    iterations: int
+    cache_policy: str
+
+    @property
+    def min_us(self) -> float:
+        return min(self.samples_us)
+
+    @property
+    def max_us(self) -> float:
+        return max(self.samples_us)
+
+    @property
+    def sample_count(self) -> int:
+        return len(self.samples_us)
 
 
 def _tuning_enabled() -> bool:
@@ -174,24 +209,158 @@ class Config:
         )
 
 
-def do_bench(fn, warmup=5, rep=25, quantiles=None):
-    """Benchmark a GPU kernel using CUDA/HIP events. Returns median ms."""
-    for _ in range(warmup):
-        fn()
-    torch.cuda.synchronize()
-    times = []
-    for _ in range(rep):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        fn()
-        end.record()
+def _filter_iqr(samples):
+    ordered = sorted(samples)
+    if len(ordered) < 8:
+        return ordered
+    q1, q3 = ordered[len(ordered) // 4], ordered[3 * len(ordered) // 4]
+    iqr = q3 - q1
+    lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+    filtered = [sample for sample in ordered if lo <= sample <= hi]
+    return filtered or ordered
+
+
+def _reduce_samples(samples, statistic):
+    if statistic == "median":
+        ordered = sorted(samples)
+        return float(ordered[len(ordered) // 2])
+    if statistic == "median_average":
+        return float(median(samples))
+    if statistic == "mean":
+        return float(mean(samples))
+    if statistic == "min":
+        return float(min(samples))
+    if statistic == "max":
+        return float(max(samples))
+    raise ValueError(f"unsupported statistic: {statistic!r}")
+
+
+def do_bench(
+    fn,
+    warmup=5,
+    rep=25,
+    quantiles=None,
+    *,
+    schedule: BenchSchedule = "isolated",
+    statistic: BenchStatistic = "median",
+    prep_fn=None,
+    flush_bytes=0,
+    iqr=False,
+    stream=None,
+    return_result=False,
+    unit="ms",
+):
+    """Benchmark a GPU callable using CUDA/HIP events.
+
+    The legacy call shape remains unchanged: isolated iterations, a median
+    scalar (or ranked quantiles), and milliseconds.  New callers should request
+    ``return_result=True``; :class:`BenchResult` always stores microseconds and
+    records the measurement contract.
+
+    ``pipelined`` uses one event pair around all calls and therefore returns a
+    single average sample. ``per_iter`` records one pair per call and performs
+    one final synchronization. ``isolated`` preserves the autotuner's existing
+    synchronize-after-each-call behavior.
+    """
+    if torch is None:
+        raise RuntimeError("do_bench requires torch with CUDA/HIP support")
+    if warmup < 0 or rep <= 0:
+        raise ValueError("warmup must be >= 0 and rep must be > 0")
+    if schedule not in ("isolated", "pipelined", "per_iter"):
+        raise ValueError(f"unsupported schedule: {schedule!r}")
+    if statistic not in ("median", "median_average", "mean", "min", "max"):
+        raise ValueError(f"unsupported statistic: {statistic!r}")
+    if unit not in ("ms", "us"):
+        raise ValueError("unit must be 'ms' or 'us'")
+    if quantiles is not None and return_result:
+        raise ValueError("quantiles and return_result cannot be combined")
+    flush_bytes = int(flush_bytes or 0)
+    if flush_bytes < 0:
+        raise ValueError("flush_bytes must be >= 0")
+    if schedule == "pipelined" and statistic != "mean":
+        raise ValueError("pipelined schedule only supports statistic='mean'")
+    if schedule == "pipelined" and (prep_fn is not None or flush_bytes):
+        raise ValueError("pipelined schedule cannot include prep_fn or cache flushing")
+
+    flush_device = getattr(stream, "device", "cuda")
+    flush_buf = torch.empty(flush_bytes, dtype=torch.uint8, device=flush_device) if flush_bytes else None
+    stream_context = torch.cuda.stream(stream) if stream is not None else nullcontext()
+
+    def prepare():
+        if flush_buf is not None:
+            flush_buf.zero_()
+        if prep_fn is not None:
+            prep_fn()
+
+    def record(event):
+        if stream is None:
+            event.record()
+        else:
+            event.record(stream)
+
+    with stream_context:
+        for _ in range(warmup):
+            prepare()
+            fn()
         torch.cuda.synchronize()
-        times.append(start.elapsed_time(end))
-    times.sort()
+
+        samples_us = []
+        if schedule == "pipelined":
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            record(start)
+            for _ in range(rep):
+                prepare()
+                fn()
+            record(end)
+            end.synchronize()
+            samples_us.append(start.elapsed_time(end) * 1e3 / rep)
+        elif schedule == "per_iter":
+            starts = [torch.cuda.Event(enable_timing=True) for _ in range(rep)]
+            ends = [torch.cuda.Event(enable_timing=True) for _ in range(rep)]
+            for index in range(rep):
+                prepare()
+                record(starts[index])
+                fn()
+                record(ends[index])
+            ends[-1].synchronize()
+            samples_us.extend(starts[index].elapsed_time(ends[index]) * 1e3 for index in range(rep))
+        else:
+            for _ in range(rep):
+                prepare()
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                record(start)
+                fn()
+                record(end)
+                if stream is None:
+                    # Preserve the legacy autotuner contract: fn may enqueue
+                    # work on streams other than the current one.
+                    torch.cuda.synchronize()
+                else:
+                    end.synchronize()
+                samples_us.append(start.elapsed_time(end) * 1e3)
+
+    reduced_samples = _filter_iqr(samples_us) if iqr else sorted(samples_us)
+    value_us = _reduce_samples(reduced_samples, statistic)
+    result = BenchResult(
+        value_us=value_us,
+        samples_us=tuple(samples_us),
+        instrument="cuda_event",
+        schedule=schedule,
+        statistic=statistic,
+        warmup=warmup,
+        iterations=rep,
+        cache_policy=f"flush:{flush_bytes}" if flush_bytes else "warm",
+    )
+    if return_result:
+        return result
+
+    scale = 1.0 if unit == "us" else 1e-3
     if quantiles:
-        return [times[min(int(q * len(times)), len(times) - 1)] for q in quantiles]
-    return times[len(times) // 2]
+        ranked = sorted(samples_us)
+        return [ranked[min(int(q * len(ranked)), len(ranked) - 1)] * scale for q in quantiles]
+    return value_us * scale
 
 
 class Autotuner:

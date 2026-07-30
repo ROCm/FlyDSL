@@ -207,7 +207,8 @@ def my_kernel_test(Input, Output):
 
 Features:
 - Device memory profiling to determine rotation count
-- Torch CUDA event timing
+- `torch.profiler` device-time attribution by default
+- Pipelined CUDA/HIP event fallback with `FLYDSL_PERFTEST_USE_EVENTS=1`
 - HIPGraph capture mode (`testGraph=True`)
 - Cache-aware iteration calculation
 
@@ -225,13 +226,43 @@ High-level validation wrapper around `checkAllclose`.
 
 ### 4.2 `tests/kernels/benchmark_common.py`
 
-Shared benchmark harness for performance comparison.
+Compatibility wrappers and performance-comparison formatting. Event timing
+delegates to the canonical `flydsl.do_bench` implementation.
 
 **Key functions:**
 ```python
 # Measure device time (torch CUDA events)
 gpu_us = bench_gpu_us_torch(fn, warmup=20, iters=200)
 ```
+
+### 4.3 Canonical event timer
+
+`flydsl.do_bench` is the single implementation for eager CUDA/HIP event
+measurement. Its explicit schedule keeps physically different experiments from
+being hidden behind ambiguous helper names:
+
+```python
+from flydsl import do_bench
+
+result = do_bench(
+    fn,
+    warmup=20,
+    rep=200,
+    schedule="pipelined",  # or "per_iter" / "isolated"
+    statistic="mean",
+    return_result=True,
+)
+print(result.value_us, result.samples_us)
+```
+
+`BenchResult` always stores microseconds and records the schedule, statistic,
+cache policy, warmup, and iteration count. The historical
+`flydsl.autotune.do_bench(fn, warmup, rep, quantiles)` scalar interface remains
+available and returns milliseconds for backward compatibility.
+
+Do not replace `run_perftest` with this helper when profiler attribution is the
+question: profiler dwell, event elapsed time, host wall clock, and graph replay
+are separate instruments.
 
 ---
 
@@ -308,7 +339,7 @@ def test_my_kernel():
 ### 6.3 Benchmark Test Pattern
 
 ```python
-from tests.kernels.benchmark_common import bench_gpu_us_torch
+from flydsl import do_bench
 
 def benchmark_my_kernel():
     # Setup
@@ -318,13 +349,38 @@ def benchmark_my_kernel():
         launch_fn(input_tensor, output_tensor)
 
     # Measure
-    gpu_us = bench_gpu_us_torch(run, warmup=20, iters=200)
+    result = do_bench(
+        run,
+        warmup=20,
+        rep=200,
+        schedule="pipelined",
+        statistic="mean",
+        return_result=True,
+    )
+    gpu_us = result.value_us
 
     # Compute metrics
     total_bytes = 2 * M * N * elem_size
     bandwidth_tbs = total_bytes / (gpu_us * 1e-6) / 1e12
     print(f"Time: {gpu_us:.1f} us, Bandwidth: {bandwidth_tbs:.2f} TB/s")
 ```
+
+### 6.4 Benchmark CI records and gates
+
+`run_benchmark.sh --output_csv PATH` preserves the existing throughput columns
+and appends normalized `avg_us`, sample metadata, measurement semantics, and
+GPU architecture. Human-readable stdout intentionally keeps its original
+five-column format for dashboard compatibility.
+
+The general comparator uses the same relative-AND-absolute rule as the
+allreduce gate. Hard failures are limited to the stable per-architecture
+allowlist in `.github/benchmark_thresholds.json`; uncalibrated rows remain
+report-only. Missing baselines skip the comparison rather than failing a PR.
+
+Initial gfx942/gfx950 rows use a 20% relative threshold plus a 10 us absolute
+floor. The relative threshold is intentionally wider than the documented
+approximately 14% gfx950 clock-variation band and must be recalibrated from CI
+history before adding more rows.
 
 ---
 
@@ -358,6 +414,7 @@ python tests/kernels/test_preshuffle_gemm.py \
 | `FLYDSL_RUNTIME_CACHE_DIR` | Compiler | Cache directory (default: `~/.flydsl/cache`) |
 | `RUN_TESTS_FULL` | `run_tests.sh` | Set to `1` to run all parametrized cases |
 | `BENCH_LOG_DIR` | `run_benchmark.sh` | Benchmark log directory (default: `/tmp/flydsl_bench`) |
+| `BENCH_OUTPUT_CSV` | `run_benchmark.sh` | Write enriched CSV with raw us and measurement metadata |
 
 ---
 
@@ -385,11 +442,15 @@ bash scripts/dumpir.sh
 |---|---|
 | `scripts/run_tests.sh` | Full test runner (pytest + examples + FileCheck) |
 | `scripts/run_benchmark.sh` | Benchmark harness with configurable shapes |
+| `scripts/benchmark_log_parser.py` | Normalize benchmark logs, including raw latency in us |
+| `scripts/compare_benchmark.py` | Throughput report plus calibrated raw-us regression gate |
+| `.github/benchmark_thresholds.json` | Per-architecture hard-gate allowlist and thresholds |
 | `scripts/dumpir.sh` | IR dump helper script |
 | `tests/conftest.py` | Pytest fixtures (MLIR context, module, insert point) |
 | `tests/test_common.py` | `perftest()`, `checkAllclose()`, `verify_output()` |
 | `tests/utils.py` | `pertoken_quant()`, `shuffle_weight()` |
-| `tests/kernels/benchmark_common.py` | `bench_gpu_us_torch()`, benchmark harness |
+| `python/flydsl/autotune.py` | Canonical `do_bench()` event timer and `BenchResult` |
+| `tests/kernels/benchmark_common.py` | Compatibility wrappers and benchmark formatting |
 | `tests/mlir/{LayoutAlgebra,Conversion,Transforms}/` | MLIR lit tests (18 files) |
 | `tests/python/examples/` | Python AOT examples |
 | `tests/kernels/test_*.py` | GPU kernel tests (12 files) |

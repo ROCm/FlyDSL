@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "calibration": "Initial allowlist uses a 20% relative threshold above the documented ~14% gfx950 clock-variation band, plus a 10 us absolute floor.",
+  "architectures": {
+    "gfx942": [
+      {
+        "op": "softmax",
+        "shape": "32768x8192",
+        "dtype": "bf16",
+        "relative_pct": 20.0,
+        "absolute_us": 10.0
+      },
+      {
+        "op": "layernorm",
+        "shape": "32768x8192",
+        "dtype": "bf16",
+        "relative_pct": 20.0,
+        "absolute_us": 10.0
+      },
+      {
+        "op": "rmsnorm",
+        "shape": "32768x8192",
+        "dtype": "bf16",
+        "relative_pct": 20.0,
+        "absolute_us": 10.0
+      }
+    ],
+    "gfx950": [
+      {
+        "op": "softmax",
+        "shape": "32768x8192",
+        "dtype": "bf16",
+        "relative_pct": 20.0,
+        "absolute_us": 10.0
+      },
+      {
+        "op": "layernorm",
+        "shape": "32768x8192",
+        "dtype": "bf16",
+        "relative_pct": 20.0,
+        "absolute_us": 10.0
+      },
+      {
+        "op": "rmsnorm",
+        "shape": "32768x8192",
+        "dtype": "bf16",
+        "relative_pct": 20.0,
+        "absolute_us": 10.0
+      }
+    ],
+    "gfx1201": []
+  }
+}

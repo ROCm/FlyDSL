@@ -27,6 +27,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import vector
+from flydsl.autotune import do_bench
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, as_ir_value, const_expr, gpu, range_constexpr, tdm_ops
 from flydsl.expr.rocdl import cluster
@@ -348,7 +349,7 @@ def _compile_tdm_shared_add(grid_m, grid_n, cluster_m, cluster_n):
 
 
 # ---------------------------------------------------------------------------
-# Benchmark timing (adapted from benchmark_common.py:bench_kernel_us)
+# Benchmark timing
 # ---------------------------------------------------------------------------
 
 
@@ -359,37 +360,16 @@ def _bench_kernel_us(run_fn, warmup=10, iters=50, flush_mb=512):
         "L2_cache_size",
         256 * 1024 * 1024,  # fallback if L2_cache_size unavailable (cmodel reports 96 MB)
     )
-    alloc_bytes = max(l2_bytes * 2, flush_mb * 1024 * 1024)
-    flush_buf = torch.empty(alloc_bytes, dtype=torch.uint8, device="cuda")
-
-    for _ in range(warmup):
-        flush_buf.zero_()
-        run_fn()
-    torch.cuda.synchronize()
-
-    start_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-    end_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-
-    for i in range(iters):
-        flush_buf.zero_()
-        start_ev[i].record()
-        run_fn()
-        end_ev[i].record()
-
-    torch.cuda.synchronize()
-    latencies = sorted(start_ev[i].elapsed_time(end_ev[i]) * 1e3 for i in range(iters))
-
-    n = len(latencies)
-    if n >= 8:
-        q1, q3 = latencies[n // 4], latencies[3 * n // 4]
-        iqr = q3 - q1
-        lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-        filtered = [x for x in latencies if lo <= x <= hi]
-        if filtered:
-            latencies = filtered
-
-    del flush_buf
-    return latencies[len(latencies) // 2]
+    return do_bench(
+        run_fn,
+        warmup=warmup,
+        rep=iters,
+        schedule="per_iter",
+        statistic="median",
+        flush_bytes=max(l2_bytes * 2, flush_mb * 1024 * 1024),
+        iqr=True,
+        unit="us",
+    )
 
 
 # ---------------------------------------------------------------------------

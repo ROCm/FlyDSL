@@ -194,6 +194,43 @@ def test_runner_of_matches_known_box_and_rejects_unknown():
     assert ingest.runner_of("") is None
 
 
+def test_ingest_run_parses_completed_failure_logs(monkeypatch):
+    job = {
+        "id": 9,
+        "name": "test (linux-flydsl-mi355-1)",
+        "status": "completed",
+        "conclusion": "failure",
+        "started_at": "2026-01-01T00:00:00Z",
+        "completed_at": "2026-01-01T00:01:00Z",
+        "html_url": "https://example.test/job/9",
+    }
+    monkeypatch.setattr(ingest, "run_jobs", lambda repo, run_id: [job])
+    monkeypatch.setattr(ingest, "resolve_pr", lambda repo, run: 123)
+    monkeypatch.setattr(
+        ingest,
+        "gh_text",
+        lambda path: ("op shape dtype TB/s TFLOPS\n" "softmax 32768x8192 bf16 4.000 -\n"),
+    )
+    run = {
+        "id": 1,
+        "head_sha": "abc",
+        "head_branch": "feature",
+        "event": "pull_request",
+        "display_title": "timing",
+        "status": "completed",
+        "conclusion": "failure",
+        "html_url": "https://example.test/run/1",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:01:00Z",
+        "actor": {"login": "user"},
+    }
+
+    records, summary = ingest.ingest_run("ROCm/FlyDSL", run, regression_pct=-3.0)
+
+    assert records and records[0]["op"] == "softmax"
+    assert summary["jobs"][0]["conclusion"] == "failure"
+
+
 # --------------------------------------------------------------------------- #
 # list_runs — default scans all branches (so PR runs are included)
 # --------------------------------------------------------------------------- #

@@ -96,7 +96,7 @@ except ImportError:
     HAS_TRITON = False
 
 
-def bench_wallclock(fn, n_warmup=20, n_iters=1000):
+def bench_host_dispatch_us(fn, n_warmup=20, n_iters=1000):
     """Measure wall-clock time per call (no GPU sync between calls).
 
     This measures CPU dispatch overhead: the time from Python calling the
@@ -112,10 +112,30 @@ def bench_wallclock(fn, n_warmup=20, n_iters=1000):
     t0 = time.perf_counter()
     for _ in range(n_iters):
         fn()
-    torch.cuda.synchronize()
     t1 = time.perf_counter()
+    torch.cuda.synchronize()
 
     return (t1 - t0) / n_iters * 1e6  # µs
+
+
+bench_wallclock = bench_host_dispatch_us
+
+
+def test_bench_wallclock_excludes_final_gpu_drain(monkeypatch):
+    """The final drain must not be part of the host-dispatch window."""
+    sync_count = 0
+
+    def fake_synchronize():
+        nonlocal sync_count
+        sync_count += 1
+
+    monkeypatch.setattr(torch.cuda, "synchronize", fake_synchronize)
+    monkeypatch.setattr(time, "perf_counter", lambda: float(sync_count))
+
+    measured_us = bench_host_dispatch_us(lambda: None, n_warmup=0, n_iters=1)
+
+    assert measured_us == 0.0
+    assert sync_count == 2
 
 
 def main():
@@ -148,19 +168,19 @@ def main():
     assert err < 1e-5, f"FlyDSL correctness failed: max_err={err}"
 
     # ── Bench flyc.compile'd function ──
-    compiled_us = bench_wallclock(
+    compiled_us = bench_host_dispatch_us(
         lambda: compiled(a, b, c, SIZE, SIZE, BLOCK, VEC, stream),
         n_iters=N_ITERS,
     )
 
     # ── Bench @flyc.jit (implicit path) ──
-    flydsl_us = bench_wallclock(
+    flydsl_us = bench_host_dispatch_us(
         lambda: vecAdd(a, b, c, SIZE, SIZE, BLOCK, VEC, stream),
         n_iters=N_ITERS,
     )
 
     # ── Bench PyTorch ──
-    torch_us = bench_wallclock(
+    torch_us = bench_host_dispatch_us(
         lambda: torch.add(a, b, out=c),
         n_iters=N_ITERS,
     )
@@ -173,7 +193,7 @@ def main():
         triton_vec_add_kernel[grid](a, b, c, SIZE)
         torch.cuda.synchronize()
 
-        triton_us = bench_wallclock(
+        triton_us = bench_host_dispatch_us(
             lambda: triton_vec_add_kernel[grid](a, b, c, SIZE),
             n_iters=N_ITERS,
         )

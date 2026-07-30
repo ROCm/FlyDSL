@@ -37,6 +37,7 @@ pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available.", allow_module_level=True)
 
+from flydsl.autotune import do_bench  # noqa: E402
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 
 _arch = str(get_rocm_arch())
@@ -224,21 +225,17 @@ def _run_tdm_mcast_add(grid_m, grid_n, cluster_x, cluster_y, n_warmup=0, n_iters
     launch_fn = _compile_tdm_mcast_add(grid_m, grid_n, cluster_x, cluster_y)
     stream = torch.cuda.Stream()
 
-    # Warmup
-    for _ in range(n_warmup):
-        launch_fn(a_dev, b_dev, c_dev, stream=stream)
-    torch.cuda.synchronize()
-
     avg_us = 0.0
     if n_iters > 1 and n_warmup > 0:
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        start_event.record(stream)
-        for _ in range(n_iters):
-            launch_fn(a_dev, b_dev, c_dev, stream=stream)
-        end_event.record(stream)
-        torch.cuda.synchronize()
-        avg_us = start_event.elapsed_time(end_event) * 1000.0 / n_iters
+        avg_us = do_bench(
+            lambda: launch_fn(a_dev, b_dev, c_dev, stream=stream),
+            warmup=n_warmup,
+            rep=n_iters,
+            schedule="pipelined",
+            statistic="mean",
+            stream=stream,
+            unit="us",
+        )
     else:
         launch_fn(a_dev, b_dev, c_dev, stream=stream)
         torch.cuda.synchronize()

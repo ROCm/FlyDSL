@@ -180,8 +180,13 @@ def run_test(M: int, N: int, dtype: str = "f32"):
     elem_bytes = 4 if dtype == "f32" else 2
     total_bytes = (2 * M * N + 2 * N) * elem_bytes  # read input + write output + (gamma+beta)
     bandwidth_gbs = total_bytes / (avg_us / 1e6) / 1e9
+    benchmark_instrument = "device_event" if int(os.environ.get("FLYDSL_PERFTEST_USE_EVENTS", 0)) else "torch_profiler"
 
     print(f"Kernel avg time: {avg_ms:.4f} ms via run_perftest (warmup={WARMUP_ITERS}, iters={BENCH_ITERS})")
+    print(
+        f"Benchmark contract: instrument={benchmark_instrument} schedule=per_iter_sync "
+        f"cache=warm statistic=mean warmup={WARMUP_ITERS} iters={BENCH_ITERS}"
+    )
     print(f"Bandwidth: {bandwidth_gbs:.2f} GB/s")
     if flydsl_gpu_us is not None:
         print(f"[Perf] FlyDSL layernorm gpu: {flydsl_gpu_us:.1f} us")

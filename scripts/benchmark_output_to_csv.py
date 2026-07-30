@@ -44,12 +44,52 @@ def main() -> int:
             continue
         if not (_is_metric(tbps) and _is_metric(tflops)):
             continue
-        rows.append([op, shape, dtype, tbps, tflops, _status(tbps, tflops)])
+        rows.append(
+            [
+                op,
+                shape,
+                dtype,
+                tbps,
+                tflops,
+                _status(tbps, tflops),
+                "-",
+                "reported",
+                "-",
+                "-",
+                "-",
+                "-",
+                "-",
+                "reported",
+                "unknown",
+                "unknown",
+                "unknown",
+            ]
+        )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["op", "shape", "dtype", "tbps", "tflops", "status"])
+        writer.writerow(
+            [
+                "op",
+                "shape",
+                "dtype",
+                "tbps",
+                "tflops",
+                "status",
+                "avg_us",
+                "statistic",
+                "min_us",
+                "max_us",
+                "sample_count",
+                "warmup",
+                "iters",
+                "instrument",
+                "schedule",
+                "cache_policy",
+                "arch",
+            ]
+        )
         writer.writerows(rows)
 
     print(f"Wrote {len(rows)} benchmark row(s) to {args.output}")

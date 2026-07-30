@@ -147,8 +147,11 @@ def ingest_run(repo: str, run: dict, regression_pct: float) -> tuple[list[dict],
             "url": job.get("html_url"),
         }
         job_status.append(js)
-        if job.get("status") != "completed" or job.get("conclusion") != "success":
-            continue  # only completed-successful jobs have parseable benchmark output
+        if job.get("status") != "completed" or job.get("conclusion") not in {"success", "failure"}:
+            continue
+        # Performance-gate failures still contain the benchmark table and
+        # comparison block that explain the regression. Parse those logs so a
+        # red CI result also remains visible in the dashboard.
         try:
             text = gh_text(f"repos/{repo}/actions/jobs/{job['id']}/logs")
         except RuntimeError as e:
