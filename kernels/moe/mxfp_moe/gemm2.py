@@ -1149,11 +1149,19 @@ def compile_gemm2_a16w4_port(
     D_INTER,
     TILE_N=256,
     TILE_K=256,
+    xcd_swizzle=1,
 ):
     """a16w4 (bf16 intermediate A x mxfp4 W2) stage2 builder.
 
     N_OUT = model_dim (down-proj output width). D_INTER = inter_dim (contraction).
     Output is bf16 [tokens, model_dim] via the atomic (routing-weighted) scatter.
+
+    ``xcd_swizzle`` (>0) round-robins the launch index bijectively across the 8
+    XCDs (like the a4w4 gemm2 ``_xcd_np`` grid). a16w4 gemm2 is HBM-bandwidth-bound
+    (flyprof: L2 hit 14.9%, 2705/8000 GB/s, MFMA 4.6%); the plain m-major grid
+    clusters consecutive tiles onto the same XCD/HBM channels, so remapping balances
+    per-channel utilization. ``xcd_swizzle`` also enables an optional M-group swizzle
+    for per-XCD L2 locality (group size = xcd_swizzle m-blocks).
     """
     _K = D_INTER
     assert _K % TILE_K == 0, f"D_INTER (K) must be a multiple of {TILE_K}, got {_K}"
@@ -1168,6 +1176,8 @@ def compile_gemm2_a16w4_port(
     _lds_bytes = _a_bytes + _acc_bytes
 
     _name = f"gemm2_a16w4_port_ne{NE}_h{N_OUT}_i{_K}_bm{BM}_tn{TILE_N}"
+    if xcd_swizzle > 0:
+        _name += f"_xcd{xcd_swizzle}"
 
     @fx.struct
     class SharedStorage:
@@ -1194,7 +1204,32 @@ def compile_gemm2_a16w4_port(
         cumsum0 = _global_i32_at(arg_cumsum, fx.Int32(0))
         total_m_blocks = cumsum0 // fx.Int32(BM)
         bound = total_m_blocks * fx.Int32(_num_n_blocks)
+
+        # Bijective XCD round-robin over the valid tiles [0, bound) to balance the
+        # per-XCD/HBM-channel weight-load traffic (a16w4 gemm2 is HBM-bound). With
+        # xcd_swizzle>0, additionally group-swizzle along M for per-XCD L2 locality.
+        _NXCD = 8
+        _xq = _udiv(bound, _NXCD)
+        _xr = _umod(bound, _NXCD)
+        _SW = xcd_swizzle
+
+        def _xcd_np(pid):
+            xc = _umod(pid, _NXCD)
+            wgid = xc * _xq + fx.Int32(arith.minsi(_raw(xc), _raw(_xr))) + _udiv(pid, _NXCD)
+            if const_expr(_SW <= 0):
+                return wgid
+            _ng = fx.Int32(_SW * _num_n_blocks)
+            group_id = wgid // _ng
+            first_pid_m = group_id * fx.Int32(_SW)
+            remaining_m = total_m_blocks - first_pid_m
+            group_size_m = fx.Int32(arith.minsi(_raw(remaining_m), _raw(fx.Int32(_SW))))
+            wig = wgid % _ng
+            m_block = first_pid_m + (wig % group_size_m)
+            n_block = wig // group_size_m
+            return m_block * fx.Int32(_num_n_blocks) + n_block
+
         if bx_i32 < bound:
+            tile = _xcd_np(bx_i32)
             _gemm2_body_a16w4(
                 lds_raw_ptr,
                 arg_a,
@@ -1204,7 +1239,7 @@ def compile_gemm2_a16w4_port(
                 arg_stids,
                 arg_sweights,
                 arg_out,
-                bx_i32,
+                tile,
                 lane,
                 wave,
                 i32_M,
