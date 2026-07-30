@@ -18,6 +18,7 @@ CDNA_ONLY_TESTS = frozenset(
         "test_pa.py",
         "test_quant.py",
         "test_allreduce.py",  # custom_all_reduce requires CDNA (gfx9xx)
+        "test_sage_attn.py",  # MI308X gfx942 SageAttention; also module-skip if not MI308
     }
 )
 
