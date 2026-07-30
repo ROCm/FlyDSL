@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-30T12:20:20Z",
+ "updated": "2026-07-30T12:54:35Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "rchamber/flex_attention",
    "event": "pull_request",
    "title": "Add flex_attention (score_mod / mask_mod) on the generic flash-attention kernel",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30541972428",
    "created_at": "2026-07-30T12:18:05Z",
-   "updated_at": "2026-07-30T12:18:20Z",
+   "updated_at": "2026-07-30T12:20:36Z",
    "actor": "RichardChamberlain1",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T12:20:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30541972428/job/90869229428"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T12:20:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30541972428/job/90869229510"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-30T12:21:17Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30541972428/job/90869229542"
+    }
+   ]
   },
   {
    "run_id": 30541803822,
@@ -68,10 +96,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-30T12:00:55Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T12:35:47Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30540330961/job/90864757821"
     }
    ]
@@ -1072,39 +1100,39 @@
    "branch": "cjl/norm_perf",
    "event": "pull_request",
    "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30472049143",
    "created_at": "2026-07-29T16:43:25Z",
-   "updated_at": "2026-07-29T17:47:41Z",
+   "updated_at": "2026-07-30T12:46:51Z",
    "actor": "cschenjunlin",
    "jobs": [
     {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-30T12:47:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30472049143/job/90875381905"
+    },
+    {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-29T16:53:35Z",
-     "completed_at": "2026-07-29T17:47:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30472049143/job/90646884783"
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T12:46:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30472049143/job/90875381946"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-29T16:53:28Z",
-     "completed_at": "2026-07-29T17:33:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30472049143/job/90646884845"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-29T16:53:37Z",
-     "completed_at": "2026-07-29T17:47:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30472049143/job/90646884998"
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-30T12:46:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30472049143/job/90875381948"
     }
    ]
   },
