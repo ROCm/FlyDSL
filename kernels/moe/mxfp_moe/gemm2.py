@@ -769,11 +769,10 @@ def _flat_mxfp4_epilog(
         if _bi + 1 < len(_blocks):
             _r_next, _grp_next, _col0_next = _issue_load(*_blocks[_bi + 1])
         if True:
-            amax_f = _raw(_fabs_f32(r[0]))
+            amax_f = _fabs_f32(r[0])
             for e in range_constexpr(1, 8):
-                abs_e = _raw(_fabs_f32(r[e]))
-                amax_f = arith.maxnumf(amax_f, abs_e)
-            amax = arith.shrui(arith.bitcast(T.i32, amax_f), _raw(fx.Int32(16)))
+                amax_f = amax_f.maximumf(_fabs_f32(r[e]))
+            amax = arith.shrui(arith.bitcast(T.i32, _raw(amax_f)), _raw(fx.Int32(16)))
             amax_dpp = _raw(_inline_dpp_quad_amax(amax))
             f32b = arith.shli(amax_dpp, _raw(fx.Int32(16)))
             e8m0, qscale_f = _e8m0_from_amax(fx.Float32(arith.bitcast(T.f32, f32b)))

@@ -32,6 +32,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.compiler.protocol import dsl_size_of
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
@@ -397,7 +398,6 @@ def compile_pa_decode_tile(
             v_scale_f = fx.Float32(value_scale)
         NEG_INF = fx.Float32(float("-inf"))
         ZERO_F = fx.Float32(0.0)
-        fm_contract = arith.FastMathFlags.contract
         # Softmax scores are finite or the -inf mask sentinel -- never NaN -- so
         # nnan lets maxnum lower to a bare v_max (no v_cmp_u NaN check + its s_nop
         # hazard) and fuse to v_max3. (ninf must NOT be set: -inf is load-bearing.)
@@ -742,7 +742,7 @@ def compile_pa_decode_tile(
                             p_off0 + a * (c16 // 4) * f32, fx.Int32, fx.Vector.from_elements([words[a]], dtype=fx.Int32)
                         )
                     for sh in (16, 32):
-                        ls = ls.addf(ls.shuffle_xor(sh, WAVE), fastmath=fm_contract)
+                        ls = ls + ls.shuffle_xor(sh, WAVE)
                     # PV output is [head-dim, query-row=lane16] after the operand
                     # swap, so correction/denominator are per-lane scalars (no sCorr).
                     safe_prev = arith.select(m_prev > NEG_INF, m_prev, ZERO_F)
@@ -751,9 +751,7 @@ def compile_pa_decode_tile(
                         _st_lw(sLsum_off, lane16, warp, ls)
                     gpu.barrier()
                     gsum = _ld_lw_row(sLsum_off, lane16).reduce(ReductionOp.ADD)
-                    l_new = fx.Float32(
-                        arith.mulf(arith.unwrap(l_prev), arith.unwrap(corr_reg), fastmath=fm_contract)
-                    ).addf(gsum, fastmath=fm_contract)
+                    l_new = l_prev * corr_reg + gsum
 
                     p_ops = _lds_load(sP_off + lane16 * SP_ROW_BYTES + rgroup * 64, fx.Int64, NVOPS)
 
@@ -879,7 +877,7 @@ def compile_pa_decode_tile(
                 if const_expr(head_dim == 64):
                     fx.rocdl.sched_dswr(NCHUNK)
                 for sh in (16, 32):
-                    ls = ls.addf(ls.shuffle_xor(sh, WAVE), fastmath=fm_contract)
+                    ls = ls + ls.shuffle_xor(sh, WAVE)
                 # PV (V=A, P=B) -> output [head-dim, query-row=lane16]; same as
                 # the phase-split path.
                 corr_reg = fx.Float32(exp2_amdgcn_scalar(m_prev - m_new))
@@ -887,9 +885,7 @@ def compile_pa_decode_tile(
                     _st_lw(sLsum_off, lane16, warp, ls)
                 gpu.barrier()
                 gsum = _ld_lw_row(sLsum_off, lane16).reduce(ReductionOp.ADD)
-                l_new = fx.Float32(arith.mulf(arith.unwrap(l_prev), arith.unwrap(corr_reg), fastmath=fm_contract)).addf(
-                    gsum, fastmath=fm_contract
-                )
+                l_new = l_prev * corr_reg + gsum
                 p_ops = _lds_load(sP_off + lane16 * SP_ROW_BYTES + rgroup * 64, fx.Int64, NVOPS)
                 corr_b = fx.Vector.from_elements([corr_reg], dtype=fx.Float32).broadcast_to(OP_ELEMS)
                 # Single tile: batch both vh's V loads upfront (no sibling chain
@@ -919,13 +915,7 @@ def compile_pa_decode_tile(
             if const_expr(per_token_kv):
                 o_scale = inv_l
             else:
-                o_scale = fx.Float32(
-                    arith.mulf(
-                        arith.unwrap(inv_l),
-                        arith.unwrap(v_scale_f * inv_fp8),
-                        fastmath=fm_contract,
-                    )
-                )
+                o_scale = inv_l * (v_scale_f * inv_fp8)
             o_scale_b = fx.Vector.from_elements([o_scale], dtype=fx.Float32).broadcast_to(OP_ELEMS)
             qi_e = row // query_group_size
             gs_head_e = row - qi_e * query_group_size
@@ -983,24 +973,25 @@ def compile_pa_decode_tile(
         stride_q_head: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        pa_decode_tile_kernel(
-            output,
-            pmax,
-            psum,
-            pout,
-            query,
-            key_cache,
-            value_cache,
-            block_tables,
-            context_lengths,
-            key_scale,
-            value_scale,
-            max_blocks_per_seq,
-            stride_ks_block,
-            stride_ks_head,
-            stride_q_row,
-            stride_q_head,
-        ).launch(grid=(num_seqs, num_kv_heads, NP), block=(BLOCK_THREADS, 1, 1), stream=stream)
+        with CompilationContext.compile_hints({"fast_fp_math": True}):
+            pa_decode_tile_kernel(
+                output,
+                pmax,
+                psum,
+                pout,
+                query,
+                key_cache,
+                value_cache,
+                block_tables,
+                context_lengths,
+                key_scale,
+                value_scale,
+                max_blocks_per_seq,
+                stride_ks_block,
+                stride_ks_head,
+                stride_q_row,
+                stride_q_head,
+            ).launch(grid=(num_seqs, num_kv_heads, NP), block=(BLOCK_THREADS, 1, 1), stream=stream)
 
     return {"launch": pa_decode_tile_launch, "kernel": pa_decode_tile_kernel}
 

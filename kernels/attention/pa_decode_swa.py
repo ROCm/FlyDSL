@@ -8,6 +8,7 @@ import functools
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import vector
+from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, as_ir_value, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, T
 from kernels.attention.pa_common import _compute_block_base_dw_i64, _prefetch_q_chunks
@@ -599,8 +600,8 @@ def _make_pa_phase_helpers(
                 diff_w = arith.select(partition_max > neg_inf, diff_w, zero_f)
             wf = exp2_f32_fast(diff_w * fx.Float32(LOG2E).ir_value())
             w_sum = sum_vec[w]
-            wf_sum = arith.mulf(arith.unwrap(w_sum), arith.unwrap(wf), fastmath=arith.FastMathFlags.contract)
-            partition_sum = arith.addf(arith.unwrap(partition_sum), wf_sum, fastmath=arith.FastMathFlags.contract)
+            wf_sum = w_sum * wf
+            partition_sum = partition_sum + wf_sum
             warp_rescale_factors[w] = wf
 
         my_warp_rescale = warp_rescale_factors[0]
@@ -627,13 +628,9 @@ def _make_pa_phase_helpers(
             accum_scale = exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value())
             part_to_new = exp2_f32_fast((partition_max - new_rmax) * fx.Float32(LOG2E).ir_value())
 
-        accum_sum = arith.mulf(arith.unwrap(accum_scale), arith.unwrap(rsum), fastmath=arith.FastMathFlags.contract)
-        partition_sum_scaled = arith.mulf(
-            arith.unwrap(partition_sum),
-            arith.unwrap(part_to_new),
-            fastmath=arith.FastMathFlags.contract,
-        )
-        rsum = arith.addf(accum_sum, partition_sum_scaled, fastmath=arith.FastMathFlags.contract)
+        accum_sum = accum_scale * rsum
+        partition_sum_scaled = partition_sum * part_to_new
+        rsum = accum_sum + partition_sum_scaled
         rmax = new_rmax
         accum_scale_vec = vector.broadcast(T.f32x4, arith.unwrap(accum_scale))
         for vhe in range_constexpr(vhe_loop):
@@ -671,7 +668,6 @@ def _make_pa_phase_helpers(
 
     def _pv_mfma(v_ops, outs, v_correction):
         v_correction = fx.Float32(v_correction).ir_value()
-        fm_contract = arith.FastMathFlags.contract
         v_correction_vec = vector.broadcast(T.f32x4, v_correction)
         for vhe in range_constexpr(vhe_loop):
             tmp_out = arith.constant_vector(0.0, T.f32x4)
@@ -694,11 +690,7 @@ def _make_pa_phase_helpers(
                             0,
                         ],
                     )
-            outs[vhe] = arith.addf(
-                arith.mulf(tmp_out, v_correction_vec, fastmath=fm_contract),
-                outs[vhe],
-                fastmath=fm_contract,
-            )
+            outs[vhe] = fx.Vector(tmp_out) * v_correction_vec + outs[vhe]
         return outs
 
     return (
@@ -1042,27 +1034,28 @@ def compile_pa_decode_sw_reduce(
         num_kv_heads,
         stream: fx.Stream = fx.Stream(None),
     ):
-        pa_decode_sw_reduce_kernel(
-            output,
-            exp_sums,
-            max_logits,
-            logits,
-            stride_output_bs,
-            stride_output_len,
-            stride_output_kv_head,
-            stride_output_group_size,
-            stride_exp_sums_seq,
-            stride_exp_sums_head,
-            stride_exp_sums_part,
-            stride_logits_seq,
-            stride_logits_head,
-            stride_logits_part,
-            stride_logits_group,
-        ).launch(
-            grid=(batch_size, num_kv_heads, query_seq_len * query_group_size),
-            block=(block_threads, 1, 1),
-            stream=stream,
-        )
+        with CompilationContext.compile_hints({"fast_fp_math": True}):
+            pa_decode_sw_reduce_kernel(
+                output,
+                exp_sums,
+                max_logits,
+                logits,
+                stride_output_bs,
+                stride_output_len,
+                stride_output_kv_head,
+                stride_output_group_size,
+                stride_exp_sums_seq,
+                stride_exp_sums_head,
+                stride_exp_sums_part,
+                stride_logits_seq,
+                stride_logits_head,
+                stride_logits_part,
+                stride_logits_group,
+            ).launch(
+                grid=(batch_size, num_kv_heads, query_seq_len * query_group_size),
+                block=(block_threads, 1, 1),
+                stream=stream,
+            )
 
     return {
         "launch": launch_pa_decode_sw_reduce,
@@ -1570,39 +1563,40 @@ def compile_pa_decode_sw(
         gz: Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        pa_decode_sw_kernel(
-            es,
-            ml,
-            to,
-            out,
-            q,
-            kc,
-            vc,
-            bt,
-            cl,
-            ks,
-            vs,
-            s_q_seq,
-            s_q_head,
-            s_k_block,
-            s_k_head,
-            s_v_block,
-            s_v_head,
-            s_es_seq,
-            s_es_head,
-            s_es_part,
-            s_to_seq,
-            s_to_head,
-            s_to_part,
-            s_to_group,
-            s_out_bs,
-            s_out_len,
-            s_out_kv_head,
-            s_out_group_size,
-            s_bt_seq,
-            s_ks_block,
-            s_ks_head,
-        ).launch(grid=(gx, gy, gz), block=(BLOCK_THREADS, 1, 1), stream=stream)
+        with CompilationContext.compile_hints({"fast_fp_math": True}):
+            pa_decode_sw_kernel(
+                es,
+                ml,
+                to,
+                out,
+                q,
+                kc,
+                vc,
+                bt,
+                cl,
+                ks,
+                vs,
+                s_q_seq,
+                s_q_head,
+                s_k_block,
+                s_k_head,
+                s_v_block,
+                s_v_head,
+                s_es_seq,
+                s_es_head,
+                s_es_part,
+                s_to_seq,
+                s_to_head,
+                s_to_part,
+                s_to_group,
+                s_out_bs,
+                s_out_len,
+                s_out_kv_head,
+                s_out_group_size,
+                s_bt_seq,
+                s_ks_block,
+                s_ks_head,
+            ).launch(grid=(gx, gy, gz), block=(BLOCK_THREADS, 1, 1), stream=stream)
 
     return {
         "launch": launch_pa_decode_sw,

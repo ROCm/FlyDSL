@@ -42,6 +42,7 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import vector
+from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, as_ir_value, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, T
 from flydsl.runtime.device import get_rocm_arch
@@ -698,12 +699,10 @@ def _make_pa_phase_helpers(
         gpu.barrier()
         sum_vec = fx.ptr_load(softmax_base + (sm_rd_sum_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
         for w in range_constexpr(NUM_WARPS):
-            partition_sum = arith.addf(
-                arith.unwrap(partition_sum), arith.unwrap(sum_vec[w]), fastmath=arith.FastMathFlags.contract
-            )
+            partition_sum = partition_sum + sum_vec[w]
 
-        accum_sum = arith.mulf(arith.unwrap(accum_scale), arith.unwrap(rsum), fastmath=arith.FastMathFlags.contract)
-        rsum = arith.addf(accum_sum, arith.unwrap(partition_sum), fastmath=arith.FastMathFlags.contract)
+        accum_sum = accum_scale * rsum
+        rsum = accum_sum + partition_sum
         rmax = new_rmax
         accum_scale_vec = vector.broadcast(T.f32x4, arith.unwrap(accum_scale))
         for vhe in range_constexpr(vhe_loop):
@@ -736,7 +735,6 @@ def _make_pa_phase_helpers(
 
     def _pv_mfma(v_ops, outs, v_correction):
         v_correction = fx.Float32(v_correction).ir_value()
-        fm_contract = arith.FastMathFlags.contract
         v_correction_vec = vector.broadcast(T.f32x4, v_correction)
 
         # ── Batch-load all P_i64 from LDS upfront ──
@@ -772,11 +770,7 @@ def _make_pa_phase_helpers(
                             0,
                         ],
                     )
-            outs[vhe] = arith.addf(
-                arith.mulf(tmp_out, v_correction_vec, fastmath=fm_contract),
-                outs[vhe],
-                fastmath=fm_contract,
-            )
+            outs[vhe] = fx.Vector(tmp_out) * v_correction_vec + outs[vhe]
         return outs
 
     return (
@@ -1192,17 +1186,18 @@ def compile_pa_metadata_v1(
         num_batches: Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        pa_metadata_v1_kernel(
-            seqlens_qo_indptr,
-            pages_kv_indptr,
-            context_lens,
-            work_indptr,
-            work_info,
-            reduce_indptr,
-            reduce_final_map,
-            reduce_partial_map,
-            num_batches,
-        ).launch(grid=(1, 1, 1), block=(warp_size, 1, 1), stream=stream)
+        with CompilationContext.compile_hints({"fast_fp_math": True}):
+            pa_metadata_v1_kernel(
+                seqlens_qo_indptr,
+                pages_kv_indptr,
+                context_lens,
+                work_indptr,
+                work_info,
+                reduce_indptr,
+                reduce_final_map,
+                reduce_partial_map,
+                num_batches,
+            ).launch(grid=(1, 1, 1), block=(warp_size, 1, 1), stream=stream)
 
     return {"kernel": pa_metadata_v1_kernel, "launch": launch_pa_metadata_v1}
 
@@ -2180,22 +2175,23 @@ def compile_pa_metadata_reduce(
         num_groups,
         stream: fx.Stream = fx.Stream(None),
     ):
-        pa_metadata_reduce_kernel(
-            final_output,
-            partial_output,
-            partial_lse,
-            reduce_indptr,
-            reduce_final_map,
-            reduce_partial_map,
-            stride_out_seq,
-            stride_out_head,
-            stride_po_row,
-            stride_pl_row,
-        ).launch(
-            grid=(num_groups, num_query_heads, query_length),
-            block=(block_threads, 1, 1),
-            stream=stream,
-        )
+        with CompilationContext.compile_hints({"fast_fp_math": True}):
+            pa_metadata_reduce_kernel(
+                final_output,
+                partial_output,
+                partial_lse,
+                reduce_indptr,
+                reduce_final_map,
+                reduce_partial_map,
+                stride_out_seq,
+                stride_out_head,
+                stride_po_row,
+                stride_pl_row,
+            ).launch(
+                grid=(num_groups, num_query_heads, query_length),
+                block=(block_threads, 1, 1),
+                stream=stream,
+            )
 
     return {"launch": launch_pa_metadata_reduce, "kernel": pa_metadata_reduce_kernel}
 
