@@ -129,9 +129,9 @@ def test_conv3d_tile_configs(tile):
 @_skip_non_cdna4
 def test_conv3d_autotune(tmp_path, monkeypatch):
     monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "at"))
-    from kernels.conv import conv3d_implicit_autotune
+    from kernels.conv import conv3d_autotune
 
-    conv3d_implicit_autotune._MEM_CACHE.clear()
+    conv3d_autotune._MEM_CACHE.clear()
 
     torch.manual_seed(4242)
     n, c, t, h, w, k = 1, 128, 6, 40, 40, 128
@@ -144,15 +144,15 @@ def test_conv3d_autotune(tmp_path, monkeypatch):
     assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
 
     # A tile was chosen and persisted; the second call must hit the cache.
-    assert len(conv3d_implicit_autotune._MEM_CACHE) == 1
+    assert len(conv3d_autotune._MEM_CACHE) == 1
     calls = {"n": 0}
-    orig = conv3d_implicit_autotune.do_bench
+    orig = conv3d_autotune.do_bench
 
     def _counting(*a, **kw):
         calls["n"] += 1
         return orig(*a, **kw)
 
-    monkeypatch.setattr(conv3d_implicit_autotune, "do_bench", _counting)
+    monkeypatch.setattr(conv3d_autotune, "do_bench", _counting)
     y2 = conv3d_implicit(x, weight, stride=1, padding=1, autotune=True)
     torch.cuda.synchronize()
     assert torch.allclose(y2, y_ref, rtol=2e-2, atol=2e-2)

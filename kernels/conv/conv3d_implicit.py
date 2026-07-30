@@ -703,7 +703,7 @@ def _conv3d_impl(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=
         chosen_tile = tuple(tile)
         chosen_wgm = 1
     elif autotune or (autotune is None and _autotune_enabled()):
-        from kernels.conv.conv3d_implicit_autotune import BF16_CANDIDATES, WGM_VALUES, autotune_conv3d
+        from kernels.conv.conv3d_autotune import BF16_CANDIDATES, WGM_VALUES, autotune_conv3d
 
         candidates = [(t, w) for t in BF16_CANDIDATES for w in WGM_VALUES]
         best = autotune_conv3d("bf16", shape, "bf16", candidates, x.device, lambda tw: _run(tw[0], tw[1])[0])
