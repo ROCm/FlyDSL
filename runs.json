@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-07-30T11:43:23Z",
+ "updated": "2026-07-30T11:49:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30539961628,
+   "pr": 930,
+   "commit": "e15585b3b0d796219948965e156a996260f6d7c5",
+   "branch": "dsl-ify-arith",
+   "event": "pull_request",
+   "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30539961628",
+   "created_at": "2026-07-30T11:48:07Z",
+   "updated_at": "2026-07-30T11:48:11Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
+  {
+   "run_id": 30539926066,
+   "pr": 876,
+   "commit": "e092035d3c3f7059d30cbed61b7a667d7490502e",
+   "branch": "mega_moe_v1",
+   "event": "pull_request",
+   "title": "MegaMoE on Gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30539926066",
+   "created_at": "2026-07-30T11:47:34Z",
+   "updated_at": "2026-07-30T11:48:15Z",
+   "actor": "yanboshao",
+   "jobs": []
+  },
+  {
+   "run_id": 30539884550,
+   "pr": 931,
+   "commit": "a9697a5591955e73d13b8c16a3da5ddaceedf280",
+   "branch": "rchamber/flex_attention",
+   "event": "pull_request",
+   "title": "Add flex_attention (score_mod / mask_mod) on the generic flash-attention kernel",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30539884550",
+   "created_at": "2026-07-30T11:46:54Z",
+   "updated_at": "2026-07-30T11:48:13Z",
+   "actor": "RichardChamberlain1",
+   "jobs": []
+  },
   {
    "run_id": 30539548932,
    "pr": 930,
@@ -10,11 +55,11 @@
    "branch": "dsl-ify-arith",
    "event": "pull_request",
    "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30539548932",
    "created_at": "2026-07-30T11:41:41Z",
-   "updated_at": "2026-07-30T11:41:55Z",
+   "updated_at": "2026-07-30T11:48:11Z",
    "actor": "xudoyuan",
    "jobs": []
   },
@@ -543,11 +588,11 @@
    "branch": "mega_moe_v1",
    "event": "pull_request",
    "title": "MegaMoE on Gfx950",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30512551718",
    "created_at": "2026-07-30T03:57:35Z",
-   "updated_at": "2026-07-30T06:14:10Z",
+   "updated_at": "2026-07-30T11:47:36Z",
    "actor": "yanboshao",
    "jobs": [
     {
@@ -580,10 +625,10 @@
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-30T06:14:10Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T11:47:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30512551718/job/90794908362"
     },
     {
@@ -2033,107 +2078,6 @@
    "updated_at": "2026-07-28T12:49:46Z",
    "actor": "AiyyappanMR",
    "jobs": []
-  },
-  {
-   "run_id": 30346434612,
-   "pr": 916,
-   "commit": "db3d1687ef7cdd997addbba78f69e1bb97498648",
-   "branch": "pr/enh-cast-rounding-mode",
-   "event": "pull_request",
-   "title": "[Enh] Add rounding-mode control for float-to-float casts",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30346434612",
-   "created_at": "2026-07-28T09:24:10Z",
-   "updated_at": "2026-07-28T12:33:49Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T11:49:26Z",
-     "completed_at": "2026-07-28T12:33:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30346434612/job/90241630213"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T10:01:24Z",
-     "completed_at": "2026-07-28T11:44:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30346434612/job/90241630226"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T10:00:29Z",
-     "completed_at": "2026-07-28T12:11:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30346434612/job/90241630249"
-    }
-   ]
-  },
-  {
-   "run_id": 30344340407,
-   "pr": null,
-   "commit": "d920d565d88535f458577cfac31237c76fe93010",
-   "branch": "pr/enh-cast-rounding-mode",
-   "event": "pull_request",
-   "title": "[Enh] Add rounding-mode control for float-to-float casts",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30344340407",
-   "created_at": "2026-07-28T08:54:57Z",
-   "updated_at": "2026-07-28T09:24:38Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 30341663905,
-   "pr": 848,
-   "commit": "0f2d86c8e5a38a95f86891578adc03c418b217d8",
-   "branch": "cjl/norm_perf",
-   "event": "pull_request",
-   "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30341663905",
-   "created_at": "2026-07-28T08:15:39Z",
-   "updated_at": "2026-07-28T11:48:53Z",
-   "actor": "cschenjunlin",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T08:18:53Z",
-     "completed_at": "2026-07-28T09:41:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30341663905/job/90218965505"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T10:19:03Z",
-     "completed_at": "2026-07-28T11:48:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30341663905/job/90218965540"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T08:18:53Z",
-     "completed_at": "2026-07-28T09:16:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30341663905/job/90218965543"
-    }
-   ]
   }
  ]
 }
