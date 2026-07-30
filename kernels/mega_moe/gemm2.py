@@ -2,8 +2,6 @@
 # Copyright (C) 2025-2026 FlyDSL Project Contributors
 """GEMM2 compute for fused MegaMoE v2 stage2."""
 
-import os
-
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import _to_raw as _raw
@@ -616,29 +614,7 @@ def get_gemm2_autotune_configs(a_dtype="fp8"):
         dict(BN=256, BK=256, use_nt=True, g2_bhoist=True, g2_ascale_pf=True, g2_spart=202, persist=False),
     ]
     bn_values = (128, 256)
-    bn_env = os.environ.get("MEGA_G2_BN_VALUES")
-    if bn_env:
-        bn_values = tuple(int(value) for value in bn_env.split(","))
-        if not bn_values or any(value not in (128, 256) for value in bn_values):
-            raise ValueError("MEGA_G2_BN_VALUES must contain comma-separated values from {128, 256}")
     persist_cu_values = (8, 16, 32, 64, 128, 240, 256)
-    persist_cu_env = os.environ.get("MEGA_G2_PERSIST_CU_VALUES")
-    if persist_cu_env:
-        persist_cu_values = tuple(int(value) for value in persist_cu_env.split(","))
-        if not persist_cu_values or any(value <= 0 or value > 256 for value in persist_cu_values):
-            raise ValueError("MEGA_G2_PERSIST_CU_VALUES must contain comma-separated values in [1, 256]")
-    persist_strided_values = (False,)
-    persist_strided_env = os.environ.get("MEGA_G2_PERSIST_STRIDED")
-    if persist_strided_env is not None:
-        if persist_strided_env not in ("0", "1"):
-            raise ValueError("MEGA_G2_PERSIST_STRIDED must be '0' or '1'")
-        persist_strided_values = (persist_strided_env == "1",)
-    bf16_lds_values = (False,)
-    bf16_lds_env = os.environ.get("MEGA_G2_BF16_LDS")
-    if bf16_lds_env is not None:
-        if bf16_lds_env not in ("0", "1"):
-            raise ValueError("MEGA_G2_BF16_LDS must be '0' or '1'")
-        bf16_lds_values = (bf16_lds_env == "1",)
     cfgs.extend(
         dict(
             BN=bn,
@@ -649,63 +625,42 @@ def get_gemm2_autotune_configs(a_dtype="fp8"):
             g2_spart=402,
             persist=True,
             persist_cu=slots,
-            **({"persist_strided": True} if persist_strided else {}),
-            **({"g2_bf16_lds": True} if g2_bf16_lds else {}),
         )
         for bn in bn_values
         for use_nt in (True, False)
         for slots in persist_cu_values
-        for persist_strided in persist_strided_values
-        for g2_bf16_lds in bf16_lds_values
     )
-    if persist_strided_env is None and bf16_lds_env is None and 240 in persist_cu_values:
-        cfgs.extend(
-            dict(
-                BN=bn,
-                BK=256,
-                use_nt=use_nt,
-                g2_bhoist=True,
-                g2_ascale_pf=True,
-                g2_spart=402,
-                persist=True,
-                persist_cu=240,
-                persist_strided=True,
-            )
-            for bn in bn_values
-            for use_nt in (True, False)
+    cfgs.extend(
+        dict(
+            BN=bn,
+            BK=256,
+            use_nt=use_nt,
+            g2_bhoist=True,
+            g2_ascale_pf=True,
+            g2_spart=402,
+            persist=True,
+            persist_cu=240,
+            persist_strided=True,
         )
-    if bf16_lds_env is None and 128 in bn_values:
-        cfgs.extend(
-            dict(
-                BN=128,
-                BK=256,
-                use_nt=use_nt,
-                g2_bhoist=True,
-                g2_ascale_pf=True,
-                g2_spart=402,
-                persist=True,
-                persist_cu=slots,
-                persist_strided=persist_strided_values[0],
-                g2_bf16_lds=True,
-            )
-            for use_nt in (True, False)
-            for slots in persist_cu_values
-            if slots in (64, 128, 240, 256)
+        for bn in bn_values
+        for use_nt in (True, False)
+    )
+    cfgs.extend(
+        dict(
+            BN=128,
+            BK=256,
+            use_nt=use_nt,
+            g2_bhoist=True,
+            g2_ascale_pf=True,
+            g2_spart=402,
+            persist=True,
+            persist_cu=slots,
+            persist_strided=False,
+            g2_bf16_lds=True,
         )
-    no_persist = os.environ.get("MEGA_G2_NO_PERSIST") == "1"
-    force_persist = os.environ.get("MEGA_G2_FORCE_PERSIST") == "1"
-    if no_persist and force_persist:
-        raise ValueError("MEGA_G2_NO_PERSIST and MEGA_G2_FORCE_PERSIST cannot both be enabled")
-    if no_persist:
-        cfgs = [config for config in cfgs if not config["persist"]]
-    elif force_persist:
-        cfgs = [config for config in cfgs if config["persist"]]
-    force_use_nt = os.environ.get("MEGA_G2_FORCE_USE_NT")
-    if force_use_nt is not None:
-        if force_use_nt not in ("0", "1"):
-            raise ValueError("MEGA_G2_FORCE_USE_NT must be '0' or '1'")
-        use_nt = force_use_nt == "1"
-        cfgs = [config for config in cfgs if config["use_nt"] == use_nt]
+        for use_nt in (True, False)
+        for slots in (64, 128, 240, 256)
+    )
     # BK128 is inaccurate here; BM128 at BN256 fits gfx950's 160 KiB block LDS.
     return [dict(config, BM=BM) for BM in (16, 32, 64, 128) for config in cfgs]
 
@@ -750,21 +705,13 @@ def _spart_output_tile_index(block_1d_id, M0, N0, group_num, m01):
 
 
 def _resolve_g2_knobs(g2_bhoist, g2_ascale_pf, g2_spart, g2_bf16_lds, use_reduce):
-    """Env-default the gemm2 perf knobs (explicit arg wins), matching aiter compile_gemm2_a4w4_port."""
-    if g2_bhoist is None:
-        g2_bhoist = os.environ.get("MXFP4_G2_BHOIST", "1") == "1"
-    g2_bhoist = bool(g2_bhoist)
-    if g2_ascale_pf is None:
-        g2_ascale_pf = os.environ.get("MXFP4_G2_ASCALE_PF", "1") == "1"
-    g2_ascale_pf = bool(g2_ascale_pf)
-    if g2_spart is None:
-        g2_spart = int(os.environ.get("MXFP4_G2_SPART", "402"))
-    g2_spart = int(g2_spart)
+    """Resolve explicit GEMM2 knobs against deterministic defaults."""
+    g2_bhoist = True if g2_bhoist is None else bool(g2_bhoist)
+    g2_ascale_pf = True if g2_ascale_pf is None else bool(g2_ascale_pf)
+    g2_spart = 402 if g2_spart is None else int(g2_spart)
     g2_group_num = g2_spart // 100 if g2_spart > 0 else 0
     g2_m01 = g2_spart % 100 if g2_spart > 0 else 0
     if g2_spart > 0 and (g2_group_num < 1 or g2_m01 < 1):
         raise AssertionError(f"g2_spart={g2_spart} must encode GroupNum>=1,M01>=1 as GroupNum*100+M01 (e.g. 402)")
-    if g2_bf16_lds is None:
-        g2_bf16_lds = os.environ.get("MXFP4_G2_BF16_LDS", "1") == "1" and use_reduce
-    g2_bf16_lds = bool(g2_bf16_lds) and use_reduce
+    g2_bf16_lds = (True if g2_bf16_lds is None else bool(g2_bf16_lds)) and use_reduce
     return g2_bhoist, g2_ascale_pf, g2_spart, g2_group_num, g2_m01, g2_bf16_lds

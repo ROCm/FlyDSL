@@ -2,8 +2,6 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 """MegaMoE v2 Stage1 autotune candidates and pruning."""
 
-import os
-
 from flydsl.autotune import Config
 
 _SHAPES = (
@@ -263,27 +261,6 @@ def _candidate_variants(shape):
 
 def get_stage1_autotune_configs(dispatch_cu=None, grid_mult=None, tile_m_values=(32,)):
     tile_m_values = {int(value) for value in tile_m_values}
-    if os.environ.get("MEGA_S1_NOTUNE") == "1":
-        # Pin one valid Stage1 config when isolating Stage2 performance.
-        return [
-            Config(
-                sort_block_m=max(tile_m_values),
-                tile_n=256,
-                tile_k=256,
-                num_waves=4,
-                grid_mult=4 if grid_mult is None else int(grid_mult),
-                pipe_weights=True,
-                mfma_amajor=True,
-                swizzle_a=True,
-                async_a_copy=False,
-                active_expert_producer=False,
-                cooperative_payload_copy=False,
-                num_dispatch_cu=64 if dispatch_cu is None else int(dispatch_cu),
-                use_tile_resource=True,
-                waves_per_eu_hint=2,
-                b_nt=-1,
-            )
-        ]
     configs = []
     seen = set()
     for sort_block_m, tile_n, num_waves in _SHAPES:
@@ -377,9 +354,7 @@ def prune_stage1_autotune_configs(configs, sig_args):
         b_nt = int(values["b_nt"])
         if b_nt == (3 if fuse_mtpr <= 512 else 0) or not stage1_config_is_valid(config, sig_args):
             continue
-        if os.environ.get("MEGA_S1_NOTUNE") == "1":
-            keep = True
-        elif tokens <= 64:
+        if tokens <= 64:
             # Keep explicit M64/M128 joint-SBM sweeps valid for small batches.
             keep = tile_n <= 512 and grid_mult <= 4 and dispatch_cu >= 32 and not (block_m > 32 and b_nt == 0)
         elif tokens <= 1024:
