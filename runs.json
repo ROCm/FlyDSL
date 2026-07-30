@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-30T15:08:15Z",
+ "updated": "2026-07-30T15:16:37Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "amartin/mxfp8-4wave",
    "event": "pull_request",
    "title": "[Kernel] Add optimized 4-wave MXFP8 GEMM kernel for gfx950",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30555020683",
    "created_at": "2026-07-30T15:06:14Z",
-   "updated_at": "2026-07-30T15:07:09Z",
+   "updated_at": "2026-07-30T15:08:39Z",
    "actor": "aris134",
    "jobs": []
   },
@@ -517,9 +517,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-30T09:44:41Z",
+     "started_at": "2026-07-30T15:14:36Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30531642345/job/90835963140"
     }
@@ -633,11 +633,11 @@
    "branch": "phil/fix-reg-offset-dynamic-add-offset",
    "event": "pull_request",
    "title": "[Bugfix] Resolve reg offset on dynamic add_offset chains",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30527535196",
    "created_at": "2026-07-30T08:39:14Z",
-   "updated_at": "2026-07-30T13:34:57Z",
+   "updated_at": "2026-07-30T15:13:29Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -652,10 +652,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-30T13:34:57Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T15:13:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30527535196/job/90822924736"
     },
     {
@@ -695,10 +695,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-30T13:34:51Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T15:14:56Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30527027523/job/90821438343"
     },
     {
