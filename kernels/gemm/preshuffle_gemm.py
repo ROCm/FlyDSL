@@ -7,8 +7,9 @@ from typing import Optional
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir.dialects import vector
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import const_expr, gpu, math, range_constexpr, rocdl, vector
+from flydsl.expr import as_ir_value, const_expr, gpu, math, range_constexpr, rocdl
 from flydsl.expr.typing import BFloat16, Float8E4M3FN, Float8E4M3FNUZ, Float16, Float32, Int8, Int32, T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch
@@ -561,44 +562,50 @@ def compile_preshuffle_gemm(
         lane_div_16 = lane_id // 16
         lane_mod_16 = lane_id % 16
 
+        # Epilogue scalar/vec4 gathers via buffer_copy atoms over a make_buffer_tensor
+        # (element-index addressing; same OOB-checked descriptor as the legacy buffer_load).
+        epi_copy_32b = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), Float32)
+        epi_copy_128b = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), Float32)
+        epi_copy_16b = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), out_elem_cls)
+
         def load_epi_operands():
             s_a = s_b = bias = None
             if const_expr(is_8bit):
                 # Per-row(scale_a) × per-col(scale_b) scaling, applied in the epilogue.
-                scale_b_rsrc = fx.buffer_ops.create_buffer_resource(arg_scale_b, max_size=True)
-                s_b = [
-                    fx.buffer_ops.buffer_load(
-                        scale_b_rsrc,
-                        fx.Int32(by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16),
-                        vec_width=1,
-                        dtype=T.f32,
+                sb_buf = fx.logical_divide(
+                    fx.rocdl.make_buffer_tensor(arg_scale_b, max_size=True), fx.make_layout(1, 1)
+                )
+                s_b = []
+                for ni in range_constexpr(num_acc_n):
+                    f = fx.make_rmem_tensor(1, Float32)
+                    fx.copy_atom_call(
+                        epi_copy_32b,
+                        sb_buf[None, fx.Int32(by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16)],
+                        f,
                     )
-                    for ni in range_constexpr(num_acc_n)
-                ]
-                scale_a_rsrc = fx.buffer_ops.create_buffer_resource(arg_scale_a, max_size=True)
-                s_a = [
-                    Vec(
-                        fx.buffer_ops.buffer_load(
-                            scale_a_rsrc, fx.Int32(bx_m + mi * 16 + lane_div_16 * 4), vec_width=4, dtype=T.f32
-                        )
-                    ).bitcast(fx.Float32)
-                    for mi in range_constexpr(m_repeat)
-                ]
+                    s_b.append(fx.Float32(f.load()[0]))
+                # scale_a: vec4 f32 per m-block (BufferCopy128b).
+                sa_buf = fx.logical_divide(
+                    fx.rocdl.make_buffer_tensor(arg_scale_a, max_size=True), fx.make_layout(4, 1)
+                )
+                s_a = []
+                for mi in range_constexpr(m_repeat):
+                    f = fx.make_rmem_tensor(4, Float32)
+                    grp = (bx_m + mi * 16 + lane_div_16 * 4) // 4
+                    fx.copy_atom_call(epi_copy_128b, sa_buf[None, fx.Int32(grp)], f)
+                    s_a.append(Vec(f.load()))
             if const_expr(_has_bias):
                 # Per-column bias (out_dtype), one scalar per N-block, shared across rows.
-                bias_rsrc = fx.buffer_ops.create_buffer_resource(arg_bias, max_size=True)
-                bias_elem_ty = T.bf16 if out_dtype == "bf16" else T.f16
-                bias = [
-                    fx.Float32(
-                        fx.buffer_ops.buffer_load(
-                            bias_rsrc,
-                            fx.Int32(by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16),
-                            vec_width=1,
-                            dtype=bias_elem_ty,
-                        )
+                bias_buf = fx.logical_divide(fx.rocdl.make_buffer_tensor(arg_bias, max_size=True), fx.make_layout(1, 1))
+                bias = []
+                for ni in range_constexpr(num_acc_n):
+                    f = fx.make_rmem_tensor(1, out_elem_cls)
+                    fx.copy_atom_call(
+                        epi_copy_16b,
+                        bias_buf[None, fx.Int32(by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16)],
+                        f,
                     )
-                    for ni in range_constexpr(num_acc_n)
-                ]
+                    bias.append(fx.Float32(f.load()[0]))
             return s_a, s_b, bias
 
         overlap_epi_load = acc_size <= 64  # small enough accumulator to keep operands live over the MMA
@@ -660,7 +667,7 @@ def compile_preshuffle_gemm(
                 val_s = apply_activation(val_s)
                 out_elems.append(val_s.to(out_elem_cls))
 
-            out_vec = vector.from_elements(T.vec(acc_size, out_elem_cls.ir_type), out_elems)
+            out_vec = vector.from_elements(T.vec(acc_size, out_elem_cls.ir_type), [as_ir_value(_e) for _e in out_elems])
             frag_C_out.store(out_vec)
             fx.copy(buf_copy_out, frag_C_retile, pC_g)
 

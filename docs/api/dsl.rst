@@ -183,26 +183,6 @@ Vector Values (``flydsl.expr.typing.Vector``)
 - **Vec(value).to(dtype)** -- convert vector element type
 - **Vec(value).store(memref, indices)** -- store vector to memref
 
-Use direct ``flydsl.expr.vector`` only for low-level boundaries that ``Vector`` does not expose.
-
-Buffer Operations (``flydsl.expr.buffer_ops``)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-AMD CDNA3/CDNA4 buffer load/store with hardware bounds checking:
-
-.. code-block:: python
-
-   from flydsl.expr import buffer_ops
-
-   rsrc = buffer_ops.create_buffer_resource(tensor, max_size=True)
-   data = buffer_ops.buffer_load(rsrc, offset, vec_width=4, dtype=T.i32)
-   buffer_ops.buffer_store(data, rsrc, offset, mask=is_valid)
-
-- **create_buffer_resource(tensor, num_records=None, max_size=False)** -- create buffer descriptor
-- **buffer_load(rsrc, offset, vec_width=4, dtype=None, mask=None, cache_modifier=0, soffset_bytes=None, is_scalar=False)** -- vector buffer load; ``is_scalar=True`` emits the uniform/SGPR ``s.buffer.load`` (vec_width 1 or 4, i32 result, no mask/soffset)
-- **buffer_store(data, rsrc, offset, soffset_bytes, mask)** -- buffer store
-- **BufferResourceDescriptor** -- descriptor dataclass
-
 ROCDL Operations (``flydsl.expr.rocdl``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

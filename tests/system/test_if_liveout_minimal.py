@@ -42,8 +42,6 @@ def test_if_liveout_silent_bug():
         bid = fx.block_idx.x
         gid = bid * block_dim + tid
 
-        from flydsl.expr import buffer_ops
-
         # val exists BEFORE the if — this is a live-out candidate
         val = fx.Float32(1.0)
 
@@ -52,8 +50,7 @@ def test_if_liveout_silent_bug():
         # After the if: on main (no yield), `val` is still 1.0 for ALL threads.
         # Correct behavior: val=2.0 for tid<threshold, val=1.0 for tid>=threshold.
 
-        rsrc = buffer_ops.create_buffer_resource(Out)
-        buffer_ops.buffer_store(val.ir_value(), rsrc, gid)
+        Out[gid] = val.ir_value()
 
     @flyc.jit
     def bugLaunch(

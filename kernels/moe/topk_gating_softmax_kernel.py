@@ -26,7 +26,8 @@ import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, range_constexpr, vector
+from flydsl._mlir.dialects import vector
+from flydsl.expr import arith, as_ir_value, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import Int32, T
 from kernels.common.kernels_common import dtype_to_elem_type, get_warp_size
@@ -310,7 +311,7 @@ def _emit_topk_gating_softmax_body(
         atom_idx = expert_lane * c_atoms_pt + fx.Int32(a)
         atom_vec = _load_atom_in(gating_div, atom_idx)
         for v in range_constexpr(ELEMS_PER_ATOM):
-            val_e = vector.extract(atom_vec, static_position=[v])
+            val_e = vector.extract(as_ir_value(atom_vec), dynamic_position=[], static_position=[v])
             xv = val_e if dtype_str == "f32" else val_e.extf(compute_type)
             x_list.append(xv)
             thread_max = thread_max.maximumf(xv)
@@ -564,7 +565,7 @@ def build_topk_gating_softmax_module(
             atom_idx = expert_lane * c_atoms_pt + fx.Int32(a)
             atom_vec = _load_atom_in(gating_div, atom_idx)
             for v in range_constexpr(ELEMS_PER_ATOM):
-                val_e = vector.extract(atom_vec, static_position=[v])
+                val_e = vector.extract(as_ir_value(atom_vec), dynamic_position=[], static_position=[v])
                 xv = val_e if dtype_str == "f32" else val_e.extf(compute_type)
                 x_list.append(xv)
                 thread_max = thread_max.maximumf(xv)

@@ -7,7 +7,7 @@
 | Kernel | Builder Function | API Style | Dtypes | Key Feature |
 |---|---|---|---|---|
 | **LayerNorm** | `build_layernorm_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | Two-pass vectorized normalization |
-| **RMSNorm** | `build_rmsnorm_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | LDS-cached 3-pass pipeline |
+| **RMSNorm** | `build_rmsnorm_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16; optional fp32 weight | LDS-cached 3-pass pipeline |
 | **Softmax** | `build_softmax_module(M, N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | Online softmax, adaptive block size |
 | **GEMM** | `compile_preshuffle_gemm(...)` | `@flyc.kernel` | fp8, int8, fp16, bf16 | Preshuffle B, ping-pong LDS, MFMA 16x16 |
 | **FlashAttention** | `build_flash_attn_func_module(...)` | `@flyc.kernel` | bf16, f16 (any arch); fp8 e4m3fn (gfx950, D=128, dense) | Dual-wave SWP fwd, GQA/MQA, causal, descale ABI |
@@ -68,14 +68,20 @@ from kernels.norm.rmsnorm_kernel import build_rmsnorm_module
 executor = build_rmsnorm_module(N=8192, dtype_str="bf16", store_rstd=False)
 ```
 
-`build_rmsnorm_module(N, dtype_str, store_rstd=False, eps=EPS)` optionally
-writes the per-row reciprocal std (`rstd`) for use by the backward pass.
+`build_rmsnorm_module(N, dtype_str, store_rstd=False, eps=EPS,
+BLOCK_THREADS=BLOCK_THREADS, weight_dtype_str=None)` optionally writes the
+per-row reciprocal std (`rstd`) for use by the backward pass.
+`weight_dtype_str` defaults to `dtype_str`; FP16/BF16 activations additionally
+support FP32 weights.
 
-**Backward:** `build_rmsnorm_bwd_module(N, dtype_str)` builds the fused RMSNorm
-backward kernel (grid `(M,)`, one block per row). Kernel signature
+**Backward:** `build_rmsnorm_bwd_module(N, dtype_str,
+weight_dtype_str=None)` builds the fused RMSNorm backward kernel (grid `(M,)`,
+one block per row). Kernel signature
 `rmsnorm_bwd_kernel(Input, Gamma, DY, Rstd, DX, DWeight)`: it reads the forward
 `Rstd`, writes `DX` (input grad) and atomic-adds into `DWeight` (fp32 weight
 grad). `eps` is baked into `Rstd` by the forward, so it is not needed here.
+The public plain and fused-add training wrappers return `dweight` in the
+original weight dtype.
 
 **Configuration Constants:** Same as LayerNorm (BLOCK_THREADS=256, VEC_WIDTH=8, etc.)
 
@@ -306,12 +312,12 @@ Used by `kernels/gemm/preshuffle_gemm.py`:
 ```python
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import gpu, buffer_ops, rocdl
+from flydsl.expr import gpu, rocdl
 
 @flyc.kernel
 def gemm_kernel(arg_c: fx.Tensor, arg_a: fx.Tensor, ...):
     tid = gpu.thread_idx.x
-    # ... uses fx.*, ArithValue/Vector, buffer_ops.*, rocdl.* ...
+    # ... uses fx.*, Numeric/Vector, gpu.*, rocdl.* ...
 
 @flyc.jit
 def launch_fn(arg_c: fx.Tensor, ..., stream: fx.Stream = fx.Stream(None)):
@@ -342,7 +348,6 @@ What operation do you need?
 │
 ├── MoE (Mixture of Experts)
 │   ├── Blockscale MoE (gate+up+reduce)
-│   │   └── → kernels/moe/moe_blockscale_2stage.py
 │   └── Standard MoE (fp8/f16/bf16/int8/int4)
 │       └── → kernels/moe/moe_gemm_2stage.py
 │
@@ -362,8 +367,7 @@ What operation do you need?
 | `kernels/gemm/blockscale_preshuffle_gemm.py` | Blockscale GEMM |
 | `kernels/gemm/hgemm_splitk.py` | FP16 GEMM split-K |
 | `kernels/moe/moe_gemm_2stage.py` | MoE GEMM 2-stage (gate/up + reduce) |
-| `kernels/moe/moe_blockscale_2stage.py` | MoE Blockscale 2-stage |
-| `kernels/moe/mixed_moe_gemm_2stage.py` | Mixed-precision MoE GEMM |
+| `kernels/moe/mxfp_moe/` | Fused a4w4/a8w4 MoE 2-stage GEMM (device fp4 re-quant) |
 | `kernels/attention/pa_decode_fp8.py` | Paged attention decode (FP8) |
 | `kernels/attention/flash_attn_generic.py` | FlashAttention generic fallback |
 | `kernels/attention/flash_attn_gfx950.py` | FlashAttention gfx950 bf16/f16 fast path |
@@ -392,7 +396,6 @@ What operation do you need?
 | `tests/kernels/test_blockscale_preshuffle_gemm.py` | Blockscale GEMM |
 | `tests/kernels/test_hgemm_splitk.py` | FP16 GEMM split-K |
 | `tests/kernels/test_moe_gemm.py` | MoE GEMM |
-| `tests/kernels/test_moe_blockscale.py` | MoE Blockscale GEMM |
 | `tests/kernels/test_moe_reduce.py` | MoE reduce kernel |
 | `tests/kernels/test_pa.py` | Paged attention decode |
 | `tests/kernels/test_flash_attn_fwd.py` | FlashAttention |

@@ -15,10 +15,8 @@ from . import utils as utils
 from . import arith as arith
 from . import gpu as gpu
 from . import math as math
-from . import vector as vector
 
 _LAZY_MODULES = {
-    "buffer_ops": ".buffer_ops",
     "rocdl": ".rocdl",
     "tdm_ops": ".rocdl.tdm_ops",
 }

@@ -1,7 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""MoE GEMM stage2 (MFMA) kernel builder + reduce-mode dispatch."""
+"""MoE GEMM stage2 (MFMA) kernel builder + reduce-mode dispatch.
+
+Legacy authoring API (SmemAllocator/SmemPtr + raw buffer_ops); slated for
+deprecation -- refactor to the current fx.* surface (make_buffer_tensor +
+SharedAllocator + fx.copy/fx.gemm). See kernels/moe/mxfp_moe and the
+kernel-code-cleanup skill.
+"""
 
 import functools
 import logging
@@ -10,7 +16,7 @@ import os
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
+from flydsl.expr import arith, as_ir_value, const_expr, gpu, range_constexpr, rocdl
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
@@ -29,9 +35,10 @@ except ImportError:
 
 
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm, scf
+from flydsl._mlir.dialects import llvm, scf, vector
 from flydsl.expr.typing import T
-from kernels.common.kernels_common import _if_then
+from kernels.common import buffer_ops
+from kernels.common.kernels_common import _if_then, default_f8_type
 from kernels.common.mem_ops import buffer_atomic_add
 from kernels.common.mma.mfma_epilogues import c_shuffle_epilog, default_epilog
 from kernels.common.mma.mfma_preshuffle_pipeline import (
@@ -214,7 +221,8 @@ def compile_moe_gemm2(
     if out_is_bf16:
         if not supports_bf16_global_atomics(gpu_arch):
             raise ValueError(
-                f"out_dtype='bf16' requires bf16 global atomics ({bf16_global_atomics_arch_description()}), got arch={gpu_arch!r}"
+                f"out_dtype='bf16' requires bf16 global atomics "
+                f"({bf16_global_atomics_arch_description()}), got arch={gpu_arch!r}"
             )
 
     if out_is_f32:
@@ -303,9 +311,13 @@ def compile_moe_gemm2(
             size_expert_ids_in = arith.index_cast(T.index, i32_size_expert_ids_in)
             # i32 versions for layout construction (fly.make_shape requires i32/i64)
             k_i32_v = i32_k_in
-            x_elem = T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8))
+            x_elem = T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else default_f8_type()))
             # For int4/int4_bf16, weights are stored as packed bytes (i8) and unpacked in-kernel.
-            w_elem = T.i8 if w_is_int4 else (T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)))
+            w_elem = (
+                T.i8
+                if w_is_int4
+                else (T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else default_f8_type())))
+            )
             scale_dtype = T.bf16 if _scale_is_bf16 else T.f32
             vec16_elems = 16 if elem_bytes == 1 else 8
             vec8_elems = 8 if elem_bytes == 1 else 4
@@ -357,7 +369,7 @@ def compile_moe_gemm2(
             lds_x_ptr = SmemPtr(
                 base_ptr,
                 lds_alloc_offset,
-                (T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8))),
+                (T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else default_f8_type()))),
                 shape=(lds_total_elems,),
             )
             lds_x = lds_x_ptr.get()
@@ -458,7 +470,8 @@ def compile_moe_gemm2(
                         x_load_bytes = 4
                     else:
                         raise ValueError(
-                            f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 4 to use the dword-indexed load mapping."
+                            f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible "
+                            "by 4 to use the dword-indexed load mapping."
                         )
                 num_x_loads = bytes_per_thread_x // x_load_bytes
                 chunk_i32 = x_load_bytes // 4  # dwords per chunk (1/2/4)
@@ -536,11 +549,11 @@ def compile_moe_gemm2(
                         idx_i32 = x_row_base_div4[i] + base_k_div4 + x_col_local_i32[i]
                         x_vec = load_x(idx_i32)
                         if const_expr(x_load_bytes == 16):
-                            parts.append(vector.bitcast(T.i32x4, x_vec))
+                            parts.append(vector.bitcast(T.i32x4, as_ir_value(x_vec)))
                         elif const_expr(x_load_bytes == 8):
-                            parts.append(vector.bitcast(T.vec(2, T.i32), x_vec))
+                            parts.append(vector.bitcast(T.vec(2, T.i32), as_ir_value(x_vec)))
                         else:
-                            parts.append(vector.bitcast(T.vec(1, T.i32), x_vec))
+                            parts.append(vector.bitcast(T.vec(1, T.i32), as_ir_value(x_vec)))
                     return parts
 
                 # tx -> wave/lane (GEMM-style decomposition).
@@ -743,10 +756,10 @@ def compile_moe_gemm2(
                     )
                     idx_a16 = preshuffle_crd2idx((fx.Int32(curr_row_a_lds), fx.Int32(col_base_swz)), layout_lds)
                     idx_a16 = idx_a16 + lds_base
-                    loaded_a16 = vector.load_op(vec16_x, lds_x, [idx_a16])
-                    a_i64x2 = vector.bitcast(T.i64x2, loaded_a16)
-                    a0 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
-                    a1 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
+                    loaded_a16 = vector.load(vec16_x, as_ir_value(lds_x), [as_ir_value(idx_a16)])
+                    a_i64x2 = vector.bitcast(T.i64x2, as_ir_value(loaded_a16))
+                    a0 = vector.extract(as_ir_value(a_i64x2), dynamic_position=[], static_position=[0])
+                    a1 = vector.extract(as_ir_value(a_i64x2), dynamic_position=[], static_position=[1])
                     return a0, a1
 
                 def compute_tile(
@@ -1242,7 +1255,7 @@ def compile_moe_gemm2(
                             col_g = col_g_list[ni]
                             sw = sw_vals[ni]
                             acc_idx = mi * num_acc_n + ni
-                            v = vector.extract(acc[acc_idx], static_position=[ii], dynamic_position=[])
+                            v = vector.extract(as_ir_value(acc[acc_idx]), dynamic_position=[], static_position=[ii])
                             if const_expr(is_int8):
                                 v = arith.sitofp(T.f32, v)
                             v = v * sx * sw
@@ -1313,7 +1326,7 @@ def compile_moe_gemm2(
                             col_local = col_base_local + (ni * 16)
                             sw = sw_vals[ni]
                             acc_idx = mi * num_acc_n + ni
-                            v = vector.extract(acc[acc_idx], static_position=[ii], dynamic_position=[])
+                            v = vector.extract(as_ir_value(acc[acc_idx]), dynamic_position=[], static_position=[ii])
                             if const_expr(is_int8):
                                 v = arith.sitofp(T.f32, v)
                             v = v * sx * sw
@@ -1323,8 +1336,13 @@ def compile_moe_gemm2(
 
                             lds_idx = row_base_lds + col_local
                             vec1_out = T.vec(1, out_elem())
-                            v1 = vector.from_elements(vec1_out, [v_out])
-                            vector.store(v1, lds_out, [lds_idx], alignment=2)
+                            v1 = vector.from_elements(vec1_out, [as_ir_value(v_out)])
+                            vector.store(
+                                as_ir_value(v1),
+                                as_ir_value(lds_out),
+                                [as_ir_value(lds_idx)],
+                                alignment=2,
+                            )
 
                     def precompute_row(*, row_local, row):
                         # Precompute row context for cshuffle stores.

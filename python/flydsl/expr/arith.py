@@ -19,6 +19,7 @@ __all__ = [
     "ArithValue",  # Deprecated: will be removed in a future release
     "_to_raw",  # Deprecated: will be removed in a future release
     "FastMathFlags",
+    "RoundingMode",
     "andi",
     "constant",
     "constant_vector",
