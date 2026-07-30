@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-30T16:27:14Z",
+ "updated": "2026-07-30T16:30:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30561468405,
+   "pr": 872,
+   "commit": "4e70fb8054e2b0c8c6a6782e6a3c81dc7b399c37",
+   "branch": "amartin/mxfp8-4wave",
+   "event": "pull_request",
+   "title": "[Kernel] Add optimized 4-wave MXFP8 GEMM kernel for gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30561468405",
+   "created_at": "2026-07-30T16:26:35Z",
+   "updated_at": "2026-07-30T16:27:13Z",
+   "actor": "aris134",
+   "jobs": []
+  },
   {
    "run_id": 30555020683,
    "pr": 872,
@@ -10,20 +25,20 @@
    "branch": "amartin/mxfp8-4wave",
    "event": "pull_request",
    "title": "[Kernel] Add optimized 4-wave MXFP8 GEMM kernel for gfx950",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30555020683",
    "created_at": "2026-07-30T15:06:14Z",
-   "updated_at": "2026-07-30T15:49:03Z",
+   "updated_at": "2026-07-30T16:26:36Z",
    "actor": "aris134",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-30T15:49:03Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T16:26:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30555020683/job/90925237387"
     },
     {
@@ -38,10 +53,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-30T15:49:03Z",
-     "completed_at": null,
+     "completed_at": "2026-07-30T16:26:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30555020683/job/90925237510"
     }
    ]
@@ -2091,49 +2106,6 @@
    "updated_at": "2026-07-28T19:01:04Z",
    "actor": "jonahbernard",
    "jobs": []
-  },
-  {
-   "run_id": 30388619215,
-   "pr": 919,
-   "commit": "aeb6d543b3537348b5a7d4c6c4907edf9672900a",
-   "branch": "perf/dualwave-xcd-head-first-mapping",
-   "event": "pull_request",
-   "title": "perf(attention): keep a head's Q-blocks on one XCD in the dualwave mapping",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30388619215",
-   "created_at": "2026-07-28T18:42:02Z",
-   "updated_at": "2026-07-28T20:32:07Z",
-   "actor": "JohnQinAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T19:07:31Z",
-     "completed_at": "2026-07-28T20:02:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30388619215/job/90376122524"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T18:50:06Z",
-     "completed_at": "2026-07-28T19:45:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30388619215/job/90376122555"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T18:57:05Z",
-     "completed_at": "2026-07-28T20:32:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30388619215/job/90376122561"
-    }
-   ]
   }
  ]
 }
