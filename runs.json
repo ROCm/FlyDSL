@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-07-30T15:06:09Z",
+ "updated": "2026-07-30T15:08:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30555020683,
+   "pr": 872,
+   "commit": "66524dd105c4c049fe3c47b083c8e793695ae220",
+   "branch": "amartin/mxfp8-4wave",
+   "event": "pull_request",
+   "title": "[Kernel] Add optimized 4-wave MXFP8 GEMM kernel for gfx950",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30555020683",
+   "created_at": "2026-07-30T15:06:14Z",
+   "updated_at": "2026-07-30T15:07:09Z",
+   "actor": "aris134",
+   "jobs": []
+  },
+  {
+   "run_id": 30554858956,
+   "pr": 872,
+   "commit": "304bb01832a8587b35515695d10d2722dcdc594b",
+   "branch": "amartin/mxfp8-4wave",
+   "event": "pull_request",
+   "title": "[Kernel] Add optimized 4-wave MXFP8 GEMM kernel for gfx950",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30554858956",
+   "created_at": "2026-07-30T15:04:19Z",
+   "updated_at": "2026-07-30T15:06:29Z",
+   "actor": "aris134",
+   "jobs": []
+  },
   {
    "run_id": 30554796756,
    "pr": null,
@@ -10,11 +40,11 @@
    "branch": "main",
    "event": "push",
    "title": "[compiler] carry Python containers through dynamic if/for/while/ifexp\u2026",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30554796756",
    "created_at": "2026-07-30T15:03:34Z",
-   "updated_at": "2026-07-30T15:03:36Z",
+   "updated_at": "2026-07-30T15:06:23Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -2046,92 +2076,6 @@
      "started_at": "2026-07-28T18:57:05Z",
      "completed_at": "2026-07-28T20:32:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30388619215/job/90376122561"
-    }
-   ]
-  },
-  {
-   "run_id": 30380903200,
-   "pr": 914,
-   "commit": "6184abd7e3c7251cdb9714b226627b4e7a086b53",
-   "branch": "fix/898-lds-offset-merge",
-   "event": "pull_request",
-   "title": "[Dialect][Perf] Don't merge mixed static/runtime offsets on LDS pointers",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30380903200",
-   "created_at": "2026-07-28T17:00:27Z",
-   "updated_at": "2026-07-28T19:06:50Z",
-   "actor": "Arist12",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T17:21:04Z",
-     "completed_at": "2026-07-28T18:53:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30380903200/job/90350068346"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T17:07:54Z",
-     "completed_at": "2026-07-28T17:59:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30380903200/job/90350068347"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T18:22:05Z",
-     "completed_at": "2026-07-28T19:06:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30380903200/job/90350068350"
-    }
-   ]
-  },
-  {
-   "run_id": 30377335890,
-   "pr": 919,
-   "commit": "2149ef8b40cf3e416e753528aa3f154d900c759f",
-   "branch": "perf/dualwave-xcd-head-first-mapping",
-   "event": "pull_request",
-   "title": "perf(attention): keep a head's Q-blocks on one XCD in the dualwave mapping",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30377335890",
-   "created_at": "2026-07-28T16:15:00Z",
-   "updated_at": "2026-07-28T18:37:36Z",
-   "actor": "JohnQinAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T17:19:26Z",
-     "completed_at": "2026-07-28T18:21:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30377335890/job/90337217954"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T16:19:04Z",
-     "completed_at": "2026-07-28T17:41:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30377335890/job/90337217972"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-28T16:54:39Z",
-     "completed_at": "2026-07-28T18:37:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30377335890/job/90337218006"
     }
    ]
   }
