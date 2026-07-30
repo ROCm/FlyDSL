@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-30T14:29:37Z",
+ "updated": "2026-07-30T14:36:52Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "amartin/mxfp8-4wave",
    "event": "pull_request",
    "title": "[Kernel] Add optimized 4-wave MXFP8 GEMM kernel for gfx950",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30551549692",
    "created_at": "2026-07-30T14:24:36Z",
-   "updated_at": "2026-07-30T14:24:37Z",
+   "updated_at": "2026-07-30T14:32:15Z",
    "actor": "aris134",
    "jobs": []
   },
