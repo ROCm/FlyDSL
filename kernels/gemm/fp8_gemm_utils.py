@@ -247,6 +247,35 @@ def wait_barrier(count):
     )
 
 
+class MfmaScale16x16x128:
+    """Common interface for scaled FP8 16x16x128 MFMA implementations.
+
+    The scale operands are MFMA-ready packed ``i32`` dwords. ``mi`` and
+    ``ni`` select the corresponding bytes through ``op_sel``/``op_sel_hi``.
+
+    Kernel implementations may override ``_do_mma`` when they require
+    instruction-specific code generation, while retaining the common
+    accumulator initialization and call interface.
+    """
+
+    def __init__(self):
+        self.zero_value = Vec.filled(4, 0.0, fx.Float32)
+
+    def _do_mma(self, a, b, c, a_scale, b_scale, mi, ni):
+        raise NotImplementedError
+
+    def call(self, a, b, c, a_scale, b_scale, mi, ni):
+        return self._do_mma(
+            a,
+            b,
+            c,
+            a_scale,
+            b_scale,
+            mi,
+            ni,
+        )
+
+
 class Mfma16x16x128:
     def __init__(self, n_tiles_a, n_tiles_b):
         self.atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
