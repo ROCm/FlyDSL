@@ -194,6 +194,20 @@ def flydsl_a16w4_gemm1(
     TILE_K = tile_k
     _m = int(n_tokens)
     b_cache_mod = (2 if (16 <= _m <= 1024) else 0) if b_nt is None else b_nt
+    # mxfp4 high-token defaults (only when the caller left tile_k / xcd_swizzle at
+    # their defaults, i.e. no CSV/explicit override): at n_tokens >= 16 the leaner
+    # TILE_K=128 (more, shorter K-tiles) plus xcd_swizzle=1 (bijective XCD/HBM-channel
+    # round-robin) measured faster across the whole M>=16 range on both Kimi-K3 shapes
+    # (3584x384 / 3584x512): gemm1-s1 ~0.83-0.94x on the high-M tail (2048..16384) and
+    # ~0.91-0.94x in the mid band (16..1024), closing the residual aiter gap. Gated at
+    # >=16 because TILE_K=128 REGRESSES the launch-latency-bound tok 1..8 (~+5-10%);
+    # those keep TILE_K=256. mxfp4 only (int4/bf16 share the body but are separately
+    # tuned) and requires K % 128 == 0.
+    if w_dtype == "mxfp4" and not use_csv_config and _m >= 16 and D_HIDDEN % 128 == 0:
+        if tile_k == 256:
+            TILE_K = 128
+        if xcd_swizzle == 0:
+            xcd_swizzle = 1
     TILE_N = tile_n
     if TILE_N is None:
         # gemm1 mxfp4: the fat-wave tile_n=256 spills to VGPR=260 -> 1 wave/SIMD
