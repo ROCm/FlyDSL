@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-07-31T10:04:32Z",
+ "updated": "2026-07-31T10:09:18Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30622441512,
+   "pr": 848,
+   "commit": "85471e615121474dd6269ccd220cb382becda98b",
+   "branch": "cjl/norm_perf",
+   "event": "pull_request",
+   "title": "[Perf] Optimize rmsnorm/layernorm",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622441512",
+   "created_at": "2026-07-31T10:07:25Z",
+   "updated_at": "2026-07-31T10:07:41Z",
+   "actor": "cschenjunlin",
+   "jobs": []
+  },
+  {
+   "run_id": 30622154072,
+   "pr": 848,
+   "commit": "6b7a130e616cfb7c6d6de978298f2769fc6f08ea",
+   "branch": "cjl/norm_perf",
+   "event": "pull_request",
+   "title": "[Perf] Optimize rmsnorm/layernorm",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622154072",
+   "created_at": "2026-07-31T10:02:49Z",
+   "updated_at": "2026-07-31T10:07:41Z",
+   "actor": "cschenjunlin",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-31T10:06:36Z",
+     "completed_at": "2026-07-31T10:07:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622154072/job/91129602325"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-31T10:06:33Z",
+     "completed_at": "2026-07-31T10:07:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622154072/job/91129602334"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-31T10:05:56Z",
+     "completed_at": "2026-07-31T10:07:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622154072/job/91129602400"
+    }
+   ]
+  },
   {
    "run_id": 30622104753,
    "pr": 930,
@@ -10,13 +68,41 @@
    "branch": "dsl-ify-arith",
    "event": "pull_request",
    "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622104753",
    "created_at": "2026-07-31T10:02:01Z",
-   "updated_at": "2026-07-31T10:02:17Z",
+   "updated_at": "2026-07-31T10:04:57Z",
    "actor": "xudoyuan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-31T10:05:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622104753/job/91129400211"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-31T10:05:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622104753/job/91129400215"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-31T10:04:57Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622104753/job/91129400273"
+    }
+   ]
   },
   {
    "run_id": 30621845362,
@@ -2075,36 +2161,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30501875673/job/90743726065"
     }
    ]
-  },
-  {
-   "run_id": 30501751865,
-   "pr": null,
-   "commit": "ebe144e214e67966adb4e291bca37abf311359af",
-   "branch": "jiacao/conv3d-gemm-port",
-   "event": "pull_request",
-   "title": "[Kernel] fp8 conv3d: 8-wave GEMM pipeline + BIG_IN fix",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30501751865",
-   "created_at": "2026-07-30T00:08:23Z",
-   "updated_at": "2026-07-30T00:10:46Z",
-   "actor": "jiacao-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 30501019425,
-   "pr": null,
-   "commit": "4f612cbbbaae05306a340e8c08e60691e121380a",
-   "branch": "jiacao/conv3d-gemm-port",
-   "event": "pull_request",
-   "title": "[Kernel] fp8 conv3d: 8-wave GEMM pipeline + BIG_IN fix",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30501019425",
-   "created_at": "2026-07-29T23:54:42Z",
-   "updated_at": "2026-07-30T00:08:40Z",
-   "actor": "jiacao-amd",
-   "jobs": []
   }
  ]
 }
