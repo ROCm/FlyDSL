@@ -41,6 +41,10 @@ def _global_i32_buffer_view(addr_i64, num_bytes):
     return fx.rocdl.make_buffer_tensor(view, max_size=False, num_records_bytes=num_bytes_i64)
 
 
+def _global_i32_buffer_tiles(addr_i64, num_bytes, tile_elems):
+    return fx.logical_divide(_global_i32_buffer_view(addr_i64, num_bytes), fx.make_layout(tile_elems, 1))
+
+
 def _lds_ptr3(base_i32, byte_off_i32):
     addr_i64 = fx.Int64(base_i32 + byte_off_i32)
     return llvm.inttoptr(ir.Type.parse(_PTR3), _raw(addr_i64))

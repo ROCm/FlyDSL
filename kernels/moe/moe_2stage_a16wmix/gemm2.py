@@ -17,6 +17,7 @@ from .common import (
     _gep3,
     _global_base_ptr1,
     _global_i32_at,
+    _global_i32_buffer_tiles,
     _global_i32_buffer_view,
     _int4_nibble_to_bf16x8,
     _lds_ptr3,
@@ -198,10 +199,13 @@ def _gemm2_body_a16w4(
     if const_expr(_is_bf16):
         _w_per_expert_bytes = N_OUT * (K * 2)
         w_base_i64 = fx.Int64(arg_bq) + fx.Int64(e) * fx.Int64(_w_per_expert_bytes)
-        w_rsrc = _buffer_rsrc(w_base_i64, num_records_bytes=min(_w_per_expert_bytes, 0xFFFFFFFF))
+        w_tiles = _global_i32_buffer_tiles(w_base_i64, min(_w_per_expert_bytes, 0xFFFFFFFF), 4)
     else:
         _w_bytes = NE * N_OUT * K_HALF
-        w_rsrc = _buffer_rsrc(arg_bq, num_records_bytes=min(_w_bytes, 0xFFFFFFFF))
+        w_tiles = _global_i32_buffer_tiles(arg_bq, min(_w_bytes, 0xFFFFFFFF), 4)
+    # W dwordx4 load via BufferCopy128b atom (cache modifier carried in the aux field).
+    w_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(b_cache_mod), fx.Int32)
+    w_reg_lay = fx.make_layout(4, 1)
     if _is_int4:
         _sw_bytes = NE * N_OUT * _g_half * 4
     else:
@@ -288,10 +292,10 @@ def _gemm2_body_a16w4(
                     layout_b,
                 )
             )
-            v4 = buffer_ops.buffer_load(
-                _raw(w_rsrc), _raw(idx_pack // fx.Int32(4)), vec_width=4, dtype=T.i32, cache_modifier=b_cache_mod
-            )
-            v4 = fx.Vector(v4)
+            # idx_pack is a fp4-byte offset; the dwordx4 tile index = (idx_pack/4 dwords)/4.
+            r = fx.make_rmem_tensor(w_reg_lay, fx.Int32)
+            fx.copy(w_copy_atom, fx.slice(w_tiles, (None, idx_pack // fx.Int32(16))), r)
+            v4 = fx.Vector(fx.memref_load_vec(r))
             raw.append([fx.Int32(v4[j]) for j in range(4)])
         return raw
 
@@ -310,13 +314,15 @@ def _gemm2_body_a16w4(
                     layout_b_bf16,
                 )
             )
-            v4 = buffer_ops.buffer_load(
-                _raw(w_rsrc), _raw(elem_idx // fx.Int32(2)), vec_width=4, dtype=T.i32, cache_modifier=b_cache_mod
-            )
-            raw.append(fx.Vector(v4).bitcast(fx.BFloat16))  # v8bf16
+            # elem_idx is a bf16-elem offset; dword index = elem_idx*2/4, tile index = /4.
+            r = fx.make_rmem_tensor(w_reg_lay, fx.Int32)
+            fx.copy(w_copy_atom, fx.slice(w_tiles, (None, elem_idx // fx.Int32(8))), r)
+            raw.append(fx.Vector(fx.memref_load_vec(r)).bitcast(fx.BFloat16))  # v8bf16
         return raw
 
     def load_b_scale(base_k, mni, n_pack):
+        # Per-lane scalar (vec_width=1) e8m0 load: kept on buffer_ops (no layout form);
+        # the W dwordx4 load uses the BufferCopy128b atom.
         scales = []
         cache = {}
         for ku in range_constexpr(k_unroll):
@@ -379,7 +385,7 @@ def _gemm2_body_a16w4(
     for ni in range_constexpr(num_acc_n):
         col_g = by_n + n_tile_base + fx.Int32(ni * 16) + lane_mod_16
         col_g_list.append(col_g)
-        # bf16 W folds expert_off into the resource base (see w_rsrc); mxfp4/int4 index it.
+        # bf16 W folds expert_off into the resource base (see w_tiles); mxfp4/int4 index it.
         _row_expert_off = fx.Int32(0) if const_expr(_is_bf16) else expert_off
         row_w = _row_expert_off + col_g
         n_blk_list.append(row_w // fx.Int32(16))
