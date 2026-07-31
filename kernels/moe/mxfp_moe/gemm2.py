@@ -1161,6 +1161,7 @@ def compile_gemm2_a16w4_port(
     TILE_K=256,
     xcd_swizzle=1,
     b_cache_mod=2,
+    waves_per_eu=None,
 ):
     """a16w4 (bf16 intermediate A x mxfp4 W2) stage2 builder.
 
@@ -1191,6 +1192,8 @@ def compile_gemm2_a16w4_port(
         _name += f"_bcm{b_cache_mod}"
     if xcd_swizzle > 0:
         _name += f"_xcd{xcd_swizzle}"
+    if waves_per_eu:
+        _name += f"_w{waves_per_eu}"
 
     @fx.struct
     class SharedStorage:
@@ -1292,6 +1295,7 @@ def compile_gemm2_a16w4_port(
             i32_M,
             i32_max_m_blocks,
             arg_out,
+            value_attrs={"rocdl.waves_per_eu": waves_per_eu} if waves_per_eu else None,
         ).launch(grid=(grid_x, 1, 1), block=(256, 1, 1), stream=stream)
 
     return launch_gemm2

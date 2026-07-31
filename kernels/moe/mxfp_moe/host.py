@@ -8,7 +8,9 @@ Ported (self-contained) from aiter's ``mxfp4_gemm1_kernels.py`` /
 (``fx.Int64``); tensors are passed as ``.data_ptr()``.
 """
 
+import csv
 import functools
+import re
 
 import torch
 
@@ -243,7 +245,9 @@ def flydsl_mxfp4_gemm2(
 
 
 @functools.cache
-def _get_compiled_gemm1_a16w4(BM, D_HIDDEN, D_INTER, NE, topk, TILE_N, TILE_K, act, b_cache_mod):
+def _get_compiled_gemm1_a16w4(
+    BM, D_HIDDEN, D_INTER, NE, topk, TILE_N, TILE_K, act, b_cache_mod, xcd_swizzle, waves_per_eu
+):
     return compile_gemm1_a16w4_port(
         BM=BM,
         D_HIDDEN=D_HIDDEN,
@@ -254,13 +258,23 @@ def _get_compiled_gemm1_a16w4(BM, D_HIDDEN, D_INTER, NE, topk, TILE_N, TILE_K, a
         TILE_K=TILE_K,
         act=act,
         b_cache_mod=b_cache_mod,
+        xcd_swizzle=xcd_swizzle,
+        waves_per_eu=waves_per_eu,
     )
 
 
 @functools.cache
-def _get_compiled_gemm2_a16w4(BM, NE, N_OUT, D_INTER, TILE_N, TILE_K, b_cache_mod=2):
+def _get_compiled_gemm2_a16w4(BM, NE, N_OUT, D_INTER, TILE_N, TILE_K, b_cache_mod=2, xcd_swizzle=1, waves_per_eu=None):
     return compile_gemm2_a16w4_port(
-        BM=BM, NE=NE, N_OUT=N_OUT, D_INTER=D_INTER, TILE_N=TILE_N, TILE_K=TILE_K, b_cache_mod=b_cache_mod
+        BM=BM,
+        NE=NE,
+        N_OUT=N_OUT,
+        D_INTER=D_INTER,
+        TILE_N=TILE_N,
+        TILE_K=TILE_K,
+        b_cache_mod=b_cache_mod,
+        xcd_swizzle=xcd_swizzle,
+        waves_per_eu=waves_per_eu,
     )
 
 
@@ -274,15 +288,19 @@ def flydsl_a16w4_gemm1(
     m_indices,
     inter_sorted_bf16,
     n_tokens,
-    BM,
     NE,
     D_HIDDEN,
     D_INTER,
     topk,
-    TILE_N=None,
-    TILE_K=256,
+    tile_m=32,
+    tile_n=None,
+    tile_k=256,
+    waves_per_eu=None,
+    k_batch=1,
+    b_nt=None,
+    xcd_swizzle=0,
+    gate_mode="separated",
     act="silu",
-    b_cache_mod=0,
     stream=None,
 ):
     """a16w4 fused stage1: gate+up GEMM + SiLU -> bf16 intermediate.
@@ -291,10 +309,35 @@ def flydsl_a16w4_gemm1(
     intermediate ``[sorted_size, D_INTER]`` (by sorted position) into
     ``inter_sorted_bf16`` (pre-allocated). No A-scale, no intermediate scale.
 
-    ``TILE_N=None`` picks the largest supported N tile that divides ``D_INTER``:
+    Tile-config interface mirrors aiter's ``compile_mixed_moe_gemm1_a16w4``:
+    ``tile_m`` (block M -> BM), ``tile_n`` (N tile -> TILE_N), ``tile_k`` (K tile
+    -> TILE_K), ``waves_per_eu`` (min-occupancy hint -> ``rocdl.waves_per_eu``),
+    ``b_nt`` (W-load cache modifier -> b_cache_mod; 0=cached, 2=nt), ``xcd_swizzle``
+    (bijective XCD/HBM-channel remap of the launch grid). ``k_batch`` (split-K) and
+    ``gate_mode`` are accepted for interface parity but this kernel only supports
+    ``k_batch=1`` / ``gate_mode="separated"``.
+
+    ``tile_n=None`` picks the largest supported N tile that divides ``D_INTER``:
     256 when ``D_INTER % 256 == 0`` (fastest, matches aiter's tuned tile) else 128
     (``D_INTER`` is always a multiple of 128 given the ``2*D_INTER % 256`` rule).
+
+    ``b_nt=None`` uses the measured per-M W-load U-shape (same mechanism as gemm2):
+    non-temporal streaming (b_nt=2) wins the mid-band, where each expert's W tiles
+    are reused across only a few M-blocks so caching pollutes L2; cached (b_nt=0)
+    wins at the ends (tiny M -> few blocks per expert; large M >= 2048 -> high W
+    L2 residency). Measured (median-of-3, 3584x512, dev7): b_nt=2 is -7..-11% s1 at
+    tok 16/128/1024 but +11%/+43% *regression* at tok 4096/16384, so the switch is
+    keyed on n_tokens. Caller may pin either mode via an explicit ``b_nt``.
     """
+    if k_batch != 1:
+        raise NotImplementedError(f"a16w4 gemm1 only supports k_batch=1, got {k_batch}")
+    if gate_mode != "separated":
+        raise NotImplementedError(f"a16w4 gemm1 only supports gate_mode='separated', got {gate_mode!r}")
+    BM = tile_m
+    TILE_K = tile_k
+    _m = int(n_tokens)
+    b_cache_mod = (2 if (16 <= _m <= 1024) else 0) if b_nt is None else b_nt
+    TILE_N = tile_n
     if TILE_N is None:
         TILE_N = 256 if D_INTER % 256 == 0 else 128
     if D_HIDDEN % TILE_K != 0:
@@ -304,7 +347,9 @@ def flydsl_a16w4_gemm1(
     if D_INTER % TILE_N != 0:
         raise NotImplementedError(f"a16w4 gemm1 requires D_INTER % TILE_N({TILE_N}) == 0, got D_INTER={D_INTER}")
 
-    launch = _get_compiled_gemm1_a16w4(BM, D_HIDDEN, D_INTER, NE, topk, TILE_N, TILE_K, act, b_cache_mod)
+    launch = _get_compiled_gemm1_a16w4(
+        BM, D_HIDDEN, D_INTER, NE, topk, TILE_N, TILE_K, act, b_cache_mod, xcd_swizzle, waves_per_eu
+    )
     max_m_blocks = int(sorted_expert_ids.numel())
     grid = gemm1_a16w4_grid(BM, INTER=D_INTER, TILE_N=TILE_N, max_m_blocks=max_m_blocks)
     _run_compiled(
@@ -335,18 +380,34 @@ def flydsl_a16w4_gemm2(
     flat_out,
     M_logical,
     max_sorted,
-    BM,
     NE,
     D_HIDDEN,
     D_INTER,
     topk,
-    TILE_N=256,
-    TILE_K=256,
+    tile_m=32,
+    tile_n=256,
+    tile_k=256,
+    waves_per_eu=None,
+    k_batch=1,
+    b_nt=None,
+    xcd_swizzle=1,
     stream=None,
 ):
     """a16w4 fused stage2 (down-proj). Consumes the bf16 [sorted_size, D_INTER]
     intermediate; scatters routing-weighted bf16 into ``flat_out`` [tokens*model_dim].
+
+    Tile-config interface mirrors aiter's ``compile_mixed_moe_gemm2_a16w4``:
+    ``tile_m`` -> BM, ``tile_n`` (model_dim N tile) -> TILE_N, ``tile_k`` (inter K
+    tile) -> TILE_K, ``waves_per_eu`` -> ``rocdl.waves_per_eu``, ``b_nt`` -> W-load
+    cache modifier, ``xcd_swizzle`` -> XCD/HBM-channel grid remap. ``k_batch`` is
+    accepted for parity (must be 1). ``b_nt=None`` keeps the measured per-M U-shape
+    default (cached at both ends, nt in the middle band).
     """
+    if k_batch != 1:
+        raise NotImplementedError(f"a16w4 gemm2 only supports k_batch=1, got {k_batch}")
+    BM = tile_m
+    TILE_N = tile_n
+    TILE_K = tile_k
     if D_INTER % TILE_K != 0:
         raise NotImplementedError(f"a16w4 gemm2 requires D_INTER (K) % {TILE_K} == 0, got D_INTER={D_INTER}")
     if D_HIDDEN % TILE_N != 0:
@@ -359,10 +420,12 @@ def flydsl_a16w4_gemm2(
     # would bypass a reusable cache) -- while non-temporal streaming
     # (cache_modifier=2) wins the middle band (32..1024, where streaming avoids L2
     # pollution). Crossovers: cached<->nt between tok16/32, nt<->cached between
-    # tok1024/2048.
+    # tok1024/2048. Caller may override via b_nt (0=cached, 2=nt).
     _m = int(M_logical)
-    _b_cache_mod = 0 if (_m <= 16 or _m >= 2048) else 2
-    launch = _get_compiled_gemm2_a16w4(BM, NE, D_HIDDEN, D_INTER, TILE_N, TILE_K, _b_cache_mod)
+    _b_cache_mod = (0 if (_m <= 16 or _m >= 2048) else 2) if b_nt is None else b_nt
+    launch = _get_compiled_gemm2_a16w4(
+        BM, NE, D_HIDDEN, D_INTER, TILE_N, TILE_K, _b_cache_mod, xcd_swizzle, waves_per_eu
+    )
     max_m_blocks = int(sorted_expert_ids.numel())
     grid = gemm2_a16w4_grid(BM, N_OUT=D_HIDDEN, TILE_N=TILE_N, max_m_blocks=max_m_blocks)
     _run_compiled(
@@ -381,3 +444,97 @@ def flydsl_a16w4_gemm2(
         torch.cuda.current_stream() if stream is None else stream,
     )
     return flat_out
+
+
+# =============================================================================
+# aiter tuned-CSV config loader for a16w4.
+#
+# Reads aiter's kimik3_fp4_tuned_fmoe.csv (or any file with the same schema),
+# selects the ``flydsl_moe1/2_abf16_wfp4`` rows for a (model_dim, inter_dim,
+# experts, topk) shape, and decodes each token's kernelName into a tile-config
+# dict consumable by ``flydsl_a16w4_gemm{1,2}``. The CSV is used only as a SOURCE
+# OF CANDIDATE tile/waves/xcd geometries -- aiter's gemm bodies differ from ours,
+# so the *latency* columns are not comparable, but the tile geometry (tile_m/n/k,
+# waves_per_eu, xcd_swizzle, b_nt, k_wave) is informative.
+# =============================================================================
+
+# kernelName tokens:  flydsl_moe{stage}_abf16_wfp4_bf16_t{m}x{n}x{k}
+#   [_w{N}]=waves_per_eu  [_xcd{N}]=xcd_swizzle  [_bnt{N}]=b_nt  [_kw{N}]=k_wave
+#   (no _sk => k_batch=1). Extra epilogue tokens (_reduce/_atomic/_persist/...)
+#   are ignored for tile-config purposes.
+_A16W4_TILE_RE = re.compile(r"_t(\d+)x(\d+)x(\d+)")
+_A16W4_W_RE = re.compile(r"_w(\d+)")
+_A16W4_XCD_RE = re.compile(r"_xcd(\d+)")
+_A16W4_BNT_RE = re.compile(r"_bnt(\d+)")
+_A16W4_KW_RE = re.compile(r"_kw(\d+)")
+
+
+def _decode_a16w4_kname(kname):
+    """Decode an ``abf16_wfp4`` kernelName into a tile-config dict, or None."""
+    m = _A16W4_TILE_RE.search(kname)
+    if m is None:
+        return None
+    tile_m, tile_n, tile_k = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    w = _A16W4_W_RE.search(kname)
+    xcd = _A16W4_XCD_RE.search(kname)
+    bnt = _A16W4_BNT_RE.search(kname)
+    kw = _A16W4_KW_RE.search(kname)
+    return {
+        "tile_m": tile_m,
+        "tile_n": tile_n,
+        "tile_k": tile_k,
+        # b_nt default in aiter's namer is 2 when the token is absent (only _bnt0
+        # / _bnt{!=2} are named); mirror that.
+        "b_nt": int(bnt.group(1)) if bnt else 2,
+        "waves_per_eu": int(w.group(1)) if w else None,
+        "xcd_swizzle": int(xcd.group(1)) if xcd else 0,
+        "k_wave": int(kw.group(1)) if kw else 1,
+        "k_batch": 1,
+    }
+
+
+@functools.cache
+def _load_a16w4_csv(csv_path):
+    """Parse the tuned CSV into {(model_dim,inter,E,topk,stage,tokens): cfg}."""
+    table = {}
+    with open(csv_path, newline="") as f:
+        for row in csv.DictReader(f):
+            try:
+                key_shape = (
+                    int(row["model_dim"]),
+                    int(row["inter_dim"]),
+                    int(row["expert"]),
+                    int(row["topk"]),
+                    int(row["token"]),
+                )
+            except (KeyError, ValueError):
+                continue
+            for stage, col in ((1, "kernelName1"), (2, "kernelName2")):
+                kname = row.get(col, "")
+                if "abf16_wfp4" not in kname:
+                    continue
+                cfg = _decode_a16w4_kname(kname)
+                if cfg is not None:
+                    table[key_shape + (stage,)] = cfg
+    return table
+
+
+def pick_a16w4_config(csv_path, *, model_dim, inter_dim, experts, topk, tokens, stage):
+    """Return aiter's tuned tile-config for one (shape, tokens, stage), or None.
+
+    Picks the exact ``tokens`` row if present, else the nearest tuned token
+    (largest tuned token <= requested, or the smallest tuned token otherwise) for
+    the shape+stage. ``stage`` is 1 (gemm1) or 2 (gemm2).
+    """
+    table = _load_a16w4_csv(csv_path)
+    exact = table.get((model_dim, inter_dim, experts, topk, tokens, stage))
+    if exact is not None:
+        return exact
+    cand = sorted(
+        t for (md, i, e, k, t, s) in table if (md, i, e, k, s) == (model_dim, inter_dim, experts, topk, stage)
+    )
+    if not cand:
+        return None
+    le = [t for t in cand if t <= tokens]
+    pick = le[-1] if le else cand[0]
+    return table[(model_dim, inter_dim, experts, topk, pick, stage)]

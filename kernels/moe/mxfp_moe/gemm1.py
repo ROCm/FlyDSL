@@ -964,7 +964,9 @@ def _gemm1_body_a16w4(
         # s_waitcnt vmcnt(0) drains (buffer_load..lds is a VMEM op, so an
         # interleaved ds_read otherwise forces a full VMEM flush that also stalls
         # the B mxfp4-weight loads).
-        return [[lds_load_a(mi, ku, slot=read_slot) for ku in range_constexpr(k_unroll)] for mi in range_constexpr(m_repeat)]
+        return [
+            [lds_load_a(mi, ku, slot=read_slot) for ku in range_constexpr(k_unroll)] for mi in range_constexpr(m_repeat)
+        ]
 
     def compute_tile(b_tile, a_frags):
         g_raw, u_raw, g_sc, u_sc = b_tile
@@ -1242,6 +1244,8 @@ def compile_gemm1_a16w4_port(
     TILE_K=256,
     act="silu",
     b_cache_mod=2,
+    xcd_swizzle=0,
+    waves_per_eu=None,
 ):
     """a16w4 (bf16 A x mxfp4 W1) fused stage1 builder.
 
@@ -1266,7 +1270,9 @@ def compile_gemm1_a16w4_port(
     assert act in ("silu", "situv2"), f"a16w4 gemm1 act must be 'silu' or 'situv2', got {act!r}"
     _act_tag = "" if act == "silu" else f"_{act}"
     _bcm_tag = "" if b_cache_mod == 2 else f"_bcm{b_cache_mod}"
-    name_suffix = f"a16w4_h{_K}_i{_INTER}_ne{NE}_bm{BM}_tn{TILE_N}{_act_tag}{_bcm_tag}"
+    _xcd_tag = f"_xcd{xcd_swizzle}" if xcd_swizzle > 0 else ""
+    _wpe_tag = f"_w{waves_per_eu}" if waves_per_eu else ""
+    name_suffix = f"a16w4_h{_K}_i{_INTER}_ne{NE}_bm{BM}_tn{TILE_N}{_act_tag}{_bcm_tag}{_xcd_tag}{_wpe_tag}"
 
     @fx.struct
     class SharedStorage:
@@ -1291,7 +1297,34 @@ def compile_gemm1_a16w4_port(
         cumsum0 = _global_i32_at(arg_cumsum, fx.Int32(0))
         total_m_blocks = cumsum0 // fx.Int32(BM)
         bound = total_m_blocks * fx.Int32(NUM_N_BLOCKS)
+
+        # Bijective XCD round-robin over the valid tiles [0, bound) to balance the
+        # per-XCD/HBM-channel weight-load traffic (matches the a4w4 gemm1 / a16w4
+        # gemm2 _xcd grid). With xcd_swizzle>0, additionally group-swizzle along M
+        # for per-XCD L2 locality (group size = xcd_swizzle m-blocks). No-op at 0.
+        _NXCD = 8
+        _xq = _udiv(bound, _NXCD)
+        _xr = _umod(bound, _NXCD)
+        _SW = xcd_swizzle
+
+        def _xcd(pid):
+            xc = _umod(pid, _NXCD)
+            wgid = xc * _xq + fx.Int32(arith.minsi(_raw(xc), _raw(_xr))) + _udiv(pid, _NXCD)
+            _ng = fx.Int32(_SW * NUM_N_BLOCKS)
+            group_id = wgid // _ng
+            first_pid_m = group_id * fx.Int32(_SW)
+            remaining_m = total_m_blocks - first_pid_m
+            group_size_m = fx.Int32(arith.minsi(_raw(remaining_m), _raw(fx.Int32(_SW))))
+            wig = wgid % _ng
+            m_block = first_pid_m + (wig % group_size_m)
+            n_block = wig // group_size_m
+            return m_block * fx.Int32(NUM_N_BLOCKS) + n_block
+
         if bx_i32 < bound:
+            if const_expr(_SW > 0):
+                _tile = _xcd(bx_i32)
+            else:
+                _tile = bx_i32
             _gemm1_body_a16w4(
                 lds_raw_ptr,
                 arg_x,
@@ -1301,7 +1334,7 @@ def compile_gemm1_a16w4_port(
                 arg_mind,
                 arg_cumsum,
                 arg_out,
-                bx_i32,
+                _tile,
                 lane,
                 wave,
                 i32_ntok,
@@ -1339,6 +1372,7 @@ def compile_gemm1_a16w4_port(
             arg_mind,
             i32_ntok,
             arg_out,
+            value_attrs={"rocdl.waves_per_eu": waves_per_eu} if waves_per_eu else None,
         ).launch(grid=(grid_x, 1, 1), block=(256, 1, 1), stream=stream)
 
     return launch_gemm1
