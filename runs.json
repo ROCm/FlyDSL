@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-31T03:11:15Z",
+ "updated": "2026-07-31T04:16:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30602402454,
+   "pr": 848,
+   "commit": "d07bf282e4041e6a91423f2ca9ee5aa7163ab916",
+   "branch": "cjl/norm_perf",
+   "event": "pull_request",
+   "title": "[Perf] Optimize rmsnorm/layernorm",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30602402454",
+   "created_at": "2026-07-31T03:46:07Z",
+   "updated_at": "2026-07-31T03:50:07Z",
+   "actor": "cschenjunlin",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-31T03:50:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30602402454/job/91068212209"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-31T03:50:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30602402454/job/91068212219"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-31T03:50:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30602402454/job/91068212236"
+    }
+   ]
+  },
   {
    "run_id": 30600810958,
    "pr": 876,
@@ -10,13 +53,41 @@
    "branch": "mega_moe_v1",
    "event": "pull_request",
    "title": "MegaMoE on Gfx950",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30600810958",
    "created_at": "2026-07-31T03:08:30Z",
-   "updated_at": "2026-07-31T03:09:13Z",
+   "updated_at": "2026-07-31T03:13:01Z",
    "actor": "yanboshao",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-31T03:13:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30600810958/job/91063470191"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-31T03:13:01Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30600810958/job/91063470208"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-31T03:13:45Z",
+     "completed_at": "2026-07-31T03:58:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30600810958/job/91063470322"
+    }
+   ]
   },
   {
    "run_id": 30599967664,
@@ -25,38 +96,38 @@
    "branch": "rdna4-wmma-atom",
    "event": "pull_request",
    "title": "[Dialect][Kernel][Perf] Add gfx12.wmma atom and port the RDNA4 GEMM to the layout API",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30599967664",
    "created_at": "2026-07-31T02:49:14Z",
-   "updated_at": "2026-07-31T02:54:14Z",
+   "updated_at": "2026-07-31T04:15:15Z",
    "actor": "vlluvia",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-31T02:54:14Z",
+     "started_at": "2026-07-31T04:15:14Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30599967664/job/91060930064"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-31T02:55:19Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T03:52:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30599967664/job/91060930077"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-31T02:54:43Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T04:09:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30599967664/job/91060930078"
     }
    ]
@@ -203,11 +274,11 @@
    "branch": "spconv-bf16-implicit-gemm",
    "event": "pull_request",
    "title": "[Kernel] Add submanifold sparse 3D convolution (bf16 implicit GEMM, gfx950)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30596798461",
    "created_at": "2026-07-31T01:36:51Z",
-   "updated_at": "2026-07-31T02:23:27Z",
+   "updated_at": "2026-07-31T04:14:59Z",
    "actor": "jiacao-amd",
    "jobs": [
     {
@@ -222,10 +293,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-31T02:23:27Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T04:14:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30596798461/job/91051207694"
     },
     {
@@ -2144,40 +2215,6 @@
      "started_at": "2026-07-29T06:42:17Z",
      "completed_at": "2026-07-29T06:48:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30428951123/job/90501683014"
-    }
-   ]
-  },
-  {
-   "run_id": 30428550222,
-   "pr": 876,
-   "commit": "2a2704c052a6a5be8c1f9d74772f2810647fdbbb",
-   "branch": "mega_moe_v1",
-   "event": "pull_request",
-   "title": "MegaMoE on Gfx950",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30428550222",
-   "created_at": "2026-07-29T06:33:24Z",
-   "updated_at": "2026-07-29T06:40:59Z",
-   "actor": "yanboshao",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-29T06:35:37Z",
-     "completed_at": "2026-07-29T06:40:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30428550222/job/90500457106"
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-29T06:34:22Z",
-     "completed_at": "2026-07-29T06:40:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30428550222/job/90500457125"
     }
    ]
   }
