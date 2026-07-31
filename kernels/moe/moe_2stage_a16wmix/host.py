@@ -196,7 +196,16 @@ def flydsl_a16w4_gemm1(
     b_cache_mod = (2 if (16 <= _m <= 1024) else 0) if b_nt is None else b_nt
     TILE_N = tile_n
     if TILE_N is None:
-        TILE_N = _default_tile_n(D_INTER, w_dtype=w_dtype)
+        # gemm1 mxfp4: the fat-wave tile_n=256 spills to VGPR=260 -> 1 wave/SIMD
+        # (occupancy cliff), which fully exposes weight-load latency and worsens with
+        # token count. tile_n=128 drops VGPR to 178 (2 waves/SIMD) and is measured
+        # faster across the whole token range (1..16384) on the Kimi-K3 3584x512 shape
+        # (e.g. s1 -7% @tok8192, -10% @tok16384) with no small-M regression. bf16
+        # (a16w16, VGPR>=448 regardless) and int4 (already 128) keep _default_tile_n.
+        if w_dtype == "mxfp4" and D_INTER % 128 == 0:
+            TILE_N = 128
+        else:
+            TILE_N = _default_tile_n(D_INTER, w_dtype=w_dtype)
     if D_HIDDEN % TILE_K != 0:
         raise NotImplementedError(f"a16w4 gemm1 requires D_HIDDEN (K) % {TILE_K} == 0, got H={D_HIDDEN}")
     if (2 * D_INTER) % 256 != 0:
