@@ -132,15 +132,25 @@ def _int4_nibble_to_bf16x8(raw_i32, scale_f32):
     as unsigned [0,15], subtracts 8 -> signed [-8,7], and multiplies the mantissa by
     16, so the ×16 correction is folded into the effective per-group scale
     (``eff = scale * 16``). ``scale_f32`` is the per-group dequant scale.
+
+    VALU-lean gfx950 path (matches aiter's tuned int4 dequant): use the SDWA
+    ``v_cvt_off_f32_i4_sdwa`` byte_sel form to read each nibble without a per-nibble
+    shift (even nibbles 0,2,4,6 = byte_sel 0..3 on ``raw``; odd nibbles 1,3,5,7 =
+    byte_sel 0..3 on ``raw>>4``, so ONE shift total instead of seven), and pack
+    f32->bf16 pairs with ``v_cvt_pk_bf16_f32`` (4 packed converts instead of 8
+    scalar ``.to(bf16)``). Same v8bf16 layout as before (nibble n -> lane n).
     """
     eff = fx.Float32(scale_f32 * fx.Float32(16.0))
-    # Shift each nibble n (bits [4n:4n+3]) into the low nibble; v_cvt_off_f32_i4 reads bits[3:0].
-    bf16s = []
-    for n in range_constexpr(8):
-        shifted = _raw(fx.Int32(raw_i32).shrui(fx.Int32(4 * n))) if n > 0 else _raw(raw_i32)
-        v = fx.Float32(rocdl.cvt_off_f32_i4(shifted)) * eff
-        bf16s.append(v.to(fx.BFloat16))
-    return fx.Vector.from_elements(bf16s, fx.BFloat16)  # v8bf16
+    raw_even = fx.Int32(raw_i32)
+    raw_odd = raw_even.shrui(fx.Int32(4))
+    i32s = []
+    for j in range_constexpr(4):
+        # bf16 pair j = (nibble 2j, nibble 2j+1): even from raw byte j, odd from raw>>4 byte j.
+        f_lo = fx.Float32(rocdl.cvt_off_f32_i4(_raw(raw_even), byte_sel=j)) * eff
+        f_hi = fx.Float32(rocdl.cvt_off_f32_i4(_raw(raw_odd), byte_sel=j)) * eff
+        i32s.append(fx.Int32(rocdl.cvt_pk_bf16_f32(_raw(f_lo), _raw(f_hi))))
+    v4i32 = fx.Vector.from_elements([_raw(x) for x in i32s], fx.Int32)
+    return v4i32.bitcast(fx.BFloat16)  # v8bf16
 
 
 def kmchunks_for(BM):
