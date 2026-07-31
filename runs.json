@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-31T10:09:18Z",
+ "updated": "2026-07-31T10:11:18Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30622588902,
+   "pr": 926,
+   "commit": "70639336fc670840742ea8027c7c829fb060a94b",
+   "branch": "phil/fix-reg-offset-dynamic-add-offset",
+   "event": "pull_request",
+   "title": "[Bugfix] Resolve reg offset on dynamic add_offset chains",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622588902",
+   "created_at": "2026-07-31T10:09:57Z",
+   "updated_at": "2026-07-31T10:10:14Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 30622441512,
    "pr": 848,
@@ -10,11 +25,11 @@
    "branch": "cjl/norm_perf",
    "event": "pull_request",
    "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622441512",
    "created_at": "2026-07-31T10:07:25Z",
-   "updated_at": "2026-07-31T10:07:41Z",
+   "updated_at": "2026-07-31T10:09:12Z",
    "actor": "cschenjunlin",
    "jobs": []
   },
@@ -111,38 +126,38 @@
    "branch": "phil/fix-reg-offset-dynamic-add-offset",
    "event": "pull_request",
    "title": "[Bugfix] Resolve reg offset on dynamic add_offset chains",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30621845362",
    "created_at": "2026-07-31T09:57:52Z",
-   "updated_at": "2026-07-31T10:00:55Z",
+   "updated_at": "2026-07-31T10:10:14Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-31T10:00:55Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T10:09:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30621845362/job/91128602083"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-31T10:01:39Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T10:10:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30621845362/job/91128602084"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-31T10:01:38Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T10:10:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30621845362/job/91128602104"
     }
    ]
@@ -2118,49 +2133,6 @@
    "updated_at": "2026-07-30T00:35:33Z",
    "actor": "jhinpan",
    "jobs": []
-  },
-  {
-   "run_id": 30501875673,
-   "pr": 860,
-   "commit": "95bb568271ed0fc2711b91b7f09343394d25331b",
-   "branch": "jiacao/conv3d-gemm-port",
-   "event": "pull_request",
-   "title": "[Kernel] fp8 conv3d: 8-wave GEMM pipeline + BIG_IN fix",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30501875673",
-   "created_at": "2026-07-30T00:10:45Z",
-   "updated_at": "2026-07-30T01:50:14Z",
-   "actor": "jiacao-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-30T00:15:18Z",
-     "completed_at": "2026-07-30T01:12:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30501875673/job/90743726032"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-30T00:15:21Z",
-     "completed_at": "2026-07-30T01:40:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30501875673/job/90743726039"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-30T00:15:11Z",
-     "completed_at": "2026-07-30T01:50:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30501875673/job/90743726065"
-    }
-   ]
   }
  ]
 }
