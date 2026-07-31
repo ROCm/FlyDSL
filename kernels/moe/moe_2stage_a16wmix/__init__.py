@@ -19,6 +19,7 @@ shuffle_weight+e8m0_shuffle W layout. Self-contained: shared helpers live in
 from kernels.moe.moe_2stage_a16wmix.gemm1 import compile_gemm1_a16w4_port, gemm1_a16w4_grid
 from kernels.moe.moe_2stage_a16wmix.gemm2 import compile_gemm2_a16w4_port, gemm2_a16w4_grid
 from kernels.moe.moe_2stage_a16wmix.host import (
+    a16wi4_recommend_block_m,
     a16wi4_scale_to_kernel_layout,
     flydsl_a16w4_gemm1,
     flydsl_a16w4_gemm2,
@@ -35,6 +36,7 @@ __all__ = [
     "flydsl_a16w4_gemm1",
     "flydsl_a16w4_gemm2",
     "a16wi4_scale_to_kernel_layout",
+    "a16wi4_recommend_block_m",
     "pick_a16w4_config",
     "resolve_a16w4_gemm1_config",
     "resolve_a16w4_gemm2_config",

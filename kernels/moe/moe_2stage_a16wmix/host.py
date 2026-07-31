@@ -98,6 +98,36 @@ def _default_tile_n(N, *, w_dtype="mxfp4"):
     return 256 if N % 256 == 0 else 128
 
 
+def a16wi4_recommend_block_m(tokens, experts, topk, *, base_block_m=32):
+    """Recommend the routing/gemm1 block_m (tile_m) for the a16wi4 (int4-W) stage1.
+
+    int4 gemm1 stage1 is W-load bound: with all experts active, the per-expert W1
+    tile is re-fetched from HBM once per padded m-block. At the *fill point* where
+    each expert has exactly two half-full 32-row m-blocks, doubling block_m to 64
+    collapses them into ONE full 64-row block, halving the W1 HBM re-reads (measured
+    TCC_MISS 3.34e7 -> 1.47e7, ~2.27x, on 7168x512 E384/k8 at tok2048) and cutting
+    stage1 latency ~7%. Outside that band block_m=64 either wastes padding (one
+    half-empty 64-row block when there is <=1 block/expert) or halves grid
+    parallelism with no reuse gain (>=3 blocks/expert), so it is *not* applied.
+
+    The decision keys on ceil(tokens*topk/experts / base_block_m), the average padded
+    m-blocks per expert at block_m==base_block_m (== aiter's ``estimated_m_per_expert``
+    heuristic): return 2*base_block_m iff that count is exactly 2 (avg tokens/expert
+    in (base_block_m, 2*base_block_m]). base_block_m==32 only (the a16wi4 default);
+    other block_m are passed through unchanged.
+
+    IMPORTANT: block_m sizes the moe_sorting padding, so the caller MUST build the
+    routing buffers with the SAME block_m it passes to gemm1 -- this helper is a
+    dispatcher-side recommendation, not a gemm1-internal override.
+    """
+    if int(base_block_m) != 32 or int(experts) <= 0:
+        return int(base_block_m)
+    routes = int(tokens) * int(topk)
+    # ceil(avg routes-per-expert / 32) == avg padded m-blocks/expert at block_m=32.
+    m_blocks_32 = -(-routes // (int(experts) * 32))
+    return 64 if m_blocks_32 == 2 else int(base_block_m)
+
+
 def a16wi4_scale_to_kernel_layout(scale_ng):
     """Re-layout a logical groupwise int4 scale ``[E, N, num_groups]`` into the
     ``(E, N, num_groups//2, 2)`` bf16-pair layout the a16wi4 kernel expects.
