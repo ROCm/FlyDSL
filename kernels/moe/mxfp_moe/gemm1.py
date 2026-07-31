@@ -955,14 +955,25 @@ def _gemm1_body_a16w4(
             [load_b_scale(base_k, scale_mni_up[ni], scale_np_up[ni]) for ni in range_constexpr(num_acc_n)],
         )
 
-    def compute_tile(b_tile, read_slot):
+    def preload_a(read_slot):
+        # Read ALL of the current tile's A-LDS fragments (m_repeat x k_unroll
+        # ds_read_b128) up front, BEFORE the next tile's A-DMA is issued. Mirrors
+        # aiter's phase-separated iteration: consume the resident buffer fully,
+        # then issue the next buffer_load..lds. Because the ds_read no longer
+        # interleaves with the in-flight LDS-DMA, the compiler drops the per-read
+        # s_waitcnt vmcnt(0) drains (buffer_load..lds is a VMEM op, so an
+        # interleaved ds_read otherwise forces a full VMEM flush that also stalls
+        # the B mxfp4-weight loads).
+        return [[lds_load_a(mi, ku, slot=read_slot) for ku in range_constexpr(k_unroll)] for mi in range_constexpr(m_repeat)]
+
+    def compute_tile(b_tile, a_frags):
         g_raw, u_raw, g_sc, u_sc = b_tile
         for ni in range_constexpr(num_acc_n):
             for ku in range_constexpr(k_unroll):
                 gb = upconvert_b(g_raw[ni], ku, g_sc[ni][ku])
                 ub = upconvert_b(u_raw[ni], ku, u_sc[ni][ku])
                 for mi in range_constexpr(m_repeat):
-                    a8 = lds_load_a(mi, ku, slot=read_slot)
+                    a8 = a_frags[mi][ku]
                     _mma(acc_gate[mi][ni], a8, gb)
                     _mma(acc_up[mi][ni], a8, ub)
 
@@ -972,7 +983,7 @@ def _gemm1_body_a16w4(
         b0 = load_b_tile(fx.Int32(0))
         rocdl.s_waitcnt(lgkmcnt=0)
         gpu.barrier()
-        compute_tile(b0, 0)
+        compute_tile(b0, preload_a(0))
         gpu.barrier()
     else:
         # prologue: tile-0 A DMA + B loads in flight.
@@ -986,12 +997,14 @@ def _gemm1_body_a16w4(
             # vmem stays in flight -- no vmcnt(0) drain.
             rocdl.s_waitcnt(lgkmcnt=0)
             gpu.barrier()  # single barrier: A(kt) visible before ds_read
-            # prefetch tile kt+1's A(->pong slot) + B/B-scale (->regs) so they
-            # overlap tile kt's MFMA cluster below (issued AFTER the wait/barrier).
+            # Phase-separated iteration (aiter-aligned): (1) read the whole
+            # resident A-LDS buffer, (2) THEN issue tile kt+1's A-DMA + B/B-scale
+            # so they overlap the MFMA cluster without forcing per-read vmcnt(0).
+            a_frags = preload_a(cur_slot)
             if const_expr(kt + 1 < K_TILES_TOTAL):
                 dma_x_tile_to_lds(fx.Int32((kt + 1) * TILE_K), slot=(kt + 1) % A_LDS_STAGES)
                 b_nxt = load_b_tile(fx.Int32((kt + 1) * TILE_K))
-            compute_tile(b_cur, cur_slot)
+            compute_tile(b_cur, a_frags)
             if const_expr(kt + 1 < K_TILES_TOTAL):
                 b_cur = b_nxt
 
