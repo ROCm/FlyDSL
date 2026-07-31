@@ -1,13 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025-2026 FlyDSL Project Contributors
 
-"""Self-contained helpers for the a16w4 (bf16 A x mxfp4 W) fused MoE kernels.
-
-This is a curated copy of the subset of ``mxfp_moe.mxfp4_gemm_common`` that the
-a16w4 stage1/stage2 bodies actually use. It is intentionally duplicated (rather
-than imported from ``mxfp_moe``) so this package has no cross-dependency on the
-a4w4/a8w4 kernels.
-"""
+"""Self-contained helpers for the a16w4/a16wi4/a16w16 fused MoE kernels."""
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
@@ -70,7 +64,6 @@ def _global_i32_ptr(addr_i64):
 
 
 def _global_i32_at(addr_i64, idx):
-    # Plain scalar read: fx pointer index, no tiling/register-fragment machinery.
     return _global_i32_ptr(addr_i64)[idx]
 
 
@@ -129,22 +122,15 @@ def _situ_mul_batch(gs, us, situ_beta=1.0, situ_linear_beta=1.0, clamp_limit=7.0
 def _int4_nibble_to_bf16x8(raw_i32, scale_f32):
     """int4 (signed) -> bf16 upconvert for one MFMA K32 step (8 nibbles -> v8bf16).
 
-    ``raw_i32`` holds 8 packed signed-int4 nibbles (positions 0..7 in the natural
-    ``bits[4n+3:4n]`` order, i.e. the SAME K ordering the a16w4 mxfp4 path uses via
-    ``cvt_scalef32_pk_bf16_fp4`` sel 0..3). Each nibble is converted with the gfx950
-    ``v_cvt_off_f32_i4`` fast path (interprets the nibble as unsigned [0,15] then
-    subtracts 8 -> signed [-8,7], and multiplies the mantissa by 16 -- so the ×16
-    correction is folded into the effective per-group dequant scale here). Even
-    nibbles read the source byte directly; odd nibbles read ``src>>4`` (one shift
-    total). Mirrors ``mfma_preshuffle_pipeline._int4_to_bf16x4_i64_gfx950`` but emits
-    a flat v8bf16 for the a16w4 body's ``MFMA(16,16,32,bf16)`` operand.
-
-    ``scale_f32`` is the per-group dequant scale (bf16-derived f32); the ×16
-    correction for ``v_cvt_off_f32_i4`` is folded in (``eff = scale * 16``).
+    ``raw_i32`` holds 8 packed signed-int4 nibbles in ``bits[4n+3:4n]`` order (the
+    SAME K ordering the mxfp4 path uses via ``cvt_scalef32_pk_bf16_fp4`` sel 0..3).
+    Each nibble uses the gfx950 ``v_cvt_off_f32_i4`` fast path: it reads the nibble
+    as unsigned [0,15], subtracts 8 -> signed [-8,7], and multiplies the mantissa by
+    16, so the ×16 correction is folded into the effective per-group scale
+    (``eff = scale * 16``). ``scale_f32`` is the per-group dequant scale.
     """
     eff = fx.Float32(scale_f32 * fx.Float32(16.0))
-    # 8 nibbles -> 8 f32. Each nibble n occupies bits [4n:4n+3]; shift it into the
-    # low nibble and use the plain (non-SDWA) v_cvt_off_f32_i4 which reads bits[3:0].
+    # Shift each nibble n (bits [4n:4n+3]) into the low nibble; v_cvt_off_f32_i4 reads bits[3:0].
     bf16s = []
     for n in range_constexpr(8):
         shifted = _raw(fx.Int32(raw_i32).shrui(fx.Int32(4 * n))) if n > 0 else _raw(raw_i32)

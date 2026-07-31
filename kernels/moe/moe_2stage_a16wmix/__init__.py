@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Fused a16w4 (bf16 A x mxfp4 W) 2-stage MoE kernels.
+"""Fused a16w4/a16wi4/a16w16 (bf16 A x mxfp4/int4/bf16 W) 2-stage MoE kernels.
 
-Standalone CDNA4 (gfx950) MFMA pipeline, extracted from ``mxfp_moe`` so the
-a16w4 arm is no longer mixed with the a4w4/a8w4 (mxfp4-activation) code. bf16 A
-(no A-scale), mxfp4 W1/W2 upconverted to bf16 in-kernel via
-``cvt_scalef32_pk_bf16_fp4``, non-scaled ``MFMA(16,16,32,bf16)``:
+Standalone CDNA4 (gfx950) MFMA pipeline. bf16 A (no A-scale), W1/W2 upconverted
+to bf16 in-kernel, non-scaled ``MFMA(16,16,32,bf16)``:
 
   - stage1 (:mod:`gemm1`): fused gate+up GEMM + SiLU/SiTUv2 -> bf16 intermediate
     ``[sorted_size, inter_dim]`` stored by sorted position (no requant, no scale).
@@ -14,8 +12,8 @@ a16w4 arm is no longer mixed with the a4w4/a8w4 (mxfp4-activation) code. bf16 A
     scatter to ``[tokens, model_dim]``.
 
 Reuses the standard sorting/cumsum/m_indices contract and the
-shuffle_weight+e8m0_shuffle W layout. Self-contained: shared numeric/layout
-helpers are duplicated into :mod:`common` (no import back into ``mxfp_moe``).
+shuffle_weight+e8m0_shuffle W layout. Self-contained: shared helpers live in
+:mod:`common`.
 """
 
 from kernels.moe.moe_2stage_a16wmix.gemm1 import compile_gemm1_a16w4_port, gemm1_a16w4_grid

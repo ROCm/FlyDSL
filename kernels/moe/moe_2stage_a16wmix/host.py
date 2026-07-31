@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Host-side launch glue for the fused a16w4 (bf16 A x mxfp4 W) MoE kernels.
+"""Host-side launch glue for the fused a16w4/a16wi4/a16w16 MoE kernels.
 
-Ported (self-contained) from aiter's mixed_moe kernels. bf16 A (no A-scale),
-bf16 ``[sorted_size, inter]`` intermediate (no intermediate scale). Reuses the
-standard sorting/cumsum/m_indices contract and the shuffle_weight+e8m0_shuffle W
-layout. Kernel launch args are raw device pointers (``fx.Int64``); tensors are
-passed as ``.data_ptr()``.
+bf16 A (no A-scale), bf16 ``[sorted_size, inter]`` intermediate (no scale). Reuses
+the standard sorting/cumsum/m_indices contract and the shuffle_weight+e8m0_shuffle W
+layout. Kernel launch args are raw device pointers (``fx.Int64``); tensors are passed
+as ``.data_ptr()``.
 """
 
 import csv
@@ -87,28 +86,15 @@ def _get_compiled_gemm2_a16w4(
 def _default_tile_n(N, *, w_dtype="mxfp4"):
     """Adaptive N-tile default for the a16w4/a16wi4/a16w16 stages.
 
-    mxfp4 (a16w4) and bf16 (a16w16): the fat-wave tile_n=256 geometry is the tuned
-    aiter tile and wins on the large Kimi-K3 shapes; keep 256 when N % 256 == 0, else
-    128. (bf16 W reuses the mxfp4 rule -- it's the same non-scaled bf16 MFMA path.)
-
-    int4 (a16wi4): this path replaced the legacy ``moe_gemm_2stage`` int4 kernel,
-    which uses tile_n=128. The inherited a16w4 tile_n=256 fat-wave geometry is a
-    consistent loss for int4: measured (median-of-3, gfx950) tile_n=128 beats 256
-    on BOTH stages across every int4 MoE shape/token tested (model_dim/inter in
-    {256,512,1024,2048}, tokens 16..1024) -- e.g. gemm1 inter=1024 tok=256 is 15.8
-    vs 30.7 us, gemm2 model_dim=2048 similar. The int4 (bf16-A) path is bandwidth-
-    and grid-fill bound, so the wide 256-col tile just halves the number of N-tiles
-    per expert (fewer waves to hide latency) with no MFMA-density payoff, unlike the
-    fp4 mxfp4 path where 256 is the tuned aiter tile. So always prefer 128 for int4
-    (falling back only when N is not a multiple of 128), leaving mxfp4 at its tuned
-    256. This closes most of the gap vs the legacy int4 kernel; the residual is a
-    BM/tile_m effect (the a16wi4 kernel prefers BM=16), controlled by the caller.
+    mxfp4/bf16: the fat-wave tile_n=256 is the tuned aiter tile and wins on the large
+    Kimi-K3 shapes; keep 256 when N % 256 == 0, else 128. int4: this bandwidth-/grid-
+    fill-bound path prefers tile_n=128 (measured faster on both stages across all int4
+    MoE shapes tested), falling back to 64 only when N is not a multiple of 128.
     """
     if w_dtype == "int4":
         if N % 128 == 0:
             return 128
         return 64 if N % 64 == 0 else 128
-    # mxfp4 (a16w4): keep the tuned fat tile.
     return 256 if N % 256 == 0 else 128
 
 
@@ -156,51 +142,36 @@ def flydsl_a16w4_gemm1(
     csv_path=None,
     stream=None,
 ):
-    """a16w4/a16wi4 fused stage1: gate+up GEMM + SiLU -> bf16 intermediate.
+    """a16w4/a16wi4/a16w16 fused stage1: gate+up GEMM + SiLU -> bf16 intermediate.
 
     ``w_dtype="mxfp4"`` (default): W1 is mxfp4 (``w1_scale_u8`` = shuffled e8m0).
-    ``w_dtype="int4"`` (a16wi4): W1 is packed signed int4 (same preshuffle byte
-    layout as mxfp4) and ``w1_scale_u8`` is the groupwise bf16 scale already in the
-    ``(E, N_OUT, G//2, 2)`` kernel layout (see :func:`a16wi4_scale_to_kernel_layout`).
-    ``w_dtype="bf16"`` (a16w16): W1 is RAW bf16 ``[E, N_OUT, K]`` preshuffled with
-    ``shuffle_weight(layout=(16,16))``; ``w1_scale_u8`` is unused (pass any pointer).
+    ``w_dtype="int4"`` (a16wi4): W1 is packed signed int4 (same preshuffle byte layout
+    as mxfp4) and ``w1_scale_u8`` is the groupwise bf16 scale in the ``(E, N_OUT, G//2,
+    2)`` kernel layout (see :func:`a16wi4_scale_to_kernel_layout`). ``w_dtype="bf16"``
+    (a16w16): W1 is RAW bf16 ``[E, N_OUT, K]`` preshuffled with ``shuffle_weight
+    (layout=(16,16))``; ``w1_scale_u8`` is unused (pass any pointer).
 
     ``a_bf16`` is the bf16 activation ``[n_tokens, D_HIDDEN]``. Writes the bf16
     intermediate ``[sorted_size, D_INTER]`` (by sorted position) into
     ``inter_sorted_bf16`` (pre-allocated). No A-scale, no intermediate scale.
 
-    Tile-config interface mirrors aiter's ``compile_mixed_moe_gemm1_a16w4``:
-    ``tile_m`` (block M -> BM), ``tile_n`` (N tile -> TILE_N), ``tile_k`` (K tile
-    -> TILE_K), ``waves_per_eu`` (min-occupancy hint -> ``rocdl.waves_per_eu``),
-    ``b_nt`` (W-load cache modifier -> b_cache_mod; 0=cached, 2=nt), ``xcd_swizzle``
-    (bijective XCD/HBM-channel remap of the launch grid), ``k_wave`` (aiter intra-
-    block slice-K: partition the 4 waves into (4/k_wave) N-waves x k_wave K-waves,
-    LDS-reducing the partial-K accumulators before the epilogue; k_wave in {1,2,4}).
-    ``k_batch`` (grid split-K) and ``gate_mode`` are accepted for interface parity but
-    this kernel only supports ``k_batch=1`` / ``gate_mode="separated"``.
-
-    ``tile_n=None`` picks the largest supported N tile that divides ``D_INTER``:
-    256 when ``D_INTER % 256 == 0`` (fastest, matches aiter's tuned tile) else 128
-    (``D_INTER`` is always a multiple of 128 given the ``2*D_INTER % 256`` rule).
-
-    ``b_nt=None`` uses the measured per-M W-load U-shape (same mechanism as gemm2):
-    non-temporal streaming (b_nt=2) wins the mid-band, where each expert's W tiles
-    are reused across only a few M-blocks so caching pollutes L2; cached (b_nt=0)
-    wins at the ends (tiny M -> few blocks per expert; large M >= 2048 -> high W
-    L2 residency). Measured (median-of-3, 3584x512, dev7): b_nt=2 is -7..-11% s1 at
-    tok 16/128/1024 but +11%/+43% *regression* at tok 4096/16384, so the switch is
-    keyed on n_tokens. Caller may pin either mode via an explicit ``b_nt``.
+    Tile config: ``tile_m`` -> BM, ``tile_n`` -> TILE_N, ``tile_k`` -> TILE_K,
+    ``waves_per_eu`` -> ``rocdl.waves_per_eu``, ``b_nt`` -> W-load cache modifier
+    (0=cached, 2=nt), ``xcd_swizzle`` -> XCD/HBM-channel grid remap, ``k_wave`` ->
+    aiter intra-block slice-K (k_wave in {1,2,4}). ``k_batch`` (grid split-K) and
+    ``gate_mode`` are accepted for parity but only ``k_batch=1`` /
+    ``gate_mode="separated"`` are supported. ``tile_n=None`` picks the largest N tile
+    dividing ``D_INTER``. ``b_nt=None`` uses the measured per-M U-shape (nt in the
+    mid-band, cached at the ends), keyed on n_tokens.
     """
     if k_batch != 1:
         raise NotImplementedError(f"a16w4 gemm1 only supports k_batch=1, got {k_batch}")
     if gate_mode != "separated":
         raise NotImplementedError(f"a16w4 gemm1 only supports gate_mode='separated', got {gate_mode!r}")
 
-    # CSV-driven per-token config (mxfp4 only): default-enable aiter's tuned tile
-    # geometry for the Kimi-K3 a16w4 shapes. Small tokens select tile_n=64 + k_wave
-    # (K-slice parallelism without spill); mid/large keep tile_n=128/256. Falls back
-    # to the adaptive default when no CSV row matches the shape. Explicit caller
-    # overrides (non-default tile_n/tile_k/k_wave/waves_per_eu/b_nt/xcd_swizzle) win.
+    # CSV-driven per-token config (mxfp4 only, opt-in): use aiter's tuned tile geometry
+    # for the Kimi-K3 shapes. Falls back to the adaptive default when no CSV row
+    # matches; explicit caller overrides (non-default args) win.
     if use_csv_config and w_dtype == "mxfp4":
         cfg = resolve_a16w4_gemm1_config(
             model_dim=D_HIDDEN, inter_dim=D_INTER, experts=NE, topk=topk, tokens=int(n_tokens), csv_path=csv_path
@@ -283,23 +254,21 @@ def flydsl_a16w4_gemm2(
     persist=None,
     stream=None,
 ):
-    """a16w4/a16wi4 fused stage2 (down-proj). Consumes the bf16 [sorted_size, D_INTER]
-    intermediate; scatters routing-weighted bf16 into ``flat_out`` [tokens*model_dim].
+    """a16w4/a16wi4/a16w16 fused stage2 (down-proj). Consumes the bf16 [sorted_size,
+    D_INTER] intermediate; scatters routing-weighted bf16 into ``flat_out``.
 
-    Tile-config interface mirrors aiter's ``compile_mixed_moe_gemm2_a16w4``:
-    ``tile_m`` -> BM, ``tile_n`` (model_dim N tile) -> TILE_N, ``tile_k`` (inter K
-    tile) -> TILE_K, ``waves_per_eu`` -> ``rocdl.waves_per_eu``, ``b_nt`` -> W-load
-    cache modifier, ``xcd_swizzle`` -> XCD/HBM-channel grid remap. ``k_batch`` is
-    accepted for parity (must be 1). ``b_nt=None`` keeps the measured per-M U-shape
-    default (cached at both ends, nt in the middle band).
+    Tile config: ``tile_m`` -> BM, ``tile_n`` (model_dim N tile) -> TILE_N, ``tile_k``
+    (inter K tile) -> TILE_K, ``waves_per_eu`` -> ``rocdl.waves_per_eu``, ``b_nt`` ->
+    W-load cache modifier, ``xcd_swizzle`` -> XCD/HBM-channel grid remap. ``k_batch``
+    is accepted for parity (must be 1). ``b_nt=None`` keeps the measured per-M U-shape
+    (cached at both ends, nt in the middle band).
     """
     if k_batch != 1:
         raise NotImplementedError(f"a16w4 gemm2 only supports k_batch=1, got {k_batch}")
 
-    # CSV-driven per-token config (mxfp4 only). gemm2 rows are all k_wave=1,
-    # tile_n=256; the useful lever here is tile_k (128 vs 256) + b_nt/xcd. Falls
-    # back to the adaptive default when no CSV row matches or violates a divisibility
-    # constraint. Explicit caller overrides win (tile_k!=256, b_nt set, etc.).
+    # CSV-driven per-token config (mxfp4 only, opt-in). Falls back to the adaptive
+    # default when no CSV row matches or violates a divisibility constraint; explicit
+    # caller overrides win.
     if use_csv_config and w_dtype == "mxfp4":
         cfg = resolve_a16w4_gemm2_config(
             model_dim=D_HIDDEN, inter_dim=D_INTER, experts=NE, topk=topk, tokens=int(M_logical), csv_path=csv_path
@@ -327,32 +296,17 @@ def flydsl_a16w4_gemm2(
     if D_HIDDEN % TILE_N != 0:
         raise NotImplementedError(f"a16w4 gemm2 requires D_HIDDEN (model_dim) % {TILE_N} == 0, got H={D_HIDDEN}")
 
-    # B (mxfp4 weight) cache modifier, per-token. Measured (median-of-5, 3584x512)
-    # is a U-shape: CACHED loads (cache_modifier=0) win at BOTH ends -- small M
-    # (whole expert's B reused across few M-blocks) and large M (>=2048; high L2
-    # residency, L2 hit ~65% -> streaming would bypass a reusable cache) -- while
-    # non-temporal streaming (cache_modifier=2) wins the middle band (32..1024,
-    # where streaming avoids L2 pollution). Crossovers: cached<->nt between
-    # tok16/32, nt<->cached between tok1024/2048. Caller may override via b_nt
-    # (0=cached, 2=nt).
+    # B (weight) cache modifier per-token: a measured U-shape. Cached (0) wins at both
+    # ends (small M: B reused across few M-blocks; large M >= 2048: high L2 residency)
+    # while non-temporal streaming (2) wins the mid-band (32..1024). Caller may override
+    # via b_nt.
     _m = int(M_logical)
     _b_cache_mod = (0 if (_m <= 16 or _m >= 2048) else 2) if b_nt is None else b_nt
     max_m_blocks = int(sorted_expert_ids.numel())
-    # Persistent CU-limited grid: cap the launch to ~NUM_CU CTAs and loop over the
-    # real work-tiles per CTA (round-robin, XCD-swizzled, one visit per real tile),
-    # instead of one CTA per padded (m x n) tile.
-    #
-    # Default is OFF (persist=None -> False). MEASURED (gfx950, E896, this gemm2):
-    # capping the grid does NOT close the perf gap and is a small (~1-7%) regression
-    # -- the padded launch's empty CTAs early-return for ~0 cost (a plain launch of
-    # only the real tiles measures the same latency), so launch over-count is NOT the
-    # bottleneck. The E896 cost is real-tile compute: with topk*tokens active slots
-    # spread over hundreds of distinct experts, the sort produces ~1 padded m-block
-    # PER EXPERT (234 blocks for 256 slots at tok16), each computing a full
-    # BM x TILE_N x K tile for ~1 token. That per-expert-block padding, plus the
-    # atomic epilogue, is the gap vs aiter's tile_k=128 REDUCE-epilogue kernel; the
-    # persistent grid cannot address it. Kept as an opt-in (persist=True) building
-    # block; byte-identical when off. Shared by a16w4 (mxfp4) and a16wi4 (int4).
+    # Persistent CU-limited grid (opt-in, default OFF): cap the launch to ~NUM_CU CTAs
+    # and loop over the real work-tiles per CTA. Measured to NOT close the E896 perf
+    # gap (the padded launch's empty CTAs early-return for ~0 cost), so kept only as an
+    # opt-in building block; byte-identical when off.
     _persist = False if persist is None else bool(persist)
     launch = _get_compiled_gemm2_a16w4(
         BM, NE, D_HIDDEN, D_INTER, TILE_N, TILE_K, _b_cache_mod, xcd_swizzle, waves_per_eu, w_dtype, _persist
@@ -377,21 +331,15 @@ def flydsl_a16w4_gemm2(
 
 
 # =============================================================================
-# aiter tuned-CSV config loader for a16w4.
-#
-# Reads aiter's kimik3_fp4_tuned_fmoe.csv (or any file with the same schema),
-# selects the ``flydsl_moe1/2_abf16_wfp4`` rows for a (model_dim, inter_dim,
-# experts, topk) shape, and decodes each token's kernelName into a tile-config
-# dict consumable by ``flydsl_a16w4_gemm{1,2}``. The CSV is used only as a SOURCE
-# OF CANDIDATE tile/waves/xcd geometries -- aiter's gemm bodies differ from ours,
-# so the *latency* columns are not comparable, but the tile geometry (tile_m/n/k,
-# waves_per_eu, xcd_swizzle, b_nt, k_wave) is informative.
+# aiter tuned-CSV config loader for a16w4. Reads aiter's kimik3_fp4_tuned_fmoe.csv
+# and decodes each ``flydsl_moe{1,2}_abf16_wfp4`` kernelName into a tile-config dict.
+# Only the tile GEOMETRY is used (aiter's gemm bodies differ, so its latency columns
+# are not comparable).
 # =============================================================================
 
 # kernelName tokens:  flydsl_moe{stage}_abf16_wfp4_bf16_t{m}x{n}x{k}
 #   [_w{N}]=waves_per_eu  [_xcd{N}]=xcd_swizzle  [_bnt{N}]=b_nt  [_kw{N}]=k_wave
-#   (no _sk => k_batch=1). Extra epilogue tokens (_reduce/_atomic/_persist/...)
-#   are ignored for tile-config purposes.
+#   (no _sk => k_batch=1). Extra epilogue tokens are ignored for tile-config purposes.
 _A16W4_TILE_RE = re.compile(r"_t(\d+)x(\d+)x(\d+)")
 _A16W4_W_RE = re.compile(r"_w(\d+)")
 _A16W4_XCD_RE = re.compile(r"_xcd(\d+)")
@@ -470,17 +418,6 @@ def pick_a16w4_config(csv_path, *, model_dim, inter_dim, experts, topk, tokens, 
     return table[(model_dim, inter_dim, experts, topk, pick, stage)]
 
 
-# -----------------------------------------------------------------------------
-# Default aiter tuned-CSV path + per-token config application.
-#
-# The tile *geometry* (tile_m/n/k, waves_per_eu, xcd_swizzle, b_nt, k_wave) in
-# aiter's kimik3_fp4_tuned_fmoe.csv is directly usable by our builders. The
-# small-M rows use tile_n=64 + k_wave in {2,4}, which -- unlike a wide tile_n=256
-# k_wave (which spills to 512 VGPR) -- keeps per-wave num_acc_n = tile_n*k_wave/64
-# at or below our no-spill default footprint (=4) while adding intra-block K-slice
-# parallelism. That is the small-M latency lever this path wires in.
-# -----------------------------------------------------------------------------
-
 # Candidate locations for aiter's tuned fp4 fmoe CSV (env override wins).
 _A16W4_CSV_ENV = "FLYDSL_A16W4_TUNED_CSV"
 _A16W4_CSV_CANDIDATES = ("/root/aiter/aiter/configs/model_configs/kimik3_fp4_tuned_fmoe.csv",)
@@ -503,16 +440,12 @@ def _default_a16w4_csv_path():
 
 
 def _kw_tile_k_for(cfg, *, K):
-    """Return a (k_wave, tile_k) pair from ``cfg`` made correct for contraction ``K``.
+    """Return a (k_wave, tile_k, note) triple from ``cfg`` correct for contraction ``K``.
 
-    The gemm1 builder requires ``K % (k_wave * tile_k) == 0`` (each of the k_wave
-    K-waves owns klen=K/k_wave, tiled by tile_k). aiter names its kw4 rows with
-    tile_k=256 but relies on K-padding we don't have (e.g. K=3584: 3584 % (4*256)
-    = 512 != 0). We keep the CSV's k_wave but pick the largest tile_k in
-    {256,128,64} that satisfies the divisibility, so the K-slice parallelism is
-    preserved without padding. If no tile_k works for that k_wave, drop k_wave to 1
-    (returns the CSV tile_k, which always divides K). Returns (k_wave, tile_k, note)
-    where note is a short string if a fallback was applied, else "".
+    The gemm1 builder requires ``K % (k_wave * tile_k) == 0``. aiter names its kw4 rows
+    with tile_k=256 but relies on K-padding we don't have, so keep the CSV's k_wave and
+    pick the largest tile_k in {256,128,64} that divides; if none works, drop k_wave to
+    1. ``note`` is a short string when a fallback was applied, else "".
     """
     kw = int(cfg.get("k_wave", 1))
     tk = int(cfg["tile_k"])

@@ -50,9 +50,8 @@ def _atomic_bf16_epilog(
 ):
     _kMChunks = kmchunks_for(BM)
     M_REPS = BM // 8
-    # 4 waves split the BN(=TILE_N) tile: each wave owns _n_per_wave cols
-    # (num_acc_n = _n_per_wave/16 MFMA N-blocks). Generic over BN (256 -> 4 acc,
-    # 128 -> 2 acc) so the int4 tile_n=128 geometry works, not just tile_n=256.
+    # 4 waves split the BN(=TILE_N) tile: each wave owns _n_per_wave cols (generic over
+    # BN, so the int4 tile_n=128 geometry works, not just tile_n=256).
     _n_per_wave = BN // 4
     num_acc_n = _n_per_wave // 16
     _s_count = BN // 64  # readback: each s-iter covers 64 cols (32 lanes x vec2)
@@ -107,14 +106,6 @@ def _atomic_bf16_epilog(
                 )
 
 
-# =============================================================================
-# a16w4 (bf16 intermediate A x mxfp4 W2 -> bf16 out) down-projection stage2.
-# Dedicated path. Reuses the M1-proven a16w4 primitives: bf16 A -> LDS, mxfp4 W
-# dwordx4 load + cvt_scalef32_pk_bf16_fp4 upconvert, non-scaled MFMA(16,16,32,
-# bf16) via fx.gemm, and the atomic bf16 scatter epilogue above.
-# =============================================================================
-
-
 def _gemm2_body_a16w4(
     lds_raw_ptr,
     arg_a,
@@ -138,11 +129,11 @@ def _gemm2_body_a16w4(
     b_cache_mod=2,
     w_dtype="mxfp4",
 ):
-    """a16w4/a16wi4 stage2 body. K=inter_dim (contraction), N=model_dim (N_OUT).
+    """a16w4/a16wi4/a16w16 stage2 body. K=inter_dim (contraction), N=model_dim (N_OUT).
 
-    A = bf16 stage1 intermediate indexed by SORTED position (like the a4w4 path):
-    A[sorted_row, k]. W2 = mxfp4, per-1x32 e8m0 scale. Output = bf16 scattered to
-    token rows (atomic-fadd, routing-weighted) at [tokens, model_dim].
+    A = bf16 stage1 intermediate indexed by SORTED position: A[sorted_row, k]. W2 =
+    mxfp4/int4/bf16 (see gemm1 for the W variants). Output = bf16 scattered to token
+    rows (atomic-fadd, routing-weighted) at [tokens, model_dim].
     """
     _is_int4 = w_dtype == "int4"
     _is_bf16 = w_dtype == "bf16"  # a16w16: raw bf16 W (unpacked, no scale, no upconvert)
@@ -155,8 +146,7 @@ def _gemm2_body_a16w4(
     m_repeat = BM // 16
     k_unroll = KH_TILE_BYTES // 64
     _k0_count = TILE_K // 128
-    # 4 waves split the TILE_N=256 tile: each wave owns 64 N-cols (num_acc_n=4).
-    # This matches the atomic-epilog's wave-split (col = wave*64 + J*16 + lane%16).
+    # 4 waves split the TILE_N tile (matches the atomic-epilog wave-split).
     _n_per_wave = TILE_N // 4
     num_acc_n = _n_per_wave // 16
     k_blocks16 = KH_TILE_BYTES // 16
@@ -202,11 +192,9 @@ def _gemm2_body_a16w4(
     by_n = n_block_idx * fx.Int32(TILE_N)
     expert_off = e * fx.Int32(N_OUT)
 
-    # bf16 W [E, N_OUT, K] is 2 B/elem == 4x the fp4 bytes; the whole-tensor byte
-    # extent overflows the 32-bit buffer num_records field AND the i32 byte-offset
-    # (buffer_load computes offset*elem_bytes in i32) at large E. Fold the per-expert
-    # base into the i64 resource address and index W WITHIN the expert (n_blk carries
-    # no expert_off for bf16). mxfp4/int4 keep the whole-tensor path (byte-identical).
+    # bf16 W (2 B/elem) overflows the 32-bit buffer num_records / i32 byte-offset at
+    # large E; fold the per-expert base into the i64 resource address and index W
+    # within the expert. mxfp4/int4 keep the whole-tensor path (byte-identical).
     if const_expr(_is_bf16):
         _w_per_expert_bytes = N_OUT * (K * 2)
         w_base_i64 = fx.Int64(arg_bq) + fx.Int64(e) * fx.Int64(_w_per_expert_bytes)
@@ -258,12 +246,10 @@ def _gemm2_body_a16w4(
         base_k_div4 = (base_k * fx.Int32(elem_bytes)) // fx.Int32(4)
         for i in range_constexpr(num_x_loads):
             col_bytes = x_col_dw[i] * fx.Int32(4)
-            # A-LDS bank-conflict XOR swizzle: LDS dest stays LINEAR (the DMA
-            # buffer_load_lds hardware does not honor an arbitrary swizzled per-lane
-            # LDS dest -- the M1 NaN); instead swizzle the GMEM source column so
-            # linear LDS slot [row][col] holds A[row][swz(row,col)]. The LDS read
-            # (lds_load_a) applies the SAME swizzle to its offset, so it fetches the
-            # right logical K. Same convention as kernels/gemm/mxfp4_preshuffle.py.
+            # A-LDS bank-conflict XOR swizzle: the LDS dest stays LINEAR (buffer_load_lds
+            # does NOT honor an arbitrary swizzled per-lane LDS dest -> NaN); instead
+            # swizzle the GMEM source column so linear LDS slot [row][col] holds
+            # A[row][swz(row,col)], and lds_load_a applies the SAME swizzle on read.
             col_sw = _a16w4_swizzle_xor16(x_row_local[i], col_bytes, fx.Int32(k_blocks16), enable=True)
             row_k_dw = x_row_base_div4[i] + base_k_div4
             global_byte = row_k_dw * fx.Int32(4) + col_sw
@@ -284,9 +270,8 @@ def _gemm2_body_a16w4(
 
     def lds_load_a(mi, ku):
         row = row_a_lds + fx.Int32(mi * 16)
-        # Same XOR swizzle as the write above (enable=True) -> read fetches logical
-        # (row, col) from its swizzled physical byte. Read cols are 16-byte-aligned
-        # multiples, and the mask XORs by multiples of 16, so alignment is preserved.
+        # Same XOR swizzle as the DMA write (read cols and the mask are 16 B multiples,
+        # so 16 B alignment is preserved).
         col_swz_bytes = _a16w4_swizzle_xor16(row, _a_col_bytes_for_ku(ku), fx.Int32(k_blocks16), enable=True)
         byte_off = row * fx.Int32(KH_TILE_BYTES) + col_swz_bytes
         r = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
@@ -396,9 +381,7 @@ def _gemm2_body_a16w4(
     for ni in range_constexpr(num_acc_n):
         col_g = by_n + n_tile_base + fx.Int32(ni * 16) + lane_mod_16
         col_g_list.append(col_g)
-        # bf16 W folds the expert offset into the resource base pointer (see w_rsrc),
-        # so its B-load index is WITHIN the expert (no expert_off). mxfp4/int4 keep
-        # expert_off in the index against the whole-tensor resource (byte-identical).
+        # bf16 W folds expert_off into the resource base (see w_rsrc); mxfp4/int4 index it.
         _row_expert_off = fx.Int32(0) if const_expr(_is_bf16) else expert_off
         row_w = _row_expert_off + col_g
         n_blk_list.append(row_w // fx.Int32(16))
@@ -452,10 +435,8 @@ def _gemm2_body_a16w4(
                     _mma(accm[mi][ni], a8, bb)
         gpu.barrier()
 
-    # ---- epilogue: reuse the existing atomic bf16 scatter (routing-weighted) ---
-    # accm[mi][ni] maps to (mchunk=mi, J=ni); the atomic epilog reads accm[i][J].
-    # The K-loop is done, so the A-LDS region (offset 0) is free for the f32 acc
-    # staging the atomic epilog needs (BM*TILE_N*4 bytes, sized into SharedStorage).
+    # ---- epilogue: atomic bf16 scatter (routing-weighted). The K-loop is done, so
+    # the A-LDS region (offset 0) is reused for the epilog's f32 acc staging.
     gpu.barrier()
     lds_acc_base_i32 = fx.Int32(fx.ptrtoint(lds_raw_ptr))
     accm_v = [[accm[i][J].load().ir_value() for J in range(num_acc_n)] for i in range(m_repeat)]
@@ -479,15 +460,10 @@ def _gemm2_body_a16w4(
 def gemm2_a16w4_grid(BM, *, N_OUT, TILE_N, max_m_blocks, persist=False):
     """Flattened launch grid for a16w4 gemm2.
 
-    Non-persistent (``persist=False``, default): one CTA per (m-block x n-block)
-    tile over the padded ``max_m_blocks`` -- byte-identical to the original grid.
-
-    Persistent (``persist=True``): cap the launch to ``min(total_work, NUM_CU)``
-    CTAs (only when the padded work exceeds ``NUM_CU*4``, i.e. it is actually
-    over-launching) and let each CTA loop over its assigned real work-tiles inside
-    the kernel. Uses the padded ``max_m_blocks`` here only as the upper bound for
-    the launch size; the in-kernel loop bounds itself to the real tiles via the
-    cumsum, so empty/padded m-blocks are never executed.
+    Non-persistent (default): one CTA per (m-block x n-block) tile over the padded
+    ``max_m_blocks``. Persistent (``persist=True``): cap the launch to
+    ``min(total_work, NUM_CU)`` CTAs (only when the padded work exceeds ``NUM_CU*4``)
+    and let each CTA loop over its real work-tiles (bounded via the cumsum).
     """
     total_work = int(max_m_blocks) * (N_OUT // TILE_N)
     if persist and total_work > NUM_CU * 4:
@@ -509,17 +485,15 @@ def compile_gemm2_a16w4_port(
     w_dtype="mxfp4",
     persist=False,
 ):
-    """a16w4/a16wi4 (bf16 intermediate A x mxfp4-or-int4 W2) stage2 builder.
+    """a16w4/a16wi4/a16w16 (bf16 intermediate A x mxfp4/int4/bf16 W2) stage2 builder.
 
     N_OUT = model_dim (down-proj output width). D_INTER = inter_dim (contraction).
     Output is bf16 [tokens, model_dim] via the atomic (routing-weighted) scatter.
 
-    ``xcd_swizzle`` (>0) round-robins the launch index bijectively across the 8
-    XCDs (like the a4w4 gemm2 ``_xcd_np`` grid). a16w4 gemm2 is HBM-bandwidth-bound
-    (flyprof: L2 hit 14.9%, 2705/8000 GB/s, MFMA 4.6%); the plain m-major grid
-    clusters consecutive tiles onto the same XCD/HBM channels, so remapping balances
-    per-channel utilization. ``xcd_swizzle`` also enables an optional M-group swizzle
-    for per-XCD L2 locality (group size = xcd_swizzle m-blocks).
+    ``xcd_swizzle`` (>0) round-robins the launch index bijectively across the 8 XCDs
+    to balance per-XCD/HBM-channel traffic (gemm2 is HBM-bandwidth-bound), and enables
+    an optional M-group swizzle for per-XCD L2 locality (group size = xcd_swizzle
+    m-blocks).
     """
     assert w_dtype in ("mxfp4", "int4", "bf16"), f"w_dtype must be 'mxfp4', 'int4' or 'bf16', got {w_dtype!r}"
     _K = D_INTER
@@ -572,8 +546,8 @@ def compile_gemm2_a16w4_port(
         bound = total_m_blocks * fx.Int32(_num_n_blocks)
 
         # Bijective XCD round-robin over the valid tiles [0, bound) to balance the
-        # per-XCD/HBM-channel weight-load traffic (a16w4 gemm2 is HBM-bound). With
-        # xcd_swizzle>0, additionally group-swizzle along M for per-XCD L2 locality.
+        # per-XCD/HBM-channel weight-load traffic. With xcd_swizzle>0, additionally
+        # group-swizzle along M for per-XCD L2 locality.
         _NXCD = 8
         _xq = _udiv(bound, _NXCD)
         _xr = _umod(bound, _NXCD)
@@ -619,16 +593,12 @@ def compile_gemm2_a16w4_port(
             )
 
         if const_expr(persist):
-            # Persistent CU-limited grid: the launch is capped to ~NUM_CU CTAs (see
-            # gemm2_a16w4_grid) instead of one CTA per padded (m x n) tile. Each CTA
-            # processes tile ``bx_i32`` then strides by the grid size over the REAL
-            # work-tiles ``[0, bound)`` (bound derived from the cumsum, so padded
-            # empty m-blocks are never touched). The XCD round-robin (_xcd_np) is
-            # applied to every visited launch index, so per-tile expert/HBM mapping
-            # is identical to the non-persistent grid; each real tile is still
-            # computed exactly once (bijective over [0, bound)). A loop-top barrier
-            # separates the previous tile's atomic-epilog LDS use from the next
-            # tile's A-DMA into the shared (offset-0) LDS region.
+            # Persistent CU-limited grid: the launch is capped to ~NUM_CU CTAs. Each
+            # CTA processes tile bx_i32 then strides by the grid size over the real
+            # work-tiles [0, bound). _xcd_np is applied to every visited index, so each
+            # real tile is computed exactly once with the same mapping as the
+            # non-persistent grid. The loop-top barrier separates the previous tile's
+            # atomic-epilog LDS use from the next tile's A-DMA (shared offset-0 region).
             grid_nb = fx.Int32(gpu.grid_dim.x)
             if bx_i32 < bound:
                 _run_tile(_xcd_np(bx_i32))
