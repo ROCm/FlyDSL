@@ -886,7 +886,7 @@ def compile_pa_decode_sw_reduce(
             )
             inv_global_exp_sum = rcp_f32(safe_global_exp_sum)
             weight_local = scaled_sum * inv_global_exp_sum
-            weight_local_i32 = arith.bitcast(T.i32, arith.unwrap(weight_local))
+            weight_local_i32 = weight_local.bitcast(fx.Int32)
 
             acc = c_zero_f
             for part_idx in range_constexpr(max_context_partition_num):

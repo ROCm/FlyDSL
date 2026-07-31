@@ -295,8 +295,8 @@ def build_silu_and_mul_fq_module(
                     if const_expr(_need_quant):
                         local_max = c0_f32
                         for vi in range_constexpr(VEC):
-                            abs_v = llvm.call_intrinsic(f32, "llvm.fabs.f32", [act_vals[vi]], [], [])
-                            local_max = arith.maximumf(local_max, abs_v)
+                            abs_v = fx.absf(act_vals[vi])
+                            local_max = fx.maxnumf(local_max, abs_v)
 
                         for sh_dist in SHUFFLE_DISTS:
                             off = arith.constant(sh_dist, type=i32)
