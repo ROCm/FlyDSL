@@ -85,14 +85,21 @@ def _build_moe_gemm2_fp8(
     doweight_stage2: bool,
     out_dtype: str,
     accumulate: bool,
+    in_dtype: str = "fp8",
 ):
-    """Native fp8 stage2 down-projection (layout API), ported from stage1's B-first path.
+    """Native stage2 down-projection (layout API), ported from stage1's B-first path.
 
     B-first MFMA: the 4 waves tile the output (model_dim / N) dimension; the weight
     W2 is the MFMA A-operand (direct global->register, prefetched one K-tile ahead),
     the stage1 activation A2 is the MFMA B-operand staged through an LDS ping-pong
-    (swizzle 3,4,3). K = inter_dim. Dequant: out = (A2 @ W2^T) * a_scale(per row) *
-    w_scale(per model_dim channel) [* routed weight].
+    (swizzle 3,4,3 for fp8 / 3,3,3 for bf16). K = inter_dim. Dequant (fp8 only):
+    out = (A2 @ W2^T) * a_scale(per row) * w_scale(per model_dim channel)
+    [* routed weight].
+
+    ``in_dtype`` selects the activation/weight element type:
+      - "fp8": Float8E4M3FNUZ, MFMA(16,16,32), per-row/per-channel dequant.
+      - "bf16": BFloat16, MFMA(16,16,32), no dequant (unscaled inputs).
+    The fp8 path is byte-identical to the original; bf16 shares the pipeline.
 
     Epilogue modes:
       - accumulate=True, out in {f16,bf16}: CShuffle -> packed atomic-add into
@@ -101,9 +108,13 @@ def _build_moe_gemm2_fp8(
       - accumulate=False (reduce), out in {f16,bf16}: CShuffle -> plain store into
         out[token*topk+slot, model_dim]; a separate reduction sums over topk.
     """
-    elem_t = fx.Float8E4M3FNUZ
+    _is_bf16 = in_dtype == "bf16"
+    if _is_bf16:
+        elem_t = fx.BFloat16  # gfx950 bf16 uses native MFMA(16,16,32)
+    else:
+        elem_t = fx.Float8E4M3FNUZ
     MFMA_K = 32
-    elem_bytes = 1  # fp8
+    elem_bytes = elem_t.width // 8  # fp8=1, bf16=2
 
     K = int(inter_dim)  # stage2 K dimension
     N = int(model_dim)  # stage2 output/N dimension
@@ -130,23 +141,26 @@ def _build_moe_gemm2_fp8(
     assert model_dim % contiguous_n == 0, f"model_dim={model_dim} must be divisible by tile_n={BN}"
 
     fp8_t = elem_t
-    a_lds_size = BM * TILE_K
+    # A LDS holds BM*TILE_K activation elements; byte size scales with elem width.
+    a_lds_bytes = BM * TILE_K * elem_bytes
     # CShuffle staging reuses the A LDS bytes; f32 output needs BM*BN*4 bytes there.
     cshuf_bytes = BM * BN * out_bytes
-    a_ping_bytes = max(a_lds_size, cshuf_bytes)
+    a_ping_bytes = max(a_lds_bytes, cshuf_bytes)
 
     @fx.struct
     class GemmBuffers:
         a_ping: fx.Array[fx.Int8, a_ping_bytes, 16]
-        a_pong: fx.Array[fx.Int8, a_lds_size, 16]
+        a_pong: fx.Array[fx.Int8, a_lds_bytes, 16]
 
     @fx.union
     class SharedStorage:
         sorted_lds: fx.Array[fx.Int32, 256, 16]
         gemm: GemmBuffers
 
-    _val_per_thr = 16  # elements per 128b buffer_load (fp8)
-    _swz_params = (3, 4, 3)  # 8-bit A-LDS swizzle (matches preshuffle_gemm)
+    _val_per_thr = 16 // elem_bytes  # elements per 128b buffer_load (fp8=16, bf16=8)
+    # A-LDS swizzle (matches preshuffle_gemm): 8-bit (fp8) uses (3,4,3);
+    # 16-bit (bf16) uses (3,3,3).
+    _swz_params = (3, 3, 3) if _is_bf16 else (3, 4, 3)
     _thrs_k = TILE_K // _val_per_thr
     _thrs_m = 256 // _thrs_k
     _m_per_wave = _thrs_m // 4
@@ -394,9 +408,7 @@ def _build_moe_gemm2_fp8(
         # data). Row = token*topk + slot.
         arg_p_input = fx.make_view(
             in_ptr,
-            fx.make_layout(
-                (tokens, fx.Int32(TOPK), fx.Int32(K)), (fx.Int32(TOPK * K), fx.Int32(K), 1)
-            ),
+            fx.make_layout((tokens, fx.Int32(TOPK), fx.Int32(K)), (fx.Int32(TOPK * K), fx.Int32(K), 1)),
         )
 
         num_valid_id = fxh.view_as_torch_tensor(fx.get_iter(arg_num_valid_ids), (1,), fx.Int32)[0]
@@ -441,9 +453,7 @@ def _build_moe_gemm2_fp8(
             else:
                 arg_p_output = fx.make_view(
                     fx.recast_iter(out_elem, fx.get_iter(arg_out)),
-                    fx.make_layout(
-                        (tokens, fx.Int32(TOPK), fx.Int32(N)), (fx.Int32(TOPK * N), fx.Int32(N), 1)
-                    ),
+                    fx.make_layout((tokens, fx.Int32(TOPK), fx.Int32(N)), (fx.Int32(TOPK * N), fx.Int32(N), 1)),
                 )
             out_tensor = fx.rocdl.make_buffer_tensor(arg_p_output, max_size=False)
             buf_atom_w128 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), out_elem)
@@ -478,7 +488,9 @@ def _build_moe_gemm2_fp8(
             c_frag = _gemm_1x4(blk_n, arg_p_input, arg_p_weight, lds, M)
 
             # fp8 dequant: a_scale (per row) * w_scale (per channel), folded into C.
-            _apply_fp8_dequant(c_frag, tid, expert_id, blk_n, asc_idx, M, arg_scale_w, arg_scale_x)
+            # bf16 inputs are unscaled, so there is no dequant step.
+            if const_expr(not _is_bf16):
+                _apply_fp8_dequant(c_frag, tid, expert_id, blk_n, asc_idx, M, arg_scale_w, arg_scale_x)
             if const_expr(doweight_stage2):
                 _apply_doweight(c_frag, tid, e_idx, arg_sorted_weights)
 
@@ -597,12 +609,15 @@ def compile_moe_gemm2(
     `use_cshuffle_epilog` controls whether we use the LDS CShuffle epilogue before
     global atomics (recommended for performance).
     """
-    # Native fp8 (layout-API port): route the non-groupwise fp8 path to the new
-    # B-first pipeline (mirrors stage1). Every other dtype/groupwise case falls
-    # through to the legacy body unchanged. MOE_FORCE_LEGACY_G2_FP8=1 forces
-    # legacy for A/B comparison.
-    _force_legacy = os.environ.get("MOE_FORCE_LEGACY_G2_FP8") == "1"
-    if in_dtype == "fp8" and group_size <= 0 and not _force_legacy:
+    # Native fp8/bf16 (layout-API port): route the non-groupwise fp8/bf16 path to
+    # the new B-first pipeline (mirrors stage1). Every other dtype/groupwise case
+    # falls through to the legacy body unchanged. MOE_FORCE_LEGACY_G2_FP8=1 forces
+    # legacy for fp8; MOE_FORCE_LEGACY_G2_BF16=1 forces legacy for bf16.
+    _new_pipe_dtype = in_dtype in ("fp8", "bf16")
+    _force_legacy = os.environ.get("MOE_FORCE_LEGACY_G2_FP8") == "1" or (
+        in_dtype == "bf16" and os.environ.get("MOE_FORCE_LEGACY_G2_BF16") == "1"
+    )
+    if _new_pipe_dtype and group_size <= 0 and not _force_legacy:
         _out_s = str(out_dtype).strip().lower()
         if _out_s not in ("f16", "fp16", "half", "bf16", "bfloat16", "f32", "fp32", "float"):
             raise ValueError(f"out_dtype must be 'f16', 'bf16', or 'f32', got {out_dtype!r}")
@@ -619,6 +634,7 @@ def compile_moe_gemm2(
             doweight_stage2=doweight_stage2,
             out_dtype=out_dtype,
             accumulate=accumulate,
+            in_dtype=in_dtype,
         )
 
     gpu_arch = get_rocm_arch()
