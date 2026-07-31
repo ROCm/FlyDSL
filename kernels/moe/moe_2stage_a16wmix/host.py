@@ -23,7 +23,7 @@ from kernels.moe.moe_2stage_a16wmix.gemm2 import compile_gemm2_a16w4_port, gemm2
 
 @functools.cache
 def _get_compiled_gemm1_a16w4(
-    BM, D_HIDDEN, D_INTER, NE, topk, TILE_N, TILE_K, act, b_cache_mod, xcd_swizzle, waves_per_eu
+    BM, D_HIDDEN, D_INTER, NE, topk, TILE_N, TILE_K, act, b_cache_mod, xcd_swizzle, waves_per_eu, w_dtype="mxfp4"
 ):
     return compile_gemm1_a16w4_port(
         BM=BM,
@@ -37,11 +37,14 @@ def _get_compiled_gemm1_a16w4(
         b_cache_mod=b_cache_mod,
         xcd_swizzle=xcd_swizzle,
         waves_per_eu=waves_per_eu,
+        w_dtype=w_dtype,
     )
 
 
 @functools.cache
-def _get_compiled_gemm2_a16w4(BM, NE, N_OUT, D_INTER, TILE_N, TILE_K, b_cache_mod=2, xcd_swizzle=1, waves_per_eu=None):
+def _get_compiled_gemm2_a16w4(
+    BM, NE, N_OUT, D_INTER, TILE_N, TILE_K, b_cache_mod=2, xcd_swizzle=1, waves_per_eu=None, w_dtype="mxfp4"
+):
     return compile_gemm2_a16w4_port(
         BM=BM,
         NE=NE,
@@ -52,7 +55,23 @@ def _get_compiled_gemm2_a16w4(BM, NE, N_OUT, D_INTER, TILE_N, TILE_K, b_cache_mo
         b_cache_mod=b_cache_mod,
         xcd_swizzle=xcd_swizzle,
         waves_per_eu=waves_per_eu,
+        w_dtype=w_dtype,
     )
+
+
+def a16wi4_scale_to_kernel_layout(scale_ng):
+    """Re-layout a logical groupwise int4 scale ``[E, N, num_groups]`` into the
+    ``(E, N, num_groups//2, 2)`` bf16-pair layout the a16wi4 kernel expects.
+
+    The kernel indexes the scale per-lane by N and reads bf16 pairs (two adjacent
+    K-groups per dword): dword index ``= n*(G//2) + group//2``, even group -> low
+    bf16, odd group -> high bf16. ``num_groups`` must be even. Input is already
+    N-major (``[E, N, G]``); we just pack consecutive group pairs into the last dim.
+    """
+    E, N, G = scale_ng.shape
+    assert G % 2 == 0, f"num_groups must be even for bf16-pair packing, got {G}"
+    s = scale_ng.to(torch.bfloat16).contiguous().view(E, N, G // 2, 2).contiguous()
+    return s
 
 
 def flydsl_a16w4_gemm1(
@@ -78,9 +97,15 @@ def flydsl_a16w4_gemm1(
     xcd_swizzle=0,
     gate_mode="separated",
     act="silu",
+    w_dtype="mxfp4",
     stream=None,
 ):
-    """a16w4 fused stage1: gate+up GEMM + SiLU -> bf16 intermediate.
+    """a16w4/a16wi4 fused stage1: gate+up GEMM + SiLU -> bf16 intermediate.
+
+    ``w_dtype="mxfp4"`` (default): W1 is mxfp4 (``w1_scale_u8`` = shuffled e8m0).
+    ``w_dtype="int4"`` (a16wi4): W1 is packed signed int4 (same preshuffle byte
+    layout as mxfp4) and ``w1_scale_u8`` is the groupwise bf16 scale already in the
+    ``(E, N_OUT, G//2, 2)`` kernel layout (see :func:`a16wi4_scale_to_kernel_layout`).
 
     ``a_bf16`` is the bf16 activation ``[n_tokens, D_HIDDEN]``. Writes the bf16
     intermediate ``[sorted_size, D_INTER]`` (by sorted position) into
@@ -125,7 +150,7 @@ def flydsl_a16w4_gemm1(
         raise NotImplementedError(f"a16w4 gemm1 requires D_INTER % TILE_N({TILE_N}) == 0, got D_INTER={D_INTER}")
 
     launch = _get_compiled_gemm1_a16w4(
-        BM, D_HIDDEN, D_INTER, NE, topk, TILE_N, TILE_K, act, b_cache_mod, xcd_swizzle, waves_per_eu
+        BM, D_HIDDEN, D_INTER, NE, topk, TILE_N, TILE_K, act, b_cache_mod, xcd_swizzle, waves_per_eu, w_dtype
     )
     max_m_blocks = int(sorted_expert_ids.numel())
     grid = gemm1_a16w4_grid(BM, INTER=D_INTER, TILE_N=TILE_N, max_m_blocks=max_m_blocks)
@@ -168,9 +193,10 @@ def flydsl_a16w4_gemm2(
     k_batch=1,
     b_nt=None,
     xcd_swizzle=1,
+    w_dtype="mxfp4",
     stream=None,
 ):
-    """a16w4 fused stage2 (down-proj). Consumes the bf16 [sorted_size, D_INTER]
+    """a16w4/a16wi4 fused stage2 (down-proj). Consumes the bf16 [sorted_size, D_INTER]
     intermediate; scatters routing-weighted bf16 into ``flat_out`` [tokens*model_dim].
 
     Tile-config interface mirrors aiter's ``compile_mixed_moe_gemm2_a16w4``:
@@ -201,7 +227,7 @@ def flydsl_a16w4_gemm2(
     _m = int(M_logical)
     _b_cache_mod = (0 if (_m <= 16 or _m >= 2048) else 2) if b_nt is None else b_nt
     launch = _get_compiled_gemm2_a16w4(
-        BM, NE, D_HIDDEN, D_INTER, TILE_N, TILE_K, _b_cache_mod, xcd_swizzle, waves_per_eu
+        BM, NE, D_HIDDEN, D_INTER, TILE_N, TILE_K, _b_cache_mod, xcd_swizzle, waves_per_eu, w_dtype
     )
     max_m_blocks = int(sorted_expert_ids.numel())
     grid = gemm2_a16w4_grid(BM, N_OUT=D_HIDDEN, TILE_N=TILE_N, max_m_blocks=max_m_blocks)

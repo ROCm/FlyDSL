@@ -65,6 +65,45 @@ def _pack_shuffled_int8_to_packed_int4_no_perm(x_shuf_i8: torch.Tensor) -> torch
     return out.view(-1).to(torch.int8)
 
 
+# ---------------------------------------------------------------------------
+# a16wi4 (bf16 A x signed-int4 W groupwise) routing of the legacy int4_bf16 path.
+#
+# The moe_2stage_a16wmix ``w_dtype="int4"`` kernel reuses the a16w4 mxfp4 body: int4
+# W is packed 2 nibbles/byte in the SAME preshuffle byte layout as mxfp4 (via
+# ``shuffle_weight`` over a float4_e2m1fn_x2 view of the packed bytes), and the
+# groupwise bf16 scale (group_size=32) is re-laid-out to (E, N, G//2, 2). This lets
+# the legacy ``int4_bf16`` tests run on the new pipeline (see run_moe_stage1/2).
+# ---------------------------------------------------------------------------
+A16WI4_GROUP = 32
+
+
+def _a16wi4_pack_shuffle_w(w_q_i8: torch.Tensor) -> torch.Tensor:
+    """Pack a signed-int4 (values in [-8,7]) 2D weight ``[rows, K]`` into the a16w4
+    mxfp4-compatible preshuffle byte layout (2 nibbles/byte, contiguous K)."""
+    from tests.kernels.utils.gemm_common_utils import pack_uint4
+
+    rows, K = w_q_i8.shape
+    u = (w_q_i8.to(torch.int16) & 0xF).to(torch.uint8)  # [rows, K]
+    packed = pack_uint4(u)  # [rows, K//2] uint8 (low nibble = even K, high = odd K)
+    shuf = shuffle_weight(packed.view(torch.float4_e2m1fn_x2)).view(torch.uint8).contiguous()
+    return shuf.view(-1).contiguous()
+
+
+def _a16wi4_scale_ng_from_legacy(scale_w_groups, scale_w_perrow, experts, N, K):
+    """Build the a16wi4 groupwise bf16 scale ``(E, N, G//2, 2)`` from either the
+    legacy groupwise scale ``[E, G, N]`` (Opt-0 layout) or a per-row scale
+    ``[E*N, 1]``/``[E*N]`` (expanded to all-equal groups)."""
+    G = K // A16WI4_GROUP
+    if scale_w_groups is not None:
+        # legacy Opt-0 layout is [E, G, N] -> transpose to [E, N, G].
+        sc_ng = scale_w_groups.float().permute(0, 2, 1).contiguous()  # [E, N, G]
+    else:
+        # per-row scale: one scale per (E, N), broadcast across all K-groups.
+        per = scale_w_perrow.float().view(experts, N, 1)
+        sc_ng = per.expand(experts, N, G).contiguous()
+    return a16wi4_scale_to_kernel_layout(sc_ng).view(-1).contiguous()
+
+
 # Optional: use aiter's exact routing/sorting implementation (matches `aiter/op_tests/test_moe_2stage.py`).
 # Some environments ship aiter python but miss required JIT .so dependencies; we fall back gracefully.
 try:
@@ -79,6 +118,7 @@ except Exception:
 # pipeline (device-side re-quant, sorted fp4 intermediate) via `_run_mxfp_moe_e2e`,
 # which replaced the parametric mixed_moe_gemm_2stage builders.
 from kernels.moe.moe_2stage_a16wmix import (  # noqa: E402
+    a16wi4_scale_to_kernel_layout,
     flydsl_a16w4_gemm1,
     flydsl_a16w4_gemm2,
 )
@@ -575,21 +615,78 @@ def run_moe_stage1(
     else:
         out = torch.empty((tokens, topk, inter_dim), device=device, dtype=_out_torch_dtype)
 
-    exe = compile_moe_gemm1(
-        model_dim=model_dim,
-        inter_dim=inter_dim,
-        experts=experts,
-        topk=topk,
-        in_dtype=in_dtype,
-        group_size=group_size,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        tile_k=tile_k,
-        doweight_stage1=bool(doweight_stage1),
-        use_cshuffle_epilog=None if _is_splitk else False,
-        scale_is_bf16=(scale_dtype == "bf16"),
-        out_dtype=out_dtype,
-        k_batch=k_batch,
+    # ---- int4_bf16 (W4A16) now routes to the moe_2stage_a16wmix w_dtype="int4" path.
+    # a16wi4 = bf16 A x signed-int4 W groupwise (group_size=32). The new kernel reuses
+    # the a16w4 mxfp4 body; we build the int4 W in the mxfp4-compatible preshuffle and
+    # a groupwise bf16 scale, run the fused stage1, then scatter the sorted bf16
+    # intermediate back to [tokens, topk, inter_dim] to preserve the legacy return.
+    if is_int4_bf16 and not _is_splitk:
+        if doweight_stage1:
+            raise NotImplementedError("a16wi4 stage1 does not apply routing weights (doweight_stage1)")
+        w1_shuf_new = _a16wi4_pack_shuffle_w(w1_q.view(experts * (2 * inter_dim), model_dim))
+        w1_sc_new = _a16wi4_scale_ng_from_legacy(scale_w1_groups, scale_w1, experts, 2 * inter_dim, model_dim)
+        cumsum_t = num_valid_ids.to(torch.int32).contiguous()
+        m_indices = sorted_token_ids.to(torch.int32).contiguous()
+        inter_sorted = torch.zeros(sorted_size, inter_dim, dtype=torch.bfloat16, device=device)
+        _tile_n1 = 256 if inter_dim % 256 == 0 else (128 if inter_dim % 128 == 0 else 64)
+        _tile_k1 = 256 if model_dim % 256 == 0 else 128
+
+        def _launch_s1():
+            flydsl_a16w4_gemm1(
+                a_bf16=x_q.contiguous(),
+                w1_u8=w1_shuf_new,
+                w1_scale_u8=w1_sc_new,
+                sorted_expert_ids=sorted_expert_ids,
+                cumsum_tensor=cumsum_t,
+                m_indices=m_indices,
+                inter_sorted_bf16=inter_sorted,
+                n_tokens=tokens,
+                NE=experts,
+                D_HIDDEN=model_dim,
+                D_INTER=inter_dim,
+                topk=topk,
+                tile_m=tile_m,
+                tile_n=_tile_n1,
+                tile_k=_tile_k1,
+                w_dtype="int4",
+            )
+
+        _, us = run_perftest(_launch_s1, num_iters=int(num_iters), num_warmup=int(num_warmup))
+        torch.cuda.synchronize()
+        # Scatter sorted [sorted_size, inter] -> [tokens, topk, inter] by (token, slot).
+        out = torch.zeros((tokens, topk, inter_dim), device=device, dtype=_out_torch_dtype)
+        sti_cpu = sorted_token_ids.to(torch.int32).cpu()
+        cs0 = int(num_valid_ids[0])
+        for row in range(cs0):
+            fused = int(sti_cpu[row])
+            tok = fused & 0x00FFFFFF
+            slot = (fused >> 24) & 0xFF
+            if tok < tokens and slot < topk:
+                out[tok, slot, :] = inter_sorted[row].to(_out_torch_dtype)
+        # fall through to the reference/verify block (skip the legacy launch below).
+        _skip_legacy_s1 = True
+    else:
+        _skip_legacy_s1 = False
+
+    exe = (
+        None
+        if _skip_legacy_s1
+        else compile_moe_gemm1(
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts=experts,
+            topk=topk,
+            in_dtype=in_dtype,
+            group_size=group_size,
+            tile_m=tile_m,
+            tile_n=tile_n,
+            tile_k=tile_k,
+            doweight_stage1=bool(doweight_stage1),
+            use_cshuffle_epilog=None if _is_splitk else False,
+            scale_is_bf16=(scale_dtype == "bf16"),
+            out_dtype=out_dtype,
+            k_batch=k_batch,
+        )
     )
 
     def _s1_args(o, x, w, sx, sw, st, eids, sw_sorted):
@@ -610,31 +707,34 @@ def run_moe_stage1(
             torch.cuda.current_stream(),
         )
 
-    compiled_exe = flyc.compile(
-        exe,
-        *_s1_args(out, x_q, w_kernel, scale_x_1d, scale_w1_1d, sorted_token_ids, sorted_expert_ids, sorted_weights_1d),
-    )
+    if not _skip_legacy_s1:
+        compiled_exe = flyc.compile(
+            exe,
+            *_s1_args(
+                out, x_q, w_kernel, scale_x_1d, scale_w1_1d, sorted_token_ids, sorted_expert_ids, sorted_weights_1d
+            ),
+        )
 
-    def launch(o, x, w, sx, sw, st, eids, sw_sorted):
-        if _is_splitk:
-            o.zero_()
-        compiled_exe(*_s1_args(o, x, w, sx, sw, st, eids, sw_sorted))
+        def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+            if _is_splitk:
+                o.zero_()
+            compiled_exe(*_s1_args(o, x, w, sx, sw, st, eids, sw_sorted))
 
-    _, us = run_perftest(
-        launch,
-        out,
-        x_q,
-        w_kernel,
-        scale_x_1d,
-        scale_w1_1d,
-        sorted_token_ids,
-        sorted_expert_ids,
-        sorted_weights_1d,
-        num_iters=int(num_iters),
-        num_warmup=int(num_warmup),
-        testGraph=test_graph,
-    )
-    torch.cuda.synchronize()
+        _, us = run_perftest(
+            launch,
+            out,
+            x_q,
+            w_kernel,
+            scale_x_1d,
+            scale_w1_1d,
+            sorted_token_ids,
+            sorted_expert_ids,
+            sorted_weights_1d,
+            num_iters=int(num_iters),
+            num_warmup=int(num_warmup),
+            testGraph=test_graph,
+        )
+        torch.cuda.synchronize()
 
     # Split-K post-processing: apply silu(gate)*up on host, reshape to [tokens, topk, inter_dim]
     # Note: the gfx950 v_cvt_off_f32_i4 x16 correction is already applied per-CTA in the kernel
@@ -1156,21 +1256,78 @@ def run_moe_stage2(
 
     doweight_stage2 = not bool(doweight_stage1)
 
-    exe = compile_fn(
-        model_dim=model_dim,
-        inter_dim=inter_dim,
-        experts=experts,
-        topk=topk,
-        in_dtype=in_dtype,
-        out_dtype=out_dtype,
-        group_size=group_size,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        tile_k=tile_k,
-        doweight_stage2=bool(doweight_stage2),
-        scale_is_bf16=(scale_dtype == "bf16"),
+    # ---- int4_bf16 (W4A16) stage2 routes to moe_2stage_a16wmix w_dtype="int4".
+    # The new gemm2 consumes a SORTED [sorted_size, inter] bf16 intermediate, so we
+    # gather a2_q ([tokens, topk, inter]) into sorted order, run the fused down-proj
+    # (atomic routing-weighted scatter to [tokens, model_dim]) and return in-place.
+    if is_int4_bf16 and (not bool(use_reduce)) and out_torch_dtype == torch.bfloat16:
+        w2_shuf_new = _a16wi4_pack_shuffle_w(w2_q.view(experts * model_dim, inter_dim))
+        w2_sc_new = _a16wi4_scale_ng_from_legacy(scale_w2_groups, scale_w2, experts, model_dim, inter_dim)
+        cumsum_t = num_valid_ids.to(torch.int32).contiguous()
+        # Gather sorted A: inter_sorted[row] = a2[token, slot].
+        a2_tsi = a2_q.view(tokens, topk, inter_dim)
+        inter_sorted = torch.zeros(sorted_size, inter_dim, dtype=torch.bfloat16, device=device)
+        sti_cpu = sorted_token_ids.to(torch.int32).cpu()
+        cs0 = int(num_valid_ids[0])
+        for row in range(cs0):
+            fused = int(sti_cpu[row])
+            tok = fused & 0x00FFFFFF
+            slot = (fused >> 24) & 0xFF
+            if tok < tokens and slot < topk:
+                inter_sorted[row] = a2_tsi[tok, slot].to(torch.bfloat16)
+        _tile_n2 = 256 if model_dim % 256 == 0 else (128 if model_dim % 128 == 0 else 64)
+        _tile_k2 = 256 if inter_dim % 256 == 0 else 128
+        flat_out = torch.zeros(tokens * model_dim, dtype=torch.bfloat16, device=device)
+
+        def _launch_s2():
+            flat_out.zero_()
+            flydsl_a16w4_gemm2(
+                inter_sorted_bf16=inter_sorted,
+                w2_u8=w2_shuf_new,
+                w2_scale_u8=w2_sc_new,
+                sorted_expert_ids=sorted_expert_ids,
+                cumsum_tensor=cumsum_t,
+                sorted_token_ids=sorted_token_ids,
+                sorted_weights=sorted_weights,
+                flat_out=flat_out,
+                M_logical=tokens,
+                max_sorted=sorted_size,
+                NE=experts,
+                D_HIDDEN=model_dim,
+                D_INTER=inter_dim,
+                topk=topk,
+                tile_m=tile_m,
+                tile_n=_tile_n2,
+                tile_k=_tile_k2,
+                w_dtype="int4",
+            )
+
+        _, us = run_perftest(_launch_s2, num_iters=int(num_iters), num_warmup=int(num_warmup))
+        torch.cuda.synchronize()
+        out = flat_out.view(tokens, model_dim).to(out_torch_dtype)
+        _skip_legacy_s2 = True
+    else:
+        _skip_legacy_s2 = False
+
+    exe = (
+        None
+        if _skip_legacy_s2
+        else compile_fn(
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts=experts,
+            topk=topk,
+            in_dtype=in_dtype,
+            out_dtype=out_dtype,
+            group_size=group_size,
+            tile_m=tile_m,
+            tile_n=tile_n,
+            tile_k=tile_k,
+            doweight_stage2=bool(doweight_stage2),
+            scale_is_bf16=(scale_dtype == "bf16"),
+        )
     )
-    is_reduce_exe = (getattr(exe, "mode", None) == MoeGemm2Mode.REDUCE) or bool(use_reduce)
+    is_reduce_exe = (not _skip_legacy_s2) and ((getattr(exe, "mode", None) == MoeGemm2Mode.REDUCE) or bool(use_reduce))
 
     def _s2_args_atomic(o, x, w, sx, sw, st, eids, sw_sorted):
         return (
@@ -1193,7 +1350,9 @@ def run_moe_stage2(
     # In reduce mode, exe is a _MoeGemm2ReduceWrapper (not a JitFunction),
     # so flyc.compile is not applicable.  The wrapper internally dispatches
     # to two separate JitFunctions (gemm2 + reduce).
-    if not is_reduce_exe and hasattr(flyc, "compile"):
+    if _skip_legacy_s2:
+        compiled_exe = None
+    elif not is_reduce_exe and hasattr(flyc, "compile"):
         compiled_exe = flyc.compile(
             exe,
             *_s2_args_atomic(
@@ -1239,41 +1398,42 @@ def run_moe_stage2(
             else:
                 exe(*_s2_args_atomic(o, x, w, sx, sw, st, eids, sw_sorted))
 
-    # Flat byte view of A2 consumed by the kernel.
-    a2_launch_buf = a2_q.view(-1)
+    if not _skip_legacy_s2:
+        # Flat byte view of A2 consumed by the kernel.
+        a2_launch_buf = a2_q.view(-1)
 
-    # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
-    # across perf iterations for correctness. Time into a dedicated buffer, then run
-    # a single clean launch for correctness verification below.
-    _, us = run_perftest(
-        launch,
-        out_perf,
-        a2_launch_buf,
-        w2_kernel.view(-1),
-        a2_scale_1d,
-        w2_scale_1d,
-        sorted_token_ids,
-        sorted_expert_ids,
-        sorted_weights_1d,
-        num_iters=int(num_iters),
-        num_warmup=int(num_warmup),
-        testGraph=test_graph,
-    )
-    torch.cuda.synchronize()
+        # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
+        # across perf iterations for correctness. Time into a dedicated buffer, then run
+        # a single clean launch for correctness verification below.
+        _, us = run_perftest(
+            launch,
+            out_perf,
+            a2_launch_buf,
+            w2_kernel.view(-1),
+            a2_scale_1d,
+            w2_scale_1d,
+            sorted_token_ids,
+            sorted_expert_ids,
+            sorted_weights_1d,
+            num_iters=int(num_iters),
+            num_warmup=int(num_warmup),
+            testGraph=test_graph,
+        )
+        torch.cuda.synchronize()
 
-    # Correctness run (single launch into a clean zeroed output).
-    out.zero_()
-    launch(
-        out,
-        a2_launch_buf,
-        w2_kernel.view(-1),
-        a2_scale_1d,
-        w2_scale_1d,
-        sorted_token_ids,
-        sorted_expert_ids,
-        sorted_weights_1d,
-    )
-    torch.cuda.synchronize()
+        # Correctness run (single launch into a clean zeroed output).
+        out.zero_()
+        launch(
+            out,
+            a2_launch_buf,
+            w2_kernel.view(-1),
+            a2_scale_1d,
+            w2_scale_1d,
+            sorted_token_ids,
+            sorted_expert_ids,
+            sorted_weights_1d,
+        )
+        torch.cuda.synchronize()
 
     if not bool(skip_ref):
         ref2 = torch_moe_gemm2(

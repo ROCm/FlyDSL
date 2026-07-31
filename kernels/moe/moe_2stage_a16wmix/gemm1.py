@@ -13,12 +13,19 @@ from .common import (
     _buffer_rsrc,
     _global_i32_at,
     _global_i32_buffer_view,
+    _int4_nibble_to_bf16x8,
     _raw,
     _silu_mul_batch,
     _situ_mul_batch,
     _udiv,
     _umod,
 )
+
+# a16wi4 (int4 W) groupwise scale: group_size fixed at 32 == one MFMA K32 step, so
+# one ku consumes exactly one K-group. The scale buffer is packed as bf16 pairs
+# (E, N, num_groups//2, 2) -> flat dword index e*N*(G//2) + n*(G//2) + (group//2);
+# even/odd ku selects the low/high bf16 half of the dword.
+A16WI4_GROUP_SIZE = 32
 
 
 def _a16w4_swizzle_xor16(row, col_bytes, k_blocks16, *, enable=False):
@@ -59,8 +66,9 @@ def _gemm1_body_a16w4(
     TOPK,
     act="silu",
     b_cache_mod=2,
+    w_dtype="mxfp4",
 ):
-    """a16w4 (bf16 A x mxfp4 W) fused stage1 gemm1 body (aiter-aligned, un-pipelined).
+    """a16w4/a16wi4 (bf16 A x mxfp4-or-int4 W) fused stage1 gemm1 body.
 
     A is native bf16 (no A-scale). W is mxfp4 (packed fp4) with per-1x32 e8m0
     scales, loaded raw (dwordx4) + upconverted to bf16 in-kernel via
@@ -68,6 +76,7 @@ def _gemm1_body_a16w4(
     ``MFMA(16,16,32,BFloat16)`` K=32. Epilogue = SiLU(gate)*up -> bf16 intermediate
     ``[sorted_size, inter_dim]`` stored by SORTED POSITION (drop-in for gemm2_a16w4).
     """
+    _is_int4 = w_dtype == "int4"
     N_OUT = 2 * INTER
     elem_bytes = 2  # bf16
     a_elem_bytes = 2
@@ -117,6 +126,11 @@ def _gemm1_body_a16w4(
     sc_stride_k0 = 64
     sc_stride_n0 = sc_k1 * sc_stride_k0
 
+    # a16wi4 groupwise scale: bf16 pairs, layout (E, N, num_groups//2, 2). Flat dword
+    # index = expert_off_n*(G//2) + n*(G//2) + (group//2); even/odd ku -> lo/hi bf16.
+    _num_groups = K // A16WI4_GROUP_SIZE
+    _g_half = _num_groups // 2
+
     lane_div_16 = lane // fx.Int32(16)
     lane_mod_16 = lane % fx.Int32(16)
 
@@ -132,7 +146,12 @@ def _gemm1_body_a16w4(
     # ---- buffer resources -----------------------------------------------------
     # (A is loaded via the BufferCopyLDS atom over x_buf below, not a raw rsrc.)
     w_rsrc = _buffer_rsrc(arg_bq, num_records_bytes=min(NE * N_OUT * K_HALF, 0xFFFFFFFF))
-    sw_rsrc = _buffer_rsrc(arg_bscale, num_records_bytes=min(NE * N_OUT * (scale_k_padded // 32), 0xFFFFFFFF))
+    if _is_int4:
+        # int4 groupwise scale buffer is (E, N_OUT, G//2, 2) bf16 -> G//2 dwords per N.
+        _sw_bytes = NE * N_OUT * _g_half * 4
+    else:
+        _sw_bytes = NE * N_OUT * (scale_k_padded // 32)
+    sw_rsrc = _buffer_rsrc(arg_bscale, num_records_bytes=min(_sw_bytes, 0xFFFFFFFF))
     # Intermediate is [sorted_size, inter] bf16. num_records = padded_sorted_rows *
     # inter * 2 bytes (padded rows = cumsum0) so masked (clamped) stores land OOB.
     _cumsum0 = _global_i32_at(arg_cumsum, fx.Int32(0))
@@ -262,11 +281,34 @@ def _gemm1_body_a16w4(
             scales.append(fx.Float32(arith.select(is_even, _raw(se), _raw(so))))
         return scales
 
+    def load_b_scale_int4(base_k, col_g):
+        # int4 groupwise (bf16-pair) scale, per-lane N = col_g. group_size=32 == one
+        # MFMA K32 step, so group index for step (base_k, ku) mirrors the mxfp4 e8m0
+        # K->group map: adj_ku = base_k//32 + (ku//4)*4 + lane_div_16. Scale buffer is
+        # (E, N, G//2, 2) bf16: dword idx = col_g*(G//2) + adj_ku//2, half by adj_ku parity.
+        scales = []
+        base_dword = col_g * fx.Int32(_g_half)
+        for ku in range_constexpr(k_unroll):
+            _k0_blk = ku // 4
+            adj_ku = base_k // fx.Int32(32) + fx.Int32(_k0_blk * 4) + lane_div_16
+            pair_idx = adj_ku // fx.Int32(2)
+            packed = fx.Int32(
+                buffer_ops.buffer_load(_raw(sw_rsrc), _raw(base_dword + pair_idx), vec_width=1, dtype=T.i32)
+            )
+            # even adj_ku -> low bf16, odd -> high bf16.
+            lo = fx.Float32(_raw(packed << fx.Int32(16)).bitcast(T.f32))
+            hi = fx.Float32(_raw(packed & fx.Int32(0xFFFF0000)).bitcast(T.f32))
+            is_even = arith.cmpi(arith.CmpIPredicate.eq, _raw(adj_ku % fx.Int32(2)), _raw(fx.Int32(0)))
+            scales.append(fx.Float32(arith.select(is_even, _raw(lo), _raw(hi))))
+        return scales
+
     vec2_bf16 = ir.Type.parse("vector<2xbf16>")
 
     def upconvert_b(raw, ku, scale_f32):
-        # raw[ku//4][ku%4] i32 holds 8 fp4 -> 4x cvt (v2bf16, sel 0..3) -> v8bf16.
         i32_val = _raw(raw[ku // 4][ku % 4])
+        if const_expr(_is_int4):
+            return _int4_nibble_to_bf16x8(fx.Int32(i32_val), scale_f32)
+        # raw[ku//4][ku%4] i32 holds 8 fp4 -> 4x cvt (v2bf16, sel 0..3) -> v8bf16.
         s_raw = _raw(scale_f32)
         i32s = []
         for sel in range_constexpr(4):
@@ -316,13 +358,25 @@ def _gemm1_body_a16w4(
     def _mma(acc, a8, b8):
         fx.gemm(mma_atom, acc, _bf16_frag(a8), _bf16_frag(b8), acc)
 
+    # int4 groupwise scale: per-lane N = expert_off + (col_g | col_g+inter). expert_off
+    # is in N_OUT units, so it doubles as the scale-N expert base ((E, N_OUT, G//2, 2)).
+    if const_expr(_is_int4):
+        scale_n_gate = [expert_off + col_g_list[ni] for ni in range_constexpr(num_acc_n)]
+        scale_n_up = [expert_off + col_g_list[ni] + inter_i32 for ni in range_constexpr(num_acc_n)]
+
     # ---- B tile load + compute helpers ----------------------------------------
     def load_b_tile(base_k):
+        if const_expr(_is_int4):
+            g_sc = [load_b_scale_int4(base_k, scale_n_gate[ni]) for ni in range_constexpr(num_acc_n)]
+            u_sc = [load_b_scale_int4(base_k, scale_n_up[ni]) for ni in range_constexpr(num_acc_n)]
+        else:
+            g_sc = [load_b_scale(base_k, scale_mni_gate[ni], scale_np_gate[ni]) for ni in range_constexpr(num_acc_n)]
+            u_sc = [load_b_scale(base_k, scale_mni_up[ni], scale_np_up[ni]) for ni in range_constexpr(num_acc_n)]
         return (
             [load_b_raw(base_k, n_blk_gate[ni], n_intra_gate[ni]) for ni in range_constexpr(num_acc_n)],
             [load_b_raw(base_k, n_blk_up[ni], n_intra_up[ni]) for ni in range_constexpr(num_acc_n)],
-            [load_b_scale(base_k, scale_mni_gate[ni], scale_np_gate[ni]) for ni in range_constexpr(num_acc_n)],
-            [load_b_scale(base_k, scale_mni_up[ni], scale_np_up[ni]) for ni in range_constexpr(num_acc_n)],
+            g_sc,
+            u_sc,
         )
 
     def preload_a(read_slot):
@@ -428,13 +482,18 @@ def compile_gemm1_a16w4_port(
     b_cache_mod=2,
     xcd_swizzle=0,
     waves_per_eu=None,
+    w_dtype="mxfp4",
 ):
-    """a16w4 (bf16 A x mxfp4 W1) fused stage1 builder.
+    """a16w4/a16wi4 (bf16 A x mxfp4-or-int4 W1) fused stage1 builder.
 
-    New dedicated path (separate from the a4w4/a8w4 scaled-MFMA body). bf16 A,
-    in-kernel mxfp4->bf16 W upconvert, non-scaled MFMA(16,16,32,bf16) K=32, SiLU
-    epilogue -> bf16 intermediate ``[tokens*topk, inter_dim]`` (no requant/scale).
+    ``w_dtype="mxfp4"`` (default): bf16 A, in-kernel mxfp4->bf16 W upconvert with
+    per-1x32 e8m0 scale, non-scaled MFMA(16,16,32,bf16) K=32, SiLU epilogue -> bf16
+    intermediate ``[sorted_size, inter_dim]``. Byte-identical to the original a16w4.
+    ``w_dtype="int4"`` (a16wi4): W is packed signed int4 (2/byte, SAME preshuffle byte
+    layout as mxfp4) with a groupwise bf16 scale (group_size=32); dequant via
+    ``v_cvt_off_f32_i4`` -> feeds the identical bf16 MFMA.
     """
+    assert w_dtype in ("mxfp4", "int4"), f"w_dtype must be 'mxfp4' or 'int4', got {w_dtype!r}"
     _K = D_HIDDEN
     _INTER = D_INTER
     _N_OUT = 2 * _INTER
@@ -454,7 +513,8 @@ def compile_gemm1_a16w4_port(
     _bcm_tag = "" if b_cache_mod == 2 else f"_bcm{b_cache_mod}"
     _xcd_tag = f"_xcd{xcd_swizzle}" if xcd_swizzle > 0 else ""
     _wpe_tag = f"_w{waves_per_eu}" if waves_per_eu else ""
-    name_suffix = f"a16w4_h{_K}_i{_INTER}_ne{NE}_bm{BM}_tn{TILE_N}{_act_tag}{_bcm_tag}{_xcd_tag}{_wpe_tag}"
+    _wd_tag = "" if w_dtype == "mxfp4" else f"_{w_dtype}"
+    name_suffix = f"a16w4{_wd_tag}_h{_K}_i{_INTER}_ne{NE}_bm{BM}_tn{TILE_N}{_act_tag}{_bcm_tag}{_xcd_tag}{_wpe_tag}"
 
     @fx.struct
     class SharedStorage:
@@ -529,6 +589,7 @@ def compile_gemm1_a16w4_port(
                 TOPK=TOPK,
                 act=act,
                 b_cache_mod=b_cache_mod,
+                w_dtype=w_dtype,
             )
 
     @flyc.jit

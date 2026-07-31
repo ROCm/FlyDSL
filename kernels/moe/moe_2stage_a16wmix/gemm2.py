@@ -18,6 +18,7 @@ from .common import (
     _global_base_ptr1,
     _global_i32_at,
     _global_i32_buffer_view,
+    _int4_nibble_to_bf16x8,
     _lds_ptr3,
     _raw,
     _udiv,
@@ -25,7 +26,7 @@ from .common import (
     kmchunks_for,
     lds_acc_bytes_for,
 )
-from .gemm1 import _a16w4_swizzle_xor16, _e8m0_byte_to_f32
+from .gemm1 import A16WI4_GROUP_SIZE, _a16w4_swizzle_xor16, _e8m0_byte_to_f32
 
 
 def _atomic_bf16_epilog(
@@ -125,13 +126,15 @@ def _gemm2_body_a16w4(
     INTER,
     NE,
     b_cache_mod=2,
+    w_dtype="mxfp4",
 ):
-    """a16w4 stage2 body. K=inter_dim (contraction), N=model_dim (N_OUT).
+    """a16w4/a16wi4 stage2 body. K=inter_dim (contraction), N=model_dim (N_OUT).
 
     A = bf16 stage1 intermediate indexed by SORTED position (like the a4w4 path):
     A[sorted_row, k]. W2 = mxfp4, per-1x32 e8m0 scale. Output = bf16 scattered to
     token rows (atomic-fadd, routing-weighted) at [tokens, model_dim].
     """
+    _is_int4 = w_dtype == "int4"
     elem_bytes = 2
     KH_TILE_BYTES = TILE_K * elem_bytes
     LDS_STRIDE = TILE_K
@@ -163,6 +166,10 @@ def _gemm2_body_a16w4(
     sc_stride_k0 = 64
     sc_stride_n0 = sc_k1 * sc_stride_k0
 
+    # a16wi4 groupwise scale: bf16 pairs (E, N_OUT, num_groups//2, 2), K = inter_dim.
+    _num_groups = K // A16WI4_GROUP_SIZE
+    _g_half = _num_groups // 2
+
     lane_div_16 = lane // fx.Int32(16)
     lane_mod_16 = lane % fx.Int32(16)
 
@@ -174,7 +181,11 @@ def _gemm2_body_a16w4(
     expert_off = e * fx.Int32(N_OUT)
 
     w_rsrc = _buffer_rsrc(arg_bq, num_records_bytes=min(NE * N_OUT * K_HALF, 0xFFFFFFFF))
-    sw_rsrc = _buffer_rsrc(arg_bscale, num_records_bytes=min(NE * N_OUT * (scale_k_padded // 32), 0xFFFFFFFF))
+    if _is_int4:
+        _sw_bytes = NE * N_OUT * _g_half * 4
+    else:
+        _sw_bytes = NE * N_OUT * (scale_k_padded // 32)
+    sw_rsrc = _buffer_rsrc(arg_bscale, num_records_bytes=min(_sw_bytes, 0xFFFFFFFF))
 
     # ---- A gather (per-thread) -> LDS. A row = SORTED position m_row + row_local.
     total_threads = 256
@@ -291,10 +302,29 @@ def _gemm2_body_a16w4(
             scales.append(fx.Float32(arith.select(is_even, _raw(se), _raw(so))))
         return scales
 
+    def load_b_scale_int4(base_k, col_g):
+        # int4 groupwise (bf16-pair) scale, per-lane N = col_g. See gemm1 counterpart.
+        scales = []
+        base_dword = col_g * fx.Int32(_g_half)
+        for ku in range_constexpr(k_unroll):
+            _k0_blk = ku // 4
+            adj_ku = base_k // fx.Int32(32) + fx.Int32(_k0_blk * 4) + lane_div_16
+            pair_idx = adj_ku // fx.Int32(2)
+            packed = fx.Int32(
+                buffer_ops.buffer_load(_raw(sw_rsrc), _raw(base_dword + pair_idx), vec_width=1, dtype=T.i32)
+            )
+            lo = fx.Float32(_raw(packed << fx.Int32(16)).bitcast(T.f32))
+            hi = fx.Float32(_raw(packed & fx.Int32(0xFFFF0000)).bitcast(T.f32))
+            is_even = arith.cmpi(arith.CmpIPredicate.eq, _raw(adj_ku % fx.Int32(2)), _raw(fx.Int32(0)))
+            scales.append(fx.Float32(arith.select(is_even, _raw(lo), _raw(hi))))
+        return scales
+
     vec2_bf16 = ir.Type.parse("vector<2xbf16>")
 
     def upconvert_b(raw, ku, scale_f32):
         i32_val = _raw(raw[ku // 4][ku % 4])
+        if const_expr(_is_int4):
+            return _int4_nibble_to_bf16x8(fx.Int32(i32_val), scale_f32)
         s_raw = _raw(scale_f32)
         i32s = []
         for sel in range_constexpr(4):
@@ -316,6 +346,9 @@ def _gemm2_body_a16w4(
         ng = expert_off + by_n + n_tile_base + fx.Int32(ni * 16)
         scale_mni_list.append(ng // fx.Int32(32))
         scale_np_list.append((ng // fx.Int32(16)) % fx.Int32(2))
+    # int4 groupwise scale: per-lane N = expert_off + col_g (row_w already computed).
+    if const_expr(_is_int4):
+        scale_n_list = [expert_off + col_g_list[ni] for ni in range_constexpr(num_acc_n)]
 
     # ---- accumulators: accm[mi][ni] f32[4] (layout the atomic epilog expects) --
     acc_layout = fx.make_layout(4, 1)
@@ -339,7 +372,10 @@ def _gemm2_body_a16w4(
         base_k = fx.Int32(kt * TILE_K)
         dma_a_tile_to_lds(base_k)
         b_raw = [load_b_raw(base_k, n_blk_list[ni], n_intra_list[ni]) for ni in range_constexpr(num_acc_n)]
-        b_sc = [load_b_scale(base_k, scale_mni_list[ni], scale_np_list[ni]) for ni in range_constexpr(num_acc_n)]
+        if const_expr(_is_int4):
+            b_sc = [load_b_scale_int4(base_k, scale_n_list[ni]) for ni in range_constexpr(num_acc_n)]
+        else:
+            b_sc = [load_b_scale(base_k, scale_mni_list[ni], scale_np_list[ni]) for ni in range_constexpr(num_acc_n)]
         gpu.barrier()
         for ni in range_constexpr(num_acc_n):
             for ku in range_constexpr(k_unroll):
@@ -389,8 +425,9 @@ def compile_gemm2_a16w4_port(
     xcd_swizzle=1,
     b_cache_mod=2,
     waves_per_eu=None,
+    w_dtype="mxfp4",
 ):
-    """a16w4 (bf16 intermediate A x mxfp4 W2) stage2 builder.
+    """a16w4/a16wi4 (bf16 intermediate A x mxfp4-or-int4 W2) stage2 builder.
 
     N_OUT = model_dim (down-proj output width). D_INTER = inter_dim (contraction).
     Output is bf16 [tokens, model_dim] via the atomic (routing-weighted) scatter.
@@ -402,6 +439,7 @@ def compile_gemm2_a16w4_port(
     per-channel utilization. ``xcd_swizzle`` also enables an optional M-group swizzle
     for per-XCD L2 locality (group size = xcd_swizzle m-blocks).
     """
+    assert w_dtype in ("mxfp4", "int4"), f"w_dtype must be 'mxfp4' or 'int4', got {w_dtype!r}"
     _K = D_INTER
     assert _K % TILE_K == 0, f"D_INTER (K) must be a multiple of {TILE_K}, got {_K}"
     assert N_OUT % TILE_N == 0, f"model_dim (N_OUT) must be a multiple of {TILE_N}, got {N_OUT}"
@@ -414,7 +452,8 @@ def compile_gemm2_a16w4_port(
     _acc_bytes = lds_acc_bytes_for(BM, TILE_N)
     _lds_bytes = _a_bytes + _acc_bytes
 
-    _name = f"gemm2_a16w4_port_ne{NE}_h{N_OUT}_i{_K}_bm{BM}_tn{TILE_N}"
+    _wd_tag = "" if w_dtype == "mxfp4" else f"_{w_dtype}"
+    _name = f"gemm2_a16w4{_wd_tag}_port_ne{NE}_h{N_OUT}_i{_K}_bm{BM}_tn{TILE_N}"
     if b_cache_mod != 2:
         _name += f"_bcm{b_cache_mod}"
     if xcd_swizzle > 0:
@@ -493,6 +532,7 @@ def compile_gemm2_a16w4_port(
                 INTER=_K,
                 NE=NE,
                 b_cache_mod=b_cache_mod,
+                w_dtype=w_dtype,
             )
 
     @flyc.jit

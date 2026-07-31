@@ -21,6 +21,7 @@ helpers are duplicated into :mod:`common` (no import back into ``mxfp_moe``).
 from kernels.moe.moe_2stage_a16wmix.gemm1 import compile_gemm1_a16w4_port, gemm1_a16w4_grid
 from kernels.moe.moe_2stage_a16wmix.gemm2 import compile_gemm2_a16w4_port, gemm2_a16w4_grid
 from kernels.moe.moe_2stage_a16wmix.host import (
+    a16wi4_scale_to_kernel_layout,
     flydsl_a16w4_gemm1,
     flydsl_a16w4_gemm2,
     pick_a16w4_config,
@@ -33,5 +34,6 @@ __all__ = [
     "gemm2_a16w4_grid",
     "flydsl_a16w4_gemm1",
     "flydsl_a16w4_gemm2",
+    "a16wi4_scale_to_kernel_layout",
     "pick_a16w4_config",
 ]
