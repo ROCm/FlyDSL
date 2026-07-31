@@ -670,49 +670,42 @@ def _compile_bf16_compacted(c_in: int, c_out: int, ct_per_block: int = 1, k_unro
         or_ = _GTensor(out_rows, dtype=T.i32, shape=(-1,))
         tkv_ = _GTensor(tile_kv, dtype=T.i32, shape=(-1,))
 
-        cg = bid % fx.Int32(const_expr(CT_GROUPS))
-        p_tile = bid // fx.Int32(const_expr(CT_GROUPS))
-        c_out_offset = fx.Index(cg) * fx.Index(const_expr(C_OUT_TILE * CT_PER_BLOCK))
+        cg = bid % fx.Int32(CT_GROUPS)
+        p_tile = bid // fx.Int32(CT_GROUPS)
+        c_out_offset = cg * fx.Int32(C_OUT_TILE * CT_PER_BLOCK)
 
-        lane = tid
-        mfma_row = lane % fx.Int32(const_expr(16))
-        mfma_col = lane % fx.Int32(const_expr(16))
-        mfma_k_lane = lane // fx.Int32(const_expr(16))
-        c_row_vec_base = mfma_k_lane * fx.Int32(const_expr(4))
-        k_lane_off = mfma_k_lane * fx.Int32(const_expr(VEC))
+        mfma_row = tid % fx.Int32(16)
+        mfma_col = mfma_row
+        mfma_k_lane = tid // fx.Int32(16)
+        c_row_vec_base = mfma_k_lane * fx.Int32(4)
+        k_lane_off = mfma_k_lane * fx.Int32(VEC)
 
-        acc_reg_ty = fx.MemRefType.get(T.f32, fx.LayoutType.get(const_expr(4), 1), fx.AddressSpace.Register)
+        acc_reg_ty = fx.MemRefType.get(T.f32, fx.LayoutType.get(4, 1), fx.AddressSpace.Register)
         acc_regs = []
         for _ctl in range_constexpr(CT_PER_BLOCK):
-            _r = fx.memref_alloca(acc_reg_ty, fx.make_layout(const_expr(4), 1))
-            fx.memref_store_vec(arith.constant_vector(0.0, T.vec(4, T.f32)), _r)
+            _r = fx.memref_alloca(acc_reg_ty, fx.make_layout(4, 1))
+            fx.memref_store_vec(fx.Vector.filled(4, 0.0, fx.Float32), _r)
             acc_regs.append(_r)
 
-        k = tkv_.load(fx.Index(p_tile))
-        w_base = fx.Index(k) * fx.Index(const_expr(N_C_OUT_TILES * W_TILE_ELEMS)) + fx.Index(cg) * fx.Index(
-            const_expr(W_TILE_ELEMS * CT_PER_BLOCK)
-        )
+        k = fx.Int32(tkv_.load(p_tile))
+        w_base = k * fx.Int32(N_C_OUT_TILES * W_TILE_ELEMS) + cg * fx.Int32(W_TILE_ELEMS * CT_PER_BLOCK)
 
-        slot = fx.Index(p_tile) * fx.Index(const_expr(BLOCK_M)) + fx.Index(mfma_row)
-        inp_row = ir_.load(slot)
-        feat_base = fx.Index(inp_row) * fx.Index(const_expr(C_IN))
+        inp_row = fx.Int32(ir_.load(p_tile * fx.Int32(BLOCK_M) + mfma_row))
+        feat_base = inp_row * fx.Int32(C_IN)
 
         for c_blk in range_constexpr(0, C_IN, K_STEP * K_UNROLL):
             a_vecs = []
             b_vecs = []
             for ku in range_constexpr(K_UNROLL):
                 c0 = c_blk + ku * K_STEP
-                a_vecs.append(
-                    feat_.vec_load((feat_base + fx.Index(const_expr(c0)) + fx.Index(k_lane_off),), const_expr(VEC))
-                )
+                a_vecs.append(feat_.vec_load((feat_base + fx.Int32(c0) + k_lane_off,), VEC))
                 for ctl in range_constexpr(CT_PER_BLOCK):
                     b_off = (
-                        fx.Index(const_expr(ctl * W_TILE_ELEMS))
-                        + fx.Index(const_expr((c0 // VEC) * C_OUT_TILE * VEC))
-                        + fx.Index(mfma_k_lane) * fx.Index(const_expr(C_OUT_TILE * VEC))
-                        + fx.Index(mfma_col) * fx.Index(const_expr(VEC))
+                        fx.Int32(ctl * W_TILE_ELEMS + (c0 // VEC) * C_OUT_TILE * VEC)
+                        + mfma_k_lane * fx.Int32(C_OUT_TILE * VEC)
+                        + mfma_col * fx.Int32(VEC)
                     )
-                    b_vecs.append(wp_.vec_load((w_base + b_off,), const_expr(VEC)))
+                    b_vecs.append(wp_.vec_load((w_base + b_off,), VEC))
             for ku in range_constexpr(K_UNROLL):
                 for ctl in range_constexpr(CT_PER_BLOCK):
                     cur_acc = fx.memref_load_vec(acc_regs[ctl])
@@ -721,7 +714,12 @@ def _compile_bf16_compacted(c_in: int, c_out: int, ct_per_block: int = 1, k_unro
                     )
                     fx.memref_store_vec(new_acc, acc_regs[ctl])
 
-        neg1 = fx.Int32(arith.constant(-1, type=T.i32))
+        # The epilogue stays on fx.Index / vector.extract on purpose: the fx-operator
+        # form is op-count-identical but measured 185 us vs 170 us at C_OUT=512
+        # (median-of-7, ~9% slower), an instruction-scheduling effect around the
+        # predicated atomics. The hot loop above took the migration with no cost.
+        neg1 = fx.Int32(-1)
+        z0 = fx.Int32(0)
         for ctl in range_constexpr(CT_PER_BLOCK):
             final_acc = fx.memref_load_vec(acc_regs[ctl])
             ctl_col = fx.Index(const_expr(ctl * C_OUT_TILE)) + fx.Index(mfma_col)
@@ -736,8 +734,7 @@ def _compile_bf16_compacted(c_in: int, c_out: int, ct_per_block: int = 1, k_unro
                 with ir.InsertionPoint(store_if.then_block):
                     val = vector.extract(final_acc, static_position=[const_expr(ri)], dynamic_position=[])
                     off_elems = fx.Index(o_row) * fx.Index(const_expr(C_OUT)) + c_out_offset + ctl_col
-                    off_b = fx.Int32(arith.index_cast(T.i32, off_elems)) * fx.Int32(const_expr(4))
-                    z0 = fx.Int32(arith.constant(0, type=T.i32))
+                    off_b = fx.Int32(arith.index_cast(T.i32, off_elems)) * fx.Int32(4)
                     _atomic_add(val, out_.rsrc, off_b, z0, z0)
                     scf.YieldOp([])
 
