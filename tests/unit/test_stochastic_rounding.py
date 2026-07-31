@@ -3,13 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Tests for fx.rocdl stochastic rounding + philox RNG.
+"""Tests for target-neutral RNG and stochastic BF16 conversion.
 
 The rounding math is checked exactly in pure Python (L0): over the full 16-bit
 random range the number of round-ups equals the discarded low 16 bits, which is
-what makes stochastic rounding unbiased. The device path and the RNG are checked
-on GPU (L2): outputs land on the two nearest bf16 values with the right up
-probability, and the empirical mean matches the input.
+what makes stochastic rounding unbiased. Device tests check the public paths,
+special values, Philox reference output, reproducibility, and uniformity.
 """
 
 from __future__ import annotations
@@ -26,9 +25,25 @@ except ImportError:
     torch = None
 
 
+_PHILOX_ZERO_VECTOR = (0x6627E8D5, 0xE169C58D, 0xBC57AC4C, 0x9B00DBD8)
+
+
 @pytest.mark.l0_backend_agnostic
-@pytest.mark.parametrize("x", [1.0, 1.001953125, 3.14159, 1e-3, float("inf"), float("-inf")])
-def test_stochastic_round_bf16_unbiased(x):
+def test_philox_4x32_reference_vector():
+    words = fx.random.philox_4x32(fx.Uint32(0), fx.Uint32(0))
+    assert tuple(int(word.value) for word in words) == _PHILOX_ZERO_VECTOR
+    repeated = fx.random.philox_4x32(fx.Uint32(0), fx.Uint32(0))
+    different_seed = fx.random.philox_4x32(fx.Uint32(0), fx.Uint32(1))
+    assert tuple(int(word.value) for word in repeated) == _PHILOX_ZERO_VECTOR
+    assert tuple(int(word.value) for word in different_seed) != _PHILOX_ZERO_VECTOR
+
+
+@pytest.mark.l0_backend_agnostic
+@pytest.mark.parametrize(
+    "x",
+    [1.0, 1.001953125, 3.14159, 1e-3, -1.001953125, -3.14159, float("inf"), float("-inf")],
+)
+def test_cvt_f32_to_bf16_sr_unbiased(x):
     u = int(np.array([x], dtype=np.float32).view(np.uint32)[0])
     low16 = u & 0xFFFF
     base = u >> 16
@@ -45,7 +60,7 @@ def test_stochastic_round_bf16_unbiased(x):
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
 @pytest.mark.parametrize("frac", [0.0, 0.5, 0.9])
-def test_stochastic_round_bf16_device(frac):
+def test_cvt_f32_to_bf16_sr_device(frac):
     BLOCK = 256
     NBLOCKS = 4096
     P = BLOCK * NBLOCKS
@@ -53,8 +68,8 @@ def test_stochastic_round_bf16_device(frac):
     @flyc.kernel(known_block_size=[BLOCK, 1, 1])
     def kernel(Out: fx.Tensor, x: fx.Float32, seed: fx.Int32):
         g = fx.block_idx.x * BLOCK + fx.thread_idx.x
-        r = fx.rocdl.philox_4x32(fx.Uint32(g), fx.Uint32(seed))[0]
-        fx.memref_store(fx.rocdl.stochastic_round_bf16(x, r), Out, g)
+        r = fx.Uint32(g) * fx.Uint32(1664525) + fx.Uint32(seed)
+        fx.memref_store(fx.random.cvt_f32_to_bf16_sr(x, r), Out, g)
 
     @flyc.jit
     def launch(Out: fx.Tensor, x: fx.Float32, seed: fx.Int32, stream: fx.Stream = fx.Stream(None)):
@@ -78,6 +93,61 @@ def test_stochastic_round_bf16_device(frac):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
+def test_cvt_f32_to_bf16_sr_special_values_device():
+    BLOCK = 1
+
+    @flyc.kernel(known_block_size=[BLOCK, 1, 1])
+    def kernel(Out: fx.Tensor, x: fx.Float32, seed: fx.Int32):
+        g = fx.block_idx.x * BLOCK + fx.thread_idx.x
+        r = fx.Uint32(g) * fx.Uint32(1664525) + fx.Uint32(seed)
+        fx.memref_store(fx.random.cvt_f32_to_bf16_sr(x, r), Out, g)
+
+    @flyc.jit
+    def launch(Out: fx.Tensor, x: fx.Float32, seed: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+        kernel(Out, x, seed).launch(grid=(1, 1, 1), block=(BLOCK, 1, 1), stream=stream)
+
+    def run(x, seed):
+        out = torch.empty(BLOCK, dtype=torch.bfloat16, device="cuda")
+        launch(out, x, seed, stream=torch.cuda.Stream())
+        torch.cuda.synchronize()
+        return out
+
+    for x in (float("inf"), float("-inf"), float("nan")):
+        first = run(x, 1)
+        second = run(x, 2)
+        assert torch.equal(first.view(torch.int16), second.view(torch.int16))
+        if np.isnan(x):
+            assert torch.isnan(first).all()
+        else:
+            assert torch.isinf(first).all()
+            assert (first < 0).all().item() == (x < 0)
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
+def test_philox_4x32_reference_vector_device():
+    @flyc.kernel(known_block_size=[1, 1, 1])
+    def kernel(Out: fx.Tensor):
+        words = fx.random.philox_4x32(fx.Uint32(0), fx.Uint32(0))
+        fx.memref_store(fx.Int32(words[0]), Out, 0)
+        fx.memref_store(fx.Int32(words[1]), Out, 1)
+        fx.memref_store(fx.Int32(words[2]), Out, 2)
+        fx.memref_store(fx.Int32(words[3]), Out, 3)
+
+    @flyc.jit
+    def launch(Out: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
+        kernel(Out).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream)
+
+    out = torch.empty(4, dtype=torch.int32, device="cuda")
+    launch(out, stream=torch.cuda.Stream())
+    torch.cuda.synchronize()
+    assert tuple(int(value) & 0xFFFFFFFF for value in out.cpu().tolist()) == _PHILOX_ZERO_VECTOR
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
 def test_philox_4x32_uniform():
     BLOCK = 256
     NBLOCKS = 1024
@@ -86,7 +156,7 @@ def test_philox_4x32_uniform():
     @flyc.kernel(known_block_size=[BLOCK, 1, 1])
     def kernel(Out: fx.Tensor, seed: fx.Int32):
         g = fx.block_idx.x * BLOCK + fx.thread_idx.x
-        fx.memref_store(fx.Int32(fx.rocdl.philox_4x32(fx.Uint32(g), fx.Uint32(seed))[0]), Out, g)
+        fx.memref_store(fx.Int32(fx.random.philox_4x32(fx.Uint32(g), fx.Uint32(seed))[0]), Out, g)
 
     @flyc.jit
     def launch(Out: fx.Tensor, seed: fx.Int32, stream: fx.Stream = fx.Stream(None)):

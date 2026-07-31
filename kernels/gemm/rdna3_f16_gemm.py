@@ -341,8 +341,8 @@ def create_wmma_gemm_module(
                         # Stochastic rounding: perturb the discarded bits with a
                         # per-element Philox draw keyed by the element index, so
                         # the f32 -> bf16 store is unbiased in expectation.
-                        rbits = fx.rocdl.philox_4x32(fx.Uint32(elem_off), fx.Uint32(sr_seed))[0]
-                        val = fx.rocdl.stochastic_round_bf16(val, rbits)
+                        rbits = fx.random.philox_4x32(fx.Uint32(elem_off), fx.Uint32(sr_seed))[0]
+                        val = fx.random.cvt_f32_to_bf16_sr(val, rbits)
                     elif const_expr(out_dtype == "bf16"):
                         val = val.to(fx.BFloat16)
                     elif const_expr(out_dtype == "f16"):
