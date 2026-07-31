@@ -56,7 +56,17 @@ def _get_compiled_gemm1_a16w4(
 
 @functools.cache
 def _get_compiled_gemm2_a16w4(
-    BM, NE, N_OUT, D_INTER, TILE_N, TILE_K, b_cache_mod=2, xcd_swizzle=1, waves_per_eu=None, w_dtype="mxfp4"
+    BM,
+    NE,
+    N_OUT,
+    D_INTER,
+    TILE_N,
+    TILE_K,
+    b_cache_mod=2,
+    xcd_swizzle=1,
+    waves_per_eu=None,
+    w_dtype="mxfp4",
+    persist=False,
 ):
     return compile_gemm2_a16w4_port(
         BM=BM,
@@ -69,6 +79,7 @@ def _get_compiled_gemm2_a16w4(
         xcd_swizzle=xcd_swizzle,
         waves_per_eu=waves_per_eu,
         w_dtype=w_dtype,
+        persist=persist,
     )
 
 
@@ -237,6 +248,7 @@ def flydsl_a16w4_gemm2(
     b_nt=None,
     xcd_swizzle=1,
     w_dtype="mxfp4",
+    persist=None,
     stream=None,
 ):
     """a16w4/a16wi4 fused stage2 (down-proj). Consumes the bf16 [sorted_size, D_INTER]
@@ -274,11 +286,27 @@ def flydsl_a16w4_gemm2(
     # (0=cached, 2=nt).
     _m = int(M_logical)
     _b_cache_mod = (0 if (_m <= 16 or _m >= 2048) else 2) if b_nt is None else b_nt
-    launch = _get_compiled_gemm2_a16w4(
-        BM, NE, D_HIDDEN, D_INTER, TILE_N, TILE_K, _b_cache_mod, xcd_swizzle, waves_per_eu, w_dtype
-    )
     max_m_blocks = int(sorted_expert_ids.numel())
-    grid = gemm2_a16w4_grid(BM, N_OUT=D_HIDDEN, TILE_N=TILE_N, max_m_blocks=max_m_blocks)
+    # Persistent CU-limited grid: cap the launch to ~NUM_CU CTAs and loop over the
+    # real work-tiles per CTA (round-robin, XCD-swizzled, one visit per real tile),
+    # instead of one CTA per padded (m x n) tile.
+    #
+    # Default is OFF (persist=None -> False). MEASURED (gfx950, E896, this gemm2):
+    # capping the grid does NOT close the perf gap and is a small (~1-7%) regression
+    # -- the padded launch's empty CTAs early-return for ~0 cost (a plain launch of
+    # only the real tiles measures the same latency), so launch over-count is NOT the
+    # bottleneck. The E896 cost is real-tile compute: with topk*tokens active slots
+    # spread over hundreds of distinct experts, the sort produces ~1 padded m-block
+    # PER EXPERT (234 blocks for 256 slots at tok16), each computing a full
+    # BM x TILE_N x K tile for ~1 token. That per-expert-block padding, plus the
+    # atomic epilogue, is the gap vs aiter's tile_k=128 REDUCE-epilogue kernel; the
+    # persistent grid cannot address it. Kept as an opt-in (persist=True) building
+    # block; byte-identical when off. Shared by a16w4 (mxfp4) and a16wi4 (int4).
+    _persist = False if persist is None else bool(persist)
+    launch = _get_compiled_gemm2_a16w4(
+        BM, NE, D_HIDDEN, D_INTER, TILE_N, TILE_K, _b_cache_mod, xcd_swizzle, waves_per_eu, w_dtype, _persist
+    )
+    grid = gemm2_a16w4_grid(BM, N_OUT=D_HIDDEN, TILE_N=TILE_N, max_m_blocks=max_m_blocks, persist=_persist)
     _run_compiled(
         launch,
         inter_sorted_bf16.data_ptr(),
