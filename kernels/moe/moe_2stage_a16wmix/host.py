@@ -59,6 +59,33 @@ def _get_compiled_gemm2_a16w4(
     )
 
 
+def _default_tile_n(N, *, w_dtype="mxfp4"):
+    """Adaptive N-tile default for the a16w4/a16wi4 stages.
+
+    mxfp4 (a16w4): the fat-wave tile_n=256 geometry is the tuned aiter tile and
+    wins on the large Kimi-K3 shapes; keep 256 when N % 256 == 0, else 128.
+
+    int4 (a16wi4): this path replaced the legacy ``moe_gemm_2stage`` int4 kernel,
+    which uses tile_n=128. The inherited a16w4 tile_n=256 fat-wave geometry is a
+    consistent loss for int4: measured (median-of-3, gfx950) tile_n=128 beats 256
+    on BOTH stages across every int4 MoE shape/token tested (model_dim/inter in
+    {256,512,1024,2048}, tokens 16..1024) -- e.g. gemm1 inter=1024 tok=256 is 15.8
+    vs 30.7 us, gemm2 model_dim=2048 similar. The int4 (bf16-A) path is bandwidth-
+    and grid-fill bound, so the wide 256-col tile just halves the number of N-tiles
+    per expert (fewer waves to hide latency) with no MFMA-density payoff, unlike the
+    fp4 mxfp4 path where 256 is the tuned aiter tile. So always prefer 128 for int4
+    (falling back only when N is not a multiple of 128), leaving mxfp4 at its tuned
+    256. This closes most of the gap vs the legacy int4 kernel; the residual is a
+    BM/tile_m effect (the a16wi4 kernel prefers BM=16), controlled by the caller.
+    """
+    if w_dtype == "int4":
+        if N % 128 == 0:
+            return 128
+        return 64 if N % 64 == 0 else 128
+    # mxfp4 (a16w4): keep the tuned fat tile.
+    return 256 if N % 256 == 0 else 128
+
+
 def a16wi4_scale_to_kernel_layout(scale_ng):
     """Re-layout a logical groupwise int4 scale ``[E, N, num_groups]`` into the
     ``(E, N, num_groups//2, 2)`` bf16-pair layout the a16wi4 kernel expects.
@@ -141,7 +168,7 @@ def flydsl_a16w4_gemm1(
     b_cache_mod = (2 if (16 <= _m <= 1024) else 0) if b_nt is None else b_nt
     TILE_N = tile_n
     if TILE_N is None:
-        TILE_N = 256 if D_INTER % 256 == 0 else 128
+        TILE_N = _default_tile_n(D_INTER, w_dtype=w_dtype)
     if D_HIDDEN % TILE_K != 0:
         raise NotImplementedError(f"a16w4 gemm1 requires D_HIDDEN (K) % {TILE_K} == 0, got H={D_HIDDEN}")
     if (2 * D_INTER) % 256 != 0:
@@ -210,6 +237,11 @@ def flydsl_a16w4_gemm2(
         raise NotImplementedError(f"a16w4 gemm2 only supports k_batch=1, got {k_batch}")
     BM = tile_m
     TILE_N = tile_n
+    if TILE_N is None:
+        # Match gemm1's adaptive default: largest supported N tile dividing the
+        # model_dim (down-proj output N). int4 prefers the legacy tile_n=128
+        # geometry on the small MoE shapes (see gemm2 tile-config note below).
+        TILE_N = _default_tile_n(D_HIDDEN, w_dtype=w_dtype)
     TILE_K = tile_k
     if D_INTER % TILE_K != 0:
         raise NotImplementedError(f"a16w4 gemm2 requires D_INTER (K) % {TILE_K} == 0, got D_INTER={D_INTER}")
