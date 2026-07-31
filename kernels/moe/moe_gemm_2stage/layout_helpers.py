@@ -566,6 +566,31 @@ def atomic_add_bf16(ptr_base, reg_vec):
         )
 
 
+def _buffer_atomic_pk(rsrc, elem_idx, reg_vec, elem_bytes):
+    """Pairwise buffer atomic-add of an f16/bf16 vector into out[elem_idx..].
+
+    Uses a buffer resource + byte offset (raw.ptr.buffer.atomic.fadd), so OOB
+    lanes are dropped by hardware clamping (matches the plain-store path).
+    """
+    from kernels.common.mem_ops import buffer_atomic_add
+
+    _z = fx.Int32(0)
+    for i in range_constexpr(reg_vec.numel // 2):
+        pair = Vec.from_elements([reg_vec[i * 2], reg_vec[i * 2 + 1]], reg_vec.dtype)
+        byte_off = (elem_idx + fx.Int32(i * 2)) * fx.Int32(elem_bytes)
+        buffer_atomic_add(pair, rsrc, byte_off, _z, _z)
+
+
+def _buffer_atomic_f32(rsrc, elem_idx, reg_vec):
+    """Scalar buffer atomic-add of an f32 vector into out[elem_idx..]."""
+    from kernels.common.mem_ops import buffer_atomic_add
+
+    _z = fx.Int32(0)
+    for i in range_constexpr(reg_vec.numel):
+        byte_off = (elem_idx + fx.Int32(i)) * fx.Int32(4)
+        buffer_atomic_add(reg_vec[i], rsrc, byte_off, _z, _z)
+
+
 def make_1x4_tiled_mma(weight_dtype):
     """B-first 1x4 tiled_mma: weight is the MFMA A-operand, activation the B-operand.
 
@@ -602,6 +627,23 @@ def make_gateup_weight_view(p_weight, expert_id, contiguous_n, N, K):
                 ((element_num, 16 * K), (1, 16 * element_num)),
             ),
             group_layout_silu,
+        ),
+    )
+
+
+def make_weight_view(p_weight, expert_id, N, K):
+    """Plain preshuffle weight view [(16, N//16), (element_num, K//element_num)] for one expert.
+
+    The stage2 analog of ``make_gateup_weight_view`` without the gate/up silu
+    grouping: presents a logical (N, K) tensor for ``expert_id`` from the
+    shuffle_weight-ordered weight iterator ``p_weight``. N = model_dim, K = inter_dim.
+    """
+    element_num = 16 // (p_weight.dtype.width // 8)
+    return fx.make_view(
+        p_weight + fx.Int64(expert_id * N * K),
+        fx.make_layout(
+            ((16, N // 16), (element_num, K // element_num)),
+            ((element_num, 16 * K), (1, 16 * element_num)),
         ),
     )
 
@@ -698,9 +740,43 @@ class _TensorWithIndex:
             else tiled_copy.get_slice(tid).partition_D(self.fake_tensor)
         )
         offset_thread = fx.Int32(fx.ptrtoint(fx.get_iter(self.fake_tensor_thr)))
+        self.offset_thread = offset_thread
         self.offset_thread_k = offset_thread // tile_m
+        # Row-guard fake: a tall column-major tile whose row count exceeds any
+        # tiled_copy grid, so partitioning does NOT wrap OOB grid rows into the
+        # column dim. Lets the atomic epilogue detect grid slots whose row is
+        # outside [0, tile_m) (the plain-store path ignores this via buffer OOB).
+        self._guard_rows = 256
+        guard_fake = fx.make_view(ptr, fx.make_layout((self._guard_rows, tile_k), (1, self._guard_rows)))
+        guard_thr = (
+            tiled_copy.get_slice(tid).partition_S(guard_fake)
+            if is_read_from_mem
+            else tiled_copy.get_slice(tid).partition_D(guard_fake)
+        )
+        self.guard_offset = fx.Int32(fx.ptrtoint(fx.get_iter(guard_thr)))
+        self.guard_layout = fx.get_layout(guard_thr)
 
-    def copy(self, copy_atom, k_idx, frag):
+    def copy(
+        self,
+        copy_atom,
+        k_idx,
+        frag,
+        atomic=None,
+        atomic_rsrc=None,
+        out_bytes=None,
+        row_stride=None,
+        row_limit=None,
+    ):
+        """Gather/scatter per-thread tiles.
+
+        Plain gather/store uses the buffer-view addressing (``is_read_from_mem``).
+        Atomic scatter (``atomic`` in {"pk","f32"}, requires ``is_read_from_mem``
+        False) issues a buffer atomic-add into ``atomic_rsrc`` (a buffer resource
+        over the rank-2 ``[rows, row_stride]`` output) at element index
+        ``tok*row_stride + k_idx*tile_k + channel_offset``. ``tok`` is clamped to
+        ``[0, row_limit)`` for sentinel rows; grid slots outside the real tile are
+        pushed OOB (dropped by the buffer's hardware clamp).
+        """
         layout = fx.get_layout(self.fake_tensor_thr)
         shape = fx.get_shape(self.fake_tensor_thr)
         rep_m = fx.size(shape[1]).to_py_value()
@@ -712,6 +788,39 @@ class _TensorWithIndex:
         block_cord = [None] * (rank - 1) + [k_idx]
         tensor_block = self.tensor_blocks_in_k[None, (*block_cord,)]
         for m in range_constexpr(rep_m):
+            if const_expr(atomic is not None):
+                tok = self.index_frag[0, m] & 0xFFFFFF
+                if const_expr(row_limit is not None):
+                    tok = (tok < row_limit).select(tok, fx.Int32(0))
+                row_base_i32 = tok * fx.Int32(row_stride) + fx.Int32(k_idx) * fx.Int32(self.tile_k)
+                for k in range_constexpr(rep_k):
+                    offset_block = fx.crd2idx((0, m, k), layout).to_py_value()
+                    offset_block_k = offset_block // self.tile_m
+                    chan_off = offset_block_k + self.offset_thread_k
+                    # elem_idx matches the plain-store target element (tok row + block
+                    # base + per-thread channel). Threads whose tiled_copy grid slot
+                    # falls outside the real (tile_m, tile_k) block are dropped by the
+                    # buffer resource's hardware OOB clamp (like the plain-store path),
+                    # by pushing their byte offset past the buffer size.
+                    guard_full = fx.crd2idx((0, m, k), self.guard_layout).to_py_value() + self.guard_offset
+                    g_row = guard_full % fx.Int32(self._guard_rows)
+                    g_col = guard_full // fx.Int32(self._guard_rows)
+                    valid = (g_row < fx.Int32(self.tile_m)) & (g_col < fx.Int32(self.tile_k))
+                    reg_vec = frag[None, m, k].load()
+                    # Out-of-tile grid slots add 0 to a valid location (out[0]) so no
+                    # OOB access and no wrong contribution. Valid atoms cover
+                    # ``reg_vec.numel`` contiguous channels aligned to that width, so
+                    # the packed atomic pairs stay naturally aligned.
+                    _va = reg_vec.numel
+                    aligned = (row_base_i32 + chan_off) & fx.Int32(~(_va - 1))
+                    elem_idx = valid.select(aligned, fx.Int32(0))
+                    zero = Vec.from_elements([reg_vec.dtype(0)] * reg_vec.numel, reg_vec.dtype)
+                    reg_vec = valid.select(reg_vec, zero)
+                    if const_expr(atomic == "f32"):
+                        _buffer_atomic_f32(atomic_rsrc, elem_idx, reg_vec)
+                    else:
+                        _buffer_atomic_pk(atomic_rsrc, elem_idx, reg_vec, out_bytes)
+                continue
             if const_expr(rank == 2):
                 tensor_sub_block = tensor_block[None, self.index_frag[0, m] & 0xFFFFFF]
             else:
@@ -736,4 +845,3 @@ class _TensorWithIndex:
 
 
 _TensorWithIndex.copy = ASTRewriter.transform(_TensorWithIndex.copy)
-
