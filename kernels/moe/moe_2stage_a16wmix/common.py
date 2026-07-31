@@ -123,6 +123,23 @@ def _situ_mul_batch(gs, us, situ_beta=1.0, situ_linear_beta=1.0, clamp_limit=7.0
     return out
 
 
+def _cvt_pk_bf16_f32_se(src_a_f32, src_b_f32):
+    """Side-effecting v_cvt_pk_bf16_f32 (pack 2 f32 -> 2xbf16 in i32).
+
+    The stateless ``rocdl.cvt_pk_bf16_f32`` (has_side_effects=False) miscompiles in
+    the a16wi4 gemm1 hot loop (garbage output) — the 4 identical-shaped packed
+    converts per K-step get CSE-merged / reordered across K iterations. Marking the
+    inline asm side-effecting pins each call to its K-step.
+    """
+    return llvm.inline_asm(
+        ir.IntegerType.get_signless(32),
+        [_raw(src_a_f32), _raw(src_b_f32)],
+        "v_cvt_pk_bf16_f32 $0, $1, $2",
+        "=v,v,v",
+        has_side_effects=True,
+    )
+
+
 def _int4_nibble_to_bf16x8(raw_i32, scale_f32):
     """int4 (signed) -> bf16 upconvert for one MFMA K32 step (8 nibbles -> v8bf16).
 
@@ -134,13 +151,16 @@ def _int4_nibble_to_bf16x8(raw_i32, scale_f32):
     (``eff = scale * 16``). ``scale_f32`` is the per-group dequant scale.
     """
     eff = fx.Float32(scale_f32 * fx.Float32(16.0))
-    # Shift each nibble n (bits [4n:4n+3]) into the low nibble; v_cvt_off_f32_i4 reads bits[3:0].
-    bf16s = []
-    for n in range_constexpr(8):
-        shifted = _raw(fx.Int32(raw_i32).shrui(fx.Int32(4 * n))) if n > 0 else _raw(raw_i32)
-        v = fx.Float32(rocdl.cvt_off_f32_i4(shifted)) * eff
-        bf16s.append(v.to(fx.BFloat16))
-    return fx.Vector.from_elements(bf16s, fx.BFloat16)  # v8bf16
+    raw_even = fx.Int32(raw_i32)
+    raw_odd = raw_even.shrui(fx.Int32(4))
+    # byte_sel loads (1 shift total instead of 7); side-effecting pk-convert.
+    i32s = []
+    for j in range_constexpr(4):
+        f_lo = fx.Float32(rocdl.cvt_off_f32_i4(_raw(raw_even), byte_sel=j)) * eff
+        f_hi = fx.Float32(rocdl.cvt_off_f32_i4(_raw(raw_odd), byte_sel=j)) * eff
+        i32s.append(fx.Int32(_cvt_pk_bf16_f32_se(_raw(f_lo), _raw(f_hi))))
+    v4i32 = fx.Vector.from_elements([_raw(x) for x in i32s], fx.Int32)
+    return v4i32.bitcast(fx.BFloat16)  # v8bf16
 
 
 def kmchunks_for(BM):
