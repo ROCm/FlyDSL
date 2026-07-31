@@ -259,6 +259,12 @@ def build_lut_dense(coords: torch.Tensor, block_m: int = 16, spatial_shape=None,
     return inp_row_lut, mask, active_kv_ids, active_count, num_tiles, N
 
 
+# NOTE: this kernel stays on raw arith/vector ops. Its keys are KEY_T (i32 or i64
+# depending on the grid extent), and GTensor.load returns a raw value whose type
+# follows that dtype rather than an fx wrapper, so operator-based compares and
+# fx.Int32 offsets do not apply here -- forcing them changes the buffer_load
+# offset path and fails to compile. The map kernels above, whose tensors are all
+# i32, use the fx operator surface.
 @functools.lru_cache(maxsize=16)
 def _compile_zdelta_kernel(block_m: int, kernel_size: int, n_bits: int, key32: bool = False):
     BLOCK_M = block_m
