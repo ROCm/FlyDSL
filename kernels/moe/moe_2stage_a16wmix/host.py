@@ -331,24 +331,38 @@ def flydsl_a16w4_gemm2(
 
 
 # =============================================================================
-# aiter tuned-CSV config loader for a16w4. Reads aiter's kimik3_fp4_tuned_fmoe.csv
-# and decodes each ``flydsl_moe{1,2}_abf16_wfp4`` kernelName into a tile-config dict.
-# Only the tile GEOMETRY is used (aiter's gemm bodies differ, so its latency columns
-# are not comparable).
+# aiter tuned-CSV config loader for bf16-A MoE. Reads aiter's tuned fmoe CSVs
+# (kimik3_fp4 for a16w4, kimik2_i4 for a16wi4) and decodes each
+# ``flydsl_moe{1,2}_abf16_w{fp4,int4,bf16}`` kernelName into a tile-config dict.
+# Only the tile GEOMETRY is used (aiter's gemm bodies differ, so its latency
+# columns are not comparable).
 # =============================================================================
 
-# kernelName tokens:  flydsl_moe{stage}_abf16_wfp4_bf16_t{m}x{n}x{k}
+# kernelName tokens:  flydsl_moe{stage}_abf16_w{fmt}_bf16_t{m}x{n}x{k}
 #   [_w{N}]=waves_per_eu  [_xcd{N}]=xcd_swizzle  [_bnt{N}]=b_nt  [_kw{N}]=k_wave
-#   (no _sk => k_batch=1). Extra epilogue tokens are ignored for tile-config purposes.
+#   [_kb{N}]=k_batch (aiter grid split-K; we map it onto k_wave, see
+#   _kwave_from_kbatch). Extra epilogue tokens are ignored for tile-config purposes.
 _A16W4_TILE_RE = re.compile(r"_t(\d+)x(\d+)x(\d+)")
 _A16W4_W_RE = re.compile(r"_w(\d+)")
 _A16W4_XCD_RE = re.compile(r"_xcd(\d+)")
 _A16W4_BNT_RE = re.compile(r"_bnt(\d+)")
 _A16W4_KW_RE = re.compile(r"_kw(\d+)")
+_A16W4_KB_RE = re.compile(r"_kb(\d+)")
+
+
+def _kwave_from_kbatch(k_batch):
+    """Map aiter's grid split-K (``_kb{N}``) onto our intra-block slice-K (k_wave).
+
+    We have no grid split-K, so approximate aiter's split-K with k_wave in {2,4}:
+    ``kb==2 -> kw2``, ``kb>2 -> kw4`` (kw only supports {1,2,4}). ``kb<=1 -> kw1``.
+    """
+    if k_batch <= 1:
+        return 1
+    return 2 if k_batch == 2 else 4
 
 
 def _decode_a16w4_kname(kname):
-    """Decode an ``abf16_wfp4`` kernelName into a tile-config dict, or None."""
+    """Decode an ``abf16_w{fp4,int4,bf16}`` kernelName into a tile-config dict, or None."""
     m = _A16W4_TILE_RE.search(kname)
     if m is None:
         return None
@@ -357,6 +371,12 @@ def _decode_a16w4_kname(kname):
     xcd = _A16W4_XCD_RE.search(kname)
     bnt = _A16W4_BNT_RE.search(kname)
     kw = _A16W4_KW_RE.search(kname)
+    kb = _A16W4_KB_RE.search(kname)
+    k_batch = int(kb.group(1)) if kb else 1
+    # An explicit _kw token wins; otherwise derive k_wave from aiter's split-K
+    # (_kb). int4 rows are tuned with grid split-K (kb2/4/7/14), which we have no
+    # equivalent of, so we replace it with the intra-block slice-K lever.
+    k_wave = int(kw.group(1)) if kw else _kwave_from_kbatch(k_batch)
     return {
         "tile_m": tile_m,
         "tile_n": tile_n,
@@ -366,8 +386,8 @@ def _decode_a16w4_kname(kname):
         "b_nt": int(bnt.group(1)) if bnt else 2,
         "waves_per_eu": int(w.group(1)) if w else None,
         "xcd_swizzle": int(xcd.group(1)) if xcd else 0,
-        "k_wave": int(kw.group(1)) if kw else 1,
-        "k_batch": 1,
+        "k_wave": k_wave,
+        "k_batch": k_batch,
     }
 
 
@@ -389,7 +409,9 @@ def _load_a16w4_csv(csv_path):
                 continue
             for stage, col in ((1, "kernelName1"), (2, "kernelName2")):
                 kname = row.get(col, "")
-                if "abf16_wfp4" not in kname:
+                # bf16-A rows across all weight formats (fp4 / int4 / bf16). Only
+                # the tile GEOMETRY is reused; aiter's gemm bodies differ.
+                if not any(w in kname for w in ("abf16_wfp4", "abf16_wint4", "abf16_wbf16")):
                     continue
                 cfg = _decode_a16w4_kname(kname)
                 if cfg is not None:
