@@ -236,7 +236,16 @@ def _gemm1_body_a16w4(
         x_row_base_div4.append(t_i32 * fx.Int32(c_k_div4))
 
     # A global->LDS async DMA via BufferCopyLDS128b (16 B / 8 bf16 per copy).
-    x_buf = _global_i32_buffer_view(arg_x, fx.Int64(0xFFFFFFFF))
+    # Size the buffer resource to the REAL activation allocation [n_tokens, K] bf16
+    # (row bytes = c_k_div4*4 == K*2). moe_sorting padding rows carry a sentinel
+    # token id >= n_tokens (decoded above into x_row_base_div4 = t_i32*c_k_div4), so
+    # their A-load byte offset lands PAST the [n_tokens, K] buffer. With num_records
+    # sized to the true allocation the HW OOB mask clamps those padding-row loads to 0
+    # (harmless: the epilogue store is already guarded by token < i32_ntok). A ~4GB
+    # (0xFFFFFFFF) resource would instead let the DMA read unmapped memory and fault
+    # at high token counts (allocation-dependent). Matches aiter. Resource-size only;
+    # no hot-loop change.
+    x_buf = _global_i32_buffer_view(arg_x, fx.Int64(i32_ntok) * fx.Int64(c_k_div4) * fx.Int64(4))
     x_dma_tiles4 = fx.logical_divide(x_buf, fx.make_layout(4, 1))
     x_dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), fx.Int32)
 
