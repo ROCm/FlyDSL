@@ -25,6 +25,7 @@ from .gemm2 import (
     kStages,
 )
 
+
 @flyc.jit
 def _fp8_scale_for_leader(is_leader, local_max):
     e8m0 = fx.Int32(0)
