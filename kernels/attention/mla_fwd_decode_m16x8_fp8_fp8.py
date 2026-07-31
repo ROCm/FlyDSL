@@ -736,7 +736,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         """Butterfly max reduce across MFMA column groups (strides 32, 16)."""
         w = _f32(val)
         for sh in [32, 16]:
-            w = (w).maximumf(_shfl_xor_f32(w, sh))
+            w = fx.maxnumf(w, _shfl_xor_f32(w, sh))
         return w
 
     def _warp_reduce_add_16(val):
@@ -896,7 +896,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         # Local max
         local_max = scaled[0]
         for i in range_constexpr(1, P_VALS_PER_THR):
-            local_max = (local_max).maximumf(scaled[i])
+            local_max = fx.maxnumf(local_max, scaled[i])
 
         # Warp reduce max (within 16-lane groups)
         local_max = _warp_reduce_max_16(local_max)
@@ -906,18 +906,18 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             new_row_max = local_max
             rescale = c_one_f32
         else:
-            new_row_max = (local_max).maximumf(row_max_old)
+            new_row_max = fx.maxnumf(local_max, row_max_old)
             # rescale = exp2((old_max - new_max) * log2e)
-            diff = (row_max_old) - (new_row_max)
-            rescale = _fast_exp2((diff) * (c_log2e))
+            diff = row_max_old - new_row_max
+            rescale = _fast_exp2(diff * c_log2e)
 
         # exp(p - max) for each value, and sum
         p_exp_vals = [None] * P_VALS_PER_THR
         local_sum = c_zero_f32
         for i in range_constexpr(P_VALS_PER_THR):
-            exp_arg = ((scaled[i]) - (new_row_max)) * (c_log2e)
+            exp_arg = (scaled[i] - new_row_max) * c_log2e
             p_exp_vals[i] = _fast_exp2(exp_arg)
-            local_sum = (local_sum) + (p_exp_vals[i])
+            local_sum = local_sum + p_exp_vals[i]
 
         # Warp reduce sum
         local_sum = _warp_reduce_add_16(local_sum)
@@ -926,7 +926,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         if const_expr(is_first_iter):
             row_sum_e_new = local_sum
         else:
-            row_sum_e_new = (_f32(rescale) * row_sum_e_old) + (local_sum)
+            row_sum_e_new = _f32(rescale) * row_sum_e_old + local_sum
 
         return p_exp_vals, new_row_max, row_sum_e_new, rescale
 

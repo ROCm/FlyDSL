@@ -333,14 +333,14 @@ def _finish_q_fragments(
 
     q_frags = []
     gpu.barrier()
-    query_scale_lane = fx.ptr_load(softmax_base + (lane16id), result_type=fx.Vector.make_type(1, fx.Float32))[
+    query_scale_lane = fx.ptr_load(softmax_base + lane16id, result_type=fx.Vector.make_type(1, fx.Float32))[
         0
     ].ir_value()
     for qkhe in range_constexpr(qkhe_loop):
         for qkr in range_constexpr(2):
             lds_rd = lane16id * fx.Int32(head_size // 8) + fx.Int32(qkhe * 8) + rowid * fx.Int32(2) + fx.Int32(qkr)
             q_v1 = fx.ptr_load(
-                fx.recast_iter(fx.Int64, logits_base) + (lds_rd), result_type=fx.Vector.make_type(1, fx.Int64)
+                fx.recast_iter(fx.Int64, logits_base) + lds_rd, result_type=fx.Vector.make_type(1, fx.Int64)
             )
             q_frags.append(q_v1[0])
     return q_frags, query_scale_lane
@@ -541,7 +541,7 @@ def _make_pa_phase_helpers(
                 for td in range_constexpr(TLOOP):
                     scale_row_base = kv_tok_thread_base + fx.Int32(td * MFMA_N)
                     k_scale_vecs.append(
-                        fx.ptr_load(scale_base + (scale_row_base), result_type=fx.Vector.make_type(4, fx.Float32))
+                        fx.ptr_load(scale_base + scale_row_base, result_type=fx.Vector.make_type(4, fx.Float32))
                     )
                     v_scale_vecs.append(
                         fx.ptr_load(
@@ -557,7 +557,7 @@ def _make_pa_phase_helpers(
         return kv_tok_thread_base + fx.Int32(td * MFMA_N)
 
     def _load_k_scale_vec(td: int):
-        return fx.ptr_load(scale_base + (_scale_row_base(td)), result_type=fx.Vector.make_type(4, fx.Float32))
+        return fx.ptr_load(scale_base + _scale_row_base(td), result_type=fx.Vector.make_type(4, fx.Float32))
 
     def _load_v_scale_vec(td: int):
         return fx.ptr_load(
@@ -669,7 +669,7 @@ def _make_pa_phase_helpers(
     def _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, outs, v_scale_vecs):
         partition_max = neg_inf
         partition_sum = zero_f
-        max_vec = fx.ptr_load(softmax_base + (sm_rd_max_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
+        max_vec = fx.ptr_load(softmax_base + sm_rd_max_offs[0], result_type=fx.Vector.make_type(4, fx.Float32))
         for w in range_constexpr(NUM_WARPS):
             partition_max = fx.maxnumf(partition_max, max_vec[w])
 
@@ -697,7 +697,7 @@ def _make_pa_phase_helpers(
             accum_scale = exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value())
 
         gpu.barrier()
-        sum_vec = fx.ptr_load(softmax_base + (sm_rd_sum_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
+        sum_vec = fx.ptr_load(softmax_base + sm_rd_sum_offs[0], result_type=fx.Vector.make_type(4, fx.Float32))
         for w in range_constexpr(NUM_WARPS):
             partition_sum = partition_sum + sum_vec[w]
 
@@ -710,7 +710,7 @@ def _make_pa_phase_helpers(
 
         if const_expr(per_token_kv):
             v_max_global = zero_f
-            vmax_vec = fx.ptr_load(softmax_base + (sm_vmax_rd_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
+            vmax_vec = fx.ptr_load(softmax_base + sm_vmax_rd_offs[0], result_type=fx.Vector.make_type(4, fx.Float32))
             for w in range_constexpr(NUM_WARPS):
                 w_vmax = vmax_vec[w]
                 v_max_global = fx.maxnumf(v_max_global, w_vmax)
@@ -749,7 +749,7 @@ def _make_pa_phase_helpers(
                 p_i64_off = pv_prob_i64_elems[vt * 2 + j]
                 p_i64_all.append(
                     fx.ptr_load(
-                        fx.recast_iter(fx.Int64, logits_base) + (p_i64_off),
+                        fx.recast_iter(fx.Int64, logits_base) + p_i64_off,
                         result_type=fx.Vector.make_type(1, fx.Int64),
                     )[0]
                 )
@@ -1672,7 +1672,7 @@ def compile_pa_decode_metadata(
                     for vt in range_constexpr(VTLOOP):
                         bt_lds_off = arith.constant(vt * TLOOP, type=T.i32) + rowid
                         v_phys_blocks.append(
-                            fx.ptr_load(bt_base + (bt_lds_off), result_type=fx.Vector.make_type(1, fx.Int32))[0]
+                            fx.ptr_load(bt_base + bt_lds_off, result_type=fx.Vector.make_type(1, fx.Int32))[0]
                         )
                 return v_phys_blocks
 
@@ -2139,7 +2139,7 @@ def compile_pa_metadata_reduce(
                 v = buffer_ops.buffer_load(
                     po_rsrc, prow * stride_po_row + qhead * c_head + tid, vec_width=1, dtype=T.f32
                 )
-                m_new = m.maximumf(lse)
+                m_new = fx.maxnumf(m, lse)
                 scale_old = exp2_f32_fast((m - m_new) * c_log2e)
                 w = exp2_f32_fast((lse - m_new) * c_log2e)
                 denom_new = denom * scale_old + w

@@ -231,10 +231,10 @@ def _finish_q_fragments(
         q_abs_i32 = q_i32 & abs_mask
         q_abs = q_abs_i32.bitcast(fx.Float32)
         chunk_max = q_abs.reduce("max")
-        local_max = local_max.maximumf(chunk_max)
+        local_max = fx.maxnumf(local_max, chunk_max)
 
     for sh in [8, 4, 2, 1]:
-        local_max = local_max.maximumf(dpp_utils.dpp_xor_f32(local_max, sh))
+        local_max = fx.maxnumf(local_max, dpp_utils.dpp_xor_f32(local_max, sh))
     query_scale_lane = fx.Float32(
         arith.select(
             local_max > c_zero_f,
@@ -265,14 +265,14 @@ def _finish_q_fragments(
 
     q_frags = []
     gpu.barrier()
-    query_scale_lane = fx.ptr_load(softmax_base + (lane16id), result_type=fx.Vector.make_type(1, fx.Float32))[
+    query_scale_lane = fx.ptr_load(softmax_base + lane16id, result_type=fx.Vector.make_type(1, fx.Float32))[
         0
     ].ir_value()
     for qkhe in range_constexpr(qkhe_loop):
         for qkr in range_constexpr(2):
             lds_rd = lane16id * fx.Int32(head_size // 8) + fx.Int32(qkhe * 8) + rowid * fx.Int32(2) + fx.Int32(qkr)
             q_v1 = fx.ptr_load(
-                fx.recast_iter(fx.Int64, logits_base) + (lds_rd), result_type=fx.Vector.make_type(1, fx.Int64)
+                fx.recast_iter(fx.Int64, logits_base) + lds_rd, result_type=fx.Vector.make_type(1, fx.Int64)
             )
             q_frags.append(q_v1[0])
     return q_frags, query_scale_lane
@@ -475,7 +475,7 @@ def _make_pa_phase_helpers(
         return kv_tok_thread_base + fx.Int32(td * MFMA_N)
 
     def _load_k_scale_vec(td: int):
-        return fx.ptr_load(scale_base + (_scale_row_base(td)), result_type=fx.Vector.make_type(4, fx.Float32))
+        return fx.ptr_load(scale_base + _scale_row_base(td), result_type=fx.Vector.make_type(4, fx.Float32))
 
     def _load_v_scale_vec(td: int):
         return fx.ptr_load(
@@ -495,9 +495,9 @@ def _make_pa_phase_helpers(
                         vs_i = vector.extract(as_ir_value(vs), static_position=[i], dynamic_position=[])
                         vs_i = arith.select(kv_tok < seq_end, vs_i, zero_f)
                         vs = vector.insert(vs_i, vs, static_position=[i], dynamic_position=[])
-                v_max_warp = v_max_warp.maximumf(fx.Vector(vs).reduce("max"))
+                v_max_warp = fx.maxnumf(v_max_warp, fx.Vector(vs).reduce("max"))
             for sh in [32, 16]:
-                v_max_warp = v_max_warp.maximumf(v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
+                v_max_warp = fx.maxnumf(v_max_warp, v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
             fx.ptr_store(
                 fx.Vector.from_elements([v_max_warp], dtype=fx.Float32),
                 softmax_base + sm_vmax_wr_off,
@@ -560,9 +560,9 @@ def _make_pa_phase_helpers(
             if const_expr(kv_tok_base is not None):
                 logits_vec = _apply_token_mask_vec(logits_vec, td, kv_tok_base, causal_bound, seq_start, neg_inf)
                 d_out[td] = logits_vec
-            qk_max = qk_max.maximumf(fx.Vector(logits_vec).reduce("max"))
+            qk_max = fx.maxnumf(qk_max, fx.Vector(logits_vec).reduce("max"))
         for sh in [32, 16]:
-            qk_max = qk_max.maximumf(qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
+            qk_max = fx.maxnumf(qk_max, qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
         fx.ptr_store(
             fx.Vector.from_elements([qk_max], dtype=fx.Float32),
             softmax_base + sm_max_off,
@@ -588,12 +588,12 @@ def _make_pa_phase_helpers(
         partition_max = neg_inf
         partition_sum = zero_f
         warp_rescale_factors = []
-        max_vec = fx.ptr_load(softmax_base + (sm_rd_max_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
+        max_vec = fx.ptr_load(softmax_base + sm_rd_max_offs[0], result_type=fx.Vector.make_type(4, fx.Float32))
         for w in range_constexpr(NUM_WARPS):
             w_max = max_vec[w]
-            partition_max = partition_max.maximumf(w_max)
+            partition_max = fx.maxnumf(partition_max, w_max)
             warp_rescale_factors.append(w_max)
-        sum_vec = fx.ptr_load(softmax_base + (sm_rd_sum_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
+        sum_vec = fx.ptr_load(softmax_base + sm_rd_sum_offs[0], result_type=fx.Vector.make_type(4, fx.Float32))
         for w in range_constexpr(NUM_WARPS):
             diff_w = warp_rescale_factors[w] - partition_max
             if const_expr(needs_mask):
@@ -612,7 +612,7 @@ def _make_pa_phase_helpers(
                 my_warp_rescale,
             )
 
-        new_rmax = rmax.maximumf(partition_max)
+        new_rmax = fx.maxnumf(rmax, partition_max)
         if const_expr(needs_mask):
             accum_scale = arith.select(
                 rmax > neg_inf,
@@ -638,10 +638,10 @@ def _make_pa_phase_helpers(
 
         if const_expr(per_token_kv):
             v_max_global = zero_f
-            vmax_vec = fx.ptr_load(softmax_base + (sm_vmax_rd_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
+            vmax_vec = fx.ptr_load(softmax_base + sm_vmax_rd_offs[0], result_type=fx.Vector.make_type(4, fx.Float32))
             for w in range_constexpr(NUM_WARPS):
                 w_vmax = vmax_vec[w]
-                v_max_global = v_max_global.maximumf(w_vmax)
+                v_max_global = fx.maxnumf(v_max_global, w_vmax)
             v_max_scaled = v_max_global * fx.Float32(1.0 / FP8_MAX).ir_value()
             v_max_safe_scaled = v_max_scaled + fx.Float32(1e-8 / FP8_MAX).ir_value()
             norm_factor = rcp_f32(v_max_safe_scaled)
@@ -676,7 +676,7 @@ def _make_pa_phase_helpers(
                 for j in range_constexpr(2):
                     p_elem_off = pv_prob_i64_elem_offs[vt * 2 + j]
                     p_i64 = fx.ptr_load(
-                        fx.recast_iter(fx.Int64, logits_base) + (p_elem_off),
+                        fx.recast_iter(fx.Int64, logits_base) + p_elem_off,
                         result_type=fx.Vector.make_type(1, fx.Int64),
                     )[0]
                     tmp_out = rocdl.mfma_f32_16x16x32_fp8_fp8(
@@ -796,7 +796,7 @@ def compile_pa_decode_sw_reduce(
         def _wave_reduce_max_full(val):
             red = val
             for sh in [32, 16, 8, 4, 2, 1]:
-                red = red.maximumf(red.shuffle_xor(fx.Int32(sh), c_w))
+                red = fx.maxnumf(red, red.shuffle_xor(fx.Int32(sh), c_w))
             return red
 
         def _wave_reduce_sum_full(val):
@@ -842,7 +842,7 @@ def compile_pa_decode_sw_reduce(
             def _wave_reduce_max(val):
                 red = val
                 for sh in reduce_shuffle_offsets:
-                    red = red.maximumf(red.shuffle_xor(fx.Int32(sh), c_w))
+                    red = fx.maxnumf(red, red.shuffle_xor(fx.Int32(sh), c_w))
                 return red
 
             def _wave_reduce_sum(val):
@@ -922,7 +922,7 @@ def compile_pa_decode_sw_reduce(
                 part_max_raw = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=fx.Float32)
                 part_max = arith.select(in_chunk, part_max_raw, c_neg_inf)
                 chunk_max = _block_reduce(part_max, "max")
-                global_max = global_max.maximumf(chunk_max)
+                global_max = fx.maxnumf(global_max, chunk_max)
 
             global_exp_sum = c_zero_f
             for chunk_base in range(0, max_context_partition_num, block_threads):

@@ -384,7 +384,7 @@ def _lane_pair_reduce(v, reducer, fm_fast):
 
 
 def _score_pair_max(v_s, neg_inf, fm_fast):
-    reducer = lambda a, b, _fm: a.maximumf(b)  # noqa: E731
+    reducer = lambda a, b, _fm: fx.maxnumf(a, b)  # noqa: E731
     return _lane_pair_reduce(_reduce_score_pair(v_s, neg_inf, reducer, fm_fast), reducer, fm_fast)
 
 
@@ -398,9 +398,9 @@ def _sub_score_pair(v_s, row_max, fm_fast):
     lo_sub = []
     hi_sub = []
     for r in range_constexpr(16):
-        lo_sub.append((s_lo[r]) - (row_max))
+        lo_sub.append(s_lo[r] - row_max)
     for r in range_constexpr(16):
-        hi_sub.append((s_hi[r]) - (row_max))
+        hi_sub.append(s_hi[r] - row_max)
     return Vec.from_elements(lo_sub, fx.Float32).ir_value(), Vec.from_elements(hi_sub, fx.Float32).ir_value()
 
 
@@ -414,7 +414,7 @@ def _scale_sub_score_pair(v_s, row_max_raw, scale, zero_f, fm_fast):
     ``-inf`` masked lanes stay ``-inf`` (scale > 0), matching the un-fused path.
     """
     s_lo, s_hi = v_s
-    neg_scaled_max = (zero_f) - ((scale) * (row_max_raw))
+    neg_scaled_max = zero_f - scale * row_max_raw
     lo = [fmath.fma(s_lo[r], scale, neg_scaled_max, fastmath=fm_fast) for r in range_constexpr(16)]
     hi = [fmath.fma(s_hi[r], scale, neg_scaled_max, fastmath=fm_fast) for r in range_constexpr(16)]
     return Vec.from_elements(lo, fx.Float32).ir_value(), Vec.from_elements(hi, fx.Float32).ir_value()
@@ -454,15 +454,15 @@ def _safe_l_inv(l_row, zero_f):
 
 
 def _rescale_from_tile_max(m_row, m_tile_max, fm_fast):
-    row_max = (m_row).maximumf(m_tile_max)
-    rescale = rocdl.exp2(T.f32, as_mlir_value((m_row) - (row_max)))
+    row_max = fx.maxnumf(m_row, m_tile_max)
+    rescale = rocdl.exp2(T.f32, as_mlir_value(m_row - row_max))
     return row_max, rescale
 
 
 def _scale_o_accs(v_o, scale_scalar, traits, fm_fast):
     scale_vec = Vec.from_elements([scale_scalar], fx.Float32).broadcast_to(16)
     for dc in range_constexpr(traits.D_CHUNKS):
-        v_o[dc] = (Vec(v_o[dc])) * (scale_vec)
+        v_o[dc] = Vec(v_o[dc]) * scale_vec
 
 
 def _causal_pair_thresholds(kv_vectorized):
@@ -2855,23 +2855,23 @@ class GenericSoftmaxHelper:
         if const_expr(os.getenv("FLYDSL_FLASH_ATTN_FUNC_TREE_REDUCE", "0") == "1"):
 
             def _max_pair(a, b):
-                return (a).maximumf(b)
+                return fx.maxnumf(a, b)
 
             local_max = _tree_reduce(list(s_raw_lo) + list(s_raw_hi), _max_pair)
         else:
             local_max = s_raw_lo[0]
             for r in range_constexpr(15):
-                local_max = (local_max).maximumf(s_raw_lo[r + 1])
+                local_max = fx.maxnumf(local_max, s_raw_lo[r + 1])
             for r in range_constexpr(16):
-                local_max = (local_max).maximumf(s_raw_hi[r])
-        row_max = (local_max).maximumf(self.reduction_peer(local_max))
-        m_new_raw = (m_running).maximumf(row_max)
+                local_max = fx.maxnumf(local_max, s_raw_hi[r])
+        row_max = fx.maxnumf(local_max, self.reduction_peer(local_max))
+        m_new_raw = fx.maxnumf(m_running, row_max)
         if const_expr(traits.CAUSAL):
-            m_new_raw = (m_new_raw).maximumf(ctx.c_neg_floor)
+            m_new_raw = fx.maxnumf(m_new_raw, ctx.c_neg_floor)
 
-        diff_m_scaled = ((m_running) - (m_new_raw)) * (ctx.c_sm_scale_log2e)
+        diff_m_scaled = (m_running - m_new_raw) * ctx.c_sm_scale_log2e
         corr = self._exp2(diff_m_scaled)
-        neg_scaled_max = (ctx.c_zero_f) - ((ctx.c_sm_scale_log2e) * (m_new_raw))
+        neg_scaled_max = ctx.c_zero_f - ctx.c_sm_scale_log2e * m_new_raw
         return m_new_raw, corr, neg_scaled_max
 
     def online_softmax(self, m_running, l_running, s_raw_lo, s_raw_hi):
@@ -2885,15 +2885,15 @@ class GenericSoftmaxHelper:
             diff_lo = fmath.fma(s_raw_lo[r], ctx.c_sm_scale_log2e, neg_scaled_max, fastmath=ctx.fm_fast)
             p_lo = self._exp2(diff_lo)
             p_vals_lo.append(p_lo)
-            local_sum = (local_sum) + (p_lo)
+            local_sum = local_sum + p_lo
         for r in range_constexpr(16):
             diff_hi = fmath.fma(s_raw_hi[r], ctx.c_sm_scale_log2e, neg_scaled_max, fastmath=ctx.fm_fast)
             p_hi = self._exp2(diff_hi)
             p_vals_hi.append(p_hi)
-            local_sum = (local_sum) + (p_hi)
+            local_sum = local_sum + p_hi
 
-        tile_sum = (local_sum) + (self.reduction_peer(local_sum))
-        l_new = ((corr) * (l_running)) + (tile_sum)
+        tile_sum = local_sum + self.reduction_peer(local_sum)
+        l_new = corr * l_running + tile_sum
         return m_new_raw, l_new, corr, p_vals_lo, p_vals_hi
 
     def rescale_o_accs(self, o_accs, corr):
@@ -2901,10 +2901,10 @@ class GenericSoftmaxHelper:
         traits = ctx.traits
         corr_vec = Vec.from_elements([corr], fx.Float32).broadcast_to(16)
         if const_expr(not traits.USE_HW_TR):
-            o_accs[0] = (Vec(o_accs[0])) * (corr_vec)
+            o_accs[0] = Vec(o_accs[0]) * corr_vec
         else:
             for dc in range_constexpr(traits.D_CHUNKS):
-                o_accs[dc] = (Vec(o_accs[dc])) * (corr_vec)
+                o_accs[dc] = Vec(o_accs[dc]) * corr_vec
         return o_accs, corr_vec
 
     def build_p_packs(self, p_vals):
@@ -2985,8 +2985,8 @@ class GenericSoftmaxHelper:
                 diff_hi = fmath.fma(s_raw_hi[p_base + j], ctx.c_sm_scale_log2e, neg_scaled_max, fastmath=ctx.fm_fast)
                 p_exp_hi.append(self._exp2(diff_hi))
             for j in range_constexpr(traits.MFMA_LANE_K):
-                local_sum = (local_sum) + (p_exp_lo[j])
-                local_sum = (local_sum) + (p_exp_hi[j])
+                local_sum = local_sum + p_exp_lo[j]
+                local_sum = local_sum + p_exp_hi[j]
             p_lo = self.bf16_trunc_pack_v4(p_exp_lo)
             p_hi = self.bf16_trunc_pack_v4(p_exp_hi)
             v_lo = [None] * traits.D_CHUNKS
@@ -2997,8 +2997,8 @@ class GenericSoftmaxHelper:
                 o_accs[dc] = gemm_helper.mfma_acc(v_lo[dc], p_lo, o_accs[dc])
             for dc in range_constexpr(traits.D_CHUNKS):
                 o_accs[dc] = gemm_helper.mfma_acc(v_hi[dc], p_hi, o_accs[dc])
-        tile_sum = (local_sum) + (self.reduction_peer(local_sum))
-        l_new = ((corr) * (l_running)) + (tile_sum)
+        tile_sum = local_sum + self.reduction_peer(local_sum)
+        l_new = corr * l_running + tile_sum
         return o_accs, l_new
 
 
@@ -3028,7 +3028,7 @@ class GenericStoreHelper:
         # LSE = sm_scale * m_raw + ln(l); natural log, softmax scale folded in
         # (fully-masked row has l == 0 -> -inf).
         ctx = self.ctx
-        lse_val = ((m_final) * (ctx.c_sm_scale)) + (fmath.log(as_mlir_value(l_final), fastmath=ctx.fm_fast))
+        lse_val = m_final * ctx.c_sm_scale + fmath.log(as_mlir_value(l_final), fastmath=ctx.fm_fast)
         lse_local = ctx.q_head_idx * ctx.seq_len_v + q_row
         # One writer per row: low half-wave + in-bounds q_row; else redirect to the
         # dropped OOB sentinel.
@@ -3647,19 +3647,19 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         return _score_pair_max(v_s, self.c_neg_inf, self.fm_fast)
 
     def floor_masked_max(self, row_max):
-        return (row_max).maximumf(self.c_neg_floor)
+        return fx.maxnumf(row_max, self.c_neg_floor)
 
     def rescale_from_tile_max(self, m_row, m_tile_max):
         return _rescale_from_tile_max(m_row, m_tile_max, self.fm_fast)
 
     def apply_l_rescale(self, l_row, rescale):
-        return (l_row) * (rescale)
+        return l_row * rescale
 
     def exp2(self, v_s, start, length):
         return _exp2_score_slice(v_s, start, length)
 
     def reduce_sum(self, l_row, v_p):
-        return (l_row) + (_score_pair_sum(v_p, self.c_zero_f, self.fm_fast))
+        return l_row + _score_pair_sum(v_p, self.c_zero_f, self.fm_fast)
 
     def sub_m(self, v_s, row_max):
         return _sub_score_pair(v_s, row_max, self.fm_fast)
@@ -3678,8 +3678,8 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         _scale_o_accs(v_o, scale_scalar, self.traits, self.fm_fast)
 
     def rescale_o(self, v_o, m_row, l_row, m_tile_max, v_p):
-        m_new = (m_row).maximumf(m_tile_max)
-        corr = rocdl.exp2(T.f32, as_mlir_value((m_row) - (m_new)))
+        m_new = fx.maxnumf(m_row, m_tile_max)
+        corr = rocdl.exp2(T.f32, as_mlir_value(m_row - m_new))
         self.scale_o(v_o, corr)
         v_o = _anchor_v_o(self.traits, v_o)
         v_p = _scale_v_p(
@@ -3689,11 +3689,11 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
             elem_dtype=self.elem_dtype,
             fm_fast=self.fm_fast,
         )
-        l_row = (l_row) * (corr)
+        l_row = l_row * corr
         return v_o, m_new, l_row, v_p
 
     def _lazy_rescale_o_rescale(self, _n, *_st, v_o, m_row, l_row, m_tile_max, v_p):
-        corr = rocdl.exp2(T.f32, as_mlir_value((m_row) - (m_tile_max)))
+        corr = rocdl.exp2(T.f32, as_mlir_value(m_row - m_tile_max))
         scaled_accs = list(v_o)
         self.scale_o(scaled_accs, corr)
         out = [as_mlir_value(scaled_accs[dc]) for dc in range(self.traits.D_CHUNKS)]
@@ -3705,7 +3705,7 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
             fm_fast=self.fm_fast,
         )
         out.append(_v_p_to_vec32(scaled_p))
-        out.append(as_mlir_value((l_row) * (corr)))
+        out.append(as_mlir_value(l_row * corr))
         out.append(_anchor_scalar_f32(m_tile_max))
         return out
 
@@ -3717,7 +3717,7 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         @flyc.jit
         def _lazy_rescale_o(v_o, m_row, l_row, m_tile_max, v_p):
             c_eight_f = fx.Float32(traits.DUALWAVE_SWP_RESCALE_THRESHOLD)
-            m_diff = (m_tile_max) - (m_row)
+            m_diff = m_tile_max - m_row
             below = fx.Float32(m_diff) <= c_eight_f
             ballot = rocdl.ballot(T.i64, as_mlir_value(below))
             all_below = arith.cmpi(arith.CmpIPredicate.eq, as_mlir_value(ballot), _read_exec_i64())
@@ -4181,7 +4181,7 @@ class DualwaveStoreHelper(DualwaveKernelContext):
         lse_per_batch_elems = fx.Index(traits.NUM_HEADS_Q) * self.seq_len_v
         lse_per_batch_bytes = lse_per_batch_elems * fx.Index(4)
         lse_rsrc = _make_ws_rsrc(lse_base_i64, self.batch_idx * lse_per_batch_bytes, lse_per_batch_bytes)
-        lse_val = ((m_row) * (self.c_ln2_f)) + (fmath.log(as_mlir_value(l_row), fastmath=self.fm_fast))
+        lse_val = m_row * self.c_ln2_f + fmath.log(as_mlir_value(l_row), fastmath=self.fm_fast)
         lse_local = self.q_head_idx * self.seq_len_v + q_row
         # One writer per row: low half-wave + in-bounds q_row; else the dropped OOB sentinel.
         lse_off_row = (q_row < self.seqlen_q_v).select(lse_local, lse_per_batch_elems)
@@ -4961,10 +4961,10 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         return _score_pair_max(v_s, self.c_neg_inf, self.fm_fast)
 
     def max2(self, a, b):
-        return (a).maximumf(b)
+        return fx.maxnumf(a, b)
 
     def floor_masked_max(self, row_max):
-        return (row_max).maximumf(self.c_neg_floor)
+        return fx.maxnumf(row_max, self.c_neg_floor)
 
     def sub_m(self, v_s, row_max):
         return _scale_sub_score_pair(v_s, row_max, self.c_logit_scale, self.c_zero_f, self.fm_fast)
@@ -4976,7 +4976,7 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         return _score_pair_sum(v_p, self.c_zero_f, self.fm_fast)
 
     def reduce_sum(self, l_row, v_p):
-        return (l_row) + (self.tile_sum(v_p))
+        return l_row + self.tile_sum(v_p)
 
     def cast_p(self, v_p):
         # Pack the finished softmax probabilities into v8 bf16 P packs for PV.
@@ -5009,13 +5009,13 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         return _safe_l_inv(l_row, self.c_zero_f)
 
     def rescale_from_tile_max(self, m_row, m_tile_max):
-        row_max = (m_row).maximumf(m_tile_max)
-        diff_scaled = ((m_row) - (row_max)) * (self.c_logit_scale)
+        row_max = fx.maxnumf(m_row, m_tile_max)
+        diff_scaled = (m_row - row_max) * self.c_logit_scale
         rescale = rocdl.exp2(T.f32, as_mlir_value(diff_scaled))
         return row_max, rescale
 
     def apply_l_rescale(self, l_row, rescale):
-        return (l_row) * (rescale)
+        return l_row * rescale
 
     def rescale_o(self, v_o, m_row, l_row, m_tile_max, v_p):
         m_new, corr = self.rescale_from_tile_max(m_row, m_tile_max)
@@ -5036,8 +5036,8 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
     def lazy_rescale_o(self, v_o, m_row, l_row, m_tile_max, v_p):
         @flyc.jit
         def _run(v_o, m_row, l_row, m_tile_max, v_p):
-            m_diff = (m_tile_max) - (m_row)
-            m_diff_scaled = (m_diff) * (self.c_logit_scale)
+            m_diff = m_tile_max - m_row
+            m_diff_scaled = m_diff * self.c_logit_scale
             below = fx.Float32(m_diff_scaled) <= self.c_eight_f
             ballot = rocdl.ballot(T.i64, as_mlir_value(below))
             all_below = arith.cmpi(arith.CmpIPredicate.eq, as_mlir_value(ballot), _read_exec_i64())
@@ -5055,7 +5055,7 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
             if fx.Boolean(all_below):
                 pass
             else:
-                corr = rocdl.exp2(T.f32, as_mlir_value((self.c_zero_f) - (m_diff_scaled)))
+                corr = rocdl.exp2(T.f32, as_mlir_value(self.c_zero_f - m_diff_scaled))
                 scaled_accs = list(v_o)
                 self.scale_o(scaled_accs, corr)
                 o0, o1, o2, o3 = (
@@ -5065,7 +5065,7 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
                     as_mlir_value(scaled_accs[3]),
                 )
                 vp_out = self.v_p_to_vec32(self.scale_v_p(v_p, corr))
-                l_out = as_mlir_value((l_row) * (corr))
+                l_out = as_mlir_value(l_row * corr)
                 m_out = self.anchor_scalar_f32(m_tile_max)
             return ([o0, o1, o2, o3], m_out, l_out, self.v_vec32_to_p(vp_out))
 
@@ -5074,8 +5074,8 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
     def lazy_correct_o(self, v_o, m_row, l_row, m_tile_max):
         @flyc.jit
         def _run(v_o, m_row, l_row, m_tile_max):
-            m_diff = (m_tile_max) - (m_row)
-            m_diff_scaled = (m_diff) * (self.c_logit_scale)
+            m_diff = m_tile_max - m_row
+            m_diff_scaled = m_diff * self.c_logit_scale
             below = fx.Float32(m_diff_scaled) <= self.c_eight_f
             ballot = rocdl.ballot(T.i64, as_mlir_value(below))
             all_below = arith.cmpi(arith.CmpIPredicate.eq, as_mlir_value(ballot), _read_exec_i64())
@@ -5092,7 +5092,7 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
             if fx.Boolean(all_below):
                 pass
             else:
-                corr = rocdl.exp2(T.f32, as_mlir_value((self.c_zero_f) - (m_diff_scaled)))
+                corr = rocdl.exp2(T.f32, as_mlir_value(self.c_zero_f - m_diff_scaled))
                 scaled_accs = list(v_o)
                 self.scale_o(scaled_accs, corr)
                 o0, o1, o2, o3 = (
@@ -5101,7 +5101,7 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
                     as_mlir_value(scaled_accs[2]),
                     as_mlir_value(scaled_accs[3]),
                 )
-                l_out = as_mlir_value((l_row) * (corr))
+                l_out = as_mlir_value(l_row * corr)
                 m_out = self.anchor_scalar_f32(m_tile_max)
             return ([o0, o1, o2, o3], m_out, l_out)
 
@@ -5321,7 +5321,7 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
     def reduce_m_max(self, m_s):
         m_max = m_s[0]
         for i in range_constexpr(self.traits.NUM_KV_SPLITS - 1):
-            m_max = (m_max).maximumf(m_s[i + 1])
+            m_max = fx.maxnumf(m_max, m_s[i + 1])
         return m_max
 
     def init_accumulators(self):
@@ -5334,9 +5334,9 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
         @flyc.jit
         def _accum_split(acc, den):
             if fx.Float32(l_i) > fx.Float32(0.0):
-                w = rocdl.exp2(T.f32, as_mlir_value((m_i) - (m_max)))
-                wl = (w) * (l_i)
-                den = (den) + (wl)
+                w = rocdl.exp2(T.f32, as_mlir_value(m_i - m_max))
+                wl = w * l_i
+                den = den + wl
                 o2_raw = buffer_ops.buffer_load(
                     orsrc_i,
                     as_mlir_value(fx.Int32(local_o_idx_i)),
@@ -5346,7 +5346,7 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
                 o2_i32 = ir.Value(o2_raw)
                 o4 = Vec(o2_i32, (2,), fx.Int32).bitcast(self.elem_dtype).to(fx.Float32)
                 w4 = Vec.from_elements([fx.Float32(wl)], fx.Float32).broadcast_to(4)
-                acc = (acc) + ((w4) * (o4))
+                acc = acc + w4 * o4
             return acc, den
 
         return _accum_split(acc, den)
@@ -5361,7 +5361,7 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
         inv_rcp = rocdl.rcp(T.f32, den)
         inv = (fx.Float32(den) > self.c_zero_f).select(inv_rcp, self.c_zero_f)
         inv4 = Vec.from_elements([fx.Float32(inv)], fx.Float32).broadcast_to(4)
-        out4 = Vec((acc) * (inv4), (4,), fx.Float32)
+        out4 = Vec(acc * inv4, (4,), fx.Float32)
         if const_expr(self.traits.DTYPE_STR == "bf16"):
             lo = rocdl.cvt_pk_bf16_f32(out4[0], out4[1])
             hi = rocdl.cvt_pk_bf16_f32(out4[2], out4[3])
@@ -5380,7 +5380,7 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
         lse_per_batch_elems = fx.Index(self.traits.NUM_HEADS_Q) * self.seq_len_v
         lse_per_batch_bytes = lse_per_batch_elems * fx.Index(4)
         lse_rsrc = _make_ws_rsrc(lse_base_i64, self.batch_idx * lse_per_batch_bytes, lse_per_batch_bytes)
-        lse_val = ((m_max) * (self.c_ln2_f)) + (fmath.log(as_mlir_value(den), fastmath=self.fm_fast))
+        lse_val = m_max * self.c_ln2_f + fmath.log(as_mlir_value(den), fastmath=self.fm_fast)
         lse_off = fx.Index((self.col == fx.Index(0)).select(self.local_ml_idx, lse_per_batch_elems))
         buffer_ops.buffer_store(as_mlir_value(fx.Float32(lse_val)), lse_rsrc, as_mlir_value(fx.Int32(lse_off)))
 
@@ -5437,7 +5437,7 @@ def _stagger_extra_barrier_if_one(stagger_i32):
 
 
 def _debug_atomic_inc_lazy_count(byte_offset, debug_counts_rsrc):
-    rocdl.raw_buffer_atomic(as_mlir_value(fx.Float32(1.0))) + (debug_counts_rsrc)
+    rocdl.raw_buffer_atomic(as_mlir_value(fx.Float32(1.0))) + debug_counts_rsrc
 
 
 @flyc.jit
