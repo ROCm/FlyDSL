@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-07-31T09:12:28Z",
+ "updated": "2026-07-31T10:04:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30622104753,
+   "pr": 930,
+   "commit": "669e9592c7cf500946b1a77de2cf2e8b7fd525d2",
+   "branch": "dsl-ify-arith",
+   "event": "pull_request",
+   "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622104753",
+   "created_at": "2026-07-31T10:02:01Z",
+   "updated_at": "2026-07-31T10:02:17Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
+  {
+   "run_id": 30621845362,
+   "pr": 926,
+   "commit": "294c01b045e200037ac24cd12b344c5bc2b4e656",
+   "branch": "phil/fix-reg-offset-dynamic-add-offset",
+   "event": "pull_request",
+   "title": "[Bugfix] Resolve reg offset on dynamic add_offset chains",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30621845362",
+   "created_at": "2026-07-31T09:57:52Z",
+   "updated_at": "2026-07-31T10:00:55Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-31T10:00:55Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30621845362/job/91128602083"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-31T10:01:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30621845362/job/91128602084"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-31T10:01:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30621845362/job/91128602104"
+    }
+   ]
+  },
   {
    "run_id": 30618551292,
    "pr": 945,
@@ -102,19 +160,19 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-31T08:13:10Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T09:39:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30613370747/job/91107651269"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-31T08:13:11Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T09:17:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30613370747/job/91107651301"
     }
    ]
@@ -145,10 +203,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-31T08:13:09Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T09:15:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30613299899/job/91107679496"
     },
     {
@@ -169,20 +227,20 @@
    "branch": "dsl-ify-arith",
    "event": "pull_request",
    "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30610070259",
    "created_at": "2026-07-31T06:34:46Z",
-   "updated_at": "2026-07-31T07:14:15Z",
+   "updated_at": "2026-07-31T10:02:03Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-31T08:02:08Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T09:11:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30610070259/job/91097116461"
     },
     {
@@ -197,10 +255,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-31T07:14:15Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T10:02:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30610070259/job/91097116493"
     }
    ]
@@ -2047,83 +2105,6 @@
    "updated_at": "2026-07-30T00:08:40Z",
    "actor": "jiacao-amd",
    "jobs": []
-  },
-  {
-   "run_id": 30498213283,
-   "pr": 923,
-   "commit": "88bf0f4a35bcd9aca3393c49e627c55a5080348c",
-   "branch": "fix/dispatch-benchmark-timing",
-   "event": "pull_request",
-   "title": "Fix host dispatch benchmark timing window",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30498213283",
-   "created_at": "2026-07-29T23:02:38Z",
-   "updated_at": "2026-07-30T00:49:53Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-29T23:06:38Z",
-     "completed_at": "2026-07-30T00:49:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30498213283/job/90732394320"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-29T23:06:14Z",
-     "completed_at": "2026-07-29T23:12:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30498213283/job/90732394349"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-29T23:06:31Z",
-     "completed_at": "2026-07-30T00:18:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30498213283/job/90732394379"
-    }
-   ]
-  },
-  {
-   "run_id": 30482303173,
-   "pr": null,
-   "commit": "f752c7d9df324d662bcec3953ff9ac455bcde76a",
-   "branch": "mega_moe_v1",
-   "event": "pull_request",
-   "title": "MegaMoE on Gfx950",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30482303173",
-   "created_at": "2026-07-29T18:58:06Z",
-   "updated_at": "2026-07-29T22:18:08Z",
-   "actor": "yanboshao",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-29T19:14:27Z",
-     "completed_at": "2026-07-29T19:23:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30482303173/job/90683139415"
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-29T22:09:20Z",
-     "completed_at": "2026-07-29T22:18:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30482303173/job/90683139475"
-    }
-   ]
   }
  ]
 }
