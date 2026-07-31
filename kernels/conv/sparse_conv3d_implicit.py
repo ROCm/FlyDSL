@@ -15,7 +15,7 @@ from kernels.common.mem_ops import buffer_atomic_add
 from kernels.common.tensor_shim import GTensor, _run_compiled
 
 
-@functools.lru_cache(maxsize=4)
+@functools.lru_cache(maxsize=64)
 def _compile_presence_scatter_kernel(block: int):
     BLOCK = block
 
@@ -55,7 +55,7 @@ def _compile_presence_scatter_kernel(block: int):
     return launch
 
 
-@functools.lru_cache(maxsize=8)
+@functools.lru_cache(maxsize=64)
 def _compile_fused_tiled_kernel(block_m: int, kernel_size: int):
     BLOCK_M = block_m
     K = kernel_size
@@ -249,7 +249,7 @@ def build_lut_dense(coords: torch.Tensor, block_m: int = 16, spatial_shape=None,
 # fx.Int32 offsets do not apply here -- forcing them changes the buffer_load
 # offset path and fails to compile. The map kernels above, whose tensors are all
 # i32, use the fx operator surface.
-@functools.lru_cache(maxsize=16)
+@functools.lru_cache(maxsize=64)
 def _compile_zdelta_kernel(block_m: int, kernel_size: int, n_bits: int, key32: bool = False):
     BLOCK_M = block_m
     K = kernel_size
@@ -593,7 +593,7 @@ def _prepare_weight_bf16(weight: torch.Tensor, kv_order: str, c_out_tile: int, k
     return entry
 
 
-@functools.lru_cache(maxsize=32)
+@functools.lru_cache(maxsize=256)
 def _compile_bf16_compacted(c_in: int, c_out: int, ct_per_block: int = 1, k_unroll: int = 1):
     C_IN = c_in
     C_OUT = c_out
