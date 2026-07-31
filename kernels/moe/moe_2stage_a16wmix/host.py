@@ -23,7 +23,19 @@ from kernels.moe.moe_2stage_a16wmix.gemm2 import compile_gemm2_a16w4_port, gemm2
 
 @functools.cache
 def _get_compiled_gemm1_a16w4(
-    BM, D_HIDDEN, D_INTER, NE, topk, TILE_N, TILE_K, act, b_cache_mod, xcd_swizzle, waves_per_eu, w_dtype="mxfp4"
+    BM,
+    D_HIDDEN,
+    D_INTER,
+    NE,
+    topk,
+    TILE_N,
+    TILE_K,
+    act,
+    b_cache_mod,
+    xcd_swizzle,
+    waves_per_eu,
+    w_dtype="mxfp4",
+    k_wave=1,
 ):
     return compile_gemm1_a16w4_port(
         BM=BM,
@@ -38,6 +50,7 @@ def _get_compiled_gemm1_a16w4(
         xcd_swizzle=xcd_swizzle,
         waves_per_eu=waves_per_eu,
         w_dtype=w_dtype,
+        k_wave=k_wave,
     )
 
 
@@ -93,6 +106,7 @@ def flydsl_a16w4_gemm1(
     tile_k=256,
     waves_per_eu=None,
     k_batch=1,
+    k_wave=1,
     b_nt=None,
     xcd_swizzle=0,
     gate_mode="separated",
@@ -115,9 +129,11 @@ def flydsl_a16w4_gemm1(
     ``tile_m`` (block M -> BM), ``tile_n`` (N tile -> TILE_N), ``tile_k`` (K tile
     -> TILE_K), ``waves_per_eu`` (min-occupancy hint -> ``rocdl.waves_per_eu``),
     ``b_nt`` (W-load cache modifier -> b_cache_mod; 0=cached, 2=nt), ``xcd_swizzle``
-    (bijective XCD/HBM-channel remap of the launch grid). ``k_batch`` (split-K) and
-    ``gate_mode`` are accepted for interface parity but this kernel only supports
-    ``k_batch=1`` / ``gate_mode="separated"``.
+    (bijective XCD/HBM-channel remap of the launch grid), ``k_wave`` (aiter intra-
+    block slice-K: partition the 4 waves into (4/k_wave) N-waves x k_wave K-waves,
+    LDS-reducing the partial-K accumulators before the epilogue; k_wave in {1,2,4}).
+    ``k_batch`` (grid split-K) and ``gate_mode`` are accepted for interface parity but
+    this kernel only supports ``k_batch=1`` / ``gate_mode="separated"``.
 
     ``tile_n=None`` picks the largest supported N tile that divides ``D_INTER``:
     256 when ``D_INTER % 256 == 0`` (fastest, matches aiter's tuned tile) else 128
@@ -150,7 +166,7 @@ def flydsl_a16w4_gemm1(
         raise NotImplementedError(f"a16w4 gemm1 requires D_INTER % TILE_N({TILE_N}) == 0, got D_INTER={D_INTER}")
 
     launch = _get_compiled_gemm1_a16w4(
-        BM, D_HIDDEN, D_INTER, NE, topk, TILE_N, TILE_K, act, b_cache_mod, xcd_swizzle, waves_per_eu, w_dtype
+        BM, D_HIDDEN, D_INTER, NE, topk, TILE_N, TILE_K, act, b_cache_mod, xcd_swizzle, waves_per_eu, w_dtype, k_wave
     )
     max_m_blocks = int(sorted_expert_ids.numel())
     grid = gemm1_a16w4_grid(BM, INTER=D_INTER, TILE_N=TILE_N, max_m_blocks=max_m_blocks)
