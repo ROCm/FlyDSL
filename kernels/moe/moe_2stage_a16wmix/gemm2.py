@@ -34,6 +34,11 @@ from .gemm1 import A16WI4_GROUP_SIZE, _a16w4_swizzle_xor16, _e8m0_byte_to_f32
 NUM_CU = 256
 
 
+# @flyc.jit is load-bearing: it AST-rewrites the ``if token_id < i32_M`` bound
+# check into an scf.if. Without it the guard runs as a plain Python if (dropped
+# at trace time), so the atomic-fadd scatter fires unconditionally on padded/OOB
+# sorted rows -- ~10x extra atomic HBM traffic (gemm2 s2 39us -> ~490us at E896).
+@flyc.jit
 def _atomic_bf16_epilog(
     lds_acc_base_i32,
     accm,
