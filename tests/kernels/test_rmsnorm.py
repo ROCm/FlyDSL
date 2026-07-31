@@ -1977,8 +1977,21 @@ def test_rmsnorm_dynamicquant():
 )
 def test_rmsnorm_smoothquant_gfx1201_scale_paths(N, dtype, route):
     """Distinguish scalar, vec8, and non-uniform XScale failures on gfx1201."""
-    M = 2
+    _run_rmsnorm_smoothquant_gfx1201_case(2, N, dtype, route, fused_add=False)
+
+
+@pytest.mark.skipif(GPU_ARCH != "gfx1201", reason="gfx1201-specific RMSNorm SmoothQuant regression")
+@pytest.mark.parametrize("M", [2, 64])
+@pytest.mark.parametrize("N", [2000, 2001, 2048])
+@pytest.mark.parametrize("fused_add", [False, True], ids=["plain", "fused-add"])
+def test_rmsnorm_smoothquant_gfx1201_exact_regression(M, N, fused_add):
+    """Exercise the historical f32 failure and its adjacent scalar-loop boundaries."""
+    _run_rmsnorm_smoothquant_gfx1201_case(M, N, "f32", "f32-scalar-boundary", fused_add=fused_add)
+
+
+def _run_rmsnorm_smoothquant_gfx1201_case(M, N, dtype, route, *, fused_add):
     scale_tol = 1e-3
+    residual_tol = {"f32": 1e-4, "f16": 1e-2, "bf16": 2e-2}[dtype]
     torch.manual_seed(1201)
 
     torch_dtype = _torch_dtype(dtype)
@@ -1988,19 +2001,38 @@ def test_rmsnorm_smoothquant_gfx1201_scale_paths(N, dtype, route):
     xscale_dev = torch.ones((N,), device="cuda", dtype=torch_dtype)
     output_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_INT8)
     yscale_dev = torch.empty((M,), device="cuda", dtype=DTYPE_FP32)
+    residual_in_dev = None
+    residual_out_dev = None
 
-    launch_fn = build_rmsnorm_smoothquant_module(N, dtype)
     stream = torch.cuda.current_stream()
-    compiled_fn = flyc.compile(
-        launch_fn,
-        input_dev,
-        gamma_dev,
-        xscale_dev,
-        output_dev,
-        yscale_dev,
-        M,
-        stream,
-    )
+    if fused_add:
+        residual_in_dev = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32).to(torch_dtype).contiguous()
+        residual_out_dev = torch.empty_like(input_dev)
+        launch_fn = build_fused_add_rmsnorm_smoothquant_module(N, dtype)
+        compiled_fn = flyc.compile(
+            launch_fn,
+            input_dev,
+            residual_in_dev,
+            gamma_dev,
+            xscale_dev,
+            output_dev,
+            residual_out_dev,
+            yscale_dev,
+            M,
+            stream,
+        )
+    else:
+        launch_fn = build_rmsnorm_smoothquant_module(N, dtype)
+        compiled_fn = flyc.compile(
+            launch_fn,
+            input_dev,
+            gamma_dev,
+            xscale_dev,
+            output_dev,
+            yscale_dev,
+            M,
+            stream,
+        )
 
     failures = []
     for scale_mode in ("ones", "random"):
@@ -2013,14 +2045,42 @@ def test_rmsnorm_smoothquant_gfx1201_scale_paths(N, dtype, route):
         # every measured launch to expose missing writes.
         output_dev.fill_(-128)
         yscale_dev.fill_(float("nan"))
-        compiled_fn(input_dev, gamma_dev, xscale_dev, output_dev, yscale_dev, M, stream)
+        if fused_add:
+            residual_out_dev.fill_(float("nan"))
+            compiled_fn(
+                input_dev,
+                residual_in_dev,
+                gamma_dev,
+                xscale_dev,
+                output_dev,
+                residual_out_dev,
+                yscale_dev,
+                M,
+                stream,
+            )
+        else:
+            compiled_fn(input_dev, gamma_dev, xscale_dev, output_dev, yscale_dev, M, stream)
         torch.cuda.synchronize()
 
-        q_expected, yscale_expected = _reference_rmsnorm_quant(
-            input_dev,
-            gamma_dev,
-            xscale_dev=xscale_dev,
-        )
+        if fused_add:
+            residual_expected, q_expected, yscale_expected = _reference_fused_add_rmsnorm_quant(
+                input_dev,
+                residual_in_dev,
+                gamma_dev,
+                xscale_dev=xscale_dev,
+            )
+            residual_diff = (residual_out_dev.to(DTYPE_FP32) - residual_expected).abs()
+            residual_error = residual_diff.max().item()
+            finite_residual = torch.isfinite(residual_out_dev).all().item()
+        else:
+            q_expected, yscale_expected = _reference_rmsnorm_quant(
+                input_dev,
+                gamma_dev,
+                xscale_dev=xscale_dev,
+            )
+            residual_error = 0.0
+            finite_residual = True
+
         q_out = output_dev.to(torch.int16)
         q_ref = q_expected.to(torch.int16)
         quant_diff = (q_out - q_ref).abs()
@@ -2029,12 +2089,15 @@ def test_rmsnorm_smoothquant_gfx1201_scale_paths(N, dtype, route):
         scale_error = scale_diff.max().item()
         finite_yscale = torch.isfinite(yscale_dev).all().item()
         mismatch_count = (quant_diff > 1).sum().item()
+        unwritten_count = (output_dev == -128).sum().item()
+        variant = "fused-add" if fused_add else "plain"
 
         print(
-            f"gfx1201 SmoothQuant route={route}, dtype={dtype}, N={N}, "
+            f"gfx1201 SmoothQuant variant={variant}, route={route}, M={M}, dtype={dtype}, N={N}, "
             f"xscale={scale_mode}: quant_error={quant_error}, "
             f"scale_error={scale_error:.3e}, mismatches={mismatch_count}, "
-            f"finite_yscale={finite_yscale}"
+            f"unwritten={unwritten_count}, finite_yscale={finite_yscale}, "
+            f"residual_error={residual_error:.3e}, finite_residual={finite_residual}"
         )
 
         bad_indices = (quant_diff > 1).nonzero()
@@ -2046,14 +2109,31 @@ def test_rmsnorm_smoothquant_gfx1201_scale_paths(N, dtype, route):
                 f"xscale={xscale_dev[col].item()}"
             )
 
-        if not finite_yscale or quant_error > 1 or not scale_error < scale_tol:
+        bad_scale_rows = ((scale_diff >= scale_tol) | ~torch.isfinite(yscale_dev)).nonzero()
+        if bad_scale_rows.numel() != 0:
+            row = bad_scale_rows[0].item()
+            print(
+                f"first scale mismatch at row {row}: "
+                f"expected={yscale_expected[row].item()}, actual={yscale_dev[row].item()}"
+            )
+
+        failed = (
+            not finite_yscale
+            or quant_error > 1
+            or not scale_error < scale_tol
+            or unwritten_count != 0
+            or not finite_residual
+            or not residual_error < residual_tol
+        )
+        if failed:
             failures.append(
                 f"xscale={scale_mode}: quant_error={quant_error}, "
                 f"scale_error={scale_error:.3e}, mismatches={mismatch_count}, "
-                f"finite_yscale={finite_yscale}"
+                f"unwritten={unwritten_count}, finite_yscale={finite_yscale}, "
+                f"residual_error={residual_error:.3e}, finite_residual={finite_residual}"
             )
 
-    assert not failures, f"gfx1201 SmoothQuant {route} failed: {'; '.join(failures)}"
+    assert not failures, f"gfx1201 SmoothQuant {variant} {route}, M={M}, N={N} failed: {'; '.join(failures)}"
 
 
 def test_rmsnorm_smoothquant():
