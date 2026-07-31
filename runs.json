@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-31T16:01:46Z",
+ "updated": "2026-07-31T16:07:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -169,11 +169,11 @@
    "branch": "phil/isa-resource-delta-table",
    "event": "pull_request",
    "title": "[Misc] Add per-kernel ISA resource delta table",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30623630216",
    "created_at": "2026-07-31T10:27:46Z",
-   "updated_at": "2026-07-31T10:31:00Z",
+   "updated_at": "2026-07-31T16:04:52Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -188,9 +188,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-31T10:31:00Z",
+     "started_at": "2026-07-31T16:04:52Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30623630216/job/91134287109"
     },
@@ -212,11 +212,11 @@
    "branch": "phil/fix-reg-offset-dynamic-add-offset",
    "event": "pull_request",
    "title": "[Bugfix] Resolve reg offset on dynamic add_offset chains",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30623517332",
    "created_at": "2026-07-31T10:25:44Z",
-   "updated_at": "2026-07-31T15:22:54Z",
+   "updated_at": "2026-07-31T16:04:25Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -231,10 +231,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-31T15:22:53Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T16:04:24Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30623517332/job/91133888542"
     },
     {
