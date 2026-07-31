@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-31T04:16:38Z",
+ "updated": "2026-07-31T04:30:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30603703154,
+   "pr": 945,
+   "commit": "87411388b223bda0bd906b15b0ee1af7ee33d302",
+   "branch": "jli/update-llvm-basemain",
+   "event": "pull_request",
+   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30603703154",
+   "created_at": "2026-07-31T04:15:48Z",
+   "updated_at": "2026-07-31T04:18:15Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 30602402454,
    "pr": 848,
@@ -63,10 +78,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-31T03:13:45Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T04:25:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30600810958/job/91063470191"
     },
     {
@@ -2181,40 +2196,6 @@
      "started_at": "2026-07-29T09:04:27Z",
      "completed_at": "2026-07-29T09:19:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30437611803/job/90529153134"
-    }
-   ]
-  },
-  {
-   "run_id": 30428951123,
-   "pr": 876,
-   "commit": "1910320ff8203444c8f7511f22a8582a1b4795ef",
-   "branch": "mega_moe_v1",
-   "event": "pull_request",
-   "title": "MegaMoE on Gfx950",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30428951123",
-   "created_at": "2026-07-29T06:40:42Z",
-   "updated_at": "2026-07-29T08:57:31Z",
-   "actor": "GwilliamHu",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-29T06:41:47Z",
-     "completed_at": "2026-07-29T08:57:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30428951123/job/90501683011"
-    },
-    {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-29T06:42:17Z",
-     "completed_at": "2026-07-29T06:48:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30428951123/job/90501683014"
     }
    ]
   }
