@@ -28,24 +28,21 @@ def _compile_presence_scatter_kernel(block: int):
         sz: fx.Int32,
         n_pts: fx.Int32,
     ):
-        tid = fx.Int32(gpu.thread_idx.x)
-        blk = fx.Int32(gpu.block_idx.x)
-        i = blk * fx.Int32(const_expr(BLOCK)) + tid
+        tid = fx.Int32(gpu.thread_id("x"))
+        blk = fx.Int32(gpu.block_id("x"))
+        i = blk * fx.Int32(BLOCK) + tid
 
         xyz_ = GTensor(out_xyz, dtype=T.i32, shape=(-1,))
         pr_ = GTensor(presence, dtype=T.i32, shape=(-1,))
-        sy_v = sy.ir_value()
-        sz_v = sz.ir_value()
 
-        i_ok = arith.cmpi(arith.CmpIPredicate.slt, i, n_pts)
+        i_ok = (i < n_pts).ir_value()
         iif = scf.IfOp(i_ok, results_=[], has_else=False)
         with ir.InsertionPoint(iif.then_block):
-            base = fx.Index(i) * fx.Index(const_expr(3))
-            x = xyz_.load(base)
-            y = xyz_.load(base + fx.Index(const_expr(1)))
-            z = xyz_.load(base + fx.Index(const_expr(2)))
-            lin = arith.addi(arith.muli(arith.addi(arith.muli(x, sy_v), y), sz_v), z)
-            pr_.store(fx.Index(fx.Int32(lin)), i)
+            base = i * fx.Int32(3)
+            x = fx.Int32(xyz_.load(base))
+            y = fx.Int32(xyz_.load(base + fx.Int32(1)))
+            z = fx.Int32(xyz_.load(base + fx.Int32(2)))
+            pr_.store((x * sy + y) * sz + z, i)
             scf.YieldOp([])
 
     @flyc.jit
@@ -94,62 +91,35 @@ def _compile_fused_tiled_kernel(block_m: int, kv_total: int):
         akv_ = GTensor(active_kv_ids, dtype=T.i32, shape=(-1,))
         cnt_ = GTensor(active_count, dtype=T.i32, shape=(-1,))
 
-        sx_v = sx.ir_value()
-        sy_v = sy.ir_value()
-        sz_v = sz.ir_value()
-        zero_c = arith.constant(0, type=T.i32)
-        one_c = fx.Int32(arith.constant(1, type=T.i32))
+        zero_i = fx.Int32(0)
+        one_c = fx.Int32(1)
 
-        o = tile * fx.Int32(const_expr(BLOCK_M)) + tid
-        row = fx.Index(tid)
+        o = tile * fx.Int32(BLOCK_M) + tid
+        row = tid
 
-        neg1_c = fx.Int32(arith.constant(-1, type=T.i32))
+        neg1_c = fx.Int32(-1)
         for kv in range_constexpr(KV):
-            pref_idx = fx.Index(tile) * fx.Index(const_expr(KV * BLOCK_M)) + fx.Index(const_expr(kv * BLOCK_M)) + row
-            lut_.store(pref_idx, neg1_c)
+            lut_.store(tile * fx.Int32(KV * BLOCK_M) + fx.Int32(kv * BLOCK_M) + row, neg1_c)
 
-        o_ok = arith.cmpi(arith.CmpIPredicate.slt, o, n_pts)
-        oif = scf.IfOp(o_ok, results_=[], has_else=False)
+        oif = scf.IfOp((o < n_pts).ir_value(), results_=[], has_else=False)
         with ir.InsertionPoint(oif.then_block):
-            ox = xyz_.load(fx.Index(o) * fx.Index(const_expr(3)))
-            oy = xyz_.load(fx.Index(o) * fx.Index(const_expr(3)) + fx.Index(const_expr(1)))
-            oz = xyz_.load(fx.Index(o) * fx.Index(const_expr(3)) + fx.Index(const_expr(2)))
+            o3 = o * fx.Int32(3)
+            ox = fx.Int32(xyz_.load(o3))
+            oy = fx.Int32(xyz_.load(o3 + fx.Int32(1)))
+            oz = fx.Int32(xyz_.load(o3 + fx.Int32(2)))
 
             for kv in range_constexpr(KV):
-                dxc = (kv % K) - R
-                dyc = ((kv // K) % K) - R
-                dzc = (kv // (K * K)) - R
-                nx = arith.addi(ox, arith.constant(dxc, type=T.i32))
-                ny = arith.addi(oy, arith.constant(dyc, type=T.i32))
-                nz = arith.addi(oz, arith.constant(dzc, type=T.i32))
-                inx = arith.andi(
-                    arith.cmpi(arith.CmpIPredicate.sge, nx, zero_c),
-                    arith.cmpi(arith.CmpIPredicate.slt, nx, sx_v),
-                )
-                iny = arith.andi(
-                    arith.cmpi(arith.CmpIPredicate.sge, ny, zero_c),
-                    arith.cmpi(arith.CmpIPredicate.slt, ny, sy_v),
-                )
-                inz = arith.andi(
-                    arith.cmpi(arith.CmpIPredicate.sge, nz, zero_c),
-                    arith.cmpi(arith.CmpIPredicate.slt, nz, sz_v),
-                )
-                in_range = arith.andi(arith.andi(inx, iny), inz)
-                rif = scf.IfOp(in_range, results_=[], has_else=False)
+                nx = ox + fx.Int32((kv % K) - R)
+                ny = oy + fx.Int32(((kv // K) % K) - R)
+                nz = oz + fx.Int32((kv // (K * K)) - R)
+                in_range = (nx >= zero_i) & (nx < sx) & (ny >= zero_i) & (ny < sy) & (nz >= zero_i) & (nz < sz)
+                rif = scf.IfOp(in_range.ir_value(), results_=[], has_else=False)
                 with ir.InsertionPoint(rif.then_block):
-                    gidx = arith.addi(arith.muli(arith.addi(arith.muli(nx, sy_v), ny), sz_v), nz)
-                    inp = pr_.load(fx.Index(fx.Int32(gidx)))
-                    found = arith.cmpi(arith.CmpIPredicate.sge, inp, zero_c)
-                    mif = scf.IfOp(found, results_=[], has_else=False)
+                    inp = fx.Int32(pr_.load((nx * sy + ny) * sz + nz))
+                    mif = scf.IfOp((inp >= zero_i).ir_value(), results_=[], has_else=False)
                     with ir.InsertionPoint(mif.then_block):
-                        lut_idx = (
-                            fx.Index(tile) * fx.Index(const_expr(KV * BLOCK_M))
-                            + fx.Index(const_expr(kv * BLOCK_M))
-                            + row
-                        )
-                        lut_.store(lut_idx, inp)
-                        msk_idx = fx.Index(tile) * fx.Index(const_expr(KV)) + fx.Index(const_expr(kv))
-                        msk_.store(msk_idx, one_c)
+                        lut_.store(tile * fx.Int32(KV * BLOCK_M) + fx.Int32(kv * BLOCK_M) + row, inp)
+                        msk_.store(tile * fx.Int32(KV) + fx.Int32(kv), one_c)
                         scf.YieldOp([])
                     scf.YieldOp([])
 
@@ -157,30 +127,23 @@ def _compile_fused_tiled_kernel(block_m: int, kv_total: int):
 
         gpu.barrier()
 
-        is_t0 = arith.cmpi(arith.CmpIPredicate.eq, tid, fx.Int32(arith.constant(0, type=T.i32)))
-        t0_if = scf.IfOp(is_t0, results_=[], has_else=False)
+        t0_if = scf.IfOp((tid == fx.Int32(0)).ir_value(), results_=[], has_else=False)
         with ir.InsertionPoint(t0_if.then_block):
-            msk_base = fx.Index(tile) * fx.Index(const_expr(KV))
-            akv_base = fx.Index(tile) * fx.Index(const_expr(KV))
-
-            cur_ty = fx.MemRefType.get(T.i32, fx.LayoutType.get(const_expr(1), 1), fx.AddressSpace.Register)
-            cur = fx.memref_alloca(cur_ty, fx.make_layout(const_expr(1), 1))
-            fx.memref_store_vec(arith.constant_vector(0, T.vec(1, T.i32)), cur)
+            base = tile * fx.Int32(KV)
+            cur_ty = fx.MemRefType.get(T.i32, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
+            cur = fx.memref_alloca(cur_ty, fx.make_layout(1, 1))
+            fx.memref_store_vec(fx.Vector.filled(1, 0, fx.Int32), cur)
 
             for k in range_constexpr(KV):
-                m = msk_.load(msk_base + fx.Index(const_expr(k)))
-                is_active = arith.cmpi(arith.CmpIPredicate.ne, m, fx.Int32(arith.constant(0, type=T.i32)))
-                act_if = scf.IfOp(is_active, results_=[], has_else=False)
+                m = fx.Int32(msk_.load(base + fx.Int32(k)))
+                act_if = scf.IfOp((m != fx.Int32(0)).ir_value(), results_=[], has_else=False)
                 with ir.InsertionPoint(act_if.then_block):
-                    c_vec = fx.memref_load_vec(cur)
-                    c = vector.extract(c_vec, static_position=[const_expr(0)], dynamic_position=[])
-                    akv_.store(akv_base + fx.Index(fx.Int32(c)), fx.Int32(arith.constant(k, type=T.i32)))
-                    c1 = arith.addi(c, arith.constant(1, type=T.i32))
-                    fx.memref_store_vec(vector.from_elements(T.vec(1, T.i32), [c1]), cur)
+                    c = fx.Vector(fx.memref_load_vec(cur))[0]
+                    akv_.store(base + c, fx.Int32(k))
+                    fx.memref_store_vec(fx.Vector.from_elements([c + fx.Int32(1)]), cur)
                     scf.YieldOp([])
 
-            final_c = vector.extract(fx.memref_load_vec(cur), static_position=[const_expr(0)], dynamic_position=[])
-            cnt_.store(fx.Index(tile), final_c)
+            cnt_.store(tile, fx.Vector(fx.memref_load_vec(cur))[0])
             scf.YieldOp([])
 
     @flyc.jit
