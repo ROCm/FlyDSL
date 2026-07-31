@@ -135,7 +135,7 @@ def _int4_nibble_to_bf16x8(raw_i32, scale_f32):
     for n in range_constexpr(8):
         shifted = _raw(fx.Int32(raw_i32).shrui(fx.Int32(4 * n))) if n > 0 else _raw(raw_i32)
         v = fx.Float32(rocdl.cvt_off_f32_i4(shifted)) * eff
-        bf16s.append(arith.TruncFOp(T.bf16, _raw(v)).result)
+        bf16s.append(v.to(fx.BFloat16))
     return fx.Vector.from_elements(bf16s, fx.BFloat16)  # v8bf16
 
 

@@ -348,8 +348,7 @@ def _gemm1_body_a16w4(
             byte_odd = byte_even + fx.Int32(1)
             se = _e8m0_byte_to_f32(packed, byte_even)
             so = _e8m0_byte_to_f32(packed, byte_odd)
-            is_even = arith.cmpi(arith.CmpIPredicate.eq, _raw(n_pack), _raw(fx.Int32(0)))
-            scales.append(fx.Float32(arith.select(is_even, _raw(se), _raw(so))))
+            scales.append((n_pack == fx.Int32(0)).select(se, so))
         return scales
 
     def load_b_scale_int4(base_k, col_g):
@@ -369,8 +368,7 @@ def _gemm1_body_a16w4(
             # even adj_ku -> low bf16, odd -> high bf16.
             lo = fx.Float32(_raw(packed << fx.Int32(16)).bitcast(T.f32))
             hi = fx.Float32(_raw(packed & fx.Int32(0xFFFF0000)).bitcast(T.f32))
-            is_even = arith.cmpi(arith.CmpIPredicate.eq, _raw(adj_ku % fx.Int32(2)), _raw(fx.Int32(0)))
-            scales.append(fx.Float32(arith.select(is_even, _raw(lo), _raw(hi))))
+            scales.append((adj_ku % fx.Int32(2) == fx.Int32(0)).select(lo, hi))
         return scales
 
     vec2_bf16 = ir.Type.parse("vector<2xbf16>")
@@ -559,16 +557,16 @@ def _gemm1_body_a16w4(
     # drop-in. Padding rows (token >= tokens) are masked out; for k_wave>1 only the
     # primary k-group (wave_k_id==0) writes (peers hold the identical reduced sum).
     if const_expr(k_wave > 1):
-        _is_primary = arith.cmpi(arith.CmpIPredicate.eq, _raw(wave_k_id), _raw(fx.Int32(0)))
+        _is_primary = wave_k_id == fx.Int32(0)
     for mi in range_constexpr(m_repeat):
         for ii in range_constexpr(4):
             row_in_tile = fx.Int32(mi * 16) + lane_div_16 * fx.Int32(4) + fx.Int32(ii)
             sorted_row = bx_m + row_in_tile
             fused = fx.Int32(_global_i32_at(arg_mind, sorted_row))
             token = fused & fx.Int32(0x00FFFFFF)
-            valid = arith.cmpi(arith.CmpIPredicate.ult, _raw(token), _raw(i32_ntok))
+            valid = token < i32_ntok
             if const_expr(k_wave > 1):
-                valid = arith.andi(_raw(valid), _raw(_is_primary))
+                valid = valid & _is_primary
             for ni in range_constexpr(num_acc_n):
                 g = fx.Float32(fx.Vector(fx.memref_load_vec(acc_gate[mi][ni]))[ii])
                 u = fx.Float32(fx.Vector(fx.memref_load_vec(acc_up[mi][ni]))[ii])
@@ -576,7 +574,7 @@ def _gemm1_body_a16w4(
                     y = _situ_mul_batch([g], [u])[0]
                 else:
                     y = _silu_mul_batch([g], [u])[0]
-                yb = arith.TruncFOp(T.bf16, _raw(y)).result
+                yb = y.to(fx.BFloat16)
                 out_idx = sorted_row * inter_i32 + col_g_list[ni]
                 buffer_ops.buffer_store(yb, _raw(out_rsrc), _raw(out_idx), mask=valid)
 

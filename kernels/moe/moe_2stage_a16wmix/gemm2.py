@@ -337,8 +337,7 @@ def _gemm2_body_a16w4(
             byte_odd = byte_even + fx.Int32(1)
             se = _e8m0_byte_to_f32(packed, byte_even)
             so = _e8m0_byte_to_f32(packed, byte_odd)
-            is_even = arith.cmpi(arith.CmpIPredicate.eq, _raw(n_pack), _raw(fx.Int32(0)))
-            scales.append(fx.Float32(arith.select(is_even, _raw(se), _raw(so))))
+            scales.append((n_pack == fx.Int32(0)).select(se, so))
         return scales
 
     def load_b_scale_int4(base_k, col_g):
@@ -354,8 +353,7 @@ def _gemm2_body_a16w4(
             )
             lo = fx.Float32(_raw(packed << fx.Int32(16)).bitcast(T.f32))
             hi = fx.Float32(_raw(packed & fx.Int32(0xFFFF0000)).bitcast(T.f32))
-            is_even = arith.cmpi(arith.CmpIPredicate.eq, _raw(adj_ku % fx.Int32(2)), _raw(fx.Int32(0)))
-            scales.append(fx.Float32(arith.select(is_even, _raw(lo), _raw(hi))))
+            scales.append((adj_ku % fx.Int32(2) == fx.Int32(0)).select(lo, hi))
         return scales
 
     vec2_bf16 = ir.Type.parse("vector<2xbf16>")
