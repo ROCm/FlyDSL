@@ -12,6 +12,7 @@ passed as ``.data_ptr()``.
 
 import csv
 import functools
+import os
 import re
 
 import torch
@@ -140,6 +141,8 @@ def flydsl_a16w4_gemm1(
     gate_mode="separated",
     act="silu",
     w_dtype="mxfp4",
+    use_csv_config=True,
+    csv_path=None,
     stream=None,
 ):
     """a16w4/a16wi4 fused stage1: gate+up GEMM + SiLU -> bf16 intermediate.
@@ -181,6 +184,30 @@ def flydsl_a16w4_gemm1(
         raise NotImplementedError(f"a16w4 gemm1 only supports k_batch=1, got {k_batch}")
     if gate_mode != "separated":
         raise NotImplementedError(f"a16w4 gemm1 only supports gate_mode='separated', got {gate_mode!r}")
+
+    # CSV-driven per-token config (mxfp4 only): default-enable aiter's tuned tile
+    # geometry for the Kimi-K3 a16w4 shapes. Small tokens select tile_n=64 + k_wave
+    # (K-slice parallelism without spill); mid/large keep tile_n=128/256. Falls back
+    # to the adaptive default when no CSV row matches the shape. Explicit caller
+    # overrides (non-default tile_n/tile_k/k_wave/waves_per_eu/b_nt/xcd_swizzle) win.
+    if use_csv_config and w_dtype == "mxfp4":
+        cfg = resolve_a16w4_gemm1_config(
+            model_dim=D_HIDDEN, inter_dim=D_INTER, experts=NE, topk=topk, tokens=int(n_tokens), csv_path=csv_path
+        )
+        if cfg is not None:
+            if tile_n is None:
+                tile_n = cfg["tile_n"]
+            if tile_k == 256:
+                tile_k = cfg["tile_k"]
+            if k_wave == 1:
+                k_wave = cfg["k_wave"]
+            if waves_per_eu is None:
+                waves_per_eu = cfg["waves_per_eu"]
+            if xcd_swizzle == 0:
+                xcd_swizzle = cfg["xcd_swizzle"]
+            if b_nt is None:
+                b_nt = cfg["b_nt"]
+
     BM = tile_m
     TILE_K = tile_k
     _m = int(n_tokens)
@@ -240,6 +267,8 @@ def flydsl_a16w4_gemm2(
     b_nt=None,
     xcd_swizzle=1,
     w_dtype="mxfp4",
+    use_csv_config=True,
+    csv_path=None,
     stream=None,
 ):
     """a16w4/a16wi4 fused stage2 (down-proj). Consumes the bf16 [sorted_size, D_INTER]
@@ -254,6 +283,25 @@ def flydsl_a16w4_gemm2(
     """
     if k_batch != 1:
         raise NotImplementedError(f"a16w4 gemm2 only supports k_batch=1, got {k_batch}")
+
+    # CSV-driven per-token config (mxfp4 only). gemm2 rows are all k_wave=1,
+    # tile_n=256; the useful lever here is tile_k (128 vs 256) + b_nt/xcd. Falls
+    # back to the adaptive default when no CSV row matches or violates a divisibility
+    # constraint. Explicit caller overrides win (tile_k!=256, b_nt set, etc.).
+    if use_csv_config and w_dtype == "mxfp4":
+        cfg = resolve_a16w4_gemm2_config(
+            model_dim=D_HIDDEN, inter_dim=D_INTER, experts=NE, topk=topk, tokens=int(M_logical), csv_path=csv_path
+        )
+        if cfg is not None:
+            if tile_n == 256 and D_HIDDEN % cfg["tile_n"] == 0:
+                tile_n = cfg["tile_n"]
+            if tile_k == 256:
+                tile_k = cfg["tile_k"]
+            if b_nt is None:
+                b_nt = cfg["b_nt"]
+            if xcd_swizzle == 1:
+                xcd_swizzle = cfg["xcd_swizzle"]
+
     BM = tile_m
     TILE_N = tile_n
     if TILE_N is None:
@@ -392,3 +440,123 @@ def pick_a16w4_config(csv_path, *, model_dim, inter_dim, experts, topk, tokens, 
     le = [t for t in cand if t <= tokens]
     pick = le[-1] if le else cand[0]
     return table[(model_dim, inter_dim, experts, topk, pick, stage)]
+
+
+# -----------------------------------------------------------------------------
+# Default aiter tuned-CSV path + per-token config application.
+#
+# The tile *geometry* (tile_m/n/k, waves_per_eu, xcd_swizzle, b_nt, k_wave) in
+# aiter's kimik3_fp4_tuned_fmoe.csv is directly usable by our builders. The
+# small-M rows use tile_n=64 + k_wave in {2,4}, which -- unlike a wide tile_n=256
+# k_wave (which spills to 512 VGPR) -- keeps per-wave num_acc_n = tile_n*k_wave/64
+# at or below our no-spill default footprint (=4) while adding intra-block K-slice
+# parallelism. That is the small-M latency lever this path wires in.
+# -----------------------------------------------------------------------------
+
+# Candidate locations for aiter's tuned fp4 fmoe CSV (env override wins).
+_A16W4_CSV_ENV = "FLYDSL_A16W4_TUNED_CSV"
+_A16W4_CSV_CANDIDATES = ("/root/aiter/aiter/configs/model_configs/kimik3_fp4_tuned_fmoe.csv",)
+
+
+@functools.cache
+def _default_a16w4_csv_path():
+    """Locate aiter's tuned fp4 fmoe CSV, or None if not found.
+
+    ``FLYDSL_A16W4_TUNED_CSV`` overrides the search. The CSV is used only as a
+    source of candidate tile geometries for the Kimi-K3 a16w4 shapes.
+    """
+    env = os.environ.get(_A16W4_CSV_ENV)
+    if env:
+        return env if os.path.isfile(env) else None
+    for p in _A16W4_CSV_CANDIDATES:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def _kw_tile_k_for(cfg, *, K):
+    """Return a (k_wave, tile_k) pair from ``cfg`` made correct for contraction ``K``.
+
+    The gemm1 builder requires ``K % (k_wave * tile_k) == 0`` (each of the k_wave
+    K-waves owns klen=K/k_wave, tiled by tile_k). aiter names its kw4 rows with
+    tile_k=256 but relies on K-padding we don't have (e.g. K=3584: 3584 % (4*256)
+    = 512 != 0). We keep the CSV's k_wave but pick the largest tile_k in
+    {256,128,64} that satisfies the divisibility, so the K-slice parallelism is
+    preserved without padding. If no tile_k works for that k_wave, drop k_wave to 1
+    (returns the CSV tile_k, which always divides K). Returns (k_wave, tile_k, note)
+    where note is a short string if a fallback was applied, else "".
+    """
+    kw = int(cfg.get("k_wave", 1))
+    tk = int(cfg["tile_k"])
+    if kw == 1:
+        return 1, tk, ""
+    if K % (kw * tk) == 0:
+        return kw, tk, ""
+    for cand_tk in (256, 128, 64):
+        if cand_tk <= tk and K % (kw * cand_tk) == 0:
+            return kw, cand_tk, f"kw{kw}:tile_k {tk}->{cand_tk}"
+    # No tile_k divides for this k_wave; fall back to no slice-K.
+    return 1, tk, f"kw{kw}->1 (no divisible tile_k at K={K})"
+
+
+def resolve_a16w4_gemm1_config(*, model_dim, inter_dim, experts, topk, tokens, csv_path=None):
+    """Resolve the per-token gemm1 tile-config for a shape from the tuned CSV.
+
+    Returns a kwargs dict (tile_m, tile_n, tile_k, waves_per_eu, xcd_swizzle,
+    b_nt, k_wave) plus a ``_note`` string, or None when no CSV is available or no
+    row matches the shape (caller then uses the adaptive default). K=model_dim is
+    the gemm1 contraction; the kw/tile_k pair is corrected for it.
+    """
+    path = csv_path or _default_a16w4_csv_path()
+    if path is None:
+        return None
+    cfg = pick_a16w4_config(
+        path, model_dim=model_dim, inter_dim=inter_dim, experts=experts, topk=topk, tokens=tokens, stage=1
+    )
+    if cfg is None:
+        return None
+    # gemm1 requires inter_dim % tile_n == 0; skip CSV tile_n if it does not divide.
+    tile_n = int(cfg["tile_n"])
+    if inter_dim % tile_n != 0:
+        return None
+    kw, tile_k, note = _kw_tile_k_for(cfg, K=model_dim)
+    return {
+        "tile_m": int(cfg["tile_m"]),
+        "tile_n": tile_n,
+        "tile_k": tile_k,
+        "waves_per_eu": cfg.get("waves_per_eu"),
+        "xcd_swizzle": int(cfg.get("xcd_swizzle", 0)),
+        "b_nt": int(cfg["b_nt"]),
+        "k_wave": kw,
+        "_note": note,
+    }
+
+
+def resolve_a16w4_gemm2_config(*, model_dim, inter_dim, experts, topk, tokens, csv_path=None):
+    """Resolve the per-token gemm2 tile-config for a shape from the tuned CSV.
+
+    gemm2 has no k_wave (fixed 4-wave N-split); the CSV rows are all k_wave=1.
+    gemm2 requires D_INTER (K) % tile_k == 0 and model_dim (N) % tile_n == 0; a
+    CSV row violating either is skipped (None -> adaptive default).
+    """
+    path = csv_path or _default_a16w4_csv_path()
+    if path is None:
+        return None
+    cfg = pick_a16w4_config(
+        path, model_dim=model_dim, inter_dim=inter_dim, experts=experts, topk=topk, tokens=tokens, stage=2
+    )
+    if cfg is None:
+        return None
+    tile_n = int(cfg["tile_n"])
+    tile_k = int(cfg["tile_k"])
+    if model_dim % tile_n != 0 or inter_dim % tile_k != 0:
+        return None
+    return {
+        "tile_m": int(cfg["tile_m"]),
+        "tile_n": tile_n,
+        "tile_k": tile_k,
+        "waves_per_eu": cfg.get("waves_per_eu"),
+        "xcd_swizzle": int(cfg.get("xcd_swizzle", 1)),
+        "b_nt": int(cfg["b_nt"]),
+        "_note": "",
+    }

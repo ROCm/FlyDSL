@@ -1735,15 +1735,18 @@ def _run_a16w4_moe_e2e(
         D_HIDDEN=model_dim,
         D_INTER=inter_dim,
         topk=topk,
-        # aiter tile-config interface; sensible default when no CSV row matches.
-        # NOTE: waves_per_eu is left None (no min-occupancy hint) on purpose --
-        # our fixed 4-wave tile_n=256 kernel is heavily LDS/VGPR-bound, so forcing
-        # aiter's tuned waves_per_eu=3/4 spills and regresses ~4-5x on this kernel
-        # (measured). aiter's 3/4 is for its lower-footprint tile_n=64 body.
+        # aiter tile-config interface. For mxfp4 (a16w4), leave tile_n/tile_k unset
+        # so the CSV-driven per-token config (use_csv_config default) selects aiter's
+        # tuned geometry (small M -> tile_n=64 + k_wave) when a CSV row matches, else
+        # the adaptive default. a16w16 (raw bf16 W) has no CSV rows, so pin the
+        # adaptive tile explicitly and disable the CSV path. NOTE: waves_per_eu is
+        # sourced from the CSV for mxfp4 (aiter's 3/4 is tuned for the tile_n=64
+        # body, which does not spill -- verified 175/236 VGPR, 0 spill).
         tile_m=BM,
-        tile_n=256 if inter_dim % 256 == 0 else 128,
+        tile_n=None if _is_bf16_w is False else (256 if inter_dim % 256 == 0 else 128),
         tile_k=256,
         w_dtype=w_dtype,
+        use_csv_config=not _is_bf16_w,
     )
 
     # stage2 -> bf16 [tokens, model_dim] (atomic routing-weighted scatter)
@@ -1767,6 +1770,7 @@ def _run_a16w4_moe_e2e(
         tile_n=256,
         tile_k=256,
         w_dtype=w_dtype,
+        use_csv_config=not _is_bf16_w,
     )
     torch.cuda.synchronize()
     out = out_buf.view(tokens, model_dim).float()
