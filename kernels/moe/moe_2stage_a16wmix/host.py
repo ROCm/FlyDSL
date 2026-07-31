@@ -253,6 +253,20 @@ def flydsl_a16w4_gemm1(
             # measured ~0.86-0.89x on gemm1-s1 at tok 1..2 on both Kimi-K3 shapes.
             # It regresses from tok4 up, so it is gated to tok<=2 only.
             TILE_N = 64
+        elif w_dtype == "int4" and BM == 64 and D_INTER % 64 == 0:
+            # int4 BM=64 (the tok~1600..3072 W1-reuse fill point where
+            # a16wi4_recommend_block_m collapses two half-full 32-row m-blocks into one
+            # 64-row block): with TILE_N=128 the wider N-tile pushes VGPR to 349 + 93
+            # AGPR -> only 1 wave/SIMD (OccupancyPercent 12.3%), fully exposing the
+            # W-load + int4-dequant + A-LDS-read latency. Halving to TILE_N=64 drops
+            # VGPR to a 2-wave/SIMD footprint (OccupancyPercent 23.0%) without spilling
+            # and WITHOUT changing the A-LDS tile (still 32KB, never the limiter here);
+            # measured ~0.77x gemm1-s1 across the whole BM=64 band (tok 1600/2048/2560/
+            # 3072: 955/966/979/997us -> 742/737/755/773us) on 7168x512 E384/k8. The
+            # narrower tile is a NET LOSS for the BM=32 mid band (tok 128..1024, already
+            # 2 waves/SIMD -> not occupancy-bound; TILE_N=64 only adds grid/LDS-wait
+            # overhead there), so this is gated to the BM=64 fill point only.
+            TILE_N = 64
         elif w_dtype == "mxfp4" and D_INTER % 128 == 0:
             TILE_N = 128
         else:
