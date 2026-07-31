@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-31T08:35:03Z",
+ "updated": "2026-07-31T09:06:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30618551292,
+   "pr": 945,
+   "commit": "c35d21ae3f6f089b9a0afc04e155847c528c8147",
+   "branch": "jli/update-llvm-basemain",
+   "event": "pull_request",
+   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30618551292",
+   "created_at": "2026-07-31T09:04:07Z",
+   "updated_at": "2026-07-31T09:04:13Z",
+   "actor": "Boss2002n",
+   "jobs": []
+  },
   {
    "run_id": 30616696359,
    "pr": null,
@@ -10,13 +25,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Doc] Define API stability contract (#925)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30616696359",
    "created_at": "2026-07-31T08:32:59Z",
-   "updated_at": "2026-07-31T08:33:13Z",
+   "updated_at": "2026-07-31T08:35:43Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-31T08:36:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30616696359/job/91111940286"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-31T08:36:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30616696359/job/91111940324"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-31T08:35:43Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30616696359/job/91111940406"
+    }
+   ]
   },
   {
    "run_id": 30616581402,
@@ -93,10 +136,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-31T08:13:09Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T08:42:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30613299899/job/91107679485"
     },
     {
@@ -145,10 +188,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-31T08:04:55Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T09:02:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30610070259/job/91097116469"
     },
     {
@@ -184,11 +227,11 @@
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
    "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30603703154",
    "created_at": "2026-07-31T04:15:48Z",
-   "updated_at": "2026-07-31T05:18:09Z",
+   "updated_at": "2026-07-31T09:04:08Z",
    "actor": "jli-melchior",
    "jobs": [
     {
@@ -212,10 +255,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-31T05:18:09Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T09:04:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30603703154/job/91079522431"
     }
    ]
@@ -2079,49 +2122,6 @@
      "started_at": "2026-07-29T22:09:20Z",
      "completed_at": "2026-07-29T22:18:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30482303173/job/90683139475"
-    }
-   ]
-  },
-  {
-   "run_id": 30472049143,
-   "pr": 848,
-   "commit": "2ab9c0016a55a37994bc2f2071b5e8731c19354e",
-   "branch": "cjl/norm_perf",
-   "event": "pull_request",
-   "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30472049143",
-   "created_at": "2026-07-29T16:43:25Z",
-   "updated_at": "2026-07-30T18:05:14Z",
-   "actor": "cschenjunlin",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-30T12:47:22Z",
-     "completed_at": "2026-07-30T13:39:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30472049143/job/90875381905"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-30T15:37:52Z",
-     "completed_at": "2026-07-30T17:31:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30472049143/job/90875381946"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-30T16:25:23Z",
-     "completed_at": "2026-07-30T18:05:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30472049143/job/90875381948"
     }
    ]
   }
