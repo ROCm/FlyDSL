@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-31T09:06:56Z",
+ "updated": "2026-07-31T09:09:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
    "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30618551292",
    "created_at": "2026-07-31T09:04:07Z",
-   "updated_at": "2026-07-31T09:04:13Z",
+   "updated_at": "2026-07-31T09:05:21Z",
    "actor": "Boss2002n",
    "jobs": []
   },
@@ -83,19 +83,19 @@
    "branch": "rdna4-wmma-atom",
    "event": "pull_request",
    "title": "[Dialect][Kernel][Perf] Add gfx120x.wmma atom and port the RDNA4 GEMM to the layout API",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30613370747",
    "created_at": "2026-07-31T07:35:50Z",
-   "updated_at": "2026-07-31T08:12:44Z",
+   "updated_at": "2026-07-31T09:07:29Z",
    "actor": "vlluvia",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-31T08:12:44Z",
+     "started_at": "2026-07-31T09:07:28Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30613370747/job/91107651214"
     },
@@ -270,11 +270,11 @@
    "branch": "cjl/norm_perf",
    "event": "pull_request",
    "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30602402454",
    "created_at": "2026-07-31T03:46:07Z",
-   "updated_at": "2026-07-31T07:35:09Z",
+   "updated_at": "2026-07-31T09:07:16Z",
    "actor": "cschenjunlin",
    "jobs": [
     {
@@ -298,10 +298,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-31T07:35:09Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T09:07:15Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30602402454/job/91068212236"
     }
    ]
