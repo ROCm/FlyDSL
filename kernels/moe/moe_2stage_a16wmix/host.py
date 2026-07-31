@@ -216,7 +216,14 @@ def flydsl_a16w4_gemm1(
         # faster across the whole token range (1..16384) on the Kimi-K3 3584x512 shape
         # (e.g. s1 -7% @tok8192, -10% @tok16384) with no small-M regression. bf16
         # (a16w16, VGPR>=448 regardless) and int4 (already 128) keep _default_tile_n.
-        if w_dtype == "mxfp4" and D_INTER % 128 == 0:
+        if w_dtype == "mxfp4" and _m <= 2 and not use_csv_config and D_INTER % 64 == 0:
+            # Very-low-M (tok 1..2): the E896 launch has only ~topk m-blocks of real
+            # work, so the whole GPU is under-filled. The narrower TILE_N=64 doubles
+            # the CTA count per m-block (better latency hiding across the CUs) and is
+            # measured ~0.86-0.89x on gemm1-s1 at tok 1..2 on both Kimi-K3 shapes.
+            # It regresses from tok4 up, so it is gated to tok<=2 only.
+            TILE_N = 64
+        elif w_dtype == "mxfp4" and D_INTER % 128 == 0:
             TILE_N = 128
         else:
             TILE_N = _default_tile_n(D_INTER, w_dtype=w_dtype)
