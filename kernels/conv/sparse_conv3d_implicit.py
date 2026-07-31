@@ -659,10 +659,18 @@ def _pick_k_unroll(c_out: int) -> int:
     return 2 if c_out >= 512 else 1
 
 
+# Keyed on the coords tensor itself, so a new or mutated coordinate set is a miss
+# rather than a stale hit. id() is recycled once a tensor dies, so the finalize below
+# must drop the entry first -- same scheme as _WPACK_CACHE.
 _LUT_CACHE: dict = {}
 
 
 _CMP_CACHE: dict = {}
+
+
+def _evict_lut(key):
+    _LUT_CACHE.pop(key, None)
+    _CMP_CACHE.pop(key, None)
 
 
 def clear_lut_cache():
@@ -855,7 +863,6 @@ def sparse_conv3d_from_coords_f32(
     coords: torch.Tensor,
     features: torch.Tensor,
     weight: torch.Tensor,
-    indice_key: Optional[str] = None,
     spatial_shape=None,
     n_batch: Optional[int] = None,
     kv_order: str = "zyx",
@@ -866,20 +873,16 @@ def sparse_conv3d_from_coords_f32(
     assert weight.shape[2:] == (k, k, k), f"kernel must be cubic, got {tuple(weight.shape[2:])}"
     assert k % 2 == 1, f"kernel size must be odd, got {k}"
 
-    cache_key = (indice_key, F32_BLOCK_M, k) if indice_key is not None else None
-    if cache_key is not None and cache_key in _LUT_CACHE:
-        inp_row_lut, mask, _akv, _cnt, num_tiles, num_act = _LUT_CACHE[cache_key]
-        if num_act != coords.shape[0]:
-            raise ValueError(
-                f"indice_key={indice_key!r} was cached for N={num_act} but got "
-                f"N={coords.shape[0]}; use a distinct key per set of coordinates"
-            )
-    else:
-        inp_row_lut, mask, _akv, _cnt, num_tiles, num_act = build_lut_auto(
-            coords, F32_BLOCK_M, spatial_shape=spatial_shape, n_batch=n_batch, kernel_size=k
-        )
-        if cache_key is not None:
-            _LUT_CACHE[cache_key] = (inp_row_lut, mask, _akv, _cnt, num_tiles, num_act)
+    cache_key = (id(coords), coords._version, F32_BLOCK_M, k)
+    entry = _LUT_CACHE.get(cache_key)
+    if entry is None:
+        entry = build_lut_auto(coords, F32_BLOCK_M, spatial_shape=spatial_shape, n_batch=n_batch, kernel_size=k)
+        _LUT_CACHE[cache_key] = entry
+        try:
+            weakref.finalize(coords, _evict_lut, cache_key)
+        except TypeError:
+            pass
+    inp_row_lut, mask, _akv, _cnt, num_tiles, num_act = entry
 
     packed_w, c_in, c_out, _kv = _prepare_weight_bf16(weight, kv_order, F32_C_OUT_TILE)
     c_in_real = features.shape[1]
@@ -891,11 +894,10 @@ def sparse_conv3d_from_coords_f32(
     if num_tiles == 0:
         return out[:, :c_out_real]
 
-    cmp_entry = _CMP_CACHE.get(cache_key) if cache_key is not None else None
+    cmp_entry = _CMP_CACHE.get(cache_key)
     if cmp_entry is None:
         cmp_entry = build_compacted_pairs(inp_row_lut, num_tiles, num_act, F32_BLOCK_M, k)
-        if cache_key is not None:
-            _CMP_CACHE[cache_key] = cmp_entry
+        _CMP_CACHE[cache_key] = cmp_entry
     in_rows, out_rows, tile_kv, n_tiles_c = cmp_entry
     if n_tiles_c == 0:
         return out[:, :c_out_real]

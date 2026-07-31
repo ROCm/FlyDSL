@@ -294,14 +294,14 @@ def test_compacted_path_matches_indexed(box, n_active, c):
     try:
         os.environ["FLYDSL_SPCONV_COMPACT"] = "0"
         clear_lut_cache()
-        ref = sparse_conv3d_from_coords_f32(coords, feat, w, indice_key="k", spatial_shape=ss)
+        ref = sparse_conv3d_from_coords_f32(coords, feat, w, spatial_shape=ss)
         torch.cuda.synchronize()
         ref = ref.clone()
 
         os.environ["FLYDSL_SPCONV_COMPACT"] = "1"
         os.environ["FLYDSL_SPCONV_COMPACT_MIN_N"] = "0"
         clear_lut_cache()
-        got = sparse_conv3d_from_coords_f32(coords, feat, w, indice_key="k", spatial_shape=ss)
+        got = sparse_conv3d_from_coords_f32(coords, feat, w, spatial_shape=ss)
         torch.cuda.synchronize()
     finally:
         os.environ.pop("FLYDSL_SPCONV_COMPACT_MIN_N", None)
