@@ -11,7 +11,8 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl.expr import T, arith, as_ir_value, const_expr, range_constexpr
+from flydsl._mlir.extras import types as T
+from flydsl.expr import arith, as_ir_value, const_expr, range_constexpr
 from flydsl.expr.rocdl import (
     ballot,
     cvt_pk_f32_fp8,

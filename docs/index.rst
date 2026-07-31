@@ -16,6 +16,7 @@ to GPU/ROCDL.
 
    installation
    quickstart
+   api_stability
 
 .. toctree::
    :maxdepth: 2

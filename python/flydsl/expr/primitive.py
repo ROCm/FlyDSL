@@ -46,9 +46,6 @@ from .enum import SyncScope
 from .meta import dsl_loc_tracing, dsl_wrap_result
 
 __all__ = [
-    # Maybe remove it in the future
-    "T",
-    # "arith",
     # Enum Attributes
     "AtomicOp",
     "AddressSpace",
