@@ -1539,11 +1539,18 @@ def _run_a16w4_moe_e2e(
         m_indices=m_indices,
         inter_sorted_bf16=inter_sorted,
         n_tokens=tokens,
-        BM=BM,
         NE=experts,
         D_HIDDEN=model_dim,
         D_INTER=inter_dim,
         topk=topk,
+        # aiter tile-config interface; sensible default when no CSV row matches.
+        # NOTE: waves_per_eu is left None (no min-occupancy hint) on purpose --
+        # our fixed 4-wave tile_n=256 kernel is heavily LDS/VGPR-bound, so forcing
+        # aiter's tuned waves_per_eu=3/4 spills and regresses ~4-5x on this kernel
+        # (measured). aiter's 3/4 is for its lower-footprint tile_n=64 body.
+        tile_m=BM,
+        tile_n=256 if inter_dim % 256 == 0 else 128,
+        tile_k=256,
     )
 
     # stage2 -> bf16 [tokens, model_dim] (atomic routing-weighted scatter)
@@ -1559,11 +1566,13 @@ def _run_a16w4_moe_e2e(
         flat_out=out_buf,
         M_logical=tokens,
         max_sorted=sorted_size,
-        BM=BM,
         NE=experts,
         D_HIDDEN=model_dim,
         D_INTER=inter_dim,
         topk=topk,
+        tile_m=BM,
+        tile_n=256,
+        tile_k=256,
     )
     torch.cuda.synchronize()
     out = out_buf.view(tokens, model_dim).float()
