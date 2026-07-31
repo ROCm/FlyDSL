@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-31T06:35:42Z",
+ "updated": "2026-07-31T07:19:18Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,9 +14,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30610070259",
    "created_at": "2026-07-31T06:34:46Z",
-   "updated_at": "2026-07-31T06:34:46Z",
+   "updated_at": "2026-07-31T07:14:15Z",
    "actor": "xudoyuan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-31T07:14:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30610070259/job/91097116461"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-31T07:14:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30610070259/job/91097116469"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-31T07:14:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30610070259/job/91097116493"
+    }
+   ]
   },
   {
    "run_id": 30605683200,
@@ -50,19 +78,19 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-31T05:37:52Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T07:17:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30603703154/job/91079522382"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-31T05:20:32Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T07:14:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30603703154/job/91079522414"
     },
     {
