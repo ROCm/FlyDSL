@@ -179,8 +179,8 @@ def test_zdelta_map_matches_dense(box, n_active, k):
     dense = build_lut_dense(coords, 16, spatial_shape=(box, box, box), kernel_size=k)
     zdelta = build_lut_zdelta(coords, 16, spatial_shape=(box, box, box), kernel_size=k)
     torch.cuda.synchronize()
-    for name, a, b in zip(("lut", "mask", "akv", "count"), dense[:4], zdelta[:4]):
-        assert torch.equal(a, b), f"{name} differs between dense and zdelta mappers"
+    assert torch.equal(dense[0], zdelta[0]), "lut differs between dense and zdelta mappers"
+    assert dense[1:] == zdelta[1:], "num_tiles/num_act differ between dense and zdelta mappers"
 
 
 @_skip_non_cdna4
@@ -194,7 +194,7 @@ def test_zdelta_handles_grid_too_large_for_dense():
     xyz = torch.stack([(torch.rand(n, device="cuda") * ss[i]).to(torch.int32) for i in range(3)], dim=1).contiguous()
     xyz = torch.unique(xyz, dim=0)
 
-    lut, mask, _akv, _cnt, num_tiles, num_act = build_lut_auto(xyz, 16, spatial_shape=ss, kernel_size=3)
+    lut, num_tiles, num_act = build_lut_auto(xyz, 16, spatial_shape=ss, kernel_size=3)
     torch.cuda.synchronize()
     assert num_act == xyz.shape[0]
     assert lut.shape == (num_tiles, 27, 16)
@@ -219,7 +219,7 @@ def test_zdelta_key_width_selection(ss, expect32):
     xyz = torch.stack([(torch.rand(n, device="cuda") * ss[i]).to(torch.int32) for i in range(3)], dim=1).contiguous()
     xyz = torch.unique(xyz, dim=0)
 
-    lut, _mask, _akv, _cnt, _nt, num_act = build_lut_zdelta(xyz, 16, spatial_shape=ss, kernel_size=3)
+    lut, _nt, num_act = build_lut_zdelta(xyz, 16, spatial_shape=ss, kernel_size=3)
     torch.cuda.synchronize()
     assert (lut[:, 13, :] >= 0).sum().item() == num_act
 
@@ -277,40 +277,62 @@ def test_weight_cache_does_not_leak():
     assert len(_WPACK_CACHE) <= 2, f"cache retained {len(_WPACK_CACHE)} entries for dead weights"
 
 
+def _uncompacted_pairs(lut, num_tiles, num_act, kv_total=27, block_m=16):
+    """Pair list built straight from the lut, bypassing build_compacted_pairs.
+
+    One tile per (tile, kv) group, empty ones included. Slots that hold no pair get
+    out_row = -1 (the gemm's guard) and in_row = 0, since the gemm gathers in_row
+    unguarded. Deliberately independent of the compaction kernels so it can serve as
+    their reference.
+    """
+    lv = lut.reshape(num_tiles, kv_total, block_m)
+    orow = torch.arange(num_tiles * block_m, device=lut.device).reshape(num_tiles, 1, block_m)
+    orow = orow.expand(num_tiles, kv_total, block_m)
+    valid = (lv >= 0) & (orow < num_act)
+    in_rows = torch.where(valid, lv, torch.zeros_like(lv)).reshape(-1).contiguous().int()
+    out_rows = torch.where(valid, orow, torch.full_like(orow, -1)).reshape(-1).contiguous().int()
+    tile_kv = torch.arange(kv_total, device=lut.device, dtype=torch.int32).repeat(num_tiles).contiguous()
+    return in_rows, out_rows, tile_kv, num_tiles * kv_total
+
+
 @_skip_non_cdna4
 @pytest.mark.parametrize("box,n_active,c", [(24, 500, 128), (30, 1000, 256), (17, 200, 512), (12, 100, 128)])
 def test_compacted_path_matches_indexed(box, n_active, c):
-    import os
-
-    from kernels.conv.sparse_conv3d_implicit import clear_lut_cache, sparse_conv3d_from_coords_f32
+    """build_compacted_pairs must not change the conv result, only the tile count."""
+    from kernels.common.tensor_shim import _run_compiled
+    from kernels.conv.sparse_conv3d_implicit import (
+        _compile_bf16_compacted,
+        _pick_ct_per_block,
+        _pick_k_unroll,
+        _prepare_weight_bf16,
+        build_compacted_pairs,
+        build_lut_auto,
+    )
 
     torch.manual_seed(n_active)
     coords = _rand_voxels(box, n_active, n_active, "cuda")
     feat = torch.randn(n_active, c, dtype=torch.float32, device="cuda") * 0.1
     w = torch.randn(c, c, 3, 3, 3, dtype=torch.float32, device="cuda") * 0.1
-    ss = (box, box, box)
 
-    prev = os.environ.get("FLYDSL_SPCONV_COMPACT")
-    try:
-        os.environ["FLYDSL_SPCONV_COMPACT"] = "0"
-        clear_lut_cache()
-        ref = sparse_conv3d_from_coords_f32(coords, feat, w, spatial_shape=ss)
+    lut, nt, na = build_lut_auto(coords, 16, spatial_shape=(box, box, box), kernel_size=3)
+    packed, c_in, c_out, _kv = _prepare_weight_bf16(w, "zyx", 16)
+    fn = _compile_bf16_compacted(c_in, c_out, _pick_ct_per_block(c_out), _pick_k_unroll(c_out))
+    fb = feat.to(torch.bfloat16).contiguous()
+    stream = torch.cuda.current_stream()
+
+    def run(pairs):
+        in_rows, out_rows, tile_kv, n_tiles = pairs
+        out = torch.zeros(na, c_out, dtype=torch.float32, device="cuda")
+        _run_compiled(fn, fb, packed, out, in_rows, out_rows, tile_kv, n_tiles, stream)
         torch.cuda.synchronize()
-        ref = ref.clone()
+        return out
 
-        os.environ["FLYDSL_SPCONV_COMPACT"] = "1"
-        os.environ["FLYDSL_SPCONV_COMPACT_MIN_N"] = "0"
-        clear_lut_cache()
-        got = sparse_conv3d_from_coords_f32(coords, feat, w, spatial_shape=ss)
-        torch.cuda.synchronize()
-    finally:
-        os.environ.pop("FLYDSL_SPCONV_COMPACT_MIN_N", None)
-        if prev is None:
-            os.environ.pop("FLYDSL_SPCONV_COMPACT", None)
-        else:
-            os.environ["FLYDSL_SPCONV_COMPACT"] = prev
-        clear_lut_cache()
+    compacted = build_compacted_pairs(lut, nt, na, 16, 3)
+    ref_pairs = _uncompacted_pairs(lut, nt, na)
+    assert compacted[3] < ref_pairs[3], "compaction did not reduce the tile count"
 
+    got, ref = run(compacted), run(ref_pairs)
+    # fp32 atomics reorder the adds, so this is close-but-not-bit-exact by design.
     torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-4)
 
 
@@ -332,7 +354,7 @@ def test_bf16_compacted_matches_fp32_reference(box, n_active, c):
     feat = torch.randn(n_active, c, dtype=torch.float32, device="cuda").relu()
     w = torch.randn(c, c, 3, 3, 3, dtype=torch.float32, device="cuda") * (2.0 / c) ** 0.5
 
-    lut, _mask, _a, _cn, nt, na = build_lut_auto(coords, 16, spatial_shape=(box, box, box), kernel_size=3)
+    lut, nt, na = build_lut_auto(coords, 16, spatial_shape=(box, box, box), kernel_size=3)
     in_rows, out_rows, tile_kv, n_tiles_c = build_compacted_pairs(lut, nt, na, 16, 3)
     if n_tiles_c == 0:
         pytest.skip("no non-centre pairs at this shape")
@@ -373,7 +395,7 @@ def test_compacted_pairs_cover_every_pair():
     torch.manual_seed(9)
     box, n = 20, 400
     coords = _rand_voxels(box, n, n, "cuda")
-    lut, _mask, _a, _c, nt, na = build_lut_auto(coords, 16, spatial_shape=(box, box, box), kernel_size=3)
+    lut, nt, na = build_lut_auto(coords, 16, spatial_shape=(box, box, box), kernel_size=3)
     in_rows, out_rows, tile_kv, n_tiles_c = build_compacted_pairs(lut, nt, na, 16, 3)
     torch.cuda.synchronize()
 
