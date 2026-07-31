@@ -279,7 +279,7 @@ def flydsl_a16w4_gemm1(
     D_HIDDEN,
     D_INTER,
     topk,
-    TILE_N=64,
+    TILE_N=256,
     TILE_K=256,
     act="silu",
     b_cache_mod=0,
