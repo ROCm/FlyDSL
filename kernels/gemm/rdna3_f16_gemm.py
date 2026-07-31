@@ -332,16 +332,22 @@ def create_wmma_gemm_module(
                 idx = rm * reg_n + rn
                 wmma_m_off = wave_m * (reg_m * WMMA_M) + 16 * rm
                 wmma_n_off = wave_n * (reg_n * WMMA_N) + 16 * rn
+                if const_expr(rounding == "rs"):
+                    # One Philox draw per 8-element block, keyed on the block's
+                    # base output element: the 4 random words cover all 8
+                    # stores, each taking a distinct 16-bit slice (low/high of a
+                    # word), so the f32 -> bf16 store is unbiased in expectation
+                    # without a per-element draw.
+                    base_off = (tile_m0 + wmma_m_off + klane) * N + (tile_n0 + wmma_n_off + lane16)
+                    rand_words = fx.random.philox_4x32(fx.Uint32(base_off), fx.Uint32(sr_seed))
                 for si in range_constexpr(8):
                     g_row = tile_m0 + wmma_m_off + 2 * si + klane
                     g_col = tile_n0 + wmma_n_off + lane16
                     val = accs[idx][si]
                     elem_off = g_row * N + g_col
                     if const_expr(rounding == "rs"):
-                        # Stochastic rounding: perturb the discarded bits with a
-                        # per-element Philox draw keyed by the element index, so
-                        # the f32 -> bf16 store is unbiased in expectation.
-                        rbits = fx.random.philox_4x32(fx.Uint32(elem_off), fx.Uint32(sr_seed))[0]
+                        word = rand_words[si // 2]
+                        rbits = word if si % 2 == 0 else (word >> fx.Uint32(16))
                         val = fx.random.cvt_f32_to_bf16_sr(val, rbits)
                     elif const_expr(out_dtype == "bf16"):
                         val = val.to(fx.BFloat16)

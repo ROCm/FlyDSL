@@ -243,9 +243,12 @@ def create_wmma_gemm_module(
             if const_expr(rounding == "rs"):
                 base_off = (pid * THREADS_PER_BLOCK + tid) * acc_size
                 out_elems = []
-                for p in range_constexpr(acc_size):
-                    rbits = fx.random.philox_4x32(fx.Uint32(base_off + p), fx.Uint32(sr_seed))[0]
-                    out_elems.append(fx.random.cvt_f32_to_bf16_sr(acc_vec[p], rbits))
+                for p_base in range_constexpr(0, acc_size, 8):
+                    rand_words = fx.random.philox_4x32(fx.Uint32(base_off + p_base), fx.Uint32(sr_seed))
+                    for p_rel in range_constexpr(8):
+                        word = rand_words[p_rel // 2]
+                        rbits = word if p_rel % 2 == 0 else (word >> fx.Uint32(16))
+                        out_elems.append(fx.random.cvt_f32_to_bf16_sr(acc_vec[p_base + p_rel], rbits))
             else:
                 out_elems = [acc_vec[p].to(out_elem_cls) for p in range_constexpr(acc_size)]
             out_vec = vector.from_elements(T.vec(acc_size, out_elem_cls.ir_type), [as_ir_value(e) for e in out_elems])
