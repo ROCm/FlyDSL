@@ -79,22 +79,6 @@ def sched_dswr(cnt):
     sched_group_barrier(mask_dswr, cnt, 0)
 
 
-@dsl_loc_tracing
-def fence_acquire(syncscope):
-    """Emit an acquire fence for the selected AMDGPU memory scope."""
-    from ..._mlir.dialects import llvm as _llvm
-
-    _llvm.FenceOp(_llvm.AtomicOrdering.acquire, syncscope=syncscope)
-
-
-@dsl_loc_tracing
-def fence_release(syncscope):
-    """Emit a release fence for the selected AMDGPU memory scope."""
-    from ..._mlir.dialects import llvm as _llvm
-
-    _llvm.FenceOp(_llvm.AtomicOrdering.release, syncscope=syncscope)
-
-
 def _unwrap_mfma_operand(v):
     """MFMA operands are MLIR Values; some trailing operands are i32 flags.
 
