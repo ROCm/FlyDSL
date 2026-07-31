@@ -141,7 +141,7 @@ def flydsl_a16w4_gemm1(
     gate_mode="separated",
     act="silu",
     w_dtype="mxfp4",
-    use_csv_config=True,
+    use_csv_config=False,  # opt-in: default uses our tuned tile_n; CSV params for aiter-compare / when requested
     csv_path=None,
     stream=None,
 ):
@@ -267,7 +267,7 @@ def flydsl_a16w4_gemm2(
     b_nt=None,
     xcd_swizzle=1,
     w_dtype="mxfp4",
-    use_csv_config=True,
+    use_csv_config=False,  # opt-in: default uses our tuned tile_n; CSV params for aiter-compare / when requested
     csv_path=None,
     stream=None,
 ):
