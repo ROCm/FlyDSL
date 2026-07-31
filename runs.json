@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-31T02:24:52Z",
+ "updated": "2026-07-31T02:27:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30598919061,
+   "pr": 876,
+   "commit": "cb0b459611efd198190b32233158a49c5a48e63e",
+   "branch": "mega_moe_v1",
+   "event": "pull_request",
+   "title": "MegaMoE on Gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30598919061",
+   "created_at": "2026-07-31T02:25:05Z",
+   "updated_at": "2026-07-31T02:25:55Z",
+   "actor": "yanboshao",
+   "jobs": []
+  },
   {
    "run_id": 30598509612,
    "pr": 876,
@@ -10,29 +25,29 @@
    "branch": "mega_moe_v1",
    "event": "pull_request",
    "title": "MegaMoE on Gfx950",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30598509612",
    "created_at": "2026-07-31T02:15:37Z",
-   "updated_at": "2026-07-31T02:17:56Z",
+   "updated_at": "2026-07-31T02:25:23Z",
    "actor": "GwilliamHu",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-31T02:17:22Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T02:25:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30598509612/job/91056143255"
     },
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-31T02:17:55Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T02:25:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30598509612/job/91056143277"
     }
    ]
@@ -2165,21 +2180,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30422854508/job/90484114900"
     }
    ]
-  },
-  {
-   "run_id": 30422408581,
-   "pr": 918,
-   "commit": "c5d831baa3f5b899baba2ba28ddbf145c48e4e49",
-   "branch": "fix-atomicrmw-vector-check",
-   "event": "pull_request",
-   "title": "[Bugfix][Dialect] Reject vector operands in atomic copy atoms",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30422408581",
-   "created_at": "2026-07-29T04:29:28Z",
-   "updated_at": "2026-07-29T04:29:28Z",
-   "actor": "AiyyappanMR",
-   "jobs": []
   }
  ]
 }
