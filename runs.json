@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-31T10:11:18Z",
+ "updated": "2026-07-31T10:13:01Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622588902",
    "created_at": "2026-07-31T10:09:57Z",
-   "updated_at": "2026-07-31T10:10:14Z",
+   "updated_at": "2026-07-31T10:11:30Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -25,13 +25,41 @@
    "branch": "cjl/norm_perf",
    "event": "pull_request",
    "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622441512",
    "created_at": "2026-07-31T10:07:25Z",
-   "updated_at": "2026-07-31T10:09:12Z",
+   "updated_at": "2026-07-31T10:11:38Z",
    "actor": "cschenjunlin",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-31T10:11:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622441512/job/91130681264"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-31T10:11:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622441512/job/91130681290"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-31T10:11:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622441512/job/91130681304"
+    }
+   ]
   },
   {
    "run_id": 30622154072,
