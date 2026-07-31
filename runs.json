@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-31T14:46:11Z",
+ "updated": "2026-07-31T14:47:35Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30639970672,
+   "pr": 930,
+   "commit": "39ce3250a4add36fb54d3511330272885fc727f4",
+   "branch": "dsl-ify-arith",
+   "event": "pull_request",
+   "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30639970672",
+   "created_at": "2026-07-31T14:45:40Z",
+   "updated_at": "2026-07-31T14:46:08Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 30638335394,
    "pr": 930,
@@ -10,38 +25,38 @@
    "branch": "dsl-ify-arith",
    "event": "pull_request",
    "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30638335394",
    "created_at": "2026-07-31T14:22:43Z",
-   "updated_at": "2026-07-31T14:25:29Z",
+   "updated_at": "2026-07-31T14:46:08Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-31T14:26:10Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T14:46:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30638335394/job/91182247961"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-31T14:25:29Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T14:45:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30638335394/job/91182248006"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-31T14:26:07Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T14:46:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30638335394/job/91182248023"
     }
    ]
@@ -68,19 +83,19 @@
    "branch": "phil/add-offset-canonicalization",
    "event": "pull_request",
    "title": "[Perf] Keep runtime base and static tail separate in add_offset [wip]",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30623702456",
    "created_at": "2026-07-31T10:29:06Z",
-   "updated_at": "2026-07-31T10:33:17Z",
+   "updated_at": "2026-07-31T14:44:29Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-31T10:33:17Z",
+     "started_at": "2026-07-31T14:44:29Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30623702456/job/91134710412"
     },
@@ -2146,21 +2161,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30523108262/job/90808433158"
     }
    ]
-  },
-  {
-   "run_id": 30519090826,
-   "pr": 891,
-   "commit": "ba9c104d44a7553acaf678da2a764452b5282a28",
-   "branch": "add-wmma-tests-gfx1250",
-   "event": "pull_request",
-   "title": "[Test] Add gfx1250 WMMA lowering tests for additional dtypes",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30519090826",
-   "created_at": "2026-07-30T06:16:52Z",
-   "updated_at": "2026-07-30T06:16:52Z",
-   "actor": "AiyyappanMR",
-   "jobs": []
   }
  ]
 }
