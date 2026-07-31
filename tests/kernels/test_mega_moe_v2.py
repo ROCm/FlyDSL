@@ -562,10 +562,6 @@ def _run_full_e2e(
         w2=w2_kernel,
         w2_scale=w2_scale_1d,
         max_tok_per_rank=mtpr,
-        stage1_dispatch_cu=None if args.v2_dispatch_cu <= 0 else args.v2_dispatch_cu,
-        stage1_grid_mult=None if args.v2_grid_mult <= 0 else args.v2_grid_mult,
-        stage1_tile_m_values=None if args.v2_tile_m <= 0 else (args.v2_tile_m,),
-        stage2_p2p_quant=args.stage2_p2p_quant,
     )
     torch.cuda.synchronize()
     ms.shmem_barrier_all()
@@ -1033,11 +1029,6 @@ def _run_mega_only(
         w2=w2_kernel,
         w2_scale=w2_scale_1d,
         max_tok_per_rank=mtpr,
-        tune_tokens=run_tokens,
-        stage1_dispatch_cu=None if args.v2_dispatch_cu <= 0 else args.v2_dispatch_cu,
-        stage1_grid_mult=None if args.v2_grid_mult <= 0 else args.v2_grid_mult,
-        stage1_tile_m_values=None if args.v2_tile_m <= 0 else (args.v2_tile_m,),
-        stage2_p2p_quant=args.stage2_p2p_quant,
     )
     torch.cuda.synchronize()
     ms.shmem_barrier_all()
@@ -1263,7 +1254,7 @@ def _run_mega_only(
         ms.shmem_barrier_all()
 
         def _stage2_body():
-            _out["o"] = moe._run_stage2(run_tokens, None, True, moe._s1_active_tile_m)
+            _out["o"] = moe._run_stage2(run_tokens, None, True, moe._active_config)
 
         stage2_ms, stage2_max_ms = _time_graph(_stage2_body)
         prequant_ms, prequant_max_ms = _time_graph(_prequant_body)
@@ -1296,7 +1287,7 @@ def _run_mega_only(
     _s1_ms_max = max(0.0, stage1_max_ms)
     _s2_ms_max = max(0.0, stage2_max_ms)
     _active_sbm = int(getattr(moe, "_s1_active_tile_m", -1))
-    _active_g2_bm = int(moe._g2_tuner.last_config.kwargs["BM"]) if not stage1_only else -1
+    _active_g2_bm = int(moe._g2_active_block_m) if not stage1_only else -1
     if rank == 0:
         _acc_s = f"{_acc_label}={_relL2_max:.3e} (floor~{_acc_floor})" if check_acc else "acc:skip"
         _perf_s = (
@@ -1342,7 +1333,7 @@ def run_one(args, rank, world, dev):
         raise SystemExit(f"experts={experts} must divide world={world}")
     epr = experts // world
 
-    mtpr = max(16, run_tokens)
+    mtpr = int(args.mtpr) if int(args.mtpr) > 0 else max(16, 1 << (run_tokens - 1).bit_length())
     mega_only = bool(getattr(args, "mega_only", False))
     local_experts_only = mega_only and (args.skip_acc or args.stage1_only or int(args.layers) == 1)
     keep_ref = bool(args.stage1_only or (mega_only and not args.skip_acc and int(args.layers) == 1))
@@ -1421,9 +1412,10 @@ def run_one(args, rank, world, dev):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--network", type=str, default="v4_flash", choices=list(NETWORKS))
+    p.add_argument("--network", type=str, default="v4_pro", choices=list(NETWORKS))
     p.add_argument("--quant", type=str, default="a8w4", choices=["a8w4"])
     p.add_argument("--tokens", type=int, default=64)
+    p.add_argument("--mtpr", type=int, default=0, help="0 selects the smallest power-of-two capacity for each BS")
     p.add_argument(
         "--topk",
         type=int,
@@ -1433,22 +1425,6 @@ def main():
     p.add_argument("--waves-per-eu", type=int, default=4)
     p.add_argument("--async-copy", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--iters", type=int, default=30)
-    p.add_argument("--v2-dispatch-cu", type=int, default=0, help="<=0 lets stage1 autotune")
-    p.add_argument("--v2-grid-mult", type=int, default=-1, help="<=0 lets stage1 autotune")
-    p.add_argument(
-        "--v2-tile-m",
-        type=int,
-        choices=(32, 64, 128),
-        default=-1,
-        help="override v2 Stage1/Stage2 M tile",
-    )
-    p.add_argument(
-        "--stage2-p2p-quant",
-        type=str,
-        default="auto",
-        choices=["auto", "none", "fp8_blockwise_1x32"],
-        help="Stage2 P2P transport; 'auto' uses FP8 only when batch size is greater than 1024.",
-    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--rank-skew-ms", type=float, default=0.0, help="delay rank r by r*N ms before first forward")
     p.add_argument(
@@ -1565,6 +1541,8 @@ def main():
         combos = [(args.network, int(b)) for b in args.bs_list.split(",") if b.strip()]
     elif args.matrix:
         combos = [(net, bs) for net in NETWORKS for bs in bs_set]
+    elif args.full_bs:
+        combos = [(args.network, bs) for bs in bs_set]
     else:
         combos = [(args.network, int(args.tokens))]
 
