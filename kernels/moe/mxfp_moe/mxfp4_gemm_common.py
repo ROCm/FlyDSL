@@ -158,10 +158,6 @@ def _a_lds_swz_block_idx(swz_layout, row, block_col):
     return fx.Int32(crd2idx([fx.Int64(row), fx.Int64(block_col)], swz_layout))
 
 
-def _fabs_f32(x):
-    return fx.Float32(llvm.call_intrinsic(T.f32, "llvm.fabs.f32", [_raw(x)], [], []))
-
-
 def _e8m0_roundup(amax_f32):
     wi = fx.Int32(_raw(amax_f32 * fx.Float32(1.0 / 6.0)).bitcast(T.i32))
     bexp = (wi + fx.Int32(0x7FFFFF)).shrui(fx.Int32(23)) & fx.Int32(0xFF)

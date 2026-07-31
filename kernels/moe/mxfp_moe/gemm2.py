@@ -12,7 +12,6 @@ from .mxfp4_gemm_common import (
     _a_lds_swz_block_idx,
     _a_lds_swz_block_layout,
     _e8m0_from_amax,
-    _fabs_f32,
     _gep1,
     _gep3,
     _global_base_ptr1,
@@ -769,9 +768,9 @@ def _flat_mxfp4_epilog(
         if _bi + 1 < len(_blocks):
             _r_next, _grp_next, _col0_next = _issue_load(*_blocks[_bi + 1])
         if True:
-            amax_f = _fabs_f32(r[0])
+            amax_f = fx.absf(r[0])
             for e in range_constexpr(1, 8):
-                amax_f = fx.maxnumf(amax_f, _fabs_f32(r[e]))
+                amax_f = fx.maxnumf(amax_f, fx.absf(r[e]))
             amax = amax_f.bitcast(fx.Uint32) >> fx.Int32(16)
             amax_dpp = _inline_dpp_quad_amax(amax)
             f32b = amax_dpp << fx.Int32(16)

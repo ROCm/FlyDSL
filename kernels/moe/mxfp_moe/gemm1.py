@@ -11,7 +11,6 @@ from flydsl.expr.typing import T
 from . import dpp_utils
 from .mxfp4_gemm_common import (
     _e8m0_from_amax,
-    _fabs_f32,
     _global_i32_at,
     _global_i32_buffer_tiles,
     _global_i32_buffer_view,
@@ -604,9 +603,9 @@ def _gemm1_body(
             up_vs[ee] = acc_load(acc_idx(row_local, up_col))
         result = _silu_mul_batch(gate_vs, up_vs)
 
-        local_max = _fabs_f32(result[0])
+        local_max = fx.absf(result[0])
         for ee in range_constexpr(1, 8):
-            local_max = local_max.maximumf(_fabs_f32(result[ee]))
+            local_max = fx.maxnumf(local_max, fx.absf(result[ee]))
         lm_i = _inline_dpp_quad_amax(fx.Int32(_raw(local_max).bitcast(T.i32)))
         local_max = fx.Float32(_raw(lm_i).bitcast(T.f32))
 
