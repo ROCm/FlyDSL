@@ -480,41 +480,161 @@ def build_lut_auto(coords, block_m=16, spatial_shape=None, n_batch=None, kernel_
     return fn(coords, block_m, spatial_shape=spatial_shape, n_batch=n_batch, kernel_size=kernel_size)
 
 
+@functools.lru_cache(maxsize=64)
+def _compile_pair_count(block: int, kernel_size: int, block_m: int):
+    BLOCK = block
+    KV = kernel_size**3
+    BM = block_m
+
+    @flyc.kernel(known_block_size=[BLOCK, 1, 1])
+    def count_kernel(lut: fx.Tensor, counts: fx.Tensor, num_tiles: fx.Int32, num_act: fx.Int32):
+        gid = fx.Int32(gpu.block_id("x")) * fx.Int32(BLOCK) + fx.Int32(gpu.thread_id("x"))
+        if gid < fx.Int32(KV) * num_tiles:
+            lut_ = GTensor(lut, dtype=T.i32, shape=(-1,))
+            cnt_ = GTensor(counts, dtype=T.i32, shape=(-1,))
+            kv = gid // num_tiles
+            tile = gid % num_tiles
+            base = tile * fx.Int32(KV * BM) + kv * fx.Int32(BM)
+            orow0 = tile * fx.Int32(BM)
+            acc_ty = fx.MemRefType.get(T.i32, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
+            acc = fx.memref_alloca(acc_ty, fx.make_layout(1, 1))
+            fx.memref_store_vec(fx.Vector.filled(1, 0, fx.Int32), acc)
+            for r in range_constexpr(BM):
+                v = fx.Int32(lut_.load(base + fx.Int32(r)))
+                if (v >= fx.Int32(0)) & (orow0 + fx.Int32(r) < num_act):
+                    c = fx.Vector(fx.memref_load_vec(acc))[0]
+                    fx.memref_store_vec(fx.Vector.from_elements([c + fx.Int32(1)]), acc)
+            cnt_.store(gid, fx.Vector(fx.memref_load_vec(acc))[0])
+
+    @flyc.jit
+    def launch(lut, counts, num_tiles, num_act, grid, stream: fx.Stream = fx.Stream(None)):
+        count_kernel(lut, counts, num_tiles, num_act).launch(grid=(grid,), block=(BLOCK,), stream=stream)
+
+    return launch
+
+
+@functools.lru_cache(maxsize=64)
+def _compile_pair_write(block: int, kernel_size: int, block_m: int):
+    BLOCK = block
+    KV = kernel_size**3
+    BM = block_m
+
+    @flyc.kernel(known_block_size=[BLOCK, 1, 1])
+    def write_kernel(
+        lut: fx.Tensor,
+        offsets: fx.Tensor,
+        in_rows: fx.Tensor,
+        out_rows: fx.Tensor,
+        num_tiles: fx.Int32,
+        num_act: fx.Int32,
+    ):
+        gid = fx.Int32(gpu.block_id("x")) * fx.Int32(BLOCK) + fx.Int32(gpu.thread_id("x"))
+        if gid < fx.Int32(KV) * num_tiles:
+            lut_ = GTensor(lut, dtype=T.i32, shape=(-1,))
+            off_ = GTensor(offsets, dtype=T.i32, shape=(-1,))
+            kv = gid // num_tiles
+            tile = gid % num_tiles
+            base = tile * fx.Int32(KV * BM) + kv * fx.Int32(BM)
+            orow0 = tile * fx.Int32(BM)
+            cur_ty = fx.MemRefType.get(T.i32, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
+            cur = fx.memref_alloca(cur_ty, fx.make_layout(1, 1))
+            fx.memref_store_vec(fx.Vector.from_elements([fx.Int32(off_.load(gid))]), cur)
+            for r in range_constexpr(BM):
+                v = fx.Int32(lut_.load(base + fx.Int32(r)))
+                orow = orow0 + fx.Int32(r)
+                if (v >= fx.Int32(0)) & (orow < num_act):
+                    ir_ = GTensor(in_rows, dtype=T.i32, shape=(-1,))
+                    or_ = GTensor(out_rows, dtype=T.i32, shape=(-1,))
+                    d = fx.Vector(fx.memref_load_vec(cur))[0]
+                    ir_.store(d, v)
+                    or_.store(d, orow)
+                    fx.memref_store_vec(fx.Vector.from_elements([d + fx.Int32(1)]), cur)
+
+    @flyc.jit
+    def launch(lut, offsets, in_rows, out_rows, num_tiles, num_act, grid, stream: fx.Stream = fx.Stream(None)):
+        write_kernel(lut, offsets, in_rows, out_rows, num_tiles, num_act).launch(
+            grid=(grid,), block=(BLOCK,), stream=stream
+        )
+
+    return launch
+
+
+@functools.lru_cache(maxsize=64)
+def _compile_tile_kv(block: int, kernel_size: int):
+    BLOCK = block
+    KV = kernel_size**3
+
+    @flyc.kernel(known_block_size=[BLOCK, 1, 1])
+    def tile_kv_kernel(tile_start: fx.Tensor, tile_kv: fx.Tensor, n_tiles_c: fx.Int32):
+        t = fx.Int32(gpu.block_id("x")) * fx.Int32(BLOCK) + fx.Int32(gpu.thread_id("x"))
+        if t < n_tiles_c:
+            ts_ = GTensor(tile_start, dtype=T.i32, shape=(-1,))
+            tk_ = GTensor(tile_kv, dtype=T.i32, shape=(-1,))
+            acc_ty = fx.MemRefType.get(T.i32, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
+            acc = fx.memref_alloca(acc_ty, fx.make_layout(1, 1))
+            fx.memref_store_vec(fx.Vector.filled(1, 0, fx.Int32), acc)
+            for k in range_constexpr(KV):
+                if fx.Int32(ts_.load(fx.Int32(k))) <= t:
+                    fx.memref_store_vec(fx.Vector.from_elements([fx.Int32(k)]), acc)
+            tk_.store(t, fx.Vector(fx.memref_load_vec(acc))[0])
+
+    @flyc.jit
+    def launch(tile_start, tile_kv, n_tiles_c, grid, stream: fx.Stream = fx.Stream(None)):
+        tile_kv_kernel(tile_start, tile_kv, n_tiles_c).launch(grid=(grid,), block=(BLOCK,), stream=stream)
+
+    return launch
+
+
+# Pairs come out ordered (kv major, tile, row). The scan runs on the [KV, num_tiles]
+# counts rather than on the KV*num_tiles*block_m lut slots -- 16x fewer elements -- which
+# is what keeps a plain cumsum adequate and avoids a device-wide scan inside a kernel.
 def build_compacted_pairs(inp_row_lut, num_tiles, num_act, block_m=16, kernel_size=3):
     KV = kernel_size**3
     device = inp_row_lut.device
-    lv = inp_row_lut.reshape(num_tiles, KV, block_m)
+    block = 256
+    stream = torch.cuda.current_stream()
+    lut_flat = inp_row_lut.reshape(-1)
 
-    out_all = torch.arange(num_tiles * block_m, dtype=torch.int32, device=device).reshape(num_tiles, 1, block_m)
-    valid = (lv >= 0) & (out_all < num_act)
+    n_threads = KV * num_tiles
+    grid = (n_threads + block - 1) // block
+    counts = torch.empty(n_threads, dtype=torch.int32, device=device)
+    _run_compiled(_compile_pair_count(block, kernel_size, block_m), lut_flat, counts, num_tiles, num_act, grid, stream)
 
-    counts = valid.sum(dim=(0, 2))
-    tiles_per_kv = (counts + block_m - 1) // block_m
+    cv = counts.view(KV, num_tiles)
+    tiles_per_kv = (cv.sum(1) + block_m - 1) // block_m
     n_tiles_c = int(tiles_per_kv.sum().item())
     if n_tiles_c == 0:
         empty_i = torch.zeros(0, dtype=torch.int32, device=device)
         return empty_i, empty_i, empty_i, 0
 
     tile_start = torch.cumsum(tiles_per_kv, 0) - tiles_per_kv
-    slot_start = (tile_start * block_m).to(torch.int64)
-
-    vt = valid.permute(1, 0, 2).reshape(KV, -1)
-    idx = vt.reshape(-1).nonzero(as_tuple=True)[0]
-    kv_of = torch.div(idx, vt.shape[1], rounding_mode="floor")
-    first_of_kv = torch.cumsum(counts, 0) - counts
-    rank = torch.arange(idx.numel(), device=device) - first_of_kv[kv_of]
-    dst = slot_start[kv_of] + rank
+    within = torch.cumsum(cv, 1) - cv
+    offsets = (within + (tile_start * block_m).unsqueeze(1)).to(torch.int32).reshape(-1).contiguous()
 
     total_slots = n_tiles_c * block_m
     in_rows = torch.zeros(total_slots, dtype=torch.int32, device=device)
     out_rows = torch.full((total_slots,), -1, dtype=torch.int32, device=device)
+    _run_compiled(
+        _compile_pair_write(block, kernel_size, block_m),
+        lut_flat,
+        offsets,
+        in_rows,
+        out_rows,
+        num_tiles,
+        num_act,
+        grid,
+        stream,
+    )
 
-    src_in = lv.permute(1, 0, 2).reshape(-1)
-    src_out = out_all.expand(num_tiles, KV, block_m).permute(1, 0, 2).reshape(-1)
-    in_rows.scatter_(0, dst, src_in[idx])
-    out_rows.scatter_(0, dst, src_out[idx])
-
-    tile_kv = torch.repeat_interleave(torch.arange(KV, dtype=torch.int32, device=device), tiles_per_kv).contiguous()
+    tile_kv = torch.empty(n_tiles_c, dtype=torch.int32, device=device)
+    _run_compiled(
+        _compile_tile_kv(block, kernel_size),
+        tile_start.to(torch.int32).contiguous(),
+        tile_kv,
+        n_tiles_c,
+        (n_tiles_c + block - 1) // block,
+        stream,
+    )
     return in_rows, out_rows, tile_kv, n_tiles_c
 
 
