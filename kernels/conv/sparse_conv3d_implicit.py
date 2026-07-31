@@ -61,11 +61,10 @@ def _compile_presence_scatter_kernel(block: int):
 
 
 @functools.lru_cache(maxsize=8)
-def _compile_fused_tiled_kernel(block_m: int, kv_total: int):
+def _compile_fused_tiled_kernel(block_m: int, kernel_size: int):
     BLOCK_M = block_m
-    KV = kv_total
-    K = round(kv_total ** (1.0 / 3.0))
-    assert K**3 == kv_total, f"kv_total={kv_total} is not a cube"
+    K = kernel_size
+    KV = K**3
     R = K // 2
 
     @flyc.kernel(known_block_size=[BLOCK_M, 1, 1])
@@ -242,7 +241,7 @@ def build_lut_dense(coords: torch.Tensor, block_m: int = 16, spatial_shape=None,
     )
 
     _run_compiled(
-        _compile_fused_tiled_kernel(block_m, KV),
+        _compile_fused_tiled_kernel(block_m, kernel_size),
         presence,
         out_xyz.reshape(-1),
         sx,
