@@ -28,6 +28,10 @@ from .common import (
 )
 from .gemm1 import A16WI4_GROUP_SIZE, _a16w4_swizzle_xor16, _e8m0_byte_to_f32
 
+# gfx950 (MI350/MI355X) CU count. Used to cap the persistent gemm2 grid so
+# high-expert-count launches (E896) do not over-launch ~max_m_blocks empty CTAs.
+NUM_CU = 256
+
 
 def _atomic_bf16_epilog(
     lds_acc_base_i32,
@@ -472,9 +476,23 @@ def _gemm2_body_a16w4(
     )
 
 
-def gemm2_a16w4_grid(BM, *, N_OUT, TILE_N, max_m_blocks):
-    """Flattened grid for a16w4 gemm2: (m-blocks) x (model_dim/tile_n) n-blocks."""
-    return int(max_m_blocks) * (N_OUT // TILE_N)
+def gemm2_a16w4_grid(BM, *, N_OUT, TILE_N, max_m_blocks, persist=False):
+    """Flattened launch grid for a16w4 gemm2.
+
+    Non-persistent (``persist=False``, default): one CTA per (m-block x n-block)
+    tile over the padded ``max_m_blocks`` -- byte-identical to the original grid.
+
+    Persistent (``persist=True``): cap the launch to ``min(total_work, NUM_CU)``
+    CTAs (only when the padded work exceeds ``NUM_CU*4``, i.e. it is actually
+    over-launching) and let each CTA loop over its assigned real work-tiles inside
+    the kernel. Uses the padded ``max_m_blocks`` here only as the upper bound for
+    the launch size; the in-kernel loop bounds itself to the real tiles via the
+    cumsum, so empty/padded m-blocks are never executed.
+    """
+    total_work = int(max_m_blocks) * (N_OUT // TILE_N)
+    if persist and total_work > NUM_CU * 4:
+        return min(total_work, NUM_CU)
+    return total_work
 
 
 def compile_gemm2_a16w4_port(
@@ -489,6 +507,7 @@ def compile_gemm2_a16w4_port(
     b_cache_mod=2,
     waves_per_eu=None,
     w_dtype="mxfp4",
+    persist=False,
 ):
     """a16w4/a16wi4 (bf16 intermediate A x mxfp4-or-int4 W2) stage2 builder.
 
@@ -523,6 +542,8 @@ def compile_gemm2_a16w4_port(
         _name += f"_xcd{xcd_swizzle}"
     if waves_per_eu:
         _name += f"_w{waves_per_eu}"
+    if persist:
+        _name += "_persist"
 
     @fx.struct
     class SharedStorage:
@@ -573,8 +594,7 @@ def compile_gemm2_a16w4_port(
             n_block = wig // group_size_m
             return m_block * fx.Int32(_num_n_blocks) + n_block
 
-        if bx_i32 < bound:
-            tile = _xcd_np(bx_i32)
+        def _run_tile(tile):
             _gemm2_body_a16w4(
                 lds_raw_ptr,
                 arg_a,
@@ -597,6 +617,27 @@ def compile_gemm2_a16w4_port(
                 b_cache_mod=b_cache_mod,
                 w_dtype=w_dtype,
             )
+
+        if const_expr(persist):
+            # Persistent CU-limited grid: the launch is capped to ~NUM_CU CTAs (see
+            # gemm2_a16w4_grid) instead of one CTA per padded (m x n) tile. Each CTA
+            # processes tile ``bx_i32`` then strides by the grid size over the REAL
+            # work-tiles ``[0, bound)`` (bound derived from the cumsum, so padded
+            # empty m-blocks are never touched). The XCD round-robin (_xcd_np) is
+            # applied to every visited launch index, so per-tile expert/HBM mapping
+            # is identical to the non-persistent grid; each real tile is still
+            # computed exactly once (bijective over [0, bound)). A loop-top barrier
+            # separates the previous tile's atomic-epilog LDS use from the next
+            # tile's A-DMA into the shared (offset-0) LDS region.
+            grid_nb = fx.Int32(gpu.grid_dim.x)
+            if bx_i32 < bound:
+                _run_tile(_xcd_np(bx_i32))
+            for iv in range(bx_i32 + grid_nb, bound, gpu.grid_dim.x):
+                gpu.barrier()
+                _run_tile(_xcd_np(fx.Int32(iv)))
+        else:
+            if bx_i32 < bound:
+                _run_tile(_xcd_np(bx_i32))
 
     @flyc.jit
     def launch_gemm2(
