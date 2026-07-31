@@ -74,6 +74,13 @@ per-row reciprocal std (`rstd`) for use by the backward pass.
 `weight_dtype_str` defaults to `dtype_str`; FP16/BF16 activations additionally
 support FP32 weights.
 
+**Quantized variants:** The DynamicQuant and SmoothQuant builders emit int8
+`Output` and fp32 per-row `YScale`. SmoothQuant `XScale` must use the same
+element dtype as `Input`, matching the LayerNorm SmoothQuant contract; this is
+an ABI change from the older RMSNorm fp32-only `XScale` convention. RMSNorm
+SmoothQuant remains unsupported on gfx1201 due to a known correctness
+regression.
+
 **Backward:** `build_rmsnorm_bwd_module(N, dtype_str,
 weight_dtype_str=None)` builds the fused RMSNorm backward kernel (grid `(M,)`,
 one block per row). Kernel signature
