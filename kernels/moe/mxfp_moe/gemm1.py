@@ -707,7 +707,13 @@ def _gemm1_body_a16w4(
     m_repeat = BM // 16
     k_unroll = KH_TILE_BYTES // 64  # bf16 8-per-lane K micro-steps per K-tile
     _k0_count = TILE_K // 128
-    num_acc_n = TILE_N // 16
+    # 4 waves split the TILE_N tile: each wave owns TILE_N/4 N-cols (num_acc_n =
+    # (TILE_N/4)/16). This mirrors _gemm2_body_a16w4's wave-split and kills the
+    # earlier all-wave-redundant N layout (every wave recomputed the full TILE_N,
+    # ~4x wasted MFMA/B-load/upconvert). n_tile_base = wave*_n_per_wave shifts each
+    # wave's gate/up N addressing + epilogue write to its distinct column slice.
+    _n_per_wave = TILE_N // 4
+    num_acc_n = _n_per_wave // 16
     k_blocks16 = KH_TILE_BYTES // 16
     # Software pipeline (ISA-aligned to aiter): A-LDS double-buffered so tile K+1's
     # DMA writes the pong slot while tile K reads ping; B (mxfp4 W) + B-scale for
@@ -899,12 +905,13 @@ def _gemm1_body_a16w4(
         v4i32 = fx.Vector.from_elements([_raw(x) for x in i32s], fx.Int32)
         return v4i32.bitcast(fx.BFloat16)  # v8bf16
 
-    # ---- N-column addressing for gate/up (SEPARATED) --------------------------
+    # ---- N-column addressing for gate/up (SEPARATED; wave owns _n_per_wave) ----
+    n_tile_base = wave * fx.Int32(_n_per_wave)
     col_g_list = []
     n_blk_gate, n_intra_gate, n_blk_up, n_intra_up = [], [], [], []
     scale_mni_gate, scale_np_gate, scale_mni_up, scale_np_up = [], [], [], []
     for ni in range_constexpr(num_acc_n):
-        col_g = by_n + fx.Int32(ni * 16) + lane_mod_16
+        col_g = by_n + n_tile_base + fx.Int32(ni * 16) + lane_mod_16
         col_g_list.append(col_g)
         row_gate = expert_off + col_g
         row_up = row_gate + inter_i32
@@ -912,7 +919,7 @@ def _gemm1_body_a16w4(
         n_intra_gate.append(row_gate % fx.Int32(16))
         n_blk_up.append(row_up // fx.Int32(16))
         n_intra_up.append(row_up % fx.Int32(16))
-        ng = expert_off + by_n + fx.Int32(ni * 16)
+        ng = expert_off + by_n + n_tile_base + fx.Int32(ni * 16)
         scale_mni_gate.append(ng // fx.Int32(32))
         scale_np_gate.append((ng // fx.Int32(16)) % fx.Int32(2))
         nu = ng + inter_i32
