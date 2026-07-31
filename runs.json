@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-31T02:18:30Z",
+ "updated": "2026-07-31T02:24:52Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,9 +14,28 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30598509612",
    "created_at": "2026-07-31T02:15:37Z",
-   "updated_at": "2026-07-31T02:16:07Z",
+   "updated_at": "2026-07-31T02:17:56Z",
    "actor": "GwilliamHu",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-31T02:17:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30598509612/job/91056143255"
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-31T02:17:55Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30598509612/job/91056143277"
+    }
+   ]
   },
   {
    "run_id": 30598461271,
@@ -40,11 +59,11 @@
    "branch": "spconv-bf16-implicit-gemm",
    "event": "pull_request",
    "title": "[Kernel] Add submanifold sparse 3D convolution (bf16 implicit GEMM, gfx950)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30596798461",
    "created_at": "2026-07-31T01:36:51Z",
-   "updated_at": "2026-07-31T01:39:42Z",
+   "updated_at": "2026-07-31T02:23:27Z",
    "actor": "jiacao-amd",
    "jobs": [
     {
@@ -59,9 +78,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-31T01:39:42Z",
+     "started_at": "2026-07-31T02:23:27Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30596798461/job/91051207694"
     },
@@ -126,20 +145,20 @@
    "branch": "phil/add-offset-canonicalization",
    "event": "pull_request",
    "title": "[Perf] Keep runtime base and static tail separate in add_offset [wip]",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30586702725",
    "created_at": "2026-07-30T22:19:03Z",
-   "updated_at": "2026-07-31T01:10:04Z",
+   "updated_at": "2026-07-31T02:22:54Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-31T01:10:03Z",
-     "completed_at": null,
+     "completed_at": "2026-07-31T02:22:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30586702725/job/91020466484"
     },
     {
