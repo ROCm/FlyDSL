@@ -174,9 +174,9 @@ def _select_stage1(bucket: int, fixed_slot: bool, mtpr: int) -> Stage1Config:
     )
 
 
-def _select_stage2(bucket: int) -> Stage2Config:
+def _select_stage2(bucket: int, fixed_slot: bool) -> Stage2Config:
     block_m = 64 if bucket >= 4096 else 32
-    block_n = 256 if bucket in (1, 4, 64) or bucket >= 1024 else 128
+    block_n = 256 if bucket in (1, 4, 64) or bucket >= 1024 or (not fixed_slot and bucket < 128) else 128
     persist = bucket >= 128
     persist_cu = 0
     if persist:
@@ -195,7 +195,7 @@ def _select_stage2(bucket: int) -> Stage2Config:
 def _select_bucket_config(bucket: int, mtpr: int, p2p_quant: str) -> MegaMoEConfig:
     fixed_slot = mtpr <= FIXED_SLOT_MAX_MTPR
     stage1 = _select_stage1(bucket, fixed_slot, mtpr)
-    stage2 = _select_stage2(bucket)
+    stage2 = _select_stage2(bucket, fixed_slot)
     return MegaMoEConfig(stage1=stage1, stage2=stage2, p2p_quant=p2p_quant)
 
 

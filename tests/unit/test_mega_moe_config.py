@@ -72,12 +72,15 @@ def test_nearest_token_bucket_prefers_larger_on_ties(tokens, bucket):
     assert nearest_token_bucket(tokens) == bucket
 
 
-def test_mtpr_selects_dispatch_path_only():
-    fixed = select_mega_moe_config(128, 128).stage1
-    compact = select_mega_moe_config(128, 8192).stage1
+def test_mtpr_selects_fixed_or_compact_configs():
+    fixed = select_mega_moe_config(128, 128)
+    compact = select_mega_moe_config(128, 8192)
 
-    assert (fixed.tile_n, fixed.num_waves, fixed.num_dispatch_cu) == (128, 4, 224)
-    assert (compact.tile_n, compact.num_waves, compact.num_dispatch_cu) == (512, 8, 128)
+    assert (fixed.stage1.tile_n, fixed.stage1.num_waves, fixed.stage1.num_dispatch_cu) == (128, 4, 224)
+    assert (compact.stage1.tile_n, compact.stage1.num_waves, compact.stage1.num_dispatch_cu) == (512, 8, 128)
+    for tokens in (8, 16, 32):
+        assert select_mega_moe_config(tokens, 128).stage2.block_n == 128
+        assert select_mega_moe_config(tokens, 8192).stage2.block_n == 256
 
 
 def test_nearby_tokens_share_the_bucket_config():
