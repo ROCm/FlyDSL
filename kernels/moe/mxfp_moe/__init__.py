@@ -19,7 +19,12 @@ does device-side re-quant and uses a ``cumsum`` + ``m_indices`` sorting contract
 
 from kernels.moe.mxfp_moe.gemm1 import compile_gemm1_a4w4_port, gemm1_grid
 from kernels.moe.mxfp_moe.gemm2 import compile_gemm2_a4w4_port
-from kernels.moe.mxfp_moe.host import flydsl_mxfp4_gemm1, flydsl_mxfp4_gemm2
+from kernels.moe.mxfp_moe.host import (
+    flydsl_a16w4_gemm1,
+    flydsl_a16w4_gemm2,
+    flydsl_mxfp4_gemm1,
+    flydsl_mxfp4_gemm2,
+)
 
 __all__ = [
     "compile_gemm1_a4w4_port",
@@ -27,4 +32,6 @@ __all__ = [
     "compile_gemm2_a4w4_port",
     "flydsl_mxfp4_gemm1",
     "flydsl_mxfp4_gemm2",
+    "flydsl_a16w4_gemm1",
+    "flydsl_a16w4_gemm2",
 ]
