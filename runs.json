@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-31T18:46:55Z",
+ "updated": "2026-07-31T18:49:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "spconv-bf16-implicit-gemm",
    "event": "pull_request",
    "title": "[Kernel] Add submanifold sparse 3D convolution (bf16 implicit GEMM, gfx950)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30656370499",
    "created_at": "2026-07-31T18:44:38Z",
-   "updated_at": "2026-07-31T18:44:50Z",
+   "updated_at": "2026-07-31T18:45:51Z",
    "actor": "jiacao-amd",
    "jobs": []
   },
