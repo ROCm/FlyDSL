@@ -569,14 +569,13 @@ def atomic_add_bf16(ptr_base, reg_vec):
 def make_1x4_tiled_mma(weight_dtype):
     """B-first 1x4 tiled_mma: weight is the MFMA A-operand, activation the B-operand.
 
-    The 4 waves tile the channel(M) dim. bf16 -> MFMA(16,16,16); fp8 -> MFMA(16,16,32).
+    The 4 waves tile the channel(M) dim. Both fp8 and (gfx950) bf16 use
+    MFMA(16,16,32); only the element type differs.
     """
-    if const_expr(weight_dtype == fx.BFloat16):
-        mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.BFloat16))
-        k_perm = fx.make_layout((4, 4, 2), (1, 8, 4))
-    else:
-        mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, weight_dtype))
-        k_perm = fx.make_layout((8, 4, 2), (1, 16, 8))
+    # Both fp8 and (gfx950) bf16 use native MFMA(16,16,32) with the same k_perm;
+    # only the element type differs.
+    mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, weight_dtype))
+    k_perm = fx.make_layout((8, 4, 2), (1, 16, 8))
     tiled_mma = fx.make_tiled_mma(
         mma_atom,
         fx.make_layout((4, 1, 1), (1, 0, 0)),
@@ -621,16 +620,21 @@ def read_sorted_index(tiled_copy_index, tid, lds_index, index_size, index_offset
     return index_frag
 
 
-def silu_pair_bf16(gate_frag, up_frag, gate_scale=None, up_scale=None, a_scale=None):
-    """silu(gate) * up over identically-laid-out gate/up fragments, -> bf16.
+def silu_pair_bf16(gate_frag, up_frag, gate_scale=None, up_scale=None, a_scale=None, out_dtype=fx.BFloat16):
+    """silu(gate) * up over identically-laid-out gate/up fragments, -> ``out_dtype``.
 
     Optional per-N-channel fp8 weight scales (gate_scale/up_scale, [value, rep_n])
     and an optional per-row fp8 activation scale (a_scale[m]) are folded into the
     read so native-fp8 dequant happens before the non-linear silu.
+
+    ``out_dtype`` MUST match the dtype of the caller's CShuffle LDS staging and
+    output store: the returned fragment holds raw ``out_dtype`` bits, so a mismatch
+    silently reinterprets the bit pattern (e.g. 1024.0 bf16 == 0x4480, read back as
+    f16 == 4.5).
     """
     log2_exp1 = -1.4426950408889634
     round_bit = fx.Uint32(0x8000)
-    out_bf16 = fx.make_fragment_like(gate_frag, dtype=fx.BFloat16)
+    out_frag = fx.make_fragment_like(gate_frag, dtype=out_dtype)
     m_reps = fx.size(fx.get_shape(gate_frag)[1]).to_py_value()
     n_reps = fx.size(fx.get_shape(gate_frag)[2]).to_py_value()
     for m in range_constexpr(m_reps):
@@ -655,9 +659,12 @@ def silu_pair_bf16(gate_frag, up_frag, gate_scale=None, up_scale=None, a_scale=N
                 tmp = rocdl.exp2(T.f32, _raw(g * log2_exp1))
                 acc.append((g * rocdl.rcp(T.f32, 1.0 + tmp)) * u)
             acc = Vec.from_elements(acc, fx.Float32)
-            acc = ((acc.bitcast(fx.Uint32) + round_bit) >> 16).to(fx.Uint16).bitcast(fx.BFloat16)
-            out_bf16[None, m, n].store(acc)
-    return out_bf16
+            if const_expr(out_dtype == fx.BFloat16):
+                acc = ((acc.bitcast(fx.Uint32) + round_bit) >> 16).to(fx.Uint16).bitcast(fx.BFloat16)
+            else:
+                acc = acc.to(out_dtype)
+            out_frag[None, m, n].store(acc)
+    return out_frag
 
 
 def make_tensor_with_index(view, tile_m, tile_k, index_frag, tiled_copy, tid, topk, is_read_from_mem=True):
@@ -729,3 +736,4 @@ class _TensorWithIndex:
 
 
 _TensorWithIndex.copy = ASTRewriter.transform(_TensorWithIndex.copy)
+

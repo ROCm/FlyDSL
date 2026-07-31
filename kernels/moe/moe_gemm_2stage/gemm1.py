@@ -67,31 +67,61 @@ def _build_moe_gemm1_fp8_gateup(
     tile_k: int,
     doweight_stage1: bool,
     out_dtype: str,
+    in_dtype: str = "fp8",
 ):
-    """Native-fp8 gate-up (layout API), ported from the reference prefill_1x4.
+    """Native gate-up (layout API), ported from the reference prefill_1x4.
 
-    B-first MFMA(16,16,32): the 4 waves tile the channel (N/inter) dimension; the
-    weight is the MFMA A-operand (direct global->register), the activation is the
-    MFMA B-operand staged through an LDS ping-pong (swizzle 3,4,3). Gate and up are
-    the two contiguous_n = tile_n//2 halves. Output scatter matches the legacy
+    B-first MFMA: the 4 waves tile the channel (N/inter) dimension; the weight is
+    the MFMA A-operand (direct global->register), the activation is the MFMA
+    B-operand staged through an LDS ping-pong (swizzle 3,4,3). Gate and up are the
+    two contiguous_n = tile_n//2 halves. Output scatter matches the legacy
     gate-up: out[t, slot, inter] = silu(gate * sx * sw_gate) * (up * sx * sw_up)
     [* sorted_weight], gathered/scattered via sorted token ids.
+
+    ``in_dtype`` selects the activation/weight element type:
+      - "fp8": Float8E4M3FNUZ, MFMA(16,16,32), per-token/per-channel dequant.
+      - "bf16": BFloat16, MFMA(16,16,32), no dequant (unscaled inputs).
+    The fp8 path is byte-identical to the original; bf16 shares the pipeline.
     """
+    _is_bf16 = in_dtype == "bf16"
+    if _is_bf16:
+        elem_t = fx.BFloat16  # gfx950 bf16 uses native MFMA(16,16,32)
+    else:
+        elem_t = fx.Float8E4M3FNUZ
+    MFMA_K = 32
+    elem_bytes = elem_t.width // 8  # fp8=1, bf16=2
+
     K = int(model_dim)
     N_e = int(2 * inter_dim)  # per-expert output cols (gate+up)
     BM = int(tile_m)
     BN = int(tile_n)
     TILE_K = int(tile_k)
-    contiguous_n = BN // 2
     TOPK = int(topk)
     out_bf16 = out_dtype == "bf16"
 
-    assert TILE_K in (128, 256), f"native-fp8 gate-up needs tile_k in (128,256), got {TILE_K}"
+    assert TILE_K in (128, 256), f"native gate-up needs tile_k in (128,256), got {TILE_K}"
     assert K % TILE_K == 0 and (K // TILE_K) % 2 == 0, f"K={K} must be an even multiple of TILE_K={TILE_K}"
-    assert 128 <= BN <= 256 and BN % 128 == 0, f"tile_n must be in [128,256] multiple of 128, got {BN}"
-    assert 32 <= BM <= 256 and BM % 32 == 0, f"tile_m must be a 32-multiple in [32,256], got {BM}"
+    assert 64 <= BN <= 256 and BN % 64 == 0, f"tile_n must be in [64,256] multiple of 64, got {BN}"
+    assert 16 <= BM <= 256 and BM % 16 == 0, f"tile_m must be a 16-multiple in [16,256], got {BM}"
 
-    fp8_t = fx.Float8E4M3FNUZ
+    # Channel (N/inter) decomposition. The B-first tiled_mma puts all 4 waves on the
+    # channel dim at 16 channels/wave, so a block must produce >=64 output channels
+    # for every wave to tile real weight rows. tile_n>=128 already satisfies this
+    # (contiguous_n = tile_n//2 >= 64). For tile_n=64 the requested contiguous_n
+    # would be 32 -- half the waves would tile weight rows that don't exist and
+    # corrupt the result -- so we round the block's channel granularity up to the
+    # 4-wave MFMA minimum of 64. All 4 waves still each compute 16 distinct real
+    # channels (not a serial fallback); the block simply covers two requested
+    # tile_n=64 groups at once. grid.x is derived from this effective granularity
+    # below. (A true sub-64 wave_k decomposition that honors tile_n=64 verbatim is
+    # left to the perf-alignment task.)
+    contiguous_n = max(BN // 2, 64)
+    assert inter_dim % contiguous_n == 0, (
+        f"inter_dim={inter_dim} must be divisible by the effective channel tile "
+        f"contiguous_n={contiguous_n} (from tile_n={BN})"
+    )
+
+    fp8_t = elem_t
     a_lds_size = BM * TILE_K
 
     @fx.struct
@@ -104,7 +134,10 @@ def _build_moe_gemm1_fp8_gateup(
         sorted_lds: fx.Array[fx.Int32, 256, 16]
         gemm: GemmBuffers
 
-    _val_per_thr = 16  # fp8: 16B / thread (128b buffer_load)
+    _val_per_thr = 16 // elem_bytes  # elements per 128b buffer_load (fp8=16, bf16=8)
+    # A-LDS swizzle (matches preshuffle_gemm): 8-bit (fp8) uses (3,4,3) at
+    # tile_k=128 (128b atom = 16 elems); 16-bit (bf16) uses (3,3,3) (128b = 8 elems).
+    _swz_params = (3, 3, 3) if _is_bf16 else (3, 4, 3)
     _thrs_k = TILE_K // _val_per_thr
     _thrs_m = 256 // _thrs_k
     _m_per_wave = _thrs_m // 4
@@ -116,7 +149,9 @@ def _build_moe_gemm1_fp8_gateup(
 
         # Explicit record bound so sentinel-row gathers (token_id == M padding) read
         # 0 via hardware OOB instead of garbage/NaN.
-        a_tensor = fx.rocdl.make_buffer_tensor(arg_p_input, max_size=False, num_records_bytes=fx.Int64(M) * fx.Int64(K))
+        a_tensor = fx.rocdl.make_buffer_tensor(
+            arg_p_input, max_size=False, num_records_bytes=fx.Int64(M) * fx.Int64(K) * fx.Int64(elem_bytes)
+        )
         b_tensor = fx.rocdl.make_buffer_tensor(arg_p_weight, max_size=False)
 
         # A (activation): static (BM,K) fake keeps flat_divide static; rows gathered via index.
@@ -142,31 +177,55 @@ def _build_moe_gemm1_fp8_gateup(
         a_cp_frag = fx.make_fragment_like(a_mem_thr[None, None, None, 0])
         gpu.barrier()  # sorted_lds reads done before overwriting with A tile
 
-        # Single-buffer A LDS staging (correctness-first; a 2-stage ping-pong is a later
-        # perf optimization). Matches the validated 2a recipe.
-        swz = fx.SwizzleType.get(3, 4, 3)
-        a_lds = fx.make_view(
-            lds.gemm.a_ping.ptr,
-            fx.make_composed_layout(fx.static(swz), fx.make_ordered_layout((BM, TILE_K), order=(1, 0))),
-        )
+        # 2-stage A LDS ping-pong: overlap the next K-tile's global load + LDS
+        # write with the MFMA that consumes the current tile. a_ping/a_pong are the
+        # two staging buffers; the loop below alternates between them each K-tile.
+        # A-LDS swizzle differs by element width (matches preshuffle_gemm): 8-bit
+        # (fp8) uses (log2(tile_k*eb/16), 4, log2(...)) == (3,4,3) at tile_k=128;
+        # 16-bit (bf16) uses (3,3,3).
+        swz = fx.SwizzleType.get(*_swz_params)
         uni_cp_atom = fx.make_copy_atom(fx.UniversalCopy128b(), fp8_t)
-        a_r2s = fx.make_tiled_copy(uni_cp_atom, g2r_tv_layout, fx.make_tile(_thrs_m, TILE_K)).get_slice(tid)
-        a_lds_w = a_r2s.partition_D(a_lds)
-        a_cp_frag_retile = a_r2s.retile(a_cp_frag)
-        a_lds_r = fx.make_tiled_copy_B(uni_cp_atom, tiled_mma).get_slice(tid).partition_S(a_lds)
-        a_frag = tiled_mma.make_fragment_B(a_lds)
-        a_frag_retile = fx.make_tiled_copy_B(uni_cp_atom, tiled_mma).get_slice(tid).retile(a_frag)
+        a_lds_bufs = []
+        a_lds_w_bufs = []
+        a_lds_r_bufs = []
+        a_frag_bufs = []
+        a_frag_retile_bufs = []
+        for _buf_ptr in (lds.gemm.a_ping.ptr, lds.gemm.a_pong.ptr):
+            a_lds = fx.make_view(
+                _buf_ptr,
+                fx.make_composed_layout(fx.static(swz), fx.make_ordered_layout((BM, TILE_K), order=(1, 0))),
+            )
+            a_r2s = fx.make_tiled_copy(uni_cp_atom, g2r_tv_layout, fx.make_tile(_thrs_m, TILE_K)).get_slice(tid)
+            a_lds_bufs.append(a_lds)
+            a_lds_w_bufs.append(a_r2s.partition_D(a_lds))
+            a_lds_r_bufs.append(fx.make_tiled_copy_B(uni_cp_atom, tiled_mma).get_slice(tid).partition_S(a_lds))
+            a_frag = tiled_mma.make_fragment_B(a_lds)
+            a_frag_bufs.append(a_frag)
+            a_frag_retile_bufs.append(fx.make_tiled_copy_B(uni_cp_atom, tiled_mma).get_slice(tid).retile(a_frag))
+        # Per-stage A gather staging fragments (one per in-flight buffer).
+        a_cp_frag_bufs = [a_cp_frag, fx.make_fragment_like(a_mem_thr[None, None, None, 0])]
+        a_cp_frag_retile_bufs = [
+            fx.make_tiled_copy(uni_cp_atom, g2r_tv_layout, fx.make_tile(_thrs_m, TILE_K)).get_slice(tid).retile(f)
+            for f in a_cp_frag_bufs
+        ]
 
-        # B (weight gate/up): direct global->register.
+        # B (weight gate/up): direct global->register, prefetched one K-tile ahead
+        # into a ping-pong pair of fragments so weight VMEM overlaps the MFMA.
         bl_tile = fx.flat_divide(b_tensor, fx.make_tile(contiguous_n, TILE_K))[None, None, blk_n * 2 + 0, None]
         br_tile = fx.flat_divide(b_tensor, fx.make_tile(contiguous_n, TILE_K))[None, None, blk_n * 2 + 1, None]
         b_g2r = fx.make_tiled_copy_A(buf_cp_atom_r, tiled_mma).get_slice(tid)
         bl_g2r = b_g2r.partition_S(bl_tile)
         br_g2r = b_g2r.partition_S(br_tile)
-        bl_frag = tiled_mma.make_fragment_A(bl_tile[None, None, 0])
-        br_frag = tiled_mma.make_fragment_A(br_tile[None, None, 0])
-        bl_ret = b_g2r.retile(bl_frag)
-        br_ret = b_g2r.retile(br_frag)
+        bl_frag_bufs = [tiled_mma.make_fragment_A(bl_tile[None, None, 0]) for _ in range(2)]
+        br_frag_bufs = [tiled_mma.make_fragment_A(br_tile[None, None, 0]) for _ in range(2)]
+        bl_ret_bufs = [b_g2r.retile(f) for f in bl_frag_bufs]
+        br_ret_bufs = [b_g2r.retile(f) for f in br_frag_bufs]
+
+        # Number of 128b buffer_loads issued per thread for the B (gate+up) tile.
+        # Used to build a targeted s_waitcnt that awaits only the A-gather (issued
+        # first) while leaving the prefetched B loads in flight to overlap the MFMA.
+        # Each BufferCopy128b load moves _val_per_thr elements; gate+up => 2 fragments.
+        _b_loads_per_tile = 2 * (fx.size(fx.get_shape(bl_frag_bufs[0])).to_py_value() // _val_per_thr)
 
         c_fake_buf = fx.rocdl.make_buffer_tensor(
             fx.make_view(fx.get_iter(arg_p_input), fx.make_layout((contiguous_n, BM), (BM, 1))), max_size=False
@@ -179,37 +238,81 @@ def _build_moe_gemm1_fp8_gateup(
 
         _m_reps = fx.size(fx.get_shape(c_gate)[1]).to_py_value()
         _n_reps = fx.size(fx.get_shape(c_gate)[2]).to_py_value()
-        k_iters = TILE_K // (2 * 32)
+        k_iters = TILE_K // (2 * MFMA_K)
         num_tiles = K // TILE_K
 
-        for kt in range_constexpr(num_tiles):
+        def _load_gmem(kt, s):
+            """Issue global A-gather + B(gate/up) loads for K-tile kt into stage s."""
             kb = fx.Int32(kt)
-            a_idx.copy(buf_cp_atom_r, kb, a_cp_frag)
-            fx.copy(buf_cp_atom_r, bl_g2r[None, None, None, kb], bl_ret)
-            fx.copy(buf_cp_atom_r, br_g2r[None, None, None, kb], br_ret)
-            rocdl.s_waitcnt(fxh._encode_waitcnt(vmcnt=0))
-            fx.copy(uni_cp_atom, a_cp_frag_retile, a_lds_w)
-            gpu.barrier()
+            a_idx.copy(buf_cp_atom_r, kb, a_cp_frag_bufs[s])
+            fx.copy(buf_cp_atom_r, bl_g2r[None, None, None, kb], bl_ret_bufs[s])
+            fx.copy(buf_cp_atom_r, br_g2r[None, None, None, kb], br_ret_bufs[s])
+
+        def _write_a_lds(s):
+            """A registers (stage s gather) -> LDS buffer s."""
+            fx.copy(uni_cp_atom, a_cp_frag_retile_bufs[s], a_lds_w_bufs[s])
+
+        def _read_a_lds(s):
+            """Issue all LDS A-reads for buffer s into its register fragment.
+
+            Kept separate from the MFMA so the ds_read latency (SQ_WAIT_INST_LDS)
+            can be hidden: the read is issued right after the barrier that made the
+            buffer valid, well ahead of the MFMA that consumes it next iteration.
+            """
             for ki in range_constexpr(k_iters):
-                fx.copy(uni_cp_atom, a_lds_r[None, None, ki], a_frag_retile[None, None, ki])
+                fx.copy(uni_cp_atom, a_lds_r_bufs[s][None, None, ki], a_frag_retile_bufs[s][None, None, ki])
+
+        def _mfma(s):
+            """MFMA over the already-read A fragment s + B fragments s."""
+            for ki in range_constexpr(k_iters):
                 for n in range_constexpr(_n_reps):
                     for m in range_constexpr(_m_reps):
                         for k in range_constexpr(2):
                             fx.mma_atom_call(
                                 mma_atom,
                                 c_gate[None, m, n],
-                                bl_frag[None, m, (k, ki)],
-                                a_frag[None, n, (k, ki)],
+                                bl_frag_bufs[s][None, m, (k, ki)],
+                                a_frag_bufs[s][None, n, (k, ki)],
                                 c_gate[None, m, n],
                             )
                             fx.mma_atom_call(
                                 mma_atom,
                                 c_up[None, m, n],
-                                br_frag[None, m, (k, ki)],
-                                a_frag[None, n, (k, ki)],
+                                br_frag_bufs[s][None, m, (k, ki)],
+                                a_frag_bufs[s][None, n, (k, ki)],
                                 c_up[None, m, n],
                             )
-            gpu.barrier()
+
+        # Prologue: stage 0 global loads + LDS write for K-tile 0. Await only the
+        # A-gather (issued before B) so the following ds_write sees valid A; the B
+        # register loads for tile 0 stay in flight to overlap the first MFMA. Then
+        # pre-read tile 0's A fragment from LDS so its latency overlaps the next
+        # tile's global loads / ds_write below.
+        _load_gmem(0, 0)
+        rocdl.s_waitcnt(fxh._encode_waitcnt(vmcnt=_b_loads_per_tile))
+        _write_a_lds(0)
+        gpu.barrier()
+        _read_a_lds(0)
+
+        # Main pipeline: compute tile `kt` on buffer `cur` (whose A fragment was
+        # pre-read after the prior barrier) while prefetching tile `kt+1` (global
+        # A+B) into `nxt` and staging its A into the other LDS buffer. After the
+        # barrier we immediately pre-read `nxt`'s A fragment for the next iter.
+        # The backend inserts targeted vmcnt waits on the B->MFMA register
+        # dependency, so only the A-gather-before-ds_write ordering needs an
+        # explicit s_waitcnt (leaving next-tile B loads outstanding for overlap).
+        for kt in range_constexpr(num_tiles):
+            cur = kt % 2
+            if kt + 1 < num_tiles:
+                nxt = (kt + 1) % 2
+                _load_gmem(kt + 1, nxt)
+                rocdl.s_waitcnt(fxh._encode_waitcnt(vmcnt=_b_loads_per_tile))
+                _write_a_lds(nxt)
+                _mfma(cur)
+                gpu.barrier()
+                _read_a_lds(nxt)
+            else:
+                _mfma(cur)
         return c_gate, c_up
 
     _gemm_1x4 = ASTRewriter.transform(_gemm_1x4)
@@ -367,13 +470,18 @@ def _build_moe_gemm1_fp8_gateup(
             c_gate_frag, c_up_frag = _gemm_1x4(blk_n, arg_p_input, arg_p_weight, lds, M)
 
             # fp8 dequant: sx (per token) * sw (per channel), folded into gate/up.
-            _apply_fp8_dequant(c_gate_frag, c_up_frag, tid, expert_id, blk_n, asc_idx, M, arg_scale_w, arg_scale_x)
+            # bf16 inputs are unscaled, so there is no dequant step.
+            if const_expr(not _is_bf16):
+                _apply_fp8_dequant(c_gate_frag, c_up_frag, tid, expert_id, blk_n, asc_idx, M, arg_scale_w, arg_scale_x)
 
             # Optional routed-weight scale (per sorted row).
             if const_expr(doweight_stage1):
                 _apply_doweight(c_gate_frag, c_up_frag, tid, e_idx, arg_sorted_weights)
 
-            c_out_bf16 = fxh.silu_pair_bf16(c_gate_frag, c_up_frag)
+            # silu output dtype MUST match the CShuffle LDS staging / output store
+            # dtype (out_elem); otherwise the raw fragment bits are reinterpreted
+            # (bf16 0x4480 == 1024.0 read back as f16 == 4.5).
+            c_out_bf16 = fxh.silu_pair_bf16(c_gate_frag, c_up_frag, out_dtype=out_elem)
 
             # CShuffle epilogue: stage silu output to LDS (transpose, swz 3,3,3), read back
             # channel-contiguous, scatter to out[t, slot, inter] via the sorted-id index.
@@ -417,9 +525,11 @@ def _build_moe_gemm1_fp8_gateup(
     ):
         inter_in = arith.index_cast(T.index, i32_inter_in)
         size_expert_ids_in = arith.index_cast(T.index, i32_size_expert_ids_in)
-        # Each block produces contiguous_n = tile_n//2 output channels (gate/up combine
-        # via silu into one output per channel pair), so gx = inter / contiguous_n.
-        gx = inter_in // fx.Index(tile_n // 2)
+        # Each block produces `contiguous_n` output channels (gate/up combine via
+        # silu into one output per channel pair), so gx = inter / contiguous_n.
+        # contiguous_n = max(tile_n//2, 64) mirrors the 4-wave MFMA channel minimum
+        # computed in the builder (see comment there).
+        gx = inter_in // fx.Index(contiguous_n)
         gy = size_expert_ids_in
         moe_gemm1_fp8_gateup(
             arg_out,
@@ -476,12 +586,17 @@ def compile_moe_gemm1(
       atomically accumulate gate/up partials. Caller must pre-zero output.
     """
 
-    # Native-fp8 gate-up (layout-API port): hoisted to the very top so the new
+    # Native gate-up (layout-API port): hoisted to the very top so the new
     # kernel is built in a clean MLIR context, before any legacy preamble
     # (SmemAllocator construction, MLIR type materialization, etc.) runs. Only
-    # the non-split-K fp8 path is routed here; every other dtype/stage/split-K
-    # case falls through to the legacy body unchanged.
-    if in_dtype == "fp8" and k_batch == 1:
+    # the non-split-K fp8/bf16 paths are routed here; every other dtype/stage/
+    # split-K case (incl. fp16) falls through to the legacy body unchanged.
+    # MOE_FORCE_LEGACY_FP8 / MOE_FORCE_LEGACY_BF16 route back to legacy for A/B.
+    _new_pipe_dtype = in_dtype in ("fp8", "bf16")
+    _force_legacy = os.environ.get("MOE_FORCE_LEGACY_FP8") == "1" or (
+        in_dtype == "bf16" and os.environ.get("MOE_FORCE_LEGACY_BF16") == "1"
+    )
+    if _new_pipe_dtype and k_batch == 1 and not _force_legacy:
         return _build_moe_gemm1_fp8_gateup(
             model_dim=model_dim,
             inter_dim=inter_dim,
@@ -492,6 +607,7 @@ def compile_moe_gemm1(
             tile_k=tile_k,
             doweight_stage1=doweight_stage1,
             out_dtype=out_dtype,
+            in_dtype=in_dtype,
         )
 
     gpu_arch = get_rocm_arch()
@@ -2139,3 +2255,4 @@ def compile_moe_gemm1(
         )
 
     return launch_moe_gemm1
+
