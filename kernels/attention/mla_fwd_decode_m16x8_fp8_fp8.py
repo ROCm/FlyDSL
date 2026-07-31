@@ -21,7 +21,6 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
-from flydsl.expr import math as fmath
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
@@ -1803,8 +1802,8 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         def _write_lse(pqo_loc_i32, rm, rse):
             """Write LSE for split output (first 16 lanes per warp)."""
             if ArithValue(lane_idx) < 16:
-                log2_sum = fmath.log2(rse, fastmath=fm_fast)
-                lse = fmath.fma(log2_sum, c_inv_log2e, rm, fastmath=fm_fast)
+                log2_sum = fx.log2(rse, fastmath=fm_fast)
+                lse = fx.fma(log2_sum, c_inv_log2e, rm, fastmath=fm_fast)
                 row_idx = _raw(ArithValue(lane_idx) + warp_idx * 16 + _idx(pqo_loc_i32) * NUM_QO_HEADS)
                 buffer_ops.buffer_store(lse, split_lse_rsrc, row_idx)
 

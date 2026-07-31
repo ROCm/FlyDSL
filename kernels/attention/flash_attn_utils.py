@@ -22,7 +22,6 @@ from flydsl._mlir.dialects import fly, llvm, vector
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TargetAddressSpace
 from flydsl.compiler.ast_rewriter import ReplaceIfWithDispatch
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
-from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
@@ -415,8 +414,8 @@ def _scale_sub_score_pair(v_s, row_max_raw, scale, zero_f, fm_fast):
     """
     s_lo, s_hi = v_s
     neg_scaled_max = zero_f - scale * row_max_raw
-    lo = [fmath.fma(s_lo[r], scale, neg_scaled_max, fastmath=fm_fast) for r in range_constexpr(16)]
-    hi = [fmath.fma(s_hi[r], scale, neg_scaled_max, fastmath=fm_fast) for r in range_constexpr(16)]
+    lo = [fx.fma(s_lo[r], scale, neg_scaled_max, fastmath=fm_fast) for r in range_constexpr(16)]
+    hi = [fx.fma(s_hi[r], scale, neg_scaled_max, fastmath=fm_fast) for r in range_constexpr(16)]
     return Vec.from_elements(lo, fx.Float32).ir_value(), Vec.from_elements(hi, fx.Float32).ir_value()
 
 
@@ -2882,12 +2881,12 @@ class GenericSoftmaxHelper:
         p_vals_hi = []
         local_sum = ctx.c_zero_f
         for r in range_constexpr(16):
-            diff_lo = fmath.fma(s_raw_lo[r], ctx.c_sm_scale_log2e, neg_scaled_max, fastmath=ctx.fm_fast)
+            diff_lo = fx.fma(s_raw_lo[r], ctx.c_sm_scale_log2e, neg_scaled_max, fastmath=ctx.fm_fast)
             p_lo = self._exp2(diff_lo)
             p_vals_lo.append(p_lo)
             local_sum = local_sum + p_lo
         for r in range_constexpr(16):
-            diff_hi = fmath.fma(s_raw_hi[r], ctx.c_sm_scale_log2e, neg_scaled_max, fastmath=ctx.fm_fast)
+            diff_hi = fx.fma(s_raw_hi[r], ctx.c_sm_scale_log2e, neg_scaled_max, fastmath=ctx.fm_fast)
             p_hi = self._exp2(diff_hi)
             p_vals_hi.append(p_hi)
             local_sum = local_sum + p_hi
@@ -2980,9 +2979,9 @@ class GenericSoftmaxHelper:
             p_exp_lo = []
             p_exp_hi = []
             for j in range_constexpr(traits.MFMA_LANE_K):
-                diff_lo = fmath.fma(s_raw_lo[p_base + j], ctx.c_sm_scale_log2e, neg_scaled_max, fastmath=ctx.fm_fast)
+                diff_lo = fx.fma(s_raw_lo[p_base + j], ctx.c_sm_scale_log2e, neg_scaled_max, fastmath=ctx.fm_fast)
                 p_exp_lo.append(self._exp2(diff_lo))
-                diff_hi = fmath.fma(s_raw_hi[p_base + j], ctx.c_sm_scale_log2e, neg_scaled_max, fastmath=ctx.fm_fast)
+                diff_hi = fx.fma(s_raw_hi[p_base + j], ctx.c_sm_scale_log2e, neg_scaled_max, fastmath=ctx.fm_fast)
                 p_exp_hi.append(self._exp2(diff_hi))
             for j in range_constexpr(traits.MFMA_LANE_K):
                 local_sum = local_sum + p_exp_lo[j]
@@ -3028,7 +3027,7 @@ class GenericStoreHelper:
         # LSE = sm_scale * m_raw + ln(l); natural log, softmax scale folded in
         # (fully-masked row has l == 0 -> -inf).
         ctx = self.ctx
-        lse_val = m_final * ctx.c_sm_scale + fmath.log(as_mlir_value(l_final), fastmath=ctx.fm_fast)
+        lse_val = m_final * ctx.c_sm_scale + fx.log(l_final, fastmath=ctx.fm_fast)
         lse_local = ctx.q_head_idx * ctx.seq_len_v + q_row
         # One writer per row: low half-wave + in-bounds q_row; else redirect to the
         # dropped OOB sentinel.
@@ -3197,7 +3196,7 @@ class DualwaveKernelContext:
         c_log2e_f = fx.Float32(_LOG2E)
         # LSE store folds the log2->ln conversion (m_row is sm_scale*log2e-scaled).
         self.c_ln2_f = fx.Float32(1.0 / _LOG2E)
-        self.c_sm_scale_log2e = fmath.rsqrt(head_dim_f32, fastmath=self.fm_fast) * c_log2e_f
+        self.c_sm_scale_log2e = fx.rsqrt(head_dim_f32, fastmath=self.fm_fast) * c_log2e_f
 
     def init_runtime_indices(self, seq_len=None, seq_len_kv=None, stride_q_n=None, stride_kv_n=None):
         if seq_len is None:
@@ -4181,7 +4180,7 @@ class DualwaveStoreHelper(DualwaveKernelContext):
         lse_per_batch_elems = fx.Index(traits.NUM_HEADS_Q) * self.seq_len_v
         lse_per_batch_bytes = lse_per_batch_elems * fx.Index(4)
         lse_rsrc = _make_ws_rsrc(lse_base_i64, self.batch_idx * lse_per_batch_bytes, lse_per_batch_bytes)
-        lse_val = m_row * self.c_ln2_f + fmath.log(as_mlir_value(l_row), fastmath=self.fm_fast)
+        lse_val = m_row * self.c_ln2_f + fx.log(l_row, fastmath=self.fm_fast)
         lse_local = self.q_head_idx * self.seq_len_v + q_row
         # One writer per row: low half-wave + in-bounds q_row; else the dropped OOB sentinel.
         lse_off_row = (q_row < self.seqlen_q_v).select(lse_local, lse_per_batch_elems)
@@ -4395,7 +4394,7 @@ class DualwaveFp8KernelContext:
 
         head_dim_f32 = fx.Float32(fx.Int32(self.head_dim_runtime))
         c_log2e_f = fx.Float32(_LOG2E)
-        c_sm_scale_log2e = fmath.rsqrt(head_dim_f32, fastmath=self.fm_fast) * c_log2e_f
+        c_sm_scale_log2e = fx.rsqrt(head_dim_f32, fastmath=self.fm_fast) * c_log2e_f
         _qd = _load_scale_scalar(self.QDescale)
         _kd = _load_scale_scalar(self.KDescale)
         self.vd_fp8 = _load_scale_scalar(self.VDescale)
@@ -5380,7 +5379,7 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
         lse_per_batch_elems = fx.Index(self.traits.NUM_HEADS_Q) * self.seq_len_v
         lse_per_batch_bytes = lse_per_batch_elems * fx.Index(4)
         lse_rsrc = _make_ws_rsrc(lse_base_i64, self.batch_idx * lse_per_batch_bytes, lse_per_batch_bytes)
-        lse_val = m_max * self.c_ln2_f + fmath.log(as_mlir_value(den), fastmath=self.fm_fast)
+        lse_val = m_max * self.c_ln2_f + fx.log(den, fastmath=self.fm_fast)
         lse_off = fx.Index((self.col == fx.Index(0)).select(self.local_ml_idx, lse_per_batch_elems))
         buffer_ops.buffer_store(as_mlir_value(fx.Float32(lse_val)), lse_rsrc, as_mlir_value(fx.Int32(lse_off)))
 

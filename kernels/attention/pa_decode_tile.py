@@ -35,7 +35,6 @@ import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.compiler.protocol import dsl_size_of
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
-from flydsl.expr import math as fmath
 from flydsl.expr.typing import ReductionOp, T
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common import buffer_ops, dpp_utils
@@ -452,9 +451,9 @@ def compile_pa_decode_tile(
             # (a buffer load is 128b max); head_dim=256 splits into 2 pieces.
             q_units = [_q_load_chunk(base_elem + u * QLOAD_UNIT) for u in range_constexpr(N_QLOADS)]
 
-            absmax = fmath.absf(q_units[0]).reduce(ReductionOp.MAX).to(fx.Float32)
+            absmax = fx.absf(q_units[0]).reduce(ReductionOp.MAX).to(fx.Float32)
             for u in range_constexpr(1, N_QLOADS):
-                absmax = fx.maxnumf(absmax, fmath.absf(q_units[u]).reduce(ReductionOp.MAX).to(fx.Float32))
+                absmax = fx.maxnumf(absmax, fx.absf(q_units[u]).reduce(ReductionOp.MAX).to(fx.Float32))
             for sh in (8, 4, 2, 1):
                 absmax = fx.maxnumf(absmax, dpp_utils.dpp_xor_f32(absmax, sh))
 
