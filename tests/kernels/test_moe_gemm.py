@@ -1674,25 +1674,47 @@ def _run_a16w4_moe_e2e(
     sorted_size,
     skip_ref,
     gcu,
+    w_dtype="mxfp4",
 ):
-    """End-to-end a16w4 (bf16 A x mxfp4 W1/W2) correctness via the fused a16w4 pipeline.
+    """End-to-end a16w4/a16w16 (bf16 A x mxfp4-or-raw-bf16 W1/W2) correctness.
 
-    A stays raw bf16 (no quant, no A-scale); W1/W2 are mxfp4 (standard shuffle +
-    e8m0 scale). Stage1 (gate+up GEMM + SiLU) writes a *bf16* ``[sorted_size, inter]``
-    intermediate by sorted position, consumed drop-in by the a16w4 stage2 (down-proj,
-    atomic epilog). Reference: torch_moe_gemm1 (bf16 A, mxfp4 W, scale=None) then
-    torch_moe_gemm2 on ``ref1.to(bf16)`` -- no fp4 re-quant of the intermediate.
+    A stays raw bf16 (no quant, no A-scale). ``w_dtype="mxfp4"`` (a16w4): W1/W2 are
+    mxfp4 (standard shuffle + e8m0 scale). ``w_dtype="bf16"`` (a16w16): W1/W2 are RAW
+    bf16 preshuffled N-major (``shuffle_weight`` (16,16)); no scale, no upconvert --
+    the loaded bf16 IS the MMA operand (should be ~1.0 cos, unquantized). Stage1
+    (gate+up GEMM + SiLU) writes a *bf16* ``[sorted_size, inter]`` intermediate by
+    sorted position, consumed drop-in by stage2 (down-proj, atomic epilog).
     """
     dev = x_fp32.device
     N_OUT = 2 * inter_dim
+    _is_bf16_w = w_dtype == "bf16"
 
-    # W1/W2 -> mxfp4 + standard preshuffle + e8m0 scale shuffle (A is raw bf16).
-    w1_q, w1_scale = _per_1x32_fp4_quant(w1_fp32.reshape(experts * N_OUT, model_dim))
-    w2_q, w2_scale = _per_1x32_fp4_quant(w2_fp32.reshape(experts * model_dim, inter_dim))
-    w1_shuf = shuffle_weight(w1_q.view(torch.float4_e2m1fn_x2)).view(torch.uint8).contiguous()
-    w2_shuf = shuffle_weight(w2_q.view(torch.float4_e2m1fn_x2)).view(torch.uint8).contiguous()
-    w1_scale_1d = gcu.e8m0_shuffle(w1_scale.view(experts * N_OUT, model_dim // 32)).view(torch.uint8).contiguous()
-    w2_scale_1d = gcu.e8m0_shuffle(w2_scale.view(experts * model_dim, inter_dim // 32)).view(torch.uint8).contiguous()
+    if _is_bf16_w:
+        # Raw bf16 W: N-major shuffle_weight, no scale (dummy scale pointer).
+        w1_ref = w1_fp32.reshape(experts * N_OUT, model_dim).to(torch.bfloat16)
+        w2_ref = w2_fp32.reshape(experts * model_dim, inter_dim).to(torch.bfloat16)
+        w1_shuf = shuffle_weight(w1_ref, layout=(16, 16)).contiguous()
+        w2_shuf = shuffle_weight(w2_ref, layout=(16, 16)).contiguous()
+        w1_scale_1d = torch.zeros(1, dtype=torch.uint8, device=dev)
+        w2_scale_1d = torch.zeros(1, dtype=torch.uint8, device=dev)
+        # bf16-dense reference weights (E, ...): scale=None -> identity dequant.
+        w1_ref_e = w1_ref.view(experts, N_OUT, model_dim)
+        w2_ref_e = w2_ref.view(experts, model_dim, inter_dim)
+        w1_scale_ref = w2_scale_ref = None
+    else:
+        # W1/W2 -> mxfp4 + standard preshuffle + e8m0 scale shuffle (A is raw bf16).
+        w1_q, w1_scale = _per_1x32_fp4_quant(w1_fp32.reshape(experts * N_OUT, model_dim))
+        w2_q, w2_scale = _per_1x32_fp4_quant(w2_fp32.reshape(experts * model_dim, inter_dim))
+        w1_shuf = shuffle_weight(w1_q.view(torch.float4_e2m1fn_x2)).view(torch.uint8).contiguous()
+        w2_shuf = shuffle_weight(w2_q.view(torch.float4_e2m1fn_x2)).view(torch.uint8).contiguous()
+        w1_scale_1d = gcu.e8m0_shuffle(w1_scale.view(experts * N_OUT, model_dim // 32)).view(torch.uint8).contiguous()
+        w2_scale_1d = (
+            gcu.e8m0_shuffle(w2_scale.view(experts * model_dim, inter_dim // 32)).view(torch.uint8).contiguous()
+        )
+        w1_ref_e = w1_q
+        w2_ref_e = w2_q
+        w1_scale_ref = w1_scale
+        w2_scale_ref = w2_scale
 
     cumsum = num_valid_ids.to(torch.int32).contiguous()
     m_indices = sorted_token_ids.to(torch.int32).contiguous()
@@ -1721,6 +1743,7 @@ def _run_a16w4_moe_e2e(
         tile_m=BM,
         tile_n=256 if inter_dim % 256 == 0 else 128,
         tile_k=256,
+        w_dtype=w_dtype,
     )
 
     # stage2 -> bf16 [tokens, model_dim] (atomic routing-weighted scatter)
@@ -1743,20 +1766,28 @@ def _run_a16w4_moe_e2e(
         tile_m=BM,
         tile_n=256,
         tile_k=256,
+        w_dtype=w_dtype,
     )
     torch.cuda.synchronize()
     out = out_buf.view(tokens, model_dim).float()
 
     if not skip_ref:
-        # bf16 A (scale=None) x mxfp4 W; no fp4 re-quant of the stage1 intermediate.
+        # bf16 A (scale=None) x {mxfp4|raw-bf16} W; no re-quant of the stage1 intermediate.
         ref1 = torch_moe_gemm1(
-            x_bf16, w1_q, None, w1_scale, topk_ids.long(), topk_weights, inter_dim=inter_dim, doweight_stage1=False
+            x_bf16,
+            w1_ref_e,
+            None,
+            w1_scale_ref,
+            topk_ids.long(),
+            topk_weights,
+            inter_dim=inter_dim,
+            doweight_stage1=False,
         )
         ref2 = torch_moe_gemm2(
             ref1.to(torch.bfloat16),
-            w2_q,
+            w2_ref_e,
             None,
-            w2_scale,
+            w2_scale_ref,
             topk_ids.long(),
             topk_weights,
             model_dim=model_dim,
@@ -1791,6 +1822,7 @@ def _run_mxfp_moe_e2e(
     num_iters: int = 0,
     num_warmup: int = 0,
     in_dtype_label: Optional[str] = None,
+    w_dtype: str = "mxfp4",
 ):
     """End-to-end a4w4 / a8w4 correctness via the fused mxfp_moe pipeline.
 
@@ -1832,6 +1864,7 @@ def _run_mxfp_moe_e2e(
             sorted_size=sorted_size,
             skip_ref=skip_ref,
             gcu=gcu,
+            w_dtype=w_dtype,
         )
         return
 
@@ -2120,6 +2153,7 @@ def test_mxfp_moe_variants(a_dtype, variant):
 
 
 @pytest.mark.skipif("gfx95" not in ARCH, reason="a16w4 requires gfx950+")
+@pytest.mark.parametrize("w_dtype", ["mxfp4", "bf16"], ids=["a16w4", "a16w16"])
 @pytest.mark.parametrize(
     "tokens, model_dim, inter_dim, experts, topk, tile_m",
     [
@@ -2128,10 +2162,11 @@ def test_mxfp_moe_variants(a_dtype, variant):
         pytest.param(128, 3584, 512, 896, 16, 32, id="kimi512", marks=pytest.mark.large_shape),
     ],
 )
-def test_a16w4_moe_e2e(tokens, model_dim, inter_dim, experts, topk, tile_m):
-    """a16w4 (bf16 A x mxfp4 W1/W2) fused MoE e2e correctness on a small shape and
-    the Kimi-K3 3584x512 E896 k16 production shape. bf16 A (no quant), bf16 sorted
-    intermediate, atomic gemm2. Cos vs torch (bf16 A x mxfp4 W) at the fp4 bar."""
+def test_a16w4_moe_e2e(tokens, model_dim, inter_dim, experts, topk, tile_m, w_dtype):
+    """a16w4 (bf16 A x mxfp4 W1/W2) and a16w16 (bf16 A x raw bf16 W1/W2) fused MoE e2e
+    correctness on a small shape and the Kimi-K3 3584x512 E896 k16 production shape.
+    bf16 A (no quant), bf16 sorted intermediate, atomic gemm2. a16w4 cos vs torch at
+    the fp4 bar; a16w16 is unquantized so cos should be ~1.0."""
     device = torch.device("cuda")
     s = 0.2
     x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * s
@@ -2165,6 +2200,7 @@ def test_a16w4_moe_e2e(tokens, model_dim, inter_dim, experts, topk, tile_m):
         topk_weights=topk_weights,
         routing=routing,
         a_dtype="a16",
+        w_dtype=w_dtype,
     )
 
 

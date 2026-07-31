@@ -73,10 +73,11 @@ def _get_compiled_gemm2_a16w4(
 
 
 def _default_tile_n(N, *, w_dtype="mxfp4"):
-    """Adaptive N-tile default for the a16w4/a16wi4 stages.
+    """Adaptive N-tile default for the a16w4/a16wi4/a16w16 stages.
 
-    mxfp4 (a16w4): the fat-wave tile_n=256 geometry is the tuned aiter tile and
-    wins on the large Kimi-K3 shapes; keep 256 when N % 256 == 0, else 128.
+    mxfp4 (a16w4) and bf16 (a16w16): the fat-wave tile_n=256 geometry is the tuned
+    aiter tile and wins on the large Kimi-K3 shapes; keep 256 when N % 256 == 0, else
+    128. (bf16 W reuses the mxfp4 rule -- it's the same non-scaled bf16 MFMA path.)
 
     int4 (a16wi4): this path replaced the legacy ``moe_gemm_2stage`` int4 kernel,
     which uses tile_n=128. The inherited a16w4 tile_n=256 fat-wave geometry is a
@@ -147,6 +148,8 @@ def flydsl_a16w4_gemm1(
     ``w_dtype="int4"`` (a16wi4): W1 is packed signed int4 (same preshuffle byte
     layout as mxfp4) and ``w1_scale_u8`` is the groupwise bf16 scale already in the
     ``(E, N_OUT, G//2, 2)`` kernel layout (see :func:`a16wi4_scale_to_kernel_layout`).
+    ``w_dtype="bf16"`` (a16w16): W1 is RAW bf16 ``[E, N_OUT, K]`` preshuffled with
+    ``shuffle_weight(layout=(16,16))``; ``w1_scale_u8`` is unused (pass any pointer).
 
     ``a_bf16`` is the bf16 activation ``[n_tokens, D_HIDDEN]``. Writes the bf16
     intermediate ``[sorted_size, D_INTER]`` (by sorted position) into

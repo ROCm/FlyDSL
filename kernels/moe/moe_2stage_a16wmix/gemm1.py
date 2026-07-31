@@ -82,6 +82,7 @@ def _gemm1_body_a16w4(
     ``[sorted_size, inter_dim]`` stored by SORTED POSITION (drop-in for gemm2_a16w4).
     """
     _is_int4 = w_dtype == "int4"
+    _is_bf16 = w_dtype == "bf16"  # a16w16: raw bf16 W (unpacked, no scale, no upconvert)
     N_OUT = 2 * INTER
     elem_bytes = 2  # bf16
     a_elem_bytes = 2
@@ -145,6 +146,20 @@ def _gemm1_body_a16w4(
         (N_OUT // 16, bl_k0, 4, 16, 16),
         (bl_stride_n0, bl_stride_k0, bl_stride_klane, 16, 1),
     )
+    # W (raw bf16) preshuffle layout (make_preshuffle_b_layout elem_bytes=2, N-major,
+    # == shuffle_weight layout=(16,16)) in bf16-ELEM units:
+    #   shape (N_OUT/16, K/32, 4, 16, 8), strides (n0: (K/32)*512, k0: 512, klane: 128,
+    #   nlane: 8, kpack: 1). One kpack = 8 bf16 = 16 B = ONE MFMA K32 B fragment (no
+    #   fp4 upconvert). The K mapping is reindexed to match the fp4 (klane_hw, ku)->K
+    #   order: bf_k0 = base_k//32 + (ku//4)*4 + klane_hw, bf_klane = ku%4 (see load_b_raw).
+    bfl_k0 = K // 32
+    bfl_stride_klane = 128
+    bfl_stride_k0 = 512
+    bfl_stride_n0 = bfl_k0 * bfl_stride_k0
+    layout_b_bf16 = fx.make_layout(
+        (N_OUT // 16, bfl_k0, 4, 16, 8),
+        (bfl_stride_n0, bfl_stride_k0, bfl_stride_klane, 8, 1),
+    )
     # B-scale preshuffle layout (make_preshuffle_scale_layout, e8m0, per-1x32):
     #   c_k = K (padded to 256 mult), c_mn = N_OUT. shape (c_mn/32, c_k1, 4, 16),
     #   strides (n0: c_k1*64, k0: 64, klane: 16, nlane: 1). elem = 1 byte (u8).
@@ -173,13 +188,16 @@ def _gemm1_body_a16w4(
 
     # ---- buffer resources -----------------------------------------------------
     # (A is loaded via the BufferCopyLDS atom over x_buf below, not a raw rsrc.)
-    w_rsrc = _buffer_rsrc(arg_bq, num_records_bytes=min(NE * N_OUT * K_HALF, 0xFFFFFFFF))
+    # W bytes: mxfp4/int4 pack 2/byte (K_HALF); raw bf16 is 2 B/elem (K * 2).
+    _w_bytes = NE * N_OUT * (K * 2) if _is_bf16 else NE * N_OUT * K_HALF
+    w_rsrc = _buffer_rsrc(arg_bq, num_records_bytes=min(_w_bytes, 0xFFFFFFFF))
     if _is_int4:
         # int4 groupwise scale buffer is (E, N_OUT, G//2, 2) bf16 -> G//2 dwords per N.
         _sw_bytes = NE * N_OUT * _g_half * 4
     else:
         _sw_bytes = NE * N_OUT * (scale_k_padded // 32)
-    sw_rsrc = _buffer_rsrc(arg_bscale, num_records_bytes=min(_sw_bytes, 0xFFFFFFFF))
+    # bf16 W has no scale buffer; sw_rsrc is unused (arg_bscale is a dummy pointer).
+    sw_rsrc = None if _is_bf16 else _buffer_rsrc(arg_bscale, num_records_bytes=min(_sw_bytes, 0xFFFFFFFF))
     # Intermediate is [sorted_size, inter] bf16. num_records = padded_sorted_rows *
     # inter * 2 bytes (padded rows = cumsum0) so masked (clamped) stores land OOB.
     _cumsum0 = _global_i32_at(arg_cumsum, fx.Int32(0))
@@ -295,6 +313,30 @@ def _gemm1_body_a16w4(
             raw.append([fx.Int32(v4[j]) for j in range(4)])
         return raw
 
+    def load_b_raw_bf16(base_k, n_blk, n_intra):
+        # Raw bf16 W: one dwordx4 (8 bf16) per ku = one MFMA K32 B fragment. Index the
+        # bf16 preshuffle so the (klane_hw=lane_div_16, ku)->K map matches the fp4 path:
+        #   bf_k0 = base_k//32 + (ku//4)*4 + klane_hw, bf_klane = ku%4. Returns
+        #   raw[ku] = v8bf16 (the MMA operand directly -- no scale, no upconvert).
+        raw = []
+        base_k0 = base_k // fx.Int32(32)
+        for ku in range_constexpr(k_unroll):
+            _k0_blk = ku // 4
+            bf_k0 = base_k0 + fx.Int32(_k0_blk * 4) + lane_div_16
+            bf_klane = fx.Int32(ku % 4)
+            elem_idx = fx.Int32(
+                crd2idx(
+                    [fx.Int64(n_blk), fx.Int64(bf_k0), fx.Int64(bf_klane), fx.Int64(n_intra), fx.Int64(0)],
+                    layout_b_bf16,
+                )
+            )
+            # elem_idx is a bf16-elem offset; dwordx4 needs a dword index = elem_idx*2//4.
+            v4 = buffer_ops.buffer_load(
+                _raw(w_rsrc), _raw(elem_idx // fx.Int32(2)), vec_width=4, dtype=T.i32, cache_modifier=b_cache_mod
+            )
+            raw.append(fx.Vector(v4).bitcast(fx.BFloat16))  # v8bf16
+        return raw
+
     def load_b_scale(base_k, mni, n_pack):
         # aiter _get_scale_f32: adj_ku = base_k//32 + (ku//4)*4 + lane_div_16.
         scales = []
@@ -345,6 +387,9 @@ def _gemm1_body_a16w4(
     vec2_bf16 = ir.Type.parse("vector<2xbf16>")
 
     def upconvert_b(raw, ku, scale_f32):
+        if const_expr(_is_bf16):
+            # raw[ku] is already the v8bf16 MMA operand (no scale, no upconvert).
+            return raw[ku]
         i32_val = _raw(raw[ku // 4][ku % 4])
         if const_expr(_is_int4):
             return _int4_nibble_to_bf16x8(fx.Int32(i32_val), scale_f32)
@@ -409,6 +454,14 @@ def _gemm1_body_a16w4(
 
     # ---- B tile load + compute helpers ----------------------------------------
     def load_b_tile(base_k):
+        if const_expr(_is_bf16):
+            # Raw bf16 W: no scale; the loaded fragments are the MMA operands.
+            return (
+                [load_b_raw_bf16(base_k, n_blk_gate[ni], n_intra_gate[ni]) for ni in range_constexpr(num_acc_n)],
+                [load_b_raw_bf16(base_k, n_blk_up[ni], n_intra_up[ni]) for ni in range_constexpr(num_acc_n)],
+                None,
+                None,
+            )
         if const_expr(_is_int4):
             g_sc = [load_b_scale_int4(base_k, scale_n_gate[ni]) for ni in range_constexpr(num_acc_n)]
             u_sc = [load_b_scale_int4(base_k, scale_n_up[ni]) for ni in range_constexpr(num_acc_n)]
@@ -439,8 +492,10 @@ def _gemm1_body_a16w4(
         g_raw, u_raw, g_sc, u_sc = b_tile
         for ni in range_constexpr(num_acc_n):
             for ku in range_constexpr(k_unroll):
-                gb = upconvert_b(g_raw[ni], ku, g_sc[ni][ku])
-                ub = upconvert_b(u_raw[ni], ku, u_sc[ni][ku])
+                _gsc = None if const_expr(_is_bf16) else g_sc[ni][ku]
+                _usc = None if const_expr(_is_bf16) else u_sc[ni][ku]
+                gb = upconvert_b(g_raw[ni], ku, _gsc)
+                ub = upconvert_b(u_raw[ni], ku, _usc)
                 for mi in range_constexpr(m_repeat):
                     a8 = a_frags[mi][ku]
                     _mma(acc_gate[mi][ni], a8, gb)
@@ -587,6 +642,9 @@ def compile_gemm1_a16w4_port(
     ``w_dtype="int4"`` (a16wi4): W is packed signed int4 (2/byte, SAME preshuffle byte
     layout as mxfp4) with a groupwise bf16 scale (group_size=32); dequant via
     ``v_cvt_off_f32_i4`` -> feeds the identical bf16 MFMA.
+    ``w_dtype="bf16"`` (a16w16): W is RAW bf16 ``[E, N_OUT, K]`` (2 B/elem, unpacked),
+    preshuffled N-major (``shuffle_weight`` layout=(16,16)). No scale, no upconvert --
+    each dwordx4 (8 bf16) IS one MFMA K32 B fragment. The trivial (largest-W-bytes) path.
 
     ``k_wave`` (aiter slice-K, default 1 == unchanged): repartition the 4 waves into
     (4/k_wave) N-waves x k_wave K-waves. Each K-wave computes a K-slice of a wider
@@ -594,7 +652,7 @@ def compile_gemm1_a16w4_port(
     SiLU/epilogue. k_wave in {1,2,4}; ``4 % k_wave == 0`` and ``D_HIDDEN % (k_wave*
     TILE_K) == 0`` required.
     """
-    assert w_dtype in ("mxfp4", "int4"), f"w_dtype must be 'mxfp4' or 'int4', got {w_dtype!r}"
+    assert w_dtype in ("mxfp4", "int4", "bf16"), f"w_dtype must be 'mxfp4', 'int4' or 'bf16', got {w_dtype!r}"
     assert k_wave in (1, 2, 4), f"k_wave must be 1, 2, or 4, got {k_wave}"
     assert 4 % k_wave == 0, f"4 must be divisible by k_wave, got {k_wave}"
     _K = D_HIDDEN

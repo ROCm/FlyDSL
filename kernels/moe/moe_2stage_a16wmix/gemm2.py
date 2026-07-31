@@ -141,6 +141,7 @@ def _gemm2_body_a16w4(
     token rows (atomic-fadd, routing-weighted) at [tokens, model_dim].
     """
     _is_int4 = w_dtype == "int4"
+    _is_bf16 = w_dtype == "bf16"  # a16w16: raw bf16 W (unpacked, no scale, no upconvert)
     elem_bytes = 2
     KH_TILE_BYTES = TILE_K * elem_bytes
     LDS_STRIDE = TILE_K
@@ -166,6 +167,17 @@ def _gemm2_body_a16w4(
         (N_OUT // 16, bl_k0, 4, 16, 16),
         (bl_stride_n0, bl_stride_k0, bl_stride_klane, 16, 1),
     )
+    # W2 (raw bf16) preshuffle layout (elem_bytes=2, N-major == shuffle_weight (16,16)):
+    #   shape (N_OUT/16, K/32, 4, 16, 8), bf16-elem strides. One kpack=8 bf16=one MFMA
+    #   K32 fragment; K reindexed to match the fp4 (klane_hw, ku)->K order (see load_b_raw_bf16).
+    bfl_k0 = K // 32
+    bfl_stride_klane = 128
+    bfl_stride_k0 = 512
+    bfl_stride_n0 = bfl_k0 * bfl_stride_k0
+    layout_b_bf16 = fx.make_layout(
+        (N_OUT // 16, bfl_k0, 4, 16, 8),
+        (bfl_stride_n0, bfl_stride_k0, bfl_stride_klane, 8, 1),
+    )
     scale_k_padded = ((K + 255) // 256) * 256
     sc_k1 = ((scale_k_padded // 32) // 4) // 2
     sc_stride_klane = 16
@@ -186,12 +198,13 @@ def _gemm2_body_a16w4(
     by_n = n_block_idx * fx.Int32(TILE_N)
     expert_off = e * fx.Int32(N_OUT)
 
-    w_rsrc = _buffer_rsrc(arg_bq, num_records_bytes=min(NE * N_OUT * K_HALF, 0xFFFFFFFF))
+    _w_bytes = NE * N_OUT * (K * 2) if _is_bf16 else NE * N_OUT * K_HALF
+    w_rsrc = _buffer_rsrc(arg_bq, num_records_bytes=min(_w_bytes, 0xFFFFFFFF))
     if _is_int4:
         _sw_bytes = NE * N_OUT * _g_half * 4
     else:
         _sw_bytes = NE * N_OUT * (scale_k_padded // 32)
-    sw_rsrc = _buffer_rsrc(arg_bscale, num_records_bytes=min(_sw_bytes, 0xFFFFFFFF))
+    sw_rsrc = None if _is_bf16 else _buffer_rsrc(arg_bscale, num_records_bytes=min(_sw_bytes, 0xFFFFFFFF))
 
     # ---- A gather (per-thread) -> LDS. A row = SORTED position m_row + row_local.
     total_threads = 256
@@ -283,6 +296,27 @@ def _gemm2_body_a16w4(
             raw.append([fx.Int32(v4[j]) for j in range(4)])
         return raw
 
+    def load_b_raw_bf16(base_k, n_blk, n_intra):
+        # Raw bf16 W: one dwordx4 (8 bf16) per ku = one MFMA K32 fragment. Index to
+        # match the fp4 (klane_hw=lane_div_16, ku)->K order (see gemm1 counterpart).
+        raw = []
+        base_k0 = base_k // fx.Int32(32)
+        for ku in range_constexpr(k_unroll):
+            _k0_blk = ku // 4
+            bf_k0 = base_k0 + fx.Int32(_k0_blk * 4) + lane_div_16
+            bf_klane = fx.Int32(ku % 4)
+            elem_idx = fx.Int32(
+                crd2idx(
+                    [fx.Int64(n_blk), fx.Int64(bf_k0), fx.Int64(bf_klane), fx.Int64(n_intra), fx.Int64(0)],
+                    layout_b_bf16,
+                )
+            )
+            v4 = buffer_ops.buffer_load(
+                _raw(w_rsrc), _raw(elem_idx // fx.Int32(2)), vec_width=4, dtype=T.i32, cache_modifier=b_cache_mod
+            )
+            raw.append(fx.Vector(v4).bitcast(fx.BFloat16))  # v8bf16
+        return raw
+
     def load_b_scale(base_k, mni, n_pack):
         scales = []
         cache = {}
@@ -328,6 +362,8 @@ def _gemm2_body_a16w4(
     vec2_bf16 = ir.Type.parse("vector<2xbf16>")
 
     def upconvert_b(raw, ku, scale_f32):
+        if const_expr(_is_bf16):
+            return raw[ku]  # already v8bf16 (no scale, no upconvert)
         i32_val = _raw(raw[ku // 4][ku % 4])
         if const_expr(_is_int4):
             return _int4_nibble_to_bf16x8(fx.Int32(i32_val), scale_f32)
@@ -377,15 +413,22 @@ def _gemm2_body_a16w4(
     for kt in range_constexpr(K_TILES_TOTAL):
         base_k = fx.Int32(kt * TILE_K)
         dma_a_tile_to_lds(base_k)
-        b_raw = [load_b_raw(base_k, n_blk_list[ni], n_intra_list[ni]) for ni in range_constexpr(num_acc_n)]
-        if const_expr(_is_int4):
-            b_sc = [load_b_scale_int4(base_k, scale_n_list[ni]) for ni in range_constexpr(num_acc_n)]
+        if const_expr(_is_bf16):
+            b_raw = [load_b_raw_bf16(base_k, n_blk_list[ni], n_intra_list[ni]) for ni in range_constexpr(num_acc_n)]
+            b_sc = None
         else:
-            b_sc = [load_b_scale(base_k, scale_mni_list[ni], scale_np_list[ni]) for ni in range_constexpr(num_acc_n)]
+            b_raw = [load_b_raw(base_k, n_blk_list[ni], n_intra_list[ni]) for ni in range_constexpr(num_acc_n)]
+            if const_expr(_is_int4):
+                b_sc = [load_b_scale_int4(base_k, scale_n_list[ni]) for ni in range_constexpr(num_acc_n)]
+            else:
+                b_sc = [
+                    load_b_scale(base_k, scale_mni_list[ni], scale_np_list[ni]) for ni in range_constexpr(num_acc_n)
+                ]
         gpu.barrier()
         for ni in range_constexpr(num_acc_n):
             for ku in range_constexpr(k_unroll):
-                bb = upconvert_b(b_raw[ni], ku, b_sc[ni][ku])
+                _bsc = None if const_expr(_is_bf16) else b_sc[ni][ku]
+                bb = upconvert_b(b_raw[ni], ku, _bsc)
                 for mi in range_constexpr(m_repeat):
                     a8 = lds_load_a(mi, ku)
                     _mma(accm[mi][ni], a8, bb)
@@ -445,7 +488,7 @@ def compile_gemm2_a16w4_port(
     per-channel utilization. ``xcd_swizzle`` also enables an optional M-group swizzle
     for per-XCD L2 locality (group size = xcd_swizzle m-blocks).
     """
-    assert w_dtype in ("mxfp4", "int4"), f"w_dtype must be 'mxfp4' or 'int4', got {w_dtype!r}"
+    assert w_dtype in ("mxfp4", "int4", "bf16"), f"w_dtype must be 'mxfp4', 'int4' or 'bf16', got {w_dtype!r}"
     _K = D_INTER
     assert _K % TILE_K == 0, f"D_INTER (K) must be a multiple of {TILE_K}, got {_K}"
     assert N_OUT % TILE_N == 0, f"model_dim (N_OUT) must be a multiple of {TILE_N}, got {N_OUT}"
