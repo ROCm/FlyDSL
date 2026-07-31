@@ -1186,7 +1186,7 @@ def compile_pa_metadata_v1(
         num_batches: Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        with CompilationContext.compile_hints({"fast_fp_math": True}):
+        with CompilationContext.compile_hints({"fastmath": arith.FastMathFlags.contract}):
             pa_metadata_v1_kernel(
                 seqlens_qo_indptr,
                 pages_kv_indptr,
@@ -2175,7 +2175,7 @@ def compile_pa_metadata_reduce(
         num_groups,
         stream: fx.Stream = fx.Stream(None),
     ):
-        with CompilationContext.compile_hints({"fast_fp_math": True}):
+        with CompilationContext.compile_hints({"fastmath": arith.FastMathFlags.contract}):
             pa_metadata_reduce_kernel(
                 final_output,
                 partial_output,

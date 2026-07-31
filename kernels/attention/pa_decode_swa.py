@@ -1034,7 +1034,7 @@ def compile_pa_decode_sw_reduce(
         num_kv_heads,
         stream: fx.Stream = fx.Stream(None),
     ):
-        with CompilationContext.compile_hints({"fast_fp_math": True}):
+        with CompilationContext.compile_hints({"fastmath": arith.FastMathFlags.contract}):
             pa_decode_sw_reduce_kernel(
                 output,
                 exp_sums,
@@ -1563,7 +1563,7 @@ def compile_pa_decode_sw(
         gz: Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        with CompilationContext.compile_hints({"fast_fp_math": True}):
+        with CompilationContext.compile_hints({"fastmath": arith.FastMathFlags.contract}):
             pa_decode_sw_kernel(
                 es,
                 ml,

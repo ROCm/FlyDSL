@@ -973,7 +973,7 @@ def compile_pa_decode_tile(
         stride_q_head: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        with CompilationContext.compile_hints({"fast_fp_math": True}):
+        with CompilationContext.compile_hints({"fastmath": arith.FastMathFlags.contract}):
             pa_decode_tile_kernel(
                 output,
                 pmax,
