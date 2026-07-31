@@ -279,7 +279,7 @@ def flydsl_a16w4_gemm1(
     D_HIDDEN,
     D_INTER,
     topk,
-    TILE_N=256,
+    TILE_N=None,
     TILE_K=256,
     act="silu",
     b_cache_mod=0,
@@ -290,7 +290,13 @@ def flydsl_a16w4_gemm1(
     ``a_bf16`` is the bf16 activation ``[n_tokens, D_HIDDEN]``. Writes the bf16
     intermediate ``[sorted_size, D_INTER]`` (by sorted position) into
     ``inter_sorted_bf16`` (pre-allocated). No A-scale, no intermediate scale.
+
+    ``TILE_N=None`` picks the largest supported N tile that divides ``D_INTER``:
+    256 when ``D_INTER % 256 == 0`` (fastest, matches aiter's tuned tile) else 128
+    (``D_INTER`` is always a multiple of 128 given the ``2*D_INTER % 256`` rule).
     """
+    if TILE_N is None:
+        TILE_N = 256 if D_INTER % 256 == 0 else 128
     if D_HIDDEN % TILE_K != 0:
         raise NotImplementedError(f"a16w4 gemm1 requires D_HIDDEN (K) % {TILE_K} == 0, got H={D_HIDDEN}")
     if (2 * D_INTER) % 256 != 0:
