@@ -198,8 +198,18 @@ def _gemm2_body_a16w4(
     by_n = n_block_idx * fx.Int32(TILE_N)
     expert_off = e * fx.Int32(N_OUT)
 
-    _w_bytes = NE * N_OUT * (K * 2) if _is_bf16 else NE * N_OUT * K_HALF
-    w_rsrc = _buffer_rsrc(arg_bq, num_records_bytes=min(_w_bytes, 0xFFFFFFFF))
+    # bf16 W [E, N_OUT, K] is 2 B/elem == 4x the fp4 bytes; the whole-tensor byte
+    # extent overflows the 32-bit buffer num_records field AND the i32 byte-offset
+    # (buffer_load computes offset*elem_bytes in i32) at large E. Fold the per-expert
+    # base into the i64 resource address and index W WITHIN the expert (n_blk carries
+    # no expert_off for bf16). mxfp4/int4 keep the whole-tensor path (byte-identical).
+    if const_expr(_is_bf16):
+        _w_per_expert_bytes = N_OUT * (K * 2)
+        w_base_i64 = fx.Int64(arg_bq) + fx.Int64(e) * fx.Int64(_w_per_expert_bytes)
+        w_rsrc = _buffer_rsrc(w_base_i64, num_records_bytes=min(_w_per_expert_bytes, 0xFFFFFFFF))
+    else:
+        _w_bytes = NE * N_OUT * K_HALF
+        w_rsrc = _buffer_rsrc(arg_bq, num_records_bytes=min(_w_bytes, 0xFFFFFFFF))
     if _is_int4:
         _sw_bytes = NE * N_OUT * _g_half * 4
     else:
@@ -382,7 +392,11 @@ def _gemm2_body_a16w4(
     for ni in range_constexpr(num_acc_n):
         col_g = by_n + n_tile_base + fx.Int32(ni * 16) + lane_mod_16
         col_g_list.append(col_g)
-        row_w = expert_off + col_g
+        # bf16 W folds the expert offset into the resource base pointer (see w_rsrc),
+        # so its B-load index is WITHIN the expert (no expert_off). mxfp4/int4 keep
+        # expert_off in the index against the whole-tensor resource (byte-identical).
+        _row_expert_off = fx.Int32(0) if const_expr(_is_bf16) else expert_off
+        row_w = _row_expert_off + col_g
         n_blk_list.append(row_w // fx.Int32(16))
         n_intra_list.append(row_w % fx.Int32(16))
         ng = expert_off + by_n + n_tile_base + fx.Int32(ni * 16)
