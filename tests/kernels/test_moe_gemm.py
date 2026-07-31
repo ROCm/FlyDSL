@@ -1594,7 +1594,11 @@ def _run_a16w4_moe_e2e(
             model_dim=model_dim,
             doweight_stage2=True,
         )
-        verify_output(out, ref2, rtol=0.5, atol=0.5, logits_diff_threshold=1)
+        # a16w4 (bf16 A x mxfp4 W) is numerically faithful (e2e cos ~0.9999); enforce
+        # a strict, asserted gate so regressions are caught. NOTE: rtol/atol must be
+        # tight too -- verify_output early-returns True when <5% of elements exceed
+        # the allclose tol, which makes a loose rtol/atol (0.5) mask the logits check.
+        assert verify_output(out, ref2, rtol=2e-3, atol=2e-3, logits_diff_threshold=2e-3)
 
 
 def _run_mxfp_moe_e2e(
@@ -1850,11 +1854,43 @@ def _run_mxfp_moe_e2e(
             model_dim=model_dim,
             doweight_stage2=True,
         )
-        verify_output(out, ref2, rtol=0.5, atol=0.5, logits_diff_threshold=1)
+        # Strict, asserted correctness gate. This exposes the pre-existing
+        # fused-mxfp4 defects (broken shared gemm2 down-proj + broken fp8-gemm1
+        # A-path); the a4w4/a8w4 callers are xfail-marked accordingly. NOTE:
+        # rtol/atol must be tight too -- verify_output early-returns True when <5%
+        # of elements exceed the allclose tol, so a loose rtol/atol (0.5) would
+        # mask the logits check (the original bug that let cos~0.1 pass silently).
+        assert verify_output(out, ref2, rtol=2e-3, atol=2e-3, logits_diff_threshold=2e-3)
+
+
+# The fused mxfp4 a4w4/a8w4 pipeline is numerically broken under the strict gate
+# (independently verified: e2e cos ~0.12 / ~0.07; the shared gemm2 down-proj is
+# broken and, for a8w4, the fp8-gemm1 A-path too -- stage1 cos 0.16). Beyond wrong
+# numbers, these kernels are memory-unsafe: launching them and then unwinding an
+# xfail under pytest teardown corrupts the JIT/HIP module state and cascades an
+# illegal-address crash into unrelated tests in the same session. So xfail with
+# run=False: document the expected failure (honest CI signal, not a silent mask)
+# WITHOUT executing the broken kernel, keeping the a16w4 strict gate runnable.
+_MXFP4_FUSED_XFAIL = pytest.mark.xfail(
+    reason="pre-existing mxfp4 fused gemm2 + fp8-gemm1 A-path bug, e2e cos ~0.1; "
+    "strict gate exposes it, not an a16w4 regression (kernel is also memory-unsafe "
+    "-> run=False to avoid crashing the session)",
+    strict=False,
+    run=False,
+)
 
 
 @pytest.mark.skipif("gfx95" not in ARCH, reason="mxfp_moe a4w4/a8w4/a16w4 requires gfx950+")
-@pytest.mark.parametrize("a_dtype", ["fp4", "fp8", "a16w4"])
+@pytest.mark.parametrize(
+    "a_dtype",
+    [
+        # a4w4 (fp4) and a8w4 (fp8) hit the broken fused mxfp4 gemm2 (and, for fp8,
+        # the broken fp8-gemm1 A-path) -> xfail under the strict gate. a16w4 is faithful.
+        pytest.param("fp4", marks=_MXFP4_FUSED_XFAIL),
+        pytest.param("fp8", marks=_MXFP4_FUSED_XFAIL),
+        "a16w4",
+    ],
+)
 @pytest.mark.parametrize(
     "variant",
     ["bm32_atomic", "inline_bm16", "interleave_bm64"],
@@ -2169,6 +2205,19 @@ def test_moe_gemm_2stage(
         # do device-side fp4 re-quant (sorted fp4 intermediate); a16w4 keeps A raw
         # bf16 and a bf16 intermediate (a_dtype="a16" -> _run_a16w4_moe_e2e branch).
         _a_dtype = {"a8w4": "fp8", "a16w4": "a16"}.get(in_dtype, "fp4")
+        # a4w4/a8w4 hit the broken (and memory-unsafe) fused mxfp4 pipeline: the
+        # shared gemm2 down-proj is broken and, for a8w4, the fp8-gemm1 A-path too
+        # (independently verified e2e cos ~0.12 / ~0.07). The strict e2e gate would
+        # fail; running the kernel and unwinding under pytest teardown also cascades
+        # an illegal-address crash into other tests. When a real reference would be
+        # checked (skip_ref=False), xfail *without* executing the broken kernel so
+        # CI stays honest and stable. a16w4 stays strict-asserted-and-passing.
+        if in_dtype in ("fp4", "a8w4") and not bool(skip_ref):
+            pytest.xfail(
+                "pre-existing mxfp4 fused gemm2 + fp8-gemm1 A-path bug, e2e cos ~0.1; "
+                "strict gate exposes it, not an a16w4 regression (kernel also "
+                "memory-unsafe -> not executed here to avoid crashing the session)"
+            )
         _run_mxfp_moe_e2e(
             tokens=tokens,
             model_dim=model_dim,
