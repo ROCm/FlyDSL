@@ -1874,7 +1874,9 @@ def _run_mxfp_moe_e2e(
 _MXFP4_FUSED_XFAIL = pytest.mark.xfail(
     reason="pre-existing mxfp4 fused gemm2 + fp8-gemm1 A-path bug, e2e cos ~0.1; "
     "strict gate exposes it, not an a16w4 regression (kernel is also memory-unsafe "
-    "-> run=False to avoid crashing the session)",
+    "-> run=False to avoid crashing the session). "
+    "See docs/issues/mxfp_moe_a4w4_a8w4_broken.md; repro "
+    "tools/repro/repro_mxfp_moe_a4w4_a8w4_broken.py. TODO(issue #NNN)",
     strict=False,
     run=False,
 )
@@ -2216,7 +2218,9 @@ def test_moe_gemm_2stage(
             pytest.xfail(
                 "pre-existing mxfp4 fused gemm2 + fp8-gemm1 A-path bug, e2e cos ~0.1; "
                 "strict gate exposes it, not an a16w4 regression (kernel also "
-                "memory-unsafe -> not executed here to avoid crashing the session)"
+                "memory-unsafe -> not executed here to avoid crashing the session). "
+                "See docs/issues/mxfp_moe_a4w4_a8w4_broken.md; repro "
+                "tools/repro/repro_mxfp_moe_a4w4_a8w4_broken.py. TODO(issue #NNN)"
             )
         _run_mxfp_moe_e2e(
             tokens=tokens,
