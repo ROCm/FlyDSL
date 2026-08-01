@@ -609,10 +609,14 @@ def compile_moe_gemm2(
     `use_cshuffle_epilog` controls whether we use the LDS CShuffle epilogue before
     global atomics (recommended for performance).
     """
-    # Native fp8/bf16 (layout-API port): route the non-groupwise fp8/bf16 path to
-    # the new B-first pipeline (mirrors stage1). Every other dtype/groupwise case
-    # falls through to the legacy body unchanged.
-    if in_dtype in ("fp8", "bf16") and group_size <= 0:
+    # Native fp8 (layout-API port): route the non-groupwise fp8 path to the new
+    # B-first pipeline (mirrors stage1). Every other dtype/groupwise case falls
+    # through to the legacy body unchanged.
+    #
+    # NOTE: the builder is dtype-parametric and also accepts in_dtype="bf16", but
+    # bf16 is NOT routed here yet (see the matching note in gemm1.py: gfx942 bf16
+    # MFMA variant + out_dtype="f32" large-tile crash). bf16 stays on legacy.
+    if in_dtype == "fp8" and group_size <= 0:
         _out_s = str(out_dtype).strip().lower()
         if _out_s not in ("f16", "fp16", "half", "bf16", "bfloat16", "f32", "fp32", "float"):
             raise ValueError(f"out_dtype must be 'f16', 'bf16', or 'f32', got {out_dtype!r}")

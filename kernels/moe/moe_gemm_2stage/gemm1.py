@@ -589,9 +589,15 @@ def compile_moe_gemm1(
     # Native gate-up (layout-API port): hoisted to the very top so the new
     # kernel is built in a clean MLIR context, before any legacy preamble
     # (SmemAllocator construction, MLIR type materialization, etc.) runs. Only
-    # the non-split-K fp8/bf16 paths are routed here; every other dtype/stage/
-    # split-K case (incl. fp16) falls through to the legacy body unchanged.
-    if in_dtype in ("fp8", "bf16") and k_batch == 1:
+    # the non-split-K fp8 path is routed here; every other dtype/stage/split-K
+    # case (incl. fp16) falls through to the legacy body unchanged.
+    #
+    # NOTE: the builder is dtype-parametric and also accepts in_dtype="bf16", but
+    # bf16 is NOT routed here yet: it needs the CDNA3 (gfx942) bf16 MFMA(16,16,16)
+    # variant (the builder currently emits the gfx950-only MFMA(16,16,32) bf16 op,
+    # which aborts compilation on gfx942) plus a fix for an out_dtype="f32" crash
+    # at large tile_m. Until both land, bf16 stays on the proven legacy path.
+    if in_dtype == "fp8" and k_batch == 1:
         return _build_moe_gemm1_fp8_gateup(
             model_dim=model_dim,
             inter_dim=inter_dim,
