@@ -68,6 +68,16 @@ def _global_i32_buffer_tiles(addr_i64, num_bytes, tile_elems):
     return fx.logical_divide(_global_i32_buffer_view(addr_i64, num_bytes), fx.make_layout(tile_elems, 1))
 
 
+def _buffer_i32_scalar_read(tiles1, idx, atom):
+    """Read one i32 dword at element ``idx`` from a ``_global_i32_buffer_tiles(..., 1)``
+    view via the layout-API BufferCopy atom (buffer_load_dword; OOB-clamped by the
+    buffer resource). ``tiles1`` is 1-dword tiles so the tile index == ``idx``.
+    """
+    r = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
+    fx.copy(atom, fx.slice(tiles1, (None, idx)), r)
+    return fx.Int32(fx.Vector(fx.memref_load_vec(r))[0])
+
+
 def _lds_ptr3(base_i32, byte_off_i32):
     addr_i64 = fx.Int64(base_i32 + byte_off_i32)
     return llvm.inttoptr(ir.Type.parse(_PTR3), _raw(addr_i64))
@@ -92,10 +102,6 @@ def _global_i32_ptr(addr_i64):
 
 def _global_i32_at(addr_i64, idx):
     return _global_i32_ptr(addr_i64)[idx]
-
-
-def _buffer_rsrc(addr_i64, num_records_bytes):
-    return buffer_ops.create_buffer_resource_from_addr(_raw(fx.Int64(addr_i64)), num_records_bytes=num_records_bytes)
 
 
 def _silu_mul_batch(gs, us):
@@ -354,10 +360,16 @@ def _gemm1_body_a16w4(
         _sw_bytes = NE * N_OUT * _g_half * 4
     else:
         _sw_bytes = NE * N_OUT * (scale_k_padded // 32)
-    # bf16 W has no scale buffer; sw_rsrc unused (arg_bscale is a dummy pointer).
-    sw_rsrc = None if _is_bf16 else _buffer_rsrc(arg_bscale, num_records_bytes=min(_sw_bytes, 0xFFFFFFFF))
+    # bf16 W has no scale buffer; sw_tiles unused (arg_bscale is a dummy pointer). Scale
+    # is a per-lane scalar e8m0/bf16-pair gather: a make_buffer_tensor 1-dword tiles view
+    # + BufferCopy32b scalar read (buffer_load_dword, OOB-clamped) replaces the raw
+    # create_buffer_resource_from_addr + buffer_load.
+    sw_tiles = None if _is_bf16 else _global_i32_buffer_tiles(arg_bscale, min(_sw_bytes, 0xFFFFFFFF), 1)
+    sw_read_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(0), fx.Int32)
     # Intermediate [sorted_size, inter] bf16: num_records = cumsum0*inter*2, so masked
-    # (clamped) stores land OOB.
+    # (clamped) stores land OOB. KEPT RAW: the output resource + masked buffer_store need a
+    # dynamic (runtime cumsum0) num_records and per-store predication; the fx.copy layout
+    # API does not express the masked scalar scatter this epilogue relies on.
     _cumsum0 = _global_i32_at(arg_cumsum, fx.Int32(0))
     out_rsrc = buffer_ops.create_buffer_resource_from_addr(
         _raw(fx.Int64(arg_out)),
@@ -524,7 +536,7 @@ def _gemm1_body_a16w4(
                     + lane_div_16 * fx.Int32(sc_stride_klane)
                     + lane_mod_16
                 )
-                cache[_k0_blk] = fx.Int32(buffer_ops.buffer_load(_raw(sw_rsrc), _raw(idx), vec_width=1, dtype=T.i32))
+                cache[_k0_blk] = _buffer_i32_scalar_read(sw_tiles, idx, sw_read_atom)
             packed = cache[_k0_blk]
             byte_even = k_pack_sub * fx.Int32(2)
             byte_odd = byte_even + fx.Int32(1)
@@ -543,9 +555,7 @@ def _gemm1_body_a16w4(
             _k0_blk = ku // 4
             adj_ku = base_k // fx.Int32(32) + fx.Int32(_k0_blk * 4) + lane_div_16
             pair_idx = adj_ku // fx.Int32(2)
-            packed = fx.Int32(
-                buffer_ops.buffer_load(_raw(sw_rsrc), _raw(base_dword + pair_idx), vec_width=1, dtype=T.i32)
-            )
+            packed = _buffer_i32_scalar_read(sw_tiles, base_dword + pair_idx, sw_read_atom)
             # even adj_ku -> low bf16, odd -> high.
             lo = fx.Float32(_raw(packed << fx.Int32(16)).bitcast(T.f32))
             hi = fx.Float32(_raw(packed & fx.Int32(0xFFFF0000)).bitcast(T.f32))

@@ -8,13 +8,12 @@ from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
-from kernels.common import buffer_ops
 from kernels.common.layout_utils import crd2idx
 
 from .gemm1 import (
     A16WI4_GROUP_SIZE,
     _a16w4_swizzle_xor16,
-    _buffer_rsrc,
+    _buffer_i32_scalar_read,
     _e8m0_byte_to_f32,
     _gep1,
     _gep3,
@@ -216,7 +215,10 @@ def _gemm2_body_a16w4(
         _sw_bytes = NE * N_OUT * _g_half * 4
     else:
         _sw_bytes = NE * N_OUT * (scale_k_padded // 32)
-    sw_rsrc = None if _is_bf16 else _buffer_rsrc(arg_bscale, num_records_bytes=min(_sw_bytes, 0xFFFFFFFF))
+    # Per-lane scalar scale gather via make_buffer_tensor 1-dword tiles + BufferCopy32b
+    # scalar read (see gemm1._buffer_i32_scalar_read), replacing raw buffer_ops.
+    sw_tiles = None if _is_bf16 else _global_i32_buffer_tiles(arg_bscale, min(_sw_bytes, 0xFFFFFFFF), 1)
+    sw_read_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(0), fx.Int32)
 
     # ---- A gather (per-thread) -> LDS. A row = SORTED position m_row + row_local.
     total_threads = 256
@@ -339,7 +341,7 @@ def _gemm2_body_a16w4(
         return raw
 
     def load_b_scale(base_k, mni, n_pack):
-        # Per-lane scalar e8m0 load on buffer_ops (no layout form).
+        # Per-lane scalar e8m0 gather (dict-cached across ku).
         scales = []
         cache = {}
         for ku in range_constexpr(k_unroll):
@@ -354,7 +356,7 @@ def _gemm2_body_a16w4(
                     + lane_div_16 * fx.Int32(sc_stride_klane)
                     + lane_mod_16
                 )
-                cache[_k0_blk] = fx.Int32(buffer_ops.buffer_load(_raw(sw_rsrc), _raw(idx), vec_width=1, dtype=T.i32))
+                cache[_k0_blk] = _buffer_i32_scalar_read(sw_tiles, idx, sw_read_atom)
             packed = cache[_k0_blk]
             byte_even = k_pack_sub * fx.Int32(2)
             byte_odd = byte_even + fx.Int32(1)
@@ -371,9 +373,7 @@ def _gemm2_body_a16w4(
             _k0_blk = ku // 4
             adj_ku = base_k // fx.Int32(32) + fx.Int32(_k0_blk * 4) + lane_div_16
             pair_idx = adj_ku // fx.Int32(2)
-            packed = fx.Int32(
-                buffer_ops.buffer_load(_raw(sw_rsrc), _raw(base_dword + pair_idx), vec_width=1, dtype=T.i32)
-            )
+            packed = _buffer_i32_scalar_read(sw_tiles, base_dword + pair_idx, sw_read_atom)
             lo = fx.Float32(_raw(packed << fx.Int32(16)).bitcast(T.f32))
             hi = fx.Float32(_raw(packed & fx.Int32(0xFFFF0000)).bitcast(T.f32))
             scales.append((adj_ku % fx.Int32(2) == fx.Int32(0)).select(lo, hi))
