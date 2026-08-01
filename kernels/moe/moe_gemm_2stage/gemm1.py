@@ -589,15 +589,17 @@ def compile_moe_gemm1(
     # Native gate-up (layout-API port): hoisted to the very top so the new
     # kernel is built in a clean MLIR context, before any legacy preamble
     # (SmemAllocator construction, MLIR type materialization, etc.) runs. Only
-    # the non-split-K fp8 path is routed here; every other dtype/stage/split-K
-    # case (incl. fp16) falls through to the legacy body unchanged.
+    # the non-split-K fp8 path on CDNA4 (gfx95*) is routed here; every other
+    # dtype/stage/split-K/arch case falls through to the legacy body unchanged.
     #
-    # NOTE: the builder is dtype-parametric and also accepts in_dtype="bf16", but
-    # bf16 is NOT routed here yet: it needs the CDNA3 (gfx942) bf16 MFMA(16,16,16)
-    # variant (the builder currently emits the gfx950-only MFMA(16,16,32) bf16 op,
-    # which aborts compilation on gfx942) plus a fix for an out_dtype="f32" crash
-    # at large tile_m. Until both land, bf16 stays on the proven legacy path.
-    if in_dtype == "fp8" and k_batch == 1:
+    # NOTE: the new pipeline is validated on gfx950 only. CDNA3 (gfx942) keeps
+    # the proven legacy path -- the new stage2 bf16-output atomic op does not
+    # lower on gfx942, and the bulk of the fp8 matrix was never exercised there,
+    # so we do not enable the new path on gfx942 without hardware validation.
+    # The builder is also dtype-parametric (accepts in_dtype="bf16"), but bf16 is
+    # not routed yet: it needs the CDNA3 bf16 MFMA(16,16,16) variant and a fix for
+    # an out_dtype="f32" crash at large tile_m.
+    if in_dtype == "fp8" and k_batch == 1 and "gfx95" in get_rocm_arch():
         return _build_moe_gemm1_fp8_gateup(
             model_dim=model_dim,
             inter_dim=inter_dim,

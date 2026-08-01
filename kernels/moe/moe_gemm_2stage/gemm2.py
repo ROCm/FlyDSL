@@ -609,14 +609,16 @@ def compile_moe_gemm2(
     `use_cshuffle_epilog` controls whether we use the LDS CShuffle epilogue before
     global atomics (recommended for performance).
     """
-    # Native fp8 (layout-API port): route the non-groupwise fp8 path to the new
-    # B-first pipeline (mirrors stage1). Every other dtype/groupwise case falls
-    # through to the legacy body unchanged.
+    # Native fp8 (layout-API port): route the non-groupwise fp8 path on CDNA4
+    # (gfx95*) to the new B-first pipeline (mirrors stage1). Every other dtype/
+    # groupwise/arch case falls through to the legacy body unchanged.
     #
-    # NOTE: the builder is dtype-parametric and also accepts in_dtype="bf16", but
-    # bf16 is NOT routed here yet (see the matching note in gemm1.py: gfx942 bf16
-    # MFMA variant + out_dtype="f32" large-tile crash). bf16 stays on legacy.
-    if in_dtype == "fp8" and group_size <= 0:
+    # NOTE: gfx942 (CDNA3) is intentionally excluded -- the new bf16-output atomic
+    # epilogue op does not lower on gfx942 (compile abort), and the fp8 matrix is
+    # unvalidated there; CDNA3 keeps the proven legacy path. The builder is also
+    # dtype-parametric (accepts in_dtype="bf16"), but bf16 is not routed yet (see
+    # the matching note in gemm1.py).
+    if in_dtype == "fp8" and group_size <= 0 and "gfx95" in get_rocm_arch():
         _out_s = str(out_dtype).strip().lower()
         if _out_s not in ("f16", "fp16", "half", "bf16", "bfloat16", "f32", "fp32", "float"):
             raise ValueError(f"out_dtype must be 'f16', 'bf16', or 'f32', got {out_dtype!r}")
