@@ -300,15 +300,16 @@ class _TensorWithIndex:
                     g_col = guard_full // fx.Int32(self._guard_rows)
                     valid = (g_row < fx.Int32(self.tile_m)) & (g_col < fx.Int32(self.tile_k))
                     reg_vec = frag[None, m, k].load()
-                    # Out-of-tile grid slots add 0 to a valid location (out[0]) so no
-                    # OOB access and no wrong contribution. Valid atoms cover
-                    # ``reg_vec.numel`` contiguous channels aligned to that width, so
-                    # the packed atomic pairs stay naturally aligned.
+                    # Out-of-tile grid slots are pushed to an OOB element index (== the
+                    # output element count) so the buffer resource's hardware bounds
+                    # check DROPS the atomic. Redirecting them to out[0] instead makes
+                    # every padding lane atomic-add 0 to the same cache line, serializing
+                    # thousands of lanes on small-tile/decode grids (~600x slowdown).
+                    # Valid atoms cover ``reg_vec.numel`` contiguous channels aligned to
+                    # that width, so the packed atomic pairs stay naturally aligned.
                     _va = reg_vec.numel
                     aligned = (row_base_i32 + chan_off) & fx.Int32(~(_va - 1))
-                    elem_idx = valid.select(aligned, fx.Int32(0))
-                    zero = Vec.from_elements([reg_vec.dtype(0)] * reg_vec.numel, reg_vec.dtype)
-                    reg_vec = valid.select(reg_vec, zero)
+                    elem_idx = valid.select(aligned, fx.Int32(row_limit) * fx.Int32(row_stride))
                     if const_expr(atomic == "f32"):
                         _buffer_atomic_f32(atomic_rsrc, elem_idx, reg_vec)
                     else:
