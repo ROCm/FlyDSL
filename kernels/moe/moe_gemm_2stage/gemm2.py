@@ -108,40 +108,17 @@ def _build_moe_gemm2_fp8(
       - accumulate=False (reduce), out in {f16,bf16}: CShuffle -> plain store into
         out[token*topk+slot, model_dim]; a separate reduction sums over topk.
 
-    Perf note (decode/sparse-MoE regime, e.g. dim=6144x1024, E=128, k=8, tile_m=16):
-    this B-first pipeline runs ~1.6x slower than the legacy X-major body (~220us vs
-    ~135us). ATT profiling (gfx950, faithful routing = ~128 sparse blocks each ~4/16
-    rows valid) attributes the stalls to memory latency + synchronization, NOT
-    compute/occupancy: buffer_load ~45%, s_barrier ~23%, s_waitcnt ~21%; by source
-    the gemm main loop (B weight load + A gather) ~64% and the per-block sorted-id
-    LDS-seed barrier ~22%. The CShuffle epilogue is only ~1.3%. Levers that do NOT
-    help (measured): raising occupancy (waves_per_eu=8, and a single-buffered
-    variant) and shrinking the epilogue tile leave perf unchanged; deepening the B
-    prefetch to all-tiles-in-flight gives <=2%. Legacy wins by overlapping the same
-    loads through its X-major software pipeline; matching this decode shape needs a
-    loop-structure rewrite of the B-first body itself (not just the k-tile roll
-    applied below, which targets the compute-bound shape's occupancy and leaves this
-    latency-bound shape unchanged). See kernels/moe/mxfp_moe for the current fx.*
-    pipeline idioms.
-
-    Atomic-vs-reduce isolation (verified on gfx950, cache-cleared median-of-3,
-    ISA-diffed): the ATOMIC epilogue gap is NOT epilogue ALU / guard cost and NOT
-    poor atomic coalescing. new-atomic and new-reduce compile to instruction-
-    identical bodies differing only by 32 ``buffer_atomic_pk_add_f16`` vs 8
-    ``buffer_store``; the per-element out-of-tile guard (crd2idx %256 // 256 +
-    compare + select) is constant-folded by the backend to ~2 cheap ops per group,
-    and the atomics are already issued wide/coalesced (128b/lane, offset:4/8/12).
-    The residual atomic cost is the runtime read-modify-write + topk-collision
-    contention at L2, which occupancy hides: the original fully-unrolled main loop
-    used 196 VGPR (2 resident blocks/CU) and could not hide the atomic drain tail,
-    so compute-bound dropped 1514 (reduce) -> 1093 (atomic) TFLOPS. Rolling the
-    k-tile loop into a single-buffer scf.for (see the main loop below) cut VGPR to
-    130 (3 resident blocks/CU) and recovered most of that gap: compute-bound atomic
-    1093 -> 1263 TFLOPS (legacy-atomic 1354, within ~7%), while reduce stays at 1478
-    (still > legacy 1363). The decode/sparse shape (num_tiles=4, only 78 VGPR) is
-    NOT occupancy-bound; its atomic gap vs legacy (~29 vs ~48) is the B-first vs
-    X-major memory-pipeline difference noted above, unaffected by the roll. Reduce
-    mode remains the fast path; prefer it over atomic when possible.
+    Perf notes (gfx950, verified cache-cleared median vs the legacy X-major body):
+      - Atomic epilogue was occupancy-bound: the fully-unrolled k-tile loop needed
+        196 VGPR (2 blocks/CU) and could not hide the atomic read-modify-write /
+        topk-collision drain tail. Rolling it into a single-buffer scf.for (see the
+        main loop) cut VGPR to 130 (3 blocks/CU): compute-bound atomic 1093 -> 1263
+        TFLOPS (legacy 1354). The gap is NOT epilogue ALU or atomic coalescing --
+        atomic vs reduce are ISA-identical but for the store op (ISA-diffed).
+      - The decode/sparse regime (small tile_m, high E/topk) is memory-latency +
+        sync bound (not occupancy: num_tiles is tiny, ~78 VGPR); the B-first body
+        runs ~1.6x the legacy X-major pipeline there and the k-roll does not help.
+      - REDUCE mode stays > legacy on both shapes -- prefer it over atomic.
     """
     _is_bf16 = in_dtype == "bf16"
     if _is_bf16:
