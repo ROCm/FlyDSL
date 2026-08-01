@@ -591,12 +591,7 @@ def compile_moe_gemm1(
     # (SmemAllocator construction, MLIR type materialization, etc.) runs. Only
     # the non-split-K fp8/bf16 paths are routed here; every other dtype/stage/
     # split-K case (incl. fp16) falls through to the legacy body unchanged.
-    # MOE_FORCE_LEGACY_FP8 / MOE_FORCE_LEGACY_BF16 route back to legacy for A/B.
-    _new_pipe_dtype = in_dtype in ("fp8", "bf16")
-    _force_legacy = os.environ.get("MOE_FORCE_LEGACY_FP8") == "1" or (
-        in_dtype == "bf16" and os.environ.get("MOE_FORCE_LEGACY_BF16") == "1"
-    )
-    if _new_pipe_dtype and k_batch == 1 and not _force_legacy:
+    if in_dtype in ("fp8", "bf16") and k_batch == 1:
         return _build_moe_gemm1_fp8_gateup(
             model_dim=model_dim,
             inter_dim=inter_dim,
@@ -2255,4 +2250,3 @@ def compile_moe_gemm1(
         )
 
     return launch_moe_gemm1
-

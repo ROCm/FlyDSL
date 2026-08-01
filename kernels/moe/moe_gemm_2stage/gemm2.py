@@ -611,13 +611,8 @@ def compile_moe_gemm2(
     """
     # Native fp8/bf16 (layout-API port): route the non-groupwise fp8/bf16 path to
     # the new B-first pipeline (mirrors stage1). Every other dtype/groupwise case
-    # falls through to the legacy body unchanged. MOE_FORCE_LEGACY_G2_FP8=1 forces
-    # legacy for fp8; MOE_FORCE_LEGACY_G2_BF16=1 forces legacy for bf16.
-    _new_pipe_dtype = in_dtype in ("fp8", "bf16")
-    _force_legacy = os.environ.get("MOE_FORCE_LEGACY_G2_FP8") == "1" or (
-        in_dtype == "bf16" and os.environ.get("MOE_FORCE_LEGACY_G2_BF16") == "1"
-    )
-    if _new_pipe_dtype and group_size <= 0 and not _force_legacy:
+    # falls through to the legacy body unchanged.
+    if in_dtype in ("fp8", "bf16") and group_size <= 0:
         _out_s = str(out_dtype).strip().lower()
         if _out_s not in ("f16", "fp16", "half", "bf16", "bfloat16", "f32", "fp32", "float"):
             raise ValueError(f"out_dtype must be 'f16', 'bf16', or 'f32', got {out_dtype!r}")
