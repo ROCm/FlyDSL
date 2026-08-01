@@ -121,6 +121,22 @@ def _build_moe_gemm2_fp8(
     loads through its X-major software pipeline; matching it needs a loop-structure
     rewrite (kept off this shared path to protect the ~1100 TFLOPS compute-bound
     shape). See kernels/moe/mxfp_moe for the current fx.* pipeline idioms.
+
+    Atomic-vs-reduce isolation (verified on gfx950, cache-cleared median-of-3,
+    ISA-diffed): the ATOMIC epilogue gap is NOT epilogue ALU / guard cost and NOT
+    poor atomic coalescing. new-atomic and new-reduce compile to instruction-
+    identical bodies (same 4096 MFMA / 645 buffer_load / 68 barrier / 196 VGPR)
+    differing only by 32 ``buffer_atomic_pk_add_f16`` vs 8 ``buffer_store``; the
+    per-element out-of-tile guard (crd2idx %256 // 256 + compare + select) is
+    constant-folded by the backend to ~2 cheap ops per group, and the atomics are
+    already issued wide/coalesced (128b/lane, offset:4/8/12). The whole slowdown is
+    the runtime atomic read-modify-write cost + topk-collision contention at L2:
+    compute-bound 1495 (reduce) -> 1087 (atomic) TFLOPS; decode 46.5 -> 29 TFLOPS,
+    same main loop. Legacy-atomic is faster (1354 / 48) despite the SAME 32 atomics
+    purely because its rolled X-major main loop uses fewer VGPRs (170 vs 196) and so
+    keeps 3 vs 2 blocks resident to hide the atomic drain tail -- again a property of
+    the shared main loop, not the epilogue. Reduce mode is the intended fast path and
+    already beats legacy-atomic on both shapes; prefer it over atomic when possible.
     """
     _is_bf16 = in_dtype == "bf16"
     if _is_bf16:
