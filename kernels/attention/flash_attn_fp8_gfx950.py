@@ -3,6 +3,8 @@
 
 """gfx950 DUALWAVE_SWP FP8 flash attention."""
 
+import os
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
@@ -21,9 +23,11 @@ from kernels.attention.flash_attn_utils import (
     DualwaveFp8StoreHelper,
     DualwaveSplitKCombineContext,
     DualwaveSplitKCombineHelper,
+    MIN_Q_BLOCKS_XCD_SWIZZLE,
+    NUM_XCD_GFX950,
     _make_dualwave_swp_fp8_traits,
-    _sched_barrier_exp_pairs,
-    _sched_barrier_pairs,
+    _s_setprio,
+    _stagger_extra_barrier_if_one,
     dualwave_splitk_workspace_elems,  # noqa: F401
 )
 from kernels.common.kernels_common import dtype_to_elem_type
@@ -45,6 +49,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
     num_kv_splits=1,
     varlen=False,
     cross_seqlen=False,
+    _xcd_swizzle=False,
 ):
     """Build the gfx950 D=128 dual-wave flash-attention launcher.
 
@@ -91,6 +96,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
         num_kv_splits=num_kv_splits,
         varlen=varlen,
         cross_seqlen=cross_seqlen,
+        xcd_swizzle=_xcd_swizzle,
     )
     # Builder-level aliases used by SharedStorage and the launch/compile wrappers.
     SPLITK = traits.SPLITK
@@ -173,17 +179,34 @@ def build_flash_attn_dualwave_swp_fp8_module(
         t0 = ctx.split_t0
         t_end = ctx.split_t_end
 
-        def _subtile_tail(v_s, v_v, v_o, l_row, m_new):
+        PP = const_expr(int(os.environ.get("FA_PP", "1")))
+        PP_PRIO = const_expr(int(os.environ.get("FA_PP_PRIO", "0")))
+        TPV = const_expr(int(os.environ.get("FA_TPV", "1")))
+
+        def _pp_prio(v):
+            if const_expr(PP_PRIO):
+                _s_setprio(v)
+
+        def _phase_bar():
+            rocdl.sched_barrier(0)
+            rocdl.s_barrier()
+            rocdl.sched_barrier(0)
+
+        def _softmax_part(v_s, l_row, m_new):
             v_s = softmax_helper.sub_m(v_s, m_new)
             v_p = softmax_helper.exp2(v_s, 0, 16)
             v_p = softmax_helper.exp2(v_p, 16, 16)
-            for _ in range_constexpr(2):
-                rocdl.sched_group_barrier(traits.SCHED_VALU_MASK, 8, 13)
-                rocdl.sched_group_barrier(traits.SCHED_EXP_MASK, 16, 13)
             l_row = softmax_helper.reduce_sum(l_row, v_p)
             v_p = gemm_helper.cast_p_fp8_direct(v_p)
+            return v_p, l_row
+
+        def _pv_part(v_p, v_v, v_o):
             v_o = gemm_helper.pv(v_p, v_v, v_o)
-            v_o = softmax_helper.anchor_v_o(v_o)
+            return softmax_helper.anchor_v_o(v_o)
+
+        def _subtile_tail(v_s, v_v, v_o, l_row, m_new):
+            v_p, l_row = _softmax_part(v_s, l_row, m_new)
+            v_o = _pv_part(v_p, v_v, v_o)
             return v_o, l_row
 
         def _mask_sub(v_s, tile_idx):
@@ -225,6 +248,10 @@ def build_flash_attn_dualwave_swp_fp8_module(
         rocdl.s_barrier()
         rocdl.sched_barrier(0)
 
+        if const_expr(PP):
+            _stagger_extra_barrier_if_one(ctx.stagger_i32)
+            _pp_prio(1)
+
         m_row = ctx.c_neg_inf
         l_row = ctx.c_zero_f
         v_o = [ctx.c_zero_v16f32 for _ in range_constexpr(D_CHUNKS)]
@@ -251,10 +278,11 @@ def build_flash_attn_dualwave_swp_fp8_module(
             v_k_b = kv_lds_to_regs.load_k(b_buf)
 
             v_s_a = gemm_helper.qk(v_k_a, q_wide)
-            v_s_a = _mask_sub(v_s_a, j)
             v_s_b = gemm_helper.qk(v_k_b, q_wide)
-            v_s_b = _mask_sub(v_s_b, j + fx.Index(1))
-            v_s_a, v_s_b = _mask_pair(v_s_a, v_s_b, j)
+            if const_expr(not PP):
+                v_s_a = _mask_sub(v_s_a, j)
+                v_s_b = _mask_sub(v_s_b, j + fx.Index(1))
+                v_s_a, v_s_b = _mask_pair(v_s_a, v_s_b, j)
 
             v_v_a = kv_lds_to_regs.load_v(a_buf)
 
@@ -263,21 +291,53 @@ def build_flash_attn_dualwave_swp_fp8_module(
             kv_gmem_to_lds.load_v((j + fx.Index(4)) * BN, f_a_buf)
             kv_gmem_to_lds.load_v((j + fx.Index(5)) * BN, f_b_buf)
 
-            m_tile = _merge_tile_max(v_s_a, v_s_b)
-            v_o, m_new, l_row = softmax_helper.lazy_correct_o(v_o, m_row, l_row, m_tile)
-            v_o = softmax_helper.anchor_v_o(v_o)
+            if const_expr(PP):
+                _phase_bar()
+                _pp_prio(0)
+                v_s_a = _mask_sub(v_s_a, j)
+                v_s_b = _mask_sub(v_s_b, j + fx.Index(1))
+                v_s_a, v_s_b = _mask_pair(v_s_a, v_s_b, j)
+                m_tile = _merge_tile_max(v_s_a, v_s_b)
+                v_o, m_new, l_row = softmax_helper.lazy_correct_o(v_o, m_row, l_row, m_tile)
+                v_o = softmax_helper.anchor_v_o(v_o)
+                v_p_a, l_row = _softmax_part(v_s_a, l_row, m_new)
+                _phase_bar()
+                _pp_prio(1)
+                v_v_b = kv_lds_to_regs.load_v(b_buf)
+                v_o = _pv_part(v_p_a, v_v_a, v_o)
+                _phase_bar()
+                _pp_prio(0)
+                v_p_b, l_row = _softmax_part(v_s_b, l_row, m_new)
+                m_row = m_new
 
-            v_o, l_row = _subtile_tail(v_s_a, v_v_a, v_o, l_row, m_new)
-            v_v_b = kv_lds_to_regs.load_v(b_buf)
-            v_o, l_row = _subtile_tail(v_s_b, v_v_b, v_o, l_row, m_new)
-            m_row = m_new
+                if const_expr(TPV):
+                    _pp_prio(1)
+                    v_o = _pv_part(v_p_b, v_v_b, v_o)
+                    rocdl.s_waitcnt(0)
+                    rocdl.sched_barrier(0)
+                    rocdl.s_barrier()
+                    rocdl.sched_barrier(0)
+                else:
+                    rocdl.s_waitcnt(0)
+                    rocdl.sched_barrier(0)
+                    rocdl.s_barrier()
+                    rocdl.sched_barrier(0)
+                    _pp_prio(1)
+                    v_o = _pv_part(v_p_b, v_v_b, v_o)
+            else:
+                m_tile = _merge_tile_max(v_s_a, v_s_b)
+                v_o, m_new, l_row = softmax_helper.lazy_correct_o(v_o, m_row, l_row, m_tile)
+                v_o = softmax_helper.anchor_v_o(v_o)
 
-            _sched_barrier_exp_pairs(traits, 8, 16, 11)
-            _sched_barrier_pairs(traits, 8, 25, 11)
-            rocdl.s_waitcnt(0)
-            rocdl.sched_barrier(0)
-            rocdl.s_barrier()
-            rocdl.sched_barrier(0)
+                v_o, l_row = _subtile_tail(v_s_a, v_v_a, v_o, l_row, m_new)
+                v_v_b = kv_lds_to_regs.load_v(b_buf)
+                v_o, l_row = _subtile_tail(v_s_b, v_v_b, v_o, l_row, m_new)
+                m_row = m_new
+
+                rocdl.s_waitcnt(0)
+                rocdl.sched_barrier(0)
+                rocdl.s_barrier()
+                rocdl.sched_barrier(0)
 
             loop_results = yield [m_row, l_row] + v_o + [nn_a_buf]
         m_row = loop_results[0]
@@ -393,13 +453,16 @@ def build_flash_attn_dualwave_swp_fp8_module(
                 stream=stream,
             )
 
+    _dualwave_swp_llvm_options = {
+        "enable-post-misched": False,
+        "lsr-drop-solution": True,
+        "disable-machine-sink": True,
+    }
+
     _dualwave_swp_compile_hints = {
         "fast_fp_math": True,
         "unsafe_fp_math": True,
-        "llvm_options": {
-            "enable-post-misched": False,
-            "lsr-drop-solution": True,
-        },
+        "llvm_options": _dualwave_swp_llvm_options,
     }
 
     def _launch(
@@ -542,5 +605,47 @@ def build_flash_attn_dualwave_swp_fp8_module(
             )
 
     _launch.compile = _compile
+
+    if (
+        not _xcd_swizzle
+        and dtype_str == "fp8"
+        and not causal
+        and not varlen
+        and NUM_KV_SPLITS == 1
+        and num_heads % NUM_XCD_GFX950 == 0
+    ):
+        block_m = traits.BLOCK_M
+        launch_xcd = build_flash_attn_dualwave_swp_fp8_module(
+            num_heads,
+            head_dim,
+            causal=causal,
+            dtype_str=dtype_str,
+            num_kv_heads=num_kv_heads,
+            waves_per_eu=waves_per_eu,
+            daz=daz,
+            dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
+            dualwave_swp_setprio=dualwave_swp_setprio,
+            dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
+            dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
+            num_kv_splits=num_kv_splits,
+            varlen=varlen,
+            cross_seqlen=cross_seqlen,
+            _xcd_swizzle=True,
+        )
+
+        def _pick(seq_len):
+            num_q_blocks = (int(seq_len) + block_m - 1) // block_m
+            return launch_xcd if num_q_blocks >= MIN_Q_BLOCKS_XCD_SWIZZLE else _launch
+
+        def _dispatch_launch(*args, **kwargs):
+            seq_len = args[5] if len(args) > 5 else kwargs["seq_len"]
+            return _pick(seq_len)(*args, **kwargs)
+
+        def _dispatch_compile(*args, **kwargs):
+            seq_len = args[5] if len(args) > 5 else kwargs["seq_len"]
+            return _pick(seq_len).compile(*args, **kwargs)
+
+        _dispatch_launch.compile = _dispatch_compile
+        return _dispatch_launch
 
     return _launch
