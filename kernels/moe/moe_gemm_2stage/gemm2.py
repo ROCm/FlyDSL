@@ -159,12 +159,16 @@ def _build_moe_gemm2_fp8(
     a_lds_bytes = BM * TILE_K * elem_bytes
     # CShuffle staging reuses the A LDS bytes; f32 output needs BM*BN*4 bytes there.
     cshuf_bytes = BM * BN * out_bytes
-    a_ping_bytes = max(a_lds_bytes, cshuf_bytes)
+    # One LDS region holds the A ping/pong pair (2*a_lds_bytes) during the main loop
+    # and is reused by the CShuffle epilogue afterwards (cshuf_bytes). Sizing it as
+    # the max of the two (rather than a_ping=max(a_lds,cshuf) + a_pong) keeps total
+    # LDS <= 64KB for large f32-output tiles so the kernel fits CDNA3 (gfx942), which
+    # has half the 160KB LDS/CU of CDNA4 (gfx950). ping = region[0:], pong = +a_lds.
+    region_bytes = max(2 * a_lds_bytes, cshuf_bytes)
 
     @fx.struct
     class GemmBuffers:
-        a_ping: fx.Array[fx.Int8, a_ping_bytes, 16]
-        a_pong: fx.Array[fx.Int8, a_lds_bytes, 16]
+        region: fx.Array[fx.Int8, region_bytes, 16]
 
     @fx.union
     class SharedStorage:
@@ -218,7 +222,7 @@ def _build_moe_gemm2_fp8(
         a_lds_r_bufs = []
         a_frag_bufs = []
         a_frag_retile_bufs = []
-        for _buf_ptr in (lds.gemm.a_ping.ptr, lds.gemm.a_pong.ptr):
+        for _buf_ptr in (lds.gemm.region.ptr, lds.gemm.region.ptr + a_lds_bytes):
             a_lds = fx.make_view(
                 fx.recast_iter(fp8_t, _buf_ptr),
                 fx.make_composed_layout(fx.static(swz), fx.make_ordered_layout((BM, TILE_K), order=(1, 0))),
@@ -516,7 +520,7 @@ def _build_moe_gemm2_fp8(
             _log2_vec = 3 if out_bytes == 2 else 2  # 8 (2B) or 4 (4B) elems per 128b
             cshuf_atom_w = fx.make_copy_atom(fx.UniversalCopy64b(), out_elem)
             cshuf_atom_r = fx.make_copy_atom(fx.UniversalCopy128b(), out_elem)
-            cshuf_ptr = fx.recast_iter(out_elem, lds.gemm.a_ping.ptr)
+            cshuf_ptr = fx.recast_iter(out_elem, lds.gemm.region.ptr)
             swz_c = fx.SwizzleType.get(3, _log2_vec, 3)
             lds_c_store = fx.make_view(
                 cshuf_ptr,
