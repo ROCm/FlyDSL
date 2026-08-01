@@ -153,12 +153,13 @@ if not torch.cuda.is_available():
 #     (the pre-#17 int4 kernel) instead of the new moe_2stage_a16wmix a16wi4 path.
 #   FLYDSL_A16WI4_TILE_N=<int> -> override the a16wi4 stage tile_n (else None -> host default).
 _INT4_FORCE_LEGACY = os.environ.get("FLYDSL_INT4_FORCE_LEGACY", "0") not in ("0", "", "false", "False")
-# The moe_2stage_a16wmix a16wi4 kernel now arch-gates its MFMA + int4 dequant:
-# gfx950 (CDNA4) uses the K=32 bf16 MFMA + v_cvt_pk_bf16_f32; gfx942 (CDNA3) uses the
-# K=16 bf16 MFMA (two 16x16x16 per K32 step) + scalar int4 dequant. Both int4 (a16wi4)
-# and bf16 (a16w16) run on gfx942 and gfx950. (a16w4/mxfp4 stays gfx950-only -- it uses
-# cvt_scalef32_pk_bf16_fp4, a CDNA4-only op, so those tests keep their gfx95 skip.)
-_A16WMIX_GFX = ("gfx95" in ARCH) or ("gfx94" in ARCH)
+# The moe_2stage_a16wmix a16wi4 kernel arch-gates its MFMA + int4 dequant (gfx950 K=32 +
+# v_cvt_pk_bf16_f32; gfx942 K=16 two-16x16x16 + scalar dequant). The gfx942 K=16 path is
+# correct on a gfx950 proxy (FLYDSL_A16WMIX_FORCE_K16) but ABORTS at launch on real gfx942
+# (the CDNA3 mfma_f32_16x16x16bf16_1k variant differs from the CDNA4 K=16 the proxy emits),
+# so int4_bf16 routes to the new kernel on gfx950 ONLY; gfx942 falls back to the legacy
+# moe_gemm_2stage builder pending real-hardware validation of the K=16 path.
+_A16WMIX_GFX = "gfx95" in ARCH
 _A16WI4_TILE_N_OVERRIDE = os.environ.get("FLYDSL_A16WI4_TILE_N", "").strip()
 
 
