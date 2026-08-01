@@ -153,6 +153,10 @@ if not torch.cuda.is_available():
 #     (the pre-#17 int4 kernel) instead of the new moe_2stage_a16wmix a16wi4 path.
 #   FLYDSL_A16WI4_TILE_N=<int> -> override the a16wi4 stage tile_n (else None -> host default).
 _INT4_FORCE_LEGACY = os.environ.get("FLYDSL_INT4_FORCE_LEGACY", "0") not in ("0", "", "false", "False")
+# The moe_2stage_a16wmix a16wi4 kernel uses the gfx950 (CDNA4) K=32 bf16 MFMA plus the
+# fp4/int4 convert ops, so it is gfx950+ only. On gfx942 (CDNA3) route int4_bf16 to the
+# legacy moe_gemm_2stage builder (which supports gfx942) instead of aborting at launch.
+_A16WMIX_GFX = "gfx95" in ARCH
 _A16WI4_TILE_N_OVERRIDE = os.environ.get("FLYDSL_A16WI4_TILE_N", "").strip()
 
 
@@ -628,7 +632,7 @@ def run_moe_stage1(
     # the a16w4 mxfp4 body; we build the int4 W in the mxfp4-compatible preshuffle and
     # a groupwise bf16 scale, run the fused stage1, then scatter the sorted bf16
     # intermediate back to [tokens, topk, inter_dim] to preserve the legacy return.
-    if is_int4_bf16 and not _is_splitk and not _INT4_FORCE_LEGACY:
+    if is_int4_bf16 and not _is_splitk and not _INT4_FORCE_LEGACY and _A16WMIX_GFX:
         if doweight_stage1:
             raise NotImplementedError("a16wi4 stage1 does not apply routing weights (doweight_stage1)")
         w1_shuf_new = _a16wi4_pack_shuffle_w(w1_q.view(experts * (2 * inter_dim), model_dim))
@@ -1268,7 +1272,13 @@ def run_moe_stage2(
     # The new gemm2 consumes a SORTED [sorted_size, inter] bf16 intermediate, so we
     # gather a2_q ([tokens, topk, inter]) into sorted order, run the fused down-proj
     # (atomic routing-weighted scatter to [tokens, model_dim]) and return in-place.
-    if is_int4_bf16 and (not bool(use_reduce)) and out_torch_dtype == torch.bfloat16 and not _INT4_FORCE_LEGACY:
+    if (
+        is_int4_bf16
+        and (not bool(use_reduce))
+        and out_torch_dtype == torch.bfloat16
+        and not _INT4_FORCE_LEGACY
+        and _A16WMIX_GFX
+    ):
         w2_shuf_new = _a16wi4_pack_shuffle_w(w2_q.view(experts * model_dim, inter_dim))
         w2_sc_new = _a16wi4_scale_ng_from_legacy(scale_w2_groups, scale_w2, experts, model_dim, inter_dim)
         cumsum_t = num_valid_ids.to(torch.int32).contiguous()
