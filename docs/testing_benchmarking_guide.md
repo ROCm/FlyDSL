@@ -46,6 +46,16 @@ cmake --build build-fly --target fly-opt -j$(nproc)
 build-fly/bin/fly-opt --fly-canonicalize tests/mlir/LayoutAlgebra/construction.mlir
 ```
 
+**Editor support (MLIR LSP):** `build-fly/bin/flydsl-lsp-server` is a thin
+`MlirLspServerMain` wrapper with Fly (+ backend) dialects registered. Point the
+editor's MLIR LSP client / `mlir-lsp-server` path at that binary for `.mlir`
+diagnostics, hover, go-to-definition, and completion. It is not a Python DSL /
+kernel language server.
+
+```bash
+cmake --build build-fly --target flydsl-lsp-server -j$(nproc)
+```
+
 ### 1.2 Python Tests (`tests/python/`)
 
 Python-based tests including AOT pre-compilation examples.
