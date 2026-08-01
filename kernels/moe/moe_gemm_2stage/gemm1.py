@@ -296,6 +296,9 @@ def _build_moe_gemm1_fp8_gateup(
         # The backend inserts targeted vmcnt waits on the B->MFMA register
         # dependency, so only the A-gather-before-ds_write ordering needs an
         # explicit s_waitcnt (leaving next-tile B loads outstanding for overlap).
+        # gemm1 is compute-bound and already low-VGPR (134 => 3 blocks/CU), so it
+        # keeps the fully-unrolled cross-tile-prefetch ping-pong; rolling it to a
+        # single buffer (like stage2) removes the overlap and regresses ~17%.
         for kt in range_constexpr(num_tiles):
             cur = kt % 2
             if kt + 1 < num_tiles:

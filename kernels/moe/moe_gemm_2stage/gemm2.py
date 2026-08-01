@@ -118,25 +118,30 @@ def _build_moe_gemm2_fp8(
     help (measured): raising occupancy (waves_per_eu=8, and a single-buffered
     variant) and shrinking the epilogue tile leave perf unchanged; deepening the B
     prefetch to all-tiles-in-flight gives <=2%. Legacy wins by overlapping the same
-    loads through its X-major software pipeline; matching it needs a loop-structure
-    rewrite (kept off this shared path to protect the ~1100 TFLOPS compute-bound
-    shape). See kernels/moe/mxfp_moe for the current fx.* pipeline idioms.
+    loads through its X-major software pipeline; matching this decode shape needs a
+    loop-structure rewrite of the B-first body itself (not just the k-tile roll
+    applied below, which targets the compute-bound shape's occupancy and leaves this
+    latency-bound shape unchanged). See kernels/moe/mxfp_moe for the current fx.*
+    pipeline idioms.
 
     Atomic-vs-reduce isolation (verified on gfx950, cache-cleared median-of-3,
     ISA-diffed): the ATOMIC epilogue gap is NOT epilogue ALU / guard cost and NOT
     poor atomic coalescing. new-atomic and new-reduce compile to instruction-
-    identical bodies (same 4096 MFMA / 645 buffer_load / 68 barrier / 196 VGPR)
-    differing only by 32 ``buffer_atomic_pk_add_f16`` vs 8 ``buffer_store``; the
-    per-element out-of-tile guard (crd2idx %256 // 256 + compare + select) is
-    constant-folded by the backend to ~2 cheap ops per group, and the atomics are
-    already issued wide/coalesced (128b/lane, offset:4/8/12). The whole slowdown is
-    the runtime atomic read-modify-write cost + topk-collision contention at L2:
-    compute-bound 1495 (reduce) -> 1087 (atomic) TFLOPS; decode 46.5 -> 29 TFLOPS,
-    same main loop. Legacy-atomic is faster (1354 / 48) despite the SAME 32 atomics
-    purely because its rolled X-major main loop uses fewer VGPRs (170 vs 196) and so
-    keeps 3 vs 2 blocks resident to hide the atomic drain tail -- again a property of
-    the shared main loop, not the epilogue. Reduce mode is the intended fast path and
-    already beats legacy-atomic on both shapes; prefer it over atomic when possible.
+    identical bodies differing only by 32 ``buffer_atomic_pk_add_f16`` vs 8
+    ``buffer_store``; the per-element out-of-tile guard (crd2idx %256 // 256 +
+    compare + select) is constant-folded by the backend to ~2 cheap ops per group,
+    and the atomics are already issued wide/coalesced (128b/lane, offset:4/8/12).
+    The residual atomic cost is the runtime read-modify-write + topk-collision
+    contention at L2, which occupancy hides: the original fully-unrolled main loop
+    used 196 VGPR (2 resident blocks/CU) and could not hide the atomic drain tail,
+    so compute-bound dropped 1514 (reduce) -> 1093 (atomic) TFLOPS. Rolling the
+    k-tile loop into a single-buffer scf.for (see the main loop below) cut VGPR to
+    130 (3 resident blocks/CU) and recovered most of that gap: compute-bound atomic
+    1093 -> 1263 TFLOPS (legacy-atomic 1354, within ~7%), while reduce stays at 1478
+    (still > legacy 1363). The decode/sparse shape (num_tiles=4, only 78 VGPR) is
+    NOT occupancy-bound; its atomic gap vs legacy (~29 vs ~48) is the B-first vs
+    X-major memory-pipeline difference noted above, unaffected by the roll. Reduce
+    mode remains the fast path; prefer it over atomic when possible.
     """
     _is_bf16 = in_dtype == "bf16"
     if _is_bf16:
@@ -276,8 +281,8 @@ def _build_moe_gemm2_fp8(
         k_iters = TILE_K // (2 * MFMA_K)
         num_tiles = K // TILE_K
 
-        def _load_gmem(kt, s):
-            kb = fx.Int32(kt)
+        def _load_gmem(kb, s):
+            # kb is an fx.Int32 K-tile index (may be a runtime scf.for value).
             a_idx.copy(buf_cp_atom_r, kb, a_cp_frag_bufs[s])
             fx.copy(buf_cp_atom_r, b_g2r_s[None, None, None, kb], b_ret_bufs[s])
 
@@ -304,24 +309,23 @@ def _build_moe_gemm2_fp8(
                                 c_frag[None, m, n],
                             )
 
-        _load_gmem(0, 0)
-        rocdl.s_waitcnt(fxh._encode_waitcnt(vmcnt=_b_loads_per_tile))
-        _write_a_lds(0)
-        gpu.barrier()
-        _read_a_lds(0)
-
-        for kt in range_constexpr(num_tiles):
-            cur = kt % 2
-            if kt + 1 < num_tiles:
-                nxt = (kt + 1) % 2
-                _load_gmem(kt + 1, nxt)
-                rocdl.s_waitcnt(fxh._encode_waitcnt(vmcnt=_b_loads_per_tile))
-                _write_a_lds(nxt)
-                _mfma(cur)
-                gpu.barrier()
-                _read_a_lds(nxt)
-            else:
-                _mfma(cur)
+        # Rolled single-buffer main loop. The former fully-unrolled ping-pong body
+        # was cheap on compute-bound shapes but kept both prefetch buffers live for
+        # the whole (num_tiles-deep) unroll -> 196 VGPR -> only 2 resident blocks/CU,
+        # which cannot hide the atomic RMW-drain tail. Rolling into an scf.for with a
+        # single staging buffer collapses the live fragment set to one tile's worth,
+        # recovering a 3rd resident block; the intra-tile load/compute overlap is
+        # kept (targeted vmcnt wait leaves the B register loads in flight across the
+        # ds_write + MFMA), only the cross-tile prefetch is dropped.
+        for iv in range(0, num_tiles, 1):
+            kb = arith.index_cast(T.i32, iv)
+            _load_gmem(kb, 0)
+            rocdl.s_waitcnt(fxh._encode_waitcnt(vmcnt=_b_loads_per_tile))
+            gpu.barrier()  # WAR: all waves finished reading the prior tile's A-LDS
+            _write_a_lds(0)
+            gpu.barrier()  # RAW: A-LDS write visible before the read below
+            _read_a_lds(0)
+            _mfma(0)
         return c_frag
 
     _gemm_1x4 = ASTRewriter.transform(_gemm_1x4)
