@@ -87,38 +87,9 @@ def _build_moe_gemm2_fp8(
     accumulate: bool,
     in_dtype: str = "fp8",
 ):
-    """Native stage2 down-projection (layout API), ported from stage1's B-first path.
-
-    B-first MFMA: the 4 waves tile the output (model_dim / N) dimension; the weight
-    W2 is the MFMA A-operand (direct global->register, prefetched one K-tile ahead),
-    the stage1 activation A2 is the MFMA B-operand staged through an LDS ping-pong
-    (swizzle 3,4,3 for fp8 / 3,3,3 for bf16). K = inter_dim. Dequant (fp8 only):
-    out = (A2 @ W2^T) * a_scale(per row) * w_scale(per model_dim channel)
-    [* routed weight].
-
-    ``in_dtype`` selects the activation/weight element type:
-      - "fp8": Float8E4M3FNUZ, MFMA(16,16,32), per-row/per-channel dequant.
-      - "bf16": BFloat16, MFMA(16,16,32), no dequant (unscaled inputs).
-    The fp8 path is byte-identical to the original; bf16 shares the pipeline.
-
-    Epilogue modes:
-      - accumulate=True, out in {f16,bf16}: CShuffle -> packed atomic-add into
-        out[token, model_dim] (topk rows for a token accumulate).
-      - accumulate=True, out=f32: CShuffle -> scalar f32 atomic-add.
-      - accumulate=False (reduce), out in {f16,bf16}: CShuffle -> plain store into
-        out[token*topk+slot, model_dim]; a separate reduction sums over topk.
-
-    Perf notes (gfx950, verified cache-cleared median vs the legacy X-major body):
-      - Atomic epilogue was occupancy-bound: the fully-unrolled k-tile loop needed
-        196 VGPR (2 blocks/CU) and could not hide the atomic read-modify-write /
-        topk-collision drain tail. Rolling it into a single-buffer scf.for (see the
-        main loop) cut VGPR to 130 (3 blocks/CU): compute-bound atomic 1093 -> 1263
-        TFLOPS (legacy 1354). The gap is NOT epilogue ALU or atomic coalescing --
-        atomic vs reduce are ISA-identical but for the store op (ISA-diffed).
-      - The decode/sparse regime (small tile_m, high E/topk) is memory-latency +
-        sync bound (not occupancy: num_tiles is tiny, ~78 VGPR); the B-first body
-        runs ~1.6x the legacy X-major pipeline there and the k-roll does not help.
-      - REDUCE mode stays > legacy on both shapes -- prefer it over atomic.
+    """Native stage2 down-projection (B-first MFMA, fp8/bf16); out=(A2@W2^T)*a_scale*w_scale.
+    Epilogue: atomic (out f16/bf16/f32) or reduce; prefer reduce (atomic is occupancy-bound
+    on compute-bound -- mitigated by the rolled k-loop below -- and memory-bound on decode).
     """
     _is_bf16 = in_dtype == "bf16"
     if _is_bf16:
@@ -157,11 +128,9 @@ def _build_moe_gemm2_fp8(
     a_lds_bytes = BM * TILE_K * elem_bytes
     # CShuffle staging reuses the A LDS bytes; f32 output needs BM*BN*4 bytes there.
     cshuf_bytes = BM * BN * out_bytes
-    # One LDS region holds the A ping/pong pair (2*a_lds_bytes) during the main loop
-    # and is reused by the CShuffle epilogue afterwards (cshuf_bytes). Sizing it as
-    # the max of the two (rather than a_ping=max(a_lds,cshuf) + a_pong) keeps total
-    # LDS <= 64KB for large f32-output tiles so the kernel fits CDNA3 (gfx942), which
-    # has half the 160KB LDS/CU of CDNA4 (gfx950). ping = region[0:], pong = +a_lds.
+    # Single LDS region: the A ping/pong pair (2*a_lds) during the loop, reused by the
+    # CShuffle epilogue (cshuf) after. max() of the two fits CDNA3's 64KB (vs CDNA4 160KB)
+    # for large f32 tiles. ping = region[0:], pong = +a_lds.
     region_bytes = max(2 * a_lds_bytes, cshuf_bytes)
 
     @fx.struct
@@ -286,14 +255,9 @@ def _build_moe_gemm2_fp8(
                                 c_frag[None, m, n],
                             )
 
-        # Rolled single-buffer main loop. The former fully-unrolled ping-pong body
-        # was cheap on compute-bound shapes but kept both prefetch buffers live for
-        # the whole (num_tiles-deep) unroll -> 196 VGPR -> only 2 resident blocks/CU,
-        # which cannot hide the atomic RMW-drain tail. Rolling into an scf.for with a
-        # single staging buffer collapses the live fragment set to one tile's worth,
-        # recovering a 3rd resident block; the intra-tile load/compute overlap is
-        # kept (targeted vmcnt wait leaves the B register loads in flight across the
-        # ds_write + MFMA), only the cross-tile prefetch is dropped.
+        # Rolled single-buffer scf.for: the unrolled ping-pong kept both buffers live
+        # over the whole unroll (196 VGPR, 2 blocks/CU) and couldn't hide the atomic
+        # drain tail; rolling drops VGPR to 130 (3 blocks/CU), keeping intra-tile overlap.
         for iv in range(0, num_tiles, 1):
             kb = arith.index_cast(T.i32, iv)
             _load_gmem(kb, 0)
@@ -624,17 +588,9 @@ def compile_moe_gemm2(
     `use_cshuffle_epilog` controls whether we use the LDS CShuffle epilogue before
     global atomics (recommended for performance).
     """
-    # Native fp8 (layout-API port): route the non-groupwise fp8 path on CDNA
-    # (gfx94*/gfx95*) to the new B-first pipeline (mirrors stage1). Every other
-    # dtype/groupwise/arch case falls through to the legacy body unchanged.
-    #
-    # gfx942 (CDNA3) carve-out: CDNA3 has no `buffer_atomic_pk_add_bf16`, so the
-    # atomic + bf16-output combo (the only path that emits it) would abort the
-    # backend. That single combo stays on the legacy body (which uses global
-    # bf16 atomics) on gfx942; every other fp8 combo uses the new path. gfx950
-    # (CDNA4) has the packed buffer atomic and uses the new path for all combos.
-    # The builder is also dtype-parametric (accepts in_dtype="bf16"), but bf16 is
-    # not routed yet (see the matching note in gemm1.py).
+    # Native fp8 (new pipeline), non-groupwise, CDNA3/CDNA4. gfx942 carve-out: CDNA3
+    # lacks buffer_atomic_pk_add_bf16, so atomic+bf16-output stays on legacy (global
+    # bf16 atomics) there; every other fp8 combo uses the new path. bf16 not routed yet.
     _arch = get_rocm_arch()
     _cdna = "gfx94" in _arch or "gfx95" in _arch
     _g942_bf16_atomic = "gfx94" in _arch and accumulate and str(out_dtype).strip().lower() in ("bf16", "bfloat16")

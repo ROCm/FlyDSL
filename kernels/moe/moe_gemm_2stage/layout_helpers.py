@@ -2,12 +2,8 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 # Portions Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
-"""Layout-API helper layer for the MoE 2-stage MFMA kernels.
-
-Reusable layout / copy-atom / fragment helpers for ``gemm1.py`` / ``gemm2.py``,
-ported from the aiter reference kernel and adapted to this repo's ``fx.*``
-surface. Package-local for now (lowest blast radius).
-"""
+"""Layout-API helper layer for the MoE 2-stage MFMA kernels (gemm1.py / gemm2.py),
+ported from the aiter reference kernel to this repo's ``fx.*`` surface."""
 
 import flydsl.expr as fx
 from flydsl._mlir.dialects import rocdl
@@ -31,11 +27,7 @@ def _encode_waitcnt(vmcnt=63, expcnt=7, lgkmcnt=63):
 
 
 def _as_ptr(p, dtype=None):
-    """Convert a memref or pointer to an iterator suitable for ``fx.make_view``.
-
-    Handles both raw ``fx.Pointer`` values and memref values passed by the
-    flydsl runtime.
-    """
+    """Iterator for ``fx.make_view`` from a raw pointer or a runtime memref (opt. recast)."""
     try:
         p = fx.get_iter(p)
     finally:
@@ -63,11 +55,8 @@ def view_as_torch_tensor(ptr, shape, dtype=None):
 
 
 def _buffer_atomic_pk(rsrc, elem_idx, reg_vec, elem_bytes):
-    """Pairwise buffer atomic-add of an f16/bf16 vector into out[elem_idx..].
-
-    Uses a buffer resource + byte offset (raw.ptr.buffer.atomic.fadd), so OOB
-    lanes are dropped by hardware clamping (matches the plain-store path).
-    """
+    """Pairwise buffer atomic-add of an f16/bf16 vector into out[elem_idx..]
+    (buffer rsrc + byte offset; OOB lanes dropped by hardware clamp)."""
     from kernels.common.mem_ops import buffer_atomic_add
 
     _z = fx.Int32(0)
@@ -88,11 +77,8 @@ def _buffer_atomic_f32(rsrc, elem_idx, reg_vec):
 
 
 def make_1x4_tiled_mma(weight_dtype):
-    """B-first 1x4 tiled_mma: weight is the MFMA A-operand, activation the B-operand.
-
-    The 4 waves tile the channel(M) dim. Both fp8 and (gfx950) bf16 use native
-    MFMA(16,16,32) with the same k_perm; only the element type differs.
-    """
+    """B-first 1x4 tiled_mma (weight=A, activation=B; 4 waves tile the M/channel dim).
+    fp8 and gfx950 bf16 both use native MFMA(16,16,32), same k_perm, differing only in dtype."""
     mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, weight_dtype))
     k_perm = fx.make_layout((8, 4, 2), (1, 16, 8))
     tiled_mma = fx.make_tiled_mma(
@@ -104,10 +90,8 @@ def make_1x4_tiled_mma(weight_dtype):
 
 
 def make_gateup_weight_view(p_weight, expert_id, contiguous_n, N, K):
-    """Preshuffle weight view [16, (element_num, K//element_num)] composed with the
-    gate/up silu grouping. ``p_weight`` is an iterator into the shuffle_weight-ordered
-    weight; the returned view presents a logical (N, K) tensor for this expert.
-    """
+    """Per-expert logical (N,K) view over the shuffle_weight-ordered weight, composed
+    with the gate/up silu grouping (N = 2*inter_dim)."""
     group_layout_silu = fx.make_layout(
         ((contiguous_n, 2, N // (contiguous_n * 2)), K),
         ((1, N // 2, contiguous_n), N),
@@ -126,12 +110,8 @@ def make_gateup_weight_view(p_weight, expert_id, contiguous_n, N, K):
 
 
 def make_weight_view(p_weight, expert_id, N, K):
-    """Plain preshuffle weight view [(16, N//16), (element_num, K//element_num)] for one expert.
-
-    The stage2 analog of ``make_gateup_weight_view`` without the gate/up silu
-    grouping: presents a logical (N, K) tensor for ``expert_id`` from the
-    shuffle_weight-ordered weight iterator ``p_weight``. N = model_dim, K = inter_dim.
-    """
+    """Per-expert logical (N,K) view over shuffle_weight-ordered weight, no gate/up
+    grouping (stage2 analog of make_gateup_weight_view; N=model_dim, K=inter_dim)."""
     element_num = 16 // (p_weight.dtype.width // 8)
     return fx.make_view(
         p_weight + fx.Int64(expert_id * N * K),
@@ -143,11 +123,8 @@ def make_weight_view(p_weight, expert_id, N, K):
 
 
 def read_sorted_index(tiled_copy_index, tid, lds_index, index_size, index_offset=0):
-    """Read the sorted M-row index from LDS into a per-thread register fragment.
-
-    Kept explicit so the read happens before the caller reuses the LDS region (the
-    CShuffle epilogue overwrites sorted_lds).
-    """
+    """Read the sorted M-row index from LDS into a per-thread fragment (explicit so it
+    happens before the CShuffle epilogue overwrites sorted_lds)."""
     lds = fx.make_view(lds_index.ptr + index_offset, fx.make_layout(index_size, 1))
     cp_atom_lds = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Int32)
     lds_thr = tiled_copy_index.get_slice(tid).partition_S(lds)
@@ -157,17 +134,9 @@ def read_sorted_index(tiled_copy_index, tid, lds_index, index_size, index_offset
 
 
 def silu_pair_bf16(gate_frag, up_frag, gate_scale=None, up_scale=None, a_scale=None, out_dtype=fx.BFloat16):
-    """silu(gate) * up over identically-laid-out gate/up fragments, -> ``out_dtype``.
-
-    Optional per-N-channel fp8 weight scales (gate_scale/up_scale, [value, rep_n])
-    and an optional per-row fp8 activation scale (a_scale[m]) are folded into the
-    read so native-fp8 dequant happens before the non-linear silu.
-
-    ``out_dtype`` MUST match the dtype of the caller's CShuffle LDS staging and
-    output store: the returned fragment holds raw ``out_dtype`` bits, so a mismatch
-    silently reinterprets the bit pattern (e.g. 1024.0 bf16 == 0x4480, read back as
-    f16 == 4.5).
-    """
+    """silu(gate)*up -> out_dtype (optional fp8 weight/act scales folded in pre-silu).
+    out_dtype MUST match the caller's CShuffle staging/store dtype: the fragment holds
+    raw bits, so a mismatch silently reinterprets them (1024.0 bf16 0x4480 -> f16 4.5)."""
     log2_exp1 = -1.4426950408889634
     round_bit = fx.Uint32(0x8000)
     out_frag = fx.make_fragment_like(gate_frag, dtype=out_dtype)
@@ -204,11 +173,8 @@ def silu_pair_bf16(gate_frag, up_frag, gate_scale=None, up_scale=None, a_scale=N
 
 
 def make_tensor_with_index(view, tile_m, tile_k, index_frag, tiled_copy, tid, topk, is_read_from_mem=True):
-    """Build a TensorWithIndex-style gather helper (MoE A-row / output-row scatter).
-
-    Returns an object exposing ``.copy(copy_atom, k_idx, frag)`` that gathers (or
-    scatters) per-thread tiles using ``index_frag`` (packed token|slot ids).
-    """
+    """MoE gather/scatter helper: returns an object whose ``.copy(copy_atom, k_idx, frag)``
+    gathers/scatters per-thread tiles by ``index_frag`` (packed token|slot ids)."""
     return _TensorWithIndex(view, tile_m, tile_k, index_frag, tiled_copy, tid, topk, is_read_from_mem)
 
 
@@ -261,16 +227,9 @@ class _TensorWithIndex:
         row_stride=None,
         row_limit=None,
     ):
-        """Gather/scatter per-thread tiles.
-
-        Plain gather/store uses the buffer-view addressing (``is_read_from_mem``).
-        Atomic scatter (``atomic`` in {"pk","f32"}, requires ``is_read_from_mem``
-        False) issues a buffer atomic-add into ``atomic_rsrc`` (a buffer resource
-        over the rank-2 ``[rows, row_stride]`` output) at element index
-        ``tok*row_stride + k_idx*tile_k + channel_offset``. ``tok`` is clamped to
-        ``[0, row_limit)`` for sentinel rows; grid slots outside the real tile are
-        pushed OOB (dropped by the buffer's hardware clamp).
-        """
+        """Gather/scatter per-thread tiles: plain buffer-view store, or (atomic in
+        {"pk","f32"}) buffer atomic-add into atomic_rsrc at tok*row_stride+k_idx*tile_k
+        +chan; sentinel/out-of-tile lanes go OOB (dropped by the buffer clamp)."""
         layout = fx.get_layout(self.fake_tensor_thr)
         rep_m = reps(self.fake_tensor_thr, 1)
         rep_k = reps(self.fake_tensor_thr, 2)
@@ -290,23 +249,14 @@ class _TensorWithIndex:
                     offset_block = fx.crd2idx((0, m, k), layout).to_py_value()
                     offset_block_k = offset_block // self.tile_m
                     chan_off = offset_block_k + self.offset_thread_k
-                    # elem_idx matches the plain-store target element (tok row + block
-                    # base + per-thread channel). Threads whose tiled_copy grid slot
-                    # falls outside the real (tile_m, tile_k) block are dropped by the
-                    # buffer resource's hardware OOB clamp (like the plain-store path),
-                    # by pushing their byte offset past the buffer size.
+                    # `valid` = this grid slot maps inside the real (tile_m, tile_k) block.
                     guard_full = fx.crd2idx((0, m, k), self.guard_layout).to_py_value() + self.guard_offset
                     g_row = guard_full % fx.Int32(self._guard_rows)
                     g_col = guard_full // fx.Int32(self._guard_rows)
                     valid = (g_row < fx.Int32(self.tile_m)) & (g_col < fx.Int32(self.tile_k))
                     reg_vec = frag[None, m, k].load()
-                    # Out-of-tile grid slots are pushed to an OOB element index (== the
-                    # output element count) so the buffer resource's hardware bounds
-                    # check DROPS the atomic. Redirecting them to out[0] instead makes
-                    # every padding lane atomic-add 0 to the same cache line, serializing
-                    # thousands of lanes on small-tile/decode grids (~600x slowdown).
-                    # Valid atoms cover ``reg_vec.numel`` contiguous channels aligned to
-                    # that width, so the packed atomic pairs stay naturally aligned.
+                    # Out-of-tile lanes -> OOB element index so the buffer bounds-check DROPS
+                    # the atomic; redirecting them to out[0] serializes padding lanes (~600x).
                     _va = reg_vec.numel
                     aligned = (row_base_i32 + chan_off) & fx.Int32(~(_va - 1))
                     elem_idx = valid.select(aligned, fx.Int32(row_limit) * fx.Int32(row_stride))

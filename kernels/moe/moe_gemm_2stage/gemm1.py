@@ -69,19 +69,9 @@ def _build_moe_gemm1_fp8_gateup(
     out_dtype: str,
     in_dtype: str = "fp8",
 ):
-    """Native gate-up (layout API), ported from the reference prefill_1x4.
-
-    B-first MFMA: the 4 waves tile the channel (N/inter) dimension; the weight is
-    the MFMA A-operand (direct global->register), the activation is the MFMA
-    B-operand staged through an LDS ping-pong (swizzle 3,4,3). Gate and up are the
-    two contiguous_n = tile_n//2 halves. Output scatter matches the legacy
-    gate-up: out[t, slot, inter] = silu(gate * sx * sw_gate) * (up * sx * sw_up)
-    [* sorted_weight], gathered/scattered via sorted token ids.
-
-    ``in_dtype`` selects the activation/weight element type:
-      - "fp8": Float8E4M3FNUZ, MFMA(16,16,32), per-token/per-channel dequant.
-      - "bf16": BFloat16, MFMA(16,16,32), no dequant (unscaled inputs).
-    The fp8 path is byte-identical to the original; bf16 shares the pipeline.
+    """Native gate-up GEMM (B-first MFMA, fp8/bf16): out[t,slot,inter] =
+    silu(gate*sx*sw_g)*(up*sx*sw_u)[*routed], scattered by sorted token ids.
+    fp8 byte-identical to the original; bf16 shares the pipeline (unscaled).
     """
     _is_bf16 = in_dtype == "bf16"
     if _is_bf16:
@@ -104,17 +94,8 @@ def _build_moe_gemm1_fp8_gateup(
     assert 64 <= BN <= 256 and BN % 64 == 0, f"tile_n must be in [64,256] multiple of 64, got {BN}"
     assert 16 <= BM <= 256 and BM % 16 == 0, f"tile_m must be a 16-multiple in [16,256], got {BM}"
 
-    # Channel (N/inter) decomposition. The B-first tiled_mma puts all 4 waves on the
-    # channel dim at 16 channels/wave, so a block must produce >=64 output channels
-    # for every wave to tile real weight rows. tile_n>=128 already satisfies this
-    # (contiguous_n = tile_n//2 >= 64). For tile_n=64 the requested contiguous_n
-    # would be 32 -- half the waves would tile weight rows that don't exist and
-    # corrupt the result -- so we round the block's channel granularity up to the
-    # 4-wave MFMA minimum of 64. All 4 waves still each compute 16 distinct real
-    # channels (not a serial fallback); the block simply covers two requested
-    # tile_n=64 groups at once. grid.x is derived from this effective granularity
-    # below. (A true sub-64 wave_k decomposition that honors tile_n=64 verbatim is
-    # left to the perf-alignment task.)
+    # 4 waves tile the channel dim at 16 ch/wave, so a block needs >=64 real channels;
+    # round tile_n=64 (contiguous_n 32) up to 64 (covers two tile_n=64 groups at once).
     contiguous_n = max(BN // 2, 64)
     assert inter_dim % contiguous_n == 0, (
         f"inter_dim={inter_dim} must be divisible by the effective channel tile "
@@ -249,12 +230,8 @@ def _build_moe_gemm1_fp8_gateup(
             fx.copy(uni_cp_atom, a_cp_frag_retile_bufs[s], a_lds_w_bufs[s])
 
         def _read_a_lds(s):
-            """Issue all LDS A-reads for buffer s into its register fragment.
-
-            Kept separate from the MFMA so the ds_read latency (SQ_WAIT_INST_LDS)
-            can be hidden: the read is issued right after the barrier that made the
-            buffer valid, well ahead of the MFMA that consumes it next iteration.
-            """
+            """Issue buffer-s LDS A-reads separately from the MFMA so ds_read latency
+            hides: read right after the validating barrier, ahead of next iter's MFMA."""
             for ki in range_constexpr(k_iters):
                 fx.copy(uni_cp_atom, a_lds_r_bufs[s][None, None, ki], a_frag_retile_bufs[s][None, None, ki])
 
@@ -289,16 +266,9 @@ def _build_moe_gemm1_fp8_gateup(
         gpu.barrier()
         _read_a_lds(0)
 
-        # Main pipeline: compute tile `kt` on buffer `cur` (whose A fragment was
-        # pre-read after the prior barrier) while prefetching tile `kt+1` (global
-        # A+B) into `nxt` and staging its A into the other LDS buffer. After the
-        # barrier we immediately pre-read `nxt`'s A fragment for the next iter.
-        # The backend inserts targeted vmcnt waits on the B->MFMA register
-        # dependency, so only the A-gather-before-ds_write ordering needs an
-        # explicit s_waitcnt (leaving next-tile B loads outstanding for overlap).
-        # gemm1 is compute-bound and already low-VGPR (134 => 3 blocks/CU), so it
-        # keeps the fully-unrolled cross-tile-prefetch ping-pong; rolling it to a
-        # single buffer (like stage2) removes the overlap and regresses ~17%.
+        # Unrolled ping-pong: compute tile kt on `cur` while prefetching kt+1 (A+B)
+        # into `nxt`. gemm1 is low-VGPR (134 -> 3 blocks/CU) so it keeps this cross-tile
+        # overlap; rolling to a single buffer (like stage2) regresses ~17%.
         for kt in range_constexpr(num_tiles):
             cur = kt % 2
             if kt + 1 < num_tiles:
@@ -584,18 +554,9 @@ def compile_moe_gemm1(
       atomically accumulate gate/up partials. Caller must pre-zero output.
     """
 
-    # Native gate-up (layout-API port): hoisted to the very top so the new
-    # kernel is built in a clean MLIR context, before any legacy preamble
-    # (SmemAllocator construction, MLIR type materialization, etc.) runs. Only
-    # the non-split-K fp8 path on CDNA4 (gfx95*) is routed here; every other
-    # dtype/stage/split-K/arch case falls through to the legacy body unchanged.
-    #
-    # Enabled on CDNA3 (gfx94*) and CDNA4 (gfx95*). stage1 uses fp8 MFMA
-    # (16,16,32) and a CShuffle store epilogue (no atomics), both of which lower
-    # on gfx942 -- the CDNA3 bf16-atomic limitation is a stage2-only concern
-    # (see the carve-out in gemm2.py). The builder is also dtype-parametric
-    # (accepts in_dtype="bf16"), but bf16 is not routed yet: it needs the CDNA3
-    # bf16 MFMA(16,16,16) variant and a fix for an out_dtype="f32" large-tile crash.
+    # Native fp8 gate-up (new pipeline), hoisted above the legacy preamble for a clean
+    # MLIR context. fp8 non-split-K on CDNA3/CDNA4 routes here (stage1 has no atomics, so
+    # no CDNA3 concern); bf16 not routed yet. Everything else -> legacy body.
     if in_dtype == "fp8" and k_batch == 1 and ("gfx95" in get_rocm_arch() or "gfx94" in get_rocm_arch()):
         return _build_moe_gemm1_fp8_gateup(
             model_dim=model_dim,
