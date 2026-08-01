@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-01T04:29:04Z",
+ "updated": "2026-08-01T05:30:48Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30685891306,
+   "pr": 947,
+   "commit": "aa92958f89774b876fa134048789bf8301c5c8de",
+   "branch": "worktree-agent-moe-2stage-port",
+   "event": "pull_request",
+   "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30685891306",
+   "created_at": "2026-08-01T05:28:21Z",
+   "updated_at": "2026-08-01T05:28:23Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 30683167732,
    "pr": 948,
@@ -29,10 +44,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-01T04:07:08Z",
-     "completed_at": null,
+     "completed_at": "2026-08-01T05:14:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30683167732/job/91324282404"
     },
     {
@@ -53,11 +68,11 @@
    "branch": "worktree-agent-moe-2stage-port",
    "event": "pull_request",
    "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30683040098",
    "created_at": "2026-08-01T03:59:17Z",
-   "updated_at": "2026-08-01T04:02:14Z",
+   "updated_at": "2026-08-01T05:28:23Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -72,19 +87,19 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-01T04:02:56Z",
-     "completed_at": null,
+     "completed_at": "2026-08-01T05:22:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30683040098/job/91323864173"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-01T04:02:14Z",
-     "completed_at": null,
+     "completed_at": "2026-08-01T05:28:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30683040098/job/91323864192"
     }
    ]
@@ -106,10 +121,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-01T03:50:26Z",
-     "completed_at": null,
+     "completed_at": "2026-08-01T05:09:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30682640054/job/91322810476"
     },
     {
@@ -124,10 +139,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-01T03:50:26Z",
-     "completed_at": null,
+     "completed_at": "2026-08-01T04:44:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30682640054/job/91322810494"
     }
    ]
@@ -2136,21 +2151,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30538672470/job/90858954509"
     }
    ]
-  },
-  {
-   "run_id": 30536314732,
-   "pr": null,
-   "commit": "e74fd1cdc6ee0ad918e3ed87107bb88c00173809",
-   "branch": "stochastic-rounding",
-   "event": "pull_request",
-   "title": "Add stochastic rounding and philox RNG under rocdl",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30536314732",
-   "created_at": "2026-07-30T10:51:51Z",
-   "updated_at": "2026-07-30T10:51:51Z",
-   "actor": "kashif",
-   "jobs": []
   }
  ]
 }
