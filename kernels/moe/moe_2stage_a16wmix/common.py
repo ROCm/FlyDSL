@@ -18,16 +18,12 @@ LOG2E = 1.4426950408889634
 
 
 def a16wmix_use_k16(arch=None):
-    """Decide the a16wmix MFMA K-size + int4 dequant path (compile-time, host side).
+    """True for the gfx942 (CDNA3) codepath: K=16 MFMA + scalar int4 dequant.
 
-    gfx950 (CDNA4) has the K=32 ``mfma_f32_16x16x32_bf16`` and the VALU-lean
-    ``v_cvt_pk_bf16_f32`` int4 dequant pack; gfx942 (CDNA3) has NEITHER -- it only has
-    the K=16 ``mfma_f32_16x16x16bf16_1k`` and must fall back to the scalar-trunc int4
-    dequant. This returns True for the gfx942 (K=16 + scalar dequant) codepath.
-
-    ``FLYDSL_A16WMIX_FORCE_K16=1`` forces the gfx942 codepath regardless of the
-    detected arch, so the K=16 path can be validated on a gfx950 box (which runs the
-    K=16 MFMA + scalar dequant fine -- it is a strict subset of its ISA).
+    Arch-gate: gfx950 (CDNA4) has K=32 mfma_f32_16x16x32_bf16 + v_cvt_pk_bf16_f32;
+    gfx942 has neither and falls back to K=16 MFMA + scalar-trunc dequant.
+    ``FLYDSL_A16WMIX_FORCE_K16=1`` forces the gfx942 path (a strict ISA subset) for
+    validation on a gfx950 box.
     """
     if os.environ.get("FLYDSL_A16WMIX_FORCE_K16", "0") not in ("0", "", "false", "False"):
         return True
@@ -53,9 +49,8 @@ def _umod(a, c):
 
 
 def _global_i32_buffer_view(addr_i64, num_bytes):
-    # fx.copy's BufferCopy/BufferCopyLDS atoms take soffset as an element count, not
-    # the bytes buffer_ops.buffer_load's soffset_bytes expected.
-    # make_layout's dynamic-shape leaf must be i32/i64, not fx.Index.
+    # fx.copy BufferCopy atoms take soffset as an element count (not bytes); the
+    # make_layout dynamic-shape leaf must be i32/i64, not fx.Index.
     num_bytes_i64 = fx.Int64(num_bytes)
     ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=4)
     ptr = fx.inttoptr(ptr_ty, fx.Int64(addr_i64))
@@ -109,8 +104,8 @@ def _sigmoid_f32(g):
 
 
 def _tanh_f32(x):
-    # tanh(x) via exp2/rcp, sign-restored (mirrors aiter mixed_moe tanh_elem):
-    #   t = (1 - exp(-2|x|)) / (1 + exp(-2|x|)),  tanh(x) = sign(x) * t
+    # tanh via exp2/rcp, sign-restored (aiter mixed_moe tanh_elem):
+    #   t = (1-exp(-2|x|))/(1+exp(-2|x|)),  tanh(x) = sign(x)*t
     neg_two_log2e = fx.Float32(-2.0 * LOG2E)
     abs_x = x.maximumf(-x)
     e = fx.Float32(rocdl.exp2(T.f32, _raw(abs_x * neg_two_log2e)))
@@ -135,9 +130,8 @@ def _situ_mul_batch(gs, us, situ_beta=1.0, situ_linear_beta=1.0, clamp_limit=7.0
 
     out = []
     for i in range(len(gs)):
-        # clamp_gate: g <= +lim  (min(g, lim) == -max(-g, -lim), upper bound only).
+        # clamp_gate: g <= +lim (upper only, via -max(-g,-lim)); clamp_lin: u in [-lim,+lim].
         g = -((-gs[i]).maximumf(neg_lim))
-        # clamp_lin: u in [-lim, +lim].
         u = (-((-us[i]).maximumf(neg_lim))).maximumf(neg_lim)
         situ_g = beta * _tanh_f32(g * beta_rcp) * _sigmoid_f32(g)
         situ_u = lbeta * _tanh_f32(u * lbeta_rcp)
@@ -146,13 +140,9 @@ def _situ_mul_batch(gs, us, situ_beta=1.0, situ_linear_beta=1.0, clamp_limit=7.0
 
 
 def _cvt_pk_bf16_f32_se(src_a_f32, src_b_f32):
-    """Side-effecting v_cvt_pk_bf16_f32 (pack 2 f32 -> 2xbf16 in i32).
-
-    The stateless ``rocdl.cvt_pk_bf16_f32`` (has_side_effects=False) miscompiles in
-    the a16wi4 gemm1 hot loop (garbage output) — the 4 identical-shaped packed
-    converts per K-step get CSE-merged / reordered across K iterations. Marking the
-    inline asm side-effecting pins each call to its K-step.
-    """
+    # Side-effecting v_cvt_pk_bf16_f32 (pack 2 f32 -> 2xbf16 in i32). LOAD-BEARING:
+    # the stateless rocdl.cvt_pk_bf16_f32 gets CSE-merged/reordered across K steps in
+    # the a16wi4 gemm1 hot loop (garbage output); side_effects pins each call.
     return llvm.inline_asm(
         ir.IntegerType.get_signless(32),
         [_raw(src_a_f32), _raw(src_b_f32)],
@@ -165,15 +155,10 @@ def _cvt_pk_bf16_f32_se(src_a_f32, src_b_f32):
 def _int4_nibble_to_bf16x8(raw_i32, scale_f32, *, use_k16=False):
     """int4 (signed) -> bf16 upconvert for one MFMA K32 step (8 nibbles -> v8bf16).
 
-    ``raw_i32`` holds 8 packed signed-int4 nibbles in ``bits[4n+3:4n]`` order (the
-    SAME K ordering the mxfp4 path uses via ``cvt_scalef32_pk_bf16_fp4`` sel 0..3).
-    Each nibble uses the gfx9xx ``v_cvt_off_f32_i4`` fast path: it reads the nibble
-    as unsigned [0,15], subtracts 8 -> signed [-8,7], and multiplies the mantissa by
-    16, so the ×16 correction is folded into the effective per-group scale
-    (``eff = scale * 16``). ``scale_f32`` is the per-group dequant scale.
-
-    ``use_k16`` (gfx942/CDNA3): the VALU-lean ``v_cvt_pk_bf16_f32`` pack is gfx950-only,
-    so fall back to a scalar ``.to(BFloat16)`` truncation per nibble (arch-agnostic).
+    ``raw_i32`` holds 8 signed-int4 nibbles in bits[4n+3:4n] (same K order as the
+    mxfp4 sel 0..3 path). ``v_cvt_off_f32_i4`` reads the nibble unsigned, subtracts 8,
+    and scales the mantissa by 16, so the x16 is folded into eff = scale*16.
+    ``use_k16`` (gfx942): v_cvt_pk_bf16_f32 is gfx950-only -> scalar .to(BFloat16).
     """
     eff = fx.Float32(scale_f32 * fx.Float32(16.0))
     raw_even = fx.Int32(raw_i32)
@@ -187,7 +172,7 @@ def _int4_nibble_to_bf16x8(raw_i32, scale_f32, *, use_k16=False):
             bf16s.append(f_lo.to(fx.BFloat16))
             bf16s.append(f_hi.to(fx.BFloat16))
         return fx.Vector.from_elements([_raw(x) for x in bf16s], fx.BFloat16)  # v8bf16
-    # byte_sel loads (1 shift total instead of 7); side-effecting pk-convert.
+    # byte_sel loads (1 shift total); side-effecting pk-convert.
     i32s = []
     for j in range_constexpr(4):
         f_lo = fx.Float32(rocdl.cvt_off_f32_i4(_raw(raw_even), byte_sel=j)) * eff

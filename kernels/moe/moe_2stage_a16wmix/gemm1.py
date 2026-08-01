@@ -27,19 +27,16 @@ from .common import (
     a16wmix_use_k16,
 )
 
-# a16wi4 (int4 W) groupwise scale: group_size fixed at 32 == one MFMA K32 step, so
-# one ku consumes exactly one K-group. The scale buffer is packed as bf16 pairs
-# (E, N, num_groups//2, 2) -> flat dword index e*N*(G//2) + n*(G//2) + (group//2);
-# even/odd ku selects the low/high bf16 half of the dword.
+# a16wi4 (int4 W) groupwise scale: group_size = 32 == one MFMA K32 step (one ku per
+# K-group). Scale packed bf16 pairs (E, N, G//2, 2); even/odd ku selects lo/hi half.
 A16WI4_GROUP_SIZE = 32
 
 
 def _a16w4_swizzle_xor16(row, col_bytes, k_blocks16, *, enable=False):
     """A-LDS bank-conflict XOR swizzle (aiter swizzle_xor16: col ^ ((row&(kb16-1))*16)).
 
-    Both the DMA write and the LDS read go through this single helper, so the
-    physical layout stays consistent. gemm1 keeps the linear layout (enable=False);
-    gemm2 enables it.
+    Both the DMA write and the LDS read go through this helper so the physical layout
+    stays consistent. gemm1 keeps linear (enable=False); gemm2 enables it.
     """
     if not enable:
         return col_bytes
@@ -76,10 +73,9 @@ def _gemm1_body_a16w4(
 ):
     """a16w4/a16wi4/a16w16 (bf16 A x mxfp4/int4/bf16 W) fused stage1 gemm1 body.
 
-    A is native bf16 (no A-scale). W is mxfp4/int4 (packed, per-group scale, loaded
-    raw + upconverted in-kernel) or raw bf16 (no scale/upconvert). MMA is the
-    non-scaled ``MFMA(16,16,32,BFloat16)`` K=32. Epilogue = SiLU(gate)*up -> bf16
-    intermediate ``[sorted_size, inter_dim]`` stored by SORTED POSITION.
+    A is native bf16 (no A-scale). W is mxfp4/int4 (packed, per-group scale, upconverted
+    in-kernel) or raw bf16. Non-scaled MFMA(16,16,32,bf16) K=32; epilogue SiLU(gate)*up
+    -> bf16 intermediate ``[sorted_size, inter_dim]`` stored by SORTED POSITION.
     """
     _is_int4 = w_dtype == "int4"
     _is_bf16 = w_dtype == "bf16"  # a16w16: raw bf16 W (unpacked, no scale, no upconvert)
@@ -91,18 +87,16 @@ def _gemm1_body_a16w4(
     m_repeat = BM // 16
     k_unroll = KH_TILE_BYTES // 64  # bf16 8-per-lane K micro-steps per K-tile
     _k0_count = TILE_K // 128
-    # Wave partition: num_n_waves x k_wave. k_wave=1: 4 waves split TILE_N (each owns
-    # TILE_N/4 cols). k_wave>1 (aiter slice-K): waves split into num_n_waves x k_wave;
-    # each wave computes a K-slice (klen=K/k_wave) of a wider N-slice, and the partial
-    # accumulators are LDS-reduced across k-group peers before the epilogue (all inside
-    # one workgroup; not grid split-K).
+    # Wave partition num_n_waves x k_wave. k_wave=1: 4 waves split TILE_N (TILE_N/4 each).
+    # k_wave>1 (aiter intra-block slice-K): each wave does a K-slice (klen=K/k_wave) of a
+    # wider N-slice; partials LDS-reduced across k-group peers before epilogue.
     _NUM_WAVES = 4
     num_n_waves = _NUM_WAVES // k_wave
     if const_expr(k_wave > 1):
         wave_n_id = wave % fx.Int32(num_n_waves)
         wave_k_id = rocdl.readfirstlane(T.i32, wave // fx.Int32(num_n_waves))
     else:
-        # k_wave=1: wave_n_id==wave and wave_k_id==0 identically (byte-identical ISA).
+        # k_wave=1: wave_n_id==wave, wave_k_id==0 (byte-identical ISA).
         wave_n_id = wave
         wave_k_id = fx.Int32(0)
     _n_per_wave = TILE_N // num_n_waves
@@ -112,20 +106,18 @@ def _gemm1_body_a16w4(
     # A load is group-local: num_n_waves*64 threads load each k-group's BM x TILE_K tile.
     a_load_threads = num_n_waves * 64
     k_blocks16 = KH_TILE_BYTES // 16
-    # Software pipeline (aiter-aligned): A-LDS double-buffered so tile K+1's DMA writes
-    # the pong slot while tile K reads ping; B + B-scale for K+1 are issued before tile
-    # K's MFMA so they stay in flight (vmcnt does not drain mid-loop). The A-DMA
+    # Software pipeline (aiter-aligned): A-LDS double-buffered (tile K+1 DMA -> pong while
+    # K reads ping); B + B-scale for K+1 issued before K's MFMA to stay in flight. A-DMA
     # completes on lgkmcnt, so only s_waitcnt(lgkmcnt=0) + one barrier gate the ds_read.
     _PIPE = K_TILES_TOTAL > 1
     A_LDS_STAGES = 2 if _PIPE else 1
     A_SLOT_BYTES = BM * KH_TILE_BYTES
-    # Per-k-group A-LDS region (byte-identical single region at k_wave=1).
+    # Per-k-group A-LDS region (single region at k_wave=1).
     _A_GRP_BYTES = A_LDS_STAGES * A_SLOT_BYTES
     NUM_N_BLOCKS = INTER // TILE_N
 
-    # W (mxfp4) preshuffle layout (aiter make_preshuffle_b_layout, N-major, fp4):
-    #   shape (n0=N_OUT/16, k0=(K/2)/64, klane=4, nlane=16, kpack=16)
-    #   strides (n0: k0*1024, k0: 1024, klane: 256, nlane: 16, kpack: 1) in fp4 bytes.
+    # W (mxfp4) preshuffle layout (aiter make_preshuffle_b_layout, N-major, fp4 bytes):
+    #   shape (N_OUT/16, (K/2)/64, klane=4, nlane=16, kpack=16), strides below.
     K_HALF = K // 2
     bl_k0 = K_HALF // 64
     bl_stride_klane = 256
@@ -135,12 +127,9 @@ def _gemm1_body_a16w4(
         (N_OUT // 16, bl_k0, 4, 16, 16),
         (bl_stride_n0, bl_stride_k0, bl_stride_klane, 16, 1),
     )
-    # W (raw bf16) preshuffle layout (make_preshuffle_b_layout elem_bytes=2, N-major,
-    # == shuffle_weight layout=(16,16)) in bf16-ELEM units:
-    #   shape (N_OUT/16, K/32, 4, 16, 8), strides (n0: (K/32)*512, k0: 512, klane: 128,
-    #   nlane: 8, kpack: 1). One kpack = 8 bf16 = 16 B = ONE MFMA K32 B fragment (no
-    #   fp4 upconvert). The K mapping is reindexed to match the fp4 (klane_hw, ku)->K
-    #   order: bf_k0 = base_k//32 + (ku//4)*4 + klane_hw, bf_klane = ku%4 (see load_b_raw).
+    # W (raw bf16) preshuffle layout (N-major == shuffle_weight (16,16)), bf16-elem units:
+    #   shape (N_OUT/16, K/32, 4, 16, 8). One kpack = 8 bf16 = ONE MFMA K32 B fragment
+    #   (no upconvert). K reindexed to the fp4 (klane_hw, ku)->K order (see load_b_raw_bf16).
     bfl_k0 = K // 32
     bfl_stride_klane = 128
     bfl_stride_k0 = 512
@@ -149,17 +138,15 @@ def _gemm1_body_a16w4(
         (N_OUT // 16, bfl_k0, 4, 16, 8),
         (bfl_stride_n0, bfl_stride_k0, bfl_stride_klane, 8, 1),
     )
-    # B-scale preshuffle layout (make_preshuffle_scale_layout, e8m0, per-1x32):
-    #   c_k = K (padded to 256 mult), c_mn = N_OUT. shape (c_mn/32, c_k1, 4, 16),
-    #   strides (n0: c_k1*64, k0: 64, klane: 16, nlane: 1). elem = 1 byte (u8).
+    # B-scale preshuffle layout (make_preshuffle_scale_layout, e8m0 u8, per-1x32):
+    #   K padded to 256 mult. shape (N_OUT/32, c_k1, 4, 16), strides below.
     scale_k_padded = ((K + 255) // 256) * 256
     sc_k1 = ((scale_k_padded // 32) // 4) // 2
     sc_stride_klane = 16
     sc_stride_k0 = 64
     sc_stride_n0 = sc_k1 * sc_stride_k0
 
-    # a16wi4 groupwise scale: bf16 pairs, layout (E, N, num_groups//2, 2). Flat dword
-    # index = expert_off_n*(G//2) + n*(G//2) + (group//2); even/odd ku -> lo/hi bf16.
+    # a16wi4 groupwise scale: bf16 pairs, layout (E, N, G//2, 2).
     _num_groups = K // A16WI4_GROUP_SIZE
     _g_half = _num_groups // 2
 
@@ -176,11 +163,9 @@ def _gemm1_body_a16w4(
     inter_i32 = fx.Int32(INTER)
 
     # ---- buffer resources -----------------------------------------------------
-    # bf16 W [E, N_OUT, K] (2 B/elem) is 4x the fp4 bytes; the whole-tensor extent
-    # overflows the 32-bit buffer num_records AND the i32 byte-offset at large E
-    # (E896: 6.6 GB). Fold the per-expert base into the i64 resource address and index
-    # W within the expert (no expert_off in the index) so both stay < 2^31. mxfp4/int4
-    # keep the whole-tensor resource + expert_off-in-index path (byte-identical).
+    # bf16 W [E, N_OUT, K] whole-tensor extent overflows the 32-bit num_records/i32
+    # byte-offset at large E (E896: 6.6GB): fold the per-expert base into the i64
+    # resource addr and index within the expert. mxfp4/int4 keep the whole-tensor path.
     if const_expr(_is_bf16):
         _w_per_expert_bytes = N_OUT * (K * 2)
         w_base_i64 = fx.Int64(arg_bq) + fx.Int64(e) * fx.Int64(_w_per_expert_bytes)
@@ -188,18 +173,18 @@ def _gemm1_body_a16w4(
     else:
         _w_bytes = NE * N_OUT * K_HALF
         w_tiles = _global_i32_buffer_tiles(arg_bq, min(_w_bytes, 0xFFFFFFFF), 4)
-    # W dwordx4 load via BufferCopy128b atom (cache modifier carried in the aux field).
+    # W dwordx4 load via BufferCopy128b atom (cache modifier in the aux field).
     w_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(b_cache_mod), fx.Int32)
     w_reg_lay = fx.make_layout(4, 1)
     if _is_int4:
-        # int4 groupwise scale buffer is (E, N_OUT, G//2, 2) bf16 -> G//2 dwords per N.
+        # int4 groupwise scale buffer (E, N_OUT, G//2, 2) bf16 -> G//2 dwords per N.
         _sw_bytes = NE * N_OUT * _g_half * 4
     else:
         _sw_bytes = NE * N_OUT * (scale_k_padded // 32)
-    # bf16 W has no scale buffer; sw_rsrc is unused (arg_bscale is a dummy pointer).
+    # bf16 W has no scale buffer; sw_rsrc unused (arg_bscale is a dummy pointer).
     sw_rsrc = None if _is_bf16 else _buffer_rsrc(arg_bscale, num_records_bytes=min(_sw_bytes, 0xFFFFFFFF))
-    # Intermediate [sorted_size, inter] bf16: num_records = cumsum0 (padded rows) *
-    # inter * 2, so masked (clamped) stores land OOB.
+    # Intermediate [sorted_size, inter] bf16: num_records = cumsum0*inter*2, so masked
+    # (clamped) stores land OOB.
     _cumsum0 = _global_i32_at(arg_cumsum, fx.Int32(0))
     out_rsrc = buffer_ops.create_buffer_resource_from_addr(
         _raw(fx.Int64(arg_out)),
@@ -208,7 +193,7 @@ def _gemm1_body_a16w4(
 
     # ---- A gather rows (per-thread) -------------------------------------------
     # a_load_threads (256 at k_wave=1) cooperatively load one k-group's BM x TILE_K
-    # bf16 tile; 16 B (v8bf16) per thread per pass -> num_x_loads passes.
+    # bf16 tile; 16 B (v8bf16) per thread per pass.
     bytes_per_thread = (BM * TILE_K * elem_bytes) // a_load_threads
     x_load_bytes = 16
     num_x_loads = bytes_per_thread // x_load_bytes
@@ -238,15 +223,9 @@ def _gemm1_body_a16w4(
         x_row_base_div4.append(t_i32 * fx.Int32(c_k_div4))
 
     # A global->LDS async DMA via BufferCopyLDS128b (16 B / 8 bf16 per copy).
-    # Size the buffer resource to the REAL activation allocation [n_tokens, K] bf16
-    # (row bytes = c_k_div4*4 == K*2). moe_sorting padding rows carry a sentinel
-    # token id >= n_tokens (decoded above into x_row_base_div4 = t_i32*c_k_div4), so
-    # their A-load byte offset lands PAST the [n_tokens, K] buffer. With num_records
-    # sized to the true allocation the HW OOB mask clamps those padding-row loads to 0
-    # (harmless: the epilogue store is already guarded by token < i32_ntok). A ~4GB
-    # (0xFFFFFFFF) resource would instead let the DMA read unmapped memory and fault
-    # at high token counts (allocation-dependent). Matches aiter. Resource-size only;
-    # no hot-loop change.
+    # LOAD-BEARING OOB clamp: size the resource to the REAL [n_tokens, K] bf16 alloc so
+    # padding-row loads (sentinel token id >= n_tokens) get HW-clamped to 0 (epilogue is
+    # token<i32_ntok guarded). A ~4GB resource would instead fault on unmapped memory.
     x_buf = _global_i32_buffer_view(arg_x, fx.Int64(i32_ntok) * fx.Int64(c_k_div4) * fx.Int64(4))
     x_dma_tiles4 = fx.logical_divide(x_buf, fx.make_layout(4, 1))
     x_dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), fx.Int32)
@@ -273,7 +252,7 @@ def _gemm1_body_a16w4(
             )
 
     # ---- A LDS read (CK sub-lane): lane L covers K[L*32..L*32+31] --------------
-    # Each (mi, ku) reads 8 bf16 = 16 bytes (one ds_read_b128) -> v8bf16 A operand.
+    # Each (mi, ku) reads 8 bf16 (one ds_read_b128) -> v8bf16 A operand.
     row_a_lds = lane_mod_16
     col_base_bytes_L = lane_div_16 * fx.Int32(64)  # 32 bf16 * 2 B
     s_x_i32_flat = fx.make_view(
@@ -317,10 +296,9 @@ def _gemm1_body_a16w4(
         return raw
 
     def load_b_raw_bf16(base_k, n_blk, n_intra):
-        # Raw bf16 W: one dwordx4 (8 bf16) per ku = one MFMA K32 B fragment. Index the
-        # bf16 preshuffle so the (klane_hw=lane_div_16, ku)->K map matches the fp4 path:
-        #   bf_k0 = base_k//32 + (ku//4)*4 + klane_hw, bf_klane = ku%4. Returns
-        #   raw[ku] = v8bf16 (the MMA operand directly -- no scale, no upconvert).
+        # Raw bf16 W: one dwordx4 (8 bf16) per ku = one MFMA K32 B fragment (v8bf16,
+        # the MMA operand directly). K map matches fp4: bf_k0 = base_k//32 + (ku//4)*4
+        # + klane_hw, bf_klane = ku%4.
         raw = []
         base_k0 = base_k // fx.Int32(32)
         for ku in range_constexpr(k_unroll):
@@ -340,9 +318,8 @@ def _gemm1_body_a16w4(
         return raw
 
     def load_b_scale(base_k, mni, n_pack):
-        # aiter _get_scale_f32: adj_ku = base_k//32 + (ku//4)*4 + lane_div_16.
-        # Per-lane scalar (vec_width=1) e8m0 load: kept on buffer_ops (no layout form,
-        # dict-cached across ku); the W dwordx4 load uses the BufferCopy128b atom.
+        # aiter _get_scale_f32: adj_ku = base_k//32 + (ku//4)*4 + lane_div_16. Per-lane
+        # scalar e8m0 load on buffer_ops (no layout form, dict-cached across ku).
         scales = []
         cache = {}
         for ku in range_constexpr(k_unroll):
@@ -367,10 +344,9 @@ def _gemm1_body_a16w4(
         return scales
 
     def load_b_scale_int4(base_k, col_g):
-        # int4 groupwise (bf16-pair) scale, per-lane N = col_g. group_size=32 == one
-        # MFMA K32 step, so group index for step (base_k, ku) mirrors the mxfp4 e8m0
-        # K->group map: adj_ku = base_k//32 + (ku//4)*4 + lane_div_16. Scale buffer is
-        # (E, N, G//2, 2) bf16: dword idx = col_g*(G//2) + adj_ku//2, half by adj_ku parity.
+        # int4 groupwise (bf16-pair) scale, per-lane N = col_g. group_size=32 == one K32
+        # step, so adj_ku = base_k//32 + (ku//4)*4 + lane_div_16 (mxfp4 K->group map).
+        # Buffer (E, N, G//2, 2) bf16: dword = col_g*(G//2) + adj_ku//2, half by parity.
         scales = []
         base_dword = col_g * fx.Int32(_g_half)
         for ku in range_constexpr(k_unroll):
@@ -380,7 +356,7 @@ def _gemm1_body_a16w4(
             packed = fx.Int32(
                 buffer_ops.buffer_load(_raw(sw_rsrc), _raw(base_dword + pair_idx), vec_width=1, dtype=T.i32)
             )
-            # even adj_ku -> low bf16, odd -> high bf16.
+            # even adj_ku -> low bf16, odd -> high.
             lo = fx.Float32(_raw(packed << fx.Int32(16)).bitcast(T.f32))
             hi = fx.Float32(_raw(packed & fx.Int32(0xFFFF0000)).bitcast(T.f32))
             scales.append((adj_ku % fx.Int32(2) == fx.Int32(0)).select(lo, hi))
@@ -437,10 +413,8 @@ def _gemm1_body_a16w4(
             acc_gate[mi][ni].store(zero4)
             acc_up[mi][ni].store(zero4)
 
-    # gfx950 (CDNA4): one K=32 bf16 MFMA per K-step. gfx942 (CDNA3, use_k16): no
-    # 16x16x32 -> split each v8bf16 K-step into two v4bf16 halves and issue TWO
-    # 16x16x16 MFMAs into the SAME 16x16 f32 accumulator. The load/dequant still
-    # produce v8bf16; only the MMA emission differs.
+    # Arch-gate: gfx950 K=32 (one MFMA/K-step); gfx942 (use_k16) has no 16x16x32 -> split
+    # each v8bf16 K-step into two v4bf16 halves -> TWO 16x16x16 MFMAs into the same acc.
     if const_expr(use_k16):
         mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.BFloat16))
     else:
@@ -463,8 +437,8 @@ def _gemm1_body_a16w4(
         else:
             fx.gemm(mma_atom, acc, _bf16_frag(a8), _bf16_frag(b8), acc)
 
-    # int4 groupwise scale: per-lane N = expert_off + (col_g | col_g+inter). expert_off
-    # is in N_OUT units, so it doubles as the scale-N expert base ((E, N_OUT, G//2, 2)).
+    # int4 groupwise scale N = expert_off + (col_g | col_g+inter); expert_off (N_OUT
+    # units) doubles as the scale-N expert base ((E, N_OUT, G//2, 2)).
     if const_expr(_is_int4):
         scale_n_gate = [expert_off + col_g_list[ni] for ni in range_constexpr(num_acc_n)]
         scale_n_up = [expert_off + col_g_list[ni] + inter_i32 for ni in range_constexpr(num_acc_n)]
@@ -493,10 +467,9 @@ def _gemm1_body_a16w4(
         )
 
     def preload_a(read_slot):
-        # Read ALL of the current tile's A-LDS fragments up front, before the next
-        # tile's A-DMA is issued (aiter phase-separated iteration): the ds_read no
-        # longer interleaves with the in-flight LDS-DMA, so the compiler drops the
-        # per-read vmcnt(0) drains that would otherwise stall the B weight loads.
+        # Read ALL current-tile A-LDS fragments up front, before the next tile's A-DMA
+        # (aiter phase-separated iteration): drops the per-read vmcnt(0) drains that
+        # would otherwise stall the B weight loads.
         return [
             [lds_load_a(mi, ku, slot=read_slot) for ku in range_constexpr(k_unroll)] for mi in range_constexpr(m_repeat)
         ]
@@ -515,8 +488,7 @@ def _gemm1_body_a16w4(
                     _mma(acc_up[mi][ni], a8, ub)
 
     # ---- main K loop (ISA-aligned software pipeline) --------------------------
-    # k-group's global K base = wave_k_id * klen (0 at k_wave=1); all K offsets are
-    # shifted into this group's K-slice. Loop still runs K_TILES_TOTAL tiles.
+    # k-group global K base = wave_k_id * klen (0 at k_wave=1). Loop runs K_TILES_TOTAL.
     if const_expr(k_wave > 1):
         k_base = wave_k_id * fx.Int32(klen)
     else:
@@ -538,8 +510,8 @@ def _gemm1_body_a16w4(
             # Wait only THIS tile's A DMA (lgkmcnt); B's vmem stays in flight.
             rocdl.s_waitcnt(lgkmcnt=0)
             gpu.barrier()  # single barrier: A(kt) visible before ds_read
-            # Phase-separated: read the resident A-LDS buffer, THEN issue tile kt+1's
-            # A-DMA + B/B-scale so they overlap the MFMA cluster.
+            # Phase-separated: read resident A-LDS, THEN issue kt+1's A-DMA + B/B-scale
+            # so they overlap the MFMA cluster.
             a_frags = preload_a(cur_slot)
             if const_expr(kt + 1 < K_TILES_TOTAL):
                 dma_x_tile_to_lds(k_base + fx.Int32((kt + 1) * TILE_K), slot=(kt + 1) % A_LDS_STAGES)
@@ -548,12 +520,10 @@ def _gemm1_body_a16w4(
             if const_expr(kt + 1 < K_TILES_TOTAL):
                 b_cur = b_nxt
 
-    # ---- k_wave slice-K reduce: sum the partial-K accumulators across the k_wave
-    # peer waves in LDS (aiter mixed_moe LDS-reduce). Each wave stores its
-    # nm = num_acc_n*m_repeat vec4-f32 acc-slots into a per-wave LDS region, then
-    # (after a barrier) sums its peers' (peer = g*num_n_waves + wave_n_id) partials.
-    # Gate and up are reduced in SEPARATE rounds to halve peak LDS scratch (kw4 at
-    # tile_n=256 otherwise overruns 160KB). Only wave_k_id==0 writes the epilogue.
+    # ---- k_wave slice-K reduce (aiter mixed_moe LDS-reduce): each wave stores its
+    # nm = num_acc_n*m_repeat vec4-f32 acc-slots to a per-wave LDS region, then sums its
+    # peers' (peer = g*num_n_waves + wave_n_id) partials. Gate/up reduced in SEPARATE
+    # rounds to halve peak LDS scratch (kw4@tile_n=256 else overruns 160KB).
     if const_expr(k_wave > 1):
         nm = num_acc_n * m_repeat
         grp_stride = 64 * nm * 4  # f32 elems per wave (vec4 per lane per acc-slot)
@@ -584,9 +554,8 @@ def _gemm1_body_a16w4(
         _reduce_round(acc_up)
 
     # ---- epilogue: SiLU(gate)*up -> bf16 intermediate [sorted_size, inter] -----
-    # Stored by SORTED POSITION (row = bx_m + row_in_tile) so gemm2 consumes it
-    # drop-in. Padding rows (token >= tokens) are masked out; for k_wave>1 only the
-    # primary k-group (wave_k_id==0) writes (peers hold the identical reduced sum).
+    # Stored by SORTED POSITION (row = bx_m + row_in_tile). Padding rows (token >=
+    # tokens) masked out; for k_wave>1 only the primary k-group (wave_k_id==0) writes.
     if const_expr(k_wave > 1):
         _is_primary = wave_k_id == fx.Int32(0)
     for mi in range_constexpr(m_repeat):
@@ -640,17 +609,15 @@ def compile_gemm1_a16w4_port(
 ):
     """a16w4/a16wi4/a16w16 (bf16 A x mxfp4/int4/bf16 W1) fused stage1 builder.
 
-    ``w_dtype="mxfp4"`` (default): in-kernel mxfp4->bf16 W upconvert with per-1x32
-    e8m0 scale. ``w_dtype="int4"`` (a16wi4): packed signed int4 (SAME preshuffle byte
-    layout as mxfp4) with a groupwise bf16 scale (group_size=32); dequant via
-    ``v_cvt_off_f32_i4``. ``w_dtype="bf16"`` (a16w16): RAW bf16 W ``[E, N_OUT, K]``
-    preshuffled N-major (``shuffle_weight`` layout=(16,16)); no scale/upconvert, each
-    dwordx4 IS one MFMA K32 fragment. All feed the non-scaled MFMA(16,16,32,bf16) K=32
-    + SiLU epilogue -> bf16 intermediate ``[sorted_size, inter_dim]``.
+    ``w_dtype="mxfp4"`` (default): in-kernel mxfp4->bf16 upconvert, per-1x32 e8m0 scale.
+    ``"int4"`` (a16wi4): packed signed int4 (SAME preshuffle byte layout as mxfp4) +
+    groupwise bf16 scale (group_size=32), dequant via v_cvt_off_f32_i4. ``"bf16"``
+    (a16w16): RAW bf16 W preshuffled N-major (shuffle_weight (16,16)); each dwordx4 IS
+    one MFMA K32 fragment. All feed MFMA(16,16,32,bf16) K=32 + SiLU epilogue.
 
-    ``k_wave`` (aiter slice-K, default 1): repartition the 4 waves into (4/k_wave)
-    N-waves x k_wave K-waves; partial accumulators are LDS-reduced before the epilogue.
-    k_wave in {1,2,4}; ``4 % k_wave == 0`` and ``D_HIDDEN % (k_wave*TILE_K) == 0``.
+    ``k_wave`` (aiter slice-K, default 1): repartition 4 waves into (4/k_wave) N-waves x
+    k_wave K-waves; partials LDS-reduced. k_wave in {1,2,4}; requires 4 % k_wave == 0 and
+    D_HIDDEN % (k_wave*TILE_K) == 0.
     """
     assert w_dtype in ("mxfp4", "int4", "bf16"), f"w_dtype must be 'mxfp4', 'int4' or 'bf16', got {w_dtype!r}"
     assert k_wave in (1, 2, 4), f"k_wave must be 1, 2, or 4, got {k_wave}"
@@ -665,13 +632,12 @@ def compile_gemm1_a16w4_port(
     assert BM % 16 == 0, f"BM must be a multiple of 16, got {BM}"
     NUM_N_BLOCKS = _INTER // TILE_N
 
-    # A-LDS tile: BM x TILE_K bf16, double-buffered (must match A_LDS_STAGES in the
-    # body); 1 slot if 1 K-tile. k_wave>1 gives each K-wave its own region (x k_wave).
+    # A-LDS tile BM x TILE_K bf16, double-buffered (must match A_LDS_STAGES in the body).
+    # k_wave>1 gives each K-wave its own region (x k_wave).
     _klen = _K // k_wave
     _a_lds_stages = 2 if (_klen // TILE_K) > 1 else 1
     _a_lds_bytes = k_wave * _a_lds_stages * BM * TILE_K * 2
-    # k_wave reduce scratch (reuses the A-LDS region after the K loop): gate and up
-    # reduced in separate rounds, so peak = 4 waves * (num_acc_n*m_repeat) * 64 * 4 * 4.
+    # k_wave reduce scratch (reuses A-LDS after the K loop); gate/up separate rounds.
     if k_wave > 1:
         _num_n_waves = 4 // k_wave
         _num_acc_n = (TILE_N // _num_n_waves) // 16
@@ -682,9 +648,8 @@ def compile_gemm1_a16w4_port(
         lds_bytes = _a_lds_bytes
 
     assert act in ("silu", "situv2"), f"a16w4 gemm1 act must be 'silu' or 'situv2', got {act!r}"
-    # gfx942 (CDNA3): K=16 MFMA + scalar int4 dequant (no 16x16x32 bf16, no
-    # v_cvt_pk_bf16_f32). gfx950 default: K=32 (byte-identical to before). Not part of
-    # name_suffix -- ARCH is already in the JIT cache key, and FORCE_K16 is a test hook.
+    # Arch-gate K=16 (gfx942) vs K=32 (gfx950); not in name_suffix (ARCH is already in
+    # the JIT cache key, FORCE_K16 is a test hook).
     _use_k16 = a16wmix_use_k16()
     _act_tag = "" if act == "silu" else f"_{act}"
     _bcm_tag = "" if b_cache_mod == 2 else f"_bcm{b_cache_mod}"
@@ -720,10 +685,9 @@ def compile_gemm1_a16w4_port(
         total_m_blocks = cumsum0 // fx.Int32(BM)
         bound = total_m_blocks * fx.Int32(NUM_N_BLOCKS)
 
-        # Bijective XCD round-robin over the valid tiles [0, bound) to balance the
-        # per-XCD/HBM-channel weight-load traffic. With xcd_swizzle>0, additionally
-        # group-swizzle along M for per-XCD L2 locality (group size = xcd_swizzle
-        # m-blocks). No-op at 0.
+        # Bijective XCD round-robin over valid tiles [0, bound) to balance per-XCD/HBM
+        # weight-load traffic; xcd_swizzle>0 also M-group-swizzles for per-XCD L2
+        # locality (group = xcd_swizzle m-blocks). No-op at 0.
         _NXCD = 8
         _xq = _udiv(bound, _NXCD)
         _xr = _umod(bound, _NXCD)
