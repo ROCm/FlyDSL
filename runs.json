@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-01T07:16:33Z",
+ "updated": "2026-08-01T07:27:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30689667535,
+   "pr": 947,
+   "commit": "7989e6a8d8e786cd139bfb8aced6401aaafdd309",
+   "branch": "worktree-agent-moe-2stage-port",
+   "event": "pull_request",
+   "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30689667535",
+   "created_at": "2026-08-01T07:24:08Z",
+   "updated_at": "2026-08-01T07:25:03Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 30689329283,
    "pr": 948,
@@ -14,9 +29,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30689329283",
    "created_at": "2026-08-01T07:14:05Z",
-   "updated_at": "2026-08-01T07:14:35Z",
+   "updated_at": "2026-08-01T07:17:13Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-01T07:17:13Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30689329283/job/91341419205"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-01T07:17:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30689329283/job/91341419229"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-01T07:17:43Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30689329283/job/91341419231"
+    }
+   ]
   },
   {
    "run_id": 30688959388,
@@ -83,20 +126,20 @@
    "branch": "worktree-agent-moe-2stage-port",
    "event": "pull_request",
    "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30687828451",
    "created_at": "2026-08-01T06:29:10Z",
-   "updated_at": "2026-08-01T06:33:14Z",
+   "updated_at": "2026-08-01T07:24:38Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-01T06:33:58Z",
-     "completed_at": null,
+     "completed_at": "2026-08-01T07:24:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30687828451/job/91337365451"
     },
     {
@@ -111,10 +154,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-01T06:33:14Z",
-     "completed_at": null,
+     "completed_at": "2026-08-01T07:24:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30687828451/job/91337365458"
     }
    ]
@@ -317,10 +360,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-01T05:56:20Z",
-     "completed_at": null,
+     "completed_at": "2026-08-01T07:17:47Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30685978818/job/91332084213"
     },
     {
@@ -2174,21 +2217,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30554796756/job/90925744031"
     }
    ]
-  },
-  {
-   "run_id": 30554139329,
-   "pr": 872,
-   "commit": "3f438f2549ad8b2d6cf6614a348b2231fba6b561",
-   "branch": "amartin/mxfp8-4wave",
-   "event": "pull_request",
-   "title": "[Kernel] Add optimized 4-wave MXFP8 GEMM kernel for gfx950",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30554139329",
-   "created_at": "2026-07-30T14:55:40Z",
-   "updated_at": "2026-07-30T14:58:37Z",
-   "actor": "aris134",
-   "jobs": []
   }
  ]
 }
