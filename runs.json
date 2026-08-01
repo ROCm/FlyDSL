@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-01T07:10:52Z",
+ "updated": "2026-08-01T07:16:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30689329283,
+   "pr": 948,
+   "commit": "ff61d329d70feef0e9b86e50feb3e140fcc14167",
+   "branch": "worktree-mxfp-moe-a16w4",
+   "event": "pull_request",
+   "title": "MoE: add a16w mix fused 2-stage kernels (bf16 A \u00d7 mxfp4/int4/bf16 W)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30689329283",
+   "created_at": "2026-08-01T07:14:05Z",
+   "updated_at": "2026-08-01T07:14:35Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 30688959388,
    "pr": 950,
@@ -25,38 +40,38 @@
    "branch": "worktree-mxfp-moe-a16w4",
    "event": "pull_request",
    "title": "MoE: add a16w mix fused 2-stage kernels (bf16 A \u00d7 mxfp4/int4/bf16 W)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30688218488",
    "created_at": "2026-08-01T06:41:19Z",
-   "updated_at": "2026-08-01T06:52:18Z",
+   "updated_at": "2026-08-01T07:14:35Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-01T06:52:50Z",
-     "completed_at": null,
+     "completed_at": "2026-08-01T07:14:33Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30688218488/job/91339092816"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-01T06:52:18Z",
-     "completed_at": null,
+     "completed_at": "2026-08-01T07:14:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30688218488/job/91339092825"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-01T06:52:50Z",
-     "completed_at": null,
+     "completed_at": "2026-08-01T07:14:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30688218488/job/91339092836"
     }
    ]
@@ -2172,21 +2187,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30554139329",
    "created_at": "2026-07-30T14:55:40Z",
    "updated_at": "2026-07-30T14:58:37Z",
-   "actor": "aris134",
-   "jobs": []
-  },
-  {
-   "run_id": 30551549692,
-   "pr": 872,
-   "commit": "bed65dbdc6070bfa821cacc66f1a6da86f6a7d92",
-   "branch": "amartin/mxfp8-4wave",
-   "event": "pull_request",
-   "title": "[Kernel] Add optimized 4-wave MXFP8 GEMM kernel for gfx950",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30551549692",
-   "created_at": "2026-07-30T14:24:36Z",
-   "updated_at": "2026-07-30T14:32:15Z",
    "actor": "aris134",
    "jobs": []
   }
