@@ -11,8 +11,11 @@ from flydsl.expr.typing import Vector as Vec
 from kernels.common import buffer_ops
 from kernels.common.layout_utils import crd2idx
 
-from .common import (
+from .gemm1 import (
+    A16WI4_GROUP_SIZE,
+    _a16w4_swizzle_xor16,
     _buffer_rsrc,
+    _e8m0_byte_to_f32,
     _gep1,
     _gep3,
     _global_base_ptr1,
@@ -28,7 +31,6 @@ from .common import (
     kmchunks_for,
     lds_acc_bytes_for,
 )
-from .gemm1 import A16WI4_GROUP_SIZE, _a16w4_swizzle_xor16, _e8m0_byte_to_f32
 
 # gfx950 CU count; caps the persistent gemm2 grid so high-expert launches (E896) do
 # not over-launch ~max_m_blocks empty CTAs.
