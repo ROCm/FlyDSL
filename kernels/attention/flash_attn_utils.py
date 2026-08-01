@@ -30,6 +30,8 @@ from kernels.common import buffer_ops
 from kernels.common.kernels_common import dtype_to_elem_type
 
 _LOG2E = host_math.log2(host_math.e)
+# gfx950 (MI350/MI355X): 8 XCDs, each with a private ~4 MB L2.
+NUM_XCD_GFX950 = 8
 # s_waitcnt bitfield encoding
 _VMCNT_LO_MASK = 0xF
 _LGKMCNT_EXPCNT_BASE = 0x3F70
@@ -891,8 +893,20 @@ def _init_dualwave_thread_mapping(ctx):
 
     Shared verbatim by DualwaveKernelContext and DualwaveFp8KernelContext."""
     traits = ctx.traits
-    ctx.h_idx = fx.Index(gpu.block_idx.x)
-    ctx.q_block_idx = fx.Index(gpu.block_idx.y)
+    # Swizzled Head-first Mapping (arXiv:2511.02132): the grid is head-fast, so one
+    # head's q-blocks scatter across all XCDs and each re-streams its K/V. Re-derive
+    # (head, q_block) with head as the slow axis to keep them on one XCD. Bijective,
+    # so output is bit-identical; split-K's third grid axis would not survive it.
+    # Non-causal only: under a causal mask q-block i does work proportional to i, so
+    # making q_block the fast axis clusters unequal work and costs 7% (measured).
+    if const_expr(not traits.SPLITK and not traits.CAUSAL and traits.NUM_HEADS_Q % NUM_XCD_GFX950 == 0):
+        num_q_blocks = fx.Index(gpu.grid_dim.y)
+        linear_wg = fx.Index(gpu.block_idx.x) + fx.Index(gpu.block_idx.y) * fx.Index(traits.NUM_HEADS_Q)
+        ctx.h_idx = linear_wg // num_q_blocks
+        ctx.q_block_idx = linear_wg % num_q_blocks
+    else:
+        ctx.h_idx = fx.Index(gpu.block_idx.x)
+        ctx.q_block_idx = fx.Index(gpu.block_idx.y)
     if const_expr(traits.SPLITK):
         ctx.bz_idx = fx.Index(gpu.block_idx.z)
         ctx.batch_idx = ctx.bz_idx // traits.NUM_KV_SPLITS

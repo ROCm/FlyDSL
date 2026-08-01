@@ -13,32 +13,9 @@ Usage:
     # ArithValue operator overloading: c + 1, c * 2, c / 4, c % 16
 """
 
-from .._mlir.dialects.arith import *  # noqa: F401,F403
-
-__all__ = [
-    "ArithValue",  # Deprecated: will be removed in a future release
-    "_to_raw",  # Deprecated: will be removed in a future release
-    "FastMathFlags",
-    "RoundingMode",
-    "andi",
-    "constant",
-    "constant_vector",
-    "fastmath",
-    "index",  # Deprecated: will be removed in a future release
-    "index_cast",  # Deprecated: will be removed in a future release
-    "int_to_fp",
-    "maxnumf",
-    "shli",
-    "sitofp",
-    "trunc_f",
-    "unwrap",  # Deprecated: will be removed in a future release
-    "xori",
-    "cmpi",
-    "cmpf",
-]
-
-# Override star-import cmpi/cmpf to accept Numeric types (Int32, etc.)
+from .._mlir.dialects.arith import *
 from .._mlir.dialects import arith
+from .math import dsl_math_wrap_result
 from .meta import dsl_loc_tracing
 from .utils.arith import (  # noqa: F401
     ArithValue,
@@ -58,6 +35,23 @@ from .utils.arith import (  # noqa: F401
     xori,
 )
 from .typing import as_ir_value
+
+__all__ = [
+    "constant_vector",  # Deprecated: will be removed in a future release
+    "index_cast",  # Deprecated: will be removed in a future release
+    # Enums
+    "FastMathFlags",
+    "RoundingMode",
+    # Fastmath context
+    "fastmath",
+    # Binary ops
+    "cmpi",
+    "cmpf",
+    "maxnumf",
+    "maximumf",
+    "minimumf",
+    "shrui",
+]
 
 
 @dsl_loc_tracing
@@ -92,11 +86,7 @@ def cmpf(predicate, lhs, rhs, **kwargs):
 
 @dsl_loc_tracing
 def maxnumf(a, b, **kwargs):
-    """Floating-point maximum, returning the non-NaN operand when one input is NaN (libm ``fmax``).
-
-    Accepts DSL numeric types (Float32, Vector, ...) and preserves the DSL type of ``a`` so the
-    result can be chained with further DSL operations (e.g. ``.shuffle_xor(...)``).
-    """
+    """Floating-point maximum, returning the non-NaN operand when one input is NaN (libm ``fmax``)."""
     from .numeric import Numeric
     from .typing import Vector
 
@@ -106,3 +96,24 @@ def maxnumf(a, b, **kwargs):
     if isinstance(a, Numeric):
         return Numeric.from_ir_type(result.type)(result)
     return result
+
+
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def maximumf(a, b, *, fastmath=None, **kwargs):
+    """NaN-propagating floating-point maximum."""
+    return arith.maximumf(as_ir_value(a), as_ir_value(b), fastmath=fastmath, **kwargs)
+
+
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def minimumf(a, b, *, fastmath=None, **kwargs):
+    """NaN-propagating floating-point minimum."""
+    return arith.minimumf(as_ir_value(a), as_ir_value(b), fastmath=fastmath, **kwargs)
+
+
+@dsl_loc_tracing
+@dsl_math_wrap_result(preserve_numeric_type=True)
+def shrui(value, amount, *, is_exact=None, **kwargs):
+    """Unsigned right shift that preserves the DSL type of ``value``."""
+    return arith.shrui(as_ir_value(value), as_ir_value(amount), is_exact=is_exact, **kwargs)
