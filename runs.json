@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-01T09:27:10Z",
+ "updated": "2026-08-01T10:00:49Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "worktree-mxfp-moe-a16w4",
    "event": "pull_request",
    "title": "MoE: add a16w mix fused 2-stage kernels (bf16 A \u00d7 mxfp4/int4/bf16 W)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30693710785",
    "created_at": "2026-08-01T09:25:22Z",
-   "updated_at": "2026-08-01T09:26:15Z",
+   "updated_at": "2026-08-01T09:27:31Z",
    "actor": "coderfeli",
    "jobs": []
   },
