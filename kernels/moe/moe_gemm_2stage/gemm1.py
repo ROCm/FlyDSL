@@ -180,9 +180,6 @@ def _build_moe_gemm1_fp8_gateup(
         # 2-stage A LDS ping-pong: overlap the next K-tile's global load + LDS
         # write with the MFMA that consumes the current tile. a_ping/a_pong are the
         # two staging buffers; the loop below alternates between them each K-tile.
-        # A-LDS swizzle differs by element width (matches preshuffle_gemm): 8-bit
-        # (fp8) uses (log2(tile_k*eb/16), 4, log2(...)) == (3,4,3) at tile_k=128;
-        # 16-bit (bf16) uses (3,3,3).
         swz = fx.SwizzleType.get(*_swz_params)
         uni_cp_atom = fx.make_copy_atom(fx.UniversalCopy128b(), fp8_t)
         a_lds_bufs = []
@@ -236,8 +233,8 @@ def _build_moe_gemm1_fp8_gateup(
         c_gate.fill(0)
         c_up.fill(0)
 
-        _m_reps = fx.size(fx.get_shape(c_gate)[1]).to_py_value()
-        _n_reps = fx.size(fx.get_shape(c_gate)[2]).to_py_value()
+        _m_reps = fxh.reps(c_gate, 1)
+        _n_reps = fxh.reps(c_gate, 2)
         k_iters = TILE_K // (2 * MFMA_K)
         num_tiles = K // TILE_K
 
@@ -249,7 +246,6 @@ def _build_moe_gemm1_fp8_gateup(
             fx.copy(buf_cp_atom_r, br_g2r[None, None, None, kb], br_ret_bufs[s])
 
         def _write_a_lds(s):
-            """A registers (stage s gather) -> LDS buffer s."""
             fx.copy(uni_cp_atom, a_cp_frag_retile_bufs[s], a_lds_w_bufs[s])
 
         def _read_a_lds(s):
@@ -263,7 +259,6 @@ def _build_moe_gemm1_fp8_gateup(
                 fx.copy(uni_cp_atom, a_lds_r_bufs[s][None, None, ki], a_frag_retile_bufs[s][None, None, ki])
 
         def _mfma(s):
-            """MFMA over the already-read A fragment s + B fragments s."""
             for ki in range_constexpr(k_iters):
                 for n in range_constexpr(_n_reps):
                     for m in range_constexpr(_m_reps):
@@ -319,8 +314,8 @@ def _build_moe_gemm1_fp8_gateup(
 
     def _apply_fp8_dequant(c_gate_frag, c_up_frag, tid, expert_id, blk_n, asc_idx, M, arg_scale_w, arg_scale_x):
         # ptpc: per-channel weight scale (gate [0,inter), up [inter,2inter)), per-token act scale.
-        m_reps = fx.size(fx.get_shape(c_gate_frag)[1]).to_py_value()
-        n_reps = fx.size(fx.get_shape(c_gate_frag)[2]).to_py_value()
+        m_reps = fxh.reps(c_gate_frag, 1)
+        n_reps = fxh.reps(c_gate_frag, 2)
         sw_ptr = fx.recast_iter(fx.Float32, fx.get_iter(arg_scale_w))
         scale_gate = fx.make_view(sw_ptr + expert_id * N_e + blk_n * contiguous_n, fx.make_layout(contiguous_n, 1))
         scale_up = fx.make_view(
@@ -362,8 +357,8 @@ def _build_moe_gemm1_fp8_gateup(
 
     def _apply_doweight(c_gate_frag, c_up_frag, tid, e_idx, arg_sorted_weights):
         # Per-sorted-row routed weight (one per token_rep n), folded into gate.
-        m_reps = fx.size(fx.get_shape(c_gate_frag)[1]).to_py_value()
-        n_reps = fx.size(fx.get_shape(c_gate_frag)[2]).to_py_value()
+        m_reps = fxh.reps(c_gate_frag, 1)
+        n_reps = fxh.reps(c_gate_frag, 2)
         sw_ptr = fx.recast_iter(fx.Float32, fx.get_iter(arg_sorted_weights) + e_idx * fx.Int32(BM))
         tw_view = fx.make_view(sw_ptr, fx.make_layout(BM, 1))
         tw_copy = fx.make_tiled_copy(

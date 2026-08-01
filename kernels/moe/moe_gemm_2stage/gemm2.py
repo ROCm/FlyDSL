@@ -254,8 +254,8 @@ def _build_moe_gemm2_fp8(
             for ki in range_constexpr(k_iters):
                 fx.copy(uni_cp_atom, a_lds_r_bufs[s][None, None, ki], a_frag_retile_bufs[s][None, None, ki])
 
-        _m_reps = fx.size(fx.get_shape(c_frag)[1]).to_py_value()
-        _n_reps = fx.size(fx.get_shape(c_frag)[2]).to_py_value()
+        _m_reps = fxh.reps(c_frag, 1)
+        _n_reps = fxh.reps(c_frag, 2)
 
         def _mfma(s):
             for ki in range_constexpr(k_iters):
@@ -295,8 +295,8 @@ def _build_moe_gemm2_fp8(
     def _apply_fp8_dequant(c_frag, tid, expert_id, blk_n, asc_idx, M, arg_scale_w, arg_scale_x):
         # ptpc: per-channel (model_dim) weight scale, per-row act scale.
         # Sentinel rows (token id decode invalid) get a_scale=0 so their atomic contribution is 0.
-        m_reps = fx.size(fx.get_shape(c_frag)[1]).to_py_value()
-        n_reps = fx.size(fx.get_shape(c_frag)[2]).to_py_value()
+        m_reps = fxh.reps(c_frag, 1)
+        n_reps = fxh.reps(c_frag, 2)
         sw_ptr = fx.recast_iter(fx.Float32, fx.get_iter(arg_scale_w))
         scale_w = fx.make_view(sw_ptr + expert_id * N + blk_n * contiguous_n, fx.make_layout(contiguous_n, 1))
         cp_atom_scale = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
@@ -338,8 +338,8 @@ def _build_moe_gemm2_fp8(
 
     def _apply_doweight(c_frag, tid, e_idx, arg_sorted_weights):
         # Per-sorted-row routed weight (one per token_rep n).
-        m_reps = fx.size(fx.get_shape(c_frag)[1]).to_py_value()
-        n_reps = fx.size(fx.get_shape(c_frag)[2]).to_py_value()
+        m_reps = fxh.reps(c_frag, 1)
+        n_reps = fxh.reps(c_frag, 2)
         sw_ptr = fx.recast_iter(fx.Float32, fx.get_iter(arg_sorted_weights) + e_idx * fx.Int32(BM))
         tw_view = fx.make_view(sw_ptr, fx.make_layout(BM, 1))
         tw_copy = fx.make_tiled_copy(
@@ -361,8 +361,8 @@ def _build_moe_gemm2_fp8(
         """Convert an f32 C fragment to an out_elem fragment (bf16 rounds via round_bit)."""
         round_bit = fx.Uint32(0x8000)
         out_frag = fx.make_fragment_like(c_frag, dtype=out_elem)
-        m_reps = fx.size(fx.get_shape(c_frag)[1]).to_py_value()
-        n_reps = fx.size(fx.get_shape(c_frag)[2]).to_py_value()
+        m_reps = fxh.reps(c_frag, 1)
+        n_reps = fxh.reps(c_frag, 2)
         for m in range_constexpr(m_reps):
             for n in range_constexpr(n_reps):
                 acc = c_frag[None, m, n].load()
