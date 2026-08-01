@@ -587,14 +587,13 @@ def compile_moe_gemm1(
     # the non-split-K fp8 path on CDNA4 (gfx95*) is routed here; every other
     # dtype/stage/split-K/arch case falls through to the legacy body unchanged.
     #
-    # NOTE: the new pipeline is validated on gfx950 only. CDNA3 (gfx942) keeps
-    # the proven legacy path -- the new stage2 bf16-output atomic op does not
-    # lower on gfx942, and the bulk of the fp8 matrix was never exercised there,
-    # so we do not enable the new path on gfx942 without hardware validation.
-    # The builder is also dtype-parametric (accepts in_dtype="bf16"), but bf16 is
-    # not routed yet: it needs the CDNA3 bf16 MFMA(16,16,16) variant and a fix for
-    # an out_dtype="f32" crash at large tile_m.
-    if in_dtype == "fp8" and k_batch == 1 and "gfx95" in get_rocm_arch():
+    # Enabled on CDNA3 (gfx94*) and CDNA4 (gfx95*). stage1 uses fp8 MFMA
+    # (16,16,32) and a CShuffle store epilogue (no atomics), both of which lower
+    # on gfx942 -- the CDNA3 bf16-atomic limitation is a stage2-only concern
+    # (see the carve-out in gemm2.py). The builder is also dtype-parametric
+    # (accepts in_dtype="bf16"), but bf16 is not routed yet: it needs the CDNA3
+    # bf16 MFMA(16,16,16) variant and a fix for an out_dtype="f32" large-tile crash.
+    if in_dtype == "fp8" and k_batch == 1 and ("gfx95" in get_rocm_arch() or "gfx94" in get_rocm_arch()):
         return _build_moe_gemm1_fp8_gateup(
             model_dim=model_dim,
             inter_dim=inter_dim,
