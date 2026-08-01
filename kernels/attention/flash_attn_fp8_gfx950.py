@@ -14,6 +14,8 @@ from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as _raw
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from kernels.attention.flash_attn_utils import (
+    MIN_Q_BLOCKS_XCD_SWIZZLE,
+    NUM_XCD_GFX950,
     DualwaveFp8GemmHelper,
     DualwaveFp8KernelContext,
     DualwaveFp8KvGmemToLdsLoader,
@@ -23,8 +25,6 @@ from kernels.attention.flash_attn_utils import (
     DualwaveFp8StoreHelper,
     DualwaveSplitKCombineContext,
     DualwaveSplitKCombineHelper,
-    MIN_Q_BLOCKS_XCD_SWIZZLE,
-    NUM_XCD_GFX950,
     _make_dualwave_swp_fp8_traits,
     _s_setprio,
     _stagger_extra_barrier_if_one,
