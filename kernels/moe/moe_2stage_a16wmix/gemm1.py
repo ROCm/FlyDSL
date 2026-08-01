@@ -222,13 +222,24 @@ def _gemm1_body_a16w4(
         t_i32 = fused & fx.Int32(0x00FFFFFF)
         x_row_base_div4.append(t_i32 * fx.Int32(c_k_div4))
 
-    # A global->LDS async DMA via BufferCopyLDS128b (16 B / 8 bf16 per copy).
+    # A global->LDS staging. gfx950 (K=32): one BufferCopyLDS128b direct-to-LDS async copy
+    # (16 B / 8 bf16, VGPR-bypassing). gfx942 (use_k16): CDNA3 direct-to-LDS moves only
+    # 4 B/lane; the 16 B dwordx4-to-LDS form does not exist and LLVM cannot legalize the
+    # s128 LDS store (ISA-lowering crash). A narrow 4x4 B direct-to-LDS split is also wrong
+    # because buffer_load_dword...lds writes lane L to M0+L*width -- four 4 B copies cannot
+    # reproduce the 16 B/lane layout the 128b copy (and the ds_read_b128 A-read) expect.
+    # So on gfx942 stage via VGPRs like the legacy kernel: buffer_load 16 B gmem->regs then
+    # ds_write 16 B regs->LDS (both b128, valid on CDNA3), preserving the same LDS layout.
     # LOAD-BEARING OOB clamp: size the resource to the REAL [n_tokens, K] bf16 alloc so
     # padding-row loads (sentinel token id >= n_tokens) get HW-clamped to 0 (epilogue is
     # token<i32_ntok guarded). A ~4GB resource would instead fault on unmapped memory.
     x_buf = _global_i32_buffer_view(arg_x, fx.Int64(i32_ntok) * fx.Int64(c_k_div4) * fx.Int64(4))
     x_dma_tiles4 = fx.logical_divide(x_buf, fx.make_layout(4, 1))
-    x_dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), fx.Int32)
+    if const_expr(use_k16):
+        x_dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(2), fx.Int32)  # gmem->regs
+        x_lds_store_atom = fx.make_copy_atom(fx.UniversalCopy128b(), fx.Int32)  # regs->LDS
+    else:
+        x_dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), fx.Int32)
 
     # Per-k-group base byte offset into the A-LDS region (zero at k_wave=1).
     if const_expr(k_wave > 1):
@@ -245,11 +256,17 @@ def _gemm1_body_a16w4(
             row_k_dw = x_row_base_div4[i] + base_k_div4
             global_byte = row_k_dw * fx.Int32(4) + col_bytes
             lds_byte = slot_byte + x_row_local[i] * fx.Int32(KH_TILE_BYTES) + col_sw
-            fx.copy(
-                x_dma_atom,
-                fx.slice(x_dma_tiles4, (None, global_byte // fx.Int32(16))),
-                fx.slice(s_x_i32x4_tiles, (None, lds_byte // fx.Int32(16))),
-            )
+            if const_expr(use_k16):
+                # gfx942: buffer_load 16 B gmem->regs, then ds_write 16 B regs->LDS.
+                r = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
+                fx.copy(x_dma_atom, fx.slice(x_dma_tiles4, (None, global_byte // fx.Int32(16))), r)
+                fx.copy(x_lds_store_atom, r, fx.slice(s_x_i32x4_tiles, (None, lds_byte // fx.Int32(16))))
+            else:
+                fx.copy(
+                    x_dma_atom,
+                    fx.slice(x_dma_tiles4, (None, global_byte // fx.Int32(16))),
+                    fx.slice(s_x_i32x4_tiles, (None, lds_byte // fx.Int32(16))),
+                )
 
     # ---- A LDS read (CK sub-lane): lane L covers K[L*32..L*32+31] --------------
     # Each (mi, ku) reads 8 bf16 (one ds_read_b128) -> v8bf16 A operand.

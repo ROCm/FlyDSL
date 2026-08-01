@@ -241,7 +241,15 @@ def _gemm2_body_a16w4(
 
     x_buf = _global_i32_buffer_view(arg_a, fx.Int64(0xFFFFFFFF))
     x_dma_tiles4 = fx.logical_divide(x_buf, fx.make_layout(4, 1))
-    x_dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), fx.Int32)
+    # gfx950 (K=32): BufferCopyLDS128b direct-to-LDS async copy. gfx942 (use_k16): CDNA3
+    # direct-to-LDS is 4 B/lane only (the 16 B form fails LLVM ISA lowering), so stage via
+    # VGPRs like the legacy kernel: buffer_load 16 B gmem->regs then ds_write 16 B regs->
+    # LDS (both b128, valid on CDNA3), preserving the same swizzled-src / linear-LDS layout.
+    if const_expr(use_k16):
+        x_dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(b_cache_mod), fx.Int32)  # gmem->regs
+        x_lds_store_atom = fx.make_copy_atom(fx.UniversalCopy128b(), fx.Int32)  # regs->LDS
+    else:
+        x_dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), fx.Int32)
 
     s_x_i32_flat = fx.make_view(
         fx.recast_iter(fx.Int32, lds_raw_ptr),
@@ -261,11 +269,17 @@ def _gemm2_body_a16w4(
             row_k_dw = x_row_base_div4[i] + base_k_div4
             global_byte = row_k_dw * fx.Int32(4) + col_sw
             lds_byte = x_row_local[i] * fx.Int32(KH_TILE_BYTES) + col_bytes
-            fx.copy(
-                x_dma_atom,
-                fx.slice(x_dma_tiles4, (None, global_byte // fx.Int32(16))),
-                fx.slice(s_x_i32x4_tiles, (None, lds_byte // fx.Int32(16))),
-            )
+            if const_expr(use_k16):
+                # gfx942: buffer_load 16 B gmem->regs, then ds_write 16 B regs->LDS.
+                r = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
+                fx.copy(x_dma_atom, fx.slice(x_dma_tiles4, (None, global_byte // fx.Int32(16))), r)
+                fx.copy(x_lds_store_atom, r, fx.slice(s_x_i32x4_tiles, (None, lds_byte // fx.Int32(16))))
+            else:
+                fx.copy(
+                    x_dma_atom,
+                    fx.slice(x_dma_tiles4, (None, global_byte // fx.Int32(16))),
+                    fx.slice(s_x_i32x4_tiles, (None, lds_byte // fx.Int32(16))),
+                )
 
     row_a_lds = lane_mod_16
     col_base_bytes_L = lane_div_16 * fx.Int32(64)
