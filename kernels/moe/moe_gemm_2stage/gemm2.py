@@ -107,6 +107,20 @@ def _build_moe_gemm2_fp8(
       - accumulate=True, out=f32: CShuffle -> scalar f32 atomic-add.
       - accumulate=False (reduce), out in {f16,bf16}: CShuffle -> plain store into
         out[token*topk+slot, model_dim]; a separate reduction sums over topk.
+
+    Perf note (decode/sparse-MoE regime, e.g. dim=6144x1024, E=128, k=8, tile_m=16):
+    this B-first pipeline runs ~1.6x slower than the legacy X-major body (~220us vs
+    ~135us). ATT profiling (gfx950, faithful routing = ~128 sparse blocks each ~4/16
+    rows valid) attributes the stalls to memory latency + synchronization, NOT
+    compute/occupancy: buffer_load ~45%, s_barrier ~23%, s_waitcnt ~21%; by source
+    the gemm main loop (B weight load + A gather) ~64% and the per-block sorted-id
+    LDS-seed barrier ~22%. The CShuffle epilogue is only ~1.3%. Levers that do NOT
+    help (measured): raising occupancy (waves_per_eu=8, and a single-buffered
+    variant) and shrinking the epilogue tile leave perf unchanged; deepening the B
+    prefetch to all-tiles-in-flight gives <=2%. Legacy wins by overlapping the same
+    loads through its X-major software pipeline; matching it needs a loop-structure
+    rewrite (kept off this shared path to protect the ~1100 TFLOPS compute-bound
+    shape). See kernels/moe/mxfp_moe for the current fx.* pipeline idioms.
     """
     _is_bf16 = in_dtype == "bf16"
     if _is_bf16:
