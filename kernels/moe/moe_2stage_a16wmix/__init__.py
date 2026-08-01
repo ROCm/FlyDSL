@@ -62,6 +62,7 @@ def _get_compiled_gemm1_a16w4(
     xcd_swizzle,
     waves_per_eu,
     w_dtype="mxfp4",
+    w_layout="standard",
     k_wave=1,
 ):
     return compile_gemm1_a16w4_port(
@@ -77,6 +78,7 @@ def _get_compiled_gemm1_a16w4(
         xcd_swizzle=xcd_swizzle,
         waves_per_eu=waves_per_eu,
         w_dtype=w_dtype,
+        w_layout=w_layout,
         k_wave=k_wave,
     )
 
@@ -340,6 +342,7 @@ def flydsl_a16w4_gemm1(
     gate_mode="separated",
     act="silu",
     w_dtype="mxfp4",
+    w_layout="standard",
     use_csv_config=False,  # opt-in: default uses our tuned tile_n; CSV params for aiter-compare / when requested
     csv_path=None,
     stream=None,
@@ -350,6 +353,10 @@ def flydsl_a16w4_gemm1(
     W1 packed signed int4 (same preshuffle as mxfp4), ``w1_scale_u8`` groupwise bf16 in
     the ``(E, N_OUT, G//2, 2)`` layout (see :func:`a16wi4_scale_to_kernel_layout`).
     ``"bf16"``: RAW bf16 W1 preshuffled ``shuffle_weight (16,16)``; ``w1_scale_u8`` unused.
+
+    ``w_layout="standard"`` (default) consumes the N-major GGUU preshuffle. ``"guinterleave"``
+    (mxfp4 only) consumes aiter's native GUGU stage1 W1+scale layout
+    (``shuffle_weight_a16w4``/``shuffle_scale_a16w4``) directly, with no host relayout.
 
     ``a_bf16`` is bf16 ``[n_tokens, D_HIDDEN]``. Writes the bf16 intermediate
     ``[sorted_size, D_INTER]`` (by sorted position) into ``inter_sorted_bf16``.
@@ -431,7 +438,20 @@ def flydsl_a16w4_gemm1(
         raise NotImplementedError(f"a16w4 gemm1 requires D_INTER % TILE_N({TILE_N}) == 0, got D_INTER={D_INTER}")
 
     launch = _get_compiled_gemm1_a16w4(
-        BM, D_HIDDEN, D_INTER, NE, topk, TILE_N, TILE_K, act, b_cache_mod, xcd_swizzle, waves_per_eu, w_dtype, k_wave
+        BM,
+        D_HIDDEN,
+        D_INTER,
+        NE,
+        topk,
+        TILE_N,
+        TILE_K,
+        act,
+        b_cache_mod,
+        xcd_swizzle,
+        waves_per_eu,
+        w_dtype,
+        w_layout,
+        k_wave,
     )
     max_m_blocks = int(sorted_expert_ids.numel())
     grid = gemm1_a16w4_grid(BM, INTER=D_INTER, TILE_N=TILE_N, max_m_blocks=max_m_blocks)

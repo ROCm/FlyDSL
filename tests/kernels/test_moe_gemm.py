@@ -2219,6 +2219,225 @@ def test_a16w4_moe_e2e(tokens, model_dim, inter_dim, experts, topk, tile_m, w_dt
     )
 
 
+@pytest.mark.skipif("gfx95" not in ARCH, reason="a16w4 requires gfx950+")
+@pytest.mark.parametrize(
+    "tokens, model_dim, inter_dim, experts, topk, tile_m",
+    [pytest.param(128, 1024, 256, 8, 2, 32, id="small")],
+)
+def test_a16w4_gemm1_guinterleave_parity(tokens, model_dim, inter_dim, experts, topk, tile_m):
+    """Stage1 native-layout (GUGU guinterleave) parity.
+
+    Feeding aiter's native ``shuffle_weight_a16w4``/``shuffle_scale_a16w4`` W1+scale
+    (``is_guinterleave=True``) through ``w_layout="guinterleave"`` must produce a
+    bit-identical bf16 intermediate to the standard GGUU-layout run on the SAME mxfp4
+    values -- both are the same kernel math, only the W1/scale memory layout differs.
+    Validates the gemm1 guinterleave weight+scale reindex (no host relayout)."""
+    aiter_shuffle = pytest.importorskip("aiter.ops.shuffle")
+    shuffle_weight_a16w4 = aiter_shuffle.shuffle_weight_a16w4
+    shuffle_scale_a16w4 = aiter_shuffle.shuffle_scale_a16w4
+    from tests.kernels.utils import gemm_common_utils as gcu
+
+    device = torch.device("cuda")
+    N_OUT = 2 * inter_dim
+    s = 0.2
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * s
+    w1_fp32 = torch.randn((experts, N_OUT, model_dim), device=device, dtype=torch.float32) * s
+    score = torch.rand((tokens, experts), device=device, dtype=torch.float32)
+    topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
+    topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
+    routing = build_routing_buffers(
+        topk_ids=topk_ids,
+        topk_weights=topk_weights,
+        experts=experts,
+        model_dim=model_dim,
+        tile_m=tile_m,
+        moe_sort_mode="torch",
+    )
+    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, sorted_size, _blocks = (
+        r.to(device) if torch.is_tensor(r) else r for r in routing
+    )
+
+    # Same mxfp4 codes + e8m0 scale, laid out two ways.
+    w1_q, w1_scale = _per_1x32_fp4_quant(w1_fp32.reshape(experts * N_OUT, model_dim))
+    w1_shuf_std = shuffle_weight(w1_q.view(torch.float4_e2m1fn_x2)).view(torch.uint8).contiguous()
+    w1_scale_std = gcu.e8m0_shuffle(w1_scale.view(experts * N_OUT, model_dim // 32)).view(torch.uint8).contiguous()
+    w1_q_e = w1_q.view(experts, N_OUT, model_dim // 2)
+    w1_shuf_gu = shuffle_weight_a16w4(w1_q_e.view(torch.float4_e2m1fn_x2), 16, True).view(torch.uint8).contiguous()
+    w1_scale_gu = (
+        shuffle_scale_a16w4(w1_scale.view(experts * N_OUT, model_dim // 32), experts, True)
+        .view(torch.uint8)
+        .contiguous()
+        .view(-1)
+    )
+
+    x_bf16 = x_fp32.to(torch.bfloat16).contiguous()
+    cumsum = num_valid_ids.to(torch.int32).contiguous()
+    m_indices = sorted_token_ids.to(torch.int32).contiguous()
+
+    def _run_stage1(w_shuf, w_scale, w_layout):
+        inter = torch.zeros(sorted_size, inter_dim, dtype=torch.bfloat16, device=device)
+        flydsl_a16w4_gemm1(
+            a_bf16=x_bf16,
+            w1_u8=w_shuf,
+            w1_scale_u8=w_scale,
+            sorted_expert_ids=sorted_expert_ids,
+            cumsum_tensor=cumsum,
+            m_indices=m_indices,
+            inter_sorted_bf16=inter,
+            n_tokens=tokens,
+            NE=experts,
+            D_HIDDEN=model_dim,
+            D_INTER=inter_dim,
+            topk=topk,
+            # Pin an identical tile config for both runs so the only difference is the
+            # W1/scale layout (parity holds regardless, but keep it deterministic).
+            tile_m=tile_m,
+            tile_n=256 if inter_dim % 256 == 0 else 128,
+            tile_k=256,
+            xcd_swizzle=0,
+            b_nt=0,
+            w_dtype="mxfp4",
+            w_layout=w_layout,
+            use_csv_config=False,
+        )
+        torch.cuda.synchronize()
+        return inter
+
+    inter_std = _run_stage1(w1_shuf_std, w1_scale_std, "standard")
+    inter_gu = _run_stage1(w1_shuf_gu, w1_scale_gu, "guinterleave")
+    assert torch.equal(
+        inter_std, inter_gu
+    ), f"guinterleave stage1 mismatch: max|Δ|={(inter_std.float() - inter_gu.float()).abs().max().item()}"
+
+
+@pytest.mark.skipif("gfx95" not in ARCH, reason="a16w4 requires gfx950+")
+@pytest.mark.parametrize(
+    "tokens, model_dim, inter_dim, experts, topk, tile_m",
+    [pytest.param(128, 1024, 256, 8, 2, 32, id="small")],
+)
+def test_a16w4_moe_e2e_native_layout(tokens, model_dim, inter_dim, experts, topk, tile_m):
+    """Full a16w4 (bf16 A x mxfp4 W) MoE e2e consuming aiter's NATIVE weight layouts.
+
+    Stage1 W1 = ``shuffle_weight_a16w4``/``shuffle_scale_a16w4`` (GUGU, gate_up=True) via
+    ``w_layout="guinterleave"``; stage2 W2 = ``shuffle_weight_a16w4``/``shuffle_scale_a16w4``
+    (gate_up=False), which is byte-identical to the standard layout gemm2 already consumes
+    (E*model_dim % 256 == 0), so gemm2 needs no mode. Validates the complete native
+    drop-in (no host relayout) against the torch reference."""
+    aiter_shuffle = pytest.importorskip("aiter.ops.shuffle")
+    shuffle_weight_a16w4 = aiter_shuffle.shuffle_weight_a16w4
+    shuffle_scale_a16w4 = aiter_shuffle.shuffle_scale_a16w4
+
+    device = torch.device("cuda")
+    N_OUT = 2 * inter_dim
+    s = 0.2
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * s
+    w1_fp32 = torch.randn((experts, N_OUT, model_dim), device=device, dtype=torch.float32) * s
+    w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (
+        s / math.sqrt(inter_dim)
+    )
+    score = torch.rand((tokens, experts), device=device, dtype=torch.float32)
+    topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
+    topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
+    routing = build_routing_buffers(
+        topk_ids=topk_ids,
+        topk_weights=topk_weights,
+        experts=experts,
+        model_dim=model_dim,
+        tile_m=tile_m,
+        moe_sort_mode="torch",
+    )
+    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, sorted_size, _blocks = (
+        r.to(device) if torch.is_tensor(r) else r for r in routing
+    )
+
+    # Quantize + native (aiter) shuffles: W1 GUGU (gate_up=True), W2 gate_up=False.
+    w1_q, w1_scale = _per_1x32_fp4_quant(w1_fp32.reshape(experts * N_OUT, model_dim))
+    w2_q, w2_scale = _per_1x32_fp4_quant(w2_fp32.reshape(experts * model_dim, inter_dim))
+    w1_shuf = (
+        shuffle_weight_a16w4(w1_q.view(experts, N_OUT, model_dim // 2).view(torch.float4_e2m1fn_x2), 16, True)
+        .view(torch.uint8)
+        .contiguous()
+    )
+    w1_scale_u8 = (
+        shuffle_scale_a16w4(w1_scale.view(experts * N_OUT, model_dim // 32), experts, True)
+        .view(torch.uint8)
+        .contiguous()
+        .view(-1)
+    )
+    w2_shuf = (
+        shuffle_weight_a16w4(w2_q.view(experts, model_dim, inter_dim // 2).view(torch.float4_e2m1fn_x2), 16, False)
+        .view(torch.uint8)
+        .contiguous()
+    )
+    w2_scale_u8 = (
+        shuffle_scale_a16w4(w2_scale.view(experts * model_dim, inter_dim // 32), experts, False)
+        .view(torch.uint8)
+        .contiguous()
+        .view(-1)
+    )
+
+    x_bf16 = x_fp32.to(torch.bfloat16).contiguous()
+    cumsum = num_valid_ids.to(torch.int32).contiguous()
+    m_indices = sorted_token_ids.to(torch.int32).contiguous()
+
+    inter_sorted = torch.zeros(sorted_size, inter_dim, dtype=torch.bfloat16, device=device)
+    flydsl_a16w4_gemm1(
+        a_bf16=x_bf16,
+        w1_u8=w1_shuf,
+        w1_scale_u8=w1_scale_u8,
+        sorted_expert_ids=sorted_expert_ids,
+        cumsum_tensor=cumsum,
+        m_indices=m_indices,
+        inter_sorted_bf16=inter_sorted,
+        n_tokens=tokens,
+        NE=experts,
+        D_HIDDEN=model_dim,
+        D_INTER=inter_dim,
+        topk=topk,
+        tile_m=tile_m,
+        w_dtype="mxfp4",
+        w_layout="guinterleave",
+        use_csv_config=False,
+    )
+    out_buf = torch.zeros(tokens * model_dim, dtype=torch.bfloat16, device=device)
+    flydsl_a16w4_gemm2(
+        inter_sorted_bf16=inter_sorted,
+        w2_u8=w2_shuf,
+        w2_scale_u8=w2_scale_u8,
+        sorted_expert_ids=sorted_expert_ids,
+        cumsum_tensor=cumsum,
+        sorted_token_ids=sorted_token_ids,
+        sorted_weights=sorted_weights,
+        flat_out=out_buf,
+        M_logical=tokens,
+        max_sorted=sorted_size,
+        NE=experts,
+        D_HIDDEN=model_dim,
+        D_INTER=inter_dim,
+        topk=topk,
+        tile_m=tile_m,
+        w_dtype="mxfp4",
+        use_csv_config=False,
+    )
+    torch.cuda.synchronize()
+    out = out_buf.view(tokens, model_dim).float()
+
+    ref1 = torch_moe_gemm1(
+        x_bf16, w1_q, None, w1_scale, topk_ids.long(), topk_weights, inter_dim=inter_dim, doweight_stage1=False
+    )
+    ref2 = torch_moe_gemm2(
+        ref1.to(torch.bfloat16),
+        w2_q,
+        None,
+        w2_scale,
+        topk_ids.long(),
+        topk_weights,
+        model_dim=model_dim,
+        doweight_stage2=True,
+    )
+    assert verify_output(out, ref2, rtol=2e-3, atol=2e-3, logits_diff_threshold=2e-3)
+
+
 @pytest.mark.parametrize(
     "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n1, tile_k1, tile_n2, tile_k2, doweight_stage1",
     [
