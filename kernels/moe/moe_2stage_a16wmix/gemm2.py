@@ -24,6 +24,7 @@ from .common import (
     _raw,
     _udiv,
     _umod,
+    a16wmix_use_k16,
     kmchunks_for,
     lds_acc_bytes_for,
 )
@@ -134,6 +135,7 @@ def _gemm2_body_a16w4(
     NE,
     b_cache_mod=2,
     w_dtype="mxfp4",
+    use_k16=False,
 ):
     """a16w4/a16wi4/a16w16 stage2 body. K=inter_dim (contraction), N=model_dim (N_OUT).
 
@@ -374,7 +376,7 @@ def _gemm2_body_a16w4(
             return raw[ku]  # already v8bf16 (no scale, no upconvert)
         i32_val = _raw(raw[ku // 4][ku % 4])
         if const_expr(_is_int4):
-            return _int4_nibble_to_bf16x8(fx.Int32(i32_val), scale_f32)
+            return _int4_nibble_to_bf16x8(fx.Int32(i32_val), scale_f32, use_k16=use_k16)
         s_raw = _raw(scale_f32)
         i32s = []
         for sel in range_constexpr(4):
@@ -410,15 +412,30 @@ def _gemm2_body_a16w4(
         for ni in range_constexpr(num_acc_n):
             accm[mi][ni].store(zero4)
 
-    mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, fx.BFloat16))
+    # gfx950 (CDNA4): one K=32 bf16 MFMA per K-step. gfx942 (CDNA3, use_k16): split
+    # each v8bf16 K-step into two v4bf16 halves -> TWO 16x16x16 MFMAs into the same
+    # 16x16 f32 accumulator (no 16x16x32 bf16 on gfx942). Load/dequant unchanged.
+    if const_expr(use_k16):
+        mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.BFloat16))
+    else:
+        mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, fx.BFloat16))
 
     def _bf16_frag(v8):
         t = fx.make_rmem_tensor(fx.make_layout(8, 1), fx.BFloat16)
         t.store(v8)
         return t
 
+    def _bf16_frag4(v8, half):
+        t = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.BFloat16)
+        t.store(fx.Vector.from_elements([_raw(v8[half * 4 + j]) for j in range_constexpr(4)], fx.BFloat16))
+        return t
+
     def _mma(acc, a8, b8):
-        fx.gemm(mma_atom, acc, _bf16_frag(a8), _bf16_frag(b8), acc)
+        if const_expr(use_k16):
+            for h in range_constexpr(2):
+                fx.gemm(mma_atom, acc, _bf16_frag4(a8, h), _bf16_frag4(b8, h), acc)
+        else:
+            fx.gemm(mma_atom, acc, _bf16_frag(a8), _bf16_frag(b8), acc)
 
     for kt in range_constexpr(K_TILES_TOTAL):
         base_k = fx.Int32(kt * TILE_K)
@@ -505,6 +522,9 @@ def compile_gemm2_a16w4_port(
     m-blocks).
     """
     assert w_dtype in ("mxfp4", "int4", "bf16"), f"w_dtype must be 'mxfp4', 'int4' or 'bf16', got {w_dtype!r}"
+    # gfx942 (CDNA3): K=16 MFMA + scalar int4 dequant. gfx950 default: K=32
+    # (byte-identical). See a16wmix_use_k16 / gemm1 for the rationale.
+    _use_k16 = a16wmix_use_k16()
     _K = D_INTER
     assert _K % TILE_K == 0, f"D_INTER (K) must be a multiple of {TILE_K}, got {_K}"
     assert N_OUT % TILE_N == 0, f"model_dim (N_OUT) must be a multiple of {TILE_N}, got {N_OUT}"
@@ -599,6 +619,7 @@ def compile_gemm2_a16w4_port(
                 NE=NE,
                 b_cache_mod=b_cache_mod,
                 w_dtype=w_dtype,
+                use_k16=_use_k16,
             )
 
         if const_expr(persist):

@@ -3,15 +3,37 @@
 
 """Self-contained helpers for the a16w4/a16wi4/a16w16 fused MoE kernels."""
 
+import os
+
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, range_constexpr, rocdl
 from flydsl.expr.typing import T
+from flydsl.runtime.device import get_rocm_arch
 from kernels.common import buffer_ops
 
 _PTR3 = "!llvm.ptr<3>"
 LOG2E = 1.4426950408889634
+
+
+def a16wmix_use_k16(arch=None):
+    """Decide the a16wmix MFMA K-size + int4 dequant path (compile-time, host side).
+
+    gfx950 (CDNA4) has the K=32 ``mfma_f32_16x16x32_bf16`` and the VALU-lean
+    ``v_cvt_pk_bf16_f32`` int4 dequant pack; gfx942 (CDNA3) has NEITHER -- it only has
+    the K=16 ``mfma_f32_16x16x16bf16_1k`` and must fall back to the scalar-trunc int4
+    dequant. This returns True for the gfx942 (K=16 + scalar dequant) codepath.
+
+    ``FLYDSL_A16WMIX_FORCE_K16=1`` forces the gfx942 codepath regardless of the
+    detected arch, so the K=16 path can be validated on a gfx950 box (which runs the
+    K=16 MFMA + scalar dequant fine -- it is a strict subset of its ISA).
+    """
+    if os.environ.get("FLYDSL_A16WMIX_FORCE_K16", "0") not in ("0", "", "false", "False"):
+        return True
+    if arch is None:
+        arch = get_rocm_arch() or ""
+    return "gfx95" not in str(arch)
 
 
 def _raw(v):
@@ -140,19 +162,31 @@ def _cvt_pk_bf16_f32_se(src_a_f32, src_b_f32):
     )
 
 
-def _int4_nibble_to_bf16x8(raw_i32, scale_f32):
+def _int4_nibble_to_bf16x8(raw_i32, scale_f32, *, use_k16=False):
     """int4 (signed) -> bf16 upconvert for one MFMA K32 step (8 nibbles -> v8bf16).
 
     ``raw_i32`` holds 8 packed signed-int4 nibbles in ``bits[4n+3:4n]`` order (the
     SAME K ordering the mxfp4 path uses via ``cvt_scalef32_pk_bf16_fp4`` sel 0..3).
-    Each nibble uses the gfx950 ``v_cvt_off_f32_i4`` fast path: it reads the nibble
+    Each nibble uses the gfx9xx ``v_cvt_off_f32_i4`` fast path: it reads the nibble
     as unsigned [0,15], subtracts 8 -> signed [-8,7], and multiplies the mantissa by
     16, so the ×16 correction is folded into the effective per-group scale
     (``eff = scale * 16``). ``scale_f32`` is the per-group dequant scale.
+
+    ``use_k16`` (gfx942/CDNA3): the VALU-lean ``v_cvt_pk_bf16_f32`` pack is gfx950-only,
+    so fall back to a scalar ``.to(BFloat16)`` truncation per nibble (arch-agnostic).
     """
     eff = fx.Float32(scale_f32 * fx.Float32(16.0))
     raw_even = fx.Int32(raw_i32)
     raw_odd = raw_even.shrui(fx.Int32(4))
+    if use_k16:
+        # gfx942 fallback: scalar f32 -> bf16 truncation (no v_cvt_pk_bf16_f32).
+        bf16s = []
+        for j in range_constexpr(4):
+            f_lo = fx.Float32(rocdl.cvt_off_f32_i4(_raw(raw_even), byte_sel=j)) * eff
+            f_hi = fx.Float32(rocdl.cvt_off_f32_i4(_raw(raw_odd), byte_sel=j)) * eff
+            bf16s.append(f_lo.to(fx.BFloat16))
+            bf16s.append(f_hi.to(fx.BFloat16))
+        return fx.Vector.from_elements([_raw(x) for x in bf16s], fx.BFloat16)  # v8bf16
     # byte_sel loads (1 shift total instead of 7); side-effecting pk-convert.
     i32s = []
     for j in range_constexpr(4):

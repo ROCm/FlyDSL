@@ -24,6 +24,7 @@ from .common import (
     _situ_mul_batch,
     _udiv,
     _umod,
+    a16wmix_use_k16,
 )
 
 # a16wi4 (int4 W) groupwise scale: group_size fixed at 32 == one MFMA K32 step, so
@@ -71,6 +72,7 @@ def _gemm1_body_a16w4(
     b_cache_mod=2,
     w_dtype="mxfp4",
     k_wave=1,
+    use_k16=False,
 ):
     """a16w4/a16wi4/a16w16 (bf16 A x mxfp4/int4/bf16 W) fused stage1 gemm1 body.
 
@@ -392,7 +394,7 @@ def _gemm1_body_a16w4(
             return raw[ku]
         i32_val = _raw(raw[ku // 4][ku % 4])
         if const_expr(_is_int4):
-            return _int4_nibble_to_bf16x8(fx.Int32(i32_val), scale_f32)
+            return _int4_nibble_to_bf16x8(fx.Int32(i32_val), scale_f32, use_k16=use_k16)
         # raw[ku//4][ku%4] i32 holds 8 fp4 -> 4x cvt (v2bf16, sel 0..3) -> v8bf16.
         s_raw = _raw(scale_f32)
         i32s = []
@@ -435,15 +437,31 @@ def _gemm1_body_a16w4(
             acc_gate[mi][ni].store(zero4)
             acc_up[mi][ni].store(zero4)
 
-    mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, fx.BFloat16))
+    # gfx950 (CDNA4): one K=32 bf16 MFMA per K-step. gfx942 (CDNA3, use_k16): no
+    # 16x16x32 -> split each v8bf16 K-step into two v4bf16 halves and issue TWO
+    # 16x16x16 MFMAs into the SAME 16x16 f32 accumulator. The load/dequant still
+    # produce v8bf16; only the MMA emission differs.
+    if const_expr(use_k16):
+        mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.BFloat16))
+    else:
+        mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, fx.BFloat16))
 
     def _bf16_frag(v8):
         t = fx.make_rmem_tensor(fx.make_layout(8, 1), fx.BFloat16)
         t.store(v8)
         return t
 
+    def _bf16_frag4(v8, half):
+        t = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.BFloat16)
+        t.store(fx.Vector.from_elements([_raw(v8[half * 4 + j]) for j in range_constexpr(4)], fx.BFloat16))
+        return t
+
     def _mma(acc, a8, b8):
-        fx.gemm(mma_atom, acc, _bf16_frag(a8), _bf16_frag(b8), acc)
+        if const_expr(use_k16):
+            for h in range_constexpr(2):
+                fx.gemm(mma_atom, acc, _bf16_frag4(a8, h), _bf16_frag4(b8, h), acc)
+        else:
+            fx.gemm(mma_atom, acc, _bf16_frag(a8), _bf16_frag(b8), acc)
 
     # int4 groupwise scale: per-lane N = expert_off + (col_g | col_g+inter). expert_off
     # is in N_OUT units, so it doubles as the scale-N expert base ((E, N_OUT, G//2, 2)).
@@ -664,6 +682,10 @@ def compile_gemm1_a16w4_port(
         lds_bytes = _a_lds_bytes
 
     assert act in ("silu", "situv2"), f"a16w4 gemm1 act must be 'silu' or 'situv2', got {act!r}"
+    # gfx942 (CDNA3): K=16 MFMA + scalar int4 dequant (no 16x16x32 bf16, no
+    # v_cvt_pk_bf16_f32). gfx950 default: K=32 (byte-identical to before). Not part of
+    # name_suffix -- ARCH is already in the JIT cache key, and FORCE_K16 is a test hook.
+    _use_k16 = a16wmix_use_k16()
     _act_tag = "" if act == "silu" else f"_{act}"
     _bcm_tag = "" if b_cache_mod == 2 else f"_bcm{b_cache_mod}"
     _xcd_tag = f"_xcd{xcd_swizzle}" if xcd_swizzle > 0 else ""
@@ -749,6 +771,7 @@ def compile_gemm1_a16w4_port(
                 b_cache_mod=b_cache_mod,
                 w_dtype=w_dtype,
                 k_wave=k_wave,
+                use_k16=_use_k16,
             )
 
     @flyc.jit
