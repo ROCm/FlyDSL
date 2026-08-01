@@ -253,6 +253,20 @@ def flydsl_a16w4_gemm1(
             # measured ~0.86-0.89x on gemm1-s1 at tok 1..2 on both Kimi-K3 shapes.
             # It regresses from tok4 up, so it is gated to tok<=2 only.
             TILE_N = 64
+            # ...and go 4-way intra-block slice-K (TILE_K=128 + k_wave=4). At M=1 the
+            # gemm1 K-loop is LDS-wait-bound (~90% of SQ_BUSY is SQ_WAIT_INST_LDS: the
+            # ds_read A-operand fetch cannot be hidden behind the shallow 7-tile K-loop).
+            # Splitting K 4 ways (each wave a klen=896 slice, then an LDS reduce) halves
+            # the per-wave K-loop depth so the exposed LDS latency drops -- measured
+            # gemm1-s1 ~0.83x at tok 1..2 on both Kimi-K3 shapes (3584x384/512), matching
+            # aiter's own tok1 kw4 config (t32x64x256_kw4). K=3584 % (4*128) == 0 is
+            # required (kw4 with TILE_K=256 would need K % 1024, which 3584 fails, so we
+            # use TILE_K=128). Regresses from tok4 up (enough M-work to hide latency +
+            # the LDS-reduce/shorter-tile overhead dominates), so gated with TILE_N=64 to
+            # tok<=2. Only when the caller left tile_k/k_wave at defaults.
+            if tile_k == 256 and k_wave == 1 and D_HIDDEN % 512 == 0:
+                TILE_K = 128
+                k_wave = 4
         elif w_dtype == "int4" and BM == 64 and D_INTER % 64 == 0:
             # int4 BM=64 (the tok~1600..3072 W1-reuse fill point where
             # a16wi4_recommend_block_m collapses two half-full 32-row m-blocks into one
