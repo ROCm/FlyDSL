@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-02T11:30:54Z",
+ "updated": "2026-08-02T12:41:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30748059779,
+   "pr": 955,
+   "commit": "5c14ee0ecbc31ffd6fc612cf9e96921593c4244e",
+   "branch": "fujun.han/split-canonicalize-pass",
+   "event": "pull_request",
+   "title": "split fly-canonicalize into form canonicalize + fly-fold-static",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30748059779",
+   "created_at": "2026-08-02T12:33:08Z",
+   "updated_at": "2026-08-02T12:33:08Z",
+   "actor": "Peter9606",
+   "jobs": []
+  },
   {
    "run_id": 30736962989,
    "pr": 954,
@@ -2246,49 +2261,6 @@
      "started_at": "2026-07-31T01:40:05Z",
      "completed_at": "2026-07-31T03:07:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30596798461/job/91051207700"
-    }
-   ]
-  },
-  {
-   "run_id": 30596670923,
-   "pr": null,
-   "commit": "c2e72f35bdb8ee1eb141e1e98a3e055e8e24c97d",
-   "branch": "spconv-bf16-implicit-gemm",
-   "event": "pull_request",
-   "title": "[Kernel] Add submanifold sparse 3D convolution (bf16 implicit GEMM, gfx950)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30596670923",
-   "created_at": "2026-07-31T01:33:57Z",
-   "updated_at": "2026-07-31T01:37:09Z",
-   "actor": "jiacao-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-31T01:36:43Z",
-     "completed_at": "2026-07-31T01:37:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30596670923/job/91050752104"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-31T01:36:24Z",
-     "completed_at": "2026-07-31T01:36:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30596670923/job/91050752146"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-31T01:36:43Z",
-     "completed_at": "2026-07-31T01:37:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30596670923/job/91050752148"
     }
    ]
   }
