@@ -518,6 +518,7 @@ class Numeric(metaclass=NumericMeta):
             T.i32(): Int32,
             T.i16(): Int16,
             T.i8(): Int8,
+            T.i(4): Int4,
             T.si64(): Int64,
             T.si32(): Int32,
             T.si16(): Int16,
