@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-02T19:27:47Z",
+ "updated": "2026-08-02T19:38:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,38 +10,38 @@
    "branch": "stochastic-rounding",
    "event": "pull_request",
    "title": "Add stochastic rounding and philox RNG under rocdl",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30761426963",
    "created_at": "2026-08-02T18:34:38Z",
-   "updated_at": "2026-08-02T18:41:59Z",
+   "updated_at": "2026-08-02T19:37:01Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-02T18:41:58Z",
-     "completed_at": null,
+     "completed_at": "2026-08-02T19:37:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30761426963/job/91533293911"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-02T18:41:49Z",
-     "completed_at": null,
+     "completed_at": "2026-08-02T19:30:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30761426963/job/91533293918"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-02T18:41:58Z",
-     "completed_at": null,
+     "completed_at": "2026-08-02T19:31:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30761426963/job/91533293922"
     }
    ]
