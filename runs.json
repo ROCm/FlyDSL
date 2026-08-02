@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-02T17:47:17Z",
+ "updated": "2026-08-02T18:00:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30760033343,
+   "pr": 957,
+   "commit": "597254d8935ea670df5b49504b1673d6b7aa8f6f",
+   "branch": "xiaoyu/svd-quark",
+   "event": "pull_request",
+   "title": "Add SVD quant for Quark",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30760033343",
+   "created_at": "2026-08-02T17:57:52Z",
+   "updated_at": "2026-08-02T17:59:13Z",
+   "actor": "amd-xiaoyu12",
+   "jobs": []
+  },
   {
    "run_id": 30759589552,
    "pr": 956,
@@ -14,9 +29,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30759589552",
    "created_at": "2026-08-02T17:45:38Z",
-   "updated_at": "2026-08-02T17:46:18Z",
+   "updated_at": "2026-08-02T17:48:40Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-02T17:48:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30759589552/job/91527861243"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-02T17:48:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30759589552/job/91527861247"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-02T17:48:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30759589552/job/91527861255"
+    }
+   ]
   },
   {
    "run_id": 30759093014,
@@ -2273,40 +2316,6 @@
      "started_at": "2026-07-31T02:30:18Z",
      "completed_at": "2026-07-31T02:35:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30598919061/job/91057821775"
-    }
-   ]
-  },
-  {
-   "run_id": 30598509612,
-   "pr": 954,
-   "commit": "c5e1ef122bb2678713376aff79d46e7ec1017d1a",
-   "branch": "mega_moe_v1",
-   "event": "pull_request",
-   "title": "MegaMoE on Gfx950",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30598509612",
-   "created_at": "2026-07-31T02:15:37Z",
-   "updated_at": "2026-07-31T02:25:23Z",
-   "actor": "GwilliamHu",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-31T02:17:22Z",
-     "completed_at": "2026-07-31T02:25:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30598509612/job/91056143255"
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-31T02:17:55Z",
-     "completed_at": "2026-07-31T02:25:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30598509612/job/91056143277"
     }
    ]
   }
