@@ -287,8 +287,8 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::add(IntTupleValueAda
     }
     auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
     return IntTupleValueAdaptor{arith::AddIOp::create(builder, loc,
-                                                      extendToIntType(lhs.value, cmpType),
-                                                      extendToIntType(rhs.value, cmpType))
+                                                      extendToIntType(lhs.getValue(), cmpType),
+                                                      extendToIntType(rhs.getValue(), cmpType))
                                     .getResult(),
                                 retAttr};
   } else {
@@ -314,8 +314,8 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::sub(IntTupleValueAda
   }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   return IntTupleValueAdaptor{arith::SubIOp::create(builder, loc,
-                                                    extendToIntType(lhs.value, cmpType),
-                                                    extendToIntType(rhs.value, cmpType))
+                                                    extendToIntType(lhs.getValue(), cmpType),
+                                                    extendToIntType(rhs.getValue(), cmpType))
                                   .getResult(),
                               retAttr};
 }
@@ -328,8 +328,8 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::mul(IntTupleValueAda
   }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   return IntTupleValueAdaptor{arith::MulIOp::create(builder, loc,
-                                                    extendToIntType(lhs.value, cmpType),
-                                                    extendToIntType(rhs.value, cmpType))
+                                                    extendToIntType(lhs.getValue(), cmpType),
+                                                    extendToIntType(rhs.getValue(), cmpType))
                                   .getResult(),
                               retAttr};
 }
@@ -342,8 +342,8 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::div(IntTupleValueAda
   }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   return IntTupleValueAdaptor{arith::DivSIOp::create(builder, loc,
-                                                     extendToIntType(lhs.value, cmpType),
-                                                     extendToIntType(rhs.value, cmpType))
+                                                     extendToIntType(lhs.getValue(), cmpType),
+                                                     extendToIntType(rhs.getValue(), cmpType))
                                   .getResult(),
                               retAttr};
 }
@@ -356,8 +356,8 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::mod(IntTupleValueAda
   }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   return IntTupleValueAdaptor{arith::RemSIOp::create(builder, loc,
-                                                     extendToIntType(lhs.value, cmpType),
-                                                     extendToIntType(rhs.value, cmpType))
+                                                     extendToIntType(lhs.getValue(), cmpType),
+                                                     extendToIntType(rhs.getValue(), cmpType))
                                   .getResult(),
                               retAttr};
 }
@@ -372,10 +372,10 @@ IntTupleBuilder<IntTupleValueAdaptor>::logicalAnd(IntTupleValueAdaptor lhs,
   auto retType = getIntType(retAttr);
   // (lhs != 0) && (rhs != 0)
   auto lhsBool = arith::CmpIOp::create(
-      builder, loc, arith::CmpIPredicate::ne, lhs.value,
+      builder, loc, arith::CmpIPredicate::ne, lhs.getValue(),
       arith::ConstantIntOp::create(builder, loc, getIntType(lhs.attr), 0).getResult());
   auto rhsBool = arith::CmpIOp::create(
-      builder, loc, arith::CmpIPredicate::ne, rhs.value,
+      builder, loc, arith::CmpIPredicate::ne, rhs.getValue(),
       arith::ConstantIntOp::create(builder, loc, getIntType(rhs.attr), 0).getResult());
   auto result = arith::AndIOp::create(builder, loc, lhsBool, rhsBool);
   return IntTupleValueAdaptor{arith::ExtUIOp::create(builder, loc, retType, result).getResult(),
@@ -392,10 +392,10 @@ IntTupleBuilder<IntTupleValueAdaptor>::logicalOr(IntTupleValueAdaptor lhs,
   auto retType = getIntType(retAttr);
   // (lhs != 0) || (rhs != 0)
   auto lhsBool = arith::CmpIOp::create(
-      builder, loc, arith::CmpIPredicate::ne, lhs.value,
+      builder, loc, arith::CmpIPredicate::ne, lhs.getValue(),
       arith::ConstantIntOp::create(builder, loc, getIntType(lhs.attr), 0).getResult());
   auto rhsBool = arith::CmpIOp::create(
-      builder, loc, arith::CmpIPredicate::ne, rhs.value,
+      builder, loc, arith::CmpIPredicate::ne, rhs.getValue(),
       arith::ConstantIntOp::create(builder, loc, getIntType(rhs.attr), 0).getResult());
   auto result = arith::OrIOp::create(builder, loc, lhsBool, rhsBool);
   return IntTupleValueAdaptor{arith::ExtUIOp::create(builder, loc, retType, result).getResult(),
@@ -411,7 +411,7 @@ IntTupleBuilder<IntTupleValueAdaptor>::logicalNot(IntTupleValueAdaptor val) cons
   auto retType = getIntType(retAttr);
   auto zero = arith::ConstantIntOp::create(builder, loc, getIntType(val.attr), 0).getResult();
   // !(val) == (val == 0)
-  auto result = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::eq, val.value, zero);
+  auto result = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::eq, val.getValue(), zero);
   return IntTupleValueAdaptor{arith::ExtUIOp::create(builder, loc, retType, result).getResult(),
                               retAttr};
 }
@@ -425,8 +425,8 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::lt(IntTupleValueAdap
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   auto retType = getIntType(retAttr);
   auto cmp = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::slt,
-                                   extendToIntType(lhs.value, cmpType),
-                                   extendToIntType(rhs.value, cmpType));
+                                   extendToIntType(lhs.getValue(), cmpType),
+                                   extendToIntType(rhs.getValue(), cmpType));
   return IntTupleValueAdaptor{arith::ExtUIOp::create(builder, loc, retType, cmp).getResult(),
                               retAttr};
 }
@@ -440,8 +440,8 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::le(IntTupleValueAdap
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   auto retType = getIntType(retAttr);
   auto cmp = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::sle,
-                                   extendToIntType(lhs.value, cmpType),
-                                   extendToIntType(rhs.value, cmpType));
+                                   extendToIntType(lhs.getValue(), cmpType),
+                                   extendToIntType(rhs.getValue(), cmpType));
   return IntTupleValueAdaptor{arith::ExtUIOp::create(builder, loc, retType, cmp).getResult(),
                               retAttr};
 }
@@ -455,8 +455,8 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::gt(IntTupleValueAdap
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   auto retType = getIntType(retAttr);
   auto cmp = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::sgt,
-                                   extendToIntType(lhs.value, cmpType),
-                                   extendToIntType(rhs.value, cmpType));
+                                   extendToIntType(lhs.getValue(), cmpType),
+                                   extendToIntType(rhs.getValue(), cmpType));
   return IntTupleValueAdaptor{arith::ExtUIOp::create(builder, loc, retType, cmp).getResult(),
                               retAttr};
 }
@@ -470,8 +470,8 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::ge(IntTupleValueAdap
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   auto retType = getIntType(retAttr);
   auto cmp = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::sge,
-                                   extendToIntType(lhs.value, cmpType),
-                                   extendToIntType(rhs.value, cmpType));
+                                   extendToIntType(lhs.getValue(), cmpType),
+                                   extendToIntType(rhs.getValue(), cmpType));
   return IntTupleValueAdaptor{arith::ExtUIOp::create(builder, loc, retType, cmp).getResult(),
                               retAttr};
 }
@@ -485,8 +485,8 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::eq(IntTupleValueAdap
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   auto retType = getIntType(retAttr);
   auto cmp = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::eq,
-                                   extendToIntType(lhs.value, cmpType),
-                                   extendToIntType(rhs.value, cmpType));
+                                   extendToIntType(lhs.getValue(), cmpType),
+                                   extendToIntType(rhs.getValue(), cmpType));
   return IntTupleValueAdaptor{arith::ExtUIOp::create(builder, loc, retType, cmp).getResult(),
                               retAttr};
 }
@@ -500,8 +500,8 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::ne(IntTupleValueAdap
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   auto retType = getIntType(retAttr);
   auto cmp = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::ne,
-                                   extendToIntType(lhs.value, cmpType),
-                                   extendToIntType(rhs.value, cmpType));
+                                   extendToIntType(lhs.getValue(), cmpType),
+                                   extendToIntType(rhs.getValue(), cmpType));
   return IntTupleValueAdaptor{arith::ExtUIOp::create(builder, loc, retType, cmp).getResult(),
                               retAttr};
 }
@@ -514,8 +514,8 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::min(IntTupleValueAda
   }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   return IntTupleValueAdaptor{arith::MinSIOp::create(builder, loc,
-                                                     extendToIntType(lhs.value, cmpType),
-                                                     extendToIntType(rhs.value, cmpType))
+                                                     extendToIntType(lhs.getValue(), cmpType),
+                                                     extendToIntType(rhs.getValue(), cmpType))
                                   .getResult(),
                               retAttr};
 }
@@ -528,8 +528,8 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::max(IntTupleValueAda
   }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   return IntTupleValueAdaptor{arith::MaxSIOp::create(builder, loc,
-                                                     extendToIntType(lhs.value, cmpType),
-                                                     extendToIntType(rhs.value, cmpType))
+                                                     extendToIntType(lhs.getValue(), cmpType),
+                                                     extendToIntType(rhs.getValue(), cmpType))
                                   .getResult(),
                               retAttr};
 }
@@ -543,8 +543,8 @@ IntTupleBuilder<IntTupleValueAdaptor>::safeDiv(IntTupleValueAdaptor lhs,
   }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   return IntTupleValueAdaptor{arith::DivSIOp::create(builder, loc,
-                                                     extendToIntType(lhs.value, cmpType),
-                                                     extendToIntType(rhs.value, cmpType))
+                                                     extendToIntType(lhs.getValue(), cmpType),
+                                                     extendToIntType(rhs.getValue(), cmpType))
                                   .getResult(),
                               retAttr};
 }
@@ -558,8 +558,8 @@ IntTupleBuilder<IntTupleValueAdaptor>::ceilDiv(IntTupleValueAdaptor lhs,
   }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   return IntTupleValueAdaptor{arith::CeilDivSIOp::create(builder, loc,
-                                                         extendToIntType(lhs.value, cmpType),
-                                                         extendToIntType(rhs.value, cmpType))
+                                                         extendToIntType(lhs.getValue(), cmpType),
+                                                         extendToIntType(rhs.getValue(), cmpType))
                                   .getResult(),
                               retAttr};
 }
@@ -573,8 +573,8 @@ IntTupleBuilder<IntTupleValueAdaptor>::shapeDiv(IntTupleValueAdaptor lhs,
   }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   return IntTupleValueAdaptor{arith::CeilDivSIOp::create(builder, loc,
-                                                         extendToIntType(lhs.value, cmpType),
-                                                         extendToIntType(rhs.value, cmpType))
+                                                         extendToIntType(lhs.getValue(), cmpType),
+                                                         extendToIntType(rhs.getValue(), cmpType))
                                   .getResult(),
                               retAttr};
 }
@@ -588,7 +588,7 @@ IntTupleBuilder<IntTupleValueAdaptor>::applySwizzle(IntTupleValueAdaptor v,
 
   // shortcut for trivial swizzle and static value
   if (swizzle.isTrivialSwizzle()) {
-    return IntTupleValueAdaptor{v.value, retAttr};
+    return IntTupleValueAdaptor{v.getValue(), retAttr};
   }
   if (retAttr.isStatic()) {
     return materializeConstantLeaf(retAttr.getLeafAsInt());
@@ -596,7 +596,7 @@ IntTupleBuilder<IntTupleValueAdaptor>::applySwizzle(IntTupleValueAdaptor v,
 
   auto intType =
       v.attr.getLeafAsInt().getWidth() == 64 ? builder.getI64Type() : builder.getI32Type();
-  auto input = extendToIntType(v.value, intType);
+  auto input = extendToIntType(v.getValue(), intType);
   int64_t bitMaskValue = ((int64_t{1} << swizzle.getMask()) - 1)
                          << (swizzle.getBase() + swizzle.getShift());
   auto bitMask = arith::ConstantIntOp::create(builder, loc, intType, bitMaskValue).getResult();
@@ -632,8 +632,8 @@ IntTupleBuilder<IntTupleValueAdaptor>::applyCoordSwizzle(IntTupleValueAdaptor co
   }
 
   auto intType = getCommonIntType(row.attr, col.attr);
-  auto rowInput = extendToIntType(row.value, intType);
-  auto colInput = extendToIntType(col.value, intType);
+  auto rowInput = extendToIntType(row.getValue(), intType);
+  auto colInput = extendToIntType(col.getValue(), intType);
   int64_t maskValue = (int64_t{1} << swizzle.getMask()) - 1;
   auto mask = arith::ConstantIntOp::create(builder, loc, intType, maskValue).getResult();
   auto rowShift =

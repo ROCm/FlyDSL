@@ -57,9 +57,11 @@ private:
                        int32_t dyncIdxEnd = -1)
       : value(value), attr(attr), dyncIdxStart(dyncIdxStart), dyncIdxEnd(dyncIdxEnd) {}
 
-  Value value = nullptr;
+  // ``value`` is materialized lazily for static int leaves
+  mutable Value value = nullptr;
   IntTupleAttr attr = nullptr;
   int32_t dyncIdxStart = 0, dyncIdxEnd = -1;
+  const IntTupleBuilder<IntTupleValueAdaptor> *lazyOwner = nullptr;
 
 public:
   IntTupleValueAdaptor() = default;
@@ -93,7 +95,7 @@ public:
   bool isStatic() const { return attr.isStatic(); }
   int32_t rank() const { return attr.rank(); }
 
-  Value getValue() const { return value; }
+  Value getValue() const; // lazily materializes static int leaves
   IntTupleAttr getAttr() const { return attr; }
 
   friend class IntTupleBuilder<IntTupleValueAdaptor>;
@@ -274,9 +276,21 @@ public:
   IntTupleValueAdaptor materializeConstantLeaf(IntAttr value, ArrayRef<int32_t> modes = {}) const {
     assert(value.isStatic() && "Value must be static");
     auto attr = attrBuilder.materializeConstantLeaf(value, modes);
+    // Construct a lazy static int leaf: no SSA op yet; getValue() materializes it.
+    if (modes.empty()) {
+      IntTupleValueAdaptor a(nullptr, attr);
+      a.lazyOwner = this;
+      return a;
+    }
     return IntTupleValueAdaptor(
         arith::ConstantIntOp::create(builder, loc, value.getValue(), value.getWidth()).getResult(),
         attr);
+  }
+
+  // Materialize the deferred constant for a static int leaf (used by getValue()).
+  Value materializeLeafValue(IntTupleAttr attr) const {
+    IntAttr ia = attr.getLeafAsInt();
+    return arith::ConstantIntOp::create(builder, loc, ia.getValue(), ia.getWidth()).getResult();
   }
   IntTupleValueAdaptor materializeConstantLeaf(BasisAttr value) const {
     assert(value.isStatic() && "Value must be static");
@@ -358,6 +372,12 @@ public:
     }
   }
 };
+
+inline Value IntTupleValueAdaptor::getValue() const {
+  if (!value && lazyOwner)
+    value = lazyOwner->materializeLeafValue(attr);
+  return value;
+}
 
 template <class BinaryOp, class IntTuple>
 IntTuple intTupleBinaryOp(const IntTupleBuilder<IntTuple> &builder, BinaryOp &&binaryOp,
