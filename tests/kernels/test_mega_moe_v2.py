@@ -750,6 +750,7 @@ def _run_full_e2e(
         scale_type_size=1,
         enable_std_moe=False,
     )
+    assert cfg_fp8.is_fp4 == _is_fp4
     dcf = FlyDSLDispatchCombineIntraNodeOp(cfg_fp8)
     torch.cuda.synchronize()
     ms.shmem_barrier_all()
