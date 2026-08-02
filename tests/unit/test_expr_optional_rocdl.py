@@ -60,8 +60,7 @@ assert "rocdl" not in expr.__dict__
 assert "tdm_ops" not in expr.__dict__
 assert "cluster_barrier" not in expr.gpu.__dict__
 assert "random" not in expr.__dict__
-assert expr.random.philox_4x32 is not None
-assert expr.random.cvt_f32_to_bf16_sr is not None
+
 assert "rocdl" not in expr.random.__dict__
 assert "flydsl.expr.random.rocdl" not in sys.modules
 

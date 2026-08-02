@@ -32,6 +32,7 @@ from flydsl._mlir.dialects import llvm as _llvm
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common import buffer_ops
+from kernels.common.kernels_common import cvt_sr_f32_to_bf16
 
 WMMA_M = 16
 WMMA_N = 16
@@ -339,7 +340,7 @@ def create_wmma_gemm_module(
                     # word), so the f32 -> bf16 store is unbiased in expectation
                     # without a per-element draw.
                     base_off = (tile_m0 + wmma_m_off + klane) * N + (tile_n0 + wmma_n_off + lane16)
-                    rand_words = fx.random.philox_4x32(fx.Uint32(base_off), fx.Uint32(sr_seed))
+                    rand_words = fx.random.randint4x(fx.Uint32(sr_seed), fx.Uint32(base_off))
                 for si in range_constexpr(8):
                     g_row = tile_m0 + wmma_m_off + 2 * si + klane
                     g_col = tile_n0 + wmma_n_off + lane16
@@ -348,7 +349,7 @@ def create_wmma_gemm_module(
                     if const_expr(rounding == "rs"):
                         word = rand_words[si // 2]
                         rbits = word if si % 2 == 0 else (word >> fx.Uint32(16))
-                        val = fx.random.cvt_f32_to_bf16_sr(val, rbits)
+                        val = cvt_sr_f32_to_bf16(val, rbits)
                     elif const_expr(out_dtype == "bf16"):
                         val = val.to(fx.BFloat16)
                     elif const_expr(out_dtype == "f16"):
