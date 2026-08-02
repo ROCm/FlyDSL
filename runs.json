@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-08-02T15:43:06Z",
+ "updated": "2026-08-02T17:47:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30759589552,
+   "pr": 956,
+   "commit": "a9220c20f6348b505da835053eca0a387b354386",
+   "branch": "pr/enh-lazy-inttuple-leaves",
+   "event": "pull_request",
+   "title": "[Opt] Lazily materialize static int tuple leaves",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30759589552",
+   "created_at": "2026-08-02T17:45:38Z",
+   "updated_at": "2026-08-02T17:46:18Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 30759093014,
+   "pr": 956,
+   "commit": "49e132a7b5ad7d736e784b2864529ac6957f73d6",
+   "branch": "pr/enh-lazy-inttuple-leaves",
+   "event": "pull_request",
+   "title": "[Opt] Lazily materialize static int tuple leaves",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30759093014",
+   "created_at": "2026-08-02T17:32:18Z",
+   "updated_at": "2026-08-02T17:46:07Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-08-02T17:36:03Z",
+     "completed_at": "2026-08-02T17:45:57Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30759093014/job/91526666573"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-08-02T17:36:12Z",
+     "completed_at": "2026-08-02T17:46:03Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30759093014/job/91526666577"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-08-02T17:36:18Z",
+     "completed_at": "2026-08-02T17:46:06Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30759093014/job/91526666634"
+    }
+   ]
+  },
   {
    "run_id": 30749501184,
    "pr": 954,
@@ -63,21 +121,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30749501184/job/91508731060"
     }
    ]
-  },
-  {
-   "run_id": 30748059779,
-   "pr": 955,
-   "commit": "5c14ee0ecbc31ffd6fc612cf9e96921593c4244e",
-   "branch": "fujun.han/split-canonicalize-pass",
-   "event": "pull_request",
-   "title": "split fly-canonicalize into form canonicalize + fly-fold-static",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30748059779",
-   "created_at": "2026-08-02T12:33:08Z",
-   "updated_at": "2026-08-02T12:33:08Z",
-   "actor": "Peter9606",
-   "jobs": []
   },
   {
    "run_id": 30736962989,
@@ -2266,21 +2309,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30598509612/job/91056143277"
     }
    ]
-  },
-  {
-   "run_id": 30598461271,
-   "pr": 954,
-   "commit": "cc020fc9c2d50682f60eab0c05cb1a225880c713",
-   "branch": "mega_moe_v1",
-   "event": "pull_request",
-   "title": "MegaMoE on Gfx950",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30598461271",
-   "created_at": "2026-07-31T02:14:36Z",
-   "updated_at": "2026-07-31T02:15:46Z",
-   "actor": "yanboshao",
-   "jobs": []
   }
  ]
 }
