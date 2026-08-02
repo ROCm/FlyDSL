@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-02T18:00:53Z",
+ "updated": "2026-08-02T18:39:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30761426963,
+   "pr": 907,
+   "commit": "2bcf6f9aa64bd1e11d2c28b776225c165b775a7f",
+   "branch": "stochastic-rounding",
+   "event": "pull_request",
+   "title": "Add stochastic rounding and philox RNG under rocdl",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30761426963",
+   "created_at": "2026-08-02T18:34:38Z",
+   "updated_at": "2026-08-02T18:37:12Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 30760033343,
    "pr": 957,
@@ -53,10 +68,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-02T17:48:30Z",
-     "completed_at": null,
+     "completed_at": "2026-08-02T18:37:21Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30759589552/job/91527861255"
     }
    ]
@@ -1454,7 +1469,7 @@
   },
   {
    "run_id": 30634637638,
-   "pr": 907,
+   "pr": null,
    "commit": "37bfa9931ead17131dc3ec10df6bfc2f73e08cd6",
    "branch": "stochastic-rounding",
    "event": "pull_request",
@@ -2273,49 +2288,6 @@
      "started_at": "2026-07-31T02:38:15Z",
      "completed_at": "2026-07-31T03:08:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30599358133/job/91058909300"
-    }
-   ]
-  },
-  {
-   "run_id": 30598919061,
-   "pr": 954,
-   "commit": "cb0b459611efd198190b32233158a49c5a48e63e",
-   "branch": "mega_moe_v1",
-   "event": "pull_request",
-   "title": "MegaMoE on Gfx950",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30598919061",
-   "created_at": "2026-07-31T02:25:05Z",
-   "updated_at": "2026-07-31T02:35:27Z",
-   "actor": "yanboshao",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-31T02:29:54Z",
-     "completed_at": "2026-07-31T02:35:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30598919061/job/91057821748"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-31T02:30:17Z",
-     "completed_at": "2026-07-31T02:35:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30598919061/job/91057821769"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-31T02:30:18Z",
-     "completed_at": "2026-07-31T02:35:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30598919061/job/91057821775"
     }
    ]
   }
