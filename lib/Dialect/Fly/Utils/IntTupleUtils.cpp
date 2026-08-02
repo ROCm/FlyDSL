@@ -586,9 +586,9 @@ IntTupleBuilder<IntTupleValueAdaptor>::applySwizzle(IntTupleValueAdaptor v,
 
   auto retAttr = attrBuilder.applySwizzle(v.attr, swizzle);
 
-  // shortcut for trivial swizzle and static value
+  // A trivial swizzle is a no-op; preserve a deferred static leaf as-is.
   if (swizzle.isTrivialSwizzle()) {
-    return IntTupleValueAdaptor{v.getValue(), retAttr};
+    return v;
   }
   if (retAttr.isStatic()) {
     return materializeConstantLeaf(retAttr.getLeafAsInt());
