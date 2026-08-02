@@ -11,6 +11,7 @@ This guide covers the available FlyDSL kernels — normalization, softmax, GEMM,
 | **Softmax** | `build_softmax_module(M, N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | Online softmax, adaptive block size |
 | **Softmax backward** | `build_softmax_bwd_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | fp32 dot reduction, native-dtype register buffering |
 | **GEMM** | `compile_preshuffle_gemm(...)` | `@flyc.kernel` | fp8, int8, fp16, bf16 | Preshuffle B, ping-pong LDS, MFMA 16x16 |
+| **A8W4 SVDQuant GEMM** | `compile_preshuffle_gemm_a8w4(...)` | `@flyc.kernel` | MXFP8 × MXFP4 | gfx950 residual GEMM with optional fused low-rank up-projection |
 | **FlashAttention** | `build_flash_attn_func_module(...)` | `@flyc.kernel` | bf16, f16 (any arch); fp8 e4m3fn (gfx950, D=128, dense) | Dual-wave SWP fwd, GQA/MQA, causal, descale ABI |
 
 All kernels use the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`).
@@ -235,6 +236,50 @@ entry point (it replaced the earlier standalone `compile_mxfp6_gemm` from #780);
 the separate `compile_mxfp4_gemm` in `kernels/gemm/gemm_fp8fp4_gfx1250.py` is the
 distinct gfx1250 kernel. `batch>1` runs a strided-batched GEMM over `grid.z`.
 Covered by `tests/kernels/test_preshuffle_gemm.py`.
+
+### 3.2 A8W4 SVDQuant Preshuffle GEMM (`kernels/gemm/preshuffle_gemm_a8w4.py`)
+
+This standalone gfx950 kernel consumes an MXFP8 activation and a preshuffled
+MXFP4 weight, both with per-1x32 E8M0 scales. It is intended for integrations
+that precompute a low-rank down-projection `d = x @ L1.T` outside FlyDSL and
+need the up-projection fused into the residual GEMM:
+
+```python
+from kernels.gemm.preshuffle_gemm_a8w4 import compile_preshuffle_gemm_a8w4
+
+launch_fn = compile_preshuffle_gemm_a8w4(
+    M=0,
+    N=3072,
+    K=3072,
+    tile_m=32,
+    tile_n=128,
+    tile_k=128,
+    out_dtype="bf16",
+    epilogue="svd_bias",
+    rank=32,
+)
+```
+
+`epilogue` supports `"none"`, the bias/activation variants, `"svd"`, and
+`"svd_bias"`. The SVD modes compute `C += d @ L2.T` in f32 before conversion
+to the output type; `"svd_bias"` additionally adds a per-N bias. `rank` is a
+compile-time value. When `rank` is divisible by 16, the default
+`svd_use_mfma=True` uses BF16 MFMA for the up-projection; other ranks use the
+scalar fallback. SVD epilogues do not support `use_cshuffle_epilog=True`.
+
+The launcher ABI is:
+
+```python
+launch_fn(C, A, B, scale_a, scale_b, bias, d, L2, M, N, stream)
+```
+
+For `"none"` and non-SVD epilogues, pass empty tensors for unused `bias`, `d`,
+and `L2`. `A` is row-major MXFP8, `B` is 16x16-preshuffled packed MXFP4, and
+both scales use the matching `shuffle_scale_w4` layout. `K` must be divisible
+by the selected `tile_k` and by 256; `N` must be divisible by `tile_n`. The
+kernel handles ragged `M` through its runtime buffer bounds. The W4A4 factory
+`compile_preshuffle_gemm_w4(...)` exposes the same epilogue and launcher
+contract.
 
 **Pipeline details:**
 - **lds_stage=2 (ping-pong)**: Two LDS buffers for A tiles. Cross-tile A0 prefetch overlaps VMEM with LDS reads
