@@ -851,7 +851,7 @@ def compile_moe_gemm2(
                         from flydsl._mlir.dialects._math_ops_gen import fma as _math_fma
 
                         _uw = arith._to_raw
-                        scale_vec = _uw(vector.broadcast(T.f32x4, scale_val))
+                        scale_vec = _uw(fx.Vector.filled(4, scale_val, fx.Float32))
                         return arith.ArithValue(_math_fma(scale_vec, _uw(f32_partial_vec), _uw(f32_acc_vec)))
 
                     if const_expr(is_int4_bf16 or is_int4_bf16_groupwise):
