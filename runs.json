@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-03T06:35:55Z",
+ "updated": "2026-08-03T06:52:19Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30791487664,
+   "pr": null,
+   "commit": "1b4e34461b403304ba6e2644640865cf5b62dd8b",
+   "branch": "main",
+   "event": "push",
+   "title": "[Opt] Lazily materialize static int tuple leaves (#956)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30791487664",
+   "created_at": "2026-08-03T06:50:07Z",
+   "updated_at": "2026-08-03T06:50:18Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 30787278945,
    "pr": 948,
@@ -139,20 +154,20 @@
    "branch": "main",
    "event": "push",
    "title": "[Perf]optimize the flash attention fp8 performance for gfx950 (#950)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30786180182",
    "created_at": "2026-08-03T05:05:58Z",
-   "updated_at": "2026-08-03T05:11:00Z",
+   "updated_at": "2026-08-03T06:50:08Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-03T05:11:31Z",
-     "completed_at": null,
+     "completed_at": "2026-08-03T06:35:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30786180182/job/91600695154"
     },
     {
@@ -167,10 +182,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-03T05:11:00Z",
-     "completed_at": null,
+     "completed_at": "2026-08-03T06:50:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30786180182/job/91600695176"
     }
    ]
@@ -510,7 +525,7 @@
   },
   {
    "run_id": 30759093014,
-   "pr": 956,
+   "pr": null,
    "commit": "49e132a7b5ad7d736e784b2864529ac6957f73d6",
    "branch": "pr/enh-lazy-inttuple-leaves",
    "event": "pull_request",
@@ -2255,49 +2270,6 @@
      "started_at": "2026-07-31T10:04:57Z",
      "completed_at": "2026-07-31T14:22:44Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622104753/job/91129400273"
-    }
-   ]
-  },
-  {
-   "run_id": 30621845362,
-   "pr": null,
-   "commit": "294c01b045e200037ac24cd12b344c5bc2b4e656",
-   "branch": "phil/fix-reg-offset-dynamic-add-offset",
-   "event": "pull_request",
-   "title": "[Bugfix] Resolve reg offset on dynamic add_offset chains",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30621845362",
-   "created_at": "2026-07-31T09:57:52Z",
-   "updated_at": "2026-07-31T10:10:14Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-31T10:00:55Z",
-     "completed_at": "2026-07-31T10:09:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30621845362/job/91128602083"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-31T10:01:39Z",
-     "completed_at": "2026-07-31T10:10:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30621845362/job/91128602084"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-31T10:01:38Z",
-     "completed_at": "2026-07-31T10:10:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30621845362/job/91128602104"
     }
    ]
   }
