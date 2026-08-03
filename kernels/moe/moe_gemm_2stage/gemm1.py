@@ -901,8 +901,8 @@ def compile_moe_gemm1(
                                         packed_g, sc_g = b_gate_raw[ni]
                                         packed_u, sc_u = b_up_raw[ni]
                                         if const_expr(_scale_is_bf16):
-                                            sc_g = extract_bf16_scale(arith, sc_g, ku)
-                                            sc_u = extract_bf16_scale(arith, sc_u, ku)
+                                            sc_g = extract_bf16_scale(sc_g, ku)
+                                            sc_u = extract_bf16_scale(sc_u, ku)
                                     else:
                                         packed_g, sc_g = b_gate_raw[ni], None
                                         packed_u, sc_u = b_up_raw[ni], None

@@ -877,7 +877,7 @@ def compile_moe_gemm2(
                                     if const_expr(is_int4_bf16_groupwise):
                                         packed, sc = b_raw[ni]
                                         if const_expr(_scale_is_bf16):
-                                            sc = extract_bf16_scale(arith, sc, ku)
+                                            sc = extract_bf16_scale(sc, ku)
                                     else:
                                         packed, sc = b_raw[ni], None
                                     if const_expr(is_int4_bf16_groupwise and use_gfx950_cvt):

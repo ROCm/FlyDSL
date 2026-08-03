@@ -806,7 +806,7 @@ def _load_groupwise_scale(
     return scale_val
 
 
-def extract_bf16_scale(arith, scale_raw_i32, ku: int):
+def extract_bf16_scale(scale_raw_i32, ku: int):
     """Extract f32 scale from raw i32 dword loaded by bf16 groupwise path.
 
     In the ``(E, G//2, N, 2)`` layout two adjacent groups share one dword.
