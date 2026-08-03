@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-03T11:35:56Z",
+ "updated": "2026-08-03T13:22:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30815926565,
+   "pr": 960,
+   "commit": "da930d50eddf70aa7fbbe7c9b6a4e0790b82e9b8",
+   "branch": "new_bias_alibi_sink_attention",
+   "event": "pull_request",
+   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815926565",
+   "created_at": "2026-08-03T13:00:03Z",
+   "updated_at": "2026-08-03T13:01:58Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
+  {
+   "run_id": 30815507237,
+   "pr": 907,
+   "commit": "05345d29a1bc458ca658134aa34bf0add0aa61f8",
+   "branch": "stochastic-rounding",
+   "event": "pull_request",
+   "title": "Add stochastic rounding and philox RNG under rocdl",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815507237",
+   "created_at": "2026-08-03T12:54:07Z",
+   "updated_at": "2026-08-03T13:01:46Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 30796923931,
    "pr": null,
@@ -57,7 +87,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30795426916",
    "created_at": "2026-08-03T07:55:37Z",
-   "updated_at": "2026-08-03T11:33:37Z",
+   "updated_at": "2026-08-03T12:58:35Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -81,11 +111,29 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-03T11:33:36Z",
+     "completed_at": "2026-08-03T12:58:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30795426916/job/91643244915"
+    },
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
      "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-03T11:33:36Z",
+     "started_at": "2026-08-03T12:58:33Z",
      "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30795426916/job/91643244915"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30795426916/job/91693088491"
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-03T12:58:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30795426916/job/91693088504"
     }
    ]
   },
@@ -96,11 +144,11 @@
    "branch": "codex/gfx1100-wmma-foundation",
    "event": "pull_request",
    "title": "[Feature][Test] Validate gfx1100 LDS and integer WMMA foundations",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30794437563",
    "created_at": "2026-08-03T07:39:20Z",
-   "updated_at": "2026-08-03T09:48:17Z",
+   "updated_at": "2026-08-03T12:58:17Z",
    "actor": "skyguan92",
    "jobs": [
     {
@@ -115,9 +163,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-03T09:48:17Z",
+     "started_at": "2026-08-03T12:58:17Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30794437563/job/91651622593"
     },
@@ -468,7 +516,7 @@
   },
   {
    "run_id": 30782023895,
-   "pr": 907,
+   "pr": null,
    "commit": "4202f28ebfd3d78069c8dfb04ed1b53fdf94a646",
    "branch": "stochastic-rounding",
    "event": "pull_request",
@@ -2230,92 +2278,6 @@
      "started_at": "2026-07-31T10:33:30Z",
      "completed_at": "2026-07-31T11:26:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30623630216/job/91563410369"
-    }
-   ]
-  },
-  {
-   "run_id": 30623517332,
-   "pr": 926,
-   "commit": "dfa31d6e3fb46dc3db36435e6bbd11ebd0ca56a3",
-   "branch": "phil/fix-reg-offset-dynamic-add-offset",
-   "event": "pull_request",
-   "title": "[Bugfix] Resolve reg offset on dynamic add_offset chains",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30623517332",
-   "created_at": "2026-07-31T10:25:44Z",
-   "updated_at": "2026-07-31T16:04:25Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-31T10:29:30Z",
-     "completed_at": "2026-07-31T11:25:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30623517332/job/91133888540"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-31T15:22:53Z",
-     "completed_at": "2026-07-31T16:04:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30623517332/job/91133888542"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-31T10:29:33Z",
-     "completed_at": "2026-07-31T11:56:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30623517332/job/91133888594"
-    }
-   ]
-  },
-  {
-   "run_id": 30622588902,
-   "pr": null,
-   "commit": "70639336fc670840742ea8027c7c829fb060a94b",
-   "branch": "phil/fix-reg-offset-dynamic-add-offset",
-   "event": "pull_request",
-   "title": "[Bugfix] Resolve reg offset on dynamic add_offset chains",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622588902",
-   "created_at": "2026-07-31T10:09:57Z",
-   "updated_at": "2026-07-31T10:26:12Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-31T10:13:49Z",
-     "completed_at": "2026-07-31T10:26:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622588902/job/91131015069"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-31T10:13:47Z",
-     "completed_at": "2026-07-31T10:26:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622588902/job/91131015075"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-31T10:13:23Z",
-     "completed_at": "2026-07-31T10:25:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622588902/job/91131015166"
     }
    ]
   }
