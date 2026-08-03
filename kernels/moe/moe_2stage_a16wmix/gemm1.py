@@ -194,6 +194,37 @@ def _int4_nibble_to_bf16x8(raw_i32, scale_f32, *, use_k16=False):
     return v4i32.bitcast(fx.BFloat16)  # v8bf16
 
 
+def _int4_nibble_to_bf16x8_raw(raw_i32, *, use_k16=False):
+    """int4 (signed) -> bf16 for one MFMA K32 step WITHOUT the groupwise scale.
+
+    Same as :func:`_int4_nibble_to_bf16x8` but emits the raw dequant weights
+    ``(nibble-8)/16`` (``v_cvt_off_f32_i4``'s native output -- no per-element
+    ``v_mul_f32``). The groupwise scale (and the folded x16) is applied ONCE per
+    K-group on the small MFMA accumulator instead (see the ``_acc_scale_int4`` path in
+    the stage1 body): for BM16 (m_repeat=1) that trades 8 per-nibble muls for 4
+    per-accumulator fmas and drops the long-lived scaled-f32 operand VGPRs.
+    ``(nibble-8)/16`` is bf16-exact (values in ``{-7/16..7/16}``).
+    ``use_k16`` (gfx942): v_cvt_pk_bf16_f32 is gfx950-only -> scalar .to(BFloat16).
+    """
+    raw_even = fx.Int32(raw_i32)
+    raw_odd = raw_even.shrui(fx.Int32(4))
+    if use_k16:
+        bf16s = []
+        for j in range_constexpr(4):
+            f_lo = fx.Float32(rocdl.cvt_off_f32_i4(_raw(raw_even), byte_sel=j))
+            f_hi = fx.Float32(rocdl.cvt_off_f32_i4(_raw(raw_odd), byte_sel=j))
+            bf16s.append(f_lo.to(fx.BFloat16))
+            bf16s.append(f_hi.to(fx.BFloat16))
+        return fx.Vector.from_elements([_raw(x) for x in bf16s], fx.BFloat16)  # v8bf16
+    i32s = []
+    for j in range_constexpr(4):
+        f_lo = fx.Float32(rocdl.cvt_off_f32_i4(_raw(raw_even), byte_sel=j))
+        f_hi = fx.Float32(rocdl.cvt_off_f32_i4(_raw(raw_odd), byte_sel=j))
+        i32s.append(fx.Int32(_cvt_pk_bf16_f32_se(_raw(f_lo), _raw(f_hi))))
+    v4i32 = fx.Vector.from_elements([_raw(x) for x in i32s], fx.Int32)
+    return v4i32.bitcast(fx.BFloat16)  # v8bf16
+
+
 def kmchunks_for(BM):
     return BM // 16
 
@@ -265,6 +296,11 @@ def _gemm1_body_a16w4(
     KH_TILE_BYTES = TILE_K * a_elem_bytes  # A-LDS bytes per row per K-tile
     LDS_STRIDE = TILE_K  # bf16 elems per LDS row (pad_k=0, LDS128)
     m_repeat = BM // 16
+    # int4: apply the groupwise scale on the MFMA accumulator (per K32 group) instead of
+    # per weight element (see _int4_nibble_to_bf16x8_raw). Only wins for m_repeat==1
+    # (BM16, decode): 4 acc-fmas/group beats 8 nibble-muls; at BM>=32 the per-mi cost
+    # (4*m_repeat) meets/exceeds the 8-mul B-side path, so keep B-side scaling there.
+    _acc_scale_int4 = _is_int4 and m_repeat == 1
     k_unroll = KH_TILE_BYTES // 64  # bf16 8-per-lane K micro-steps per K-tile
     _k0_count = TILE_K // 128
     # Wave partition num_n_waves x k_wave. k_wave=1: 4 waves split TILE_N (TILE_N/4 each).
@@ -657,6 +693,18 @@ def _gemm1_body_a16w4(
         else:
             fx.gemm(mma_atom, acc, _bf16_frag(a8), _bf16_frag(b8), acc)
 
+    def _mma_scaled_add(acc, a8, b8_unscaled, scale_f32):
+        # acc += (scale*16) * (A @ b_unscaled). b_unscaled = (nibble-8)/16, so the folded
+        # x16 and the groupwise scale are applied once here on the 4-elem accumulator
+        # (the whole lane shares one N -> one scale) instead of per weight element.
+        tmp = fx.make_rmem_tensor(acc_layout, fx.Float32)
+        tmp.store(zero4)
+        _mma(tmp, a8, b8_unscaled)
+        eff = scale_f32 * fx.Float32(16.0)
+        va = fx.Vector(fx.memref_load_vec(acc))
+        vt = fx.Vector(fx.memref_load_vec(tmp))
+        acc.store(fx.Vector.from_elements([va[j] + eff * vt[j] for j in range_constexpr(4)], fx.Float32))
+
     # int4 groupwise scale N = expert_off + (col_g | col_g+inter); expert_off (N_OUT
     # units) doubles as the scale-N expert base ((E, N_OUT, G//2, 2)).
     if const_expr(_is_int4):
@@ -698,6 +746,15 @@ def _gemm1_body_a16w4(
         g_raw, u_raw, g_sc, u_sc = b_tile
         for ni in range_constexpr(num_acc_n):
             for ku in range_constexpr(k_unroll):
+                if const_expr(_acc_scale_int4):
+                    # unscaled dequant + per-group accumulator scaling (decode BM16).
+                    gb = _int4_nibble_to_bf16x8_raw(fx.Int32(_raw(g_raw[ni][ku // 4][ku % 4])), use_k16=use_k16)
+                    ub = _int4_nibble_to_bf16x8_raw(fx.Int32(_raw(u_raw[ni][ku // 4][ku % 4])), use_k16=use_k16)
+                    for mi in range_constexpr(m_repeat):
+                        a8 = a_frags[mi][ku]
+                        _mma_scaled_add(acc_gate[mi][ni], a8, gb, g_sc[ni][ku])
+                        _mma_scaled_add(acc_up[mi][ni], a8, ub, u_sc[ni][ku])
+                    continue
                 _gsc = None if const_expr(_is_bf16) else g_sc[ni][ku]
                 _usc = None if const_expr(_is_bf16) else u_sc[ni][ku]
                 gb = upconvert_b(g_raw[ni], ku, _gsc)
