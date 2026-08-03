@@ -562,6 +562,7 @@ def _run_full_e2e(
         w2=w2_kernel,
         w2_scale=w2_scale_1d,
         max_tok_per_rank=mtpr,
+        stage2_p2p_quant=args.stage2_p2p_quant,
     )
     torch.cuda.synchronize()
     ms.shmem_barrier_all()
@@ -1029,6 +1030,7 @@ def _run_mega_only(
         w2=w2_kernel,
         w2_scale=w2_scale_1d,
         max_tok_per_rank=mtpr,
+        stage2_p2p_quant=args.stage2_p2p_quant,
     )
     torch.cuda.synchronize()
     ms.shmem_barrier_all()
@@ -1414,6 +1416,13 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--network", type=str, default="v4_pro", choices=list(NETWORKS))
     p.add_argument("--quant", type=str, default="a8w4", choices=["a8w4"])
+    p.add_argument(
+        "--stage2-p2p-quant",
+        type=str,
+        default="auto",
+        choices=["auto", "none", "fp8_blockwise_1x32"],
+        help="override the Stage2 transport mode; auto keeps the production threshold",
+    )
     p.add_argument("--tokens", type=int, default=64)
     p.add_argument("--mtpr", type=int, default=0, help="0 selects the smallest power-of-two capacity for each BS")
     p.add_argument(

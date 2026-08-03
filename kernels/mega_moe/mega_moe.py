@@ -24,7 +24,7 @@ class MegaMoEV2:
     # fmt: off
     def __init__(self, *, rank: int, world_size: int, model_dim: int, inter_dim: int, experts: int, topk: int,
         quant: str, w1: torch.Tensor, w1_scale: torch.Tensor, w2: torch.Tensor, w2_scale: torch.Tensor,
-        max_tok_per_rank: int, mega_scheme: str = "fixedslot"):
+        max_tok_per_rank: int, mega_scheme: str = "fixedslot", stage2_p2p_quant: str = "auto"):
     # fmt: on
         if quant != "a8w4":
             raise ValueError("MegaMoEV2 currently supports quant='a8w4' only")
@@ -32,6 +32,8 @@ class MegaMoEV2:
             raise ValueError(f"experts={experts} must be divisible by world_size={world_size}")
         if max_tok_per_rank <= 0 or max_tok_per_rank & (max_tok_per_rank - 1):
             raise ValueError(f"max_tok_per_rank={max_tok_per_rank} must be a power of two")
+        if stage2_p2p_quant not in ("auto", "none", "fp8_blockwise_1x32"):
+            raise ValueError(f"unsupported stage2_p2p_quant={stage2_p2p_quant!r}")
         self.rank = int(rank)
         self.world_size = int(world_size)
         self.model_dim = int(model_dim)
@@ -40,6 +42,7 @@ class MegaMoEV2:
         self.epr = int(experts // world_size)
         self.topk = int(topk)
         self.mtpr = int(max_tok_per_rank)
+        self._stage2_p2p_quant = stage2_p2p_quant
         self.dev = torch.device("cuda", rank)
         self.max_recv = self.world_size * self.mtpr
         compact = self.mtpr > FIXED_SLOT_MAX_MTPR
@@ -166,7 +169,7 @@ class MegaMoEV2:
         self._s1_disp = torch.tensor(table, dtype=torch.int64, device=self.dev)
 
     def _select_config(self, tokens: int) -> MegaMoEConfig:
-        config = select_mega_moe_config(tokens, self.mtpr)
+        config = select_mega_moe_config(tokens, self.mtpr, self._stage2_p2p_quant)
         self._active_config = config
         return config
 
@@ -309,9 +312,10 @@ class MegaMoEV2:
             self._g2v2_inter, self._g2v2_hidden, s_fx, BM=stage2.block_m,
             SBM=config.stage1.sort_block_m, BN=stage2.block_n, BK=stage2.block_k,
             use_nt=stage2.use_nt, g2_bhoist=stage2.b_hoist,
+            g2_b2stage=stage2.b2stage,
             g2_ascale_pf=stage2.ascale_prefetch, g2_spart=stage2.spatial_partition,
             persist=stage2.persist, persist_cu=stage2.persist_cu,
-            persist_strided=stage2.persist_strided, g2_bf16_lds=stage2.bf16_lds, **invariants)
+            persist_strided=stage2.persist_strided, **invariants)
         # fmt: on
         self._g2_active_block_m = stage2.block_m
         return comb_op.combine_no_stage1(

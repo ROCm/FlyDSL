@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from functools import lru_cache
 
 TOKEN_BUCKETS = (1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768)
-P2P_FP8_MIN_TOKENS = 1024
+P2P_FP8_MIN_TOKENS = 16
 FIXED_SLOT_MAX_MTPR = 255
 
 
@@ -43,9 +43,9 @@ class Stage2Config:
     persist_strided: bool = False
     block_k: int = 256
     b_hoist: bool = True
+    b2stage: bool = True
     ascale_prefetch: bool = True
     spatial_partition: int = 402
-    bf16_lds: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,8 +61,6 @@ class MegaMoEConfig:
             raise ValueError(f"Stage2 block_m={bm} must divide Stage1 sort_block_m={sbm}")
         if self.p2p_quant not in ("none", "fp8_blockwise_1x32"):
             raise ValueError(f"unsupported p2p_quant={self.p2p_quant!r}")
-        if self.p2p_quant != "none" and self.stage2.bf16_lds:
-            raise ValueError("FP8 P2P requires Stage2 bf16_lds=False")
 
 
 _FIXED_GEOMETRY = {
@@ -174,7 +172,43 @@ def _select_stage1(bucket: int, fixed_slot: bool, mtpr: int) -> Stage1Config:
     )
 
 
-def _select_stage2(bucket: int, fixed_slot: bool) -> Stage2Config:
+_FP8_SMALL_STAGE2 = {
+    64: Stage2Config(
+        block_m=32,
+        block_n=256,
+        persist=False,
+        persist_cu=0,
+        use_nt=True,
+        b_hoist=False,
+    ),
+    128: Stage2Config(
+        block_m=32,
+        block_n=256,
+        persist=True,
+        persist_cu=64,
+        use_nt=True,
+    ),
+    256: Stage2Config(
+        block_m=64,
+        block_n=256,
+        persist=True,
+        persist_cu=128,
+        use_nt=False,
+    ),
+    512: Stage2Config(
+        block_m=64,
+        block_n=256,
+        persist=True,
+        persist_cu=240,
+        use_nt=False,
+        persist_strided=True,
+    ),
+}
+
+
+def _select_stage2(bucket: int, fixed_slot: bool, p2p_quant: str) -> Stage2Config:
+    if p2p_quant == "fp8_blockwise_1x32" and bucket in _FP8_SMALL_STAGE2:
+        return _FP8_SMALL_STAGE2[bucket]
     block_m = 64 if bucket >= 4096 else 32
     block_n = 256 if bucket in (1, 4, 64) or bucket >= 1024 or (not fixed_slot and bucket < 128) else 128
     persist = bucket >= 128
@@ -195,11 +229,11 @@ def _select_stage2(bucket: int, fixed_slot: bool) -> Stage2Config:
 def _select_bucket_config(bucket: int, mtpr: int, p2p_quant: str) -> MegaMoEConfig:
     fixed_slot = mtpr <= FIXED_SLOT_MAX_MTPR
     stage1 = _select_stage1(bucket, fixed_slot, mtpr)
-    stage2 = _select_stage2(bucket, fixed_slot)
+    stage2 = _select_stage2(bucket, fixed_slot, p2p_quant)
     return MegaMoEConfig(stage1=stage1, stage2=stage2, p2p_quant=p2p_quant)
 
 
-def select_mega_moe_config(tokens: int, mtpr: int) -> MegaMoEConfig:
+def select_mega_moe_config(tokens: int, mtpr: int, p2p_quant: str = "auto") -> MegaMoEConfig:
     if mtpr <= 0 or mtpr & (mtpr - 1):
         raise ValueError(f"mtpr={mtpr} must be a positive power of two")
     if tokens > mtpr:
@@ -208,5 +242,8 @@ def select_mega_moe_config(tokens: int, mtpr: int) -> MegaMoEConfig:
     fixed_slot = mtpr <= FIXED_SLOT_MAX_MTPR
     if fixed_slot and bucket not in _FIXED_GEOMETRY:
         raise ValueError(f"fixed-slot does not support token bucket {bucket}")
-    p2p_quant = "fp8_blockwise_1x32" if tokens > P2P_FP8_MIN_TOKENS else "none"
+    if p2p_quant == "auto":
+        p2p_quant = "fp8_blockwise_1x32" if tokens >= P2P_FP8_MIN_TOKENS else "none"
+    elif p2p_quant not in ("none", "fp8_blockwise_1x32"):
+        raise ValueError(f"unsupported p2p_quant={p2p_quant!r}")
     return _select_bucket_config(bucket, mtpr, p2p_quant)

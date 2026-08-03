@@ -166,6 +166,7 @@ def gemm2_compute_v2(
     SBM=None,
     g2_bhoist=True,
     g2_ascale_pf=True,
+    g2_b2stage=True,
     expert_offset=0,
 ):
     """Run the GEMM2 K-loop and return accumulators for the selected epilogue."""
@@ -448,8 +449,8 @@ def gemm2_compute_v2(
                 n += 1
         return n
 
-    if const_expr(BM == 64 and BN == 256):
-        # BM64/BN256 uses the 1-stage B path unconditionally; do not depend on env knobs.
+    if const_expr(BM == 64 and BN == 256 and not g2_b2stage):
+        # Retained as an explicit fallback for direct A/B experiments.
         for kt_iv, state in range(
             fx.Int32(0),
             K_TILES_RT,
@@ -639,7 +640,7 @@ def _spart_output_tile_index(block_1d_id, M0, N0, group_num, m01):
     return m_block_idx, n_block_idx
 
 
-def _resolve_g2_knobs(g2_bhoist, g2_ascale_pf, g2_spart, g2_bf16_lds, use_reduce):
+def _resolve_g2_knobs(g2_bhoist, g2_ascale_pf, g2_spart):
     """Resolve explicit GEMM2 knobs against deterministic defaults."""
     g2_bhoist = True if g2_bhoist is None else bool(g2_bhoist)
     g2_ascale_pf = True if g2_ascale_pf is None else bool(g2_ascale_pf)
@@ -648,5 +649,4 @@ def _resolve_g2_knobs(g2_bhoist, g2_ascale_pf, g2_spart, g2_bf16_lds, use_reduce
     g2_m01 = g2_spart % 100 if g2_spart > 0 else 0
     if g2_spart > 0 and (g2_group_num < 1 or g2_m01 < 1):
         raise AssertionError(f"g2_spart={g2_spart} must encode GroupNum>=1,M01>=1 as GroupNum*100+M01 (e.g. 402)")
-    g2_bf16_lds = (True if g2_bf16_lds is None else bool(g2_bf16_lds)) and use_reduce
-    return g2_bhoist, g2_ascale_pf, g2_spart, g2_group_num, g2_m01, g2_bf16_lds
+    return g2_bhoist, g2_ascale_pf, g2_spart, g2_group_num, g2_m01
