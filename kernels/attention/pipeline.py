@@ -330,6 +330,18 @@ class PipelineScheduler:
 
         self._validate_dataflow()
         self._config = self._build_config()
+        # The prime stage is the first entry of the first cluster — the async
+        # DMA that must run ahead of everything else in the pipeline.
+        self._prime_fn = self._config.clusters[0].entries[0].fn
+        # For the epilogue drain: collect the fn of the LAST sub-stage of any
+        # decomposed stage. The last sub-stage already consumed the carry in
+        # the main loop's final iteration; running it again would double-count.
+        self._decomposed_last_fns = set()
+        for w in self.wires:
+            if w.stage.max_slots > 1 and self._config.depth > 1:
+                subs = w.stage.decompose(min(w.stage.max_slots, self._config.depth))
+                if len(subs) > 1:
+                    self._decomposed_last_fns.add(subs[-1].fn)
         # self._dump_config()  # uncomment for pipeline debug
 
     @property
@@ -601,147 +613,123 @@ class PipelineScheduler:
 
     # ── Code emission ────────────────────────────────────────────────────
 
-    def emit_prologue(self, infra: InfraContext, shared_regs: dict) -> None:
-        """Prime ``depth-1`` tiles before the main loop.
+    def _is_prime(self, entry: ClusterEntry) -> bool:
+        """True if this entry is the pipeline's prime stage (first entry of
+        first cluster — the async DMA that must run ahead of everything else)."""
+        return entry.fn is self._prime_fn
 
-        For depth-2: DMA tile 0 into buf 0, wait, barrier.
-        For depth-3: additionally DMA tile 1 into buf 1, DMA V tile 0.
-        Then open wave-group stagger if enabled.
+    def _run_non_prime(self, cluster: ClusterSpec, infra: InfraContext,
+                       shared_regs: dict, label: str = "") -> None:
+        """Run all entries in a cluster EXCEPT the prime stage."""
+        for entry in cluster.entries:
+            if not self._is_prime(entry):
+                if label:
+                    print(f"  {label} C{cluster.index}({cluster.kind.name}): {entry.name}")
+                result = entry.fn(infra, **shared_regs)
+                if result:
+                    shared_regs.update(result)
+
+    def emit_prologue(self, infra: InfraContext, shared_regs: dict) -> None:
+        """Prime the pipeline by running the first stage ``depth-1`` tiles ahead.
+
+        - depth=1: no priming needed (all stages run in lockstep per tile).
+        - depth>=2: run the prime stage for the first tile(s), wait, barrier.
         """
         from flydsl.expr import rocdl
 
         depth = self._config.depth
 
-        # DMA first tile into buf 0. LoadKV must complete (waitcnt) before
-        # ReadKV reads from LDS — run them with a wait in between.
-        infra.tile_idx = 0
-        infra.buf_slot = 0
-        for c in self._config.clusters:
-            if c.kind == StageKind.MEMORY:
-                for entry in c.entries:
-                    if entry.name == "LoadKV":
-                        entry.fn(infra)
-                rocdl.s_waitcnt(vmcnt=0)
-                rocdl.s_barrier()
-                for entry in c.entries:
-                    if entry.name != "LoadKV":
-                        result = entry.fn(infra, **shared_regs)
-                        if result:
-                            shared_regs.update(result)
-                break
+        print(f"[PROLOGUE] depth={depth}")
+        if depth >= 2:
+            for t in range(depth - 1):
+                infra.tile_idx = t
+                infra.buf_slot = t % self._config.lds_ring_slots
+                print(f"  [PRIME] tile={t} buf={infra.buf_slot}")
+                self._prime_fn(infra)
+            rocdl.s_waitcnt(vmcnt=0)
+            rocdl.s_barrier()
 
-        # For depth >= 3: prefetch additional tiles
-        for t in range(1, depth - 1):
-            infra.tile_idx = t
-            infra.buf_slot = t % self._config.lds_ring_slots
-            for c in self._config.clusters:
-                if c.kind == StageKind.MEMORY:
-                    self._execute_cluster(c, infra, shared_regs)
-                    break
-
-        # Open wave-group stagger
         if self.enable_stagger and infra.stagger_i32 is not None:
             self._stagger_open(infra.stagger_i32)
-        else:
+        elif depth >= 2:
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
 
     def emit_main_loop(self, infra: InfraContext, shared_regs: dict,
                        n_kv_tiles: int) -> None:
-        """Emit the main KV-tile loop with cluster-based pipelining.
+        """Emit the main KV-tile loop.
 
-        The loop is compile-time unrolled via ``range_constexpr``. Each
-        iteration:
-          1. Memory clusters: DMA next tile (async) + read current from LDS
-          2. Compute clusters: execute stage callables
-          3. Wait for next tile's DMA + barrier
-
-        For staggered pipelines, ``_dualwave_sync_barrier()`` separates
-        each cluster. For non-staggered, a single vmcnt drain + barrier
-        at the loop bottom suffices.
+        - depth=1: each iteration runs the prime stage synchronously (issue +
+          wait + barrier), then all remaining stages.
+        - depth>=2: prefetch the prime stage for the next tile (async), then
+          run all non-prime stages on the current tile, drain at the bottom.
         """
         from flydsl.expr import const_expr, range_constexpr, rocdl
 
         depth = self._config.depth
         clusters = self._config.clusters
         staggered = self.enable_stagger and infra.stagger_i32 is not None
-
+        print(f"[MAIN_LOOP] n_kv_tiles={n_kv_tiles}, staggered={staggered}, "
+              f"num_clusters={len(clusters)}")
         for kv in range_constexpr(n_kv_tiles):
             read_buf = kv % self._config.lds_ring_slots
             write_buf = (kv + 1) % self._config.lds_ring_slots
             infra.buf_slot = read_buf
 
             if staggered:
-                # Staggered path: execute each cluster with sync barriers
                 for ci, cluster in enumerate(clusters):
                     infra.cluster_id = ci
                     if cluster.kind == StageKind.MEMORY:
-                        # Issue DMA for next tile (async)
                         if const_expr(kv + depth - 1 < n_kv_tiles):
                             infra.tile_idx = kv + depth - 1
                             infra.buf_slot = write_buf
                             self._execute_cluster(cluster, infra, shared_regs)
                             infra.buf_slot = read_buf
-                        # Wait for current tile's data
                         rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0)
                     else:
                         self._execute_cluster(cluster, infra, shared_regs)
-
                     self._dualwave_sync_barrier()
+
+            elif depth == 1:
+                # Synchronous: prime stage → wait → all other stages.
+                infra.tile_idx = kv
+                print(f"[LOOP d1 kv={kv}] prime tile={kv} buf={infra.buf_slot}")
+                self._prime_fn(infra)
+                rocdl.s_waitcnt(vmcnt=0)
+                rocdl.s_barrier()
+                for c in clusters:
+                    self._run_non_prime(c, infra, shared_regs, label=f"[LOOP d1 kv={kv}]")
+
             else:
-                # Non-staggered path: prefetch + compute + drain
-                did_prefetch = False
                 if const_expr(kv + 1 < n_kv_tiles):
                     infra.tile_idx = kv + 1
                     infra.buf_slot = write_buf
-                    for c in clusters:
-                        if c.kind == StageKind.MEMORY:
-                            for entry in c.entries:
-                                if entry.name == "LoadKV":
-                                    result = entry.fn(infra)
-                                    if result:
-                                        shared_regs.update(result)
-                                    break
-                            break
+                    print(f"[LOOP d2 kv={kv}] prefetch prime tile={kv+1} buf={write_buf}")
+                    self._prime_fn(infra)
                     infra.buf_slot = read_buf
-                    did_prefetch = True
 
-                # Read current tile from LDS + run compute. Always skip LoadKV.
                 for c in clusters:
-                    if c.kind == StageKind.MEMORY:
-                        for entry in c.entries:
-                            if entry.name != "LoadKV":
-                                result = entry.fn(infra, **shared_regs)
-                                if result:
-                                    shared_regs.update(result)
-                    else:
-                        self._execute_cluster(c, infra, shared_regs)
+                    self._run_non_prime(c, infra, shared_regs, label=f"[LOOP d2 kv={kv}]")
 
-                # Drain next tile's DMA + sync
                 rocdl.s_waitcnt(vmcnt=0)
                 rocdl.s_barrier()
 
     def emit_epilogue(self, infra: InfraContext, shared_regs: dict) -> None:
-        """Drain remaining in-flight work after the loop.
+        """Drain the pipeline after the main loop.
 
-        When decomposed stages produce loop-carried intermediates (e.g.
-        ``v_p_partial`` from SoftmaxStart), the last iteration's output
-        hasn't been consumed yet. The epilogue runs one final drain pass
-        through the COMPUTE and MEMORY clusters (without new DMA) to
-        process it.
-
-        For staggered pipelines: ``(depth-1)`` full drain passes with
-        decreasing vmcnt, then close the stagger.
-
-        For non-staggered: one drain pass through all non-LoadKV stages.
+        - depth=1: nothing to drain.
+        - depth>=2: run ``depth-1`` drain iterations through all non-prime
+          stages (no new DMA, just process remaining loop-carried state).
         """
         from flydsl.expr import rocdl
 
+        depth = self._config.depth
         clusters = self._config.clusters
 
-        if self.enable_stagger and infra.stagger_i32 is not None:
-            depth = self._config.depth
+        if depth <= 1:
+            return
 
+        if self.enable_stagger and infra.stagger_i32 is not None:
             for drain in range(depth - 1):
                 for cluster in clusters:
                     infra.cluster_id = cluster.index
@@ -750,407 +738,22 @@ class PipelineScheduler:
                     else:
                         self._execute_cluster(cluster, infra, shared_regs)
                     self._dualwave_sync_barrier()
-
             self._stagger_close(infra.stagger_i32)
         else:
-            # Drain: run all non-LoadKV stages once more to process the
-            # last iteration's loop-carried intermediates (v_p_partial, etc.)
-            actually_decomposed = self._config.depth > 1 and any(w.stage.max_slots > 1 for w in self.wires)
-            if actually_decomposed:
+            # Drain: run all non-prime stages, skipping the LAST sub-stage
+            # of any decomposed stage (it already consumed the carry in the
+            # main loop's final iteration — running it again would double-count).
+            print(f"[EPILOGUE] depth={depth}, drains={depth-1}")
+            for drain in range(depth - 1):
                 for c in clusters:
-                    if c.kind == StageKind.MEMORY:
-                        for entry in c.entries:
-                            if entry.name != "LoadKV":
-                                result = entry.fn(infra, **shared_regs)
-                                if result:
-                                    shared_regs.update(result)
-                    else:
-                        self._execute_cluster(c, infra, shared_regs)
+                    for entry in c.entries:
+                        if self._is_prime(entry):
+                            continue
+                        if entry.fn in self._decomposed_last_fns:
+                            print(f"  [DRAIN {drain}] SKIP C{c.index}: {entry.name} (decomposed last)")
+                            continue
+                        print(f"  [DRAIN {drain}] C{c.index}({c.kind.name}): {entry.name}")
+                        result = entry.fn(infra, **shared_regs)
+                        if result:
+                            shared_regs.update(result)
 
-
-# ---------------------------------------------------------------------------
-# Pipeline builders (user-facing API)
-# ---------------------------------------------------------------------------
-
-
-def build_standard_attention_pipeline(
-    *,
-    max_depth: int = 3,
-    enable_stagger: bool = True,
-) -> PipelineScheduler:
-    """Build the standard flash-attention pipeline (no flex hooks).
-
-    Wire list::
-
-        LoadKV          →                              (DMA to LDS)
-        ReadKV          → frag_K, frag_Vt              (LDS to regs)
-        Gemm1_QK        ← frag_K, frag_Q  → frag_S
-        SoftmaxFinish   ← v_p_partial, l_i → frag_P, l_i   carry: v_p_partial, l_i
-        BridgeP         ← frag_P           → frag_P_a
-        RescaleAndGemm2 ← frag_S, frag_P_a, frag_Vt, m_i, frag_O
-                                           → v_p_partial, m_i, frag_O
-                                                            carry: m_i, frag_O
-    """
-    wires = _build_attention_wires()
-    return PipelineScheduler(
-        wires, max_depth=max_depth, enable_stagger=enable_stagger,
-    )
-
-
-def build_flex_attention_pipeline(
-    *,
-    score_mod: Optional[Callable] = None,
-    mask_mod: Optional[Callable] = None,
-    max_depth: int = 3,
-    enable_stagger: bool = True,
-) -> PipelineScheduler:
-    """Build a flex-attention pipeline with optional score_mod/mask_mod.
-
-    Inserts ScoreMod and/or MaskMod wires between Gemm1_QK and
-    SoftmaxFinish. The scheduler auto-adjusts depth.
-    """
-    wires = _build_attention_wires(score_mod=score_mod, mask_mod=mask_mod)
-    return PipelineScheduler(
-        wires, max_depth=max_depth, enable_stagger=enable_stagger,
-    )
-
-
-def _build_attention_wires(
-    *,
-    score_mod: Optional[Callable] = None,
-    mask_mod: Optional[Callable] = None,
-) -> list[Wire]:
-    """Assemble the wire list for standard or flex attention."""
-    wires = [
-        Wire(LoadKV(),   out=()),
-        Wire(ReadKV(),   out=("frag_K", "frag_Vt")),
-        Wire(Gemm1_QK(), inp=("frag_K", "frag_Q"), out=("frag_S",),
-             carry=("frag_Q",)),
-    ]
-    if score_mod is not None:
-        wires.append(Wire(
-            ScoreMod(score_mod), inp=("frag_S",), out=("frag_S",),
-        ))
-    if mask_mod is not None:
-        wires.append(Wire(
-            MaskMod(mask_mod), inp=("frag_S",), out=("frag_S",),
-        ))
-    wires.extend([
-        Wire(SoftmaxFinish(), inp=("v_p_partial", "l_i"),
-             out=("frag_P", "l_i"), carry=("v_p_partial", "l_i")),
-        Wire(BridgeP(),       inp=("frag_P",), out=("frag_P_a",)),
-        Wire(RescaleAndGemm2(),
-             inp=("frag_S", "frag_P_a", "frag_Vt", "m_i", "frag_O"),
-             out=("v_p_partial", "m_i", "frag_O"),
-             carry=("m_i", "frag_O")),
-    ])
-    return wires
-
-
-# ---------------------------------------------------------------------------
-# Concrete stages — extracted from flex_attention_layout_gfx950.py
-# ---------------------------------------------------------------------------
-#
-# Each stage uses the same layout-API primitives as the original kernel:
-# fx.gemm, fx.copy, partition_C, make_fragment, BufferCopyLDS128b, etc.
-#
-# Import these inside execute() to avoid top-level FlyDSL deps when the
-# module is used for scheduler-only testing.
-# ---------------------------------------------------------------------------
-
-
-class LoadKV(PipelineStage):
-    """DMA K+V tiles from global memory into LDS (async, vmcnt-tracked).
-
-    Issues buffer_load_dwordx4...lds via BufferCopyLDS128b. Both K and V
-    for the target tile are loaded into the specified LDS buffer slot.
-    The actual data won't be consumed until a later cluster issues the
-    LDS→register reads + s_waitcnt.
-
-    This is a MEMORY stage — the scheduler places it in a memory cluster.
-    """
-
-    @property
-    def name(self):
-        return "LoadKV"
-
-    @property
-    def kind(self):
-        return StageKind.MEMORY
-
-    @property
-    def resources(self):
-        return ResourceDecl(dma_count=8, lds_bytes=0)
-
-    def execute(self, infra, **kwargs):
-        infra.stage_kv_to_lds(infra.tile_idx, infra.buf_slot)
-        return {}
-
-
-class ReadKV(PipelineStage):
-    """Read K and V fragments from LDS into registers.
-
-    Copies from the current LDS buffer slot into the MMA B-operand
-    register fragments using UniversalCopy128b (LDS→register).
-
-    This is a MEMORY stage — the LDS reads use the LGKM counter.
-    """
-
-    @property
-    def name(self):
-        return "ReadKV"
-
-    @property
-    def kind(self):
-        return StageKind.MEMORY
-
-    @property
-    def resources(self):
-        return ResourceDecl(lds_read_count=8)
-
-    def execute(self, infra, **kwargs):
-        infra.load_kv_from_lds(infra.buf_slot)
-        buf = infra.buf_slot
-        return {"frag_K": infra.frag_K[buf], "frag_Vt": infra.frag_Vt[buf]}
-
-
-class Gemm1_QK(PipelineStage):
-    """GEMM1: S = Q @ K^T producing raw attention scores.
-
-    Uses ``fx.gemm(tiled_mma_qk, frag_S, frag_Q, frag_K, frag_S)``
-    with the resident Q fragment and the K fragment from ReadKV.
-    """
-
-    @property
-    def name(self):
-        return "Gemm1_QK"
-
-    @property
-    def kind(self):
-        return StageKind.COMPUTE
-
-    @property
-    def resources(self):
-        return ResourceDecl(mfma_count=4)
-
-    def execute(self, infra, *, frag_K, frag_Q, **_):
-        import flydsl.expr as fx
-        frag_S = infra.thr_qk.make_fragment_C(infra.sP)
-        frag_S.fill(0.0)
-        fx.gemm(infra.tiled_mma_qk, frag_S, frag_Q, frag_K, frag_S)
-        return {"frag_S": frag_S}
-
-
-class ScoreMod(PipelineStage):
-    """Apply a user-supplied ``score_mod(score, b, h, q_idx, kv_idx)`` to frag_S.
-
-    A flex-attention compute stage. The ``score_mod`` callable operates on
-    ``fx`` scalar values (compile-time inlined). This stage is omitted from
-    the wire list in standard attention pipelines.
-    """
-
-    def __init__(self, score_mod_fn: Callable):
-        self._fn = score_mod_fn
-
-    @property
-    def name(self):
-        return "ScoreMod"
-
-    @property
-    def kind(self):
-        return StageKind.COMPUTE
-
-    @property
-    def resources(self):
-        return ResourceDecl(valu_count=64)
-
-    def execute(self, infra, *, frag_S, **_):
-        # Apply score_mod per element of the S fragment.
-        # The exact per-element iteration depends on the fragment layout;
-        # infra provides n_c (number of C-fragment slots) and the
-        # row/col coordinate maps for q_idx/kv_idx derivation.
-        n_c = infra.n_c
-        for i in infra.range_constexpr(n_c):
-            frag_S[i] = self._fn(frag_S[i], infra, i)
-        return {"frag_S": frag_S}
-
-
-class MaskMod(PipelineStage):
-    """Apply a user-supplied ``mask_mod(b, h, q_idx, kv_idx) -> bool`` to frag_S.
-
-    Positions where ``mask_mod`` returns False are set to ``-inf`` so they
-    contribute zero probability after softmax. This stage is omitted from
-    the wire list in standard attention pipelines.
-    """
-
-    def __init__(self, mask_mod_fn: Callable):
-        self._fn = mask_mod_fn
-
-    @property
-    def name(self):
-        return "MaskMod"
-
-    @property
-    def kind(self):
-        return StageKind.COMPUTE
-
-    @property
-    def resources(self):
-        return ResourceDecl(valu_count=64)
-
-    def execute(self, infra, *, frag_S, **_):
-        import flydsl.expr as fx
-        n_c = infra.n_c
-        neg_inf = fx.Float32(float("-inf"))
-        for i in infra.range_constexpr(n_c):
-            mask = self._fn(infra, i)
-            frag_S[i] = mask.select(frag_S[i], neg_inf)
-        return {"frag_S": frag_S}
-
-
-class SoftmaxFinish(PipelineStage):
-    """Finish the PREVIOUS tile's softmax: exp2 second half + reduce_sum + cast.
-
-    Reads ``v_p_partial`` (loop-carried from the previous iteration's
-    RescaleAndGemm2 stage) and produces ``frag_P`` ready for the P bridge.
-
-    In the dualwave kernel this corresponds to the exp2(16,16) + reduce_sum +
-    cast_p sequence in Cluster 1/5 that finishes the prior tile's softmax
-    while the current tile's GEMM1 runs alongside.
-    """
-
-    @property
-    def name(self):
-        return "SoftmaxFinish"
-
-    @property
-    def kind(self):
-        return StageKind.COMPUTE
-
-    @property
-    def resources(self):
-        return ResourceDecl(exp_count=16, valu_count=16)
-
-    def execute(self, infra, *, v_p_partial, l_i, **_):
-        from flydsl.expr import math as fmath
-        _FM = infra._FM
-        n_rows = infra.n_rows
-        _row_reduce = infra.row_reduce
-
-        for r in infra.range_constexpr(n_rows):
-            slots = infra.row_slots[r]
-            row_sum = v_p_partial[slots[0]]
-            for si in range(1, len(slots)):
-                row_sum = row_sum.addf(v_p_partial[slots[si]], fastmath=_FM)
-            tile_l = _row_reduce(row_sum, "sum")
-            l_i[r] = l_i[r] + tile_l
-
-        frag_P = v_p_partial
-        return {"frag_P": frag_P, "l_i": l_i}
-
-
-class BridgeP(PipelineStage):
-    """C→A bridge: write P to LDS, read back as GEMM2 A-operand.
-
-    The GEMM1 C-fragment layout doesn't match the GEMM2 A-fragment layout,
-    so P must round-trip through LDS. Uses ``partition_C`` for the
-    coordinate map and ``fx.copy`` with UniversalCopy for the read-back.
-
-    This is a MEMORY stage (LDS writes + barriers + LDS reads).
-    """
-
-    @property
-    def name(self):
-        return "BridgeP"
-
-    @property
-    def kind(self):
-        return StageKind.MEMORY
-
-    @property
-    def resources(self):
-        return ResourceDecl(lds_read_count=4)
-
-    def execute(self, infra, *, frag_P, **_):
-        import flydsl.expr as fx
-        from flydsl.expr import rocdl
-
-        n_c = infra.n_c
-        tr = infra.tr
-        tc = infra.tc
-        sP = infra.sP
-        elem_dtype = infra.elem_dtype
-
-        rocdl.sched_barrier(0)
-        fx.gpu.barrier()
-        for i in infra.range_constexpr(n_c):
-            sP[fx.get_scalar(tr[i]), fx.get_scalar(tc[i])] = frag_P[i].to(elem_dtype)
-        fx.gpu.barrier()
-        rocdl.sched_barrier(0)
-
-        frag_P_a = infra.thr_pv.make_fragment_A(sP)
-        fx.copy(infra.uca, infra.tcA2.partition_S(sP), infra.tcA2.retile(frag_P_a))
-        return {"frag_P_a": frag_P_a}
-
-
-class RescaleAndGemm2(PipelineStage):
-    """Fused: softmax start (reduce_max, rescale O, sub_m, exp2 first half)
-    + GEMM2 (O += P @ V) with MFMA/VALU interleaving.
-
-    This fuses the rescale and P@V GEMM because they must interleave at the
-    instruction level: the first MFMA micro-step runs before the rescale
-    (so its MFMA is in-flight during the VALU-heavy rescale), then the
-    remaining micro-steps run after.
-
-    Produces ``v_p_partial`` (loop-carried to the next iteration's
-    SoftmaxFinish) and updated ``m_i``, ``frag_O``.
-    """
-
-    @property
-    def name(self):
-        return "RescaleAndGemm2"
-
-    @property
-    def kind(self):
-        return StageKind.COMPUTE
-
-    @property
-    def resources(self):
-        return ResourceDecl(mfma_count=4, valu_count=32, exp_count=16)
-
-    def execute(self, infra, *, frag_S, frag_P_a, frag_Vt, m_i, frag_O, **_):
-        import flydsl.expr as fx
-        from flydsl.expr import math as fmath
-
-        _FM = infra._FM
-        scale_log2e = infra.scale_log2e
-        n_rows = infra.n_rows
-        n_o = infra.n_o
-        o_slot_row = infra.o_slot_row
-        _row_reduce = infra.row_reduce
-
-        # GEMM2: first micro-step (MFMA in-flight during softmax VALU below)
-        fx.gemm(infra.tiled_mma_pv, frag_O, frag_P_a, frag_Vt, frag_O)
-
-        # Softmax start: reduce_max, rescale O, exp2 first half
-        corr = [fx.Float32(1.0) for _ in infra.range_constexpr(n_rows)]
-        for r in infra.range_constexpr(n_rows):
-            slots = infra.row_slots[r]
-            row_max = frag_S[slots[0]]
-            for si in range(1, len(slots)):
-                row_max = row_max.maximumf(frag_S[slots[si]])
-            tile_m = _row_reduce(row_max, "max")
-            m_new = m_i[r].maximumf(tile_m)
-            corr[r] = fmath.exp2((m_i[r] - m_new) * scale_log2e, fastmath=_FM)
-            for si in range(len(slots)):
-                s = slots[si]
-                frag_S[s] = fmath.exp2((frag_S[s] - m_new) * scale_log2e, fastmath=_FM)
-            m_i[r] = m_new
-
-        # Rescale O by correction factors
-        for i in infra.range_constexpr(n_o):
-            frag_O[i] = frag_O[i] * corr[o_slot_row[i]]
-
-        # v_p_partial = exponentiated frag_S (loop-carried to SoftmaxFinish)
-        v_p_partial = frag_S
-        return {"v_p_partial": v_p_partial, "m_i": m_i, "frag_O": frag_O}
