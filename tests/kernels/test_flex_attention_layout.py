@@ -87,6 +87,43 @@ def test_flex_attention_layout(B, Sq, Skv, H, D, dtype_str):
     )
 
 
+# depth=2 decomposed pipeline (dual-wave); subset of _SHAPES with bf16 only.
+_D2_SHAPES = [
+    (1, 64, 32, 4, 128),
+    (1, 64, 128, 4, 128),
+    (1, 64, 64, 4, 64),
+    (2, 128, 128, 8, 128),
+]
+
+
+def _run_d2(B, Sq, Skv, H, D, dtype_str):
+    import math
+
+    dtype = _DTYPES[dtype_str]
+    dev = "cuda"
+    torch.manual_seed(0)
+    q = torch.empty(B, Sq, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    k = torch.empty(B, Skv, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    v = torch.empty(B, Skv, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    scale = 1.0 / math.sqrt(D)
+
+    out = flydsl_flex_attention_layout(q, k, v, scale=scale, pipe_depth=2).float()
+    ref = _sdpa_ref(q, k, v, scale).float()
+    max_err = (out - ref).abs().max().item()
+    cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
+    return max_err, cos
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("dtype_str", ["bf16"])
+@pytest.mark.parametrize("B,Sq,Skv,H,D", _D2_SHAPES)
+def test_flex_attention_layout_d2(B, Sq, Skv, H, D, dtype_str):
+    max_err, cos = _run_d2(B, Sq, Skv, H, D, dtype_str)
+    assert max_err < 3e-2 and cos > 0.99, (
+        f"d2 B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
+    )
+
+
 def main():
     for (B, Sq, Skv, H, D) in _SHAPES:
         for dt in ["bf16", "f16"]:

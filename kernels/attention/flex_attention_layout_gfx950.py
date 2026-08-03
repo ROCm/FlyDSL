@@ -142,6 +142,7 @@ def make_flex_attn_kernel_name(param: FlexAttnParam) -> str:
     name = f"flex_attn_{dtype_str}_m{param.block_m}n{param.block_n}d{param.head_dim}"
     name += f"_w{param.m_waves}x{param.n_waves}g{param.num_groups}"
     name += "_causal" if param.causal else "_dense"
+    name += f"_pd{param.pipe_depth}"
     return name
 
 
@@ -472,17 +473,20 @@ def flex_attn_fwd_gfx950_kernel(
                 m_i[r] = m_new
             for i in range_constexpr(n_o):
                 frag_O[i] = frag_O[i] * corr[o_slot_row[i]]
-            return {"frag_P": frag_S, "m_i": m_i, "l_i": l_i, "frag_O": frag_O}
+            return {
+                "frag_P": frag_S, "m_i": m_i, "l_i": l_i, "frag_O": frag_O,
+                "softmax_corr": corr,
+            }
         def decompose(self, allocated_slots):
             if allocated_slots == 1:
                 return [SubStage("Softmax", self.execute, self.resources)]
-            # Start first (stays at C1 with Gemm1, produces frag_P),
-            # Finish deferred (goes to C3 with Gemm2, sums v_p into l_i).
+            # Finish first (C1 with Gemm1: sum previous tile's v_p into l_i),
+            # Start deferred (C3 with Gemm2: max/rescale/exp2 for current tile).
             return [
-                SubStage("SoftmaxStart", self._start,
-                         ResourceDecl(valu_count=npair * 8, exp_count=n_c)),
                 SubStage("SoftmaxFinish", self._finish,
                          ResourceDecl(valu_count=npair * 4)),
+                SubStage("SoftmaxStart", self._start,
+                         ResourceDecl(valu_count=npair * 8, exp_count=n_c)),
             ]
         def _finish(self, infra, *, v_p_partial, l_i, **_):
             for r in range_constexpr(npair):
@@ -493,7 +497,9 @@ def flex_attn_fwd_gfx950_kernel(
                 tile_l = _row_reduce(row_sum, "sum")
                 l_i[r] = l_i[r] + tile_l
             return {"l_i": l_i}
-        def _start(self, infra, *, frag_S, m_i, l_i, v_p_partial, frag_O, **_):
+        def _start(self, infra, *, frag_S, m_i, l_i, v_p_partial, v_p_for_gemm, frag_O, **_):
+            for i in range_constexpr(n_c):
+                v_p_for_gemm[i] = v_p_partial[i]
             corr = [fx.Float32(1.0) for _ in range_constexpr(npair)]
             for r in range_constexpr(npair):
                 slots = _row_slots[r]
@@ -511,23 +517,39 @@ def flex_attn_fwd_gfx950_kernel(
                 m_i[r] = m_new
             for i in range_constexpr(n_o):
                 frag_O[i] = frag_O[i] * corr[o_slot_row[i]]
-            return {"frag_P": v_p_partial, "v_p_partial": frag_S, "m_i": m_i, "l_i": l_i, "frag_O": frag_O}
+            return {
+                "frag_P": v_p_partial, "v_p_partial": frag_S, "m_i": m_i, "l_i": l_i,
+                "frag_O": frag_O, "softmax_corr": corr,
+            }
 
     # ── BridgeP: C→A bridge through LDS. Single stage, no split. ────────
+    def _bridge_p_to_lds(infra, p_frag):
+        rocdl.sched_barrier(0)
+        fx.gpu.barrier()
+        for i in range_constexpr(n_c):
+            sP[fx.get_scalar(tr[i]), fx.get_scalar(tc[i])] = p_frag[i].to(elem_dtype)
+        fx.gpu.barrier()
+        rocdl.sched_barrier(0)
+        frag_P_a = thr_pv.make_fragment_A(sP)
+        fx.copy(uca, tcA2.partition_S(sP), tcA2.retile(frag_P_a))
+        return frag_P_a
+
+    def _bridge_p_epilogue(infra, *, v_p_partial, **_):
+        return {"frag_P_a": _bridge_p_to_lds(infra, v_p_partial)}
+
     class _StageBridgeP(PipelineStage):
         name = "BridgeP"
         kind = StageKind.MEMORY
         resources = ResourceDecl(lds_read_count=4)
-        def execute(self, infra, *, frag_P, **_):
-            rocdl.sched_barrier(0)
-            fx.gpu.barrier()
-            for i in range_constexpr(n_c):
-                sP[fx.get_scalar(tr[i]), fx.get_scalar(tc[i])] = frag_P[i].to(elem_dtype)
-            fx.gpu.barrier()
-            rocdl.sched_barrier(0)
-            frag_P_a = thr_pv.make_fragment_A(sP)
-            fx.copy(uca, tcA2.partition_S(sP), tcA2.retile(frag_P_a))
-            return {"frag_P_a": frag_P_a}
+        def execute(self, infra, **shared_regs):
+            # depth>=2: Bridge runs before SoftmaxStart; v_p_partial still holds
+            # the previous tile's exp2(S) (P for lagged Gemm2). frag_P is a stale
+            # rescale carry and must not be bridged.
+            if const_expr(param.pipe_depth >= 2):
+                p_frag = shared_regs["v_p_partial"]
+            else:
+                p_frag = shared_regs["frag_P"]
+            return {"frag_P_a": _bridge_p_to_lds(infra, p_frag)}
 
     # ── Gemm2_PV: O += P @ V. ──────────────────────────────────────────
     # depth=1: P and V are from the same tile → use frag_Vt_next directly.
@@ -538,7 +560,17 @@ def flex_attn_fwd_gfx950_kernel(
         fx.gemm(tiled_mma_pv, frag_O, frag_P_a, frag_Vt_next, frag_O)
         return {"frag_O": frag_O}
 
-    def _gemm2_d2(infra, *, frag_P_a, frag_Vt, frag_Vt_next, frag_O, **_):
+    def _gemm2_d2(infra, *, frag_Vt, frag_Vt_next, frag_O, v_p_for_gemm, softmax_corr, **_):
+        # Snapshot of previous tile's exp2(S), scaled by this tile's row corr (matches O).
+        rocdl.sched_barrier(0)
+        fx.gpu.barrier()
+        for i in range_constexpr(n_c):
+            pi = v_p_for_gemm[i].to(fx.Float32) * softmax_corr[_s_slot_to_row_idx[i]]
+            sP[fx.get_scalar(tr[i]), fx.get_scalar(tc[i])] = pi.to(elem_dtype)
+        fx.gpu.barrier()
+        rocdl.sched_barrier(0)
+        frag_P_a = thr_pv.make_fragment_A(sP)
+        fx.copy(uca, tcA2.partition_S(sP), tcA2.retile(frag_P_a))
         fx.gemm(tiled_mma_pv, frag_O, frag_P_a, frag_Vt, frag_O)
         return {"frag_O": frag_O, "frag_Vt": frag_Vt_next}
 
@@ -562,12 +594,12 @@ def flex_attn_fwd_gfx950_kernel(
         Wire(_StageReadKV(),  out=("frag_K", "frag_Vt_next")),
         Wire(_StageGemm1(),   inp=("frag_K", "frag_Q"),  out=("frag_S",),
                               carry=("frag_Q",)),
-        Wire(_StageSoftmax(), inp=("frag_S", "m_i", "l_i", "frag_O"),
-                              out=("frag_P", "v_p_partial", "m_i", "l_i", "frag_O"),
-                              carry=("v_p_partial", "m_i", "l_i", "frag_O")),
-        Wire(_StageBridgeP(), inp=("frag_P",),  out=("frag_P_a",)),
+        Wire(_StageSoftmax(), inp=("frag_S", "m_i", "l_i", "frag_O", "v_p_for_gemm"),
+                              out=("frag_P", "v_p_partial", "m_i", "l_i", "frag_O", "softmax_corr"),
+                              carry=("v_p_partial", "m_i", "l_i", "frag_O", "v_p_for_gemm")),
+        Wire(_StageBridgeP(), inp=("frag_P", "v_p_partial"), out=("frag_P_a",)),
         Wire(_StageGemm2(),
-             inp=("frag_P_a", "frag_Vt", "frag_Vt_next", "frag_O") if _pd >= 2
+             inp=("frag_Vt", "frag_Vt_next", "frag_O", "v_p_for_gemm", "softmax_corr") if _pd >= 2
                  else ("frag_P_a", "frag_Vt_next", "frag_O"),
              out=("frag_O", "frag_Vt") if _pd >= 2 else ("frag_O",),
              carry=("frag_Vt",) if _pd >= 2 else ()),
@@ -581,15 +613,22 @@ def flex_attn_fwd_gfx950_kernel(
     # RescaleAndGemm2 → v_p_partial, consumed by tile 1's SoftmaxFinish.
     frag_P_init = thr_qk.make_fragment_C(sP)
     frag_P_init.fill(0.0)
+    frag_P_carry = thr_qk.make_fragment_C(sP)
+    frag_P_carry.fill(0.0)
+    v_p_for_gemm_init = thr_qk.make_fragment_C(sP)
+    v_p_for_gemm_init.fill(0.0)
     shared_regs = {
         "frag_Q": frag_Q,
         "m_i": m_i,
         "l_i": l_i,
         "frag_O": frag_O,
         "v_p_partial": frag_P_init,
+        "frag_P": frag_P_carry,
+        "v_p_for_gemm": v_p_for_gemm_init,
     }
     if _pd >= 2:
         shared_regs["frag_Vt"] = thr_pv.make_fragment_B(sV[0])  # dummy; first P is zeros
+        shared_regs["softmax_corr"] = [fx.Float32(1.0) for _ in range_constexpr(npair)]
 
     infra = InfraContext()
     infra.tiled_mma_qk = tiled_mma_qk
@@ -602,7 +641,16 @@ def flex_attn_fwd_gfx950_kernel(
     # execution, barrier placement, vmcnt management, and stagger.
     pipeline.emit_prologue(infra, shared_regs)
     pipeline.emit_main_loop(infra, shared_regs, n_kv_tiles)
-    pipeline.emit_epilogue(infra, shared_regs)
+    if const_expr(param.pipe_depth >= 2):
+        # Inline tail drain (one KV tile of lagged softmax mass + P@V).
+        _softmax = _StageSoftmax()
+        shared_regs.update(_softmax._finish(infra, **shared_regs))
+        shared_regs.update(_bridge_p_epilogue(infra, **shared_regs))
+        # Last tile: P and V are aligned (not lagged like the main loop).
+        shared_regs.update(_gemm2_d1(infra, **shared_regs))
+        rocdl.s_barrier()
+    else:
+        pipeline.emit_epilogue(infra, shared_regs)
     
     frag_O = shared_regs["frag_O"]
     l_i = shared_regs["l_i"]

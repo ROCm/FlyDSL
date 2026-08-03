@@ -333,15 +333,15 @@ class PipelineScheduler:
         # The prime stage is the first entry of the first cluster — the async
         # DMA that must run ahead of everything else in the pipeline.
         self._prime_fn = self._config.clusters[0].entries[0].fn
-        # For the epilogue drain: collect the fn of the LAST sub-stage of any
-        # decomposed stage. The last sub-stage already consumed the carry in
-        # the main loop's final iteration; running it again would double-count.
-        self._decomposed_last_fns = set()
-        for w in self.wires:
-            if w.stage.max_slots > 1 and self._config.depth > 1:
-                subs = w.stage.decompose(min(w.stage.max_slots, self._config.depth))
-                if len(subs) > 1:
-                    self._decomposed_last_fns.add(subs[-1].fn)
+        # depth>=2 epilogue tail (see emit_epilogue / kernel inline drain).
+        self._epilogue_tail_entries: list[ClusterEntry] = []
+        if self._config.depth > 1:
+            for tail_name in ("SoftmaxFinish", "BridgeP", "Gemm2_PV"):
+                for c in self._config.clusters:
+                    for e in c.entries:
+                        if e.name == tail_name:
+                            self._epilogue_tail_entries.append(e)
+                            break
         # self._dump_config()  # uncomment for pipeline debug
 
     @property
@@ -623,8 +623,6 @@ class PipelineScheduler:
         """Run all entries in a cluster EXCEPT the prime stage."""
         for entry in cluster.entries:
             if not self._is_prime(entry):
-                if label:
-                    print(f"  {label} C{cluster.index}({cluster.kind.name}): {entry.name}")
                 result = entry.fn(infra, **shared_regs)
                 if result:
                     shared_regs.update(result)
@@ -639,12 +637,10 @@ class PipelineScheduler:
 
         depth = self._config.depth
 
-        print(f"[PROLOGUE] depth={depth}")
         if depth >= 2:
             for t in range(depth - 1):
                 infra.tile_idx = t
                 infra.buf_slot = t % self._config.lds_ring_slots
-                print(f"  [PRIME] tile={t} buf={infra.buf_slot}")
                 self._prime_fn(infra)
             rocdl.s_waitcnt(vmcnt=0)
             rocdl.s_barrier()
@@ -669,8 +665,6 @@ class PipelineScheduler:
         depth = self._config.depth
         clusters = self._config.clusters
         staggered = self.enable_stagger and infra.stagger_i32 is not None
-        print(f"[MAIN_LOOP] n_kv_tiles={n_kv_tiles}, staggered={staggered}, "
-              f"num_clusters={len(clusters)}")
         for kv in range_constexpr(n_kv_tiles):
             read_buf = kv % self._config.lds_ring_slots
             write_buf = (kv + 1) % self._config.lds_ring_slots
@@ -693,27 +687,24 @@ class PipelineScheduler:
             elif depth == 1:
                 # Synchronous: prime stage → wait → all other stages.
                 infra.tile_idx = kv
-                print(f"[LOOP d1 kv={kv}] prime tile={kv} buf={infra.buf_slot}")
                 self._prime_fn(infra)
                 rocdl.s_waitcnt(vmcnt=0)
                 rocdl.s_barrier()
                 for c in clusters:
-                    self._run_non_prime(c, infra, shared_regs, label=f"[LOOP d1 kv={kv}]")
+                    self._run_non_prime(c, infra, shared_regs)
 
             else:
                 if const_expr(kv + 1 < n_kv_tiles):
                     infra.tile_idx = kv + 1
                     infra.buf_slot = write_buf
-                    print(f"[LOOP d2 kv={kv}] prefetch prime tile={kv+1} buf={write_buf}")
                     self._prime_fn(infra)
                     infra.buf_slot = read_buf
 
                 for c in clusters:
-                    self._run_non_prime(c, infra, shared_regs, label=f"[LOOP d2 kv={kv}]")
+                    self._run_non_prime(c, infra, shared_regs)
 
                 rocdl.s_waitcnt(vmcnt=0)
                 rocdl.s_barrier()
-
     def emit_epilogue(self, infra: InfraContext, shared_regs: dict) -> None:
         """Drain the pipeline after the main loop.
 
@@ -740,20 +731,10 @@ class PipelineScheduler:
                     self._dualwave_sync_barrier()
             self._stagger_close(infra.stagger_i32)
         else:
-            # Drain: run all non-prime stages, skipping the LAST sub-stage
-            # of any decomposed stage (it already consumed the carry in the
-            # main loop's final iteration — running it again would double-count).
-            print(f"[EPILOGUE] depth={depth}, drains={depth-1}")
-            for drain in range(depth - 1):
-                for c in clusters:
-                    for entry in c.entries:
-                        if self._is_prime(entry):
-                            continue
-                        if entry.fn in self._decomposed_last_fns:
-                            print(f"  [DRAIN {drain}] SKIP C{c.index}: {entry.name} (decomposed last)")
-                            continue
-                        print(f"  [DRAIN {drain}] C{c.index}({c.kind.name}): {entry.name}")
-                        result = entry.fn(infra, **shared_regs)
-                        if result:
-                            shared_regs.update(result)
-
+            # Main loop leaves one tile of softmax mass and lagged P@V in
+            # loop-carried regs; run only the tail stages (no new GEMM1 / DMA).
+            for entry in self._epilogue_tail_entries:
+                result = entry.fn(infra, **shared_regs)
+                if result:
+                    shared_regs.update(result)
+            rocdl.s_barrier()
