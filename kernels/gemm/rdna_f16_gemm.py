@@ -124,7 +124,7 @@ def create_wmma_gemm_module(
         sr_seed: fx.Int32,  # runtime seed; only read on the stochastic-rounding path
     ):
         tid = fx.thread_idx.x
-        pid = gpu.block_id("x")
+        pid = fx.block_idx.x
 
         # Swizzle workgroup mapping for L2 locality
         effective_group_m = min(group_m, grid_m)
