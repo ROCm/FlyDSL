@@ -39,6 +39,11 @@ from tests.test_common import run_perftest  # noqa: E402
 UNIFORM_RANGE = (-1, 1)
 DEFAULT_SEED = 123
 PAGED_KV_MIN_CONTEXT_LENGTH = 16384
+# Target share of the softmax mass placed on the attention sink (see calibrate_sink).
+DEFAULT_SINK_SHARE = 0.5
+# Attention-bias addressing limits (see bias_fits).
+BIAS_BUFFER_MAX_BYTES = 0xFFFFFFFF  # buffer descriptor num_records clamp
+BIAS_I32_MAX_ELEMS = 2**31 - 1  # kernel computes bias element offsets in i32
 # fp8 correctness gate (fixed; fp8 is lossy).
 FP8_MAX_ERR = 5e-2
 FP8_MIN_COS = 0.98
@@ -187,7 +192,104 @@ def setup_seed(seed: int) -> None:
     torch.backends.cudnn.deterministic = True
 
 
-def pytorch_ref_attention(q, k, v, causal=True):
+def make_alibi_slopes(batch, num_heads, two_d=False, device="cuda"):
+    """Positive fp32 ALiBi slopes, [batch, num_heads] if two_d else [num_heads].
+
+    The canonical geometric ladder 2**(-8*(h+1)/H) with a per-batch jitter on the
+    2D form, so a bug that broadcast or swapped the head/batch index cannot alias
+    into a pass. Deterministic: consumes no RNG, so Q/K/V stay bit-identical to a
+    run without ALiBi.
+    """
+    base = torch.tensor(
+        [2.0 ** (-((h + 1) * 8.0 / num_heads)) for h in range(num_heads)], dtype=torch.float32, device=device
+    )
+    if not two_d:
+        return base.contiguous()
+    jitter = 1.0 + 0.25 * torch.arange(batch, dtype=torch.float32, device=device)[:, None]
+    return (base[None, :] * jitter).contiguous()
+
+
+def _alibi_term(alibi_slopes, q_lo, q_hi, delta, key_idx):
+    """-slope * |i + delta - j| for q rows [q_lo, q_hi) -> [B or 1, H, q_hi-q_lo, Skv].
+
+    Built per Q chunk rather than materialized whole: a full [B, H, Sq, Skv] fp32
+    ALiBi matrix is the same size as the score matrix the caller is already
+    chunking to avoid.
+    """
+    i = torch.arange(q_lo, q_hi, device=alibi_slopes.device)[:, None]
+    rel = (i + delta - key_idx.view(1, -1)).abs().to(torch.float32)
+    s = alibi_slopes.float()
+    if s.dim() == 1:
+        s = s.unsqueeze(0)
+    return -s[:, :, None, None] * rel
+
+
+def _rows_logsumexp(q_t, k_t, causal, bias=None, alibi_slopes=None):
+    """Per-head sum and count of row logsumexp(scores), chunked over Q.
+
+    q_t: [B, Sq, H, D], k_t: [B, Skv, Hkv, D]. Returns (sum_per_head, count),
+    both fp32 [H] / scalar, over finite rows only.
+    """
+    q_h = q_t.transpose(1, 2).float()
+    k_h = k_t.transpose(1, 2).float()
+    B, H, Sq, D = q_h.shape
+    Skv = k_h.shape[2]
+    if H != k_h.shape[1]:
+        k_h = k_h.repeat_interleave(H // k_h.shape[1], dim=1)
+    delta = Skv - Sq
+    scale = 1.0 / math.sqrt(D)
+    k_trans = k_h.transpose(-1, -2).contiguous()
+    key_idx = torch.arange(Skv, device=q_t.device).view(1, 1, 1, Skv)
+    chunk = max(1, min(Sq, (64 * 1024 * 1024) // max(B * H * Skv, 1)))
+    total = torch.zeros(H, dtype=torch.float32, device=q_t.device)
+    count = 0
+    for s0 in range(0, Sq, chunk):
+        s1 = min(s0 + chunk, Sq)
+        sc = torch.matmul(q_h[:, :, s0:s1, :], k_trans) * scale
+        if alibi_slopes is not None:
+            sc = sc + _alibi_term(alibi_slopes, s0, s1, delta, key_idx)
+        if bias is not None:
+            sc = sc + bias[s0:s1].float()
+        if causal:
+            q_idx = torch.arange(s0, s1, device=q_t.device).view(1, 1, -1, 1)
+            sc = sc.masked_fill(key_idx > q_idx + delta, float("-inf"))
+        lse = torch.logsumexp(sc, dim=-1)  # [B, H, chunk]
+        finite = torch.isfinite(lse)
+        total += torch.where(finite, lse, torch.zeros_like(lse)).sum(dim=(0, 2))
+        count += int(finite[:, 0, :].sum().item()) if finite.numel() else 0
+    return total, max(count, 1)
+
+
+def calibrate_sink(sum_lse, count, share):
+    """Per-head sink logit placing `share` of the softmax mass on the sink.
+
+    share = sigmoid(sink - logsumexp(scores)), so invert it per head. Calibration
+    matters: logsumexp grows like ln(seqlen), so a sink drawn near 0 would own a
+    fraction of a percent of the mass -- below the bf16 noise floor, and a row
+    with a dropped sink would pass just as happily.
+    """
+    return (sum_lse / count + math.log(share / (1.0 - share))).float().contiguous()
+
+
+def _sink_softmax(scores, sink):
+    """softmax over [scores, sink], where the sink carries no value row.
+
+    Returns probs summing to 1 - sink_share. A fully-masked row needs no
+    special-casing: the max collapses to the sink, every score term is
+    exp(-inf) = 0, and the row becomes all-sink -- probs 0, matching the kernel.
+    """
+    s = sink.view(1, -1, 1, 1)
+    m = torch.maximum(scores.amax(dim=-1, keepdim=True), s)
+    e = torch.exp(scores - m)
+    return e / (e.sum(dim=-1, keepdim=True) + torch.exp(s - m))
+
+
+def pytorch_ref_attention(q, k, v, causal=True, bias=None, alibi_slopes=None, sink=None):
+    if bias is not None or alibi_slopes is not None or sink is not None:
+        # These must land after the sm_scale multiply and before the mask, and SDPA
+        # rejects an additive attn_mask together with is_causal, so defer to the
+        # explicit chunked path (identical result when Sq == Skv).
+        return pytorch_ref_attention_qkv_diff(q, k, v, causal=causal, bias=bias, alibi_slopes=alibi_slopes, sink=sink)
     q_t = q.transpose(1, 2).float()
     k_t = k.transpose(1, 2).float()
     v_t = v.transpose(1, 2).float()
@@ -229,13 +331,7 @@ def pytorch_ref_attention_chunked(q_t, k_t, v_t, causal=True):
 
 
 @torch.no_grad()
-def pytorch_ref_attention_qkv_diff(q, k, v, causal=True):
-    """Reference for seqlen_q != seqlen_kv with a BOTTOM-RIGHT aligned causal mask.
-
-    q: [B,Sq,H,D]; k,v: [B,Skv,Hkv,D]. Row r keeps keys [0, r+delta] with
-    delta = Skv - Sq (so the mask hugs the bottom-right corner); an all-masked
-    row outputs 0. Chunked over Q to bound the score matrix memory.
-    """
+def pytorch_ref_attention_qkv_diff(q, k, v, causal=True, bias=None, alibi_slopes=None, sink=None):
     q_t = q.transpose(1, 2).float()
     k_t = k.transpose(1, 2).float()
     v_t = v.transpose(1, 2).float()
@@ -256,17 +352,34 @@ def pytorch_ref_attention_qkv_diff(q, k, v, causal=True):
     for s0 in range(0, Sq, chunk):
         s1 = min(s0 + chunk, Sq)
         scores = torch.matmul(q_t[:, :, s0:s1, :], k_trans) * scale
+        if alibi_slopes is not None:
+            scores = scores + _alibi_term(alibi_slopes, s0, s1, delta, key_idx)
+        if bias is not None:
+            scores = scores + bias[s0:s1].float()
         if causal:
             q_idx = torch.arange(s0, s1, device=q_t.device).view(1, 1, -1, 1)
             scores = scores.masked_fill(key_idx > q_idx + delta, float("-inf"))
-        probs = torch.softmax(scores, dim=-1)
-        probs = torch.nan_to_num(probs, nan=0.0)  # all-masked row -> 0 output
+        if sink is not None:
+            # The sink also fixes the all-masked row: it becomes all-sink, probs 0.
+            probs = _sink_softmax(scores, sink)
+        else:
+            probs = torch.softmax(scores, dim=-1)
+            probs = torch.nan_to_num(probs, nan=0.0)  # all-masked row -> 0 output
         out[:, :, s0:s1, :] = torch.matmul(probs, v_t)
     return out.transpose(1, 2)
 
 
 def _ceil_div(a, b):
     return (a + b - 1) // b
+
+
+def bias_fits(rows, cols, elem_size=2):
+    elems = rows * cols
+    if elems > BIAS_I32_MAX_ELEMS:
+        return False, f"bias {rows}x{cols} = {elems:.3g} elems exceeds i32 offset range"
+    if elems * elem_size > BIAS_BUFFER_MAX_BYTES:
+        return False, f"bias {elems * elem_size / 2**30:.1f} GiB exceeds 4 GiB buffer limit"
+    return True, ""
 
 
 def _block_table_from_indices(kv_indptr_cpu, kv_indices_cpu, batch_size, max_num_pages_per_seq):
@@ -527,6 +640,12 @@ def _build_attn_inputs_for_config(
     page_size,
     kv_cache_layout,
     trigger_lazy_else,
+    use_bias=False,
+    use_alibi=False,
+    alibi_two_d=False,
+    use_sink=False,
+    sink_share=DEFAULT_SINK_SHARE,
+    causal=False,
 ):
     device = "cuda"
     H, D, H_KV = num_heads, head_dim, num_kv_heads
@@ -562,8 +681,38 @@ def _build_attn_inputs_for_config(
             kv_cache = None
             k_t = torch.empty(total_kv, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
             v_t = torch.empty(total_kv, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
+        # Packed bias: row = global packed q token, column = per-batch-local key.
+        # Drawn after Q/K/V so those stay bit-identical to a no-bias run.
+        bias = (
+            torch.empty(total_q, max(vl_kv), dtype=dtype, device=device).uniform_(*UNIFORM_RANGE) if use_bias else None
+        )
+        alibi_slopes = make_alibi_slopes(B, H, alibi_two_d, device) if use_alibi else None
+        sink = None
+        if use_sink:
+            # One [H] table shared by every sequence, so calibrate over all their
+            # rows together -- matching how the kernel consumes it.
+            tot_lse = torch.zeros(H, dtype=torch.float32, device=device)
+            tot_n = 0
+            for b in range(B):
+                sl, n = _rows_logsumexp(
+                    q_t[cuq[b] : cuq[b + 1]].unsqueeze(0),
+                    k_t[cukv[b] : cukv[b + 1]].unsqueeze(0),
+                    causal,
+                    bias=bias[cuq[b] : cuq[b + 1], : vl_kv[b]] if bias is not None else None,
+                    alibi_slopes=(
+                        (alibi_slopes[b] if alibi_slopes.dim() == 2 else alibi_slopes)
+                        if alibi_slopes is not None
+                        else None
+                    ),
+                )
+                tot_lse += sl
+                tot_n += n
+            sink = calibrate_sink(tot_lse, tot_n, sink_share)
         return {
             "varlen": True,
+            "sink": sink,
+            "bias": bias,
+            "alibi_slopes": alibi_slopes,
             "B": B,
             "Sq": Sq,
             "Skv": None,
@@ -604,6 +753,16 @@ def _build_attn_inputs_for_config(
         k_t = torch.empty(B, Skv, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
         v_t = torch.empty(B, Skv, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
 
+    # Dense bias: (Sq, Skv), broadcast over batch and head. Drawn after Q/K/V so
+    # those stay bit-identical to a no-bias run.
+    bias = torch.empty(Sq, Skv, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE) if use_bias else None
+    alibi_slopes = make_alibi_slopes(B, H, alibi_two_d, device) if use_alibi else None
+    sink = (
+        calibrate_sink(*_rows_logsumexp(q_t, k_t, causal, bias=bias, alibi_slopes=alibi_slopes), sink_share)
+        if use_sink
+        else None
+    )
+
     if trigger_lazy_else:
         q_t.fill_(1.0)
         k_t.zero_()
@@ -616,6 +775,9 @@ def _build_attn_inputs_for_config(
 
     return {
         "varlen": False,
+        "sink": sink,
+        "bias": bias,
+        "alibi_slopes": alibi_slopes,
         "B": B,
         "Sq": Sq,
         "Skv": Skv,
@@ -639,6 +801,9 @@ def _build_attn_inputs_for_config(
 def _compute_reference_from_inputs(inputs, num_heads, head_dim, dtype, causal, seqlen_q, seqlen_kv):
     H, D = num_heads, head_dim
     q_t, k_t, v_t = inputs["q_t"], inputs["k_t"], inputs["v_t"]
+    bias = inputs["bias"]
+    alibi = inputs["alibi_slopes"]
+    sink = inputs["sink"]
 
     if inputs["varlen"]:
         ref_t = torch.empty(inputs["total_q"], H, D, dtype=dtype, device=q_t.device)
@@ -648,20 +813,25 @@ def _compute_reference_from_inputs(inputs, num_heads, head_dim, dtype, causal, s
             qb = q_t[cuq[b] : cuq[b + 1]].unsqueeze(0).float()
             kb = k_t[cukv[b] : cukv[b + 1]].unsqueeze(0).float()
             vb = v_t[cukv[b] : cukv[b + 1]].unsqueeze(0).float()
+            bias_b = bias[cuq[b] : cuq[b + 1], : vl_kv[b]] if bias is not None else None
+            alibi_b = (alibi[b] if alibi.dim() == 2 else alibi) if alibi is not None else None
             ref_fn = pytorch_ref_attention if vl_q[b] == vl_kv[b] else pytorch_ref_attention_qkv_diff
-            ref_t[cuq[b] : cuq[b + 1]] = ref_fn(qb, kb, vb, causal=causal).to(dtype).squeeze(0)
+            ref_t[cuq[b] : cuq[b + 1]] = (
+                ref_fn(qb, kb, vb, causal=causal, bias=bias_b, alibi_slopes=alibi_b, sink=sink).to(dtype).squeeze(0)
+            )
         return ref_t
 
     self_attn = seqlen_kv is None or seqlen_kv == seqlen_q
-    if self_attn:
-        return pytorch_ref_attention(q_t.float(), k_t.float(), v_t.float(), causal=causal).to(dtype)
-    return pytorch_ref_attention_qkv_diff(q_t.float(), k_t.float(), v_t.float(), causal=causal).to(dtype)
+    ref_fn = pytorch_ref_attention if self_attn else pytorch_ref_attention_qkv_diff
+    return ref_fn(q_t.float(), k_t.float(), v_t.float(), causal=causal, bias=bias, alibi_slopes=alibi, sink=sink).to(
+        dtype
+    )
 
 
 def _build_inputs_and_reference_for_config(**kwargs):
     setup_seed(kwargs.pop("seed"))
     causal = kwargs.pop("causal")
-    inputs = _build_attn_inputs_for_config(**kwargs)
+    inputs = _build_attn_inputs_for_config(causal=causal, **kwargs)
     ref_t = _compute_reference_from_inputs(
         inputs,
         kwargs["num_heads"],
@@ -871,6 +1041,11 @@ def run_attn_config(
     use_block_table=False,
     page_size=64,
     kv_cache_layout="linear",
+    use_bias=False,
+    use_alibi=False,
+    alibi_two_d=False,
+    use_sink=False,
+    sink_share=DEFAULT_SINK_SHARE,
 ):
     """Unified flash-attention test/bench function.
 
@@ -915,6 +1090,27 @@ def run_attn_config(
         if D not in (64, 128) or dtype_str not in ("bf16", "f16") or (seqlen_q is not None and seqlen_q < 384):
             return {"skip": True}
 
+    # ── bias addressing guard ────────────────────────────────────────────────
+    if use_bias:
+        if varlen:
+            vl_q_cfg = list(varlen_seqlens_q)
+            vl_kv_cfg = list(varlen_seqlens_kv) if varlen_seqlens_kv is not None else vl_q_cfg
+            bias_rows, bias_cols = sum(vl_q_cfg), max(vl_kv_cfg)
+            if max(vl_q_cfg) > vl_q_cfg[-1]:
+                return {
+                    "skip": True,
+                    "skip_reason": (
+                        f"varlen bias reads OOB when the last seqlen ({vl_q_cfg[-1]}) "
+                        f"is below max_seqlen_q ({max(vl_q_cfg)})"
+                    ),
+                }
+        else:
+            bias_rows = seqlen_q
+            bias_cols = seqlen_kv if seqlen_kv is not None else seqlen_q
+        fits, why = bias_fits(bias_rows, bias_cols, torch.empty((), dtype=dtype).element_size())
+        if not fits:
+            return {"skip": True, "skip_reason": why}
+
     if use_block_table and (precomputed_inputs is None or precomputed_ref is None):
         return {"err": "block-table tests require precomputed_inputs and precomputed_ref"}
 
@@ -934,6 +1130,12 @@ def run_attn_config(
             page_size=page_size,
             kv_cache_layout=kv_cache_layout,
             trigger_lazy_else=trigger_lazy_else,
+            use_bias=use_bias,
+            use_alibi=use_alibi,
+            alibi_two_d=alibi_two_d,
+            use_sink=use_sink,
+            sink_share=sink_share,
+            causal=causal,
         )
 
     varlen = precomputed_inputs["varlen"]
@@ -942,9 +1144,6 @@ def run_attn_config(
     Skv = precomputed_inputs["Skv"]
     vl_q = precomputed_inputs["vl_q"]
     vl_kv = precomputed_inputs["vl_kv"]
-    cuq = precomputed_inputs["cuq"]
-    cukv = precomputed_inputs["cukv"]
-    total_q = precomputed_inputs["total_q"]
     cu_q_t = precomputed_inputs["cu_q_t"]
     cu_kv_t = precomputed_inputs["cu_kv_t"]
     q_t = precomputed_inputs["q_t"]
@@ -953,6 +1152,9 @@ def run_attn_config(
     cross = precomputed_inputs["cross"]
     max_seqlen_kv = precomputed_inputs["max_seqlen_kv"]
     kv_cache = precomputed_inputs["kv_cache"]
+    bias_t = precomputed_inputs["bias"]
+    alibi_t = precomputed_inputs["alibi_slopes"]
+    sink_t = precomputed_inputs["sink"]
 
     debug_counts = torch.zeros(2, dtype=torch.float32, device=device) if debug_lazy else None
     o_t = torch.zeros_like(q_t)
@@ -993,6 +1195,9 @@ def run_attn_config(
                 max_seqlen_kv=max_seqlen_kv if varlen else None,
                 cross_seqlen=cross if varlen else None,
                 num_kv_splits=int(num_kv_splits),
+                bias=bias_t,
+                alibi_slopes=alibi_t,
+                sink=sink_t,
                 out=o_t,
                 debug_counts=debug_counts,
                 **_cfg_kw(),
@@ -1017,21 +1222,12 @@ def run_attn_config(
     # ── reference ───────────────────────────────────────────────────────────
     # precomputed_ref makes FlyDSL/aiter_ck/aiter_asm share one reference tensor.
     # Otherwise compute the cheapest reference path for the active mode.
-    _self_attn = not varlen and (seqlen_kv is None or seqlen_kv == seqlen_q)
+    # Delegated rather than inlined so the bias enters the reference in exactly one
+    # place; two copies of this dispatch would be free to drift apart.
     if precomputed_ref is not None:
         ref_t = precomputed_ref
-    elif varlen:
-        ref_t = torch.empty(total_q, H, D, dtype=dtype, device=device)
-        for b in range(B):
-            qb = q_t[cuq[b] : cuq[b + 1]].unsqueeze(0).float()
-            kb = k_t[cukv[b] : cukv[b + 1]].unsqueeze(0).float()
-            vb = v_t[cukv[b] : cukv[b + 1]].unsqueeze(0).float()
-            ref_fn = pytorch_ref_attention if vl_q[b] == vl_kv[b] else pytorch_ref_attention_qkv_diff
-            ref_t[cuq[b] : cuq[b + 1]] = ref_fn(qb, kb, vb, causal=causal).to(dtype).squeeze(0)
-    elif _self_attn:
-        ref_t = pytorch_ref_attention(q_t.float(), k_t.float(), v_t.float(), causal=causal).to(dtype)
     else:
-        ref_t = pytorch_ref_attention_qkv_diff(q_t.float(), k_t.float(), v_t.float(), causal=causal).to(dtype)
+        ref_t = _compute_reference_from_inputs(precomputed_inputs, H, D, dtype, causal, seqlen_q, seqlen_kv)
 
     o_f32 = o_t.contiguous().reshape(-1).float()
     ref_f32 = ref_t.contiguous().reshape(-1).float()
@@ -1115,6 +1311,9 @@ def run_attn_config(
                     max_seqlen_kv=max_seqlen_kv if varlen else None,
                     cross_seqlen=cross if varlen else None,
                     num_kv_splits=int(num_kv_splits),
+                    bias=bias_t,
+                    alibi_slopes=alibi_t,
+                    sink=sink_t,
                     out=o_t,
                     debug_counts=debug_counts,
                     **_cfg_kw(),
@@ -1156,6 +1355,9 @@ def run_aiter_bench(
     seqlen_kv=None,
     varlen_seqlens_q=None,
     varlen_seqlens_kv=None,
+    use_bias=False,
+    use_alibi=False,
+    use_sink=False,
 ):
     """Run true aiter_ck or true aiter_asm kernel via aiter and return {tflops, max_err, us}."""
     try:
@@ -1169,6 +1371,15 @@ def run_aiter_bench(
     if backend == "asm" and head_dim != 128:
         return {"skip": True}
     if backend == "asm" and (varlen or (seqlen_kv is not None and seqlen_kv != seq_len)):
+        return {"skip": True}
+    bias = precomputed_inputs["bias"] if precomputed_inputs is not None else None
+    if use_bias and (backend == "asm" or varlen or bias is None):
+        return {"skip": True}
+    alibi = precomputed_inputs["alibi_slopes"] if precomputed_inputs is not None else None
+    if use_alibi and (backend == "asm" or causal or use_bias or alibi is None):
+        return {"skip": True}
+    sink = precomputed_inputs["sink"] if precomputed_inputs is not None else None
+    if use_sink and (backend == "asm" or varlen or sink is None):
         return {"skip": True}
 
     results = {}
@@ -1248,14 +1459,15 @@ def run_aiter_bench(
                 causal,  # is_causal
                 -1,  # window_size_left
                 -1,  # window_size_right
-                0,  # sink_size
+                1 if use_sink else 0,  # sink_size
                 True,  # return_softmax_lse
                 False,  # return_dropout_randval
+                sink_ptr=sink if use_sink else None,
                 cu_seqlens_q=cu_q_t,
                 cu_seqlens_kv=cu_kv_t,
                 out=None,
-                bias=None,
-                alibi_slopes=None,
+                bias=bias,
+                alibi_slopes=alibi,
                 q_descale=None,
                 k_descale=None,
                 v_descale=None,
@@ -2369,6 +2581,49 @@ def main():
         help="Run additional varlen/cross-length configs from EXTRA_CONFIGS",
     )
     parser.add_argument(
+        "--bias",
+        action="store_true",
+        help="Add an additive attention bias to the scores: softmax(q@k^T * sm_scale + bias). "
+        "Dense bias is [Sq, Skv] broadcast over batch and head; varlen bias is packed "
+        "[total_q, max_seqlen_kv] with global q rows and batch-local key columns. "
+        "gfx950 bf16/f16 D=64/128 only; incompatible with --block-table and fp8. Rows whose "
+        "bias exceeds the i32 offset / 4 GiB buffer limits are SKIPped.",
+    )
+    parser.add_argument(
+        "--alibi",
+        action="store_true",
+        help="Add a per-head ALiBi positional bias: score += -slope * |i + seqlen_kv - seqlen_q - j|, "
+        "applied after the 1/sqrt(D) scaling and bottom-right aligned like the causal mask. "
+        "Slopes are the canonical 2**(-8*(h+1)/H) ladder. gfx950 bf16/f16 D=64/128 only; "
+        "incompatible with --block-table and fp8. Combines with --bias.",
+    )
+    parser.add_argument(
+        "--sink",
+        action="store_true",
+        help="Add a per-head attention sink: one extra softmax denominator logit with no matching V "
+        "row, O = sum_j exp(s_j-m) v_j / (exp(sink-m) + sum_j exp(s_j-m)). The sink is calibrated per "
+        "run to --sink-share of the softmax mass; an uncalibrated sink near 0 would sit below the bf16 "
+        "noise floor and pass even if dropped. gfx950 bf16/f16 D=64/128 only; incompatible with "
+        "--block-table and fp8. Combines with --bias and --alibi. Under --compare the aiter_ck "
+        "column runs a real sink baseline (mha_fwd sink_size/sink_ptr); aiter_asm has no sink "
+        "parameter and is SKIPped, as is the varlen path.",
+    )
+    parser.add_argument(
+        "--sink-share",
+        type=float,
+        default=DEFAULT_SINK_SHARE,
+        dest="sink_share",
+        help=f"Fraction of the softmax mass the sink should take, in (0, 1). Default {DEFAULT_SINK_SHARE}. "
+        "Values in 0.25-0.95 keep the sink well above bf16 noise. Requires --sink.",
+    )
+    parser.add_argument(
+        "--alibi-2d",
+        action="store_true",
+        dest="alibi_two_d",
+        help="Use a per-(batch, head) [B, H] slope table instead of the [H] form, exercising the "
+        "kernel's alibi_stride_b path. Requires --alibi.",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Print per-config result_md5 / ref_md5 and bit-identical check (also enabled in --compare mode)",
@@ -2444,6 +2699,26 @@ def main():
     args = parser.parse_args()
     if not args.block_table and args.kv_cache_layout != "linear":
         parser.error("--kv-cache-layout requires --block-table")
+    # Paged KV and fp8 have no bias support in the kernel; reject rather than run
+    # a bias-free kernel against a biased reference.
+    if args.bias and args.block_table:
+        parser.error("--bias is not supported with --block-table (paged KV)")
+    if args.bias and args.dtype == "fp8":
+        parser.error("--bias is not supported with --dtype fp8")
+    if args.alibi and args.block_table:
+        parser.error("--alibi is not supported with --block-table (paged KV)")
+    if args.alibi and args.dtype == "fp8":
+        parser.error("--alibi is not supported with --dtype fp8")
+    if args.alibi_two_d and not args.alibi:
+        parser.error("--alibi-2d requires --alibi")
+    if args.sink and args.block_table:
+        parser.error("--sink is not supported with --block-table (paged KV)")
+    if args.sink and args.dtype == "fp8":
+        parser.error("--sink is not supported with --dtype fp8")
+    if args.sink_share != DEFAULT_SINK_SHARE and not args.sink:
+        parser.error("--sink-share requires --sink")
+    if not 0.0 < args.sink_share < 1.0:
+        parser.error(f"--sink-share must be in (0, 1), got {args.sink_share}")
 
     # Build kernel config from parsed args (no env-var reads).
     FLASH_ATTN_FUNC_KERNEL_CONFIG.update(
@@ -2482,6 +2757,10 @@ def main():
 
     causal_desc = {True: "causal", False: "non-causal", None: "causal+non-causal"}[args.causal]
     dtype_desc = args.dtype or "bf16+fp16"
+    _terms = [t for t, on in (("bias", args.bias), ("alibi", args.alibi), ("sink", args.sink)) if on]
+    bias_desc = ("; " + "+".join(_terms)) if _terms else ""
+    # Keep biased and unbiased baselines in separate CSVs so they stay diffable.
+    csv_tag = ("_" + "".join(_terms)) if _terms else ""
     extra_cases = (
         [_extra_case_from_config(row) for row in EXTRA_CONFIGS] if args.extra and configs is DEFAULT_CONFIGS else []
     )
@@ -2501,7 +2780,7 @@ def main():
     if args.compare:
         # ---- Comparison mode: FlyDSL vs aiter_ck vs aiter_asm ----
         print("=" * 130)
-        print(f"FlyDSL vs aiter_ck vs aiter_asm  ({causal_desc}, {dtype_desc})")
+        print(f"FlyDSL vs aiter_ck vs aiter_asm  ({causal_desc}, {dtype_desc}{bias_desc})")
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         if args.num_kv_splits > 1:
             print(
@@ -2566,10 +2845,9 @@ def main():
                                 continue
                         else:
                             shared_ref = None
-                            # Compute reference once for bf16/fp16 rows (fp8 helper owns quantization + reference).
                             if dtype_str == "fp8":
                                 pass
-                            elif args.trigger_lazy_else:
+                            elif args.trigger_lazy_else or args.bias or args.alibi or args.sink:
                                 precomputed_inputs, shared_ref = _build_inputs_and_reference_for_config(
                                     batch=batch,
                                     seqlen_q=seq_len,
@@ -2585,7 +2863,12 @@ def main():
                                     use_block_table=False,
                                     page_size=args.page_size,
                                     kv_cache_layout=kv_cache_layout or "linear",
-                                    trigger_lazy_else=True,
+                                    trigger_lazy_else=args.trigger_lazy_else,
+                                    use_bias=args.bias,
+                                    use_alibi=args.alibi,
+                                    use_sink=args.sink,
+                                    sink_share=args.sink_share,
+                                    alibi_two_d=args.alibi_two_d,
                                 )
                             else:
                                 # All three use the same seed -> same Q/K/V -> identical reference.
@@ -2643,6 +2926,11 @@ def main():
                                     use_block_table=args.block_table,
                                     page_size=args.page_size,
                                     kv_cache_layout=kv_cache_layout or "linear",
+                                    use_bias=args.bias,
+                                    use_alibi=args.alibi,
+                                    use_sink=args.sink,
+                                    sink_share=args.sink_share,
+                                    alibi_two_d=args.alibi_two_d,
                                 )
                         except Exception as _fly_err:
                             print(f"    [FlyDSL unsupported] {_fmt_cfg(cfg)}: {_fly_err}", flush=True)
@@ -2700,6 +2988,9 @@ def main():
                                 num_kv_heads=nh_kv,
                                 precomputed_ref=shared_ref,
                                 precomputed_inputs=precomputed_inputs,
+                                use_bias=args.bias,
+                                use_alibi=args.alibi,
+                                use_sink=args.sink,
                             )
                             asm_r = run_aiter_bench(
                                 batch,
@@ -2715,6 +3006,9 @@ def main():
                                 num_kv_heads=nh_kv,
                                 precomputed_ref=shared_ref,
                                 precomputed_inputs=precomputed_inputs,
+                                use_bias=args.bias,
+                                use_alibi=args.alibi,
+                                use_sink=args.sink,
                             )
                         rows.append((cfg, fly_r, ck_r, asm_r))
 
@@ -2769,7 +3063,7 @@ def main():
         _print_grouped_avgs(rows, lambda r: _tag_group(r[0]), _cmp_avg)
         print("=" * len(hdr2))
 
-        csv_path = f"fmha_perf_compare_{_gpu_short_name()}.csv"
+        csv_path = f"fmha_perf_compare{csv_tag}_{_gpu_short_name()}.csv"
         _write_cmp_csv(csv_path, rows, cmp_avg_rows)
         print(f"Results saved to: {csv_path}")
 
@@ -2856,6 +3150,11 @@ def main():
                                     use_block_table=args.block_table,
                                     page_size=args.page_size,
                                     kv_cache_layout=kv_cache_layout or "linear",
+                                    use_bias=args.bias,
+                                    use_alibi=args.alibi,
+                                    use_sink=args.sink,
+                                    sink_share=args.sink_share,
+                                    alibi_two_d=args.alibi_two_d,
                                     **kwargs,
                                 )
                             except Exception as _fly_err:
@@ -2892,6 +3191,9 @@ def main():
                                     seqlen_kv=kwargs.get("seqlen_kv"),
                                     varlen_seqlens_q=kwargs.get("varlen_seqlens_q"),
                                     varlen_seqlens_kv=kwargs.get("varlen_seqlens_kv"),
+                                    use_bias=args.bias,
+                                    use_alibi=args.alibi,
+                                    use_sink=args.sink,
                                 )
                             varlen_cmp_rows.append(
                                 (
@@ -2925,14 +3227,14 @@ def main():
 
             _print_grouped_avgs(varlen_cmp_rows, lambda r: (r[5], r[6]), _extra_cmp_avg)
             print("=" * len(xhdr2))
-            varlen_csv_path = f"fmha_varlen_perf_compare_{_gpu_short_name()}.csv"
+            varlen_csv_path = f"fmha_varlen_perf_compare{csv_tag}_{_gpu_short_name()}.csv"
             _write_varlen_cmp_csv(varlen_csv_path, varlen_cmp_rows, varlen_cmp_avg_rows)
             print(f"Varlen results saved to: {varlen_csv_path}")
 
     else:
         # ---- Normal FlyDSL test mode ----
         print("=" * 130)
-        print(f"FlyDSL flash_attn_func ({causal_desc}, {dtype_desc})")
+        print(f"FlyDSL flash_attn_func ({causal_desc}, {dtype_desc}{bias_desc})")
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"  Kernel opts: {FLASH_ATTN_FUNC_KERNEL_CONFIG}")
         if args.block_table:
@@ -3021,6 +3323,11 @@ def main():
                                 precomputed_inputs=precomputed_inputs,
                                 page_size=args.page_size,
                                 kv_cache_layout=kv_cache_layout or "linear",
+                                use_bias=args.bias,
+                                use_alibi=args.alibi,
+                                use_sink=args.sink,
+                                sink_share=args.sink_share,
+                                alibi_two_d=args.alibi_two_d,
                             )
                             if "err" in r:
                                 print(f"    [FlyDSL unsupported] {_fmt_cfg(cfg)} {path}: {r['err']}", flush=True)
@@ -3070,7 +3377,7 @@ def main():
         _print_grouped_avgs(rows, lambda r: _tag_group(r[0]), _normal_avg_fn)
         print("=" * len(hdr))
 
-        csv_path = f"fmha_perf_{_gpu_short_name()}.csv"
+        csv_path = f"fmha_perf{csv_tag}_{_gpu_short_name()}.csv"
         _write_normal_csv(csv_path, rows, normal_avg_rows)
         print(f"Results saved to: {csv_path}")
 
@@ -3179,6 +3486,11 @@ def main():
                                         precomputed_inputs=precomputed_inputs,
                                         page_size=args.page_size,
                                         kv_cache_layout=kv_cache_layout or "linear",
+                                        use_bias=args.bias,
+                                        use_alibi=args.alibi,
+                                        use_sink=args.sink,
+                                        sink_share=args.sink_share,
+                                        alibi_two_d=args.alibi_two_d,
                                         **kwargs,
                                     )
                             except Exception as e:
@@ -3276,7 +3588,7 @@ def main():
 
             _print_grouped_avgs(varlen_rows, lambda r: (r[5], r[6]), _extra_normal_avg)
             print("=" * len(xhdr))
-            varlen_csv_path = f"fmha_varlen_perf_{_gpu_short_name()}.csv"
+            varlen_csv_path = f"fmha_varlen_perf{csv_tag}_{_gpu_short_name()}.csv"
             _write_varlen_normal_csv(varlen_csv_path, varlen_rows, varlen_avg_rows)
             print(f"Varlen results saved to: {varlen_csv_path}")
 
@@ -3428,6 +3740,180 @@ def test_lse_varlen(causal):
         _assert_lse_matches(lse[b, :, :n], ref, _ATOL_BF16)
 
 
+# ── attention bias ───────────────────────────────────────────────────────────
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("B,S,H,Hkv,D", [(1, 512, 8, 8, 128), (2, 384, 8, 4, 64)])
+def test_bias_dense(causal, B, S, H, Hkv, D):
+    """Dense bias is [Sq, Skv], broadcast over batch and head."""
+    dtype = torch.bfloat16
+    setup_seed(DEFAULT_SEED)
+    q = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    k = torch.empty(B, S, Hkv, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    v = torch.empty(B, S, Hkv, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    bias = torch.empty(S, S, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+
+    out = flydsl_flash_attn_func(q, k, v, causal=causal, num_kv_heads=Hkv, bias=bias)
+    torch.cuda.synchronize()
+    ref = pytorch_ref_attention(q.float(), k.float(), v.float(), causal=causal, bias=bias)
+    _, _, passed = _acc_metric(out.float().reshape(-1), ref.float().reshape(-1), D)
+    assert passed, f"biased output does not match the biased reference (B={B} S={S} causal={causal})"
+
+    # The bias must actually change the result: an unbiased run must NOT match the
+    # biased reference, otherwise a silently-dropped bias would pass the check above.
+    out_nb = flydsl_flash_attn_func(q, k, v, causal=causal, num_kv_heads=Hkv)
+    torch.cuda.synchronize()
+    assert (out_nb.float() - ref.float()).abs().max().item() > 1e-2, "bias had no effect on the output"
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+def test_bias_varlen(causal):
+    """Varlen bias is packed [total_q, max_seqlen_kv]: global q rows, batch-local key columns."""
+    dtype = torch.bfloat16
+    D, H, Hkv = 128, 8, 4
+    seqs = [512, 256, 384]
+    setup_seed(DEFAULT_SEED)
+    cu_list = [0]
+    for s in seqs:
+        cu_list.append(cu_list[-1] + s)
+    total, max_s = cu_list[-1], max(seqs)
+    cu = torch.tensor(cu_list, dtype=torch.int32, device="cuda")
+    q = torch.empty(total, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    k = torch.empty(total, Hkv, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    v = torch.empty(total, Hkv, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    bias = torch.empty(total, max_s, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+
+    out = flydsl_flash_attn_func(
+        q,
+        k,
+        v,
+        causal=causal,
+        num_kv_heads=Hkv,
+        cu_seqlens_q=cu,
+        cu_seqlens_kv=cu,
+        max_seqlen_q=max_s,
+        max_seqlen_kv=max_s,
+        cross_seqlen=False,
+        bias=bias,
+    )
+    torch.cuda.synchronize()
+    for b, n in enumerate(seqs):
+        s0, s1 = cu_list[b], cu_list[b + 1]
+        ref = pytorch_ref_attention(
+            q[s0:s1].unsqueeze(0).float(),
+            k[s0:s1].unsqueeze(0).float(),
+            v[s0:s1].unsqueeze(0).float(),
+            causal=causal,
+            bias=bias[s0:s1, :n],
+        ).squeeze(0)
+        _, _, passed = _acc_metric(out[s0:s1].float().reshape(-1), ref.float().reshape(-1), D)
+        assert passed, f"varlen batch {b} (seqlen {n}, causal={causal}) does not match the biased reference"
+
+
+# ── ALiBi ────────────────────────────────────────────────────────────────────
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("two_d", [False, True])
+@pytest.mark.parametrize("B,S,H,Hkv,D", [(2, 512, 8, 8, 128), (1, 384, 8, 4, 64)])
+def test_alibi_dense(causal, two_d, B, S, H, Hkv, D):
+    """score += -slope * |i + Skv - Sq - j|; slopes are [H] or [B, H] (alibi_stride_b)."""
+    dtype = torch.bfloat16
+    setup_seed(DEFAULT_SEED)
+    q = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    k = torch.empty(B, S, Hkv, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    v = torch.empty(B, S, Hkv, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    slopes = make_alibi_slopes(B, H, two_d)
+    assert slopes.shape == ((B, H) if two_d else (H,))
+
+    out = flydsl_flash_attn_func(q, k, v, causal=causal, num_kv_heads=Hkv, alibi_slopes=slopes)
+    torch.cuda.synchronize()
+    ref = pytorch_ref_attention(q.float(), k.float(), v.float(), causal=causal, alibi_slopes=slopes)
+    _, _, passed = _acc_metric(out.float().reshape(-1), ref.float().reshape(-1), D)
+    assert passed, f"ALiBi output does not match the reference (B={B} S={S} two_d={two_d} causal={causal})"
+
+    # Without slopes the result must differ, else a dropped ALiBi term would pass above.
+    out_nb = flydsl_flash_attn_func(q, k, v, causal=causal, num_kv_heads=Hkv)
+    torch.cuda.synchronize()
+    assert (out_nb.float() - ref.float()).abs().max().item() > 1e-2, "ALiBi had no effect on the output"
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+def test_alibi_varlen(causal):
+    """ALiBi positions are within-sequence: no packed-token base, per-batch lengths."""
+    dtype = torch.bfloat16
+    D, H, Hkv = 128, 8, 4
+    seqs = [512, 256, 384]
+    setup_seed(DEFAULT_SEED)
+    cu_list = [0]
+    for s in seqs:
+        cu_list.append(cu_list[-1] + s)
+    total, max_s = cu_list[-1], max(seqs)
+    cu = torch.tensor(cu_list, dtype=torch.int32, device="cuda")
+    q = torch.empty(total, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    k = torch.empty(total, Hkv, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    v = torch.empty(total, Hkv, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    slopes = make_alibi_slopes(len(seqs), H, two_d=True)
+
+    out = flydsl_flash_attn_func(
+        q,
+        k,
+        v,
+        causal=causal,
+        num_kv_heads=Hkv,
+        cu_seqlens_q=cu,
+        cu_seqlens_kv=cu,
+        max_seqlen_q=max_s,
+        max_seqlen_kv=max_s,
+        cross_seqlen=False,
+        alibi_slopes=slopes,
+    )
+    torch.cuda.synchronize()
+    for b, n in enumerate(seqs):
+        s0, s1 = cu_list[b], cu_list[b + 1]
+        ref = pytorch_ref_attention(
+            q[s0:s1].unsqueeze(0).float(),
+            k[s0:s1].unsqueeze(0).float(),
+            v[s0:s1].unsqueeze(0).float(),
+            causal=causal,
+            alibi_slopes=slopes[b],
+        ).squeeze(0)
+        _, _, passed = _acc_metric(out[s0:s1].float().reshape(-1), ref.float().reshape(-1), D)
+        assert passed, f"varlen batch {b} (seqlen {n}, causal={causal}) does not match the ALiBi reference"
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+def test_alibi_and_bias_combined(causal):
+    """ALiBi and bias are independent score terms and must both land."""
+    dtype = torch.bfloat16
+    B, S, H, D = 1, 512, 8, 128
+    setup_seed(DEFAULT_SEED)
+    q = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    k = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    v = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    bias = torch.empty(S, S, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    slopes = make_alibi_slopes(B, H)
+
+    out = flydsl_flash_attn_func(q, k, v, causal=causal, bias=bias, alibi_slopes=slopes)
+    torch.cuda.synchronize()
+    qf, kf, vf = q.float(), k.float(), v.float()
+    ref_both = pytorch_ref_attention(qf, kf, vf, causal=causal, bias=bias, alibi_slopes=slopes)
+    _, _, passed = _acc_metric(out.float().reshape(-1), ref_both.float().reshape(-1), D)
+    assert passed, "combined bias+ALiBi output does not match the combined reference"
+
+    # Neither term alone explains the output.
+    ref_alibi = pytorch_ref_attention(qf, kf, vf, causal=causal, alibi_slopes=slopes)
+    ref_bias = pytorch_ref_attention(qf, kf, vf, causal=causal, bias=bias)
+    assert (out.float() - ref_alibi.float()).abs().max().item() > 1e-2, "bias term missing"
+    assert (out.float() - ref_bias.float()).abs().max().item() > 1e-2, "ALiBi term missing"
+
+
 def test_lse_fully_masked_rows():
     """Cross-attention causal with Skv < Sq: leading query rows see no keys -> -inf."""
     dtype = torch.bfloat16
@@ -3473,3 +3959,118 @@ def test_return_lse_rejects_fp8():
 
 if __name__ == "__main__":
     main()
+
+
+# ── attention sink ───────────────────────────────────────────────────────────
+
+
+def _sink_for(q, k, causal, share=DEFAULT_SINK_SHARE):
+    return calibrate_sink(*_rows_logsumexp(q, k, causal), share)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("share", [0.25, 0.9])
+@pytest.mark.parametrize("B,S,H,Hkv,D", [(1, 512, 8, 8, 128), (2, 384, 8, 4, 64)])
+def test_sink_dense(causal, share, B, S, H, Hkv, D):
+    """One extra softmax denominator logit per head, with no matching V row."""
+    dtype = torch.bfloat16
+    setup_seed(DEFAULT_SEED)
+    q = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    k = torch.empty(B, S, Hkv, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    v = torch.empty(B, S, Hkv, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    sink = _sink_for(q, k, causal, share)
+    assert sink.shape == (H,) and sink.dtype == torch.float32
+
+    out = flydsl_flash_attn_func(q, k, v, causal=causal, num_kv_heads=Hkv, sink=sink)
+    torch.cuda.synchronize()
+    ref = pytorch_ref_attention(q.float(), k.float(), v.float(), causal=causal, sink=sink)
+    _, _, passed = _acc_metric(out.float().reshape(-1), ref.float().reshape(-1), D)
+    assert passed, f"sink output does not match the reference (B={B} S={S} share={share} causal={causal})"
+
+    # Calibration is what makes this test meaningful: with the sink dropped the
+    # result must visibly differ. An uncalibrated sink near 0 would not.
+    out_ns = flydsl_flash_attn_func(q, k, v, causal=causal, num_kv_heads=Hkv)
+    torch.cuda.synchronize()
+    assert (out_ns.float() - ref.float()).abs().max().item() > 1e-2, "sink had no effect on the output"
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+def test_sink_varlen(causal):
+    dtype = torch.bfloat16
+    D, H, Hkv = 128, 8, 4
+    seqs = [512, 256, 384]
+    setup_seed(DEFAULT_SEED)
+    cu_list = [0]
+    for s in seqs:
+        cu_list.append(cu_list[-1] + s)
+    total, max_s = cu_list[-1], max(seqs)
+    cu = torch.tensor(cu_list, dtype=torch.int32, device="cuda")
+    q = torch.empty(total, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    k = torch.empty(total, Hkv, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    v = torch.empty(total, Hkv, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    # One [H] table shared by every sequence, calibrated over all their rows.
+    tot, cnt = torch.zeros(H, dtype=torch.float32, device="cuda"), 0
+    for b in range(len(seqs)):
+        s0, s1 = cu_list[b], cu_list[b + 1]
+        sl, n = _rows_logsumexp(q[s0:s1].unsqueeze(0), k[s0:s1].unsqueeze(0), causal)
+        tot += sl
+        cnt += n
+    sink = calibrate_sink(tot, cnt, DEFAULT_SINK_SHARE)
+
+    out = flydsl_flash_attn_func(
+        q,
+        k,
+        v,
+        causal=causal,
+        num_kv_heads=Hkv,
+        cu_seqlens_q=cu,
+        cu_seqlens_kv=cu,
+        max_seqlen_q=max_s,
+        max_seqlen_kv=max_s,
+        cross_seqlen=False,
+        sink=sink,
+    )
+    torch.cuda.synchronize()
+    for b, n in enumerate(seqs):
+        s0, s1 = cu_list[b], cu_list[b + 1]
+        ref = pytorch_ref_attention(
+            q[s0:s1].unsqueeze(0).float(),
+            k[s0:s1].unsqueeze(0).float(),
+            v[s0:s1].unsqueeze(0).float(),
+            causal=causal,
+            sink=sink,
+        ).squeeze(0)
+        _, _, passed = _acc_metric(out[s0:s1].float().reshape(-1), ref.float().reshape(-1), D)
+        assert passed, f"varlen batch {b} (seqlen {n}, causal={causal}) does not match the sink reference"
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("num_kv_splits", [2, 3, 4])
+def test_sink_splitk_counted_once(num_kv_splits):
+    """Split-K writes sink-free partials and folds the sink in once, in the combine.
+
+    LSE is the sharp signal: it is the log denominator, so a sink counted
+    num_kv_splits times (or zero times) shows up directly instead of being
+    normalized away as it is in O.
+    """
+    dtype = torch.bfloat16
+    B, S, H, D = 1, 2048, 8, 128
+    setup_seed(DEFAULT_SEED)
+    q = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    k = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    v = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    sink = _sink_for(q, k, True)
+
+    out1, lse1 = flydsl_flash_attn_func(q, k, v, causal=True, sink=sink, return_lse=True)
+    outk, lsek = flydsl_flash_attn_func(q, k, v, causal=True, sink=sink, num_kv_splits=num_kv_splits, return_lse=True)
+    torch.cuda.synchronize()
+    # Split-K must agree with the single-split result it is meant to reproduce.
+    assert (lsek - lse1).abs().max().item() < 2e-2, f"split-K LSE diverges at {num_kv_splits} splits"
+    _, _, passed = _acc_metric(outk.float().reshape(-1), out1.float().reshape(-1), D)
+    assert passed, f"split-K output diverges at {num_kv_splits} splits"
+
+    # A sink counted once per split would shift LSE by ~ln(num_kv_splits); assert
+    # we are nowhere near that, so the test cannot pass on a double-count.
+    assert (lsek - lse1).abs().max().item() < 0.5 * math.log(num_kv_splits)
