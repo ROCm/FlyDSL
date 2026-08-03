@@ -4,6 +4,7 @@
 """gfx950 DUALWAVE_SWP FP8 flash attention."""
 
 import os
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
