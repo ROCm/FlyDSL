@@ -266,7 +266,7 @@ def _i8x4_in_i32_to_bf16x4_i64(val_i32, arith, vector, scale_val=None):
 
     c16 = fx.Int32(16)
     c_ffff0000 = fx.Int32(0xFFFF0000)
-    bits = [f.bitcast(fx.Int32) for f in f32_vals]
+    bits = [arith.bitcast(T.i32, f) for f in f32_vals]
     i32_lo = (bits[0] >> c16) | (bits[1] & c_ffff0000)
     i32_hi = (bits[2] >> c16) | (bits[3] & c_ffff0000)
     return _pack_i32_pair_to_i64(i32_lo, i32_hi, vector)
@@ -377,7 +377,7 @@ def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_va
         # Truncate f32→bf16 via bit-shift (exact for scaled int values).
         c16_shift = fx.Int32(16)
         c_ffff0000 = fx.Int32(0xFFFF0000)
-        bf16_vals = [v.bitcast(fx.Int32) for v in f32_vals]
+        bf16_vals = [arith.bitcast(T.i32, _av(v)) for v in f32_vals]
         i32_lo = (bf16_vals[0] >> c16_shift) | (bf16_vals[1] & c_ffff0000)
         i32_hi = (bf16_vals[2] >> c16_shift) | (bf16_vals[3] & c_ffff0000)
 
@@ -812,12 +812,13 @@ def extract_bf16_scale(scale_raw_i32, ku: int):
     In the ``(E, G//2, N, 2)`` layout two adjacent groups share one dword.
     ``ku`` determines which half: even ku → low bf16, odd ku → high bf16.
     """
+    v = fx.Uint32(scale_raw_i32)
     if ku % 2 == 0:
         # Low bf16: shift left by 16 to place in upper 16 bits → f32
-        return (scale_raw_i32 << fx.Int32(16)).bitcast(fx.Float32)
+        return (v << fx.Int32(16)).bitcast(fx.Float32)
     else:
         # High bf16: mask upper 16 bits → f32
-        return (scale_raw_i32 & fx.Int32(0xFFFF0000)).bitcast(fx.Float32)
+        return (v & fx.Int32(0xFFFF0000)).bitcast(fx.Float32)
 
 
 # ---------------------------------------------------------------------------
