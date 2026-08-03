@@ -69,6 +69,7 @@ Build the Fly C++ dialect, compiler passes, and embedded Python bindings:
 After a successful build you will have:
 
 - ``build-fly/bin/fly-opt`` -- the Fly optimization tool
+- ``build-fly/bin/flydsl-lsp-server`` -- MLIR Language Server for FlyDSL ``.mlir``
 - ``build-fly/python_packages/flydsl/`` -- Python package root containing:
 
   - ``flydsl/`` -- Python DSL API (sources from ``python/flydsl/``)
