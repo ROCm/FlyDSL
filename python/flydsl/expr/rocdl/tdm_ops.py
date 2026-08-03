@@ -55,6 +55,8 @@ __all__ = [
     "tensor_load_2d",
     "tensor_load_gather",
     "tensor_store_gather",
+    "tdm_gather",
+    "tdm_scatter",
     "tensor_store_2d",
     "tensor_wait",
     "update_tensor_descriptor_2d_addr_lo",
@@ -728,13 +730,22 @@ def make_tensor_gather_dgroup0(
         glb_byte_off_i64 = arith.index_cast(T.i64, global_byte_offset)
         glb_base_i64 = glb_base_i64 + glb_byte_off_i64
 
-    # lds_memref may be a std MLIR memref (extract its aligned pointer) OR an
-    # already-resolved LDS base index -- e.g. from a pointer-based allocator
-    # (SharedAllocator) via index_cast(index, ptrtoint(ptr)). Use it directly
-    # in that case; only std memrefs support extract_aligned_pointer_as_index.
+    # lds_memref accepts, in priority order:
+    #   * an already-resolved LDS base index (e.g. from a pointer-based
+    #     allocator via index_cast(index, ptrtoint(ptr))) -- used directly;
+    #   * a fly view (lds_view) -- handled symmetrically to global_ptr above,
+    #     extracting its aligned LDS pointer (addrspace 3) via the fly dialect;
+    #   * a std MLIR memref -- via memref.extract_aligned_pointer_as_index.
     if hasattr(lds_memref, "type") and isinstance(lds_memref.type, ir.IndexType):
         lds_base_idx = (
             lds_memref if isinstance(lds_memref, _ArithValue) else _ArithValue(lds_memref)
+        )
+    elif hasattr(lds_memref, "__extract_to_ir_values__"):
+        lds_ptr_type = ir.Type.parse("!llvm.ptr<3>")
+        lds_raw = lds_memref.__extract_to_ir_values__()[0]
+        lds_ptr = _fly_d.extract_aligned_pointer_as_index(lds_ptr_type, lds_raw)
+        lds_base_idx = _ArithValue(
+            arith.index_cast(T.index, llvm_dialect.ptrtoint(i64, lds_ptr))
         )
     else:
         lds_base_idx = _ArithValue(
@@ -807,6 +818,112 @@ def tensor_store_gather(
         dg4,
         cache_policy,
     )
+
+
+# ---------------------------------------------------------------------------
+# High-level one-call TDM indexed gather/scatter
+#
+# These fuse ``make_tensor_gather_descriptor`` with the matching issue op so a
+# kernel expresses a hardware TDM indexed transfer in a single call, mirroring
+# the ``fx.copy`` / ``fx.gather`` / ``fx.scatter`` naming family.
+#
+# NOTE: unlike the *software* ``fx.gather`` / ``fx.scatter`` (which expand to a
+# per-row loop of ordinary copies), ``tdm_gather`` / ``tdm_scatter`` emit ONE
+# hardware TDM instruction that packs up to 8 (32-bit index) / 16 (16-bit
+# index) row indices into the descriptor. ``lds_memref`` accepts a fly LDS view
+# (lds_view), a std memref, or an LDS base index -- see
+# ``make_tensor_gather_dgroup0``.
+# ---------------------------------------------------------------------------
+
+
+@dsl_loc_tracing
+def tdm_gather(
+    global_ptr,
+    lds_memref,
+    row_indices,
+    *,
+    row_width: int,
+    tensor_dim0: int,
+    tensor_dim1,
+    stride: int,
+    elem_bytes: int = 1,
+    pad_interval: int = 0,
+    pad_amount: int = 0,
+    index_size: int = 32,
+    gather_tile_dim1=None,
+    lds_byte_offset=None,
+    global_byte_offset=None,
+    workgroup_mask: Union[int, "ir.Value"] = 0,
+    cache_policy: int = 0,
+) -> None:
+    """Hardware TDM indexed load ``lds[...] = global[row_indices]`` in one call.
+
+    Thin wrapper over ``make_tensor_gather_descriptor`` + ``tensor_load_gather``.
+    See those for the full argument semantics.
+    """
+    desc = make_tensor_gather_descriptor(
+        global_ptr,
+        lds_memref,
+        row_indices,
+        row_width=row_width,
+        tensor_dim0=tensor_dim0,
+        tensor_dim1=tensor_dim1,
+        stride=stride,
+        elem_bytes=elem_bytes,
+        pad_interval=pad_interval,
+        pad_amount=pad_amount,
+        index_size=index_size,
+        gather_tile_dim1=gather_tile_dim1,
+        lds_byte_offset=lds_byte_offset,
+        global_byte_offset=global_byte_offset,
+        workgroup_mask=workgroup_mask,
+    )
+    tensor_load_gather(desc, cache_policy)
+
+
+@dsl_loc_tracing
+def tdm_scatter(
+    global_ptr,
+    lds_memref,
+    row_indices,
+    *,
+    row_width: int,
+    tensor_dim0: int,
+    tensor_dim1,
+    stride: int,
+    elem_bytes: int = 1,
+    pad_interval: int = 0,
+    pad_amount: int = 0,
+    index_size: int = 32,
+    gather_tile_dim1=None,
+    lds_byte_offset=None,
+    global_byte_offset=None,
+    workgroup_mask: Union[int, "ir.Value"] = 0,
+    cache_policy: int = 0,
+) -> None:
+    """Hardware TDM indexed store ``global[row_indices] = lds[...]`` in one call.
+
+    Thin wrapper over ``make_tensor_gather_descriptor`` + ``tensor_store_gather``.
+    See those for the full argument semantics.
+    """
+    desc = make_tensor_gather_descriptor(
+        global_ptr,
+        lds_memref,
+        row_indices,
+        row_width=row_width,
+        tensor_dim0=tensor_dim0,
+        tensor_dim1=tensor_dim1,
+        stride=stride,
+        elem_bytes=elem_bytes,
+        pad_interval=pad_interval,
+        pad_amount=pad_amount,
+        index_size=index_size,
+        gather_tile_dim1=gather_tile_dim1,
+        lds_byte_offset=lds_byte_offset,
+        global_byte_offset=global_byte_offset,
+        workgroup_mask=workgroup_mask,
+    )
+    tensor_store_gather(desc, cache_policy)
 
 
 # ---------------------------------------------------------------------------
