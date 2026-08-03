@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-03T08:09:13Z",
+ "updated": "2026-08-03T08:21:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30796923931,
+   "pr": null,
+   "commit": "c212733e43f182007910a5d00cbfc3a5fdeab2c0",
+   "branch": "main",
+   "event": "push",
+   "title": "Feat: Add flydsl-lsp-server for FlyDSL .mlir editor support. (#952)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30796923931",
+   "created_at": "2026-08-03T08:19:00Z",
+   "updated_at": "2026-08-03T08:19:12Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 30795426916,
    "pr": 930,
@@ -40,11 +55,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Opt] Lazily materialize static int tuple leaves (#956)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30791487664",
    "created_at": "2026-08-03T06:50:07Z",
-   "updated_at": "2026-08-03T07:00:03Z",
+   "updated_at": "2026-08-03T08:19:02Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -59,10 +74,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-03T07:00:03Z",
-     "completed_at": null,
+     "completed_at": "2026-08-03T08:19:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30791487664/job/91617421142"
     },
     {
@@ -2199,49 +2214,6 @@
      "started_at": "2026-07-31T10:13:23Z",
      "completed_at": "2026-07-31T10:25:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622588902/job/91131015166"
-    }
-   ]
-  },
-  {
-   "run_id": 30622441512,
-   "pr": 848,
-   "commit": "85471e615121474dd6269ccd220cb382becda98b",
-   "branch": "cjl/norm_perf",
-   "event": "pull_request",
-   "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622441512",
-   "created_at": "2026-07-31T10:07:25Z",
-   "updated_at": "2026-07-31T14:43:34Z",
-   "actor": "cschenjunlin",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-31T10:12:23Z",
-     "completed_at": "2026-07-31T11:35:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622441512/job/91130681264"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-31T10:12:48Z",
-     "completed_at": "2026-07-31T11:09:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622441512/job/91130681290"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-31T13:20:40Z",
-     "completed_at": "2026-07-31T14:43:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622441512/job/91130681304"
     }
    ]
   }
