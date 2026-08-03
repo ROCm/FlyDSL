@@ -726,12 +726,9 @@ def _make_pa_phase_helpers(
             v_correction = v_scale_val
 
         for td in range_constexpr(TLOOP):
-            p0 = vector.extract(as_ir_value(d_out[td]), static_position=[0], dynamic_position=[])
-            p1 = vector.extract(as_ir_value(d_out[td]), static_position=[1], dynamic_position=[])
-            p2 = vector.extract(as_ir_value(d_out[td]), static_position=[2], dynamic_position=[])
-            p3 = vector.extract(as_ir_value(d_out[td]), static_position=[3], dynamic_position=[])
-            lo = rocdl.cvt_pk_fp8_f32(T.i32, p0, p1, arith.constant(0, type=T.i32), False)
-            pk = rocdl.cvt_pk_fp8_f32(T.i32, p2, p3, lo, True)
+            pv = fx.Vector(d_out[td])
+            lo = rocdl.cvt_pk_fp8_f32(T.i32, pv[0], pv[1], arith.constant(0, type=T.i32), False)
+            pk = rocdl.cvt_pk_fp8_f32(T.i32, pv[2], pv[3], lo, True)
             elem_base = prob_wr_thread_base + arith.constant(td * MFMA_N * (PROB_ROW_STRIDE_BYTES // 4), type=T.i32)
             pk_vec = fx.Vector.from_elements([pk], dtype=fx.Int32)
             fx.ptr_store(pk_vec, logits_base + elem_base)
@@ -1500,8 +1497,8 @@ def compile_pa_decode_metadata(
         # ── Work loop bounds ──
         # wi[cu_id] and wi[cu_id+1] are adjacent int32; load both in one vec2 load.
         work_bounds = buffer_ops.buffer_load(wi_rsrc, cu_id, vec_width=2, dtype=T.i32)
-        work_start = vector.extract(as_ir_value(work_bounds), static_position=[0], dynamic_position=[])
-        work_end = vector.extract(as_ir_value(work_bounds), static_position=[1], dynamic_position=[])
+        work_start = fx.Vector(work_bounds)[0]
+        work_end = fx.Vector(work_bounds)[1]
 
         # Outer work loop — each work item = one (batch, kv_head_range, kv_page_range)
         _work_start_idx = fx.Index(arith.unwrap(work_start))
@@ -1520,12 +1517,14 @@ def compile_pa_decode_metadata(
             wi_hi = buffer_ops.buffer_load(
                 winfo_rsrc, info_base + arith.constant(4, type=T.i32), vec_width=4, dtype=T.i32
             )
-            batch_idx = vector.extract(as_ir_value(wi_lo), static_position=[0], dynamic_position=[])
-            partial_idx = vector.extract(as_ir_value(wi_lo), static_position=[1], dynamic_position=[])
-            qo_start = vector.extract(as_ir_value(wi_lo), static_position=[2], dynamic_position=[])
-            kv_start = vector.extract(as_ir_value(wi_hi), static_position=[0], dynamic_position=[])
-            kv_end = vector.extract(as_ir_value(wi_hi), static_position=[1], dynamic_position=[])
-            q_head_range = vector.extract(as_ir_value(wi_hi), static_position=[3], dynamic_position=[])
+            wi_lo_v = fx.Vector(wi_lo)
+            batch_idx = wi_lo_v[0]
+            partial_idx = wi_lo_v[1]
+            qo_start = wi_lo_v[2]
+            wi_hi_v = fx.Vector(wi_hi)
+            kv_start = wi_hi_v[0]
+            kv_end = wi_hi_v[1]
+            q_head_range = wi_hi_v[3]
 
             # work_info.kv_start/kv_end are cumulative partition indices (256-token
             # units, summed across batches).  partition_indptr[batch] gives the
@@ -1537,8 +1536,9 @@ def compile_pa_decode_metadata(
             # array.  kv_page_end clamps small-block page-gather reads so the last
             # (partial) partition never reads past the sequence.
             _kvind2 = buffer_ops.buffer_load(kvindptr_rsrc, batch_idx, vec_width=2, dtype=T.i32)
-            kv_page_base = vector.extract(as_ir_value(_kvind2), static_position=[0], dynamic_position=[])
-            kv_page_end = vector.extract(as_ir_value(_kvind2), static_position=[1], dynamic_position=[])
+            _kvind2_v = fx.Vector(_kvind2)
+            kv_page_base = _kvind2_v[0]
+            kv_page_end = _kvind2_v[1]
             local_part_start = kv_start - kv_part_base
 
             # Derive kv_head from q_head_range
@@ -2078,7 +2078,7 @@ def compile_pa_decode_metadata(
 #   reduce_partial_map: slot → partial row base (in the sliced buffer).
 # Direct (non-split) outputs have empty groups (indptr delta 0) and are skipped.
 @functools.lru_cache(maxsize=64)
-def compile_pa_ps_reduce(
+def compile_pa_metadata_reduce(
     *,
     query_length: int,
     num_query_heads: int,
@@ -2089,7 +2089,7 @@ def compile_pa_ps_reduce(
     assert 0 < block_threads <= 1024, "head_size must fit in one workgroup"
 
     @flyc.kernel(known_block_size=(block_threads, 1, 1))
-    def pa_ps_reduce_kernel(
+    def pa_metadata_reduce_kernel(
         final_output_ptr: fx.Tensor,
         partial_output_ptr: fx.Tensor,
         partial_lse_ptr: fx.Tensor,
@@ -2166,7 +2166,7 @@ def compile_pa_ps_reduce(
             buffer_ops.buffer_store(out_val, out_rsrc, out_off)
 
     @flyc.jit
-    def launch_pa_ps_reduce(
+    def launch_pa_metadata_reduce(
         final_output,
         partial_output,
         partial_lse,
@@ -2180,7 +2180,7 @@ def compile_pa_ps_reduce(
         num_groups,
         stream: fx.Stream = fx.Stream(None),
     ):
-        pa_ps_reduce_kernel(
+        pa_metadata_reduce_kernel(
             final_output,
             partial_output,
             partial_lse,
@@ -2197,7 +2197,7 @@ def compile_pa_ps_reduce(
             stream=stream,
         )
 
-    return {"launch": launch_pa_ps_reduce, "kernel": pa_ps_reduce_kernel}
+    return {"launch": launch_pa_metadata_reduce, "kernel": pa_metadata_reduce_kernel}
 
 
 _PA_PS_REDUCE_DTYPE_STR = {
@@ -2207,7 +2207,7 @@ _PA_PS_REDUCE_DTYPE_STR = {
 }
 
 
-def pa_ps_reduce(
+def pa_metadata_reduce(
     *,
     partial_output: torch.Tensor,
     partial_lse: torch.Tensor,
@@ -2231,7 +2231,7 @@ def pa_ps_reduce(
     stride_po_row = num_query_heads * head_size
     stride_pl_row = num_query_heads
     out_dtype_str = _PA_PS_REDUCE_DTYPE_STR[final_output.dtype]
-    compiled = compile_pa_ps_reduce(
+    compiled = compile_pa_metadata_reduce(
         query_length=int(max_seqlen_q),
         num_query_heads=int(num_query_heads),
         head_size=int(head_size),

@@ -35,6 +35,19 @@ from .struct import (
 )
 from .typing import Array, PointerType, Tuple3D, as_ir_value
 
+__all__ = [
+    "thread_idx",
+    "block_idx",
+    "block_dim",
+    "grid_dim",
+    "barrier",
+    "shuffle_xor",
+    "shuffle_up",
+    "shuffle_down",
+    "shuffle_idx",
+    "SharedAllocator",
+]
+
 
 @dsl_loc_tracing
 def thread_id(*args, **kwargs):
@@ -229,21 +242,3 @@ class SharedAllocator(Arena):
             }
         )
         return make_ptr(ptr_ty, [], dict_attrs=dict_attrs)
-
-
-__all__ = [
-    "thread_id",
-    "block_id",
-    "thread_idx",
-    "block_idx",
-    "block_dim",
-    "grid_dim",
-    "barrier",
-    "shuffle_xor",
-    "shuffle_up",
-    "shuffle_down",
-    "shuffle_idx",
-    "smem_space",
-    "lds_space",
-    "SharedAllocator",
-]

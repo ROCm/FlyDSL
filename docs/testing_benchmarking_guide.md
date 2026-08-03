@@ -46,6 +46,16 @@ cmake --build build-fly --target fly-opt -j$(nproc)
 build-fly/bin/fly-opt --fly-canonicalize tests/mlir/LayoutAlgebra/construction.mlir
 ```
 
+**Editor support (MLIR LSP):** `build-fly/bin/flydsl-lsp-server` is a thin
+`MlirLspServerMain` wrapper with Fly (+ backend) dialects registered. Point the
+editor's MLIR LSP client / `mlir-lsp-server` path at that binary for `.mlir`
+diagnostics, hover, go-to-definition, and completion. It is not a Python DSL /
+kernel language server.
+
+```bash
+cmake --build build-fly --target flydsl-lsp-server -j$(nproc)
+```
+
 ### 1.2 Python Tests (`tests/python/`)
 
 Python-based tests including AOT pre-compilation examples.
@@ -69,7 +79,6 @@ Full end-to-end tests: compile FlyDSL kernels, execute on GPU, validate against 
 | `test_preshuffle_gemm.py` | GEMM | Preshuffle MFMA GEMM (fp8/int8/fp16/bf16) |
 | `test_blockscale_preshuffle_gemm.py` | GEMM | Block-scale (MXFP4) preshuffle GEMM |
 | `test_moe_gemm.py` | MoE GEMM | Mixture-of-Experts GEMM |
-| `test_moe_blockscale.py` | MoE | MoE with block-scale quantization |
 | `test_moe_reduce.py` | MoE Reduce | MoE reduction kernel |
 | `test_pa.py` | Paged Attn | Paged attention decode |
 | `test_quant.py` | Quantization | Quantization ops |

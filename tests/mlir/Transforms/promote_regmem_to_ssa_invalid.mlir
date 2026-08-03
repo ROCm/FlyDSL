@@ -40,4 +40,21 @@ gpu.module @promote_regmem_to_ssa_recast_skip {
     fly.ptr.store(%sum, %out) : (i32, !fly.ptr<i32, global>) -> ()
     gpu.return
   }
+
+// A dynamic offset yields no concrete slot index, so the access must stay in
+// memory form.  Promoting it would silently read slot 0, because a dynamic
+// IntAttr carries value == 0.
+// CHECK-LABEL: gpu.func @skip_register_dynamic_offset
+// CHECK: fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}}
+// CHECK: fly.add_offset
+// CHECK: fly.ptr.load
+// CHECK-NOT: vector.extract
+  gpu.func @skip_register_dynamic_offset(%out: !fly.ptr<f32, global>, %idx: i32) kernel {
+    %reg = fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}} : () -> !fly.ptr<f32, register>
+    %dyn = fly.make_int_tuple(%idx) : (i32) -> !fly.int_tuple<?>
+    %slot = fly.add_offset(%reg, %dyn) : (!fly.ptr<f32, register>, !fly.int_tuple<?>) -> !fly.ptr<f32, register>
+    %val = fly.ptr.load(%slot) : (!fly.ptr<f32, register>) -> f32
+    fly.ptr.store(%val, %out) : (f32, !fly.ptr<f32, global>) -> ()
+    gpu.return
+  }
 }

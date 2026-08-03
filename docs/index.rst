@@ -16,10 +16,11 @@ to GPU/ROCDL.
 
    installation
    quickstart
+   api_stability
 
 .. toctree::
    :maxdepth: 2
-   :caption: Language Specification
+   :caption: Language
 
    language/arithmetic_types
 
@@ -31,6 +32,7 @@ to GPU/ROCDL.
    layout_system_guide
    kernel_authoring_guide
    kernel_tuning_guide
+   autotune_guide
    prebuilt_kernels_guide
    testing_benchmarking_guide
    cute_layout_algebra_guide

@@ -16,9 +16,51 @@ This module provides access to ROCm-specific GPU operations including:
 
 from ..._mlir.dialects.rocdl import *  # noqa: F401,F403
 from ..meta import dsl_loc_tracing
+from . import cdna3 as cdna3
 from . import cdna4 as cdna4
 from . import cdna5 as cdna5
+from . import rdna3 as rdna3
+from . import rdna4 as rdna4
 from .enum import SyncScope as SyncScope
+from .universal import *
+
+__all__ = [
+    # Targets
+    "cdna3",
+    "cdna4",
+    # "cdna5", unstable for now
+    "rdna3",
+    "rdna4",
+    # Enums
+    "SyncScope",
+    # Re-exported from .universal
+    "s_waitcnt",
+    "BufferCopy",
+    "BufferCopy8b",
+    "BufferCopy16b",
+    "BufferCopy32b",
+    "BufferCopy64b",
+    "BufferCopy128b",
+    "BufferCopyLDS",
+    "BufferCopyLDS32b",
+    "BufferCopyLDS64b",
+    "BufferCopyLDS128b",
+    "BufferAtomic",
+    "BufferAtomicAdd",
+    "BufferAtomicMax",
+    "BufferAtomicMin",
+    "BufferAtomicPkAdd",
+    "MFMA",
+    "WMMA",
+    "make_buffer_ptr",
+    "make_buffer_tensor",
+    "get_buffer_rsrc",
+    # Operations
+    "sched_mfma",
+    "sched_vmem",
+    "sched_dsrd",
+    "sched_dswr",
+]
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
 _ods_wmma_scale_f32_16x16x128_f8f6f4 = globals().get("wmma_scale_f32_16x16x128_f8f6f4", None)
@@ -458,7 +500,6 @@ def lds_transpose_load(result_type, lds_memref, elem_offset, elem_bytes):
 
 
 # ── New high-level helpers from universal.py ──────────────────────────
-from .universal import *  # noqa: E402,F401,F403,I001
 from .cdna5 import *  # noqa: E402,F401,F403,I001
 from .inline_asm import *  # noqa: E402,F401,F403,I001
 
