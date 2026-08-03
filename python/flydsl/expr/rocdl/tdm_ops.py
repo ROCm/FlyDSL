@@ -728,7 +728,18 @@ def make_tensor_gather_dgroup0(
         glb_byte_off_i64 = arith.index_cast(T.i64, global_byte_offset)
         glb_base_i64 = glb_base_i64 + glb_byte_off_i64
 
-    lds_base_idx = _ArithValue(memref_dialect.extract_aligned_pointer_as_index(lds_memref))
+    # lds_memref may be a std MLIR memref (extract its aligned pointer) OR an
+    # already-resolved LDS base index -- e.g. from a pointer-based allocator
+    # (SharedAllocator) via index_cast(index, ptrtoint(ptr)). Use it directly
+    # in that case; only std memrefs support extract_aligned_pointer_as_index.
+    if hasattr(lds_memref, "type") and isinstance(lds_memref.type, ir.IndexType):
+        lds_base_idx = (
+            lds_memref if isinstance(lds_memref, _ArithValue) else _ArithValue(lds_memref)
+        )
+    else:
+        lds_base_idx = _ArithValue(
+            memref_dialect.extract_aligned_pointer_as_index(lds_memref)
+        )
     lds_total_off = lds_base_idx
     if lds_byte_offset is not None:
         lds_total_off = lds_total_off + lds_byte_offset
