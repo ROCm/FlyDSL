@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-03T06:52:19Z",
+ "updated": "2026-08-03T07:29:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Opt] Lazily materialize static int tuple leaves (#956)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30791487664",
    "created_at": "2026-08-03T06:50:07Z",
-   "updated_at": "2026-08-03T06:50:18Z",
+   "updated_at": "2026-08-03T07:00:03Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-03T07:01:21Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30791487664/job/91617421079"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-03T07:00:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30791487664/job/91617421142"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-03T07:00:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30791487664/job/91617421292"
+    }
+   ]
   },
   {
    "run_id": 30787278945,
@@ -35,10 +63,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-03T06:00:37Z",
-     "completed_at": null,
+     "completed_at": "2026-08-03T06:58:14Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30787278945/job/91607666476"
     },
     {
@@ -96,10 +124,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-03T05:32:49Z",
-     "completed_at": null,
+     "completed_at": "2026-08-03T07:02:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30786568389/job/91601707544"
     }
    ]
