@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-03T13:22:29Z",
+ "updated": "2026-08-03T13:56:24Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815926565",
    "created_at": "2026-08-03T13:00:03Z",
-   "updated_at": "2026-08-03T13:01:58Z",
+   "updated_at": "2026-08-03T13:40:58Z",
    "actor": "amd-nprotaso",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-03T13:40:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815926565/job/91704099266"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-03T13:41:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815926565/job/91704099303"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-03T13:41:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815926565/job/91704099370"
+    }
+   ]
   },
   {
    "run_id": 30815507237,
@@ -25,13 +53,41 @@
    "branch": "stochastic-rounding",
    "event": "pull_request",
    "title": "Add stochastic rounding and philox RNG under rocdl",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815507237",
    "created_at": "2026-08-03T12:54:07Z",
-   "updated_at": "2026-08-03T13:01:46Z",
+   "updated_at": "2026-08-03T13:41:47Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-03T13:42:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815507237/job/91704310652"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-03T13:41:47Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815507237/job/91704310663"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-03T13:42:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815507237/job/91704310665"
+    }
+   ]
   },
   {
    "run_id": 30796923931,
@@ -83,11 +139,11 @@
    "branch": "dsl-ify-arith",
    "event": "pull_request",
    "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30795426916",
    "created_at": "2026-08-03T07:55:37Z",
-   "updated_at": "2026-08-03T12:58:35Z",
+   "updated_at": "2026-08-03T13:53:27Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -120,19 +176,19 @@
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-03T12:58:33Z",
-     "completed_at": null,
+     "completed_at": "2026-08-03T13:53:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30795426916/job/91693088491"
     },
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-03T12:58:34Z",
-     "completed_at": null,
+     "completed_at": "2026-08-03T13:22:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30795426916/job/91693088504"
     }
    ]
