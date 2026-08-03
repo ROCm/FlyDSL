@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-03T15:35:55Z",
+ "updated": "2026-08-03T15:42:18Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30828444001,
+   "pr": 931,
+   "commit": "94c9454d5c9c2061937e97bd6edcd0447a9d5fb3",
+   "branch": "rchamber/flex_attention",
+   "event": "pull_request",
+   "title": "Add flex_attention (score_mod / mask_mod) on the generic flash-attention kernel",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30828444001",
+   "created_at": "2026-08-03T15:38:26Z",
+   "updated_at": "2026-08-03T15:39:43Z",
+   "actor": "RichardChamberlain1",
+   "jobs": []
+  },
   {
    "run_id": 30822360546,
    "pr": 930,
@@ -2321,21 +2336,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30623702456/job/91134710426"
     }
    ]
-  },
-  {
-   "run_id": 30623653613,
-   "pr": null,
-   "commit": "4d1431b87833ba3092f54b4e4c98794af4a6abec",
-   "branch": "stochastic-rounding",
-   "event": "pull_request",
-   "title": "Add stochastic rounding and philox RNG under rocdl",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30623653613",
-   "created_at": "2026-07-31T10:28:10Z",
-   "updated_at": "2026-07-31T10:28:10Z",
-   "actor": "sjfeng1999",
-   "jobs": []
   }
  ]
 }
