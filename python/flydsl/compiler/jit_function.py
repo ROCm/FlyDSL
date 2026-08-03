@@ -1472,7 +1472,6 @@ class JitFunction:
             _compile_lock_ctx = nullcontext((None, None))
 
         with _compile_lock_ctx as (_lock_result, _cache_writer):
-
             if _lock_result is not None and not getattr(_lock_result, "_link_libs", None):
                 # Cache hit after waiting for another process to compile.
                 compiled_func = _lock_result
@@ -1646,7 +1645,7 @@ class CompiledFunction:
         return self._call_state(args)
 
 
-def _compile_impl(func, *args) -> CompiledFunction:
+def _compile_impl(func, *args) -> Optional[CompiledFunction]:
     """Pre-compile a ``@flyc.jit`` function, returning a fast callable.
 
     Usage::
@@ -1662,6 +1661,9 @@ def _compile_impl(func, *args) -> CompiledFunction:
 
     Constexpr values are baked in at compile time and ignored on subsequent
     calls; only runtime values (data pointers, scalars, stream) may change.
+
+    When ``COMPILE_ONLY`` is enabled, compilation and cache persistence still
+    run, but no execution engine is materialized and ``None`` is returned.
     """
     if not isinstance(func, JitFunction):
         raise TypeError(f"flyc.compile() expects a @flyc.jit function, got {type(func).__name__}")
@@ -1669,6 +1671,8 @@ def _compile_impl(func, *args) -> CompiledFunction:
     jf = func
 
     jf(*args)
+    if env.compile.compile_only:
+        return None
 
     # Retrieve the CallState (already built by __call__ above).
     sig = jf._sig  # guaranteed initialized after __call__
