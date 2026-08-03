@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-03T07:29:53Z",
+ "updated": "2026-08-03T07:58:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30795426916,
+   "pr": 930,
+   "commit": "34943386cf10260d6083567e052b764803e4a0ab",
+   "branch": "dsl-ify-arith",
+   "event": "pull_request",
+   "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30795426916",
+   "created_at": "2026-08-03T07:55:37Z",
+   "updated_at": "2026-08-03T07:55:53Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
+  {
+   "run_id": 30794437563,
+   "pr": 958,
+   "commit": "0e3279bf56e12784ea8f22759e28066fee40a991",
+   "branch": "codex/gfx1100-wmma-foundation",
+   "event": "pull_request",
+   "title": "[Feature][Test] Validate gfx1100 LDS and integer WMMA foundations",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30794437563",
+   "created_at": "2026-08-03T07:39:20Z",
+   "updated_at": "2026-08-03T07:39:20Z",
+   "actor": "skyguan92",
+   "jobs": []
+  },
   {
    "run_id": 30791487664,
    "pr": null,
@@ -72,10 +102,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-03T06:00:33Z",
-     "completed_at": null,
+     "completed_at": "2026-08-03T07:43:59Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30787278945/job/91607666496"
     },
     {
@@ -225,11 +255,11 @@
    "branch": "dsl-ify-arith",
    "event": "pull_request",
    "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30785702542",
    "created_at": "2026-08-03T04:54:58Z",
-   "updated_at": "2026-08-03T04:58:11Z",
+   "updated_at": "2026-08-03T07:55:38Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -244,10 +274,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-03T04:58:11Z",
-     "completed_at": null,
+     "completed_at": "2026-08-03T07:55:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30785702542/job/91599096008"
     },
     {
@@ -437,7 +467,7 @@
   },
   {
    "run_id": 30770091231,
-   "pr": 958,
+   "pr": null,
    "commit": "d517327035306418b73133235b46fa31e465e3b3",
    "branch": "codex/gfx1100-wmma-foundation",
    "event": "pull_request",
@@ -2212,92 +2242,6 @@
      "started_at": "2026-07-31T13:20:40Z",
      "completed_at": "2026-07-31T14:43:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622441512/job/91130681304"
-    }
-   ]
-  },
-  {
-   "run_id": 30622154072,
-   "pr": 848,
-   "commit": "6b7a130e616cfb7c6d6de978298f2769fc6f08ea",
-   "branch": "cjl/norm_perf",
-   "event": "pull_request",
-   "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622154072",
-   "created_at": "2026-07-31T10:02:49Z",
-   "updated_at": "2026-07-31T10:07:41Z",
-   "actor": "cschenjunlin",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-31T10:06:36Z",
-     "completed_at": "2026-07-31T10:07:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622154072/job/91129602325"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-31T10:06:33Z",
-     "completed_at": "2026-07-31T10:07:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622154072/job/91129602334"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-31T10:05:56Z",
-     "completed_at": "2026-07-31T10:07:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622154072/job/91129602400"
-    }
-   ]
-  },
-  {
-   "run_id": 30622104753,
-   "pr": 930,
-   "commit": "669e9592c7cf500946b1a77de2cf2e8b7fd525d2",
-   "branch": "dsl-ify-arith",
-   "event": "pull_request",
-   "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622104753",
-   "created_at": "2026-07-31T10:02:01Z",
-   "updated_at": "2026-07-31T14:22:45Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-31T10:05:50Z",
-     "completed_at": "2026-07-31T11:28:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622104753/job/91129400211"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-31T10:05:50Z",
-     "completed_at": "2026-07-31T11:02:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622104753/job/91129400215"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-31T10:04:57Z",
-     "completed_at": "2026-07-31T14:22:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30622104753/job/91129400273"
     }
    ]
   }
