@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-08-03T14:23:34Z",
+ "updated": "2026-08-03T15:35:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30822360546,
+   "pr": 930,
+   "commit": "e4e62858b546833180f837f522a532387b5af153",
+   "branch": "dsl-ify-arith",
+   "event": "pull_request",
+   "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30822360546",
+   "created_at": "2026-08-03T14:22:13Z",
+   "updated_at": "2026-08-03T14:56:16Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-03T14:56:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30822360546/job/91724505634"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-03T14:56:16Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30822360546/job/91724505635"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-03T14:57:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30822360546/job/91724505695"
+    }
+   ]
+  },
   {
    "run_id": 30815926565,
    "pr": 960,
@@ -10,29 +53,29 @@
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815926565",
    "created_at": "2026-08-03T13:00:03Z",
-   "updated_at": "2026-08-03T13:40:58Z",
+   "updated_at": "2026-08-03T15:34:16Z",
    "actor": "amd-nprotaso",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-03T13:40:58Z",
+     "started_at": "2026-08-03T15:34:15Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815926565/job/91704099266"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-03T13:41:27Z",
-     "completed_at": null,
+     "completed_at": "2026-08-03T15:26:20Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815926565/job/91704099303"
     },
     {
@@ -63,10 +106,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-03T13:42:04Z",
-     "completed_at": null,
+     "completed_at": "2026-08-03T15:18:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815507237/job/91704310652"
     },
     {
@@ -96,20 +139,20 @@
    "branch": "main",
    "event": "push",
    "title": "Feat: Add flydsl-lsp-server for FlyDSL .mlir editor support. (#952)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30796923931",
    "created_at": "2026-08-03T08:19:00Z",
-   "updated_at": "2026-08-03T09:37:32Z",
+   "updated_at": "2026-08-03T15:33:54Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-03T09:37:32Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-03T14:22:32Z",
+     "completed_at": "2026-08-03T15:33:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30796923931/job/91649171536"
     },
     {
@@ -2293,49 +2336,6 @@
    "updated_at": "2026-07-31T10:28:10Z",
    "actor": "sjfeng1999",
    "jobs": []
-  },
-  {
-   "run_id": 30623630216,
-   "pr": 928,
-   "commit": "aa6a2d40e88394088451f2a48252f87e5cbaf089",
-   "branch": "phil/isa-resource-delta-table",
-   "event": "pull_request",
-   "title": "[Tool] Add per-kernel ISA resource delta table",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30623630216",
-   "created_at": "2026-07-31T10:27:46Z",
-   "updated_at": "2026-08-02T23:49:52Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-02T23:49:10Z",
-     "completed_at": "2026-08-02T23:49:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30623630216/job/91563410161"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-31T11:29:51Z",
-     "completed_at": "2026-07-31T13:26:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30623630216/job/91563410291"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-31T10:33:30Z",
-     "completed_at": "2026-07-31T11:26:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30623630216/job/91563410369"
-    }
-   ]
   }
  ]
 }
