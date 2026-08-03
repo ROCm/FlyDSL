@@ -4,6 +4,12 @@
 from ..._mlir.dialects.fly_rocdl import CopyOpCDNA4LdsReadTransposeType, MmaOpCDNA4_MFMAScaleType
 from ..._mlir.extras import types as T
 
+__all__ = [
+    "LDSReadTrans",
+    "MFMAScale",
+    "MFMA_Scale",
+]
+
 
 def LDSReadTrans(trans_granularity, bit_size):
     """Create a GFX950 LDS read-transpose copy atom (ds_read_tr series)."""
@@ -33,3 +39,6 @@ def MFMA_Scale(m, n, k, elem_ty_a, elem_ty_b=None, elem_ty_acc=None, *, opsel_a=
     else:
         ty_acc = elem_ty_acc.ir_type if hasattr(elem_ty_acc, "ir_type") else elem_ty_acc
     return MmaOpCDNA4_MFMAScaleType.get(m, n, k, ty_a, ty_b, ty_acc, opsel_a=opsel_a, opsel_b=opsel_b)
+
+
+MFMAScale = MFMA_Scale

@@ -4,4 +4,8 @@
 
 __version__ = "0.3.0"
 
-from .autotune import Config as Config, autotune as autotune  # noqa: E402
+from .autotune import Config as Config, autotune as autotune
+
+__all__ = [
+    "__version__",
+]

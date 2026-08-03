@@ -25,6 +25,8 @@ from flydsl.expr import arith
 __all__ = [
     "store_i32_system",
     "store_i64_global_system",
+    "fence_acquire",
+    "fence_release",
     "fence_system_acquire",
     "fence_system_release",
     "fence_agent_acquire",
@@ -64,24 +66,34 @@ def store_i64_global_system(addr_i64, val):
     _llvm_d.StoreOp(arith.unwrap(val), gptr, alignment=8, ordering=_llvm_d.AtomicOrdering.release, syncscope="one-as")
 
 
+def fence_acquire(syncscope):
+    """Emit an acquire fence for the selected AMDGPU memory scope."""
+    _llvm_d.FenceOp(_llvm_d.AtomicOrdering.acquire, syncscope=syncscope)
+
+
+def fence_release(syncscope):
+    """Emit a release fence for the selected AMDGPU memory scope."""
+    _llvm_d.FenceOp(_llvm_d.AtomicOrdering.release, syncscope=syncscope)
+
+
 def fence_system_acquire():
     """System-scope acquire fence."""
-    fx.rocdl.fence_acquire(fx.rocdl.SyncScope.OneAs)
+    fence_acquire(fx.rocdl.SyncScope.OneAs)
 
 
 def fence_system_release():
     """System-scope release fence."""
-    fx.rocdl.fence_release(fx.rocdl.SyncScope.OneAs)
+    fence_release(fx.rocdl.SyncScope.OneAs)
 
 
 def fence_agent_acquire():
     """Agent-scope acquire fence."""
-    fx.rocdl.fence_acquire(fx.rocdl.SyncScope.AgentOneAs)
+    fence_acquire(fx.rocdl.SyncScope.AgentOneAs)
 
 
 def fence_agent_release():
     """Agent-scope release fence."""
-    fx.rocdl.fence_release(fx.rocdl.SyncScope.AgentOneAs)
+    fence_release(fx.rocdl.SyncScope.AgentOneAs)
 
 
 def load_i64_global(addr_i64):

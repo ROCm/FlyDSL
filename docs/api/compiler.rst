@@ -104,7 +104,7 @@ The ``flydsl.expr.rocdl`` module provides AMD-specific operations:
 - **fx.rocdl.make_buffer_tensor** -- create buffer resource descriptor from tensor (CDNA buffer copy)
 - **fx.rocdl.BufferCopy32b** / **BufferCopy128b** -- buffer copy atoms
 - **fx.rocdl.MFMA** -- MFMA instruction atoms (CDNA3/CDNA4; e.g., ``MFMA(16, 16, 4, fx.Float32)``)
-- **fx.rocdl.WMMA** / **fx.rocdl.WMMAScale** -- gfx1250 (wave32) WMMA and E8M0 MX-scaled WMMA MMA atoms
+- **fx.rocdl.WMMA** / **fx.rocdl.WMMAScale** -- wave32 WMMA MMA atoms; ``WMMA`` is arch-dispatched (gfx11 / gfx120x RDNA4 / gfx1250), ``WMMAScale`` is the gfx1250 E8M0 MX-scaled form
 - **fx.rocdl.make_tdm_atom** / **fx.rocdl.TDM** -- gfx1250 TDM async Global↔LDS whole-tile copy atom (1–5D; base from the copy operand, per-dim extent/stride/imm_offset/mask as atom state)
 
 fly-opt CLI

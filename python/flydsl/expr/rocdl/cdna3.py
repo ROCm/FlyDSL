@@ -4,6 +4,10 @@
 from ..._mlir.dialects import rocdl as mlir_rocdl
 from .utils import normalize_s_waitcnt_field
 
+__all__ = [
+    "s_waitcnt",
+]
+
 
 def s_waitcnt(vmcnt=None, lgkmcnt=None, expcnt=None):
     """
