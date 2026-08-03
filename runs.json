@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-03T22:57:01Z",
+ "updated": "2026-08-03T23:29:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -141,11 +141,11 @@
    "branch": "dsl-ify-arith",
    "event": "pull_request",
    "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30822360546",
    "created_at": "2026-08-03T14:22:13Z",
-   "updated_at": "2026-08-03T21:27:57Z",
+   "updated_at": "2026-08-03T23:28:04Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -178,10 +178,10 @@
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-03T21:27:49Z",
-     "completed_at": null,
+     "completed_at": "2026-08-03T23:28:03Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30822360546/job/91822696250"
     },
     {
