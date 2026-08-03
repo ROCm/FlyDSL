@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-03T01:29:46Z",
+ "updated": "2026-08-03T02:03:03Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30778183602,
+   "pr": 950,
+   "commit": "9f776e7db66f957b54c47713769c096cd7fa09c8",
+   "branch": "binding_fa_fp8_gfx950_opt2",
+   "event": "pull_request",
+   "title": "[Perf]optimize the flash attention fp8 performance for gfx950",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30778183602",
+   "created_at": "2026-08-03T01:59:39Z",
+   "updated_at": "2026-08-03T02:01:12Z",
+   "actor": "binding7012",
+   "jobs": []
+  },
   {
    "run_id": 30770091231,
    "pr": 958,
@@ -569,7 +584,7 @@
   },
   {
    "run_id": 30689816344,
-   "pr": 950,
+   "pr": null,
    "commit": "3b2330de90b73653cd671f16fe14eca1b12abf7e",
    "branch": "binding_fa_fp8_gfx950_opt2",
    "event": "pull_request",
@@ -2273,49 +2288,6 @@
      "started_at": "2026-07-31T03:13:45Z",
      "completed_at": "2026-07-31T03:58:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30600810958/job/91063470322"
-    }
-   ]
-  },
-  {
-   "run_id": 30599967664,
-   "pr": null,
-   "commit": "69844b23f76e7e9afd9c231b99c3cccf9239ff5b",
-   "branch": "rdna4-wmma-atom",
-   "event": "pull_request",
-   "title": "[Dialect][Kernel][Perf] Add gfx120x.wmma atom and port the RDNA4 GEMM to the layout API",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30599967664",
-   "created_at": "2026-07-31T02:49:14Z",
-   "updated_at": "2026-07-31T06:19:33Z",
-   "actor": "vlluvia",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-31T04:15:14Z",
-     "completed_at": "2026-07-31T06:19:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30599967664/job/91060930064"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-31T02:55:19Z",
-     "completed_at": "2026-07-31T03:52:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30599967664/job/91060930077"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-31T02:54:43Z",
-     "completed_at": "2026-07-31T04:09:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30599967664/job/91060930078"
     }
    ]
   }
