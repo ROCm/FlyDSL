@@ -66,12 +66,14 @@ def _run(B, Sq, Skv, H, D, dtype_str):
     return max_err, cos
 
 
-# (B, Sq, Skv, H, D) — block_m=32 so Sq multiple of 32; Skv multiple of 32.
+# (B, Sq, Skv, H, D) — Sq must be a multiple of block_m*num_groups (64 for 2 groups);
+# Skv must be a multiple of block_n (32).
 _SHAPES = [
-    (1, 32, 32, 4, 128),    # single q-tile, single kv-tile
-    (1, 32, 128, 4, 128),   # single q-tile, 4 kv-tiles (online softmax loop)
-    (2, 64, 128, 8, 128),   # 2 q-tiles, batch, more heads
-    (1, 32, 64, 4, 64),     # D=64
+    (1, 64, 32, 4, 128),    # single group-tile, single kv-tile
+    (1, 64, 128, 4, 128),   # single group-tile, 4 kv-tiles (online softmax loop)
+    (2, 128, 128, 8, 128),  # 2 group-tiles, batch, more heads
+    (1, 64, 64, 4, 64),     # D=64
+    (1, 128, 128, 4, 128),  # larger Sq
 ]
 
 
