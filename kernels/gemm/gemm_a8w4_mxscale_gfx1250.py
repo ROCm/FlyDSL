@@ -14,8 +14,7 @@ from flydsl.utils.smem_allocator import check_smem_capacity
 from kernels.common.gfx1250_cluster import compute_mcast_masks
 
 from .gemm_common_gfx1250 import (
-    lds_load_b32_raw,
-    lds_load_b128_raw,
+    make_lds_copy_ops,
     pipeline_fence,
     workgroup_barrier,
 )
@@ -91,8 +90,6 @@ def launch_gemm_a8w4_mxscale(
         i32_lda: fx.Int32,
         i32_ldc: fx.Int32,
     ):
-        rocdl.disable_xdl_arb_stall()
-
         K_TILES = i32_k // tile_k
         k64 = fx.Int64(i32_k)
         lda64 = fx.Int64(i32_lda)
@@ -211,10 +208,13 @@ def launch_gemm_a8w4_mxscale(
         wmb = wave_m * warp_tile_m
         wnb = wave_n * warp_tile_n
 
+        lds_load_b32, _ = make_lds_copy_ops(32)
+        lds_load_b128, _ = make_lds_copy_ops(128)
+
         def load_a(buf, wm, ks):
             row = wmb + wm * 16 + lane16
             b0 = fx.index_cast(T.index, row * A_LDS_ROW + ks * WMMA_K + kgrp * 16)
-            v = [Vec(lds_load_b128_raw(buf, b0 + 32 * j)) for j in range_constexpr(4)]
+            v = [Vec(lds_load_b128(buf, b0 + 32 * j)) for j in range_constexpr(4)]
             v01 = v[0].shuffle(v[1], list(range(8)))
             v23 = v[2].shuffle(v[3], list(range(8)))
             return v01.shuffle(v23, list(range(16)))
@@ -222,19 +222,19 @@ def launch_gemm_a8w4_mxscale(
         def load_b(buf, wn, ks):
             nbl = wnb // 16 + wn
             b0 = fx.index_cast(T.index, STAGE_A + nbl * B_LDS_ROW + ks * 1024 + kgrp * 256 + lane16 * 16)
-            v0 = Vec(lds_load_b128_raw(buf, b0))
-            v1 = Vec(lds_load_b128_raw(buf, b0 + 512))
+            v0 = Vec(lds_load_b128(buf, b0))
+            v1 = Vec(lds_load_b128(buf, b0 + 512))
             return v0.shuffle(v1, list(range(8)))
 
         def load_sa(buf, wm, ks):
             row = wmb + wm * 16 + lane16
             word = (row // 32) * SC_WORDS + ks * 32 + (row % 32)
-            return lds_load_b32_raw(buf, fx.index_cast(T.index, SA_OFF + word * 4))
+            return lds_load_b32(buf, fx.index_cast(T.index, SA_OFF + word * 4))[0]
 
         def load_sb(buf, wn, ks):
             col = wnb + wn * 16 + lane16
             word = (col // 32) * SC_WORDS + ks * 32 + (col % 32)
-            return lds_load_b32_raw(buf, fx.index_cast(T.index, SB_OFF + word * 4))
+            return lds_load_b32(buf, fx.index_cast(T.index, SB_OFF + word * 4))[0]
 
         wmma_atom = fx.make_mma_atom(
             fx.rocdl.WMMAScale(WMMA_M, WMMA_N, WMMA_K, fx.Float4E2M1FN, fx.Float8E4M3FN, fx.Float32)
