@@ -305,7 +305,7 @@ def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_di
 
     Covers:
       1. All Python source files under flydsl.compiler.*, flydsl.expr.*,
-         flydsl.runtime.*, flydsl.utils.*
+         flydsl.extension.*, flydsl.runtime.*, flydsl.utils.*
       2. Native shared libraries (_mlirDialectsFly*.so, libFly*.so, libfly_jit_runtime.so,
          libmlir_rocm_runtime.so)
       3. flydsl.__version__
@@ -320,7 +320,7 @@ def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_di
     flydsl_root = Path(flydsl.__file__).resolve().parent
 
     # 1) Hash all Python source files in key sub-packages.
-    for package_name in ("compiler", "expr", "runtime", "utils"):
+    for package_name in ("compiler", "expr", "extension", "runtime", "utils"):
         pkg_path = flydsl_root / package_name
         if not pkg_path.is_dir():
             continue

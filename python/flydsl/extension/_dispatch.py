@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Lazy target overrides for target-neutral expression libraries."""
+"""Lazy target overrides for target-neutral extension libraries."""
 
 import importlib
 from functools import wraps
@@ -11,8 +11,8 @@ from typing import Callable, Mapping
 from ..compiler.backends import compile_backend_name
 
 
-class Library:
-    """Dispatch universal library functions to optional target modules.
+class Dispatcher:
+    """Dispatch a library's universal functions to optional target modules.
 
     ``targets`` maps compiler backend IDs to public target namespaces. For
     example, ``{"rocm": "rocdl"}`` maps the ROCm compiler backend to the

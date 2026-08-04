@@ -21,12 +21,13 @@ _BACKEND_MODULES = {
     "rocdl": ".rocdl",
     "tdm_ops": ".rocdl.tdm_ops",  # deprecated, use .rocdl.tdm_ops instead
 }
+
 _LIBRARY_MODULES = {
-    "random": ".random",
+    "random": "..extension.random",
 }
 
 
-# lazy load backend subpackages
+# lazy load backend subpackages and extension libraries
 def __getattr__(name: str):
     module_name = _BACKEND_MODULES.get(name) or _LIBRARY_MODULES.get(name)
     if module_name is None:

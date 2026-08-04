@@ -7,13 +7,13 @@
 target; ``fx.random.universal.<name>`` always runs the portable one.
 """
 
-from .._library import Library
+from .._dispatch import Dispatcher
 from . import universal
 from .universal import *  # noqa: F401,F403
 
 __all__ = list(universal.__all__)
 
-_library = Library(__name__, targets={"rocm": "rocdl"})
-__getattr__ = _library.load_target
+_dispatch = Dispatcher(__name__, targets={"rocm": "rocdl"})
+__getattr__ = _dispatch.load_target
 
-_library.dispatch_all(globals(), __all__)
+_dispatch.dispatch_all(globals(), __all__)

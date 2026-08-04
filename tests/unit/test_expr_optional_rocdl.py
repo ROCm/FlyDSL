@@ -61,14 +61,15 @@ assert "tdm_ops" not in expr.__dict__
 assert "cluster_barrier" not in expr.gpu.__dict__
 assert "random" not in expr.__dict__
 
+assert expr.random.randint4x is not None
 assert "rocdl" not in expr.random.__dict__
-assert "flydsl.expr.random.rocdl" not in sys.modules
+assert "flydsl.extension.random.rocdl" not in sys.modules
 
 from flydsl.compiler.jit_function import _flydsl_key_cached
 
 _flydsl_key_cached(False, "", ())
 assert "flydsl.expr.rocdl" not in sys.modules
-assert "flydsl.expr.random.rocdl" not in sys.modules
+assert "flydsl.extension.random.rocdl" not in sys.modules
 
 
 def _assert_rocdl_import_error(alias, exc):
@@ -93,16 +94,16 @@ expr = importlib.import_module("flydsl.expr")
 assert "buffer_ops" not in expr.__dict__
 assert "rocdl" not in expr.__dict__
 assert "tdm_ops" not in expr.__dict__
-assert "flydsl.expr.random.rocdl" not in sys.modules
+assert "flydsl.extension.random.rocdl" not in sys.modules
 
 from flydsl.expr import rocdl, tdm_ops
 from flydsl.expr.rocdl import cluster
-from flydsl.expr.random import rocdl as random_rocdl
+from flydsl.extension.random import rocdl as random_rocdl
 
 assert rocdl.__name__ == "flydsl.expr.rocdl"
 assert tdm_ops.__name__ == "flydsl.expr.rocdl.tdm_ops"
 assert cluster.__name__ == "flydsl.expr.rocdl.cluster"
-assert random_rocdl.__name__ == "flydsl.expr.random.rocdl"
+assert random_rocdl.__name__ == "flydsl.extension.random.rocdl"
 assert expr.random.rocdl is random_rocdl
 assert cluster.CLUSTER_BARRIER_ID == -3
 assert expr.rocdl is rocdl
