@@ -63,7 +63,9 @@ __all__ = [
 ]
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
-_ods_wmma_scale_f32_16x16x128_f8f6f4 = globals().get("wmma_scale_f32_16x16x128_f8f6f4", None)
+_ods_wmma_scale_f32_16x16x128_f8f6f4 = globals().get(
+    "wmma_scale_f32_16x16x128_f8f6f4", None
+)
 _ods_wmma_scale_f32_32x16x128_f4 = globals().get("wmma_scale_f32_32x16x128_f4", None)
 _ods_wmma_f32_16x16x128_fp8_fp8 = globals().get("wmma_f32_16x16x128_fp8_fp8", None)
 _ods_wave_id = wave_id  # ODS: wave_id(res, ...) -> i32
@@ -88,9 +90,9 @@ _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
 _ods_mfma_i32_16x16x32_i8 = mfma_i32_16x16x32_i8
 _ods_mfma_f32_16x16x32_f16 = globals().get("mfma_f32_16x16x32_f16", None)
 _ods_mfma_f32_16x16x32_bf16 = globals().get("mfma_f32_16x16x32_bf16", None)
-_ods_mfma_scale_f32_16x16x128_f8f6f4 = globals().get("mfma_scale_f32_16x16x128_f8f6f4", None) or globals().get(
-    "mfma_scale_f32_16x16x128_f8f6f4_", None
-)
+_ods_mfma_scale_f32_16x16x128_f8f6f4 = globals().get(
+    "mfma_scale_f32_16x16x128_f8f6f4", None
+) or globals().get("mfma_scale_f32_16x16x128_f8f6f4_", None)
 mask_mfma = 0x008
 mask_vmem_rd = 0x020
 mask_dsrd = 0x100
@@ -173,7 +175,9 @@ def _unwrap_mfma_operand(v):
     from .. import arith as _arith_ext
 
     if isinstance(v, int):
-        return _arith_ext.unwrap(_arith_ext.constant(v, type=IntegerType.get_signless(32)))
+        return _arith_ext.unwrap(
+            _arith_ext.constant(v, type=IntegerType.get_signless(32))
+        )
     return _arith_ext.unwrap(v)
 
 
@@ -289,7 +293,13 @@ def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands):
     ).result
 
 
-_WMMA_FMT_INT_TO_KW = {0: "fp8_e4m3", 1: "fp8_e5m2", 2: "fp6_e2m3", 3: "fp6_e3m2", 4: "fp4_e2m1"}
+_WMMA_FMT_INT_TO_KW = {
+    0: "fp8_e4m3",
+    1: "fp8_e5m2",
+    2: "fp6_e2m3",
+    3: "fp6_e3m2",
+    4: "fp4_e2m1",
+}
 _WMMA_MODC_INT_TO_KW = {0: "none", 1: "neg", 2: "abs", 3: "neg_abs"}
 _WMMA_SCALE_TYPE_INT_TO_KW = {0: "row0", 1: "row1"}
 _WMMA_SCALE_FMT_INT_TO_KW = {0: "e8", 1: "e5m3", 2: "e4m3"}
@@ -434,7 +444,9 @@ def wmma_scale_f32_32x16x128_f4(
 
 
 @dsl_loc_tracing
-def wmma_f32_16x16x128_fp8_fp8(result_type, a, b, c, *, modC=0, reuseA=False, reuseB=False):
+def wmma_f32_16x16x128_fp8_fp8(
+    result_type, a, b, c, *, modC=0, reuseA=False, reuseB=False
+):
     """Non-scale V_WMMA_F32_16X16X128 (E4M3) for gfx1250 (wave32).
 
     Operand types (wave32):
@@ -447,7 +459,9 @@ def wmma_f32_16x16x128_fp8_fp8(result_type, a, b, c, *, modC=0, reuseA=False, re
     a_v = _unwrap_mfma_operand(a)
     b_v = _unwrap_mfma_operand(b)
     c_v = _unwrap_mfma_operand(c)
-    return _ods_wmma_f32_16x16x128_fp8_fp8(result_type, a_v, b_v, c_v, modC=_wmma_modc(modC), reuseA=reuseA, reuseB=reuseB).result
+    return _ods_wmma_f32_16x16x128_fp8_fp8(
+        result_type, a_v, b_v, c_v, modC=_wmma_modc(modC), reuseA=reuseA, reuseB=reuseB
+    ).result
 
 
 @dsl_loc_tracing
@@ -491,7 +505,9 @@ def cluster_workgroup_id_z():
 
 
 @dsl_loc_tracing
-def cluster_load_async_to_lds(global_ptr, lds_ptr, size_bytes, offset=0, cpol=0, mask=None):
+def cluster_load_async_to_lds(
+    global_ptr, lds_ptr, size_bytes, offset=0, cpol=0, mask=None
+):
     """Per-lane cluster broadcast load: Global -> LDS with MCAST (gfx1250).
 
     Args:
@@ -510,7 +526,9 @@ def cluster_load_async_to_lds(global_ptr, lds_ptr, size_bytes, offset=0, cpol=0,
     }
     fn = _dispatch.get(size_bytes)
     if fn is None:
-        raise ValueError(f"cluster_load_async_to_lds: size_bytes must be 1, 4, 8, or 16, got {size_bytes}")
+        raise ValueError(
+            f"cluster_load_async_to_lds: size_bytes must be 1, 4, 8, or 16, got {size_bytes}"
+        )
     if mask is None:
         from ..._mlir import ir
         from .. import arith as _arith
@@ -595,7 +613,9 @@ def _to_ir(v):
     from .. import arith as _arith_ext
 
     if isinstance(v, int):
-        return _arith_ext.unwrap(_arith_ext.constant(v, type=_ir.IntegerType.get_signless(32)))
+        return _arith_ext.unwrap(
+            _arith_ext.constant(v, type=_ir.IntegerType.get_signless(32))
+        )
     if isinstance(v, float):
         return _arith_ext.unwrap(_arith_ext.constant(v, type=_ir.F32Type.get()))
     if not isinstance(v, _ir.Value) and hasattr(v, "ir_value"):
@@ -607,21 +627,32 @@ def _to_ir(v):
 def raw_ptr_buffer_atomic_fadd(vdata, rsrc, offset, soffset, aux, **kw):
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_atomic_fadd as _op
 
-    return _op(_to_ir(vdata), _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), _to_ir(aux), **kw)
+    return _op(
+        _to_ir(vdata), _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), _to_ir(aux), **kw
+    )
 
 
 @dsl_loc_tracing
 def raw_ptr_buffer_atomic_fmax(vdata, rsrc, offset, soffset, aux, **kw):
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_atomic_fmax as _op
 
-    return _op(_to_ir(vdata), _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), _to_ir(aux), **kw)
+    return _op(
+        _to_ir(vdata), _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), _to_ir(aux), **kw
+    )
 
 
 @dsl_loc_tracing
 def cvt_pk_fp8_f32(res, src_a, src_b, old, word_sel, **kw):
     from ..._mlir.dialects.rocdl import cvt_pk_fp8_f32 as _op
 
-    return _op(res=res, src_a=_to_ir(src_a), src_b=_to_ir(src_b), old=_to_ir(old), word_sel=word_sel, **kw)
+    return _op(
+        res=res,
+        src_a=_to_ir(src_a),
+        src_b=_to_ir(src_b),
+        old=_to_ir(old),
+        word_sel=word_sel,
+        **kw,
+    )
 
 
 @dsl_loc_tracing
@@ -648,7 +679,9 @@ def cvt_scalef32_pk_f32_fp4(res, src, scale, src_sel_index, **kw):
     """
     from ..._mlir.dialects.rocdl import cvt_scalef32_pk_f32_fp4 as _op
 
-    return _op(res=res, src=_to_ir(src), scale=_to_ir(scale), src_sel_index=src_sel_index, **kw)
+    return _op(
+        res=res, src=_to_ir(src), scale=_to_ir(scale), src_sel_index=src_sel_index, **kw
+    )
 
 
 @dsl_loc_tracing
@@ -720,11 +753,20 @@ def raw_ptr_buffer_load(res, rsrc, offset, soffset, aux=None, **kw):
             aux = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), aux)
         else:
             aux = None
-    return _op(res=res, rsrc=_to_ir(rsrc), offset=_to_ir(offset), soffset=_to_ir(soffset), aux=aux, **kw)
+    return _op(
+        res=res,
+        rsrc=_to_ir(rsrc),
+        offset=_to_ir(offset),
+        soffset=_to_ir(soffset),
+        aux=aux,
+        **kw,
+    )
 
 
 @dsl_loc_tracing
-def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux=None, **kw):
+def raw_ptr_buffer_load_lds(
+    rsrc, lds_ptr, size, voffset, soffset, offset, aux=None, **kw
+):
     from ..._mlir import ir as _ir
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_load_lds as _op
 
@@ -734,7 +776,14 @@ def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux=N
         else:
             aux = None
     return _op(
-        _to_ir(rsrc), _to_ir(lds_ptr), _to_ir(size), _to_ir(voffset), _to_ir(soffset), _to_ir(offset), aux=aux, **kw
+        _to_ir(rsrc),
+        _to_ir(lds_ptr),
+        _to_ir(size),
+        _to_ir(voffset),
+        _to_ir(soffset),
+        _to_ir(offset),
+        aux=aux,
+        **kw,
     )
 
 
@@ -746,33 +795,47 @@ def buffer_load_to_lds(rsrc, lds_ptr, voffset, size_bytes=4, soffset=0, offset=0
     sensible defaults (``soffset=0``, ``offset=0``, ``aux=0``).
     Python int arguments are auto-materialised as i32 constants.
     """
-    return raw_ptr_buffer_load_lds(rsrc, lds_ptr, size_bytes, voffset, soffset, offset, 0, **kw)
+    return raw_ptr_buffer_load_lds(
+        rsrc, lds_ptr, size_bytes, voffset, soffset, offset, 0, **kw
+    )
 
 
 @dsl_loc_tracing
-def tensor_load_to_lds(dgroup0, dgroup1, dgroup2, dgroup3, dgroup4, cache_policy=None, **kw):
+def tensor_load_to_lds(
+    dgroup0, dgroup1, dgroup2, dgroup3, dgroup4, cache_policy=None, **kw
+):
     from ..._mlir import ir as _ir
     from ..._mlir.dialects.rocdl import tensor_load_to_lds as _op
 
     if cache_policy is not None and not isinstance(cache_policy, _ir.Attribute):
         if isinstance(cache_policy, int):
-            cache_policy = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), cache_policy)
+            cache_policy = _ir.IntegerAttr.get(
+                _ir.IntegerType.get_signless(32), cache_policy
+            )
         else:
             cache_policy = None
-    return _op(dgroup0, dgroup1, dgroup2, dgroup3, dgroup4, cache_policy=cache_policy, **kw)
+    return _op(
+        dgroup0, dgroup1, dgroup2, dgroup3, dgroup4, cache_policy=cache_policy, **kw
+    )
 
 
 @dsl_loc_tracing
-def tensor_store_from_lds(dgroup0, dgroup1, dgroup2, dgroup3, dgroup4, cache_policy=None, **kw):
+def tensor_store_from_lds(
+    dgroup0, dgroup1, dgroup2, dgroup3, dgroup4, cache_policy=None, **kw
+):
     from ..._mlir import ir as _ir
     from ..._mlir.dialects.rocdl import tensor_store_from_lds as _op
 
     if cache_policy is not None and not isinstance(cache_policy, _ir.Attribute):
         if isinstance(cache_policy, int):
-            cache_policy = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), cache_policy)
+            cache_policy = _ir.IntegerAttr.get(
+                _ir.IntegerType.get_signless(32), cache_policy
+            )
         else:
             cache_policy = None
-    return _op(dgroup0, dgroup1, dgroup2, dgroup3, dgroup4, cache_policy=cache_policy, **kw)
+    return _op(
+        dgroup0, dgroup1, dgroup2, dgroup3, dgroup4, cache_policy=cache_policy, **kw
+    )
 
 
 @dsl_loc_tracing
