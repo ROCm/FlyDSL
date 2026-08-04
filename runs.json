@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-04T13:01:00Z",
+ "updated": "2026-08-04T13:04:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -371,11 +371,11 @@
    "branch": "mega_moe_v1",
    "event": "pull_request",
    "title": "BugFix for MegaMoE",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30890822517",
    "created_at": "2026-08-04T08:10:14Z",
-   "updated_at": "2026-08-04T11:30:15Z",
+   "updated_at": "2026-08-04T13:01:20Z",
    "actor": "GwilliamHu",
    "jobs": [
     {
@@ -408,10 +408,10 @@
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-04T11:30:06Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T13:01:19Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30890822517/job/91978023450"
     },
     {
