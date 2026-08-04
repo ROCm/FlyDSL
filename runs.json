@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-04T13:29:41Z",
+ "updated": "2026-08-04T13:43:10Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30914997731,
+   "pr": 948,
+   "commit": "3a3946696306c4f68ab30831a1c971a4eca38d5f",
+   "branch": "worktree-mxfp-moe-a16w4",
+   "event": "pull_request",
+   "title": "MoE: add a16w mix fused 2-stage kernels (bf16 A \u00d7 mxfp4/int4/bf16 W)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30914997731",
+   "created_at": "2026-08-04T13:40:30Z",
+   "updated_at": "2026-08-04T13:40:57Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 30913308309,
    "pr": 948,
@@ -10,38 +25,38 @@
    "branch": "worktree-mxfp-moe-a16w4",
    "event": "pull_request",
    "title": "MoE: add a16w mix fused 2-stage kernels (bf16 A \u00d7 mxfp4/int4/bf16 W)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30913308309",
    "created_at": "2026-08-04T13:20:14Z",
-   "updated_at": "2026-08-04T13:25:21Z",
+   "updated_at": "2026-08-04T13:40:44Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-04T13:25:21Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T13:40:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30913308309/job/92006505331"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-04T13:26:09Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T13:38:56Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30913308309/job/92006505350"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-04T13:25:21Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-08-04T13:28:40Z",
+     "completed_at": "2026-08-04T13:40:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30913308309/job/92006505410"
     }
    ]
@@ -268,10 +283,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-04T12:19:02Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T13:31:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30905221848/job/91989108986"
     }
    ]
@@ -2095,49 +2110,6 @@
      "started_at": "2026-08-02T07:03:44Z",
      "completed_at": "2026-08-02T07:54:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30736962989/job/91467687290"
-    }
-   ]
-  },
-  {
-   "run_id": 30712488774,
-   "pr": 952,
-   "commit": "4916d1d8e2fd2ed3206db53481802f49f1fe65b8",
-   "branch": "fujun.han/flydsl-lsp-server",
-   "event": "pull_request",
-   "title": "Feat: Add flydsl-lsp-server for FlyDSL .mlir editor support.",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30712488774",
-   "created_at": "2026-08-01T18:25:35Z",
-   "updated_at": "2026-08-03T01:28:08Z",
-   "actor": "Peter9606",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-03T00:10:57Z",
-     "completed_at": "2026-08-03T01:03:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30712488774/job/91565515200"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-03T00:10:56Z",
-     "completed_at": "2026-08-03T01:28:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30712488774/job/91565515216"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-03T00:10:48Z",
-     "completed_at": "2026-08-03T01:03:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30712488774/job/91565515229"
     }
    ]
   }
