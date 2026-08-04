@@ -20,6 +20,7 @@ gfx950 LDS swizzles; it is NOT expected to run on gfx942.
 """
 
 from typing import Optional
+import warnings
 
 import torch
 
@@ -29,6 +30,8 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import ReductionOp
 from flydsl.runtime.device import get_rocm_arch
+
+from kernels.attention.pipeline import pipeline_stagger_enabled
 
 GFX950_WAVE_SIZE = 64
 GFX950_DMA_BYTES = 16
@@ -66,6 +69,7 @@ class FlexAttnParam:
     in_data_bytes: fx.Constexpr[int]
     n_kv_tiles: fx.Constexpr[int]  # seqlen_kv // block_n (KV loop is compile-time unrolled)
     pipe_depth: fx.Constexpr[int]  # 1 = monolithic, 2 = decomposed pipeline
+    pipe_stages: fx.Constexpr[int]  # deprecated: stagger follows num_groups/pipe_depth/m_waves
 
 
 def make_flex_attn_param(
@@ -84,6 +88,7 @@ def make_flex_attn_param(
     mma_n: int = 16,
     mma_k: int = 32,
     pipe_depth: int = 1,
+    pipe_stages: int = 1,
 ) -> FlexAttnParam:
     if dtype_id not in (FLEX_DTYPE_BF16, FLEX_DTYPE_FP16):
         raise ValueError(f"unsupported dtype_id={dtype_id}")
@@ -109,6 +114,18 @@ def make_flex_attn_param(
         raise ValueError(f"head_dim ({head_dim}) must be divisible by mma_k ({mma_k})")
     if seqlen_kv % block_n != 0:
         raise ValueError(f"seqlen_kv ({seqlen_kv}) must be a multiple of block_n ({block_n})")
+    if pipe_stages not in (1, 2):
+        raise ValueError("pipe_stages must be 1 or 2")
+    if pipe_stages >= 2 and pipe_depth < 2:
+        raise ValueError("pipe_stages=2 requires pipe_depth>=2 (decomposed pipeline)")
+    if pipe_stages >= 2 and not pipeline_stagger_enabled(
+        depth=pipe_depth, num_groups=num_groups, m_waves=m_waves,
+    ):
+        warnings.warn(
+            "pipe_stages=2 does not enable stagger; stagger is auto when "
+            "pipe_depth>=2, num_groups>=2, and m_waves>=2",
+            stacklevel=2,
+        )
 
     in_dbytes = 2  # bf16/f16
     group_threads = m_waves * n_waves * GFX950_WAVE_SIZE
@@ -134,6 +151,7 @@ def make_flex_attn_param(
         in_data_bytes=in_dbytes,
         n_kv_tiles=seqlen_kv // block_n,
         pipe_depth=pipe_depth,
+        pipe_stages=pipe_stages,
     )
 
 
@@ -143,6 +161,12 @@ def make_flex_attn_kernel_name(param: FlexAttnParam) -> str:
     name += f"_w{param.m_waves}x{param.n_waves}g{param.num_groups}"
     name += "_causal" if param.causal else "_dense"
     name += f"_pd{param.pipe_depth}"
+    if pipeline_stagger_enabled(
+        depth=int(param.pipe_depth),
+        num_groups=int(param.num_groups),
+        m_waves=int(param.m_waves),
+    ):
+        name += "_stg"
     return name
 
 
@@ -162,6 +186,26 @@ def _row_reduce(x, mode):
         peer = w.shuffle_xor(off, GFX950_WAVE_SIZE)
         w = w.maximumf(peer) if mode == "max" else w.addf(peer, fastmath=_FM)
     return w
+
+
+def _scale_sched_pairs(pairs, head_dim):
+    return max(1, (pairs + 1) // 2) if head_dim == 64 else pairs
+
+
+def _sched_barrier_pairs(traits, pairs, valu_cnt, group):
+    """Emit ``pairs`` × {1 MFMA + valu_cnt VALU} sched_group_barrier groups."""
+    pairs = _scale_sched_pairs(pairs, traits.HEAD_DIM)
+    for _ in range_constexpr(pairs):
+        rocdl.sched_group_barrier(traits.SCHED_MFMA_MASK, 1, group)
+        rocdl.sched_group_barrier(traits.SCHED_VALU_MASK, valu_cnt, group)
+
+
+def _sched_barrier_exp_pairs(traits, pairs, exp_cnt, group):
+    """Emit ``pairs`` × {1 MFMA + exp_cnt EXP} sched_group_barrier groups."""
+    pairs = _scale_sched_pairs(pairs, traits.HEAD_DIM)
+    for _ in range_constexpr(pairs):
+        rocdl.sched_group_barrier(traits.SCHED_MFMA_MASK, 1, group)
+        rocdl.sched_group_barrier(traits.SCHED_EXP_MASK, exp_cnt, group)
 
 
 @flyc.kernel
@@ -372,7 +416,36 @@ def flex_attn_fwd_gfx950_kernel(
     from kernels.attention.pipeline import (
         PipelineStage, PipelineScheduler, Wire, InfraContext,
         StageKind, ResourceDecl, SubStage,
+        pipeline_stagger_enabled,
     )
+
+    class _LayoutSchedTraits:
+        """Minimal traits for flash-style sched_group_barrier emitters."""
+        HEAD_DIM = int(param.head_dim)
+        SCHED_MFMA_MASK = 0x008
+        SCHED_VALU_MASK = 0x002
+        SCHED_EXP_MASK = 0x400
+
+    # IGroupLP groups mirror flash dualwave C1/C3 compute clusters (not cluster.index).
+    _SCHED_GROUP_C1 = 1
+    _SCHED_GROUP_C3 = 2
+    _pd_for_sched = int(param.pipe_depth)
+
+    def _sched_after_softmax_finish(infra, _cluster_index, _entry_index):
+        t = infra.traits
+        _sched_barrier_exp_pairs(t, 6, 3, _SCHED_GROUP_C1)
+        _sched_barrier_pairs(t, 10, 5, _SCHED_GROUP_C1)
+
+    def _sched_after_softmax_start(infra, _cluster_index, _entry_index):
+        t = infra.traits
+        _sched_barrier_pairs(t, 4, 6, _SCHED_GROUP_C3)
+        _sched_barrier_pairs(t, 6, 6, _SCHED_GROUP_C3)
+        _sched_barrier_exp_pairs(t, 6, 3, _SCHED_GROUP_C3)
+
+    def _sched_after_gemm2_pv(infra, _cluster_index, _entry_index):
+        t = infra.traits
+        _sched_barrier_pairs(t, 4, 6, _SCHED_GROUP_C3)
+        _sched_barrier_pairs(t, 6, 6, _SCHED_GROUP_C3)
 
     # ── LoadKV: DMA K+V global → LDS. Single stage, no split. ───────────
     class _StageLoadKV(PipelineStage):
@@ -483,10 +556,18 @@ def flex_attn_fwd_gfx950_kernel(
             # Finish first (C1 with Gemm1: sum previous tile's v_p into l_i),
             # Start deferred (C3 with Gemm2: max/rescale/exp2 for current tile).
             return [
-                SubStage("SoftmaxFinish", self._finish,
-                         ResourceDecl(valu_count=npair * 4)),
-                SubStage("SoftmaxStart", self._start,
-                         ResourceDecl(valu_count=npair * 8, exp_count=n_c)),
+                SubStage(
+                    "SoftmaxFinish", self._finish,
+                    ResourceDecl(valu_count=npair * 4),
+                    epilogue_drain=True,
+                    sched_after=_sched_after_softmax_finish if _pd_for_sched >= 2 else None,
+                ),
+                SubStage(
+                    "SoftmaxStart", self._start,
+                    ResourceDecl(valu_count=npair * 8, exp_count=n_c),
+                    sync_after=True,
+                    sched_after=_sched_after_softmax_start if _pd_for_sched >= 2 else None,
+                ),
             ]
         def _finish(self, infra, *, v_p_partial, l_i, **_):
             for r in range_constexpr(npair):
@@ -522,53 +603,85 @@ def flex_attn_fwd_gfx950_kernel(
                 "frag_O": frag_O, "softmax_corr": corr,
             }
 
-    # ── BridgeP: C→A bridge through LDS. Single stage, no split. ────────
-    def _bridge_p_to_lds(infra, p_frag):
-        rocdl.sched_barrier(0)
-        fx.gpu.barrier()
+    # ── BridgeP: C→A bridge through LDS. ────────────────────────────────
+    def _bridge_p_write(infra, **shared_regs):
+        if const_expr(param.pipe_depth >= 2):
+            p_frag = shared_regs["v_p_partial"]
+        else:
+            p_frag = shared_regs["frag_P"]
         for i in range_constexpr(n_c):
             sP[fx.get_scalar(tr[i]), fx.get_scalar(tc[i])] = p_frag[i].to(elem_dtype)
-        fx.gpu.barrier()
-        rocdl.sched_barrier(0)
+        return {}
+
+    def _bridge_p_load(infra, **_):
         frag_P_a = thr_pv.make_fragment_A(sP)
         fx.copy(uca, tcA2.partition_S(sP), tcA2.retile(frag_P_a))
-        return frag_P_a
+        return {"frag_P_a": frag_P_a}
 
-    def _bridge_p_epilogue(infra, *, v_p_partial, **_):
-        return {"frag_P_a": _bridge_p_to_lds(infra, v_p_partial)}
+    def _bridge_p_epilogue(infra, **shared_regs):
+        _bridge_p_write(infra, **shared_regs)
+        return _bridge_p_load(infra)
 
     class _StageBridgeP(PipelineStage):
         name = "BridgeP"
         kind = StageKind.MEMORY
         resources = ResourceDecl(lds_read_count=4)
+
+        @property
+        def min_slots(self):
+            return 2
+
+        @property
+        def max_slots(self):
+            return 2
+
+        @property
+        def epilogue_drain(self):
+            return True
+
+        def decompose(self, allocated_slots):
+            assert allocated_slots == 2
+            return [
+                SubStage(
+                    "BridgePWrite", _bridge_p_write,
+                    ResourceDecl(valu_count=n_c),
+                    sync_after=True,
+                    defer_to_next_cluster=False,
+                ),
+                SubStage(
+                    "BridgePLoad", _bridge_p_load,
+                    ResourceDecl(lds_read_count=4),
+                    epilogue_drain=True,
+                    epilogue_fn=_bridge_p_epilogue,
+                    defer_to_next_cluster=False,
+                ),
+            ]
+
         def execute(self, infra, **shared_regs):
-            # depth>=2: Bridge runs before SoftmaxStart; v_p_partial still holds
-            # the previous tile's exp2(S) (P for lagged Gemm2). frag_P is a stale
-            # rescale carry and must not be bridged.
-            if const_expr(param.pipe_depth >= 2):
-                p_frag = shared_regs["v_p_partial"]
-            else:
-                p_frag = shared_regs["frag_P"]
-            return {"frag_P_a": _bridge_p_to_lds(infra, p_frag)}
+            _bridge_p_write(infra, **shared_regs)
+            return _bridge_p_load(infra)
 
     # ── Gemm2_PV: O += P @ V. ──────────────────────────────────────────
     # depth=1: P and V are from the same tile → use frag_Vt_next directly.
     # depth>=2: P is from the PREVIOUS tile → use frag_Vt (lagged carry).
     _pd = int(param.pipe_depth)
+    _enable_stagger = pipeline_stagger_enabled(
+        depth=_pd,
+        num_groups=int(num_groups),
+        m_waves=int(param.m_waves),
+    )
 
     def _gemm2_d1(infra, *, frag_P_a, frag_Vt_next, frag_O, **_):
         fx.gemm(tiled_mma_pv, frag_O, frag_P_a, frag_Vt_next, frag_O)
         return {"frag_O": frag_O}
 
-    def _gemm2_d2(infra, *, frag_Vt, frag_Vt_next, frag_O, v_p_for_gemm, softmax_corr, **_):
-        # Snapshot of previous tile's exp2(S), scaled by this tile's row corr (matches O).
-        rocdl.sched_barrier(0)
-        fx.gpu.barrier()
+    def _gemm2_write_p(infra, *, v_p_for_gemm, softmax_corr, **_):
         for i in range_constexpr(n_c):
             pi = v_p_for_gemm[i].to(fx.Float32) * softmax_corr[_s_slot_to_row_idx[i]]
             sP[fx.get_scalar(tr[i]), fx.get_scalar(tc[i])] = pi.to(elem_dtype)
-        fx.gpu.barrier()
-        rocdl.sched_barrier(0)
+        return {}
+
+    def _gemm2_pv(infra, *, frag_Vt, frag_Vt_next, frag_O, **_):
         frag_P_a = thr_pv.make_fragment_A(sP)
         fx.copy(uca, tcA2.partition_S(sP), tcA2.retile(frag_P_a))
         fx.gemm(tiled_mma_pv, frag_O, frag_P_a, frag_Vt, frag_O)
@@ -578,7 +691,63 @@ def flex_attn_fwd_gfx950_kernel(
         name = "Gemm2_PV"
         kind = StageKind.COMPUTE
         resources = ResourceDecl(mfma_count=head_dim // mma_k * 2)
-        execute = staticmethod(_gemm2_d2 if _pd >= 2 else _gemm2_d1)
+        execute = staticmethod(_gemm2_d1)
+
+        @property
+        def min_slots(self):
+            return 2 if _pd >= 2 else 1
+
+        @property
+        def max_slots(self):
+            return 2 if _pd >= 2 else 1
+
+        @property
+        def epilogue_drain(self):
+            return _pd >= 2
+
+        @property
+        def epilogue_fn(self):
+            return _gemm2_d1 if _pd >= 2 else None
+
+        def decompose(self, allocated_slots):
+            if allocated_slots == 1:
+                return [SubStage("Gemm2_PV", self.execute, self.resources)]
+            return [
+                SubStage(
+                    "Gemm2WriteP", _gemm2_write_p,
+                    ResourceDecl(valu_count=n_c),
+                    sync_after=True,
+                    defer_to_next_cluster=False,
+                ),
+                SubStage(
+                    "Gemm2PV", _gemm2_pv,
+                    ResourceDecl(mfma_count=head_dim // mma_k * 2),
+                    epilogue_drain=True,
+                    epilogue_fn=_gemm2_d1,
+                    defer_to_next_cluster=False,
+                    sched_after=_sched_after_gemm2_pv if _pd_for_sched >= 2 else None,
+                ),
+            ]
+
+        def execute(self, infra, **shared_regs):
+            if const_expr(_pd >= 2):
+                _gemm2_write_p(
+                    infra,
+                    v_p_for_gemm=shared_regs["v_p_for_gemm"],
+                    softmax_corr=shared_regs["softmax_corr"],
+                )
+                return _gemm2_pv(
+                    infra,
+                    frag_Vt=shared_regs["frag_Vt"],
+                    frag_Vt_next=shared_regs["frag_Vt_next"],
+                    frag_O=shared_regs["frag_O"],
+                )
+            return _gemm2_d1(
+                infra,
+                frag_P_a=shared_regs["frag_P_a"],
+                frag_Vt_next=shared_regs["frag_Vt_next"],
+                frag_O=shared_regs["frag_O"],
+            )
 
     # ── Assemble pipeline ────────────────────────────────────────────────
     # The scheduler auto-assigns clusters by StageKind alternation.
@@ -586,8 +755,8 @@ def flex_attn_fwd_gfx950_kernel(
     # decomposes them to produce the 4-cluster dualwave structure:
     #   C0 (mem):  LoadKV + ReadK
     #   C1 (comp): Gemm1_QK + SoftmaxFinish
-    #   C2 (mem):  BridgeP + ReadV
-    #   C3 (comp): SoftmaxStart + Gemm2_PV
+    #   C2 (mem):  BridgePWrite + ReadV + BridgePLoad
+    #   C3 (comp): SoftmaxStart + Gemm2WriteP + Gemm2PV
     # With max_slots=1 (or force_depth=1), everything stays monolithic.
     pipeline = PipelineScheduler([
         Wire(_StageLoadKV(),  out=()),
@@ -603,7 +772,8 @@ def flex_attn_fwd_gfx950_kernel(
                  else ("frag_P_a", "frag_Vt_next", "frag_O"),
              out=("frag_O", "frag_Vt") if _pd >= 2 else ("frag_O",),
              carry=("frag_Vt",) if _pd >= 2 else ()),
-    ], force_depth=param.pipe_depth, enable_stagger=False)
+    ], force_depth=param.pipe_depth, enable_stagger=True,
+       num_groups=int(num_groups), m_waves=int(param.m_waves))
 
     # Initialize shared registers: pre-loop values + initial v_p_partial.
     # The first tile's SoftmaxFinish reads v_p_partial (loop-carried from
@@ -631,26 +801,25 @@ def flex_attn_fwd_gfx950_kernel(
         shared_regs["softmax_corr"] = [fx.Float32(1.0) for _ in range_constexpr(npair)]
 
     infra = InfraContext()
+    infra.traits = _LayoutSchedTraits()
+    infra.head_dim = head_dim
     infra.tiled_mma_qk = tiled_mma_qk
     infra.tiled_mma_pv = tiled_mma_pv
     infra.elem_dtype = elem_dtype
     infra.n_kv_tiles = n_kv_tiles
+    if const_expr(_enable_stagger):
+        _wave_id_uni_i32 = rocdl.readfirstlane(
+            fx.Int32.ir_type,
+            fx.Int32(local_tid // GFX950_WAVE_SIZE),
+        )
+        infra.stagger_i32 = _wave_id_uni_i32
 
     # ── Pipeline: prologue → main tile loop → epilogue ───────────────────
     # The scheduler handles: buffer priming, prefetch timing, cluster
     # execution, barrier placement, vmcnt management, and stagger.
     pipeline.emit_prologue(infra, shared_regs)
     pipeline.emit_main_loop(infra, shared_regs, n_kv_tiles)
-    if const_expr(param.pipe_depth >= 2):
-        # Inline tail drain (one KV tile of lagged softmax mass + P@V).
-        _softmax = _StageSoftmax()
-        shared_regs.update(_softmax._finish(infra, **shared_regs))
-        shared_regs.update(_bridge_p_epilogue(infra, **shared_regs))
-        # Last tile: P and V are aligned (not lagged like the main loop).
-        shared_regs.update(_gemm2_d1(infra, **shared_regs))
-        rocdl.s_barrier()
-    else:
-        pipeline.emit_epilogue(infra, shared_regs)
+    pipeline.emit_epilogue(infra, shared_regs)
     
     frag_O = shared_regs["frag_O"]
     l_i = shared_regs["l_i"]
@@ -709,6 +878,17 @@ def launch_flex_attn_gfx950(
     )
 
 
+# fast_fp_math breaks pipe_depth=2 when seqlen_kv == block_n (single KV tile); omit it.
+_flex_attn_compile_hints = {
+    "unsafe_fp_math": True,
+    "llvm_options": {
+        "enable-post-misched": False,
+        "lsr-drop-solution": True,
+    },
+}
+launch_flex_attn_gfx950.compile_hints = dict(_flex_attn_compile_hints)
+
+
 def flydsl_flex_attention_layout(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -722,6 +902,7 @@ def flydsl_flex_attention_layout(
     block_n: int = 32,
     num_groups: int = 2,
     pipe_depth: int = 1,
+    pipe_stages: int = 1,
     stream: Optional[torch.cuda.Stream] = None,
 ) -> torch.Tensor:
     """Dense flash-attention forward on the layout API (gfx950). Phase 0: no mods.
@@ -770,6 +951,7 @@ def flydsl_flex_attention_layout(
         causal=causal,
         num_groups=num_groups,
         pipe_depth=pipe_depth,
+        pipe_stages=pipe_stages,
     )
     # V is pre-transposed on the host to [B, Hkv, D, Skv] (contiguous) so GEMM2's
     # B operand has block_n (K-dim) contiguous. In-kernel LDSReadTrans is a future opt.

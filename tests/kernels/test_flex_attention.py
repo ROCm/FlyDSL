@@ -44,6 +44,62 @@ DEFAULT_SEED = 123
 _DTYPE_MAP = {"bf16": torch.bfloat16, "f16": torch.float16}
 
 
+def _layout_attn_tflops(B, Sq, Skv, H, D, us):
+    return 4.0 * B * H * Sq * Skv * D / (us * 1e-6) / 1e12
+
+
+def compare_layout_pipeline_depth(
+    B, Sq, Skv, H, Hkv, D, dtype_str, *, warmup=10, iters=100,
+):
+    """Benchmark layout-API flex attn: pd1, pd2, ps2 (buffered). gfx950 only."""
+    from flydsl.runtime.device import get_rocm_arch
+    from kernels.attention.flex_attention_layout_gfx950 import flydsl_flex_attention_layout
+
+    if not get_rocm_arch().startswith("gfx950"):
+        print("layout pipeline compare: skipped (requires gfx950)")
+        return None
+
+    dtype = _DTYPE_MAP[dtype_str]
+    dev = torch.device("cuda")
+    torch.manual_seed(DEFAULT_SEED)
+    q = torch.empty(B, Sq, H, D, dtype=dtype, device=dev).uniform_(*UNIFORM_RANGE)
+    k = torch.empty(B, Skv, Hkv, D, dtype=dtype, device=dev).uniform_(*UNIFORM_RANGE)
+    v = torch.empty(B, Skv, Hkv, D, dtype=dtype, device=dev).uniform_(*UNIFORM_RANGE)
+    scale = 1.0 / math.sqrt(D)
+
+    def _pd1():
+        flydsl_flex_attention_layout(q, k, v, scale=scale, num_kv_heads=Hkv, pipe_depth=1)
+
+    def _pd2():
+        flydsl_flex_attention_layout(
+            q, k, v, scale=scale, num_kv_heads=Hkv, pipe_depth=2, num_groups=1,
+        )
+
+    def _ps2():
+        flydsl_flex_attention_layout(
+            q, k, v, scale=scale, num_kv_heads=Hkv, pipe_depth=2, num_groups=2,
+        )
+
+    _, us1 = run_perftest(_pd1, num_iters=iters, num_warmup=warmup)
+    _, us2 = run_perftest(_pd2, num_iters=iters, num_warmup=warmup)
+    _, us3 = run_perftest(_ps2, num_iters=iters, num_warmup=warmup)
+    tf1 = _layout_attn_tflops(B, Sq, Skv, H, D, us1)
+    tf2 = _layout_attn_tflops(B, Sq, Skv, H, D, us2)
+    tf3 = _layout_attn_tflops(B, Sq, Skv, H, D, us3)
+    print(
+        f"layout pipeline  B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}  "
+        f"pd1={us1:.1f}us ({tf1:.2f} TFLOPS)  "
+        f"pd2={us2:.1f}us ({tf2:.2f} TFLOPS)  "
+        f"ps2={us3:.1f}us ({tf3:.2f} TFLOPS)  "
+        f"ps2/pd1={(us1 / us3 if us3 > 0 else float('nan')):.3f}x  "
+        f"ps2/pd2={(us2 / us3 if us3 > 0 else float('nan')):.3f}x"
+    )
+    return {
+        "us_pd1": us1, "us_pd2": us2, "us_ps2": us3,
+        "tflops_pd1": tf1, "tflops_pd2": tf2, "tflops_ps2": tf3,
+    }
+
+
 # ── torch references for each mod (applied to the fp32 score matrix) ──────────
 
 
@@ -269,9 +325,26 @@ def main():
     p.add_argument("--case", type=str, default="alibi", choices=_CASES)
     p.add_argument("--warmup", type=int, default=10)
     p.add_argument("--iters", type=int, default=100)
+    p.add_argument(
+        "--compare-pipeline",
+        action="store_true",
+        help="benchmark layout kernel pd1 vs pd2 vs ps2 (gfx950; same shape flags)",
+    )
     args = p.parse_args()
 
     Hkv = args.num_kv_heads or args.num_heads
+    if args.compare_pipeline:
+        compare_layout_pipeline_depth(
+            args.batch,
+            args.seq_len,
+            args.seq_len,
+            args.num_heads,
+            Hkv,
+            args.head_dim,
+            args.dtype,
+            warmup=args.warmup,
+            iters=args.iters,
+        )
     r = run_flex_config(
         args.case,
         args.batch,

@@ -39,6 +39,29 @@ class StageKind(Enum):
 
 
 @dataclass(frozen=True)
+class WaitFull:
+    """Drain VM and LDS/GDS (``s_waitcnt vmcnt=0 lgkmcnt=0``)."""
+
+
+@dataclass(frozen=True)
+class WaitLgkmOnly:
+    """Drain LDS/GDS only; VM loads may remain in flight."""
+
+
+@dataclass(frozen=True)
+class WaitVmcntAtMost:
+    """Wait until at most ``n`` global loads are outstanding (``vmcnt(n)``).
+
+    If ``n`` is ``None``, the emitter uses ``PipelineConfig.vmcnt_targets`` for
+    this cluster index, or an explicit ``vmcnt_at_most`` override at emit time.
+    """
+    n: Optional[int] = None
+
+
+WaitPolicy = WaitFull | WaitLgkmOnly | WaitVmcntAtMost
+
+
+@dataclass(frozen=True)
 class ResourceDecl:
     """Compile-time resource estimate for depth computation and sched hints.
 
@@ -140,6 +163,26 @@ class PipelineStage(ABC):
     def max_slots(self) -> int:
         return 1
 
+    @property
+    def epilogue_drain(self) -> bool:
+        """If True, this stage's cluster entry runs in the depth>=2 epilogue tail."""
+        return False
+
+    @property
+    def epilogue_fn(self) -> Optional[Callable]:
+        """Optional callable for epilogue tail; None means use ``execute``."""
+        return None
+
+    @property
+    def sync_before(self) -> bool:
+        """If True, emit a pipeline sync barrier immediately before ``execute``."""
+        return False
+
+    @property
+    def sync_after(self) -> bool:
+        """If True, emit a pipeline sync barrier after this entry when the next runs."""
+        return False
+
     @abstractmethod
     def execute(self, infra: InfraContext, **kwargs) -> dict:
         """Emit IR. Receives shared regs as kwargs, returns output dict.
@@ -163,7 +206,14 @@ class PipelineStage(ABC):
         Default: single sub-stage wrapping ``self.execute``.
         """
         assert self.min_slots <= allocated_slots <= self.max_slots
-        return [SubStage(self.name, self.execute, self.resources)]
+        return [SubStage(
+            self.name, self.execute, self.resources,
+            epilogue_drain=self.epilogue_drain,
+            epilogue_fn=self.epilogue_fn,
+            sync_before=self.sync_before,
+            sync_after=self.sync_after,
+            sched_after=self.sched_hints,
+        )]
 
     def resources_for_slots(self, n_slots: int) -> list[ResourceDecl]:
         r = self.resources
@@ -178,6 +228,14 @@ class PipelineStage(ABC):
 
     @property
     def sched_hints(self) -> Optional[Callable]:
+        """Optional scheduler hook invoked after this stage's cluster entry runs.
+
+        Signature: ``(infra: InfraContext, cluster_index: int, entry_index: int) -> None``.
+
+        Emit ``sched_group_barrier`` (or similar) here — not in pipeline sync
+        barriers. Wired automatically for non-decomposed stages; decomposed
+        stages may set ``SubStage.sched_after`` per sub-stage instead.
+        """
         return None
 
 
@@ -192,6 +250,12 @@ class SubStage:
     name: str
     fn: Callable  # (infra, **kwargs) -> dict
     resources: ResourceDecl
+    epilogue_drain: bool = False
+    epilogue_fn: Optional[Callable] = None
+    sync_before: bool = False
+    sync_after: bool = False
+    defer_to_next_cluster: bool = True
+    sched_after: Optional[Callable] = None
 
 
 # ---------------------------------------------------------------------------
@@ -206,20 +270,13 @@ class Wire:
     Declared by the pipeline author when assembling the stage list::
 
         PipelineScheduler([
-            Wire(LoadK(),            out=("frag_K",)),
-            Wire(LoadV(),            out=("frag_Vt",)),
-            Wire(Gemm1_QK(),         inp=("frag_K", "frag_Q"),
-                                     out=("frag_S",)),
-            Wire(ScoreMod(alibi),    inp=("frag_S",),
-                                     out=("frag_S",)),
-            Wire(Softmax(),          inp=("frag_S",),
-                                     out=("frag_P",),
-                                     carry=("m_i", "l_i")),
-            Wire(BridgeP(),          inp=("frag_P",),
-                                     out=("frag_P_a",)),
-            Wire(RescaleAndGemm2(),  inp=("frag_P_a", "frag_Vt"),
-                                     out=("frag_O",),
-                                     carry=("frag_O",)),
+            Wire(StageA(),            out=("buf_a",)),
+            Wire(StageB(),            out=("buf_b",)),
+            Wire(StageC(),            inp=("buf_a", "buf_b"),
+                                     out=("acc",)),
+            Wire(StageD(),            inp=("acc",),
+                                     out=("out",),
+                                     carry=("state",)),
         ])
 
     Parameters
@@ -252,6 +309,11 @@ class ClusterEntry:
     inp: tuple
     out: tuple
     resources: ResourceDecl
+    epilogue_drain: bool = False
+    epilogue_fn: Optional[Callable] = None
+    sync_before: bool = False
+    sync_after: bool = False
+    sched_after: Optional[Callable] = None
 
 
 @dataclass(frozen=True)
@@ -260,6 +322,7 @@ class ClusterSpec:
     index: int
     kind: StageKind
     entries: tuple[ClusterEntry, ...]
+    wait_policies: tuple[WaitPolicy, ...] = (WaitFull(),)
 
     @property
     def total_dma(self) -> int:
@@ -287,6 +350,11 @@ class PipelineConfig:
     lds_bytes_per_slot: int
     vmcnt_targets: dict
     loop_carried: tuple[str, ...]
+
+
+def pipeline_stagger_enabled(*, depth: int, num_groups: int, m_waves: int) -> bool:
+    """True when wave-group stagger + multi-group Strategy A layout is valid."""
+    return depth >= 2 and num_groups >= 2 and m_waves >= 2
 
 
 # ---------------------------------------------------------------------------
@@ -321,27 +389,32 @@ class PipelineScheduler:
         force_depth: Optional[int] = None,
         enable_stagger: bool = True,
         lds_capacity_bytes: int = 160 * 1024,
+        num_groups: int = 1,
+        m_waves: int = 2,
     ):
         self.wires = list(wires)
         self.max_depth = max_depth
         self.force_depth = force_depth
-        self.enable_stagger = enable_stagger
         self.lds_capacity_bytes = lds_capacity_bytes
 
         self._validate_dataflow()
         self._config = self._build_config()
+        self.enable_stagger = enable_stagger and pipeline_stagger_enabled(
+            depth=self._config.depth,
+            num_groups=num_groups,
+            m_waves=m_waves,
+        )
         # The prime stage is the first entry of the first cluster — the async
         # DMA that must run ahead of everything else in the pipeline.
         self._prime_fn = self._config.clusters[0].entries[0].fn
-        # depth>=2 epilogue tail (see emit_epilogue / kernel inline drain).
+        self._prime_vm_dma = self._config.clusters[0].entries[0].resources.dma_count
+        # depth>=2 epilogue tail: entries flagged on Wire.stage / SubStage.
         self._epilogue_tail_entries: list[ClusterEntry] = []
         if self._config.depth > 1:
-            for tail_name in ("SoftmaxFinish", "BridgeP", "Gemm2_PV"):
-                for c in self._config.clusters:
-                    for e in c.entries:
-                        if e.name == tail_name:
-                            self._epilogue_tail_entries.append(e)
-                            break
+            for c in self._config.clusters:
+                for e in c.entries:
+                    if e.epilogue_drain:
+                        self._epilogue_tail_entries.append(e)
         # self._dump_config()  # uncomment for pipeline debug
 
     @property
@@ -363,8 +436,8 @@ class PipelineScheduler:
         print(f"\n  CLUSTERS ({len(cfg.clusters)}):")
         for c in cfg.clusters:
             entry_names = [e.name for e in c.entries]
-            entry_ios = [(e.inp, e.out) for e in c.entries]
-            print(f"    C{c.index} ({c.kind.name}): {entry_names}")
+            print(f"    C{c.index} ({c.kind.name}): {entry_names}"
+                  f"  wait={c.wait_policies}")
             for e in c.entries:
                 print(f"      {e.name}: inp={e.inp} out={e.out}")
         print(f"{'='*70}\n")
@@ -400,6 +473,7 @@ class PipelineScheduler:
             depth = self._refine_depth(clusters)
 
         clusters = self._assign_clusters(depth)
+        clusters = list(self._clusters_with_wait_policies(clusters))
 
         lds_per_slot = sum(
             w.stage.resources.lds_bytes for w in self.wires
@@ -407,6 +481,9 @@ class PipelineScheduler:
         )
         while depth > 2 and depth * lds_per_slot > self.lds_capacity_bytes:
             depth -= 1
+            clusters = list(self._clusters_with_wait_policies(
+                self._assign_clusters(depth),
+            ))
 
         vmcnt_targets = {}
         for c in clusters:
@@ -426,27 +503,23 @@ class PipelineScheduler:
             loop_carried=tuple(sorted(loop_carried)),
         )
 
-    def _dump_config(self) -> None:
-        """Print the pipeline configuration for debugging."""
-        cfg = self._config
-        print(f"\n{'='*70}")
-        print(f"PIPELINE CONFIG: depth={cfg.depth}, lds_ring_slots={cfg.lds_ring_slots}, "
-              f"stagger={self.enable_stagger}")
-        print(f"  loop_carried: {cfg.loop_carried}")
-        print(f"  wires ({len(self.wires)}):")
-        for i, w in enumerate(self.wires):
-            decomposed = w.stage.max_slots > 1 and cfg.depth > 1
-            print(f"    W{i}: {w.stage.name} ({w.stage.kind.name})"
-                  f"  inp={w.inp}  out={w.out}  carry={w.carry}"
-                  f"  {'DECOMPOSED' if decomposed else 'monolithic'}")
-        print(f"  clusters ({len(cfg.clusters)}):")
-        for c in cfg.clusters:
-            entry_names = [e.name for e in c.entries]
-            entry_io = [(e.name, e.inp, e.out) for e in c.entries]
-            print(f"    C{c.index} ({c.kind.name}): {entry_names}")
-            for name, inp, out in entry_io:
-                print(f"      {name}: inp={inp} out={out}")
-        print(f"{'='*70}\n")
+    def _clusters_with_wait_policies(
+        self, clusters: list[ClusterSpec],
+    ) -> tuple[ClusterSpec, ...]:
+        """Attach per-cluster wait policies (default full drain)."""
+        out: list[ClusterSpec] = []
+        for c in clusters:
+            if c.kind == StageKind.MEMORY and c.total_dma > 0:
+                policies: tuple[WaitPolicy, ...] = (
+                    WaitLgkmOnly(),
+                    WaitVmcntAtMost(None),
+                )
+            else:
+                policies = (WaitFull(),)
+            out.append(ClusterSpec(
+                c.index, c.kind, c.entries, wait_policies=policies,
+            ))
+        return tuple(out)
 
     def _initial_depth_estimate(self) -> int:
         if self.force_depth is not None:
@@ -501,8 +574,13 @@ class PipelineScheduler:
                         entry = ClusterEntry(
                             name=ss.name, fn=ss.fn,
                             inp=s_inp, out=s_out, resources=sr,
+                            epilogue_drain=ss.epilogue_drain,
+                            epilogue_fn=ss.epilogue_fn,
+                            sync_before=ss.sync_before,
+                            sync_after=ss.sync_after,
+                            sched_after=ss.sched_after,
                         )
-                        if i == 0:
+                        if i == 0 or not ss.defer_to_next_cluster:
                             expanded.append((stage.kind, entry))
                         else:
                             deferred[stage.kind].append(entry)
@@ -511,6 +589,11 @@ class PipelineScheduler:
             expanded.append((stage.kind, ClusterEntry(
                 name=stage.name, fn=stage.execute,
                 inp=w.inp, out=w.out, resources=stage.resources,
+                epilogue_drain=stage.epilogue_drain,
+                epilogue_fn=stage.epilogue_fn,
+                sync_before=stage.sync_before,
+                sync_after=stage.sync_after,
+                sched_after=stage.sched_hints,
             )))
 
         # Flush any remaining deferred sub-stages at the end.
@@ -553,18 +636,39 @@ class PipelineScheduler:
 
     # ── Cluster execution helper ─────────────────────────────────────────
 
-    def _execute_cluster(self, cluster: ClusterSpec, infra: InfraContext,
-                         shared_regs: dict) -> None:
-        """Run all entries in a cluster, passing/collecting shared regs.
+    def _pipeline_sync_barrier(self) -> None:
+        """Shared full workgroup sync (cluster boundary and entry handoffs)."""
+        self._dualwave_sync_barrier()
 
-        All shared_regs are passed as kwargs (not just entry.inp) so that
-        decomposed sub-stages can access carry values that aren't in the
-        Wire's declared inp. Each stage's ``**_`` absorbs unused keys.
-        """
-        for entry in cluster.entries:
+    def _run_cluster_entries(
+        self,
+        cluster: ClusterSpec,
+        infra: InfraContext,
+        shared_regs: dict,
+        *,
+        skip_prime: bool = False,
+    ) -> None:
+        """Run cluster entries with pipeline sync at declared handoff points."""
+        entries = cluster.entries
+        prev_idx = -1
+        for i, entry in enumerate(entries):
+            if skip_prime and self._is_prime(entry):
+                continue
+            if prev_idx >= 0:
+                prev = entries[prev_idx]
+                if prev.sync_after or entry.sync_before:
+                    self._pipeline_sync_barrier()
             result = entry.fn(infra, **shared_regs)
             if result:
                 shared_regs.update(result)
+            if entry.sched_after is not None:
+                entry.sched_after(infra, cluster.index, i)
+            prev_idx = i
+
+    def _execute_cluster(self, cluster: ClusterSpec, infra: InfraContext,
+                         shared_regs: dict) -> None:
+        """Run all entries in a cluster, passing/collecting shared regs."""
+        self._run_cluster_entries(cluster, infra, shared_regs, skip_prime=False)
 
     # ── Sync barrier helpers ────────────────────────────────────────────
 
@@ -584,31 +688,29 @@ class PipelineScheduler:
     @staticmethod
     def _stagger_open(stagger_i32):
         """Open wave-group phase shift: group B gets one extra s_barrier."""
+        from flydsl._mlir import ir
         from flydsl.expr import rocdl
         from flydsl._mlir.dialects import scf
         from flydsl.expr import arith
         from flydsl.expr.typing import T
-        is_group_b = arith.cmpi(arith.CmpIPredicate.ne, stagger_i32, arith.constant(0, T.i32))
-        _if = scf.IfOp(is_group_b)
-        with _if.then_block:
+        is_group_b = arith.cmpi(arith.CmpIPredicate.ne, stagger_i32, arith.constant(0, type=T.i32))
+        _if = scf.IfOp(is_group_b, [], has_else=False)
+        with ir.InsertionPoint(_if.then_block):
             rocdl.s_barrier()
-            scf.YieldOp([])
-        with _if.else_block:
             scf.YieldOp([])
 
     @staticmethod
     def _stagger_close(stagger_i32):
         """Close wave-group phase shift: group A gets one extra s_barrier."""
+        from flydsl._mlir import ir
         from flydsl.expr import rocdl
         from flydsl._mlir.dialects import scf
         from flydsl.expr import arith
         from flydsl.expr.typing import T
-        is_group_a = arith.cmpi(arith.CmpIPredicate.eq, stagger_i32, arith.constant(0, T.i32))
-        _if = scf.IfOp(is_group_a)
-        with _if.then_block:
+        is_group_a = arith.cmpi(arith.CmpIPredicate.eq, stagger_i32, arith.constant(0, type=T.i32))
+        _if = scf.IfOp(is_group_a, [], has_else=False)
+        with ir.InsertionPoint(_if.then_block):
             rocdl.s_barrier()
-            scf.YieldOp([])
-        with _if.else_block:
             scf.YieldOp([])
 
     # ── Code emission ────────────────────────────────────────────────────
@@ -618,14 +720,40 @@ class PipelineScheduler:
         first cluster — the async DMA that must run ahead of everything else)."""
         return entry.fn is self._prime_fn
 
+    def _emit_cluster_waitcnt(
+        self,
+        cluster: ClusterSpec,
+        infra: InfraContext,
+        *,
+        vmcnt_at_most: Optional[int] = None,
+    ) -> None:
+        """Emit ``s_waitcnt`` sequence for a cluster per ``wait_policies``."""
+        from flydsl.expr import rocdl
+
+        for policy in cluster.wait_policies:
+            if isinstance(policy, WaitFull):
+                rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0)
+            elif isinstance(policy, WaitLgkmOnly):
+                traits = infra.traits
+                lgkm_only = getattr(traits, "LGKMCNT_0_ONLY", None) if traits else None
+                if lgkm_only is not None:
+                    rocdl.s_waitcnt(lgkm_only)
+                else:
+                    rocdl.s_waitcnt(lgkmcnt=0)
+            elif isinstance(policy, WaitVmcntAtMost):
+                n = vmcnt_at_most
+                if n is None:
+                    n = policy.n
+                if n is None:
+                    n = self._config.vmcnt_targets.get(cluster.index, 0)
+                rocdl.s_waitcnt(vmcnt=n)
+            else:
+                raise TypeError(f"unknown wait policy: {policy!r}")
+
     def _run_non_prime(self, cluster: ClusterSpec, infra: InfraContext,
                        shared_regs: dict, label: str = "") -> None:
         """Run all entries in a cluster EXCEPT the prime stage."""
-        for entry in cluster.entries:
-            if not self._is_prime(entry):
-                result = entry.fn(infra, **shared_regs)
-                if result:
-                    shared_regs.update(result)
+        self._run_cluster_entries(cluster, infra, shared_regs, skip_prime=True)
 
     def emit_prologue(self, infra: InfraContext, shared_regs: dict) -> None:
         """Prime the pipeline by running the first stage ``depth-1`` tiles ahead.
@@ -674,12 +802,21 @@ class PipelineScheduler:
                 for ci, cluster in enumerate(clusters):
                     infra.cluster_id = ci
                     if cluster.kind == StageKind.MEMORY:
+                        infra.tile_idx = kv
+                        infra.buf_slot = read_buf
+                        self._run_non_prime(cluster, infra, shared_regs)
                         if const_expr(kv + depth - 1 < n_kv_tiles):
                             infra.tile_idx = kv + depth - 1
                             infra.buf_slot = write_buf
-                            self._execute_cluster(cluster, infra, shared_regs)
+                            self._prime_fn(infra)
                             infra.buf_slot = read_buf
-                        rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0)
+                            self._emit_cluster_waitcnt(
+                                cluster, infra, vmcnt_at_most=self._prime_vm_dma,
+                            )
+                        else:
+                            self._emit_cluster_waitcnt(
+                                cluster, infra, vmcnt_at_most=0,
+                            )
                     else:
                         self._execute_cluster(cluster, infra, shared_regs)
                     self._dualwave_sync_barrier()
@@ -702,6 +839,7 @@ class PipelineScheduler:
 
                 for c in clusters:
                     self._run_non_prime(c, infra, shared_regs)
+                    self._pipeline_sync_barrier()
 
                 rocdl.s_waitcnt(vmcnt=0)
                 rocdl.s_barrier()
@@ -725,7 +863,9 @@ class PipelineScheduler:
                 for cluster in clusters:
                     infra.cluster_id = cluster.index
                     if cluster.kind == StageKind.MEMORY:
-                        rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0)
+                        self._emit_cluster_waitcnt(
+                            cluster, infra, vmcnt_at_most=0,
+                        )
                     else:
                         self._execute_cluster(cluster, infra, shared_regs)
                     self._dualwave_sync_barrier()
@@ -733,8 +873,12 @@ class PipelineScheduler:
         else:
             # Main loop leaves one tile of softmax mass and lagged P@V in
             # loop-carried regs; run only the tail stages (no new GEMM1 / DMA).
-            for entry in self._epilogue_tail_entries:
-                result = entry.fn(infra, **shared_regs)
+            tail = self._epilogue_tail_entries
+            for i, entry in enumerate(tail):
+                if i > 0 and (tail[i - 1].sync_after or entry.sync_before):
+                    self._pipeline_sync_barrier()
+                fn = entry.epilogue_fn if entry.epilogue_fn is not None else entry.fn
+                result = fn(infra, **shared_regs)
                 if result:
                     shared_regs.update(result)
             rocdl.s_barrier()
