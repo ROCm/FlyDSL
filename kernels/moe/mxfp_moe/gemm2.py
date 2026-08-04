@@ -10,6 +10,7 @@ from flydsl.expr.typing import Vector as Vec
 
 from .mxfp4_gemm_common import (
     _e8m0_from_amax,
+    _e8m0_from_amax_fp8,
     _fabs_f32,
     _gep1,
     _gep3,
@@ -39,18 +40,6 @@ from .mxfp4_gemm_common import (
 )
 
 NUM_CU = 256
-
-_FMT_MAX_FP8_E4M3 = 448.0
-
-
-def _e8m0_from_amax_fp8(amax_f32):
-    wi = fx.Int32(_raw(amax_f32 * fx.Float32(1.0 / _FMT_MAX_FP8_E4M3)).bitcast(T.i32))
-    bexp = (wi + fx.Int32(0x7FFFFF)).shrui(fx.Int32(23)) & fx.Int32(0xFF)
-    lt = arith.cmpi(arith.CmpIPredicate.ult, _raw(bexp), _raw(fx.Int32(254)))
-    e8m0 = fx.Int32(arith.select(lt, _raw(bexp), _raw(fx.Int32(254))))
-    qscale = fx.Float32(_raw(e8m0 << fx.Int32(23)).bitcast(T.f32))
-    return e8m0, qscale
-
 
 _A_STAGES_PIPELINED = 3
 _A_STAGES_PIPELINED_NONATOMIC = 4
