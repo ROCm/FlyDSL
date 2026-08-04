@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-04T16:04:28Z",
+ "updated": "2026-08-04T17:18:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -20,19 +20,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-04T15:58:56Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T16:32:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30925509937/job/92048842787"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-04T15:53:40Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T16:54:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30925509937/job/92048842825"
     },
     {
@@ -68,11 +68,11 @@
    "branch": "mega_moe_v1",
    "event": "pull_request",
    "title": "BugFix for MegaMoE",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30917193760",
    "created_at": "2026-08-04T14:06:11Z",
-   "updated_at": "2026-08-04T14:17:34Z",
+   "updated_at": "2026-08-04T17:17:11Z",
    "actor": "GwilliamHu",
    "jobs": [
     {
@@ -96,9 +96,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-04T14:17:34Z",
+     "started_at": "2026-08-04T17:17:10Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30917193760/job/92021560000"
     }
@@ -384,20 +384,20 @@
    "branch": "binding_moe_mxfp4_stage2_opt",
    "event": "pull_request",
    "title": "[Perf]opimize moe mxfp4 stage2 perf",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30905221848",
    "created_at": "2026-08-04T11:32:26Z",
-   "updated_at": "2026-08-04T15:52:44Z",
+   "updated_at": "2026-08-04T17:16:24Z",
    "actor": "binding7012",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-04T15:52:43Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T17:16:23Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30905221848/job/91989108970"
     },
     {
