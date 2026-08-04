@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-04T17:18:26Z",
+ "updated": "2026-08-04T18:48:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -68,11 +68,11 @@
    "branch": "mega_moe_v1",
    "event": "pull_request",
    "title": "BugFix for MegaMoE",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30917193760",
    "created_at": "2026-08-04T14:06:11Z",
-   "updated_at": "2026-08-04T17:17:11Z",
+   "updated_at": "2026-08-04T18:46:12Z",
    "actor": "GwilliamHu",
    "jobs": [
     {
@@ -96,11 +96,29 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-04T17:17:10Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T17:41:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30917193760/job/92021560000"
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-04T17:52:28Z",
+     "completed_at": "2026-08-04T18:23:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30917193760/job/92079031924"
+    },
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-04T18:21:22Z",
+     "completed_at": "2026-08-04T18:46:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30917193760/job/92079031947"
     }
    ]
   },
@@ -240,11 +258,11 @@
    "branch": "remove-cdna-blockscale-fp8-gemm",
    "event": "pull_request",
    "title": "[Prune] Remove CDNA blockscale FP8 GEMM",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912760344",
    "created_at": "2026-08-04T13:13:30Z",
-   "updated_at": "2026-08-04T13:23:05Z",
+   "updated_at": "2026-08-04T17:42:04Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -259,9 +277,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-04T13:23:05Z",
+     "started_at": "2026-08-04T17:42:03Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912760344/job/92005879193"
     },
