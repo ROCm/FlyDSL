@@ -108,9 +108,7 @@ def compute_padding_encoding(
     amount_dw = pad_amount_elems * elem_bits // dword_bits
     if interval_dw <= 0 or amount_dw <= 0:
         return (0, 0)
-    assert (
-        interval_dw & (interval_dw - 1) == 0
-    ), f"padIntervalInDwords must be power-of-2, got {interval_dw}"
+    assert interval_dw & (interval_dw - 1) == 0, f"padIntervalInDwords must be power-of-2, got {interval_dw}"
     encoded_interval = int(math.log2(interval_dw)) - 1
     encoded_amount = amount_dw - 1
     return (encoded_interval, encoded_amount)
@@ -310,23 +308,15 @@ def make_tensor_descriptor_2d(
         outer_stride_idx = arith.index(outer_stride)
         outer_stride_is_runtime = False
     else:
-        os_val = (
-            outer_stride.ir_value()
-            if hasattr(outer_stride, "ir_value")
-            else outer_stride
-        )
+        os_val = outer_stride.ir_value() if hasattr(outer_stride, "ir_value") else outer_stride
         if not isinstance(os_val, ir.Value):
-            raise TypeError(
-                f"outer stride must be int or i32/index ir.Value, got {type(outer_stride).__name__}"
-            )
+            raise TypeError(f"outer stride must be int or i32/index ir.Value, got {type(outer_stride).__name__}")
         if isinstance(os_val.type, ir.IndexType):
             outer_stride_idx = _ArithValue(os_val)
         elif isinstance(os_val.type, ir.IntegerType) and os_val.type.width == 32:
             outer_stride_idx = arith.index_cast(T.index, os_val)
         else:
-            raise TypeError(
-                f"outer stride ir.Value must be index or i32, got {os_val.type}"
-            )
+            raise TypeError(f"outer stride ir.Value must be index or i32, got {os_val.type}")
         outer_stride_is_runtime = True
 
     # -- Warp distribution --
@@ -358,17 +348,15 @@ def make_tensor_descriptor_2d(
     a_raw = global_ptr.__extract_to_ir_values__()[0]
     glb_ptr = _fly_d.extract_aligned_pointer_as_index(glb_ptr_type, a_raw)
     glb_base_i64 = _ArithValue(llvm_dialect.ptrtoint(i64, glb_ptr))
-    glb_elem_off = (outer_off + warp_off_outer) * outer_stride_idx + (
-        inner_off + warp_off_inner
-    ) * arith.index(inner_stride)
+    glb_elem_off = (outer_off + warp_off_outer) * outer_stride_idx + (inner_off + warp_off_inner) * arith.index(
+        inner_stride
+    )
     glb_byte_off = glb_elem_off * arith.index(elem_bytes)
     glb_byte_off_i64 = arith.index_cast(T.i64, glb_byte_off)
     glb_addr_i64 = glb_base_i64 + glb_byte_off_i64
 
     # -- LDS address (byte address within shared memory) --
-    lds_base_idx = _ArithValue(
-        memref_dialect.extract_aligned_pointer_as_index(lds_memref)
-    )
+    lds_base_idx = _ArithValue(memref_dialect.extract_aligned_pointer_as_index(lds_memref))
     # Compute padded LDS stride (elements) for the outer dim
     if pad_interval > 0 and pad_amount > 0:
         lds_inner_stride = inner_tile + pad_amount  # padded row width
@@ -428,9 +416,7 @@ def make_tensor_descriptor_2d(
     # Padding encoding
     if pad_interval > 0 and pad_amount > 0:
         elem_bits = elem_bytes * 8
-        enc_interval, enc_amount = compute_padding_encoding(
-            pad_interval, pad_amount, elem_bits
-        )
+        enc_interval, enc_amount = compute_padding_encoding(pad_interval, pad_amount, elem_bits)
         pad_enable = 1
     else:
         enc_interval, enc_amount = 0, 0
@@ -481,27 +467,17 @@ def make_tensor_descriptor_2d(
         if isinstance(oob_outer_bound, int):
             ob_i32 = arith.constant(oob_outer_bound, type=T.i32)
         else:
-            ob_i32 = (
-                oob_outer_bound.ir_value()
-                if hasattr(oob_outer_bound, "ir_value")
-                else oob_outer_bound
-            )
+            ob_i32 = oob_outer_bound.ir_value() if hasattr(oob_outer_bound, "ir_value") else oob_outer_bound
             if not isinstance(ob_i32, ir.Value):
                 raise TypeError(
                     f"oob_outer_bound must be int or i32/index ir.Value, got {type(oob_outer_bound).__name__}"
                 )
             if isinstance(ob_i32.type, ir.IndexType):
                 ob_i32 = arith.index_cast(T.i32, ob_i32)
-            elif not (
-                isinstance(ob_i32.type, ir.IntegerType) and ob_i32.type.width == 32
-            ):
-                raise TypeError(
-                    f"oob_outer_bound ir.Value must be index or i32, got {ob_i32.type}"
-                )
+            elif not (isinstance(ob_i32.type, ir.IntegerType) and ob_i32.type.width == 32):
+                raise TypeError(f"oob_outer_bound ir.Value must be index or i32, got {ob_i32.type}")
         start_i32 = arith.index_cast(T.i32, outer_off + warp_off_outer)
-        tdim1_rt = arith.maxsi(
-            arith.subi(ob_i32, start_i32), arith.constant(0, type=T.i32)
-        )
+        tdim1_rt = arith.maxsi(arith.subi(ob_i32, start_i32), arith.constant(0, type=T.i32))
         c16 = arith.constant(16, type=T.i32)
         c_mask16 = arith.constant(0xFFFF, type=T.i32)
         # sgpr2: tensor_dim0_hi[15:0] (const) | tensor_dim1_lo[31:16] (runtime)
@@ -530,10 +506,7 @@ def make_tensor_descriptor_2d(
 
     dgroup1 = vector.from_elements(
         T.vec(8, T.i32),
-        [
-            as_ir_value(v)
-            for v in [g1_s0, g1_s1, g1_s2, g1_s3, g1_s4, g1_s5, g1_s6, g1_s7]
-        ],
+        [as_ir_value(v) for v in [g1_s0, g1_s1, g1_s2, g1_s3, g1_s4, g1_s5, g1_s6, g1_s7]],
     )
 
     return TDMDescriptor2D(dgroup0=dgroup0, dgroup1=dgroup1)
@@ -619,9 +592,7 @@ def make_tensor_gather_descriptor(
 
     if pad_interval > 0 and pad_amount > 0:
         elem_bits = elem_bytes * 8
-        enc_interval, enc_amount = compute_padding_encoding(
-            pad_interval, pad_amount, elem_bits
-        )
+        enc_interval, enc_amount = compute_padding_encoding(pad_interval, pad_amount, elem_bits)
         pad_enable = 1
     else:
         enc_interval, enc_amount = 0, 0
@@ -640,12 +611,7 @@ def make_tensor_gather_descriptor(
         )
         g1_s0 = arith.constant(g1_s0_val, type=T.i32)
     else:
-        upper = (
-            (data_size_code << 16)
-            | (pad_enable << 20)
-            | (enc_interval << 22)
-            | (enc_amount << 25)
-        )
+        upper = (data_size_code << 16) | (pad_enable << 20) | (enc_interval << 22) | (enc_amount << 25)
         g1_s0 = arith.ori(
             arith.constant(upper, type=T.i32),
             arith.andi(workgroup_mask, arith.constant(0xFFFF, type=T.i32)),
@@ -701,10 +667,7 @@ def make_tensor_gather_descriptor(
 
     dgroup1 = vector.from_elements(
         T.vec(8, T.i32),
-        [
-            as_ir_value(v)
-            for v in [g1_s0, g1_s1, g1_s2, g1_s3, g1_s4, g1_s5, g1_s6, g1_s7]
-        ],
+        [as_ir_value(v) for v in [g1_s0, g1_s1, g1_s2, g1_s3, g1_s4, g1_s5, g1_s6, g1_s7]],
     )
 
     # ================================================================
@@ -715,9 +678,7 @@ def make_tensor_gather_descriptor(
     if index_size == 32:
         # 32-bit mode: group2 has indices [0..3], group3 has [4..7]
         g2_vals = [row_indices[i] if i < num_indices else zero for i in range(4)]
-        g3_vals = [
-            row_indices[i + 4] if (i + 4) < num_indices else zero for i in range(4)
-        ]
+        g3_vals = [row_indices[i + 4] if (i + 4) < num_indices else zero for i in range(4)]
     else:
         # 16-bit mode: pack 2 x 16-bit indices per 32-bit word
         # Group 2: indices [0..7] packed into 4 x i32
@@ -786,9 +747,7 @@ def make_tensor_gather_dgroup0(
         glb_byte_off_i64 = arith.index_cast(T.i64, global_byte_offset)
         glb_base_i64 = glb_base_i64 + glb_byte_off_i64
 
-    lds_base_idx = _ArithValue(
-        memref_dialect.extract_aligned_pointer_as_index(lds_memref)
-    )
+    lds_base_idx = _ArithValue(memref_dialect.extract_aligned_pointer_as_index(lds_memref))
     lds_total_off = lds_base_idx
     if lds_byte_offset is not None:
         lds_total_off = lds_total_off + lds_byte_offset
@@ -802,9 +761,7 @@ def make_tensor_gather_dgroup0(
     i32 = ir.IntegerType.get_signless(32)
     g0_s2 = _ArithValue(std_arith.TruncIOp(i32, _raw(glb_base_i64)).result)
     hi_raw = _ArithValue(_raw(glb_base_i64)).shrui(arith.constant(32, type=T.i64))
-    g0_s3 = _ArithValue(std_arith.TruncIOp(i32, _raw(hi_raw)).result) | arith.constant(
-        1 << 31, type=T.i32
-    )
+    g0_s3 = _ArithValue(std_arith.TruncIOp(i32, _raw(hi_raw)).result) | arith.constant(1 << 31, type=T.i32)
     return vector.from_elements(
         T.vec(4, T.i32),
         [
@@ -1040,12 +997,8 @@ def add_addr_with_carry(base_addr_lo, base_addr_hi, delta_i32):
     # overloads.
     base_hi = _ArithValue(base_addr_hi)
     addr_hi_only = _ArithValue(base_hi & arith.constant(_TDM_ADDR_HI_MASK, type=T.i32))
-    flag_bits = _ArithValue(
-        base_hi & arith.constant(_TDM_ADDR_HI_FLAG_MASK, type=T.i32)
-    )
-    new_hi_addr = _ArithValue(
-        (addr_hi_only + carry_i32) & arith.constant(_TDM_ADDR_HI_MASK, type=T.i32)
-    )
+    flag_bits = _ArithValue(base_hi & arith.constant(_TDM_ADDR_HI_FLAG_MASK, type=T.i32))
+    new_hi_addr = _ArithValue((addr_hi_only + carry_i32) & arith.constant(_TDM_ADDR_HI_MASK, type=T.i32))
     new_addr_hi = new_hi_addr | flag_bits
 
     return new_addr_lo, new_addr_hi
@@ -1298,9 +1251,7 @@ def l2_prefetch_tile(
     # For simplicity, each thread prefetches row[tid % outer_size], col=0.
     tile_row = thread_id % arith.index(outer_size)
 
-    elem_off = (outer_off + tile_row) * arith.index(
-        outer_stride
-    ) + inner_off * arith.index(inner_stride)
+    elem_off = (outer_off + tile_row) * arith.index(outer_stride) + inner_off * arith.index(inner_stride)
     byte_off = elem_off * arith.index(elem_bytes)
     byte_off_i64 = arith.index_cast(T.i64, byte_off)
     addr_i64 = glb_base_i64 + byte_off_i64

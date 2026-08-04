@@ -197,9 +197,7 @@ def get_element_ptr(
 
     base_ptr = _unwrap_value(base_ptr)
     if not isinstance(static_byte_offset, int):
-        raise TypeError(
-            f"static_byte_offset must be int, got {type(static_byte_offset).__name__}"
-        )
+        raise TypeError(f"static_byte_offset must be int, got {type(static_byte_offset).__name__}")
     if elem_type is None:
         elem_type = T.i8()
     elif callable(elem_type):
@@ -215,24 +213,15 @@ def get_element_ptr(
         offset_val = _unwrap_value(byte_offset)
         if isinstance(offset_val.type, ir.IndexType):
             i64_type = T.i64()
-            offset_val = _unwrap_value(
-                std_arith.IndexCastOp(i64_type, offset_val).result
-            )
+            offset_val = _unwrap_value(std_arith.IndexCastOp(i64_type, offset_val).result)
         elif not isinstance(offset_val.type, ir.IntegerType):
-            raise TypeError(
-                "byte_offset must be int, index, or integer-typed MLIR value; "
-                f"got {offset_val.type}"
-            )
+            raise TypeError("byte_offset must be int, index, or integer-typed MLIR value; " f"got {offset_val.type}")
 
         if static_byte_offset != 0:
             static_type = offset_val.type
             static_attr = ir.IntegerAttr.get(static_type, int(static_byte_offset))
-            static_const = _unwrap_value(
-                std_arith.ConstantOp(static_type, static_attr).result
-            )
-            offset_val = _unwrap_value(
-                std_arith.AddIOp(offset_val, static_const).result
-            )
+            static_const = _unwrap_value(std_arith.ConstantOp(static_type, static_attr).result)
+            offset_val = _unwrap_value(std_arith.AddIOp(offset_val, static_const).result)
 
         dynamic_indices = [offset_val]
         raw_constant_indices = [_gep_dynamic_index_sentinel]
@@ -363,9 +352,7 @@ class BufferResourceDescriptor:
 
         # Create resource descriptor (returns !llvm.ptr<8>)
         rsrc_type = ir.Type.parse("!llvm.ptr<8>")
-        rsrc = rocdl.MakeBufferRsrcOp(
-            rsrc_type, base_ptr, stride_val, num_records, flags
-        ).result
+        rsrc = rocdl.MakeBufferRsrcOp(rsrc_type, base_ptr, stride_val, num_records, flags).result
 
         return BufferResourceDescriptor(rsrc)
 
@@ -407,22 +394,13 @@ def create_buffer_resource_from_addr(
     else:
         num_records = _unwrap_value(num_records_bytes)
         i64_type = T.i64()
-        if (
-            not isinstance(num_records.type, ir.IntegerType)
-            or num_records.type.width != 64
-        ):
+        if not isinstance(num_records.type, ir.IntegerType) or num_records.type.width != 64:
             if isinstance(num_records.type, ir.IndexType):
-                num_records = _unwrap_value(
-                    std_arith.IndexCastOp(i64_type, num_records).result
-                )
+                num_records = _unwrap_value(std_arith.IndexCastOp(i64_type, num_records).result)
             else:
-                num_records = _unwrap_value(
-                    std_arith.ExtSIOp(i64_type, num_records).result
-                )
+                num_records = _unwrap_value(std_arith.ExtSIOp(i64_type, num_records).result)
     rsrc_type = ir.Type.parse("!llvm.ptr<8>")
-    return rocdl.MakeBufferRsrcOp(
-        rsrc_type, base_ptr, stride, num_records, flags
-    ).result
+    return rocdl.MakeBufferRsrcOp(rsrc_type, base_ptr, stride, num_records, flags).result
 
 
 @dsl_loc_tracing
@@ -509,13 +487,9 @@ def buffer_load(
     # element->byte offset math below uses 4 and the result type is i32 / v4i32.
     if is_scalar:
         if vec_width not in (1, 4):
-            raise ValueError(
-                f"buffer_load(is_scalar=True): unsupported vec_width={vec_width}"
-            )
+            raise ValueError(f"buffer_load(is_scalar=True): unsupported vec_width={vec_width}")
         if mask is not None or soffset_bytes is not None:
-            raise ValueError(
-                "buffer_load(is_scalar=True) does not support mask or soffset_bytes"
-            )
+            raise ValueError("buffer_load(is_scalar=True) does not support mask or soffset_bytes")
         dtype = T.i32()
     # Default dtype to f32
     elif dtype is None:
@@ -581,11 +555,7 @@ def buffer_load(
             if not isinstance(soffset.type, ir.IntegerType) or soffset.type.width != 32:
                 op = std_arith.IndexCastOp(T.i32(), soffset)
                 soffset = _unwrap_value(op.result)
-    aux_attr = (
-        ir.IntegerAttr.get(ir.IntegerType.get_signless(32), cache_modifier)
-        if cache_modifier
-        else None
-    )
+    aux_attr = ir.IntegerAttr.get(ir.IntegerType.get_signless(32), cache_modifier) if cache_modifier else None
 
     # Emit buffer load
     load_op = rocdl.RawPtrBufferLoadOp(result_type, rsrc, offset, soffset, aux=aux_attr)
@@ -670,11 +640,7 @@ def buffer_store(
             if not isinstance(soffset.type, ir.IntegerType) or soffset.type.width != 32:
                 op = std_arith.IndexCastOp(T.i32(), soffset)
                 soffset = _unwrap_value(op.result)
-    aux_attr = (
-        ir.IntegerAttr.get(ir.IntegerType.get_signless(32), cache_modifier)
-        if cache_modifier
-        else None
-    )
+    aux_attr = ir.IntegerAttr.get(ir.IntegerType.get_signless(32), cache_modifier) if cache_modifier else None
 
     # Emit buffer store
     rocdl.RawPtrBufferStoreOp(data, rsrc, offset, soffset, aux=aux_attr)
