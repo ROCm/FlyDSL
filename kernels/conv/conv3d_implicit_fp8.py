@@ -77,6 +77,16 @@ def _make_fp8_buffer_tensor_from_addr(addr_i64, fp8_ir_t, ref_buf_tensor):
 
 _WEIGHT_FP8_CACHE = {}
 
+C_ALIGN = 16
+
+
+def _pad_channels(c):
+    return (c + C_ALIGN - 1) // C_ALIGN * C_ALIGN
+
+
+def _pad_c_dim(t, c, cp):
+    return t if cp == c else torch.nn.functional.pad(t, (0, 0, 0, 0, 0, 0, 0, cp - c))
+
 
 def _prep_weight_fp8(weight: torch.Tensor) -> torch.Tensor:
     """Reorder + cache the FP8 weight (KCTRS -> KTRSC) by source identity."""
@@ -85,7 +95,9 @@ def _prep_weight_fp8(weight: torch.Tensor) -> torch.Tensor:
     ent = _WEIGHT_FP8_CACHE.get(key)
     if ent is not None and ent[0]() is weight:
         return ent[1]
-    out = weight.permute(0, 2, 3, 4, 1).contiguous().view(torch.int8).view(-1)
+    c = weight.shape[1]
+    wsrc = _pad_c_dim(weight, c, _pad_channels(c))
+    out = wsrc.permute(0, 2, 3, 4, 1).contiguous().view(torch.int8).view(-1)
     _WEIGHT_FP8_CACHE[key] = (weakref.ref(weight), out)
     return out
 
@@ -119,9 +131,9 @@ TR_LDS_S = TR_TILE + TR_PAD
 
 @functools.lru_cache(maxsize=64)
 def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
-    """Transpose flat fp8 (N, C, S) -> (N, S, C), S == D*H*W. Requires c%16==0, s%16==0."""
+    """Transpose flat fp8 (N, C, S) -> (N, S, C), S == D*H*W. Requires c%16==0, s%4==0."""
     assert c % TR_VEC == 0, f"fp8 transpose needs C % {TR_VEC} == 0, got C={c}"
-    assert s % TR_VEC == 0, f"fp8 transpose needs s % {TR_VEC} == 0, got s={s}"
+    assert s % 4 == 0, f"fp8 transpose reads the input in dwords, needs s % 4 == 0, got s={s}"
     total_bytes = n * c * s
     grid_s = (s + TR_TILE - 1) // TR_TILE
     grid_c = (c + TR_TILE - 1) // TR_TILE
@@ -211,7 +223,7 @@ def _transpose_activation_fp8(x_fp8):
     """Fast tiled NCDHW->NDHWC fp8 transpose; falls back to torch for odd shapes."""
     n, c, d, h, w = x_fp8.shape
     s = d * h * w
-    if not (x_fp8.is_contiguous() and c % TR_VEC == 0 and s % TR_VEC == 0):
+    if not (x_fp8.is_contiguous() and c % TR_VEC == 0 and s % 4 == 0):
         return x_fp8.permute(0, 2, 3, 4, 1).contiguous().view(torch.int8).view(-1)
     out = torch.empty((n * s * c,), device=x_fp8.device, dtype=torch.int8)
     exe = compile_transpose_ncdhw_ndhwc_fp8(n, c, s)
@@ -673,13 +685,17 @@ def _conv3d_impl_fp8(x, weight, bias=None, stride=1, padding=0, stream=None, wgm
     assert (
         x.dtype == torch.float8_e4m3fn and weight.dtype == torch.float8_e4m3fn
     ), f"expected FP8 E4M3FN x/weight, got x={x.dtype}, weight={weight.dtype}"
-    assert c % 16 == 0, f"FP8 conv needs C % 16 == 0, got C={c}"
     st, sh, sw = _normalize_3(stride)
     pt, ph, pw = _normalize_3(padding)
 
     do = (d + 2 * pt - kt) // st + 1
     ho = (h + 2 * ph - kh) // sh + 1
     wo = (width + 2 * pw - kw) // sw + 1
+
+    # Zero-pad C to the gather's vector width; padded channels see zero weights.
+    cp = _pad_channels(c)
+    x = _pad_c_dim(x, c, cp)
+    c = cp
 
     launch_stream = torch.cuda.current_stream() if stream is None else stream
     x_arg = _transpose_activation_fp8(x)

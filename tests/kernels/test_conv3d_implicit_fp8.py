@@ -8,7 +8,7 @@
 The kernel consumes FP8 (E4M3FN) inputs natively, so the tests quantize the bf16
 inputs to FP8 and pass the FP8 tensors in, checking against an FP8-cast reference
 (the same FP8 tensors cast back to bf16) rather than the full-precision bf16 conv.
-Requires the CDNA4 (gfx95x) 16x16x128 FP8 MFMA. Only ``c % 16 == 0`` is required;
+Requires the CDNA4 (gfx95x) 16x16x128 FP8 MFMA. Any channel count is supported;
 partial M/N/K tiles (NPQ, K, CRS not multiples of 128) are masked, so misaligned
 channel counts and frame counts are covered too.
 """
@@ -167,3 +167,38 @@ def test_conv1d_fp8_vs_reference(s, padding):
     assert y.shape == ref.shape
     rel = (y.float() - ref.float()).abs().mean() / ref.float().abs().mean().clamp_min(1e-6)
     assert rel.item() < 2e-2, f"FP8 conv1d rel_err {rel.item():.3e}"
+
+
+# Channel counts that are not a multiple of 16.
+@_skip_no_fp8
+@pytest.mark.parametrize("c", [1, 3, 4, 8, 12, 24, 48])
+def test_conv3d_fp8_unaligned_channels(c):
+    torch.manual_seed(7200 + c)
+    n, t, h, w, k = 1, 3, 16, 16, 128
+    x = _fp8(torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16))
+    weight = _fp8(torch.randn((k, c, 3, 3, 3), device="cuda", dtype=torch.bfloat16))
+
+    y = conv3d_implicit_fp8(x, weight, padding=1)
+    ref = F.conv3d(x.to(torch.bfloat16), weight.to(torch.bfloat16), padding=1)
+    torch.cuda.synchronize()
+
+    assert y.shape == ref.shape
+    rel = (y.float() - ref.float()).abs().mean() / ref.float().abs().mean().clamp_min(1e-6)
+    assert rel.item() < 2e-2, f"FP8 conv rel_err {rel.item():.3e} for C={c}"
+
+
+# Spatial extents that are dword- but not 16-byte-aligned.
+@_skip_no_fp8
+@pytest.mark.parametrize("c", [16, 64, 128])
+@pytest.mark.parametrize("t,h,w", [(1, 10, 10), (1, 5, 4), (2, 5, 10), (1, 6, 6)])
+def test_fp8_transpose_dword_aligned_spatial(c, t, h, w):
+    from kernels.conv.conv3d_implicit_fp8 import _transpose_activation_fp8
+
+    torch.manual_seed(7300 + c + t * h * w)
+    x = _fp8(torch.randn((1, c, t, h, w), device="cuda", dtype=torch.bfloat16))
+
+    got = _transpose_activation_fp8(x)
+    torch.cuda.synchronize()
+
+    ref = x.permute(0, 2, 3, 4, 1).contiguous().view(torch.int8).view(-1)
+    assert torch.equal(got, ref)

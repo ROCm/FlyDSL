@@ -17,9 +17,8 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, const_expr, range_constexpr, rocdl
+from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
-from kernels.common import buffer_ops
 from kernels.common.mem_ops import buffer_atomic_add
 
 TILE_K = 32
@@ -46,12 +45,18 @@ def _autotune_enabled():
 _WEIGHT_CACHE = {}
 
 
+def _pad_channels(c):
+    return (c + LDG_VEC - 1) // LDG_VEC * LDG_VEC
+
+
 def _prep_weight(w, k, kt, kh, kw, c):
     key = id(w)
     ent = _WEIGHT_CACHE.get(key)
     if ent is not None and ent[0]() is w:
         return ent[1]
-    wk = w.permute(0, 2, 3, 4, 1).contiguous().reshape(k, kt * kh * kw * c)
+    cp = _pad_channels(c)
+    wsrc = torch.nn.functional.pad(w, (0, 0, 0, 0, 0, 0, 0, cp - c)) if cp != c else w
+    wk = wsrc.permute(0, 2, 3, 4, 1).contiguous().reshape(k, kt * kh * kw * cp)
     _WEIGHT_CACHE[key] = (weakref.ref(w), wk)
     return wk
 
@@ -67,7 +72,7 @@ _TR_LDS_S = TR_TILE + _TR_PAD
 
 @functools.lru_cache(maxsize=64)
 def compile_transpose_ncdhw_ndhwc(n, c, s):
-    """Transpose flat (N, C, S) -> (N, S, C) (S == T*H*W). Requires c%8==0, s%8==0."""
+    """Transpose flat (N, C, S) -> (N, S, C) (S == T*H*W). Requires c%8==0."""
     grid_s = (s + TR_TILE - 1) // TR_TILE
     grid_c = (c + TR_TILE - 1) // TR_TILE
     elem_ty = fx.BFloat16
@@ -75,6 +80,7 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
 
     @flyc.kernel(known_block_size=[TR_THREADS, 1, 1])
     def transpose_kernel(out: fx.Tensor, inp: fx.Tensor):
+        # max_size: an exact num_records would zero the whole straddling tail read.
         in_rsrc = buffer_ops.create_buffer_resource(inp)
         out_rsrc = buffer_ops.create_buffer_resource(out)
         lds_alloc = fx.SharedAllocator(static=False)
@@ -156,7 +162,7 @@ def _ncdhw_to_ndhwc(x, stream):
     """Fast NCDHW->NDHWC via the tiled transpose kernel; falls back to torch."""
     n, c, t, h, w = x.shape
     s = t * h * w
-    if not (x.is_contiguous() and x.dtype == torch.bfloat16 and c % 8 == 0 and s % 8 == 0):
+    if not (x.is_contiguous() and x.dtype == torch.bfloat16 and c % TR_VEC == 0):
         return x.permute(0, 2, 3, 4, 1).contiguous()
     out = torch.empty((n, t, h, w, c), device=x.device, dtype=x.dtype)
     exe = compile_transpose_ncdhw_ndhwc(n, c, s)
@@ -186,7 +192,7 @@ def compile_conv3d_implicit(
     assert (TILE_M * TILE_K) % BLOCK_VECS == 0, f"A tile {TILE_M}x{TILE_K} not a multiple of {BLOCK_VECS} vecs"
     assert (TILE_N * TILE_K) % BLOCK_VECS == 0, f"B tile {TILE_N}x{TILE_K} not a multiple of {BLOCK_VECS} vecs"
     assert LDG_A_COUNT >= 1 and LDG_B_COUNT >= 1
-    assert c % LDG_VEC == 0
+    assert c % LDG_VEC == 0, f"c={c} must be a multiple of LDG_VEC={LDG_VEC}; use _conv3d_impl to pad"
     assert BLOCK_THREADS <= 1024, f"BLOCK_THREADS={BLOCK_THREADS} exceeds 1024"
 
     do = (d + 2 * pt - kt) // st + 1
@@ -676,6 +682,12 @@ def _conv3d_impl(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=
     ho = (h + 2 * ph - kh) // sh + 1
     wo = (w + 2 * pw - kw) // sw + 1
     npq = n * do * ho * wo
+
+    # Zero-pad C to the gather's vector width; padded channels see zero weights.
+    cp = _pad_channels(c)
+    if cp != c:
+        x = torch.nn.functional.pad(x, (0, 0, 0, 0, 0, 0, 0, cp - c))
+    c = cp
     crs = c * kt * kh * kw
 
     launch_stream = torch.cuda.current_stream() if stream is None else stream
@@ -683,7 +695,7 @@ def _conv3d_impl(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=
     bias_arg = bias.to(torch.float32).contiguous() if has_bias else torch.empty(1, device=x.device, dtype=torch.float32)
 
     x_ndhwc = _ncdhw_to_ndhwc(x, stream)
-    w_packed = _prep_weight(weight, k, kt, kh, kw, c)
+    w_packed = _prep_weight(weight, k, kt, kh, kw, wc)
 
     shape = (n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias)
 
