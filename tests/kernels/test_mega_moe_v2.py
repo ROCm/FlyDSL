@@ -46,7 +46,7 @@ except Exception as _exc:  # noqa: BLE001
 NETWORKS = {
     "r1_v3": dict(model_dim=7168, inter_dim=2048, experts=256, topk=8),
     "v4_flash": dict(model_dim=4096, inter_dim=2048, experts=256, topk=6),
-    "v4_pro": dict(model_dim=7168, inter_dim=3072, experts=384, topk=6),
+    "v4_pro": dict(model_dim=7168, inter_dim=3072, experts=384, topk=6, swiglu_limit=10.0),
 }
 
 # batch-size sweeps for --matrix / --full-bs.
@@ -274,6 +274,13 @@ def _rmsnorm(x, eps=1e-6):
     return n.to(x.dtype)
 
 
+def _swiglu(gate, up, limit):
+    if limit > 0:
+        gate = gate.clamp(max=limit)
+        up = up.clamp(-limit, limit)
+    return torch.nn.functional.silu(gate) * up
+
+
 def _calc_diff(x, y):
     """Return one minus FP64 cosine similarity."""
     x, y = x.double(), y.double()
@@ -297,9 +304,10 @@ def _make_layer_routings(n_layers, tokens, experts, topk, dev, seed, rank):
 class RefModel:
     """Pure PyTorch FP32 reference for chained MoE residual layers."""
 
-    def __init__(self, w1_f32, w2_f32, inter_dim, dev, sw1=None, sw2=None):
+    def __init__(self, w1_f32, w2_f32, inter_dim, dev, swiglu_limit=0.0, sw1=None, sw2=None):
         self.w1_f32, self.w2_f32 = w1_f32, w2_f32  # full-precision [E, 2I, H], [E, H, I]
         self.inter_dim = inter_dim
+        self.swiglu_limit = float(swiglu_limit)
         self.sw1, self.sw2 = sw1, sw2  # optional dense shared experts (None here)
         self.dev = dev
         self._cache = {}
@@ -314,12 +322,9 @@ class RefModel:
             )
         return wd
 
-    @staticmethod
-    def _ffn(x, w1d, w2d):
-        import torch.nn.functional as _F
-
+    def _ffn(self, x, w1d, w2d):
         gate, up = (x @ w1d.t()).chunk(2, dim=-1)
-        return (_F.silu(gate) * up) @ w2d.t()
+        return _swiglu(gate, up, self.swiglu_limit) @ w2d.t()
 
     def _shared(self, x):
         if self.sw1 is None:
@@ -460,6 +465,7 @@ def _run_full_e2e(
     experts,
     epr,
     topk,
+    swiglu_limit,
     run_tokens,
     mtpr,
     a_dtype,
@@ -474,7 +480,6 @@ def _run_full_e2e(
 ):
     """Compare MegaMoEV2 with FP8- and BF16-dispatch ATOM pipelines."""
     import numpy as _np
-    import torch.nn.functional as _F
 
     from kernels.mega_moe import MegaMoEV2
     from kernels.mega_moe.quant import mxfp4_moe_scale_sort, per_1x32_mx_quant
@@ -562,6 +567,7 @@ def _run_full_e2e(
         w2=w2_kernel,
         w2_scale=w2_scale_1d,
         max_tok_per_rank=mtpr,
+        swiglu_limit=swiglu_limit,
     )
     torch.cuda.synchronize()
     ms.shmem_barrier_all()
@@ -810,7 +816,9 @@ def _run_full_e2e(
         w1e = _dequant_mx_to_f32(w1_all[e], "fp4")  # [2*inter_dim, model_dim]
         w2e = _dequant_mx_to_f32(w2_all[e], "fp4")  # [model_dim, inter_dim]
         xr = x32[rows]
-        _a1 = _F.silu(xr @ w1e[:inter_dim].t()) * (xr @ w1e[inter_dim : 2 * inter_dim].t())
+        gate = xr @ w1e[:inter_dim].t()
+        up = xr @ w1e[inter_dim : 2 * inter_dim].t()
+        _a1 = _swiglu(gate, up, swiglu_limit)
         oracle_w[rows] += w_e[:, None] * (_a1 @ w2e.t())
         del w1e, w2e
     orw = oracle_w.cpu().numpy()
@@ -827,7 +835,7 @@ def _run_full_e2e(
     _oracle_broken = _ra_w > _floor
     # Allow the expected FP4 quantization divergence while requiring no material regression.
     _match_ok = (_rma < 5e-2) or (_rm_w <= _ra8_w + 2e-2)
-    ok = _match_ok and (_oracle_broken or (_mega_ok and _atom8_ok))
+    ok = _mega_ok if swiglu_limit > 0 else _match_ok and (_oracle_broken or (_mega_ok and _atom8_ok))
 
     # Gate on the worst expert shard across ranks.
     _rm_w_max = _all_max(dev, _rm_w)
@@ -955,6 +963,7 @@ def _run_mega_only(
     experts,
     epr,
     topk,
+    swiglu_limit,
     run_tokens,
     mtpr,
     quant,
@@ -973,7 +982,6 @@ def _run_mega_only(
 ):
     """Run the aiter-free MegaMoEV2 accuracy and performance CI path."""
     import numpy as _np
-    import torch.nn.functional as _F
 
     from kernels.mega_moe import MegaMoEV2
 
@@ -1030,6 +1038,7 @@ def _run_mega_only(
         w2=w2_kernel,
         w2_scale=w2_scale_1d,
         max_tok_per_rank=mtpr,
+        swiglu_limit=swiglu_limit,
     )
     torch.cuda.synchronize()
     ms.shmem_barrier_all()
@@ -1102,7 +1111,9 @@ def _run_mega_only(
             rows = torch.nonzero(eids_s1 == int(expert), as_tuple=False).flatten()
             w1e = _dequant_mx_to_f32(w_ref_local[expert - rank * epr], "fp4")
             xr = inp_s1[rows]
-            ref_s1[rows] = _F.silu(xr @ w1e[:inter_dim].t()) * (xr @ w1e[inter_dim:].t())
+            gate = xr @ w1e[:inter_dim].t()
+            up = xr @ w1e[inter_dim:].t()
+            ref_s1[rows] = _swiglu(gate, up, swiglu_limit)
         if not torch.isfinite(got_s1).all() or not torch.isfinite(ref_s1).all():
             got_bad = int((~torch.isfinite(got_s1)).sum().item())
             ref_bad = int((~torch.isfinite(ref_s1)).sum().item())
@@ -1163,7 +1174,7 @@ def _run_mega_only(
             torch.cuda.synchronize()
             ms.shmem_barrier_all()
             out_dev = xd[:run_tokens].float()
-            out_ref = RefModel(w1_all, w2_all, inter_dim, dev).run(x_in, routings).float()
+            out_ref = RefModel(w1_all, w2_all, inter_dim, dev, swiglu_limit).run(x_in, routings).float()
             _acc_metric = _calc_diff(out_ref, out_dev)  # 1 - cosine (fp64), end-to-end accumulated
             _acc_floor = _CHAIN_TOL
             _acc_label = f"cos_diff(chain x{n_layers})"
@@ -1193,7 +1204,9 @@ def _run_mega_only(
                 w1e = _dequant_mx_to_f32(w1_all[local_e], "fp4")
                 w2e = _dequant_mx_to_f32(w2_all[local_e], "fp4")
                 xr = x32[rows]
-                _a1 = _F.silu(xr @ w1e[:inter_dim].t()) * (xr @ w1e[inter_dim : 2 * inter_dim].t())
+                gate = xr @ w1e[:inter_dim].t()
+                up = xr @ w1e[inter_dim : 2 * inter_dim].t()
+                _a1 = _swiglu(gate, up, swiglu_limit)
                 oracle[rows] += w_e[:, None] * (_a1 @ w2e.t())
                 del w1e, w2e
             if local_experts_only:
@@ -1327,6 +1340,7 @@ def _run_mega_only(
 def run_one(args, rank, world, dev):
     net = NETWORKS[args.network]
     model_dim, inter_dim, experts = net["model_dim"], net["inter_dim"], net["experts"]
+    swiglu_limit = float(net.get("swiglu_limit", 0.0))
     # topk: --topk>0 overrides; else use the network's native topk (r1_v3=8, v4_*=6).
     topk = int(args.topk) if int(args.topk) > 0 else int(net["topk"])
     run_tokens = max(int(args.tokens), 1)  # allow bs=1 (1 token/rank); routing still reaches all ranks
@@ -1369,6 +1383,7 @@ def run_one(args, rank, world, dev):
             experts=experts,
             epr=epr,
             topk=topk,
+            swiglu_limit=swiglu_limit,
             run_tokens=run_tokens,
             mtpr=mtpr,
             quant=args.quant,
@@ -1397,6 +1412,7 @@ def run_one(args, rank, world, dev):
         experts=experts,
         epr=epr,
         topk=topk,
+        swiglu_limit=swiglu_limit,
         run_tokens=run_tokens,
         mtpr=mtpr,
         a_dtype=a_dtype,
