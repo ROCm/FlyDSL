@@ -7,8 +7,8 @@ import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import const_expr, range_constexpr, rocdl, tdm_ops
-from flydsl.expr.rocdl import cluster
+from flydsl.expr import const_expr, range_constexpr, rocdl
+from flydsl.expr.rocdl import cluster, tdm_ops
 from flydsl.expr.typing import Constexpr, T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -128,10 +128,12 @@ def launch_gemm_a8w8(
             nb_oob = (i32_n // 128 - blk_n // 128) if not ALIGNED_N else None
             stride_ask64 = fx.Int64(i32_stride_ascale_k)
 
-        base_ptr = fx.SharedAllocator(static=False).allocate(ARENA_B)._ptr
+        arena = fx.SharedAllocator(static=False)
+        arena.allocate(ARENA_B)
+        base_ptr = arena.base_ptr
 
         def _bidx(p):
-            return fx.index_cast(T.index, fx.ptrtoint(p))
+            return fx.Int64(fx.ptrtoint(p))
 
         def _buf_ptr(s):
             return fx.add_offset(base_ptr, s * PITCH)
@@ -186,11 +188,11 @@ def launch_gemm_a8w8(
 
             W_SA, W_SB = 2 % num_waves, 3 % num_waves
             sa_off0 = blk_m64
-            sb_off0 = blk_n64 // 128 * (fx.Int64(i32_k) // 128)
+            sb_off0 = blk_n64 // 128 * (k64 // 128)
             gSA = _gv(arg_scale_a, sa_off0, (K_WS, tile_m), (tile_m, 1))
             atomSA = _tdm1(gSA, None, mn_oob, stride_ask64, a_mask)
             gSB = _gv(arg_scale_b, sb_off0, (N_BLOCKS, K_WS), (K_WS, 1))
-            atomSB = _tdm1(gSB, nb_oob, None, fx.Int64(i32_k) // 128, b_mask)
+            atomSB = _tdm1(gSB, nb_oob, None, k64 // 128, b_mask)
 
         def _wcopy(w, atom, gt, lv, imm_offset):
             if wave == w:
@@ -198,13 +200,13 @@ def launch_gemm_a8w8(
 
         def issue(s, kt):
             pa = _buf_ptr(s)
-            _wcopy(W_A, atomA, gA, _lv(pa, (tile_m, tile_k), (A_LDS_ROW, 1)), fx.Int64(kt) * fx.Int64(tile_k))
+            _wcopy(W_A, atomA, gA, _lv(pa, (tile_m, tile_k), (A_LDS_ROW, 1)), fx.Int64(kt) * tile_k)
             _wcopy(
                 W_B,
                 atomB,
                 gB,
                 _lv(fx.add_offset(pa, STAGE_A), (tile_n // 16, tile_k * 16), (B_LDS_ROW, 1)),
-                fx.Int64(kt) * fx.Int64(tile_k * 16),
+                fx.Int64(kt) * (tile_k * 16),
             )
             if const_expr(is_bsc):
                 _wcopy(
@@ -219,7 +221,7 @@ def launch_gemm_a8w8(
                     atomSB,
                     gSB,
                     _lv(fx.add_offset(pa, SB_OFF), (N_BLOCKS, K_WS), (K_WS, 1)),
-                    fx.Int64(kt) * fx.Int64(K_WS),
+                    fx.Int64(kt) * K_WS,
                 )
 
         wmb = wave_m * warp_tile_m
@@ -227,7 +229,7 @@ def launch_gemm_a8w8(
 
         def load_a(buf, wm, ks):
             row = wmb + wm * 16 + lane16
-            b0 = fx.index_cast(T.index, row * A_LDS_ROW + ks * WMMA_K + kgrp * 16)
+            b0 = fx.Int64(row * A_LDS_ROW + ks * WMMA_K + kgrp * 16)
             v = [Vec(lds_load_b128(buf, b0 + 32 * j)) for j in range_constexpr(4)]
             v01 = v[0].shuffle(v[1], list(range(8)))
             v23 = v[2].shuffle(v[3], list(range(8)))
@@ -235,7 +237,7 @@ def launch_gemm_a8w8(
 
         def load_b(buf, wn, ks):
             nbl = wnb // 16 + wn
-            b0 = fx.index_cast(T.index, STAGE_A + nbl * B_LDS_ROW + ks * 2048 + kgrp * 256 + lane16 * 16)
+            b0 = fx.Int64(STAGE_A + nbl * B_LDS_ROW + ks * 2048 + kgrp * 256 + lane16 * 16)
             v = [Vec(lds_load_b128(buf, b0 + 512 * j)) for j in range_constexpr(4)]
             v01 = v[0].shuffle(v[1], list(range(8)))
             v23 = v[2].shuffle(v[3], list(range(8)))
@@ -266,7 +268,7 @@ def launch_gemm_a8w8(
             wmma_atom = fx.make_mma_atom(fx.rocdl.WMMA(WMMA_M, WMMA_N, WMMA_K, fx.Float8E4M3FN, fx.Float32))
         c_frags = [fx.make_rmem_tensor(8, fx.Float32) for _ in range_constexpr(n_acc)]
         for cf in c_frags:
-            cf.store(fx.constant_vector(0.0, T.vec(8, T.f32)))
+            cf.store(Vec.filled(8, 0.0, fx.Float32))
 
         def _rmem(n, v):
             t = fx.make_rmem_tensor(n, fx.Int32)

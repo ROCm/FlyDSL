@@ -8,8 +8,8 @@ from collections import namedtuple
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import const_expr, range_constexpr, rocdl, tdm_ops
-from flydsl.expr.rocdl import cluster
+from flydsl.expr import const_expr, range_constexpr, rocdl
+from flydsl.expr.rocdl import cluster, tdm_ops
 from flydsl.expr.typing import Constexpr, T
 from flydsl.expr.typing import Vector as Vec
 from kernels.common.gfx1250_cluster import compute_mcast_masks
@@ -188,10 +188,12 @@ def launch_moe_gemm_a8w4(
         # Per-expert A-data OOB: bound to the owning expert's valid-row
         mn_oob = tile_map[(expert < n_experts).select(expert, n_experts - 1)] - blk_m
 
-        base_ptr = fx.SharedAllocator(static=False).allocate(ARENA_B)._ptr
+        arena = fx.SharedAllocator(static=False)
+        arena.allocate(ARENA_B)
+        base_ptr = arena.base_ptr
 
         def ptr_to_idx(p):
-            return fx.index_cast(T.index, fx.ptrtoint(p))
+            return fx.Int32(fx.ptrtoint(p))
 
         stC_idx = ptr_to_idx(base_ptr)
 
@@ -344,7 +346,7 @@ def launch_moe_gemm_a8w4(
         wmma_atom = fx.make_mma_atom(fx.rocdl.WMMAScale(WMMA_M, WMMA_N, WMMA_K, fx.Float4E2M1FN, ACT_ELEM, fx.Float32))
         c_frags = [fx.make_rmem_tensor(8, fx.Float32) for _ in range_constexpr(n_acc)]
         for cf in c_frags:
-            cf.store(fx.constant_vector(0.0, T.vec(8, T.f32)))
+            cf.store(Vec.filled(8, 0.0, fx.Float32))
 
         def to_rmem(n, v):
             t = fx.make_rmem_tensor(n, fx.Int32)
