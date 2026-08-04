@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-04T12:17:50Z",
+ "updated": "2026-08-04T12:34:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30909470044,
+   "pr": null,
+   "commit": "45e7af94deea86ab120e445cde91ef7a580340e2",
+   "branch": "main",
+   "event": "push",
+   "title": "[Fix] Avoid runtime materialization in compile-only mode (#961)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30909470044",
+   "created_at": "2026-08-04T12:31:22Z",
+   "updated_at": "2026-08-04T12:32:22Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 30908342310,
    "pr": null,
@@ -10,13 +25,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Build] Default CMAKE_BUILD_TYPE to RelWithDebInfo when unset (#964)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30908342310",
    "created_at": "2026-08-04T12:16:07Z",
-   "updated_at": "2026-08-04T12:16:09Z",
+   "updated_at": "2026-08-04T12:31:40Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-08-04T12:25:59Z",
+     "completed_at": "2026-08-04T12:31:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30908342310/job/91990990761"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-08-04T12:27:30Z",
+     "completed_at": "2026-08-04T12:31:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30908342310/job/91990990789"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-08-04T12:27:32Z",
+     "completed_at": "2026-08-04T12:31:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30908342310/job/91990990824"
+    }
+   ]
   },
   {
    "run_id": 30905221848,
@@ -25,13 +68,41 @@
    "branch": "binding_moe_mxfp4_stage2_opt",
    "event": "pull_request",
    "title": "[Perf]opimize moe mxfp4 stage2 perf",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30905221848",
    "created_at": "2026-08-04T11:32:26Z",
-   "updated_at": "2026-08-04T11:35:04Z",
+   "updated_at": "2026-08-04T12:18:04Z",
    "actor": "binding7012",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-04T12:18:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30905221848/job/91989108970"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-04T12:18:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30905221848/job/91989108983"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-04T12:19:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30905221848/job/91989108986"
+    }
+   ]
   },
   {
    "run_id": 30904296535,
@@ -98,10 +169,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-04T11:26:57Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T12:28:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30903223647/job/91977225341"
     }
    ]
@@ -303,10 +374,10 @@
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-04T11:30:14Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T12:26:24Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30890822517/job/91978023525"
     }
    ]
@@ -792,7 +863,7 @@
   },
   {
    "run_id": 30831251073,
-   "pr": 961,
+   "pr": null,
    "commit": "b0d17295a91bf2bf9354cb61f8aa0f262dce990f",
    "branch": "fix/compile-only-engine-materialization",
    "event": "pull_request",
@@ -2067,49 +2138,6 @@
      "started_at": "2026-08-01T11:11:38Z",
      "completed_at": "2026-08-01T12:49:23Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30695146850/job/91361949549"
-    }
-   ]
-  },
-  {
-   "run_id": 30693710785,
-   "pr": 948,
-   "commit": "3d1e03d66f6576e21eaa444321234baac7410740",
-   "branch": "worktree-mxfp-moe-a16w4",
-   "event": "pull_request",
-   "title": "MoE: add a16w mix fused 2-stage kernels (bf16 A \u00d7 mxfp4/int4/bf16 W)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30693710785",
-   "created_at": "2026-08-01T09:25:22Z",
-   "updated_at": "2026-08-01T13:09:26Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-01T10:04:19Z",
-     "completed_at": "2026-08-01T11:42:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30693710785/job/91356124417"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-01T10:03:16Z",
-     "completed_at": "2026-08-01T13:09:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30693710785/job/91356124420"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-01T10:03:43Z",
-     "completed_at": "2026-08-01T12:16:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30693710785/job/91356124430"
     }
    ]
   }
