@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-04T18:48:29Z",
+ "updated": "2026-08-04T18:50:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -215,11 +215,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Prune] Remove CDNA blockscale FP8 GEMM (#966)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912980863",
    "created_at": "2026-08-04T13:16:09Z",
-   "updated_at": "2026-08-04T13:24:12Z",
+   "updated_at": "2026-08-04T18:48:13Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -243,9 +243,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-04T13:24:12Z",
+     "started_at": "2026-08-04T18:48:12Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912980863/job/92006189152"
     }
@@ -258,11 +258,11 @@
    "branch": "remove-cdna-blockscale-fp8-gemm",
    "event": "pull_request",
    "title": "[Prune] Remove CDNA blockscale FP8 GEMM",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912760344",
    "created_at": "2026-08-04T13:13:30Z",
-   "updated_at": "2026-08-04T17:42:04Z",
+   "updated_at": "2026-08-04T18:47:34Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -277,10 +277,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-04T17:42:03Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T18:47:33Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912760344/job/92005879193"
     },
     {
