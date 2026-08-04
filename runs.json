@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-04T08:47:43Z",
+ "updated": "2026-08-04T09:05:37Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30893337206",
    "created_at": "2026-08-04T08:45:51Z",
-   "updated_at": "2026-08-04T08:46:51Z",
+   "updated_at": "2026-08-04T08:52:45Z",
    "actor": "jli-melchior",
    "jobs": []
   },
@@ -25,11 +25,11 @@
    "branch": "mega_moe_v1",
    "event": "pull_request",
    "title": "BugFix for MegaMoE",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30890822517",
    "created_at": "2026-08-04T08:10:14Z",
-   "updated_at": "2026-08-04T08:11:02Z",
+   "updated_at": "2026-08-04T08:47:27Z",
    "actor": "GwilliamHu",
    "jobs": []
   },
@@ -40,11 +40,11 @@
    "branch": "main",
    "event": "push",
    "title": "refactor gfx1250 common LDS copy operations (#963)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30890799265",
    "created_at": "2026-08-04T08:09:56Z",
-   "updated_at": "2026-08-04T08:11:02Z",
+   "updated_at": "2026-08-04T08:51:04Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -70,13 +70,41 @@
    "branch": "pr/enh-default-build-type",
    "event": "pull_request",
    "title": "[Build] Default CMAKE_BUILD_TYPE to RelWithDebInfo when unset",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30887750126",
    "created_at": "2026-08-04T07:25:26Z",
-   "updated_at": "2026-08-04T08:09:33Z",
+   "updated_at": "2026-08-04T08:52:09Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-04T08:52:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30887750126/job/91941753241"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-04T08:53:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30887750126/job/91941753297"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-04T08:53:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30887750126/job/91941753397"
+    }
+   ]
   },
   {
    "run_id": 30886949810,
@@ -85,13 +113,41 @@
    "branch": "binding_moe_mxfp4_stage2_opt",
    "event": "pull_request",
    "title": "[Perf]opimize moe mxfp4 stage2 perf",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30886949810",
    "created_at": "2026-08-04T07:13:25Z",
-   "updated_at": "2026-08-04T08:09:44Z",
+   "updated_at": "2026-08-04T08:51:45Z",
    "actor": "binding7012",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-04T08:52:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30886949810/job/91941662785"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-04T08:51:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30886949810/job/91941662789"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-04T08:51:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30886949810/job/91941662801"
+    }
+   ]
   },
   {
    "run_id": 30885764036,
@@ -100,13 +156,41 @@
    "branch": "gfx1250/flydsl-gemm-unify",
    "event": "pull_request",
    "title": "[gfx1250] Refactor LDS copy ops and unify A8W8 GEMM kernels",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30885764036",
    "created_at": "2026-08-04T06:55:35Z",
-   "updated_at": "2026-08-04T08:09:27Z",
+   "updated_at": "2026-08-04T08:50:06Z",
    "actor": "aoli26",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-04T08:50:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30885764036/job/91941278510"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-04T08:50:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30885764036/job/91941278550"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-04T09:04:13Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30885764036/job/91941278568"
+    }
+   ]
   },
   {
    "run_id": 30885456197,
@@ -246,20 +330,20 @@
    "branch": "stochastic-rounding",
    "event": "pull_request",
    "title": "Add stochastic rounding and philox RNG under rocdl",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30877675125",
    "created_at": "2026-08-04T04:26:19Z",
-   "updated_at": "2026-08-04T06:43:10Z",
+   "updated_at": "2026-08-04T09:04:06Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-04T06:43:10Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T09:04:05Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30877675125/job/91893262050"
     },
     {
