@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-04T11:00:34Z",
+ "updated": "2026-08-04T11:13:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30903223647,
+   "pr": 965,
+   "commit": "bb09121b2704a78d668abb913b44bc78a71f396e",
+   "branch": "pr/enh-defer-kernel-lowering",
+   "event": "pull_request",
+   "title": "[Enh] Defer kernel lowering to launch time and infer known_block_size\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30903223647",
+   "created_at": "2026-08-04T11:03:34Z",
+   "updated_at": "2026-08-04T11:05:38Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 30902752870,
    "pr": 959,
@@ -53,9 +68,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-04T10:35:09Z",
+     "started_at": "2026-08-04T11:01:23Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30898746086/job/91965831739"
     }
@@ -227,11 +242,11 @@
    "branch": "pr/enh-default-build-type",
    "event": "pull_request",
    "title": "[Build] Default CMAKE_BUILD_TYPE to RelWithDebInfo when unset",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30887750126",
    "created_at": "2026-08-04T07:25:26Z",
-   "updated_at": "2026-08-04T09:14:05Z",
+   "updated_at": "2026-08-04T11:10:53Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -246,19 +261,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-04T08:53:19Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T11:00:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30887750126/job/91941753297"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-04T08:53:04Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T11:10:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30887750126/job/91941753397"
     }
    ]
@@ -2163,21 +2178,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30689329283/job/91341419231"
     }
    ]
-  },
-  {
-   "run_id": 30688959388,
-   "pr": null,
-   "commit": "8975715a00e54667448c0b0bd2b18c51526b8649",
-   "branch": "binding_fa_fp8_gfx950_opt2",
-   "event": "pull_request",
-   "title": "[Perf]optimize the flash attention fp8 performance for gfx950",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30688959388",
-   "created_at": "2026-08-01T07:03:29Z",
-   "updated_at": "2026-08-01T07:04:45Z",
-   "actor": "binding7012",
-   "jobs": []
   }
  ]
 }
