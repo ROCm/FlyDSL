@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-04T11:13:32Z",
+ "updated": "2026-08-04T11:19:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30904116175,
+   "pr": 959,
+   "commit": "2a8d717865372886b0c556a50f1b407d154f16a6",
+   "branch": "binding_moe_mxfp4_stage2_opt",
+   "event": "pull_request",
+   "title": "[Perf]opimize moe mxfp4 stage2 perf",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30904116175",
+   "created_at": "2026-08-04T11:16:13Z",
+   "updated_at": "2026-08-04T11:17:43Z",
+   "actor": "binding7012",
+   "jobs": []
+  },
   {
    "run_id": 30903223647,
    "pr": 965,
@@ -20,7 +35,7 @@
   },
   {
    "run_id": 30902752870,
-   "pr": 959,
+   "pr": null,
    "commit": "bd463fb009ba28c8112a8f71baf9f8193c83ea8c",
    "branch": "binding_moe_mxfp4_stage2_opt",
    "event": "pull_request",
@@ -126,11 +141,11 @@
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
    "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30893337206",
    "created_at": "2026-08-04T08:45:51Z",
-   "updated_at": "2026-08-04T09:25:05Z",
+   "updated_at": "2026-08-04T11:14:36Z",
    "actor": "jli-melchior",
    "jobs": [
     {
@@ -154,9 +169,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-04T09:25:05Z",
+     "started_at": "2026-08-04T11:14:35Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30893337206/job/91949638627"
     }
@@ -179,10 +194,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-04T10:33:31Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T11:14:05Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30890822517/job/91951178554"
     },
     {
@@ -2133,49 +2148,6 @@
      "started_at": "2026-08-01T07:27:46Z",
      "completed_at": "2026-08-01T10:09:03Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30689667535/job/91342347377"
-    }
-   ]
-  },
-  {
-   "run_id": 30689329283,
-   "pr": 948,
-   "commit": "ff61d329d70feef0e9b86e50feb3e140fcc14167",
-   "branch": "worktree-mxfp-moe-a16w4",
-   "event": "pull_request",
-   "title": "MoE: add a16w mix fused 2-stage kernels (bf16 A \u00d7 mxfp4/int4/bf16 W)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30689329283",
-   "created_at": "2026-08-01T07:14:05Z",
-   "updated_at": "2026-08-01T08:26:45Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-01T07:17:13Z",
-     "completed_at": "2026-08-01T08:26:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30689329283/job/91341419205"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-01T07:17:42Z",
-     "completed_at": "2026-08-01T08:03:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30689329283/job/91341419229"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-01T07:17:43Z",
-     "completed_at": "2026-08-01T08:26:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30689329283/job/91341419231"
     }
    ]
   }
