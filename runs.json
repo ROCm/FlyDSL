@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-04T11:21:52Z",
+ "updated": "2026-08-04T11:25:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -141,10 +141,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-04T10:33:06Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T11:22:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30896317249/job/91965270333"
     }
    ]
@@ -358,20 +358,20 @@
    "branch": "gfx1250/flydsl-gemm-unify",
    "event": "pull_request",
    "title": "[gfx1250] Refactor LDS copy ops and unify A8W8 GEMM kernels",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30885764036",
    "created_at": "2026-08-04T06:55:35Z",
-   "updated_at": "2026-08-04T09:32:33Z",
+   "updated_at": "2026-08-04T11:23:47Z",
    "actor": "aoli26",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-04T09:32:33Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T11:23:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30885764036/job/91941278510"
     },
     {
