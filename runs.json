@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-04T05:00:32Z",
+ "updated": "2026-08-04T05:33:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30880948143,
+   "pr": 954,
+   "commit": "52f335e00ea57a1d84d2cc6d5a73794a61e419b6",
+   "branch": "mega_moe_v1",
+   "event": "pull_request",
+   "title": "BugFix for MegaMoE",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30880948143",
+   "created_at": "2026-08-04T05:31:23Z",
+   "updated_at": "2026-08-04T05:31:55Z",
+   "actor": "yanboshao",
+   "jobs": []
+  },
   {
    "run_id": 30877675125,
    "pr": 907,
@@ -68,11 +83,11 @@
    "branch": "mega_moe_v1",
    "event": "pull_request",
    "title": "BugFix for MegaMoE",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30874954803",
    "created_at": "2026-08-04T03:30:36Z",
-   "updated_at": "2026-08-04T03:54:32Z",
+   "updated_at": "2026-08-04T05:31:25Z",
    "actor": "GwilliamHu",
    "jobs": [
     {
@@ -87,19 +102,19 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-04T03:54:32Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T05:31:24Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30874954803/job/91887702678"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-04T03:55:14Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T05:14:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30874954803/job/91887702701"
     }
    ]
@@ -2291,49 +2306,6 @@
      "started_at": "2026-08-01T02:58:42Z",
      "completed_at": "2026-08-01T03:14:59Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30678854116/job/91317752180"
-    }
-   ]
-  },
-  {
-   "run_id": 30674604476,
-   "pr": 942,
-   "commit": "f9cb4f1ba49b43719850108a085de517482a47b1",
-   "branch": "spconv-bf16-implicit-gemm",
-   "event": "pull_request",
-   "title": "[Kernel] Add submanifold sparse 3D convolution (bf16 implicit GEMM, gfx950)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30674604476",
-   "created_at": "2026-08-01T00:04:55Z",
-   "updated_at": "2026-08-02T00:08:10Z",
-   "actor": "jiacao-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-01T00:08:46Z",
-     "completed_at": "2026-08-01T01:02:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30674604476/job/91299562413"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-01T00:08:49Z",
-     "completed_at": "2026-08-01T01:11:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30674604476/job/91299562415"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-01T00:08:08Z",
-     "completed_at": "2026-08-02T00:08:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30674604476/job/91299562421"
     }
    ]
   }
