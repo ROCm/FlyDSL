@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-04T13:18:03Z",
+ "updated": "2026-08-04T13:22:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30913308309,
+   "pr": 948,
+   "commit": "9bd0bef93566b91feb8d5c8a8ce2a383921966ba",
+   "branch": "worktree-mxfp-moe-a16w4",
+   "event": "pull_request",
+   "title": "MoE: add a16w mix fused 2-stage kernels (bf16 A \u00d7 mxfp4/int4/bf16 W)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30913308309",
+   "created_at": "2026-08-04T13:20:14Z",
+   "updated_at": "2026-08-04T13:20:54Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 30912980863,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Prune] Remove CDNA blockscale FP8 GEMM (#966)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912980863",
    "created_at": "2026-08-04T13:16:09Z",
-   "updated_at": "2026-08-04T13:16:43Z",
+   "updated_at": "2026-08-04T13:21:05Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -25,11 +40,11 @@
    "branch": "remove-cdna-blockscale-fp8-gemm",
    "event": "pull_request",
    "title": "[Prune] Remove CDNA blockscale FP8 GEMM",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912760344",
    "created_at": "2026-08-04T13:13:30Z",
-   "updated_at": "2026-08-04T13:14:31Z",
+   "updated_at": "2026-08-04T13:17:56Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -40,11 +55,11 @@
    "branch": "worktree-mxfp-moe-a16w4",
    "event": "pull_request",
    "title": "MoE: add a16w mix fused 2-stage kernels (bf16 A \u00d7 mxfp4/int4/bf16 W)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30911063083",
    "created_at": "2026-08-04T12:52:22Z",
-   "updated_at": "2026-08-04T12:53:57Z",
+   "updated_at": "2026-08-04T13:20:36Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -2039,49 +2054,6 @@
      "started_at": "2026-08-03T00:10:48Z",
      "completed_at": "2026-08-03T01:03:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30712488774/job/91565515229"
-    }
-   ]
-  },
-  {
-   "run_id": 30703504176,
-   "pr": 947,
-   "commit": "64c267d215b127227fa4b635e94545b9e93b5be7",
-   "branch": "worktree-agent-moe-2stage-port",
-   "event": "pull_request",
-   "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8 (gfx942 + gfx950)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30703504176",
-   "created_at": "2026-08-01T14:18:36Z",
-   "updated_at": "2026-08-02T10:43:23Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-02T09:54:11Z",
-     "completed_at": "2026-08-02T10:43:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30703504176/job/91381941833"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-01T14:56:06Z",
-     "completed_at": "2026-08-01T16:12:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30703504176/job/91381941845"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-01T14:55:58Z",
-     "completed_at": "2026-08-01T16:11:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30703504176/job/91381941857"
     }
    ]
   }
