@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-04T08:12:45Z",
+ "updated": "2026-08-04T08:45:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "mega_moe_v1",
    "event": "pull_request",
    "title": "BugFix for MegaMoE",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30890822517",
    "created_at": "2026-08-04T08:10:14Z",
-   "updated_at": "2026-08-04T08:10:55Z",
+   "updated_at": "2026-08-04T08:11:02Z",
    "actor": "GwilliamHu",
    "jobs": []
   },
@@ -25,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "refactor gfx1250 common LDS copy operations (#963)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30890799265",
    "created_at": "2026-08-04T08:09:56Z",
-   "updated_at": "2026-08-04T08:10:23Z",
+   "updated_at": "2026-08-04T08:11:02Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -128,9 +128,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-04T08:00:51Z",
+     "started_at": "2026-08-04T08:11:17Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30885456197/job/91930082071"
     }
@@ -478,20 +478,20 @@
    "branch": "dsl-ify-arith",
    "event": "pull_request",
    "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30822360546",
    "created_at": "2026-08-03T14:22:13Z",
-   "updated_at": "2026-08-04T07:09:07Z",
+   "updated_at": "2026-08-04T08:43:08Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-04T07:09:07Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T08:43:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30822360546/job/91905047987"
     },
     {
