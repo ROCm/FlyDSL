@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-08-04T14:42:06Z",
+ "updated": "2026-08-04T15:53:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30925509937,
+   "pr": 967,
+   "commit": "70a750174a5aa551a0a36ad9615559d1e815ac44",
+   "branch": "gfx1250/fix-gemm-buffer-ops",
+   "event": "pull_request",
+   "title": "[gfx1250] Migrate gemm kernels to the stable DSL API",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30925509937",
+   "created_at": "2026-08-04T15:42:29Z",
+   "updated_at": "2026-08-04T15:50:01Z",
+   "actor": "aoli26",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-04T15:50:01Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30925509937/job/92048842787"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-04T15:50:01Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30925509937/job/92048842825"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-04T15:50:01Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30925509937/job/92048842851"
+    }
+   ]
+  },
   {
    "run_id": 30917243418,
    "pr": 948,
@@ -35,19 +78,19 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-04T14:21:35Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T15:27:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30917193760/job/92021559826"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-04T14:21:11Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T15:35:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30917193760/job/92021559908"
     },
     {
@@ -173,10 +216,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-04T13:25:07Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T14:48:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912980863/job/92006189134"
     },
     {
@@ -515,11 +558,11 @@
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30896317249",
    "created_at": "2026-08-04T09:26:21Z",
-   "updated_at": "2026-08-04T14:39:56Z",
+   "updated_at": "2026-08-04T15:51:57Z",
    "actor": "amd-nprotaso",
    "jobs": [
     {
@@ -534,10 +577,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-04T14:39:55Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T15:51:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30896317249/job/91965270321"
     },
     {
@@ -2049,49 +2092,6 @@
      "started_at": "2026-08-02T17:48:30Z",
      "completed_at": "2026-08-02T18:37:21Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30759589552/job/91580506380"
-    }
-   ]
-  },
-  {
-   "run_id": 30759093014,
-   "pr": null,
-   "commit": "49e132a7b5ad7d736e784b2864529ac6957f73d6",
-   "branch": "pr/enh-lazy-inttuple-leaves",
-   "event": "pull_request",
-   "title": "[Opt] Lazily materialize static int tuple leaves",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30759093014",
-   "created_at": "2026-08-02T17:32:18Z",
-   "updated_at": "2026-08-02T17:46:07Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-02T17:36:03Z",
-     "completed_at": "2026-08-02T17:45:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30759093014/job/91526666573"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-02T17:36:12Z",
-     "completed_at": "2026-08-02T17:46:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30759093014/job/91526666577"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-02T17:36:18Z",
-     "completed_at": "2026-08-02T17:46:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30759093014/job/91526666634"
     }
    ]
   }
