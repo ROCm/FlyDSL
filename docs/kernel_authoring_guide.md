@@ -76,8 +76,8 @@ vec_add(A, B, C, 1024)
    - AST rewriting (Python loops/ifs → MLIR scf ops)
    - MLIR module creation with `gpu.container_module`
    - Tracing the jit function body to generate MLIR ops
-   - Calling `vec_add_kernel(...)` emits a `gpu.func` in `gpu.module`
-   - `.launch()` emits `gpu.launch_func`
+   - Calling `vec_add_kernel(...)` captures a pending kernel call
+   - `.launch()` emits the specialized `gpu.func` and `gpu.launch_func`
    - `MlirCompiler.compile()` runs the full pass pipeline
    - `JITCFunction` wraps the resulting ExecutionEngine
 4. Subsequent calls with the same type signature use the cached binary
