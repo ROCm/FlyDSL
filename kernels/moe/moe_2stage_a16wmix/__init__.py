@@ -341,6 +341,9 @@ def flydsl_a16w4_gemm1(
     xcd_swizzle=0,
     gate_mode="separated",
     act="silu",
+    situ_beta=1.0,
+    situ_linear_beta=1.0,
+    swiglu_limit=float("inf"),
     w_dtype="mxfp4",
     w_layout="standard",
     use_csv_config=False,  # opt-in: default uses our tuned tile_n; CSV params for aiter-compare / when requested
@@ -455,6 +458,13 @@ def flydsl_a16w4_gemm1(
     )
     max_m_blocks = int(sorted_expert_ids.numel())
     grid = gemm1_a16w4_grid(BM, INTER=D_INTER, TILE_N=TILE_N, max_m_blocks=max_m_blocks)
+    # SiTUv2 beta/linear_beta + swiglu_limit -> runtime f32 scalars (host precomputes
+    # reciprocals; no device rcp). swiglu_limit is the SiTUv2 clamp bound (+inf = no
+    # clamp), matching the a8w4/mixed_moe situv2 clamp. Unused by the silu kernel.
+    _beta = float(situ_beta)
+    _lbeta = float(situ_linear_beta)
+    if _beta <= 0.0 or _lbeta <= 0.0:
+        raise ValueError(f"situ_beta/situ_linear_beta must be > 0, got {_beta!r}/{_lbeta!r}")
     _run_compiled(
         launch,
         a_bf16.data_ptr(),
@@ -465,6 +475,11 @@ def flydsl_a16w4_gemm1(
         m_indices.data_ptr(),
         int(n_tokens),
         int(grid),
+        _beta,
+        1.0 / _beta,
+        _lbeta,
+        1.0 / _lbeta,
+        float(swiglu_limit),
         inter_sorted_bf16.data_ptr(),
         torch.cuda.current_stream() if stream is None else stream,
     )

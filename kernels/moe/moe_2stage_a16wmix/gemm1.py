@@ -127,24 +127,25 @@ def _tanh_f32(x):
     return fx.Float32(arith.select(is_pos, _raw(tanh_abs), _raw(-tanh_abs)))
 
 
-def _situ_mul_batch(gs, us, situ_beta=1.0, situ_linear_beta=1.0, clamp_limit=7.0):
+def _situ_mul_batch(gs, us, beta, beta_rcp, lbeta, lbeta_rcp, neg_clamp_limit):
     """SiTUv2 activation (aiter mixed_moe situ_mul_vec4):
         situ(g)    = beta * tanh(g / beta) * sigmoid(g)
         situ_up(u) = linear_beta * tanh(u / linear_beta)
         out        = situ(clamp_gate(g)) * situ_up(clamp_lin(u))
     clamp_gate: g <= +limit (upper only); clamp_lin: u in [-limit, +limit].
-    """
-    neg_lim = fx.Float32(-clamp_limit)
-    beta = fx.Float32(situ_beta)
-    beta_rcp = fx.Float32(1.0 / situ_beta)
-    lbeta = fx.Float32(situ_linear_beta)
-    lbeta_rcp = fx.Float32(1.0 / situ_linear_beta)
 
+    beta/beta_rcp/lbeta/lbeta_rcp and neg_clamp_limit are runtime fx.Float32
+    scalars (nothing baked; one kernel serves any beta/limit). neg_clamp_limit is
+    -swiglu_limit (host-negated): a +inf limit -> -inf -> maximumf no-op = no
+    clamp; a finite limit clamps. Matches the a8w4/mixed_moe situv2 clamp -- do
+    NOT drop the clamp, at large linear_beta the model expects it and no-clamp
+    diverges badly.
+    """
     out = []
     for i in range(len(gs)):
-        # clamp_gate: g <= +lim (upper only, via -max(-g,-lim)); clamp_lin: u in [-lim,+lim].
-        g = -((-gs[i]).maximumf(neg_lim))
-        u = (-((-us[i]).maximumf(neg_lim))).maximumf(neg_lim)
+        # clamp_gate: g <= +lim (upper only); clamp_lin: u in [-lim, +lim].
+        g = -((-gs[i]).maximumf(neg_clamp_limit))
+        u = (-((-us[i]).maximumf(neg_clamp_limit))).maximumf(neg_clamp_limit)
         situ_g = beta * _tanh_f32(g * beta_rcp) * _sigmoid_f32(g)
         situ_u = lbeta * _tanh_f32(u * lbeta_rcp)
         out.append(situ_g * situ_u)
@@ -267,6 +268,11 @@ def _gemm1_body_a16w4(
     lane,
     wave,
     i32_ntok,
+    f32_situ_beta,
+    f32_situ_beta_rcp,
+    f32_situ_linbeta,
+    f32_situ_linbeta_rcp,
+    f32_swiglu_limit,
     *,
     BM,
     TILE_N,
@@ -848,7 +854,15 @@ def _gemm1_body_a16w4(
                 g = fx.Float32(fx.Vector(fx.memref_load_vec(acc_gate[mi][ni]))[ii])
                 u = fx.Float32(fx.Vector(fx.memref_load_vec(acc_up[mi][ni]))[ii])
                 if const_expr(act == "situv2"):
-                    y = _situ_mul_batch([g], [u])[0]
+                    y = _situ_mul_batch(
+                        [g],
+                        [u],
+                        fx.Float32(f32_situ_beta),
+                        fx.Float32(f32_situ_beta_rcp),
+                        fx.Float32(f32_situ_linbeta),
+                        fx.Float32(f32_situ_linbeta_rcp),
+                        -fx.Float32(f32_swiglu_limit),
+                    )[0]
                 else:
                     y = _silu_mul_batch([g], [u])[0]
                 yb = y.to(fx.BFloat16)
@@ -965,6 +979,11 @@ def compile_gemm1_a16w4_port(
         arg_cumsum: fx.Int64,
         arg_mind: fx.Int64,
         i32_ntok: fx.Int32,
+        f32_situ_beta: fx.Float32,
+        f32_situ_beta_rcp: fx.Float32,
+        f32_situ_linbeta: fx.Float32,
+        f32_situ_linbeta_rcp: fx.Float32,
+        f32_swiglu_limit: fx.Float32,
         arg_out: fx.Int64,
     ):
         lds_raw_ptr = fx.SharedAllocator().allocate(SharedStorage).peek().raw.ptr
@@ -1015,6 +1034,11 @@ def compile_gemm1_a16w4_port(
                 lane,
                 wave,
                 i32_ntok,
+                f32_situ_beta,
+                f32_situ_beta_rcp,
+                f32_situ_linbeta,
+                f32_situ_linbeta_rcp,
+                f32_swiglu_limit,
                 BM=BM,
                 TILE_N=TILE_N,
                 TILE_K=TILE_K,
@@ -1040,6 +1064,11 @@ def compile_gemm1_a16w4_port(
         arg_mind: fx.Int64,
         i32_ntok: fx.Int32,
         i32_grid: fx.Int32,
+        f32_situ_beta: fx.Float32,
+        f32_situ_beta_rcp: fx.Float32,
+        f32_situ_linbeta: fx.Float32,
+        f32_situ_linbeta_rcp: fx.Float32,
+        f32_swiglu_limit: fx.Float32,
         arg_out: fx.Int64,
         stream: fx.Stream,
     ):
@@ -1052,6 +1081,11 @@ def compile_gemm1_a16w4_port(
             arg_cumsum,
             arg_mind,
             i32_ntok,
+            f32_situ_beta,
+            f32_situ_beta_rcp,
+            f32_situ_linbeta,
+            f32_situ_linbeta_rcp,
+            f32_swiglu_limit,
             arg_out,
             value_attrs={"rocdl.waves_per_eu": waves_per_eu} if waves_per_eu else None,
         ).launch(grid=(grid_x, 1, 1), block=(256, 1, 1), stream=stream)
