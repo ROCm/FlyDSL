@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-04T04:31:27Z",
+ "updated": "2026-08-04T05:00:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "stochastic-rounding",
    "event": "pull_request",
    "title": "Add stochastic rounding and philox RNG under rocdl",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30877675125",
    "created_at": "2026-08-04T04:26:19Z",
-   "updated_at": "2026-08-04T04:29:41Z",
+   "updated_at": "2026-08-04T04:33:10Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-04T04:33:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30877675125/job/91893262050"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-04T04:33:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30877675125/job/91893262054"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-04T04:33:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30877675125/job/91893262065"
+    }
+   ]
   },
   {
    "run_id": 30876682515,
@@ -229,29 +257,29 @@
    "branch": "dsl-ify-arith",
    "event": "pull_request",
    "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30822360546",
    "created_at": "2026-08-03T14:22:13Z",
-   "updated_at": "2026-08-04T04:24:29Z",
+   "updated_at": "2026-08-04T04:59:26Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-04T04:24:29Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T04:57:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30822360546/job/91891839332"
     },
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-04T04:24:22Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T04:59:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30822360546/job/91891839336"
     },
     {
@@ -480,11 +508,11 @@
    "branch": "codex/gfx1100-wmma-foundation",
    "event": "pull_request",
    "title": "[Feature][Test] Validate gfx1100 LDS and integer WMMA foundations",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30794437563",
    "created_at": "2026-08-03T07:39:20Z",
-   "updated_at": "2026-08-04T02:59:05Z",
+   "updated_at": "2026-08-04T04:29:45Z",
    "actor": "skyguan92",
    "jobs": [
     {
