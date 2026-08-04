@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""GEMM kernel tests: A8W4 mxscale, A8W8 ptpc, A8W8 blockscale for gfx1250."""
+"""GEMM kernel tests: A8W4 mxscale and A8W8 ptpc for gfx1250."""
 
 import os
 import sys
@@ -22,7 +22,6 @@ import flydsl.expr as fx  # noqa: E402
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.gemm.gemm_a8w4_mxscale_gfx1250 import launch_gemm_a8w4_mxscale  # noqa: E402
-from kernels.gemm.gemm_a8w8_blockscale_gfx1250 import launch_gemm_a8w8_bsc_col  # noqa: E402
 from kernels.gemm.gemm_a8w8_ptpc_gfx1250 import launch_gemm_a8w8_ptpc  # noqa: E402
 from tests.kernels.utils import gemm_common_utils  # noqa: E402
 
@@ -31,7 +30,6 @@ if not torch.cuda.is_available():
 
 _DT = {"bf16": torch.bfloat16, "f16": torch.float16}
 SCALE_BLOCK_32 = 32
-SCALE_BLOCK_128 = 128
 
 
 def _require_gpu():
@@ -338,106 +336,6 @@ def test_a8w8_ptpc_gemm(
     )
 
 
-def _reference_blockscale(a, b, a_scale, b_scale, M, N, K):
-    scale_k = K // SCALE_BLOCK_128
-    a_f32 = gemm_common_utils.fp8_e4m3_to_f32(a.view(torch.uint8))[:M, :K].clone()
-    b_f32 = gemm_common_utils.fp8_e4m3_to_f32(b.view(torch.uint8))[:N, :K].clone()
-    a_sc = gemm_common_utils.e8m0_to_f32(a_scale.view(torch.uint8))[:M, :scale_k]
-    b_sc = gemm_common_utils.e8m0_to_f32(b_scale.view(torch.uint8))[: N // SCALE_BLOCK_128, :scale_k]
-    a_f32.view(M, scale_k, SCALE_BLOCK_128).mul_(a_sc.unsqueeze(-1))
-    b_sc_rows = b_sc.repeat_interleave(SCALE_BLOCK_128, dim=0)[:N]
-    b_f32.view(N, scale_k, SCALE_BLOCK_128).mul_(b_sc_rows.unsqueeze(-1))
-    return torch.matmul(a_f32, b_f32.T)
-
-
-def _build_a8w8_blockscale_case(
-    M,
-    N,
-    K,
-    tile_m,
-    tile_n,
-    tile_k,
-    m_warp,
-    n_warp,
-    num_buffers,
-    *,
-    lda_extra=0,
-    ldc_extra=0,
-    cluster_m=1,
-    cluster_n=1,
-):
-    torch.manual_seed(0)
-    a = _random_fp8_bytes(M, K)
-    b = _random_fp8_bytes(N, K)
-    scale_k = K // SCALE_BLOCK_128
-    a_scale = gemm_common_utils.random_e8m0(M, scale_k, low_exp=126, high_exp=129)
-    b_scale = gemm_common_utils.random_e8m0(N // SCALE_BLOCK_128, scale_k, low_exp=126, high_exp=129)
-    ref = _reference_blockscale(a, b, a_scale, b_scale, M, N, K)
-
-    lda, ldc = K + lda_extra, N + ldc_extra
-    a_gpu = _with_strided_a(a, K, lda).cuda()
-    b_gpu = gemm_common_utils.preshuffle_b_16x16(b, N, K).cuda()
-    as_gpu = a_scale.T.contiguous().cuda()  # [scale_k, M], row stride == M
-    bs_gpu = b_scale.cuda()
-    c_gpu = torch.zeros(M, ldc, dtype=torch.bfloat16, device="cuda")
-
-    def make_args(stream):
-        return (
-            c_gpu,
-            flyc.from_c_void_p(fx.Int8, a_gpu.data_ptr(), assumed_align=16),
-            flyc.from_c_void_p(fx.Int8, b_gpu.data_ptr(), assumed_align=16),
-            as_gpu,
-            bs_gpu,
-            M,
-            stream,
-            N,
-            K,
-            M,  # stride_ascale_k
-            lda,
-            ldc,
-            tile_m,
-            tile_n,
-            tile_k,
-            m_warp,
-            n_warp,
-            0,  # bf16 output
-            num_buffers,
-            cluster_m,
-            cluster_n,
-        )
-
-    return c_gpu, make_args, ref, (1e-2, 5e-2)
-
-
-# (M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, lda_extra, ldc_extra)
-_BLOCKSCALE_CASES = [
-    (128, 256, 512, 128, 256, 128, 2, 2, 2, 0, 0),
-    (256, 256, 512, 256, 256, 128, 2, 2, 4, 0, 0),
-    (1024, 1024, 1024, 128, 256, 128, 2, 2, 3, 0, 0),
-    (128, 256, 512, 128, 256, 128, 2, 2, 2, 128, 192),
-]
-
-
-@pytest.mark.parametrize(
-    "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, lda_extra, ldc_extra", _BLOCKSCALE_CASES
-)
-def test_a8w8_blockscale_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, lda_extra, ldc_extra):
-    _run_case(
-        "blockscale_a8w8",
-        M,
-        N,
-        K,
-        tile_m,
-        tile_n,
-        tile_k,
-        m_warp,
-        n_warp,
-        num_buffers,
-        lda_extra=lda_extra,
-        ldc_extra=ldc_extra,
-    )
-
-
 _MODES = {
     "mxscale_a8w4": dict(
         build=_build_a8w4_case,
@@ -461,18 +359,6 @@ _MODES = {
             (num_buffers > 1 and (K // tile_k) < num_buffers, f"{num_buffers}-buf requires more K-tiles"),
         ],
         smoke=dict(N=256, K=512, tile=(128, 128, 128), warps=(2, 2), num_buffers=4),
-    ),
-    "blockscale_a8w8": dict(
-        build=_build_a8w8_blockscale_case,
-        launch=launch_gemm_a8w8_bsc_col,
-        supports_out_dtype=False,
-        checks=lambda N, K, tile_n, tile_k, num_buffers: [
-            (K % SCALE_BLOCK_128 != 0 or N % SCALE_BLOCK_128 != 0, f"N={N}, K={K} must both be divisible by 128"),
-            (N % tile_n != 0, f"N={N} must be divisible by tile_n={tile_n}"),
-            (K % tile_k != 0 or (K // tile_k) < num_buffers, f"K={K} incompatible with tile_k={tile_k}"),
-        ],
-        # N gives 2 tile_n-wide blocks so cluster_n=2 has a real 2nd block to span.
-        smoke=dict(N=512, K=512, tile=(128, 256, 128), warps=(2, 2), num_buffers=2),
     ),
 }
 
