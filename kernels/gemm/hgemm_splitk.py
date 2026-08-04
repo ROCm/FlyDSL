@@ -288,8 +288,8 @@ def compile_hgemm_kernel(
 
         def zero_c():
             # zero c if current block is the first block
-            is_t0_cond = arith.cmpi(arith.CmpIPredicate.eq, fx.Index(tid), fx.Index(0))
-            cond_ks0 = arith.cmpi(arith.CmpIPredicate.eq, ks_idx, fx.Index(0))
+            is_t0_cond = as_ir_value(fx.Index(tid) == fx.Index(0))
+            cond_ks0 = as_ir_value(ks_idx == fx.Index(0))
             cond_ks0_if = scf.IfOp(cond_ks0, results_=[], has_else=False)
             with ir.InsertionPoint(cond_ks0_if.then_block):
                 zero_vec = vector.broadcast(T.vec(LDG_VEC_SIZE, dtype_), c_zero_d)
@@ -301,11 +301,11 @@ def compile_hgemm_kernel(
                     init_vec = zero_vec
                     if const_expr(HAS_BIAS):
                         init_vec = BIAS_.vec_load((n_offset + n_local_idx,), LDG_VEC_SIZE)
-                    cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, row_idx, fx.Index(m))
+                    cond_boundary = as_ir_value(row_idx < fx.Index(m))
                     cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
                     with ir.InsertionPoint(cond_boundary_if.then_block):
                         bytes_offset = C_.linear_offset((row_idx, n_offset + n_local_idx))
-                        bytes_offset_i32 = arith.index_cast(T.i32, bytes_offset)
+                        bytes_offset_i32 = as_ir_value(fx.Int32(bytes_offset))
                         c_ptr = get_llvm_ptr(C, bytes_offset_i32, DTYPE_BYTES)
                         llvm.InlineAsmOp(
                             None,
@@ -333,7 +333,7 @@ def compile_hgemm_kernel(
 
         def split_k_barrier():
             # spin-wait until signal triggered
-            is_t0_cond = arith.cmpi(arith.CmpIPredicate.eq, fx.Index(tid), fx.Index(0))
+            is_t0_cond = as_ir_value(fx.Index(tid) == fx.Index(0))
             is_t0_cond_if = scf.IfOp(is_t0_cond, results_=[], has_else=False)
             with ir.InsertionPoint(is_t0_cond_if.then_block):
                 init_cur = arith.constant(0, type=T.i32)
@@ -362,7 +362,7 @@ def compile_hgemm_kernel(
             is_t0_cond_if = scf.IfOp(is_t0_cond, results_=[], has_else=False)
             with ir.InsertionPoint(is_t0_cond_if.then_block):
                 arrive_idx = atomic_add(semaphore, signal_idx, arith.constant(1, type=T.i32), dtype_bytes=4)
-                cond_ksl = arith.cmpi(arith.CmpIPredicate.eq, fx.Index(arrive_idx), fx.Index(SPLIT_K - 1))
+                cond_ksl = as_ir_value(fx.Index(arrive_idx) == fx.Index(SPLIT_K - 1))
                 cond_ksl_if = scf.IfOp(cond_ksl, results_=[], has_else=False)
                 with ir.InsertionPoint(cond_ksl_if.then_block):
                     semaphore_[signal_idx] = arith.constant(0, type=T.i32)
@@ -379,7 +379,7 @@ def compile_hgemm_kernel(
                 k_local_idx = global_tid % LDG_A_X_THREADS * LDG_VEC_SIZE
                 row_idx = m_offset + fx.Index(m_local_idx)
                 safe_row_idx = arith.select(
-                    arith.cmpi(arith.CmpIPredicate.ult, row_idx, fx.Index(m)),
+                    row_idx < fx.Index(m),
                     row_idx,
                     fx.Index(0),
                 )
@@ -401,7 +401,7 @@ def compile_hgemm_kernel(
         def get_dma_copy_warp_offset():
             warp_offset = rocdl.readfirstlane(
                 T.i64,
-                arith.index_cast(T.i64, fx.Index(wid) * arith.constant(WARP_SIZE * DMA_BYTES, index=True)),
+                as_ir_value(fx.Int64(wid) * fx.Int64(WARP_SIZE * DMA_BYTES)),
             )
             return warp_offset
 
@@ -425,14 +425,14 @@ def compile_hgemm_kernel(
                 col_in_bytes = swizzle_xor16(m_local_idx, col_in_bytes, k_blocks16)
                 row_idx = m_offset + fx.Index(m_local_idx)
                 safe_row_idx = arith.select(
-                    arith.cmpi(arith.CmpIPredicate.ult, row_idx, fx.Index(m)),
+                    row_idx < fx.Index(m),
                     row_idx,
                     fx.Index(0),
                 )
                 col_idx = fx.Index(k_offset + col_in_bytes // DTYPE_BYTES)
                 # get offset
                 global_offset = A_.linear_offset((safe_row_idx, col_idx)) * DTYPE_BYTES
-                global_offset = arith.index_cast(T.i32, global_offset)
+                global_offset = as_ir_value(fx.Int32(global_offset))
                 # get lds ptr
                 if const_expr(i == 0):
                     lds_byte_offset = as_off(lds_stage, 0, 0) * DTYPE_BYTES
@@ -456,14 +456,14 @@ def compile_hgemm_kernel(
                 col_in_bytes = swizzle_xor16(n_local_idx, col_in_bytes, k_blocks16)
                 row_idx = n_offset + fx.Index(n_local_idx)
                 safe_row_idx = arith.select(
-                    arith.cmpi(arith.CmpIPredicate.ult, row_idx, fx.Index(n)),
+                    row_idx < fx.Index(n),
                     row_idx,
                     fx.Index(0),
                 )
                 col_idx = fx.Index(k_offset + col_in_bytes // DTYPE_BYTES)
                 # get offset
                 global_offset = B_.linear_offset((safe_row_idx, col_idx)) * DTYPE_BYTES
-                global_offset = arith.index_cast(T.i32, global_offset)
+                global_offset = as_ir_value(fx.Int32(global_offset))
                 # get lds ptr
                 if const_expr(i == 0):
                     lds_byte_offset = bs_off(lds_stage, 0, 0) * DTYPE_BYTES
@@ -586,7 +586,7 @@ def compile_hgemm_kernel(
                 # ================ Reordered ================
                 rocdl.sched_barrier(0)
 
-            init_state = [ks_begin, arith.constant(0, index=True)] + c_frags
+            init_state = [ks_begin, fx.Index(0)] + c_frags
             for bki, state in range(0, BLOCK_K_LOOPS - (STAGES - 1), 1, init=init_state):
                 k_offset = state[0]
                 current_stage = fx.Index(state[1])
@@ -629,7 +629,7 @@ def compile_hgemm_kernel(
                 # ================ Reordered ================
                 rocdl.sched_barrier(0)
 
-            init_state = [ks_begin, arith.constant(0, index=True)] + c_frags + b_frags_next
+            init_state = [ks_begin, fx.Index(0)] + c_frags + b_frags_next
             for bki, state in range(1, BLOCK_K_LOOPS, init=init_state):
                 k_offset = state[0]
                 current_stage = fx.Index(state[1])
@@ -682,7 +682,7 @@ def compile_hgemm_kernel(
                 n_local_idx = fx.Int64(global_tid % LDG_C_X_THREADS * LDG_VEC_SIZE)
                 m_global_idx = m_offset + m_local_idx
                 n_global_idx = n_offset + n_local_idx
-                cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, m_global_idx, fx.Index(m))
+                cond_boundary = as_ir_value(m_global_idx < fx.Index(m))
                 cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
                 with ir.InsertionPoint(cond_boundary_if.then_block):
                     pk_val = fx.ptr_load(
@@ -719,7 +719,7 @@ def compile_hgemm_kernel(
                 m_local_idx = fx.Int64(global_tid // LDG_C_X_THREADS)
                 n_local_idx = fx.Int64(global_tid % LDG_C_X_THREADS * LDG_VEC_SIZE)
                 m_global_idx = m_offset + m_local_idx
-                cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, m_global_idx, fx.Index(m))
+                cond_boundary = as_ir_value(m_global_idx < fx.Index(m))
                 cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
                 with ir.InsertionPoint(cond_boundary_if.then_block):
                     vec = fx.ptr_load(

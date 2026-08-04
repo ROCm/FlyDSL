@@ -26,7 +26,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm, scf, vector
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, as_ir_value, const_expr, range_constexpr
-from flydsl.expr.arith import ArithValue, CmpIPredicate
+from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import Int32, T
 from kernels.common import buffer_ops
 
@@ -157,14 +157,14 @@ def build_silu_and_mul_fq_module(
         token_num_i32 = ArithValue(token_num)
         bid_i32 = ArithValue(bid)
 
-        row_in_range = arith.cmpi(CmpIPredicate.ult, bid_i32, num_valid)
+        row_in_range = bid_i32 < num_valid
         fused_tid_val = buffer_ops.buffer_load(tid_rsrc, bid_i32, vec_width=1, dtype=i32)
         mask24 = arith.constant(0xFFFFFF, type=i32)
         token_id = fused_tid_val & mask24
         slot_id = ArithValue(fused_tid_val) >> arith.constant(24, type=i32)
-        t_ok = arith.cmpi(CmpIPredicate.ult, token_id, token_num_i32)
-        s_ok = arith.cmpi(CmpIPredicate.ult, slot_id, topk_i32)
-        is_valid = arith.andi(row_in_range, arith.andi(t_ok, s_ok))
+        t_ok = token_id < token_num_i32
+        s_ok = slot_id < topk_i32
+        is_valid = as_ir_value(row_in_range & t_ok & s_ok)
 
         if const_expr(_need_fp4):
 
@@ -174,11 +174,8 @@ def build_silu_and_mul_fq_module(
                 qx = qx_f32.bitcast(i32)
                 s = qx & c0x80000000_i32
                 qx_abs = qx & c0x7FFFFFFF_i32
-                denormal_mask = arith.cmpi(CmpIPredicate.ult, qx_abs, c0x3F800000_i32)
-                normal_mask = arith.andi(
-                    arith.cmpi(CmpIPredicate.ult, qx_abs, c0x40C00000_i32),
-                    arith.cmpi(CmpIPredicate.uge, qx_abs, c0x3F800000_i32),
-                )
+                denormal_mask = qx_abs < c0x3F800000_i32
+                normal_mask = (qx_abs < c0x40C00000_i32) & (qx_abs >= c0x3F800000_i32)
 
                 denorm_f32 = qx_abs.bitcast(f32) + c0x4A800000_i32.bitcast(f32)
                 denormal_x = denorm_f32.bitcast(i32) - c0x4A800000_i32
@@ -197,7 +194,7 @@ def build_silu_and_mul_fq_module(
         for iter_idx in range_constexpr((inter_dim + COLS_PER_ITER - 1) // COLS_PER_ITER):
             col0 = thread_id * arith.constant(VEC, type=i32) + arith.constant(iter_idx * COLS_PER_ITER, type=i32)
 
-            col_valid = arith.cmpi(CmpIPredicate.ult, col0, inter_dim_i32)
+            col_valid = as_ir_value(col0 < inter_dim_i32)
             _if_col = scf.IfOp(col_valid)
             with ir.InsertionPoint(_if_col.then_block):
 
@@ -298,8 +295,8 @@ def build_silu_and_mul_fq_module(
                     if const_expr(_need_quant):
                         local_max = c0_f32
                         for vi in range_constexpr(VEC):
-                            abs_v = llvm.call_intrinsic(f32, "llvm.fabs.f32", [act_vals[vi]], [], [])
-                            local_max = arith.maximumf(local_max, abs_v)
+                            abs_v = fx.absf(act_vals[vi])
+                            local_max = fx.maxnumf(local_max, abs_v)
 
                         for sh_dist in SHUFFLE_DISTS:
                             off = arith.constant(sh_dist, type=i32)
@@ -413,7 +410,7 @@ def build_silu_and_mul_fq_module(
                                     )
 
                         lane_in_blk = col0 & c31_i32
-                        _if_sw = scf.IfOp(arith.cmpi(CmpIPredicate.eq, lane_in_blk, c0_i32))
+                        _if_sw = scf.IfOp(as_ir_value(lane_in_blk == c0_i32))
                         with ir.InsertionPoint(_if_sw.then_block):
                             row_s = bid_i32
                             col_s = col0 >> c5_i32
@@ -456,7 +453,7 @@ def build_silu_and_mul_fq_module(
                 with ir.InsertionPoint(_if_valid.else_block):
                     if const_expr(_need_quant):
                         lane_in_blk_p = col0 & c31_i32
-                        _if_sw_p = scf.IfOp(arith.cmpi(CmpIPredicate.eq, lane_in_blk_p, c0_i32))
+                        _if_sw_p = scf.IfOp(as_ir_value(lane_in_blk_p == c0_i32))
                         with ir.InsertionPoint(_if_sw_p.then_block):
                             row_s_p = bid_i32
                             col_s_p = col0 >> c5_i32

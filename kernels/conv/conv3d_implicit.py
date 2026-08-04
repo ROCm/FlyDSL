@@ -565,12 +565,12 @@ def compile_conv3d_implicit(
 
         def _valid_raw(row, col):
             if const_expr(_row_chk and n_tail):
-                return arith.andi(row < fx.Index(npq), col < fx.Index(k))
+                return fx.as_ir_value((row < fx.Index(npq)) & (col < fx.Index(k)))
             if const_expr(_row_chk):
                 v = row < fx.Index(npq)
-                return arith.andi(v, v)
+                return fx.as_ir_value(v & v)
             v = col < fx.Index(k)
-            return arith.andi(v, v)
+            return fx.as_ir_value(v & v)
 
         def store_acc():
             for mi in range_constexpr(MI_M):
