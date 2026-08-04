@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-04T00:58:07Z",
+ "updated": "2026-08-04T03:32:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30874954803,
+   "pr": 954,
+   "commit": "bd8914cc9d42d9016c1b38abe2f82b2479f052af",
+   "branch": "mega_moe_v1",
+   "event": "pull_request",
+   "title": "BugFix for MegaMoE",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30874954803",
+   "created_at": "2026-08-04T03:30:36Z",
+   "updated_at": "2026-08-04T03:31:18Z",
+   "actor": "GwilliamHu",
+   "jobs": []
+  },
+  {
+   "run_id": 30874945164,
+   "pr": 954,
+   "commit": "9513a2ab6c08b39bef0e0038c370864480235b85",
+   "branch": "mega_moe_v1",
+   "event": "pull_request",
+   "title": "BugFix for MegaMoE",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30874945164",
+   "created_at": "2026-08-04T03:30:25Z",
+   "updated_at": "2026-08-04T03:30:39Z",
+   "actor": "yanboshao",
+   "jobs": []
+  },
   {
    "run_id": 30849471669,
    "pr": 901,
@@ -245,39 +275,39 @@
    "branch": "stochastic-rounding",
    "event": "pull_request",
    "title": "Add stochastic rounding and philox RNG under rocdl",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815507237",
    "created_at": "2026-08-03T12:54:07Z",
-   "updated_at": "2026-08-03T20:14:05Z",
+   "updated_at": "2026-08-04T02:59:21Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-03T13:42:04Z",
-     "completed_at": "2026-08-03T15:18:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815507237/job/91704310652"
-    },
-    {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-03T18:23:21Z",
-     "completed_at": "2026-08-03T20:14:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815507237/job/91704310663"
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-04T02:59:11Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815507237/job/91879729270"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-04T02:59:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815507237/job/91879729284"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-03T13:42:04Z",
-     "completed_at": "2026-08-03T14:14:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815507237/job/91704310665"
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-04T02:59:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815507237/job/91879729313"
     }
    ]
   },
@@ -392,30 +422,21 @@
    "branch": "codex/gfx1100-wmma-foundation",
    "event": "pull_request",
    "title": "[Feature][Test] Validate gfx1100 LDS and integer WMMA foundations",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30794437563",
    "created_at": "2026-08-03T07:39:20Z",
-   "updated_at": "2026-08-03T14:21:38Z",
+   "updated_at": "2026-08-04T02:59:05Z",
    "actor": "skyguan92",
    "jobs": [
     {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-03T09:48:58Z",
-     "completed_at": "2026-08-03T10:53:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30794437563/job/91651622572"
-    },
-    {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-03T12:58:17Z",
-     "completed_at": "2026-08-03T14:21:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30794437563/job/91651622593"
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-04T02:59:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30794437563/job/91879772714"
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -424,7 +445,16 @@
      "conclusion": "success",
      "started_at": "2026-08-03T09:49:00Z",
      "completed_at": "2026-08-03T11:31:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30794437563/job/91651622632"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30794437563/job/91879773168"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-03T09:48:58Z",
+     "completed_at": "2026-08-03T10:53:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30794437563/job/91879773169"
     }
    ]
   },
@@ -2278,36 +2308,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30656370499/job/91252191456"
     }
    ]
-  },
-  {
-   "run_id": 30655658538,
-   "pr": null,
-   "commit": "cf6840560c2178ce42a3a6c9083592d82c06e957",
-   "branch": "spconv-bf16-implicit-gemm",
-   "event": "pull_request",
-   "title": "[Kernel] Add submanifold sparse 3D convolution (bf16 implicit GEMM, gfx950)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30655658538",
-   "created_at": "2026-07-31T18:34:01Z",
-   "updated_at": "2026-07-31T18:44:40Z",
-   "actor": "jiacao-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 30653885037,
-   "pr": null,
-   "commit": "84cbfcc2827ba2bf210cb49decf566b3194405d7",
-   "branch": "spconv-bf16-implicit-gemm",
-   "event": "pull_request",
-   "title": "[Kernel] Add submanifold sparse 3D convolution (bf16 implicit GEMM, gfx950)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30653885037",
-   "created_at": "2026-07-31T18:07:05Z",
-   "updated_at": "2026-07-31T18:34:02Z",
-   "actor": "jiacao-amd",
-   "jobs": []
   }
  ]
 }
