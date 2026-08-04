@@ -18,7 +18,6 @@ kStages = 2
 kBS_stride_k0_dw = 64
 LOG2E = 1.4426950408889634
 
-
 def _raw(v):
     if not isinstance(v, ir.Value) and hasattr(v, "ir_value"):
         return v.ir_value()
