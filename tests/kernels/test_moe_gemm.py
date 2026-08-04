@@ -117,7 +117,7 @@ except Exception:
 # The a4w4 (MX-FP4) and a8w4 (MX-FP8 activation) paths run through the fused mxfp_moe
 # pipeline (device-side re-quant, sorted fp4 intermediate) via `_run_mxfp_moe_e2e`,
 # which replaced the parametric mixed_moe_gemm_2stage builders.
-from kernels.moe.moe_2stage_a16wmix import (  # noqa: E402
+from tests.kernels.moe_a16wmix_host import (  # noqa: E402
     a16wi4_scale_to_kernel_layout,
     flydsl_a16w4_gemm1,
     flydsl_a16w4_gemm2,
