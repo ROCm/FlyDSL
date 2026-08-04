@@ -317,9 +317,8 @@ def launch_moe_gemm_a8w4(
         wnb = wave_n * warp_tile_n
 
         lds_load_b32, _ = make_lds_copy_ops(32)
-        lds_load_b128, _ = make_lds_copy_ops(128)
+        lds_load_b128, lds_store_b128 = make_lds_copy_ops(128)
         _, lds_store_b64 = make_lds_copy_ops(64)
-        _, lds_store_b128 = make_lds_copy_ops(128)
 
         def load_a(buf, wm, ksl):
             row = wmb + wm * 16 + lane16

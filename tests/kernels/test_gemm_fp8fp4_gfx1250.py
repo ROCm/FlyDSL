@@ -274,11 +274,11 @@ def _build_a8w8_ptpc_case(
 
     def make_args(stream):
         return (
-            c_gpu,
+            flyc.from_c_void_p(fx.Uint8, c_gpu.data_ptr()),
             flyc.from_c_void_p(fx.Uint8, a_gpu.data_ptr()),
             flyc.from_c_void_p(fx.Uint8, b_gpu.data_ptr()),
-            sa_gpu,
-            sb_gpu,
+            flyc.from_c_void_p(fx.Uint8, sa_gpu.data_ptr()),
+            flyc.from_c_void_p(fx.Uint8, sb_gpu.data_ptr()),
             M,
             stream,
             N,
@@ -384,11 +384,11 @@ def _build_a8w8_blockscale_case(
 
     def make_args(stream):
         return (
-            c_gpu,
+            flyc.from_c_void_p(fx.Int8, c_gpu.data_ptr(), assumed_align=16),
             flyc.from_c_void_p(fx.Int8, a_gpu.data_ptr(), assumed_align=16),
             flyc.from_c_void_p(fx.Int8, b_gpu.data_ptr(), assumed_align=16),
-            as_gpu,
-            bs_gpu,
+            flyc.from_c_void_p(fx.Int8, as_gpu.data_ptr(), assumed_align=16),
+            flyc.from_c_void_p(fx.Int8, bs_gpu.data_ptr(), assumed_align=16),
             M,
             stream,
             N,

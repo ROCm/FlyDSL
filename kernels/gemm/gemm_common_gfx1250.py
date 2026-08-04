@@ -10,7 +10,8 @@ from flydsl.expr.typing import T
 
 def make_lds_copy_ops(bits):
     """Create one reusable layout/copy atom and return its load/store callables."""
-    assert bits in (32, 64, 128), f"bits must be 32/64/128, got {bits}"
+    if bits not in (32, 64, 128):
+        raise ValueError(f"bits must be 32/64/128, got {bits}")
     elem_count = bits // fx.Int32.width
     layout = fx.make_layout(elem_count, 1)
     atom = fx.make_copy_atom(fx.UniversalCopy(bits), fx.Int32)
