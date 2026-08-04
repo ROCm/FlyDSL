@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-04T06:32:02Z",
+ "updated": "2026-08-04T06:40:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30884612191,
+   "pr": 945,
+   "commit": "9cab8c853eaf1cfcd46306528a2fac184b0f8748",
+   "branch": "jli/update-llvm-basemain",
+   "event": "pull_request",
+   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30884612191",
+   "created_at": "2026-08-04T06:36:51Z",
+   "updated_at": "2026-08-04T06:38:40Z",
+   "actor": "Boss2002n",
+   "jobs": []
+  },
   {
    "run_id": 30884154097,
    "pr": 945,
@@ -2207,49 +2222,6 @@
      "started_at": "2026-08-01T04:02:14Z",
      "completed_at": "2026-08-01T05:28:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30683040098/job/91323864192"
-    }
-   ]
-  },
-  {
-   "run_id": 30682640054,
-   "pr": null,
-   "commit": "cf1db2fe0adff6ff72017d804f3b00973475368e",
-   "branch": "main",
-   "event": "push",
-   "title": "perf(attention): keep a head's Q-blocks on one XCD in the dualwave ma\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30682640054",
-   "created_at": "2026-08-01T03:46:22Z",
-   "updated_at": "2026-08-01T05:29:43Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-01T03:50:26Z",
-     "completed_at": "2026-08-01T05:09:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30682640054/job/91322810476"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-01T03:49:37Z",
-     "completed_at": "2026-08-01T05:29:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30682640054/job/91322810486"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-01T03:50:26Z",
-     "completed_at": "2026-08-01T04:44:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30682640054/job/91322810494"
     }
    ]
   }
