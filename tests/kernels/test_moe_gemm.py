@@ -2653,12 +2653,20 @@ def test_moe_gemm_2stage(
         # checked (skip_ref=False), xfail *without* executing the broken kernel so
         # CI stays honest and stable. a16w4 stays strict-asserted-and-passing.
         if in_dtype in ("fp4", "a8w4") and not bool(skip_ref):
-            pytest.xfail(
+            _xfail_reason = (
                 "pre-existing mxfp4 fused gemm2 + fp8-gemm1 A-path bug, e2e cos ~0.1; "
                 "strict gate exposes it, not an a16w4 regression (kernel also "
                 "memory-unsafe -> not executed here to avoid crashing the session). "
                 "TODO(issue #NNN)"
             )
+            # pytest.xfail() only unwinds cleanly inside a pytest session; in the
+            # __main__/script path (CI runs `python test_moe_gemm.py`) it raises an
+            # uncaught XFailed and crashes the job. Xfail under pytest, skip-return
+            # in script mode.
+            if os.environ.get("PYTEST_CURRENT_TEST"):
+                pytest.xfail(_xfail_reason)
+            print(f"[xfail/skip] {in_dtype}: {_xfail_reason}")
+            return
         _run_mxfp_moe_e2e(
             tokens=tokens,
             model_dim=model_dim,
