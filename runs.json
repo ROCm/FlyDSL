@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-04T07:15:03Z",
+ "updated": "2026-08-04T07:33:18Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30888155903,
+   "pr": 954,
+   "commit": "9407d8e1ec9fff6f1ac1d5c159ae1bf2d08fe93b",
+   "branch": "mega_moe_v1",
+   "event": "pull_request",
+   "title": "BugFix for MegaMoE",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30888155903",
+   "created_at": "2026-08-04T07:31:29Z",
+   "updated_at": "2026-08-04T07:31:36Z",
+   "actor": "yanboshao",
+   "jobs": []
+  },
+  {
+   "run_id": 30887750126,
+   "pr": 964,
+   "commit": "2f681815b16f2001c13ec2feee78259cdd5f43f4",
+   "branch": "pr/enh-default-build-type",
+   "event": "pull_request",
+   "title": "[Build] Default CMAKE_BUILD_TYPE to RelWithDebInfo when unset",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30887750126",
+   "created_at": "2026-08-04T07:25:26Z",
+   "updated_at": "2026-08-04T07:26:33Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 30886949810,
    "pr": 959,
@@ -10,11 +40,11 @@
    "branch": "binding_moe_mxfp4_stage2_opt",
    "event": "pull_request",
    "title": "[Perf]opimize moe mxfp4 stage2 perf",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30886949810",
    "created_at": "2026-08-04T07:13:25Z",
-   "updated_at": "2026-08-04T07:14:00Z",
+   "updated_at": "2026-08-04T07:14:34Z",
    "actor": "binding7012",
    "jobs": []
   },
@@ -100,38 +130,38 @@
    "branch": "mega_moe_v1",
    "event": "pull_request",
    "title": "BugFix for MegaMoE",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30880948143",
    "created_at": "2026-08-04T05:31:23Z",
-   "updated_at": "2026-08-04T06:59:53Z",
+   "updated_at": "2026-08-04T07:31:31Z",
    "actor": "yanboshao",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-04T06:59:53Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T07:31:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30880948143/job/91917349470"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-04T06:59:53Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T07:31:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30880948143/job/91917349485"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-04T06:59:53Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T07:31:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30880948143/job/91917349527"
     }
    ]
@@ -2110,64 +2140,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30686022510/job/91462637173"
     }
    ]
-  },
-  {
-   "run_id": 30685978818,
-   "pr": null,
-   "commit": "5675194f18f0655ce1f979c517f673533963fa93",
-   "branch": "main",
-   "event": "push",
-   "title": "[Fix] Resolve reg offset on dynamic add_offset chains (#926)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30685978818",
-   "created_at": "2026-08-01T05:30:59Z",
-   "updated_at": "2026-08-02T05:34:57Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-01T05:35:26Z",
-     "completed_at": "2026-08-01T07:00:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30685978818/job/91332084209"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-01T05:56:20Z",
-     "completed_at": "2026-08-01T07:17:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30685978818/job/91332084213"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-01T05:34:55Z",
-     "completed_at": "2026-08-02T05:34:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30685978818/job/91332084224"
-    }
-   ]
-  },
-  {
-   "run_id": 30685932533,
-   "pr": null,
-   "commit": "824b7fada3ad796ef8693941b174f7fec10aeea9",
-   "branch": "main",
-   "event": "push",
-   "title": "Add gfx120x.wmma MMA atom and port the RDNA4 GEMM to the layout API (\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30685932533",
-   "created_at": "2026-08-01T05:29:41Z",
-   "updated_at": "2026-08-01T05:31:00Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
