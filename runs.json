@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-04T13:22:56Z",
+ "updated": "2026-08-04T13:29:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "worktree-mxfp-moe-a16w4",
    "event": "pull_request",
    "title": "MoE: add a16w mix fused 2-stage kernels (bf16 A \u00d7 mxfp4/int4/bf16 W)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30913308309",
    "created_at": "2026-08-04T13:20:14Z",
-   "updated_at": "2026-08-04T13:20:54Z",
+   "updated_at": "2026-08-04T13:25:21Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-04T13:25:21Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30913308309/job/92006505331"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-04T13:26:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30913308309/job/92006505350"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-04T13:25:21Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30913308309/job/92006505410"
+    }
+   ]
   },
   {
    "run_id": 30912980863,
@@ -25,13 +53,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Prune] Remove CDNA blockscale FP8 GEMM (#966)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912980863",
    "created_at": "2026-08-04T13:16:09Z",
-   "updated_at": "2026-08-04T13:21:05Z",
+   "updated_at": "2026-08-04T13:24:12Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-04T13:25:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912980863/job/92006189058"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-04T13:25:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912980863/job/92006189134"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-04T13:24:12Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912980863/job/92006189152"
+    }
+   ]
   },
   {
    "run_id": 30912760344,
@@ -40,13 +96,41 @@
    "branch": "remove-cdna-blockscale-fp8-gemm",
    "event": "pull_request",
    "title": "[Prune] Remove CDNA blockscale FP8 GEMM",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912760344",
    "created_at": "2026-08-04T13:13:30Z",
-   "updated_at": "2026-08-04T13:17:56Z",
+   "updated_at": "2026-08-04T13:23:05Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-04T13:26:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912760344/job/92005879162"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-04T13:23:05Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912760344/job/92005879193"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-04T13:23:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912760344/job/92005879238"
+    }
+   ]
   },
   {
    "run_id": 30911063083,
@@ -229,11 +313,11 @@
    "branch": "pr/enh-defer-kernel-lowering",
    "event": "pull_request",
    "title": "[Enh] Defer kernel lowering to launch time and infer known_block_size\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30903223647",
    "created_at": "2026-08-04T11:03:34Z",
-   "updated_at": "2026-08-04T12:35:12Z",
+   "updated_at": "2026-08-04T13:27:40Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -248,10 +332,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-04T11:26:44Z",
-     "completed_at": null,
+     "completed_at": "2026-08-04T13:27:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30903223647/job/91977225333"
     },
     {
