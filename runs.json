@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-04T11:19:47Z",
+ "updated": "2026-08-04T11:21:52Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30904296535,
+   "pr": 931,
+   "commit": "92db086261be6fce6ab66c673e9bf86cab4b2b77",
+   "branch": "rchamber/flex_attention",
+   "event": "pull_request",
+   "title": "Add flex_attention (score_mod / mask_mod) on the generic flash-attention kernel",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30904296535",
+   "created_at": "2026-08-04T11:18:52Z",
+   "updated_at": "2026-08-04T11:20:13Z",
+   "actor": "RichardChamberlain1",
+   "jobs": []
+  },
   {
    "run_id": 30904116175,
    "pr": 959,
@@ -2105,49 +2120,6 @@
      "started_at": "2026-08-01T07:33:00Z",
      "completed_at": "2026-08-01T08:25:15Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30689816344/job/91342720806"
-    }
-   ]
-  },
-  {
-   "run_id": 30689667535,
-   "pr": 947,
-   "commit": "7989e6a8d8e786cd139bfb8aced6401aaafdd309",
-   "branch": "worktree-agent-moe-2stage-port",
-   "event": "pull_request",
-   "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8 (gfx942 + gfx950)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30689667535",
-   "created_at": "2026-08-01T07:24:08Z",
-   "updated_at": "2026-08-01T10:09:04Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-01T07:28:06Z",
-     "completed_at": "2026-08-01T08:46:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30689667535/job/91342347332"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-01T07:28:07Z",
-     "completed_at": "2026-08-01T08:51:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30689667535/job/91342347341"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-01T07:27:46Z",
-     "completed_at": "2026-08-01T10:09:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30689667535/job/91342347377"
     }
    ]
   }
