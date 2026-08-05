@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-05T05:40:28Z",
+ "updated": "2026-08-05T05:48:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30979131790,
+   "pr": 945,
+   "commit": "fc5250c09d54f158309436f2c3d5535402d2979f",
+   "branch": "jli/update-llvm-basemain",
+   "event": "pull_request",
+   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30979131790",
+   "created_at": "2026-08-05T05:46:13Z",
+   "updated_at": "2026-08-05T05:46:30Z",
+   "actor": "Boss2002n",
+   "jobs": []
+  },
   {
    "run_id": 30978688277,
    "pr": 945,
@@ -10,11 +25,11 @@
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
    "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30978688277",
    "created_at": "2026-08-05T05:37:40Z",
-   "updated_at": "2026-08-05T05:37:58Z",
+   "updated_at": "2026-08-05T05:46:30Z",
    "actor": "Boss2002n",
    "jobs": []
   },
@@ -2096,21 +2111,6 @@
    "created_at": "2026-08-03T01:59:39Z",
    "updated_at": "2026-08-03T02:01:12Z",
    "actor": "binding7012",
-   "jobs": []
-  },
-  {
-   "run_id": 30770091231,
-   "pr": null,
-   "commit": "d517327035306418b73133235b46fa31e465e3b3",
-   "branch": "codex/gfx1100-wmma-foundation",
-   "event": "pull_request",
-   "title": "[Feature][Test] Validate gfx1100 LDS and integer WMMA foundations",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30770091231",
-   "created_at": "2026-08-02T22:26:08Z",
-   "updated_at": "2026-08-02T22:26:08Z",
-   "actor": "skyguan92",
    "jobs": []
   }
  ]
