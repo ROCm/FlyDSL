@@ -53,7 +53,7 @@ of arithmetic to perform* is what is produced.
 Because tracing builds IR, you cannot use a bare Python `float` for a device
 value — there is nothing to trace it into. Instead FlyDSL gives you typed value
 wrappers (`fx.Float32`, `fx.Int32`, vector and struct types) that know how to emit
-the right ops. This is why Chapter *arithmetic_types* in the main docs exists and
+the right ops. This is why the type system gets its own chapter (Chapter 4) and
 why "just use `float`" does not work: a `float` is a host constant, an
 `fx.Float32` is a node in the IR.
 
@@ -116,16 +116,16 @@ Because the body is traced, control flow needs care. There are two regimes:
       ...
   ```
 
-- **Runtime control flow.** A `for i in range(...)` (note: plain `range`) or an
-  `if` on a *dynamic* value is rewritten into structured-control-flow ops
+- **Runtime control flow.** A `for i in range(...)` (note: plain builtin `range`)
+  or an `if` on a *dynamic* value is rewritten into structured-control-flow ops
   (`scf.for`, `scf.if`) that exist in the IR and execute on the device. Loops that
-  carry state across iterations use `range(start, stop, step, init=[...])`, which
-  yields loop-carried values:
+  carry state across iterations use `range(start, stop, step, init=[...])` with a
+  plain `yield`:
 
   ```python
-  for k, (acc,) in fx.range(0, K, BLOCK_K, init=[acc0]):   # scf.for on device
-      acc = acc + work(k)
-      fx.yield_(acc)
+  for k, state in range(0, K, BLOCK_K, init=[acc0]):   # scf.for on device
+      acc = state[0] + work(k)
+      results = yield [acc]                             # loop-carried value
   ```
 
 This rewriting is not magic you must invoke — it is done by an **AST rewriter**
@@ -133,7 +133,8 @@ that transforms your function's syntax tree *before* tracing (Chapter 2, §2.3).
 `and`/`or`/`not`, chained comparisons, `if`, `for`, `while`, and `yield` are all
 rewritten to DSL dispatch calls (`python/flydsl/compiler/ast_rewriter.py`).
 
-A few rules follow from this and recur in the puzzles:
+A few rules follow from this and recur in the puzzles (Chapter 3 covers them in
+depth):
 
 - Don't define a value only inside one branch of an `if` and use it afterwards —
   the merged value is undefined. Hoist it, or return a single merged value.

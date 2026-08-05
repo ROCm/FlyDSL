@@ -67,7 +67,7 @@ def run(..., stream=fx.Stream(None)):
 | `fx.block_idx.x/y/z` | `blockIdx.x/y/z` |
 | `fx.block_dim.x/...` | `blockDim.x/...` |
 
-### Layout construction / query (Ch. 3)
+### Layout construction / query (Ch. 5)
 
 ```python
 fx.make_shape(8, 16); fx.make_stride(1, 8)
@@ -77,7 +77,7 @@ fx.size(L); fx.cosize(L); fx.rank(L); fx.get_shape(L); fx.get_stride(L)
 fx.crd2idx(coord, L); fx.idx2crd(idx, L); fx.coalesce(L); fx.composition(A,B)
 ```
 
-### Divide / product (Ch. 3)
+### Divide / product (Ch. 5)
 
 ```python
 fx.zipped_divide(A, (BM,BN)); fx.logical_divide(A, tiler)
@@ -86,7 +86,7 @@ fx.slice(bA, (None, bid))            # pick a block's tile
 fx.blocked_product(v,t); fx.raked_product(v,t)
 ```
 
-### Tiling / partitioning (Ch. 4)
+### Tiling / partitioning (Ch. 6)
 
 ```python
 tiler_mn, tv = fx.make_layout_tv(thr_layout, val_layout)
@@ -100,7 +100,7 @@ fA = thr_mma.make_fragment_A(t)  # _B / _C ; frag.fill(0)
 fx.make_fragment_like(part[, dtype=fx.Boolean])
 ```
 
-### Copy atoms and copy (Ch. 5)
+### Copy atoms and copy (Ch. 7)
 
 ```python
 fx.make_copy_atom(fx.UniversalCopy128b(), fx.Float32)          # portable
@@ -111,7 +111,7 @@ fx.copy_atom_call(copy_atom, src, dst)                         # single atom
 fx.elem_less(coord_tensor, (M,N))                              # in-bounds mask
 ```
 
-### MMA atoms and gemm (Ch. 6)
+### MMA atoms and gemm (Ch. 8)
 
 ```python
 fx.make_mma_atom(fx.rocdl.MFMA(16,16,4, fx.Float32))          # CDNA
@@ -119,15 +119,18 @@ fx.make_mma_atom(fx.rocdl.WMMA(16,16,128, fx.Float8E4M3FN))   # RDNA/gfx1250
 fx.gemm(mma_atom, D, A, B, C)                                 # D = A*B + C
 ```
 
-### Control flow (§1.3)
+### Control flow (Ch. 3)
 
 ```python
 for i in fx.range_constexpr(N):        ...   # unrolled at trace time
-for i, (acc,) in fx.range(0, K, step, init=[acc0]):
-    acc = ...; fx.yield_(acc)                 # scf.for, loop-carried
+for iv, state in range(0, K, step, init=[acc0]):    # scf.for, loop-carried
+    acc = state[0] + work(iv)
+    results = yield [acc]              # plain builtin range + plain yield
+if fx.const_expr(FLAG): ...            # compile-time branch (no scf.if)
+if dyn_cond: ...                       # runtime branch -> scf.if
 ```
 
-### LDS / shared memory (§5.6)
+### LDS / shared memory (§7.6)
 
 ```python
 smem = fx.SharedAllocator().allocate(SharedStorage).peek()
@@ -160,7 +163,7 @@ fx.printf("tid={} val={}", tid, value)
 | non-type template param `<int A>` | `A: fx.Constexpr` |
 | type template param `<typename T>` | `T: type[fx.Float16]` |
 | `#pragma unroll` fixed loop | `for i in fx.range_constexpr(N)` |
-| runtime `for` loop | `for i in fx.range(...)` (`scf.for`) |
+| runtime `for` loop | `for iv, state in range(..., init=[...])` (`scf.for`) |
 | tensor descriptor `(lengths,strides)` | `fx.make_layout(shape, stride)` |
 | `descriptor.CalculateOffset` | `fx.crd2idx(coord, layout)` |
 | `Sequence<>` / `Tuple<>` extents | IntTuple (`fx.make_shape`, nested) |

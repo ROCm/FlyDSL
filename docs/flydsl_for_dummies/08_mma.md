@@ -2,7 +2,7 @@
 
 This chapter is about the matrix cores. On CDNA (MI300X/MI350) that means the
 **MFMA** instructions; you know them as `__builtin_amdgcn_mfma_*`. In FlyDSL an
-MFMA is an **MMA atom**, replicated by a **TiledMma** (Chapter 4) and executed by
+MFMA is an **MMA atom**, replicated by a **TiledMma** (Chapter 6) and executed by
 `fx.gemm`. This chapter defines the atom, the operand fragment contract, and how
 a K-loop accumulates.
 
@@ -58,7 +58,7 @@ third argument permutes/strides the atom placement for scheduling. The resulting
 ## The fragment contract and `fx.gemm`
 
 `fx.gemm` computes `D = A * B + C` on fragments allocated from the thread's MMA
-slice (§4.4):
+slice (§6.4):
 
 ```python
 thr_mma = tiled_mma.thr_slice(tid)
@@ -75,7 +75,7 @@ The contract that makes this correct:
 1. `make_fragment_A/B/C` allocate register tensors whose layout **is**
    `layout_A_tv/B_tv/C_tv` of the atom — so the elements are already in
    MFMA-operand order.
-2. When you *load* into them, you `retile` the copy to that same order (§4.4). Get
+2. When you *load* into them, you `retile` the copy to that same order (§6.4). Get
    this wrong and you get numerically plausible garbage — the classic MFMA
    debugging trap. In FlyDSL both sides derive from the *same atom*, so they match
    by construction.
@@ -111,15 +111,16 @@ fx.copy(copy_atom_c, thr_copy_c.retile(frag_C), thr_copy_c.partition_D(bC))
 
 Use `range_constexpr` when `num_k_tiles` is known at trace time (it usually is,
 from a `Constexpr` block-K); the loop unrolls and the compiler schedules the
-loads and MFMAs. When K is dynamic, use `fx.range(..., init=[frag_C])` and carry
-the accumulator as a loop-carried value (§1.3) so the SSA form stays well-defined.
+loads and MFMAs. When K is dynamic, use `range(..., init=[frag_C.load()])` and
+carry the accumulator as a loop-carried value (§3.2) so the SSA form stays
+well-defined.
 
 > **HIP/CK-Tile → FlyDSL.** This is the classic accumulate-over-K main loop. The
 > `range_constexpr` unroll is your `#pragma unroll` K-loop; the loop-carried
-> `fx.range` form is the runtime K-loop with the accumulator kept in registers
-> across iterations. Software pipelining (prefetch next K while MFMA-ing current)
-> is layered on top in Chapter 7 and the GEMM puzzles — the atom and fragment
-> contract does not change.
+> `range(..., init=[...])` form (§3.2) is the runtime K-loop with the accumulator
+> kept in registers across iterations. Software pipelining (prefetch next K while
+> MFMA-ing current) is layered on top in Chapter 9 and the GEMM puzzles — the atom
+> and fragment contract does not change.
 
 ## Where subtargets differ
 
@@ -139,7 +140,7 @@ the wave size to 32; the layout algebra, tiling, partitioning, and copy machiner
 are identical. That portability — same layout algebra, swap the atom — is the
 payoff of making the atom a first-class object.
 
-With layouts (Ch. 3), tiling/partitioning (Ch. 4), copy atoms (Ch. 5), and MMA
-atoms (Ch. 6) defined, you have the full vocabulary. Chapter 7 reads three
-complete kernels line by line; Chapter 8 is how you debug them when they break;
-Chapter 9 is the reference you keep open while working the puzzles.
+With layouts (Ch. 5), tiling/partitioning (Ch. 6), copy atoms (Ch. 7), and MMA
+atoms (Ch. 8) defined, you have the full vocabulary. Chapter 9 reads three
+complete kernels line by line; Chapter 10 is how you debug them when they break;
+Chapter 11 is the reference you keep open while working the puzzles.

@@ -1,6 +1,6 @@
 # The Fly Dialect II — Tiling and Partitioning
 
-Chapter 3 gave you layouts and the divide/product operators. This chapter is
+Chapter 5 gave you layouts and the divide/product operators. This chapter is
 about the step every kernel performs next: taking a block's tile and **handing
 each thread its slice** — the FlyDSL equivalent of CK-Tile's `tile_distribution`
 and CuTe's *thread-value (TV) layout*.
@@ -40,7 +40,7 @@ tiler_mn, layout_tv = fx.make_layout_tv(thr_layout, val_layout)
 `make_layout_tv` returns the tile shape it covers (`tiler_mn`) and the TV layout.
 Choosing `thr_layout` is choosing your access pattern: a thread layout whose
 fastest mode matches the tile's contiguous axis gives **coalesced** loads (this
-is the `raked_product` from §3.3.3 happening under the hood).
+is the `raked_product` from §5.3.3 happening under the hood).
 
 > **HIP/CK-Tile → FlyDSL.** The TV layout *is* a `tile_distribution`: it is the
 > single object encoding the H/Y/P/R mapping from `(warp, lane, register)` to
@@ -51,7 +51,7 @@ is the `raked_product` from §3.3.3 happening under the hood).
 ## TiledCopy and TiledMma: TV layouts with an atom attached
 
 A bare TV layout says *how* to distribute elements. A **TiledCopy** or
-**TiledMma** binds that distribution to a hardware **atom** (Chapters 5–6) so the
+**TiledMma** binds that distribution to a hardware **atom** (Chapters 7–8) so the
 compiler knows *what instruction* moves/computes each thread's slice.
 
 ```python
@@ -151,7 +151,7 @@ A = fx.rocdl.make_buffer_tensor(A_ptr, ...)      # (M,K)
 B = fx.rocdl.make_buffer_tensor(B_ptr, ...)      # (N,K)  -> computes A @ B.T
 C = fx.rocdl.make_buffer_tensor(C_ptr, ...)
 
-# 2. tile + slice this block (Ch. 3)
+# 2. tile + slice this block (Ch. 5)
 bA = fx.slice(fx.zipped_divide(A, (block_m, block_k)), (None, bid_m))
 bB = fx.slice(fx.zipped_divide(B, (block_n, block_k)), (None, bid_n))
 bC = fx.slice(fx.zipped_divide(C, (block_m, block_n)), (None, bid))
@@ -166,12 +166,12 @@ frag_A = thr_mma.make_fragment_A(bA)
 frag_B = thr_mma.make_fragment_B(bB)
 frag_C = thr_mma.make_fragment_C(bC)
 frag_C.fill(0)
-# ... copy into frag_A/frag_B (Ch. 5) ...
+# ... copy into frag_A/frag_B (Ch. 7) ...
 fx.gemm(mma_atom, frag_C, frag_A, frag_B, frag_C)   # D = A*B + C
-# ... store frag_C to bC (Ch. 5) ...
+# ... store frag_C to bC (Ch. 7) ...
 ```
 
-Steps 1–2 are Chapter 3 (layout algebra), step 3 is this chapter (TV
-layouts/atoms), step 4 previews Chapters 5–6 (copy and MMA atoms). The rest of
+Steps 1–2 are Chapter 5 (layout algebra), step 3 is this chapter (TV
+layouts/atoms), step 4 previews Chapters 7–8 (copy and MMA atoms). The rest of
 the book fills in the "copy into fragments" and "store" ellipses, and then scales
 this single-block kernel into a pipelined GEMM.

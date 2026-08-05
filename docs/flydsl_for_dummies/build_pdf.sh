@@ -27,13 +27,15 @@ CHAPTERS=(
   00_preface.md
   01_mental_model.md
   02_compilation_pipeline.md
-  03_layout_algebra.md
-  04_tiling_partitioning.md
-  05_data_movement.md
-  06_mma.md
-  07_worked_examples.md
-  08_debugging.md
-  09_reference.md
+  03_control_flow.md
+  04_types_and_values.md
+  05_layout_algebra.md
+  06_tiling_partitioning.md
+  07_data_movement.md
+  08_mma.md
+  09_worked_examples.md
+  10_debugging.md
+  11_reference.md
 )
 
 if [[ "${1:-}" == "--html" ]]; then

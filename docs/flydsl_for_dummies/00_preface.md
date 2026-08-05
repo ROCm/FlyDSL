@@ -28,7 +28,7 @@ core, where a `Layout` is a `Shape:Stride` pair over hierarchical `IntTuple`s, a
 mapping tiles onto threads. **FlyDSL's layout algebra is that same algebra.** The
 names line up almost one to one — `make_layout`, `logical_divide`, `zipped_divide`,
 `composition`, `partition_S/D`, `make_fragment_like`, `make_tiled_copy`,
-`make_tiled_mma` — so if you know CuTe you already know most of Chapters 3–6, and
+`make_tiled_mma` — so if you know CuTe you already know most of Chapters 5–8, and
 the CuTe identities you rely on (divide/product duality, the TV-layout contract)
 hold here unchanged.
 
@@ -57,23 +57,27 @@ CK-Tile) equivalent, the `HIP/CK-Tile → FlyDSL` boxes call it out; the reposit
    named lowering passes, down to ROCDL/LLVM and the HSACO fat binary, with a
    side-by-side comparison to `hipcc` and CK-Tile template instantiation
    (Chapter 2).
-3. **The Fly dialect, formally** — the layout algebra (Chapter 3), tiling and
-   partitioning (Chapter 4), data movement / copy atoms (Chapter 5), and MMA
-   atoms (Chapter 6), each with small worked examples and a mapping to the
+3. **The language foundations** — how C++ control flow (`if`/`for`/`while`) maps to
+   FlyDSL's trace-time vs. run-time regimes (Chapter 3), and the type system: how
+   Python types become value types at each IR level (Chapter 4).
+4. **The Fly dialect, formally** — the layout algebra (Chapter 5), tiling and
+   partitioning (Chapter 6), data movement / copy atoms (Chapter 7), and MMA
+   atoms (Chapter 8), each with small worked examples and a mapping to the
    CK-Tile / CuTe concept you already know.
-4. **Worked examples** — three complete kernels annotated line by line
-   (Chapter 7).
-5. **Debugging** — how (and how far) you can actually debug a FlyDSL kernel:
+5. **Worked examples** — three complete kernels annotated line by line
+   (Chapter 9).
+6. **Debugging** — how (and how far) you can actually debug a FlyDSL kernel:
    the three layers of failure, the IR-dump and `printf` tools, a repeatable
-   isolation loop, and two real worked failures (Chapter 8).
-6. **A reference appendix** — environment variables, an API cheat-sheet, and a
-   HIP/CK-Tile ↔ FlyDSL glossary (Chapter 9).
+   isolation loop, and two real worked failures (Chapter 10).
+7. **A reference appendix** — environment variables, an API cheat-sheet, and a
+   HIP/CK-Tile ↔ FlyDSL glossary (Chapter 11).
 
 ## How to read it
 
-Read Chapters 1 and 2 first — they install the mental model that makes everything
-else make sense. Then either continue linearly, or jump to the algebra chapters
-(3–6) as a reference while you work the companion **[FlyDSL Puzzles](../../puzzles/)**.
+Read Chapters 1–4 first — they install the mental model, the control-flow rules,
+and the type system that make everything else make sense. Then either continue
+linearly, or jump to the algebra chapters (5–8) as a reference while you work the
+companion **[FlyDSL Puzzles](../../puzzles/)**.
 The puzzles are where the learning actually sticks: each one references the section
 here that explains it.
 
