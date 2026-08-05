@@ -7,6 +7,23 @@ from typing import Callable, List, Protocol, Tuple, runtime_checkable
 
 from .._mlir import ir
 
+__all__ = [
+    # Protocols
+    "DslType",
+    "JitArgument",
+    "Storable",
+    # Interfaces
+    "get_ir_types",
+    "cache_signature",
+    "c_abi_spec",
+    "extract_to_ir_values",
+    "construct_from_ir_values",
+    "dsl_size_of",
+    "dsl_align_of",
+    "peek_from_ptr",
+    "poke_into_ptr",
+]
+
 
 @runtime_checkable
 class DslType(Protocol):

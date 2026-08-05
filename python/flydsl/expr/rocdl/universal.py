@@ -4,6 +4,7 @@
 from ..._mlir import ir
 from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import (
     MmaOpGFX11_WMMAType,
+    MmaOpGFX120X_WMMAType,
     MmaOpGFX1250_WMMAType,
 )
 from ..._mlir.dialects import fly_rocdl
@@ -121,10 +122,10 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
         sign_b (bool, default False): treat B operand as signed.
         clamp  (bool, default False): saturate integer accumulator.
     Forwarded to the arch-specific WMMA atom (MmaOpGFX11_WMMAType on gfx11,
-    MmaOpGFX1250_WMMAType on gfx12 / gfx1250); the atom's verify() rejects them
-    on the float (fp16/bf16/fp8) paths, where the intrinsic has no such operands.
-    Future WMMA ops for new architectures should extend kwargs here rather
-    than growing the positional signature.
+    MmaOpGFX120X_WMMAType on gfx120x, MmaOpGFX1250_WMMAType on gfx1250); the
+    atom's verify() rejects them on the float (fp16/bf16/fp8) paths, where the
+    intrinsic has no such operands. Future WMMA ops for new architectures
+    should extend kwargs here rather than growing the positional signature.
     """
     ty_ab = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
     if elem_ty_acc is None:
@@ -134,14 +135,16 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
 
     # Arch-aware dispatch:
     #   * RDNA3 / RDNA3.5 (gfx1100..gfx1152) use the legacy v16-operand WMMA ABI.
-    #   * RDNA4 (gfx12xx, e.g. gfx1201) and gfx1250 use the new v8-operand ABI;
-    #     both route through MmaOpGFX1250_WMMAType via the gfx12 prefix below.
-    #     (gfx1250 is its own arch, not RDNA4, but shares this WMMA atom.)
+    #   * RDNA4 (gfx1200 / gfx1201) and gfx1250 share the v8-operand ABI but not
+    #     the instruction shapes: RDNA4 has the gfx11 16x16x16 forms, gfx1250 has
+    #     16x16x32 (plus fp8 K=64/128) with mods/reuse operands. They therefore
+    #     get separate atoms, matched on the disjoint gfx120x / gfx1250 prefixes
+    #     rather than on a shared gfx12 one.
 
     arch = get_rocm_arch() or ""
     if arch.startswith("gfx11"):
         return MmaOpGFX11_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc, **kwargs)
-    if arch.startswith("gfx12"):
+    if arch.startswith("gfx1250"):
         return MmaOpGFX1250_WMMAType.get(
             m,
             n,
@@ -153,8 +156,20 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
             sign_b=bool(kwargs.get("sign_b", False)),
             clamp=bool(kwargs.get("clamp", False)),
         )
+    if arch.startswith("gfx120"):
+        return MmaOpGFX120X_WMMAType.get(
+            m,
+            n,
+            k,
+            ty_ab,
+            ty_ab,
+            ty_acc,
+            sign_a=bool(kwargs.get("sign_a", False)),
+            sign_b=bool(kwargs.get("sign_b", False)),
+            clamp=bool(kwargs.get("clamp", False)),
+        )
     raise ValueError(
-        f"WMMA is not available on target arch {arch!r}; supported: gfx11xx (RDNA3 / RDNA3.5), gfx12xx (RDNA4), and gfx1250. "
+        f"WMMA is not available on target arch {arch!r}; supported: gfx11xx (RDNA3 / RDNA3.5), gfx120x (RDNA4), and gfx1250. "
     )
 
 
