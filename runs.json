@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-05T06:55:21Z",
+ "updated": "2026-08-05T07:04:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30983436470,
+   "pr": null,
+   "commit": "ce75eca7aae826e05a439a401915a31071396024",
+   "branch": "main",
+   "event": "push",
+   "title": "[Enh] Defer kernel lowering to launch time and infer known_block_size\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30983436470",
+   "created_at": "2026-08-05T07:01:44Z",
+   "updated_at": "2026-08-05T07:03:22Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 30983275620,
+   "pr": null,
+   "commit": "25a94f18e168e13f24571af2bd3f7280761cc753",
+   "branch": "main",
+   "event": "push",
+   "title": "Add stochastic rounding and philox RNG under rocdl (#907)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30983275620",
+   "created_at": "2026-08-05T06:59:16Z",
+   "updated_at": "2026-08-05T07:03:02Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 30982906965,
    "pr": 948,
@@ -10,11 +40,11 @@
    "branch": "worktree-mxfp-moe-a16w4",
    "event": "pull_request",
    "title": "MoE: add a16w mix fused 2-stage kernels (bf16 A \u00d7 mxfp4/int4/bf16 W)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30982906965",
    "created_at": "2026-08-05T06:53:07Z",
-   "updated_at": "2026-08-05T06:54:20Z",
+   "updated_at": "2026-08-05T06:55:22Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -2081,64 +2111,6 @@
    "created_at": "2026-08-03T03:42:25Z",
    "updated_at": "2026-08-03T03:45:30Z",
    "actor": "xudoyuan",
-   "jobs": []
-  },
-  {
-   "run_id": 30782023895,
-   "pr": null,
-   "commit": "4202f28ebfd3d78069c8dfb04ed1b53fdf94a646",
-   "branch": "stochastic-rounding",
-   "event": "pull_request",
-   "title": "Add stochastic rounding and philox RNG under rocdl",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30782023895",
-   "created_at": "2026-08-03T03:31:35Z",
-   "updated_at": "2026-08-03T06:34:38Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-03T03:44:51Z",
-     "completed_at": "2026-08-03T05:08:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30782023895/job/91589916468"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-03T03:44:51Z",
-     "completed_at": "2026-08-03T04:42:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30782023895/job/91589916476"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-03T04:55:46Z",
-     "completed_at": "2026-08-03T06:34:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30782023895/job/91589916496"
-    }
-   ]
-  },
-  {
-   "run_id": 30781703108,
-   "pr": null,
-   "commit": "8c77a70bac88730cfbb727995b7d286ac8901b86",
-   "branch": "stochastic-rounding",
-   "event": "pull_request",
-   "title": "Add stochastic rounding and philox RNG under rocdl",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30781703108",
-   "created_at": "2026-08-03T03:23:45Z",
-   "updated_at": "2026-08-03T03:23:45Z",
-   "actor": "sjfeng1999",
    "jobs": []
   }
  ]
