@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-05T16:56:08Z",
+ "updated": "2026-08-05T17:47:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31030506501,
+   "pr": 969,
+   "commit": "891bb7586b1b6b37cb5dd45c2bc5d4292445956c",
+   "branch": "jiacao/fix-conv3d-fp8-padded-row-store",
+   "event": "pull_request",
+   "title": "[Fix] conv3d fp8: guard padded M rows in the epilogue store",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31030506501",
+   "created_at": "2026-08-05T17:32:38Z",
+   "updated_at": "2026-08-05T17:35:26Z",
+   "actor": "jiacao-amd",
+   "jobs": []
+  },
   {
    "run_id": 31023957346,
    "pr": 891,
@@ -53,10 +68,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-05T15:54:32Z",
-     "completed_at": null,
+     "completed_at": "2026-08-05T17:00:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31022130191/job/92362809795"
     }
    ]
@@ -68,29 +83,29 @@
    "branch": "worktree-agent-moe-2stage-port",
    "event": "pull_request",
    "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8 (gfx942 + gfx950)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31022017864",
    "created_at": "2026-08-05T15:46:51Z",
-   "updated_at": "2026-08-05T15:51:46Z",
+   "updated_at": "2026-08-05T17:46:27Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-05T15:53:00Z",
-     "completed_at": null,
+     "completed_at": "2026-08-05T16:56:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31022017864/job/92362274263"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-05T15:51:46Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-05T16:55:18Z",
+     "completed_at": "2026-08-05T17:46:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31022017864/job/92362274345"
     },
     {
@@ -2013,49 +2028,6 @@
      "started_at": "2026-08-04T06:59:53Z",
      "completed_at": "2026-08-04T07:31:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30880948143/job/91917349527"
-    }
-   ]
-  },
-  {
-   "run_id": 30877675125,
-   "pr": 907,
-   "commit": "0409aa9867b3b6e83a27645c57516acc85c5a2e7",
-   "branch": "stochastic-rounding",
-   "event": "pull_request",
-   "title": "Add stochastic rounding and philox RNG under rocdl",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30877675125",
-   "created_at": "2026-08-04T04:26:19Z",
-   "updated_at": "2026-08-04T14:39:11Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-04T13:05:57Z",
-     "completed_at": "2026-08-04T14:39:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30877675125/job/91950808856"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-04T04:33:36Z",
-     "completed_at": "2026-08-04T05:42:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30877675125/job/91950809378"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-04T04:33:33Z",
-     "completed_at": "2026-08-04T06:06:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30877675125/job/91950809895"
     }
    ]
   }
