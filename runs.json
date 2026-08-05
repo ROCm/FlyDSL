@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-05T21:46:04Z",
+ "updated": "2026-08-05T23:54:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31056296292,
+   "pr": 901,
+   "commit": "8cfdf55ed7403d61de8caa7d3b9d79f12a8dece5",
+   "branch": "moe_sorting_optimization",
+   "event": "pull_request",
+   "title": "Add Optimized MoE Routing Path",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31056296292",
+   "created_at": "2026-08-05T23:25:15Z",
+   "updated_at": "2026-08-05T23:27:45Z",
+   "actor": "amd-wsung102",
+   "jobs": []
+  },
   {
    "run_id": 31031791682,
    "pr": 969,
@@ -84,20 +99,20 @@
    "event": "pull_request",
    "title": "a16w16 for gfx1250 on flydsl",
    "status": "completed",
-   "conclusion": "failure",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31022130191",
    "created_at": "2026-08-05T15:48:13Z",
-   "updated_at": "2026-08-05T18:40:11Z",
+   "updated_at": "2026-08-05T23:52:55Z",
    "actor": "omuhamma",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
      "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-05T17:47:22Z",
-     "completed_at": "2026-08-05T18:40:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31022130191/job/92362809501"
+     "conclusion": "success",
+     "started_at": "2026-08-05T22:39:22Z",
+     "completed_at": "2026-08-05T23:52:54Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31022130191/job/92465904839"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -106,7 +121,7 @@
      "conclusion": "success",
      "started_at": "2026-08-05T15:54:42Z",
      "completed_at": "2026-08-05T16:46:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31022130191/job/92362809566"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31022130191/job/92465905293"
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -115,7 +130,7 @@
      "conclusion": "success",
      "started_at": "2026-08-05T15:54:32Z",
      "completed_at": "2026-08-05T17:00:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31022130191/job/92362809795"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31022130191/job/92465905345"
     }
    ]
   },
@@ -2014,21 +2029,6 @@
    "created_at": "2026-08-04T06:29:10Z",
    "updated_at": "2026-08-04T06:30:52Z",
    "actor": "Boss2002n",
-   "jobs": []
-  },
-  {
-   "run_id": 30883984241,
-   "pr": 945,
-   "commit": "45d44c00deee94746e37004cdae9439f6a4fa470",
-   "branch": "jli/update-llvm-basemain",
-   "event": "pull_request",
-   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30883984241",
-   "created_at": "2026-08-04T06:26:10Z",
-   "updated_at": "2026-08-04T06:27:27Z",
-   "actor": "jli-melchior",
    "jobs": []
   }
  ]
