@@ -24,6 +24,21 @@ cluster execution but run during prologue tail and memory-cluster prefetch
 **Stagger:** when ``pipeline_stagger_enabled`` (depth >= 2, ``num_groups`` and
 ``m_waves`` >= 2), wave groups get asymmetric barriers at pipeline open/close.
 
+**Manual cluster emit (stagger main loop):** ``emit_prologue`` / ``emit_epilogue``
+are unchanged. For hand scheduling between clusters, call after prologue::
+
+    for kv in range_constexpr(n_kv_tiles):
+        pipeline.emit_tile_stagger_kv(kv, n_kv_tiles, infra, shared_regs)
+    # or per cluster:
+        pipeline.emit_tile_memory_cluster(kv, 0, infra, shared_regs, n_kv_tiles, ...)
+        pipeline.emit_cluster_boundary_sync(0)
+        pipeline.emit_tile_compute_cluster(kv, 1, ...)
+        ...
+
+Requires ``enable_stagger`` and ``infra.stagger_i32`` (flex layout pd>=2).
+See ``emit_tile_memory_cluster``, ``emit_tile_compute_cluster``,
+``emit_cluster_boundary_sync``, ``emit_tile_stagger_kv``.
+
 Internal state for decomposed stages (e.g. Softmax's partial exp2 registers
 between its two sub-stages) is held on the stage object itself, invisible to
 the wiring.
@@ -959,6 +974,116 @@ class PipelineScheduler:
                 cluster, infra, vmcnt_at_most=0,
             )
 
+    def _require_cluster(self, cluster_index: int, kind: StageKind) -> ClusterSpec:
+        clusters = self._config.clusters
+        if cluster_index < 0 or cluster_index >= len(clusters):
+            raise ValueError(
+                f"cluster_index {cluster_index} out of range "
+                f"(pipeline has {len(clusters)} clusters)"
+            )
+        cluster = clusters[cluster_index]
+        if cluster.kind != kind:
+            raise ValueError(
+                f"cluster C{cluster_index} is {cluster.kind.name}, expected {kind.name}"
+            )
+        return cluster
+
+    def emit_cluster_boundary_sync(self, cluster_index: int) -> None:
+        """After cluster ``cluster_index`` in a manual stagger tile (dualwave or light C1→C2)."""
+        self._emit_stagger_cluster_boundary_sync(cluster_index)
+
+    def emit_tile_memory_cluster(
+        self,
+        kv: int,
+        cluster_index: int,
+        infra: InfraContext,
+        shared_regs: dict,
+        n_kv_tiles: int,
+        *,
+        skip_read_k: bool = False,
+        skip_read_v: bool = False,
+    ) -> None:
+        """One memory cluster for tile ``kv``: reads, prefetch, partial vmcnt (stagger path)."""
+        cluster = self._require_cluster(cluster_index, StageKind.MEMORY)
+        depth = self._config.depth
+        infra.cluster_id = cluster_index
+        self._emit_stagger_memory_cluster(
+            cluster, kv, n_kv_tiles, depth, infra, shared_regs,
+            skip_read_k=skip_read_k,
+            skip_read_v=skip_read_v,
+        )
+
+    def emit_tile_compute_cluster(
+        self,
+        kv: int,
+        cluster_index: int,
+        infra: InfraContext,
+        shared_regs: dict,
+        n_kv_tiles: int,
+        *,
+        inter_tile_readahead_after: bool = False,
+    ) -> None:
+        """One compute cluster for tile ``kv``; optional ReadK hoisted after C3."""
+        from flydsl.expr import const_expr
+
+        cluster = self._require_cluster(cluster_index, StageKind.COMPUTE)
+        infra.cluster_id = cluster_index
+        clusters = self._config.clusters
+        self._execute_cluster(cluster, infra, shared_regs)
+        if inter_tile_readahead_after and self._inter_tile_readahead:
+            if const_expr(kv + 1 < n_kv_tiles):
+                self._emit_intertile_reads_for_next(
+                    kv + 1, infra, shared_regs, tuple(clusters),
+                )
+
+    def emit_tile_stagger_kv(
+        self,
+        kv: int,
+        n_kv_tiles: int,
+        infra: InfraContext,
+        shared_regs: dict,
+    ) -> None:
+        """One KV tile: C0→sync→C1→sync→C2→sync→C3→sync (same rules as ``emit_main_loop`` stagger)."""
+        from flydsl.expr import const_expr
+
+        clusters = self._config.clusters
+        read_buf = kv % self._config.lds_ring_slots
+        infra.buf_slot = read_buf
+        for ci, cluster in enumerate(clusters):
+            infra.cluster_id = ci
+            if cluster.kind == StageKind.MEMORY:
+                if self._inter_tile_readahead and cluster.index == 0:
+                    if const_expr(kv > 0):
+                        self.emit_tile_memory_cluster(
+                            kv, cluster.index, infra, shared_regs, n_kv_tiles,
+                            skip_read_k=True, skip_read_v=False,
+                        )
+                    else:
+                        self.emit_tile_memory_cluster(
+                            kv, cluster.index, infra, shared_regs, n_kv_tiles,
+                            skip_read_k=False, skip_read_v=False,
+                        )
+                elif self._inter_tile_readahead and cluster.index == 2:
+                    self.emit_tile_memory_cluster(
+                        kv, cluster.index, infra, shared_regs, n_kv_tiles,
+                        skip_read_k=False, skip_read_v=False,
+                    )
+                else:
+                    self.emit_tile_memory_cluster(
+                        kv, cluster.index, infra, shared_regs, n_kv_tiles,
+                        skip_read_k=False, skip_read_v=False,
+                    )
+            elif ci == 3 and self._inter_tile_readahead:
+                self.emit_tile_compute_cluster(
+                    kv, cluster.index, infra, shared_regs, n_kv_tiles,
+                    inter_tile_readahead_after=True,
+                )
+            else:
+                self.emit_tile_compute_cluster(
+                    kv, cluster.index, infra, shared_regs, n_kv_tiles,
+                )
+            self.emit_cluster_boundary_sync(ci)
+
     def emit_prologue(self, infra: InfraContext, shared_regs: dict) -> None:
         """Prime the pipeline by running the first stage ``depth-1`` tiles ahead.
 
@@ -1015,39 +1140,7 @@ class PipelineScheduler:
             infra.buf_slot = read_buf
 
             if staggered:
-                for ci, cluster in enumerate(clusters):
-                    infra.cluster_id = ci
-                    if cluster.kind == StageKind.MEMORY:
-                        if self._inter_tile_readahead and cluster.index == 0:
-                            if const_expr(kv > 0):
-                                self._emit_stagger_memory_cluster(
-                                    cluster, kv, n_kv_tiles, depth, infra, shared_regs,
-                                    skip_read_k=True, skip_read_v=False,
-                                )
-                            else:
-                                self._emit_stagger_memory_cluster(
-                                    cluster, kv, n_kv_tiles, depth, infra, shared_regs,
-                                    skip_read_k=False, skip_read_v=False,
-                                )
-                        elif self._inter_tile_readahead and cluster.index == 2:
-                            self._emit_stagger_memory_cluster(
-                                cluster, kv, n_kv_tiles, depth, infra, shared_regs,
-                                skip_read_k=False, skip_read_v=False,
-                            )
-                        else:
-                            self._emit_stagger_memory_cluster(
-                                cluster, kv, n_kv_tiles, depth, infra, shared_regs,
-                                skip_read_k=False, skip_read_v=False,
-                            )
-                    elif ci == 3 and self._inter_tile_readahead:
-                        self._execute_cluster(cluster, infra, shared_regs)
-                        if const_expr(kv + 1 < n_kv_tiles):
-                            self._emit_intertile_reads_for_next(
-                                kv + 1, infra, shared_regs, clusters,
-                            )
-                    else:
-                        self._execute_cluster(cluster, infra, shared_regs)
-                    self._emit_stagger_cluster_boundary_sync(ci)
+                self.emit_tile_stagger_kv(kv, n_kv_tiles, infra, shared_regs)
 
             elif depth == 1:
                 # Synchronous: prime stage → wait → all other stages.
@@ -1071,124 +1164,6 @@ class PipelineScheduler:
 
                 _rocdl_waitcnt_vmcnt0()
                 rocdl.s_barrier()
-
-    def _emit_pd2_stagger_tile(
-        self,
-        kv,
-        n_kv_tiles: int,
-        infra: InfraContext,
-        shared_regs: dict,
-        clusters: tuple,
-    ) -> None:
-        """One KV iteration with stagger: explicit cluster sequence (C0..C3)."""
-        from flydsl.expr import const_expr
-
-        depth = 2
-        read_buf = kv % self._config.lds_ring_slots
-        write_buf = (kv + 1) % self._config.lds_ring_slots
-        infra.buf_slot = read_buf
-
-        c0, c1, c2, c3 = clusters[0], clusters[1], clusters[2], clusters[3]
-
-        infra.cluster_id = 0
-        if self._inter_tile_readahead:
-            if const_expr(kv > 0):
-                self._emit_stagger_memory_cluster(
-                    c0, kv, n_kv_tiles, depth, infra, shared_regs,
-                    skip_read_k=True, skip_read_v=False,
-                )
-            else:
-                self._emit_stagger_memory_cluster(
-                    c0, kv, n_kv_tiles, depth, infra, shared_regs,
-                    skip_read_k=False, skip_read_v=False,
-                )
-        else:
-            self._emit_stagger_memory_cluster(
-                c0, kv, n_kv_tiles, depth, infra, shared_regs,
-                skip_read_k=False, skip_read_v=False,
-            )
-        self._dualwave_sync_barrier()
-
-        infra.cluster_id = 1
-        self._execute_cluster(c1, infra, shared_regs)
-        self._emit_stagger_cluster_boundary_sync(1)
-
-        infra.cluster_id = 2
-        self._emit_stagger_memory_cluster(
-            c2, kv, n_kv_tiles, depth, infra, shared_regs,
-            skip_read_k=False, skip_read_v=False,
-        )
-        self._dualwave_sync_barrier()
-
-        infra.cluster_id = 3
-        self._execute_cluster(c3, infra, shared_regs)
-        if self._inter_tile_readahead:
-            if const_expr(kv + 1 < n_kv_tiles):
-                self._emit_intertile_reads_for_next(
-                    kv + 1, infra, shared_regs, clusters,
-                )
-        self._dualwave_sync_barrier()
-
-    def _emit_pd2_nostagger_tile(
-        self,
-        kv,
-        n_kv_tiles: int,
-        infra: InfraContext,
-        shared_regs: dict,
-        clusters: tuple,
-    ) -> None:
-        """One KV iteration without stagger: prefetch then explicit cluster sequence."""
-        from flydsl.expr import const_expr, rocdl
-
-        read_buf = kv % self._config.lds_ring_slots
-        write_buf = (kv + 1) % self._config.lds_ring_slots
-        infra.buf_slot = read_buf
-
-        if const_expr(kv + 1 < n_kv_tiles):
-            infra.tile_idx = kv + 1
-            infra.buf_slot = write_buf
-            self._prime_fn(infra)
-            infra.buf_slot = read_buf
-
-        c0, c1, c2, c3 = clusters[0], clusters[1], clusters[2], clusters[3]
-        for cluster in (c0, c1, c2, c3):
-            self._run_non_prime(cluster, infra, shared_regs)
-            self._pipeline_sync_barrier()
-
-        _rocdl_waitcnt_vmcnt0()
-        rocdl.s_barrier()
-
-    def emit_pd2_unrolled(
-        self,
-        infra: InfraContext,
-        shared_regs: dict,
-        n_kv_tiles: int,
-    ) -> None:
-        """Depth-2 prologue/main/epilogue with per-tile cluster sequence unrolled (no cluster loop).
-
-        Semantics match ``emit_prologue`` + ``emit_main_loop`` + ``emit_epilogue`` at ``force_depth=2``,
-        but each KV tile runs C0→C1→C2→C3 explicitly for hand-optimised codegen.
-        """
-        from flydsl.expr import range_constexpr
-
-        if self._config.depth != 2:
-            raise ValueError(f"emit_pd2_unrolled requires depth=2, got {self._config.depth}")
-        clusters = self._config.clusters
-        if len(clusters) != 4:
-            raise ValueError(
-                f"emit_pd2_unrolled expects 4 clusters (layout pd2 wire list), got {len(clusters)}"
-            )
-        clusters = tuple(clusters)
-
-        self.emit_prologue(infra, shared_regs)
-
-        if not (self.enable_stagger and infra.stagger_i32 is not None):
-            raise ValueError("emit_pd2_unrolled requires stagger (depth>=2 with num_groups>=2)")
-
-        for kv in range_constexpr(n_kv_tiles):
-            self._emit_pd2_stagger_tile(kv, n_kv_tiles, infra, shared_regs, clusters)
-
-        self.emit_epilogue(infra, shared_regs)
 
     def emit_epilogue(self, infra: InfraContext, shared_regs: dict) -> None:
         """Drain the pipeline after the main loop.

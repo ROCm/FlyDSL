@@ -6,6 +6,10 @@ Compares flydsl_flex_attention_layout against torch scaled_dot_product_attention
 
 Phase 0 kernel constraints (see the kernel's make_flex_attn_param): block_m=32,
 block_n multiple of 32, head_dim multiple of 32, seqlen_kv multiple of block_n.
+
+pd2 stagger main loop uses ``emit_tile_stagger_kv`` internally (same path as manual
+cluster emit); no separate parity test yet. ``_D2_SHAPES`` includes Skv=32 (single
+KV tile when block_n=32); pd2 kernels with ``n_kv_tiles==1`` use ``emit_tile_stagger_kv`` + epilogue.
 """
 import argparse
 import math
@@ -85,36 +89,27 @@ def bench_pipeline_depths(B, Sq, Skv, H, D, dtype_str, *, warmup=10, iters=100):
     def _pd1():
         flydsl_flex_attention_layout(q, k, v, scale=scale, pipe_depth=1)
 
-    def _pd2():
-        flydsl_flex_attention_layout(
-            q, k, v, scale=scale, pipe_depth=2, num_groups=1,
-        )
-
     def _ps2():
         flydsl_flex_attention_layout(q, k, v, scale=scale, pipe_depth=2, num_groups=2)
 
     _, us1 = run_perftest(_pd1, num_iters=iters, num_warmup=warmup)
-    _, us2 = run_perftest(_pd2, num_iters=iters, num_warmup=warmup)
     _, us3 = run_perftest(_ps2, num_iters=iters, num_warmup=warmup)
-    return us1, us2, us3
+    return us1, us3
 
 
 def print_pipeline_compare(B, Sq, Skv, H, D, dtype_str, *, warmup=10, iters=100):
-    us1, us2, us3 = bench_pipeline_depths(
+    us1, us3 = bench_pipeline_depths(
         B, Sq, Skv, H, D, dtype_str, warmup=warmup, iters=iters,
     )
     tf1 = _attn_tflops(B, Sq, Skv, H, D, us1)
-    tf2 = _attn_tflops(B, Sq, Skv, H, D, us2)
     tf3 = _attn_tflops(B, Sq, Skv, H, D, us3)
     print(
         f"B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}  "
         f"pd1={us1:.1f}us ({tf1:.2f} TFLOPS)  "
-        f"pd2={us2:.1f}us ({tf2:.2f} TFLOPS)  "
         f"ps2={us3:.1f}us ({tf3:.2f} TFLOPS)  "
-        f"ps2/pd1={(us1 / us3 if us3 > 0 else float('nan')):.3f}x  "
-        f"ps2/pd2={(us2 / us3 if us3 > 0 else float('nan')):.3f}x"
+        f"ps2/pd1={(us1 / us3 if us3 > 0 else float('nan')):.3f}x"
     )
-    return us1, us2, us3
+    return us1, us3
 
 
 _SHAPES = [
@@ -146,16 +141,6 @@ def test_flex_attention_layout(B, Sq, Skv, H, D, dtype_str):
 @_requires_gfx950
 @pytest.mark.parametrize("dtype_str", ["bf16"])
 @pytest.mark.parametrize("B,Sq,Skv,H,D", _D2_SHAPES)
-def test_flex_attention_layout_d2_sync(B, Sq, Skv, H, D, dtype_str):
-    max_err, cos = _run(B, Sq, Skv, H, D, dtype_str, pipe_depth=2, num_groups=1)
-    assert max_err < 3e-2 and cos > 0.99, (
-        f"d2 sync B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
-    )
-
-
-@_requires_gfx950
-@pytest.mark.parametrize("dtype_str", ["bf16"])
-@pytest.mark.parametrize("B,Sq,Skv,H,D", _D2_SHAPES)
 def test_flex_attention_layout_d2(B, Sq, Skv, H, D, dtype_str):
     max_err, cos = _run(B, Sq, Skv, H, D, dtype_str, pipe_depth=2)
     assert max_err < 3e-2 and cos > 0.99, (
@@ -165,7 +150,7 @@ def test_flex_attention_layout_d2(B, Sq, Skv, H, D, dtype_str):
 
 def main():
     p = argparse.ArgumentParser(description="layout flex-attn correctness and/or pipeline bench")
-    p.add_argument("--bench", action="store_true", help="compare pd1 vs pd2 vs ps2 (buffered) performance")
+    p.add_argument("--bench", action="store_true", help="compare pd1 vs ps2 (pipe_depth=2 stagger) performance")
     p.add_argument("--batch", type=int, default=2)
     p.add_argument("--seq_len", type=int, default=2048)
     p.add_argument("--seq_len_kv", type=int, default=None, help="defaults to --seq_len")

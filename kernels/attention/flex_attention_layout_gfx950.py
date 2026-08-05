@@ -102,7 +102,6 @@ class FlexAttnParam:
     n_kv_tiles: fx.Constexpr[int]  # seqlen_kv // block_n (KV loop is compile-time unrolled)
     pipe_depth: fx.Constexpr[int]  # 1 = monolithic, 2 = decomposed pipeline
     pipe_stages: fx.Constexpr[int]  # deprecated: stagger follows num_groups/pipe_depth/m_waves
-    hand_optimised: fx.Constexpr[bool]  # pd>=2: unrolled pd2 pipeline emit vs generic scheduler loop
 
 
 def make_flex_attn_param(
@@ -122,7 +121,6 @@ def make_flex_attn_param(
     mma_k: int = 32,
     pipe_depth: int = 1,
     pipe_stages: int = 1,
-    hand_optimised: bool = False,
 ) -> FlexAttnParam:
     if dtype_id not in (FLEX_DTYPE_BF16, FLEX_DTYPE_FP16):
         raise ValueError(f"unsupported dtype_id={dtype_id}")
@@ -193,7 +191,6 @@ def make_flex_attn_param(
         n_kv_tiles=seqlen_kv // block_n,
         pipe_depth=pipe_depth,
         pipe_stages=pipe_stages,
-        hand_optimised=hand_optimised,
     )
 
 
@@ -203,8 +200,6 @@ def make_flex_attn_kernel_name(param: FlexAttnParam) -> str:
     name += f"_w{param.m_waves}x{param.n_waves}g{param.num_groups}"
     name += "_causal" if param.causal else "_dense"
     name += f"_pd{param.pipe_depth}"
-    if param.hand_optimised:
-        name += "_hand"
     if pipeline_stagger_enabled(
         depth=int(param.pipe_depth),
         num_groups=int(param.num_groups),
@@ -220,7 +215,7 @@ def summarize_flex_attn_launch(
     seqlen_q: Optional[int] = None,
     seqlen_kv: Optional[int] = None,
 ) -> str:
-    """Human-readable launch config: ``FlexAttnParam`` plus pd2 hand vs scheduler notes."""
+    """Human-readable launch config: ``FlexAttnParam`` plus pipeline emit notes."""
     stagger = pipeline_stagger_enabled(
         depth=int(param.pipe_depth),
         num_groups=int(param.num_groups),
@@ -235,22 +230,13 @@ def summarize_flex_attn_launch(
         f"  mma={param.mma_m}x{param.mma_n}x{param.mma_k} gqa_group={param.gqa_group} "
         f"n_kv_tiles={param.n_kv_tiles}",
         f"  pipe_depth={param.pipe_depth} pipe_stages={param.pipe_stages} "
-        f"hand_optimised={param.hand_optimised} pipeline_stagger={stagger} causal={param.causal}",
+        f"pipeline_stagger={stagger} causal={param.causal}",
     ]
     if seqlen_q is not None and seqlen_kv is not None:
         rows_per_wg = int(param.block_m) * int(param.num_groups)
         lines.append(f"  seqlen_q={seqlen_q} seqlen_kv={seqlen_kv} rows_per_wg={rows_per_wg}")
-    if param.hand_optimised and int(param.pipe_depth) >= 2:
-        lines.append(
-            "  hand path: emit_pd2_unrolled (same stages as PipelineScheduler, explicit C0..C3/tile)"
-        )
-        lines.append(
-            f"    _LayoutSchedTraits: HEAD_DIM={param.head_dim} "
-            f"LGKMCNT_0_ONLY=0x{LGKMCNT_0_ONLY:X} "
-            f"SCHED_MFMA=0x008 SCHED_VALU=0x002 SCHED_EXP=0x400"
-        )
-    elif int(param.pipe_depth) >= 2:
-        lines.append("  main path: PipelineScheduler (stage wires, emit_prologue/main/epilogue)")
+    if int(param.pipe_depth) >= 2:
+        lines.append("  PipelineScheduler: emit_prologue + emit_main_loop + emit_epilogue")
         lines.append(
             f"    _LayoutSchedTraits: HEAD_DIM={param.head_dim} "
             f"LGKMCNT_0_ONLY=0x{LGKMCNT_0_ONLY:X} "
@@ -368,11 +354,13 @@ def flex_attn_fwd_gfx950_kernel(
 
     # ── LDS: K/V staging (shared across all groups) + per-group P bridge ──────
     kv_tile_elems = block_n * head_dim  # elements in one K or V tile
+    _lds_ring_slots = max(2, int(param.pipe_depth))
+    _lds_kv_elems = _lds_ring_slots * kv_tile_elems
 
     @fx.struct
     class SharedStorage:
-        k_lds: fx.Array[elem_dtype, 2 * kv_tile_elems, 16]
-        v_lds: fx.Array[elem_dtype, 2 * kv_tile_elems, 16]
+        k_lds: fx.Array[elem_dtype, _lds_kv_elems, 16]
+        v_lds: fx.Array[elem_dtype, _lds_kv_elems, 16]
         p: fx.Array[elem_dtype, num_groups * block_m * block_n, 16]
 
     storage = fx.SharedAllocator().allocate(SharedStorage)
@@ -382,12 +370,12 @@ def flex_attn_fwd_gfx950_kernel(
     # K LDS: [block_n, head_dim] row-major (head_dim contiguous).
     sK = [
         fx.make_view(sK_ptr + i * kv_tile_elems, fx.make_layout((block_n, head_dim), (head_dim, 1)))
-        for i in range_constexpr(2)
+        for i in range_constexpr(_lds_ring_slots)
     ]
     # V LDS: [head_dim, block_n] row-major (block_n contiguous) — V is host-transposed.
     sV = [
         fx.make_view(sV_ptr + i * kv_tile_elems, fx.make_layout((head_dim, block_n), (block_n, 1)))
-        for i in range_constexpr(2)
+        for i in range_constexpr(_lds_ring_slots)
     ]
     # Per-group P-bridge region: group g uses [g*block_m*block_n : +block_m*block_n).
     sP = fx.make_view(
@@ -467,10 +455,10 @@ def flex_attn_fwd_gfx950_kernel(
 
     # Copy builders and fragments for double-buffered K/V
     tcA2 = fx.make_tiled_copy_A(uca, tiled_mma_pv).get_slice(local_tid)
-    tcB_lds = [fx.make_tiled_copy_B(uca, tiled_mma_qk).get_slice(local_tid) for _ in range_constexpr(2)]
-    tcB2_lds = [fx.make_tiled_copy_B(uca, tiled_mma_pv).get_slice(local_tid) for _ in range_constexpr(2)]
-    frag_K = [thr_qk.make_fragment_B(sK[i]) for i in range_constexpr(2)]
-    frag_V = [thr_pv.make_fragment_B(sV[i]) for i in range_constexpr(2)]
+    tcB_lds = [fx.make_tiled_copy_B(uca, tiled_mma_qk).get_slice(local_tid) for _ in range_constexpr(_lds_ring_slots)]
+    tcB2_lds = [fx.make_tiled_copy_B(uca, tiled_mma_pv).get_slice(local_tid) for _ in range_constexpr(_lds_ring_slots)]
+    frag_K = [thr_qk.make_fragment_B(sK[i]) for i in range_constexpr(_lds_ring_slots)]
+    frag_V = [thr_pv.make_fragment_B(sV[i]) for i in range_constexpr(_lds_ring_slots)]
 
     # DMA infrastructure
     block_threads = param.block_threads
@@ -493,9 +481,9 @@ def flex_attn_fwd_gfx950_kernel(
     k_div = fx.logical_divide(gK_flat, fx.make_layout(1, 1))
     v_div = fx.logical_divide(gV_flat, fx.make_layout(1, 1))
     sK_i8 = [fx.recast_iter(fx.Int8, sK_ptr) + i * fx.Int32(kv_tile_elems * param.in_data_bytes)
-             for i in range_constexpr(2)]
+             for i in range_constexpr(_lds_ring_slots)]
     sV_i8 = [fx.recast_iter(fx.Int8, sV_ptr) + i * fx.Int32(kv_tile_elems * param.in_data_bytes)
-             for i in range_constexpr(2)]
+             for i in range_constexpr(_lds_ring_slots)]
     _step_bytes = block_threads * _dma_bytes
 
     # P-bridge: write via QK thread's partition of the P LDS tile.
@@ -983,8 +971,8 @@ def flex_attn_fwd_gfx950_kernel(
     infra.traits = _LayoutSchedTraits()
     # Option A (pd2 two-tile-in-flight via scheduler): pipe_depth=2, stagger
     # (num_groups>=2, m_waves>=2), split LoadK/LoadV + prefetch-only LoadV,
-    # loop-carried softmax; default emit = prologue + main_loop + epilogue
-    # (hand_optimised=False). Not flash's j+=2 / 8-cluster loop.
+    # loop-carried softmax; emit = prologue + main_loop + epilogue.
+    # Not flash's j+=2 / 8-cluster loop.
     # Barriers: 4× dualwave sync per KV tile (unchanged); in-cluster WG sync_after
     # removed on BridgeP/Gemm2/SoftmaxStart — LDS handoffs use lgkm wait in load/MFMA.
     # Memory exits use K+V partial vmcnt (_kv_dma_in_flight_bound). ATT (pd2 S=2048):
@@ -1011,12 +999,161 @@ def flex_attn_fwd_gfx950_kernel(
        light_c1_c2_boundary=(_pd_for_sched >= 2),
        inter_tile_readahead=(_pd_for_sched >= 2))
 
-    if const_expr(param.hand_optimised and _pd >= 2):
-        pipeline.emit_pd2_unrolled(infra, shared_regs, n_kv_tiles)
+    # Manual pd2 (n_kv_tiles>=2): emit_tile_memory_cluster on C0/C2; hand C1/C3; sched hooks at sync.
+    # n_kv_tiles==1 uses full emit_tile_stagger_kv (see branch below).
+    if const_expr(param.pipe_depth == 1):
+        for kv in range_constexpr(n_kv_tiles):
+            infra.tile_idx = kv
+            infra.buf_slot = kv % _lds_ring_slots
+            res  = _StageLoadKV().execute(infra, **shared_regs)
+            rocdl.s_waitcnt(0)
+            rocdl.s_barrier()
+            if res is not None:
+                shared_regs.update(res)
+            res = _StageReadKV().execute(infra, **shared_regs)
+            rocdl.s_waitcnt(0)
+            rocdl.s_barrier()
+            if res is not None:
+                shared_regs.update(res)
+            res = _StageGemm1().execute(infra, **shared_regs)
+            rocdl.s_waitcnt(0)
+            rocdl.s_barrier()
+            if res is not None:
+                shared_regs.update(res)
+            res = _StageSoftmax().execute(infra, **shared_regs)
+            rocdl.s_waitcnt(0)
+            rocdl.s_barrier()
+            if res is not None:
+                shared_regs.update(res)
+            res = _StageBridgeP().execute(infra, **shared_regs)
+            rocdl.s_waitcnt(0)
+            rocdl.s_barrier()
+            if res is not None:
+                shared_regs.update(res)
+            res = _StageGemm2().execute(infra, **shared_regs)
+            rocdl.s_waitcnt(0)
+            rocdl.s_barrier()
+            if res is not None:
+                shared_regs.update(res)
+    elif const_expr(param.pipe_depth == 2):
+        # Pd2 manual stagger assumes >= 2 KV tiles; n_kv_tiles==1 uses scheduler tile path.
+        if const_expr(n_kv_tiles == 1):
+            pipeline.emit_prologue(infra, shared_regs)
+            for kv in range_constexpr(n_kv_tiles):
+                pipeline.emit_tile_stagger_kv(kv, n_kv_tiles, infra, shared_regs)
+            pipeline.emit_epilogue(infra, shared_regs)
+        else:
+            gemm2 = _StageGemm2()
+            gemm2_write_p, gemm2_pv = gemm2.decompose(2)[0].fn, gemm2.decompose(2)[1].fn
+            softmax = _StageSoftmax()
+            readahead = pipeline._inter_tile_readahead
+            _pd2_clusters = tuple(pipeline.config.clusters)
+
+            def _merge(regs, res):
+                if res is not None:
+                    regs.update(res)
+
+            pipeline.emit_prologue(infra, shared_regs)
+
+            for kv in range_constexpr(n_kv_tiles):
+                rb = kv % _lds_ring_slots
+
+                # ── C0 MEMORY (partial vmcnt + optional skip ReadK if readahead) ──
+                if readahead:
+                    if const_expr(kv > 0):
+                        pipeline.emit_tile_memory_cluster(
+                            kv, 0, infra, shared_regs, n_kv_tiles,
+                            skip_read_k=True, skip_read_v=False,
+                        )
+                    else:
+                        pipeline.emit_tile_memory_cluster(
+                            kv, 0, infra, shared_regs, n_kv_tiles,
+                            skip_read_k=False, skip_read_v=False,
+                        )
+                else:
+                    pipeline.emit_tile_memory_cluster(
+                        kv, 0, infra, shared_regs, n_kv_tiles,
+                        skip_read_k=False, skip_read_v=False,
+                    )
+                pipeline._dualwave_sync_barrier()
+
+                # ── C1 COMPUTE (manual: insert sched between clusters here) ──
+                infra.tile_idx = kv
+                infra.buf_slot = rb
+                _merge(shared_regs, _StageGemm1().execute(infra, **shared_regs))
+                _merge(shared_regs, softmax._finish(infra, **shared_regs))
+                pipeline._dualwave_sync_barrier()
+                
+
+                # ── C2 MEMORY (ReadV, prefetch LoadV, BridgePWrite, waits) ──
+                pipeline.emit_tile_memory_cluster(
+                    kv, 2, infra, shared_regs, n_kv_tiles,
+                    skip_read_k=False, skip_read_v=False,
+                )
+                pipeline._dualwave_sync_barrier()
+
+                # ── C3 COMPUTE (manual) + ReadK hoist for next tile ──
+                infra.tile_idx = kv
+                infra.buf_slot = rb
+                _merge(shared_regs, softmax._start(infra, **shared_regs))
+                gemm2_write_p(infra, **shared_regs)
+                _merge(shared_regs, gemm2_pv(infra, **shared_regs))
+                if readahead:
+                    if const_expr(kv + 1 < n_kv_tiles):
+                        pipeline._emit_intertile_reads_for_next(
+                            kv + 1, infra, shared_regs, _pd2_clusters,
+                        )
+                pipeline._dualwave_sync_barrier()
+
+            pipeline.emit_epilogue(infra, shared_regs)
     else:
         pipeline.emit_prologue(infra, shared_regs)
         pipeline.emit_main_loop(infra, shared_regs, n_kv_tiles)
         pipeline.emit_epilogue(infra, shared_regs)
+
+
+    #    pipeline.emit_prologue(infra, shared_regs)
+    #    readahead = pipeline._inter_tile_readahead  # True on flex pd2 with inter_tile_readahead
+    #    for kv in range_constexpr(n_kv_tiles):
+    #        # ── C0 MEMORY ──
+    #        if const_expr(readahead):
+    #            if const_expr(kv > 0):
+    #                pipeline.emit_tile_memory_cluster(
+    #                    kv, 0, infra, shared_regs, n_kv_tiles,
+    #                    skip_read_k=True, skip_read_v=False,
+    #                )
+    #            else:
+    #                pipeline.emit_tile_memory_cluster(
+    #                    kv, 0, infra, shared_regs, n_kv_tiles,
+    #                    skip_read_k=False, skip_read_v=False,
+    #                )
+    #        else:
+    #            pipeline.emit_tile_memory_cluster(
+    #                kv, 0, infra, shared_regs, n_kv_tiles,
+    #            )
+    #        # optional: rocdl.sched_group_barrier(...), s_nop(...), etc.
+    #        pipeline.emit_cluster_boundary_sync(0)
+    #
+    #        # ── C1 COMPUTE ──
+    #        pipeline.emit_tile_compute_cluster(
+    #            kv, 1, infra, shared_regs, n_kv_tiles,
+    #        )
+    #        pipeline.emit_cluster_boundary_sync(1)
+    #   
+    #        # ── C2 MEMORY ──
+    #        pipeline.emit_tile_memory_cluster(
+    #            kv, 2, infra, shared_regs, n_kv_tiles,
+    #            skip_read_k=False, skip_read_v=False,
+    #        )
+    #        pipeline.emit_cluster_boundary_sync(2)
+    #
+    #        # ── C3 COMPUTE (+ optional ReadK for kv+1) ──
+    #        pipeline.emit_tile_compute_cluster(
+    #            kv, 3, infra, shared_regs, n_kv_tiles,
+    #            inter_tile_readahead_after=readahead,
+    #        )
+    #        pipeline.emit_cluster_boundary_sync(3) 
+    #    pipeline.emit_epilogue(infra, shared_regs)
 
     #pipeline._dump_config()
     frag_O = shared_regs["frag_O"]
@@ -1100,7 +1237,6 @@ def flydsl_flex_attention_layout(
     num_groups: int = 2,
     pipe_depth: int = 1,
     pipe_stages: int = 1,
-    hand_optimised: bool = False,
     stream: Optional[torch.cuda.Stream] = None,
 ) -> torch.Tensor:
     """Dense flash-attention forward on the layout API (gfx950). Phase 0: no mods.
@@ -1118,15 +1254,11 @@ def flydsl_flex_attention_layout(
       indices per trip.
     - For meaningful steady-state overlap, use ``Skv / block_n >= 2``. A single KV
       tile (``Skv == block_n``) is supported but is mostly prologue/epilogue drain.
-    - Default path: ``hand_optimised=False`` → ``emit_prologue`` +
-      ``emit_main_loop`` + ``emit_epilogue``. Cluster debug dumps list static wiring;
-      ``LoadV`` is prefetch-only during normal C2 execution (V from prior prefetch or
-      prologue for tile 0).
+    - ``emit_prologue`` + ``emit_main_loop`` + ``emit_epilogue``. Cluster debug dumps
+      list static wiring; ``LoadV`` is prefetch-only during normal C2 execution (V from
+      prior prefetch or prologue for tile 0).
 
     ``pipe_depth >= 2`` requires ``num_groups >= 2`` (staggered Strategy A pipeline).
-
-    When ``hand_optimised=True`` and ``pipe_depth >= 2``, emits the same pd2 stage
-    wiring via ``emit_pd2_unrolled`` (explicit C0..C3 per tile).
     """
     arch = get_rocm_arch()
     if not arch.startswith("gfx950"):
@@ -1159,8 +1291,6 @@ def flydsl_flex_attention_layout(
     if out is None:
         out = torch.empty(q.shape, dtype=q.dtype, device=q.device)
 
-    if hand_optimised and pipe_depth < 2:
-        raise ValueError("hand_optimised requires pipe_depth >= 2")
     if pipe_depth >= 2 and num_groups < 2:
         raise ValueError(
             "pipe_depth>=2 requires num_groups>=2 (Strategy A staggered pipeline)"
@@ -1178,7 +1308,6 @@ def flydsl_flex_attention_layout(
         num_groups=num_groups,
         pipe_depth=pipe_depth,
         pipe_stages=pipe_stages,
-        hand_optimised=hand_optimised,
     )
     #if os.environ.get("FLEX_ATTN_PRINT_TRAITS"):
     #    print_flex_attn_launch_summary(param, seqlen_q=Sq, seqlen_kv=Skv)
