@@ -22,8 +22,7 @@ import flydsl.expr as fx  # noqa: E402
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.gemm.gemm_a8w4_mxscale_gfx1250 import launch_gemm_a8w4_mxscale  # noqa: E402
-from kernels.gemm.gemm_a8w8_blockscale_gfx1250 import launch_gemm_a8w8_bsc_col  # noqa: E402
-from kernels.gemm.gemm_a8w8_ptpc_gfx1250 import launch_gemm_a8w8_ptpc  # noqa: E402
+from kernels.gemm.gemm_a8w8_gfx1250 import launch_gemm_a8w8  # noqa: E402
 from tests.kernels.utils import gemm_common_utils  # noqa: E402
 
 if not torch.cuda.is_available():
@@ -275,15 +274,16 @@ def _build_a8w8_ptpc_case(
 
     def make_args(stream):
         return (
-            c_gpu,
+            flyc.from_c_void_p(fx.Uint8, c_gpu.data_ptr()),
             flyc.from_c_void_p(fx.Uint8, a_gpu.data_ptr()),
             flyc.from_c_void_p(fx.Uint8, b_gpu.data_ptr()),
-            sa_gpu,
-            sb_gpu,
+            flyc.from_c_void_p(fx.Uint8, sa_gpu.data_ptr()),
+            flyc.from_c_void_p(fx.Uint8, sb_gpu.data_ptr()),
             M,
             stream,
             N,
             K,
+            0,
             lda,
             ldc,
             tile_m,
@@ -295,6 +295,7 @@ def _build_a8w8_ptpc_case(
             num_buffers,
             cluster_m,
             cluster_n,
+            False,
         )
 
     return c_gpu, make_args, ref, (2e-2, max(5e-2, 2e-2 * peak))
@@ -383,11 +384,11 @@ def _build_a8w8_blockscale_case(
 
     def make_args(stream):
         return (
-            c_gpu,
+            flyc.from_c_void_p(fx.Int8, c_gpu.data_ptr(), assumed_align=16),
             flyc.from_c_void_p(fx.Int8, a_gpu.data_ptr(), assumed_align=16),
             flyc.from_c_void_p(fx.Int8, b_gpu.data_ptr(), assumed_align=16),
-            as_gpu,
-            bs_gpu,
+            flyc.from_c_void_p(fx.Int8, as_gpu.data_ptr(), assumed_align=16),
+            flyc.from_c_void_p(fx.Int8, bs_gpu.data_ptr(), assumed_align=16),
             M,
             stream,
             N,
@@ -404,6 +405,7 @@ def _build_a8w8_blockscale_case(
             num_buffers,
             cluster_m,
             cluster_n,
+            True,
         )
 
     return c_gpu, make_args, ref, (1e-2, 5e-2)
@@ -453,7 +455,7 @@ _MODES = {
     ),
     "ptpc_a8w8": dict(
         build=_build_a8w8_ptpc_case,
-        launch=launch_gemm_a8w8_ptpc,
+        launch=launch_gemm_a8w8,
         supports_out_dtype=True,
         checks=lambda N, K, tile_n, tile_k, num_buffers: [
             (N % tile_n != 0, f"N={N} must be divisible by tile_n={tile_n} (no silent pad)"),
@@ -464,7 +466,7 @@ _MODES = {
     ),
     "blockscale_a8w8": dict(
         build=_build_a8w8_blockscale_case,
-        launch=launch_gemm_a8w8_bsc_col,
+        launch=launch_gemm_a8w8,
         supports_out_dtype=False,
         checks=lambda N, K, tile_n, tile_k, num_buffers: [
             (K % SCALE_BLOCK_128 != 0 or N % SCALE_BLOCK_128 != 0, f"N={N}, K={K} must both be divisible by 128"),

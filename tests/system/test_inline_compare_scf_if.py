@@ -41,7 +41,7 @@ def test_inline_compare_buffer_store_no_liveout(monkeypatch):
         gid = bid * block_dim + tid
 
         if tid < threshold:
-            Out[gid] = arith.constant(1.0, type=fx.T.f32())
+            Out[gid] = arith.constant(1.0, type=fx.T.f32)
 
     @flyc.jit
     def conditionalStore(

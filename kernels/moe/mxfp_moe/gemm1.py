@@ -268,6 +268,8 @@ def _gemm1_body(
                     t.store(lo.shuffle(hi, list(range(8))))
                     a[i][k] = t
             else:
+                # Manual XOR swizzle kept: the crd2idx form (see gemm2) is ISA-identical
+                # but ~5% slower here from scheduling sensitivity in this tuned loop.
                 lds_col = (lane_div_16 * fx.Int32(16) + fx.Int32(k * 64)) ^ mask
                 for i in range_constexpr(kMChunks):
                     lds_row = lane_mod_16 + fx.Int32(i * 16)

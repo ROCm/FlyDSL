@@ -76,8 +76,8 @@ vec_add(A, B, C, 1024)
    - AST rewriting (Python loops/ifs → MLIR scf ops)
    - MLIR module creation with `gpu.container_module`
    - Tracing the jit function body to generate MLIR ops
-   - Calling `vec_add_kernel(...)` emits a `gpu.func` in `gpu.module`
-   - `.launch()` emits `gpu.launch_func`
+   - Calling `vec_add_kernel(...)` captures a pending kernel call
+   - `.launch()` emits the specialized `gpu.func` and `gpu.launch_func`
    - `MlirCompiler.compile()` runs the full pass pipeline
    - `JITCFunction` wraps the resulting ExecutionEngine
 4. Subsequent calls with the same type signature use the cached binary
@@ -331,6 +331,16 @@ mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 32, fx.Float16))          # f16 → f3
 mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 128, fx.Float8E4M3FN))    # fp8 → f32
 # signed int4 with accumulator clamp:
 mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 32, T.i4, T.i32, sign_a=True, sign_b=True, clamp=True))
+```
+
+On RDNA4 (`gfx1200` / `gfx1201`) the same factory builds `MmaOpGFX120X_WMMAType`
+instead. RDNA4 shares the v8 register ABI but keeps the gfx11 instruction
+shapes, so the only valid form is `16x16x16` f16/bf16 → f32 — the 16x16x32 and
+fp8 K=64/128 shapes above are gfx1250-only and are rejected by the atom's
+verifier. See `kernels/gemm/rdna_f16_gemm.py` for a full pipelined example.
+
+```python
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 16, fx.BFloat16, fx.Float32))  # RDNA4
 ```
 
 **MX-scaled WMMA** — `rocdl.WMMAScale(m, n, k, elem_ty_a, elem_ty_b=None,
