@@ -177,14 +177,33 @@ def _unwrap_mfma_operand(v):
     return _arith_ext.unwrap(v)
 
 
+_BLGP_INT_TO_KW = {
+    0: "none",
+    1: "bcast_first_32",
+    2: "bcast_second_32",
+    4: "bcast_first_16",
+    5: "bcast_second_16",
+}
+
+
+def _blgp_attr(val):
+    """Convert an int blgp value to a ROCDL MFMAPermB attribute."""
+    from ..._mlir import ir as _ir
+
+    if isinstance(val, _ir.Attribute):
+        return val
+    kw = _BLGP_INT_TO_KW.get(int(val), "none")
+    return _ir.Attribute.parse(f"#rocdl<mfma_perm_b {kw}>")
+
+
 def _split_mfma_operands(operands):
-    """Split [a, b, c, cbsz, abid, blgp] into (a, b, c) Values + (cbsz, abid, blgp) ints."""
+    """Split [a, b, c, cbsz, abid, blgp] into (a, b, c) Values + (cbsz, abid, blgp) attrs."""
     a = _unwrap_mfma_operand(operands[0])
     b = _unwrap_mfma_operand(operands[1])
     c = _unwrap_mfma_operand(operands[2])
     cbsz = int(operands[3]) if len(operands) > 3 else 0
     abid = int(operands[4]) if len(operands) > 4 else 0
-    blgp = int(operands[5]) if len(operands) > 5 else 0
+    blgp = _blgp_attr(operands[5]) if len(operands) > 5 else _blgp_attr(0)
     return a, b, c, cbsz, abid, blgp
 
 
@@ -269,8 +288,8 @@ def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands):
     a = _unwrap_mfma_operand(operands[0])
     b = _unwrap_mfma_operand(operands[1])
     c = _unwrap_mfma_operand(operands[2])
-    cbsz = int(operands[3]) if len(operands) > 3 else 0
-    blgp = int(operands[4]) if len(operands) > 4 else 0
+    cbsz = operands[3] if len(operands) > 3 else 0
+    blgp = operands[4] if len(operands) > 4 else 0
     opselA = int(operands[5]) if len(operands) > 5 else 0
     scaleA = _unwrap_mfma_operand(operands[6]) if len(operands) > 6 else a
     opselB = int(operands[7]) if len(operands) > 7 else 0
@@ -280,8 +299,8 @@ def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands):
         a,
         b,
         c,
-        cbsz,
-        blgp,
+        _wmma_fmt(cbsz),
+        _wmma_fmt(blgp),
         opselA,
         scaleA,
         opselB,
