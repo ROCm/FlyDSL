@@ -59,13 +59,13 @@ Each carries a fixed width and maps to exactly one MLIR element type:
 | `Float8E4M3FN` | 8 | `f8E4M3FN` |
 | `Float4E2M1FN` | 4 | `f4E2M1FN` |
 
-`.to(dtype)` casts (emitting the right `arith` conversion); `.bitcast(dtype)`
-reinterprets the same bits.
+Converting between these — and reaching the raw `ir.Value` underneath — is its own
+small topic, covered in §4.4.
 
 > **HIP/CK-Tile → FlyDSL.** `fx.Float16` is `ck::half_t` / `_Float16`,
 > `fx.BFloat16` is `ck::bhalf_t`, `fx.Boolean` is the `bool` a predicate returns.
 > The difference: in C++ the type vanishes into the instruction stream; here it is
-> an MLIR type you can print (§4.6).
+> an MLIR type you can print (§4.7).
 
 ## From a dtype string to an element type
 
@@ -83,6 +83,71 @@ gfx95\* / gfx12\*. Let the helper choose rather than hard-coding a variant.
 
 > **HIP/CK-Tile → FlyDSL.** This is the `__hip_fp8_e4m3` vs `__hip_fp8_e4m3_fnuz`
 > selection you already do per-arch by hand; `default_f8_type()` centralizes it.
+
+## Converting between values
+
+There are three distinct conversions you will reach for, and it helps to keep them
+apart — they answer different questions.
+
+**1. Change the *type* of a value: `x.to(dtype)`.** The one method you use daily.
+It is a value-preserving cast that emits the right `arith` conversion (int↔float,
+widen/narrow, sign handling):
+
+```python
+a = fx.Int32(5)
+f = a.to(fx.Float32)          # -> Float32(5.0)   (arith.sitofp)
+h = f.to(fx.Float16)          # -> Float16        (arith.truncf)
+```
+
+Float-to-float narrowing accepts an explicit IEEE rounding mode (integers do not,
+and it requires a run-time value):
+
+```python
+lo = x.to(fx.Float16, rounding_mode=fx.RoundingMode.downward)
+hi = x.to(fx.Float16, rounding_mode=fx.RoundingMode.upward)
+```
+
+`x.to(...)` is also overloaded for the *degenerate* targets: `x.to(int)` /
+`x.to(float)` / `x.to(bool)` materialize a **compile-time** `Numeric` back to a
+host Python value (and raise on a run-time value — there is nothing to read yet),
+and `x.to(ir.Value)` extracts the raw MLIR value (next point).
+
+**2. Reinterpret the *bits*: `x.bitcast(dtype)`.** Same width, no numeric
+conversion — the register contents are relabeled. This is how you move between a
+float and its integer bit pattern (e.g. for a fast-math trick or a bit mask):
+
+```python
+bits = fx.Float32(1.0).bitcast(fx.Int32)   # -> Int32(0x3F800000)
+```
+
+Distinguish it sharply from `to`: `to` preserves the *number*, `bitcast` preserves
+the *bits*.
+
+**3. Reach the raw `ir.Value`: `x.ir_value()`.** A `Numeric` wraps either a Python
+literal or an MLIR `ir.Value` (`is_static()` tells you which). When you call a raw
+MLIR builder directly, you need the unwrapped `ir.Value`; `x.ir_value()` is the
+public accessor (it is exactly `x.to(ir.Value)`, materializing a constant for a
+static value). For arbitrary DSL values — vectors, structs, tuples, not just
+scalars — the module-level `fx.as_ir_value(v)` is the canonical "DSL → `ir.Value`"
+converter, and `fx.as_dsl_value(v, exemplar)` is its inverse ("`ir.Value` → DSL",
+using `exemplar` as the type template). You rarely need these unless you are
+dropping down to hand-written MLIR ops; the typed methods above cover normal
+kernel code.
+
+> **Gotcha — `_to_raw` is deprecated.** You will see `_to_raw(v)` in the codebase
+> (`python/flydsl/expr/utils/arith.py`): it is an *internal* helper that unwraps a
+> value to a raw `ir.Value`, and it is explicitly marked for removal
+> (`python/flydsl/expr/arith.py:20`). Do not reach for it in new code — use
+> `x.ir_value()` for a `Numeric`, or `fx.as_ir_value(x)` for any DSL value. The
+> same "deprecated, will be removed" note applies to the old free functions
+> `unwrap`, `index`, and `index_cast` in that module; prefer the `Numeric` methods
+> (`x.to(fx.Index)`, `x.ir_value()`).
+
+> **HIP/CK-Tile → FlyDSL.** `x.to(dtype)` is `static_cast<T>(x)` /
+> `type_convert<T>(x)`; `x.bitcast(dtype)` is `bit_cast<T>(x)` /
+> `__builtin_bit_cast`; `x.ir_value()` / `fx.as_ir_value(x)` is "hand me the raw
+> SSA operand" — the escape hatch for talking to the MLIR builder directly, with no
+> C++ analogue because in C++ there is no IR object to reach for.
 
 ## Vectors, arrays, and structs
 
