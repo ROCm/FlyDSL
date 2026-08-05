@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-08-05T12:59:20Z",
+ "updated": "2026-08-05T13:28:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31008863651,
+   "pr": 968,
+   "commit": "db84e0804cb5d8971310ab7ba802b8ade3f8ba17",
+   "branch": "pr/enh-known-block-size",
+   "event": "pull_request",
+   "title": "[Feat] Add fx.known_block_size() as constant accessor",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31008863651",
+   "created_at": "2026-08-05T13:09:14Z",
+   "updated_at": "2026-08-05T13:13:02Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-05T13:13:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31008863651/job/92316546475"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-05T13:13:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31008863651/job/92316546584"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-05T13:13:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31008863651/job/92316546594"
+    }
+   ]
+  },
   {
    "run_id": 31005535320,
    "pr": 960,
@@ -10,20 +53,20 @@
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31005535320",
    "created_at": "2026-08-05T12:25:23Z",
-   "updated_at": "2026-08-05T12:28:28Z",
+   "updated_at": "2026-08-05T13:26:59Z",
    "actor": "amd-nprotaso",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-05T12:29:16Z",
-     "completed_at": null,
+     "completed_at": "2026-08-05T13:21:24Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31005535320/job/92305130112"
     },
     {
@@ -38,9 +81,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-05T12:28:28Z",
+     "started_at": "2026-08-05T13:26:58Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31005535320/job/92305130182"
     }
@@ -96,11 +139,11 @@
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
    "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31000639542",
    "created_at": "2026-08-05T11:14:06Z",
-   "updated_at": "2026-08-05T12:30:25Z",
+   "updated_at": "2026-08-05T13:26:51Z",
    "actor": "jli-melchior",
    "jobs": [
     {
@@ -124,10 +167,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-05T12:30:24Z",
-     "completed_at": null,
+     "completed_at": "2026-08-05T13:26:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31000639542/job/92292332078"
     }
    ]
@@ -2003,49 +2046,6 @@
      "started_at": "2026-08-03T13:41:54Z",
      "completed_at": "2026-08-03T14:21:48Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815926565/job/91704099370"
-    }
-   ]
-  },
-  {
-   "run_id": 30815507237,
-   "pr": null,
-   "commit": "05345d29a1bc458ca658134aa34bf0add0aa61f8",
-   "branch": "stochastic-rounding",
-   "event": "pull_request",
-   "title": "Add stochastic rounding and philox RNG under rocdl",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815507237",
-   "created_at": "2026-08-03T12:54:07Z",
-   "updated_at": "2026-08-04T04:29:10Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-04T02:59:11Z",
-     "completed_at": "2026-08-04T04:29:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815507237/job/91879729270"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-04T02:59:20Z",
-     "completed_at": "2026-08-04T03:58:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815507237/job/91879729284"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-04T02:59:20Z",
-     "completed_at": "2026-08-04T03:42:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815507237/job/91879729313"
     }
    ]
   }
