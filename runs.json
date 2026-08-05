@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-05T13:28:46Z",
+ "updated": "2026-08-05T13:44:54Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31011495826,
+   "pr": 968,
+   "commit": "d3441573161d9bdc33d86b40a03816c2fb8b6b18",
+   "branch": "pr/enh-known-block-size",
+   "event": "pull_request",
+   "title": "[Feat] Add fx.known_block_size() as constant accessor",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31011495826",
+   "created_at": "2026-08-05T13:42:21Z",
+   "updated_at": "2026-08-05T13:43:30Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 31008863651,
    "pr": 968,
@@ -10,38 +25,38 @@
    "branch": "pr/enh-known-block-size",
    "event": "pull_request",
    "title": "[Feat] Add fx.known_block_size() as constant accessor",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31008863651",
    "created_at": "2026-08-05T13:09:14Z",
-   "updated_at": "2026-08-05T13:13:02Z",
+   "updated_at": "2026-08-05T13:42:55Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-05T13:13:22Z",
-     "completed_at": null,
+     "completed_at": "2026-08-05T13:42:50Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31008863651/job/92316546475"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-05T13:13:31Z",
-     "completed_at": null,
+     "completed_at": "2026-08-05T13:42:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31008863651/job/92316546584"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-05T13:13:02Z",
-     "completed_at": null,
+     "completed_at": "2026-08-05T13:42:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31008863651/job/92316546594"
     }
    ]
@@ -2003,49 +2018,6 @@
      "started_at": "2026-08-04T04:24:22Z",
      "completed_at": "2026-08-04T04:59:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30822360546/job/91905048656"
-    }
-   ]
-  },
-  {
-   "run_id": 30815926565,
-   "pr": null,
-   "commit": "da930d50eddf70aa7fbbe7c9b6a4e0790b82e9b8",
-   "branch": "new_bias_alibi_sink_attention",
-   "event": "pull_request",
-   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815926565",
-   "created_at": "2026-08-03T13:00:03Z",
-   "updated_at": "2026-08-03T18:23:08Z",
-   "actor": "amd-nprotaso",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-03T15:34:15Z",
-     "completed_at": "2026-08-03T18:23:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815926565/job/91704099266"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-03T13:41:27Z",
-     "completed_at": "2026-08-03T15:26:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815926565/job/91704099303"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-03T13:41:54Z",
-     "completed_at": "2026-08-03T14:21:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30815926565/job/91704099370"
     }
    ]
   }
