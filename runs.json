@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-05T14:50:35Z",
+ "updated": "2026-08-05T15:17:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "main",
    "event": "push",
    "title": "MoE: add a16w mix fused 2-stage kernels (bf16 A \u00d7 mxfp4/int4/bf16 W) \u2026",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31016862619",
    "created_at": "2026-08-05T14:45:58Z",
-   "updated_at": "2026-08-05T14:49:18Z",
+   "updated_at": "2026-08-05T15:15:58Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-05T14:55:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31016862619/job/92345704961"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-05T15:15:57Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31016862619/job/92345704970"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-05T14:55:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31016862619/job/92345704976"
+    }
+   ]
   },
   {
    "run_id": 31016762631,
@@ -70,29 +98,29 @@
    "branch": "pr/enh-known-block-size",
    "event": "pull_request",
    "title": "[Feat] Add fx.known_block_size() as constant accessor",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31011979433",
    "created_at": "2026-08-05T13:48:15Z",
-   "updated_at": "2026-08-05T14:31:42Z",
+   "updated_at": "2026-08-05T15:15:52Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-05T13:52:30Z",
-     "completed_at": null,
+     "completed_at": "2026-08-05T15:13:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31011979433/job/92327186804"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-05T14:31:41Z",
-     "completed_at": null,
+     "completed_at": "2026-08-05T15:15:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31011979433/job/92327186812"
     },
     {
