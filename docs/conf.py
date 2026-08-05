@@ -45,12 +45,6 @@ html_theme_options = {
     "use_issues_button": True,
     "use_download_button": True,
 }
-# html_theme_options = {
-#     "navigation_depth": 4,
-#     "collapse_navigation": False,
-#     "sticky_navigation": True,
-#     "titles_only": False,
-# }
 
 # -- Extension configuration -------------------------------------------------
 
