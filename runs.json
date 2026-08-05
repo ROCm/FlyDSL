@@ -1,22 +1,93 @@
 {
  "schema": 1,
- "updated": "2026-08-05T11:17:17Z",
+ "updated": "2026-08-05T11:47:03Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31000877088,
+   "pr": 960,
+   "commit": "e5e109de3e754dc5c78dfca4bdad3677a857fb3e",
+   "branch": "new_bias_alibi_sink_attention",
+   "event": "pull_request",
+   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31000877088",
+   "created_at": "2026-08-05T11:17:40Z",
+   "updated_at": "2026-08-05T11:24:13Z",
+   "actor": "amd-nprotaso",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-05T11:24:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31000877088/job/92290589728"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-05T11:24:12Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31000877088/job/92290589734"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-05T11:24:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31000877088/job/92290589757"
+    }
+   ]
+  },
   {
    "run_id": 31000639542,
    "pr": 945,
    "commit": "03b1a4f833297609e955b7c2c0ebe236e3945f7c",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
-   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
    "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31000639542",
    "created_at": "2026-08-05T11:14:06Z",
-   "updated_at": "2026-08-05T11:15:15Z",
+   "updated_at": "2026-08-05T11:32:08Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-05T11:32:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31000639542/job/92292332056"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-05T11:32:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31000639542/job/92292332062"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-05T11:32:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31000639542/job/92292332078"
+    }
+   ]
   },
   {
    "run_id": 30996937633,
@@ -24,7 +95,7 @@
    "commit": "5d7f145a1ef7adc838bb0bca6964925e1856f767",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
-   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30996937633",
@@ -67,7 +138,7 @@
    "commit": "318879bf0e0afe0978cb3509c1003304ed6fce12",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
-   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30991529983",
@@ -153,7 +224,7 @@
    "commit": "9bb26a4766a327e8b806027ab7d4b8b94779b4a3",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
-   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30985188421",
@@ -196,7 +267,7 @@
    "commit": "58cc8b29b4a3ccfcfedc82bceaa1e3ca3e7c8c30",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
-   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30985117407",
@@ -211,7 +282,7 @@
    "commit": "2a581f2ff4b55f9b3acc2d0729a429aaafe488b3",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
-   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30984958913",
@@ -315,11 +386,11 @@
    "branch": "worktree-mxfp-moe-a16w4",
    "event": "pull_request",
    "title": "MoE: add a16w mix fused 2-stage kernels (bf16 A \u00d7 mxfp4/int4/bf16 W)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30982906965",
    "created_at": "2026-08-05T06:53:07Z",
-   "updated_at": "2026-08-05T10:33:11Z",
+   "updated_at": "2026-08-05T11:44:42Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -334,10 +405,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-05T10:33:10Z",
-     "completed_at": null,
+     "completed_at": "2026-08-05T11:44:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30982906965/job/92241022710"
     },
     {
@@ -400,7 +471,7 @@
    "commit": "fc5250c09d54f158309436f2c3d5535402d2979f",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
-   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30979131790",
@@ -443,7 +514,7 @@
    "commit": "0694bb63fcca3405c642aff2ace46507d1ea1c07",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
-   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30978688277",
@@ -458,7 +529,7 @@
    "commit": "7de78cbb0904158d1f71789d83e21a9d07073b93",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
-   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30974784739",
@@ -501,7 +572,7 @@
    "commit": "1a735294c774e41783dc5894e128cb5f08fd7323",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
-   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30967941835",
@@ -1106,7 +1177,7 @@
   },
   {
    "run_id": 30896317249,
-   "pr": 960,
+   "pr": null,
    "commit": "15e4078092ab264575be33a1f24761849cbf2741",
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
@@ -1153,7 +1224,7 @@
    "commit": "b0ee23e6bde31957234861126bcb76516d7422db",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
-   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30893337206",
@@ -1416,7 +1487,7 @@
    "commit": "d9c1d166b52c7b747d9eaf50abd9371195d5c772",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
-   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30885456197",
@@ -1459,7 +1530,7 @@
    "commit": "9cab8c853eaf1cfcd46306528a2fac184b0f8748",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
-   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30884612191",
@@ -1474,7 +1545,7 @@
    "commit": "e8220619a0665764479fb8404c6b2ef720c702e4",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
-   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30884154097",
@@ -1489,7 +1560,7 @@
    "commit": "45d44c00deee94746e37004cdae9439f6a4fa470",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
-   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30883984241",
@@ -1975,67 +2046,6 @@
      "started_at": "2026-08-03T09:38:17Z",
      "completed_at": "2026-08-03T10:52:03Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30796923931/job/91649171559"
-    }
-   ]
-  },
-  {
-   "run_id": 30795426916,
-   "pr": 930,
-   "commit": "34943386cf10260d6083567e052b764803e4a0ab",
-   "branch": "dsl-ify-arith",
-   "event": "pull_request",
-   "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30795426916",
-   "created_at": "2026-08-03T07:55:37Z",
-   "updated_at": "2026-08-03T13:53:27Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-03T09:12:42Z",
-     "completed_at": "2026-08-03T10:50:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30795426916/job/91643244900"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-03T09:12:12Z",
-     "completed_at": "2026-08-03T11:23:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30795426916/job/91643244909"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-03T11:33:36Z",
-     "completed_at": "2026-08-03T12:58:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30795426916/job/91643244915"
-    },
-    {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-03T12:58:33Z",
-     "completed_at": "2026-08-03T13:53:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30795426916/job/91693088491"
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-03T12:58:34Z",
-     "completed_at": "2026-08-03T13:22:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30795426916/job/91693088504"
     }
    ]
   }
