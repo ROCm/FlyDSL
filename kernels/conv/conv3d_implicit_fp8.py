@@ -456,7 +456,13 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
                                     n_idx = row // dhw
                                     sp = row % dhw
                                     off_ncdhw = n_idx * (k * dhw) + col * dhw + sp
-                                buffer_ops.buffer_store(out.to(fx.BFloat16), y_rsrc, off_ncdhw, mask=col_valid)
+                                # Padded M rows (npq..grid_m*TILE_M) must not store: with the
+                                # n==1 layout col*dhw+row they alias real elements of a later
+                                # column and race legitimate stores from another block.
+                                row_valid = row < fx.Index(npq)
+                                buffer_ops.buffer_store(
+                                    out.to(fx.BFloat16), y_rsrc, off_ncdhw, mask=col_valid & row_valid
+                                )
 
         store_half_pair(acc00, acc01, 0)
         store_half_pair(acc10, acc11, 1)
