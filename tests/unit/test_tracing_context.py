@@ -30,9 +30,16 @@ def test_inner_scope_shadows_and_restores():
         assert tracing_option("fastmath") == "fast"
 
 
-def test_none_option_does_not_shadow_an_outer_value():
+def test_explicit_none_shadows_an_outer_value():
     with tracing_context(fastmath="fast"):
         with tracing_context(_traced, fastmath=None):
+            assert tracing_option("fastmath") is None
+        assert tracing_option("fastmath") == "fast"
+
+
+def test_unset_key_inherits_the_outer_value():
+    with tracing_context(fastmath="fast"):
+        with tracing_context(_traced, unroll=4):
             assert tracing_option("fastmath") == "fast"
 
 

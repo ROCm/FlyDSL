@@ -61,14 +61,14 @@ def tracing_context(func=None, **options):
     *func*, when given, marks the call-site boundary used by
     ``capture_user_location``; a frame entered without one inherits the
     enclosing boundary.  Keyword *options* become ambient settings readable
-    with ``tracing_option(key)``; an option whose value is ``None`` is
-    dropped, so an enclosing setting for that key stays visible.
+    with ``tracing_option(key)``.  Every key passed is set, ``None`` included
+    -- an explicit ``None`` shadows an enclosing setting.
     """
     stack = _stack()
     boundary = getattr(func, "__code__", None)
     if boundary is None and stack:
         boundary = stack[-1][0]
-    stack.append((boundary, {k: v for k, v in options.items() if v is not None}))
+    stack.append((boundary, options))
     try:
         yield
     finally:
