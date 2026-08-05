@@ -1,4 +1,4 @@
-Pre-built Kernels
+Pre-built kernels
 =================
 
 FlyDSL ships with a collection of pre-built GPU kernels in the ``kernels/``
@@ -6,7 +6,7 @@ directory, organized into subpackages (``gemm/``, ``norm/``, ``attention/``,
 ``moe/``, ``mma/``, ``common/``, ``comm/``, ``conv/``). These serve as both
 ready-to-use components and reference implementations for kernel development.
 
-GEMM Kernels
+GEMM kernels
 -------------
 
 - ``kernels.gemm.preshuffle_gemm`` -- MFMA-based GEMM with LDS pipeline and pre-shuffled weights (FP8, INT8, FP16, BF16)
@@ -14,7 +14,7 @@ GEMM Kernels
 - ``kernels.gemm.fp4_gemm_4wave`` -- 4-wave FP4 GEMM (gfx950)
 - ``kernels.gemm.hgemm_splitk`` -- FP16 split-K GEMM
 
-MoE (Mixture-of-Experts) Kernels
+MoE (Mixture-of-Experts) kernels
 ----------------------------------
 
 - ``kernels.moe.moe_gemm_2stage`` -- MoE GEMM with 2-stage pipeline (stage1 + stage2). Also
@@ -22,7 +22,7 @@ MoE (Mixture-of-Experts) Kernels
   compiled via ``compile_moe_reduction()``.
 - ``kernels.moe.mxfp_moe`` -- Fused a4w4 / a8w4 MoE 2-stage GEMM (device-side fp4 re-quant)
 
-Paged Attention
+Paged attention
 ----------------
 
 - ``kernels.attention.pa_decode_fp8`` -- Paged attention decode kernel with FP8 support

@@ -1,10 +1,10 @@
-Quick Start
+Quick start
 ===========
 
 This guide walks through writing, compiling, and running a simple GPU kernel
 with FlyDSL.
 
-A Minimal Vector Add Kernel
+A minimal vector add kernel
 ----------------------------
 
 The following example demonstrates the core FlyDSL workflow: define a kernel
@@ -79,7 +79,7 @@ with ``@flyc.kernel``, use layout algebra to partition data, then launch with
 See ``examples/01-vectorAdd.py`` for the complete implementation with
 CUDA Graph capture support.
 
-Key Concepts
+Key concepts
 ------------
 
 1. **@flyc.kernel**: Decorator that compiles a Python function into GPU IR.
@@ -92,11 +92,11 @@ Key Concepts
 6. **Automatic caching**: Compiled kernels are cached to disk
    (``~/.flydsl/cache/``) and reused on subsequent calls.
 
-Compilation Pipeline
+Compilation pipeline
 --------------------
 
-On first call, ``@flyc.jit`` traces the Python function into an MLIR module,
-then compiles it through the Fly MLIR pipeline. The pass list is built by
+On first call, ``@flyc.jit`` traces the Python function into an MLIR module
+and compiles it through the Fly MLIR pipeline. The pass list is built by
 ``RocmBackend._pipeline_parts()`` in three stages; see
 :doc:`architecture_guide` §3 for the per-pass table.
 
@@ -131,12 +131,12 @@ then compiles it through the Fly MLIR pipeline. The pass list is built by
            ▼
       Cached Compiled Artifact (ExecutionEngine)
 
-AOT Pre-compilation
+AOT pre-compilation
 --------------------
 
 FlyDSL supports ahead-of-time (AOT) compilation of kernels for deployment
 without JIT overhead. The ``tests/python/examples/aot_example.py`` script
-demonstrates pre-compiling preshuffle GEMM kernels into a cache directory:
+shows how to pre-compile preshuffle GEMM kernels into a cache directory:
 
 .. code-block:: bash
 
@@ -149,10 +149,10 @@ demonstrates pre-compiling preshuffle GEMM kernels into a cache directory:
    # Custom cache directory
    FLYDSL_RUNTIME_CACHE_DIR=/my/cache python tests/python/examples/aot_example.py
 
-At runtime, compiled kernels are loaded from the cache automatically when
+At runtime, FlyDSL loads compiled kernels from the cache automatically when
 ``FLYDSL_RUNTIME_CACHE_DIR`` is set.
 
-Next Steps
+Next steps
 ----------
 
 - :doc:`kernel_authoring_guide` -- detailed guide to writing GPU kernels

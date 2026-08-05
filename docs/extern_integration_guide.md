@@ -1,6 +1,6 @@
 # External bitcode integration (`ffi` + `link_extern`)
 
-This document describes how a framework (e.g. mori's shmem device API) plugs
+This document describes how a framework (for example, mori's shmem device API) plugs
 its pre-compiled LLVM bitcode into FlyDSL's JIT pipeline and participates in
 post-load device-side initialisation, **without** FlyDSL's compiler ever
 importing the framework.
@@ -12,7 +12,7 @@ contract, and user-level `@flyc.kernel` examples — see
 ## 1. The expression-level `ffi` surface
 
 `flydsl.expr.extern.ffi` emits an `llvm.call` to an external C symbol inside a
-`@flyc.kernel` body.  It is intentionally link-agnostic and mirrors a normal
+`@flyc.kernel` body. It is intentionally link-agnostic and mirrors a normal
 expression builder: declare the external prototype if needed, then emit the
 call at the current insertion point.
 
@@ -50,7 +50,7 @@ The wrapper registers:
   invoked once per loaded `hipModule_t`.
 
 `flydsl.expr.extern.ExternFunction` is the same pure FFI callable exposed as
-`ffi`.  Integrations that need external bitcode or post-load initialization
+`ffi`. Integrations that need external bitcode or post-load initialization
 should explicitly wrap it with `link_extern(...)`.
 
 ## 3. How the JIT pipeline picks things up
@@ -64,19 +64,19 @@ to `MlirCompiler.compile(..., link_libs=...)` and
 `CompiledArtifact(post_load_processors=...)` respectively.
 
 The compiler path **never imports the framework** — everything flows through
-`CompilationContext`.  Adding a new framework (Triton-on-FlyDSL, a custom
+`CompilationContext`. Adding a new framework (Triton-on-FlyDSL, a custom
 in-house DSL, …) only requires building matching `ffi + link_extern` wrappers.
 
 ## 4. The post-load module capture contract
 
 `module_init_fn` typically writes runtime pointers into device-side globals
-(e.g. mori's `globalGpuStates`) that the framework's bitcode relies on.
+(for example, mori's `globalGpuStates`) that the framework's bitcode relies on.
 Triggering it at exactly the right moment requires cooperation with the
-runtime.  FlyDSL installs a custom GPU offloading handler,
-`#fly.explicit_module`, on JIT GPU modules.  During LLVM translation this
+runtime. FlyDSL installs a custom GPU offloading handler,
+`#fly.explicit_module`, on JIT GPU modules. During LLVM translation this
 handler emits lookup-able `flydsl_gpu_module_init` and
 `flydsl_gpu_module_load_to_device` functions instead of relying on a global
-constructor.  The Python executor calls those functions explicitly and owns the
+constructor. The Python executor calls those functions explicitly and owns the
 returned `hipModule_t` handles.
 
 The short version:
@@ -90,37 +90,37 @@ On the Python side,
 [`jit_executor.py::CompiledArtifact._ensure_engine`](../python/flydsl/compiler/jit_executor.py)
 enforces a **post-condition**: if any `post_load_processors` were registered
 but explicit module loading produced zero observed module loads, it raises
-`RuntimeError` immediately.  This turns a silent contract violation into a
+`RuntimeError` immediately. This turns a silent contract violation into a
 loud, top-of-stack failure instead of letting the first kernel launch fault on
 uninitialised device globals.
 
 ## 5. Pickling / on-disk cache contract
 
-`CompiledArtifact` is pickleable for on-disk JIT caching.  The
+`CompiledArtifact` is pickleable for on-disk JIT caching. The
 serialisation rules are:
 
 * `ffi` / linked extern instances are **never** pickled — they are module-level
   callables reachable via normal `import`/attribute access.
 * `post_load_processors` callables are serialised as
-  `"module:qualname"` strings and re-imported on cache hit.  Lambdas,
+  `"module:qualname"` strings and re-imported on cache hit. Lambdas,
   `functools.partial`, and bound methods cannot be represented and will
   cause `__getstate__` to raise `pickle.PicklingError` **at cache-write
   time**.
-* Extern-linked artifacts are not written to the on-disk cache.  Their external
+* Extern-linked artifacts are not written to the on-disk cache. Their external
   bitcode is a compilation input, so the in-memory cache is used for
   same-process reuse while avoiding stale fatbins across processes.
 
-Silent drops are intentionally *not* allowed: a cached kernel that round-tripped
+Silent drops are intentionally not allowed: a cached kernel that round-tripped
 without its initialiser would later GPU-fault on uninitialised device globals,
-with a stack that gives no hint about the missing processor.  Failing loudly at
+with a stack that gives no hint about the missing processor. Failing loudly at
 pickle time shifts that diagnostic from production into the development cycle.
 
-If a callable cannot legitimately be hoisted to top-level (e.g. an instance
-method closing over runtime state), the caller should either:
+If you cannot legitimately hoist a callable to top-level (for example, an instance
+method closing over runtime state), you should either:
 
-1. wrap it in a thin top-level function that re-acquires the state on each
+1. Wrap it in a thin top-level function that re-acquires the state on each
    call, or
-2. suppress the disk-cache write path for that specific artifact and rely on
+2. Suppress the disk-cache write path for that specific artifact and rely on
    the in-memory cache only.
 
 ## 6. Related files
