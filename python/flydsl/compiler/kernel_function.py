@@ -10,7 +10,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from .._mlir import ir
 from .._mlir.dialects import arith, gpu
 from ..expr.meta import capture_user_location, file_location, tracing_context
-from ..expr.typing import Constexpr
+from ..expr.numeric import Index, Integer
+from ..expr.typing import Constexpr, as_ir_value
 from ..expr.utils.arith import fastmath as fastmath_ctx
 from .ast_rewriter import ASTRewriter
 from .diagnostics import install_excepthook, warn_annotation_value_mismatch, warn_invalid_annotations
@@ -77,10 +78,12 @@ def _validate_known_block_size(value):
         raise ValueError(f"known_block_size must have exactly 3 elements (x, y, z), got {len(elems)}")
 
     for i, v in enumerate(elems):
+        v = as_ir_value(v, keep_static=True)
         if not isinstance(v, int):
             raise TypeError(f"known_block_size[{i}] must be an int, got {type(v).__name__}")
         if v <= 0:
             raise ValueError(f"known_block_size[{i}] must be positive, got {v}")
+        elems[i] = v
 
     return elems
 
@@ -133,31 +136,12 @@ def func_def_location(func: Callable, context=None) -> ir.Location:
 # Launch Configuration
 # =============================================================================
 
-DimValueType = Union[int, ir.Value]
-DimType = Union[int, ir.Value, Tuple[DimValueType, ...], List[DimValueType]]
-
-
-def _unwrap_to_raw(val):
-    if isinstance(val, ir.Value):
-        return val
-    if hasattr(val, "__extract_to_ir_values__"):
-        values = val.__extract_to_ir_values__()
-        if len(values) == 1:
-            return values[0]
-    return val
-
-
-def _to_index_value(val: DimValueType) -> ir.Value:
-    val = _unwrap_to_raw(val)
-    if isinstance(val, ir.Value):
-        if val.type == ir.IndexType.get():
-            return val
-        return arith.index_cast(ir.IndexType.get(), val)
-    return arith.constant(ir.IndexType.get(), val)
+DimValueType = Union[int, ir.Value, Integer]
+DimType = Union[int, ir.Value, Integer, Tuple[DimValueType, ...], List[DimValueType]]
 
 
 def _normalize_dim(dim: DimType) -> Tuple[DimValueType, DimValueType, DimValueType]:
-    if isinstance(dim, (int, ir.Value)):
+    if isinstance(dim, (int, ir.Value, Integer)):
         return (dim, 1, 1)
     elif len(dim) == 1:
         return (dim[0], 1, 1)
@@ -218,6 +202,7 @@ class CompilationContext:
     def __init__(self):
         self.gpu_module_op = None
         self.kernel_counter = 0
+        self._kernel_names: set[str] = set()
         self.stream_arg = None
         self.link_libs: list = []
         self._link_libs_seen: set = set()
@@ -252,6 +237,16 @@ class CompilationContext:
         self.kernel_counter += 1
         return kid
 
+    def unique_kernel_name(self, base_name: str, kernel_id: int) -> str:
+        """Reserve a kernel symbol, suffixing repeated explicit names."""
+        name = base_name
+        suffix = kernel_id
+        while name in self._kernel_names:
+            name = f"{base_name}_{suffix}"
+            suffix += 1
+        self._kernel_names.add(name)
+        return name
+
 
 def effective_fastmath_hint(hints: dict):
     """Resolve the ambient fastmath hint for traced JIT/kernel bodies."""
@@ -268,48 +263,58 @@ def effective_fastmath_hint(hints: dict):
 
 
 class KernelLauncher:
-    """Holds kernel reference and generates gpu.launch_func on launch().
+    """Holds a pending kernel call and materializes it on launch().
 
-    Created by calling a @kernel decorated function. Call .launch()
-    to emit the actual launch operation.
+    Created by calling a @kernel decorated function. Call .launch() to emit
+    both the specialized gpu.func and its gpu.launch_func operation.
     """
 
     def __init__(
         self,
-        kernel_name: str,
-        kernel_args: Tuple,
-        call_location: Optional[ir.Location] = None,
-        known_block_size: Optional[List[int]] = None,
-        smem_bytes: Optional[int] = None,
+        kernel_function: "KernelFunction",
+        ctx: CompilationContext,
+        args: Tuple,
+        kwargs: Dict[str, Any],
+        bound_self: Any = None,
+        unit_attrs: Optional[List[str]] = None,
+        value_attrs: Optional[Dict[str, Any]] = None,
     ):
-        self._kernel_name = kernel_name
-        self._kernel_args = kernel_args
-        self._call_location = call_location
-        self._known_block_size = known_block_size
-        self._smem_bytes = smem_bytes
+        self._kernel_function = kernel_function
+        self._ctx = ctx
+        self._args = args
+        self._kwargs = kwargs
+        self._bound_self = bound_self
+        self._unit_attrs = list(unit_attrs) if unit_attrs is not None else None
+        self._value_attrs = dict(value_attrs) if value_attrs is not None else None
+        self._emitted_kernels = {}
 
-    def _check_block_vs_known(self, block_dims: Tuple) -> None:
-        """Raise when statically-known *block* dims are invalid for AMDGPU."""
-        if self._known_block_size is None:
-            if all(isinstance(v, int) for v in block_dims):
-                total = block_dims[0] * block_dims[1] * block_dims[2]
-                if total > 256:
-                    raise ValueError(
-                        f"launch block size {block_dims[0]}x{block_dims[1]}x{block_dims[2]}"
-                        f" = {total} threads exceeds the AMDGPU default "
-                        f"max_flat_workgroup_size of 256. "
-                        f"Add known_block_size=[{block_dims[0]}, {block_dims[1]}, {block_dims[2]}] "
-                        f"to @kernel for kernel '{self._kernel_name}'."
-                    )
+    def _kernel_display_name(self) -> str:
+        return self._kernel_function._name or self._kernel_function._func.__name__
+
+    def _resolve_known_block_size(self, block_dims: Tuple) -> Optional[List[int]]:
+        """Return an explicit block size or infer one from static launch dims."""
+        explicit = self._kernel_function._known_block_size
+        if explicit is not None:
+            return _validate_known_block_size(explicit)
+
+        raw_dims = tuple(as_ir_value(value, keep_static=True) for value in block_dims)
+        if all(isinstance(value, int) for value in raw_dims):
+            return _validate_known_block_size(raw_dims)
+        return None
+
+    def _check_block_vs_known(self, block_dims: Tuple, known_block_size: Optional[List[int]]) -> None:
+        """Raise when static launch dimensions contradict an exact block size."""
+        if known_block_size is None:
             return
 
         labels = ("x", "y", "z")
-        for i, (launch_val, declared) in enumerate(zip(block_dims, self._known_block_size)):
+        for i, (launch_val, declared) in enumerate(zip(block_dims, known_block_size)):
+            launch_val = as_ir_value(launch_val, keep_static=True)
             if isinstance(launch_val, int) and launch_val != declared:
                 raise ValueError(
                     f"launch block {labels[i]}={launch_val} differs from "
                     f"known_block_size {labels[i]}={declared} declared on "
-                    f"kernel '{self._kernel_name}'. "
+                    f"kernel '{self._kernel_display_name()}'. "
                     f"This produces an internally-inconsistent IR and is "
                     f"undefined behavior on AMDGPU."
                 )
@@ -328,8 +333,12 @@ class KernelLauncher:
         """Emit gpu.launch_func operation with the given configuration.
 
         Args:
-            grid: Grid dimensions (x, y, z). Can be int, ir.Value, tuple, or list.
-            block: Block dimensions (x, y, z). Can be int, ir.Value, tuple, or list.
+            grid: Grid dimensions (x, y, z). Can be int, integer Numeric,
+                ir.Value, tuple, or list.
+            block: Block dimensions (x, y, z). Can be int, integer Numeric,
+                ir.Value, tuple, or list. Static integer dimensions
+                automatically specialize the emitted kernel's
+                ``known_block_size``.
             smem: Dynamic shared memory size in bytes. ``None`` (default)
                 auto-infers from ``SharedAllocator.allocated_bytes`` when one
                 was used inside the kernel body. Explicit values are allowed
@@ -340,42 +349,56 @@ class KernelLauncher:
             unit_attrs: Unit attributes to attach to gpu.launch_func.
             value_attrs: Value attributes to attach to gpu.launch_func.
         """
-        if smem is None:
-            smem = self._smem_bytes if self._smem_bytes is not None else 0
-        elif self._smem_bytes is not None:
-            smem_int = None
-            try:
-                smem_int = int(_unwrap_to_raw(smem))
-            except (TypeError, ValueError):
-                pass
-            if smem_int is not None and smem_int < self._smem_bytes:
-                raise ValueError(
-                    f"launch smem={smem_int} is less than the "
-                    f"{self._smem_bytes} bytes allocated by SharedAllocator "
-                    f"in kernel '{self._kernel_name}'"
-                )
-
         launch_loc = capture_user_location()
-
-        kernel_operands = []
-        for arg in self._kernel_args:
-            kernel_operands.extend(extract_to_ir_values(arg))
-
         grid_dims = _normalize_dim(grid)
         block_dims = _normalize_dim(block)
+        known_block_size = self._resolve_known_block_size(block_dims)
+        self._check_block_vs_known(block_dims, known_block_size)
 
-        self._check_block_vs_known(block_dims)
+        specialization_key = tuple(known_block_size) if known_block_size is not None else None
+        emitted_kernel = self._emitted_kernels.get(specialization_key)
+        if emitted_kernel is None:
+            kernel_name, kernel_args, gpu_func_op, smem_bytes = self._kernel_function._emit_kernel(
+                self._ctx,
+                self._args,
+                self._kwargs,
+                bound_self=self._bound_self,
+                known_block_size=known_block_size,
+            )
+            _attach_attrs(gpu_func_op, self._unit_attrs, self._value_attrs)
+            emitted_kernel = (kernel_name, kernel_args, smem_bytes)
+            self._emitted_kernels[specialization_key] = emitted_kernel
+        else:
+            kernel_name, kernel_args, smem_bytes = emitted_kernel
+
+        if smem is None:
+            smem = smem_bytes if smem_bytes is not None else 0
+        elif smem_bytes is not None:
+            smem_int = None
+            try:
+                smem_int = int(as_ir_value(smem, keep_static=True))
+            except (TypeError, ValueError):
+                pass
+            if smem_int is not None and smem_int < smem_bytes:
+                raise ValueError(
+                    f"launch smem={smem_int} is less than the {smem_bytes} bytes "
+                    f"allocated by SharedAllocator in kernel '{kernel_name}'"
+                )
+
+        kernel_operands = []
+        for arg in kernel_args:
+            kernel_operands.extend(extract_to_ir_values(arg))
 
         with launch_loc:
-            grid_x = _to_index_value(grid_dims[0])
-            grid_y = _to_index_value(grid_dims[1])
-            grid_z = _to_index_value(grid_dims[2])
-            block_x = _to_index_value(block_dims[0])
-            block_y = _to_index_value(block_dims[1])
-            block_z = _to_index_value(block_dims[2])
+            grid_x = Index(grid_dims[0]).ir_value()
+            grid_y = Index(grid_dims[1]).ir_value()
+            grid_z = Index(grid_dims[2]).ir_value()
+            block_x = Index(block_dims[0]).ir_value()
+            block_y = Index(block_dims[1]).ir_value()
+            block_z = Index(block_dims[2]).ir_value()
 
             smem_val = None
-            smem_raw = _unwrap_to_raw(smem)
+            smem_raw = as_ir_value(smem, keep_static=True)
             if isinstance(smem_raw, ir.Value):
                 smem_val = smem_raw
             else:
@@ -388,7 +411,7 @@ class KernelLauncher:
                     smem_val = arith.constant(ir.IntegerType.get_signless(32), smem_py)
 
             if stream is not None:
-                stream_val = _unwrap_to_raw(stream)
+                stream_val = as_ir_value(stream, keep_static=True)
             else:
                 ctx = CompilationContext.get_current()
                 stream_val = ctx.stream_arg if ctx and ctx.stream_arg else None
@@ -399,9 +422,9 @@ class KernelLauncher:
             if cluster is not None:
                 cx, cy, cz = _normalize_dim(cluster)
                 cluster_size = (
-                    _to_index_value(cx),
-                    _to_index_value(cy),
-                    _to_index_value(cz),
+                    Index(cx).ir_value(),
+                    Index(cy).ir_value(),
+                    Index(cz).ir_value(),
                 )
 
             launch_kwargs = {
@@ -414,7 +437,7 @@ class KernelLauncher:
                 launch_kwargs["cluster_size"] = cluster_size
 
             launch_op = gpu.LaunchFuncOp(
-                ["kernels", self._kernel_name],
+                ["kernels", kernel_name],
                 (grid_x, grid_y, grid_z),
                 (block_x, block_y, block_z),
                 kernel_operands,
@@ -431,13 +454,14 @@ class KernelLauncher:
 class KernelFunction:
     """Wrapper for @kernel decorated functions.
 
-    When called, emits a gpu.func and returns a KernelLauncher for
-    configuring and launching the kernel.
+    Calling it captures the kernel arguments and returns a KernelLauncher.
+    The launcher emits a specialized gpu.func together with its launch op once
+    the launch configuration is known.
     """
 
     _current: Optional["KernelFunction"] = None
 
-    def __init__(self, func: Callable, some_args=None, name: Optional[str] = None, known_block_size=None):
+    def __init__(self, func: Callable, name: Optional[str] = None, known_block_size=None):
         install_excepthook()
         # ASTRewriter.transform mutates `func.__code__` in place.  To preserve
         # the *pre-rewrite* code object (whose co_names / co_freevars still
@@ -459,7 +483,6 @@ class KernelFunction:
         self._original_func.__qualname__ = func.__qualname__
         self._original_func.__module__ = func.__module__
         self._func = ASTRewriter.transform(func)
-        self._some_args = some_args
         self._name = name
         self._known_block_size = _validate_known_block_size(known_block_size)
         self._kernel_name: Optional[str] = None
@@ -494,7 +517,14 @@ class KernelFunction:
             return self
         return partial(self.__call__, obj)
 
-    def _emit_kernel(self, ctx: CompilationContext, args: Tuple, kwargs: Dict, bound_self: Any = None):
+    def _emit_kernel(
+        self,
+        ctx: CompilationContext,
+        args: Tuple,
+        kwargs: Dict,
+        bound_self: Any = None,
+        known_block_size: Optional[List[int]] = None,
+    ):
         """Emit gpu.func for this kernel into the GPU module."""
         sig = self._sig
         bound = sig.bind(*args, **kwargs)
@@ -527,9 +557,9 @@ class KernelFunction:
 
         kernel_id = ctx.next_kernel_id()
         if self._name is not None:
-            self._kernel_name = self._name
+            self._kernel_name = ctx.unique_kernel_name(self._name, kernel_id)
         else:
-            self._kernel_name = f"{self._func.__name__}_{kernel_id}"
+            self._kernel_name = ctx.unique_kernel_name(f"{self._func.__name__}_{kernel_id}", kernel_id)
 
         kernel_loc = func_def_location(self._func)
 
@@ -542,7 +572,7 @@ class KernelFunction:
                     gpu_func = create_gpu_func(
                         self._kernel_name,
                         ir.TypeAttr.get(func_type),
-                        known_block_size=self._known_block_size,
+                        known_block_size=known_block_size,
                     )
                 gpu_func.regions[0].blocks.append(*kernel_arg_types)
                 entry_block = gpu_func.regions[0].blocks[0]
@@ -578,7 +608,7 @@ class KernelFunction:
         else:
             smem_bytes = None
 
-        return tuple(param_values), gpu_func, smem_bytes
+        return self._kernel_name, tuple(param_values), gpu_func, smem_bytes
 
     def __call__(
         self,
@@ -591,19 +621,21 @@ class KernelFunction:
         if ctx is None:
             raise RuntimeError("@kernel can only be called inside @jit function")
 
-        call_loc = capture_user_location()
-
         bound_self = None
         if self._has_self_param:
             if not args:
                 raise TypeError(f"{self._func.__name__}() missing 'self' argument")
             bound_self, args = args[0], args[1:]
 
-        kernel_args, gpu_func_op, smem_bytes = self._emit_kernel(ctx, args, kwargs, bound_self=bound_self)
-
-        _attach_attrs(gpu_func_op, unit_attrs, value_attrs)
-
-        return KernelLauncher(self._kernel_name, kernel_args, call_loc, self._known_block_size, smem_bytes)
+        return KernelLauncher(
+            self,
+            ctx,
+            args,
+            kwargs,
+            bound_self=bound_self,
+            unit_attrs=unit_attrs,
+            value_attrs=value_attrs,
+        )
 
 
 # =============================================================================
@@ -614,7 +646,6 @@ class KernelFunction:
 def kernel(
     func: Optional[Callable] = None,
     *,
-    some_args=None,
     name: Optional[str] = None,
     known_block_size=None,
 ) -> KernelFunction:
@@ -631,27 +662,29 @@ def kernel(
         def my_kernel(a: Tensor):
             ...
 
-        # With known block size (required when block > 256 on AMDGPU):
+        # With an explicit block size contract (normally inferred at launch):
         @kernel(known_block_size=[512, 1, 1])
         def my_kernel(a: Tensor):
             ...
 
     The decorated function can be called inside a @jit function to
-    define the kernel, then .launch(config) is called to emit the launch op.
+    capture a pending kernel call. ``.launch(config)`` emits the specialized
+    kernel definition and launch op together.
 
     Args:
         func: Function to decorate
-        some_args: Optional kernel-specific arguments
         name: Optional kernel name override; shown in profiler instead of the
               Python function name. Tile/dtype info can be embedded here.
         known_block_size: Optional list of [x, y, z] block dimensions. Sets
               the ``known_block_size`` attribute on the GPU function, which the
               AMDGPU backend uses to derive ``max_flat_workgroup_size``.
-              Required when block size exceeds 256 threads.
+              When omitted, static integer launch dimensions are inferred
+              automatically. Explicit values remain useful as a contract for
+              dynamic launch dimensions.
 
     Returns:
         KernelFunction wrapper
     """
     if func is None:
-        return lambda f: KernelFunction(f, some_args=some_args, name=name, known_block_size=known_block_size)
-    return KernelFunction(func, some_args=some_args, name=name, known_block_size=known_block_size)
+        return lambda f: KernelFunction(f, name=name, known_block_size=known_block_size)
+    return KernelFunction(func, name=name, known_block_size=known_block_size)
