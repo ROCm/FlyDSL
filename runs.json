@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-05T10:20:55Z",
+ "updated": "2026-08-05T10:34:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
    "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30996937633",
    "created_at": "2026-08-05T10:19:10Z",
-   "updated_at": "2026-08-05T10:20:01Z",
+   "updated_at": "2026-08-05T10:20:59Z",
    "actor": "jli-melchior",
    "jobs": []
   },
@@ -68,11 +68,11 @@
    "branch": "phil/add-offset-canonicalization",
    "event": "pull_request",
    "title": "[Perf] Keep runtime base and static tail separate in add_offset",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30988407654",
    "created_at": "2026-08-05T08:17:23Z",
-   "updated_at": "2026-08-05T09:22:21Z",
+   "updated_at": "2026-08-05T10:32:47Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -87,10 +87,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-05T09:22:20Z",
-     "completed_at": null,
+     "completed_at": "2026-08-05T10:32:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30988407654/job/92249278822"
     },
     {
@@ -272,11 +272,11 @@
    "branch": "worktree-mxfp-moe-a16w4",
    "event": "pull_request",
    "title": "MoE: add a16w mix fused 2-stage kernels (bf16 A \u00d7 mxfp4/int4/bf16 W)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30982906965",
    "created_at": "2026-08-05T06:53:07Z",
-   "updated_at": "2026-08-05T07:42:46Z",
+   "updated_at": "2026-08-05T10:33:11Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -291,9 +291,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-05T07:42:46Z",
+     "started_at": "2026-08-05T10:33:10Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30982906965/job/92241022710"
     },
