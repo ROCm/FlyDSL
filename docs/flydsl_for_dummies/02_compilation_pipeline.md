@@ -256,7 +256,7 @@ compiles to.
 Other useful switches: `FLYDSL_DEBUG_PRINT_AFTER_ALL` (print IR after every pass),
 `FLYDSL_DEBUG_AST_DIFF` (see the AST rewrite from §2.3), and
 `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1` (line info for the profiler; incompatible with
-`FLYDSL_RUNTIME_RUN_ONLY`). See Chapter 11 for the full table. Chapter 10 puts these
+`FLYDSL_RUNTIME_RUN_ONLY`). See Chapter 14 for the full table. Chapter 13 puts these
 switches to work on real failures.
 
 With the pipeline in hand, we can now look at the objects that flow through it: the

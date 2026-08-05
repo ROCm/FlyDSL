@@ -119,7 +119,7 @@ well-defined.
 > `range_constexpr` unroll is your `#pragma unroll` K-loop; the loop-carried
 > `range(..., init=[...])` form (§3.2) is the runtime K-loop with the accumulator
 > kept in registers across iterations. Software pipelining (prefetch next K while
-> MFMA-ing current) is layered on top in Chapter 9 and the GEMM puzzles — the atom
+> MFMA-ing current) is layered on top in Chapter 12 and the GEMM puzzles — the atom
 > and fragment contract does not change.
 
 ## Where subtargets differ
@@ -141,6 +141,9 @@ are identical. That portability — same layout algebra, swap the atom — is th
 payoff of making the atom a first-class object.
 
 With layouts (Ch. 5), tiling/partitioning (Ch. 6), copy atoms (Ch. 7), and MMA
-atoms (Ch. 8) defined, you have the full vocabulary. Chapter 9 reads three
-complete kernels line by line; Chapter 10 is how you debug them when they break;
-Chapter 11 is the reference you keep open while working the puzzles.
+atoms (Ch. 8) defined, you have the full high-level vocabulary. Chapters 9–10 open
+the copy and MFMA atoms down to the actual `rocdl.*` instructions and VGPR layouts,
+and Chapter 11 covers the escape hatches for when the atom layer is not enough.
+Chapter 12 then reads three complete kernels line by line; Chapter 13 is how you
+debug them when they break; Chapter 14 is the reference you keep open while working
+the puzzles.

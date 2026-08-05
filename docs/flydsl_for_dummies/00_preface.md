@@ -64,13 +64,18 @@ CK-Tile) equivalent, the `HIP/CK-Tile → FlyDSL` boxes call it out; the reposit
    partitioning (Chapter 6), data movement / copy atoms (Chapter 7), and MMA
    atoms (Chapter 8), each with small worked examples and a mapping to the
    CK-Tile / CuTe concept you already know.
-5. **Worked examples** — three complete kernels annotated line by line
-   (Chapter 9).
-6. **Debugging** — how (and how far) you can actually debug a FlyDSL kernel:
+5. **Close to the metal** — the intrinsic level beneath the atoms: loads and stores
+   down to `buffer_load`/`ds_read` (Chapter 9), MFMA down to the `rocdl.mfma.*`
+   instruction and its operand/accumulator VGPRs (Chapter 10), and the escape
+   hatches for when the high-level dialect is not enough — small MFMAs outside a
+   GEMM, cross-lane ops, inline asm (Chapter 11).
+6. **Worked examples** — three complete kernels annotated line by line
+   (Chapter 12).
+7. **Debugging** — how (and how far) you can actually debug a FlyDSL kernel:
    the three layers of failure, the IR-dump and `printf` tools, a repeatable
-   isolation loop, and two real worked failures (Chapter 10).
-7. **A reference appendix** — environment variables, an API cheat-sheet, and a
-   HIP/CK-Tile ↔ FlyDSL glossary (Chapter 11).
+   isolation loop, and two real worked failures (Chapter 13).
+8. **A reference appendix** — environment variables, an API cheat-sheet, and a
+   HIP/CK-Tile ↔ FlyDSL glossary (Chapter 14).
 
 ## How to read it
 

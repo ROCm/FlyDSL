@@ -33,9 +33,12 @@ CHAPTERS=(
   06_tiling_partitioning.md
   07_data_movement.md
   08_mma.md
-  09_worked_examples.md
-  10_debugging.md
-  11_reference.md
+  09_loads_stores_intrinsics.md
+  10_mfma_intrinsics.md
+  11_escape_hatches.md
+  12_worked_examples.md
+  13_debugging.md
+  14_reference.md
 )
 
 if [[ "${1:-}" == "--html" ]]; then

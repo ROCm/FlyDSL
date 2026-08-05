@@ -80,7 +80,7 @@ fx.copy(copy_atom_b, thr_copy_b.partition_S(bB), thr_copy_b.retile(frag_B))
 fx.copy(copy_atom_c, thr_copy_c.retile(frag_C), thr_copy_c.partition_D(bC))
 ```
 
-Add an LDS staging tier (Chapter 9 / GEMM puzzles) and it becomes
+Add an LDS staging tier (§9.5 / Chapter 12 / GEMM puzzles) and it becomes
 global→LDS then LDS→registers, but the call shape is identical.
 
 ## Predication: safe boundaries without branches
@@ -153,7 +153,7 @@ fx.copy(copy_atom, smem_A_part, frag_A)
 ```
 
 Bank-conflict avoidance is a *layout* concern: you pick a swizzled LDS layout so
-lanes hit distinct banks (Chapter 9 and the GEMM puzzles). The copy calls do not
+lanes hit distinct banks (Chapter 12 and the GEMM puzzles). The copy calls do not
 change — only the LDS layout does. Full LDS mechanics, double-buffering, and
 swizzle live in `docs/kernel_tuning_guide.md`; the GEMM puzzles build them up
 step by step.
