@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-08-05T00:51:10Z",
+ "updated": "2026-08-05T03:40:42Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30967941835,
+   "pr": 945,
+   "commit": "1a735294c774e41783dc5894e128cb5f08fd7323",
+   "branch": "jli/update-llvm-basemain",
+   "event": "pull_request",
+   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30967941835",
+   "created_at": "2026-08-05T01:57:49Z",
+   "updated_at": "2026-08-05T03:39:18Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-05T02:19:44Z",
+     "completed_at": "2026-08-05T03:39:17Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30967941835/job/92189129945"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-05T02:19:54Z",
+     "completed_at": "2026-08-05T03:14:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30967941835/job/92189129949"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-05T02:19:53Z",
+     "completed_at": "2026-08-05T03:22:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30967941835/job/92189129954"
+    }
+   ]
+  },
   {
    "run_id": 30925509937,
    "pr": 967,
@@ -2069,49 +2112,6 @@
    "updated_at": "2026-08-02T17:59:13Z",
    "actor": "amd-xiaoyu12",
    "jobs": []
-  },
-  {
-   "run_id": 30759589552,
-   "pr": 956,
-   "commit": "a9220c20f6348b505da835053eca0a387b354386",
-   "branch": "pr/enh-lazy-inttuple-leaves",
-   "event": "pull_request",
-   "title": "[Opt] Lazily materialize static int tuple leaves",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30759589552",
-   "created_at": "2026-08-02T17:45:38Z",
-   "updated_at": "2026-08-03T04:26:40Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-03T02:25:41Z",
-     "completed_at": "2026-08-03T04:26:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30759589552/job/91580505777"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-02T17:48:39Z",
-     "completed_at": "2026-08-02T19:25:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30759589552/job/91580506013"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-02T17:48:30Z",
-     "completed_at": "2026-08-02T18:37:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30759589552/job/91580506380"
-    }
-   ]
   }
  ]
 }
