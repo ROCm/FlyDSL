@@ -3756,6 +3756,14 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         l_row = _fmul(l_row, corr, self.fm_fast)
         return v_o, m_new, l_row, v_p
 
+    def fold_sink(self, v_o, m_row, l_row, sink_log2):
+        m_new = _fmax(m_row, sink_log2, self.fm_fast)
+        corr = rocdl.exp2(T.f32, as_mlir_value(_fsub(m_row, m_new, self.fm_fast)))
+        self.scale_o(v_o, corr)
+        sink_w = rocdl.exp2(T.f32, as_mlir_value(_fsub(sink_log2, m_new, self.fm_fast)))
+        l_row = _fadd(_fmul(l_row, corr, self.fm_fast), sink_w, self.fm_fast)
+        return m_new, l_row
+
     def _lazy_rescale_o_rescale(self, _n, *_st, v_o, m_row, l_row, m_tile_max, v_p):
         corr = rocdl.exp2(T.f32, as_mlir_value(_fsub(m_row, m_tile_max, self.fm_fast)))
         scaled_accs = list(v_o)
@@ -5289,6 +5297,7 @@ class DualwaveSplitKCombineContext:
         seq_len=None,
         stride_q_n=None,
         LSE=None,
+        Sink=None,
     ):
         if isinstance(traits_or_ctx, DualwaveSplitKCombineContext):
             self.__dict__.update(traits_or_ctx.__dict__)
@@ -5300,6 +5309,7 @@ class DualwaveSplitKCombineContext:
         self.O = O
         self.WS = WS
         self.LSE = LSE
+        self.Sink = Sink
         self.batch_size = batch_size
         self.seq_len = seq_len
         self.stride_q_n = stride_q_n
@@ -5403,6 +5413,26 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
         for i in range_constexpr(self.traits.NUM_KV_SPLITS - 1):
             m_max = _fmax(m_max, m_s[i + 1], self.fm_fast)
         return m_max
+
+    def fold_sink(self, m_max, bias_log2e):
+        sink_rsrc = buffer_ops.create_buffer_resource_from_addr(
+            as_mlir_value(fx.Int64(fx.ptrtoint(fx.get_iter(self.Sink)))),
+            num_records_bytes=as_mlir_value(fx.Int64(self.traits.NUM_HEADS_Q * 4)),
+        )
+        sink_f32 = buffer_ops.buffer_load(
+            sink_rsrc,
+            as_mlir_value(fx.Int32(self.q_head_idx)),
+            vec_width=1,
+            dtype=T.f32,
+        )
+
+        sink_log2 = _fmul(sink_f32, fx.Float32(bias_log2e), self.fm_fast)
+        m_new = _fmax(m_max, sink_log2, self.fm_fast)
+        sink_w = rocdl.exp2(T.f32, as_mlir_value(_fsub(sink_log2, m_new, self.fm_fast)))
+        return m_new, sink_w
+
+    def add_sink_den(self, den, sink_w):
+        return _fadd(den, sink_w, self.fm_fast)
 
     def init_accumulators(self):
         return as_mlir_value(self.c_zero_v4f32), as_mlir_value(self.c_zero_f)
