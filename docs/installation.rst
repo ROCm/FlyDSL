@@ -44,7 +44,7 @@ If you already have an MLIR build with Python bindings enabled, point to it:
 
    export MLIR_PATH=/path/to/llvm-project/build-flydsl/mlir_install
 
-Otherwise, use the helper script which clones the ROCm llvm-project and builds MLIR:
+Otherwise, use the helper script that clones the ROCm llvm-project and builds MLIR:
 
 .. code-block:: bash
 
@@ -66,7 +66,7 @@ Build the Fly C++ dialect, compiler passes, and embedded Python bindings:
 
    MLIR_PATH=/path/to/mlir_install bash scripts/build.sh -j64
 
-After a successful build you will have:
+After a successful build, you have:
 
 - ``build-fly/bin/fly-opt`` -- the Fly optimization tool
 - ``build-fly/bin/flydsl-lsp-server`` -- MLIR Language Server for FlyDSL ``.mlir``
@@ -84,14 +84,13 @@ For development (editable install):
 
    pip install -e .
 
-Or using setup.py directly:
+Or use setup.py directly:
 
 .. code-block:: bash
 
    python setup.py develop
 
-This creates an editable install — changes to ``python/flydsl/`` are immediately
-reflected.
+This creates an editable install — changes to ``python/flydsl/`` are immediately reflected.
 
 **Without installing**, you can also set paths manually:
 
@@ -107,16 +106,16 @@ To build a distributable wheel:
    python setup.py bdist_wheel
    ls dist/
 
-Verify Installation
+Verify installation
 -------------------
 
-Run the test suite to verify everything works:
+Run the test suite to verify that everything works:
 
 .. code-block:: bash
 
    bash scripts/run_tests.sh
 
-This runs:
+This runs the following:
 
 - **MLIR lit tests**: ``tests/mlir/{LayoutAlgebra,Conversion,Transforms}/*.mlir``
   through ``fly-opt``
