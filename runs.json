@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-05T16:01:21Z",
+ "updated": "2026-08-05T16:56:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31023957346,
+   "pr": 891,
+   "commit": "627ada3add976ab7bc943cb71d0228b389b52e0d",
+   "branch": "add-wmma-tests-gfx1250",
+   "event": "pull_request",
+   "title": "[Test] Add gfx1250 WMMA lowering tests for additional dtypes",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31023957346",
+   "created_at": "2026-08-05T16:10:12Z",
+   "updated_at": "2026-08-05T16:10:12Z",
+   "actor": "AiyyappanMR",
+   "jobs": []
+  },
   {
    "run_id": 31022130191,
    "pr": 875,
@@ -29,10 +44,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-05T15:54:42Z",
-     "completed_at": null,
+     "completed_at": "2026-08-05T16:46:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31022130191/job/92362809566"
     },
     {
@@ -81,10 +96,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-05T15:52:37Z",
-     "completed_at": null,
+     "completed_at": "2026-08-05T16:39:49Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31022017864/job/92362274431"
     }
    ]
@@ -96,38 +111,38 @@
    "branch": "main",
    "event": "push",
    "title": "[Feat] Add fx.known_block_size() as constant accessor (#968)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31021325251",
    "created_at": "2026-08-05T15:38:32Z",
-   "updated_at": "2026-08-05T15:43:59Z",
+   "updated_at": "2026-08-05T16:54:17Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-05T15:43:56Z",
-     "completed_at": null,
+     "completed_at": "2026-08-05T16:19:29Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31021325251/job/92359732987"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-05T15:43:58Z",
-     "completed_at": null,
+     "completed_at": "2026-08-05T16:35:49Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31021325251/job/92359733052"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-05T15:43:33Z",
-     "completed_at": null,
+     "completed_at": "2026-08-05T16:54:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31021325251/job/92359733073"
     }
    ]
@@ -2043,21 +2058,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30877675125/job/91950809895"
     }
    ]
-  },
-  {
-   "run_id": 30876682515,
-   "pr": null,
-   "commit": "3762aba04790f178798d6d3fe2894600997e5d4e",
-   "branch": "stochastic-rounding",
-   "event": "pull_request",
-   "title": "Add stochastic rounding and philox RNG under rocdl",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30876682515",
-   "created_at": "2026-08-04T04:06:40Z",
-   "updated_at": "2026-08-04T04:06:40Z",
-   "actor": "sjfeng1999",
-   "jobs": []
   }
  ]
 }
