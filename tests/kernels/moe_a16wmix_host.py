@@ -27,7 +27,6 @@ import re
 import torch
 
 from kernels.common.tensor_shim import _run_compiled
-
 from kernels.moe.moe_2stage_a16wmix.gemm1 import compile_gemm1_a16w4_port, gemm1_a16w4_grid
 from kernels.moe.moe_2stage_a16wmix.gemm2 import compile_gemm2_a16w4_port, gemm2_a16w4_grid
 
