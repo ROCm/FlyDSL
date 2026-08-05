@@ -631,17 +631,31 @@ def _to_ir(v):
 
 
 @dsl_loc_tracing
-def raw_ptr_buffer_atomic_fadd(vdata, rsrc, offset, soffset, aux, **kw):
+def raw_ptr_buffer_atomic_fadd(vdata, rsrc, offset, soffset, aux=None, **kw):
+    from ..._mlir import ir as _ir
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_atomic_fadd as _op
 
-    return _op(_to_ir(vdata), _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), _to_ir(aux), **kw)
+    vdata_ir = _to_ir(vdata)
+    if aux is not None and not isinstance(aux, _ir.Attribute):
+        if isinstance(aux, int):
+            aux = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), aux)
+        else:
+            aux = None
+    return _op(vdata_ir.type, vdata_ir, _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), aux=aux, **kw)
 
 
 @dsl_loc_tracing
-def raw_ptr_buffer_atomic_fmax(vdata, rsrc, offset, soffset, aux, **kw):
+def raw_ptr_buffer_atomic_fmax(vdata, rsrc, offset, soffset, aux=None, **kw):
+    from ..._mlir import ir as _ir
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_atomic_fmax as _op
 
-    return _op(_to_ir(vdata), _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), _to_ir(aux), **kw)
+    vdata_ir = _to_ir(vdata)
+    if aux is not None and not isinstance(aux, _ir.Attribute):
+        if isinstance(aux, int):
+            aux = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), aux)
+        else:
+            aux = None
+    return _op(vdata_ir.type, vdata_ir, _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), aux=aux, **kw)
 
 
 @dsl_loc_tracing
