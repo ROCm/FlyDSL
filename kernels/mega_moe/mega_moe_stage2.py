@@ -34,9 +34,7 @@ def _fp8_scale(local_max):
 
 
 def _quantize_fp8_payload(v8, weight):
-    weighted_v8 = fx.Vector.from_elements(
-        [v8[i] * weight for i in range_constexpr(8)], fx.Float32
-    )
+    weighted_v8 = fx.Vector.from_elements([v8[i] * weight for i in range_constexpr(8)], fx.Float32)
     vals = [weighted_v8[i] for i in range_constexpr(8)]
     local_max = fabs_f32(vals[0])
     for q in range_constexpr(1, 8):
@@ -323,7 +321,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
     use_nt: bool = True, HIDDEN_MAX: int = 8192, INTER_MAX: int = 8192, a_dtype: str = "fp8", SBM: int = None,
     persist: bool = False, cu_num: int = 0, has_pad: bool = False, g2_bhoist=None, g2_b2stage: bool = True,
     g2_ascale_pf=None,
-    g2_spart=None, persist_strided: bool = False, p2p_quant_type: str = "none",
+    g2_spart=None, g2_deep_a_pipeline: bool = False, persist_strided: bool = False, p2p_quant_type: str = "none",
     fixed_slot_dispatch: bool = False):
 # fmt: on
     """Compile fused GEMM2 and weighted cross-rank P2P scatter."""
@@ -344,6 +342,8 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         raise AssertionError(f"a_dtype must be 'fp4' or 'fp8', got {a_dtype!r}")
     if persist and cu_num <= 0:
         raise AssertionError(f"persist=True requires cu_num>0, got {cu_num}")
+    if g2_deep_a_pipeline and not g2_b2stage:
+        raise AssertionError("g2_deep_a_pipeline requires g2_b2stage=True")
     log2_max_tok = max_tok.bit_length() - 1
     mask_max_tok = max_tok - 1
     N_OUT = model_dim
@@ -351,7 +351,8 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         g2_bhoist, g2_ascale_pf, g2_spart
     )
     is_f8 = a_dtype == "fp8"
-    aStages = 3
+    # PR959-style deeper A ring: selected BN256 profiles can retire two slots per WG fence.
+    aStages = 4 if g2_deep_a_pipeline else 3
     KH_TILE_A = BK // (1 if is_f8 else 2)
     compute_lds_bytes = _stage2_lds_bytes(BM, BN, BK, a_dtype, aStages)
     lds_packed_off = compute_lds_bytes
@@ -373,6 +374,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         f"_sbm{SBM}_{a_dtype}_nt{int(use_nt)}"
         f"_p{int(persist)}cu{cu_num}s{int(persist_strided)}_pad{int(has_pad)}"
         f"_bh{int(g2_bhoist)}b2{int(g2_b2stage)}apf{int(g2_ascale_pf)}sp{g2_group_num}x{g2_m01}"
+        f"_dap{int(g2_deep_a_pipeline)}"
         f"_{p2p_quant_type}"
     )
 
@@ -412,6 +414,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
             )
 
         def issue_all_a_loads(m_row0):
+            # Seed kStages lookahead slots; the first loop iterations fill any deeper-ring slots.
             for slot in range_constexpr(kStages):
                 issue_a_load_lds_dt(arg_aq, lds_base_i32, slot, slot, m_row0, wave, lane,
                     is_f8, KH_TILE_A, k_bytes, BM=BM)
@@ -450,11 +453,11 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
                     ),
                 )
             # fmt: off
-            accm_vecs, m_row, n_block_idx, _n_out_rt = gemm2_compute_v2(lds_base_i32, arg_ascale, arg_bq,
+            accm_vecs, n_block_idx = gemm2_compute_v2(lds_base_i32, arg_ascale, arg_bq,
                 arg_bscale, arg_eids, arg_aq, i32_max_m_blocks, unit_bx, lane, wave, i32_inter, i32_hidden,
                 i32_kpad, i32_npad, BM=BM, BN=BN, BK=BK, use_nt=use_nt, INTER_MAX=INTER_MAX, aStages=aStages,
                 a_dtype=a_dtype, has_pad=has_pad, SBM=SBM, g2_bhoist=g2_bhoist, g2_ascale_pf=g2_ascale_pf,
-                g2_b2stage=g2_b2stage, expert_offset=_expert_offset)
+                g2_b2stage=g2_b2stage, g2_deep_a_pipeline=g2_deep_a_pipeline, expert_offset=_expert_offset)
             p2p_scatter_epilog(lds_base_i32, accm_vecs, n_block_idx, wave, lane, N_OUT=N_OUT,
                 BM=BM, BN=BN, npes=npes, topk=topk,
                 log2_max_tok=log2_max_tok, mask_max_tok=mask_max_tok, recv_cap=_recv_cap,
@@ -546,7 +549,7 @@ def run_mega_moe_stage2(arg_aq, arg_ascale, arg_bq, arg_bscale, arg_eids, arg_cu
     model_dim, inter_dim, experts, topk, rank, npes, max_tok, recv_cap, comb_inp_nbytes, BM, SBM,
     HIDDEN_MAX, INTER_MAX, cu_num, BN=256, BK=256, use_nt=True, g2_bhoist=True,
     g2_b2stage=True, g2_ascale_pf=True, g2_spart=402, persist=False, persist_cu=0, persist_strided=False,
-    p2p_quant_type="none", fixed_slot_dispatch=False):
+    p2p_quant_type="none", fixed_slot_dispatch=False, g2_deep_a_pipeline=False, a_dtype="fp8"):
     # fmt: on
     """Compile or reuse one fused Stage2 configuration and launch it."""
     launch_cu_num = min(cu_num, persist_cu) if persist and persist_cu > 0 else cu_num
@@ -555,8 +558,9 @@ def run_mega_moe_stage2(arg_aq, arg_ascale, arg_bq, arg_bscale, arg_eids, arg_cu
         max_tok=max_tok, recv_cap=recv_cap, comb_inp_nbytes=comb_inp_nbytes, BM=BM, BN=BN, BK=BK,
         use_nt=use_nt, HIDDEN_MAX=HIDDEN_MAX, INTER_MAX=INTER_MAX, SBM=SBM, persist=persist,
         cu_num=launch_cu_num, g2_bhoist=g2_bhoist, g2_b2stage=g2_b2stage, g2_ascale_pf=g2_ascale_pf,
-        g2_spart=g2_spart, persist_strided=persist_strided, p2p_quant_type=p2p_quant_type,
-        fixed_slot_dispatch=fixed_slot_dispatch,
+        g2_spart=g2_spart, g2_deep_a_pipeline=g2_deep_a_pipeline, persist_strided=persist_strided,
+        p2p_quant_type=p2p_quant_type,
+        fixed_slot_dispatch=fixed_slot_dispatch, a_dtype=a_dtype,
     )
     max_m_blocks = (row_capacity + BM - 1) // BM
     grid_blocks = launch_cu_num if persist else max_m_blocks

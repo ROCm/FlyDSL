@@ -46,6 +46,7 @@ class Stage2Config:
     b2stage: bool = True
     ascale_prefetch: bool = True
     spatial_partition: int = 402
+    deep_a_pipeline: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +195,7 @@ _FP8_SMALL_STAGE2 = {
         persist=True,
         persist_cu=128,
         use_nt=False,
+        deep_a_pipeline=True,
     ),
     512: Stage2Config(
         block_m=64,
@@ -202,6 +204,7 @@ _FP8_SMALL_STAGE2 = {
         persist_cu=240,
         use_nt=False,
         persist_strided=True,
+        deep_a_pipeline=True,
     ),
 }
 
@@ -222,6 +225,7 @@ def _select_stage2(bucket: int, fixed_slot: bool, p2p_quant: str) -> Stage2Confi
         persist_cu=persist_cu,
         use_nt=bucket <= 128,
         persist_strided=bucket in (512, 1024, 2048),
+        deep_a_pipeline=bucket >= 1024 and block_n == 256,
     )
 
 
@@ -247,3 +251,34 @@ def select_mega_moe_config(tokens: int, mtpr: int, p2p_quant: str = "auto") -> M
     elif p2p_quant not in ("none", "fp8_blockwise_1x32"):
         raise ValueError(f"unsupported p2p_quant={p2p_quant!r}")
     return _select_bucket_config(bucket, mtpr, p2p_quant)
+
+
+def apply_mega_moe_quant_config(config: MegaMoEConfig, tokens: int, a_dtype: str) -> MegaMoEConfig:
+    """Apply activation-dtype-specific tuning without changing the shared table."""
+    if a_dtype not in ("fp4", "fp8"):
+        raise ValueError(f"unsupported activation dtype={a_dtype!r}")
+    if a_dtype == "fp8":
+        return config
+
+    bucket = nearest_token_bucket(tokens)
+    stage1_overrides = {}
+    stage2_overrides = {}
+    if bucket <= 128 and config.stage1.async_a_copy:
+        # FP4 halves the A K-step bytes. The 8-wave compact kernel therefore
+        # needs SBM64 so every thread owns one or more 16-byte async copies.
+        stage1_overrides["sort_block_m"] = 64
+    if tokens >= 256:
+        stage1_overrides["waves_per_eu_hint"] = 1
+    if bucket == 512:
+        stage1_overrides.update(b_nt=0, num_dispatch_cu=160)
+    elif bucket == 1024:
+        stage1_overrides.update(sort_block_m=128, num_dispatch_cu=88)
+        stage2_overrides["block_m"] = 64
+
+    if not stage1_overrides and not stage2_overrides:
+        return config
+    return replace(
+        config,
+        stage1=replace(config.stage1, **stage1_overrides),
+        stage2=replace(config.stage2, **stage2_overrides),
+    )

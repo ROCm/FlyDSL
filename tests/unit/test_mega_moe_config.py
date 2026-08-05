@@ -3,7 +3,11 @@
 
 import pytest
 
-from kernels.mega_moe.mega_moe_config import nearest_token_bucket, select_mega_moe_config
+from kernels.mega_moe.mega_moe_config import (
+    apply_mega_moe_quant_config,
+    nearest_token_bucket,
+    select_mega_moe_config,
+)
 
 _STANDARD_PROFILES = {
     1: (32, 256, 4, 1, 64, 0, 1, 2, 32, 256, 0, 0, 0, "none"),
@@ -63,6 +67,9 @@ def test_standard_profiles_match_tuned_artifacts(tokens, expected):
     assert stage2.b_hoist == (tokens != 64)
     assert stage2.ascale_prefetch
     assert stage2.spatial_partition == 402
+    expected_deep_a = stage2.block_n == 256 and (tokens in (256, 512) or tokens >= 1024)
+    assert stage2.deep_a_pipeline == expected_deep_a
+    assert not stage2.deep_a_pipeline or stage2.b2stage
 
 
 @pytest.mark.parametrize(
@@ -121,12 +128,48 @@ def test_forced_fp8_uses_quant_aware_small_batch_profiles(tokens, expected):
         stage2.b_hoist,
     ) == expected
     assert config.p2p_quant == "fp8_blockwise_1x32"
+    assert stage2.deep_a_pipeline == (tokens in (256, 512))
     if tokens == 256:
         assert config.stage1.sort_block_m == 64
 
 
 def test_nearby_tokens_share_the_bucket_config():
     assert select_mega_moe_config(500, 512) is select_mega_moe_config(512, 512)
+
+
+def test_a4_config_overrides_are_quant_specific():
+    base_512 = select_mega_moe_config(500, 512)
+    a4 = apply_mega_moe_quant_config(base_512, 500, "fp4").stage1
+    assert (a4.b_nt, a4.num_dispatch_cu, a4.waves_per_eu_hint) == (0, 160, 1)
+
+    base_1024 = select_mega_moe_config(1024, 1024)
+    a4_1024 = apply_mega_moe_quant_config(base_1024, 1024, "fp4")
+    assert (a4_1024.stage1.sort_block_m, a4_1024.stage1.num_dispatch_cu) == (128, 88)
+    assert a4_1024.stage2.block_m == 64
+
+    a8 = apply_mega_moe_quant_config(base_512, 500, "fp8").stage1
+    assert (a8.b_nt, a8.num_dispatch_cu, a8.waves_per_eu_hint) == (3, 128, 2)
+
+    a4_256 = apply_mega_moe_quant_config(select_mega_moe_config(256, 256), 256, "fp4")
+    assert a4_256.stage1.waves_per_eu_hint == 1
+    assert not select_mega_moe_config(256, 256, "none").stage2.deep_a_pipeline
+    with pytest.raises(ValueError, match="unsupported activation dtype"):
+        apply_mega_moe_quant_config(base_512, 500, "bf16")
+
+
+@pytest.mark.parametrize(
+    "tokens,expected_sort_block_m",
+    [(8, 64), (32, 64), (64, 64), (128, 64), (256, 64), (1024, 128), (4096, 128), (8192, 128)],
+)
+def test_a4_fixed_mtpr_profiles_support_async_copy(tokens, expected_sort_block_m):
+    config = apply_mega_moe_quant_config(select_mega_moe_config(tokens, 8192), tokens, "fp4")
+    stage1 = config.stage1
+    a_k_step_bytes = stage1.tile_k // 2
+    total_threads = stage1.num_waves * 64
+
+    assert stage1.sort_block_m == expected_sort_block_m
+    assert stage1.async_a_copy
+    assert (stage1.sort_block_m * (a_k_step_bytes // 16)) % total_threads == 0
 
 
 @pytest.mark.parametrize("tokens,mtpr", [(0, 16), (17, 16), (1, 0), (1, 24)])
