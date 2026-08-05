@@ -12,10 +12,6 @@ def : Pat<(Fly_PtrLoadOp Fly_IntTuple:$int_tuple),
 
 def : Pat<(Fly_AddOffsetOp Fly_IntTuple:$int_tuple, Fly_IntTuple:$offset),
           (Fly_IntTupleAddOp $int_tuple, $offset)>;
-// Nested add_offset is canonicalized by AddOffsetCanonicalization in
-// LayoutLowering.cpp.  Fusing unconditionally here merged a runtime offset with
-// a compile-time constant, which gave every LDS read its own base register
-// instead of sharing one (issue #898).
 
 def : Pat<(Fly_DecompositionOp Fly_MemRef:$memref),
           (replaceWithValue $memref),

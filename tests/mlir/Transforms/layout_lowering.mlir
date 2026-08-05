@@ -455,8 +455,8 @@ func.func @test_load_vec_coord_tensor() -> vector<6xi32> {
 // layer plus one static tail.  Fusing a runtime offset with a compile-time
 // constant would give every access its own base register instead of sharing one.
 
-// dynamic -> static is already canonical: the two levels must stay split so the
-// static tail can reach the ds_read offset: immediate off a shared base.
+// dynamic -> static is already canonical: the two levels must stay split so
+// many accesses share one runtime base instead of each computing its own.
 // CHECK-LABEL: @test_add_offset_dyn_static_kept
 func.func @test_add_offset_dyn_static_kept(%ptr: !fly.ptr<f32, shared>, %x: i32) -> f32 {
   %d = fly.make_int_tuple(%x) : (i32) -> !fly.int_tuple<?>
@@ -608,9 +608,8 @@ func.func @test_add_offset_zero_and_negative(%ptr: !fly.ptr<f32, shared>, %x: i3
 }
 
 // A multi-use inner op still fuses when neither offset is dynamic: fusion
-// rewrites only the outer op, which is what the original TableGen rule did
-// unconditionally.  Restricting this to single-use inner ops left long chains
-// unfused on the buffer path and inflated VGPR usage.
+// rewrites only the outer op, so the inner one stays valid for its other
+// users.  Only the swap needs a single-use inner op.
 // CHECK-LABEL: @test_add_offset_multi_use_inner_still_fuses
 func.func @test_add_offset_multi_use_inner_still_fuses(%ptr: !fly.ptr<f32, shared>) -> f32 {
   %a = fly.make_int_tuple() : () -> !fly.int_tuple<64>

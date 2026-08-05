@@ -45,8 +45,8 @@ gpu.module @m_lds {
 
 // === Swizzled LDS: applicability boundary ===
 //
-// A non-trivial swizzle is applied at the load, to the FINAL address, so the
-// static tail is folded into the XOR and cannot become a ds_read immediate.
+// A non-trivial swizzle is applied at the load, to the FINAL address, so
+// XOR(base + c) != XOR(base) + c and the shared-base shape does not survive.
 // The canonicalization is neutral here, not harmful: the runtime base is still
 // a single GEP and no runtime+constant fusion happens.  This test pins that
 // "neutral, still correct" behaviour so the boundary stays visible.
@@ -75,8 +75,8 @@ gpu.module @m_swz {
 // === Buffer descriptor: separate offset adds, no fusion ===
 //
 // Buffer pointers add into the fat-pointer offset field instead of emitting a
-// GEP.  The runtime and the constant must stay two separate adds so the backend
-// can still fold the constant into the buffer instruction's immediate offset.
+// GEP.  The runtime and the constant must stay two separate adds, so one
+// runtime offset can be shared by several constant tails.
 // CHECK-LABEL: @buffer_runtime_then_static
 func.func @buffer_runtime_then_static(%ptr: !fly.ptr<f32, #fly_rocdl.buffer_desc>, %x: i32) -> f32 {
   %d = fly.make_int_tuple(%x) : (i32) -> !fly.int_tuple<?>

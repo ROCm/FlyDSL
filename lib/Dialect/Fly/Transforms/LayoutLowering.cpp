@@ -2898,12 +2898,13 @@ public:
 ///
 /// Fusing a runtime offset with a compile-time constant makes every access
 /// compute its own address off the runtime base, so the backend materializes
-/// one base register per access instead of sharing one (issue #898).  Keeping
-/// the static part as a separate outer offset preserves the shared base.
+/// one base register per access instead of sharing one.  Keeping the static
+/// part as a separate outer offset preserves the shared base.
 ///
 /// Convergence: each rewrite either drops a level from the chain (fuse) or
 /// moves the static offset strictly outward (swap), and the resulting
-/// `dyn -> static` form is rejected below, so the pattern cannot loop.
+/// `dyn -> static` form is rejected by the already-canonical check, so the
+/// pattern cannot loop.
 class AddOffsetCanonicalization : public OpRewritePattern<AddOffsetOp> {
 public:
   using OpRewritePattern<AddOffsetOp>::OpRewritePattern;
@@ -2912,8 +2913,7 @@ public:
     auto inner = op.getPtr().getDefiningOp<AddOffsetOp>();
     if (!inner)
       return failure();
-    // Keep the shape the old TableGen rule matched: the chain bottoms out in a
-    // pointer.  IntTuple bases are handled by the int_tuple_add rule.
+    // Rewrite pointer based add_offset only. IntTuple bases are handled by the int_tuple_add rule.
     if (!isa<PointerType>(inner.getPtr().getType()))
       return failure();
     auto innerTy = dyn_cast<IntTupleType>(inner.getOffset().getType());
@@ -2936,8 +2936,8 @@ public:
     if (innerStatic && !outerStatic) {
       // The swap rebuilds the inner op, so with other users the old one
       // survives and we would add an add_offset instead of replacing one.
-      // Fusion below has no such problem: it rewrites only the outer op, which
-      // is what the original TableGen rule did unconditionally.
+      // Fusion below has no such problem: it rewrites only the outer op, so
+      // the inner one stays valid for its other users.
       if (!inner->hasOneUse())
         return failure();
       Value dynBase = AddOffsetOp::create(rewriter, loc, inner.getPtr(), op.getOffset());
@@ -2946,7 +2946,7 @@ public:
     }
 
     // static -> static and dynamic -> dynamic both fuse: no runtime value is
-    // merged with a constant, so the shared base is unaffected.
+    // merged with a constant.
     Value sum = IntTupleAddOp::create(rewriter, loc, inner.getOffset(), op.getOffset());
     rewriter.replaceOpWithNewOp<AddOffsetOp>(op, inner.getPtr(), sum);
     return success();
