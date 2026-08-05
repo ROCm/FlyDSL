@@ -22,7 +22,6 @@ from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
 from ..expr.meta import tracing_context
 from ..expr.typing import Constexpr, Stream
-from ..expr.utils.arith import fastmath as fastmath_ctx
 from ..utils import env, log
 from ..utils.file import atomic_write
 from .ast_rewriter import ASTRewriter
@@ -1511,12 +1510,11 @@ class JitFunction:
                                 log().info(f"dsl_args={dsl_args}")
                                 named_args = dict(zip(param_names, dsl_args))
                                 named_args.update(constexpr_values)
-                                fastmath_flag = effective_fastmath_hint(CompilationContext.get_compile_hints())
-                                fastmath_scope = (
-                                    fastmath_ctx(fastmath_flag) if fastmath_flag is not None else nullcontext()
-                                )
                                 # Bound the call-site boundary at the jit body.
-                                with tracing_context(self.func), fastmath_scope:
+                                with tracing_context(
+                                    self.func,
+                                    fastmath=effective_fastmath_hint(CompilationContext.get_compile_hints()),
+                                ):
                                     if bound_self is not None:
                                         self.func(bound_self, **named_args)
                                     else:
