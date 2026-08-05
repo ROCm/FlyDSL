@@ -2,7 +2,8 @@ Quick start
 ===========
 
 This guide walks through writing, compiling, and running a simple GPU kernel
-with FlyDSL.
+with FlyDSL. See :doc:`Install FlyDSL <installation>` for installation
+instructions.
 
 A minimal vector add kernel
 ----------------------------
