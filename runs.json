@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-05T14:33:08Z",
+ "updated": "2026-08-05T14:44:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31016607719,
+   "pr": null,
+   "commit": "7d861b1cd843d96430f171c59d7ed75f90d04572",
+   "branch": "main",
+   "event": "push",
+   "title": "[gfx1250] Migrate gemm kernels to the stable DSL API (#967)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31016607719",
+   "created_at": "2026-08-05T14:42:59Z",
+   "updated_at": "2026-08-05T14:43:25Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 31016135354,
+   "pr": null,
+   "commit": "6f268ea8278b8171e33858449626c0262f5c38e9",
+   "branch": "main",
+   "event": "push",
+   "title": "[Perf] Keep runtime base and static tail separate in add_offset (#933)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31016135354",
+   "created_at": "2026-08-05T14:37:21Z",
+   "updated_at": "2026-08-05T14:43:06Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 31011979433,
    "pr": 968,
@@ -38,10 +68,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-05T13:52:31Z",
-     "completed_at": null,
+     "completed_at": "2026-08-05T14:42:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31011979433/job/92327186840"
     }
    ]
@@ -1972,64 +2002,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30832200948/job/91749550569"
     }
    ]
-  },
-  {
-   "run_id": 30831251073,
-   "pr": null,
-   "commit": "b0d17295a91bf2bf9354cb61f8aa0f262dce990f",
-   "branch": "fix/compile-only-engine-materialization",
-   "event": "pull_request",
-   "title": "[Fix] Avoid runtime materialization in compile-only mode",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30831251073",
-   "created_at": "2026-08-03T16:14:32Z",
-   "updated_at": "2026-08-03T16:27:04Z",
-   "actor": "zhiding512",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-03T16:17:49Z",
-     "completed_at": "2026-08-03T16:26:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30831251073/job/91746309802"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-03T16:18:26Z",
-     "completed_at": "2026-08-03T16:27:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30831251073/job/91746309881"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-03T16:18:26Z",
-     "completed_at": "2026-08-03T16:27:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30831251073/job/91746310065"
-    }
-   ]
-  },
-  {
-   "run_id": 30828444001,
-   "pr": 931,
-   "commit": "94c9454d5c9c2061937e97bd6edcd0447a9d5fb3",
-   "branch": "rchamber/flex_attention",
-   "event": "pull_request",
-   "title": "Add flex_attention (score_mod / mask_mod) on the generic flash-attention kernel",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30828444001",
-   "created_at": "2026-08-03T15:38:26Z",
-   "updated_at": "2026-08-03T15:39:43Z",
-   "actor": "RichardChamberlain1",
-   "jobs": []
   }
  ]
 }
