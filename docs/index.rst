@@ -1,5 +1,5 @@
-FlyDSL Documentation
-=====================
+FlyDSL |FLYDSL_VERSION| documentation
+=====================================
 
 **FlyDSL** is a Python DSL and MLIR compiler stack for authoring high-performance
 GPU kernels with explicit layout algebra, targeting AMD ROCm/HIP GPUs.
