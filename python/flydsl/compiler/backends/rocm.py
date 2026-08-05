@@ -129,12 +129,11 @@ class RocmBackend(BaseBackend):
             return
 
         with module.context:
+            from ..._mlir import ir as _ir
+
+            wpe_attr = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), waves_per_eu)
             for func_op in _iter_gpu_kernel_funcs(module):
-                # rocdl.waves_per_eu expresses a minimum. Replace it with the exact
-                # min/max LLVM passthrough for an explicit compile-hint override.
-                if "rocdl.waves_per_eu" in func_op.attributes:
-                    del func_op.attributes["rocdl.waves_per_eu"]
-                _set_passthrough(func_op, "amdgpu-waves-per-eu", f"{waves_per_eu},{waves_per_eu}")
+                func_op.attributes["rocdl.waves_per_eu"] = wpe_attr
 
     def gpu_module_targets(self) -> List[str]:
         chip = self.target.arch
