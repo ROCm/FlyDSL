@@ -340,6 +340,7 @@ def run_moe_stage1(
     even_dispatch: bool = False,
     out_dtype: str = "f16",
     k_batch: int = 1,
+    activation: str = "silu",
 ):
     assert model_dim % 64 == 0
     assert model_dim % tile_k == 0
@@ -586,6 +587,7 @@ def run_moe_stage1(
         scale_is_bf16=(scale_dtype == "bf16"),
         out_dtype=out_dtype,
         k_batch=k_batch,
+        activation=activation,
     )
 
     def _s1_args(o, x, w, sx, sw, st, eids, sw_sorted):
@@ -638,7 +640,11 @@ def run_moe_stage1(
     if _is_splitk:
         gate = out[:, :inter_dim]  # [tokens*topk, inter_dim] f32
         up = out[:, inter_dim:]  # [tokens*topk, inter_dim] f32
-        out = (torch.nn.functional.silu(gate) * up).to(_out_torch_dtype).view(tokens, topk, inter_dim)
+        if activation == "gelu_tanh":
+            act_gate = torch.nn.functional.gelu(gate, approximate="tanh")
+        else:
+            act_gate = torch.nn.functional.silu(gate)
+        out = (act_gate * up).to(_out_torch_dtype).view(tokens, topk, inter_dim)
 
     if not bool(skip_ref):
         if is_int8smooth:
@@ -656,6 +662,7 @@ def run_moe_stage1(
                 doweight_stage1=doweight_stage1,
                 group_size=group_size,
                 scale_w1_groups=scale_w1_groups,
+                activation=activation,
             )
             rtol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
             atol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
@@ -674,6 +681,7 @@ def run_moe_stage1(
                 doweight_stage1=doweight_stage1,
                 group_size=group_size,
                 scale_w1_groups=scale_w1_groups,
+                activation=activation,
             )
             rtol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
             atol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
@@ -730,8 +738,8 @@ def run_moe_stage1(
         compare_ck = os.environ.get("COMPARE_AITER_CK", "1" if HAS_AITER else "0") == "1"
     else:
         compare_ck = bool(compare_aiter_ck)
-    # aiter paths are fp8-only in our setup.
-    compare_ck = compare_ck and (in_dtype == "fp8")
+    # aiter paths are fp8-only in our setup, and aiter stage1 pins ActivationType.Silu.
+    compare_ck = compare_ck and (in_dtype == "fp8") and (activation == "silu")
     if compare_ck:
         if not HAS_AITER:
             pytest.skip("aiter not available; cannot compare to aiter moe stage1.", allow_module_level=False)
@@ -1858,6 +1866,7 @@ def test_mxfp_moe_variants(a_dtype, variant):
     ],
 )
 @pytest.mark.parametrize("group_size", [-1, 32], ids=["perrow", "g32"])
+@pytest.mark.parametrize("activation", ["silu", "gelu_tanh"])
 def test_moe_gemm_2stage(
     tokens: int,
     model_dim: int,
@@ -1876,6 +1885,7 @@ def test_moe_gemm_2stage(
     use_valid_mask: bool,
     test_graph: bool,
     group_size: int,
+    activation: str,
     *,
     seed: int = 0,
     num_iters: int = 5,
@@ -2010,6 +2020,7 @@ def test_moe_gemm_2stage(
         skip_ref=bool(skip_ref),
         w_fp4_kernel=w_fp4_kernel,
         test_graph=test_graph,
+        activation=activation,
     )
 
     if w_fp4_kernel:
@@ -2273,6 +2284,7 @@ def test_moe_gemm_2stage_bf16_out(use_reduce):
         use_valid_mask=False,
         test_graph=False,
         group_size=-1,
+        activation="silu",
         num_iters=2,
         num_warmup=1,
     )
@@ -2706,6 +2718,7 @@ if __name__ == "__main__":
             use_reduce=use_reduce,
             use_valid_mask=bool(args.use_valid_mask),
             test_graph=bool(args.test_graph),
+            activation="silu",
         )
 
     # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.

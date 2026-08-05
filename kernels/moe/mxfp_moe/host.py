@@ -50,7 +50,7 @@ _G2_SUPPORTED = {
 
 @functools.cache
 def _get_compiled_gemm1(
-    BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, topk, BN, BK, interleave, xcd_swizzle, a_dtype
+    BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, topk, BN, BK, interleave, xcd_swizzle, a_dtype, activation
 ):
     return compile_gemm1_a4w4_port(
         BM,
@@ -65,6 +65,7 @@ def _get_compiled_gemm1(
         interleave=interleave,
         xcd_swizzle=xcd_swizzle,
         a_dtype=a_dtype,
+        activation=activation,
     )
 
 
@@ -109,6 +110,7 @@ def flydsl_mxfp4_gemm1(
     interleave=False,
     xcd_swizzle=0,
     a_dtype="fp4",
+    activation="silu",
     stream=None,
 ):
     """Fused stage1: gate+up GEMM + SiLU + fp4 re-quant.
@@ -143,7 +145,7 @@ def flydsl_mxfp4_gemm1(
         )
 
     launch = _get_compiled_gemm1(
-        BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, topk, BN, BK, interleave, xcd_swizzle, a_dtype
+        BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, topk, BN, BK, interleave, xcd_swizzle, a_dtype, activation
     )
     grid = gemm1_grid(n_tokens, BM, NE=NE, TOPK=topk, INTER=D_INTER, BN=BN)
     _run_compiled(

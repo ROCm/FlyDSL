@@ -15,6 +15,7 @@ from .mxfp4_gemm_common import (
     _global_i32_at,
     _global_i32_buffer_tiles,
     _global_i32_buffer_view,
+    _gelu_tanh_mul_batch,
     _global_i32_load,
     _global_scalar_tiles,
     _inline_dpp_quad_amax,
@@ -95,6 +96,7 @@ def _gemm1_body(
     N_OUT,
     NE,
     interleave=False,
+    activation="silu",
 ):
     # A-code tile bytes/row: fp4 packs 2 codes/byte (BK/2); fp8 is 1 B/elem (BK).
     KH_TILE = BK if a_dtype == "fp8" else BK // 2
@@ -602,7 +604,10 @@ def _gemm1_body(
             up_col = fx.Int32(128) + gate_col
             gate_vs[ee] = acc_load(acc_idx(row_local, gate_col))
             up_vs[ee] = acc_load(acc_idx(row_local, up_col))
-        result = _silu_mul_batch(gate_vs, up_vs)
+        if const_expr(activation == "gelu_tanh"):
+            result = _gelu_tanh_mul_batch(gate_vs, up_vs)
+        else:
+            result = _silu_mul_batch(gate_vs, up_vs)
 
         local_max = _fabs_f32(result[0])
         for ee in range_constexpr(1, 8):
@@ -692,9 +697,12 @@ def compile_gemm1_a4w4_port(
     interleave=False,
     xcd_swizzle=0,
     a_dtype="fp4",
+    activation="silu",
 ):
     if a_dtype not in ("fp4", "fp8"):
         raise AssertionError(f"a_dtype must be 'fp4' or 'fp8', got {a_dtype!r}")
+    if activation not in ("silu", "gelu_tanh"):
+        raise AssertionError(f"activation must be 'silu' or 'gelu_tanh', got {activation!r}")
     if (BM, use_nt, inline_quant) not in _G1_VARIANTS[a_dtype]:
         raise AssertionError(
             f"unsupported gemm1 variant (a_dtype={a_dtype}, BM={BM}, use_nt={use_nt}, inline_quant={inline_quant})"
@@ -718,6 +726,8 @@ def compile_gemm1_a4w4_port(
     # kernel/smem symbols (so KIMI and non-KIMI instances never collide).
     gu_tag = "il" if interleave else "sep"
     name_suffix = f"{a_dtype}_h{_K}_i{_INTER}_ne{_NE}_bm{BM}_{variant_tag}_{gu_tag}"
+    if activation != "silu":
+        name_suffix += f"_{activation}"
     if xcd_swizzle > 0:
         name_suffix += f"_xcd{xcd_swizzle}"
 
@@ -799,6 +809,7 @@ def compile_gemm1_a4w4_port(
                 N_OUT=_N_OUT,
                 NE=_NE,
                 interleave=interleave,
+                activation=activation,
             )
 
     @flyc.jit

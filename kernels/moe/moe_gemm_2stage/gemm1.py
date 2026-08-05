@@ -52,6 +52,7 @@ from kernels.moe.moe_common import (
 from kernels.moe.moe_common import (
     i64x2_to_v8f16 as _i64x2_to_v8f16,
 )
+from kernels.moe.moe_gemm_2stage.activations import gelu_tanh, silu
 
 
 @functools.lru_cache(maxsize=1024)
@@ -72,6 +73,7 @@ def compile_moe_gemm1(
     use_cshuffle_epilog: bool | None = None,
     scale_is_bf16: bool = False,
     k_batch: int = 1,
+    activation: str = "silu",
 ):
     """Compile stage1 kernel (`moe_gemm1`) and return the compiled executable.
 
@@ -105,6 +107,14 @@ def compile_moe_gemm1(
     elem_bytes = 2 if is_f16_or_bf16 else 1
     if out_dtype not in ("f16", "bf16"):
         raise ValueError(f"out_dtype must be 'f16' or 'bf16', got {out_dtype!r}")
+    _valid_activations = ("silu", "gelu_tanh")
+    if activation not in _valid_activations:
+        raise ValueError(f"activation must be one of {_valid_activations}, got {activation!r}")
+    if activation != "silu" and k_batch > 1:
+        raise ValueError(
+            f"activation={activation!r} is not supported with split-K (k_batch={k_batch}); "
+            "stage1 defers activation under split-K"
+        )
 
     # NOTE: don't materialize MLIR types outside an active MLIR Context.
     def out_mlir():
@@ -309,20 +319,6 @@ def compile_moe_gemm1(
             vec8_elems = 8 if elem_bytes == 1 else 4
             vec8_x = T.vec(vec8_elems, x_elem)
             vec16_x = T.vec(vec16_elems, x_elem)
-
-            def silu(x):
-                # device fast path:
-                #   emu = exp(-x)  ~= exp2(log2e * (-x))  -> v_exp_f32
-                #   sig = rcp(1 + emu)                   -> v_rcp_f32
-                #   y = x * sig
-                #
-                # Using llvm.amdgcn intrinsics prevents lowering to the div_scale/div_fixup
-                # sequences that introduce extra compares/cndmasks.
-                t = x * (-1.4426950408889634)  # -log2(e)
-                emu = rocdl.exp2(T.f32, t)
-                den = 1.0 + emu
-                sig = rocdl.rcp(T.f32, den)
-                return x * sig
 
             acc_init = arith.constant_vector(0, T.i32x4) if is_int8 else arith.constant_vector(0.0, T.f32x4)
             zero_f32_acc = arith.constant_vector(0.0, T.f32x4) if is_int4_bf16_groupwise else None
@@ -1541,7 +1537,10 @@ def compile_moe_gemm1(
                             vg = vg * sx * sw_gate
                             vu = vu * sx * sw_up
 
-                            y = silu(vg) * vu
+                            if const_expr(activation == "gelu_tanh"):
+                                y = gelu_tanh(vg) * vu
+                            else:
+                                y = silu(vg) * vu
                             if const_expr(doweight_stage1):
                                 y = y * tw
                             y16 = arith.trunc_f(T.f16, y)
@@ -1669,7 +1668,10 @@ def compile_moe_gemm1(
                             vg = vg * sx * sw_gate
                             vu = vu * sx * sw_up
 
-                            y = silu(vg) * vu
+                            if const_expr(activation == "gelu_tanh"):
+                                y = gelu_tanh(vg) * vu
+                            else:
+                                y = silu(vg) * vu
                             if const_expr(doweight_stage1):
                                 y = y * tw
                             y = arith.trunc_f(out_mlir(), y)

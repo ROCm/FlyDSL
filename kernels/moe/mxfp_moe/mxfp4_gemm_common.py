@@ -256,6 +256,23 @@ def _silu_mul_batch(gs, us):
     return [gs[i] * sig[i] * us[i] for i in range(len(gs))]
 
 
+def _gelu_tanh_mul_batch(gs, us):
+    # GeLU tanh approx: 0.5*g*(1 + tanh(sqrt(2/pi)*(g + 0.044715*g^3))).
+    # Expand tanh via exp(-2|y|) in [0,1] (non-positive exponent avoids fp32
+    # overflow); exp(-2|y|) uses exp2(-2*LOG2E*|y|) to match _silu_mul_batch's idiom.
+    out = []
+    for i in range(len(gs)):
+        g = gs[i]
+        y = fx.Float32(0.7978845608) * (g + fx.Float32(0.044715) * (g * g * g))
+        abs_y = fx.Float32(y).maximumf(fx.Float32(0.0) - y)
+        e = fx.Float32(rocdl.exp2(T.f32, _raw(fx.Float32(-2.0 * LOG2E) * abs_y)))
+        rcp = fx.Float32(rocdl.rcp(T.f32, _raw(fx.Float32(1.0) + e)))
+        # 1 + tanh(y): y>=0 -> 2/(1+e) ; y<0 -> 2e/(1+e)
+        numerator = (y > fx.Float32(0.0)).select(fx.Float32(2.0), fx.Float32(2.0) * e)
+        out.append(fx.Float32(0.5) * g * numerator * rcp * us[i])
+    return out
+
+
 def _umax_i32(a, b):
     is_gt = arith.cmpi(arith.CmpIPredicate.ugt, _raw(a), _raw(b))
     return fx.Int32(arith.select(is_gt, _raw(a), _raw(b)))
