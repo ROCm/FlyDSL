@@ -216,6 +216,9 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
 
     grid_m = (npq + TILE_M - 1) // TILE_M
     grid_n = (k + TILE_N - 1) // TILE_N
+    # Padded M rows only exist when npq is not tile-aligned; mirrors _row_chk in
+    # the BF16 kernel so aligned shapes emit no extra compare.
+    row_chk = npq % TILE_M != 0
     elem_ty = fx.Float8E4M3FN
 
     @flyc.kernel(known_block_size=[BLOCK_THREADS, 1, 1])
@@ -459,10 +462,10 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
                                 # Padded M rows (npq..grid_m*TILE_M) must not store: with the
                                 # n==1 layout col*dhw+row they alias real elements of a later
                                 # column and race legitimate stores from another block.
-                                row_valid = row < fx.Index(npq)
-                                buffer_ops.buffer_store(
-                                    out.to(fx.BFloat16), y_rsrc, off_ncdhw, mask=col_valid & row_valid
-                                )
+                                store_mask = col_valid
+                                if const_expr(row_chk):
+                                    store_mask = col_valid & (row < fx.Index(npq))
+                                buffer_ops.buffer_store(out.to(fx.BFloat16), y_rsrc, off_ncdhw, mask=store_mask)
 
         store_half_pair(acc00, acc01, 0)
         store_half_pair(acc10, acc11, 1)
