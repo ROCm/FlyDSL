@@ -1,5 +1,9 @@
-Installation
-============
+Install FlyDSL
+==============
+
+FlyDSL is a Python DSL and MLIR compiler stack for writing high-performance AMD
+GPU kernels. This page explains how to install FlyDSL using pip or from source,
+verify the installation, and resolve common issues.
 
 Prerequisites
 -------------
@@ -8,6 +12,8 @@ Prerequisites
 - **ROCm**: Required for GPU execution tests and benchmarks (IR-only tests do not need a GPU)
 - **Supported GPUs**: AMD MI300X/MI308X (gfx942), AMD MI350 (gfx950)
 - **Supported OS**: Linux with ROCm 6.x or 7.x
+
+For the latest ROCm installation instructions, see :doc:`rocm:install/rocm`.
 
 Install from PyPI
 -----------------
@@ -22,7 +28,7 @@ Verify that Python can import FlyDSL:
 
 .. code-block:: bash
 
-   python -c "import flydsl; print('FlyDSL installed')"
+   python -c "import flydsl; print('FlyDSL version', flydsl.__version__)"
 
 Build from source
 -----------------
