@@ -906,6 +906,7 @@ class TestNumericIntrospection:
 
             assert Numeric.from_ir_type(T.f32()) is Float32
             assert Numeric.from_ir_type(T.i32()) is Int32
+            assert Numeric.from_ir_type(T.i(4)) is fx.Int4
 
         run(body)
 
