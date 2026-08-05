@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-05T07:26:53Z",
+ "updated": "2026-08-05T07:29:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30985117407,
+   "pr": 945,
+   "commit": "58cc8b29b4a3ccfcfedc82bceaa1e3ca3e7c8c30",
+   "branch": "jli/update-llvm-basemain",
+   "event": "pull_request",
+   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30985117407",
+   "created_at": "2026-08-05T07:27:51Z",
+   "updated_at": "2026-08-05T07:28:37Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 30984958913,
+   "pr": 945,
+   "commit": "2a581f2ff4b55f9b3acc2d0729a429aaafe488b3",
+   "branch": "jli/update-llvm-basemain",
+   "event": "pull_request",
+   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30984958913",
+   "created_at": "2026-08-05T07:25:24Z",
+   "updated_at": "2026-08-05T07:27:53Z",
+   "actor": "Boss2002n",
+   "jobs": []
+  },
   {
    "run_id": 30984871048,
    "pr": null,
@@ -14,7 +44,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30984871048",
    "created_at": "2026-08-05T07:24:04Z",
-   "updated_at": "2026-08-05T07:25:14Z",
+   "updated_at": "2026-08-05T07:28:14Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1996,92 +2026,6 @@
      "started_at": "2026-08-03T06:34:55Z",
      "completed_at": "2026-08-03T08:20:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30786246553/job/91600697656"
-    }
-   ]
-  },
-  {
-   "run_id": 30786180182,
-   "pr": null,
-   "commit": "ca99de5e649063e500ae362a8bfa0c69a4ea1ce1",
-   "branch": "main",
-   "event": "push",
-   "title": "[Perf]optimize the flash attention fp8 performance for gfx950 (#950)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30786180182",
-   "created_at": "2026-08-03T05:05:58Z",
-   "updated_at": "2026-08-03T06:50:08Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-03T05:11:31Z",
-     "completed_at": "2026-08-03T06:35:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30786180182/job/91600695154"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-03T05:11:31Z",
-     "completed_at": "2026-08-03T06:08:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30786180182/job/91600695169"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-03T05:11:00Z",
-     "completed_at": "2026-08-03T06:50:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30786180182/job/91600695176"
-    }
-   ]
-  },
-  {
-   "run_id": 30785702542,
-   "pr": 930,
-   "commit": "c647d9faab8a3af994c6bf5153b09619a5de96e5",
-   "branch": "dsl-ify-arith",
-   "event": "pull_request",
-   "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30785702542",
-   "created_at": "2026-08-03T04:54:58Z",
-   "updated_at": "2026-08-03T07:55:38Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-03T04:58:50Z",
-     "completed_at": "2026-08-03T05:52:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30785702542/job/91599096007"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-03T04:58:11Z",
-     "completed_at": "2026-08-03T07:55:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30785702542/job/91599096008"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-03T04:58:49Z",
-     "completed_at": "2026-08-03T05:45:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30785702542/job/91599096012"
     }
    ]
   }
