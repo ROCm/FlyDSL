@@ -31,7 +31,7 @@ external_projects_current_project = "flydsl"
 rocm_docs_generate_llms = True
 
 templates_path = ["_templates"]
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "README.md"]
 
 # -- Options for HTML output -------------------------------------------------
 html_title = f"FlyDSL {version}"
@@ -45,12 +45,6 @@ html_theme_options = {
     "use_issues_button": True,
     "use_download_button": True,
 }
-# html_theme_options = {
-#     "navigation_depth": 4,
-#     "collapse_navigation": False,
-#     "sticky_navigation": True,
-#     "titles_only": False,
-# }
 
 # -- Extension configuration -------------------------------------------------
 
@@ -79,6 +73,7 @@ myst_enable_extensions = {
     "deflist",
     "tasklist",
 }
+myst_heading_anchors = 3
 # For substitutions in MyST Markdown and rST files.
 # Usage:
 #   ```md              | ```rst
