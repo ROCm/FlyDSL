@@ -140,17 +140,10 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
 
-# Perf-measurement escape hatches (scratch harness only; do not affect default tests):
-#   FLYDSL_INT4_FORCE_LEGACY=1 -> route int4_bf16 to the legacy moe_gemm_2stage builder
-#     (the pre-#17 int4 kernel) instead of the new moe_2stage_a16wmix a16wi4 path.
+# Perf-measurement escape hatch (scratch harness only; does not affect default tests):
 #   FLYDSL_A16WI4_TILE_N=<int> -> override the a16wi4 stage tile_n (else None -> host default).
-_INT4_FORCE_LEGACY = os.environ.get("FLYDSL_INT4_FORCE_LEGACY", "0") not in ("0", "", "false", "False")
-# The moe_2stage_a16wmix a16wi4 kernel arch-gates its MFMA + int4 dequant (gfx950 K=32 +
-# v_cvt_pk_bf16_f32; gfx942 K=16 two-16x16x16 mfma_f32_16x16x16bf16_1k + scalar dequant)
-# and its A-tile staging (gfx950 direct-to-LDS 128b; gfx942 buffer_load->regs->ds_write
-# 128b, since CDNA3 direct-to-LDS is 4 B/lane only). int4_bf16 now routes to the new
-# kernel on both CDNA3 (gfx942) and CDNA4 (gfx95*); the legacy moe_gemm_2stage path
-# remains reachable via FLYDSL_INT4_FORCE_LEGACY=1.
+# int4_bf16 routes to the moe_2stage_a16wmix a16wi4 kernel on both CDNA3 (gfx942) and CDNA4
+# (gfx95*); it arch-gates MFMA + int4 dequant + A-tile staging internally.
 _A16WMIX_GFX = ("gfx95" in ARCH) or ("gfx942" in ARCH)
 _A16WI4_TILE_N_OVERRIDE = os.environ.get("FLYDSL_A16WI4_TILE_N", "").strip()
 
