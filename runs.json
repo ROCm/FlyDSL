@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-05T04:25:26Z",
+ "updated": "2026-08-05T05:21:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,9 +14,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30974784739",
    "created_at": "2026-08-05T04:19:06Z",
-   "updated_at": "2026-08-05T04:21:20Z",
+   "updated_at": "2026-08-05T04:45:28Z",
    "actor": "Boss2002n",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-05T04:45:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30974784739/job/92209144001"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-05T04:39:35Z",
+     "completed_at": "2026-08-05T05:10:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30974784739/job/92209144033"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-05T04:39:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30974784739/job/92209144037"
+    }
+   ]
   },
   {
    "run_id": 30967941835,
@@ -533,29 +561,29 @@
    "branch": "pr/enh-defer-kernel-lowering",
    "event": "pull_request",
    "title": "[Enh] Defer kernel lowering to launch time and infer known_block_size\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30903223647",
    "created_at": "2026-08-04T11:03:34Z",
-   "updated_at": "2026-08-05T03:56:13Z",
+   "updated_at": "2026-08-05T05:20:07Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-05T03:56:12Z",
-     "completed_at": null,
+     "completed_at": "2026-08-05T05:20:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30903223647/job/92202907991"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-05T03:54:51Z",
-     "completed_at": null,
+     "completed_at": "2026-08-05T04:44:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30903223647/job/92202908004"
     },
     {
