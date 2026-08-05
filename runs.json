@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-05T07:04:43Z",
+ "updated": "2026-08-05T07:07:42Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30983726529,
+   "pr": null,
+   "commit": "c3f623e3f1691f89c23d262dd4d44cdef4312a67",
+   "branch": "main",
+   "event": "push",
+   "title": "[Feature][Test] Validate gfx1100 LDS and integer WMMA foundations (#958)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30983726529",
+   "created_at": "2026-08-05T07:06:06Z",
+   "updated_at": "2026-08-05T07:06:08Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 30983436470,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Enh] Defer kernel lowering to launch time and infer known_block_size\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30983436470",
    "created_at": "2026-08-05T07:01:44Z",
-   "updated_at": "2026-08-05T07:03:22Z",
+   "updated_at": "2026-08-05T07:06:08Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -108,10 +123,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-05T06:06:39Z",
-     "completed_at": null,
+     "completed_at": "2026-08-05T07:05:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30979131790/job/92222685758"
     },
     {
@@ -1738,7 +1753,7 @@
   },
   {
    "run_id": 30794437563,
-   "pr": 958,
+   "pr": null,
    "commit": "0e3279bf56e12784ea8f22759e28066fee40a991",
    "branch": "codex/gfx1100-wmma-foundation",
    "event": "pull_request",
@@ -2097,21 +2112,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30782594326/job/91590353863"
     }
    ]
-  },
-  {
-   "run_id": 30782466681,
-   "pr": 930,
-   "commit": "ade843dfb0679f7b4aa7467c00e0bca1f9e9a5bf",
-   "branch": "dsl-ify-arith",
-   "event": "pull_request",
-   "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30782466681",
-   "created_at": "2026-08-03T03:42:25Z",
-   "updated_at": "2026-08-03T03:45:30Z",
-   "actor": "xudoyuan",
-   "jobs": []
   }
  ]
 }
