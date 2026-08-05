@@ -1,20 +1,35 @@
 {
  "schema": 1,
- "updated": "2026-08-05T23:54:55Z",
+ "updated": "2026-08-05T23:57:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 31056296292,
+   "run_id": 31057925158,
    "pr": 901,
-   "commit": "8cfdf55ed7403d61de8caa7d3b9d79f12a8dece5",
+   "commit": "e1b2636fb3956ab369b638bf90770efb148b1ef7",
    "branch": "moe_sorting_optimization",
    "event": "pull_request",
    "title": "Add Optimized MoE Routing Path",
    "status": "in_progress",
    "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31057925158",
+   "created_at": "2026-08-05T23:54:06Z",
+   "updated_at": "2026-08-05T23:55:00Z",
+   "actor": "amd-wsung102",
+   "jobs": []
+  },
+  {
+   "run_id": 31056296292,
+   "pr": null,
+   "commit": "8cfdf55ed7403d61de8caa7d3b9d79f12a8dece5",
+   "branch": "moe_sorting_optimization",
+   "event": "pull_request",
+   "title": "Add Optimized MoE Routing Path",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31056296292",
    "created_at": "2026-08-05T23:25:15Z",
-   "updated_at": "2026-08-05T23:27:45Z",
+   "updated_at": "2026-08-05T23:54:33Z",
    "actor": "amd-wsung102",
    "jobs": []
   },
@@ -2013,21 +2028,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30884612191",
    "created_at": "2026-08-04T06:36:51Z",
    "updated_at": "2026-08-04T06:38:40Z",
-   "actor": "Boss2002n",
-   "jobs": []
-  },
-  {
-   "run_id": 30884154097,
-   "pr": 945,
-   "commit": "e8220619a0665764479fb8404c6b2ef720c702e4",
-   "branch": "jli/update-llvm-basemain",
-   "event": "pull_request",
-   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30884154097",
-   "created_at": "2026-08-04T06:29:10Z",
-   "updated_at": "2026-08-04T06:30:52Z",
    "actor": "Boss2002n",
    "jobs": []
   }
