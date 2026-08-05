@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-05T03:40:42Z",
+ "updated": "2026-08-05T04:25:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 30974784739,
+   "pr": 945,
+   "commit": "7de78cbb0904158d1f71789d83e21a9d07073b93",
+   "branch": "jli/update-llvm-basemain",
+   "event": "pull_request",
+   "title": "[WIP][LLVM][Flydsl] bump up llvm for upstream and internal coexec opt and adapt flydsl api",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30974784739",
+   "created_at": "2026-08-05T04:19:06Z",
+   "updated_at": "2026-08-05T04:21:20Z",
+   "actor": "Boss2002n",
+   "jobs": []
+  },
   {
    "run_id": 30967941835,
    "pr": 945,
@@ -518,21 +533,30 @@
    "branch": "pr/enh-defer-kernel-lowering",
    "event": "pull_request",
    "title": "[Enh] Defer kernel lowering to launch time and infer known_block_size\u2026",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/30903223647",
    "created_at": "2026-08-04T11:03:34Z",
-   "updated_at": "2026-08-04T13:27:40Z",
+   "updated_at": "2026-08-05T03:56:13Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-05T03:56:12Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30903223647/job/92202907991"
+    },
+    {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-04T12:35:12Z",
-     "completed_at": "2026-08-04T13:05:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30903223647/job/91977225270"
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-05T03:54:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30903223647/job/92202908004"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -541,16 +565,7 @@
      "conclusion": "success",
      "started_at": "2026-08-04T11:26:44Z",
      "completed_at": "2026-08-04T13:27:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30903223647/job/91977225333"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-04T11:26:57Z",
-     "completed_at": "2026-08-04T12:28:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30903223647/job/91977225341"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30903223647/job/92202908715"
     }
    ]
   },
@@ -2097,21 +2112,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30761426963/job/91533293922"
     }
    ]
-  },
-  {
-   "run_id": 30760033343,
-   "pr": 957,
-   "commit": "597254d8935ea670df5b49504b1673d6b7aa8f6f",
-   "branch": "xiaoyu/svd-quark",
-   "event": "pull_request",
-   "title": "Add SVD quant for Quark",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30760033343",
-   "created_at": "2026-08-02T17:57:52Z",
-   "updated_at": "2026-08-02T17:59:13Z",
-   "actor": "amd-xiaoyu12",
-   "jobs": []
   }
  ]
 }
