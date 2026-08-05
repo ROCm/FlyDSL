@@ -164,7 +164,7 @@ def _iter_gpu_kernel_funcs(module):
         if top.operation.name != "gpu.module":
             continue
         for op in top.regions[0].blocks[0].operations:
-            if op.operation.name == "gpu.func" and "gpu.kernel" in op.attributes:
+            if op.operation.name == "gpu.func" and ("kernel" in op.attributes or "gpu.kernel" in op.attributes):
                 yield op
 
 
