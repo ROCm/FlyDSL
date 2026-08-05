@@ -1,20 +1,35 @@
 {
  "schema": 1,
- "updated": "2026-08-05T17:47:39Z",
+ "updated": "2026-08-05T17:52:35Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 31030506501,
+   "run_id": 31031791682,
    "pr": 969,
-   "commit": "891bb7586b1b6b37cb5dd45c2bc5d4292445956c",
+   "commit": "f86a007860647e89102fc63094e662fb2865da57",
    "branch": "jiacao/fix-conv3d-fp8-padded-row-store",
    "event": "pull_request",
    "title": "[Fix] conv3d fp8: guard padded M rows in the epilogue store",
    "status": "in_progress",
    "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31031791682",
+   "created_at": "2026-08-05T17:49:18Z",
+   "updated_at": "2026-08-05T17:50:46Z",
+   "actor": "jiacao-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 31030506501,
+   "pr": null,
+   "commit": "891bb7586b1b6b37cb5dd45c2bc5d4292445956c",
+   "branch": "jiacao/fix-conv3d-fp8-padded-row-store",
+   "event": "pull_request",
+   "title": "[Fix] conv3d fp8: guard padded M rows in the epilogue store",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31030506501",
    "created_at": "2026-08-05T17:32:38Z",
-   "updated_at": "2026-08-05T17:35:26Z",
+   "updated_at": "2026-08-05T17:49:58Z",
    "actor": "jiacao-amd",
    "jobs": []
   },
@@ -40,19 +55,19 @@
    "branch": "omuhamma/fly_a16",
    "event": "pull_request",
    "title": "a16w16 for gfx1250 on flydsl",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31022130191",
    "created_at": "2026-08-05T15:48:13Z",
-   "updated_at": "2026-08-05T15:53:38Z",
+   "updated_at": "2026-08-05T17:47:23Z",
    "actor": "omuhamma",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-05T15:53:38Z",
+     "started_at": "2026-08-05T17:47:22Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31022130191/job/92362809501"
     },
@@ -1987,49 +2002,6 @@
    "updated_at": "2026-08-04T06:27:27Z",
    "actor": "jli-melchior",
    "jobs": []
-  },
-  {
-   "run_id": 30880948143,
-   "pr": 954,
-   "commit": "52f335e00ea57a1d84d2cc6d5a73794a61e419b6",
-   "branch": "mega_moe_v1",
-   "event": "pull_request",
-   "title": "BugFix for MegaMoE",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30880948143",
-   "created_at": "2026-08-04T05:31:23Z",
-   "updated_at": "2026-08-04T07:31:31Z",
-   "actor": "yanboshao",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-04T06:59:53Z",
-     "completed_at": "2026-08-04T07:31:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30880948143/job/91917349470"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-04T06:59:53Z",
-     "completed_at": "2026-08-04T07:31:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30880948143/job/91917349485"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-04T06:59:53Z",
-     "completed_at": "2026-08-04T07:31:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30880948143/job/91917349527"
-    }
-   ]
   }
  ]
 }
