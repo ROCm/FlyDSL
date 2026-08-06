@@ -21,6 +21,7 @@ import flydsl.compiler as flyc  # noqa: E402,I001
 import flydsl.expr as fx  # noqa: E402
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
+from kernels.gemm.gemm_a8w4_256x256_gfx1250 import launch_gemm_a8w4_256x256  # noqa: E402
 from kernels.gemm.gemm_a8w4_mxscale_gfx1250 import launch_gemm_a8w4_mxscale  # noqa: E402
 from kernels.gemm.gemm_a8w8_gfx1250 import launch_gemm_a8w8  # noqa: E402
 from tests.kernels.utils import gemm_common_utils  # noqa: E402
@@ -115,10 +116,17 @@ def _scales_ptpc(a_f32, b_f32, M, N, K, _fp4_w, _scale_exp, scale_scale):
 
 _SCALES = {"mx32": _scales_mx32, "mx128": _scales_mx128, "ptpc": _scales_ptpc}
 
+_A8W4_256_PROFILE = (256, 256, 128, 2, 2, 4, 1, 2)
+
 _MODES = {
     "a8w4_mx32": dict(
         launch=launch_gemm_a8w4_mxscale, fp4_w=True, scale="mx32", a8w8=False, tail=(), wrap=_i8,
         scale_exp=(127, 132), f16_kw=dict(scale_exp=(127, 127)),
+    ),
+    "a8w4_256x256": dict(
+        launch=launch_gemm_a8w4_256x256, fp4_w=True, scale="mx32", a8w8=False, tail=(), wrap=_i8,
+        scale_exp=(127, 132), f16_kw=dict(scale_exp=(127, 127)),
+        profile=_A8W4_256_PROFILE, smoke=(512, 512, 256, 256, 128, 2, 2),
     ),
     "a8w8_mx32": dict(
         launch=launch_gemm_a8w8, fp4_w=False, scale="mx32", a8w8=True, tail=(True, 32), wrap=_i8,
@@ -135,8 +143,15 @@ _MODES = {
 }  # fmt: skip
 
 
-def _skip_reason(spec, N, K, tile_m, tile_n, tile_k, num_buffers):
+def _skip_reason(spec, N, K, tile_cfg, cluster):
     """None when the mode supports this shape/tile combination, else why it cannot."""
+    tile_m, tile_n, tile_k, _m_warp, _n_warp, num_buffers = tile_cfg
+    profile = spec.get("profile")
+    if profile is not None:
+        if (*tile_cfg, *cluster) != profile:
+            return f"this kernel hand-schedules one profile, {profile}"
+        if N % (tile_n * cluster[1]) or K % (tile_k * num_buffers):
+            return f"N={N} must divide {tile_n * cluster[1]} and K={K} must divide {tile_k * num_buffers}"
     if N % tile_n or K % tile_k:
         return f"N={N} / K={K} must divide tile_n={tile_n} / tile_k={tile_k} (the kernel does not pad)"
     if K // tile_k < num_buffers:
@@ -198,7 +213,8 @@ def _build_case(
 
     def make_args(stream):
         w = spec["wrap"]
-        ptrs = [w(t) for t in dev] if spec["a8w8"] else [dev[0], w(dev[1]), w(dev[2]), dev[3], dev[4]]
+        ptr_args = spec["a8w8"] or spec.get("profile") is not None
+        ptrs = [w(t) for t in dev] if ptr_args else [dev[0], w(dev[1]), w(dev[2]), dev[3], dev[4]]
         return (
             *ptrs,
             M,
@@ -236,12 +252,17 @@ def _assert_case(mode, M, N, K, *tile_cfg, **kwargs):
     return c_gpu, make_args, compiled
 
 
-def _run_case(mode, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, **kwargs):
+def _run_case(mode, M, N, K, *tile_cfg, **kwargs):
     _require_gpu()
-    reason = _skip_reason(_MODES[mode], N, K, tile_m, tile_n, tile_k, num_buffers)
+    profile = _MODES[mode].get("profile")
+    if profile is not None:  # sweeps that do not parametrize the cluster get the tuned one
+        kwargs.setdefault("cluster_m", profile[6])
+        kwargs.setdefault("cluster_n", profile[7])
+    cluster = (kwargs.get("cluster_m", 1), kwargs.get("cluster_n", 1))
+    reason = _skip_reason(_MODES[mode], N, K, tile_cfg, cluster)
     if reason:
         pytest.skip(reason)
-    _assert_case(mode, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, **kwargs)
+    _assert_case(mode, M, N, K, *tile_cfg, **kwargs)
 
 
 _MODE_IDS = sorted(_MODES)
@@ -258,15 +279,19 @@ _CASES = [
     (128, 128, 512, 128, 128, 128, 1, 2, 2),  # 2-wave workgroup
     (64, 64, 1024, 16, 32, 512, 1, 2, 2),  # tile_m below one 32-row scale super
     (128, 128, 1024, 32, 32, 512, 2, 2, 2),
+    (256, 512, 512, 256, 256, 128, 2, 2, 4),
+    (257, 512, 4608, 256, 256, 128, 2, 2, 4),
 ]
 _SMOKE = (512, 512, 128, 256, 128, 2, 2)  # N, K, tile_m, tile_n, tile_k, m_warp, n_warp
 _SMOKE_BUFFERS = [2, 4]
 _RAGGED_M_VALUES = [1, 2, 5, 15, 16, 17, 33, 63, 65, 100, 127, 128, 129, 191, 200, 255, 256, 257, 384, 500, 1000, 2048]
 
 
-def _run_smoke(mode, M, num_buffers=2, **kwargs):
-    N, K, *tile_cfg = _SMOKE
-    _run_case(mode, M, N, K, *tile_cfg, num_buffers, **kwargs)
+def _run_smoke(mode, M, num_buffers=None, **kwargs):
+    spec = _MODES[mode]
+    N, K, *tile_cfg = spec.get("smoke", _SMOKE)
+    profile = spec.get("profile")
+    _run_case(mode, M, N, K, *tile_cfg, num_buffers or (profile[5] if profile else 2), **kwargs)
 
 
 @pytest.mark.parametrize("M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers", _CASES)
@@ -299,6 +324,29 @@ def test_gemm_ragged_m(mode, M, num_buffers):
 @pytest.mark.parametrize("mode", _MODE_IDS)
 def test_gemm_cluster(mode, M, cluster_m, cluster_n, num_buffers):
     _run_smoke(mode, M, num_buffers=num_buffers, cluster_m=cluster_m, cluster_n=cluster_n)
+
+
+@pytest.mark.parametrize("knob", range(len(_A8W4_256_PROFILE)))
+def test_a8w4_256x256_rejects_other_profiles(knob):
+    _require_gpu()
+    cfg = list(_A8W4_256_PROFILE)
+    cfg[knob] *= 2
+    _, make_args, _, _ = _build_case("a8w4_256x256", 256, 512, 512, *cfg[:6], cluster_m=cfg[6], cluster_n=cfg[7])
+    with pytest.raises(AssertionError, match="only the tuned"):
+        flyc.compile(launch_gemm_a8w4_256x256, *make_args(torch.cuda.current_stream()))
+
+
+def test_a8w4_256x256_back_to_back_determinism():
+    _require_gpu()
+    c_gpu, make_args, compiled = _assert_case(
+        "a8w4_256x256", 512, 512, 4608, *_A8W4_256_PROFILE[:6], cluster_m=1, cluster_n=2
+    )
+    golden = c_gpu.clone()
+    stream = torch.cuda.current_stream()
+    for _ in range(32):
+        compiled(*make_args(stream))
+    torch.cuda.synchronize()
+    assert torch.equal(c_gpu, golden), "back-to-back launches drifted from the synchronized result"
 
 
 def _bench_us(launch, output: torch.Tensor, *, warmup: int = 10, iters: int = 100) -> float:
