@@ -119,13 +119,13 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
 
             def _load_vec(div_tensor, idx):
                 r = fx.make_rmem_tensor(vec_width, elem_dtype)
-                fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
+                fx.copy(copy_atom, fx.slice(div_tensor, (None, idx)), r)
                 return fx.memref_load_vec(r)
 
             def _store_vec(val, div_tensor, idx):
                 r = fx.make_rmem_tensor(vec_width, elem_dtype)
                 fx.memref_store_vec(val, r)
-                fx.copy_atom_call(copy_atom, r, fx.slice(div_tensor, (None, idx)))
+                fx.copy(copy_atom, r, fx.slice(div_tensor, (None, idx)))
 
             # 1. Load + compute local max
             row_buffer = []
@@ -185,7 +185,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             def _load_scalar(divided, index):
                 view = fx.slice(divided, (None, index))
                 r = fx.make_rmem_tensor(1, elem_dtype)
-                fx.copy_atom_call(copy_atom_s, view, r)
+                fx.copy(copy_atom_s, view, r)
                 return fx.memref_load_vec(r)[0]
 
             def _store_scalar(divided, index, val):
@@ -193,7 +193,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 ts = full(1, elem_dtype(val), elem_dtype)
                 fx.memref_store_vec(ts, r)
                 view = fx.slice(divided, (None, index))
-                fx.copy_atom_call(copy_atom_s, r, view)
+                fx.copy(copy_atom_s, r, view)
 
             # 1. Load + max
             row_buffer = []

@@ -24,7 +24,7 @@ class MegaMoEV2:
     # fmt: off
     def __init__(self, *, rank: int, world_size: int, model_dim: int, inter_dim: int, experts: int, topk: int,
         quant: str, w1: torch.Tensor, w1_scale: torch.Tensor, w2: torch.Tensor, w2_scale: torch.Tensor,
-        max_tok_per_rank: int, mega_scheme: str = "fixedslot"):
+        max_tok_per_rank: int, mega_scheme: str = "fixedslot", swiglu_limit: float = 0.0):
     # fmt: on
         if quant != "a8w4":
             raise ValueError("MegaMoEV2 currently supports quant='a8w4' only")
@@ -40,6 +40,9 @@ class MegaMoEV2:
         self.epr = int(experts // world_size)
         self.topk = int(topk)
         self.mtpr = int(max_tok_per_rank)
+        self.swiglu_limit = float(swiglu_limit)
+        if self.swiglu_limit < 0:
+            raise ValueError("swiglu_limit must be non-negative")
         self.dev = torch.device("cuda", rank)
         self.max_recv = self.world_size * self.mtpr
         compact = self.mtpr > FIXED_SLOT_MAX_MTPR
@@ -111,20 +114,21 @@ class MegaMoEV2:
             "work_head": torch.zeros(8 * 16, dtype=torch.int32, device=self.dev),
             "work_tail": torch.zeros(1, dtype=torch.int32, device=self.dev),
             "expert_tile_end": torch.empty(self.epr, dtype=torch.int32, device=self.dev),
-            "active_experts": torch.empty(total_experts, dtype=torch.int32, device=self.dev),
-            "active_count": torch.zeros(self.world_size, dtype=torch.int32, device=self.dev),
+            "group_done": torch.zeros(1, dtype=torch.int32, device=self.dev),
         }
         workspace["bigcnt"] = op._sym((self.world_size * self.epr,), torch.int32)
         workspace["count_done"] = op._sym((2 * self.world_size,), torch.int32)
         workspace["my_base"] = op._sym((total_experts,), torch.int32)
         workspace["plan_ready"] = op._sym((2 * self.world_size,), torch.int32)
         workspace["payload_ready"] = op._sym((2 * self.epr,), torch.int32)
+        workspace["launch_ready"] = op._sym((self.world_size,), torch.int32)
         ms.shmem_barrier_all()
         workspace["p2p_bigcnt"] = op._p2p_table(workspace["bigcnt"])
         workspace["p2p_count_done"] = op._p2p_table(workspace["count_done"])
         workspace["p2p_my_base"] = op._p2p_table(workspace["my_base"])
         workspace["p2p_plan_ready"] = op._p2p_table(workspace["plan_ready"])
         workspace["p2p_payload_ready"] = op._p2p_table(workspace["payload_ready"])
+        workspace["p2p_launch_ready"] = op._p2p_table(workspace["launch_ready"])
         self._s1_dispatch_workspace = workspace
 
     def _build_v2_disp_table(self):
@@ -159,10 +163,11 @@ class MegaMoEV2:
         table[DispatchSlot.WORK_HEAD] = workspace["work_head"].data_ptr()
         table[DispatchSlot.WORK_TAIL] = workspace["work_tail"].data_ptr()
         table[DispatchSlot.EXPERT_TILE_END] = workspace["expert_tile_end"].data_ptr()
-        table[DispatchSlot.ACTIVE_EXPERTS] = workspace["active_experts"].data_ptr()
-        table[DispatchSlot.ACTIVE_COUNT] = workspace["active_count"].data_ptr()
+        table[DispatchSlot.GROUP_DONE] = workspace["group_done"].data_ptr()
         table[DispatchSlot.RUNNING] = op.running.data_ptr()
         table[DispatchSlot.P2P_RUNNING] = op.p2p_running.data_ptr()
+        table[DispatchSlot.LAUNCH_READY] = workspace["launch_ready"].data_ptr()
+        table[DispatchSlot.P2P_LAUNCH_READY] = workspace["p2p_launch_ready"].data_ptr()
         self._s1_disp = torch.tensor(table, dtype=torch.int64, device=self.dev)
 
     def _select_config(self, tokens: int) -> MegaMoEConfig:
@@ -207,12 +212,11 @@ class MegaMoEV2:
             sort_block_m=config.sort_block_m, tile_n=config.tile_n, tile_k=config.tile_k,
             num_waves=config.num_waves, grid_mult=config.grid_mult, pipe_weights=config.pipe_weights,
             mfma_amajor=config.mfma_amajor, swizzle_a=config.swizzle_a,
-            async_a_copy=config.async_a_copy, active_expert_producer=config.active_expert_producer,
-            cooperative_payload_copy=config.cooperative_payload_copy,
-            num_dispatch_cu=config.num_dispatch_cu, use_tile_resource=config.use_tile_resource,
+            async_a_copy=config.async_a_copy, num_dispatch_cu=config.num_dispatch_cu,
+            use_tile_resource=config.use_tile_resource,
             waves_per_eu_hint=config.waves_per_eu_hint, b_nt=config.b_nt,
             work_shards=config.work_shards, external_grouping=config.external_grouping,
-            external_counting=config.external_counting)
+            external_counting=config.external_counting, swiglu_limit=self.swiglu_limit)
         # fmt: on
         self._s1_active_tile_m = config.sort_block_m
         return self._s1_active_tile_m
