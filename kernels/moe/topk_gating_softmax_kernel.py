@@ -277,7 +277,7 @@ def _emit_topk_gating_softmax_body(
         """Load ELEMS_PER_ATOM contiguous elements starting at atom_index."""
         view = fx.slice(divided, (None, atom_index))
         r = fx.memref_alloca(atom_reg_ty_in, atom_reg_lay_in)
-        fx.copy_atom_call(copy_atom_in, view, r)
+        fx.copy(copy_atom_in, view, r)
         return fx.memref_load_vec(r)
 
     def _store_scalar_f32(divided, index, val):
@@ -285,7 +285,7 @@ def _emit_topk_gating_softmax_body(
         v = fx.Vector.from_elements([val], fx.Float32)
         fx.memref_store_vec(v, r)
         view = fx.slice(divided, (None, index))
-        fx.copy_atom_call(copy_atom_f32, r, view)
+        fx.copy(copy_atom_f32, r, view)
 
     def _store_scalar_i32(divided, index, val):
         # `divided` is a logical_divide of a torch.float32-viewed buffer,
@@ -297,7 +297,7 @@ def _emit_topk_gating_softmax_body(
         v = fx.Vector.from_elements([val_f32], fx.Float32)
         fx.memref_store_vec(v, r)
         view = fx.slice(divided, (None, index))
-        fx.copy_atom_call(copy_atom_f32, r, view)
+        fx.copy(copy_atom_f32, r, view)
 
     # Pass 1: load this thread's VPT experts + per-thread max
     col_idx_list = []
@@ -523,7 +523,7 @@ def build_topk_gating_softmax_module(
             """Load ELEMS_PER_ATOM contiguous elements starting at atom_index."""
             view = fx.slice(divided, (None, atom_index))
             r = fx.make_rmem_tensor(ELEMS_PER_ATOM, elem_dtype)
-            fx.copy_atom_call(copy_atom_in, view, r)
+            fx.copy(copy_atom_in, view, r)
             return fx.memref_load_vec(r)
 
         def _store_scalar_f32(divided, index, val):
@@ -531,7 +531,7 @@ def build_topk_gating_softmax_module(
             v = fx.Vector.from_elements([val], fx.Float32)
             fx.memref_store_vec(v, r)
             view = fx.slice(divided, (None, index))
-            fx.copy_atom_call(copy_atom_f32, r, view)
+            fx.copy(copy_atom_f32, r, view)
 
         def _store_scalar_i32(divided, index, val):
             # `divided` is a logical_divide of a torch.float32-viewed buffer,
@@ -543,7 +543,7 @@ def build_topk_gating_softmax_module(
             v = fx.Vector.from_elements([val_f32], fx.Float32)
             fx.memref_store_vec(v, r)
             view = fx.slice(divided, (None, index))
-            fx.copy_atom_call(copy_atom_f32, r, view)
+            fx.copy(copy_atom_f32, r, view)
 
         # ==================================================================
         # Pass 1: Load this thread's VPT experts + per-thread max

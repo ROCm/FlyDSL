@@ -3279,10 +3279,10 @@ class DualwaveKernelContext:
         lds = fx.SharedAllocator().allocate(shared_storage).peek()
         self.lds = lds
         self.lds_kv_base_idx = fx.Index(fx.ptrtoint(lds.kv.ptr))
-        self.lds_kv_base_ptr = buffer_ops.create_llvm_ptr(self.lds_kv_base_idx, address_space=3)
+        self.lds_kv_base_ptr = lds.kv.ptr.llvm_ptr
         if const_expr(self.traits.PAGED):
             self.lds_bt_base_idx = fx.Index(fx.ptrtoint(lds.bt.ptr))
-            self.lds_bt_base_ptr = buffer_ops.create_llvm_ptr(self.lds_bt_base_idx, address_space=3)
+            self.lds_bt_base_ptr = lds.bt.ptr.llvm_ptr
         else:
             self.lds_bt_base_ptr = None
 
@@ -4367,11 +4367,11 @@ class DualwaveFp8KernelContext:
         lds = fx.SharedAllocator().allocate(shared_storage).peek()
         self.lds = lds
         self.lds_kv_base_idx = fx.Index(fx.ptrtoint(lds.kv.ptr))
-        self.lds_kv_base_ptr = buffer_ops.create_llvm_ptr(self.lds_kv_base_idx, address_space=3)
+        self.lds_kv_base_ptr = lds.kv.ptr.llvm_ptr
         self.lds_vt_base_idx = fx.Index(fx.ptrtoint(lds.vt.ptr))
-        self.lds_vt_base_ptr = buffer_ops.create_llvm_ptr(self.lds_vt_base_idx, address_space=3)
+        self.lds_vt_base_ptr = lds.vt.ptr.llvm_ptr
         self.lds_q_base_idx = fx.Index(fx.ptrtoint(lds.q.ptr))
-        self.lds_q_base_ptr = buffer_ops.create_llvm_ptr(self.lds_q_base_idx, address_space=3)
+        self.lds_q_base_ptr = lds.q.ptr.llvm_ptr
 
     def init_thread_mapping(self):
         _init_dualwave_thread_mapping(self)

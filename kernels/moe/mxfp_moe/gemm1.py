@@ -246,7 +246,7 @@ def _gemm1_body(
         # ds_read_b128 straight into an i32[4] register fragment (kept as a tensor
         # so it can feed fx.gemm directly).
         r = fx.make_rmem_tensor(i32x4_reg_lay, fx.Int32)
-        fx.copy_atom_call(i32x4_copy_atom, fx.slice(s_aq_i32x4_tiles, (None, tile_idx)), r)
+        fx.copy(i32x4_copy_atom, fx.slice(s_aq_i32x4_tiles, (None, tile_idx)), r)
         return r
 
     def issue_a_ds_read(slot):
@@ -559,11 +559,11 @@ def _gemm1_body(
     def acc_store(idx, value):
         r = fx.make_rmem_tensor(acc_reg_lay, fx.Float32)
         r.store(fx.Vector.from_elements([fx.Float32(value)], fx.Float32))
-        fx.copy_atom_call(acc_copy_atom, r, fx.slice(acc_flat_tiles, (None, idx)))
+        fx.copy(acc_copy_atom, r, fx.slice(acc_flat_tiles, (None, idx)))
 
     def acc_load(idx):
         r = fx.make_rmem_tensor(acc_reg_lay, fx.Float32)
-        fx.copy_atom_call(acc_copy_atom, fx.slice(acc_flat_tiles, (None, idx)), r)
+        fx.copy(acc_copy_atom, fx.slice(acc_flat_tiles, (None, idx)), r)
         return r.load()[0]
 
     for i in range_constexpr(kMChunks):
