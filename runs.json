@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-06T00:49:43Z",
+ "updated": "2026-08-06T02:03:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,38 +10,38 @@
    "branch": "moe_sorting_optimization",
    "event": "pull_request",
    "title": "Add Optimized MoE Routing Path",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31057925158",
    "created_at": "2026-08-05T23:54:06Z",
-   "updated_at": "2026-08-05T23:59:21Z",
+   "updated_at": "2026-08-06T02:01:10Z",
    "actor": "amd-wsung102",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-05T23:59:21Z",
-     "completed_at": null,
+     "completed_at": "2026-08-06T02:01:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31057925158/job/92480108239"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-05T23:59:20Z",
-     "completed_at": null,
+     "completed_at": "2026-08-06T01:20:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31057925158/job/92480108252"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-05T23:59:09Z",
-     "completed_at": null,
+     "completed_at": "2026-08-06T01:13:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31057925158/job/92480108253"
     }
    ]
