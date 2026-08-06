@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
-"""Fused stage1 with low-ID dispatch producers and oversubscribed FP8xFP4 grouped-GEMM1 consumers."""
+"""Fused Stage1 dispatch with FP8/FP4 activation and FP4-weight GEMM1."""
 
 import functools
 
@@ -58,7 +58,7 @@ def compile_mega_moe_stage1(
     cooperative_payload_copy: bool = False, use_tile_resource: bool = True,
     waves_per_eu_hint: int = 2, num_cu: int = 256, num_dispatch_cu: int = 32, b_nt: int = -1,
     work_shards: int | None = None, external_grouping: bool | None = None,
-    external_counting: bool | None = None,
+    external_counting: bool | None = None, a_dtype: str = "fp8", out_dtype: str = "fp8",
 ):
     arch = str(get_rocm_arch() or "")
     if not arch.startswith("gfx95"):
@@ -85,11 +85,11 @@ def compile_mega_moe_stage1(
     M_REPEAT = sort_block_m // 16
     NUM_ACC_N = n_per_wave // 16
     assert NUM_ACC_N % 2 == 0 and M_REPEAT % 2 == 0
+    assert a_dtype in ("fp4", "fp8")
+    assert out_dtype in ("fp4", "fp8")
 
-    TILE_K_BYTES = tile_k // 2
-    assert TILE_K_BYTES % 128 == 0
-    A_K_STEP_BYTES = tile_k
-    assert A_K_STEP_BYTES == 256, "MegaMoE v2 GEMM1 requires tile_k=256"
+    assert tile_k == 256, "MegaMoE v2 GEMM1 requires tile_k=256"
+    A_K_STEP_BYTES = tile_k // (2 if a_dtype == "fp4" else 1)
     K_ITERS = model_dim // tile_k
     TOTAL_THREADS = NUM_WAVES * 64
     WORK_SHARDS = 4 if work_shards is None and int(fuse_mtpr) >= 8192 else 8
@@ -119,13 +119,16 @@ def compile_mega_moe_stage1(
     fz_total_experts = fz_npes * fz_epr
     # Small batches stream B; large batches cache it across M tiles.
     b_cache_modifier = int(b_nt) if int(b_nt) >= 0 else (3 if fz_mtpr <= 512 else 0)
-    fz_n_i32, fz_nbytes = model_dim // 4, model_dim
+    a_pack = 2 if a_dtype == "fp4" else 1
+    out_pack = 2 if out_dtype == "fp4" else 1
+    fz_nbytes = model_dim // a_pack
+    fz_n_i32 = fz_nbytes // 4
     fz_scale_bytes = int(fuse_scale_dim)
     fz_scale_n_i32 = (fz_scale_bytes + 3) // 4 if fz_scale_bytes > 0 else 0
     fz_enable_scales = fz_scale_bytes > 0
     fz_safe_end_i32 = (fz_n_i32 // 512) * 512
     _validate_dispatch_capacity(
-        fz_mtpr, fz_npes, fz_epr, fz_k, fz_tile_m, fz_nbytes, inter_dim, use_tile_resource
+        fz_mtpr, fz_npes, fz_epr, fz_k, fz_tile_m, fz_nbytes, inter_dim // out_pack, use_tile_resource
     )
 
     @fx.struct
@@ -136,6 +139,7 @@ def compile_mega_moe_stage1(
     dispatch_path = "fixedslot" if fixed_slot_dispatch else "compact"
     kernel_name = (
         f"megamoe_stage1_{dispatch_path}_t{sort_block_m}x{tile_n}x{tile_k}"
+        f"_a{a_dtype}o{out_dtype}"
         f"_w{NUM_WAVES}_gm{grid_mult}"
         f"_dcu{dispatch_blocks}_pw{int(pipe_weights)}ma{int(mfma_amajor)}sw{int(swizzle_a)}"
         f"aa{int(async_a_copy)}_aep{int(active_expert_producer)}cpc{int(cooperative_payload_copy)}"
@@ -159,7 +163,7 @@ def compile_mega_moe_stage1(
         parity_rsrc = _buffer_ops.create_buffer_resource_from_addr(addr_parity)
         expected_rsrc = _buffer_ops.create_buffer_resource_from_addr(addr_expected)
         def _disp_ptr(slot):
-            return _buffer_ops.buffer_load(disp_rsrc, fx.Int32(int(slot)), vec_width=1, dtype=fx.Int64)
+            return _buffer_ops.buffer_load(disp_rsrc, fx.Int32(slot), vec_width=1, dtype=fx.Int64)
 
         a_entry_count = _disp_ptr(DispatchSlot.ENTRY_COUNT)
         a_epoch_gate = _disp_ptr(DispatchSlot.EPOCH_GATE)
@@ -277,7 +281,7 @@ def compile_mega_moe_stage1(
                 )
         else:
             payload_table = _buffer_ops.buffer_load(
-                disp_rsrc, fx.Int32(int(DispatchSlot.P2P_PAYLOAD_READY)), vec_width=1, dtype=fx.Int64)
+                disp_rsrc, fx.Int32(DispatchSlot.P2P_PAYLOAD_READY), vec_width=1, dtype=fx.Int64)
             addr_payload_ready = _buffer_ops.buffer_load(
                 _buffer_ops.create_buffer_resource_from_addr(payload_table), fx.Int32(fz_rank), vec_width=1,
                 dtype=fx.Int64)
@@ -297,7 +301,7 @@ def compile_mega_moe_stage1(
         if const_expr(use_tile_resource):
             out_rsrc = _buffer_ops.create_buffer_resource(out, max_size=True)
         else:
-            out_nbytes = tokens * fx.Int32(inter_dim)
+            out_nbytes = tokens * fx.Int32(inter_dim // out_pack)
             out_rsrc = _buffer_ops.create_buffer_resource(out, max_size=False, num_records_bytes=out_nbytes)
         os_rsrc = _buffer_ops.create_buffer_resource(out_scale, max_size=False, num_records_bytes=os_nbytes)
 
@@ -313,11 +317,12 @@ def compile_mega_moe_stage1(
             n_tiles=N_TILES, expert_offset=fz_rank * fz_epr, b_cache_modifier=b_cache_modifier,
             swizzle_a=swizzle_a, pipe_weights=pipe_weights, mfma_amajor=mfma_amajor,
             async_a_copy=async_a_copy, use_tile_resource=use_tile_resource,
+            a_dtype=a_dtype, out_dtype=out_dtype,
         )
 
         if tid == fx.Int32(0):
             local_plan_ready = _buffer_ops.buffer_load(
-                disp_rsrc, fx.Int32(int(DispatchSlot.PLAN_READY)), vec_width=1, dtype=fx.Int64)
+                disp_rsrc, fx.Int32(DispatchSlot.PLAN_READY), vec_width=1, dtype=fx.Int64)
             ready_index = payload_parity * fx.Int32(fz_npes) + fx.Int32(fz_rank)
             mori_shmem.int32_wait_until_equals(
                 local_plan_ready + fx.Int64(ready_index) * fx.Int64(4), payload_expected)
@@ -389,7 +394,8 @@ def run_mega_moe_stage1(out, x, w, scale_x, scale_w, sorted_token_ids, expert_id
     sort_block_m=32, tile_n=256, tile_k=256, num_waves=4, grid_mult=4, pipe_weights=True,
     mfma_amajor=False, swizzle_a=True, async_a_copy=False, active_expert_producer=False,
     cooperative_payload_copy=False, num_dispatch_cu=32, use_tile_resource=True, waves_per_eu_hint=2,
-    b_nt=-1, work_shards=None, external_grouping=None, external_counting=None):
+    b_nt=-1, work_shards=None, external_grouping=None, external_counting=None,
+    a_dtype="fp8", out_dtype="fp8"):
     launch = compile_mega_moe_stage1(
         model_dim=model_dim, inter_dim=inter_dim, rank=rank, experts_per_rank=experts_per_rank,
         fuse_npes=fuse_npes, fuse_topk=fuse_topk, fuse_cap=fuse_cap, fuse_mtpr=fuse_mtpr,
@@ -400,7 +406,7 @@ def run_mega_moe_stage1(out, x, w, scale_x, scale_w, sorted_token_ids, expert_id
         cooperative_payload_copy=cooperative_payload_copy, use_tile_resource=use_tile_resource,
         waves_per_eu_hint=waves_per_eu_hint, num_cu=num_cu, num_dispatch_cu=num_dispatch_cu,
         b_nt=b_nt, work_shards=work_shards, external_grouping=external_grouping,
-        external_counting=external_counting,
+        external_counting=external_counting, a_dtype=a_dtype, out_dtype=out_dtype,
     )
     _run_compiled(
         launch, out, x, w, scale_x, scale_w, sorted_token_ids, expert_ids, num_valid_ids, out_scale,

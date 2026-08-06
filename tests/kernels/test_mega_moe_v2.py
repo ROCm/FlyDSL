@@ -176,7 +176,7 @@ def _kernel_table_from_trace(trace_path: str, op_tag: str, active_iters: int, sk
     return rows, e2e, valid
 
 
-def _profile_body(body, dc_op, op_tag, args, rank, world, dev, out_dir, meta):
+def _profile_body(body, op_tag, args, rank, world, dev, out_dir, meta):
     """Profile CUDAGraph replays and report per-kernel and cross-rank timing."""
     ms.shmem_barrier_all()
     body()
@@ -230,7 +230,7 @@ def _profile_body(body, dc_op, op_tag, args, rank, world, dev, out_dir, meta):
             nm = n if len(n) <= 50 else n[:47] + "..."
             print(f"  {nm:<52}{calls:>9.2f}{us:>11.2f}")
         print(sep, flush=True)
-    return {"e2e_us_avg": s.item() / world, "e2e_us_max": mx.item()}
+    return {"e2e_us_avg": s.item() / world}
 
 
 def _chunked_fp4_quant(x):
@@ -281,6 +281,17 @@ def _calc_diff(x, y):
     return float(1 - 2 * (x * y).sum() / denom) if denom > 0 else 0.0
 
 
+def _relative_l2(a, b):
+    """Return relative L2 error for NumPy-compatible inputs."""
+    import numpy as np
+
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    numerator = float(((a - b) ** 2).sum())
+    denominator = float((b**2).sum())
+    return (numerator / denominator) ** 0.5 if denominator > 0 else -1.0
+
+
 def _make_layer_routings(n_layers, tokens, experts, topk, dev, seed, rank):
     """Build deterministic per-layer routing shared by device and reference paths."""
     routings = []
@@ -297,11 +308,9 @@ def _make_layer_routings(n_layers, tokens, experts, topk, dev, seed, rank):
 class RefModel:
     """Pure PyTorch FP32 reference for chained MoE residual layers."""
 
-    def __init__(self, w1_f32, w2_f32, inter_dim, dev, sw1=None, sw2=None):
+    def __init__(self, w1_f32, w2_f32, sw1=None, sw2=None):
         self.w1_f32, self.w2_f32 = w1_f32, w2_f32  # full-precision [E, 2I, H], [E, H, I]
-        self.inter_dim = inter_dim
         self.sw1, self.sw2 = sw1, sw2  # optional dense shared experts (None here)
-        self.dev = dev
         self._cache = {}
 
     def _expert(self, g):
@@ -375,22 +384,9 @@ def _prepare(
     w1_fp32 = torch.randn((weight_experts, 2 * inter_dim, model_dim), device=dev, dtype=torch.float32)
     w1_fp32.mul_(init_scale)
 
-    if quant == "a8w4":
-        # activation: MX-FP8 (fp8_e4m3fn, 1 byte/elem) + e8m0 block scale
-        x_q, scale_x_mx = _per_1x32_mxfp8_quant(x_fp32)
-        x_payload = x_q.contiguous()  # [tokens, model_dim] fp8_e4m3fn
-        token_dtype = torch.float8_e4m3fn
-        a_dtype = "fp8"
-        row_view_dim = model_dim
-    elif quant == "a4w4":
-        # activation: MX-FP4 (packed 2/byte) + e8m0 block scale
-        x_q, scale_x_mx = _per_1x32_fp4_quant(x_fp32)
-        x_payload = x_q.view(torch.float4_e2m1fn_x2).contiguous()  # [tokens, model_dim//2]
-        token_dtype = torch.float4_e2m1fn_x2
-        a_dtype = "fp4"
-        row_view_dim = model_dim // 2
-    else:
+    if quant not in ("a4w4", "a8w4"):
         raise SystemExit(f"unknown quant {quant!r} (use a8w4|a4w4)")
+    a_dtype = "fp4" if quant == "a4w4" else "fp8"
 
     # weight: MX-FP4 + shuffle for the GEMM (shared across a8w4/a4w4)
     w1_flat = w1_fp32.view(weight_experts * (2 * inter_dim), model_dim)
@@ -429,8 +425,6 @@ def _prepare(
     wts = torch.full((tokens, topk), 1.0 / topk, device=dev, dtype=torch.float32)
 
     return dict(
-        x_payload=x_payload,
-        scale_mx_u8=scale_x_mx.contiguous(),
         w_kernel=w_kernel,
         scale_w1_1d=scale_w1_1d,
         w_kernel_gui=w_kernel_gui,
@@ -439,14 +433,9 @@ def _prepare(
         local_experts_only=bool(local_experts_only),
         topk_ids=topk_ids,
         wts=wts,
-        token_dtype=token_dtype,
         a_dtype=a_dtype,
-        row_view_dim=row_view_dim,
-        x_bf16=x_fp32.to(torch.bfloat16).contiguous(),  # --from-bf16: production-quant source
+        x_bf16=x_fp32.to(torch.bfloat16).contiguous(),
     )
-
-
-_E2M1_LUT = None
 
 
 def _run_full_e2e(
@@ -473,19 +462,11 @@ def _run_full_e2e(
     scale_gui=None,
 ):
     """Compare MegaMoEV2 with FP8- and BF16-dispatch ATOM pipelines."""
-    import numpy as _np
     import torch.nn.functional as _F
 
     from kernels.mega_moe import MegaMoEV2
     from kernels.mega_moe.quant import mxfp4_moe_scale_sort, per_1x32_mx_quant
     from kernels.moe.moe_sorting_kernel import moe_sorting_flydsl
-
-    def _relL2(a, b):
-        a = _np.asarray(a, dtype=_np.float64)
-        b = _np.asarray(b, dtype=_np.float64)
-        n = float(((a - b) ** 2).sum())
-        d = float((b**2).sum())
-        return (n / d) ** 0.5 if d > 0 else -1.0
 
     _is_fp4 = s1_out == "fp4"
     max_recv = world * mtpr
@@ -518,7 +499,7 @@ def _run_full_e2e(
     x_q, x_sc = per_1x32_mx_quant(x_bf16[:run_tokens].contiguous(), quant_mode=("fp4" if _is_fp4 else "fp8"))
     x_sc = x_sc.view(torch.uint8)
 
-    def _cg_time(body, dc_op):
+    def _cg_time(body):
         ms.shmem_barrier_all()
         body()
         torch.cuda.synchronize()
@@ -545,7 +526,7 @@ def _run_full_e2e(
     _spe = scale_w1_1d.numel() // experts  # per-expert uint8 elems (scale)
     _w1_arg = w_kernel.reshape(-1)[rank * epr * _wpe : (rank + 1) * epr * _wpe].contiguous()
     _w1s_arg = scale_w1_1d.reshape(-1)[rank * epr * _spe : (rank + 1) * epr * _spe].contiguous()
-    # MegaMoEV2 supports the interleaved A8W4 layout only; ATOM keeps the separated weights.
+    # MegaMoEV2 uses INTERLEAVE gate/up for A8W4 and A4W4; ATOM stays SEPARATED.
     assert w_kernel_gui is not None and scale_gui is not None
     _w1_arg_mega = w_kernel_gui.reshape(-1)[rank * epr * _wpe : (rank + 1) * epr * _wpe].contiguous()
     _w1s_arg_mega = scale_gui.reshape(-1)[rank * epr * _spe : (rank + 1) * epr * _spe].contiguous()
@@ -562,6 +543,7 @@ def _run_full_e2e(
         w2=w2_kernel,
         w2_scale=w2_scale_1d,
         max_tok_per_rank=mtpr,
+        stage2_p2p_quant=args.stage2_p2p_quant,
     )
     torch.cuda.synchronize()
     ms.shmem_barrier_all()
@@ -815,10 +797,10 @@ def _run_full_e2e(
     orw = oracle_w.cpu().numpy()
 
     # Compare all routing-weighted paths against the dequantized-weight oracle.
-    _rm_w = _relL2(out_mega, orw)  # mega(prod)
-    _ra_w = _relL2(out_atom, orw)  # atom-bf16 (reference)
-    _ra8_w = _relL2(out_atom8, orw)  # atom-fp8 (primary baseline)
-    _rma = _relL2(out_mega, out_atom8)  # mega vs primary baseline (should be ~0)
+    _rm_w = _relative_l2(out_mega, orw)  # mega(prod)
+    _ra_w = _relative_l2(out_atom, orw)  # atom-bf16 (reference)
+    _ra8_w = _relative_l2(out_atom8, orw)  # atom-fp8 (primary baseline)
+    _rma = _relative_l2(out_mega, out_atom8)  # mega vs primary baseline (should be ~0)
     _floor = 0.28 if _is_fp4 else 0.10
     _mega_ok = _rm_w < _floor
     _atom8_ok = _ra8_w < _floor
@@ -840,14 +822,14 @@ def _run_full_e2e(
         _pmeta = dict(tokens=run_tokens, network=args.network, quant=args.quant)
         _pdir = getattr(args, "profile_dir", "") or "/tmp/mega_prof"
         _tag = f"{args.network}_{args.quant}_bs{run_tokens}"
-        _pm = _profile_body(_mega_body, moe.comb_op, f"mega_{_tag}", args, rank, world, dev, _pdir, _pmeta)
-        _pa8 = _profile_body(_atom_fp8_body, dc, f"atomfp8_{_tag}", args, rank, world, dev, _pdir, _pmeta)
-        _pa = _profile_body(_atom_body, dc, f"atombf16_{_tag}", args, rank, world, dev, _pdir, _pmeta)
+        _pm = _profile_body(_mega_body, f"mega_{_tag}", args, rank, world, dev, _pdir, _pmeta)
+        _pa8 = _profile_body(_atom_fp8_body, f"atomfp8_{_tag}", args, rank, world, dev, _pdir, _pmeta)
+        _pa = _profile_body(_atom_body, f"atombf16_{_tag}", args, rank, world, dev, _pdir, _pmeta)
         _t_mega, _t_atom8, _t_atom = (_pm["e2e_us_avg"] / 1e3, _pa8["e2e_us_avg"] / 1e3, _pa["e2e_us_avg"] / 1e3)
     else:
-        _t_mega = _cg_time(_mega_body, moe.comb_op)  # megav2 e2e (stage1+stage2)
-        _t_atom8 = _cg_time(_atom_fp8_body, dc)  # baseline e2e (fp8 dispatch)
-        _t_atom = _cg_time(_atom_body, dc)  # reference e2e (bf16 dispatch)
+        _t_mega = _cg_time(_mega_body)  # megav2 e2e (stage1+stage2)
+        _t_atom8 = _cg_time(_atom_fp8_body)  # baseline e2e (fp8 dispatch)
+        _t_atom = _cg_time(_atom_body)  # reference e2e (bf16 dispatch)
     # Populate Stage1 buffers once before isolated Stage2 timing.
     _t_mega_s2 = -1.0
     if not getattr(args, "profile", False):
@@ -858,7 +840,7 @@ def _run_full_e2e(
         def _mega_s2_body():
             moe._run_stage2(run_tokens, None, True)
 
-        _t_mega_s2 = _cg_time(_mega_s2_body, moe.comb_op)
+        _t_mega_s2 = _cg_time(_mega_s2_body)
 
     if rank == 0:
         _e2e_warn = (
@@ -900,6 +882,8 @@ def _run_full_e2e(
 
 
 _PERF_BASELINE_CACHE = {}
+# Allow 5% for run-to-run, thermal, and clock variance.
+_MEGA_PERF_TOL = 0.05
 _MEGA_PERF_BASELINE = {
     "v4_flash:a8w4:8": 0.1135,
     "v4_flash:a8w4:16": 0.1232,
@@ -920,14 +904,25 @@ _MEGA_PERF_BASELINE = {
     "v4_pro:a8w4:2048": 1.6634,
     "v4_pro:a8w4:4096": 3.1158,
     "v4_pro:a8w4:8192": 6.0063,
+    "v4_pro:a4w4:512": 0.5350,
+    "v4_pro:a4w4:1024": 0.7050,
+    "v4_pro:a4w4:8:mtpr8192": 0.4317,
+    "v4_pro:a4w4:32:mtpr8192": 0.5476,
+    "v4_pro:a4w4:64:mtpr8192": 0.5437,
+    "v4_pro:a4w4:128:mtpr8192": 0.4759,
+    "v4_pro:a4w4:256:mtpr8192": 0.4209,
+    "v4_pro:a4w4:1024:mtpr8192": 0.7031,
+    "v4_pro:a4w4:4096:mtpr8192": 1.8450,
+    "v4_pro:a4w4:8192:mtpr8192": 3.4728,
 }
 
 
-def _perf_key(network, quant, tokens):
-    return f"{network}:{quant}:{tokens}"
+def _perf_key(network, quant, tokens, mtpr=0):
+    key = f"{network}:{quant}:{tokens}"
+    return f"{key}:mtpr{mtpr}" if mtpr else key
 
 
-def _perf_baseline_lookup(path, network, quant, tokens):
+def _perf_baseline_lookup(path, network, quant, tokens, mtpr=0):
     """Look up a MegaMoEV2 latency baseline, optionally overriding the built-in table."""
     data = _MEGA_PERF_BASELINE
     if path:
@@ -939,7 +934,7 @@ def _perf_baseline_lookup(path, network, quant, tokens):
             except Exception:  # noqa: BLE001
                 data = {}
             _PERF_BASELINE_CACHE[path] = data
-    v = data.get(_perf_key(network, quant, tokens))
+    v = data.get(_perf_key(network, quant, tokens, mtpr))
     return float(v) if v is not None else None
 
 
@@ -971,20 +966,14 @@ def _run_mega_only(
     stage1_only=False,
 ):
     """Run the aiter-free MegaMoEV2 accuracy and performance CI path."""
-    import numpy as _np
     import torch.nn.functional as _F
 
     from kernels.mega_moe import MegaMoEV2
 
-    def _relL2(a, b):
-        a = _np.asarray(a, dtype=_np.float64)
-        b = _np.asarray(b, dtype=_np.float64)
-        n = float(((a - b) ** 2).sum())
-        d = float((b**2).sum())
-        return (n / d) ** 0.5 if d > 0 else -1.0
+    _is_fp4_mega = quant == "a4w4"
 
     # The dequantized-weight oracle isolates kernel and activation-quantization error.
-    _floor = 0.10
+    _floor = 0.28 if quant == "a4w4" else 0.10
 
     if stage1_only:
         w2_f32 = None
@@ -1029,6 +1018,7 @@ def _run_mega_only(
         w2=w2_kernel,
         w2_scale=w2_scale_1d,
         max_tok_per_rank=mtpr,
+        stage2_p2p_quant=args.stage2_p2p_quant,
     )
     torch.cuda.synchronize()
     ms.shmem_barrier_all()
@@ -1068,12 +1058,13 @@ def _run_mega_only(
         src_valid = src[valid]
         src_tok = (src_valid & 0x00FFFFFF).to(torch.int64) % moe.mtpr
         x_e8 = scale_s1.view(torch.uint8).view(-1, model_dim // 32)[src_tok].float()
+        x_source = x_s1.view(torch.uint8) if _is_fp4_mega else x_s1
+        x_payload = x_source.view(-1, model_dim // 2 if _is_fp4_mega else model_dim)[src_tok]
+        if _is_fp4_mega:
+            x_payload = x_payload.view(torch.float4_e2m1fn_x2)
+        x_values = gemm_common_utils.mxfp4_to_f32(x_payload) if _is_fp4_mega else x_payload.float()
         inp_s1 = (
-            x_s1.view(-1, model_dim)[src_tok]
-            .float()
-            .view(-1, model_dim // 32, 32)
-            .mul(torch.pow(2.0, x_e8 - 127.0)[:, :, None])
-            .reshape(-1, model_dim)
+            x_values.view(-1, model_dim // 32, 32).mul(torch.pow(2.0, x_e8 - 127.0)[:, :, None]).reshape(-1, model_dim)
         )
         scale_cols = (inter_dim // 32 + 7) // 8 * 8
         cols = torch.arange(inter_dim // 32, device=dev, dtype=torch.int64)
@@ -1088,10 +1079,13 @@ def _run_mega_only(
             + d1[:, None]
         )
         e8 = moe._s1_osd[scale_offsets]
+        out_source = moe._s1_out.view(torch.uint8) if _is_fp4_mega else moe._s1_out
+        out_payload = out_source.view(-1, inter_dim // 2 if _is_fp4_mega else inter_dim)[compact_rows]
+        if _is_fp4_mega:
+            out_payload = out_payload.view(torch.float4_e2m1fn_x2)
+        out_values = gemm_common_utils.mxfp4_to_f32(out_payload) if _is_fp4_mega else out_payload.float()
         got_s1 = (
-            moe._s1_out.view(-1, inter_dim)[compact_rows]
-            .float()
-            .view(-1, inter_dim // 32, 32)
+            out_values.view(-1, inter_dim // 32, 32)
             .mul(torch.pow(2.0, e8.float() - 127.0)[:, :, None])
             .reshape(-1, inter_dim)
         )
@@ -1120,11 +1114,12 @@ def _run_mega_only(
 
     if stage1_only:
         stage1_rel_max = _all_max(dev, stage1_rel)
-        stage1_ok = 0.0 <= stage1_rel_max < 0.10
+        stage1_ok = 0.0 <= stage1_rel_max < _floor
         if rank == 0:
             print(
                 f"[STAGE1-ONLY] {args.network} {quant} bs={run_tokens} -> "
-                f"{'PASS' if stage1_ok else 'FAIL'} (all {world} ranks) [relL2={stage1_rel_max:.4e}]",
+                f"{'PASS' if stage1_ok else 'FAIL'} (all {world} ranks) "
+                f"[relL2={stage1_rel_max:.4e}, floor={_floor}]",
                 flush=True,
             )
         return dict(
@@ -1162,7 +1157,7 @@ def _run_mega_only(
             torch.cuda.synchronize()
             ms.shmem_barrier_all()
             out_dev = xd[:run_tokens].float()
-            out_ref = RefModel(w1_all, w2_all, inter_dim, dev).run(x_in, routings).float()
+            out_ref = RefModel(w1_all, w2_all).run(x_in, routings).float()
             _acc_metric = _calc_diff(out_ref, out_dev)  # 1 - cosine (fp64), end-to-end accumulated
             _acc_floor = _CHAIN_TOL
             _acc_label = f"cos_diff(chain x{n_layers})"
@@ -1198,7 +1193,7 @@ def _run_mega_only(
             if local_experts_only:
                 dist.all_reduce(oracle, op=dist.ReduceOp.SUM)
                 oracle = oracle.view(world, run_tokens, model_dim)[rank]
-            _acc_metric = _relL2(out_mega, oracle.cpu().numpy())
+            _acc_metric = _relative_l2(out_mega, oracle.cpu().numpy())
             acc_ok = _acc_metric < _acc_floor
         del w1_all
         torch.cuda.empty_cache()
@@ -1262,7 +1257,6 @@ def _run_mega_only(
         if args.profile:
             _profile_body(
                 _body,
-                moe.comb_op,
                 f"mega_only_{args.network}_{quant}_bs{run_tokens}",
                 args,
                 rank,
@@ -1271,7 +1265,9 @@ def _run_mega_only(
                 args.profile_dir,
                 dict(tokens=run_tokens, network=args.network, quant=quant),
             )
-        _base = _perf_baseline_lookup(getattr(args, "perf_baseline", ""), args.network, quant, run_tokens)
+        _base = _perf_baseline_lookup(
+            getattr(args, "perf_baseline", ""), args.network, quant, run_tokens, int(args.mtpr)
+        )
         if _base is not None and _base > 0:
             _tol = float(args.perf_tol)
             perf_ok = mega_ms <= _base * (1.0 + _tol)
@@ -1308,6 +1304,8 @@ def _run_mega_only(
         network=args.network,
         quant=quant,
         tokens=run_tokens,
+        max_tok_per_rank=mtpr,
+        perf_mtpr=int(args.mtpr),
         mega_only_relL2=relL2,
         mega_sorted_block_m=_active_sbm,
         mega_gemm2_block_m=_active_g2_bm,
@@ -1413,7 +1411,14 @@ def run_one(args, rank, world, dev):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--network", type=str, default="v4_pro", choices=list(NETWORKS))
-    p.add_argument("--quant", type=str, default="a8w4", choices=["a8w4"])
+    p.add_argument("--quant", type=str, default="a8w4", choices=["a8w4", "a4w4"])
+    p.add_argument(
+        "--stage2-p2p-quant",
+        type=str,
+        default="auto",
+        choices=["auto", "none", "fp8_blockwise_1x32"],
+        help="override the Stage2 transport mode; auto keeps the production threshold",
+    )
     p.add_argument("--tokens", type=int, default=64)
     p.add_argument("--mtpr", type=int, default=0, help="0 selects the smallest power-of-two capacity for each BS")
     p.add_argument(
@@ -1511,12 +1516,12 @@ def main():
         type=str,
         default="",
         help="(--mega-only) optional latency JSON overriding the built-in baseline "
-        "({'network:quant:bs': ms}); passes if measured <= golden * (1 + --perf-tol).",
+        "({'network:quant:bs[:mtprN]': ms}); passes if measured <= golden * (1 + --perf-tol).",
     )
     p.add_argument(
         "--perf-tol",
         type=float,
-        default=0.05,
+        default=_MEGA_PERF_TOL,
         help="(--mega-only) fractional slack over the golden baseline that still counts as a match "
         "(default 0.05 = 5%%).",
     )
@@ -1524,8 +1529,8 @@ def main():
         "--perf-out",
         type=str,
         default="",
-        help="(--mega-only) write the measured latencies as a golden JSON ({'network:quant:bs': ms}) "
-        "to this path (used to capture the baseline on a reference machine).",
+        help="(--mega-only) write measured latencies as golden JSON "
+        "({'network:quant:bs[:mtprN]': ms}) to this path (used on a reference machine).",
     )
     args = p.parse_args()
     if args.stage1_only and not args.mega_only:
@@ -1608,7 +1613,9 @@ def main():
                 golden = {}
         for r in results:
             if r.get("mega_only_ms", -1.0) > 0.0:
-                golden[_perf_key(r["network"], r["quant"], r["tokens"])] = round(float(r["mega_only_ms"]), 4)
+                golden[_perf_key(r["network"], r["quant"], r["tokens"], r.get("perf_mtpr", 0))] = round(
+                    float(r["mega_only_ms"]), 4
+                )
         with open(args.perf_out, "w") as f:
             json.dump(golden, f, indent=2, sort_keys=True)
             f.write("\n")
@@ -1669,17 +1676,15 @@ def _skip_unless_mega_8gpu() -> None:
         pytest.skip(f"MegaMoEV2 deps unavailable (need mori + FlyDSL dispatch/combine): {_HARNESS_DEPS_ERROR}")
     arch = _gpu_arch()
     if not arch.startswith("gfx95"):
-        pytest.skip(f"MegaMoEV2 A8W4 requires CDNA4 (gfx95x); current arch: {arch or 'unknown'}")
+        pytest.skip(f"MegaMoEV2 A8W4/A4W4 requires CDNA4 (gfx95x); current arch: {arch or 'unknown'}")
     phys = _count_physical_gpus()
     if phys < 8:
         pytest.skip(f"requires >= 8 physical GPUs, found {phys}")
 
 
-# The benchmark gate allows 5% run-to-run, thermal, and clock variance.
-_MEGA_PERF_TOL = 0.05
-
-
-def _run_mega_8gpu(*, network, quant, bs_list, iters, measure_perf=False, skip_acc=False, layers=1, timeout=2400):
+def _run_mega_8gpu(
+    *, network, quant, bs_list, iters, measure_perf=False, skip_acc=False, layers=1, mtpr=0, timeout=2400
+):
     """Run this file under eight-GPU torchrun and require a clean strict exit."""
     import subprocess as _sp
 
@@ -1709,6 +1714,8 @@ def _run_mega_8gpu(*, network, quant, bs_list, iters, measure_perf=False, skip_a
         str(iters),
         "--strict",
     ]
+    if mtpr > 0:
+        cmd += ["--mtpr", str(mtpr)]
     if layers > 1:
         cmd += ["--layers", str(layers)]
     if measure_perf:
@@ -1722,7 +1729,8 @@ def _run_mega_8gpu(*, network, quant, bs_list, iters, measure_perf=False, skip_a
         if any(tag in line for tag in ("[MEGA-ONLY]", "[strict]")):
             print(line)
     assert result.returncode == 0, (
-        f"MegaMoEV2 8-GPU {network}/{quant} bs={bs_list} FAILED (exit {result.returncode}).\n"
+        f"MegaMoEV2 8-GPU {network}/{quant} bs={bs_list} mtpr={mtpr or 'auto'} "
+        f"FAILED (exit {result.returncode}).\n"
         f"stdout (last 3000 chars):\n{result.stdout[-3000:]}\n"
         f"stderr (last 2000 chars):\n{result.stderr[-2000:]}"
     )
@@ -1732,11 +1740,13 @@ def _run_mega_8gpu(*, network, quant, bs_list, iters, measure_perf=False, skip_a
 # (network, quant, bs_list) v4_pro accuracy shapes covered by committed tuning artifacts.
 _MEGA_ACC_PARAMS = [
     ("v4_pro", "a8w4", "2048,8192"),
+    ("v4_pro", "a4w4", "128,512,2048"),
 ]
 
 # (network, quant, bs_list) perf-relevant batch sizes for the benchmark (golden) gate.
 _MEGA_BENCH_PARAMS = [
     ("v4_pro", "a8w4", "4096,8192"),
+    ("v4_pro", "a4w4", "512,1024"),
 ]
 
 
@@ -1759,6 +1769,39 @@ def test_mega_moe_8gpu_benchmark(network, quant, bs_list):
     """Gate eight-GPU MegaMoEV2 latency against the committed baseline."""
     _skip_unless_mega_8gpu()
     _run_mega_8gpu(network=network, quant=quant, bs_list=bs_list, iters=20, measure_perf=True, skip_acc=True)
+
+
+_MEGA_A4_FIXED_MTPR = 8192
+_MEGA_A4_FIXED_MTPR_BS = "8,32,64,128,256,1024,4096,8192"
+
+
+@pytest.mark.multi_gpu
+def test_mega_moe_8gpu_a4w4_fixed_mtpr_accuracy():
+    """Cover production-style dynamic batches using one maximum-capacity configuration."""
+    _skip_unless_mega_8gpu()
+    _run_mega_8gpu(
+        network="v4_pro",
+        quant="a4w4",
+        bs_list=_MEGA_A4_FIXED_MTPR_BS,
+        mtpr=_MEGA_A4_FIXED_MTPR,
+        iters=5,
+    )
+
+
+@pytest.mark.multi_gpu
+@pytest.mark.benchmark
+def test_mega_moe_8gpu_a4w4_fixed_mtpr_benchmark():
+    """Measure production-style dynamic batches using one maximum-capacity configuration."""
+    _skip_unless_mega_8gpu()
+    _run_mega_8gpu(
+        network="v4_pro",
+        quant="a4w4",
+        bs_list=_MEGA_A4_FIXED_MTPR_BS,
+        mtpr=_MEGA_A4_FIXED_MTPR,
+        iters=20,
+        measure_perf=True,
+        skip_acc=True,
+    )
 
 
 # A8W4 alone supports the chained-accumulation accuracy safeguard.
