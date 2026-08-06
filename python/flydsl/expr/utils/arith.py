@@ -3,18 +3,16 @@
 
 import builtins
 import contextlib
-import threading
 from functools import partialmethod
 
 from ..._mlir import ir
 from ..._mlir.dialects import arith, math
 from ..._mlir.extras import types as T
-from ..meta import dsl_loc_tracing
+from ..meta import dsl_loc_tracing, tracing_context, tracing_option
 
 # --------------------------------------------------------------------------- #
-# Ambient fastmath context (thread-local)
+# Ambient fastmath context (a ``tracing_context`` option)
 # --------------------------------------------------------------------------- #
-_fm_tls = threading.local()
 
 
 def _normalize_fastmath(flags):
@@ -37,7 +35,7 @@ def _normalize_fastmath(flags):
 
 def current_fastmath():
     """Return the ambient fastmath flags set by ``fastmath(...)``, or ``None``."""
-    return getattr(_fm_tls, "value", None)
+    return _normalize_fastmath(tracing_option("fastmath"))
 
 
 def resolve_fastmath(explicit):
@@ -48,12 +46,8 @@ def resolve_fastmath(explicit):
 @contextlib.contextmanager
 def fastmath(flags):
     """Apply *flags* to floating-point ops built inside the ``with`` block."""
-    prev = getattr(_fm_tls, "value", None)
-    _fm_tls.value = _normalize_fastmath(flags)
-    try:
+    with tracing_context(fastmath=_normalize_fastmath(flags)):
         yield
-    finally:
-        _fm_tls.value = prev
 
 
 def element_type(ty) -> ir.Type:

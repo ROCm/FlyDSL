@@ -201,11 +201,13 @@ def as_ir_value(value, *, keep_static=False):
       - ``None``                                    -> ``None``
       - ``ir.Value``                                -> returned unchanged
       - ``Numeric`` holding a Python literal, when
+        ``keep_static=True``                        -> its Python payload
+        ``keep_static=False``                       -> promoted via ``as_numeric(value).ir_value()``
+      - ``bool`` / ``int`` / ``float``, when
         ``keep_static=True``                        -> returned unchanged
         ``keep_static=False``                       -> promoted via ``as_numeric(value).ir_value()``
       - ``tuple`` / ``list``                        -> recursed, shape preserved
       - object with ``__extract_to_ir_values__``    -> single value extracted; multi-value returns a list
-      - ``bool`` / ``int`` / ``float``              -> promoted via ``as_numeric(value).ir_value()``
       - object with ``ir_value()``                  -> called as a fallback
       - anything else                               -> returned unchanged
     """
@@ -213,8 +215,10 @@ def as_ir_value(value, *, keep_static=False):
         return None
     if isinstance(value, ir.Value):
         return value
-    if keep_static and isinstance(value, Numeric) and not isinstance(value.value, ir.Value):
+    if keep_static and isinstance(value, (bool, int, float)):
         return value
+    if keep_static and isinstance(value, Numeric) and value.is_static():
+        return value.value
     if isinstance(value, tuple):
         return tuple(as_ir_value(v, keep_static=keep_static) for v in value)
     if isinstance(value, list):

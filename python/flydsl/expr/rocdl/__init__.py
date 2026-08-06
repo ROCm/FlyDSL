@@ -570,6 +570,21 @@ def cvt_scalef32_pk_f32_fp4(res, src, scale, src_sel_index, **kw):
 
 
 @dsl_loc_tracing
+def cvt_scalef32_pk_bf16_fp4(res, src, scale, src_sel_index, **kw):
+    """ROCDL ``cvt_scalef32_pk_bf16_fp4``: unpack 2 fp4 (from one i32 holding 8 packed
+    fp4 elems) into ``vector<2xbf16>``, multiplied by ``scale``.
+
+    Same operand shape as :func:`cvt_scalef32_pk_f32_fp4` but the destination is bf16
+    (the mxfp4->bf16 upconvert used by the a16w4 MoE path). ``src_sel_index`` (Python
+    int in ``[0,3]``) selects which fp4 pair within the i32 lane is decoded; a full
+    v8bf16 unpack requires 4 calls (sel=0..3).
+    """
+    from ..._mlir.dialects.rocdl import cvt_scalef32_pk_bf16_fp4 as _op
+
+    return _op(res=res, src=_to_ir(src), scale=_to_ir(scale), src_sel_index=src_sel_index, **kw)
+
+
+@dsl_loc_tracing
 def cvt_scalef32_pk_fp4_f32(res, old_vdst, src0, src1, scale, dst_sel_index, **kw):
     """ROCDL ``cvt_scalef32_pk_fp4_f32``: pack 2 fp32 into 2 fp4 and write them into
     slot ``dst_sel_index`` of the i32 lane ``old_vdst`` (other slots preserved).

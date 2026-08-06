@@ -59,6 +59,17 @@ assert "buffer_ops" not in expr.__dict__
 assert "rocdl" not in expr.__dict__
 assert "tdm_ops" not in expr.__dict__
 assert "cluster_barrier" not in expr.gpu.__dict__
+assert "random" not in expr.__dict__
+
+assert expr.random.randint4x is not None
+assert "rocdl" not in expr.random.__dict__
+assert "flydsl.extension.random.rocdl" not in sys.modules
+
+from flydsl.compiler.jit_function import _flydsl_key_cached
+
+_flydsl_key_cached(False, "", ())
+assert "flydsl.expr.rocdl" not in sys.modules
+assert "flydsl.extension.random.rocdl" not in sys.modules
 
 
 def _assert_rocdl_import_error(alias, exc):
@@ -77,18 +88,23 @@ for name in ("rocdl", "tdm_ops"):
 
 _LAZY_ALIAS_CHECK = """
 import importlib
+import sys
 
 expr = importlib.import_module("flydsl.expr")
 assert "buffer_ops" not in expr.__dict__
 assert "rocdl" not in expr.__dict__
 assert "tdm_ops" not in expr.__dict__
+assert "flydsl.extension.random.rocdl" not in sys.modules
 
 from flydsl.expr import rocdl, tdm_ops
 from flydsl.expr.rocdl import cluster
+from flydsl.extension.random import rocdl as random_rocdl
 
 assert rocdl.__name__ == "flydsl.expr.rocdl"
 assert tdm_ops.__name__ == "flydsl.expr.rocdl.tdm_ops"
 assert cluster.__name__ == "flydsl.expr.rocdl.cluster"
+assert random_rocdl.__name__ == "flydsl.extension.random.rocdl"
+assert expr.random.rocdl is random_rocdl
 assert cluster.CLUSTER_BARRIER_ID == -3
 assert expr.rocdl is rocdl
 assert expr.tdm_ops is tdm_ops
@@ -96,7 +112,12 @@ assert expr.tdm_ops is tdm_ops
 
 
 def _build_env():
-    pkg = _REPO_ROOT / "build-fly" / "python_packages" / "flydsl"
+    pkg = Path(
+        os.environ.get(
+            "FLYDSL_TEST_BUILD_FLYDSL_PKG",
+            _REPO_ROOT / "build-fly" / "python_packages" / "flydsl",
+        )
+    )
     if not pkg.is_dir():
         pytest.skip("build-fly python_packages not found (run scripts/build.sh)")
 

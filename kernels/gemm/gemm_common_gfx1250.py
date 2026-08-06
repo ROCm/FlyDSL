@@ -2,59 +2,41 @@
 
 import math as _math
 
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm as llvm_dialect
-from flydsl.expr import arith, gpu, rocdl, tdm_ops
-from flydsl.expr.arith import _to_raw as _raw
-from flydsl.expr.rocdl import cluster
+import flydsl.expr as fx
+from flydsl.expr import gpu, rocdl
+from flydsl.expr.rocdl import cluster, tdm_ops
 from flydsl.expr.typing import T
 
 
-def _raw_lds_ptr(lds_base_idx, byte_offset):
-    """Materialize an LLVM LDS pointer from a pre-extracted byte base."""
-    from flydsl._mlir.dialects import llvm as _llvm
-    from flydsl.expr.arith import ArithValue as _AV
+def make_lds_copy_ops(bits):
+    """Create one reusable layout/copy atom and return its load/store callables."""
+    if bits not in (32, 64, 128):
+        raise ValueError(f"bits must be 32/64/128, got {bits}")
+    elem_count = bits // fx.Int32.width
+    layout = fx.make_layout(elem_count, 1)
+    atom = fx.make_copy_atom(fx.UniversalCopy(bits), fx.Int32)
+    ptr_ty = fx.PointerType.get(
+        elem_ty=fx.Int32.ir_type,
+        address_space=fx.AddressSpace.Shared,
+        alignment=bits // 8,
+    )
 
-    if not isinstance(_raw(byte_offset).type, ir.IndexType):
-        byte_offset = arith.index_cast(T.index, byte_offset)
-    lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
-    total_byte = _AV(lds_base_idx) + byte_offset
-    addr_i32 = _raw(arith.index_cast(T.i32, total_byte))
-    return _llvm.inttoptr(lds_ptr_ty, addr_i32)
+    def _view(lds_base_idx, byte_offset):
+        addr_i32 = fx.Int32(lds_base_idx) + fx.Int32(byte_offset)
+        ptr = fx.inttoptr(ptr_ty, addr_i32)
+        return fx.Tensor(fx.make_view(ptr, layout))
 
+    def load(lds_base_idx, byte_offset):
+        rmem = fx.make_rmem_tensor(layout, fx.Int32)
+        fx.copy_atom_call(atom, _view(lds_base_idx, byte_offset), rmem)
+        return rmem.load()
 
-def lds_load_b128_raw(lds_base_idx, byte_offset):
-    """Load 16 bytes from LDS using a pre-extracted base index (raw LLVM).
+    def store(lds_base_idx, byte_offset, data):
+        rmem = fx.make_rmem_tensor(layout, fx.Int32)
+        rmem.store(data)
+        fx.copy_atom_call(atom, rmem, _view(lds_base_idx, byte_offset))
 
-    Args:
-        lds_base_idx: LDS byte-base index value.
-        byte_offset: Byte offset (index-type) relative to the base.
-    """
-    ptr_val = _raw_lds_ptr(lds_base_idx, byte_offset)
-    return llvm_dialect.load(ir.VectorType.get([4], ir.IntegerType.get_signless(32)), ptr_val)
-
-
-def lds_load_b32_raw(lds_base_idx, byte_offset):
-    """Load 4 bytes (one i32) from LDS using a pre-extracted base index (raw LLVM).
-
-    Unlike :func:`lds_load_b128_raw`, this only requires 4-byte alignment, so it
-    suits scale layouts where consumed words sit at 4-byte (not 16-byte) granular
-    offsets (e.g. the 32x4 B-scale layout's one-i32-per-atom reads).
-    """
-    ptr_val = _raw_lds_ptr(lds_base_idx, byte_offset)
-    return llvm_dialect.load(ir.IntegerType.get_signless(32), ptr_val)
-
-
-def lds_store_b128_raw(lds_base_idx, byte_offset, data):
-    """Store 16 bytes to LDS using a pre-extracted base index (raw LLVM)."""
-    ptr_val = _raw_lds_ptr(lds_base_idx, byte_offset)
-    llvm_dialect.store(_raw(data), ptr_val)
-
-
-def lds_store_b64_raw(lds_base_idx, byte_offset, data):
-    """Store 8 bytes to LDS using a pre-extracted base index (vector<2xi32>)."""
-    ptr_val = _raw_lds_ptr(lds_base_idx, byte_offset)
-    llvm_dialect.store(_raw(data), ptr_val)
+    return load, store
 
 
 def workgroup_barrier(use_cluster=False):
@@ -145,8 +127,7 @@ def fused_silu_swiglu_elem(g, u, *, swiglu, limit_f32, neg_limit_f32):
 
 __all__ = [
     # LDS helpers
-    # Raw LLVM path
-    "lds_load_b128_raw",
+    "make_lds_copy_ops",
     # Pipeline
     "workgroup_barrier",
     "pipeline_fence",
