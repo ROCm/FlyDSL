@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-06T08:10:30Z",
+ "updated": "2026-08-06T08:19:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31084299890,
+   "pr": null,
+   "commit": "772f0703114377de7194a85d0ec48743456d9d63",
+   "branch": "main",
+   "event": "push",
+   "title": "[cleanup] Migrate kernels to fx.copy / .llvm_ptr; expand kernel-code-\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31084299890",
+   "created_at": "2026-08-06T08:17:36Z",
+   "updated_at": "2026-08-06T08:18:08Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 31083664978,
    "pr": 974,
@@ -10,11 +25,11 @@
    "branch": "cleanup/fx-copy-and-llvm-ptr",
    "event": "pull_request",
    "title": "[cleanup] Migrate kernels to fx.copy / .llvm_ptr; expand kernel-code-cleanup skill",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31083664978",
    "created_at": "2026-08-06T08:08:19Z",
-   "updated_at": "2026-08-06T08:08:56Z",
+   "updated_at": "2026-08-06T08:09:58Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -35,7 +50,7 @@
   },
   {
    "run_id": 31082436865,
-   "pr": 974,
+   "pr": null,
    "commit": "0e86e529ae3273930d05c38a5b7ab28d874d02e3",
    "branch": "cleanup/fx-copy-and-llvm-ptr",
    "event": "pull_request",
@@ -55,11 +70,11 @@
    "branch": "worktree-fix-numeric-64bit-gaps",
    "event": "pull_request",
    "title": "[Fix] Implement integer wrap-around, wide unsigned constants",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31081796824",
    "created_at": "2026-08-06T07:40:00Z",
-   "updated_at": "2026-08-06T07:41:12Z",
+   "updated_at": "2026-08-06T08:10:24Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -190,10 +205,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-06T06:52:59Z",
-     "completed_at": null,
+     "completed_at": "2026-08-06T08:09:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31077644318/job/92542464572"
     },
     {
@@ -214,38 +229,38 @@
    "branch": "main",
    "event": "push",
    "title": "[Fix] conv3d fp8: guard padded M rows in the epilogue store (#969)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31077599968",
    "created_at": "2026-08-06T06:31:56Z",
-   "updated_at": "2026-08-06T06:52:50Z",
+   "updated_at": "2026-08-06T08:18:08Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-06T06:53:39Z",
-     "completed_at": null,
+     "completed_at": "2026-08-06T08:18:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31077599968/job/92542651658"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-06T06:52:50Z",
-     "completed_at": null,
+     "completed_at": "2026-08-06T08:17:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31077599968/job/92542651661"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-06T06:53:33Z",
-     "completed_at": null,
+     "completed_at": "2026-08-06T08:18:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31077599968/job/92542651677"
     }
    ]
@@ -2041,49 +2056,6 @@
      "started_at": "2026-08-04T12:37:46Z",
      "completed_at": "2026-08-04T13:16:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30909470044/job/91993902566"
-    }
-   ]
-  },
-  {
-   "run_id": 30908342310,
-   "pr": null,
-   "commit": "f2eeb0da237dbcc172f3bbc2fa6d726aef64308d",
-   "branch": "main",
-   "event": "push",
-   "title": "[Build] Default CMAKE_BUILD_TYPE to RelWithDebInfo when unset (#964)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30908342310",
-   "created_at": "2026-08-04T12:16:07Z",
-   "updated_at": "2026-08-04T12:31:40Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-04T12:25:59Z",
-     "completed_at": "2026-08-04T12:31:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30908342310/job/91990990761"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-04T12:27:30Z",
-     "completed_at": "2026-08-04T12:31:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30908342310/job/91990990789"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-04T12:27:32Z",
-     "completed_at": "2026-08-04T12:31:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30908342310/job/91990990824"
     }
    ]
   }
