@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-06T02:03:45Z",
+ "updated": "2026-08-06T02:46:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31066451110,
+   "pr": 945,
+   "commit": "966c4b0121449dbea1d924dcf865f55c0245e79a",
+   "branch": "jli/update-llvm-basemain",
+   "event": "pull_request",
+   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31066451110",
+   "created_at": "2026-08-06T02:44:05Z",
+   "updated_at": "2026-08-06T02:44:24Z",
+   "actor": "Boss2002n",
+   "jobs": []
+  },
+  {
+   "run_id": 31066404150,
+   "pr": 945,
+   "commit": "9d6415a586be88bc27eb7305e5fa5ef8d6e326d2",
+   "branch": "jli/update-llvm-basemain",
+   "event": "pull_request",
+   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31066404150",
+   "created_at": "2026-08-06T02:43:05Z",
+   "updated_at": "2026-08-06T02:44:12Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 31057925158,
    "pr": 901,
@@ -2000,64 +2030,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30885764036/job/91941278568"
     }
    ]
-  },
-  {
-   "run_id": 30885456197,
-   "pr": 945,
-   "commit": "d9c1d166b52c7b747d9eaf50abd9371195d5c772",
-   "branch": "jli/update-llvm-basemain",
-   "event": "pull_request",
-   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30885456197",
-   "created_at": "2026-08-04T06:50:46Z",
-   "updated_at": "2026-08-04T08:46:19Z",
-   "actor": "Boss2002n",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-04T08:00:51Z",
-     "completed_at": "2026-08-04T08:45:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30885456197/job/91930081855"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-04T08:09:27Z",
-     "completed_at": "2026-08-04T08:46:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30885456197/job/91930081864"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-04T08:11:17Z",
-     "completed_at": "2026-08-04T08:46:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30885456197/job/91930082071"
-    }
-   ]
-  },
-  {
-   "run_id": 30884612191,
-   "pr": 945,
-   "commit": "9cab8c853eaf1cfcd46306528a2fac184b0f8748",
-   "branch": "jli/update-llvm-basemain",
-   "event": "pull_request",
-   "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30884612191",
-   "created_at": "2026-08-04T06:36:51Z",
-   "updated_at": "2026-08-04T06:38:40Z",
-   "actor": "Boss2002n",
-   "jobs": []
   }
  ]
 }
