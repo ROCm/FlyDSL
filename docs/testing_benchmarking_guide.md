@@ -77,6 +77,7 @@ Full end-to-end tests: compile FlyDSL kernels, execute on GPU, validate against 
 | `test_layernorm.py` | LayerNorm | Layer normalization |
 | `test_rmsnorm.py` | RMSNorm | RMS normalization |
 | `test_preshuffle_gemm.py` | GEMM | Preshuffle MFMA GEMM (fp8/int8/fp16/bf16) |
+| `test_gemm_a16w16_universe_gfx950.py` | GEMM | Layout-universal FP16/BF16 GEMM (gfx950) |
 | `test_moe_gemm.py` | MoE GEMM | Mixture-of-Experts GEMM |
 | `test_moe_reduce.py` | MoE Reduce | MoE reduction kernel |
 | `test_pa.py` | Paged Attn | Paged attention decode |

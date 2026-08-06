@@ -11,8 +11,8 @@ GEMM Kernels
 
 - ``kernels.gemm.preshuffle_gemm`` -- MFMA-based GEMM with LDS pipeline and pre-shuffled weights (FP8, INT8, FP16, BF16)
 - ``kernels.gemm.mxfp4_preshuffle`` -- MXFP4 / FP4 (and f8f4) preshuffle GEMM
+- ``kernels.gemm.gemm_a16w16_universe_gfx950`` -- A16W16 universe GEMM for gfx950
 - ``kernels.gemm.fp4_gemm_4wave`` -- 4-wave FP4 GEMM (gfx950)
-- ``kernels.gemm.hgemm_splitk`` -- FP16 split-K GEMM
 
 MoE (Mixture-of-Experts) Kernels
 ----------------------------------

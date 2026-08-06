@@ -79,10 +79,10 @@ FlyDSL/
 │   ├── gemm/                         # Dense GEMM kernels
 │   │   ├── preshuffle_gemm.py        # GEMM (preshuffle layout)
 │   │   ├── mxfp4_preshuffle.py       # MXFP4 preshuffle GEMM
+│   │   ├── gemm_a16w16_universe_gfx950.py # A16W16 universe GEMM (gfx950)
 │   │   ├── fp4_gemm_4wave.py         # FP4 4-wave GEMM
 │   │   ├── fp8_gemm_4wave.py         # FP8 4-wave GEMM
 │   │   ├── fp8_gemm_8wave.py         # FP8 8-wave GEMM
-│   │   ├── hgemm_splitk.py           # FP16 GEMM split-K
 │   │   ├── rdna_f16_gemm.py          # RDNA FP16 GEMM
 │   │   ├── rdna_fp8_preshuffle_gemm.py # RDNA FP8 GEMM
 │   │   ├── gemm_common_gfx1250.py    # GFX1250 GEMM common

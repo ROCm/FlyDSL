@@ -56,8 +56,7 @@ def get_llvm_ptr(ptr, offset, dtype_bytes, ptr_type=None):
     """Build a global (address-space 1) ``!llvm.ptr`` at ``ptr + offset*dtype_bytes``.
 
     Shared home for the LLVM-ptr arithmetic used by atomic/global accesses
-    (previously duplicated in hgemm_splitk.py, small_m_hgemm.py, splitk_hgemm.py
-    and rmsnorm_kernel.py).
+    (previously duplicated across multiple kernels).
     """
     if ptr_type is None:
         ptr_type = ir.Type.parse("!llvm.ptr<1>")
