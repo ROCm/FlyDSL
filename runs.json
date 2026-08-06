@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-06T07:08:15Z",
+ "updated": "2026-08-06T07:16:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "mega_moe_a4w4",
    "event": "pull_request",
    "title": "add A4W4 and FP8 P2P transport support to MegaMoE v2",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31079676495",
    "created_at": "2026-08-06T07:06:47Z",
-   "updated_at": "2026-08-06T07:06:48Z",
+   "updated_at": "2026-08-06T07:11:08Z",
    "actor": "Yaowu-Xiong",
    "jobs": []
   },
@@ -40,13 +40,41 @@
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
    "title": "[WIP][LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31077707312",
    "created_at": "2026-08-06T06:33:53Z",
-   "updated_at": "2026-08-06T06:47:29Z",
+   "updated_at": "2026-08-06T07:10:03Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-06T07:10:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31077707312/job/92546044888"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-06T07:10:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31077707312/job/92546044906"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-06T07:11:13Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31077707312/job/92546044979"
+    }
+   ]
   },
   {
    "run_id": 31077644318,
