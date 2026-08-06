@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-06T04:18:01Z",
+ "updated": "2026-08-06T04:26:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31070877266,
+   "pr": 971,
+   "commit": "3cf26da2b545c8e1f08323f6a95e5c97870b2089",
+   "branch": "gfx1250/gemm-opt-0805",
+   "event": "pull_request",
+   "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31070877266",
+   "created_at": "2026-08-06T04:18:16Z",
+   "updated_at": "2026-08-06T04:19:28Z",
+   "actor": "aoli26",
+   "jobs": []
+  },
   {
    "run_id": 31070762606,
    "pr": 970,
@@ -10,11 +25,11 @@
    "branch": "mega_moe_stage2",
    "event": "pull_request",
    "title": "[MegaMoE] Add A4W4 support and optimize FP8 P2P transport",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31070762606",
    "created_at": "2026-08-06T04:15:45Z",
-   "updated_at": "2026-08-06T04:16:10Z",
+   "updated_at": "2026-08-06T04:18:03Z",
    "actor": "Yaowu-Xiong",
    "jobs": []
   },
@@ -63,7 +78,7 @@
   },
   {
    "run_id": 31069841097,
-   "pr": 970,
+   "pr": null,
    "commit": "979c4804e844f75300f54f35c2a7765ac2145a60",
    "branch": "mega_moe_stage2",
    "event": "pull_request",
@@ -2014,21 +2029,6 @@
    "created_at": "2026-08-04T08:09:56Z",
    "updated_at": "2026-08-04T09:39:39Z",
    "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 30888155903,
-   "pr": 954,
-   "commit": "9407d8e1ec9fff6f1ac1d5c159ae1bf2d08fe93b",
-   "branch": "mega_moe_v1",
-   "event": "pull_request",
-   "title": "BugFix for MegaMoE",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30888155903",
-   "created_at": "2026-08-04T07:31:29Z",
-   "updated_at": "2026-08-04T08:10:20Z",
-   "actor": "yanboshao",
    "jobs": []
   }
  ]
