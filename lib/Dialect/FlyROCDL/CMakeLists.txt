@@ -11,6 +11,7 @@ add_mlir_dialect_library(MLIRFlyROCDLDialect
   GFX1250/MmaAtomScale.cpp
   GFX1250/CopyAtom.cpp
   GFX11/MmaAtom.cpp
+  GFX120X/MmaAtom.cpp
 
   DEPENDS
   MLIRFlyROCDLIncGen

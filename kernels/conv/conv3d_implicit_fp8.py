@@ -20,17 +20,14 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir as _ir
 from flydsl._mlir.dialects import llvm
-from flydsl._mlir.dialects import llvm as _llvm
-from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TAS
 from flydsl.expr import arith, const_expr, range_constexpr
+from flydsl.expr.rocdl.universal import make_buffer_ptr
 from flydsl.expr.typing import Vector as Vec
-from flydsl.expr.utils.arith import ArithValue as _ArithValue
 from kernels.common import buffer_ops
+from kernels.gemm.fp8_gemm_8wave import TiledMmaDriver
 from kernels.gemm.fp8_gemm_utils import (
     G2SLoader,
-    Mfma16x16x128,
     S2RLoader,
     compute_global_swizzle,
     make_fp8_buffer_tensor,
@@ -51,27 +48,10 @@ def _make_fp8_buffer_tensor_from_addr(addr_i64, fp8_ir_t, ref_buf_tensor):
 
     The 2 GB num_records bound ensures OOB-routed padding taps read zero.
     """
-    from flydsl.expr.rocdl.universal import make_ptr
-
     BIG_ASYNC_NR = 0x80000000  # 2 GB
     alignment = fx.PointerType(fx.get_iter(ref_buf_tensor).type).alignment
-    f8_ptr_ty = fx.PointerType.get(
-        elem_ty=fp8_ir_t,
-        address_space=_TAS.BufferDesc,
-        alignment=alignment,
-    )
-    llvm_ptr_ty = _ir.Type.parse("!llvm.ptr")
-    addr_val = addr_i64.ir_value() if hasattr(addr_i64, "ir_value") else addr_i64
-    base_ptr = _llvm.IntToPtrOp(llvm_ptr_ty, addr_val).result
-    buf_ptr = make_ptr(
-        f8_ptr_ty,
-        [
-            _ArithValue(base_ptr),
-            fx.Int16(0).ir_value(),
-            fx.Int64(BIG_ASYNC_NR).ir_value(),
-            fx.Int32(buffer_ops._get_buffer_flags()).ir_value(),
-        ],
-    )
+    g_ptr_ty = fx.PointerType.get(elem_ty=fp8_ir_t, address_space=1, alignment=alignment)
+    buf_ptr = make_buffer_ptr(fx.inttoptr(g_ptr_ty, addr_i64), num_records_bytes=BIG_ASYNC_NR)
     return fx.Tensor(fx.make_view(buf_ptr, fx.get_layout(ref_buf_tensor)))
 
 
@@ -485,7 +465,13 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
 
         a_s2r = S2RLoader(wave_m, N_TILES_A)
         b_s2r = S2RLoader(wave_n, N_TILES_B)
-        mfma = Mfma16x16x128(N_TILES_A, N_TILES_B)
+        # Single 16x16x128 fp8 atom, built in-kernel (raw i32x8 operands need the
+        # concrete tiled_mma; a tiled_mma kernel-arg fails cold-compile).
+        tiled_mma = fx.make_tiled_mma(
+            fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, elem_ty)),
+            fx.make_layout((1, 1, 1), (0, 0, 0)),
+        )
+        mfma = TiledMmaDriver(tiled_mma, N_TILES_A, N_TILES_B)
 
         c00_frag = [mfma.zero_value] * N_ACCUMS
         c01_frag = [mfma.zero_value] * N_ACCUMS

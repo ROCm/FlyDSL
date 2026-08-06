@@ -24,6 +24,44 @@ from . import rdna4 as rdna4
 from .enum import SyncScope as SyncScope
 from .universal import *
 
+__all__ = [
+    # Targets
+    "cdna3",
+    "cdna4",
+    # "cdna5", unstable for now
+    "rdna3",
+    "rdna4",
+    # Enums
+    "SyncScope",
+    # Re-exported from .universal
+    "s_waitcnt",
+    "BufferCopy",
+    "BufferCopy8b",
+    "BufferCopy16b",
+    "BufferCopy32b",
+    "BufferCopy64b",
+    "BufferCopy128b",
+    "BufferCopyLDS",
+    "BufferCopyLDS32b",
+    "BufferCopyLDS64b",
+    "BufferCopyLDS128b",
+    "BufferAtomic",
+    "BufferAtomicAdd",
+    "BufferAtomicMax",
+    "BufferAtomicMin",
+    "BufferAtomicPkAdd",
+    "MFMA",
+    "WMMA",
+    "make_buffer_ptr",
+    "make_buffer_tensor",
+    "get_buffer_rsrc",
+    # Operations
+    "sched_mfma",
+    "sched_vmem",
+    "sched_dsrd",
+    "sched_dswr",
+]
+
 # Keep references to ODS-generated builders so we can wrap them without losing access.
 _ods_wmma_scale_f32_16x16x128_f8f6f4 = globals().get("wmma_scale_f32_16x16x128_f8f6f4", None)
 _ods_wmma_scale_f32_32x16x128_f4 = globals().get("wmma_scale_f32_32x16x128_f4", None)
@@ -527,6 +565,21 @@ def cvt_scalef32_pk_f32_fp4(res, src, scale, src_sel_index, **kw):
     two-stage shuffle to stitch.
     """
     from ..._mlir.dialects.rocdl import cvt_scalef32_pk_f32_fp4 as _op
+
+    return _op(res=res, src=_to_ir(src), scale=_to_ir(scale), src_sel_index=src_sel_index, **kw)
+
+
+@dsl_loc_tracing
+def cvt_scalef32_pk_bf16_fp4(res, src, scale, src_sel_index, **kw):
+    """ROCDL ``cvt_scalef32_pk_bf16_fp4``: unpack 2 fp4 (from one i32 holding 8 packed
+    fp4 elems) into ``vector<2xbf16>``, multiplied by ``scale``.
+
+    Same operand shape as :func:`cvt_scalef32_pk_f32_fp4` but the destination is bf16
+    (the mxfp4->bf16 upconvert used by the a16w4 MoE path). ``src_sel_index`` (Python
+    int in ``[0,3]``) selects which fp4 pair within the i32 lane is decoded; a full
+    v8bf16 unpack requires 4 calls (sel=0..3).
+    """
+    from ..._mlir.dialects.rocdl import cvt_scalef32_pk_bf16_fp4 as _op
 
     return _op(res=res, src=_to_ir(src), scale=_to_ir(scale), src_sel_index=src_sel_index, **kw)
 

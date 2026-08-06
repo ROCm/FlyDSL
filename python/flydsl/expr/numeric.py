@@ -23,6 +23,40 @@ from .utils.arith import (
     is_float_type,
 )
 
+__all__ = [
+    "NumericMeta",
+    "Numeric",
+    "as_numeric",
+    "Integer",
+    "Float",
+    "Boolean",
+    "Int4",
+    "Int8",
+    "Int16",
+    "Int32",
+    "Int64",
+    "Int128",
+    "Uint8",
+    "Uint16",
+    "Uint32",
+    "Uint64",
+    "Uint128",
+    "Float16",
+    "BFloat16",
+    "Float32",
+    "Float64",
+    "Float8E5M2",
+    "Float8E4M3FN",
+    "Float8E4M3FNUZ",
+    "Float8E4M3B11FNUZ",
+    "Float8E4M3",
+    "Float6E2M3FN",
+    "Float6E3M2FN",
+    "Float8E8M0FNU",
+    "Float4E2M1FN",
+    "Index",
+]
+
 
 def _infer_np_dtype(width, signed, name):
     if signed is not None:
@@ -484,6 +518,7 @@ class Numeric(metaclass=NumericMeta):
             T.i32(): Int32,
             T.i16(): Int16,
             T.i8(): Int8,
+            T.i(4): Int4,
             T.si64(): Int64,
             T.si32(): Int32,
             T.si16(): Int16,
