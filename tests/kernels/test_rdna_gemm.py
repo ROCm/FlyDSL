@@ -103,6 +103,41 @@ def test_f16_gemm_correctness(M, N, K, in_dtype, out_dtype):
     assert verify_output(C.float(), C_ref, atol=0.05, rtol=0.05)
 
 
+def test_f16_gemm_stochastic_rounding():
+    """BF16 GEMM with the stochastic-rounding epilogue: bounded, seed-varying, reproducible.
+
+    Unbiasedness of the rounding itself is proven in tests/unit/test_stochastic_rounding.py;
+    here we only check the GEMM wiring.
+    """
+    _requires_rdna_wmma()
+
+    M = N = K = 256
+    torch.manual_seed(0)
+    A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") * 0.1
+    B_T = torch.randn(N, K, dtype=torch.bfloat16, device="cuda") * 0.1
+    C_ref = A.float() @ B_T.float().T
+    stream = torch.cuda.current_stream()
+
+    rn_gemm, _, _, _ = create_wmma_gemm_module(M, N, K, in_dtype="bf16", out_dtype="bf16", rounding="rn")
+    rs_gemm, _, _, _ = create_wmma_gemm_module(M, N, K, in_dtype="bf16", out_dtype="bf16", rounding="rs")
+
+    def run(launch_fn, *seed):
+        C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
+        launch_fn(C, A, B_T, stream, *seed)
+        torch.cuda.synchronize()
+        return C.float()
+
+    C_rn = run(rn_gemm)  # default 4-arg launch: seed is unused for round-to-nearest
+    C_rs1, C_rs2 = run(rs_gemm, 1), run(rs_gemm, 2)
+
+    # SR stays within about an ULP of round-to-nearest against the f32 reference
+    assert (C_rs1 - C_ref).abs().max() < 3 * (C_rn - C_ref).abs().max() + 5e-3
+    # the seed is a runtime argument: one compiled kernel, different seeds vary
+    # the rounding, and a repeated seed is reproducible
+    assert not torch.equal(C_rs1, C_rs2)
+    assert torch.equal(C_rs1, run(rs_gemm, 1))
+
+
 @pytest.mark.parametrize(
     "M, N, K",
     [

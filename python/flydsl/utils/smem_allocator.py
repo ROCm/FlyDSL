@@ -242,6 +242,7 @@ SMEM_CAPACITY_MAP = {
     "gfx942": 65536,  # MI300A / MI300X: 64KB LDS per CU
     # CDNA 4 (MI350 Series) - 160KB LDS per CU (key upgrade for CDNA4)
     "gfx950": 163840,  # MI300C / MI300X Enhanced Models: 64KB LDS per CU
+    "gfx1100": 65536,  # RDNA3 (Navi 31 / W7900): 64KB max per workgroup
     "gfx1151": 65536,  # RDNA3.5: 64KB LDS per WGP
     "gfx1201": 65536,  # RDNA4: 64KB LDS per WGP
     # GFX1250 - 320KB LDS (WGP$ unified, 5 × 64KB segments)

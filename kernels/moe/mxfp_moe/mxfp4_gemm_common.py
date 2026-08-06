@@ -214,22 +214,31 @@ def _fabs_f32(x):
 fabs_f32 = _fabs_f32
 
 
-def _e8m0_roundup(amax_f32):
-    wi = fx.Int32(_raw(amax_f32 * fx.Float32(1.0 / 6.0)).bitcast(T.i32))
+_FMT_MAX_FP4 = 6.0
+_FMT_MAX_FP8_E4M3 = 448.0
+
+
+def _e8m0_roundup(amax_f32, fmt_max):
+    wi = (amax_f32 * fx.Float32(1.0 / fmt_max)).bitcast(fx.Int32)
     bexp = (wi + fx.Int32(0x7FFFFF)).shrui(fx.Int32(23)) & fx.Int32(0xFF)
-    lt = arith.cmpi(arith.CmpIPredicate.ult, _raw(bexp), _raw(fx.Int32(254)))
-    return fx.Int32(arith.select(lt, _raw(bexp), _raw(fx.Int32(254))))
+    return (bexp < fx.Int32(254)).select(bexp, fx.Int32(254))
 
 
 def _e8m0_from_amax(amax_f32):
-    e8m0 = _e8m0_roundup(amax_f32)
-    qscale = fx.Float32(_raw(e8m0 << fx.Int32(23)).bitcast(T.f32))
+    e8m0 = _e8m0_roundup(amax_f32, _FMT_MAX_FP4)
+    qscale = (e8m0 << fx.Int32(23)).bitcast(fx.Float32)
+    return e8m0, qscale
+
+
+def _e8m0_from_amax_fp8(amax_f32):
+    e8m0 = _e8m0_roundup(amax_f32, _FMT_MAX_FP8_E4M3)
+    qscale = (e8m0 << fx.Int32(23)).bitcast(fx.Float32)
     return e8m0, qscale
 
 
 def _inline_e8m0(amax_u16_i32):
-    f32 = fx.Float32(_raw((fx.Int32(_raw(amax_u16_i32)) & fx.Int32(0xFFFF)) << fx.Int32(16)).bitcast(T.f32))
-    return _e8m0_roundup(f32)
+    f32 = ((fx.Int32(amax_u16_i32) & fx.Int32(0xFFFF)) << fx.Int32(16)).bitcast(fx.Float32)
+    return _e8m0_roundup(f32, _FMT_MAX_FP4)
 
 
 def _pkmax_u16(a_i32, b_i32):

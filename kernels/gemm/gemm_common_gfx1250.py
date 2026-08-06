@@ -3,14 +3,15 @@
 import math as _math
 
 import flydsl.expr as fx
-from flydsl.expr import gpu, rocdl, tdm_ops
-from flydsl.expr.rocdl import cluster
+from flydsl.expr import gpu, rocdl
+from flydsl.expr.rocdl import cluster, tdm_ops
 from flydsl.expr.typing import T
 
 
 def make_lds_copy_ops(bits):
     """Create one reusable layout/copy atom and return its load/store callables."""
-    assert bits in (32, 64, 128), f"bits must be 32/64/128, got {bits}"
+    if bits not in (32, 64, 128):
+        raise ValueError(f"bits must be 32/64/128, got {bits}")
     elem_count = bits // fx.Int32.width
     layout = fx.make_layout(elem_count, 1)
     atom = fx.make_copy_atom(fx.UniversalCopy(bits), fx.Int32)
@@ -21,8 +22,7 @@ def make_lds_copy_ops(bits):
     )
 
     def _view(lds_base_idx, byte_offset):
-        byte_offset = fx.index_cast(T.index, byte_offset)
-        addr_i32 = fx.index_cast(T.i32, lds_base_idx + byte_offset)
+        addr_i32 = fx.Int32(lds_base_idx) + fx.Int32(byte_offset)
         ptr = fx.inttoptr(ptr_ty, addr_i32)
         return fx.Tensor(fx.make_view(ptr, layout))
 

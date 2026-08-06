@@ -7,7 +7,6 @@ import hashlib
 import inspect
 import os
 import pickle
-import pkgutil
 import threading
 import time
 import types
@@ -23,7 +22,6 @@ from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
 from ..expr.meta import tracing_context
 from ..expr.typing import Constexpr, Stream
-from ..expr.utils.arith import fastmath as fastmath_ctx
 from ..utils import env, log
 from ..utils.file import atomic_write
 from .ast_rewriter import ASTRewriter
@@ -306,7 +304,7 @@ def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_di
 
     Covers:
       1. All Python source files under flydsl.compiler.*, flydsl.expr.*,
-         flydsl.runtime.*, flydsl.utils.*
+         flydsl.extension.*, flydsl.runtime.*, flydsl.utils.*
       2. Native shared libraries (_mlirDialectsFly*.so, libFly*.so, libfly_jit_runtime.so,
          libmlir_rocm_runtime.so)
       3. flydsl.__version__
@@ -321,23 +319,15 @@ def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_di
     flydsl_root = Path(flydsl.__file__).resolve().parent
 
     # 1) Hash all Python source files in key sub-packages.
-    pkg_prefixes = [
-        (str(flydsl_root / "compiler"), "flydsl.compiler."),
-        (str(flydsl_root / "expr"), "flydsl.expr."),
-        (str(flydsl_root / "runtime"), "flydsl.runtime."),
-        (str(flydsl_root / "utils"), "flydsl.utils."),
-    ]
-    for pkg_path, prefix in pkg_prefixes:
-        if not os.path.isdir(pkg_path):
+    for package_name in ("compiler", "expr", "extension", "runtime", "utils"):
+        pkg_path = flydsl_root / package_name
+        if not pkg_path.is_dir():
             continue
-        for lib in pkgutil.walk_packages([pkg_path], prefix=prefix):
-            try:
-                spec = lib.module_finder.find_spec(lib.name)
-                if spec and spec.origin and os.path.isfile(spec.origin):
-                    with open(spec.origin, "rb") as f:
-                        contents.append(hashlib.sha256(f.read()).hexdigest())
-            except Exception:
-                pass
+        for py_file in sorted(pkg_path.rglob("*.py")):
+            with open(py_file, "rb") as f:
+                source_hash = hashlib.sha256(f.read()).hexdigest()
+            relative_path = py_file.relative_to(flydsl_root).as_posix()
+            contents.append(f"{relative_path}:{source_hash}")
 
     p = flydsl_root / "__init__.py"
     if p.is_file():
@@ -1520,12 +1510,11 @@ class JitFunction:
                                 log().info(f"dsl_args={dsl_args}")
                                 named_args = dict(zip(param_names, dsl_args))
                                 named_args.update(constexpr_values)
-                                fastmath_flag = effective_fastmath_hint(CompilationContext.get_compile_hints())
-                                fastmath_scope = (
-                                    fastmath_ctx(fastmath_flag) if fastmath_flag is not None else nullcontext()
-                                )
                                 # Bound the call-site boundary at the jit body.
-                                with tracing_context(self.func), fastmath_scope:
+                                with tracing_context(
+                                    self.func,
+                                    fastmath=effective_fastmath_hint(CompilationContext.get_compile_hints()),
+                                ):
                                     if bound_self is not None:
                                         self.func(bound_self, **named_args)
                                     else:
