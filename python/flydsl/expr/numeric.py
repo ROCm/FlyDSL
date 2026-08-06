@@ -23,6 +23,57 @@ from .utils.arith import (
     is_float_type,
 )
 
+__all__ = [
+    "NumericMeta",
+    "Numeric",
+    "as_numeric",
+    "Integer",
+    "Float",
+    "Boolean",
+    "Int4",
+    "Int8",
+    "Int16",
+    "Int32",
+    "Int64",
+    "Int128",
+    "Uint8",
+    "Uint16",
+    "Uint32",
+    "Uint64",
+    "Uint128",
+    "Float16",
+    "BFloat16",
+    "Float32",
+    "Float64",
+    "Float8E5M2",
+    "Float8E4M3FN",
+    "Float8E4M3FNUZ",
+    "Float8E4M3B11FNUZ",
+    "Float8E4M3",
+    "Float6E2M3FN",
+    "Float6E3M2FN",
+    "Float8E8M0FNU",
+    "Float4E2M1FN",
+    "Index",
+]
+
+
+def _wrap_int(value, ty):
+    """Reduce a Python int to *ty*'s width, wrapping around like a C cast.
+
+    Matches ``numpy.astype`` for the widths numpy can express, and additionally
+    covers ``Int4`` / ``Int128`` / ``Uint128``, which it cannot. Unlike the numpy
+    round trip it has no intermediate machine integer, so a value at or above
+    ``2**64`` wraps instead of raising ``OverflowError``.
+    """
+    if ty.width == 1:
+        # ``Boolean`` is signed with width 1; reducing it would map True to -1.
+        return int(bool(value))
+    value = int(value) & ((1 << ty.width) - 1)
+    if ty.signed and value >= 1 << (ty.width - 1):
+        value -= 1 << ty.width
+    return value
+
 
 def _infer_np_dtype(width, signed, name):
     if signed is not None:
@@ -484,6 +535,7 @@ class Numeric(metaclass=NumericMeta):
             T.i32(): Int32,
             T.i16(): Int16,
             T.i8(): Int8,
+            T.i(4): Int4,
             T.si64(): Int64,
             T.si32(): Int32,
             T.si16(): Int16,
@@ -634,11 +686,10 @@ class Integer(Numeric, metaclass=NumericMeta, width=32, signed=True, ir_type=T.i
                     raise ValueError("float NaN is not representable as integer")
                 elif np.isinf(x):
                     raise OverflowError("float infinity is not representable as integer")
-            np_dtype = ty.numpy_dtype
-            if np_dtype is not None:
-                x_val = int(np.array(x).astype(np_dtype))
+                np_dtype = ty.numpy_dtype
+                x_val = int(np.array(x).astype(np_dtype)) if np_dtype is not None else int(x)
             else:
-                x_val = int(x)
+                x_val = _wrap_int(x, ty)
         elif type(x) is ty:
             x_val = x.value
         elif isinstance(x, ir.Value):
@@ -658,12 +709,9 @@ class Integer(Numeric, metaclass=NumericMeta, width=32, signed=True, ir_type=T.i
                 else:
                     x_val = int_to_int(raw, ty)
             else:
-                src_dtype = type(x).numpy_dtype
-                dst_dtype = ty.numpy_dtype
-                if src_dtype is not None and dst_dtype is not None:
-                    x_val = int(np.array(x.value, dtype=src_dtype).astype(dst_dtype))
-                else:
-                    x_val = int(x.value)
+                # ``x.value`` already carries the source type's sign, so reducing
+                # it to *ty*'s width sign-extends or truncates as a C cast would.
+                x_val = _wrap_int(x.value, ty)
         elif isinstance(x, Float):
             Integer.__init__(self, x.value)
             return

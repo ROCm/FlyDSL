@@ -611,6 +611,18 @@ jobs:
               --output-dir /tmp/flydsl_ci_sweep
           "
 
+      # MegaMoEV2 A8W4 v4_pro accuracy against the torch f32 oracle. The test self-skips on gfx942.
+      - name: Run multi-GPU MegaMoEV2 A8W4 v4_pro accuracy tests
+        timeout-minutes: 45
+        run: |
+          docker exec flydsl_test bash -c "
+            cd /flydsl-test &&
+            python3 -c 'import torch; n = torch.cuda.device_count(); assert n >= 8, f\"requires 8 GPUs, found {n}\"' &&
+            python3 -m pytest \
+              tests/kernels/test_mega_moe_v2.py::test_mega_moe_8gpu_accuracy \
+              -v --no-header --tb=short
+          "
+
       - name: Run multi-GPU allreduce tests
         timeout-minutes: 30
         run: |

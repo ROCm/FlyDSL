@@ -78,7 +78,6 @@ FlyDSL/
 ├── kernels/                          # Production GPU kernels (organized by domain)
 │   ├── gemm/                         # Dense GEMM kernels
 │   │   ├── preshuffle_gemm.py        # GEMM (preshuffle layout)
-│   │   ├── blockscale_preshuffle_gemm.py # Blockscale GEMM
 │   │   ├── mxfp4_preshuffle.py       # MXFP4 preshuffle GEMM
 │   │   ├── fp4_gemm_4wave.py         # FP4 4-wave GEMM
 │   │   ├── fp8_gemm_4wave.py         # FP8 4-wave GEMM

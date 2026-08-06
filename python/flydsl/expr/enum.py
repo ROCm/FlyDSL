@@ -3,6 +3,10 @@
 
 """Target-neutral DSL enums."""
 
+__all__ = [
+    "SyncScope",
+]
+
 
 class SyncScope:
     """LLVM target-neutral sync scopes.
