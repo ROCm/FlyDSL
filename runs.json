@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-06T13:50:40Z",
+ "updated": "2026-08-06T13:53:54Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31107932546,
+   "pr": null,
+   "commit": "f83759e953db4b9b0d1e0304f9c3634443a3bf3b",
+   "branch": "main",
+   "event": "push",
+   "title": "[Fix] Implement integer wrap-around, wide unsigned constants, and Phi\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31107932546",
+   "created_at": "2026-08-06T13:51:37Z",
+   "updated_at": "2026-08-06T13:52:30Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 31107673675,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "BugFix for MegaMoE (#954)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31107673675",
    "created_at": "2026-08-06T13:48:25Z",
-   "updated_at": "2026-08-06T13:49:17Z",
+   "updated_at": "2026-08-06T13:51:51Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -2053,67 +2068,6 @@
    "updated_at": "2026-08-04T14:08:22Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 30917193760,
-   "pr": null,
-   "commit": "a715c10fb52871c4a66af83cda1e734a4369b53a",
-   "branch": "mega_moe_v1",
-   "event": "pull_request",
-   "title": "BugFix for MegaMoE",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30917193760",
-   "created_at": "2026-08-04T14:06:11Z",
-   "updated_at": "2026-08-04T18:46:12Z",
-   "actor": "GwilliamHu",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-04T14:21:35Z",
-     "completed_at": "2026-08-04T15:27:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30917193760/job/92021559826"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-04T14:21:11Z",
-     "completed_at": "2026-08-04T15:35:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30917193760/job/92021559908"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-04T17:17:10Z",
-     "completed_at": "2026-08-04T17:41:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30917193760/job/92021560000"
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-04T17:52:28Z",
-     "completed_at": "2026-08-04T18:23:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30917193760/job/92079031924"
-    },
-    {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-04T18:21:22Z",
-     "completed_at": "2026-08-04T18:46:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30917193760/job/92079031947"
-    }
-   ]
   }
  ]
 }
