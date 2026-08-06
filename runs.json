@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-06T11:56:53Z",
+ "updated": "2026-08-06T12:45:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -907,20 +907,20 @@
    "branch": "add-wmma-tests-gfx1250",
    "event": "pull_request",
    "title": "[Test] Add gfx1250 WMMA lowering tests for additional dtypes",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31023957346",
    "created_at": "2026-08-05T16:10:12Z",
-   "updated_at": "2026-08-06T11:55:01Z",
+   "updated_at": "2026-08-06T12:43:02Z",
    "actor": "AiyyappanMR",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-06T11:55:01Z",
-     "completed_at": null,
+     "completed_at": "2026-08-06T12:43:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31023957346/job/92534582461"
     },
     {
