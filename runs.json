@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-06T08:56:34Z",
+ "updated": "2026-08-06T09:20:19Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31086859764",
    "created_at": "2026-08-06T08:54:53Z",
-   "updated_at": "2026-08-06T08:54:55Z",
+   "updated_at": "2026-08-06T08:56:46Z",
    "actor": "GwilliamHu",
    "jobs": []
   },
@@ -53,9 +53,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-06T08:38:09Z",
+     "started_at": "2026-08-06T09:04:19Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31084299890/job/92564539217"
     }
@@ -111,13 +111,41 @@
    "branch": "mega_moe_a4w4",
    "event": "pull_request",
    "title": "add A4W4 and FP8 P2P transport support to MegaMoE v2",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31083451920",
    "created_at": "2026-08-06T08:05:14Z",
-   "updated_at": "2026-08-06T08:21:35Z",
+   "updated_at": "2026-08-06T09:03:41Z",
    "actor": "Yaowu-Xiong",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-06T09:04:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31083451920/job/92570294163"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-06T09:03:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31083451920/job/92570294248"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-06T09:03:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31083451920/job/92570294314"
+    }
+   ]
   },
   {
    "run_id": 31082436865,
@@ -414,11 +442,11 @@
    "branch": "gfx1250/gemm-opt-0805",
    "event": "pull_request",
    "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31070877266",
    "created_at": "2026-08-06T04:18:16Z",
-   "updated_at": "2026-08-06T07:29:09Z",
+   "updated_at": "2026-08-06T09:19:09Z",
    "actor": "aoli26",
    "jobs": [
     {
@@ -442,10 +470,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-06T07:29:08Z",
-     "completed_at": null,
+     "completed_at": "2026-08-06T09:19:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31070877266/job/92519636232"
     }
    ]
