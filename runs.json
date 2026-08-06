@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-06T10:13:47Z",
+ "updated": "2026-08-06T10:54:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31094859946,
+   "pr": 975,
+   "commit": "4cfe6a4fd62dd4f248eb63f9883ce392070db59f",
+   "branch": "xyt/hgemm_layout",
+   "event": "pull_request",
+   "title": "Replace legacy HGEMM kernels with gfx950 A16W16 universe GEMM",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31094859946",
+   "created_at": "2026-08-06T10:50:39Z",
+   "updated_at": "2026-08-06T10:51:56Z",
+   "actor": "xytpai",
+   "jobs": []
+  },
+  {
+   "run_id": 31093012631,
+   "pr": 891,
+   "commit": "a1438c2355d7f5c3fba9a4002863ed914b1be4e9",
+   "branch": "add-wmma-tests-gfx1250",
+   "event": "pull_request",
+   "title": "[Test] Add gfx1250 WMMA lowering tests for additional dtypes",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31093012631",
+   "created_at": "2026-08-06T10:22:50Z",
+   "updated_at": "2026-08-06T10:22:50Z",
+   "actor": "AiyyappanMR",
+   "jobs": []
+  },
   {
    "run_id": 31089787031,
    "pr": 971,
@@ -38,9 +68,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-06T09:56:18Z",
+     "started_at": "2026-08-06T10:27:39Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31089787031/job/92582294315"
     }
@@ -149,10 +179,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-06T08:39:06Z",
-     "completed_at": null,
+     "completed_at": "2026-08-06T10:26:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31083664978/job/92564559635"
     },
     {
@@ -192,10 +222,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-06T09:04:25Z",
-     "completed_at": null,
+     "completed_at": "2026-08-06T10:51:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31083451920/job/92570294163"
     },
     {
@@ -210,10 +240,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-06T09:40:53Z",
-     "completed_at": null,
+     "completed_at": "2026-08-06T10:34:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31083451920/job/92570294314"
     }
    ]
@@ -872,7 +902,7 @@
   },
   {
    "run_id": 31023957346,
-   "pr": 891,
+   "pr": null,
    "commit": "627ada3add976ab7bc943cb71d0228b389b52e0d",
    "branch": "add-wmma-tests-gfx1250",
    "event": "pull_request",
@@ -2110,92 +2140,6 @@
      "started_at": "2026-08-04T13:28:40Z",
      "completed_at": "2026-08-04T13:40:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30913308309/job/92006505410"
-    }
-   ]
-  },
-  {
-   "run_id": 30912980863,
-   "pr": null,
-   "commit": "b9e89d6cfaa7b8f9bc83552b76145b6c295aafa4",
-   "branch": "main",
-   "event": "push",
-   "title": "[Prune] Remove CDNA blockscale FP8 GEMM (#966)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912980863",
-   "created_at": "2026-08-04T13:16:09Z",
-   "updated_at": "2026-08-04T19:17:24Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-04T13:25:34Z",
-     "completed_at": "2026-08-04T14:31:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912980863/job/92006189058"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-04T13:25:07Z",
-     "completed_at": "2026-08-04T14:48:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912980863/job/92006189134"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-04T18:48:12Z",
-     "completed_at": "2026-08-04T19:17:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912980863/job/92006189152"
-    }
-   ]
-  },
-  {
-   "run_id": 30912760344,
-   "pr": 966,
-   "commit": "3247e799e455ba28f6739749e2b798349992aff0",
-   "branch": "remove-cdna-blockscale-fp8-gemm",
-   "event": "pull_request",
-   "title": "[Prune] Remove CDNA blockscale FP8 GEMM",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912760344",
-   "created_at": "2026-08-04T13:13:30Z",
-   "updated_at": "2026-08-04T18:47:34Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-04T13:26:07Z",
-     "completed_at": "2026-08-04T14:29:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912760344/job/92005879162"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-04T17:42:03Z",
-     "completed_at": "2026-08-04T18:47:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912760344/job/92005879193"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-04T13:23:48Z",
-     "completed_at": "2026-08-04T14:15:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30912760344/job/92005879238"
     }
    ]
   }
