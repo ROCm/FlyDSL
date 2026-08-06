@@ -5,3 +5,6 @@
 if("rocdl" IN_LIST FLYDSL_BACKENDS)
   add_subdirectory(ROCm)
 endif()
+if("nvvm" IN_LIST FLYDSL_BACKENDS)
+  add_subdirectory(CUDA)
+endif()

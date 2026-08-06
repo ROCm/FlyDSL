@@ -49,10 +49,13 @@ FlyDSL/
 │   │   └── autotune.py        # Triton-style autotune module
 │   └── mlir_flydsl/           # MLIR Python bindings (built, not edited)
 ├── examples/                  # Runnable examples
-│   ├── 01-vectorAdd.py        # Vector addition with layout algebra
-│   ├── 02-tiledCopy.py        # Tiled copy with partitioned tensors
-│   ├── 03-tiledMma.py         # Tiled MMA (GEMM) with MFMA atoms
-│   └── 04-preshuffle_gemm.py  # Preshuffle GEMM end-to-end example
+│   ├── 01-vectorAdd.py        # Vector addition
+│   ├── 02-gather_scatter.py   # Row gather/scatter
+│   ├── rocm/                  # AMD ROCm examples
+│   │   ├── 01-tiledCopy.py    # Tiled copy with partitioned tensors
+│   │   ├── 02-tiledMma.py     # Tiled MMA (GEMM) with MFMA atoms
+│   │   └── 03-preshuffle_gemm.py  # Preshuffle GEMM end-to-end example
+│   └── cuda/                  # NVIDIA CUDA examples
 ├── kernels/                   # Production GPU kernels (importable as `kernels.*`)
 ├── tests/                     # All tests (kernels/, mlir/, unit/)
 ├── CMakeLists.txt             # top-level CMake
@@ -358,7 +361,7 @@ torch.cuda.synchronize()
 print("Result correct:", torch.allclose(C, A + B))
 ```
 
-See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tiled MMA (`03-tiledMma.py`), and preshuffle GEMM (`04-preshuffle_gemm.py`).
+See `examples/rocm/` for AMD examples including tiled copy (`02-tiledCopy.py`), tiled MMA (`03-tiledMma.py`), and preshuffle GEMM (`04-preshuffle_gemm.py`), and `examples/cuda/` for the NVIDIA NVVM examples.
 
 ## ✅ Testing Status
 

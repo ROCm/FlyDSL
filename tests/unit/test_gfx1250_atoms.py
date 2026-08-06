@@ -13,7 +13,10 @@ round-trip + verifier behavior; no GPU is required.
 
 import pytest
 
-pytestmark = [pytest.mark.l0_backend_agnostic]
+# No GPU needed, but these do construct vendor target-dialect types, so this is
+# l1b rather than l0: the FlyROCDL bindings only exist in a build that includes
+# the ROCDL backend.
+pytestmark = [pytest.mark.l1b_target_dialect, pytest.mark.rocm_lower]
 
 from flydsl._mlir import ir  # noqa: E402
 
