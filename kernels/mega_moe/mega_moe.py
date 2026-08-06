@@ -16,6 +16,7 @@ from .mega_moe_config import (
     FIXED_SLOT_MAX_MTPR,
     MegaMoEConfig,
     Stage1Config,
+    apply_mega_moe_quant_config,
     select_mega_moe_config,
 )
 from .quant import per_1x32_mx_quant
@@ -24,19 +25,24 @@ __all__ = ["MegaMoEV2"]
 
 
 class MegaMoEV2:
-    """Fused dispatch, GEMM1, GEMM2, and combine with one in-flight launch per instance."""
+    """Fused dispatch, GEMM1, GEMM2, and combine with one in-flight launch.
+
+    Both A8W4 and A4W4 consume INTERLEAVE gate/up W1 weight and scale buffers.
+    """
 
     # fmt: off
     def __init__(self, *, rank: int, world_size: int, model_dim: int, inter_dim: int, experts: int, topk: int,
         quant: str, w1: torch.Tensor, w1_scale: torch.Tensor, w2: torch.Tensor, w2_scale: torch.Tensor,
-        max_tok_per_rank: int, mega_scheme: str = "fixedslot", swiglu_limit: float = 0.0):
+        max_tok_per_rank: int, mega_scheme: str = "fixedslot", stage2_p2p_quant: str = "auto"):
     # fmt: on
-        if quant != "a8w4":
-            raise ValueError("MegaMoEV2 currently supports quant='a8w4' only")
+        if quant not in ("a4w4", "a8w4"):
+            raise ValueError("MegaMoEV2 quant must be 'a4w4' or 'a8w4'")
         if experts % world_size != 0:
             raise ValueError(f"experts={experts} must be divisible by world_size={world_size}")
         if max_tok_per_rank <= 0 or max_tok_per_rank & (max_tok_per_rank - 1):
             raise ValueError(f"max_tok_per_rank={max_tok_per_rank} must be a power of two")
+        if stage2_p2p_quant not in ("auto", "none", "fp8_blockwise_1x32"):
+            raise ValueError(f"unsupported stage2_p2p_quant={stage2_p2p_quant!r}")
         self.rank = int(rank)
         self.world_size = int(world_size)
         self.model_dim = int(model_dim)
@@ -45,9 +51,10 @@ class MegaMoEV2:
         self.epr = int(experts // world_size)
         self.topk = int(topk)
         self.mtpr = int(max_tok_per_rank)
-        self.swiglu_limit = float(swiglu_limit)
-        if self.swiglu_limit < 0:
-            raise ValueError("swiglu_limit must be non-negative")
+        self._a_dtype = "fp4" if quant == "a4w4" else "fp8"
+        self._a_torch_dtype = torch.float4_e2m1fn_x2 if self._a_dtype == "fp4" else torch.float8_e4m3fn
+        self._a_view_dim = self.model_dim // 2 if self._a_dtype == "fp4" else self.model_dim
+        self._stage2_p2p_quant = stage2_p2p_quant
         self.dev = torch.device("cuda", rank)
         self.max_recv = self.world_size * self.mtpr
         compact = self.mtpr > FIXED_SLOT_MAX_MTPR
@@ -58,7 +65,7 @@ class MegaMoEV2:
         self.comb_cfg = FlyDSLDispatchCombineConfig(rank=self.rank, world_size=self.world_size,
             hidden_dim=self.model_dim, max_num_inp_token_per_rank=self.mtpr, num_experts_per_rank=self.epr,
             num_experts_per_token=self.topk, combine_dtype=torch.bfloat16,
-            dispatch_dtype=torch.float8_e4m3fn, scale_dim=self._s1_scale_dim, scale_type_size=1,
+            dispatch_dtype=self._a_torch_dtype, scale_dim=self._s1_scale_dim, scale_type_size=1,
             enable_std_moe=False, enable_group_major=True, gm_unit_size=capacity_tile_m,
             gm_scheme=mega_scheme, gm_compact=compact, max_total_recv_tokens=self.world_size)
         # fmt: on
@@ -90,22 +97,29 @@ class MegaMoEV2:
         self._s1_epoch_parity = torch.zeros(1, dtype=torch.int32, device=self.dev)
         self._s1_epoch_expected = torch.zeros(2, dtype=torch.int32, device=self.dev)
         self._s1_num_cu = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
-        self._allocate_dispatch_workspace(op, metadata_blocks)
+        self._allocate_dispatch_workspace(op)
         self._s1_mega = run_mega_moe_stage1
 
         v = op._ll_views()
         self._s1_rx = v["rx_em"]
         self._s1_scale_i32 = v["scale_em_i32"]
+        self._s1_rx_kernel = self._s1_rx.view(torch.uint8) if self._a_dtype == "fp4" else self._s1_rx
 
         inter_dim = self.inter_dim
         a2rows = self._s1_nvm
-        self._s1_out = torch.zeros((a2rows, inter_dim), dtype=torch.float8_e4m3fn, device=self.dev)
+        if self._a_dtype == "fp4":
+            self._s1_out = torch.zeros((a2rows, inter_dim // 2), dtype=torch.uint8, device=self.dev).view(
+                torch.float4_e2m1fn_x2
+            )
+        else:
+            self._s1_out = torch.zeros((a2rows, inter_dim), dtype=torch.float8_e4m3fn, device=self.dev)
+        self._s1_out_kernel = self._s1_out.view(torch.uint8) if self._a_dtype == "fp4" else self._s1_out
         prows = ((a2rows + 255) // 256) * 256
         pcols = (((inter_dim // 32) + 7) // 8) * 8
         self._s1_osd = torch.zeros(prows * pcols + inter_dim, dtype=torch.uint8, device=self.dev)
         self._build_v2_disp_table()
 
-    def _allocate_dispatch_workspace(self, op, metadata_blocks):
+    def _allocate_dispatch_workspace(self, op):
         total_experts = self.world_size * self.epr
         workspace = {
             "local_hist": torch.zeros(total_experts, dtype=torch.int32, device=self.dev),
@@ -119,31 +133,20 @@ class MegaMoEV2:
             "work_head": torch.zeros(8 * 16, dtype=torch.int32, device=self.dev),
             "work_tail": torch.zeros(1, dtype=torch.int32, device=self.dev),
             "expert_tile_end": torch.empty(self.epr, dtype=torch.int32, device=self.dev),
-            "max_expert_tiles": torch.zeros(1, dtype=torch.int32, device=self.dev),
-            "payload_chunk_done": torch.zeros(total_experts, dtype=torch.int32, device=self.dev),
-            "tile_expected": torch.zeros(metadata_blocks, dtype=torch.int32, device=self.dev),
-            "active_payload_blocks": torch.zeros(1, dtype=torch.int32, device=self.dev),
-            "payload_blocks_per_destination": torch.zeros(self.world_size, dtype=torch.int32, device=self.dev),
-            "payload_chunks_per_destination": torch.zeros(self.world_size, dtype=torch.int32, device=self.dev),
-            "group_done": torch.zeros(1, dtype=torch.int32, device=self.dev),
+            "active_experts": torch.empty(total_experts, dtype=torch.int32, device=self.dev),
+            "active_count": torch.zeros(self.world_size, dtype=torch.int32, device=self.dev),
         }
         workspace["bigcnt"] = op._sym((self.world_size * self.epr,), torch.int32)
         workspace["count_done"] = op._sym((2 * self.world_size,), torch.int32)
         workspace["my_base"] = op._sym((total_experts,), torch.int32)
         workspace["plan_ready"] = op._sym((2 * self.world_size,), torch.int32)
         workspace["payload_ready"] = op._sym((2 * self.epr,), torch.int32)
-        workspace["launch_ready"] = op._sym((self.world_size,), torch.int32)
-        workspace["tile_ready"] = op._sym((metadata_blocks,), torch.int32)
-        workspace["payload_ready_rows"] = op._sym((1,), torch.int32)
         ms.shmem_barrier_all()
         workspace["p2p_bigcnt"] = op._p2p_table(workspace["bigcnt"])
         workspace["p2p_count_done"] = op._p2p_table(workspace["count_done"])
         workspace["p2p_my_base"] = op._p2p_table(workspace["my_base"])
         workspace["p2p_plan_ready"] = op._p2p_table(workspace["plan_ready"])
         workspace["p2p_payload_ready"] = op._p2p_table(workspace["payload_ready"])
-        workspace["p2p_launch_ready"] = op._p2p_table(workspace["launch_ready"])
-        workspace["p2p_tile_ready"] = op._p2p_table(workspace["tile_ready"])
-        workspace["p2p_payload_ready_rows"] = op._p2p_table(workspace["payload_ready_rows"])
         self._s1_dispatch_workspace = workspace
 
     def _build_v2_disp_table(self):
@@ -178,35 +181,15 @@ class MegaMoEV2:
         table[DispatchSlot.WORK_HEAD] = workspace["work_head"].data_ptr()
         table[DispatchSlot.WORK_TAIL] = workspace["work_tail"].data_ptr()
         table[DispatchSlot.EXPERT_TILE_END] = workspace["expert_tile_end"].data_ptr()
-        table[DispatchSlot.GROUP_DONE] = workspace["group_done"].data_ptr()
+        table[DispatchSlot.ACTIVE_EXPERTS] = workspace["active_experts"].data_ptr()
+        table[DispatchSlot.ACTIVE_COUNT] = workspace["active_count"].data_ptr()
         table[DispatchSlot.RUNNING] = op.running.data_ptr()
         table[DispatchSlot.P2P_RUNNING] = op.p2p_running.data_ptr()
-        table[DispatchSlot.LAUNCH_READY] = workspace["launch_ready"].data_ptr()
-        table[DispatchSlot.P2P_LAUNCH_READY] = workspace["p2p_launch_ready"].data_ptr()
-        table[DispatchSlot.MAX_EXPERT_TILES] = workspace["max_expert_tiles"].data_ptr()
-        table[DispatchSlot.PAYLOAD_CHUNK_DONE] = workspace["payload_chunk_done"].data_ptr()
-        table[DispatchSlot.TILE_READY] = workspace["tile_ready"].data_ptr()
-        table[DispatchSlot.P2P_TILE_READY] = workspace["p2p_tile_ready"].data_ptr()
-        table[DispatchSlot.TILE_EXPECTED] = workspace["tile_expected"].data_ptr()
-        table[DispatchSlot.ACTIVE_PAYLOAD_BLOCKS] = workspace["active_payload_blocks"].data_ptr()
-        table[DispatchSlot.PAYLOAD_READY_ROWS] = workspace["payload_ready_rows"].data_ptr()
-        table[DispatchSlot.P2P_PAYLOAD_READY_ROWS] = workspace["p2p_payload_ready_rows"].data_ptr()
-        table[DispatchSlot.PAYLOAD_BLOCKS_PER_DESTINATION] = workspace[
-            "payload_blocks_per_destination"
-        ].data_ptr()
-        table[DispatchSlot.PAYLOAD_CHUNKS_PER_DESTINATION] = workspace[
-            "payload_chunks_per_destination"
-        ].data_ptr()
         self._s1_disp = torch.tensor(table, dtype=torch.int64, device=self.dev)
 
     def _select_config(self, tokens: int) -> MegaMoEConfig:
-        config = select_mega_moe_config(
-            tokens,
-            self.mtpr,
-            experts_per_rank=self.epr,
-            model_dim=self.model_dim,
-            inter_dim=self.inter_dim,
-        )
+        config = select_mega_moe_config(tokens, self.mtpr, self._stage2_p2p_quant)
+        config = apply_mega_moe_quant_config(config, tokens, self._a_dtype)
         self._active_config = config
         return config
 
@@ -216,10 +199,10 @@ class MegaMoEV2:
         cur_tok = int(x.shape[0])
         if cur_tok > self.mtpr:
             raise ValueError(f"run_tokens={cur_tok} > max_tok_per_rank={self.mtpr}")
-        if x.dtype != torch.float8_e4m3fn or not x.is_contiguous():
-            raise ValueError("x must be contiguous float8_e4m3fn")
-        if tuple(x.shape) != (cur_tok, self.model_dim):
-            raise ValueError(f"x must have shape ({cur_tok}, {self.model_dim})")
+        if x.dtype != self._a_torch_dtype or not x.is_contiguous():
+            raise ValueError(f"x must be contiguous {self._a_torch_dtype}")
+        if tuple(x.shape) != (cur_tok, self._a_view_dim):
+            raise ValueError(f"x must have shape ({cur_tok}, {self._a_view_dim})")
         if wts.dtype != torch.float32 or not wts.is_contiguous():
             raise ValueError("wts must be contiguous float32")
         if tuple(wts.shape) != (cur_tok, self.topk):
@@ -235,7 +218,7 @@ class MegaMoEV2:
         op = self._s1_op
         # fmt: off
         self._s1_mega(
-            self._s1_out, self._s1_rx, self._s1_w1, self._s1_scale_i32, self._s1_w1_scale,
+            self._s1_out_kernel, self._s1_rx_kernel, self._s1_w1, self._s1_scale_i32, self._s1_w1_scale,
             op.tile_row_base, op.sorted_expert_ids, op.num_valid, self._s1_osd, fx.Int32(self._s1_nvm),
             fx.Int64(self._s1_disp.data_ptr()), fx.Int32(cur_tok), fx.Int64(x.data_ptr()),
             fx.Int64(topk_ids.data_ptr()), fx.Int64(wts.data_ptr()), fx.Int64(scales.data_ptr()),
@@ -247,19 +230,19 @@ class MegaMoEV2:
             sort_block_m=config.sort_block_m, tile_n=config.tile_n, tile_k=config.tile_k,
             num_waves=config.num_waves, grid_mult=config.grid_mult, pipe_weights=config.pipe_weights,
             mfma_amajor=config.mfma_amajor, swizzle_a=config.swizzle_a,
-            async_a_copy=config.async_a_copy, num_dispatch_cu=config.num_dispatch_cu,
-            use_tile_resource=config.use_tile_resource,
+            async_a_copy=config.async_a_copy, active_expert_producer=config.active_expert_producer,
+            cooperative_payload_copy=config.cooperative_payload_copy,
+            num_dispatch_cu=config.num_dispatch_cu, use_tile_resource=config.use_tile_resource,
             waves_per_eu_hint=config.waves_per_eu_hint, b_nt=config.b_nt,
             work_shards=config.work_shards, external_grouping=config.external_grouping,
-            external_counting=config.external_counting, payload_chunk_rows=config.payload_chunk_rows,
-            payload_tile_ready=config.payload_tile_ready,
-            swiglu_limit=self.swiglu_limit)
+            external_counting=config.external_counting,
+            a_dtype=self._a_dtype, out_dtype=self._a_dtype)
         # fmt: on
         self._s1_active_tile_m = config.sort_block_m
         return self._s1_active_tile_m
 
     def quantize(self, x_bf16):
-        return per_1x32_mx_quant(x_bf16, quant_mode="fp8")
+        return per_1x32_mx_quant(x_bf16, quant_mode=self._a_dtype)
 
     def _run_joint(self, x, scales, wts, topk_ids, run_tokens, stream, slice_output):
         config = self._select_config(run_tokens)
@@ -326,6 +309,7 @@ class MegaMoEV2:
                 "comb_inp_nbytes": int(comb_cfg.max_num_inp_token_per_rank) * int(k) * p2p_row_nbytes,
                 "HIDDEN_MAX": int(comb_cfg.hidden_dim), "INTER_MAX": int(self.inter_dim), "cu_num": int(cu_num),
                 "p2p_quant_type": p2p_quant, "fixed_slot_dispatch": bool(self._s1_fixed_slot),
+                "a_dtype": self._a_dtype,
             }
         self._g2_combine_placeholder = torch.empty(
             1, comb_cfg.hidden_dim, dtype=comb_cfg.combine_dtype, device=dev
@@ -345,16 +329,16 @@ class MegaMoEV2:
             fx.Int64(self._s1_out.view(-1).data_ptr()), fx.Int64(self._s1_osd.data_ptr()),
             fx.Int64(self.w2.data_ptr()), fx.Int64(self.w2_scale.data_ptr()),
             fx.Int64(op.sorted_expert_ids.data_ptr()), fx.Int64(op.num_valid.data_ptr()),
-            fx.Int64(self._s1_dispatch_workspace["max_expert_tiles"].data_ptr()),
             fx.Int64(op.srcmap_em.data_ptr()), fx.Int64(op.wts_em.data_ptr()),
             fx.Int64(op.tile_row_base.data_ptr()), comb_op._fx_p2p_comb_inp, self._s1_nvm,
             self._g2v2_inter, self._g2v2_hidden, s_fx, BM=stage2.block_m,
             SBM=config.stage1.sort_block_m, BN=stage2.block_n, BK=stage2.block_k,
             use_nt=stage2.use_nt, g2_bhoist=stage2.b_hoist,
+            g2_b2stage=stage2.b2stage,
             g2_ascale_pf=stage2.ascale_prefetch, g2_spart=stage2.spatial_partition,
             persist=stage2.persist, persist_cu=stage2.persist_cu,
-            persist_strided=stage2.persist_strided, skew_cu=stage2.skew_cu,
-            g2_bf16_lds=stage2.bf16_lds, **invariants)
+            persist_strided=stage2.persist_strided,
+            g2_deep_a_pipeline=stage2.deep_a_pipeline, **invariants)
         # fmt: on
         self._g2_active_block_m = stage2.block_m
         return comb_op.combine_no_stage1(
