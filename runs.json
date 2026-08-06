@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-06T08:07:36Z",
+ "updated": "2026-08-06T08:10:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31083664978,
+   "pr": 974,
+   "commit": "72df6998c05dc992f7c033b76a7352c76f08e4a2",
+   "branch": "cleanup/fx-copy-and-llvm-ptr",
+   "event": "pull_request",
+   "title": "[cleanup] Migrate kernels to fx.copy / .llvm_ptr; expand kernel-code-cleanup skill",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31083664978",
+   "created_at": "2026-08-06T08:08:19Z",
+   "updated_at": "2026-08-06T08:08:56Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 31083451920,
    "pr": 972,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31083451920",
    "created_at": "2026-08-06T08:05:14Z",
-   "updated_at": "2026-08-06T08:05:29Z",
+   "updated_at": "2026-08-06T08:05:53Z",
    "actor": "Yaowu-Xiong",
    "jobs": []
   },
@@ -25,11 +40,11 @@
    "branch": "cleanup/fx-copy-and-llvm-ptr",
    "event": "pull_request",
    "title": "[cleanup] Migrate kernels to fx.copy / .llvm_ptr; expand kernel-code-cleanup skill",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31082436865",
    "created_at": "2026-08-06T07:50:01Z",
-   "updated_at": "2026-08-06T07:51:42Z",
+   "updated_at": "2026-08-06T08:08:21Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -2069,49 +2084,6 @@
      "started_at": "2026-08-04T12:27:32Z",
      "completed_at": "2026-08-04T12:31:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/30908342310/job/91990990824"
-    }
-   ]
-  },
-  {
-   "run_id": 30905221848,
-   "pr": 959,
-   "commit": "f9b9bdb58d3084e856316ddcb1d7286b64519d29",
-   "branch": "binding_moe_mxfp4_stage2_opt",
-   "event": "pull_request",
-   "title": "[Perf]opimize moe mxfp4 stage2 perf",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/30905221848",
-   "created_at": "2026-08-04T11:32:26Z",
-   "updated_at": "2026-08-04T17:16:24Z",
-   "actor": "binding7012",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-04T15:52:43Z",
-     "completed_at": "2026-08-04T17:16:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30905221848/job/91989108970"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-04T12:18:59Z",
-     "completed_at": "2026-08-04T14:03:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30905221848/job/91989108983"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-04T12:19:02Z",
-     "completed_at": "2026-08-04T13:31:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/30905221848/job/91989108986"
     }
    ]
   }
