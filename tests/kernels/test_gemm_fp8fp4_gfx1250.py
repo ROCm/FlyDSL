@@ -150,8 +150,8 @@ def _skip_reason(spec, N, K, tile_cfg, cluster):
     if profile is not None:
         if (*tile_cfg, *cluster) != profile:
             return f"this kernel hand-schedules one profile, {profile}"
-        if N % (tile_n * cluster[1]) or K % (tile_k * num_buffers):
-            return f"N={N} must divide {tile_n * cluster[1]} and K={K} must divide {tile_k * num_buffers}"
+        if N % (tile_n * cluster[1]):
+            return f"N={N} must divide {tile_n * cluster[1]}"
     if N % tile_n or K % tile_k:
         return f"N={N} / K={K} must divide tile_n={tile_n} / tile_k={tile_k} (the kernel does not pad)"
     if K // tile_k < num_buffers:
@@ -281,6 +281,10 @@ _CASES = [
     (128, 128, 1024, 32, 32, 512, 2, 2, 2),
     (256, 512, 512, 256, 256, 128, 2, 2, 4),
     (257, 512, 4608, 256, 256, 128, 2, 2, 4),
+    (256, 512, 640, 256, 256, 128, 2, 2, 4),  # 5 K-tiles -> 1 active stage in rev 1
+    (256, 512, 768, 256, 256, 128, 2, 2, 4),  # 6 K-tiles -> 2 active stages
+    (257, 512, 896, 256, 256, 128, 2, 2, 4),  # 7 K-tiles -> 3 active, ragged M
+    (256, 512, 4736, 256, 256, 128, 2, 2, 4),  # 37 K-tiles, long run
 ]
 _SMOKE = (512, 512, 128, 256, 128, 2, 2)  # N, K, tile_m, tile_n, tile_k, m_warp, n_warp
 _SMOKE_BUFFERS = [2, 4]

@@ -46,7 +46,7 @@ def launch_gemm_a8w4_256x256(
     cluster_m: Constexpr[int],
     cluster_n: Constexpr[int],
 ):
-    """Launch the 1x2-cluster kernel; N and K must be divisible by 512, with K >= 512."""
+    """Launch the 1x2-cluster kernel; N must be divisible by 512, K by 128, with K >= 512."""
 
     assert (tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, cluster_m, cluster_n) == (
         256,
@@ -207,13 +207,13 @@ def launch_gemm_a8w4_256x256(
             fx.Int32(dgroup0[3]),
         )
 
-        def _prepare_tdm(slot, tile):
+        def _prepare_tdm(slot, tile_delta):
             desc = tdm_ops.update_tensor_descriptor_2d_lds_addr(tdm_desc, tdm_base_lds + tdm_lds_step * fx.Int32(slot))
             return tdm_ops.update_tensor_descriptor_2d_addr64(
                 desc,
                 tdm_base_lo,
                 tdm_base_hi,
-                fx.Int32(tile) * tdm_global_step,
+                tile_delta,
             )
 
         wmb = wave_m * warp_tile_m
@@ -686,19 +686,24 @@ def launch_gemm_a8w4_256x256(
 
         # Keep all four slots in flight and statically expand one revolution.
         for i in range_constexpr(num_buffers):
-            tdm_ops.tensor_load_2d(_prepare_tdm(i, i))
+            tdm_ops.tensor_load_2d(_prepare_tdm(i, fx.Int32(i) * tdm_global_step))
         pipeline_fence(outstanding=num_buffers - 1, use_cluster=False)
         _load_seed_a(0, 0)
         _load_seed_b(0, 0)
         rocdl.s_wait_dscnt(0)
 
-        n_steady = K_TILES - num_buffers
+        n_full = (K_TILES + num_buffers - 1) // num_buffers - 1
+        drain_n = K_TILES - n_full * num_buffers  # 1..num_buffers
+        last_delta = (K_TILES - 1) * tdm_global_step
+        stage_delta = [fx.Int32(s + num_buffers) * tdm_global_step for s in range_constexpr(num_buffers)]
 
         def _run_steady(owner_parity):
-            for rev in range(n_steady // num_buffers):
+            for rev in range(n_full):
+                rev_delta = (rev * num_buffers) * tdm_global_step
                 for s in range_constexpr(num_buffers):
-                    kt = rev * num_buffers + s
-                    args = (s, (s + 1) % num_buffers, s % 2, (s + 1) % 2, s, kt + num_buffers, num_buffers - 2)
+                    delta = rev_delta + stage_delta[s]
+                    delta = (delta < last_delta).select(delta, last_delta)
+                    args = (s, (s + 1) % num_buffers, s % 2, (s + 1) % 2, s, delta, num_buffers - 2)
                     if const_expr(owner_parity == 0):
                         _compute_even_stage(*args)
                     else:
@@ -724,9 +729,10 @@ def launch_gemm_a8w4_256x256(
         rocdl.s_wait_dscnt(0)
         rocdl.sched_barrier(0)
         for j in range_constexpr(num_buffers):
-            _compute_stage(
-                j, (j + 1) % num_buffers, j % 2, (j + 1) % 2, j, None, num_buffers - 2 - j, j < num_buffers - 1
-            )
+            if j < drain_n:
+                _compute_stage(
+                    j, (j + 1) % num_buffers, j % 2, (j + 1) % 2, j, None, num_buffers - 2 - j, j < num_buffers - 1
+                )
         accs = [c_frags[idx].load() for idx in range_constexpr(n_acc)]
 
         pipeline_fence(outstanding=0, use_cluster=True)
