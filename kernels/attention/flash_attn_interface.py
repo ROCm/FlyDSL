@@ -323,6 +323,7 @@ def _build_paged(
     varlen: bool = False,
     kv_cache_layout: str = "linear",
     return_lse: bool = False,
+    has_bias: bool = False,
 ):
     """Build (and cache) a paged-KV launcher (gfx950 DUALWAVE_SWP, paged=True).
 
@@ -356,6 +357,7 @@ def _build_paged(
         dualwave_swp_setprio=setprio,
         dualwave_swp_enable_stagger=enable_stagger,
         return_lse=return_lse,
+        has_bias=has_bias,
     )
 
 
@@ -373,6 +375,7 @@ def _flydsl_flash_attn_paged(
     *,
     causal: bool,
     num_kv_heads: Optional[int],
+    bias: Optional[torch.Tensor],
     block_table: Optional[torch.Tensor],
     seqlen_k: Optional[torch.Tensor],
     max_seqlen_kv: Optional[int],
@@ -487,6 +490,22 @@ def _flydsl_flash_attn_paged(
         cross = bool(cross_seqlen) if cross_seqlen is not None else True
     else:
         cross = skv != Sq
+    if bias is not None:
+        # Same convention as non-paged: rows are q tokens, columns are batch-local
+        # logical key positions (the block table only redirects the K/V fetch).
+        _bias_rows = int(q.shape[0]) if varlen else Sq
+        if bias.dim() != 2:
+            raise ValueError(f"flydsl_flash_attn_func: paged bias must be 2D, got {bias.dim()}D")
+        if bias.shape[0] != _bias_rows:
+            raise ValueError(
+                f"flydsl_flash_attn_func: paged bias must have {_bias_rows} rows "
+                f"({'total_q' if varlen else 'seq_len_q'}), got {tuple(bias.shape)}"
+            )
+        if bias.shape[1] < skv:
+            raise ValueError(
+                f"flydsl_flash_attn_func: paged bias needs >= max_seqlen_kv={skv} columns, got {bias.shape[1]}"
+            )
+
     block_table_stride = int(block_table.shape[1])
     # Flatten so the kernel's flat row-major index addresses block_table correctly.
     block_table_i32 = (
@@ -499,6 +518,7 @@ def _flydsl_flash_attn_paged(
         _arch = _gpu_arch(q.device)
         _paged_light_ok = (
             (num_kv_splits <= 1)
+            and bias is None  # the light paged kernel has no bias path
             and D in (64, 128)
             and dtype_str in ("bf16", "f16")
             and (not _arch.startswith("gfx950") or Sq <= _VARLEN_LIGHT_MAX_SEQ)
@@ -536,6 +556,7 @@ def _flydsl_flash_attn_paged(
                 num_kv_splits=int(num_kv_splits),
                 varlen=varlen,
                 kv_cache_layout=kv_cache_layout,
+                has_bias=bias is not None,
             )
         if out is None:
             out = torch.empty_like(q)
@@ -546,6 +567,8 @@ def _flydsl_flash_attn_paged(
         v_flat = v.contiguous()
         o_flat = out.contiguous()
         kwargs = dict(block_table=block_table_i32, block_table_stride=block_table_stride, stream=launch_stream)
+        if bias is not None:
+            kwargs["bias"] = bias
         if varlen:
             kwargs["cu_seqlens_q"] = cu_seqlens_q
             kwargs["cu_seqlens_kv"] = cu_seqlens_kv
@@ -756,7 +779,7 @@ def flydsl_flash_attn_func(
     for _name, _t in (("bias", bias), ("alibi_slopes", alibi_slopes), ("sink", sink)):
         if _t is None:
             continue
-        if paged_kv:
+        if paged_kv and _name != "bias":
             raise NotImplementedError(f"flydsl_flash_attn_func: {_name} is not supported for paged KV")
         if dtype_str == "fp8":
             raise NotImplementedError(f"flydsl_flash_attn_func: {_name} is not supported for fp8")
@@ -784,6 +807,7 @@ def flydsl_flash_attn_func(
             v,
             causal=causal,
             num_kv_heads=num_kv_heads,
+            bias=bias,
             block_table=block_table,
             seqlen_k=seqlen_k,
             max_seqlen_kv=max_seqlen_kv,

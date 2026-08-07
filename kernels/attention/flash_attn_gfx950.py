@@ -35,10 +35,16 @@ from kernels.attention.flash_attn_utils import (
     DualwaveStoreHelper,
     _anchor_v_o,
     _anchor_v_p,
+    _bias_buf_bytes,
+    _bias_dma_m0_base,
+    _bias_dma_src_elem,
+    _bias_lds_lane_base,
+    _buffer_load_lds_128,
     _dualwave_sync_barrier,
-    _get_q_pack,
+    _load_bias_frag_lds,
+    _make_bias_lds_ptr,
     _make_dualwave_swp_traits,
-    _mfma_acc,
+    _num_bias_dma,
     _s_barrier,
     _s_nop,
     _s_setprio,
@@ -146,13 +152,31 @@ def build_flash_attn_dualwave_swp_module(
 
     # Shared-memory layout: one 16B-aligned K/V region (K0/V0/K1/V1).
     _lds_elem_dtype = dtype_to_elem_type(traits.DTYPE_STR)
+    # Bias adds a double-buffered [NUM_WAVES, ROWS_PER_WAVE, BLOCK_N] staging tile.
+    _BIAS_LDS_ELEMS = 2 * _bias_buf_bytes(traits) // traits.BF16_BYTES
+    _NUM_DMA_BIAS = _num_bias_dma(traits)
 
-    if const_expr(traits.PAGED):
+    if const_expr(traits.PAGED and HAS_BIAS):
 
         @fx.struct
         class SharedStorage:
             kv: fx.Array[_lds_elem_dtype, traits.LDS_KV_TOTAL_SIZE, 16]
             bt: fx.Array[fx.Int32, traits.PAGED_BT_LDS_SIZE, 16]
+            bias: fx.Array[_lds_elem_dtype, _BIAS_LDS_ELEMS, 16]
+
+    elif const_expr(traits.PAGED):
+
+        @fx.struct
+        class SharedStorage:
+            kv: fx.Array[_lds_elem_dtype, traits.LDS_KV_TOTAL_SIZE, 16]
+            bt: fx.Array[fx.Int32, traits.PAGED_BT_LDS_SIZE, 16]
+
+    elif const_expr(HAS_BIAS):
+
+        @fx.struct
+        class SharedStorage:
+            kv: fx.Array[_lds_elem_dtype, traits.LDS_KV_TOTAL_SIZE, 16]
+            bias: fx.Array[_lds_elem_dtype, _BIAS_LDS_ELEMS, 16]
 
     else:
 
@@ -232,19 +256,28 @@ def build_flash_attn_dualwave_swp_module(
 
         # ---------------- attention bias ----------------
         if const_expr(HAS_BIAS):
-            _bias_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(Bias), fx.make_layout(1, 1))
-            if const_expr(traits.KV_VECTORIZED):
-                _BIAS_VEC = 8
-                _bias_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), ctx.elem_dtype)
-            else:
-                _BIAS_VEC = 4
-                _bias_atom = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), ctx.elem_dtype)
+            _bias_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(Bias, max_size=False), fx.make_layout(1, 1))
+            _BIAS_VEC = 8 if const_expr(traits.KV_VECTORIZED) else 4
             _BIAS_GROUPS = 16 // _BIAS_VEC
-            _bias_frags = [
-                fx.make_rmem_tensor(fx.make_layout(_BIAS_VEC, 1), ctx.elem_dtype) for _ in range_constexpr(_BIAS_GROUPS)
-            ]
+            _bias_frag_ty = Vec.make_type(_BIAS_VEC, ctx.elem_dtype)
+            _bias_frag_align = _BIAS_VEC * traits.BF16_BYTES
             _bias_log2e = Vec.filled(_BIAS_VEC, BIAS_LOG2E, fx.Float32)
-            _bias_row_base_i32 = fx.Int32(ctx.q_tok_base) if const_expr(VARLEN) else None
+            _bias_lds_base_idx = fx.Index(fx.ptrtoint(ctx.lds.bias.ptr))
+            _bias_lds_base_ptr = _make_bias_lds_ptr(_bias_lds_base_idx)
+            _bias_gran_bytes = traits.DMA_BYTES
+            _bias_gran_elems = traits.DMA_BYTES // traits.BF16_BYTES
+            _bias_half_grans = traits.K_SUB_N // _bias_gran_elems
+            _BIAS_BUF_BYTES = _bias_buf_bytes(traits)
+            # bits [4, 7): `Swizzle(mask=3, base=4, shift=3)` computes
+            #     i ^ ((i & (((1 << 3) - 1) << (4 + 3))) >> 3)
+            # which is exactly `(row % 8) * 16`.
+            _bias_swz_layout = fx.make_composed_layout(
+                fx.static(fx.SwizzleType.get(3, 4, 3)),
+                fx.make_layout(_BIAS_LDS_ELEMS * traits.BF16_BYTES, 1),
+            )
+            _bias_lane_base = fx.Index(
+                _bias_lds_lane_base(traits, 0, ctx.wave_id, ctx.lane_mod_32, ctx.lane_div_32, _BIAS_VEC)
+            )
 
         # ---------------- ALiBi ----------------
         if const_expr(HAS_ALIBI):
@@ -269,27 +302,51 @@ def build_flash_attn_dualwave_swp_module(
 
                 return Vec(_sink_frag.load(), (1,), fx.Float32)[0] * fx.Float32(BIAS_LOG2E)
 
-        def _score_bias_half(s_h, tile_idx, h):
-            col_base_h = _seq_pad_col_base(traits, tile_idx, lane_div_32=ctx.lane_div_32) + fx.Int32(32 * h)
+        def _issue_bias_dma(tile_idx, buf):
+            """Coalesced global->LDS DMA of this wave's bias tile into buffer `buf`."""
+            row_base = ctx.q_start + ctx.wave_q_offset
+            if const_expr(VARLEN):
+                row_base = row_base + ctx.q_tok_base
+            tile_col_base = tile_idx * fx.Index(traits.BLOCK_N)
+            for d in range_constexpr(_NUM_DMA_BIAS):
+                _buffer_load_lds_128(
+                    _bias_div,
+                    _bias_dma_m0_base(traits, buf, d, ctx.wave_id_uni, _bias_lds_base_idx),
+                    _bias_dma_src_elem(
+                        traits,
+                        row_base,
+                        tile_col_base,
+                        d,
+                        lane_in_warp=ctx.lane_in_warp,
+                        bias_stride0_v=fx.Index(bias_stride0),
+                    ),
+                    0,
+                    _dma_atom=ctx.dma_atom,
+                    _lds_ptr_ty=ctx.lds_ptr_ty,
+                )
+
+        def _read_bias_frag(h, g, buf):
+            """Read one 4-element bias fragment for score half `h`, group `g` from LDS."""
+            gran = _seq_pad_score_threshold(traits, g * _BIAS_VEC) // _bias_gran_elems + _bias_half_grans * h
+            sel = gran * _bias_gran_bytes + buf * _BIAS_BUF_BYTES
+            crd = fx.make_int_tuple(fx.Int32(_bias_lane_base + fx.Index(sel)))
+            off = fx.get_scalar(fx.crd2idx(crd, _bias_swz_layout))
+            return _load_bias_frag_lds(_bias_lds_base_ptr, fx.Int32(off), _bias_frag_ty, _bias_frag_align)
+
+        def _score_bias_half(s_h, tile_idx, h, buf):
             src = Vec(s_h)
             out = [src[r] for r in range_constexpr(16)]
 
             if const_expr(HAS_ALIBI):
+                col_base_h = _seq_pad_col_base(traits, tile_idx, lane_div_32=ctx.lane_div_32) + fx.Int32(32 * h)
                 rel0 = fx.Float32(ctx.q_row_i32 + ctx.delta_i32 - col_base_h)
                 for r in range_constexpr(16):
                     d = rel0 - fx.Float32(float(_seq_pad_score_threshold(traits, r)))
                     out[r] = fmath.absf(d) * _alibi_neg_slope + out[r]
 
             if const_expr(HAS_BIAS):
-                bias_row_i32 = ctx.q_row_i32
-                if const_expr(VARLEN):
-                    bias_row_i32 = bias_row_i32 + _bias_row_base_i32
-                base = bias_row_i32 * fx.Int32(bias_stride0) + col_base_h
                 for g in range_constexpr(_BIAS_GROUPS):
-                    col_off = _seq_pad_score_threshold(traits, g * _BIAS_VEC)
-                    fx.copy(_bias_atom, fx.slice(_bias_div, (None, base + fx.Int32(col_off))), _bias_frags[g])
-                for g in range_constexpr(_BIAS_GROUPS):
-                    bv = Vec(Vec(_bias_frags[g].load(), (_BIAS_VEC,), ctx.elem_dtype).to(fx.Float32))
+                    bv = Vec(Vec(_read_bias_frag(h, g, buf), (_BIAS_VEC,), ctx.elem_dtype).to(fx.Float32))
                     r0 = g * _BIAS_VEC
                     acc = Vec.from_elements([out[r0 + e] for e in range_constexpr(_BIAS_VEC)], fx.Float32)
                     fused = bv * _bias_log2e + acc
@@ -298,22 +355,16 @@ def build_flash_attn_dualwave_swp_module(
 
             return Vec.from_elements(out, fx.Float32)
 
-        def qk_scored(v_k, q_all_scaled_bf16, tile_idx):
+        def qk_scored(v_k, q_all_scaled_bf16, tile_idx, buf=0):
             if const_expr(not (HAS_BIAS or HAS_ALIBI)):
                 return gemm_helper.qk(v_k, q_all_scaled_bf16)
-            out_halves = []
-            for h, k_h in ((0, v_k[0]), (1, v_k[1])):
-                acc = gemm_helper.c_zero_v16f32
-                for ks in range_constexpr(traits.K_STEPS_QK):
-                    acc = _mfma_acc(
-                        k_h[ks],
-                        _get_q_pack(traits, q_all_scaled_bf16, ks),
-                        acc,
-                        gemm_helper.mma_atom,
-                        gemm_helper.mfma_acc_vec_type,
-                    )
-                out_halves.append(_score_bias_half(acc, tile_idx, h))
-            return (out_halves[0], out_halves[1])
+            if const_expr(HAS_BIAS):
+                _issue_bias_dma(tile_idx + fx.Index(1), 1 - buf)
+            v_s_lo, v_s_hi = gemm_helper.qk(v_k, q_all_scaled_bf16)
+            return (
+                _score_bias_half(v_s_lo, tile_idx, 0, buf),
+                _score_bias_half(v_s_hi, tile_idx, 1, buf),
+            )
 
         def _main_body():
             # Paged: stage the block-table row into LDS before any page-id ds_read.
@@ -332,6 +383,9 @@ def build_flash_attn_dualwave_swp_module(
             _s_waitcnt(0)
             _sched_barrier(0)
             _s_barrier()
+
+            if const_expr(HAS_BIAS):
+                _issue_bias_dma(ctx.split_tile(0), 0)
 
             # Load this wave's Q rows and pre-scale by the 1/sqrt(D) softmax
             q_all_bf16 = q_loader.load_all()
@@ -362,7 +416,7 @@ def build_flash_attn_dualwave_swp_module(
             if const_expr(traits.PAGED):
                 pro_pageid_2_lds = page_ids.load_page_id_lds(page_ids.split_tile(2))
 
-            v_s_0 = qk_scored(v_k, q_all_scaled_bf16, ctx.split_tile(0))
+            v_s_0 = qk_scored(v_k, q_all_scaled_bf16, ctx.split_tile(0), buf=0)
             _sched_barrier(0)
 
             if const_expr(traits.CAUSAL):
@@ -439,7 +493,7 @@ def build_flash_attn_dualwave_swp_module(
                 # Cluster 1 computes MMA0, finishes v_p_0 softmax, updates l_row, and casts P.
                 if const_expr(traits.PAGED):
                     c2_pageid_lds = page_ids.load_page_id_lds(j_idx)
-                v_s_1 = qk_scored(v_k, q_all_scaled_bf16, j_idx - 2)
+                v_s_1 = qk_scored(v_k, q_all_scaled_bf16, j_idx - 2, buf=1)
                 v_p_0 = softmax_helper.exp2(v_p_0, 16, 16)
                 l_row = softmax_helper.reduce_sum(l_row, v_p_0)
                 v_p_0 = softmax_helper.cast_p(v_p_0)
@@ -514,7 +568,7 @@ def build_flash_attn_dualwave_swp_module(
                 # Cluster 5 mirrors C1: MMA0, finish v_p_1 softmax, update l_row, and cast P.
                 if const_expr(traits.PAGED):
                     _c6_kpid_lds = page_ids.load_page_id_lds(j_idx + 1)
-                v_s_0 = qk_scored(v_k, q_all_scaled_bf16, j_idx - 1)
+                v_s_0 = qk_scored(v_k, q_all_scaled_bf16, j_idx - 1, buf=0)
                 v_p_1 = softmax_helper.exp2(v_p_1, 16, 16)
                 l_row = softmax_helper.reduce_sum(l_row, v_p_1)
                 v_p_1 = softmax_helper.cast_p(v_p_1)
@@ -605,7 +659,7 @@ def build_flash_attn_dualwave_swp_module(
             # Epilogue C1 (compute): MMA0 -> v_s_1; finish v_p_0 softmax (like C1).
             if const_expr(traits.PAGED):
                 ec2_pageid_lds = page_ids.load_page_id_lds(max_m1)
-            v_s_1 = qk_scored(v_k, q_all_scaled_bf16, max_m3)
+            v_s_1 = qk_scored(v_k, q_all_scaled_bf16, max_m3, buf=1)
             v_p_0 = softmax_helper.exp2(v_p_0, 16, 16)
             l_row = softmax_helper.reduce_sum(l_row, v_p_0)
             v_p_0 = softmax_helper.cast_p(v_p_0)
@@ -672,7 +726,7 @@ def build_flash_attn_dualwave_swp_module(
             _dualwave_sync_barrier()
 
             # Epilogue C5 computes MMA0, folds rescale_e3 into l_row, and finishes v_p_1 softmax.
-            v_s_0 = qk_scored(v_k, q_all_scaled_bf16, max_m2)
+            v_s_0 = qk_scored(v_k, q_all_scaled_bf16, max_m2, buf=0)
             l_row = softmax_helper.apply_l_rescale(l_row, rescale_e3)
             v_p_1 = softmax_helper.exp2(v_p_1, 16, 16)
             l_row = softmax_helper.reduce_sum(l_row, v_p_1)
@@ -731,7 +785,7 @@ def build_flash_attn_dualwave_swp_module(
             _dualwave_sync_barrier()
 
             # Epilogue C9 computes the last-tile MMA0, folds rescale_e7 into l_row, and finishes v_p_0.
-            v_s_1 = qk_scored(v_k, q_all_scaled_bf16, max_m1)
+            v_s_1 = qk_scored(v_k, q_all_scaled_bf16, max_m1, buf=1)
             l_row = softmax_helper.apply_l_rescale(l_row, rescale_e7)
             v_p_0 = softmax_helper.exp2(v_p_0, 16, 16)
             l_row = softmax_helper.reduce_sum(l_row, v_p_0)

@@ -1179,6 +1179,7 @@ def run_attn_config(
                 kv_cache_layout=kv_cache_layout,
                 num_kv_splits=int(num_kv_splits),
                 out=o_t,
+                bias=bias_t,
                 **_paged_varlen_kw,
                 **_cfg_kw(),
             )
@@ -1295,6 +1296,7 @@ def run_attn_config(
                     kv_cache_layout=kv_cache_layout,
                     num_kv_splits=int(num_kv_splits),
                     out=o_t,
+                    bias=bias_t,
                     **_paged_varlen_kw,
                     **_cfg_kw(),
                 )
@@ -2699,10 +2701,8 @@ def main():
     args = parser.parse_args()
     if not args.block_table and args.kv_cache_layout != "linear":
         parser.error("--kv-cache-layout requires --block-table")
-    # Paged KV and fp8 have no bias support in the kernel; reject rather than run
-    # a bias-free kernel against a biased reference.
-    if args.bias and args.block_table:
-        parser.error("--bias is not supported with --block-table (paged KV)")
+    # fp8 has no bias support in the kernel; reject rather than run a bias-free
+    # kernel against a biased reference. Paged KV does support bias.
     if args.bias and args.dtype == "fp8":
         parser.error("--bias is not supported with --dtype fp8")
     if args.alibi and args.block_table:
@@ -3811,6 +3811,60 @@ def test_bias_varlen(causal):
         ).squeeze(0)
         _, _, passed = _acc_metric(out[s0:s1].float().reshape(-1), ref.float().reshape(-1), D)
         assert passed, f"varlen batch {b} (seqlen {n}, causal={causal}) does not match the biased reference"
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("kv_cache_layout", ["linear", "vectorized"])
+def test_bias_paged(causal, kv_cache_layout):
+    """Paged bias is [Sq, max_seqlen_kv]: q rows, batch-local logical key columns.
+
+    The block table only redirects the K/V fetch, so the bias column is still the
+    logical KV position -- the same index the causal mask already uses.
+    """
+    dtype = torch.bfloat16
+    B, Sq, H, Hkv, D = 2, 512, 8, 4, 128
+    # Uniform KV lengths: ragged per-batch seqlen_k on the dense paged path already
+    # disagrees with this reference without any bias, so keep that out of scope here.
+    kv_lens = [Sq, Sq]
+    max_kv = max(kv_lens)
+    setup_seed(DEFAULT_SEED)
+    q = torch.empty(B, Sq, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    kv_cache = _build_paged_kv_for_test(B, max_kv, 64, Hkv, D, kv_lens, dtype, "cuda", kv_cache_layout)
+    bias = torch.empty(Sq, max_kv, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+
+    paged_kw = dict(
+        causal=causal,
+        num_kv_heads=Hkv,
+        max_seqlen_kv=max_kv,
+        block_table=kv_cache["block_table"],
+        seqlen_k=kv_cache["seqlen_k"],
+        kv_cache_layout=kv_cache_layout,
+    )
+    out = flydsl_flash_attn_func(q, kv_cache["k_cache"], kv_cache["v_cache"], bias=bias, **paged_kw)
+    torch.cuda.synchronize()
+
+    for b, n in enumerate(kv_lens):
+        kb, vb = _logical_kv_from_pages(
+            kv_cache["k_cache"][_page_ids_for_batch(kv_cache, b)],
+            kv_cache["v_cache"][_page_ids_for_batch(kv_cache, b)],
+            kv_cache_layout,
+            n,
+        )
+        ref = pytorch_ref_attention(
+            q[b].unsqueeze(0).float(),
+            kb.unsqueeze(0).float(),
+            vb.unsqueeze(0).float(),
+            causal=causal,
+            bias=bias[:, :n],
+        ).squeeze(0)
+        _, _, passed = _acc_metric(out[b].float().reshape(-1), ref.float().reshape(-1), D)
+        assert passed, f"paged batch {b} ({kv_cache_layout}, causal={causal}) does not match the biased reference"
+
+    # A bias-free paged run must NOT match, so a silently-dropped bias cannot pass.
+    out_nb = flydsl_flash_attn_func(q, kv_cache["k_cache"], kv_cache["v_cache"], **paged_kw)
+    torch.cuda.synchronize()
+    assert (out_nb.float() - out.float()).abs().max().item() > 1e-2, "bias had no effect on the paged output"
 
 
 # ── ALiBi ────────────────────────────────────────────────────────────────────
