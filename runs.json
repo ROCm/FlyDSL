@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-07T10:55:30Z",
+ "updated": "2026-08-07T11:05:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31172521237,
+   "pr": 971,
+   "commit": "0a4eb7777dce97ffcc5d2ad685fc43cb7a5f60b5",
+   "branch": "gfx1250/gemm-opt-0805",
+   "event": "pull_request",
+   "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31172521237",
+   "created_at": "2026-08-07T11:03:12Z",
+   "updated_at": "2026-08-07T11:04:26Z",
+   "actor": "aoli26",
+   "jobs": []
+  },
   {
    "run_id": 31163858482,
    "pr": 945,
@@ -100,11 +115,11 @@
    "branch": "pr/nvvm-target",
    "event": "pull_request",
    "title": "[Feat] Add an experimental cuda nvvm backend",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31159580754",
    "created_at": "2026-08-07T07:55:29Z",
-   "updated_at": "2026-08-07T08:04:09Z",
+   "updated_at": "2026-08-07T11:04:15Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -119,9 +134,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-07T08:04:09Z",
+     "started_at": "2026-08-07T11:04:14Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31159580754/job/92808484188"
     },
@@ -217,11 +232,11 @@
    "branch": "gfx1250/gemm-opt-0805",
    "event": "pull_request",
    "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31157898956",
    "created_at": "2026-08-07T07:30:10Z",
-   "updated_at": "2026-08-07T10:53:13Z",
+   "updated_at": "2026-08-07T11:03:31Z",
    "actor": "aoli26",
    "jobs": [
     {
@@ -237,10 +252,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-07T10:53:13Z",
-     "completed_at": null,
+     "completed_at": "2026-08-07T11:03:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31157898956/job/92808491917"
     },
     {
@@ -2134,51 +2149,6 @@
    "updated_at": "2026-08-05T14:43:06Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 31011979433,
-   "pr": 968,
-   "commit": "a36e2e2571e168087ccca0721cd87690d9e4ab92",
-   "branch": "pr/enh-known-block-size",
-   "event": "pull_request",
-   "title": "[Feat] Add fx.known_block_size() as constant accessor",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31011979433",
-   "created_at": "2026-08-05T13:48:15Z",
-   "updated_at": "2026-08-05T15:15:52Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-05T13:52:30Z",
-     "completed_at": "2026-08-05T15:13:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31011979433/job/92327186804",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-05T14:31:41Z",
-     "completed_at": "2026-08-05T15:15:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31011979433/job/92327186812"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-05T13:52:31Z",
-     "completed_at": "2026-08-05T14:42:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31011979433/job/92327186840",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
