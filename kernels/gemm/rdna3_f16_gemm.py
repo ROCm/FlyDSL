@@ -230,9 +230,7 @@ def create_wmma_gemm_module(
         # ============================================================
         # GMEM -> registers -> LDS, through the tiled copy
         # ============================================================
-        tA = fx.flat_divide(fx.rocdl.make_buffer_tensor(arg_a), fx.make_tile(BLOCK_M, BLOCK_K))[
-            None, None, bid_m, None
-        ]
+        tA = fx.flat_divide(fx.rocdl.make_buffer_tensor(arg_a), fx.make_tile(BLOCK_M, BLOCK_K))[None, None, bid_m, None]
         tB = fx.flat_divide(fx.rocdl.make_buffer_tensor(arg_bt), fx.make_tile(BLOCK_N, BLOCK_K))[
             None, None, bid_n, None
         ]
@@ -250,9 +248,7 @@ def create_wmma_gemm_module(
         # allocation instead, which is what the flat _v8_store did by hand.
         def _lds_dst(buf_offset, base, rows, row_stride):
             ptr = fx.add_offset(lds_ptr, fx.make_int_tuple(buf_offset + base))
-            view = fx.make_view(
-                fx.recast_iter(elem_dtype, ptr), fx.make_layout((rows, BLOCK_K), (row_stride, 1))
-            )
+            view = fx.make_view(fx.recast_iter(elem_dtype, ptr), fx.make_layout((rows, BLOCK_K), (row_stride, 1)))
             return thr_g2s.partition_D(view)[None, None, None]
 
         def _pA_s(buf_offset):
@@ -373,9 +369,7 @@ def create_wmma_gemm_module(
         #
         # frag_C flattens as si + 8*(rm + reg_m*rn), so each run of 8 elements is
         # exactly one atom's accumulator, and one Philox draw still covers one run.
-        ordered_accs = [
-            accs[rm * reg_n + rn] for rn in range_constexpr(reg_n) for rm in range_constexpr(reg_m)
-        ]
+        ordered_accs = [accs[rm * reg_n + rn] for rn in range_constexpr(reg_n) for rm in range_constexpr(reg_m)]
         if const_expr(rounding == "rs"):
             # The 4 random words cover all 8 values, each taking a distinct
             # 16-bit slice (low/high of a word), so the f32 -> bf16 store is

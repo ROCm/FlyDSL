@@ -35,9 +35,9 @@ def _swizzled_tiles(grid_m, grid_n, group_m=DEFAULT_GROUP_M):
         (3, 3),
         (5, 5),
         (8, 8),
-        (12, 6),   # 1536 / 128 — used to take 8 and address tiles 12..15
+        (12, 6),  # 1536 / 128 — used to take 8 and address tiles 12..15
         (16, 8),
-        (20, 5),   # 2560 / 128 — used to take 8 and address tiles 20..23
+        (20, 5),  # 2560 / 128 — used to take 8 and address tiles 20..23
         (32, 8),
     ],
 )
@@ -56,13 +56,20 @@ def test_group_width_always_divides_the_grid(grid_m, group_m):
 @pytest.mark.parametrize(
     "grid_m, grid_n",
     [
-        (1, 1), (1, 8), (8, 1),
-        (12, 12),   # 1536x1536 at 128x128: the grid that faulted
-        (20, 20),   # 2560x2560 at 128x128: likewise
-        (9, 9),     # 1152x1152: returned a wrong C instead of faulting
-        (10, 10),   # 1280x1280: likewise
-        (13, 13),   # 1664x1664: likewise
-        (3, 7), (5, 4), (7, 3), (16, 16), (12, 5), (20, 3),
+        (1, 1),
+        (1, 8),
+        (8, 1),
+        (12, 12),  # 1536x1536 at 128x128: the grid that faulted
+        (20, 20),  # 2560x2560 at 128x128: likewise
+        (9, 9),  # 1152x1152: returned a wrong C instead of faulting
+        (10, 10),  # 1280x1280: likewise
+        (13, 13),  # 1664x1664: likewise
+        (3, 7),
+        (5, 4),
+        (7, 3),
+        (16, 16),
+        (12, 5),
+        (20, 3),
     ],
 )
 def test_swizzle_covers_every_tile_exactly_once(grid_m, grid_n):
