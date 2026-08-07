@@ -192,6 +192,13 @@ def test_p2p_quant_is_rank_invariant_for_an_mtpr(mtpr, expected):
     assert {config.p2p_quant for config in configs} == {expected}
 
 
+def test_a4_auto_p2p_restores_fp8_at_mtpr_1024_without_losing_rank_invariance():
+    configs = [select_mega_moe_config(tokens, 1024, a_dtype="fp4") for tokens in TOKEN_BUCKETS if tokens <= 1024]
+
+    assert {config.p2p_quant for config in configs} == {"fp8_blockwise_1x32"}
+    assert select_mega_moe_config(1024, 1024, "none", a_dtype="fp4").p2p_quant == "none"
+
+
 def test_explicit_p2p_quant_override_is_preserved():
     assert select_mega_moe_config(64, 64, "fp8_blockwise_1x32").p2p_quant == "fp8_blockwise_1x32"
     assert select_mega_moe_config(2048, 2048, "none").p2p_quant == "none"
@@ -217,8 +224,23 @@ def test_a4_config_overrides_are_quant_specific():
     a4_256 = apply_mega_moe_quant_config(select_mega_moe_config(256, 256), 256, "fp4")
     assert a4_256.stage1.waves_per_eu_hint == 1
     assert not select_mega_moe_config(256, 256, "none").stage2.deep_a_pipeline
+
+    a4_fixed_256 = apply_mega_moe_quant_config(
+        select_mega_moe_config(256, 8192, a_dtype="fp4"),
+        256,
+        "fp4",
+    )
+    assert (
+        a4_fixed_256.stage2.block_m,
+        a4_fixed_256.stage2.block_n,
+        a4_fixed_256.stage2.persist_cu,
+        a4_fixed_256.stage2.deep_a_pipeline,
+    ) == (64, 256, 128, True)
+
     with pytest.raises(ValueError, match="unsupported activation dtype"):
         apply_mega_moe_quant_config(base_512, 500, "bf16")
+    with pytest.raises(ValueError, match="unsupported activation dtype"):
+        select_mega_moe_config(512, 512, a_dtype="bf16")
 
 
 @pytest.mark.parametrize(

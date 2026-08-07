@@ -343,18 +343,27 @@ def _select_bucket_config(bucket: int, mtpr: int, p2p_quant: str) -> MegaMoEConf
     return MegaMoEConfig(stage1=stage1, stage2=stage2, p2p_quant=p2p_quant)
 
 
-def select_mega_moe_config(tokens: int, mtpr: int, p2p_quant: str = "auto") -> MegaMoEConfig:
+def select_mega_moe_config(
+    tokens: int,
+    mtpr: int,
+    p2p_quant: str = "auto",
+    *,
+    a_dtype: str = "fp8",
+) -> MegaMoEConfig:
     if mtpr <= 0 or mtpr & (mtpr - 1):
         raise ValueError(f"mtpr={mtpr} must be a positive power of two")
     if tokens > mtpr:
         raise ValueError(f"tokens={tokens} exceeds mtpr={mtpr}")
+    if a_dtype not in ("fp4", "fp8"):
+        raise ValueError(f"unsupported activation dtype={a_dtype!r}")
     bucket = nearest_token_bucket(tokens)
     fixed_slot = mtpr <= FIXED_SLOT_MAX_MTPR
     if fixed_slot and bucket not in _FIXED_GEOMETRY:
         raise ValueError(f"fixed-slot does not support token bucket {bucket}")
     if p2p_quant == "auto":
         # MTPR is rank-invariant; local token counts need not be.
-        p2p_quant = "fp8_blockwise_1x32" if mtpr > P2P_FP8_MIN_MTPR else "none"
+        use_fp8 = mtpr >= P2P_FP8_MIN_MTPR if a_dtype == "fp4" else mtpr > P2P_FP8_MIN_MTPR
+        p2p_quant = "fp8_blockwise_1x32" if use_fp8 else "none"
     elif p2p_quant not in ("none", "fp8_blockwise_1x32"):
         raise ValueError(f"unsupported p2p_quant={p2p_quant!r}")
     return _select_bucket_config(bucket, mtpr, p2p_quant)
@@ -376,7 +385,17 @@ def apply_mega_moe_quant_config(config: MegaMoEConfig, tokens: int, a_dtype: str
         stage1_overrides["sort_block_m"] = 64
     if tokens >= 256:
         stage1_overrides["waves_per_eu_hint"] = 1
-    if bucket == 512:
+    if bucket == 256 and config.p2p_quant == "fp8_blockwise_1x32":
+        stage2_overrides.update(
+            block_m=64,
+            block_n=256,
+            persist=True,
+            persist_cu=128,
+            use_nt=False,
+            persist_strided=False,
+            deep_a_pipeline=True,
+        )
+    elif bucket == 512:
         stage1_overrides.update(b_nt=0, num_dispatch_cu=160)
     elif bucket == 1024:
         stage1_overrides.update(sort_block_m=128, num_dispatch_cu=88)

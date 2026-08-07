@@ -194,7 +194,12 @@ class MegaMoE:
         self._s1_disp = torch.tensor(table, dtype=torch.int64, device=self.dev)
 
     def _select_config(self, tokens: int) -> MegaMoEConfig:
-        config = select_mega_moe_config(tokens, self.mtpr, self._stage2_p2p_quant)
+        config = select_mega_moe_config(
+            tokens,
+            self.mtpr,
+            self._stage2_p2p_quant,
+            a_dtype=self._a_dtype,
+        )
         config = apply_mega_moe_quant_config(config, tokens, self._a_dtype)
         self._active_config = config
         return config
