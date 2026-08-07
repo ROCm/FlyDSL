@@ -20,7 +20,7 @@ subtrees:
   - caption: Language
     entries:
       - file: language/arithmetic_types
-        title: Arithmentic types
+        title: Arithmetic types
   - caption: Guides
     entries:
       - file: architecture_guide
