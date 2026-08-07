@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
-"""MegaMoEV2 end-to-end accuracy and performance tests."""
+"""MegaMoE end-to-end accuracy and performance tests."""
 
 from __future__ import annotations
 
@@ -393,7 +393,7 @@ def _prepare(
     w1_fp4, w1_scale_raw = _chunked_fp4_quant(w1_flat)
     w_kernel = shuffle_weight(w1_fp4.view(torch.float4_e2m1fn_x2)).view(torch.uint8).contiguous()
     scale_w1_1d = gemm_common_utils.e8m0_shuffle(w1_scale_raw).view(torch.uint8).contiguous()
-    # MegaMoEV2 uses interleaved gate/up while the ATOM baseline uses separated weights.
+    # MegaMoE uses interleaved gate/up while the ATOM baseline uses separated weights.
     w_kernel_gui = (
         gemm_common_utils.shuffle_weight_w4(
             w1_fp4.view(weight_experts, 2 * inter_dim, model_dim // 2), NLane=16, gate_up=True, moe_gemm=True
@@ -461,10 +461,10 @@ def _run_full_e2e(
     w_kernel_gui=None,
     scale_gui=None,
 ):
-    """Compare MegaMoEV2 with FP8- and BF16-dispatch ATOM pipelines."""
+    """Compare MegaMoE with FP8- and BF16-dispatch ATOM pipelines."""
     import torch.nn.functional as _F
 
-    from kernels.mega_moe import MegaMoEV2
+    from kernels.mega_moe import MegaMoE
     from kernels.mega_moe.quant import mxfp4_moe_scale_sort, per_1x32_mx_quant
     from kernels.moe.moe_sorting_kernel import moe_sorting_flydsl
 
@@ -521,16 +521,16 @@ def _run_full_e2e(
         torch.cuda.synchronize()
         return _all_mean(dev, _s.elapsed_time(_e) / _n)
 
-    # Slice expert-major W1 because MegaMoEV2 indexes local experts.
+    # Slice expert-major W1 because MegaMoE indexes local experts.
     _wpe = w_kernel.numel() // experts  # per-expert uint8 elems (weight)
     _spe = scale_w1_1d.numel() // experts  # per-expert uint8 elems (scale)
     _w1_arg = w_kernel.reshape(-1)[rank * epr * _wpe : (rank + 1) * epr * _wpe].contiguous()
     _w1s_arg = scale_w1_1d.reshape(-1)[rank * epr * _spe : (rank + 1) * epr * _spe].contiguous()
-    # MegaMoEV2 uses INTERLEAVE gate/up for A8W4 and A4W4; ATOM stays SEPARATED.
+    # MegaMoE uses INTERLEAVE gate/up for A8W4 and A4W4; ATOM stays SEPARATED.
     assert w_kernel_gui is not None and scale_gui is not None
     _w1_arg_mega = w_kernel_gui.reshape(-1)[rank * epr * _wpe : (rank + 1) * epr * _wpe].contiguous()
     _w1s_arg_mega = scale_gui.reshape(-1)[rank * epr * _spe : (rank + 1) * epr * _spe].contiguous()
-    moe = MegaMoEV2(
+    moe = MegaMoE(
         rank=rank,
         world_size=world,
         model_dim=model_dim,
@@ -827,7 +827,7 @@ def _run_full_e2e(
         _pa = _profile_body(_atom_body, f"atombf16_{_tag}", args, rank, world, dev, _pdir, _pmeta)
         _t_mega, _t_atom8, _t_atom = (_pm["e2e_us_avg"] / 1e3, _pa8["e2e_us_avg"] / 1e3, _pa["e2e_us_avg"] / 1e3)
     else:
-        _t_mega = _cg_time(_mega_body)  # megav2 e2e (stage1+stage2)
+        _t_mega = _cg_time(_mega_body)  # MegaMoE e2e (stage1+stage2)
         _t_atom8 = _cg_time(_atom_fp8_body)  # baseline e2e (fp8 dispatch)
         _t_atom = _cg_time(_atom_body)  # reference e2e (bf16 dispatch)
     # Populate Stage1 buffers once before isolated Stage2 timing.
@@ -861,7 +861,7 @@ def _run_full_e2e(
         _timer = "profiler-e2e" if getattr(args, "profile", False) else "cuda-event"
         print(
             f"  [perf E2E (stage1+fused-stage2), ms | {_timer}]  baseline-fp8={_t_atom8:.4f}  "
-            f"megav2={_t_mega:.4f}  speedup={(_t_atom8 / _t_mega) if _t_mega > 0 else -1:.3f}  "
+            f"mega={_t_mega:.4f}  speedup={(_t_atom8 / _t_mega) if _t_mega > 0 else -1:.3f}  "
             f"| ref bf16-dispatch baseline={_t_atom:.4f}  (out=bf16)",
             flush=True,
         )
@@ -923,7 +923,7 @@ def _perf_key(network, quant, tokens, mtpr=0):
 
 
 def _perf_baseline_lookup(path, network, quant, tokens, mtpr=0):
-    """Look up a MegaMoEV2 latency baseline, optionally overriding the built-in table."""
+    """Look up a MegaMoE latency baseline, optionally overriding the built-in table."""
     data = _MEGA_PERF_BASELINE
     if path:
         data = _PERF_BASELINE_CACHE.get(path)
@@ -965,10 +965,10 @@ def _run_mega_only(
     measure_perf=False,
     stage1_only=False,
 ):
-    """Run the aiter-free MegaMoEV2 accuracy and performance CI path."""
+    """Run the aiter-free MegaMoE accuracy and performance CI path."""
     import torch.nn.functional as _F
 
-    from kernels.mega_moe import MegaMoEV2
+    from kernels.mega_moe import MegaMoE
 
     _is_fp4_mega = quant == "a4w4"
 
@@ -995,7 +995,7 @@ def _run_mega_only(
         del w2_fp4, w2_sr
         torch.cuda.empty_cache()
 
-    # MegaMoEV2 local weights: this rank's epr experts.
+    # MegaMoE local weights: this rank's epr experts.
     _weight_experts = epr if local_experts_only else experts
     _wpe = w_kernel.numel() // _weight_experts
     _spe = scale_w1_1d.numel() // _weight_experts
@@ -1005,7 +1005,7 @@ def _run_mega_only(
     _w1 = w_kernel_gui.reshape(-1)[_w1sl].contiguous()
     _w1s = scale_gui.reshape(-1)[_w1ssl].contiguous()
 
-    moe = MegaMoEV2(
+    moe = MegaMoE(
         rank=rank,
         world_size=world,
         model_dim=model_dim,
@@ -1101,14 +1101,14 @@ def _run_mega_only(
             ref_bad = int((~torch.isfinite(ref_s1)).sum().item())
             e8_min, e8_max = int(e8.min().item()), int(e8.max().item())
             print(
-                f"[v2-diag rank={rank}] nonfinite: got={got_bad}/{got_s1.numel()} "
+                f"[mega-diag rank={rank}] nonfinite: got={got_bad}/{got_s1.numel()} "
                 f"ref={ref_bad}/{ref_s1.numel()} e8=[{e8_min},{e8_max}]",
                 flush=True,
             )
         stage1_rel = (torch.norm(got_s1 - ref_s1) / torch.norm(ref_s1)).item()
         stage1_ratio = (torch.norm(got_s1) / torch.norm(ref_s1)).item()
         print(
-            f"[v2-diag rank={rank}] stage1-vs-ref: relL2={stage1_rel:.4e} norm_ratio={stage1_ratio:.4f}",
+            f"[mega-diag rank={rank}] stage1-vs-ref: relL2={stage1_rel:.4e} norm_ratio={stage1_ratio:.4f}",
             flush=True,
         )
 
@@ -1383,7 +1383,7 @@ def run_one(args, rank, world, dev):
             stage1_only=bool(args.stage1_only),
         )
 
-    # The manual path compares MegaMoEV2 with the FlyDSL ATOM pipeline.
+    # The manual path compares MegaMoE with the FlyDSL ATOM pipeline.
     return _run_full_e2e(
         args,
         rank,
@@ -1484,13 +1484,13 @@ def main():
         "--min-speedup",
         type=float,
         default=0.0,
-        help="CI perf gate for the ATOM path (only meaningful with --strict): require the megav2 E2E "
+        help="CI perf gate for the ATOM path (only meaningful with --strict): require the MegaMoE E2E "
         "speedup vs the atom-fp8 production baseline to be >= this value for every case (0 = disabled).",
     )
     p.add_argument(
         "--mega-only",
         action="store_true",
-        help="Aiter-free CI path: run only MegaMoEV2 (moe.forward), without ATOM or aiter. "
+        help="Aiter-free CI path: run only MegaMoE (moe.forward), without ATOM or aiter. "
         "Accuracy is gated vs a torch f32 oracle; perf vs a committed golden baseline "
         "(--perf-baseline). This is what the multi-gpu CI runs.",
     )
@@ -1673,10 +1673,10 @@ def _gpu_arch() -> str:
 def _skip_unless_mega_8gpu() -> None:
     """Skip unless the host supports the eight-GPU A8W4 harness."""
     if _HARNESS_DEPS_ERROR is not None:
-        pytest.skip(f"MegaMoEV2 deps unavailable (need mori + FlyDSL dispatch/combine): {_HARNESS_DEPS_ERROR}")
+        pytest.skip(f"MegaMoE deps unavailable (need mori + FlyDSL dispatch/combine): {_HARNESS_DEPS_ERROR}")
     arch = _gpu_arch()
     if not arch.startswith("gfx95"):
-        pytest.skip(f"MegaMoEV2 A8W4/A4W4 requires CDNA4 (gfx95x); current arch: {arch or 'unknown'}")
+        pytest.skip(f"MegaMoE A8W4/A4W4 requires CDNA4 (gfx95x); current arch: {arch or 'unknown'}")
     phys = _count_physical_gpus()
     if phys < 8:
         pytest.skip(f"requires >= 8 physical GPUs, found {phys}")
@@ -1729,7 +1729,7 @@ def _run_mega_8gpu(
         if any(tag in line for tag in ("[MEGA-ONLY]", "[strict]")):
             print(line)
     assert result.returncode == 0, (
-        f"MegaMoEV2 8-GPU {network}/{quant} bs={bs_list} mtpr={mtpr or 'auto'} "
+        f"MegaMoE 8-GPU {network}/{quant} bs={bs_list} mtpr={mtpr or 'auto'} "
         f"FAILED (exit {result.returncode}).\n"
         f"stdout (last 3000 chars):\n{result.stdout[-3000:]}\n"
         f"stderr (last 2000 chars):\n{result.stderr[-2000:]}"
@@ -1757,7 +1757,7 @@ def _mega_id(network, quant, bs_list):
 @pytest.mark.multi_gpu
 @pytest.mark.parametrize("network,quant,bs_list", _MEGA_ACC_PARAMS, ids=[_mega_id(*p) for p in _MEGA_ACC_PARAMS])
 def test_mega_moe_8gpu_accuracy(network, quant, bs_list):
-    """Gate eight-GPU MegaMoEV2 accuracy against the routing-weighted FP32 oracle."""
+    """Gate eight-GPU MegaMoE accuracy against the routing-weighted FP32 oracle."""
     _skip_unless_mega_8gpu()
     _run_mega_8gpu(network=network, quant=quant, bs_list=bs_list, iters=5)
 
@@ -1766,7 +1766,7 @@ def test_mega_moe_8gpu_accuracy(network, quant, bs_list):
 @pytest.mark.benchmark
 @pytest.mark.parametrize("network,quant,bs_list", _MEGA_BENCH_PARAMS, ids=[_mega_id(*p) for p in _MEGA_BENCH_PARAMS])
 def test_mega_moe_8gpu_benchmark(network, quant, bs_list):
-    """Gate eight-GPU MegaMoEV2 latency against the committed baseline."""
+    """Gate eight-GPU MegaMoE latency against the committed baseline."""
     _skip_unless_mega_8gpu()
     _run_mega_8gpu(network=network, quant=quant, bs_list=bs_list, iters=20, measure_perf=True, skip_acc=True)
 
