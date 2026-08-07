@@ -149,7 +149,13 @@ def _tune_shape(
 ):
     import torch
 
+    from flydsl.runtime.device import get_rocm_arch
     from kernels.attention.pa_decode_fp8 import get_pa_metadata, pa_decode_ps_launch
+
+    # gfx950 consumes OCP e4m3; gfx942 consumes the FNUZ variant. Feeding the
+    # wrong one rescales the decode output by the exponent-bias ratio, which
+    # trips the correctness check below.
+    fp8_dtype = torch.float8_e4m3fn if "gfx95" in get_rocm_arch() else torch.float8_e4m3fnuz
 
     pages_per_sequence = (context_length + block_size - 1) // block_size
     num_blocks = batch_size * pages_per_sequence
@@ -164,12 +170,12 @@ def _tune_shape(
     kv_page_indices = torch.arange(num_blocks, dtype=torch.int32, device=device)
     key = torch.zeros(
         (num_blocks, num_kv_heads, head_dim // 16, block_size, 16),
-        dtype=torch.float8_e4m3fnuz,
+        dtype=fp8_dtype,
         device=device,
     )
     value = torch.ones(
         (num_blocks, num_kv_heads, block_size // 16, head_dim, 16),
-        dtype=torch.float8_e4m3fnuz,
+        dtype=fp8_dtype,
         device=device,
     )
     if per_token_kv:
