@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-07T09:41:05Z",
+ "updated": "2026-08-07T10:07:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -38,10 +38,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-07T09:15:18Z",
-     "completed_at": null,
+     "completed_at": "2026-08-07T09:57:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31163858482/job/92823895695"
     }
    ]
@@ -63,10 +63,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-07T09:00:03Z",
-     "completed_at": null,
+     "completed_at": "2026-08-07T09:50:42Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31163693061/job/92820527051"
     },
     {
@@ -298,11 +298,11 @@
    "branch": "feat/rdna3-gemm-tiled-api",
    "event": "pull_request",
    "title": "[Kernel] Fix the RDNA3 GEMM grid swizzle and migrate it to the tiled copy/MMA API",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31155912657",
    "created_at": "2026-08-07T06:59:14Z",
-   "updated_at": "2026-08-07T07:03:03Z",
+   "updated_at": "2026-08-07T10:06:01Z",
    "actor": "vlluvia",
    "jobs": [
     {
@@ -326,9 +326,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-07T07:03:03Z",
+     "started_at": "2026-08-07T10:06:00Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31155912657/job/92795988359"
     }
@@ -371,11 +371,11 @@
    "branch": "main",
    "event": "push",
    "title": "compile only remove log (#977)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31153598433",
    "created_at": "2026-08-07T06:20:31Z",
-   "updated_at": "2026-08-07T08:56:24Z",
+   "updated_at": "2026-08-07T10:05:24Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -390,10 +390,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-07T08:56:23Z",
-     "completed_at": null,
+     "completed_at": "2026-08-07T10:05:24Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31153598433/job/92788918298"
     },
     {
