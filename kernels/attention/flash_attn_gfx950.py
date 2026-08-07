@@ -256,7 +256,12 @@ def build_flash_attn_dualwave_swp_module(
 
         # ---------------- attention bias ----------------
         if const_expr(HAS_BIAS):
-            _bias_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(Bias, max_size=False), fx.make_layout(1, 1))
+            _bias_rec_bytes = (
+                (fx.Int64(fx.get_scalar(fx.cosize(fx.get_layout(Bias)))) * traits.BF16_BYTES + 3) // 4
+            ) * 4
+            _bias_div = fx.logical_divide(
+                fx.rocdl.make_buffer_tensor(Bias, num_records_bytes=_bias_rec_bytes), fx.make_layout(1, 1)
+            )
             _BIAS_VEC = 8 if const_expr(traits.KV_VECTORIZED) else 4
             _BIAS_GROUPS = 16 // _BIAS_VEC
             _bias_frag_ty = Vec.make_type(_BIAS_VEC, ctx.elem_dtype)
