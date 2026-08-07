@@ -28,9 +28,9 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl, arith
 from flydsl.expr import math as fmath
-from flydsl.expr.typing import ReductionOp
+from flydsl.expr.typing import ReductionOp, T
 from flydsl.runtime.device import get_rocm_arch
 
 from kernels.attention.pipeline import (
@@ -209,11 +209,42 @@ def make_flex_attn_kernel_name(param: FlexAttnParam) -> str:
     return name
 
 
+def summarize_flex_wg_thread_layout(param: FlexAttnParam) -> str:
+    """Thread / wave layout inside one HIP workgroup (constexpr from ``FlexAttnParam``)."""
+    waves_per_group = int(param.m_waves) * int(param.n_waves)
+    waves_per_wg = int(param.num_groups) * waves_per_group
+    rows_per_wg = int(param.block_m) * int(param.num_groups)
+    lds_ring = max(2, int(param.pipe_depth))
+    stagger = pipeline_stagger_enabled(
+        depth=int(param.pipe_depth),
+        num_groups=int(param.num_groups),
+        m_waves=int(param.m_waves),
+    )
+    return "\n".join([
+        "flex_attn workgroup layout:",
+        f"  block_threads={param.block_threads} "
+        f"({param.num_groups} query groups × {param.group_threads} threads/group)",
+        f"  waves_per_group={waves_per_group} "
+        f"(m_waves={param.m_waves} × n_waves={param.n_waves}, lane_width={GFX950_WAVE_SIZE})",
+        f"  waves_per_workgroup={waves_per_wg} (= num_groups × waves_per_group)",
+        f"  Q rows: {param.block_m} per group, {rows_per_wg} per workgroup (Strategy A shared KV loop)",
+        f"  KV iterations per WG: n_kv_tiles={param.n_kv_tiles} (seqlen_kv/block_n at compile time)",
+        f"  LDS K/V ring slots={lds_ring} (pipe_depth={param.pipe_depth})",
+        f"  pipeline_stagger (dual-wave phase shift within each group)={stagger}",
+        "  tid → group=tid//group_threads, local_tid=tid%group_threads; "
+        "stagger_i32=local_tid//64 when stagger enabled",
+        "  All groups in a WG share K/V LDS and the same kv loop; groups differ in Q/O rows only",
+        "  Grid blocks are mapped to CUs by the HIP scheduler (no fixed tiles/CU in kernel code)",
+        f"  Launch grid: (num_q_tiles=ceil(seqlen_q/{rows_per_wg}), heads={param.num_heads_q}, batch)",
+    ])
+
+
 def summarize_flex_attn_launch(
     param: FlexAttnParam,
     *,
     seqlen_q: Optional[int] = None,
     seqlen_kv: Optional[int] = None,
+    batch: Optional[int] = None,
 ) -> str:
     """Human-readable launch config: ``FlexAttnParam`` plus pipeline emit notes."""
     stagger = pipeline_stagger_enabled(
@@ -231,10 +262,21 @@ def summarize_flex_attn_launch(
         f"n_kv_tiles={param.n_kv_tiles}",
         f"  pipe_depth={param.pipe_depth} pipe_stages={param.pipe_stages} "
         f"pipeline_stagger={stagger} causal={param.causal}",
+        summarize_flex_wg_thread_layout(param),
     ]
+    rows_per_wg = int(param.block_m) * int(param.num_groups)
     if seqlen_q is not None and seqlen_kv is not None:
-        rows_per_wg = int(param.block_m) * int(param.num_groups)
-        lines.append(f"  seqlen_q={seqlen_q} seqlen_kv={seqlen_kv} rows_per_wg={rows_per_wg}")
+        num_q_tiles = (int(seqlen_q) + rows_per_wg - 1) // rows_per_wg
+        lines.append(
+            f"  seqlen_q={seqlen_q} seqlen_kv={seqlen_kv} rows_per_wg={rows_per_wg} "
+            f"num_q_tiles={num_q_tiles}"
+        )
+        if batch is not None:
+            total_wgs = num_q_tiles * int(param.num_heads_q) * int(batch)
+            lines.append(
+                f"  grid=(x={num_q_tiles}, y={param.num_heads_q}, z={batch}) "
+                f"total_workgroups={total_wgs}"
+            )
     if int(param.pipe_depth) >= 2:
         lines.append("  PipelineScheduler: emit_prologue + emit_main_loop + emit_epilogue")
         lines.append(
@@ -250,8 +292,9 @@ def print_flex_attn_launch_summary(
     *,
     seqlen_q: Optional[int] = None,
     seqlen_kv: Optional[int] = None,
+    batch: Optional[int] = None,
 ) -> None:
-    print(summarize_flex_attn_launch(param, seqlen_q=seqlen_q, seqlen_kv=seqlen_kv), flush=True)
+    print(summarize_flex_attn_launch(param, seqlen_q=seqlen_q, seqlen_kv=seqlen_kv, batch=batch), flush=True)
 
 
 _FM = fx.arith.FastMathFlags.fast
@@ -312,6 +355,59 @@ def _sched_barrier_exp_pairs(traits, pairs, exp_cnt, group):
 
 
 LGKMCNT_0_ONLY = 0xC07F
+
+# rocprof PC sampling phase tags (s_nop 1..7 in pd2 loop). Set FLEX_ATTN_PC_MARKERS=1 before JIT.
+_FLEX_ATTN_PC_MARKERS = os.environ.get("FLEX_ATTN_PC_MARKERS", "0") == "1"
+
+
+def _flex_pc_marker_m0_load() -> None:
+    from flydsl._mlir import ir
+    from flydsl._mlir.dialects import llvm
+
+    llvm.InlineAsmOp(ir.Type.parse("!llvm.void"), [], "s_nop 1", "", has_side_effects=True)
+
+
+def _flex_pc_marker_m1_read() -> None:
+    from flydsl._mlir import ir
+    from flydsl._mlir.dialects import llvm
+
+    llvm.InlineAsmOp(ir.Type.parse("!llvm.void"), [], "s_nop 2", "", has_side_effects=True)
+
+
+def _flex_pc_marker_c1_qk() -> None:
+    from flydsl._mlir import ir
+    from flydsl._mlir.dialects import llvm
+
+    llvm.InlineAsmOp(ir.Type.parse("!llvm.void"), [], "s_nop 3", "", has_side_effects=True)
+
+
+def _flex_pc_marker_c2_softmax() -> None:
+    from flydsl._mlir import ir
+    from flydsl._mlir.dialects import llvm
+
+    llvm.InlineAsmOp(ir.Type.parse("!llvm.void"), [], "s_nop 4", "", has_side_effects=True)
+
+
+def _flex_pc_marker_m2_pwrite() -> None:
+    from flydsl._mlir import ir
+    from flydsl._mlir.dialects import llvm
+
+    llvm.InlineAsmOp(ir.Type.parse("!llvm.void"), [], "s_nop 5", "", has_side_effects=True)
+
+
+def _flex_pc_marker_c3_pv() -> None:
+    from flydsl._mlir import ir
+    from flydsl._mlir.dialects import llvm
+
+    llvm.InlineAsmOp(ir.Type.parse("!llvm.void"), [], "s_nop 6", "", has_side_effects=True)
+
+
+def _flex_pc_marker_tail_sync() -> None:
+    from flydsl._mlir import ir
+    from flydsl._mlir.dialects import llvm
+
+    llvm.InlineAsmOp(ir.Type.parse("!llvm.void"), [], "s_nop 7", "", has_side_effects=True)
+
 
 @flyc.kernel
 def flex_attn_fwd_gfx950_kernel(
@@ -492,6 +588,8 @@ def flex_attn_fwd_gfx950_kernel(
     # Row-slot map for softmax (compile-time)
     _row_slots = [[s for s in range(n_c) if _s_slot_to_row_idx[s] == r] for r in range(npair)]
 
+    print(summarize_flex_wg_thread_layout(param), flush=True)
+
     # ── Stage: DMA K+V global → LDS ─────────────────────────────────────
     def _stage_kv_to_lds(kv_idx, buf):
         wave_off = rocdl.readfirstlane(fx.Int32.ir_type, fx.Int32(tid // GFX950_WAVE_SIZE * GFX950_WAVE_SIZE * _dma_bytes))
@@ -551,6 +649,8 @@ def flex_attn_fwd_gfx950_kernel(
         PipelineStage, PipelineScheduler, Wire, InfraContext,
         StageKind, ResourceDecl, SubStage,
         pipeline_stagger_enabled,
+        _rocdl_waitcnt_vm_n,
+        _rocdl_waitcnt_vmcnt0,
     )
 
     class _LayoutSchedTraits:
@@ -582,14 +682,228 @@ def flex_attn_fwd_gfx950_kernel(
         _sched_barrier_pairs(t, 4, 6, _SCHED_GROUP_C3)
         _sched_barrier_pairs(t, 6, 6, _SCHED_GROUP_C3)
 
-    def _flex_wait_lgkm_after_lds_write(infra):
+    def _flex_wait_lgkm_after_lds_write():
         """Drain LDS after ds writes (P bridge / Gemm2WriteP) without a full WG barrier."""
         if const_expr(_pd_for_sched >= 2):
-            rocdl.s_waitcnt(infra.traits.LGKMCNT_0_ONLY)
+            rocdl.s_waitcnt(LGKMCNT_0_ONLY)
+
+    # ── Stage bodies: explicit parameters, list returns (no shared_regs dict) ──
+
+    def load_k(tile_idx, slot):
+        _stage_k_to_lds(tile_idx, slot)
+        return []
+
+    def load_v(tile_idx, slot):
+        _stage_v_to_lds(tile_idx, slot)
+        return []
+
+    def load_kv(tile_idx, slot):
+        _stage_kv_to_lds(tile_idx, slot)
+        return []
+
+    def read_k(slot):
+        fx.copy(uca, tcB_lds[slot].partition_S(sK[slot]), tcB_lds[slot].retile(frag_K[slot]))
+        return [frag_K[slot]]
+
+    def read_v(slot):
+        fx.copy(uca, tcB2_lds[slot].partition_S(sV[slot]), tcB2_lds[slot].retile(frag_V[slot]))
+        return [frag_V[slot]]
+
+    def read_kv(slot):
+        read_k(slot)
+        read_v(slot)
+        return [frag_K[slot], frag_V[slot]]
+
+    def read_kv_work(slot):
+        # pd2 scf.for: dynamic ring slot, fixed register tiles (avoid fragment SSA merge).
+        fx.copy(uca, tcB_lds[slot].partition_S(sK[slot]), tcB_lds[slot].retile(frag_K[0]))
+        fx.copy(uca, tcB2_lds[slot].partition_S(sV[slot]), tcB2_lds[slot].retile(frag_V[0]))
+        return []
+
+    def gemm1_qk(frag_Q_in, frag_K_in):
+        frag_S_out = thr_qk.make_fragment_C(sP)
+        frag_S_out.fill(0.0)
+        fx.gemm(tiled_mma_qk, frag_S_out, frag_Q_in, frag_K_in, frag_S_out)
+        return [frag_S_out]
+
+    def softmax_full(frag_S_in, m_i_in, l_i_in, frag_O_in):
+        corr = [fx.Float32(1.0) for _ in range_constexpr(npair)]
+        for r in range_constexpr(npair):
+            slots = _row_slots[r]
+            row_max = frag_S_in[slots[0]]
+            for si in range_constexpr(1, len(slots)):
+                row_max = row_max.maximumf(frag_S_in[slots[si]])
+            tile_m = _row_reduce(row_max, "max")
+            m_new = m_i_in[r].maximumf(tile_m)
+            corr[r] = fmath.exp2((m_i_in[r] - m_new) * scale_log2e, fastmath=_FM)
+            for si in range_constexpr(len(slots)):
+                frag_S_in[slots[si]] = fmath.exp2(
+                    (frag_S_in[slots[si]] - m_new) * scale_log2e, fastmath=_FM
+                )
+            row_sum = frag_S_in[slots[0]]
+            for si in range_constexpr(1, len(slots)):
+                row_sum = row_sum.addf(frag_S_in[slots[si]], fastmath=_FM)
+            tile_l = _row_reduce(row_sum, "sum")
+            l_i_in[r] = l_i_in[r] * corr[r] + tile_l
+            m_i_in[r] = m_new
+        for i in range_constexpr(n_o):
+            frag_O_in[i] = frag_O_in[i] * corr[o_slot_row[i]]
+        return [frag_S_in, m_i_in, l_i_in, frag_O_in, corr]
+
+    def softmax_finish(v_p_partial_in, l_i_in):
+        for r in range_constexpr(npair):
+            slots = _row_slots[r]
+            row_sum = v_p_partial_in[slots[0]]
+            for si in range_constexpr(1, len(slots)):
+                row_sum = row_sum.addf(v_p_partial_in[slots[si]], fastmath=_FM)
+            tile_l = _row_reduce(row_sum, "sum")
+            l_i_in[r] = l_i_in[r] + tile_l
+        return [l_i_in]
+
+    def softmax_start(frag_S_in, m_i_in, l_i_in, v_p_partial_in, p_pv_snap_in, frag_O_in):
+        for i in range_constexpr(n_c):
+            p_pv_snap_in[i] = v_p_partial_in[i]
+        corr = [fx.Float32(1.0) for _ in range_constexpr(npair)]
+        for r in range_constexpr(npair):
+            slots = _row_slots[r]
+            row_max = frag_S_in[slots[0]]
+            for si in range_constexpr(1, len(slots)):
+                row_max = row_max.maximumf(frag_S_in[slots[si]])
+            tile_m = _row_reduce(row_max, "max")
+            m_new = m_i_in[r].maximumf(tile_m)
+            corr[r] = fmath.exp2((m_i_in[r] - m_new) * scale_log2e, fastmath=_FM)
+            l_i_in[r] = l_i_in[r] * corr[r]
+            for si in range_constexpr(len(slots)):
+                v_p_partial_in[slots[si]] = v_p_partial_in[slots[si]] * corr[r]
+            for si in range_constexpr(len(slots)):
+                frag_S_in[slots[si]] = fmath.exp2(
+                    (frag_S_in[slots[si]] - m_new) * scale_log2e, fastmath=_FM
+                )
+            m_i_in[r] = m_new
+        for i in range_constexpr(n_o):
+            frag_O_in[i] = frag_O_in[i] * corr[o_slot_row[i]]
+        return [v_p_partial_in, frag_S_in, m_i_in, l_i_in, frag_O_in, corr]
+
+    def bridge_p_write_from_v_partial(v_p_partial_in):
+        for i in range_constexpr(n_c):
+            thr_p_lds[i] = _to_elem(v_p_partial_in[i], elem_dtype)
+        return []
+
+    def bridge_p_write_from_frag_p(frag_P_in):
+        for i in range_constexpr(n_c):
+            thr_p_lds[i] = _to_elem(frag_P_in[i], elem_dtype)
+        return []
+
+    def bridge_p_load():
+        _flex_wait_lgkm_after_lds_write()
+        frag_P_a_out = thr_pv.make_fragment_A(sP)
+        fx.copy(uca, tcA2.partition_S(sP), tcA2.retile(frag_P_a_out))
+        return [frag_P_a_out]
+
+    def gemm2_write_p(v_p_for_gemm_in, softmax_corr_in):
+        for i in range_constexpr(n_c):
+            pi = _to_elem(v_p_for_gemm_in[i], fx.Float32) * softmax_corr_in[_s_slot_to_row_idx[i]]
+            thr_p_lds[i] = _to_elem(pi, elem_dtype)
+        return []
+
+    def gemm2_pv(frag_Vt_in, frag_Vt_next_in, frag_O_in):
+        _flex_wait_lgkm_after_lds_write()
+        frag_P_a_local = thr_pv.make_fragment_A(sP)
+        fx.copy(uca, tcA2.partition_S(sP), tcA2.retile(frag_P_a_local))
+        fx.gemm(tiled_mma_pv, frag_O_in, frag_P_a_local, frag_Vt_in, frag_O_in)
+        return [frag_O_in, frag_Vt_next_in]
+
+    def gemm2_pd1(frag_P_a_in, frag_Vt_next_in, frag_O_in):
+        fx.gemm(tiled_mma_pv, frag_O_in, frag_P_a_in, frag_Vt_next_in, frag_O_in)
+        return [frag_O_in]
+
+    def dualwave_cluster_sync(cluster_index):
+        if const_expr(cluster_index == 1 and _pd_for_sched >= 2):
+            rocdl.sched_barrier(0)
+        else:
+            rocdl.sched_barrier(0)
+            rocdl.s_barrier()
+            rocdl.sched_barrier(0)
+
+    def mem_cluster_exit(vm_at_most):
+        rocdl.s_waitcnt(LGKMCNT_0_ONLY)
+        if const_expr(vm_at_most == 0):
+            _rocdl_waitcnt_vmcnt0()
+        else:
+            _rocdl_waitcnt_vm_n(vm_at_most)
+
+    def stagger_open(stagger_i32):
+        from flydsl._mlir import ir
+        from flydsl._mlir.dialects import scf
+        from flydsl.expr import arith
+        from flydsl.expr.typing import T
+        is_group_b = arith.cmpi(
+            arith.CmpIPredicate.ne, stagger_i32, arith.constant(0, type=T.i32),
+        )
+        _if = scf.IfOp(is_group_b, [], has_else=False)
+        with ir.InsertionPoint(_if.then_block):
+            rocdl.s_barrier()
+            scf.YieldOp([])
+
+    def stagger_close(stagger_i32):
+        from flydsl._mlir import ir
+        from flydsl._mlir.dialects import scf
+        from flydsl.expr import arith
+        from flydsl.expr.typing import T
+        is_group_a = arith.cmpi(
+            arith.CmpIPredicate.eq, stagger_i32, arith.constant(0, type=T.i32),
+        )
+        _if = scf.IfOp(is_group_a, [], has_else=False)
+        with ir.InsertionPoint(_if.then_block):
+            rocdl.s_barrier()
+            scf.YieldOp([])
+
+    # ── Pipeline adapters (infra + dict) for PipelineScheduler wiring only ──
+
+    def _pipeline_load_k(infra, **_):
+        load_k(infra.tile_idx, infra.buf_slot)
+        return {}
+
+    def _pipeline_load_v(infra, **_):
+        load_v(infra.tile_idx, infra.buf_slot)
+        return {}
+
+    def _pipeline_read_k(infra, **_):
+        out = read_k(infra.buf_slot)
+        return {"frag_K": out[0]}
+
+    def _pipeline_read_v(infra, **_):
+        out = read_v(infra.buf_slot)
+        return {"frag_Vt_next": out[0]}
+
+    def _pipeline_bridge_p_write(infra, **regs):
+        if const_expr(param.pipe_depth >= 2):
+            bridge_p_write_from_v_partial(regs["v_p_partial"])
+        else:
+            bridge_p_write_from_frag_p(regs["frag_P"])
+        return {}
+
+    def _pipeline_bridge_p_load(infra, **_):
+        out = bridge_p_load()
+        return {"frag_P_a": out[0]}
+
+    def _pipeline_gemm2_write_p(infra, **regs):
+        gemm2_write_p(regs["frag_P"], regs["softmax_corr"])
+        return {}
+
+    def _pipeline_gemm2_pv(infra, **regs):
+        out = gemm2_pv(regs["frag_Vt"], regs["frag_Vt_next"], regs["frag_O"])
+        return {"frag_O": out[0], "frag_Vt": out[1]}
+
+    def _pipeline_gemm2_pd1(infra, *, frag_P_a, frag_Vt_next, frag_O, **_):
+        out = gemm2_pd1(frag_P_a, frag_Vt_next, frag_O)
+        return {"frag_O": out[0]}
+
+    def _pipeline_bridge_p_epilogue(infra, **shared_regs):
+        _pipeline_bridge_p_write(infra, **shared_regs)
+        return _pipeline_bridge_p_load(infra)
 
     # ── LoadKV: DMA K+V global → LDS. min_slots=1, max_slots=2. ─────────
-    # At 1 slot (pd1): monolithic K+V DMA in one memory cluster.
-    # At 2 slots (pd2): LoadK in C0; LoadV is prefetch-only (C2 prefetch + prologue t0).
     class _StageLoadKV(PipelineStage):
         name = "LoadKV"
         kind = StageKind.MEMORY
@@ -606,8 +920,8 @@ def flex_attn_fwd_gfx950_kernel(
         def max_slots(self):
             return 2
 
-        def execute(self, infra, **kw):
-            _stage_kv_to_lds(infra.tile_idx, infra.buf_slot)
+        def execute(self, infra, **_):
+            load_kv(infra.tile_idx, infra.buf_slot)
             return {}
 
         def decompose(self, allocated_slots):
@@ -620,27 +934,16 @@ def flex_attn_fwd_gfx950_kernel(
                     ),
                 ]
             return [
-                SubStage("LoadK", self._load_k, ResourceDecl(dma_count=_dma_ops_per_thread)),
+                SubStage("LoadK", _pipeline_load_k, ResourceDecl(dma_count=_dma_ops_per_thread)),
                 SubStage(
                     "LoadV",
-                    self._load_v,
+                    _pipeline_load_v,
                     ResourceDecl(dma_count=_dma_ops_per_thread),
                     prefetch_only=True,
                 ),
             ]
 
-        def _load_k(self, infra, **kw):
-            _stage_k_to_lds(infra.tile_idx, infra.buf_slot)
-            return {}
-
-        def _load_v(self, infra, **kw):
-            _stage_v_to_lds(infra.tile_idx, infra.buf_slot)
-            return {}
-
     # ── ReadKV: LDS → register fragments. min_slots=1, max_slots=2. ─────
-    # At 1 slot: reads both K and V in the same memory cluster.
-    # At 2 slots: ReadK in C0, ReadV in C2 — K available for GEMM1 earlier,
-    # V loaded later (closer to GEMM2), matching the dualwave pattern.
     class _StageReadKV(PipelineStage):
         name = "ReadKV"
         kind = StageKind.MEMORY
@@ -653,27 +956,16 @@ def flex_attn_fwd_gfx950_kernel(
         @property
         def max_slots(self):
             return 2
-        def execute(self, infra, **kw):
-            fx.copy(uca, tcB_lds[infra.buf_slot].partition_S(sK[infra.buf_slot]),
-                    tcB_lds[infra.buf_slot].retile(frag_K[infra.buf_slot]))
-            fx.copy(uca, tcB2_lds[infra.buf_slot].partition_S(sV[infra.buf_slot]),
-                    tcB2_lds[infra.buf_slot].retile(frag_V[infra.buf_slot]))
-            return {"frag_K": frag_K[infra.buf_slot], "frag_Vt_next": frag_V[infra.buf_slot]}
+        def execute(self, infra, **_):
+            read_kv(infra.buf_slot)
+            return {}
         def decompose(self, allocated_slots):
             if allocated_slots == 1:
                 return [SubStage("ReadKV", self.execute, self.resources)]
             return [
-                SubStage("ReadK", self._read_k, ResourceDecl(lds_read_count=4)),
-                SubStage("ReadV", self._read_v, ResourceDecl(lds_read_count=4)),
+                SubStage("ReadK", _pipeline_read_k, ResourceDecl(lds_read_count=4)),
+                SubStage("ReadV", _pipeline_read_v, ResourceDecl(lds_read_count=4)),
             ]
-        def _read_k(self, infra, **kw):
-            buf = infra.buf_slot
-            fx.copy(uca, tcB_lds[buf].partition_S(sK[buf]), tcB_lds[buf].retile(frag_K[buf]))
-            return {"frag_K": frag_K[buf]}
-        def _read_v(self, infra, **kw):
-            buf = infra.buf_slot
-            fx.copy(uca, tcB2_lds[buf].partition_S(sV[buf]), tcB2_lds[buf].retile(frag_V[buf]))
-            return {"frag_Vt_next": frag_V[buf]}
 
     # ── Gemm1_QK: S = Q @ K^T. Single stage, no split. ──────────────────
     class _StageGemm1(PipelineStage):
@@ -681,20 +973,10 @@ def flex_attn_fwd_gfx950_kernel(
         kind = StageKind.COMPUTE
         resources = ResourceDecl(mfma_count=head_dim // mma_k * 2)
         def execute(self, infra, *, frag_K, frag_Q, **_):
-            frag_S = thr_qk.make_fragment_C(sP)
-            frag_S.fill(0.0)
-            fx.gemm(tiled_mma_qk, frag_S, frag_Q, frag_K, frag_S)
-            return {"frag_S": frag_S}
+            out = gemm1_qk(frag_Q, frag_K)
+            return {"frag_S": out[0]}
 
     # ── Softmax: online softmax. min_slots=1, max_slots=2. ──────────────
-    # At 1 slot: full softmax (reduce_max + rescale_O + exp2 + reduce_sum)
-    #            runs monolithically in one compute cluster.
-    # At 2 slots (dualwave pattern):
-    #   Sub-stage 0 "SoftmaxFinish" (C1): finish PREVIOUS tile's exp2
-    #     second half + reduce_sum + cast → frag_P. Runs alongside GEMM1.
-    #   Sub-stage 1 "SoftmaxStart" (C3): reduce_max + rescale_O + sub_m +
-    #     exp2 first half → v_p_partial. Runs alongside GEMM2.
-    #   v_p_partial is loop-carried across tile iterations.
     class _StageSoftmax(PipelineStage):
         name = "Softmax"
         kind = StageKind.COMPUTE
@@ -708,100 +990,39 @@ def flex_attn_fwd_gfx950_kernel(
         def max_slots(self):
             return 2
         def execute(self, infra, *, frag_S, m_i, l_i, frag_O, **_):
-            corr = [fx.Float32(1.0) for _ in range_constexpr(npair)]
-            for r in range_constexpr(npair):
-                slots = _row_slots[r]
-                row_max = frag_S[slots[0]]
-                for si in range_constexpr(1, len(slots)):
-                    row_max = row_max.maximumf(frag_S[slots[si]])
-                tile_m = _row_reduce(row_max, "max")
-                m_new = m_i[r].maximumf(tile_m)
-                corr[r] = fmath.exp2((m_i[r] - m_new) * scale_log2e, fastmath=_FM)
-                for si in range_constexpr(len(slots)):
-                    frag_S[slots[si]] = fmath.exp2((frag_S[slots[si]] - m_new) * scale_log2e, fastmath=_FM)
-                row_sum = frag_S[slots[0]]
-                for si in range_constexpr(1, len(slots)):
-                    row_sum = row_sum.addf(frag_S[slots[si]], fastmath=_FM)
-                tile_l = _row_reduce(row_sum, "sum")
-                l_i[r] = l_i[r] * corr[r] + tile_l
-                m_i[r] = m_new
-            for i in range_constexpr(n_o):
-                frag_O[i] = frag_O[i] * corr[o_slot_row[i]]
+            out = softmax_full(frag_S, m_i, l_i, frag_O)
             return {
-                "frag_P": frag_S, "m_i": m_i, "l_i": l_i, "frag_O": frag_O,
-                "softmax_corr": corr,
+                "frag_P": out[0], "m_i": out[1], "l_i": out[2], "frag_O": out[3],
+                "softmax_corr": out[4],
             }
         def decompose(self, allocated_slots):
             if allocated_slots == 1:
                 return [SubStage("Softmax", self.execute, self.resources)]
-            # Finish first (C1 with Gemm1: sum previous tile's v_p into l_i),
-            # Start deferred (C3 with Gemm2: max/rescale/exp2 for current tile).
             return [
                 SubStage(
-                    "SoftmaxFinish", self._finish,
+                    "SoftmaxFinish", self._finish_pipeline,
                     ResourceDecl(valu_count=npair * 4),
                     epilogue_drain=True,
                     sched_after=_sched_after_softmax_finish if _pd_for_sched >= 2 else None,
                 ),
                 SubStage(
-                    "SoftmaxStart", self._start,
+                    "SoftmaxStart", self._start_pipeline,
                     ResourceDecl(valu_count=npair * 8, exp_count=n_c),
                     sched_after=_sched_after_softmax_start if _pd_for_sched >= 2 else None,
                 ),
             ]
-        def _finish(self, infra, *, v_p_partial, l_i, **_):
-            for r in range_constexpr(npair):
-                slots = _row_slots[r]
-                row_sum = v_p_partial[slots[0]]
-                for si in range_constexpr(1, len(slots)):
-                    row_sum = row_sum.addf(v_p_partial[slots[si]], fastmath=_FM)
-                tile_l = _row_reduce(row_sum, "sum")
-                l_i[r] = l_i[r] + tile_l
-            return {"l_i": l_i}
-        def _start(self, infra, *, frag_S, m_i, l_i, v_p_partial, v_p_for_gemm, frag_O, **_):
-            for i in range_constexpr(n_c):
-                v_p_for_gemm[i] = v_p_partial[i]
-            corr = [fx.Float32(1.0) for _ in range_constexpr(npair)]
-            for r in range_constexpr(npair):
-                slots = _row_slots[r]
-                row_max = frag_S[slots[0]]
-                for si in range_constexpr(1, len(slots)):
-                    row_max = row_max.maximumf(frag_S[slots[si]])
-                tile_m = _row_reduce(row_max, "max")
-                m_new = m_i[r].maximumf(tile_m)
-                corr[r] = fmath.exp2((m_i[r] - m_new) * scale_log2e, fastmath=_FM)
-                l_i[r] = l_i[r] * corr[r]
-                for si in range_constexpr(len(slots)):
-                    v_p_partial[slots[si]] = v_p_partial[slots[si]] * corr[r]
-                for si in range_constexpr(len(slots)):
-                    frag_S[slots[si]] = fmath.exp2((frag_S[slots[si]] - m_new) * scale_log2e, fastmath=_FM)
-                m_i[r] = m_new
-            for i in range_constexpr(n_o):
-                frag_O[i] = frag_O[i] * corr[o_slot_row[i]]
+        def _finish_pipeline(self, infra, *, v_p_partial, l_i, **_):
+            out = softmax_finish(v_p_partial, l_i)
+            return {"l_i": out[0]}
+        def _start_pipeline(self, infra, *, frag_S, m_i, l_i, v_p_partial, frag_P, frag_O, **_):
+            out = softmax_start(frag_S, m_i, l_i, v_p_partial, frag_P, frag_O)
             return {
-                "frag_P": v_p_partial, "v_p_partial": frag_S, "m_i": m_i, "l_i": l_i,
-                "frag_O": frag_O, "softmax_corr": corr,
+                "v_p_partial": out[1],
+                "m_i": out[2],
+                "l_i": out[3],
+                "frag_O": out[4],
+                "softmax_corr": out[5],
             }
-
-    # ── BridgeP: C→A bridge through LDS. ────────────────────────────────
-    def _bridge_p_write(infra, **shared_regs):
-        if const_expr(param.pipe_depth >= 2):
-            p_frag = shared_regs["v_p_partial"]
-        else:
-            p_frag = shared_regs["frag_P"]
-        for i in range_constexpr(n_c):
-            thr_p_lds[i] = _to_elem(p_frag[i], elem_dtype)
-        return {}
-
-    def _bridge_p_load(infra, **_):
-        _flex_wait_lgkm_after_lds_write(infra)
-        frag_P_a = thr_pv.make_fragment_A(sP)
-        fx.copy(uca, tcA2.partition_S(sP), tcA2.retile(frag_P_a))
-        return {"frag_P_a": frag_P_a}
-
-    def _bridge_p_epilogue(infra, **shared_regs):
-        _bridge_p_write(infra, **shared_regs)
-        return _bridge_p_load(infra)
 
     class _StageBridgeP(PipelineStage):
         name = "BridgeP"
@@ -824,22 +1045,22 @@ def flex_attn_fwd_gfx950_kernel(
             assert allocated_slots == 2
             return [
                 SubStage(
-                    "BridgePWrite", _bridge_p_write,
+                    "BridgePWrite", _pipeline_bridge_p_write,
                     ResourceDecl(valu_count=n_c),
                     defer_to_next_cluster=False,
                 ),
                 SubStage(
-                    "BridgePLoad", _bridge_p_load,
+                    "BridgePLoad", _pipeline_bridge_p_load,
                     ResourceDecl(lds_read_count=4),
                     epilogue_drain=True,
-                    epilogue_fn=_bridge_p_epilogue,
+                    epilogue_fn=_pipeline_bridge_p_epilogue,
                     defer_to_next_cluster=False,
                 ),
             ]
 
         def execute(self, infra, **shared_regs):
-            _bridge_p_write(infra, **shared_regs)
-            return _bridge_p_load(infra)
+            _pipeline_bridge_p_write(infra, **shared_regs)
+            return _pipeline_bridge_p_load(infra)
 
     # ── Gemm2_PV: O += P @ V. ──────────────────────────────────────────
     # depth=1: P and V are from the same tile → use frag_Vt_next directly.
@@ -851,28 +1072,10 @@ def flex_attn_fwd_gfx950_kernel(
         m_waves=int(param.m_waves),
     )
 
-    def _gemm2_d1(infra, *, frag_P_a, frag_Vt_next, frag_O, **_):
-        fx.gemm(tiled_mma_pv, frag_O, frag_P_a, frag_Vt_next, frag_O)
-        return {"frag_O": frag_O}
-
-    def _gemm2_write_p(infra, *, v_p_for_gemm, softmax_corr, **_):
-        for i in range_constexpr(n_c):
-            pi = _to_elem(v_p_for_gemm[i], fx.Float32) * softmax_corr[_s_slot_to_row_idx[i]]
-            thr_p_lds[i] = _to_elem(pi, elem_dtype)
-        return {}
-
-    def _gemm2_pv(infra, *, frag_Vt, frag_Vt_next, frag_O, **_):
-        _flex_wait_lgkm_after_lds_write(infra)
-        frag_P_a = thr_pv.make_fragment_A(sP)
-        fx.copy(uca, tcA2.partition_S(sP), tcA2.retile(frag_P_a))
-        fx.gemm(tiled_mma_pv, frag_O, frag_P_a, frag_Vt, frag_O)
-        return {"frag_O": frag_O, "frag_Vt": frag_Vt_next}
-
     class _StageGemm2(PipelineStage):
         name = "Gemm2_PV"
         kind = StageKind.COMPUTE
         resources = ResourceDecl(mfma_count=head_dim // mma_k * 2)
-        execute = staticmethod(_gemm2_d1)
 
         @property
         def min_slots(self):
@@ -888,22 +1091,22 @@ def flex_attn_fwd_gfx950_kernel(
 
         @property
         def epilogue_fn(self):
-            return _gemm2_d1 if _pd >= 2 else None
+            return _pipeline_gemm2_pd1 if _pd >= 2 else None
 
         def decompose(self, allocated_slots):
             if allocated_slots == 1:
-                return [SubStage("Gemm2_PV", self.execute, self.resources)]
+                return [SubStage("Gemm2_PV", _pipeline_gemm2_pd1, self.resources)]
             return [
                 SubStage(
-                    "Gemm2WriteP", _gemm2_write_p,
+                    "Gemm2WriteP", _pipeline_gemm2_write_p,
                     ResourceDecl(valu_count=n_c),
                     defer_to_next_cluster=False,
                 ),
                 SubStage(
-                    "Gemm2PV", _gemm2_pv,
+                    "Gemm2PV", _pipeline_gemm2_pv,
                     ResourceDecl(mfma_count=head_dim // mma_k * 2),
                     epilogue_drain=True,
-                    epilogue_fn=_gemm2_d1,
+                    epilogue_fn=_pipeline_gemm2_pd1,
                     defer_to_next_cluster=False,
                     sched_after=_sched_after_gemm2_pv if _pd_for_sched >= 2 else None,
                 ),
@@ -911,49 +1114,37 @@ def flex_attn_fwd_gfx950_kernel(
 
         def execute(self, infra, **shared_regs):
             if const_expr(_pd >= 2):
-                _gemm2_write_p(
-                    infra,
-                    v_p_for_gemm=shared_regs["v_p_for_gemm"],
-                    softmax_corr=shared_regs["softmax_corr"],
+                gemm2_write_p(shared_regs["frag_P"], shared_regs["softmax_corr"])
+                out = gemm2_pv(
+                    shared_regs["frag_Vt"],
+                    shared_regs["frag_Vt_next"],
+                    shared_regs["frag_O"],
                 )
-                return _gemm2_pv(
-                    infra,
-                    frag_Vt=shared_regs["frag_Vt"],
-                    frag_Vt_next=shared_regs["frag_Vt_next"],
-                    frag_O=shared_regs["frag_O"],
-                )
-            return _gemm2_d1(
-                infra,
-                frag_P_a=shared_regs["frag_P_a"],
-                frag_Vt_next=shared_regs["frag_Vt_next"],
-                frag_O=shared_regs["frag_O"],
+                return {"frag_O": out[0], "frag_Vt": out[1]}
+            out = gemm2_pd1(
+                shared_regs["frag_P_a"],
+                shared_regs["frag_Vt_next"],
+                shared_regs["frag_O"],
             )
+            return {"frag_O": out[0]}
 
     # ── Assemble pipeline ───────────────────────────────────────────
     # Initialize shared registers: pre-loop values + initial v_p_partial.
     # The first tile's SoftmaxFinish reads v_p_partial (loop-carried from
     # "previous tile"). We seed it with zeros so reduce_sum adds 0 to l_i,
-    # and the initial frag_P is zero (GEMM2 accumulates 0 for the non-existent
-    # "tile -1"). The real first contribution comes from tile 0's own
-    # RescaleAndGemm2 → v_p_partial, consumed by tile 1's SoftmaxFinish.
+    # pd2+: frag_P (frag_P_carry) holds the pre-rescale P snap for GEMM2WriteP;
+    # v_p_partial carries the split-softmax partial (in frag_S after SoftmaxStart).
     frag_P_init = thr_qk.make_fragment_C(sP)
     frag_P_init.fill(0.0)
     frag_P_carry = thr_qk.make_fragment_C(sP)
     frag_P_carry.fill(0.0)
-    v_p_for_gemm_init = thr_qk.make_fragment_C(sP)
-    v_p_for_gemm_init.fill(0.0)
-    shared_regs = {
-        "frag_Q": frag_Q,
-        "m_i": m_i,
-        "l_i": l_i,
-        "frag_O": frag_O,
-        "v_p_partial": frag_P_init,
-        "frag_P": frag_P_carry,
-        "v_p_for_gemm": v_p_for_gemm_init,
-    }
-    if _pd >= 2:
-        shared_regs["frag_Vt"] = thr_pv.make_fragment_B(sV[0])  # dummy; first P is zeros
-        shared_regs["softmax_corr"] = [fx.Float32(1.0) for _ in range_constexpr(npair)]
+    v_p_partial = frag_P_init
+    frag_P = frag_P_carry
+    frag_Vt = thr_pv.make_fragment_B(sV[0])
+    softmax_corr = [fx.Float32(1.0) for _ in range_constexpr(npair)]
+    frag_Vt_next = frag_V[0]
+    frag_S = frag_P_init
+    frag_P_a = thr_pv.make_fragment_A(sP)
 
     infra = InfraContext()
     infra.head_dim = head_dim
@@ -969,195 +1160,135 @@ def flex_attn_fwd_gfx950_kernel(
         infra.stagger_i32 = _wave_id_uni_i32
 
     infra.traits = _LayoutSchedTraits()
-    # Option A (pd2 two-tile-in-flight via scheduler): pipe_depth=2, stagger
-    # (num_groups>=2, m_waves>=2), split LoadK/LoadV + prefetch-only LoadV,
-    # loop-carried softmax; emit = prologue + main_loop + epilogue.
-    # Not flash's j+=2 / 8-cluster loop.
-    # Barriers: 4× dualwave sync per KV tile (unchanged); in-cluster WG sync_after
-    # removed on BridgeP/Gemm2/SoftmaxStart — LDS handoffs use lgkm wait in load/MFMA.
-    # Memory exits use K+V partial vmcnt (_kv_dma_in_flight_bound). ATT (pd2 S=2048):
-    # ~54% waitcnt stall (mostly vmcnt), ~32% s_barrier — C1→C2 uses sched_barrier(0)
-    # only (light_c1_c2_boundary); other cluster ends keep dualwave sync.
-    # inter_tile_readahead: ReadK for tile kv+1 after C3 on tile kv (skip ReadK in next
-    # C0); shortens the memory cluster on the following iteration.
-    pipeline = PipelineScheduler([
-        Wire(_StageLoadKV(),  out=()),
-        Wire(_StageReadKV(),  out=("frag_K", "frag_Vt_next")),
-        Wire(_StageGemm1(),   inp=("frag_K", "frag_Q"),  out=("frag_S",),
-              carry=("frag_Q",)),
-        Wire(_StageSoftmax(), inp=("frag_S", "m_i", "l_i", "frag_O", "v_p_for_gemm"),
-              out=("frag_P", "v_p_partial", "m_i", "l_i", "frag_O", "softmax_corr"),
-              carry=("v_p_partial", "m_i", "l_i", "frag_O", "v_p_for_gemm")),
-        Wire(_StageBridgeP(), inp=("frag_P", "v_p_partial"), out=("frag_P_a",)),
-        Wire(_StageGemm2(),
-             inp=("frag_Vt", "frag_Vt_next", "frag_O", "v_p_for_gemm", "softmax_corr") if _pd >= 2
-                 else ("frag_P_a", "frag_Vt_next", "frag_O"),
-             out=("frag_O", "frag_Vt") if _pd >= 2 else ("frag_O",),
-             carry=("frag_Vt",) if _pd >= 2 else ()),
-    ], force_depth=param.pipe_depth, enable_stagger=True,
-       num_groups=int(num_groups), m_waves=int(param.m_waves),
-       light_c1_c2_boundary=(_pd_for_sched >= 2),
-       inter_tile_readahead=(_pd_for_sched >= 2))
+    _kv_vm_in_flight = _dma_ops_per_thread * 2
 
-    # Manual pd2 (n_kv_tiles>=2): emit_tile_memory_cluster on C0/C2; hand C1/C3; sched hooks at sync.
-    # n_kv_tiles==1 uses full emit_tile_stagger_kv (see branch below).
     if const_expr(param.pipe_depth == 1):
         for kv in range_constexpr(n_kv_tiles):
-            infra.tile_idx = kv
-            infra.buf_slot = kv % _lds_ring_slots
-            res  = _StageLoadKV().execute(infra, **shared_regs)
+            rb = kv % _lds_ring_slots
+            load_kv(kv, rb)
             rocdl.s_waitcnt(0)
             rocdl.s_barrier()
-            if res is not None:
-                shared_regs.update(res)
-            res = _StageReadKV().execute(infra, **shared_regs)
+            read_kv(rb)
+            frag_Vt_next = frag_V[rb]
+            frag_S, = gemm1_qk(frag_Q, frag_K[rb])
+            out_sm = softmax_full(frag_S, m_i, l_i, frag_O)
+            frag_P, m_i, l_i, frag_O, softmax_corr = (
+                out_sm[0], out_sm[1], out_sm[2], out_sm[3], out_sm[4],
+            )
+            bridge_p_write_from_frag_p(frag_P)
             rocdl.s_waitcnt(0)
             rocdl.s_barrier()
-            if res is not None:
-                shared_regs.update(res)
-            res = _StageGemm1().execute(infra, **shared_regs)
+            frag_P_a, = bridge_p_load()
+            frag_O, = gemm2_pd1(frag_P_a, frag_Vt_next, frag_O)
             rocdl.s_waitcnt(0)
             rocdl.s_barrier()
-            if res is not None:
-                shared_regs.update(res)
-            res = _StageSoftmax().execute(infra, **shared_regs)
-            rocdl.s_waitcnt(0)
-            rocdl.s_barrier()
-            if res is not None:
-                shared_regs.update(res)
-            res = _StageBridgeP().execute(infra, **shared_regs)
-            rocdl.s_waitcnt(0)
-            rocdl.s_barrier()
-            if res is not None:
-                shared_regs.update(res)
-            res = _StageGemm2().execute(infra, **shared_regs)
-            rocdl.s_waitcnt(0)
-            rocdl.s_barrier()
-            if res is not None:
-                shared_regs.update(res)
     elif const_expr(param.pipe_depth == 2):
-        # Pd2 manual stagger assumes >= 2 KV tiles; n_kv_tiles==1 uses scheduler tile path.
-        if const_expr(n_kv_tiles == 1):
-            pipeline.emit_prologue(infra, shared_regs)
-            for kv in range_constexpr(n_kv_tiles):
-                pipeline.emit_tile_stagger_kv(kv, n_kv_tiles, infra, shared_regs)
-            pipeline.emit_epilogue(infra, shared_regs)
-        else:
-            gemm2 = _StageGemm2()
-            gemm2_write_p, gemm2_pv = gemm2.decompose(2)[0].fn, gemm2.decompose(2)[1].fn
-            softmax = _StageSoftmax()
-            readahead = pipeline._inter_tile_readahead
-            _pd2_clusters = tuple(pipeline.config.clusters)
+        # scf.for KV loop (one loop body in IR). Lockstep phases; ring 0/1 via dynamic if.
+        load_kv(fx.Int32(0), 0)
+        rocdl.s_waitcnt(0)
+        rocdl.s_barrier()
+        if const_expr(_enable_stagger):
+            stagger_open(infra.stagger_i32)
 
-            def _merge(regs, res):
-                if res is not None:
-                    regs.update(res)
+        init_args = (
+            [m_i[r] for r in range_constexpr(npair)]
+            + [l_i[r] for r in range_constexpr(npair)]
+            + [frag_O]
+        )
+        _o = 2 * npair
+        loop_results = init_args
+        for kv, loop_args in range(
+            fx.Int32(0),
+            fx.Int32(n_kv_tiles),
+            fx.Int32(1),
+            init=init_args,
+        ):
+            m_i = [loop_args[r] for r in range_constexpr(npair)]
+            l_i = [loop_args[npair + r] for r in range_constexpr(npair)]
+            frag_O = loop_args[_o]
 
-            pipeline.emit_prologue(infra, shared_regs)
+            kv_i32 = fx.Int32(arith.index_cast(T.i32, kv))
+            _ring_slots = fx.Int32(_lds_ring_slots)
+            ring0 = (kv_i32 % _ring_slots) == fx.Int32(0)
+            write_ring0 = ((kv_i32 + fx.Int32(1)) % _ring_slots) == fx.Int32(0)
+            has_next = (kv_i32 + fx.Int32(1)) < fx.Int32(n_kv_tiles)
 
-            for kv in range_constexpr(n_kv_tiles):
-                rb = kv % _lds_ring_slots
+            if ring0:
+                read_kv_work(0)
+            else:
+                read_kv_work(1)
 
-                # ── C0 MEMORY (partial vmcnt + optional skip ReadK if readahead) ──
-                if readahead:
-                    if const_expr(kv > 0):
-                        pipeline.emit_tile_memory_cluster(
-                            kv, 0, infra, shared_regs, n_kv_tiles,
-                            skip_read_k=True, skip_read_v=False,
-                        )
-                    else:
-                        pipeline.emit_tile_memory_cluster(
-                            kv, 0, infra, shared_regs, n_kv_tiles,
-                            skip_read_k=False, skip_read_v=False,
-                        )
+            frag_S, = gemm1_qk(frag_Q, frag_K[0])
+            out_sm = softmax_full(frag_S, m_i, l_i, frag_O)
+            frag_P, m_i, l_i, frag_O, softmax_corr = (
+                out_sm[0], out_sm[1], out_sm[2], out_sm[3], out_sm[4],
+            )
+            bridge_p_write_from_frag_p(frag_P)
+            rocdl.s_waitcnt(0)
+            rocdl.s_barrier()
+            frag_P_a, = bridge_p_load()
+            frag_O, = gemm2_pd1(frag_P_a, frag_V[0], frag_O)
+            rocdl.s_waitcnt(0)
+            rocdl.s_barrier()
+            if has_next:
+                if write_ring0:
+                    load_kv(kv_i32 + fx.Int32(1), 0)
                 else:
-                    pipeline.emit_tile_memory_cluster(
-                        kv, 0, infra, shared_regs, n_kv_tiles,
-                        skip_read_k=False, skip_read_v=False,
-                    )
-                pipeline._dualwave_sync_barrier()
+                    load_kv(kv_i32 + fx.Int32(1), 1)
 
-                # ── C1 COMPUTE (manual: insert sched between clusters here) ──
-                infra.tile_idx = kv
-                infra.buf_slot = rb
-                _merge(shared_regs, _StageGemm1().execute(infra, **shared_regs))
-                _merge(shared_regs, softmax._finish(infra, **shared_regs))
-                pipeline._dualwave_sync_barrier()
-                
+            loop_results = yield (
+                [m_i[r] for r in range_constexpr(npair)]
+                + [l_i[r] for r in range_constexpr(npair)]
+                + [frag_O]
+            )
 
-                # ── C2 MEMORY (ReadV, prefetch LoadV, BridgePWrite, waits) ──
-                pipeline.emit_tile_memory_cluster(
-                    kv, 2, infra, shared_regs, n_kv_tiles,
-                    skip_read_k=False, skip_read_v=False,
-                )
-                pipeline._dualwave_sync_barrier()
-
-                # ── C3 COMPUTE (manual) + ReadK hoist for next tile ──
-                infra.tile_idx = kv
-                infra.buf_slot = rb
-                _merge(shared_regs, softmax._start(infra, **shared_regs))
-                gemm2_write_p(infra, **shared_regs)
-                _merge(shared_regs, gemm2_pv(infra, **shared_regs))
-                if readahead:
-                    if const_expr(kv + 1 < n_kv_tiles):
-                        pipeline._emit_intertile_reads_for_next(
-                            kv + 1, infra, shared_regs, _pd2_clusters,
-                        )
-                pipeline._dualwave_sync_barrier()
-
-            pipeline.emit_epilogue(infra, shared_regs)
+        m_i = [loop_results[r] for r in range_constexpr(npair)]
+        l_i = [loop_results[npair + r] for r in range_constexpr(npair)]
+        frag_O = loop_results[_o]
+        if const_expr(_enable_stagger):
+            stagger_close(infra.stagger_i32)
+        rocdl.s_waitcnt(0)
+        rocdl.s_barrier()
     else:
+        shared_regs = {
+            "frag_Q": frag_Q,
+            "m_i": m_i,
+            "l_i": l_i,
+            "frag_O": frag_O,
+            "v_p_partial": v_p_partial,
+            "frag_P": frag_P,
+            "frag_Vt": frag_Vt,
+            "frag_Vt_next": frag_Vt_next,
+            "softmax_corr": softmax_corr,
+            "frag_S": frag_S,
+            "frag_P_a": frag_P_a,
+            "frag_K": frag_K[0],
+        }
+        pipeline = PipelineScheduler([
+            Wire(_StageLoadKV(),  out=()),
+            Wire(_StageReadKV(),  out=("frag_K", "frag_Vt_next")),
+            Wire(_StageGemm1(),   inp=("frag_K", "frag_Q"),  out=("frag_S",),
+                  carry=("frag_Q",)),
+            Wire(_StageSoftmax(), inp=("frag_S", "m_i", "l_i", "frag_O", "frag_P"),
+                  out=("v_p_partial", "m_i", "l_i", "frag_O", "softmax_corr"),
+                  carry=("v_p_partial", "m_i", "l_i", "frag_O", "frag_P")),
+            Wire(_StageBridgeP(), inp=("frag_P", "v_p_partial"), out=("frag_P_a",)),
+            Wire(_StageGemm2(),
+                 inp=("frag_Vt", "frag_Vt_next", "frag_O", "frag_P", "softmax_corr"),
+                 out=("frag_O", "frag_Vt"),
+                 carry=("frag_Vt",)),
+        ], force_depth=param.pipe_depth, enable_stagger=True,
+           num_groups=int(num_groups), m_waves=int(param.m_waves),
+           light_c1_c2_boundary=(_pd_for_sched >= 2),
+           inter_tile_readahead=(_pd_for_sched >= 2))
         pipeline.emit_prologue(infra, shared_regs)
         pipeline.emit_main_loop(infra, shared_regs, n_kv_tiles)
         pipeline.emit_epilogue(infra, shared_regs)
+        frag_O = shared_regs["frag_O"]
+        l_i = shared_regs["l_i"]
 
-
-    #    pipeline.emit_prologue(infra, shared_regs)
-    #    readahead = pipeline._inter_tile_readahead  # True on flex pd2 with inter_tile_readahead
-    #    for kv in range_constexpr(n_kv_tiles):
-    #        # ── C0 MEMORY ──
-    #        if const_expr(readahead):
-    #            if const_expr(kv > 0):
-    #                pipeline.emit_tile_memory_cluster(
-    #                    kv, 0, infra, shared_regs, n_kv_tiles,
-    #                    skip_read_k=True, skip_read_v=False,
-    #                )
-    #            else:
-    #                pipeline.emit_tile_memory_cluster(
-    #                    kv, 0, infra, shared_regs, n_kv_tiles,
-    #                    skip_read_k=False, skip_read_v=False,
-    #                )
-    #        else:
-    #            pipeline.emit_tile_memory_cluster(
-    #                kv, 0, infra, shared_regs, n_kv_tiles,
-    #            )
-    #        # optional: rocdl.sched_group_barrier(...), s_nop(...), etc.
-    #        pipeline.emit_cluster_boundary_sync(0)
-    #
-    #        # ── C1 COMPUTE ──
-    #        pipeline.emit_tile_compute_cluster(
-    #            kv, 1, infra, shared_regs, n_kv_tiles,
-    #        )
-    #        pipeline.emit_cluster_boundary_sync(1)
-    #   
-    #        # ── C2 MEMORY ──
-    #        pipeline.emit_tile_memory_cluster(
-    #            kv, 2, infra, shared_regs, n_kv_tiles,
-    #            skip_read_k=False, skip_read_v=False,
-    #        )
-    #        pipeline.emit_cluster_boundary_sync(2)
-    #
-    #        # ── C3 COMPUTE (+ optional ReadK for kv+1) ──
-    #        pipeline.emit_tile_compute_cluster(
-    #            kv, 3, infra, shared_regs, n_kv_tiles,
-    #            inter_tile_readahead_after=readahead,
-    #        )
-    #        pipeline.emit_cluster_boundary_sync(3) 
-    #    pipeline.emit_epilogue(infra, shared_regs)
 
     #pipeline._dump_config()
-    frag_O = shared_regs["frag_O"]
-    l_i = shared_regs["l_i"]
 
     for i in range_constexpr(n_o):
         frag_O[i] = frag_O[i] * (fx.Float32(1.0) / l_i[o_slot_row[i]])
