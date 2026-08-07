@@ -10,7 +10,6 @@ kernel-code-cleanup skill.
 """
 
 import functools
-import logging
 import os
 
 import flydsl.compiler as flyc
@@ -57,6 +56,7 @@ from kernels.common.mma.mfma_preshuffle_pipeline import (
     tile_chunk_coord_i32,
     unpack_b_w4a16,
 )
+from kernels.common.tensor_shim import _run_compiled
 from kernels.moe.moe_common import (
     i64_to_v4f16 as _i64_to_v4f16,
 )
@@ -70,7 +70,7 @@ from kernels.moe.moe_common import (
     i64x2_to_v8f16 as _i64x2_to_v8f16,
 )
 from kernels.moe.moe_gemm_2stage import layout_helpers as fxh
-from kernels.moe.moe_gemm_2stage.reduction import compile_moe_reduction
+from kernels.moe.moe_gemm_2stage.moe_reduce import compile_moe_reduction
 
 
 def _build_moe_gemm2_fp8(
@@ -2043,12 +2043,15 @@ class _MoeGemm2ReduceWrapper:
         n_in,
         k_in,
         size_expert_ids_in,
-        valid_mask=None,
+        expert_mask=None,
+        topk_ids=None,
         stream=None,
     ):
         """Execute GEMM2 + reduce.
 
         Args match moe_gemm2 kernel signature (see compile_moe_gemm2).
+        When ``self._use_mask`` is True, expert_mask + topk_ids are required and
+        the reduction fuses ``valid = expert_mask[topk_ids[t, k]] != 0``.
         """
         import torch
 
@@ -2079,14 +2082,37 @@ class _MoeGemm2ReduceWrapper:
             size_expert_ids_in,
             stream,
         )
-        # Phase 2: Reduce over topk -> [tokens, model_dim]
+        # Phase 2: Reduce over topk -> [tokens, model_dim]. The reduce launcher
+        # takes fx.Pointer args (base-ptr folding keeps voffsets i32-safe for
+        # X > 4 GiB), so dispatch it through the _run_compiled pointer shim.
         X = intermediate.view(tokens_in, self._topk, self._model_dim)
         Y = arg_out.view(tokens_in, self._model_dim)
-        if not self._use_mask:
-            if valid_mask is not None:
-                logging.warning("valid_mask provided but use_mask=False; ignoring valid_mask")
-            valid_mask = torch.empty((0, self._topk), device=arg_out.device, dtype=torch.uint8)
-        self._reduce_exe(X, Y, valid_mask, tokens_in, stream)
+        if self._use_mask:
+            if expert_mask is None or topk_ids is None:
+                raise ValueError("expert_mask and topk_ids are required when use_mask=True")
+            em = expert_mask.to(torch.int32).contiguous()
+            tk = topk_ids.to(torch.int32).contiguous()
+        else:
+            # Placeholders; kernel ignores them when use_mask=False (compile-time).
+            em = torch.empty(0, device=arg_out.device, dtype=torch.int32)
+            tk = torch.empty(0, device=arg_out.device, dtype=torch.int32)
+
+        def _ptr_arg(t):
+            type_name = type(t).__name__
+            module_name = type(t).__module__
+            if type_name == "FakeTensor" or "fake_tensor" in module_name:
+                return flyc.from_c_void_p(fx.Uint8, 0)
+            return flyc.from_c_void_p(fx.Uint8, t.data_ptr())
+
+        _run_compiled(
+            self._reduce_exe,
+            _ptr_arg(X),
+            _ptr_arg(Y),
+            _ptr_arg(em),
+            _ptr_arg(tk),
+            tokens_in,
+            stream,
+        )
 
     @property
     def mode(self) -> str:
@@ -2110,7 +2136,7 @@ def compile_moe_gemm2_ex(
     use_cshuffle_epilog: bool | None = None,
     # Extended parameters for mode control
     mode: str = MoeGemm2Mode.ATOMIC,
-    valid_mask=None,
+    use_mask: bool = False,
     zero_intermediate: bool = True,
     scale_is_bf16: bool = False,
 ):
@@ -2123,6 +2149,10 @@ def compile_moe_gemm2_ex(
             - "atomic": Use atomic accumulation (original behavior)
             - "reduce": Use non-atomic write + reduce kernel
 
+        use_mask: If True, the reduction kernel fuses the EP gather
+            ``valid = expert_mask[topk_ids[t, k]] != 0`` and only sums
+            valid slots. Caller must pass expert_mask + topk_ids at call time.
+
         zero_intermediate: If all output slots are valid,
             set False to increase performance
 
@@ -2131,9 +2161,6 @@ def compile_moe_gemm2_ex(
     """
     # Compile based on mode
     if mode == MoeGemm2Mode.REDUCE:
-        # Determine if we need masked reduction
-        use_mask = valid_mask is not None
-
         # Compile GEMM2 with accumulate=False
         gemm2_exe = compile_moe_gemm2(
             model_dim=model_dim,
@@ -2164,6 +2191,8 @@ def compile_moe_gemm2_ex(
             model_dim=model_dim,
             dtype_str=dtype_str,
             use_mask=use_mask,
+            # expert_mask is sized by global expert count (≠ w2.shape[0] under EP).
+            num_experts=experts,
         )
         return _MoeGemm2ReduceWrapper(
             gemm2_exe=gemm2_exe,

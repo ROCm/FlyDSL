@@ -21,7 +21,7 @@ from kernels.moe.moe_gemm_2stage.gemm2 import (
     compile_moe_gemm2,
     compile_moe_gemm2_ex,
 )
-from kernels.moe.moe_gemm_2stage.reduction import compile_moe_reduction
+from kernels.moe.moe_gemm_2stage.moe_reduce import compile_moe_reduction
 
 __all__ = [
     "MoeGemm2Mode",
