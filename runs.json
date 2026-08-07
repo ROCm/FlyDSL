@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-07T03:29:58Z",
+ "updated": "2026-08-07T03:31:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "feat/rdna3-gemm-tile-autotune",
    "event": "pull_request",
    "title": "[Perf] Choose the RDNA3 GEMM tile from the shape",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31144374673",
    "created_at": "2026-08-07T03:26:54Z",
-   "updated_at": "2026-08-07T03:27:39Z",
+   "updated_at": "2026-08-07T03:28:15Z",
    "actor": "vlluvia",
    "jobs": []
   },
