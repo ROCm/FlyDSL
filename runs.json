@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-07T19:16:09Z",
+ "updated": "2026-08-07T19:46:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31212634116,
+   "pr": 981,
+   "commit": "da659955db1b8d09fd02d1a14fb793895e78ad43",
+   "branch": "docs/setup-rtd",
+   "event": "pull_request",
+   "title": "docs: Update configs for documentation to host on Read the Docs",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31212634116",
+   "created_at": "2026-08-07T19:42:17Z",
+   "updated_at": "2026-08-07T19:44:34Z",
+   "actor": "peterjunpark",
+   "jobs": []
+  },
   {
    "run_id": 31210492295,
    "pr": 981,
@@ -2049,49 +2064,6 @@
      "started_at": "2026-08-06T06:07:04Z",
      "completed_at": "2026-08-06T07:15:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31023957346/job/92534582498"
-    }
-   ]
-  },
-  {
-   "run_id": 31022130191,
-   "pr": 875,
-   "commit": "1273aa33d5eb8c6f5b724f890fdf159439f8bcc4",
-   "branch": "omuhamma/fly_a16",
-   "event": "pull_request",
-   "title": "a16w16 for gfx1250 on flydsl",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31022130191",
-   "created_at": "2026-08-05T15:48:13Z",
-   "updated_at": "2026-08-05T23:52:55Z",
-   "actor": "omuhamma",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-05T22:39:22Z",
-     "completed_at": "2026-08-05T23:52:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31022130191/job/92465904839"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-05T15:54:42Z",
-     "completed_at": "2026-08-05T16:46:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31022130191/job/92465905293"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-05T15:54:32Z",
-     "completed_at": "2026-08-05T17:00:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31022130191/job/92465905345"
     }
    ]
   }
