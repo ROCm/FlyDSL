@@ -52,10 +52,11 @@ FlyDSL/
 │   ├── 01-vectorAdd.py        # Vector addition
 │   ├── 02-gather_scatter.py   # Row gather/scatter
 │   ├── rocm/                  # AMD ROCm examples
-│   │   ├── 01-tiledCopy.py    # Tiled copy with partitioned tensors
-│   │   ├── 02-tiledMma.py     # Tiled MMA (GEMM) with MFMA atoms
+│   │   ├── 01-BufferCopy.py   # Tiled copy with partitioned tensors
+│   │   ├── 02-MFMA.py         # Tiled MMA (GEMM) with MFMA atoms
 │   │   └── 03-preshuffle_gemm.py  # Preshuffle GEMM end-to-end example
 │   └── cuda/                  # NVIDIA CUDA examples
+│       └── 01-MmaSync.py      # Tiled MMA (GEMM) with mma.sync atoms
 ├── kernels/                   # Production GPU kernels (importable as `kernels.*`)
 ├── tests/                     # All tests (kernels/, mlir/, unit/)
 ├── CMakeLists.txt             # top-level CMake

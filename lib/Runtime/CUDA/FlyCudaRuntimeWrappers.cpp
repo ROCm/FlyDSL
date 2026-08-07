@@ -16,10 +16,12 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include <cassert>
 #include <cstdint>
 #include <cstdio>
 #include <map>
 #include <mutex>
+#include <vector>
 
 #include "cuda.h"
 #include "mlir/ExecutionEngine/CRunnerUtils.h"
@@ -274,14 +276,24 @@ extern "C" void mgpuMemHostRegister(void *ptr, uint64_t sizeBytes) {
 extern "C" void mgpuMemHostRegisterMemRef(int64_t rank, StridedMemRefType<char, 1> *descriptor,
                                           int64_t elementSizeBytes) {
   int64_t *sizes = descriptor->sizes;
-  int64_t *strides = sizes + rank;
+  [[maybe_unused]] int64_t *strides = sizes + rank;
 
-  int64_t denseStride = 1;
-  for (int64_t i = rank - 1; i >= 0; --i) {
-    (void)strides;
-    denseStride *= sizes[i];
+  std::vector<int64_t> denseStrides(static_cast<size_t>(rank));
+  if (rank > 0) {
+    denseStrides[static_cast<size_t>(rank - 1)] = sizes[rank - 1];
+    for (int64_t i = rank - 2; i >= 0; --i)
+      denseStrides[static_cast<size_t>(i)] = sizes[i] * denseStrides[static_cast<size_t>(i + 1)];
   }
-  auto sizeBytes = denseStride * elementSizeBytes;
+  auto sizeBytes = (rank > 0 ? denseStrides[0] : 1) * elementSizeBytes;
+
+  for (int64_t i = 0; i < rank - 1; ++i)
+    denseStrides[static_cast<size_t>(i)] = denseStrides[static_cast<size_t>(i + 1)];
+  if (rank > 0)
+    denseStrides[static_cast<size_t>(rank - 1)] = 1;
+
+  for (int64_t i = 0; i < rank; ++i)
+    assert(strides[i] == denseStrides[static_cast<size_t>(i)]);
+
   auto *ptr = descriptor->data + descriptor->offset * elementSizeBytes;
   mgpuMemHostRegister(ptr, sizeBytes);
 }
