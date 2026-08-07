@@ -285,6 +285,9 @@ _CASES = [
     (256, 512, 768, 256, 256, 128, 2, 2, 4),  # 6 K-tiles -> 2 active stages
     (257, 512, 896, 256, 256, 128, 2, 2, 4),  # 7 K-tiles -> 3 active, ragged M
     (256, 512, 4736, 256, 256, 128, 2, 2, 4),  # 37 K-tiles, long run
+    (12288, 512, 512, 256, 256, 128, 2, 2, 4),  # 48 M-tiles -> grid split 16 x 3
+    (16384, 512, 512, 256, 256, 128, 2, 2, 4),  # 64 M-tiles -> grid split 32 x 2
+    (8448, 512, 512, 256, 256, 128, 2, 2, 4),  # 33 M-tiles -> no exact split, flat grid
 ]
 _SMOKE = (512, 512, 128, 256, 128, 2, 2)  # N, K, tile_m, tile_n, tile_k, m_warp, n_warp
 _SMOKE_BUFFERS = [2, 4]

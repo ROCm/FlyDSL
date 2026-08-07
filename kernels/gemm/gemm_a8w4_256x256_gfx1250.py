@@ -59,6 +59,7 @@ def launch_gemm_a8w4_256x256(
         2,
     ), "only the tuned 256x256x128, 2x2-wave, 4-buffer, 1x2-cluster profile is supported"
     cluster_sync_revs = 8
+    m_run_max, m_run_min = 32, 8
     WMMA_M = WMMA_N = 16
     WMMA_K = 128
     WAVE = 32
@@ -112,7 +113,7 @@ def launch_gemm_a8w4_256x256(
         Kp16 = (k64 // 2) * 16
 
         tid = fx.Int32(fx.thread_idx.x)
-        bid_x, bid_y, _ = fx.block_idx
+        bid_x, bid_y, bid_z = fx.block_idx
         wave = rocdl.readfirstlane(T.i32, tid // WAVE)
         lane = tid % WAVE
         lane16 = lane % 16
@@ -121,7 +122,7 @@ def launch_gemm_a8w4_256x256(
         wave_n = wave % n_warp
         local_x, local_y = cluster.compute_cluster_position()
         a_mask, b_mask = compute_mcast_masks(local_x, local_y, cluster_m, cluster_n)
-        blk_m = bid_x * tile_m
+        blk_m = (bid_z * fx.Int32(fx.grid_dim.x) + bid_x) * tile_m
         blk_n = bid_y * tile_n
         blk_m64 = fx.Int64(blk_m)
         blk_n64 = fx.Int64(blk_n)
@@ -757,6 +758,11 @@ def launch_gemm_a8w4_256x256(
 
     gx = (i32_m + (tile_m - 1)) // tile_m
     gy = (N + (tile_n - 1)) // tile_n
+    # Split gx exactly, so no workgroup is left over to recompute a duplicate tile.
+    pow2 = gx & -gx
+    capped = (pow2 < m_run_max).select(pow2, fx.Int32(m_run_max))
+    m_run = ((gx > m_run_max) & (pow2 >= m_run_min)).select(capped, gx)
+    grid_arg = (m_run, gy, gx // m_run)
     # Runtime N/K shape checks belong to the caller.
     cluster_arg = (cluster_m, cluster_n, 1)
     kernel_gemm_a8w4_256x256(
@@ -771,7 +777,7 @@ def launch_gemm_a8w4_256x256(
         i32_lda,
         i32_ldc,
         value_attrs={"rocdl.cluster_dims": f"{cluster_m},{cluster_n},1"},
-    ).launch(grid=(gx, gy, 1), block=(block, 1, 1), stream=stream, cluster=cluster_arg)
+    ).launch(grid=grid_arg, block=(block, 1, 1), stream=stream, cluster=cluster_arg)
 
 
 launch_gemm_a8w4_256x256.compile_hints["llvm_options"] = {
