@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
-"""Compact dispatch path for MegaMoE v2 stage1."""
+"""Compact dispatch path for MegaMoE stage1."""
 
 from enum import IntEnum
 

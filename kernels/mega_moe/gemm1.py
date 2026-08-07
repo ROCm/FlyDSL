@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
-"""GEMM1 compute shared by fused MegaMoE v2 stage1 and its standalone interface."""
+"""GEMM1 compute shared by fused MegaMoE stage1 and its standalone interface."""
 
 import functools
 
@@ -448,7 +448,7 @@ def gemm1_kernel(
     num_cu: int = 256, b_cache_modifier: int = 0, a_dtype: str = "fp8", out_dtype: str = "fp8",
 ):
     # fmt: on
-    """Run standalone MegaMoEV2 group GEMM1 and return ``(out, out_scale)``."""
+    """Run standalone MegaMoE group GEMM1 and return ``(out, out_scale)``."""
     num_valid = int(num_valid)
     if num_valid < 0 or num_valid % int(sort_block_m):
         raise ValueError("num_valid must be a non-negative multiple of sort_block_m")

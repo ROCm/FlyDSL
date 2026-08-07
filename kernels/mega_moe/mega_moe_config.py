@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
-"""Static MegaMoEV2 configurations tuned for eight-GPU MI355X."""
+"""Static MegaMoE configurations tuned for eight-GPU MI355X."""
 
 from bisect import bisect_left
 from dataclasses import dataclass, replace

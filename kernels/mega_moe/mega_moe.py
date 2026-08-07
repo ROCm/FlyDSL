@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
-"""MegaMoE v2 fused dispatch, GEMM1, GEMM2, and combine implementation."""
+"""MegaMoE fused dispatch, GEMM1, GEMM2, and combine implementation."""
 
 import mori.shmem as ms
 import torch
@@ -21,10 +21,10 @@ from .mega_moe_config import (
 )
 from .quant import per_1x32_mx_quant
 
-__all__ = ["MegaMoEV2"]
+__all__ = ["MegaMoE"]
 
 
-class MegaMoEV2:
+class MegaMoE:
     """Fused dispatch, GEMM1, GEMM2, and combine with one in-flight launch.
 
     Both A8W4 and A4W4 consume INTERLEAVE gate/up W1 weight and scale buffers.
@@ -36,7 +36,7 @@ class MegaMoEV2:
         max_tok_per_rank: int, mega_scheme: str = "fixedslot", stage2_p2p_quant: str = "auto"):
     # fmt: on
         if quant not in ("a4w4", "a8w4"):
-            raise ValueError("MegaMoEV2 quant must be 'a4w4' or 'a8w4'")
+            raise ValueError("MegaMoE quant must be 'a4w4' or 'a8w4'")
         if experts % world_size != 0:
             raise ValueError(f"experts={experts} must be divisible by world_size={world_size}")
         if max_tok_per_rank <= 0 or max_tok_per_rank & (max_tok_per_rank - 1):
@@ -117,7 +117,7 @@ class MegaMoEV2:
         prows = ((a2rows + 255) // 256) * 256
         pcols = (((inter_dim // 32) + 7) // 8) * 8
         self._s1_osd = torch.zeros(prows * pcols + inter_dim, dtype=torch.uint8, device=self.dev)
-        self._build_v2_disp_table()
+        self._build_dispatch_table()
 
     def _allocate_dispatch_workspace(self, op):
         total_experts = self.world_size * self.epr
@@ -149,7 +149,7 @@ class MegaMoEV2:
         workspace["p2p_payload_ready"] = op._p2p_table(workspace["payload_ready"])
         self._s1_dispatch_workspace = workspace
 
-    def _build_v2_disp_table(self):
+    def _build_dispatch_table(self):
         op = self._s1_op
         workspace = self._s1_dispatch_workspace
         table = [0] * DISPATCH_TABLE_SIZE
@@ -291,8 +291,8 @@ class MegaMoEV2:
         dev = torch.device("cuda", comb_cfg.rank)
         k = comb_cfg.num_experts_per_token
         cu_num = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
-        self._g2v2_inter = int(self.inter_dim)
-        self._g2v2_hidden = int(comb_cfg.hidden_dim)
+        self._g2_inter = int(self.inter_dim)
+        self._g2_hidden = int(comb_cfg.hidden_dim)
         self._g2_run = run_mega_moe_stage2
         self._g2_invariants_by_quant = {}
         for p2p_quant in ("none", "fp8_blockwise_1x32"):
@@ -331,7 +331,7 @@ class MegaMoEV2:
             fx.Int64(op.sorted_expert_ids.data_ptr()), fx.Int64(op.num_valid.data_ptr()),
             fx.Int64(op.srcmap_em.data_ptr()), fx.Int64(op.wts_em.data_ptr()),
             fx.Int64(op.tile_row_base.data_ptr()), comb_op._fx_p2p_comb_inp, self._s1_nvm,
-            self._g2v2_inter, self._g2v2_hidden, s_fx, BM=stage2.block_m,
+            self._g2_inter, self._g2_hidden, s_fx, BM=stage2.block_m,
             SBM=config.stage1.sort_block_m, BN=stage2.block_n, BK=stage2.block_k,
             use_nt=stage2.use_nt, g2_bhoist=stage2.b_hoist,
             g2_b2stage=stage2.b2stage,

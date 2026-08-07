@@ -42,9 +42,9 @@ def _validate_dispatch_capacity(
 ):
     max_rows = npes * batch_size * topk + experts_per_rank * tile_m
     if not use_tile_resource and max_rows * row_bytes >= _BUFFER_OFFSET_ABI_BYTES:
-        raise ValueError("MegaMoE v2 stage1 payload exceeds the 32-bit buffer-resource ABI")
+        raise ValueError("MegaMoE stage1 payload exceeds the 32-bit buffer-resource ABI")
     if not use_tile_resource and max_rows * output_row_bytes >= _BUFFER_OFFSET_ABI_BYTES:
-        raise ValueError("MegaMoE v2 stage1 output exceeds the 32-bit buffer-resource ABI")
+        raise ValueError("MegaMoE stage1 output exceeds the 32-bit buffer-resource ABI")
 
 
 # fmt: off
@@ -62,7 +62,7 @@ def compile_mega_moe_stage1(
 ):
     arch = str(get_rocm_arch() or "")
     if not arch.startswith("gfx95"):
-        raise RuntimeError(f"MegaMoE v2 stage1 requires CDNA4 (gfx95x), got {arch or 'unknown'}")
+        raise RuntimeError(f"MegaMoE stage1 requires CDNA4 (gfx95x), got {arch or 'unknown'}")
     NUM_WAVES = int(num_waves)
     assert NUM_WAVES > 1, "planner needs one communication wave and at least one grouping wave"
     assert 1 <= waves_per_eu_hint <= 4
@@ -88,7 +88,7 @@ def compile_mega_moe_stage1(
     assert a_dtype in ("fp4", "fp8")
     assert out_dtype in ("fp4", "fp8")
 
-    assert tile_k == 256, "MegaMoE v2 GEMM1 requires tile_k=256"
+    assert tile_k == 256, "MegaMoE GEMM1 requires tile_k=256"
     A_K_STEP_BYTES = tile_k // (2 if a_dtype == "fp4" else 1)
     K_ITERS = model_dim // tile_k
     TOTAL_THREADS = NUM_WAVES * 64

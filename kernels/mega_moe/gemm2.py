@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025-2026 FlyDSL Project Contributors
-"""GEMM2 compute for fused MegaMoE v2 stage2."""
+"""GEMM2 compute for fused MegaMoE stage2."""
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -138,7 +138,7 @@ def issue_a_load_lds_dt(
 
 
 @flyc.jit
-def gemm2_compute_v2(
+def gemm2_compute(
     lds_base_i32,
     arg_ascale,
     arg_bq,
