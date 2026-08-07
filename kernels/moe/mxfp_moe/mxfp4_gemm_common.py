@@ -6,6 +6,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl._mlir.dialects import memref as memref_dialect
 from flydsl.expr import arith, rocdl
+from flydsl.expr import math as fmath
 from flydsl.expr.typing import Float4E2M1FN, Float8E4M3FN, T
 from kernels.common import buffer_ops
 from kernels.common.layout_utils import crd2idx
@@ -102,7 +103,7 @@ def _global_i32_load(tiles, idx):
     # Atom/types must be built with an active MLIR trace context, not as globals.
     atom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Int32)
     r = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
-    fx.copy_atom_call(atom, fx.slice(tiles, (None, idx)), r)
+    fx.copy(atom, fx.slice(tiles, (None, idx)), r)
     return r.load()[0]
 
 
@@ -121,7 +122,7 @@ def _scalar_store(tiles, idx, value, numeric_cls):
     atom = fx.make_copy_atom(fx.UniversalCopy(numeric_cls.width), numeric_cls)
     r = fx.make_rmem_tensor(fx.make_layout(1, 1), numeric_cls)
     r.store(fx.Vector.from_elements([numeric_cls(value)], numeric_cls))
-    fx.copy_atom_call(atom, r, fx.slice(tiles, (None, idx)))
+    fx.copy(atom, r, fx.slice(tiles, (None, idx)))
 
 
 def _layout_idx(layout, *coords):
@@ -137,26 +138,107 @@ def _lds_swizzle_mask(row):
     return (row & fx.Int32(14)) << fx.Int32(3)
 
 
+lds_swizzle_mask = _lds_swizzle_mask
+
+
+def lds_swizzle_mask_f8(row):
+    return (row & 15) << 4
+
+
+def lds_dma_dst(base_i32, byte_off_i32, elem_ty=None, align=16):
+    elem_ty = T.i32 if elem_ty is None else elem_ty
+    ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Shared, align)
+    ptr = fx.inttoptr(ptr_ty, fx.Int32(base_i32 + byte_off_i32))
+    return fx.make_view(ptr, fx.make_layout(1, 1))
+
+
+def global_typed_ptr(arg, elem_ty, align=4):
+    ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Global, align)
+    return fx.inttoptr(ptr_ty, fx.Int64(arg))
+
+
+def lds_typed_ptr(base_i32, elem_ty, align=4):
+    ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Shared, align)
+    return fx.inttoptr(ptr_ty, fx.Int32(base_i32))
+
+
+def lds_vec_load(base_i32, byte_off_i32, result_type, elem_ty, align=4):
+    elem_ir_ty = elem_ty.ir_type if hasattr(elem_ty, "ir_type") else elem_ty
+    ptr = lds_typed_ptr(fx.Int32(base_i32) + byte_off_i32, elem_ir_ty, align=align)
+    return fx.ptr_load(ptr, result_type=result_type)
+
+
+def lds_dma_atom_128():
+    return fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
+
+
+def flat_buffer_view(arg, base_elems, elem_ty, *, align, elem_bytes, fold=True, num_records_bytes=None):
+    ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Global, align)
+    if fold:
+        base = fx.Int32(fx.rocdl.readfirstlane(T.i32, base_elems))
+        off_i64 = fx.Uint32(base).to(fx.Uint64).bitcast(fx.Int64)
+        base_iter = fx.inttoptr(ptr_ty, fx.Int64(arg) + off_i64 * fx.Int64(elem_bytes))
+    else:
+        base_iter = fx.inttoptr(ptr_ty, fx.Int64(arg))
+    view = fx.Tensor(fx.make_view(base_iter, fx.make_layout((1, 1), (1, 1))))
+    if num_records_bytes is not None:
+        return fx.rocdl.make_buffer_tensor(view, num_records_bytes=num_records_bytes)
+    return fx.rocdl.make_buffer_tensor(view, max_size=True)
+
+
+# A-LDS bank-conflict swizzle as layout algebra: over the flat 16-byte-block index
+# (row*8 + block_col) the manual XOR mask equals SwizzleType(3, 0, 4) (verified bit-for-bit).
+_A_LDS_BLOCKS_PER_ROW = 8  # 128-byte fp4 row / 16-byte block
+
+
+def _a_lds_swz_block_layout(rows):
+    """Composed layout over 16-byte A-LDS blocks: (rows, 8) row-major, swizzled S<3,0,4>.
+
+    crd2idx((row, block_col), <this>) == the manual `(byte_off ^ mask) // 16` block index.
+    """
+    return fx.make_composed_layout(
+        fx.static(fx.SwizzleType.get(3, 0, 4)),
+        fx.make_layout((rows, _A_LDS_BLOCKS_PER_ROW), (_A_LDS_BLOCKS_PER_ROW, 1)),
+    )
+
+
+def _a_lds_swz_block_idx(swz_layout, row, block_col):
+    """Swizzled 16-byte-block index for (row, block_col) via layout algebra."""
+    return fx.Int32(crd2idx([fx.Int64(row), fx.Int64(block_col)], swz_layout))
+
+
 def _fabs_f32(x):
-    return fx.Float32(llvm.call_intrinsic(T.f32, "llvm.fabs.f32", [_raw(x)], [], []))
+    return fmath.absf(x)
 
 
-def _e8m0_roundup(amax_f32):
-    wi = fx.Int32(_raw(amax_f32 * fx.Float32(1.0 / 6.0)).bitcast(T.i32))
+fabs_f32 = _fabs_f32
+
+
+_FMT_MAX_FP4 = 6.0
+_FMT_MAX_FP8_E4M3 = 448.0
+
+
+def _e8m0_roundup(amax_f32, fmt_max):
+    wi = (amax_f32 * fx.Float32(1.0 / fmt_max)).bitcast(fx.Int32)
     bexp = (wi + fx.Int32(0x7FFFFF)).shrui(fx.Int32(23)) & fx.Int32(0xFF)
-    lt = arith.cmpi(arith.CmpIPredicate.ult, _raw(bexp), _raw(fx.Int32(254)))
-    return fx.Int32(arith.select(lt, _raw(bexp), _raw(fx.Int32(254))))
+    return (bexp < fx.Int32(254)).select(bexp, fx.Int32(254))
 
 
 def _e8m0_from_amax(amax_f32):
-    e8m0 = _e8m0_roundup(amax_f32)
-    qscale = fx.Float32(_raw(e8m0 << fx.Int32(23)).bitcast(T.f32))
+    e8m0 = _e8m0_roundup(amax_f32, _FMT_MAX_FP4)
+    qscale = (e8m0 << fx.Int32(23)).bitcast(fx.Float32)
+    return e8m0, qscale
+
+
+def _e8m0_from_amax_fp8(amax_f32):
+    e8m0 = _e8m0_roundup(amax_f32, _FMT_MAX_FP8_E4M3)
+    qscale = (e8m0 << fx.Int32(23)).bitcast(fx.Float32)
     return e8m0, qscale
 
 
 def _inline_e8m0(amax_u16_i32):
-    f32 = fx.Float32(_raw((fx.Int32(_raw(amax_u16_i32)) & fx.Int32(0xFFFF)) << fx.Int32(16)).bitcast(T.f32))
-    return _e8m0_roundup(f32)
+    f32 = ((fx.Int32(amax_u16_i32) & fx.Int32(0xFFFF)) << fx.Int32(16)).bitcast(fx.Float32)
+    return _e8m0_roundup(f32, _FMT_MAX_FP4)
 
 
 def _pkmax_u16(a_i32, b_i32):

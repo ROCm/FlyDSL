@@ -36,7 +36,7 @@ Common to `Numeric` and `Vector`, elementwise for `Vector`:
 | `x.dtype` | the scalar type (`Numeric`) / element type (`Vector`) | `Int32(5).dtype` / `Int32x4(0).dtype` → `Int32` |
 | `x.ir_value()` | the underlying `ir.Value`, materializing a constant for a compile-time value | `Int32(5).ir_value()` |
 | `cond.select(true_value, false_value)` | ternary select; a non-`Boolean` `cond` is converted by truthiness (nonzero) | `(a < b).select(a, b)` → min |
-| `x.to(dtype)` | value-preserving conversion to another type | `Int32(5).to(Float32)` → `Float32(5.0)` |
+| `x.to(dtype, *, rounding_mode=None)` | value-preserving conversion; the optional `rounding_mode=` applies to float-to-float casts | `Int32(5).to(Float32)` → `Float32(5.0)` |
 
 `Numeric`-only methods:
 
@@ -74,6 +74,29 @@ If every operand is compile-time, the result is compile-time — the host folds 
 and emits no MLIR (`Int32(3) + Int32(4)` ⇒ `Int32` holding `7`). As soon as one
 operand is run-time, the result is run-time and an MLIR op is emitted. This
 holds uniformly across arithmetic, comparison, bitwise, and shift operators.
+
+### Integer wrap-around
+
+Folding is *not* unbounded Python arithmetic. Constructing an integer — whether
+from a Python `int`, from another integer type, or as the result of a fold —
+reduces the value modulo `2**width`, sign-extending or truncating exactly as the
+corresponding C cast would. This is what keeps a folded result equal to what the
+run-time op would have computed, since `arith.addi` / `muli` / `trunci` wrap on
+their own.
+
+| Expression | Result |
+|---|---|
+| `Uint32(0xFFFFFFFF) + Uint32(2)` | `Uint32` holding `1` |
+| `Uint64(0xFFFFFFFFFFFFFFFF) + Uint64(2)` | `Uint64` holding `1` |
+| `Uint64(-1)` | `0xFFFFFFFFFFFFFFFF` |
+| `Int8(200)` | `-56` |
+| `Uint8(Int32(-1))` | `255` (sign-extend, then truncate) |
+| `Uint64(Uint128(2**100 + 7))` | `7` |
+| `Int4(20)` | `4` |
+
+The reduction applies at every width, including `Int4` / `Int128` / `Uint128`
+and values that exceed any machine integer. `Boolean` is the one exception: it
+is one bit wide and signed, but normalizes to `0` / `1` rather than `0` / `-1`.
 
 ### Python literals
 
@@ -157,6 +180,27 @@ Given the common type `C` from the table above:
 | `/` | `C` if `C` is a `Float`; if `C` is an `Integer`, `Float32` when its width is at most 32 bits, otherwise `Float64` |
 | `<`  `<=`  `>`  `>=`  `==`  `!=` | `Boolean` (operands are compared as `C`) |
 | `&`  `\|`  `^`  `<<`  `>>` | `C`; operands must be `Integer` (a `Float` operand raises `TypeError`) |
+
+## Rounding-mode control
+
+`fx.RoundingMode` provides the IEEE-754 modes:
+
+- `to_nearest_even` — round to the nearest representable value; ties to even.
+- `downward` — round toward negative infinity.
+- `upward` — round toward positive infinity.
+- `toward_zero` — truncate toward zero.
+- `to_nearest_away` — round to the nearest representable value; ties away from zero.
+
+Only float-to-float casts accept a mode and any cast involving an integer raises
+`TypeError`. A compile-time constant is narrowed on the host, so passing a mode
+for one raises `ValueError`. The value must be a run-time value.
+
+```python
+lo = x.to(fx.Float16, rounding_mode=fx.RoundingMode.downward)
+hi = x.to(fx.Float16, rounding_mode=fx.RoundingMode.upward)
+```
+
+The keyword applies elementwise to a `Vector` as well.
 
 ## Fast-math control
 
