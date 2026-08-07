@@ -189,6 +189,22 @@ the separate `compile_mxfp4_gemm` in `kernels/gemm/gemm_fp8fp4_gfx1250.py` is th
 distinct gfx1250 kernel. `batch>1` runs a strided-batched GEMM over `grid.z`.
 Covered by `tests/kernels/test_preshuffle_gemm.py`.
 
+**8-wave a8w8 MXFP8 GEMM (`kernels/gemm/mxfp8_gemm_kernel.py`, gfx950):**
+`gemm_mxfp8_flydsl_kernel` runs `fp8 A x fp8 B^T` (NT only) with per-1x32 E8M0
+block scales and bf16/fp16 output. The device kernel is `compile_mxfp8_gemm_8w`
+in `kernels/gemm/fp8_gemm_8wave.py` -- the block-scale mode of the shared
+HipKittens FP8_8wave pipeline (8 waves in a 2x4 grid, 256x256 tile, A *and* B
+staged in double-buffered LDS), feeding the E8M0 scale to
+`v_mfma_scale_f32_16x16x128_f8f6f4` per K-iteration so the epilogue is a plain
+FP32->BF16/FP16 store. Unlike the `mxfp4_preshuffle` a8w8 path, **B and the
+scales need no host-side preshuffle**: raw E8M0 `[M, K//32]` / `[N, K//32]` are
+passed straight in and a device-side repack kernel is fused into the same
+`@flyc.jit` stub (single dispatch, caller-owned int32 workspace). The first call
+per shape autotunes `GROUP_M` / `num_xcd` / `group_n` (`BLOCK_M` fixed at 256,
+since the A-scale preshuffle layout depends on it). Requires `K % 128 == 0` and
+`K >= 256`. Measured ~2740 TFLOPS at 4096x4096x8192 and ~2900 TFLOPS at 8192^3.
+Covered by `tests/kernels/test_mxfp8_gemm.py`.
+
 **Pipeline details:**
 - **lds_stage=2 (ping-pong)**: Two LDS buffers for A tiles. Cross-tile A0 prefetch overlaps VMEM with LDS reads
 - **lds_stage=1 (single)**: CK-style intrawave schedule with single LDS buffer
