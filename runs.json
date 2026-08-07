@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-08-07T12:07:44Z",
+ "updated": "2026-08-07T12:34:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31177603525,
+   "pr": 960,
+   "commit": "811ae069096929354249bbe3ee4aa1f06d4ce021",
+   "branch": "new_bias_alibi_sink_attention",
+   "event": "pull_request",
+   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31177603525",
+   "created_at": "2026-08-07T12:18:04Z",
+   "updated_at": "2026-08-07T12:21:48Z",
+   "actor": "amd-nprotaso",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-07T12:22:11Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31177603525/job/92863858199"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-07T12:22:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31177603525/job/92863858239"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-07T12:21:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31177603525/job/92863858271"
+    }
+   ]
+  },
   {
    "run_id": 31172521237,
    "pr": 971,
@@ -2087,21 +2130,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31016607719",
    "created_at": "2026-08-05T14:42:59Z",
    "updated_at": "2026-08-05T14:44:51Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 31016135354,
-   "pr": null,
-   "commit": "6f268ea8278b8171e33858449626c0262f5c38e9",
-   "branch": "main",
-   "event": "push",
-   "title": "[Perf] Keep runtime base and static tail separate in add_offset (#933)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31016135354",
-   "created_at": "2026-08-05T14:37:21Z",
-   "updated_at": "2026-08-05T14:43:06Z",
    "actor": "coderfeli",
    "jobs": []
   }
