@@ -78,7 +78,7 @@ func.func @test_wmma_scale_call_fp8(
 
 // CHECK-LABEL: @test_wmma_scale_call_fp4_opsel
 func.func @test_wmma_scale_call_fp4_opsel(
-    %atom: !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f4E2M1FN, f4E2M1FN) -> f32, opselA = 1, opselB = 2, modC = 0, reuseA = false, reuseB = false, blockSize = 32>>) {
+    %atom: !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f4E2M1FN, f4E2M1FN) -> f32, opselA = 1, opselB = 1, modC = 0, reuseA = false, reuseB = false, blockSize = 32>>) {
   %lay_ab = fly.static : !fly.layout<32:1>
   %lay_cd = fly.static : !fly.layout<8:1>
   %d = fly.memref.alloca(%lay_cd) : (!fly.layout<8:1>) -> !fly.memref<f32, register, 8:1>
@@ -86,8 +86,8 @@ func.func @test_wmma_scale_call_fp4_opsel(
   %b = fly.memref.alloca(%lay_ab) : (!fly.layout<32:1>) -> !fly.memref<f4E2M1FN, register, 32:1>
   %c = fly.memref.alloca(%lay_cd) : (!fly.layout<8:1>) -> !fly.memref<f32, register, 8:1>
 
-  // CHECK: rocdl.wmma.scale.f32.16x16x128.f8f6f4 %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, fmtA = fp4_e2m1, fmtB = fp4_e2m1, modC = none, scaleAType = row1, fmtScaleA = e8, scaleBType = #rocdl<wmma_matrix_scale >, fmtScaleB = e8 : (vector<8xi32>, vector<8xi32>, vector<8xf32>, i32, i32) -> vector<8xf32>
-  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f4E2M1FN, f4E2M1FN) -> f32, opselA = 1, opselB = 2, modC = 0, reuseA = false, reuseB = false, blockSize = 32>>, !fly.memref<f32, register, 8:1>, !fly.memref<f4E2M1FN, register, 32:1>, !fly.memref<f4E2M1FN, register, 32:1>, !fly.memref<f32, register, 8:1>) -> ()
+  // CHECK: rocdl.wmma.scale.f32.16x16x128.f8f6f4 %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, fmtA = fp4_e2m1, fmtB = fp4_e2m1, modC = none, scaleAType = row1, fmtScaleA = e8, scaleBType = row1, fmtScaleB = e8 : (vector<8xi32>, vector<8xi32>, vector<8xf32>, i32, i32) -> vector<8xf32>
+  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f4E2M1FN, f4E2M1FN) -> f32, opselA = 1, opselB = 1, modC = 0, reuseA = false, reuseB = false, blockSize = 32>>, !fly.memref<f32, register, 8:1>, !fly.memref<f4E2M1FN, register, 32:1>, !fly.memref<f4E2M1FN, register, 32:1>, !fly.memref<f32, register, 8:1>) -> ()
   return
 }
 

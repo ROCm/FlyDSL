@@ -168,10 +168,10 @@ LogicalResult MmaOpGFX1250_WMMAScaleType::verify(function_ref<InFlightDiagnostic
                           "f6E3M2FN, f4E2M1FN, got "
                        << elemTyB;
   }
-  if (opselA < 0 || opselA > 3)
-    return emitError() << "opselA must be in [0, 3], got " << opselA;
-  if (opselB < 0 || opselB > 3)
-    return emitError() << "opselB must be in [0, 3], got " << opselB;
+  if (opselA < 0 || opselA > 1)
+    return emitError() << "opselA must be in [0, 1] (row0/row1), got " << opselA;
+  if (opselB < 0 || opselB > 1)
+    return emitError() << "opselB must be in [0, 1] (row0/row1), got " << opselB;
   if (modC < 0 || modC > 0xFFFF)
     return emitError() << "modC must fit the i16 intrinsic field [0, 65535], got " << modC;
   return success();
