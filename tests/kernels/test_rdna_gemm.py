@@ -21,6 +21,7 @@ if _REPO_ROOT not in sys.path:
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.gemm.rdna3_f16_gemm import create_wmma_gemm_module as _create_wmma_gemm_module_gfx11  # noqa: E402
+from kernels.gemm.rdna3_f16_gemm_autotune import pick_tile  # noqa: E402
 from kernels.gemm.rdna_f16_gemm import create_wmma_gemm_module as _create_wmma_gemm_module_gfx12  # noqa: E402
 from kernels.gemm.rdna_fp8_preshuffle_gemm import (  # noqa: E402
     compile_fp8_gemm,
@@ -207,6 +208,47 @@ def test_f16_gemm_grid_m_not_a_multiple_of_the_group_width(M, N, K):
 
     C_ref = A.float() @ B_T.float().T
     assert verify_output(C.float(), C_ref, atol=0.05, rtol=0.05)
+
+
+@pytest.mark.parametrize(
+    "M, N, K",
+    [
+        pytest.param(256, 256, 4096, id="256x256x4096"),
+        pytest.param(1024, 1024, 1024, id="1024x1024x1024"),
+    ],
+)
+def test_f16_gemm_autotuned_matches_the_heuristic_path(M, N, K):
+    """The autotune wrapper, left unconfigured, is a pass-through.
+
+    It resolves through the tuner once and then calls the built module directly:
+    the tuner re-derives its cache key on every call, which costs more host time
+    than these shapes take on the GPU. So this checks both halves — the same
+    tile as ``pick_tile``, and that the second call does not build again.
+    """
+    _requires_rdna3()
+    from kernels.gemm import rdna3_f16_gemm_autotune as gemm_autotune
+
+    torch.manual_seed(42)
+    A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") * 0.1
+    B_T = torch.randn(N, K, dtype=torch.bfloat16, device="cuda") * 0.1
+    C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
+
+    signature = (M, N, K, "bf16", "bf16", "rn")
+    gemm_autotune._resolved.pop(signature, None)
+
+    gemm_autotune.rdna3_gemm_autotuned(C, A, B_T)
+    torch.cuda.synchronize()
+    assert verify_output(C.float(), A.float() @ B_T.float().T, atol=0.05, rtol=0.05)
+
+    resolved = gemm_autotune._resolved[signature]
+    expected_tile = pick_tile(M, N, K)
+    assert resolved is gemm_autotune._build(M, N, K, "bf16", "bf16", "rn", *expected_tile)
+
+    C.zero_()
+    gemm_autotune.rdna3_gemm_autotuned(C, A, B_T)
+    torch.cuda.synchronize()
+    assert verify_output(C.float(), A.float() @ B_T.float().T, atol=0.05, rtol=0.05)
+    assert gemm_autotune._resolved[signature] is resolved
 
 
 @pytest.mark.parametrize(
