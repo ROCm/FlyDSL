@@ -25,6 +25,8 @@ from .gemm2 import (
     kStages,
 )
 
+_BUFFER_OFFSET_ABI_BYTES = 1 << 31
+
 
 @flyc.jit
 def _fp8_scale(local_max):
@@ -347,12 +349,13 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
     log2_max_tok = max_tok.bit_length() - 1
     mask_max_tok = max_tok - 1
     N_OUT = model_dim
-    g2_bhoist, g2_ascale_pf, g2_spart, g2_group_num, g2_m01 = _resolve_g2_knobs(
-        g2_bhoist, g2_ascale_pf, g2_spart
+    # The scatter path uses the f32 CShuffle slab rather than BF16 LDS.
+    g2_bhoist, g2_ascale_pf, g2_spart, g2_group_num, g2_m01, _g2_bf16_lds = _resolve_g2_knobs(
+        g2_bhoist, g2_ascale_pf, g2_spart, False, False
     )
     is_f8 = a_dtype == "fp8"
-    # PR959-style deeper A ring: selected BN256 profiles can retire two slots per WG fence.
-    aStages = 4 if g2_deep_a_pipeline else 3
+    # Selected BN256 profiles use a deeper A ring to retire two slots per WG fence.
+    aStages = 4 if g2_deep_a_pipeline else kStages + 1
     KH_TILE_A = BK // (1 if is_f8 else 2)
     compute_lds_bytes = _stage2_lds_bytes(BM, BN, BK, a_dtype, aStages)
     lds_packed_off = compute_lds_bytes
@@ -362,6 +365,8 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
     _recv_cap = npes * max_tok if recv_cap is None else int(recv_cap)
     _row_nbytes = N_OUT + N_OUT // 32 if p2p_quant_type == "fp8_blockwise_1x32" else N_OUT * 2
     _comb_inp_nbytes = max_tok * topk * _row_nbytes if comb_inp_nbytes is None else int(comb_inp_nbytes)
+    if not 0 < _comb_inp_nbytes < _BUFFER_OFFSET_ABI_BYTES:
+        raise ValueError("MegaMoE stage2 P2P buffer exceeds the 32-bit buffer-resource ABI")
     _expert_offset = rank * experts
 
     @fx.struct

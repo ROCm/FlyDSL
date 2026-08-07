@@ -456,8 +456,8 @@ def gemm2_compute(
                 n += 1
         return n
 
-    if const_expr(BM == 64 and BN == 256 and (a_dtype == "fp8" or not g2_b2stage)):
-        # Keep main's 1-stage A8W4 path; A4W4 retains its tuned 2-stage pipeline.
+    if const_expr(BM == 64 and BN == 256 and not g2_b2stage):
+        # Explicit g2_b2stage=False retains the one-stage fallback.
         for kt_iv, state in range(
             fx.Int32(0),
             K_TILES_RT,
