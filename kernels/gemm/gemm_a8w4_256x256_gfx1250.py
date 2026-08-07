@@ -129,7 +129,9 @@ def launch_gemm_a8w4_256x256(
         mn_oob = i32_m - blk_m  # valid M rows (A / C)
         sa_oob = (i32_m + 31) // 32 - blk_m // 32  # valid M-supers (scale-A)
 
-        base_ptr = fx.SharedAllocator(static=False).allocate(ARENA_B)._ptr
+        arena = fx.SharedAllocator(static=False)
+        arena.allocate(ARENA_B)
+        base_ptr = arena.base_ptr
 
         def _planar_base(offset, stride, stage):
             ptr = fx.add_offset(base_ptr, offset + stage * stride)

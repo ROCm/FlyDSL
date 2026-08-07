@@ -21,6 +21,7 @@ import flydsl.compiler as flyc  # noqa: E402,I001
 import flydsl.expr as fx  # noqa: E402
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
+from kernels.gemm.gemm_a4w4_256x256_gfx1250 import launch_gemm_a4w4_256x256  # noqa: E402
 from kernels.gemm.gemm_a8w4_256x256_gfx1250 import launch_gemm_a8w4_256x256  # noqa: E402
 from kernels.gemm.gemm_a8w4_mxscale_gfx1250 import launch_gemm_a8w4_mxscale  # noqa: E402
 from kernels.gemm.gemm_a8w8_gfx1250 import launch_gemm_a8w8  # noqa: E402
@@ -117,6 +118,7 @@ def _scales_ptpc(a_f32, b_f32, M, N, K, _fp4_w, _scale_exp, scale_scale):
 _SCALES = {"mx32": _scales_mx32, "mx128": _scales_mx128, "ptpc": _scales_ptpc}
 
 _A8W4_256_PROFILE = (256, 256, 128, 2, 2, 4, 1, 2)
+_A4W4_256_PROFILE = (256, 256, 256, 2, 2, 4, 1, 2)
 
 _MODES = {
     "a8w4_mx32": dict(
@@ -127,6 +129,11 @@ _MODES = {
         launch=launch_gemm_a8w4_256x256, fp4_w=True, scale="mx32", a8w8=False, tail=(), wrap=_i8,
         scale_exp=(127, 132), f16_kw=dict(scale_exp=(127, 127)),
         profile=_A8W4_256_PROFILE, smoke=(512, 512, 256, 256, 128, 2, 2),
+    ),
+    "a4w4_256x256": dict(
+        launch=launch_gemm_a4w4_256x256, fp4_w=True, scale="mx32", a8w8=False, tail=(), wrap=_i8,
+        scale_exp=(127, 132), f16_kw=dict(scale_exp=(127, 127)), fp4_act=True,
+        profile=_A4W4_256_PROFILE, smoke=(512, 1024, 256, 256, 256, 2, 2),
     ),
     "a8w8_mx32": dict(
         launch=launch_gemm_a8w8, fp4_w=False, scale="mx32", a8w8=True, tail=(True, 32), wrap=_i8,
@@ -189,8 +196,12 @@ def _build_case(
 ):
     spec = _MODES[mode]
     torch.manual_seed(0)
-    a = _random_fp8_bytes(M, K)
-    a_f32 = gemm_common_utils.fp8_e4m3_to_f32(a)
+    if spec.get("fp4_act"):
+        a = gemm_common_utils.random_fp4_packed(M, K)  # [M, K//2], two E2M1 nibbles per byte
+        a_f32, a_cols = gemm_common_utils.mxfp4_to_f32(a), K // 2
+    else:
+        a = _random_fp8_bytes(M, K)
+        a_f32, a_cols = gemm_common_utils.fp8_e4m3_to_f32(a), K
     if spec["fp4_w"]:
         b = gemm_common_utils.random_fp4_packed(N, K)  # [N, K//2], two E2M1 nibbles per byte
         b_f32, b_cols = gemm_common_utils.mxfp4_to_f32(b), K // 2
@@ -204,7 +215,7 @@ def _build_case(
     lda, ldc = K + lda_extra, N + ldc_extra
     dev = [
         torch.zeros(M, ldc, dtype=_DT[out_dtype], device="cuda"),
-        _with_strided_a(a, K, lda).cuda(),
+        _with_strided_a(a, a_cols, lda if a_cols == K else lda // 2).cuda(),
         gemm_common_utils.preshuffle_b_16x16(b, N, b_cols).cuda(),
         a_s.cuda(),
         b_s.cuda(),
@@ -343,10 +354,13 @@ def test_a8w4_256x256_rejects_other_profiles(knob):
         flyc.compile(launch_gemm_a8w4_256x256, *make_args(torch.cuda.current_stream()))
 
 
-def test_a8w4_256x256_back_to_back_determinism():
+@pytest.mark.parametrize("mode, K", [("a8w4_256x256", 4608), ("a4w4_256x256", 4096)])
+def test_256x256_back_to_back_determinism(mode, K):
+    """A drifting result across relaunches means a pipeline race, not quantization noise."""
     _require_gpu()
+    profile = _MODES[mode]["profile"]
     c_gpu, make_args, compiled = _assert_case(
-        "a8w4_256x256", 512, 512, 4608, *_A8W4_256_PROFILE[:6], cluster_m=1, cluster_n=2
+        mode, 512, 512, K, *profile[:6], cluster_m=profile[6], cluster_n=profile[7]
     )
     golden = c_gpu.clone()
     stream = torch.cuda.current_stream()
