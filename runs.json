@@ -1,20 +1,35 @@
 {
  "schema": 1,
- "updated": "2026-08-07T14:34:01Z",
+ "updated": "2026-08-07T15:10:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 31177603525,
+   "run_id": 31191024109,
    "pr": 960,
+   "commit": "4252dbd076603c59418f7c715d913cf77d352331",
+   "branch": "new_bias_alibi_sink_attention",
+   "event": "pull_request",
+   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31191024109",
+   "created_at": "2026-08-07T15:07:15Z",
+   "updated_at": "2026-08-07T15:07:35Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
+  {
+   "run_id": 31177603525,
+   "pr": null,
    "commit": "811ae069096929354249bbe3ee4aa1f06d4ce021",
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31177603525",
    "created_at": "2026-08-07T12:18:04Z",
-   "updated_at": "2026-08-07T14:32:49Z",
+   "updated_at": "2026-08-07T15:07:35Z",
    "actor": "amd-nprotaso",
    "jobs": [
     {
@@ -38,10 +53,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-07T14:32:48Z",
-     "completed_at": null,
+     "completed_at": "2026-08-07T15:07:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31177603525/job/92863858271"
     }
    ]
@@ -200,11 +215,11 @@
    "branch": "pr/nvvm-target",
    "event": "pull_request",
    "title": "[Feat] Add an experimental cuda nvvm backend",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31159580754",
    "created_at": "2026-08-07T07:55:29Z",
-   "updated_at": "2026-08-07T12:37:02Z",
+   "updated_at": "2026-08-07T15:07:45Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -219,9 +234,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-07T12:37:01Z",
+     "started_at": "2026-08-07T15:07:44Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31159580754/job/92867343205"
     },
@@ -2133,21 +2148,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31016762631",
    "created_at": "2026-08-05T14:44:50Z",
    "updated_at": "2026-08-05T14:46:25Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 31016607719,
-   "pr": null,
-   "commit": "7d861b1cd843d96430f171c59d7ed75f90d04572",
-   "branch": "main",
-   "event": "push",
-   "title": "[gfx1250] Migrate gemm kernels to the stable DSL API (#967)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31016607719",
-   "created_at": "2026-08-05T14:42:59Z",
-   "updated_at": "2026-08-05T14:44:51Z",
    "actor": "coderfeli",
    "jobs": []
   }
