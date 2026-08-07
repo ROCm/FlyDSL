@@ -29,7 +29,7 @@ from kernels.moe.mxfp_moe.mxfp4_gemm_common import (
 
 def scale_view(arg_scale, base_dw, K_TILES_TOTAL, k0_stride_dw=64, num_records_bytes=None):
     """View one e8m0 scale word, optionally bounded to the real buffer extent."""
-    base_dw = fx.Int32(rocdl.readfirstlane(T.i32, base_dw))
+    base_dw = rocdl.readfirstlane(T.i32, base_dw)
     i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=4)
     off_i64 = fx.Int64(base_dw)
     base_iter = fx.inttoptr(i32_ptr_ty, fx.Int64(arg_scale) + off_i64 * fx.Int64(4))
@@ -217,11 +217,11 @@ def gemm2_compute(
     n_block_idx = bx_i32 - m_block_idx * num_n_blocks
     eids_ptr = global_typed_ptr(arg_eids, T.i32)
     if const_expr(SBM == BM):
-        e = fx.Int32(rocdl.readfirstlane(T.i32, eids_ptr[m_block_idx]))
+        e = rocdl.readfirstlane(T.i32, eids_ptr[m_block_idx])
         m_row = m_block_idx * BM
     else:
         m_row = m_block_idx * BM
-        e = fx.Int32(rocdl.readfirstlane(T.i32, eids_ptr[m_row // fx.Int32(SBM)]))
+        e = rocdl.readfirstlane(T.i32, eids_ptr[m_row // fx.Int32(SBM)])
     if const_expr(expert_offset != 0):
         e = e - fx.Int32(expert_offset)
 
@@ -327,7 +327,7 @@ def gemm2_compute(
                 ascale_views[sub][lane_div_16, lane_mod_16, chunk_kt, None],
                 saf,
             )
-            out.append(Vec(saf.load())[0].ir_value())
+            out.append(Vec(saf.load())[0])
         return out
 
     # Stream B weights and scales through registers so use_nt reaches the ISA cache policy.
@@ -398,12 +398,12 @@ def gemm2_compute(
         if const_expr(tilesPerScaleChunk == 1):
             return scale
         scale_shift = (kt_rt % fx.Int32(tilesPerScaleChunk)) * fx.Int32(16)
-        return fx.Int32(scale).shrui(scale_shift).ir_value()
+        return fx.Int32(scale).shrui(scale_shift)
 
     def mfma_cluster(bqf, bsf, sa, kt_rt):
         # opsel (no gate/up split): mni=J//2, in_b=J%2; sa is a per-32-row-chunk list.
         sa = [shift_scale_word(sa[sub], kt_rt) for sub in range_constexpr(kScaleSubBlocks)]
-        sb_words = [shift_scale_word(Vec(bsf[mni].load())[0].ir_value(), kt_rt) for mni in range_constexpr(nPairs)]
+        sb_words = [shift_scale_word(Vec(bsf[mni].load())[0], kt_rt) for mni in range_constexpr(nPairs)]
         for J in range_constexpr(numAccN):
             mni, in_b = J // 2, J % 2
             sb = sb_words[mni]
@@ -456,8 +456,8 @@ def gemm2_compute(
                 n += 1
         return n
 
-    if const_expr(BM == 64 and BN == 256 and not g2_b2stage):
-        # Retained as an explicit fallback for direct A/B experiments.
+    if const_expr(BM == 64 and BN == 256 and (a_dtype == "fp8" or not g2_b2stage)):
+        # Keep main's 1-stage A8W4 path; A4W4 retains its tuned 2-stage pipeline.
         for kt_iv, state in range(
             fx.Int32(0),
             K_TILES_RT,
@@ -537,7 +537,7 @@ def gemm2_compute(
             # A-scale vmem load(s) for K-tile kt_rt into the given (per-stage) fragment(s).
             sa = load_a_scale_tile(kt_rt)
             for sub in range_constexpr(kScaleSubBlocks):
-                saf[sub].store(sa[sub])
+                saf[sub].store(Vec.filled(1, sa[sub], Int32))
 
         def load_carry():
             return load_c_carry() + load_b_carry()
@@ -594,7 +594,7 @@ def gemm2_compute(
             # Consume the prefetched A-scale carry or use the synchronous
             # fallback when scale prefetching is disabled.
             if const_expr(g2_ascale_pf):
-                sa = [Vec(cur_saf[sub].load())[0].ir_value() for sub in range_constexpr(kScaleSubBlocks)]
+                sa = [Vec(cur_saf[sub].load())[0] for sub in range_constexpr(kScaleSubBlocks)]
             else:
                 sa = load_a_scale_tile(kt_rt)
             if const_expr(not g2_bhoist):
@@ -627,10 +627,10 @@ def _spart_output_tile_index(block_1d_id, M0, N0, group_num, m01):
     group_id_y = block_1d_id // gn
     group_id_x = block_1d_id - group_id_y * gn
 
-    # remap = group_id_x <= big_group_num ? gx*gs + gy : gx*gs + big - gx + gy
+    # remap = group_id_x < big_group_num ? gx*gs + gy : gx*gs + big - gx + gy
     remap_a = group_id_x * group_size + group_id_y
     remap_b = group_id_x * group_size + big_group_num - group_id_x + group_id_y
-    remap = (group_id_x <= big_group_num).select(remap_a, remap_b)
+    remap = (group_id_x < big_group_num).select(remap_a, remap_b)
 
     idx_M0 = remap // n0
     idx_N0 = remap - idx_M0 * n0
@@ -652,7 +652,7 @@ def _spart_output_tile_index(block_1d_id, M0, N0, group_num, m01):
     return m_block_idx, n_block_idx
 
 
-def _resolve_g2_knobs(g2_bhoist, g2_ascale_pf, g2_spart):
+def _resolve_g2_knobs(g2_bhoist, g2_ascale_pf, g2_spart, g2_bf16_lds, use_reduce):
     """Resolve explicit GEMM2 knobs against deterministic defaults."""
     g2_bhoist = True if g2_bhoist is None else bool(g2_bhoist)
     g2_ascale_pf = True if g2_ascale_pf is None else bool(g2_ascale_pf)
@@ -661,4 +661,5 @@ def _resolve_g2_knobs(g2_bhoist, g2_ascale_pf, g2_spart):
     g2_m01 = g2_spart % 100 if g2_spart > 0 else 0
     if g2_spart > 0 and (g2_group_num < 1 or g2_m01 < 1):
         raise AssertionError(f"g2_spart={g2_spart} must encode GroupNum>=1,M01>=1 as GroupNum*100+M01 (e.g. 402)")
-    return g2_bhoist, g2_ascale_pf, g2_spart, g2_group_num, g2_m01
+    g2_bf16_lds = (True if g2_bf16_lds is None else bool(g2_bf16_lds)) and use_reduce
+    return g2_bhoist, g2_ascale_pf, g2_spart, g2_group_num, g2_m01, g2_bf16_lds
