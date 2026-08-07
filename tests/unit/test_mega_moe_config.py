@@ -204,6 +204,34 @@ def test_explicit_p2p_quant_override_is_preserved():
     assert select_mega_moe_config(2048, 2048, "none").p2p_quant == "none"
 
 
+@pytest.mark.parametrize(
+    "a_dtype,tokens,persist_cu,persist_strided",
+    [
+        ("fp8", 256, 128, False),
+        ("fp8", 512, 240, True),
+        ("fp4", 512, 240, True),
+    ],
+)
+def test_fp8_transport_restores_tuned_medium_stage2_profiles(a_dtype, tokens, persist_cu, persist_strided):
+    config = apply_mega_moe_quant_config(
+        select_mega_moe_config(tokens, tokens, "fp8_blockwise_1x32", a_dtype=a_dtype),
+        tokens,
+        a_dtype,
+    )
+    stage2 = config.stage2
+
+    assert (stage2.block_m, stage2.block_n) == (64, 256)
+    assert (stage2.persist, stage2.persist_cu, stage2.use_nt) == (True, persist_cu, False)
+    assert (stage2.persist_strided, stage2.deep_a_pipeline) == (persist_strided, True)
+
+    none = apply_mega_moe_quant_config(
+        select_mega_moe_config(tokens, tokens, "none", a_dtype=a_dtype),
+        tokens,
+        a_dtype,
+    ).stage2
+    assert (none.block_m, none.block_n) == (32, 128)
+
+
 def test_nearby_tokens_share_the_bucket_config():
     assert select_mega_moe_config(500, 512) is select_mega_moe_config(512, 512)
 

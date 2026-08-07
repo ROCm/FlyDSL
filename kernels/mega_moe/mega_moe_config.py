@@ -370,32 +370,36 @@ def select_mega_moe_config(
 
 
 def apply_mega_moe_quant_config(config: MegaMoEConfig, tokens: int, a_dtype: str) -> MegaMoEConfig:
-    """Apply activation-dtype-specific tuning without changing the shared table."""
+    """Apply activation- and transport-specific tuning without changing the shared table."""
     if a_dtype not in ("fp4", "fp8"):
         raise ValueError(f"unsupported activation dtype={a_dtype!r}")
-    if a_dtype == "fp8":
-        return config
 
     bucket = nearest_token_bucket(tokens)
     stage1_overrides = {}
     stage2_overrides = {}
+    if config.p2p_quant == "fp8_blockwise_1x32" and bucket in (256, 512):
+        stage2_overrides.update(
+            block_m=64,
+            block_n=256,
+            persist=True,
+            persist_cu=128 if bucket == 256 else 240,
+            use_nt=False,
+            persist_strided=bucket == 512,
+            deep_a_pipeline=True,
+        )
+
+    if a_dtype == "fp8":
+        if not stage2_overrides:
+            return config
+        return replace(config, stage2=replace(config.stage2, **stage2_overrides))
+
     if bucket <= 128 and config.stage1.async_a_copy:
         # FP4 halves the A K-step bytes. The 8-wave compact kernel therefore
         # needs SBM64 so every thread owns one or more 16-byte async copies.
         stage1_overrides["sort_block_m"] = 64
     if tokens >= 256:
         stage1_overrides["waves_per_eu_hint"] = 1
-    if bucket == 256 and config.p2p_quant == "fp8_blockwise_1x32":
-        stage2_overrides.update(
-            block_m=64,
-            block_n=256,
-            persist=True,
-            persist_cu=128,
-            use_nt=False,
-            persist_strided=False,
-            deep_a_pipeline=True,
-        )
-    elif bucket == 512:
+    if bucket == 512:
         stage1_overrides.update(b_nt=0, num_dispatch_cu=160)
     elif bucket == 1024:
         stage1_overrides.update(sort_block_m=128, num_dispatch_cu=88)

@@ -354,7 +354,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         g2_bhoist, g2_ascale_pf, g2_spart, False, False
     )
     is_f8 = a_dtype == "fp8"
-    # PR959-style deeper A ring: selected BN256 profiles can retire two slots per WG fence.
+    # Selected BN256 profiles use a deeper A ring to retire two slots per WG fence.
     aStages = 4 if g2_deep_a_pipeline else kStages + 1
     KH_TILE_A = BK // (1 if is_f8 else 2)
     compute_lds_bytes = _stage2_lds_bytes(BM, BN, BK, a_dtype, aStages)
