@@ -280,7 +280,7 @@ def _build_kernel(
 
         def load_vec(div_tensor, idx, *, layout=full_lay, atom=full_atom, dt=elem_dtype):
             r = fx.make_rmem_tensor(layout, dt)
-            fx.copy_atom_call(atom, fx.slice(div_tensor, (None, idx)), r)
+            fx.copy(atom, fx.slice(div_tensor, (None, idx)), r)
             return fx.memref_load_vec(r)
 
         bid_x = fx.block_idx.x  # 0..H-1 (Q head) or H (KV)

@@ -139,14 +139,14 @@ def build_fused_rope_cache_module(
         # Helper: load a VEC_WIDTH vector from a divided 1D tensor at given index
         def load_vec(div_tensor, idx, atom=None):
             r = fx.make_rmem_tensor(vec_lay, elem_dtype)
-            fx.copy_atom_call(atom or copy_atom, fx.slice(div_tensor, (None, idx)), r)
+            fx.copy(atom or copy_atom, fx.slice(div_tensor, (None, idx)), r)
             return fx.memref_load_vec(r)
 
         # Helper: store a VEC_WIDTH vector to a divided 1D tensor at given index
         def store_vec(val, div_tensor, idx, atom=None):
             r = fx.make_rmem_tensor(vec_lay, elem_dtype)
             fx.memref_store_vec(val, r)
-            fx.copy_atom_call(atom or copy_atom, r, fx.slice(div_tensor, (None, idx)))
+            fx.copy(atom or copy_atom, r, fx.slice(div_tensor, (None, idx)))
 
         # Helper: get the rotary-pair element via ds_bpermute (LDS cross-lane shuffle).
         # For NeoX RoPE, the pair of thread tid is tid XOR vecs_per_half.
@@ -276,8 +276,8 @@ def build_fused_rope_cache_module(
                         vs_div = fx.logical_divide(vs_buf, f32_lay)
                         r_ks = fx.make_rmem_tensor(f32_lay, fx.Float32)
                         r_vs = fx.make_rmem_tensor(f32_lay, fx.Float32)
-                        fx.copy_atom_call(f32_copy_atom, fx.slice(ks_div, (None, 0)), r_ks)
-                        fx.copy_atom_call(f32_copy_atom, fx.slice(vs_div, (None, 0)), r_vs)
+                        fx.copy(f32_copy_atom, fx.slice(ks_div, (None, 0)), r_ks)
+                        fx.copy(f32_copy_atom, fx.slice(vs_div, (None, 0)), r_vs)
                         k_scale_val = fx.memref_load_vec(r_ks)[0]
                         v_scale_val = fx.memref_load_vec(r_vs)[0]
                         k_rcp = fx.rocdl.rcp(T.f32, k_scale_val)
