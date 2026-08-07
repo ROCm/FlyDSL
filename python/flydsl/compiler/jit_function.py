@@ -7,7 +7,6 @@ import hashlib
 import inspect
 import os
 import pickle
-import pkgutil
 import threading
 import time
 import types
@@ -306,7 +305,7 @@ def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_di
 
     Covers:
       1. All Python source files under flydsl.compiler.*, flydsl.expr.*,
-         flydsl.runtime.*, flydsl.utils.*
+         flydsl.extension.*, flydsl.runtime.*, flydsl.utils.*
       2. Native shared libraries (_mlirDialectsFly*.so, libFly*.so, libfly_jit_runtime.so,
          libmlir_rocm_runtime.so)
       3. flydsl.__version__
@@ -321,23 +320,15 @@ def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_di
     flydsl_root = Path(flydsl.__file__).resolve().parent
 
     # 1) Hash all Python source files in key sub-packages.
-    pkg_prefixes = [
-        (str(flydsl_root / "compiler"), "flydsl.compiler."),
-        (str(flydsl_root / "expr"), "flydsl.expr."),
-        (str(flydsl_root / "runtime"), "flydsl.runtime."),
-        (str(flydsl_root / "utils"), "flydsl.utils."),
-    ]
-    for pkg_path, prefix in pkg_prefixes:
-        if not os.path.isdir(pkg_path):
+    for package_name in ("compiler", "expr", "extension", "runtime", "utils"):
+        pkg_path = flydsl_root / package_name
+        if not pkg_path.is_dir():
             continue
-        for lib in pkgutil.walk_packages([pkg_path], prefix=prefix):
-            try:
-                spec = lib.module_finder.find_spec(lib.name)
-                if spec and spec.origin and os.path.isfile(spec.origin):
-                    with open(spec.origin, "rb") as f:
-                        contents.append(hashlib.sha256(f.read()).hexdigest())
-            except Exception:
-                pass
+        for py_file in sorted(pkg_path.rglob("*.py")):
+            with open(py_file, "rb") as f:
+                source_hash = hashlib.sha256(f.read()).hexdigest()
+            relative_path = py_file.relative_to(flydsl_root).as_posix()
+            contents.append(f"{relative_path}:{source_hash}")
 
     p = flydsl_root / "__init__.py"
     if p.is_file():
@@ -1472,7 +1463,6 @@ class JitFunction:
             _compile_lock_ctx = nullcontext((None, None))
 
         with _compile_lock_ctx as (_lock_result, _cache_writer):
-
             if _lock_result is not None and not getattr(_lock_result, "_link_libs", None):
                 # Cache hit after waiting for another process to compile.
                 compiled_func = _lock_result
@@ -1646,7 +1636,7 @@ class CompiledFunction:
         return self._call_state(args)
 
 
-def _compile_impl(func, *args) -> CompiledFunction:
+def _compile_impl(func, *args) -> Optional[CompiledFunction]:
     """Pre-compile a ``@flyc.jit`` function, returning a fast callable.
 
     Usage::
@@ -1662,6 +1652,9 @@ def _compile_impl(func, *args) -> CompiledFunction:
 
     Constexpr values are baked in at compile time and ignored on subsequent
     calls; only runtime values (data pointers, scalars, stream) may change.
+
+    When ``COMPILE_ONLY`` is enabled, compilation and cache persistence still
+    run, but no execution engine is materialized and ``None`` is returned.
     """
     if not isinstance(func, JitFunction):
         raise TypeError(f"flyc.compile() expects a @flyc.jit function, got {type(func).__name__}")
@@ -1669,6 +1662,8 @@ def _compile_impl(func, *args) -> CompiledFunction:
     jf = func
 
     jf(*args)
+    if env.compile.compile_only:
+        return None
 
     # Retrieve the CallState (already built by __call__ above).
     sig = jf._sig  # guaranteed initialized after __call__
