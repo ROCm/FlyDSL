@@ -21,6 +21,7 @@ if _REPO_ROOT not in sys.path:
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.gemm.rdna3_f16_gemm import create_wmma_gemm_module as _create_wmma_gemm_module_gfx11  # noqa: E402
+from kernels.gemm.rdna3_f16_gemm_autotune import pick_tile  # noqa: E402
 from kernels.gemm.rdna_f16_gemm import create_wmma_gemm_module as _create_wmma_gemm_module_gfx12  # noqa: E402
 from kernels.gemm.rdna_fp8_preshuffle_gemm import (  # noqa: E402
     compile_fp8_gemm,
@@ -47,6 +48,12 @@ def _requires_rdna_wmma():
     """gfx11* (RDNA3/RDNA3.5) or gfx120* (RDNA4) — anything with f16/bf16 WMMA."""
     if not (ARCH.startswith("gfx11") or ARCH.startswith("gfx120")):
         pytest.skip(f"RDNA WMMA GEMM requires gfx11* or gfx120*, got {ARCH}")
+
+
+def _requires_rdna3():
+    """Only rdna3_f16_gemm picks its tile from the shape; gfx12 still uses a fixed one."""
+    if not ARCH.startswith("gfx11"):
+        pytest.skip(f"gfx11-only behaviour, got {ARCH}")
 
 
 def create_wmma_gemm_module(*args, **kwargs):
@@ -161,6 +168,87 @@ def test_f16_gemm_f32_output(M, N, K):
 
     C_ref = A.float() @ B_T.float().T
     assert verify_output(C.float(), C_ref, atol=0.05, rtol=0.05)
+
+
+@pytest.mark.parametrize(
+    "M, N, K",
+    [
+        pytest.param(384, 384, 2048, id="384x384x2048"),
+        pytest.param(1152, 1152, 1024, id="1152x1152x1024"),
+        pytest.param(2560, 2560, 1024, id="2560x2560x1024", marks=pytest.mark.large_shape),
+    ],
+)
+def test_f16_gemm_grid_m_not_a_multiple_of_the_group_width(M, N, K):
+    """Shapes whose M-tile count is not a multiple of the L2 grouping cap.
+
+    The grid swizzle derives bid_m from a fixed group width, so before the width
+    was snapped down to a divisor of grid_m the last group addressed tiles past
+    the end of the grid. This is reachable at the default 128x128 tile, not only
+    at narrower ones: measured on gfx1100, 1152, 1280 and 1664 square came back
+    wrong by roughly 400x the bf16 rounding floor, while 1536 and 2560 square
+    faulted the GPU. Which of the two you get depends on whether the address past
+    the grid happens to be mapped, so the silent wrong answer is the common case.
+
+    At the default 128x128 tile these give grid_m of 3, 9 and 20, none of them a
+    multiple of the group width of 8.
+    """
+    _requires_rdna3()
+    torch.manual_seed(42)
+
+    launch_fn, BLOCK_M, _, _ = _create_wmma_gemm_module_gfx11(M, N, K, in_dtype="bf16", out_dtype="bf16")
+    grid_m = M // BLOCK_M
+    assert grid_m % 8, f"grid_m={grid_m} divides the default group width; shape no longer covers the fault"
+
+    A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") * 0.1
+    B_T = torch.randn(N, K, dtype=torch.bfloat16, device="cuda") * 0.1
+    C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
+
+    launch_fn(C, A, B_T, torch.cuda.current_stream())
+    torch.cuda.synchronize()
+
+    C_ref = A.float() @ B_T.float().T
+    assert verify_output(C.float(), C_ref, atol=0.05, rtol=0.05)
+
+
+@pytest.mark.parametrize(
+    "M, N, K",
+    [
+        pytest.param(256, 256, 4096, id="256x256x4096"),
+        pytest.param(1024, 1024, 1024, id="1024x1024x1024"),
+    ],
+)
+def test_f16_gemm_autotuned_matches_the_heuristic_path(M, N, K):
+    """The autotune wrapper, left unconfigured, is a pass-through.
+
+    It resolves through the tuner once and then calls the built module directly:
+    the tuner re-derives its cache key on every call, which costs more host time
+    than these shapes take on the GPU. So this checks both halves — the same
+    tile as ``pick_tile``, and that the second call does not build again.
+    """
+    _requires_rdna3()
+    from kernels.gemm import rdna3_f16_gemm_autotune as gemm_autotune
+
+    torch.manual_seed(42)
+    A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") * 0.1
+    B_T = torch.randn(N, K, dtype=torch.bfloat16, device="cuda") * 0.1
+    C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
+
+    signature = (M, N, K, "bf16", "bf16", "rn")
+    gemm_autotune._resolved.pop(signature, None)
+
+    gemm_autotune.rdna3_gemm_autotuned(C, A, B_T)
+    torch.cuda.synchronize()
+    assert verify_output(C.float(), A.float() @ B_T.float().T, atol=0.05, rtol=0.05)
+
+    resolved = gemm_autotune._resolved[signature]
+    expected_tile = pick_tile(M, N, K)
+    assert resolved is gemm_autotune._build(M, N, K, "bf16", "bf16", "rn", *expected_tile)
+
+    C.zero_()
+    gemm_autotune.rdna3_gemm_autotuned(C, A, B_T)
+    torch.cuda.synchronize()
+    assert verify_output(C.float(), A.float() @ B_T.float().T, atol=0.05, rtol=0.05)
+    assert gemm_autotune._resolved[signature] is resolved
 
 
 @pytest.mark.parametrize(
