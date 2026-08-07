@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-07T04:44:05Z",
+ "updated": "2026-08-07T04:55:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -337,11 +337,11 @@
    "branch": "zhimding/simplify_aot_logs_0806",
    "event": "pull_request",
    "title": "[cleanup] Remove COMPILE_ONLY print from the JIT call path",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31118300773",
    "created_at": "2026-08-06T16:01:10Z",
-   "updated_at": "2026-08-07T03:27:29Z",
+   "updated_at": "2026-08-07T04:53:59Z",
    "actor": "zhiding512",
    "jobs": [
     {
@@ -367,10 +367,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-07T03:27:29Z",
-     "completed_at": null,
+     "completed_at": "2026-08-07T04:53:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31118300773/job/92752155688"
     }
    ]
