@@ -59,6 +59,9 @@ def test_group_width_always_divides_the_grid(grid_m, group_m):
         (1, 1), (1, 8), (8, 1),
         (12, 12),   # 1536x1536 at 128x128: the grid that faulted
         (20, 20),   # 2560x2560 at 128x128: likewise
+        (9, 9),     # 1152x1152: returned a wrong C instead of faulting
+        (10, 10),   # 1280x1280: likewise
+        (13, 13),   # 1664x1664: likewise
         (3, 7), (5, 4), (7, 3), (16, 16), (12, 5), (20, 3),
     ],
 )
@@ -66,7 +69,9 @@ def test_swizzle_covers_every_tile_exactly_once(grid_m, grid_n):
     """The swizzle must be a bijection onto the grid.
 
     With a grouping width that does not divide grid_m the last group runs off the
-    end: bid_m exceeds grid_m, the kernel writes past C, and the launch faults.
+    end: bid_m exceeds grid_m and the kernel addresses past C. Measured on gfx1100
+    that is a wrong result at grid_m 9, 10 and 13 and a hard fault at 12 and 20,
+    so a bijection here is a memory-safety property, not just a tidy mapping.
     """
     mapped = _swizzled_tiles(grid_m, grid_n)
 

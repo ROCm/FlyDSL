@@ -55,9 +55,9 @@ def _group_width(grid_m, group_m):
 
     ``_swizzle_tile_id`` derives bid_m from a fixed group width, so a grid_m that
     is not a multiple of it makes the final group address tiles past the end of
-    the grid and fault. At the default 128x128 tile grid_m divides evenly for
-    every shape in use, which is why this only surfaces once a caller asks for a
-    narrower tile.
+    the grid. That is reachable at the default 128x128 tile: on gfx1100 it writes
+    a wrong C at M of 1152, 1280 and 1664, and faults outright at 1536 and 2560,
+    depending on whether the address past the grid happens to be mapped.
     """
     return max(d for d in range(1, min(group_m, grid_m) + 1) if grid_m % d == 0)
 

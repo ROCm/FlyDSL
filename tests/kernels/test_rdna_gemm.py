@@ -182,8 +182,11 @@ def test_f16_gemm_grid_m_not_a_multiple_of_the_group_width(M, N, K):
 
     The grid swizzle derives bid_m from a fixed group width, so before the width
     was snapped down to a divisor of grid_m the last group addressed tiles past
-    the end of the grid and the kernel faulted writing C. Every shape in use when
-    the swizzle was written happened to divide evenly, which is why it survived.
+    the end of the grid. This is reachable at the default 128x128 tile, not only
+    at narrower ones: measured on gfx1100, 1152, 1280 and 1664 square came back
+    wrong by roughly 400x the bf16 rounding floor, while 1536 and 2560 square
+    faulted the GPU. Which of the two you get depends on whether the address past
+    the grid happens to be mapped, so the silent wrong answer is the common case.
 
     At the default 128x128 tile these give grid_m of 3, 9 and 20, none of them a
     multiple of the group width of 8.
