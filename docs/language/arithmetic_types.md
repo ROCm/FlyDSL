@@ -75,6 +75,29 @@ and emits no MLIR (`Int32(3) + Int32(4)` ⇒ `Int32` holding `7`). As soon as on
 operand is run-time, the result is run-time and an MLIR op is emitted. This
 holds uniformly across arithmetic, comparison, bitwise, and shift operators.
 
+### Integer wrap-around
+
+Folding is *not* unbounded Python arithmetic. Constructing an integer — whether
+from a Python `int`, from another integer type, or as the result of a fold —
+reduces the value modulo `2**width`, sign-extending or truncating exactly as the
+corresponding C cast would. This is what keeps a folded result equal to what the
+run-time op would have computed, since `arith.addi` / `muli` / `trunci` wrap on
+their own.
+
+| Expression | Result |
+|---|---|
+| `Uint32(0xFFFFFFFF) + Uint32(2)` | `Uint32` holding `1` |
+| `Uint64(0xFFFFFFFFFFFFFFFF) + Uint64(2)` | `Uint64` holding `1` |
+| `Uint64(-1)` | `0xFFFFFFFFFFFFFFFF` |
+| `Int8(200)` | `-56` |
+| `Uint8(Int32(-1))` | `255` (sign-extend, then truncate) |
+| `Uint64(Uint128(2**100 + 7))` | `7` |
+| `Int4(20)` | `4` |
+
+The reduction applies at every width, including `Int4` / `Int128` / `Uint128`
+and values that exceed any machine integer. `Boolean` is the one exception: it
+is one bit wide and signed, but normalizes to `0` / `1` rather than `0` / `-1`.
+
 ### Python literals
 
 A bare literal stays plain Python while it only meets other Python values

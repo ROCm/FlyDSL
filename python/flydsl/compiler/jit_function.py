@@ -1578,7 +1578,6 @@ class JitFunction:
 
         # OUTSIDE lock: engine init + kernel launch
         if env.compile.compile_only:
-            print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={get_backend().target.arch})")
             return None
 
         # The in-process CompiledArtifact cache above owns the ExecutionEngine/
