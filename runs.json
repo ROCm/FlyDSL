@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-07T08:58:03Z",
+ "updated": "2026-08-07T09:00:19Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31163858482,
+   "pr": 945,
+   "commit": "48c732be7fd6450b8725a4950856aa7e85ff849e",
+   "branch": "jli/update-llvm-basemain",
+   "event": "pull_request",
+   "title": "[LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31163858482",
+   "created_at": "2026-08-07T08:57:26Z",
+   "updated_at": "2026-08-07T08:57:41Z",
+   "actor": "Boss2002n",
+   "jobs": []
+  },
   {
    "run_id": 31163693061,
    "pr": 972,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31163693061",
    "created_at": "2026-08-07T08:55:00Z",
-   "updated_at": "2026-08-07T08:55:37Z",
+   "updated_at": "2026-08-07T08:57:54Z",
    "actor": "yanboshao",
    "jobs": []
   },
@@ -68,11 +83,11 @@
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
    "title": "[LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31158486047",
    "created_at": "2026-08-07T07:39:00Z",
-   "updated_at": "2026-08-07T08:01:44Z",
+   "updated_at": "2026-08-07T08:57:29Z",
    "actor": "Boss2002n",
    "jobs": [
     {
@@ -96,10 +111,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-07T08:01:44Z",
-     "completed_at": null,
+     "completed_at": "2026-08-07T08:57:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31158486047/job/92807964774"
     }
    ]
@@ -300,11 +315,11 @@
    "branch": "main",
    "event": "push",
    "title": "compile only remove log (#977)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31153598433",
    "created_at": "2026-08-07T06:20:31Z",
-   "updated_at": "2026-08-07T06:24:36Z",
+   "updated_at": "2026-08-07T08:56:24Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -319,9 +334,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-07T06:24:36Z",
+     "started_at": "2026-08-07T08:56:23Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31153598433/job/92788918298"
     },
@@ -2031,49 +2046,6 @@
      "started_at": "2026-08-05T13:52:31Z",
      "completed_at": "2026-08-05T14:42:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31011979433/job/92327186840"
-    }
-   ]
-  },
-  {
-   "run_id": 31011495826,
-   "pr": null,
-   "commit": "d3441573161d9bdc33d86b40a03816c2fb8b6b18",
-   "branch": "pr/enh-known-block-size",
-   "event": "pull_request",
-   "title": "[Feat] Add fx.known_block_size() as constant accessor",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31011495826",
-   "created_at": "2026-08-05T13:42:21Z",
-   "updated_at": "2026-08-05T13:48:35Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-05T13:46:48Z",
-     "completed_at": "2026-08-05T13:48:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31011495826/job/92325586142"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-05T13:46:45Z",
-     "completed_at": "2026-08-05T13:48:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31011495826/job/92325586184"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-05T13:45:59Z",
-     "completed_at": "2026-08-05T13:48:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31011495826/job/92325586240"
     }
    ]
   }
