@@ -353,7 +353,14 @@ def create_wmma_gemm_module(
 
             results = yield list(s_accs)
 
-        accs = list(results[:n_acc])
+        # A one-atom tile carries one scf.for result. FlyDSL intentionally
+        # unwraps a single result to its value, while multiple results remain a
+        # sliceable sequence. Keep the kernel-side accumulator container stable
+        # in both cases so 16x16 tiles can reach the epilogue.
+        if const_expr(n_acc == 1):
+            accs = [results]
+        else:
+            accs = list(results[:n_acc])
 
         last_read_off = ((num_k_tiles - 1) % 2) * c_lds_buf_stride
         for rk in range_constexpr(reg_k):
