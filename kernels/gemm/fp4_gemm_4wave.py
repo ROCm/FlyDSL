@@ -39,6 +39,7 @@ from kernels.gemm.fp8_gemm_utils import (
     make_fp8_buffer_tensor,
     swizzle_128,
     wait_barrier,
+    xcd_swizzle,
 )
 
 
@@ -123,33 +124,6 @@ def _s2r_thunks(s2r, src, holder, n, pre):
     return ts
 
 
-def _min(a, b):
-    return arith.select(a < b, a, b)
-
-
-def _xcd_swizzle(num_pid_m, num_pid_n):
-    NUM_XCDS = 8
-    WGM = 4
-    NUM_CUS = 32 * NUM_XCDS
-    SWIZZLE_THRESHOLD = 4 * NUM_CUS
-
-    wgid = fx.block_idx.x
-    num_wg = num_pid_m * num_pid_n
-    simple_m, simple_n = divmod(wgid, num_pid_n)
-
-    intra_xcd, xcd = divmod(wgid, NUM_XCDS)
-    wgid_remap = xcd * (num_wg // NUM_XCDS) + intra_xcd
-    num_wgid_in_group = WGM * num_pid_n
-    group_id, intra_group = divmod(wgid_remap, num_wgid_in_group)
-    first_pid_m = group_id * WGM
-    group_size_m = _min(num_pid_m - first_pid_m, WGM)
-    pid_n, intra_group_m = divmod(intra_group, group_size_m)
-    pid_m = first_pid_m + intra_group_m
-
-    use_simple = (num_wg < SWIZZLE_THRESHOLD) | (num_wg % NUM_XCDS != 0)
-    return (arith.select(use_simple, simple_m, pid_m), arith.select(use_simple, simple_n, pid_n))
-
-
 # ── FP4 scaled MFMA ──────────────────────────────────────────────────────────
 _FP4_CBSZ = 4
 _FP4_BLGP = 4
@@ -230,7 +204,7 @@ class Mfma16x16x128Fp4:
         # Build the op_sel / op_sel_hi suffix (compile-time). op_sel[2]/hi[2]=0.
         opsel = f"op_sel:[{ia},{jb},0]"
         opsel_hi = f"op_sel_hi:[{ksub},{ksub},0]"
-        asm = "v_mfma_scale_f32_16x16x128_f8f6f4 $0, $1, $2, $0, $3, $4 " f"{opsel} {opsel_hi} cbsz:4 blgp:4"
+        asm = f"v_mfma_scale_f32_16x16x128_f8f6f4 $0, $1, $2, $0, $3, $4 {opsel} {opsel_hi} cbsz:4 blgp:4"
         return _llvm.inline_asm(
             self.res_ty,
             [
@@ -392,7 +366,7 @@ def compile_fp4_gemm_4w(
 
         n_blocks = ceildiv(c_n, BLOCK_N)
         if const_expr(use_xcd_remap):
-            tile_i, tile_j = _xcd_swizzle(ceildiv(c_m, BLOCK_M), n_blocks)
+            tile_i, tile_j = xcd_swizzle(ceildiv(c_m, BLOCK_M), n_blocks)
         else:
             tile_i, tile_j = divmod(fx.block_idx.x, n_blocks)
 
