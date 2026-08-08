@@ -105,7 +105,7 @@ LogicalResult compileAssemblyObjects(gpu::BinaryOp binary) {
     auto object = dyn_cast<gpu::ObjectAttr>(attr);
     auto target =
         object ? dyn_cast<ROCDL::ROCDLTargetAttr>(object.getTarget()) : ROCDL::ROCDLTargetAttr();
-    if (!target || object.getFormat() != gpu::CompilationTarget::Assembly) {
+    if (!object || !target || object.getFormat() != gpu::CompilationTarget::Assembly) {
       compiled.push_back(attr);
       continue;
     }

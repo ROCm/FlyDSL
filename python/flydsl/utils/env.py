@@ -238,6 +238,13 @@ class CompileEnvManager(EnvManager):
     arch = OptStr("", env_var="ARCH", description="Override target GPU architecture (e.g. gfx942, gfx950)")
     backend = OptStr("rocm", description="GPU compile backend id (e.g. rocm)")
     llvm_dir = OptStr("", description="External LLVM/MLIR install prefix for final code generation")
+    rocm_path = OptStr(
+        "",
+        description=(
+            "ROCm toolkit root supplying AMDGCN device bitcode (<root>/amdgcn/bitcode). "
+            "Overrides the bitcode bundled with FlyDSL and the ROCM_PATH/ROCM_ROOT/ROCM_HOME variables"
+        ),
+    )
 
 
 class DebugEnvManager(EnvManager):
