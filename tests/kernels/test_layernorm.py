@@ -97,6 +97,7 @@ def _get_layernorm_configs():
             (32, 128, "f16"),  # f16 aligned
             (64, 2000, "f32"),  # unaligned tail handling
             (16, 512, "bf16"),  # bf16 small shape
+            (8, 2056, "f16"),  # vec8 path with a partially active final iteration
             (64, 8192, "bf16"),  # bf16 fast-path N with small M
         ]
     return configs
@@ -106,6 +107,11 @@ def _get_layernorm_large_configs():
     return [
         (32768, 8192, "bf16"),
     ]
+
+
+def _quant_test_eps(N: int) -> float:
+    """Use a non-default eps to verify every quant builder forwards it."""
+    return 1e-2 if N == 256 else EPS
 
 
 def run_test(M: int, N: int, dtype: str = "f32"):
@@ -206,21 +212,23 @@ def run_test(M: int, N: int, dtype: str = "f32"):
     return ok, flydsl_gpu_us
 
 
-def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
+def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool, eps: float = EPS):
     mode = "smoothquant" if is_smooth else "dynamicquant"
     print(f"\nTesting LayerNorm {mode} (M={M}, N={N}, dtype={dtype})")
 
     try:
         if is_smooth:
-            launch_fn = build_layernorm_smoothquant_module(N, dtype)
+            launch_fn = build_layernorm_smoothquant_module(N, dtype, eps=eps)
         else:
-            launch_fn = build_layernorm_dynamicquant_module(N, dtype)
+            launch_fn = build_layernorm_dynamicquant_module(N, dtype, eps=eps)
     except Exception as e:
         print(f"[FAIL] Compile failed for {mode} layernorm (M={M}, N={N}, dtype={dtype}): {type(e).__name__}: {e}")
         return False, None
 
     torch.manual_seed(42)
     input_t = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32)
+    if eps != EPS:
+        input_t = input_t * 1e-3
     gamma_t = torch.rand((N,), device="cuda", dtype=DTYPE_FP32)
     beta_t = torch.rand((N,), device="cuda", dtype=DTYPE_FP32)
     xscale_t = torch.rand((N,), device="cuda", dtype=DTYPE_FP32) + 0.5 if is_smooth else None
@@ -244,6 +252,7 @@ def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
         gamma_ref,
         beta_ref,
         xscale_dev=xscale_dev if is_smooth else None,
+        eps=eps,
     )
 
     print("Launching kernel...")
@@ -313,11 +322,11 @@ def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     return ok, flydsl_gpu_us
 
 
-def run_fused_add_test(M: int, N: int, dtype: str = "f32"):
+def run_fused_add_test(M: int, N: int, dtype: str = "f32", eps: float = EPS):
     print(f"\nTesting FusedAdd LayerNorm (M={M}, N={N}, dtype={dtype})")
 
     try:
-        launch_fn = build_fused_add_layernorm_module(N, dtype)
+        launch_fn = build_fused_add_layernorm_module(N, dtype, eps=eps)
     except Exception as e:
         print(f"[FAIL] Compile failed for fused_add layernorm (M={M}, N={N}, dtype={dtype}): {type(e).__name__}: {e}")
         return False, None
@@ -344,7 +353,13 @@ def run_fused_add_test(M: int, N: int, dtype: str = "f32"):
     else:
         raise ValueError(f"unsupported dtype: {dtype}")
 
-    residual_expected, expected = _reference_fused_add_layernorm(input_dev, residual_dev, gamma_dev, beta_dev)
+    residual_expected, expected = _reference_fused_add_layernorm(
+        input_dev,
+        residual_dev,
+        gamma_dev,
+        beta_dev,
+        eps=eps,
+    )
 
     print("Launching kernel...")
     stream = torch.cuda.current_stream()
@@ -410,15 +425,15 @@ def run_fused_add_test(M: int, N: int, dtype: str = "f32"):
     return ok, flydsl_gpu_us
 
 
-def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
+def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool, eps: float = EPS):
     mode = "smoothquant" if is_smooth else "dynamicquant"
     print(f"\nTesting FusedAdd LayerNorm {mode} (M={M}, N={N}, dtype={dtype})")
 
     try:
         if is_smooth:
-            launch_fn = build_fused_add_layernorm_smoothquant_module(N, dtype)
+            launch_fn = build_fused_add_layernorm_smoothquant_module(N, dtype, eps=eps)
         else:
-            launch_fn = build_fused_add_layernorm_dynamicquant_module(N, dtype)
+            launch_fn = build_fused_add_layernorm_dynamicquant_module(N, dtype, eps=eps)
     except Exception as e:
         print(
             f"[FAIL] Compile failed for fused_add {mode} layernorm "
@@ -429,6 +444,9 @@ def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     torch.manual_seed(42)
     input_t = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32)
     residual_t = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32)
+    if eps != EPS:
+        input_t = input_t * 1e-3
+        residual_t = residual_t * 1e-3
     gamma_t = torch.rand((N,), device="cuda", dtype=DTYPE_FP32)
     beta_t = torch.rand((N,), device="cuda", dtype=DTYPE_FP32)
     xscale_t = torch.rand((N,), device="cuda", dtype=DTYPE_FP32) + 0.5 if is_smooth else None
@@ -460,6 +478,7 @@ def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
         gamma_dev,
         beta_dev,
         xscale_dev=xscale_dev if is_smooth else None,
+        eps=eps,
     )
 
     print("Launching kernel...")
@@ -578,17 +597,17 @@ def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     return ok, flydsl_gpu_us
 
 
-def _reference_layernorm(input_dev, gamma_dev, beta_dev):
+def _reference_layernorm(input_dev, gamma_dev, beta_dev, *, eps: float = EPS):
     x = input_dev.to(DTYPE_FP32)
     gamma = gamma_dev.to(DTYPE_FP32)
     beta = beta_dev.to(DTYPE_FP32)
     mean = x.mean(dim=1, keepdim=True)
     var = x.var(dim=1, keepdim=True, unbiased=False)
-    return ((x - mean) / torch.sqrt(var + EPS) * gamma + beta).to(DTYPE_FP32)
+    return ((x - mean) / torch.sqrt(var + eps) * gamma + beta).to(DTYPE_FP32)
 
 
-def _reference_layernorm_quant(input_dev, gamma_dev, beta_dev, *, xscale_dev=None):
-    normalized = _reference_layernorm(input_dev, gamma_dev, beta_dev)
+def _reference_layernorm_quant(input_dev, gamma_dev, beta_dev, *, xscale_dev=None, eps: float = EPS):
+    normalized = _reference_layernorm(input_dev, gamma_dev, beta_dev, eps=eps)
     if xscale_dev is not None:
         normalized = normalized * xscale_dev.to(DTYPE_FP32)
 
@@ -598,14 +617,22 @@ def _reference_layernorm_quant(input_dev, gamma_dev, beta_dev, *, xscale_dev=Non
     return q, yscale
 
 
-def _reference_fused_add_layernorm(input_dev, residual_dev, gamma_dev, beta_dev):
+def _reference_fused_add_layernorm(input_dev, residual_dev, gamma_dev, beta_dev, *, eps: float = EPS):
     added = input_dev + residual_dev
     residual_expected = added.to(DTYPE_FP32)
-    expected = _reference_layernorm(added, gamma_dev, beta_dev)
+    expected = _reference_layernorm(added, gamma_dev, beta_dev, eps=eps)
     return residual_expected, expected
 
 
-def _reference_fused_add_layernorm_quant(input_dev, residual_dev, gamma_dev, beta_dev, *, xscale_dev=None):
+def _reference_fused_add_layernorm_quant(
+    input_dev,
+    residual_dev,
+    gamma_dev,
+    beta_dev,
+    *,
+    xscale_dev=None,
+    eps: float = EPS,
+):
     added = input_dev + residual_dev
     residual_expected = added.to(DTYPE_FP32)
     q, yscale = _reference_layernorm_quant(
@@ -613,6 +640,7 @@ def _reference_fused_add_layernorm_quant(input_dev, residual_dev, gamma_dev, bet
         gamma_dev,
         beta_dev,
         xscale_dev=xscale_dev,
+        eps=eps,
     )
     return residual_expected, q, yscale
 
@@ -844,7 +872,7 @@ def test_layernorm_dynamicquant():
     failures = 0
 
     for M, N, dtype in configs:
-        ok, flydsl_gpu_us = run_quant_test(M, N, dtype, is_smooth=False)
+        ok, flydsl_gpu_us = run_quant_test(M, N, dtype, is_smooth=False, eps=_quant_test_eps(N))
         if not ok:
             failures += 1
 
@@ -887,7 +915,7 @@ def test_layernorm_smoothquant():
     failures = 0
 
     for M, N, dtype in configs:
-        ok, flydsl_gpu_us = run_quant_test(M, N, dtype, is_smooth=True)
+        ok, flydsl_gpu_us = run_quant_test(M, N, dtype, is_smooth=True, eps=_quant_test_eps(N))
         if not ok:
             failures += 1
 
@@ -930,7 +958,13 @@ def test_fused_add_layernorm_dynamicquant():
     failures = 0
 
     for M, N, dtype in configs:
-        ok, flydsl_gpu_us = run_fused_add_quant_test(M, N, dtype, is_smooth=False)
+        ok, flydsl_gpu_us = run_fused_add_quant_test(
+            M,
+            N,
+            dtype,
+            is_smooth=False,
+            eps=_quant_test_eps(N),
+        )
         if not ok:
             failures += 1
 
@@ -973,7 +1007,13 @@ def test_fused_add_layernorm_smoothquant():
     failures = 0
 
     for M, N, dtype in configs:
-        ok, flydsl_gpu_us = run_fused_add_quant_test(M, N, dtype, is_smooth=True)
+        ok, flydsl_gpu_us = run_fused_add_quant_test(
+            M,
+            N,
+            dtype,
+            is_smooth=True,
+            eps=_quant_test_eps(N),
+        )
         if not ok:
             failures += 1
 

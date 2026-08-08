@@ -135,11 +135,23 @@ def _get_rmsnorm_configs():
     if override is not None:
         return override
     return [
-        (64, 256, "f32"),  # f32 aligned
-        (32, 128, "f16"),  # f16 aligned
-        (64, 2000, "f32"),  # unaligned tail handling
-        (16, 512, "bf16"),  # bf16 small shape
-        (64, 8192, "bf16"),  # bf16 fast-path N with small M
+        (64, 256, "f32"),  # small-N scalar path
+        (32, 128, "f16"),  # small-N aligned vec8 path
+        (64, 2001, "f32"),  # small-N scalar path with an unaligned tail
+        (16, 512, "bf16"),  # small-N multi-row vec8 path
+        (64, 8192, "bf16"),  # large-N aligned vec8 path
+    ]
+
+
+def _get_rmsnorm_forward_configs():
+    override = _get_rmsnorm_shape_override()
+    if override is not None:
+        return override
+    return _get_rmsnorm_configs() + [
+        (1, 511, "bf16"),  # small M plus vec8 prefix/scalar tail
+        (9, 2048, "f16"),  # small-N dispatch boundary
+        (33, 3072, "bf16"),  # vec8 row not divisible by BLOCK_THREADS * VEC_WIDTH
+        (7, 3073, "f16"),  # large-N scalar fallback for an unaligned row
     ]
 
 
@@ -159,6 +171,19 @@ def _get_rmsnorm_large_configs():
     return [
         (32768, 8192, "bf16"),
     ]
+
+
+def _quant_test_eps(N: int) -> float:
+    """Use one non-default value to verify every quant builder forwards eps."""
+    return 1e-2 if N == 256 else EPS
+
+
+def _assert_rmsnorm_forward_copy_width(compiled_fn, N: int, dtype: str):
+    if dtype not in ("f16", "bf16"):
+        return
+    expects_vec8 = N >= 8 and (N <= rmsnorm_kernel_impl.SMALL_N_THRESHOLD or N % 8 == 0)
+    has_128b_io = "buffer_copy<128>, 16>" in compiled_fn._keepalive.source_ir
+    assert has_128b_io == expects_vec8, f"unexpected RMSNorm copy width for N={N}, dtype={dtype}"
 
 
 def run_test(M: int, N: int, dtype: str = "f32", weight_dtype: str | None = None):
@@ -199,6 +224,7 @@ def run_test(M: int, N: int, dtype: str = "f32", weight_dtype: str | None = None
     print("Launching kernel...")
     stream = torch.cuda.current_stream()
     compiled_fn = flyc.compile(launch_fn, input_dev, gamma_dev, output_dev, M, stream)
+    _assert_rmsnorm_forward_copy_width(compiled_fn, N, dtype)
 
     def kernel_launch():
         compiled_fn(input_dev, gamma_dev, output_dev, M, stream)
@@ -243,21 +269,24 @@ def run_test(M: int, N: int, dtype: str = "f32", weight_dtype: str | None = None
     return ok, flydsl_gpu_us
 
 
-def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
+def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool, eps: float = EPS):
     mode = "smoothquant" if is_smooth else "dynamicquant"
     print(f"\nTesting RMSNorm {mode} (M={M}, N={N}, dtype={dtype})")
 
     try:
         if is_smooth:
-            launch_fn = build_rmsnorm_smoothquant_module(N, dtype)
+            launch_fn = build_rmsnorm_smoothquant_module(N, dtype, eps=eps)
         else:
-            launch_fn = build_rmsnorm_dynamicquant_module(N, dtype)
+            launch_fn = build_rmsnorm_dynamicquant_module(N, dtype, eps=eps)
     except Exception as e:
         print(f"[FAIL] Compile failed for {mode} (M={M}, N={N}, dtype={dtype}): " f"{type(e).__name__}: {e}")
         return False, None
 
     torch.manual_seed(42)
     input_t = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32)
+    if eps != EPS:
+        # Keep mean(x^2) below eps so a hardcoded default is visible in YScale.
+        input_t = input_t * 1e-3
     gamma_t = torch.rand((N,), device="cuda", dtype=DTYPE_FP32)
 
     torch_dtype = _torch_dtype(dtype)
@@ -317,6 +346,7 @@ def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
         input_dev,
         gamma_dev,
         xscale_dev=xscale_dev,
+        eps=eps,
     )
     q_out = output_dev.to(torch.int16)
     q_expected = q_ref.to(torch.int16)
@@ -442,15 +472,15 @@ def run_fused_add_test(M: int, N: int, dtype: str):
     return ok, flydsl_gpu_us
 
 
-def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
+def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool, eps: float = EPS):
     mode = "smoothquant" if is_smooth else "dynamicquant"
     print(f"\nTesting FusedAdd RMSNorm {mode} (M={M}, N={N}, dtype={dtype})")
 
     try:
         if is_smooth:
-            launch_fn = build_fused_add_rmsnorm_smoothquant_module(N, dtype)
+            launch_fn = build_fused_add_rmsnorm_smoothquant_module(N, dtype, eps=eps)
         else:
-            launch_fn = build_fused_add_rmsnorm_dynamicquant_module(N, dtype)
+            launch_fn = build_fused_add_rmsnorm_dynamicquant_module(N, dtype, eps=eps)
     except Exception as e:
         print(
             f"[FAIL] Compile failed for fused_add rmsnorm {mode} "
@@ -461,6 +491,10 @@ def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     torch.manual_seed(42)
     input_t = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32)
     residual_t = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32)
+    if eps != EPS:
+        # Keep mean((x + residual)^2) below eps so YScale distinguishes eps.
+        input_t = input_t * 1e-3
+        residual_t = residual_t * 1e-3
     gamma_t = torch.rand((N,), device="cuda", dtype=DTYPE_FP32)
 
     torch_dtype = _torch_dtype(dtype)
@@ -568,6 +602,7 @@ def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
         residual_in_dev,
         gamma_dev,
         xscale_dev=xscale_dev,
+        eps=eps,
     )
     residual_out_ref = residual_out_dev.to(DTYPE_FP32)
     q_out = output_dev.to(torch.int16)
@@ -603,14 +638,14 @@ def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     return ok, flydsl_gpu_us
 
 
-def _reference_rmsnorm(input_dev, gamma_dev):
+def _reference_rmsnorm(input_dev, gamma_dev, *, eps: float = EPS):
     x = input_dev.to(DTYPE_FP32)
     gamma = gamma_dev.to(DTYPE_FP32)
-    return ((x / torch.sqrt((x * x).mean(dim=1, keepdim=True) + EPS)) * gamma).to(DTYPE_FP32)
+    return ((x / torch.sqrt((x * x).mean(dim=1, keepdim=True) + eps)) * gamma).to(DTYPE_FP32)
 
 
-def _reference_rmsnorm_quant(input_dev, gamma_dev, *, xscale_dev=None):
-    normalized = _reference_rmsnorm(input_dev, gamma_dev)
+def _reference_rmsnorm_quant(input_dev, gamma_dev, *, xscale_dev=None, eps: float = EPS):
+    normalized = _reference_rmsnorm(input_dev, gamma_dev, eps=eps)
     if xscale_dev is not None:
         normalized = normalized * xscale_dev.to(DTYPE_FP32)
 
@@ -634,6 +669,7 @@ def _reference_fused_add_rmsnorm_quant(
     gamma_dev,
     *,
     xscale_dev=None,
+    eps: float = EPS,
 ):
     added = input_dev + residual_in_dev
     residual_expected = added.to(DTYPE_FP32)
@@ -641,6 +677,7 @@ def _reference_fused_add_rmsnorm_quant(
         added,
         gamma_dev,
         xscale_dev=xscale_dev,
+        eps=eps,
     )
     return residual_expected, q, yscale
 
@@ -1368,7 +1405,7 @@ def test_rmsnorm():
     print("Running RMSNorm Tests")
     print("=" * 80)
 
-    configs = _get_rmsnorm_configs()
+    configs = _get_rmsnorm_forward_configs()
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
@@ -1521,6 +1558,36 @@ def test_rmsnorm_eps_honored():
         print(f"  N={N} eps 1e-2 vs 1e-6 output diff = {diff:.3e} (must be > 0)")
         assert diff > 0, f"N={N}: eps appears to be ignored"
     print("  -> PASSED")
+
+
+def test_rmsnorm_small_n_mixed_weight_tail_and_rstd():
+    """The small-N vec8 tail path preserves FP32 weights and training rstd."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    M, N = 3, 511
+    torch.manual_seed(0)
+    x = torch.randn((M, N), device=device, dtype=DTYPE_BF16)
+    weight = torch.rand((N,), device=device, dtype=DTYPE_FP32)
+    output = torch.empty_like(x)
+    rstd = torch.empty((M,), device=device, dtype=DTYPE_FP32)
+    stream = torch.cuda.current_stream(device)
+
+    launcher = build_rmsnorm_module(
+        N,
+        "bf16",
+        store_rstd=True,
+        weight_dtype_str="f32",
+    )
+    compiled = flyc.compile(launcher, x, weight, output, rstd, M, stream)
+    _assert_rmsnorm_forward_copy_width(compiled, N, "bf16")
+    assert "buffer_copy<128>, 32>" in compiled._keepalive.source_ir
+    compiled(x, weight, output, rstd, M, stream)
+    torch.cuda.synchronize(device)
+
+    x_f32 = x.to(DTYPE_FP32)
+    expected_rstd = torch.rsqrt(x_f32.square().mean(dim=1) + EPS)
+    expected = x_f32 * expected_rstd.unsqueeze(1) * weight
+    torch.testing.assert_close(output.to(DTYPE_FP32), expected, rtol=1e-2, atol=2e-2)
+    torch.testing.assert_close(rstd, expected_rstd, rtol=1e-4, atol=1e-4)
 
 
 def test_rmsnorm_bwd_dispatch_boundary():
@@ -1865,7 +1932,7 @@ def test_rmsnorm_dynamicquant():
 
     failures = 0
     for M, N, dtype in configs:
-        ok, flydsl_gpu_us = run_quant_test(M, N, dtype, is_smooth=False)
+        ok, flydsl_gpu_us = run_quant_test(M, N, dtype, is_smooth=False, eps=_quant_test_eps(N))
         if not ok:
             failures += 1
 
@@ -1897,9 +1964,186 @@ def test_rmsnorm_dynamicquant():
         raise SystemExit(1)
 
 
+@pytest.mark.skipif(GPU_ARCH != "gfx1201", reason="gfx1201-specific RMSNorm SmoothQuant diagnostics")
+@pytest.mark.parametrize(
+    "N,dtype,route",
+    [
+        pytest.param(256, "f32", "scalar", id="f32-scalar"),
+        pytest.param(128, "f16", "scalar", id="f16-scalar"),
+        pytest.param(512, "bf16", "scalar", id="bf16-scalar"),
+        pytest.param(2048, "bf16", "vec8-single-tile", id="bf16-vec1"),
+        pytest.param(8192, "bf16", "vec8-multi-tile", id="bf16-vec4"),
+    ],
+)
+def test_rmsnorm_smoothquant_gfx1201_scale_paths(N, dtype, route):
+    """Distinguish scalar, vec8, and non-uniform XScale failures on gfx1201."""
+    _run_rmsnorm_smoothquant_gfx1201_case(2, N, dtype, route, fused_add=False)
+
+
+@pytest.mark.skipif(GPU_ARCH != "gfx1201", reason="gfx1201-specific RMSNorm SmoothQuant regression")
+@pytest.mark.xfail(
+    GPU_ARCH == "gfx1201",
+    reason="known gfx1201 RMSNorm SmoothQuant correctness regression; keep diagnostics while quarantined",
+    strict=False,
+)
+@pytest.mark.parametrize("M", [2, 64])
+@pytest.mark.parametrize("N", [2000, 2001, 2048])
+@pytest.mark.parametrize("fused_add", [False, True], ids=["plain", "fused-add"])
+def test_rmsnorm_smoothquant_gfx1201_exact_regression(M, N, fused_add):
+    """Exercise the historical f32 failure and its adjacent scalar-loop boundaries."""
+    _run_rmsnorm_smoothquant_gfx1201_case(M, N, "f32", "f32-scalar-boundary", fused_add=fused_add)
+
+
+def _run_rmsnorm_smoothquant_gfx1201_case(M, N, dtype, route, *, fused_add):
+    scale_tol = 1e-3
+    residual_tol = {"f32": 1e-4, "f16": 1e-2, "bf16": 2e-2}[dtype]
+    torch.manual_seed(1201)
+
+    torch_dtype = _torch_dtype(dtype)
+    input_dev = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32).to(torch_dtype).contiguous()
+    gamma_dev = torch.rand((N,), device="cuda", dtype=DTYPE_FP32).to(torch_dtype).contiguous()
+    random_xscale = (torch.rand((N,), device="cuda", dtype=DTYPE_FP32) + 0.5).to(torch_dtype).contiguous()
+    xscale_dev = torch.ones((N,), device="cuda", dtype=torch_dtype)
+    output_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_INT8)
+    yscale_dev = torch.empty((M,), device="cuda", dtype=DTYPE_FP32)
+    residual_in_dev = None
+    residual_out_dev = None
+
+    stream = torch.cuda.current_stream()
+    if fused_add:
+        residual_in_dev = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32).to(torch_dtype).contiguous()
+        residual_out_dev = torch.empty_like(input_dev)
+        launch_fn = build_fused_add_rmsnorm_smoothquant_module(N, dtype)
+        compiled_fn = flyc.compile(
+            launch_fn,
+            input_dev,
+            residual_in_dev,
+            gamma_dev,
+            xscale_dev,
+            output_dev,
+            residual_out_dev,
+            yscale_dev,
+            M,
+            stream,
+        )
+    else:
+        launch_fn = build_rmsnorm_smoothquant_module(N, dtype)
+        compiled_fn = flyc.compile(
+            launch_fn,
+            input_dev,
+            gamma_dev,
+            xscale_dev,
+            output_dev,
+            yscale_dev,
+            M,
+            stream,
+        )
+
+    failures = []
+    for scale_mode in ("ones", "random"):
+        if scale_mode == "ones":
+            xscale_dev.fill_(1.0)
+        else:
+            xscale_dev.copy_(random_xscale)
+
+        # flyc.compile may execute the kernel once, so poison outputs before
+        # every measured launch to expose missing writes.
+        output_dev.fill_(-128)
+        yscale_dev.fill_(float("nan"))
+        if fused_add:
+            residual_out_dev.fill_(float("nan"))
+            compiled_fn(
+                input_dev,
+                residual_in_dev,
+                gamma_dev,
+                xscale_dev,
+                output_dev,
+                residual_out_dev,
+                yscale_dev,
+                M,
+                stream,
+            )
+        else:
+            compiled_fn(input_dev, gamma_dev, xscale_dev, output_dev, yscale_dev, M, stream)
+        torch.cuda.synchronize()
+
+        if fused_add:
+            residual_expected, q_expected, yscale_expected = _reference_fused_add_rmsnorm_quant(
+                input_dev,
+                residual_in_dev,
+                gamma_dev,
+                xscale_dev=xscale_dev,
+            )
+            residual_diff = (residual_out_dev.to(DTYPE_FP32) - residual_expected).abs()
+            residual_error = residual_diff.max().item()
+            finite_residual = torch.isfinite(residual_out_dev).all().item()
+        else:
+            q_expected, yscale_expected = _reference_rmsnorm_quant(
+                input_dev,
+                gamma_dev,
+                xscale_dev=xscale_dev,
+            )
+            residual_error = 0.0
+            finite_residual = True
+
+        q_out = output_dev.to(torch.int16)
+        q_ref = q_expected.to(torch.int16)
+        quant_diff = (q_out - q_ref).abs()
+        scale_diff = (yscale_dev - yscale_expected).abs()
+        quant_error = quant_diff.max().item()
+        scale_error = scale_diff.max().item()
+        finite_yscale = torch.isfinite(yscale_dev).all().item()
+        mismatch_count = (quant_diff > 1).sum().item()
+        unwritten_count = (output_dev == -128).sum().item()
+        variant = "fused-add" if fused_add else "plain"
+
+        print(
+            f"gfx1201 SmoothQuant variant={variant}, route={route}, M={M}, dtype={dtype}, N={N}, "
+            f"xscale={scale_mode}: quant_error={quant_error}, "
+            f"scale_error={scale_error:.3e}, mismatches={mismatch_count}, "
+            f"unwritten={unwritten_count}, finite_yscale={finite_yscale}, "
+            f"residual_error={residual_error:.3e}, finite_residual={finite_residual}"
+        )
+
+        bad_indices = (quant_diff > 1).nonzero()
+        if bad_indices.numel() != 0:
+            row, col = bad_indices[0].tolist()
+            print(
+                f"first mismatch at ({row}, {col}): "
+                f"expected={q_ref[row, col].item()}, actual={q_out[row, col].item()}, "
+                f"xscale={xscale_dev[col].item()}"
+            )
+
+        bad_scale_rows = ((scale_diff >= scale_tol) | ~torch.isfinite(yscale_dev)).nonzero()
+        if bad_scale_rows.numel() != 0:
+            row = bad_scale_rows[0].item()
+            print(
+                f"first scale mismatch at row {row}: "
+                f"expected={yscale_expected[row].item()}, actual={yscale_dev[row].item()}"
+            )
+
+        failed = (
+            not finite_yscale
+            or quant_error > 1
+            or not scale_error < scale_tol
+            or unwritten_count != 0
+            or not finite_residual
+            or not residual_error < residual_tol
+        )
+        if failed:
+            failures.append(
+                f"xscale={scale_mode}: quant_error={quant_error}, "
+                f"scale_error={scale_error:.3e}, mismatches={mismatch_count}, "
+                f"unwritten={unwritten_count}, finite_yscale={finite_yscale}, "
+                f"residual_error={residual_error:.3e}, finite_residual={finite_residual}"
+            )
+
+    assert not failures, f"gfx1201 SmoothQuant {variant} {route}, M={M}, N={N} failed: {'; '.join(failures)}"
+
+
 @pytest.mark.skipif(
     GPU_ARCH == "gfx1201",
-    reason="RMSNorm SmoothQuant is temporarily quarantined on gfx1201 pending correctness investigation",
+    reason="RMSNorm SmoothQuant has a known correctness regression on gfx1201",
 )
 def test_rmsnorm_smoothquant():
     print("=" * 80)
@@ -1913,7 +2157,7 @@ def test_rmsnorm_smoothquant():
 
     failures = 0
     for M, N, dtype in configs:
-        ok, flydsl_gpu_us = run_quant_test(M, N, dtype, is_smooth=True)
+        ok, flydsl_gpu_us = run_quant_test(M, N, dtype, is_smooth=True, eps=_quant_test_eps(N))
         if not ok:
             failures += 1
 
@@ -2000,7 +2244,13 @@ def test_fused_add_rmsnorm_dynamicquant():
 
     failures = 0
     for M, N, dtype in configs:
-        ok, flydsl_gpu_us = run_fused_add_quant_test(M, N, dtype, is_smooth=False)
+        ok, flydsl_gpu_us = run_fused_add_quant_test(
+            M,
+            N,
+            dtype,
+            is_smooth=False,
+            eps=_quant_test_eps(N),
+        )
         if not ok:
             failures += 1
 
@@ -2046,7 +2296,13 @@ def test_fused_add_rmsnorm_smoothquant():
 
     failures = 0
     for M, N, dtype in configs:
-        ok, flydsl_gpu_us = run_fused_add_quant_test(M, N, dtype, is_smooth=True)
+        ok, flydsl_gpu_us = run_fused_add_quant_test(
+            M,
+            N,
+            dtype,
+            is_smooth=True,
+            eps=_quant_test_eps(N),
+        )
         if not ok:
             failures += 1
 
@@ -2081,6 +2337,7 @@ if __name__ == "__main__":
     test_rmsnorm_backward()
     test_rmsnorm_autograd()
     test_rmsnorm_eps_honored()
+    test_rmsnorm_small_n_mixed_weight_tail_and_rstd()
     if torch.cuda.device_count() >= 2:
         test_rmsnorm_multi_gpu()
     test_rmsnorm_dynamicquant()
