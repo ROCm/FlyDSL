@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-08T05:35:12Z",
+ "updated": "2026-08-08T05:39:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,28 +25,28 @@
    "branch": "megamoe_perf",
    "event": "pull_request",
    "title": "Optimize megamoe performance",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239378308",
    "created_at": "2026-08-08T04:24:44Z",
-   "updated_at": "2026-08-08T04:28:25Z",
+   "updated_at": "2026-08-08T05:38:08Z",
    "actor": "yanboshao",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-08T04:29:22Z",
-     "completed_at": null,
+     "completed_at": "2026-08-08T05:37:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239378308/job/93058026322"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-08T04:28:25Z",
+     "started_at": "2026-08-08T05:38:07Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239378308/job/93058026323"
     },
@@ -102,11 +102,11 @@
    "branch": "gfx1250/gemm-opt-0805",
    "event": "pull_request",
    "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239082336",
    "created_at": "2026-08-08T04:16:41Z",
-   "updated_at": "2026-08-08T05:34:08Z",
+   "updated_at": "2026-08-08T05:37:50Z",
    "actor": "aoli26",
    "jobs": [
     {
@@ -130,10 +130,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-08T05:34:08Z",
-     "completed_at": null,
+     "completed_at": "2026-08-08T05:37:49Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239082336/job/93057279914"
     }
    ]
