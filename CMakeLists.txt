@@ -27,6 +27,28 @@ else()
                  "spawning ld.lld from the ROCm toolkit path")
 endif()
 
+# AMDGCN device bitcode (ocml/ockl/...) is loaded from <toolkit>/amdgcn/bitcode
+# whenever a kernel calls __ocml_* / __ockl_*.  Bundle it into the Python
+# package so that lookup does not depend on where the container installs ROCm.
+# Override the source with -DFLYDSL_ROCM_BITCODE_DIR=<dir>.
+if(NOT FLYDSL_ROCM_BITCODE_DIR)
+  find_path(FLYDSL_ROCM_BITCODE_DIR ocml.bc
+    HINTS
+      "$ENV{ROCM_PATH}/amdgcn/bitcode"
+      "$ENV{ROCM_ROOT}/amdgcn/bitcode"
+      "$ENV{ROCM_HOME}/amdgcn/bitcode"
+      "/opt/rocm/amdgcn/bitcode"
+    NO_DEFAULT_PATH)
+endif()
+if(FLYDSL_ROCM_BITCODE_DIR)
+  message(STATUS "Found AMDGCN device bitcode: ${FLYDSL_ROCM_BITCODE_DIR}")
+else()
+  message(WARNING
+    "AMDGCN device bitcode (ocml.bc) not found; the Python package will not bundle it. "
+    "Kernels calling __ocml_*/__ockl_* will then need FLYDSL_COMPILE_ROCM_PATH or "
+    "ROCM_PATH to point at a ROCm install. Set -DFLYDSL_ROCM_BITCODE_DIR=<dir> to bundle it.")
+endif()
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE "RelWithDebInfo" CACHE STRING "Build type (Debug, Release, RelWithDebInfo, MinSizeRel)" FORCE)
   message(STATUS "CMAKE_BUILD_TYPE not set; defaulting to ${CMAKE_BUILD_TYPE}")
