@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-08T09:32:30Z",
+ "updated": "2026-08-08T10:00:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -68,11 +68,11 @@
    "branch": "megamoe_perf",
    "event": "pull_request",
    "title": "Optimize megamoe performance",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31248159074",
    "created_at": "2026-08-08T08:19:41Z",
-   "updated_at": "2026-08-08T09:30:10Z",
+   "updated_at": "2026-08-08T09:58:15Z",
    "actor": "yanboshao",
    "jobs": [
     {
@@ -105,19 +105,19 @@
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-08T09:30:10Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-08T09:31:11Z",
+     "completed_at": "2026-08-08T09:54:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31248159074/job/93086535926"
     },
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-08T09:30:10Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-08T09:31:13Z",
+     "completed_at": "2026-08-08T09:58:14Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31248159074/job/93086535928"
     }
    ]
