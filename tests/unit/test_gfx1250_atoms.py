@@ -83,3 +83,21 @@ def test_tdm2d_type_roundtrip():
         t3 = U.TDM(1, 1, atomic_barrier=True, early_timeout=True)
         assert "barrier = true, timeout = true" in str(t3)
         assert ir.Type.parse(str(t3)) == t3
+
+        # Default is tiled: index_width 0.
+        assert "iwidth = 0" in str(t)
+
+
+def test_tdm2d_gather_type_roundtrip():
+    with _ctx(), ir.Location.unknown():
+        from flydsl._mlir.dialects import fly_rocdl  # noqa: F401
+        from flydsl.expr.rocdl import cdna5 as U
+
+        # A non-zero index_width selects rank-2 gather and carries the element width.
+        tg = U.TDM(2, 1, index_width=32)
+        assert "iwidth = 32" in str(tg)
+        assert ir.Type.parse(str(tg)) == tg
+
+        tg16 = U.TDM(2, 1, index_width=16)
+        assert "iwidth = 16" in str(tg16)
+        assert ir.Type.parse(str(tg16)) == tg16

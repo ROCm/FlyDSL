@@ -16,7 +16,7 @@
 func.func @bad_tdm_pad_interval_dw(
     %src: !fly.memref<f16, global, (128,64):(64,1)>,
     %dst: !fly.memref<f16, shared, (128,64):(64,1)>) {
-  %atom = fly.make_copy_atom {valBits = 0 : i32} : !fly.copy_atom<!fly_rocdl.gfx1250.tdm<rank = 2, warps = 1, pad = 2, 8, cache = 0, barrier = false, timeout = false>, 0>
-  fly.copy_atom_call(%atom, %src, %dst) : (!fly.copy_atom<!fly_rocdl.gfx1250.tdm<rank = 2, warps = 1, pad = 2, 8, cache = 0, barrier = false, timeout = false>, 0>, !fly.memref<f16, global, (128,64):(64,1)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
+  %atom = fly.make_copy_atom {valBits = 0 : i32} : !fly.copy_atom<!fly_rocdl.gfx1250.tdm<rank = 2, warps = 1, pad = 2, 8, cache = 0, barrier = false, timeout = false, iwidth = 0>, 0>
+  fly.copy_atom_call(%atom, %src, %dst) : (!fly.copy_atom<!fly_rocdl.gfx1250.tdm<rank = 2, warps = 1, pad = 2, 8, cache = 0, barrier = false, timeout = false, iwidth = 0>, 0>, !fly.memref<f16, global, (128,64):(64,1)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
   return
 }

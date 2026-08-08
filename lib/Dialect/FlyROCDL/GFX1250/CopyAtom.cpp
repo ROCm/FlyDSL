@@ -110,6 +110,9 @@ static constexpr unsigned kMaxTdmRank = 5;
 // These are TDM-private (not shared AtomStateField cases); see tdmGeomSlot.
 static constexpr unsigned kExtentSlot0 = 1;
 static constexpr unsigned kStrideSlot0 = kExtentSlot0 + kMaxTdmRank; // 6
+// imm_offset occupies kStrideSlot0 + (kMaxTdmRank - 1) = 10 (see getFieldIndex).
+// The gather row-index buffer pointer (global) rides in the next slot.
+static constexpr unsigned kIndexPtrSlot = kStrideSlot0 + (kMaxTdmRank - 1) + 1; // 11
 
 std::optional<unsigned> CopyOpGFX1250TDMType::getFieldIndex(AtomStateField field) {
   switch (field) {
@@ -125,14 +128,17 @@ std::optional<unsigned> CopyOpGFX1250TDMType::getFieldIndex(AtomStateField field
   }
 }
 
-// TDM-private per-dim geometry fields, resolved by name instead of via the shared
-// AtomStateField enum: "extent_i" -> kExtentSlot0+i, "stride_i" -> kStrideSlot0+i.
+// TDM-private state fields, resolved by name instead of via the shared
+// AtomStateField enum: "extent_i" -> kExtentSlot0+i, "stride_i" -> kStrideSlot0+i,
+// "index_ptr" -> kIndexPtrSlot (gather row-index buffer).
 static std::optional<unsigned> tdmGeomSlot(StringRef name) {
   unsigned i;
   if (name.consume_front("extent_") && !name.getAsInteger(10, i) && i < kMaxTdmRank)
     return kExtentSlot0 + i;
   if (name.consume_front("stride_") && !name.getAsInteger(10, i) && i < kMaxTdmRank - 1)
     return kStrideSlot0 + i;
+  if (name == "index_ptr")
+    return kIndexPtrSlot;
   return std::nullopt;
 }
 
@@ -143,6 +149,10 @@ Type CopyOpGFX1250TDMType::getConvertedType(MLIRContext *ctx) const {
   fields.append(kMaxTdmRank, i32);     // extent_0..4
   fields.append(kMaxTdmRank - 1, i64); // stride_0..3
   fields.push_back(i64);               // imm_offset
+  // Gather mode carries one extra slot: the row-index buffer pointer. Tiled mode
+  // keeps the original layout so its lowering/tests are unaffected.
+  if (getIndexWidth() != 0)
+    fields.push_back(LLVM::LLVMPointerType::get(ctx, /*addrSpace=*/1)); // index_ptr
   return LLVM::LLVMStructType::getLiteral(ctx, fields);
 }
 
@@ -167,6 +177,11 @@ Value CopyOpGFX1250TDMType::getDefaultState(OpBuilder &builder, Location loc) co
   for (unsigned i = 0; i < kMaxTdmRank - 1; ++i)
     insertSlot(kStrideSlot0 + i, strideUnset);
   insert(AtomStateField::ImmOffset, zero64);
+  if (getIndexWidth() != 0) {
+    Value nullIdx =
+        LLVM::ZeroOp::create(builder, loc, LLVM::LLVMPointerType::get(ctx, /*addrSpace=*/1));
+    insertSlot(kIndexPtrSlot, nullIdx);
+  }
   return state;
 }
 
@@ -202,9 +217,19 @@ Attribute CopyOpGFX1250TDMType::getThrBitLayoutRef() const {
 LogicalResult CopyOpGFX1250TDMType::verify(function_ref<InFlightDiagnostic()> emitError,
                                            int32_t rank, int32_t numWarps, int32_t padInterval,
                                            int32_t padAmount, int32_t cacheModifier,
-                                           bool atomicBarrier, bool earlyTimeout) {
+                                           bool atomicBarrier, bool earlyTimeout,
+                                           int32_t indexWidth) {
   if (rank < 1 || rank > static_cast<int32_t>(kMaxTdmRank))
     return emitError() << "TDM rank must be in [1, " << kMaxTdmRank << "], got " << rank;
+  // index_width == 0 is tiled; 16/32 selects rank-2 row gather/scatter.
+  if (indexWidth != 0) {
+    if (indexWidth != 16 && indexWidth != 32)
+      return emitError() << "TDM index_width must be 0 (tiled) or 16/32 (gather), got "
+                         << indexWidth;
+    if (rank != 2)
+      return emitError() << "TDM gather (index_width " << indexWidth << ") requires rank 2, got "
+                         << rank;
+  }
   if (numWarps < 1 || (numWarps & (numWarps - 1)) != 0)
     return emitError() << "numWarps must be a positive power of two, got " << numWarps;
   if ((padInterval == 0) != (padAmount == 0))
@@ -242,6 +267,173 @@ FailureOr<Value> CopyOpGFX1250TDMType::emitAtomCallSSA(OpBuilder &builder, Locat
   return Value{};
 }
 
+// Gather-mode emit: load the rows selected by the atom's `index_ptr` row-index
+// buffer (element width from the atom's index_width: i16 or i32; row count from the
+// rank-2 tile layout's outer extent) into the descriptor index groups, and pack the
+// rank-2 gather descriptor. The base pointer comes from the copy_atom_call global
+// operand (glbPtr); OOB extents / row stride / index_ptr come from atom state.
+// The row-index descriptor packing mirrors the Triton AMD backend (TDMUtility.cpp
+// createTDMDescriptor gather path), matching the tiled emit's Triton-derived layout.
+static LogicalResult emitTdmGather(OpBuilder &builder, Location loc, CopyOpGFX1250TDMType atomTy,
+                                   fly::MemRefType glbMemTy, Value glbPtr, Value ldsPtr,
+                                   bool isLoad, Value atomVal) {
+  auto layout = dyn_cast<fly::LayoutAttr>(glbMemTy.getLayout());
+  if (!layout || !layout.isStaticShape() || layout.rank() != 2)
+    return failure();
+  int32_t outer = layout.getShape().at(0).getLeafAsInt().getValue();    // rows gathered
+  int32_t rowWidth = layout.getShape().at(1).getLeafAsInt().getValue(); // tile_dim0
+  bool hasStaticStride = layout.isStaticStride();
+
+  int32_t elemBits = glbMemTy.getElemTy().getIntOrFloatBitWidth();
+  if (elemBits % 8 != 0)
+    return failure();
+  int32_t elemBytes = elemBits / 8;
+  if ((elemBytes & (elemBytes - 1)) != 0)
+    return failure();
+  int32_t dataSizeCode = llvm::Log2_32(static_cast<uint32_t>(elemBytes));
+
+  // Row-index width (16/32) from the atom's index_width; row count is the tile's
+  // outer extent, bounded by the descriptor's 8x i32 / 16x i16 index slots.
+  int32_t indexSize = atomTy.getIndexWidth();
+  if (indexSize != 16 && indexSize != 32)
+    return mlir::emitError(loc) << "gfx1250 TDM gather: index_width must be 16 or 32";
+  int32_t count = outer;
+  int32_t maxCount = indexSize == 32 ? 8 : 16;
+  if (count < 1 || count > maxCount)
+    return mlir::emitError(loc) << "gfx1250 TDM gather: " << indexSize << "-bit row count must be "
+                                << "in [1, " << maxCount << "], got " << count;
+
+  Type i32Ty = builder.getI32Type();
+  Type i64Ty = builder.getI64Type();
+  Type idxElemTy = builder.getIntegerType(indexSize);
+  auto slotField = [&](unsigned slot) {
+    return LLVM::ExtractValueOp::create(builder, loc, atomVal, ArrayRef<int64_t>{slot});
+  };
+  auto stateField = [&](AtomStateField f) {
+    return LLVM::ExtractValueOp::create(builder, loc, atomVal,
+                                        ArrayRef<int64_t>{*CopyOpGFX1250TDMType::getFieldIndex(f)});
+  };
+
+  // Row-index buffer pointer from atom state.
+  Value indices = slotField(kIndexPtrSlot);
+  auto idxPtrTy = cast<LLVM::LLVMPointerType>(indices.getType());
+  Value zeroC = i32Const(builder, loc, 0);
+  Value c16v = i32Const(builder, loc, 16);
+  // Load index j from the buffer and zero-extend to i32.
+  auto loadIdx = [&](int32_t j) -> Value {
+    Value gep = LLVM::GEPOp::create(builder, loc, idxPtrTy, idxElemTy, indices,
+                                    ArrayRef<LLVM::GEPArg>{LLVM::GEPArg(j)});
+    Value v = LLVM::LoadOp::create(builder, loc, idxElemTy, gep);
+    if (indexSize == 32)
+      return v;
+    return LLVM::ZExtOp::create(builder, loc, i32Ty, v);
+  };
+
+  // Pack the loaded indices into 8x i32 descriptor words (32-bit: one per word;
+  // 16-bit: two per word, lo | hi<<16). Unfilled slots are zero.
+  SmallVector<Value> words(8, zeroC);
+  if (indexSize == 32) {
+    for (int32_t j = 0; j < count; ++j)
+      words[j] = loadIdx(j);
+  } else {
+    for (int32_t w = 0; w < 8; ++w) {
+      Value lo = (2 * w < count) ? loadIdx(2 * w) : zeroC;
+      Value hi = (2 * w + 1 < count) ? loadIdx(2 * w + 1) : zeroC;
+      Value hiSh = arith::ShLIOp::create(builder, loc, hi, c16v);
+      words[w] = arith::OrIOp::create(builder, loc, lo, hiSh);
+    }
+  }
+
+  Value tensorDim1 = slotField(kExtentSlot0 + 0); // rows (OOB on indices)
+  Value tensorDim0 = slotField(kExtentSlot0 + 1); // row width (column OOB)
+  Value stateStride = slotField(kStrideSlot0 + 0);
+  Value immOffset = stateField(AtomStateField::ImmOffset);
+
+  // Row stride (i64 state; unset sentinel falls back to the static layout stride),
+  // truncated to the descriptor's 32-bit row-stride slot.
+  Value outerStride64;
+  if (hasStaticStride) {
+    int64_t s = layout.getStride().at(0).getLeafAsInt().getValue();
+    Value unset =
+        arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::eq, stateStride,
+                              arith::ConstantIntOp::create(builder, loc, kOuterStrideUnset, 64));
+    outerStride64 = arith::SelectOp::create(
+        builder, loc, unset, arith::ConstantIntOp::create(builder, loc, s, 64), stateStride);
+  } else {
+    outerStride64 = stateStride;
+  }
+  Value outerStride = LLVM::TruncOp::create(builder, loc, i32Ty, outerStride64);
+
+  // Global base = the copy_atom_call operand pointer (not atom state), plus the
+  // i64 imm_offset (carry-safe into glb_hi via the i64 split below).
+  Value glbBase = LLVM::PtrToIntOp::create(builder, loc, i64Ty, glbPtr);
+  glbBase = arith::AddIOp::create(builder, loc, glbBase, immOffset);
+  Value ldsAddr = LLVM::PtrToIntOp::create(builder, loc, i32Ty, ldsPtr);
+
+  int32_t padInterval = atomTy.getPadInterval();
+  int32_t padAmount = atomTy.getPadAmount();
+  FailureOr<PadEncoding> padOr = computePadEncoding(padInterval, padAmount, elemBits);
+  if (failed(padOr))
+    return mlir::emitError(loc) << "gfx1250 TDM gather: padding (interval=" << padInterval
+                                << ", amount=" << padAmount << " elements at " << elemBits
+                                << "-bit) is not encodable";
+  PadEncoding pad = *padOr;
+
+  // GROUP0: pred (gather-index bit [30] set for 32-bit mode, type field [31]),
+  // lds_addr, glb_lo, glb_hi | type.
+  int32_t gatherIndexBit = (indexSize == 32) ? 1 : 0;
+  Value g0s0 = i32Const(builder, loc, 1 | (gatherIndexBit << 30) | (1 << 31));
+  Value g0s2 = LLVM::TruncOp::create(builder, loc, i32Ty, glbBase);
+  Value glbHiRaw = LLVM::LShrOp::create(builder, loc, glbBase,
+                                        arith::ConstantIntOp::create(builder, loc, 32, 64));
+  Value glbHi = LLVM::TruncOp::create(builder, loc, i32Ty, glbHiRaw);
+  Value g0s3 = arith::OrIOp::create(builder, loc, glbHi, i32Const(builder, loc, 1 << 31));
+  Value dgroup0 = vector::FromElementsOp::create(builder, loc, VectorType::get({4}, i32Ty),
+                                                 ValueRange{g0s0, ldsAddr, g0s2, g0s3});
+
+  // GROUP1: config + tensor dims + tile row width + count + row stride.
+  int32_t g1s0Upper = (dataSizeCode << 16) | ((pad.enable ? 1 : 0) << 20) | (pad.interval << 22) |
+                      (pad.amount << 25);
+  Value maskRaw = stateField(AtomStateField::WorkgroupMask);
+  Value maskLow = arith::AndIOp::create(builder, loc, maskRaw, i32Const(builder, loc, 0xFFFF));
+  Value g1s0 = arith::OrIOp::create(builder, loc, i32Const(builder, loc, g1s0Upper), maskLow);
+
+  Value mask16 = i32Const(builder, loc, 0xFFFF);
+  Value td0Lo = arith::AndIOp::create(builder, loc, tensorDim0, mask16);
+  Value td0Hi = arith::AndIOp::create(
+      builder, loc, arith::ShRUIOp::create(builder, loc, tensorDim0, c16v), mask16);
+  Value td1Lo = arith::AndIOp::create(builder, loc, tensorDim1, mask16);
+  Value td1Hi = arith::AndIOp::create(
+      builder, loc, arith::ShRUIOp::create(builder, loc, tensorDim1, c16v), mask16);
+  Value g1s1 = arith::ShLIOp::create(builder, loc, td0Lo, c16v);
+  Value g1s2 =
+      arith::OrIOp::create(builder, loc, td0Hi, arith::ShLIOp::create(builder, loc, td1Lo, c16v));
+  Value g1s3 = arith::OrIOp::create(builder, loc, td1Hi, i32Const(builder, loc, rowWidth << 16));
+  Value g1s4 = i32Const(builder, loc, count & 0xFFFF); // gather tile_dim1 = valid row count
+  Value dgroup1 = vector::FromElementsOp::create(
+      builder, loc, VectorType::get({8}, i32Ty),
+      ValueRange{g1s0, g1s1, g1s2, g1s3, g1s4, outerStride, zeroC, zeroC});
+
+  // GROUP2 / GROUP3: the packed row-index words.
+  Value dg2 = vector::FromElementsOp::create(builder, loc, VectorType::get({4}, i32Ty),
+                                             ValueRange{words[0], words[1], words[2], words[3]});
+  Value dg3 = vector::FromElementsOp::create(builder, loc, VectorType::get({4}, i32Ty),
+                                             ValueRange{words[4], words[5], words[6], words[7]});
+  Value dg4 = vector::FromElementsOp::create(
+      builder, loc, VectorType::get({8}, i32Ty),
+      ValueRange{zeroC, zeroC, zeroC, zeroC, zeroC, zeroC, zeroC, zeroC});
+
+  uint32_t cachePolicy = static_cast<uint32_t>(atomTy.getCacheModifier());
+  ArrayAttr noAliasScopes;
+  if (isLoad)
+    ROCDL::TensorLoadToLDSOp::create(builder, loc, dgroup0, dgroup1, dg2, dg3, dg4, cachePolicy,
+                                     noAliasScopes, noAliasScopes, noAliasScopes);
+  else
+    ROCDL::TensorStoreFromLDSOp::create(builder, loc, dgroup0, dgroup1, dg2, dg3, dg4, cachePolicy,
+                                        noAliasScopes, noAliasScopes, noAliasScopes);
+  return success();
+}
+
 LogicalResult CopyOpGFX1250TDMType::emitAtomCall(OpBuilder &builder, Location loc,
                                                  Type copyAtomTyArg, Type srcMemTyArg,
                                                  Type dstMemTyArg, Value atomVal, Value src,
@@ -269,6 +461,10 @@ LogicalResult CopyOpGFX1250TDMType::emitAtomCall(OpBuilder &builder, Location lo
   fly::MemRefType glbMemTy = isLoad ? srcMemTy : dstMemTy;
   Value glbPtr = isLoad ? src : dst;
   Value ldsPtr = isLoad ? dst : src;
+
+  if (getIndexWidth() != 0)
+    return emitTdmGather(builder, loc, *this, glbMemTy, glbPtr, ldsPtr, isLoad, atomVal);
+
   int32_t rank = getRank();
 
   auto layout = dyn_cast<fly::LayoutAttr>(glbMemTy.getLayout());
