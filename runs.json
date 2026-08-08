@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-08T04:26:36Z",
+ "updated": "2026-08-08T05:35:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31241169768,
+   "pr": 986,
+   "commit": "d9a560a72eca742e6e4170034672926b3fa768cf",
+   "branch": "codex/rdna3-single-acc-20260808",
+   "event": "pull_request",
+   "title": "[Kernel] Fix single-accumulator RDNA3 GEMM tiles",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31241169768",
+   "created_at": "2026-08-08T05:12:26Z",
+   "updated_at": "2026-08-08T05:12:26Z",
+   "actor": "skyguan92",
+   "jobs": []
+  },
   {
    "run_id": 31239378308,
    "pr": 985,
@@ -10,13 +25,41 @@
    "branch": "megamoe_perf",
    "event": "pull_request",
    "title": "Optimize megamoe performance",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239378308",
    "created_at": "2026-08-08T04:24:44Z",
-   "updated_at": "2026-08-08T04:25:43Z",
+   "updated_at": "2026-08-08T04:28:25Z",
    "actor": "yanboshao",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-08T04:29:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239378308/job/93058026322"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-08T04:28:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239378308/job/93058026323"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-08T04:29:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239378308/job/93058026346"
+    }
+   ]
   },
   {
    "run_id": 31239204180,
@@ -59,37 +102,37 @@
    "branch": "gfx1250/gemm-opt-0805",
    "event": "pull_request",
    "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239082336",
    "created_at": "2026-08-08T04:16:41Z",
-   "updated_at": "2026-08-08T04:21:15Z",
+   "updated_at": "2026-08-08T05:34:08Z",
    "actor": "aoli26",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-08T04:21:36Z",
-     "completed_at": null,
+     "completed_at": "2026-08-08T05:27:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239082336/job/93057279891"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-08T04:21:35Z",
-     "completed_at": null,
+     "completed_at": "2026-08-08T05:09:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239082336/job/93057279907"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-08T04:21:14Z",
+     "started_at": "2026-08-08T05:34:08Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239082336/job/93057279914"
     }
@@ -160,11 +203,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Kernel] Fix the RDNA3 GEMM grid swizzle and migrate it to the tiled \u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31234878751",
    "created_at": "2026-08-08T02:24:08Z",
-   "updated_at": "2026-08-08T02:27:21Z",
+   "updated_at": "2026-08-08T05:33:49Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -188,10 +231,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-08T02:27:21Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-08T05:28:26Z",
+     "completed_at": "2026-08-08T05:33:48Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31234878751/job/93045743658"
     }
    ]
@@ -2040,49 +2083,6 @@
      "started_at": "2026-08-06T06:04:02Z",
      "completed_at": "2026-08-06T06:33:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31069910454/job/92533965265"
-    }
-   ]
-  },
-  {
-   "run_id": 31069841097,
-   "pr": null,
-   "commit": "979c4804e844f75300f54f35c2a7765ac2145a60",
-   "branch": "mega_moe_stage2",
-   "event": "pull_request",
-   "title": "[MegaMoE] Add A4W4 support and optimize FP8 P2P transport",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31069841097",
-   "created_at": "2026-08-06T03:56:44Z",
-   "updated_at": "2026-08-06T04:16:10Z",
-   "actor": "Yaowu-Xiong",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-06T04:03:24Z",
-     "completed_at": "2026-08-06T04:15:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31069841097/job/92516240213"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-06T04:04:18Z",
-     "completed_at": "2026-08-06T04:16:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31069841097/job/92516240215"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-06T04:04:17Z",
-     "completed_at": "2026-08-06T04:16:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31069841097/job/92516240248"
     }
    ]
   }
