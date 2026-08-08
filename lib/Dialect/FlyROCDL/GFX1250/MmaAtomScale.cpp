@@ -168,10 +168,10 @@ LogicalResult MmaOpGFX1250_WMMAScaleType::verify(function_ref<InFlightDiagnostic
                           "f6E3M2FN, f4E2M1FN, got "
                        << elemTyB;
   }
-  if (opselA < 0 || opselA > 3)
-    return emitError() << "opselA must be in [0, 3], got " << opselA;
-  if (opselB < 0 || opselB > 3)
-    return emitError() << "opselB must be in [0, 3], got " << opselB;
+  if (opselA < 0 || opselA > 1)
+    return emitError() << "opselA must be in [0, 1] (row0/row1), got " << opselA;
+  if (opselB < 0 || opselB > 1)
+    return emitError() << "opselB must be in [0, 1] (row0/row1), got " << opselB;
   if (modC < 0 || modC > 0xFFFF)
     return emitError() << "modC must fit the i16 intrinsic field [0, 65535], got " << modC;
   return success();
@@ -240,20 +240,20 @@ FailureOr<Value> MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder,
   // the atom's compile-time params. block-16 selects the V_WMMA_SCALE16 form
   // (i64 scale operands); block-32 the V_WMMA_SCALE form (i32 scale operands).
   bool block16 = getBlockSize() == 16;
+  auto modC = static_cast<ROCDL::WMMACModifier>(getModC());
+  auto scaleAType = static_cast<ROCDL::WMMAMatrixScale>(getOpselA());
+  auto scaleBType = static_cast<ROCDL::WMMAMatrixScale>(getOpselB());
+  auto fmtScale0 = static_cast<ROCDL::WMMAMatrixScaleFormat>(0);
+
   if (m == 32 && n == 16 && k == 128) {
-    // fp4-only form; no fmtA/fmtB operands.
     if (block16)
       return ROCDL::wmma_scale16_f32_32x16x128_f4::create(
-                 builder, loc, accTy, a, b, /*modC=*/(uint16_t)getModC(), c,
-                 /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
-                 /*scaleBType=*/(uint32_t)getOpselB(), /*fmtScaleB=*/(uint32_t)0, scaleB,
-                 /*reuseA=*/getReuseA(), /*reuseB=*/getReuseB())
+                 builder, loc, accTy, a, b, modC, c, scaleAType, fmtScale0, scaleA, scaleBType,
+                 fmtScale0, scaleB, getReuseA(), getReuseB())
           .getResult();
-    return ROCDL::wmma_scale_f32_32x16x128_f4::create(
-               builder, loc, accTy, a, b, /*modC=*/(uint16_t)getModC(), c,
-               /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
-               /*scaleBType=*/(uint32_t)getOpselB(), /*fmtScaleB=*/(uint32_t)0, scaleB,
-               /*reuseA=*/getReuseA(), /*reuseB=*/getReuseB())
+    return ROCDL::wmma_scale_f32_32x16x128_f4::create(builder, loc, accTy, a, b, modC, c,
+                                                      scaleAType, fmtScale0, scaleA, scaleBType,
+                                                      fmtScale0, scaleB, getReuseA(), getReuseB())
         .getResult();
   }
 
@@ -262,20 +262,17 @@ FailureOr<Value> MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder,
   if (!aFmt || !bFmt)
     return failure();
 
+  auto fmtA = static_cast<ROCDL::MatrixFormat>(*aFmt);
+  auto fmtB = static_cast<ROCDL::MatrixFormat>(*bFmt);
+
   if (block16)
     return ROCDL::wmma_scale16_f32_16x16x128_f8f6f4::create(
-               builder, loc, accTy, /*fmtA=*/*aFmt, a, /*fmtB=*/*bFmt, b,
-               /*modC=*/(uint16_t)getModC(), c,
-               /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
-               /*scaleBType=*/(uint32_t)getOpselB(), /*fmtScaleB=*/(uint32_t)0, scaleB,
-               /*reuseA=*/getReuseA(), /*reuseB=*/getReuseB())
+               builder, loc, accTy, fmtA, a, fmtB, b, modC, c, scaleAType, fmtScale0, scaleA,
+               scaleBType, fmtScale0, scaleB, getReuseA(), getReuseB())
         .getResult();
   return ROCDL::wmma_scale_f32_16x16x128_f8f6f4::create(
-             builder, loc, accTy, /*fmtA=*/*aFmt, a, /*fmtB=*/*bFmt, b,
-             /*modC=*/(uint16_t)getModC(), c,
-             /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
-             /*scaleBType=*/(uint32_t)getOpselB(), /*fmtScaleB=*/(uint32_t)0, scaleB,
-             /*reuseA=*/getReuseA(), /*reuseB=*/getReuseB())
+             builder, loc, accTy, fmtA, a, fmtB, b, modC, c, scaleAType, fmtScale0, scaleA,
+             scaleBType, fmtScale0, scaleB, getReuseA(), getReuseB())
       .getResult();
 }
 
