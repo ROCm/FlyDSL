@@ -63,6 +63,8 @@ def build_flash_attn_func_module_primary(
     kv_cache_layout="linear",
     skip_kv_pad_mask=None,
     return_lse=False,
+    score_mod=None,
+    mask_mod=None,
 ):
     """Build a generic f16/bf16 flash-attention launcher.
 
@@ -102,6 +104,8 @@ def build_flash_attn_func_module_primary(
             kv_cache_layout=kv_cache_layout,
             skip_kv_pad_mask=skip_kv_pad_mask,
             return_lse=return_lse,
+            score_mod=score_mod,
+            mask_mod=mask_mod,
         )
         _launcher_m256 = build_flash_attn_func_module_primary(
             num_heads,
@@ -125,6 +129,8 @@ def build_flash_attn_func_module_primary(
             kv_cache_layout=kv_cache_layout,
             skip_kv_pad_mask=skip_kv_pad_mask,
             return_lse=return_lse,
+            score_mod=score_mod,
+            mask_mod=mask_mod,
         )
         _bs_threshold = 2048 * num_heads if gpu_arch.startswith("gfx942") else 4096 * num_heads
 
@@ -208,6 +214,8 @@ def build_flash_attn_func_module_primary(
         sm_scale=sm_scale,
         skip_kv_pad_mask=skip_kv_pad_mask,
         return_lse=return_lse,
+        score_mod=score_mod,
+        mask_mod=mask_mod,
     )
     _flash_attn_generic_cache_tag = traits.cache_tag
 
@@ -428,8 +436,15 @@ def build_flash_attn_func_module_primary(
 
                 # ==== Online softmax over 64 KV positions ====
                 s_raw_lo, s_raw_hi = softmax_helper.split_scores(s_acc_lo, s_acc_hi)
+                s_raw_lo, s_raw_hi = softmax_helper.apply_score_mod(s_raw_lo, s_raw_hi, kv_start)
                 s_raw_lo, s_raw_hi = softmax_helper.apply_kv_mask(s_raw_lo, s_raw_hi, kv_start)
-                if const_expr(traits.ENABLE_GFX942_KV_GPFETCH and traits.DTYPE_STR == "bf16" and not traits.USE_K16):
+                if const_expr(
+                    traits.ENABLE_GFX942_KV_GPFETCH
+                    and traits.DTYPE_STR == "bf16"
+                    and not traits.USE_K16
+                    and traits.SCORE_MOD is None
+                    and traits.MASK_MOD is None
+                ):
                     m_new_raw, corr, neg_scaled_max = softmax_helper.online_softmax_stats(m_running, s_raw_lo, s_raw_hi)
                     o_accs, corr_vec = softmax_helper.rescale_o_accs(o_accs, corr)
                 else:
@@ -474,7 +489,13 @@ def build_flash_attn_func_module_primary(
                     gpu.barrier()
 
                 # ==== Build P packs, then GEMM2: O += V^T_lo @ P_lo + V^T_hi @ P_hi ====
-                if const_expr(traits.ENABLE_GFX942_KV_GPFETCH and traits.DTYPE_STR == "bf16" and not traits.USE_K16):
+                if const_expr(
+                    traits.ENABLE_GFX942_KV_GPFETCH
+                    and traits.DTYPE_STR == "bf16"
+                    and not traits.USE_K16
+                    and traits.SCORE_MOD is None
+                    and traits.MASK_MOD is None
+                ):
                     o_accs, l_new = softmax_helper.gemm2_gpfetch_fused(
                         gemm_helper,
                         kv_lds_to_vgpr,
@@ -676,6 +697,8 @@ def build_flash_attn_func_module_primary(
             kv_cache_layout=kv_cache_layout,
             skip_kv_pad_mask=True,
             return_lse=return_lse,
+            score_mod=score_mod,
+            mask_mod=mask_mod,
         )
         _launch_mask = build_flash_attn_func_module_primary(
             num_heads,
@@ -699,6 +722,8 @@ def build_flash_attn_func_module_primary(
             kv_cache_layout=kv_cache_layout,
             skip_kv_pad_mask=False,
             return_lse=return_lse,
+            score_mod=score_mod,
+            mask_mod=mask_mod,
         )
 
         def _pad_dispatch(*args, **kwargs):
