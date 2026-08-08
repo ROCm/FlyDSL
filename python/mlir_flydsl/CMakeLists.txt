@@ -236,6 +236,28 @@ else()
   set(_FLY_COPY_ROCDL_TABLEGEN "")
 endif()
 
+# Bundle the AMDGCN device bitcode that appendStandardLibs() can ask for, so
+# `toolkit=` can point inside the package instead of at a ROCm install whose
+# location varies per container.  addControlVariables() synthesizes the
+# oclc_* control variables in-module, so only these four files are ever read.
+#
+# It lands under `_mlir/` because that subtree is already the build-output
+# payload of the package: editable installs symlink it and wheels map it
+# through package_dir["flydsl._mlir"], so no extra packaging plumbing is needed.
+set(_FLY_COPY_DEVICE_BITCODE "")
+if(FLYDSL_ROCM_BITCODE_DIR)
+  foreach(_bc ocml ockl hip opencl)
+    if(EXISTS "${FLYDSL_ROCM_BITCODE_DIR}/${_bc}.bc")
+      list(APPEND _FLY_COPY_DEVICE_BITCODE
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${FLYDSL_ROCM_BITCODE_DIR}/${_bc}.bc"
+          "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/_rocm/amdgcn/bitcode/${_bc}.bc")
+    else()
+      message(WARNING "Device bitcode ${_bc}.bc missing from ${FLYDSL_ROCM_BITCODE_DIR}")
+    endif()
+  endforeach()
+endif()
+
 add_custom_target(CopyFlyPythonSources ALL
   COMMAND ${CMAKE_COMMAND} -E copy_directory
     "${PROJECT_SOURCE_DIR}/python/flydsl"
@@ -248,6 +270,7 @@ add_custom_target(CopyFlyPythonSources ALL
     "${MLIR_BINARY_DIR}/python/mlir_flydsl/dialects/_fly_enum_gen.py"
     "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/dialects/_fly_enum_gen.py"
   ${_FLY_COPY_ROCDL_TABLEGEN}
+  ${_FLY_COPY_DEVICE_BITCODE}
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "$<TARGET_FILE:mlir_c_runner_utils>"
     "${_MLIR_LIBS_DIR}/libmlir_c_runner_utils.so"

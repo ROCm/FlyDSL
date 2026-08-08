@@ -258,9 +258,22 @@ that installs ROCm elsewhere. Linking LLD as a library removes that lookup and
 pins the linker to the LLVM revision that produced the ISA. An LLVM built
 without the `lld` project falls back to the upstream behavior.
 
-Device bitcode (`ocml`/`ockl`) is still loaded from `<toolkit>/amdgcn/bitcode`
-when the module calls `__ocml_*` / `__ockl_*`, so a valid ROCm path remains
-required for kernels that use those math functions.
+Device bitcode (`ocml`/`ockl`/`hip`/`opencl`) is loaded from
+`<toolkit>/amdgcn/bitcode` when the module calls `__ocml_*` / `__ockl_*` — for
+example `fx.erfc`, which has no LLVM intrinsic. FlyDSL bundles that bitcode into
+the package at build time and points `toolkit=` at it, so this lookup does not
+depend on where the container installs ROCm either.
+`RocmBackend.rocm_toolkit_path()` resolves it in order:
+
+1. `FLYDSL_COMPILE_ROCM_PATH`
+2. the bitcode bundled with the package
+3. `ROCM_PATH` / `ROCM_ROOT` / `ROCM_HOME`
+
+If none of them contains `amdgcn/bitcode/ocml.bc`, no `toolkit=` is passed and
+upstream's own lookup applies. Configure the build with
+`-DFLYDSL_ROCM_BITCODE_DIR=<dir>` to choose which ROCm supplies the bundled
+bitcode; CMake otherwise searches `ROCM_PATH`/`ROCM_ROOT`/`ROCM_HOME` and
+`/opt/rocm`.
 
 `gpu-kernel-outlining` is no longer a pass in the runtime pipeline. Kernel
 outlining happens during Python tracing, when `@flyc.kernel` emits
