@@ -7,6 +7,11 @@ from ...runtime.device import get_rocm_arch, is_rdna_arch
 from ...utils import env
 from .base import BaseBackend, GPUTarget
 
+#: FlyDSL wrapper around ``gpu-module-to-binary`` that links the HSA code object
+#: with the in-process LLD library instead of spawning ``ld.lld`` from the ROCm
+#: toolkit path.  See ``lib/Conversion/FlyToROCDL/FlyEmitGPUBinary.cpp``.
+BINARY_PASS_NAME = "fly-emit-gpu-binary"
+
 
 class RocmBackend(BaseBackend):
     """ROCm / AMDGPU compile backend (HIP runtime, ROCDL lowering)."""
@@ -49,7 +54,7 @@ class RocmBackend(BaseBackend):
         """Format {key: value, ...} as 'key=value key2=value2' for MLIR pass options."""
         return " ".join(f"{k}={v}" for k, v in opts.items())
 
-    def _pipeline_parts(self, *, compile_hints: dict) -> Tuple[List[str], str]:
+    def _pipeline_parts(self, *, compile_hints: dict, external: bool = False) -> Tuple[List[str], str]:
         chip = self.target.arch
         waves_per_eu = compile_hints.get("waves_per_eu")
         maxnreg = compile_hints.get("maxnreg")
@@ -106,7 +111,12 @@ class RocmBackend(BaseBackend):
                 else []
             ),
         ]
-        binary_fragment = f'gpu-module-to-binary{{format=fatbin opts="{" ".join(bin_cli_opts)}"}}'
+        opts = f'opts="{" ".join(bin_cli_opts)}"'
+        # The external toolchain drives an upstream mlir-opt that does not know
+        # about FlyDSL passes, so that path keeps using gpu-module-to-binary.
+        binary_fragment = (
+            f"gpu-module-to-binary{{format=fatbin {opts}}}" if external else f"{BINARY_PASS_NAME}{{{opts}}}"
+        )
         return [*pre_binary_fragments, *binary_prep_fragments], binary_fragment
 
     def pipeline_fragments(self, *, compile_hints: dict) -> List[str]:
@@ -114,7 +124,7 @@ class RocmBackend(BaseBackend):
         return [*pre_binary_fragments, binary_fragment]
 
     def external_binary_pipeline_fragments(self, *, compile_hints: dict) -> Tuple[List[str], str]:
-        return self._pipeline_parts(compile_hints=compile_hints)
+        return self._pipeline_parts(compile_hints=compile_hints, external=True)
 
     def lower_compile_hints(self, module, *, compile_hints: dict) -> None:
         """Materialize a scalar waves-per-EU override on kernel entries."""
