@@ -306,7 +306,7 @@ Python Function (@flyc.kernel / @flyc.jit)
    │    reconcile-unrealized-casts                            │
    ├──────────────────────────────────────────────────────────┤
    │ C. binary_fragment                                       │
-   │    gpu-module-to-binary{format=fatbin}                   │
+   │    fly-emit-gpu-binary                                   │
    └──────────────────────────────────────────────────────────┘
         │
         ▼

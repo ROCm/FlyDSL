@@ -12,6 +12,11 @@ from ...runtime.device import get_rocm_arch, get_warp_size
 from ...utils import env
 from .base import AOTRuntimeConfig, BaseBackend, GPUTarget
 
+#: FlyDSL wrapper around ``gpu-module-to-binary`` that links the HSA code object
+#: with the in-process LLD library instead of spawning ``ld.lld`` from the ROCm
+#: toolkit path.  See ``lib/Conversion/FlyToROCDL/FlyEmitGPUBinary.cpp``.
+BINARY_PASS_NAME = "fly-emit-gpu-binary"
+
 
 def _ktrace_tracing_enabled(compile_hints: dict) -> bool:
     if "ktrace" in compile_hints:
@@ -74,7 +79,7 @@ class RocmBackend(BaseBackend):
 
     # -- compile pipeline ------------------------------------------------
 
-    def _pipeline_parts(self, *, compile_hints: dict) -> Tuple[List[str], str]:
+    def _pipeline_parts(self, *, compile_hints: dict, external: bool = False) -> Tuple[List[str], str]:
         # MLIR Chipset::parse only accepts bare gfxNNNN. The gpu.module target keeps
         # the full arch (e.g. gfx1250-strict) so LLVM codegen sees it.
         chipset = self.target.arch.split("-", 1)[0]
@@ -116,13 +121,12 @@ class RocmBackend(BaseBackend):
                 else []
             ),
         ]
-        toolkit = ""
-        if os.name == "nt":
-            # No /opt/rocm default here: name a root holding llvm/bin/ld.lld and amdgcn/bitcode.
-            from ...runtime.device_runtime.rocm import _rocm_toolkit_root
-
-            toolkit = f' toolkit="{_rocm_toolkit_root()}"'
-        binary_fragment = f'gpu-module-to-binary{{format=fatbin opts="{" ".join(bin_cli_opts)}"{toolkit}}}'
+        opts = f'opts="{" ".join(bin_cli_opts)}"'
+        # The external toolchain drives an upstream mlir-opt that does not know
+        # about FlyDSL passes, so that path keeps using gpu-module-to-binary.
+        binary_fragment = (
+            f"gpu-module-to-binary{{format=fatbin {opts}}}" if external else f"{BINARY_PASS_NAME}{{{opts}}}"
+        )
         return [*pre_binary_fragments, *binary_prep_fragments], binary_fragment
 
     def pipeline_fragments(self, *, compile_hints: dict) -> List[str]:
@@ -130,7 +134,7 @@ class RocmBackend(BaseBackend):
         return [*pre_binary_fragments, binary_fragment]
 
     def external_binary_pipeline_fragments(self, *, compile_hints: dict) -> Tuple[List[str], str]:
-        return self._pipeline_parts(compile_hints=compile_hints)
+        return self._pipeline_parts(compile_hints=compile_hints, external=True)
 
     def lower_compile_hints(self, module, *, compile_hints: dict) -> None:
         """Materialize a scalar waves-per-EU override on kernel entries."""
