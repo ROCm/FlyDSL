@@ -11,6 +11,22 @@ find_package(MLIR REQUIRED CONFIG)
 
 message(STATUS "Found MLIR: ${MLIR_DIR}")
 
+# LLD is linked as a library so GPU binary emission never has to locate an
+# `ld.lld` executable at runtime (see lib/Conversion/FlyToROCDL/FlyEmitGPUBinary.cpp).
+# Always resolve it from the LLVM install that provides MLIR: NO_DEFAULT_PATH
+# keeps CMake from picking up a system LLD whose version would not match the
+# code generator.  Optional, so an LLVM built without the lld project still works.
+if(NOT LLD_DIR)
+  set(LLD_DIR ${LLVM_LIBRARY_DIR}/cmake/lld)
+endif()
+find_package(LLD CONFIG PATHS "${LLD_DIR}" NO_DEFAULT_PATH)
+if(LLD_FOUND)
+  message(STATUS "Found LLD: ${LLD_DIR} (in-process GPU binary linking)")
+else()
+  message(STATUS "LLD not found under ${LLD_DIR}; GPU binary emission falls back to "
+                 "spawning ld.lld from the ROCm toolkit path")
+endif()
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE "RelWithDebInfo" CACHE STRING "Build type (Debug, Release, RelWithDebInfo, MinSizeRel)" FORCE)
   message(STATUS "CMAKE_BUILD_TYPE not set; defaulting to ${CMAKE_BUILD_TYPE}")
