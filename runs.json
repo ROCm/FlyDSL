@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-08T13:33:10Z",
+ "updated": "2026-08-08T15:31:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -29,19 +29,19 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-08T13:27:42Z",
-     "completed_at": null,
+     "completed_at": "2026-08-08T14:30:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31257973184/job/93108105666"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-08T13:27:40Z",
-     "completed_at": null,
+     "completed_at": "2026-08-08T14:15:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31257973184/job/93108105693"
     }
    ]
