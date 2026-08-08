@@ -365,7 +365,7 @@ See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tile
 | Category | Test File | Description |
 |----------|-----------|-------------|
 | **Preshuffle GEMM** | `test_preshuffle_gemm.py` | FP8, INT8, INT4, BF16, FP4 |
-| **HGEMM Split-K** | `test_hgemm_splitk.py` | FP16 GEMM split-K |
+| **A16W16 Universe GEMM** | `test_gemm_a16w16_universe_gfx950.py` | FP16/BF16 layout and split-K GEMM |
 | **MoE GEMM** | `test_moe_gemm.py` | MoE 2-stage (gate/up + reduce) |
 | **MoE Reduce** | `test_moe_reduce.py` | MoE reduce kernel |
 | **PagedAttention** | `test_pa.py` | Paged attention decode (FP8) — *WIP perf tuning* |

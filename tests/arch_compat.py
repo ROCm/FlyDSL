@@ -12,6 +12,7 @@ CDNA_ONLY_TESTS = frozenset(
     {
         "test_flash_attn_fwd.py",  # MFMA + hardcoded wave64 FMHA kernels
         "test_preshuffle_gemm.py",
+        "test_gemm_a16w16_universe_gfx950.py",
         "test_moe_gemm.py",
         "test_moe_reduce.py",
         "test_pa.py",
