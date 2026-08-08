@@ -755,7 +755,7 @@ def _pipeline_fragments_for_mode(backend, *, compile_hints: dict) -> PipelineCon
     return PipelineConfig(
         fragments=fragments,
         pre_binary=None,
-        binary_fragment=None,
+        binary_fragment=fragments[-1],
         llvm_opts=llvm_opts,
         external=False,
     )
@@ -834,7 +834,7 @@ class MlirCompiler:
                 stage_num_base = 1
                 dump_fragments = pre_binary_fragments if external_binary else fragments
                 for idx, frag in enumerate(dump_fragments):
-                    if frag.strip().startswith("gpu-module-to-binary"):
+                    if frag == binary_fragment:
                         llir = _extract_llvm_ir(module)
 
                     stage_num = stage_num_base + idx

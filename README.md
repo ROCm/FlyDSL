@@ -88,6 +88,10 @@ Prerequisites for source builds:
 
 - **Build tools**: `cmake` (>=3.20), C++17 compiler, optionally `ninja`
 - **Python deps**: `nanobind`, `numpy`, `pybind11` (installed by `scripts/build_llvm.sh`; install them manually if you skip that step)
+- **ROCm device bitcode**: `scripts/build.sh` bundles `amdgcn/bitcode/*.bc` from the ROCm found via
+  `ROCM_PATH`/`ROCM_ROOT`/`ROCM_HOME` or `/opt/rocm`, so kernels calling `__ocml_*` compile wherever the
+  package is later installed. Override with `-DFLYDSL_ROCM_BITCODE_DIR=<dir>`; skipping it only means
+  those kernels need `FLYDSL_COMPILE_ROCM_PATH` or `ROCM_PATH` set at compile time.
 
 ```bash
 # Clone ROCm LLVM and build MLIR (takes ~30min with -j64)
@@ -254,7 +258,7 @@ Python Function (@flyc.kernel / @flyc.jit)
    │    reconcile-unrealized-casts                            │
    ├──────────────────────────────────────────────────────────┤
    │ C. binary_fragment                                       │
-   │    gpu-module-to-binary{format=fatbin}                   │
+   │    fly-emit-gpu-binary                                   │
    └──────────────────────────────────────────────────────────┘
         │
         ▼

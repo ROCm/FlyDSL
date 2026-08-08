@@ -192,7 +192,7 @@ Python Function (@flyc.kernel / @flyc.jit)
    │   ensure-debug-info-scope-on-llvm-func  (optional)     │
    ├────────────────────────────────────────────────────────┤
    │ Stage C — binary_fragment                              │
-   │   gpu-module-to-binary{format=fatbin opts="..."}       │
+   │   fly-emit-gpu-binary{opts="..."}                      │
    └────────────────────────────────────────────────────────┘
         │
         ▼
@@ -207,7 +207,9 @@ The pipeline is built by `RocmBackend._pipeline_parts()` in
 the pipeline as a single combined pass list (`pipeline_fragments()`) or split
 it for external LLVM codegen (`external_binary_pipeline_fragments()`). External
 mode runs Stages A and B with the bundled MLIR runtime, then invokes the
-external LLVM toolchain only for Stage C (`gpu-module-to-binary`).
+external LLVM toolchain only for Stage C. That toolchain drives an upstream
+`mlir-opt` which does not know FlyDSL passes, so external mode substitutes
+`gpu-module-to-binary{format=fatbin}` for `fly-emit-gpu-binary`.
 
 **Stage A — `pre_binary_fragments`** (Fly dialect → ROCDL lowering)
 
@@ -245,7 +247,34 @@ When `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, Stage B appends
 
 | # | Pass | Description |
 |---|---|---|
-| 19 | `gpu-module-to-binary{format=fatbin opts="..."}` | Invokes the LLVM AMDGPU backend and emits an HSA fatbin. |
+| 19 | `fly-emit-gpu-binary{opts="..."}` | Invokes the LLVM AMDGPU backend and emits an HSA fatbin. |
+
+Stage C wraps the upstream `gpu-module-to-binary` pass
+(`lib/Conversion/FlyToROCDL/FlyEmitGPUBinary.cpp`): it runs upstream only as far
+as `format=isa`, then assembles the ISA with `mlir::ROCDL::assembleIsa` and
+links the HSA code object through the LLD ELF driver linked into FlyDSL.
+Upstream would instead spawn `<toolkit>/llvm/bin/ld.lld`, resolved from
+`ROCM_PATH` or a path baked into the LLVM build, which fails on any container
+that installs ROCm elsewhere. Linking LLD as a library removes that lookup and
+pins the linker to the LLVM revision that produced the ISA. An LLVM built
+without the `lld` project falls back to the upstream behavior.
+
+Device bitcode (`ocml`/`ockl`/`hip`/`opencl`) is loaded from
+`<toolkit>/amdgcn/bitcode` when the module calls `__ocml_*` / `__ockl_*` — for
+example `fx.erfc`, which has no LLVM intrinsic. FlyDSL bundles that bitcode into
+the package at build time and points `toolkit=` at it, so this lookup does not
+depend on where the container installs ROCm either.
+`RocmBackend.rocm_toolkit_path()` resolves it in order:
+
+1. `FLYDSL_COMPILE_ROCM_PATH`
+2. the bitcode bundled with the package
+3. `ROCM_PATH` / `ROCM_ROOT` / `ROCM_HOME`
+
+If none of them contains `amdgcn/bitcode/ocml.bc`, no `toolkit=` is passed and
+upstream's own lookup applies. Configure the build with
+`-DFLYDSL_ROCM_BITCODE_DIR=<dir>` to choose which ROCm supplies the bundled
+bitcode; CMake otherwise searches `ROCM_PATH`/`ROCM_ROOT`/`ROCM_HOME` and
+`/opt/rocm`.
 
 `gpu-kernel-outlining` is no longer a pass in the runtime pipeline — kernel
 outlining happens during Python tracing, when `@flyc.kernel` emits
