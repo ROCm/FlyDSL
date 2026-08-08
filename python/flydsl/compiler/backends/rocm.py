@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+import hashlib
+import os
+from functools import lru_cache
+from pathlib import Path
 from typing import List, Tuple
 
 from ...runtime.device import get_rocm_arch, is_rdna_arch
@@ -11,6 +15,72 @@ from .base import BaseBackend, GPUTarget
 #: with the in-process LLD library instead of spawning ``ld.lld`` from the ROCm
 #: toolkit path.  See ``lib/Conversion/FlyToROCDL/FlyEmitGPUBinary.cpp``.
 BINARY_PASS_NAME = "fly-emit-gpu-binary"
+
+#: ROCm toolkit root bundled with the package; holds ``amdgcn/bitcode/*.bc``
+#: copied in at build time.  Lives under ``_mlir`` because that subtree is the
+#: packaged build output.  Absent when CMake could not locate a ROCm install.
+BUNDLED_ROCM_PATH = Path(__file__).resolve().parents[2] / "_mlir" / "_rocm"
+
+
+def _has_device_bitcode(root: Path) -> bool:
+    return (root / "amdgcn" / "bitcode" / "ocml.bc").is_file()
+
+
+@lru_cache(maxsize=1)
+def rocm_toolkit_path() -> str:
+    """Resolve the ROCm root that supplies AMDGCN device bitcode.
+
+    Only ``<root>/amdgcn/bitcode`` is read: ``fly-emit-gpu-binary`` links the HSA
+    code object in process, so no ``ld.lld`` lookup is involved.  The bundled
+    tree is preferred over the environment so that a container that installs
+    ROCm somewhere unexpected still compiles kernels that call ``__ocml_*``.
+
+    Returns an empty string when nothing is found, which leaves the upstream
+    ``ROCM_PATH`` lookup in place rather than forcing a bad path on it.
+    """
+    candidates: List[Tuple[str, Path]] = []
+    if env.compile.rocm_path:
+        candidates.append(("FLYDSL_COMPILE_ROCM_PATH", Path(env.compile.rocm_path)))
+    candidates.append(("bundled with flydsl", BUNDLED_ROCM_PATH))
+    for var in ("ROCM_PATH", "ROCM_ROOT", "ROCM_HOME"):
+        value = os.environ.get(var)
+        if value:
+            candidates.append((var, Path(value)))
+
+    for _, root in candidates:
+        if not _has_device_bitcode(root):
+            continue
+        path = str(root)
+        # MLIR's pass-pipeline parser treats whitespace, commas and braces as
+        # structural syntax, so such a path cannot be spelled as an option.
+        bad = sorted({ch for ch in path if ch.isspace() or ch in ",{}\"'"})
+        if bad:
+            raise ValueError(
+                f"ROCm toolkit path {path!r} contains unsupported character(s) {bad!r} and cannot be "
+                "passed to an MLIR pass option. Point FLYDSL_COMPILE_ROCM_PATH at a path without "
+                "whitespace, commas, braces, or quotes."
+            )
+        return path
+    return ""
+
+
+#: Device libraries ``appendStandardLibs()`` can pull out of a toolkit path.
+_DEVICE_BITCODE_FILES = ("ocml.bc", "ockl.bc", "hip.bc", "opencl.bc")
+
+
+@lru_cache(maxsize=4)
+def _device_bitcode_fingerprint(toolkit: str) -> str:
+    """Digest the device bitcode reachable from *toolkit*."""
+    if not toolkit:
+        return "none"
+    bitcode_dir = Path(toolkit) / "amdgcn" / "bitcode"
+    digest = hashlib.sha256()
+    for name in _DEVICE_BITCODE_FILES:
+        digest.update(name.encode())
+        path = bitcode_dir / name
+        if path.is_file():
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 class RocmBackend(BaseBackend):
@@ -112,6 +182,9 @@ class RocmBackend(BaseBackend):
             ),
         ]
         opts = f'opts="{" ".join(bin_cli_opts)}"'
+        toolkit = rocm_toolkit_path()
+        if toolkit:
+            opts = f"toolkit={toolkit} {opts}"
         # The external toolchain drives an upstream mlir-opt that does not know
         # about FlyDSL passes, so that path keeps using gpu-module-to-binary.
         binary_fragment = (
@@ -125,6 +198,16 @@ class RocmBackend(BaseBackend):
 
     def external_binary_pipeline_fragments(self, *, compile_hints: dict) -> Tuple[List[str], str]:
         return self._pipeline_parts(compile_hints=compile_hints, external=True)
+
+    def hash(self) -> str:
+        """Fold the device bitcode into the JIT cache key.
+
+        Linked-in ocml/ockl changes the generated code but no FlyDSL shared
+        library, so the native-library hashes alone would not invalidate a
+        stale cache after a rebuild against a different ROCm.
+        """
+        toolkit = rocm_toolkit_path()
+        return f"{self.target}:{toolkit}:{_device_bitcode_fingerprint(toolkit)}"
 
     def lower_compile_hints(self, module, *, compile_hints: dict) -> None:
         """Materialize a scalar waves-per-EU override on kernel entries."""
