@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
-"""Static MegaMoEV2 configurations tuned for eight-GPU MI355X."""
+"""Static MegaMoE configurations tuned for eight-GPU MI355X."""
 
 from bisect import bisect_left
 from dataclasses import dataclass, replace
@@ -57,9 +57,10 @@ class Stage2Config:
     persist_strided: bool = False
     block_k: int = 256
     b_hoist: bool = True
+    b2stage: bool = True
     ascale_prefetch: bool = True
     spatial_partition: int = 402
-    bf16_lds: bool = False
+    deep_a_pipeline: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,8 +76,6 @@ class MegaMoEConfig:
             raise ValueError(f"Stage2 block_m={bm} must divide Stage1 sort_block_m={sbm}")
         if self.p2p_quant not in ("none", "fp8_blockwise_1x32"):
             raise ValueError(f"unsupported p2p_quant={self.p2p_quant!r}")
-        if self.p2p_quant != "none" and self.stage2.bf16_lds:
-            raise ValueError("FP8 P2P requires Stage2 bf16_lds=False")
 
 
 _FIXED_GEOMETRY = {
@@ -332,26 +331,84 @@ def _select_stage2(bucket: int, fixed_slot: bool, mtpr: int, sort_block_m: int) 
         persist_cu=persist_cu,
         use_nt=bucket <= 128,
         persist_strided=bucket in (512, 1024, 2048),
+        deep_a_pipeline=bucket >= 1024 and block_n == 256,
     )
 
 
 @lru_cache(maxsize=None)
-def _select_bucket_config(bucket: int, mtpr: int) -> MegaMoEConfig:
+def _select_bucket_config(bucket: int, mtpr: int, p2p_quant: str) -> MegaMoEConfig:
     fixed_slot = mtpr <= FIXED_SLOT_MAX_MTPR
     stage1 = _select_stage1(bucket, fixed_slot, mtpr)
     stage2 = _select_stage2(bucket, fixed_slot, mtpr, stage1.sort_block_m)
-    # MTPR is rank-invariant; local token counts need not be.
-    p2p_quant = "fp8_blockwise_1x32" if mtpr > P2P_FP8_MIN_MTPR else "none"
     return MegaMoEConfig(stage1=stage1, stage2=stage2, p2p_quant=p2p_quant)
 
 
-def select_mega_moe_config(tokens: int, mtpr: int) -> MegaMoEConfig:
+def select_mega_moe_config(
+    tokens: int,
+    mtpr: int,
+    p2p_quant: str = "auto",
+    *,
+    a_dtype: str = "fp8",
+) -> MegaMoEConfig:
     if mtpr <= 0 or mtpr & (mtpr - 1):
         raise ValueError(f"mtpr={mtpr} must be a positive power of two")
     if tokens > mtpr:
         raise ValueError(f"tokens={tokens} exceeds mtpr={mtpr}")
+    if a_dtype not in ("fp4", "fp8"):
+        raise ValueError(f"unsupported activation dtype={a_dtype!r}")
     bucket = nearest_token_bucket(tokens)
     fixed_slot = mtpr <= FIXED_SLOT_MAX_MTPR
     if fixed_slot and bucket not in _FIXED_GEOMETRY:
         raise ValueError(f"fixed-slot does not support token bucket {bucket}")
-    return _select_bucket_config(bucket, mtpr)
+    if p2p_quant == "auto":
+        # MTPR is rank-invariant; local token counts need not be.
+        use_fp8 = mtpr >= P2P_FP8_MIN_MTPR if a_dtype == "fp4" else mtpr > P2P_FP8_MIN_MTPR
+        p2p_quant = "fp8_blockwise_1x32" if use_fp8 else "none"
+    elif p2p_quant not in ("none", "fp8_blockwise_1x32"):
+        raise ValueError(f"unsupported p2p_quant={p2p_quant!r}")
+    return _select_bucket_config(bucket, mtpr, p2p_quant)
+
+
+def apply_mega_moe_quant_config(config: MegaMoEConfig, tokens: int, a_dtype: str) -> MegaMoEConfig:
+    """Apply activation- and transport-specific tuning without changing the shared table."""
+    if a_dtype not in ("fp4", "fp8"):
+        raise ValueError(f"unsupported activation dtype={a_dtype!r}")
+
+    bucket = nearest_token_bucket(tokens)
+    stage1_overrides = {}
+    stage2_overrides = {}
+    if config.p2p_quant == "fp8_blockwise_1x32" and bucket in (256, 512):
+        stage2_overrides.update(
+            block_m=64,
+            block_n=256,
+            persist=True,
+            persist_cu=128 if bucket == 256 else 240,
+            use_nt=False,
+            persist_strided=bucket == 512,
+            deep_a_pipeline=True,
+        )
+
+    if a_dtype == "fp8":
+        if not stage2_overrides:
+            return config
+        return replace(config, stage2=replace(config.stage2, **stage2_overrides))
+
+    if bucket <= 128 and config.stage1.async_a_copy:
+        # FP4 halves the A K-step bytes. The 8-wave compact kernel therefore
+        # needs SBM64 so every thread owns one or more 16-byte async copies.
+        stage1_overrides["sort_block_m"] = 64
+    if tokens >= 256:
+        stage1_overrides["waves_per_eu_hint"] = 1
+    if bucket == 512:
+        stage1_overrides.update(b_nt=0, num_dispatch_cu=160)
+    elif bucket == 1024:
+        stage1_overrides.update(sort_block_m=128, num_dispatch_cu=88)
+        stage2_overrides["block_m"] = 64
+
+    if not stage1_overrides and not stage2_overrides:
+        return config
+    return replace(
+        config,
+        stage1=replace(config.stage1, **stage1_overrides),
+        stage2=replace(config.stage2, **stage2_overrides),
+    )
