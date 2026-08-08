@@ -155,7 +155,8 @@ def _skip_reason(spec, N, K, tile_cfg, cluster):
     tile_m, tile_n, tile_k, _m_warp, _n_warp, num_buffers = tile_cfg
     profile = spec.get("profile")
     if profile is not None:
-        if (*tile_cfg, *cluster) != profile:
+        legal_cluster_n = (profile[7], 4) if profile[7] == 2 else (profile[7],)
+        if (*tile_cfg, cluster[0]) != profile[:7] or cluster[1] not in legal_cluster_n:
             return f"this kernel hand-schedules one profile, {profile}"
         if N % (tile_n * cluster[1]):
             return f"N={N} must divide {tile_n * cluster[1]}"
@@ -348,10 +349,17 @@ def test_gemm_cluster(mode, M, cluster_m, cluster_n, num_buffers):
 def test_a8w4_256x256_rejects_other_profiles(knob):
     _require_gpu()
     cfg = list(_A8W4_256_PROFILE)
-    cfg[knob] *= 2
+    cfg[knob] = 8 if knob == 7 else cfg[knob] * 2  # cluster_n=4 is a supported profile
     _, make_args, _, _ = _build_case("a8w4_256x256", 256, 512, 512, *cfg[:6], cluster_m=cfg[6], cluster_n=cfg[7])
     with pytest.raises(AssertionError, match="only the tuned"):
         flyc.compile(launch_gemm_a8w4_256x256, *make_args(torch.cuda.current_stream()))
+
+
+@pytest.mark.parametrize("M, N, K", [(256, 1024, 512), (288, 1024, 896), (512, 2048, 4608)])
+def test_a8w4_256x256_cluster1x4(M, N, K):
+    """A 4-wide cluster multicasts A to four workgroups instead of two."""
+    _require_gpu()
+    _run_case("a8w4_256x256", M, N, K, *_A8W4_256_PROFILE[:6], cluster_m=1, cluster_n=4)
 
 
 @pytest.mark.parametrize("mode, K", [("a8w4_256x256", 4608), ("a4w4_256x256", 4096)])

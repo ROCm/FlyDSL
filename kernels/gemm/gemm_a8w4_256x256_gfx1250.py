@@ -46,18 +46,20 @@ def launch_gemm_a8w4_256x256(
     cluster_m: Constexpr[int],
     cluster_n: Constexpr[int],
 ):
-    """Launch the 1x2-cluster kernel; N must be divisible by 512, K by 128, with K >= 512."""
+    """M must divide 256*cluster_m and N 256*cluster_n; K divides 128 and is at least 512."""
 
-    assert (tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, cluster_m, cluster_n) == (
+    assert (tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers) == (
         256,
         256,
         128,
         2,
         2,
         4,
-        1,
-        2,
-    ), "only the tuned 256x256x128, 2x2-wave, 4-buffer, 1x2-cluster profile is supported"
+    ) and (cluster_m, cluster_n) in (
+        (1, 2),
+        (1, 4),
+        (4, 4),
+    ), "only the tuned 256x256x128, 2x2-wave, 4-buffer profile with a 1x2 / 1x4 / 4x4 cluster is supported"
     cluster_sync_revs = 8
     m_run_max, m_run_min = 32, 8
     WMMA_M = WMMA_N = 16
@@ -419,11 +421,9 @@ def launch_gemm_a8w4_256x256(
             rocdl.sched_barrier(0)
             rocdl.s_wait_dscnt(17)
             rocdl.sched_barrier(0)
-            _mma_block_range(0, half_n, a_top, b_right, sa_k, sb_k, 8, 5)
-            rocdl.sched_barrier(0)
             pipeline_fence_signal(outstanding=fence_outstanding, use_cluster=False)
             rocdl.sched_barrier(0)
-            _mma_block_range(0, half_n, a_top, b_right, sa_k, sb_k, 13, 3)
+            _mma_block_range(0, half_n, a_top, b_right, sa_k, sb_k, 8, 8)
             rocdl.sched_barrier(0)
             pipeline_fence_wait(use_cluster=False)
             rocdl.sched_barrier(0)
@@ -590,12 +590,11 @@ def launch_gemm_a8w4_256x256(
                 rocdl.sched_barrier(0)
                 rocdl.s_wait_dscnt(10)
                 rocdl.sched_barrier(0)
-                _mma_block_range(half_m, 0, a_bottom, b_left, sa_k, sb_k, 8, 5, True)
-
-                # Signal READY before W13 and wait after W15.
+                # Signal READY early: the window between signal and wait is what absorbs a
+                # late sibling, and the TDM it waits on has far more slack than the barrier.
                 pipeline_fence_signal(outstanding=fence_outstanding, use_cluster=False)
                 rocdl.sched_barrier(0)
-                _mma_block_range(half_m, 0, a_bottom, b_left, sa_k, sb_k, 13, 3, True)
+                _mma_block_range(half_m, 0, a_bottom, b_left, sa_k, sb_k, 8, 8, True)
                 rocdl.sched_barrier(0)
                 pipeline_fence_wait(use_cluster=False)
                 rocdl.s_wait_dscnt(0)
