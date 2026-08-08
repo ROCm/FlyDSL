@@ -91,6 +91,9 @@ _ods_mfma_f32_16x16x32_bf16 = globals().get("mfma_f32_16x16x32_bf16", None)
 _ods_mfma_scale_f32_16x16x128_f8f6f4 = globals().get("mfma_scale_f32_16x16x128_f8f6f4", None) or globals().get(
     "mfma_scale_f32_16x16x128_f8f6f4_", None
 )
+_ods_mfma_scale_f32_32x32x64_f8f6f4 = globals().get("mfma_scale_f32_32x32x64_f8f6f4", None) or globals().get(
+    "mfma_scale_f32_32x32x64_f8f6f4_", None
+)
 mask_mfma = 0x008
 mask_vmem_rd = 0x020
 mask_dsrd = 0x100
@@ -281,10 +284,14 @@ def mfma_f32_16x16x32_bf16(result_type, operands):
     return _ods_mfma_f32_16x16x32_bf16(result_type, a, b, c, cbsz, abid, blgp).result
 
 
-@dsl_loc_tracing
-def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands):
-    if _ods_mfma_scale_f32_16x16x128_f8f6f4 is None:
-        raise AttributeError("ROCDL op not found: mfma_scale_f32_16x16x128_f8f6f4(_)")
+def _mfma_scale_call(ods_op, name, result_type, operands):
+    """Shared body for the scaled-MFMA wrappers.
+
+    ``cbsz``/``blgp`` are ROCDL MatrixFormat enum attributes, so every
+    scale variant must route them through ``_wmma_fmt``.
+    """
+    if ods_op is None:
+        raise AttributeError(f"ROCDL op not found: {name}(_)")
     a = _unwrap_mfma_operand(operands[0])
     b = _unwrap_mfma_operand(operands[1])
     c = _unwrap_mfma_operand(operands[2])
@@ -294,7 +301,7 @@ def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands):
     scaleA = _unwrap_mfma_operand(operands[6]) if len(operands) > 6 else a
     opselB = int(operands[7]) if len(operands) > 7 else 0
     scaleB = _unwrap_mfma_operand(operands[8]) if len(operands) > 8 else b
-    return _ods_mfma_scale_f32_16x16x128_f8f6f4(
+    return ods_op(
         result_type,
         a,
         b,
@@ -306,6 +313,26 @@ def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands):
         opselB,
         scaleB,
     ).result
+
+
+@dsl_loc_tracing
+def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands):
+    return _mfma_scale_call(
+        _ods_mfma_scale_f32_16x16x128_f8f6f4,
+        "mfma_scale_f32_16x16x128_f8f6f4",
+        result_type,
+        operands,
+    )
+
+
+@dsl_loc_tracing
+def mfma_scale_f32_32x32x64_f8f6f4(result_type, operands):
+    return _mfma_scale_call(
+        _ods_mfma_scale_f32_32x32x64_f8f6f4,
+        "mfma_scale_f32_32x32x64_f8f6f4",
+        result_type,
+        operands,
+    )
 
 
 _WMMA_FMT_INT_TO_KW = {
