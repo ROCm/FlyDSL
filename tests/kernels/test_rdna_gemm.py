@@ -109,6 +109,37 @@ def test_f16_gemm_correctness(M, N, K, in_dtype, out_dtype):
     assert verify_output(C.float(), C_ref, atol=0.05, rtol=0.05)
 
 
+def test_f16_gemm_single_accumulator_loop_result():
+    """A 16x16 tile keeps one WMMA accumulator across the pipelined K loop."""
+    _requires_rdna3()
+
+    M, N, K = 16, 16, 64
+    torch.manual_seed(42)
+    launch_fn, block_m, block_n, block_k = _create_wmma_gemm_module_gfx11(
+        M,
+        N,
+        K,
+        in_dtype="bf16",
+        out_dtype="bf16",
+        reg_m=1,
+        reg_n=1,
+        reg_k=2,
+        waves_m=1,
+        waves_n=1,
+    )
+    assert (block_m, block_n, block_k) == (16, 16, 32)
+
+    A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") * 0.1
+    B_T = torch.randn(N, K, dtype=torch.bfloat16, device="cuda") * 0.1
+    C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
+
+    launch_fn(C, A, B_T, torch.cuda.current_stream())
+    torch.cuda.synchronize()
+
+    C_ref = A.float() @ B_T.float().T
+    assert verify_output(C.float(), C_ref, atol=0.05, rtol=0.05)
+
+
 def test_f16_gemm_stochastic_rounding():
     """BF16 GEMM with the stochastic-rounding epilogue: bounded, seed-varying, reproducible.
 
