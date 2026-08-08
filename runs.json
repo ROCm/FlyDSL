@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-08T05:39:04Z",
+ "updated": "2026-08-08T06:22:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,11 +25,11 @@
    "branch": "megamoe_perf",
    "event": "pull_request",
    "title": "Optimize megamoe performance",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239378308",
    "created_at": "2026-08-08T04:24:44Z",
-   "updated_at": "2026-08-08T05:38:08Z",
+   "updated_at": "2026-08-08T06:20:31Z",
    "actor": "yanboshao",
    "jobs": [
     {
@@ -44,20 +44,38 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-08T05:38:07Z",
-     "completed_at": null,
+     "completed_at": "2026-08-08T05:46:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239378308/job/93058026323"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-08T04:29:22Z",
-     "completed_at": null,
+     "completed_at": "2026-08-08T05:55:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239378308/job/93058026346"
+    },
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-08T05:56:29Z",
+     "completed_at": "2026-08-08T06:18:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239378308/job/93066294545"
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-08T05:56:21Z",
+     "completed_at": "2026-08-08T06:20:30Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239378308/job/93066294548"
     }
    ]
   },
