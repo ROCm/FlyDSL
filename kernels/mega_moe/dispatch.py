@@ -94,11 +94,13 @@ def _increment_i32(rsrc, index):
     buffer_ops.buffer_store(value + fx.Int32(1), rsrc, index)
 
 
+# fmt: off
 @flyc.jit
 def _configure_payload_geometry(
     addr_local_hist, addr_chunk_counts, addr_block_counts, addr_active_blocks, lane, *, fz_npes, fz_epr,
     payload_chunk_rows, dispatch_blocks,
 ):
+# fmt: on
     crfa = buffer_ops.create_buffer_resource_from_addr
     local_hist = crfa(addr_local_hist)
     chunk_counts = crfa(addr_chunk_counts)
@@ -125,11 +127,13 @@ def _configure_payload_geometry(
         buffer_ops.buffer_store(active_payload_blocks, crfa(addr_active_blocks), fx.Int32(0))
 
 
+# fmt: off
 @flyc.jit
 def _store_expert_metadata(
     addr_sorted_expert, addr_tile_row_base, addr_srcmap, ge, local_row_base, total_count, num_tiles,
     padded_rows, *, fz_tile_m, invalid_source,
 ):
+# fmt: on
     crfa = buffer_ops.create_buffer_resource_from_addr
     sorted_expert = crfa(addr_sorted_expert)
     tile_row_base = crfa(addr_tile_row_base)
