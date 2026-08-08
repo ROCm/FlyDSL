@@ -19,26 +19,13 @@ import torch
 from kernels.attention.pa_decode_swa import compile_pa_decode_sw, compile_pa_decode_sw_reduce
 from kernels.attention.pa_decode_tile import pa_decode_tile
 from kernels.attention.pa_metadata import compile_pa_decode_metadata
+from kernels.attention.pa_metadata_tuning import lookup_pa_metadata_grid_multiplier
 from kernels.common.tensor_shim import _run_compiled
 from kernels.common.utils import cdiv
 
 # ── Kernel geometry constants ────────────────────────────────────────
 KV_COMPUTE_BLOCK = 256  # tile size (matches SP3 kTileKV)
-# Persistent-grid oversubscription for the metadata decode path: launch
-# CU_count * this many workgroups so the HW keeps multiple workgroups resident
-# per CU (memory-latency hiding).  1 = original (1 wg/CU).
-_PA_METADATA_GRID_OVERSUB = 3
 MFMA_N = 16
-
-_PACKED_FP8_QUERY_DTYPES = tuple(
-    dtype
-    for dtype in (
-        torch.uint8,
-        getattr(torch, "float8_e4m3fnuz", None),
-        getattr(torch, "float8_e4m3fn", None),
-    )
-    if dtype is not None
-)
 
 
 # =====================================================================
@@ -54,6 +41,9 @@ def get_pa_metadata(
     num_query_heads: int,
     num_kv_heads: int,
     partition_size: int = KV_COMPUTE_BLOCK,
+    *,
+    per_token_kv: bool | None = None,
+    grid_multiplier: int | None = None,
 ):
     """Compute PA metadata (worklist, reduce maps) via get_pa_metadata_v1.
 
@@ -69,6 +59,11 @@ def get_pa_metadata(
     NOTE: the consuming decode kernel must interpret kv_start/kv_end as partition
     indices accordingly.
 
+    Exact shape/device matches are loaded from FlyDSL's persistent Autotuner
+    cache. Missing entries default to ``grid_multiplier=1``. ``per_token_kv``
+    selects scale-mode-specific tuning, and ``grid_multiplier`` is the tuner's
+    explicit candidate override.
+
     Returns a dict with: work_indptr, work_info_flat, reduce_indptr,
     reduce_final_map, reduce_partial_map, num_sm, partial_output,
     partial_lse, stride_po_partial, stride_pl_partial.
@@ -81,13 +76,25 @@ def get_pa_metadata(
     head_size = query.shape[-1]
 
     props = torch.cuda.get_device_properties(dev)
-    # Oversubscribe the persistent grid: the decode kernel is memory-latency-bound
-    # and only ~3 workgroups/CU fit by VGPR, but the worklist defaults to 1 wg/CU
-    # (grid = CU count).  Distributing work across num_cu = CU_count * OVERSUB bins
-    # (and launching that many workgroups) lets the HW keep multiple workgroups
-    # resident per CU → more waves in flight → better latency hiding.
-    base_cu = props.multi_processor_count
-    num_sm = base_cu * _PA_METADATA_GRID_OVERSUB
+    num_blocks = key_cache.shape[0]
+    if grid_multiplier is None and per_token_kv is not None:
+        grid_multiplier = lookup_pa_metadata_grid_multiplier(
+            num_cu=props.multi_processor_count,
+            batch_size=batch_size,
+            num_blocks=num_blocks,
+            query_length=query_length,
+            per_token_kv=per_token_kv,
+            num_query_heads=num_query_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_size,
+            block_size=key_cache.shape[-2],
+            device_tensor=query,
+        )
+    if grid_multiplier is None:
+        grid_multiplier = 1
+    if grid_multiplier < 1:
+        raise ValueError("grid_multiplier must be positive")
+    num_sm = props.multi_processor_count * grid_multiplier
     num_sm = (num_sm // num_kv_heads) * num_kv_heads  # keep divisible by num_kv_heads
 
     seqlens_qo_indptr = torch.arange(batch_size + 1, dtype=torch.int32, device=dev) * query_length
@@ -100,10 +107,7 @@ def get_pa_metadata(
     partition_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=dev)
     partition_indptr[1:] = torch.cumsum(_parts_per_batch, dim=0).to(torch.int32)
 
-    block_size = key_cache.shape[-2] if len(key_cache.shape) == 5 else key_cache.shape[-2]
-
     (
-        (work_meta_data_size, work_meta_data_type),
         (work_indptr_size, work_indptr_type),
         (work_info_set_size, work_info_set_type),
         (reduce_indptr_size, reduce_indptr_type),
@@ -111,7 +115,6 @@ def get_pa_metadata(
         (reduce_partial_map_size, reduce_partial_map_type),
     ) = get_pa_metadata_info_v1(batch_size, num_kv_heads, num_cu=num_sm)
 
-    work_metadata_ptrs = torch.empty(work_meta_data_size, dtype=work_meta_data_type, device=dev)
     work_indptr = torch.empty(work_indptr_size, dtype=work_indptr_type, device=dev)
     work_info = torch.empty(work_info_set_size, dtype=work_info_set_type, device=dev)
     reduce_indptr = torch.empty(reduce_indptr_size, dtype=reduce_indptr_type, device=dev)
@@ -120,24 +123,18 @@ def get_pa_metadata(
 
     get_pa_metadata_v1(
         seqlens_qo_indptr,
-        kv_indptr,
         context_lengths,
-        num_query_heads // num_kv_heads,
-        num_kv_heads,
-        True,
-        work_metadata_ptrs,
         work_indptr,
         work_info,
         reduce_indptr,
         reduce_final_map,
         reduce_partial_map,
+        query_group_size=num_query_heads // num_kv_heads,
+        num_kv_heads=num_kv_heads,
         kv_granularity=partition_size,
-        block_size=block_size,
-        max_seqlen_qo=query_length,
-        uni_seqlen_qo=query_length,
-        fast_mode=True,
-        max_split_per_batch=-1,
+        query_length=query_length,
         num_cu=num_sm,
+        stream=torch.cuda.current_stream(dev),
     )
 
     # The FlyDSL get_pa_metadata_v1 produces the reduce_* maps natively
@@ -216,15 +213,11 @@ def _prepare_scale_tensor(
 
 
 def _get_query_input_dtype(query: torch.Tensor) -> str:
-    if query.dtype in _PACKED_FP8_QUERY_DTYPES:
-        return "packed_fp8"
     if query.dtype == torch.bfloat16:
         return "bf16"
     if query.dtype == torch.float16:
         return "f16"
-    raise ValueError(
-        f"Unsupported query dtype for pa_decode_ps_launch: {query.dtype}. " "Expected packed FP8/uint8, bf16, or f16."
-    )
+    raise ValueError(f"Unsupported query dtype for pa_decode_ps_launch: {query.dtype}. Expected bf16 or f16.")
 
 
 def _get_output_dtype_str(output: torch.Tensor) -> str:
@@ -269,9 +262,8 @@ def get_recommended_splits(
     return max(4, min(n, 8))
 
 
-# Small block_size (16/64) is routed through the load-balanced worklist
-# (metadata) path: `compile_pa_decode_metadata` gathers 256//block_size physical
-# pages per 256-token partition, for both per-tensor and per-token KV quant.
+# Small block sizes use the standalone tile kernel; the metadata decode path
+# below is reserved for 1024-token physical pages.
 _PA_DECODE_PS_SMALL_BLOCK_SIZES = (16, 64)
 
 
@@ -322,12 +314,6 @@ def pa_decode_ps_launch(
         device=dev,
         is_graph_capturing=is_graph_capturing,
     )
-    if query_input_dtype == "packed_fp8":
-        raise ValueError(
-            "`pa_decode_ps_launch` no longer accepts host query_scale and only supports "
-            "bf16/f16 query inputs with kernel-internal query scale computation."
-        )
-
     # Detect per-token vs per-tensor quantization from scale tensor
     # dimensionality: a >1-D scale tensor carries one scale per (block, head,
     # token), which enables the per-token K/V path in the metadata kernel.
@@ -516,7 +502,15 @@ def pa_decode_ps_launch(
                 "CUDA graph capture requires precomputed `metadata`; "
                 "call `get_pa_metadata()` before capture and pass it via `metadata=`."
             )
-        metadata = get_pa_metadata(query, key_cache, context_lengths, kv_indptr, num_query_heads, num_kv_heads)
+        metadata = get_pa_metadata(
+            query,
+            key_cache,
+            context_lengths,
+            kv_indptr,
+            num_query_heads,
+            num_kv_heads,
+            per_token_kv=per_token_kv,
+        )
 
     work_indptr = metadata["work_indptr"]
     work_info_flat = metadata["work_info_flat"]
@@ -590,7 +584,7 @@ def pa_decode_ps_launch(
         max_seqlen_q=query_length,
         final_output=output,
         num_query_heads=num_query_heads,
-        head_size=int(query.shape[-1]),
+        head_dim=int(query.shape[-1]),
         stream=s,
     )
 
