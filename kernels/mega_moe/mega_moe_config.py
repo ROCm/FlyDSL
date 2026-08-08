@@ -4,7 +4,7 @@
 
 from bisect import bisect_left
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cache
 
 TOKEN_BUCKETS = (1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768)
 P2P_FP8_MIN_MTPR = 1024
@@ -283,7 +283,7 @@ def _select_large_stage2(bucket: int, sort_block_m: int, model_dim: int) -> Stag
     )
 
 
-@lru_cache(maxsize=None)
+@cache
 def _select_bucket_config(
     bucket: int, mtpr_class: int, experts_per_rank: int, model_dim: int, inter_dim: int
 ) -> MegaMoEConfig:
