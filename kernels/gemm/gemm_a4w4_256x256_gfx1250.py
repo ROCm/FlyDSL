@@ -45,9 +45,10 @@ def launch_gemm_a4w4_256x256(
     cluster_m: Constexpr[int],
     cluster_n: Constexpr[int],
 ):
-    """Launch the A4W4 kernel; K must be divisible by 1024, with K >= 1024.
+    """Launch the A4W4 kernel.
 
-    ``i32_lda`` counts A elements (FP4 nibbles), so the byte stride is ``i32_lda // 2``.
+    N must divide 1024 and ceil(M/256) must be a multiple of 4 (M itself may be ragged);
+    K must be divisible by 1024, with K >= 1024.
     """
 
     assert (tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, cluster_m, cluster_n) == (
@@ -57,9 +58,9 @@ def launch_gemm_a4w4_256x256(
         2,
         2,
         4,
-        1,
-        2,
-    ), "only the tuned 256x256x256, 2x2-wave, 4-buffer, 1x2-cluster profile is supported"
+        4,
+        4,
+    ), "only the tuned 256x256x256, 2x2-wave, 4-buffer profile with a 4x4 cluster is supported"
     cluster_sync_revs = 8
     m_run_max, m_run_min = 32, 8
     FENCE_WAIT_POS = 7  # WMMAs of slack between the READY signal and its matching wait
@@ -411,8 +412,6 @@ def launch_gemm_a4w4_256x256(
             ds.wait(need)
             rocdl.sched_barrier(0)
             n_lead = len(produce)
-            # A producer list longer than the quadrant would silently drop its tail, which
-            # shows up as half the output being stale rather than as a compile error.
             assert n_lead <= WMMA_PER_Q, f"{n_lead} producers do not fit {WMMA_PER_Q} WMMA slots"
             for pos in range_constexpr(WMMA_PER_Q):
                 _mma_block_range(wm0, wn0, act, wt, sa_k, sb_k, pos, 1, n_fast)
@@ -494,8 +493,6 @@ def launch_gemm_a4w4_256x256(
                     out.append(_go)
                 return out
 
-            # (quadrant origin, act, wt, producer).  Both orders respect the same dependency
-            # chain: each quadrant only consumes halves an earlier quadrant already produced.
             TL, TR = (0, 0), (0, half_n)
             BL, BR = (half_m, 0), (half_m, half_n)
             if const_expr(parity == 0):
@@ -533,9 +530,6 @@ def launch_gemm_a4w4_256x256(
                                 tdm_ops.tensor_load_2d(prepared)
                             rocdl.sched_barrier(0)
 
-                # Indices 0..3 always resolve; 4..7 are only read once the matching half has
-                # been produced, which the plan order guarantees.  The idx==2 quadrant only
-                # touches registers until `mid`, so deferring the barrier wait is safe.
                 _quadrant(
                     wm0,
                     wn0,

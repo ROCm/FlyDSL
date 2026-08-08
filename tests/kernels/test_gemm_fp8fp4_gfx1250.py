@@ -118,7 +118,7 @@ def _scales_ptpc(a_f32, b_f32, M, N, K, _fp4_w, _scale_exp, scale_scale):
 _SCALES = {"mx32": _scales_mx32, "mx128": _scales_mx128, "ptpc": _scales_ptpc}
 
 _A8W4_256_PROFILE = (256, 256, 128, 2, 2, 4, 4, 4)
-_A4W4_256_PROFILE = (256, 256, 256, 2, 2, 4, 1, 2)
+_A4W4_256_PROFILE = (256, 256, 256, 2, 2, 4, 4, 4)
 
 _MODES = {
     "a8w4_mx32": dict(
@@ -133,7 +133,7 @@ _MODES = {
     "a4w4_256x256": dict(
         launch=launch_gemm_a4w4_256x256, fp4_w=True, scale="mx32", a8w8=False, tail=(), wrap=_i8,
         scale_exp=(127, 132), f16_kw=dict(scale_exp=(127, 127)), fp4_act=True,
-        profile=_A4W4_256_PROFILE, smoke=(512, 1024, 256, 256, 256, 2, 2),
+        profile=_A4W4_256_PROFILE, smoke=(1024, 1024, 256, 256, 256, 2, 2),
     ),
     "a8w8_mx32": dict(
         launch=launch_gemm_a8w8, fp4_w=False, scale="mx32", a8w8=True, tail=(True, 32), wrap=_i8,
@@ -320,15 +320,25 @@ def test_gemm_shapes(mode, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_
     _run_case(mode, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers)
 
 
+def _whole_clusters_m(mode, M):
+    """Round M up so it fills whole clusters; for tests where the exact M is incidental."""
+    profile = _MODES[mode].get("profile")
+    if profile is None:
+        return M
+    tile_m, cluster_m = profile[0], profile[6]
+    gx = -(-M // tile_m)
+    return tile_m * (gx + (-gx % cluster_m))
+
+
 @pytest.mark.parametrize("lda_extra, ldc_extra", [(128, 192), (128, 256), (64, 96)])
 @pytest.mark.parametrize("mode", _MODE_IDS)
 def test_gemm_strided_lda_ldc(mode, lda_extra, ldc_extra):
-    _run_smoke(mode, 128, lda_extra=lda_extra, ldc_extra=ldc_extra)
+    _run_smoke(mode, _whole_clusters_m(mode, 128), lda_extra=lda_extra, ldc_extra=ldc_extra)
 
 
 @pytest.mark.parametrize("mode", [m for m in _MODE_IDS if _MODES[m]["f16_kw"]])
 def test_gemm_f16_out(mode):
-    _run_smoke(mode, 128, out_dtype="f16", **_MODES[mode]["f16_kw"])
+    _run_smoke(mode, _whole_clusters_m(mode, 128), out_dtype="f16", **_MODES[mode]["f16_kw"])
 
 
 @pytest.mark.parametrize("num_buffers", _SMOKE_BUFFERS)
@@ -362,6 +372,13 @@ def test_a8w4_256x256_cluster4x4(M, N, K):
     """The 4x4 cluster multicasts A across four workgroups and B across four more."""
     _require_gpu()
     _run_case("a8w4_256x256", M, N, K, *_A8W4_256_PROFILE[:6], cluster_m=4, cluster_n=4)
+
+
+@pytest.mark.parametrize("M, N, K", [(1024, 1024, 1024), (2048, 1024, 3072), (1000, 2048, 4096)])
+def test_a4w4_256x256_cluster4x4(M, N, K):
+    """The 4x4 cluster multicasts A across four workgroups and B across four more."""
+    _require_gpu()
+    _run_case("a4w4_256x256", M, N, K, *_A4W4_256_PROFILE[:6], cluster_m=4, cluster_n=4)
 
 
 @pytest.mark.parametrize("mode, K", [("a8w4_256x256", 4608), ("a4w4_256x256", 4096)])
