@@ -117,7 +117,7 @@ def _scales_ptpc(a_f32, b_f32, M, N, K, _fp4_w, _scale_exp, scale_scale):
 
 _SCALES = {"mx32": _scales_mx32, "mx128": _scales_mx128, "ptpc": _scales_ptpc}
 
-_A8W4_256_PROFILE = (256, 256, 128, 2, 2, 4, 1, 2)
+_A8W4_256_PROFILE = (256, 256, 128, 2, 2, 4, 4, 4)
 _A4W4_256_PROFILE = (256, 256, 256, 2, 2, 4, 1, 2)
 
 _MODES = {
@@ -128,7 +128,7 @@ _MODES = {
     "a8w4_256x256": dict(
         launch=launch_gemm_a8w4_256x256, fp4_w=True, scale="mx32", a8w8=False, tail=(), wrap=_i8,
         scale_exp=(127, 132), f16_kw=dict(scale_exp=(127, 127)),
-        profile=_A8W4_256_PROFILE, smoke=(512, 512, 256, 256, 128, 2, 2),
+        profile=_A8W4_256_PROFILE, smoke=(1024, 512, 256, 256, 128, 2, 2), k_pair=True,
     ),
     "a4w4_256x256": dict(
         launch=launch_gemm_a4w4_256x256, fp4_w=True, scale="mx32", a8w8=False, tail=(), wrap=_i8,
@@ -150,16 +150,17 @@ _MODES = {
 }  # fmt: skip
 
 
-def _skip_reason(spec, N, K, tile_cfg, cluster):
+def _skip_reason(spec, M, N, K, tile_cfg, cluster):
     """None when the mode supports this shape/tile combination, else why it cannot."""
     tile_m, tile_n, tile_k, _m_warp, _n_warp, num_buffers = tile_cfg
     profile = spec.get("profile")
     if profile is not None:
-        legal_cluster_n = (profile[7], 4) if profile[7] == 2 else (profile[7],)
-        if (*tile_cfg, cluster[0]) != profile[:7] or cluster[1] not in legal_cluster_n:
+        if (*tile_cfg, *cluster) != profile:
             return f"this kernel hand-schedules one profile, {profile}"
-        if N % (tile_n * cluster[1]):
-            return f"N={N} must divide {tile_n * cluster[1]}"
+        if N % (tile_n * cluster[1]) or (-(-M // tile_m)) % cluster[0]:
+            return f"the {cluster[0]}x{cluster[1]} cluster needs whole clusters of {tile_m}x{tile_n} tiles"
+        if spec.get("k_pair") and K % (tile_k * 2):
+            return f"K={K} must divide {tile_k * 2}: one TDM covers two K-tiles"
     if N % tile_n or K % tile_k:
         return f"N={N} / K={K} must divide tile_n={tile_n} / tile_k={tile_k} (the kernel does not pad)"
     if K // tile_k < num_buffers:
@@ -271,7 +272,7 @@ def _run_case(mode, M, N, K, *tile_cfg, **kwargs):
         kwargs.setdefault("cluster_m", profile[6])
         kwargs.setdefault("cluster_n", profile[7])
     cluster = (kwargs.get("cluster_m", 1), kwargs.get("cluster_n", 1))
-    reason = _skip_reason(_MODES[mode], N, K, tile_cfg, cluster)
+    reason = _skip_reason(_MODES[mode], M, N, K, tile_cfg, cluster)
     if reason:
         pytest.skip(reason)
     _assert_case(mode, M, N, K, *tile_cfg, **kwargs)
@@ -349,17 +350,18 @@ def test_gemm_cluster(mode, M, cluster_m, cluster_n, num_buffers):
 def test_a8w4_256x256_rejects_other_profiles(knob):
     _require_gpu()
     cfg = list(_A8W4_256_PROFILE)
-    cfg[knob] = 8 if knob == 7 else cfg[knob] * 2  # cluster_n=4 is a supported profile
+    cfg[knob] = cfg[knob] * 2
     _, make_args, _, _ = _build_case("a8w4_256x256", 256, 512, 512, *cfg[:6], cluster_m=cfg[6], cluster_n=cfg[7])
     with pytest.raises(AssertionError, match="only the tuned"):
         flyc.compile(launch_gemm_a8w4_256x256, *make_args(torch.cuda.current_stream()))
 
 
-@pytest.mark.parametrize("M, N, K", [(256, 1024, 512), (288, 1024, 896), (512, 2048, 4608)])
-def test_a8w4_256x256_cluster1x4(M, N, K):
-    """A 4-wide cluster multicasts A to four workgroups instead of two."""
+# K/256 mod 3 selects the drain length, so 1024 / 1280 / 1536 walk all three tails.
+@pytest.mark.parametrize("M, N, K", [(1024, 1024, 1024), (2048, 1024, 1280), (1024, 2048, 1536)])
+def test_a8w4_256x256_cluster4x4(M, N, K):
+    """The 4x4 cluster multicasts A across four workgroups and B across four more."""
     _require_gpu()
-    _run_case("a8w4_256x256", M, N, K, *_A8W4_256_PROFILE[:6], cluster_m=1, cluster_n=4)
+    _run_case("a8w4_256x256", M, N, K, *_A8W4_256_PROFILE[:6], cluster_m=4, cluster_n=4)
 
 
 @pytest.mark.parametrize("mode, K", [("a8w4_256x256", 4608), ("a4w4_256x256", 4096)])
@@ -368,7 +370,7 @@ def test_256x256_back_to_back_determinism(mode, K):
     _require_gpu()
     profile = _MODES[mode]["profile"]
     c_gpu, make_args, compiled = _assert_case(
-        mode, 512, 512, K, *profile[:6], cluster_m=profile[6], cluster_n=profile[7]
+        mode, 1024, 256 * profile[7], K, *profile[:6], cluster_m=profile[6], cluster_n=profile[7]
     )
     golden = c_gpu.clone()
     stream = torch.cuda.current_stream()

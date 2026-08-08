@@ -46,27 +46,25 @@ def launch_gemm_a8w4_256x256(
     cluster_m: Constexpr[int],
     cluster_n: Constexpr[int],
 ):
-    """M must divide 256*cluster_m and N 256*cluster_n; K divides 128 and is at least 512."""
+    """N must divide 1024 and ceil(M/256) must be a multiple of 4 (M itself may be ragged);
+    K divides 256 and is at least 512."""
 
-    assert (tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers) == (
+    assert (tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, cluster_m, cluster_n) == (
         256,
         256,
         128,
         2,
         2,
         4,
-    ) and (cluster_m, cluster_n) in (
-        (1, 2),
-        (1, 4),
-        (4, 4),
-    ), "only the tuned 256x256x128, 2x2-wave, 4-buffer profile with a 1x2 / 1x4 / 4x4 cluster is supported"
+        4,
+        4,
+    ), "only the tuned 256x256x128, 2x2-wave, 4-buffer profile with a 4x4 cluster is supported"
     cluster_sync_revs = 8
     m_run_max, m_run_min = 32, 8
     WMMA_M = WMMA_N = 16
     WMMA_K = 128
     WAVE = 32
     PACK_TK = tile_k // 2  # B row bytes per K-tile (FP4 packed 2/byte)
-    SC_WORDS = tile_k // 4  # scale i32 words per super-row per K-tile
     SA_SUPERS = tile_m // 32
     SB_SUPERS = tile_n // 32
     warp_tile_m = tile_m // m_warp
@@ -77,19 +75,24 @@ def launch_gemm_a8w4_256x256(
     n_acc = wmma_m_rep * wmma_n_rep
     num_waves = m_warp * n_warp
     block = num_waves * WAVE
+    # A slot holds KPAIR K-tiles side by side in each LDS row
+    KPAIR = 2
+    num_super = num_buffers - 1
+    UNROLL = KPAIR * num_super
+    SUPER_K = tile_k * KPAIR
     LDS_PAD_A = 16
-    A_LDS_ROW = tile_k + LDS_PAD_A
-    B_LDS_ROW = PACK_TK * 16
+    A_LDS_ROW = SUPER_K + LDS_PAD_A
+    B_LDS_ROW = PACK_TK * 16 * KPAIR
     STAGE_A = tile_m * A_LDS_ROW
     STAGE_B = (tile_n // 16) * B_LDS_ROW
-    STAGE_SA = SA_SUPERS * tile_k
-    STAGE_SB = SB_SUPERS * tile_k
-    # Operand-major planes keep scale storage compact and B 64-KiB aligned.
-    PLANAR_SA_BASE = 0
-    PLANAR_A_BASE = PLANAR_SA_BASE + num_buffers * STAGE_SA
-    PLANAR_SB_BASE = PLANAR_A_BASE + num_buffers * STAGE_A
-    PLANAR_B_BASE = 3 * 65536
-    PLANAR_END = PLANAR_B_BASE + num_buffers * STAGE_B
+    STAGE_SA = SA_SUPERS * SUPER_K
+    STAGE_SB = SB_SUPERS * SUPER_K
+    # B first so it keeps a 64-KiB-aligned base; the rest packs behind it.
+    PLANAR_B_BASE = 0
+    PLANAR_A_BASE = PLANAR_B_BASE + num_super * STAGE_B
+    PLANAR_SA_BASE = PLANAR_A_BASE + num_super * STAGE_A
+    PLANAR_SB_BASE = PLANAR_SA_BASE + num_super * STAGE_SA
+    PLANAR_END = PLANAR_SB_BASE + num_super * STAGE_SB
 
     ARENA_B = PLANAR_END
     check_smem_capacity(ARENA_B, str(get_hip_arch()))
@@ -161,16 +164,16 @@ def launch_gemm_a8w4_256x256(
 
         def _build_tdm_desc(owner):
             if const_expr(owner == 0):
-                tensor, offset, shape, lds_stride = gA, PLANAR_A_BASE, (tile_m, tile_k), A_LDS_ROW
+                tensor, offset, shape, lds_stride = gA, PLANAR_A_BASE, (tile_m, SUPER_K), A_LDS_ROW
                 stride, mask, bound, pad, early = i32_lda, a_mask, mn_oob, LDS_PAD_A, False
             elif const_expr(owner == 1):
-                tensor, offset, shape, lds_stride = gB, PLANAR_B_BASE, (tile_n // 16, PACK_TK * 16), B_LDS_ROW
+                tensor, offset, shape, lds_stride = gB, PLANAR_B_BASE, (tile_n // 16, B_LDS_ROW), B_LDS_ROW
                 stride, mask, bound, pad, early = i32_k * 8, b_mask, None, 0, False
             elif const_expr(owner == 2):
-                tensor, offset, shape, lds_stride = gSA, PLANAR_SA_BASE, (SA_SUPERS, tile_k), tile_k
+                tensor, offset, shape, lds_stride = gSA, PLANAR_SA_BASE, (SA_SUPERS, SUPER_K), SUPER_K
                 stride, mask, bound, pad, early = i32_k, a_mask, sa_oob, 0, True
             else:
-                tensor, offset, shape, lds_stride = gSB, PLANAR_SB_BASE, (SB_SUPERS, tile_k), tile_k
+                tensor, offset, shape, lds_stride = gSB, PLANAR_SB_BASE, (SB_SUPERS, SUPER_K), SUPER_K
                 stride, mask, bound, pad, early = i32_k, b_mask, None, 0, False
             desc = tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=tensor,
@@ -284,13 +287,14 @@ def launch_gemm_a8w4_256x256(
         sa_row, sb_col = wmb + lane, wnb + lane
         a_byte = fx.index_cast(T.index, (wmb + lane16) * A_LDS_ROW + kgrp * 16)
         b_byte = fx.index_cast(T.index, (wnb // 16) * B_LDS_ROW + kgrp * 256 + lane16 * 16)
-        sa_byte = fx.index_cast(T.index, ((sa_row // 32) * SC_WORDS + sa_row % 32) * 4)
-        sb_byte = fx.index_cast(T.index, ((sb_col // 32) * SC_WORDS + sb_col % 32) * 4)
-        for addr_stage in range_constexpr(num_buffers):
-            stage_a_addr.append(_planar_base(PLANAR_A_BASE, STAGE_A, addr_stage) + a_byte)
-            stage_b_addr.append(_planar_base(PLANAR_B_BASE, STAGE_B, addr_stage) + b_byte)
-            stage_sa_addr.append(_planar_base(PLANAR_SA_BASE, STAGE_SA, addr_stage) + sa_byte)
-            stage_sb_addr.append(_planar_base(PLANAR_SB_BASE, STAGE_SB, addr_stage) + sb_byte)
+        sa_byte = fx.index_cast(T.index, (sa_row // 32) * SUPER_K + (sa_row % 32) * 4)
+        sb_byte = fx.index_cast(T.index, (sb_col // 32) * SUPER_K + (sb_col % 32) * 4)
+        for addr_stage in range_constexpr(UNROLL):
+            slot, par = addr_stage // KPAIR, addr_stage % KPAIR
+            stage_a_addr.append(_planar_base(PLANAR_A_BASE, STAGE_A, slot) + a_byte + par * tile_k)
+            stage_b_addr.append(_planar_base(PLANAR_B_BASE, STAGE_B, slot) + b_byte + par * PACK_TK * 16)
+            stage_sa_addr.append(_planar_base(PLANAR_SA_BASE, STAGE_SA, slot) + sa_byte + par * tile_k)
+            stage_sb_addr.append(_planar_base(PLANAR_SB_BASE, STAGE_SB, slot) + sb_byte + par * tile_k)
 
         lds_load_b32, _ = make_lds_copy_ops(32)
         lds_load_b128, _ = make_lds_copy_ops(128)
@@ -307,10 +311,10 @@ def launch_gemm_a8w4_256x256(
             return v0.shuffle(v1, list(range(8)))
 
         def _stage_load_sa(stage, sm):
-            return lds_load_b32(stage_sa_addr[stage], sm * SC_WORDS * 4)[0]
+            return lds_load_b32(stage_sa_addr[stage], sm * SUPER_K)[0]
 
         def _stage_load_sb(stage, sn):
-            return lds_load_b32(stage_sb_addr[stage], sn * SC_WORDS * 4)[0]
+            return lds_load_b32(stage_sb_addr[stage], sn * SUPER_K)[0]
 
         # Separate seed banks prevent WMMA source/address register coalescing.
         pipe_a = [[fx.make_rmem_tensor(16, fx.Int32) for _ in range_constexpr(half_m)] for _ in range_constexpr(2)]
@@ -360,6 +364,7 @@ def launch_gemm_a8w4_256x256(
             future_slot,
             future_kt,
             fence_outstanding,
+            boundary,
         ):
             """Even-wave stage ordered to align sibling READY arrival."""
             a_top = pipe_a[bank]
@@ -421,17 +426,20 @@ def launch_gemm_a8w4_256x256(
             rocdl.sched_barrier(0)
             rocdl.s_wait_dscnt(17)
             rocdl.sched_barrier(0)
-            pipeline_fence_signal(outstanding=fence_outstanding, use_cluster=False)
+            if const_expr(boundary):
+                pipeline_fence_signal(outstanding=fence_outstanding, use_cluster=False)
             rocdl.sched_barrier(0)
             _mma_block_range(0, half_n, a_top, b_right, sa_k, sb_k, 8, 8)
             rocdl.sched_barrier(0)
-            pipeline_fence_wait(use_cluster=False)
-            rocdl.sched_barrier(0)
-            rocdl.s_wait_dscnt(0)
+            if const_expr(boundary):
+                pipeline_fence_wait(use_cluster=False)
+                rocdl.sched_barrier(0)
+                rocdl.s_wait_dscnt(0)
             rocdl.sched_barrier(0)
 
             # q10: produce next A and issue TDM at W3.
-            prepared_refill_desc = _prepare_tdm(future_slot, future_kt)
+            if const_expr(boundary):
+                prepared_refill_desc = _prepare_tdm(future_slot, future_kt)
             _mma_block_range(half_m, 0, a_bottom, b_left, sa_k, sb_left, 0, 1)
             _load_seed_a_scales(next_stage, next_bank)
             for pos in range_constexpr(1, 3):
@@ -443,7 +451,8 @@ def launch_gemm_a8w4_256x256(
                 rocdl.sched_mfma(1)
                 rocdl.sched_dsrd(4)
             rocdl.sched_barrier(0)
-            tdm_ops.tensor_load_2d(prepared_refill_desc)
+            if const_expr(boundary):
+                tdm_ops.tensor_load_2d(prepared_refill_desc)
             rocdl.sched_barrier(0)
             for pos in range_constexpr(3, 5):
                 _mma_block_range(half_m, 0, a_bottom, b_left, sa_k, sb_left, pos, 1)
@@ -518,6 +527,7 @@ def launch_gemm_a8w4_256x256(
             fence_outstanding,
             has_next,
             steady=False,
+            boundary=True,
         ):
             """Odd-wave steady stage or shared drain stage."""
 
@@ -592,17 +602,20 @@ def launch_gemm_a8w4_256x256(
                 rocdl.sched_barrier(0)
                 # Signal READY early: the window between signal and wait is what absorbs a
                 # late sibling, and the TDM it waits on has far more slack than the barrier.
-                pipeline_fence_signal(outstanding=fence_outstanding, use_cluster=False)
+                if const_expr(boundary):
+                    pipeline_fence_signal(outstanding=fence_outstanding, use_cluster=False)
                 rocdl.sched_barrier(0)
                 _mma_block_range(half_m, 0, a_bottom, b_left, sa_k, sb_k, 8, 8, True)
                 rocdl.sched_barrier(0)
-                pipeline_fence_wait(use_cluster=False)
-                rocdl.s_wait_dscnt(0)
+                if const_expr(boundary):
+                    pipeline_fence_wait(use_cluster=False)
+                    rocdl.s_wait_dscnt(0)
                 rocdl.sched_barrier(0)
                 rocdl.sched_barrier(0)
 
                 # q01: produce next B and issue TDM after five WMMAs.
-                prepared_refill_desc = _prepare_tdm(future_slot, future_kt)
+                if const_expr(boundary):
+                    prepared_refill_desc = _prepare_tdm(future_slot, future_kt)
                 _mma_block_range(0, half_n, a_top, b_right, sa_k, sb_k, 0, 1, True)
                 _load_seed_b_scales(next_stage, next_bank)
                 _mma_block_range(0, half_n, a_top, b_right, sa_k, sb_k, 1, 1, True)
@@ -619,7 +632,8 @@ def launch_gemm_a8w4_256x256(
                     rocdl.sched_dsrd(4)
                 rocdl.sched_mfma(2)
                 rocdl.sched_barrier(0)
-                tdm_ops.tensor_load_2d(prepared_refill_desc)
+                if const_expr(boundary):
+                    tdm_ops.tensor_load_2d(prepared_refill_desc)
                 _mma_block_range(0, half_n, a_top, b_right, sa_k, sb_k, 5, 2, True)
                 _mma_block_range(0, half_n, a_top, b_right, sa_k, sb_k, 7, 9, True)
 
@@ -671,10 +685,12 @@ def launch_gemm_a8w4_256x256(
             if const_expr(has_next):
                 rocdl.s_wait_dscnt(9)
                 _mma_block_range(half_m, 0, a_bottom, b_left, sa_k, sb_k, 0, 13)
-                pipeline_fence_signal(outstanding=fence_outstanding, use_cluster=False)
+                if const_expr(boundary):
+                    pipeline_fence_signal(outstanding=fence_outstanding, use_cluster=False)
                 rocdl.sched_barrier(0)
                 _mma_block_range(half_m, 0, a_bottom, b_left, sa_k, sb_k, 13, 3)
-                pipeline_fence_wait(use_cluster=False)
+                if const_expr(boundary):
+                    pipeline_fence_wait(use_cluster=False)
                 rocdl.s_wait_dscnt(0)
                 rocdl.sched_barrier(0)
                 _load_seed_a(next_stage, next_bank)
@@ -686,30 +702,39 @@ def launch_gemm_a8w4_256x256(
             _mma_block(0, half_n, a_top, b_right, sa_k, sb_k)
             _mma_block(half_m, half_n, a_bottom, b_right, sa_k, sb_k)
 
-        # Keep all four slots in flight and statically expand one revolution.
-        for i in range_constexpr(num_buffers):
-            tdm_ops.tensor_load_2d(_prepare_tdm(i, fx.Int32(i) * tdm_global_step))
-        pipeline_fence(outstanding=num_buffers - 1, use_cluster=False)
+        # Keep every slot in flight and statically expand one revolution of KPAIR*num_super
+        # K-tiles.  One TDM covers a whole slot, so it is issued once per KPAIR stages.
+        SUPERS = K_TILES // KPAIR
+        last_delta = (SUPERS - 1) * tdm_global_step
+        for i in range_constexpr(num_super):
+            seed_delta = fx.Int32(i) * tdm_global_step
+            seed_delta = (seed_delta < last_delta).select(seed_delta, last_delta)
+            tdm_ops.tensor_load_2d(_prepare_tdm(i, seed_delta))
+        pipeline_fence(outstanding=num_super - 1, use_cluster=False)
         _load_seed_a(0, 0)
         _load_seed_b(0, 0)
         rocdl.s_wait_dscnt(0)
 
-        n_full = (K_TILES + num_buffers - 1) // num_buffers - 1
-        drain_n = K_TILES - n_full * num_buffers  # 1..num_buffers
-        last_delta = (K_TILES - 1) * tdm_global_step
-        stage_delta = [fx.Int32(s + num_buffers) * tdm_global_step for s in range_constexpr(num_buffers)]
+        n_full = (SUPERS + num_super - 1) // num_super - 1
+        drain_s = SUPERS - n_full * num_super  # 1..num_super
+        slot_delta = [fx.Int32(c + num_super) * tdm_global_step for c in range_constexpr(num_super)]
+
+        def _stage_args(g, rev_delta, fence_outstanding):
+            slot = g // KPAIR
+            delta = rev_delta + slot_delta[slot]
+            delta = (delta < last_delta).select(delta, last_delta)
+            return (g, (g + 1) % UNROLL, g % 2, (g + 1) % 2, slot, delta, fence_outstanding)
 
         def _run_steady(owner_parity):
             for rev in range(n_full):
-                rev_delta = (rev * num_buffers) * tdm_global_step
-                for s in range_constexpr(num_buffers):
-                    delta = rev_delta + stage_delta[s]
-                    delta = (delta < last_delta).select(delta, last_delta)
-                    args = (s, (s + 1) % num_buffers, s % 2, (s + 1) % 2, s, delta, num_buffers - 2)
+                rev_delta = (rev * num_super) * tdm_global_step
+                for g in range_constexpr(UNROLL):
+                    args = _stage_args(g, rev_delta, num_super - 2)
+                    boundary = g % KPAIR == KPAIR - 1
                     if const_expr(owner_parity == 0):
-                        _compute_even_stage(*args)
+                        _compute_even_stage(*args, boundary)
                     else:
-                        _compute_stage(*args, True, True)
+                        _compute_stage(*args, True, True, boundary)
                 if rev % cluster_sync_revs == cluster_sync_revs - 1:
                     cluster.cluster_barrier()
 
@@ -730,10 +755,19 @@ def launch_gemm_a8w4_256x256(
         # Retire the last steady producer before the shared drain.
         rocdl.s_wait_dscnt(0)
         rocdl.sched_barrier(0)
-        for j in range_constexpr(num_buffers):
-            if j < drain_n:
+        for g in range_constexpr(UNROLL):
+            if g < drain_s * KPAIR:
                 _compute_stage(
-                    j, (j + 1) % num_buffers, j % 2, (j + 1) % 2, j, None, num_buffers - 2 - j, j < num_buffers - 1
+                    g,
+                    (g + 1) % UNROLL,
+                    g % 2,
+                    (g + 1) % 2,
+                    g // KPAIR,
+                    None,
+                    num_super - 2 - g // KPAIR,
+                    g < UNROLL - 1,
+                    False,
+                    g % KPAIR == KPAIR - 1,
                 )
         accs = [c_frags[idx].load() for idx in range_constexpr(n_acc)]
 
