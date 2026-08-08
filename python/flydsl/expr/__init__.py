@@ -19,7 +19,8 @@ from . import math as math
 
 _BACKEND_MODULES = {
     "rocdl": ".rocdl",
-    "tdm_ops": ".rocdl.tdm_ops",  # deprecated, use .rocdl.tdm_ops instead
+    "tdm_ops": ".rocdl.tdm_ops",  # deprecated, use fx.rocdl.tdm_ops instead
+    "nvvm": ".nvvm",
 }
 
 _LIBRARY_MODULES = {

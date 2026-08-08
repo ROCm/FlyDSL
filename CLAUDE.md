@@ -58,7 +58,8 @@ FlyDSL/
 │   └── mlir_flydsl/               # MLIR Python binding package source
 ├── include/flydsl/                # C++ TableGen headers for Fly / FlyROCDL dialects and passes
 ├── lib/                           # C++ dialect implementation, conversions, runtime wrappers, Python bindings
-│   └── Dialect/FlyROCDL/{CDNA3,CDNA4,GFX11,GFX120X,GFX1250}/  # Per-subtarget atom lowering: MmaAtom (MFMA on CDNA3/4, WMMA on GFX11/120X/1250) + CopyAtom (Buffer/LDS, CDNA3/4 only; TDM on GFX1250)
+│   ├── Dialect/FlyROCDL/{CDNA3,CDNA4,...}/  # Per-subtarget atom lowering: MmaAtom (MFMA on CDNA3/4, WMMA on GFX11/120X/1250) + CopyAtom (Buffer/LDS, CDNA3/4 only; TDM on GFX1250)
+│   └── Dialect/FlyNVVM/{SM80, ...}/      # NVIDIA atom lowering: mma.sync.aligned, cp.async, ldmatrix (nvvm backend only)
 ├── tools/                         # fly-opt
 ├── kernels/                       # Production kernels, importable as kernels.*
 ├── tests/
@@ -67,7 +68,9 @@ FlyDSL/
 │   ├── system/                    # Cross-cutting compile/system tests
 │   ├── mlir/                      # FileCheck tests driven by scripts/run_tests.sh
 │   └── python/examples/           # AOT compile/cache pytest tests (aot_example.py)
-├── examples/                      # 01-vectorAdd, 02-tiledCopy, 03-tiledMma, 04-preshuffle_gemm
+├── examples/                      # Target-neutral, run on every backend
+│   ├── rocm/                      # AMD ROCm only
+│   └── cuda/                      # NVIDIA CUDA only
 ├── scripts/                       # build, test, benchmark, wheel, debug helper scripts
 ├── docs/                          # Sphinx documentation source
 ├── thirdparty/                    # Vendored dlpack and tvm-ffi
@@ -95,8 +98,12 @@ Public docs are deployed from `.github/workflows/docs.yml` to
 
 ```bash
 bash scripts/build_llvm.sh -j64       # Build LLVM/MLIR once
-bash scripts/build.sh -j64            # Build FlyDSL C++ + Python bindings
+bash scripts/build.sh -j64            # Build FlyDSL C++ + Python bindings (rocdl backend)
 pip install -e .                      # Editable Python install
+
+# Backend selection (CMake cache var FLYDSL_BACKENDS; default "rocdl").
+# One backend per build for now; a combined "rocdl;nvvm" build is not supported yet.
+FLYDSL_BACKENDS="nvvm" bash scripts/build.sh -j64   # NVIDIA instead of AMD (needs a CUDA toolkit)
 
 # If not relying on editable install paths:
 export PYTHONPATH="${PWD}/build-fly/python_packages:${PWD}:${PYTHONPATH}"
@@ -138,7 +145,7 @@ Use names from `python/flydsl/utils/env.py`; do not introduce alternate spelling
 
 | Purpose | Variable |
 |---|---|
-| Compile backend | `FLYDSL_COMPILE_BACKEND` (default `rocm`) |
+| Compile backend | `FLYDSL_COMPILE_BACKEND` (default `rocm`; `cuda` selects the NVVM backend) |
 | Override compile arch | `ARCH` |
 | Compile without execution | `COMPILE_ONLY` |
 | JIT cache directory | `FLYDSL_RUNTIME_CACHE_DIR` |
@@ -165,6 +172,8 @@ helper code that is not part of the traced closure.
 
 ## GPU Architecture Support
 
+AMD (`FLYDSL_COMPILE_BACKEND=rocm`, the default):
+
 | Arch | Chips | Wave size | MMA path | Notes |
 |---|---|---|---|---|
 | `gfx942` | MI300X / MI308X | 64 | MFMA | CDNA3 baseline; preshuffle GEMM, PA decode, CDNA BufferCopy |
@@ -182,6 +191,15 @@ RDNA and is wave32-true only for `gfx10*`/`gfx11*`/`gfx120*` prefixes; it does
 64 for gfx1250 — gfx1250 kernels set wave32 explicitly.
 `tests/kernels/test_rdna_gemm.py` shows the gfx11* (v16 ABI) vs gfx120* (v8 ABI)
 kernel-selection pattern.
+
+NVIDIA (`FLYDSL_COMPILE_BACKEND=cuda`, requires a `FLYDSL_BACKENDS=nvvm` build):
+
+| Arch | Warp size | MMA path | Notes |
+|---|---|---|---|
+| `sm_80`+ | 32 | `mma.sync.aligned` | SM80 m16n8k16 f16->f32 MMA, SM80 `cp.async`, SM75+ `ldmatrix`. Arch string comes from `get_cuda_arch()`. |
+
+Target-specific NVIDIA atoms live in `python/flydsl/expr/nvvm/` (reached as
+`fx.nvvm`).
 
 ## Kernel Entry Points
 

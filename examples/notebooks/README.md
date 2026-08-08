@@ -21,7 +21,7 @@ last.
 
 The whole API these notebooks cover, in one place — enough to write a kernel without
 reading the source. The MMA atoms (`make_mma_atom`, `make_tiled_mma`, `gemm`) are the
-one piece left for later; `examples/03-tiledMma.py` is the worked reference.
+one piece left for later.
 
 ```python
 # Kernel + launch (00)

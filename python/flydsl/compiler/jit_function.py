@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import os
 import pickle
+import re
 import threading
 import time
 import types
@@ -659,20 +660,24 @@ def _extract_isa_text(mlir_asm: str) -> str:
     return "".join(chars)
 
 
-def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_name: str = "15_final_isa"):
+def _dump_isa(
+    *, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_name: str = "15_final_isa", binary_fragment: str
+):
     """Best-effort dump of final GPU ISA/assembly (.s).
 
-    Runs ``gpu-module-to-binary{format=isa}`` on a *cloned* module so the
-    main compilation is not affected.  The raw ISA text is extracted from the
-    MLIR ``assembly = "..."`` attribute and written as a clean ``.s`` file.
+    Runs the backend's own ``gpu-module-to-binary`` fragment with ``format=isa``
+    on a *cloned* module so the main compilation is not affected. The raw ISA
+    text is extracted from the MLIR ``assembly = "..."`` attribute and written
+    as a clean ``.s`` file.
     """
     try:
         mod = ir.Module.parse(asm, context=ctx)
         di_pass = (
             "ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}," if env.debug.enable_debug_info else ""
         )
+        isa_fragment = re.sub(r"\bformat=\w+", "format=isa", binary_fragment, count=1)
         pm = PassManager.parse(
-            f'builtin.module({di_pass}gpu-module-to-binary{{format=isa opts="{"-g" if env.debug.enable_debug_info else ""}" section= toolkit=}})',
+            f"builtin.module({di_pass}{isa_fragment})",
             context=ctx,
         )
         pm.enable_verifier(bool(verify))
@@ -830,12 +835,14 @@ class MlirCompiler:
                 print(f"[flydsl.compile] dump 00_origin -> {out}")
 
                 asm_for_isa = None
+                isa_binary_fragment = None
                 llir = None
                 stage_num_base = 1
                 dump_fragments = pre_binary_fragments if external_binary else fragments
                 for idx, frag in enumerate(dump_fragments):
                     if frag.strip().startswith("gpu-module-to-binary"):
                         llir = _extract_llvm_ir(module)
+                        isa_binary_fragment = frag.strip()
 
                     stage_num = stage_num_base + idx
                     stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
@@ -882,7 +889,7 @@ class MlirCompiler:
                     print(f"[flydsl.compile] dump {ll_name} -> {dump_dir / f'{ll_name}.ll'}")
                     next_stage += 1
 
-                if asm_for_isa is not None:
+                if asm_for_isa is not None and isa_binary_fragment is not None:
                     if not external_binary:
                         isa_stage = f"{next_stage:02d}_final_isa"
                         isa_out = _dump_isa(
@@ -891,6 +898,7 @@ class MlirCompiler:
                             asm=asm_for_isa,
                             verify=env.debug.enable_verifier,
                             stage_name=isa_stage,
+                            binary_fragment=isa_binary_fragment,
                         )
                         if isa_out is not None:
                             print(f"[flydsl.compile] dump {isa_stage} -> {isa_out}")

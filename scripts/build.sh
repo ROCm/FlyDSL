@@ -116,6 +116,13 @@ cmake_args=(
   -DPython3_EXECUTABLE="$(which python3)"
   -DHIP_PLATFORM="${HIP_PLATFORM}"
 )
+# Enabled backend stacks (semicolon-separated), e.g. "rocdl", "rocdl;nvvm",
+# "nvvm". Defaults to the CMake default (rocdl) when unset. Override with:
+#   FLYDSL_BACKENDS="rocdl;nvvm" bash scripts/build.sh
+if [ -n "${FLYDSL_BACKENDS:-}" ]; then
+  cmake_args+=(-DFLYDSL_BACKENDS="${FLYDSL_BACKENDS}")
+  echo "  FLYDSL_BACKENDS: ${FLYDSL_BACKENDS}"
+fi
 if [ -n "${NANOBIND_DIR}" ]; then
   cmake_args+=(-Dnanobind_DIR="${NANOBIND_DIR}")
 fi
