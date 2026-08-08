@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-08-08T15:31:27Z",
+ "updated": "2026-08-08T18:32:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31265730584,
+   "pr": 971,
+   "commit": "a113838cd6ac7f84ca697b8f5de71172ee37f94c",
+   "branch": "gfx1250/gemm-opt-0805",
+   "event": "pull_request",
+   "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31265730584",
+   "created_at": "2026-08-08T15:56:47Z",
+   "updated_at": "2026-08-08T16:00:25Z",
+   "actor": "aoli26",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-08T16:01:05Z",
+     "completed_at": "2026-08-08T16:47:53Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31265730584/job/93123802759"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-08T16:00:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31265730584/job/93123802760"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-08T16:01:05Z",
+     "completed_at": "2026-08-08T17:01:31Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31265730584/job/93123802761"
+    }
+   ]
+  },
   {
    "run_id": 31257973184,
    "pr": 945,
@@ -2060,21 +2103,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31079676495/job/92555717058"
     }
    ]
-  },
-  {
-   "run_id": 31078987595,
-   "pr": 972,
-   "commit": "a62685decbf04480a2ef7bd8c8f43928ae810ac5",
-   "branch": "mega_moe_a4w4",
-   "event": "pull_request",
-   "title": "add A4W4 and FP8 P2P transport support to MegaMoE v2",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31078987595",
-   "created_at": "2026-08-06T06:55:48Z",
-   "updated_at": "2026-08-06T07:06:48Z",
-   "actor": "Yaowu-Xiong",
-   "jobs": []
   }
  ]
 }
