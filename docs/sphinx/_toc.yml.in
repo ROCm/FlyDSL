@@ -55,3 +55,7 @@ subtrees:
         title: Basic usage
       - file: tutorials/kernel_development
         title: Kernel development techniques
+  - caption: About
+    entries:
+      - file: about/license
+        title: License

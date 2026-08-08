@@ -1,10 +1,10 @@
-# Pre-built Kernel Library Guide
+# Pre-built kernel library guide
 
-> Available FlyDSL kernels: Normalization, Softmax, GEMM — configuration, data types, pipelines, and shared utilities.
+This guide covers the available FlyDSL kernels — normalization, softmax, GEMM, and attention — along with their configuration options, supported data types, pipeline designs, and shared utilities.
 
-## Quick Reference
+## Quick reference
 
-| Kernel | Builder Function | API Style | Dtypes | Key Feature |
+| Kernel | Builder function | API style | Dtypes | Key feature |
 |---|---|---|---|---|
 | **LayerNorm** | `build_layernorm_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | Two-pass vectorized normalization |
 | **RMSNorm** | `build_rmsnorm_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16; optional fp32 weight | LDS-cached 3-pass pipeline |
@@ -12,11 +12,11 @@
 | **GEMM** | `compile_preshuffle_gemm(...)` | `@flyc.kernel` | fp8, int8, fp16, bf16 | Preshuffle B, ping-pong LDS, MFMA 16x16 |
 | **FlashAttention** | `build_flash_attn_func_module(...)` | `@flyc.kernel` | bf16, f16 (any arch); fp8 e4m3fn (gfx950, D=128, dense) | Dual-wave SWP fwd, GQA/MQA, causal, descale ABI |
 
-> **Note on API styles**: All kernels use the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`).
+All kernels use the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`).
 
 ---
 
-## 1. Normalization Kernels
+## 1. Normalization kernels
 
 ### 1.1 LayerNorm (`kernels/norm/layernorm_kernel.py`)
 
@@ -29,7 +29,7 @@ from kernels.norm.layernorm_kernel import build_layernorm_module
 executor = build_layernorm_module(N=8192, dtype_str="bf16")
 ```
 
-**Configuration Constants:**
+**Configuration constants:**
 | Constant | Value | Description |
 |---|---|---|
 | `BLOCK_THREADS` | 256 | Threads per block |
@@ -41,7 +41,7 @@ executor = build_layernorm_module(N=8192, dtype_str="bf16")
 
 **Algorithm:**
 - **Two-pass normalization**: Pass 1 computes mean and variance, Pass 2 applies affine transform
-- **Fast path**: When `N == BLOCK_THREADS * VEC_WIDTH * 4` (e.g., N=8192), uses fully register-resident computation with no scalar tail
+- **Fast path**: When `N == BLOCK_THREADS * VEC_WIDTH * 4` (for example, N=8192), uses fully register-resident computation with no scalar tail
 - **Generic path**: Handles arbitrary N with vector body + scalar tail
 - **bf16 handling**: Software round-to-nearest-even (RNE) pack on gfx942; hardware `cvt_pk_bf16_f32` on gfx950+
 - **Warp reduction**: XOR-shuffle-based intra-wave reduction (shifts: 32, 16, 8, 4, 2, 1), then LDS-based cross-wave synchronization
@@ -77,13 +77,13 @@ support FP32 weights.
 **Backward:** `build_rmsnorm_bwd_module(N, dtype_str,
 weight_dtype_str=None)` builds the fused RMSNorm backward kernel (grid `(M,)`,
 one block per row). Kernel signature
-`rmsnorm_bwd_kernel(Input, Gamma, DY, Rstd, DX, DWeight)`: it reads the forward
-`Rstd`, writes `DX` (input grad) and atomic-adds into `DWeight` (fp32 weight
-grad). `eps` is baked into `Rstd` by the forward, so it is not needed here.
+`rmsnorm_bwd_kernel(Input, Gamma, DY, Rstd, DX, DWeight)`: reads the forward
+`Rstd`, writes `DX` (input grad), and atomic-adds into `DWeight` (fp32 weight
+grad). The forward bakes `eps` into `Rstd`, so the backward does not need it.
 The public plain and fused-add training wrappers return `dweight` in the
 original weight dtype.
 
-**Configuration Constants:** Same as LayerNorm (BLOCK_THREADS=256, VEC_WIDTH=8, etc.)
+**Configuration constants:** Same as LayerNorm (BLOCK_THREADS=256, VEC_WIDTH=8, etc.)
 
 **Algorithm (3-pass with LDS caching):**
 1. **Pass 0**: Global → LDS row cache (one-pass global read, vectorized)
@@ -100,7 +100,7 @@ rmsnorm_kernel(self, Input, Gamma, Output, m_in)
 
 ---
 
-## 2. Softmax Kernel
+## 2. Softmax kernel
 
 ### 2.1 Softmax (`kernels/norm/softmax_kernel.py`)
 
@@ -121,12 +121,12 @@ executor = build_softmax_module(M=32768, N=8192, dtype_str="bf16")
 | `WARP_SIZE` | 64 | AMD wavefront size |
 
 **Algorithm (6 stages):**
-1. **Load Data**: Vectorized global loads into register buffer with validity masks
-2. **Local Max**: Per-thread vector reduction (`maxnumf`)
-3. **Global Max**: Block-wide shuffle reduction (intra-wave XOR → wave0 finalize via LDS)
-4. **Local Exp + Sum**: `exp2(x * log2(e))` approximation, accumulate partial sums
-5. **Global Sum**: Block-wide reduction for sum
-6. **Normalize + Store**: Divide by sum, convert to output dtype, vectorized store
+1. **Load data**: Vectorized global loads into register buffer with validity masks
+2. **Local max**: Per-thread vector reduction (`maxnumf`)
+3. **Global max**: Block-wide shuffle reduction (intra-wave XOR → wave0 finalize via LDS)
+4. **Local exp + sum**: `exp2(x * log2(e))` approximation, accumulate partial sums
+5. **Global sum**: Block-wide reduction for sum
+6. **Normalize + store**: Divide by sum, convert to output dtype, vectorized store
 
 **Kernel signature:**
 ```
@@ -138,13 +138,13 @@ softmax_kernel(self, A, C, m_in)
 
 ---
 
-## 3. GEMM Kernel
+## 3. GEMM kernel
 
 ### 3.1 Preshuffle GEMM (`kernels/gemm/preshuffle_gemm.py`)
 
 MFMA 16x16-based GEMM with B-matrix preshuffle layout: `C[M,N] = A[M,K] @ B[N,K]^T`.
 
-Uses the new `@flyc.kernel` / `@flyc.jit` API.
+Uses the `@flyc.kernel` / `@flyc.jit` API.
 
 **Builder:**
 ```python
@@ -202,14 +202,13 @@ Covered by `tests/kernels/test_preshuffle_gemm.py`.
 launch_fn(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, arg_bias, M_val, N_val, stream)
 ```
 
-Where:
 - `arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, arg_bias`: PyTorch tensors (auto-converted to memref). `arg_bias` is the fused epilogue bias (per-N, `out_dtype`); unused when `epilogue == "none"`.
 - `M_val, N_val`: Python int (auto-converted to Int32)
 - `stream`: `fx.Stream` (default stream if omitted)
 
 ---
 
-## 3b. FlashAttention Forward (`kernels/attention/flash_attn_generic.py`, `kernels/attention/flash_attn_gfx950.py`, `kernels/attention/flash_attn_fp8_gfx950.py`)
+## 3b. FlashAttention forward (`kernels/attention/flash_attn_generic.py`, `kernels/attention/flash_attn_gfx950.py`, `kernels/attention/flash_attn_fp8_gfx950.py`)
 
 Dense FlashAttention forward. `build_flash_attn_func_module(num_heads, head_dim,
 causal=..., dtype_str=..., num_kv_heads=...)` is the public builder; on
@@ -251,9 +250,9 @@ python3 tests/kernels/test_flash_attn_fwd.py --dtype fp8 --compare --warmup 10 -
 
 ---
 
-## 4. Shared Utilities
+## 4. Shared utilities
 
-### 4.1 Common Kernel Helpers (`kernels/common/kernels_common.py`)
+### 4.1 Common kernel helpers (`kernels/common/kernels_common.py`)
 
 Shared kernel utilities used across GEMM/MoE/norm kernels.
 
@@ -266,7 +265,7 @@ Shared kernel utilities used across GEMM/MoE/norm kernels.
 | `atomic_add(...)` | Emit an atomic add |
 | `_if_then(if_op, scf=None)` / `_if_else(if_op, scf=None)` | SCF `if`/`else` region context managers |
 
-### 4.2 MFMA Epilogues (`kernels/mma/mfma_epilogues.py`)
+### 4.2 MFMA epilogues (`kernels/mma/mfma_epilogues.py`)
 
 Configurable epilogue strategies for MFMA 16x16 kernels.
 
@@ -276,7 +275,7 @@ Configurable epilogue strategies for MFMA 16x16 kernels.
 | `c_shuffle_epilog(...)` | CK-style LDS CShuffle: write to LDS → barrier → remap threads → half2 store |
 | `mfma_epilog(use_cshuffle, ...)` | Dispatcher: calls default or CShuffle based on flag |
 
-### 4.3 Preshuffle Pipeline (`kernels/mma/mfma_preshuffle_pipeline.py`)
+### 4.3 Preshuffle pipeline (`kernels/mma/mfma_preshuffle_pipeline.py`)
 
 Shared data movement and layout utilities for preshuffle GEMM kernels.
 
@@ -290,7 +289,7 @@ Shared data movement and layout utilities for preshuffle GEMM kernels.
 | `lds_load_pack_k32(...)` | Load A-pack from LDS for K32 micro-step |
 | `swizzle_xor16(...)` | XOR-based swizzle for LDS bank-conflict avoidance |
 
-### 4.4 Layout Coordinate Helpers
+### 4.4 Layout coordinate helpers
 
 Native Fly dialect coordinate mapping (in `flydsl.expr` and `kernels/mma/mfma_preshuffle_pipeline.py`):
 
@@ -303,7 +302,7 @@ Native Fly dialect coordinate mapping (in `flydsl.expr` and `kernels/mma/mfma_pr
 
 ---
 
-## 5. Kernel API Comparison
+## 5. Kernel API comparison
 
 ### New API (GEMM)
 
@@ -326,7 +325,7 @@ def launch_fn(arg_c: fx.Tensor, ..., stream: fx.Stream = fx.Stream(None)):
 
 ---
 
-## 6. Kernel Decision Tree
+## 6. Kernel decision tree
 
 ```
 What operation do you need?
@@ -359,7 +358,7 @@ What operation do you need?
 
 ---
 
-## 7. Source Files
+## 7. Source files
 
 | File | Description |
 |---|---|
@@ -387,7 +386,7 @@ What operation do you need?
 | `kernels/common/kernels_common.py` | Common kernel utilities |
 | `kernels/common/tensor_shim.py` | GTensor/STensor abstraction |
 
-## 8. Test Files
+## 8. Test files
 
 | File | Tests |
 |---|---|
