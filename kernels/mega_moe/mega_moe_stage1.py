@@ -39,7 +39,14 @@ def _use_direct_fixed_slot(enabled, npes, experts_per_rank, max_tokens_per_rank,
 
 
 def _validate_dispatch_capacity(
-    batch_size, npes, experts_per_rank, topk, tile_m, row_bytes, output_row_bytes, use_tile_resource
+    batch_size,
+    npes,
+    experts_per_rank,
+    topk,
+    tile_m,
+    row_bytes,
+    output_row_bytes,
+    use_tile_resource,
 ):
     max_rows = npes * batch_size * topk + experts_per_rank * tile_m
     if not use_tile_resource and max_rows * row_bytes >= _BUFFER_OFFSET_ABI_BYTES:
@@ -49,7 +56,7 @@ def _validate_dispatch_capacity(
 
 
 # fmt: off
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def compile_mega_moe_stage1(
     *, model_dim: int, inter_dim: int, rank: int, experts_per_rank: int, fuse_npes: int, fuse_topk: int,
     fuse_cap: int, fuse_mtpr: int, fuse_scale_dim: int, fixed_slot_dispatch: bool, sort_block_m: int = 32,
@@ -58,7 +65,8 @@ def compile_mega_moe_stage1(
     async_a_copy: bool = False, use_tile_resource: bool = True,
     waves_per_eu_hint: int = 2, num_cu: int = 256, num_dispatch_cu: int = 32, b_nt: int = -1,
     work_shards: int | None = None, external_grouping: bool | None = None,
-    external_counting: bool | None = None, swiglu_limit: float = 0.0,
+    external_counting: bool | None = None, payload_chunk_rows: int = 0, payload_tile_ready: bool = False,
+    swiglu_limit: float = 0.0,
 ):
     arch = str(get_rocm_arch() or "")
     if not arch.startswith("gfx95"):
@@ -74,8 +82,12 @@ def compile_mega_moe_stage1(
     assert grid_mult in GRID_MULT_VALUES, "grid_mult out of range"
     grid_epoch_slot = GRID_MULT_VALUES.index(grid_mult)
     dispatch_blocks = int(num_dispatch_cu)
+    payload_chunk_rows = int(payload_chunk_rows)
     assert 0 < dispatch_blocks < num_cu, "num_dispatch_cu must be in [1, num_cu)"
     assert dispatch_blocks % fuse_npes == 0, "num_dispatch_cu must be divisible by fuse_npes"
+    if payload_chunk_rows:
+        assert not fixed_slot_dispatch and payload_chunk_rows % sort_block_m == 0
+    assert not payload_tile_ready or payload_chunk_rows > 0
     planner_blocks = 1
     # Keep the fused grid on an exact CU multiple instead of appending control/producer CTAs as a tail.
     grid_x = num_cu * grid_mult - planner_blocks - dispatch_blocks
@@ -147,6 +159,8 @@ def compile_mega_moe_stage1(
         f"_dcu{dispatch_blocks}_pw{int(pipe_weights)}ma{int(mfma_amajor)}sw{int(swizzle_a)}"
         f"aa{int(async_a_copy)}"
         f"_tr{int(use_tile_resource)}wpe{waves_per_eu_hint}_bnt{b_cache_modifier}_ws{WORK_SHARDS}"
+        f"_pc{payload_chunk_rows}"
+        f"_ptr{int(payload_tile_ready)}"
         f"{swiglu_suffix}"
     )
 
@@ -176,8 +190,11 @@ def compile_mega_moe_stage1(
         a_work_head = _disp_ptr(DispatchSlot.WORK_HEAD)
         a_work_tail = _disp_ptr(DispatchSlot.WORK_TAIL)
         a_group_done = _disp_ptr(DispatchSlot.GROUP_DONE)
+        a_payload_blocks_per_destination = _disp_ptr(DispatchSlot.PAYLOAD_BLOCKS_PER_DESTINATION)
+        a_payload_chunks_per_destination = _disp_ptr(DispatchSlot.PAYLOAD_CHUNKS_PER_DESTINATION)
         a_launch_ready = _disp_ptr(DispatchSlot.LAUNCH_READY)
         p_launch_ready = _disp_ptr(DispatchSlot.P2P_LAUNCH_READY)
+        a_payload_ready_rows = _disp_ptr(DispatchSlot.PAYLOAD_READY_ROWS)
 
         ticket_scratch = fx.recast_iter(fx.Int64, a_buf.ptr)
         ticket_view = fx.make_view(ticket_scratch, fx.make_layout(1, 1))
@@ -210,6 +227,11 @@ def compile_mega_moe_stage1(
                 )
             next_parity = fx.Int32(fx.rocdl.readfirstlane(T.i32, next_parity_lane))
             launch_epoch = fx.Int32(fx.rocdl.readfirstlane(T.i32, launch_epoch_lane))
+            if const_expr(payload_tile_ready):
+                if tid == fx.Int32(0):
+                    comm_ops.store_i32_system(a_payload_ready_rows, fx.Int32(0), fx.Int32(fz_tile_m))
+                    comm_ops.fence_system_release()
+                fx.barrier()
             if tid < fx.Int32(fz_npes):
                 peer = (tid + fx.Int32(fz_rank)) % fx.Int32(fz_npes)
                 comm_ops.fence_system_release()
@@ -248,7 +270,7 @@ def compile_mega_moe_stage1(
         payload_parity = _buffer_load(parity_rsrc, fx.Int32(0), fx.Int32, cache_modifier=_SC0_CACHE)
         payload_expected = _buffer_load(expected_rsrc, payload_parity, fx.Int32, cache_modifier=_SC0_CACHE)
 
-        if compact_owner:
+        if compact_owner:  # noqa: SIM102 - keep the device and compile-time branches separate.
             if const_expr(not direct_fixed_slot):
                 emit_dispatch_plan(
                     num_waves=NUM_WAVES, fz_npes=fz_npes, fz_epr=fz_epr, fz_k=fz_k, fz_mtpr=fz_mtpr,
@@ -256,7 +278,8 @@ def compile_mega_moe_stage1(
                     i32_cur_tok=i32_cur_tok, addr_in_idx=addr_in_idx, parity=payload_parity,
                     expected=payload_expected, external_grouping=external_grouping,
                     external_counting=external_counting,
-                    dispatch_blocks=dispatch_blocks,
+                    dispatch_blocks=dispatch_blocks, payload_chunk_rows=payload_chunk_rows,
+                    payload_tile_ready=payload_tile_ready,
                 )
 
         if compact_producer:
@@ -276,7 +299,7 @@ def compile_mega_moe_stage1(
                         num_waves=NUM_WAVES, fz_k=fz_k, fz_total_experts=fz_total_experts, addr_disp=addr_disp,
                         i32_cur_tok=i32_cur_tok, addr_in_idx=addr_in_idx, dispatch_blocks=dispatch_blocks,
                         producer_slot=producer_slot, parity=payload_parity, expected=payload_expected,
-                        external_counting=external_counting,
+                        external_counting=external_counting, adaptive_grouping=payload_tile_ready,
                     )
                 else:
                     if tid == fx.Int32(0):
@@ -284,14 +307,36 @@ def compile_mega_moe_stage1(
                             a_pair_order_ready + fx.Int64(payload_parity) * fx.Int64(4), payload_expected)
                         comm_ops.fence_agent_acquire()
                     fx.barrier()
-                emit_dispatch_payload(
-                    num_waves=NUM_WAVES, fz_epr=fz_epr, fz_k=fz_k, fz_mtpr=fz_mtpr, fz_rank=fz_rank,
-                    fz_total_experts=fz_total_experts, fz_nbytes=fz_nbytes, fz_n_i32=fz_n_i32,
-                    fz_safe_end_i32=fz_safe_end_i32, fz_scale_n_i32=fz_scale_n_i32,
-                    fz_enable_scales=fz_enable_scales, addr_disp=addr_disp, addr_in_tok=addr_in_tok,
-                    addr_in_wts=addr_in_wts, addr_in_sc=addr_in_sc, dispatch_blocks=dispatch_blocks,
-                    producer_slot=producer_slot, parity=payload_parity, expected=payload_expected,
-                )
+                producers_per_destination = fx.Int32(dispatch_blocks // fz_npes)
+                chunks_per_destination = fx.Int32(1)
+                if const_expr(payload_chunk_rows > 0):
+                    chunks_per_destination = fx.Int32(
+                        (fz_mtpr + payload_chunk_rows - 1) // payload_chunk_rows
+                    )
+                payload_active = fx.Int32(0) == fx.Int32(0)
+                if const_expr(payload_tile_ready and dispatch_blocks > 32):
+                    producer_destination = producer_slot % fx.Int32(fz_npes)
+                    producer_round = producer_slot // fx.Int32(fz_npes)
+                    producers_per_destination = _buffer_load(
+                        _make_buffer_from_addr(a_payload_blocks_per_destination, fx.Int32),
+                        producer_destination, fx.Int32,
+                    )
+                    chunks_per_destination = _buffer_load(
+                        _make_buffer_from_addr(a_payload_chunks_per_destination, fx.Int32),
+                        producer_destination, fx.Int32,
+                    )
+                    payload_active = producer_round < producers_per_destination
+                if payload_active:
+                    emit_dispatch_payload(
+                        num_waves=NUM_WAVES, fz_epr=fz_epr, fz_k=fz_k, fz_mtpr=fz_mtpr, fz_rank=fz_rank,
+                        fz_total_experts=fz_total_experts, fz_nbytes=fz_nbytes, fz_n_i32=fz_n_i32,
+                        fz_safe_end_i32=fz_safe_end_i32, fz_scale_n_i32=fz_scale_n_i32,
+                        fz_enable_scales=fz_enable_scales, addr_disp=addr_disp, addr_in_tok=addr_in_tok,
+                        addr_in_wts=addr_in_wts, addr_in_sc=addr_in_sc, dispatch_blocks=dispatch_blocks,
+                        producer_slot=producer_slot, parity=payload_parity, expected=payload_expected,
+                        producers_per_destination=producers_per_destination, payload_chunk_rows=payload_chunk_rows,
+                        chunks_per_destination=chunks_per_destination, payload_tile_ready=payload_tile_ready,
+                    )
         if const_expr(direct_fixed_slot):
             if compact_owner:
                 emit_direct_fixed_slot_finalize(
@@ -304,6 +349,8 @@ def compile_mega_moe_stage1(
             addr_payload_ready = _buffer_load(
                 _make_buffer_from_addr(payload_table, fx.Int64), fx.Int32(fz_rank), fx.Int64
             )
+            addr_tile_ready = _disp_ptr(DispatchSlot.TILE_READY)
+            addr_tile_expected = _disp_ptr(DispatchSlot.TILE_EXPECTED)
         wave_id = fx.thread_idx.x // 64
 
         w_rsrc = _make_buffer(w, fx.Int32, 4)
@@ -349,10 +396,20 @@ def compile_mega_moe_stage1(
         total_work = num_m_tiles * fx.Int32(N_TILES)
 
         def _wait_tile_payload(flat):
-            pe = expert_of_flat(flat)
-            pe_index = payload_parity * fx.Int32(fz_epr) + pe
-            mori_shmem.int32_wait_until_equals(addr_payload_ready + fx.Int64(pe_index) * fx.Int64(4), payload_expected)
-            comm_ops.fence_system_acquire()
+            if const_expr(payload_tile_ready):
+                tile_index = flat // fx.Int32(N_TILES)
+                expected_tiles = _buffer_load(
+                    _make_buffer_from_addr(addr_tile_expected, fx.Int32), tile_index, fx.Int32
+                )
+                mori_shmem.int32_wait_until_equals(
+                    addr_tile_ready + fx.Int64(tile_index) * fx.Int64(4), expected_tiles
+                )
+            else:
+                pe = expert_of_flat(flat)
+                pe_index = payload_parity * fx.Int32(fz_epr) + pe
+                mori_shmem.int32_wait_until_equals(
+                    addr_payload_ready + fx.Int64(pe_index) * fx.Int64(4), payload_expected
+                )
 
         # Control CTAs join the work pool after dispatch.
         consumer_active = fx.Int32(1) == fx.Int32(1)
@@ -372,13 +429,15 @@ def compile_mega_moe_stage1(
             work = Vec(work_scratch_view.load())[0]
             if tid == fx.Int32(0):
                 has_work = (work < total_work).select(fx.Int32(1), fx.Int32(0))
-                if has_work != fx.Int32(0):
+                if has_work != fx.Int32(0):  # noqa: SIM102 - keep the device and compile-time branches separate.
                     if const_expr(not direct_fixed_slot):
                         _wait_tile_payload(work)
                 fx.ptr_store(Vec.from_elements([has_work], fx.Int32), work_scratch)
             fx.barrier()
             has_work = Vec(work_scratch_view.load())[0]
             if has_work != fx.Int32(0):
+                if const_expr(not direct_fixed_slot):
+                    comm_ops.fence_system_acquire()
                 _do_scheduled_tile(work)
             consumer_active = has_work != fx.Int32(0)
 
@@ -409,7 +468,8 @@ def run_mega_moe_stage1(out, x, w, scale_x, scale_w, sorted_token_ids, expert_id
     sort_block_m=32, tile_n=256, tile_k=256, num_waves=4, grid_mult=4, pipe_weights=True,
     mfma_amajor=False, swizzle_a=True, async_a_copy=False, num_dispatch_cu=32,
     use_tile_resource=True, waves_per_eu_hint=2,
-    b_nt=-1, work_shards=None, external_grouping=None, external_counting=None, swiglu_limit=0.0):
+    b_nt=-1, work_shards=None, external_grouping=None, external_counting=None,
+    payload_chunk_rows=0, payload_tile_ready=False, swiglu_limit=0.0):
     launch = compile_mega_moe_stage1(
         model_dim=model_dim, inter_dim=inter_dim, rank=rank, experts_per_rank=experts_per_rank,
         fuse_npes=fuse_npes, fuse_topk=fuse_topk, fuse_cap=fuse_cap, fuse_mtpr=fuse_mtpr,
@@ -419,7 +479,9 @@ def run_mega_moe_stage1(out, x, w, scale_x, scale_w, sorted_token_ids, expert_id
         async_a_copy=async_a_copy, use_tile_resource=use_tile_resource,
         waves_per_eu_hint=waves_per_eu_hint, num_cu=num_cu, num_dispatch_cu=num_dispatch_cu,
         b_nt=b_nt, work_shards=work_shards, external_grouping=external_grouping,
-        external_counting=external_counting, swiglu_limit=swiglu_limit,
+        external_counting=external_counting, payload_chunk_rows=payload_chunk_rows,
+        payload_tile_ready=payload_tile_ready,
+        swiglu_limit=swiglu_limit,
     )
     _run_compiled(
         launch, out, x, w, scale_x, scale_w, sorted_token_ids, expert_ids, num_valid_ids, out_scale,
