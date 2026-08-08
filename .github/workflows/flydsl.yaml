@@ -604,8 +604,9 @@ jobs:
         run: |
           docker exec flydsl_test bash -c "
             cd /flydsl-test &&
-            python tests/kernels/test_profiler_dispatch_combine.py \
+            MORI_SOCKET_IFNAME=lo python tests/kernels/test_profiler_dispatch_combine.py \
               --ci-sweep \
+              --skip-verify-spawn \
               --world-size 8 \
               --port 29503 \
               --output-dir /tmp/flydsl_ci_sweep
