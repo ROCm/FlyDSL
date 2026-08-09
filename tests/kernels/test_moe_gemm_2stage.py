@@ -742,5 +742,196 @@ def test_moe_gemm2_rejects_f32_reduce():
         )
 
 
+# ===========================================================================
+# TASK A: broadened shape coverage.
+#
+# Constraints are DERIVED from the kernel builders (gemm1.py / gemm2.py asserts):
+#   gemm1: K=model_dim; tile_k in (128,256); model_dim % tile_k == 0 AND
+#          (model_dim//tile_k) even; tile_n in [64,256] %64; tile_m in [16,256]
+#          %16; contiguous_n = max(tile_n//2, 64); inter_dim % contiguous_n == 0.
+#   gemm2: K=inter_dim; tile_k in (128,256); inter_dim % tile_k == 0; tile_n in
+#          [64,256] %64; tile_m %16; contiguous_n = tile_n; model_dim % tile_n == 0;
+#          epilogue: tile_m % 8 == 0 (row-thread grid) -- implied by %16.
+# Invalid combinations are skipped with an explicit reason instead of dropped.
+# ===========================================================================
+
+
+def _skip_if_invalid_gemm1(*, model_dim, inter_dim, tile_m, tile_n, tile_k):
+    if tile_k not in (128, 256):
+        pytest.skip(f"gemm1 requires tile_k in (128,256), got {tile_k}")
+    if model_dim % tile_k != 0 or (model_dim // tile_k) % 2 != 0:
+        pytest.skip(f"gemm1 requires model_dim({model_dim}) an EVEN multiple of tile_k({tile_k})")
+    if not (64 <= tile_n <= 256 and tile_n % 64 == 0):
+        pytest.skip(f"gemm1 requires tile_n in [64,256] multiple of 64, got {tile_n}")
+    if not (16 <= tile_m <= 256 and tile_m % 16 == 0):
+        pytest.skip(f"gemm1 requires tile_m a 16-multiple in [16,256], got {tile_m}")
+    contiguous_n = max(tile_n // 2, 64)
+    if inter_dim % contiguous_n != 0:
+        pytest.skip(f"gemm1 requires inter_dim({inter_dim}) % contiguous_n({contiguous_n}) == 0")
+
+
+def _skip_if_invalid_gemm2(*, model_dim, inter_dim, tile_m, tile_n, tile_k):
+    if tile_k not in (128, 256):
+        pytest.skip(f"gemm2 requires tile_k in (128,256), got {tile_k}")
+    if inter_dim % tile_k != 0:
+        pytest.skip(f"gemm2 requires inter_dim({inter_dim}) % tile_k({tile_k}) == 0")
+    if not (64 <= tile_n <= 256 and tile_n % 64 == 0):
+        pytest.skip(f"gemm2 requires tile_n in [64,256] multiple of 64, got {tile_n}")
+    if not (16 <= tile_m <= 256 and tile_m % 16 == 0):
+        pytest.skip(f"gemm2 requires tile_m a 16-multiple in [16,256], got {tile_m}")
+    if model_dim % tile_n != 0:
+        pytest.skip(f"gemm2 requires model_dim({model_dim}) % tile_n({tile_n}) == 0")
+
+
+# Shape coverage. model_dim/inter_dim kept small (128/256) to stay fast; the
+# variety lives in tokens (ragged M), experts, topk, and the tile_* triples.
+#
+# Split into a small FAST core (default CI) and an exhaustive `large_shape` sweep.
+
+# FAST core: (tokens, experts, topk, tile_m, tile_n, tile_k). Each row targets a
+# distinct M-stress: ragged tails, padding-heavy routing, topk extremes, tile_k=256.
+_FAST_GEMM1 = [
+    (1, 8, 1, 16, 64, 128),  # single token, topk=1: almost all sorted slots padding
+    (3, 4, 2, 16, 64, 128),  # tiny, ragged vs tile_m=16
+    (7, 8, 2, 32, 64, 128),  # ragged tail vs tile_m=32
+    (31, 32, 6, 64, 128, 128),  # not a multiple of tile_m=64; many experts, topk=6
+    (33, 8, 2, 64, 128, 128),  # just over 32
+    (129, 128, 8, 128, 256, 128),  # just over 128; 128 experts, topk=8
+]
+# gemm2 fast core reuses the same M/tile rows plus a tile_k=256 case (needs inter_dim=256).
+_FAST_GEMM2 = _FAST_GEMM1 + [
+    (17, 8, 2, 16, 64, 256),  # tile_k=256 path (requires inter_dim % 256 == 0)
+]
+
+# Exhaustive (large_shape): full cross of M cases x tile triples x dims.
+_M_CASES = [
+    (1, 8, 1),
+    (3, 4, 2),
+    (7, 8, 2),
+    (31, 32, 6),
+    (33, 8, 2),
+    (129, 128, 8),
+]
+_TILE_CASES = [
+    (16, 64, 128),
+    (32, 64, 128),
+    (64, 128, 128),
+    (128, 256, 256),
+    (16, 64, 256),
+]
+_DIM_CASES = [
+    (256, 128),  # gemm1 K=256 (even x128); gemm2 K=128
+    (256, 256),  # gemm2 K=256 exercises tile_k=256
+]
+
+
+@_requires_fp8
+@pytest.mark.parametrize("tokens,experts,topk,tile_m,tile_n,tile_k", _FAST_GEMM1)
+def test_moe_gemm1_shapes_fast(tokens, experts, topk, tile_m, tile_n, tile_k):
+    """FAST stage1 shape coverage: ragged M tails, varied experts/topk, tile triples.
+    One dtype (int8) to stay quick; the dtype x shape cross is in the large_shape sweep."""
+    _skip_if_invalid_gemm1(model_dim=256, inter_dim=128, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k)
+    out, ref = _run_gemm1(
+        tokens=tokens,
+        model_dim=256,
+        inter_dim=128,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        out_dtype="bf16",
+        in_dtype="int8",
+    )
+    cos = _cosine_sim(out, ref)
+    assert cos > 0.99, f"stage1 fast cos={cos:.5f} (tile=({tile_m},{tile_n},{tile_k}), M=({tokens},{experts},{topk}))"
+
+
+@_requires_fp8
+@pytest.mark.parametrize("accumulate", [True, False])
+@pytest.mark.parametrize("tokens,experts,topk,tile_m,tile_n,tile_k", _FAST_GEMM2)
+def test_moe_gemm2_shapes_fast(accumulate, tokens, experts, topk, tile_m, tile_n, tile_k):
+    """FAST stage2 shape coverage (atomic + reduce): ragged M tails, varied
+    experts/topk, tile triples. inter_dim=256 so tile_k in (128,256) both apply."""
+    _skip_if_invalid_gemm2(model_dim=256, inter_dim=256, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k)
+    got, ref = _run_gemm2(
+        tokens=tokens,
+        model_dim=256,
+        inter_dim=256,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        out_dtype="bf16",
+        accumulate=accumulate,
+        in_dtype="int8",
+    )
+    cos = _cosine_sim(got, ref)
+    mode = "atomic" if accumulate else "reduce"
+    assert cos > 0.99, f"stage2 fast cos={cos:.5f} ({mode}, tile=({tile_m},{tile_n},{tile_k}), M=({tokens},{experts},{topk}))"
+
+
+@pytest.mark.large_shape
+@_requires_fp8
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int4"])
+@pytest.mark.parametrize("model_dim,inter_dim", _DIM_CASES)
+@pytest.mark.parametrize("tile_m,tile_n,tile_k", _TILE_CASES)
+@pytest.mark.parametrize("tokens,experts,topk", _M_CASES)
+def test_moe_gemm1_shapes(in_dtype, model_dim, inter_dim, tile_m, tile_n, tile_k, tokens, experts, topk):
+    """Exhaustive stage1 shape sweep across all four dtype-capable inputs, dims,
+    tile triples, and ragged M cases (large_shape: excluded from fast CI)."""
+    _skip_if_invalid_gemm1(model_dim=model_dim, inter_dim=inter_dim, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k)
+    out, ref = _run_gemm1(
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        out_dtype="bf16",
+        in_dtype=in_dtype,
+    )
+    cos = _cosine_sim(out, ref)
+    assert cos > 0.99, (
+        f"stage1 shapes cos={cos:.5f} (in={in_dtype}, dims=({model_dim},{inter_dim}), "
+        f"tile=({tile_m},{tile_n},{tile_k}), M=({tokens},{experts},{topk}))"
+    )
+
+
+@pytest.mark.large_shape
+@_requires_fp8
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int4"])
+@pytest.mark.parametrize("accumulate", [True, False])
+@pytest.mark.parametrize("model_dim,inter_dim", _DIM_CASES)
+@pytest.mark.parametrize("tile_m,tile_n,tile_k", _TILE_CASES)
+@pytest.mark.parametrize("tokens,experts,topk", _M_CASES)
+def test_moe_gemm2_shapes(in_dtype, accumulate, model_dim, inter_dim, tile_m, tile_n, tile_k, tokens, experts, topk):
+    """Exhaustive stage2 shape sweep (atomic + reduce) across all four dtype-capable
+    inputs, dims, tile triples, and ragged M cases (large_shape: excluded from fast CI)."""
+    _skip_if_invalid_gemm2(model_dim=model_dim, inter_dim=inter_dim, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k)
+    got, ref = _run_gemm2(
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        out_dtype="bf16",
+        accumulate=accumulate,
+        in_dtype=in_dtype,
+    )
+    cos = _cosine_sim(got, ref)
+    mode = "atomic" if accumulate else "reduce"
+    assert cos > 0.99, (
+        f"stage2 shapes cos={cos:.5f} ({mode}, in={in_dtype}, dims=({model_dim},{inter_dim}), "
+        f"tile=({tile_m},{tile_n},{tile_k}), M=({tokens},{experts},{topk}))"
+    )
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
