@@ -342,26 +342,15 @@ def test_moe_gemm1_numeric_prefill(out_dtype):
 
 
 @_requires_fp8
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Known stage1 fp8 kernel bug at commit fe45e686, tile_m=16 (decode) "
-        "path ONLY: the first-routed token (token 0, slot 0; sorted-id == 0) "
-        "gets wrong output across all channels, dragging per-route cosine to "
-        "~0.96 and the overall cosine below 0.99 (magnitude-independent). All "
-        "other routes are exact and the tile_m=64 prefill path is fully "
-        "correct (see test_moe_gemm1_numeric_prefill). Never caught before "
-        "because stage1 had build-only coverage; stage2's harness feeds it the "
-        "torch reference, not the stage1 kernel output. This strict xfail "
-        "documents the bug and will flip to a failure once the decode gather "
-        "is fixed -- remove the marker then."
-    ),
-)
 @pytest.mark.parametrize("out_dtype", ["f16", "bf16"])
 def test_moe_gemm1_numeric_decode(out_dtype):
     """Stage1 gate-up + silu matches the torch fp8 reference (decode tile_m=16).
 
-    KNOWN-FAILING: see the xfail reason above.
+    Regression guard for the decode-path gather/scatter bug: the A-gather and
+    output-scatter TV layouts read 32 M-rows even when BM=16, so un-seeded
+    sorted_lds slots (16..31) decoded to a valid token 0 / slot 0 and piled
+    garbage onto the first-routed token. Fixed by seeding a sentinel token id
+    (== M, hardware-OOB) into every readable LDS slot before the real ids.
     """
     out, ref = _run_gemm1(
         tokens=8,

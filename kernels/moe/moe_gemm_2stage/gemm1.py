@@ -348,7 +348,18 @@ def _build_moe_gemm1_fp8_gateup(
             arg_p_weight = fxh.make_gateup_weight_view(w_ptr, expert_id, contiguous_n, N_e, K)
 
             # Seed sorted ids into LDS (used by A-gather + output scatter index).
+            # The A-gather / output-scatter TV layouts read up to 256/(tile_k/16)
+            # M-rows (32 at tile_k=128), which EXCEEDS BM on the decode path
+            # (BM=16). Un-seeded LDS slots decode to a VALID token 0 / slot 0 (id
+            # bits all zero), so out-of-tile lanes would pile garbage onto token 0
+            # instead of being dropped. Seed every slot any lane can read with the
+            # sentinel token id == M (out of range -> hardware OOB clamp drops the
+            # gather/scatter, matching the padding-row sentinel), then overwrite
+            # the real rows.
             sorted_ids_buf = fx.rocdl.make_buffer_tensor(arg_p_sorted_ids, max_size=False)
+            sentinel_view = fx.make_view(lds.sorted_lds.ptr, fx.make_layout(256, 1))
+            sentinel_view[tid] = M
+            gpu.barrier()
             if tid < fx.Int32(BM):
                 lds_view = fx.make_view(lds.sorted_lds.ptr, fx.make_layout(BM, 1))
                 lds_view[tid] = sorted_ids_buf[tid]
