@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-09T06:38:09Z",
+ "updated": "2026-08-09T07:42:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31301689535,
+   "pr": 989,
+   "commit": "3dc1392e2b3ee4960009a2ee74ca3b483c2ea4f2",
+   "branch": "ci/upgrade-rocm-7.14",
+   "event": "pull_request",
+   "title": "CI: upgrade PyTorch images to ROCm 7.14",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31301689535",
+   "created_at": "2026-08-09T07:40:13Z",
+   "updated_at": "2026-08-09T07:40:48Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 31296560849,
    "pr": 989,
@@ -11,29 +26,29 @@
    "event": "pull_request",
    "title": "CI: upgrade PyTorch images to ROCm 7.14",
    "status": "completed",
-   "conclusion": "failure",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31296560849",
    "created_at": "2026-08-09T05:22:54Z",
-   "updated_at": "2026-08-09T05:52:45Z",
+   "updated_at": "2026-08-09T07:40:32Z",
    "actor": "coderfeli",
    "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-08-09T07:31:06Z",
+     "completed_at": "2026-08-09T07:40:31Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31296560849/job/93214366168"
+    },
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
      "status": "completed",
      "conclusion": "failure",
-     "started_at": "2026-08-09T05:37:47Z",
-     "completed_at": "2026-08-09T05:52:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31296560849/job/93202543406"
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-09T05:33:21Z",
-     "completed_at": "2026-08-09T05:50:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31296560849/job/93202543414"
+     "started_at": "2026-08-09T07:31:07Z",
+     "completed_at": "2026-08-09T07:37:53Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31296560849/job/93214366180"
     }
    ]
   },
@@ -1987,49 +2002,6 @@
    "updated_at": "2026-08-06T10:22:50Z",
    "actor": "AiyyappanMR",
    "jobs": []
-  },
-  {
-   "run_id": 31089787031,
-   "pr": 971,
-   "commit": "462fd4434e97e0fafe7ae0d5a97994b18fb213b9",
-   "branch": "gfx1250/gemm-opt-0805",
-   "event": "pull_request",
-   "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31089787031",
-   "created_at": "2026-08-06T09:36:05Z",
-   "updated_at": "2026-08-06T20:04:44Z",
-   "actor": "aoli26",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-06T09:58:08Z",
-     "completed_at": "2026-08-06T11:07:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31089787031/job/92582294207"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-06T19:18:56Z",
-     "completed_at": "2026-08-06T20:04:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31089787031/job/92582294297"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-06T10:27:39Z",
-     "completed_at": "2026-08-06T11:22:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31089787031/job/92582294315"
-    }
-   ]
   }
  ]
 }
