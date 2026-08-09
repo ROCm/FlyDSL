@@ -54,7 +54,25 @@ _requires_fp8 = pytest.mark.skipif(not _fp8_supported(), reason="fp8 2-stage MoE
 
 def _quant_dtype(in_dtype: str) -> torch.dtype:
     """Kernel input torch dtype for the given ``in_dtype``."""
-    return torch.int8 if in_dtype in ("int8", "int8smooth") else _DTYPE_FP8
+    return torch.int8 if in_dtype in ("int8", "int8smooth", "int4") else _DTYPE_FP8
+
+
+def _pack_shuffled_int8_to_packed_int4(x_shuf_i8: torch.Tensor) -> torch.Tensor:
+    """Pack a PRESHUFFLED int8 tensor (values in [-8, 7]) into packed int4 bytes.
+
+    W4A8 weight packing: each contiguous 8-value block [v0..v7] -> 4 bytes with
+    ``byte_j = v_j | (v_{j+4} << 4)`` (low nibbles hold v0..v3, high hold v4..v7),
+    matching the in-kernel 7-op unpack (even={v0..v3}, odd={v4..v7}). Perturbing
+    this de-interleave order (e.g. swapping the low/high nibble halves) breaks the
+    result -- exercised by test_moe_gemm1_int4_perturb.
+    """
+    flat = x_shuf_i8.contiguous().view(-1).to(torch.int16)
+    assert flat.numel() % 8 == 0
+    u = (flat & 0xF).to(torch.uint8).view(-1, 8)
+    out = torch.empty((u.shape[0], 4), device=u.device, dtype=torch.uint8)
+    for j in range(4):
+        out[:, j] = u[:, j] | (u[:, j + 4] << 4)
+    return out.view(-1).to(torch.int8)
 
 
 def _cosine_sim(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -156,11 +174,16 @@ def _run_gemm1(
         1.0 / math.sqrt(model_dim)
     )
 
+    _is_int4 = in_dtype == "int4"
     x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=_qd)
-    w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=_qd)
+    # W4A8 weight is quantized to signed int4 range [-8, 7] (dtypeMax=7).
+    w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=_qd, **({"dtypeMax": 7} if _is_int4 else {}))
 
     w1_shuffled = shuffle_weight(w1_q)
     w1_shuffled_flat = w1_shuffled.view(experts * (2 * inter_dim), model_dim).contiguous()
+    if _is_int4:
+        # Preshuffled int8 -> packed 2 int4/byte; the reference still uses w1_q_flat.
+        w1_shuffled_flat = _pack_shuffled_int8_to_packed_int4(w1_shuffled_flat)
     w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
     scale_w1_flat = scale_w1.view(experts * (2 * inter_dim), 1)
 
@@ -254,9 +277,11 @@ def _run_gemm2(
         s / math.sqrt(inter_dim)
     )
 
+    _is_int4 = in_dtype == "int4"
+    _wmax = {"dtypeMax": 7} if _is_int4 else {}
     x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=_qd)
-    w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=_qd)
-    w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=_qd)
+    w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=_qd, **_wmax)
+    w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=_qd, **_wmax)
 
     # Stage2 input A2 = quantized reference stage1 output.
     w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
@@ -275,6 +300,8 @@ def _run_gemm2(
 
     w2_shuffled = shuffle_weight(w2_q)
     w2_kernel = w2_shuffled.view(experts * model_dim, inter_dim).contiguous().view(-1)
+    if _is_int4:
+        w2_kernel = _pack_shuffled_int8_to_packed_int4(w2_kernel)
     a2_scale_1d = a2_scale.view(-1).contiguous()
     w2_scale_1d = scale_w2.view(experts * model_dim, 1).view(-1).contiguous()
     sorted_weights_1d = sorted_weights.contiguous().view(-1)
@@ -346,12 +373,12 @@ _SHAPE = dict(model_dim=256, inter_dim=128, experts=4, topk=2)
 
 
 @_requires_fp8
-@pytest.mark.parametrize("in_dtype", ["fp8", "int8"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int4"])
 @pytest.mark.parametrize("out_dtype", ["f16", "bf16"])
 @pytest.mark.parametrize("tile_m,tokens", [(64, 128), (16, 8)])
 def test_moe_gemm1_numeric(in_dtype, out_dtype, tile_m, tokens):
     """Stage1 gate-up + silu matches the torch reference (prefill tile_m=64,
-    decode tile_m=16), for both fp8 and int8 inputs.
+    decode tile_m=16), for fp8, int8, and W4A8 (int4 weight) inputs.
 
     The tile_m=16 case is the decode-path gather/scatter regression guard: the
     A-gather and output-scatter TV layouts read 32 M-rows even when BM=16, so
@@ -372,6 +399,77 @@ def test_moe_gemm1_numeric(in_dtype, out_dtype, tile_m, tokens):
     )
     cos = _cosine_sim(out, ref)
     assert cos > 0.99, f"stage1 cos={cos:.5f} (in_dtype={in_dtype}, out_dtype={out_dtype}, tile_m={tile_m})"
+
+
+@_requires_fp8
+def test_moe_gemm1_int4_perturb():
+    """W4A8 de-interleave order is load-bearing: swapping the low/high nibble halves
+    of every packed byte (which re-orders the in-kernel unpack's even={v0..v3} /
+    odd={v4..v7} split) must destroy correctness. Runs the SAME kernel with the
+    correct packing and with the perturbed packing and asserts the perturbed cosine
+    collapses -- guarding the nibble ordering that ``_pack_shuffled_int8_to_packed_int4``
+    and ``load_weight_int4_frag`` jointly define. gemm2 shares that loader; its
+    all-positive weight data masks the swap, so the discriminating check lives here.
+    """
+    device = torch.device("cuda")
+    tokens, tile_m = 128, 64
+    topk_ids, topk_weights, routing = _make_routing(tokens, _SHAPE["experts"], _SHAPE["topk"], tile_m, device, 0)
+    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, blocks = routing
+    x_fp32 = torch.randn((tokens, _SHAPE["model_dim"]), device=device, dtype=torch.float32)
+    w1_fp32 = torch.randn(
+        (_SHAPE["experts"], 2 * _SHAPE["inter_dim"], _SHAPE["model_dim"]), device=device, dtype=torch.float32
+    ) * (1.0 / math.sqrt(_SHAPE["model_dim"]))
+    x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
+    w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
+    w1_shuf = shuffle_weight(w1_q).view(_SHAPE["experts"] * (2 * _SHAPE["inter_dim"]), _SHAPE["model_dim"]).contiguous()
+    w1_q_flat = w1_q.view(_SHAPE["experts"] * (2 * _SHAPE["inter_dim"]), _SHAPE["model_dim"])
+    scale_w1_flat = scale_w1.view(_SHAPE["experts"] * (2 * _SHAPE["inter_dim"]), 1)
+    packed_ok = _pack_shuffled_int8_to_packed_int4(w1_shuf)
+    # Perturbation: swap low/high nibble of every byte (even/odd de-interleave swap).
+    _b = packed_ok.to(torch.int16) & 0xFF
+    packed_bad = (((_b & 0xF) << 4) | ((_b >> 4) & 0xF)).to(torch.uint8).to(torch.int8)
+
+    exe = compile_moe_gemm1(
+        **_SHAPE, tile_m=tile_m, tile_n=64, tile_k=128, doweight_stage1=False, out_dtype="bf16", in_dtype="int4"
+    )
+
+    def _run(packed_w):
+        out = torch.empty((tokens, _SHAPE["topk"], _SHAPE["inter_dim"]), device=device, dtype=torch.bfloat16)
+        args = (
+            out,
+            x_q.contiguous().view(-1),
+            packed_w.view(-1),
+            scale_x.view(-1).contiguous(),
+            scale_w1_flat.view(-1).contiguous(),
+            sorted_token_ids,
+            sorted_expert_ids,
+            sorted_weights.contiguous().view(-1),
+            num_valid_ids,
+            tokens,
+            _SHAPE["inter_dim"],
+            _SHAPE["model_dim"],
+            int(blocks),
+            torch.cuda.current_stream(),
+        )
+        compiled = flyc.compile(exe, *args)
+        compiled(*args)
+        torch.cuda.synchronize()
+        return out
+
+    ref = torch_moe_gemm1(
+        x_q,
+        w1_q_flat,
+        scale_x,
+        scale_w1_flat,
+        topk_ids.to(torch.int64),
+        topk_weights,
+        inter_dim=_SHAPE["inter_dim"],
+        doweight_stage1=False,
+    )
+    cos_ok = _cosine_sim(_run(packed_ok), ref)
+    cos_bad = _cosine_sim(_run(packed_bad), ref)
+    assert cos_ok > 0.99, f"correct W4A8 packing should match: cos={cos_ok:.5f}"
+    assert cos_bad < 0.5, f"perturbed nibble de-interleave should break: cos={cos_bad:.5f}"
 
 
 # ---------------------------------------------------------------------------
@@ -502,7 +600,7 @@ def test_moe_gemm1_int8smooth_numeric(out_dtype, tile_m, tokens):
 
 
 @_requires_fp8
-@pytest.mark.parametrize("in_dtype", ["fp8", "int8"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int4"])
 @pytest.mark.parametrize(
     "accumulate,out_dtype",
     [
@@ -515,12 +613,13 @@ def test_moe_gemm1_int8smooth_numeric(out_dtype, tile_m, tokens):
 )
 @pytest.mark.parametrize("tile_m,tokens", [(16, 8), (64, 128)])
 def test_moe_gemm2_numeric(accumulate, out_dtype, tile_m, tokens, in_dtype):
-    """Stage2 down-projection matches the torch reference (cosine), for both fp8
-    and int8 inputs.
+    """Stage2 down-projection matches the torch reference (cosine), for fp8, int8,
+    and W4A8 (int4 weight) inputs.
 
     Covers atomic (accumulate=True) and reduce (accumulate=False) modes, all
     supported output dtypes, and both decode-ish (tile_m=16) and prefill-ish
-    (tile_m=64) paths. int8 shares the fp8 pipeline (i32 MFMA acc, f32 dequant).
+    (tile_m=64) paths. int8/int4 share the fp8 pipeline (i32 MFMA acc, f32 dequant);
+    int4 swaps the weight load for an explicit ki-correct preshuffle loader.
     """
     got, ref = _run_gemm2(
         tokens=tokens,
