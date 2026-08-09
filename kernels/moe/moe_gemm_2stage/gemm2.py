@@ -220,9 +220,7 @@ def _build_moe_gemm2_fp8(
             # kb is an fx.Int32 K-tile index (may be a runtime scf.for value).
             a_idx.copy(buf_cp_atom_r, kb, a_cp_frag_bufs[s])
             if const_expr(is_int4):
-                fxh.load_weight_int4_frag(
-                    b_raw, b_layout_i4, b_frag_bufs[s], _expert_off, _col_base, kb, tid, _ki_reps
-                )
+                fxh.load_weight_int4_frag(b_raw, b_layout_i4, b_frag_bufs[s], _expert_off, _col_base, kb, tid, _ki_reps)
             else:
                 fx.copy(buf_cp_atom_r, b_g2r_s[None, None, None, kb], b_ret_bufs[s])
 

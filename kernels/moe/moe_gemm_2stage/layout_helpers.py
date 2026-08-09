@@ -144,12 +144,9 @@ def make_preshuffle_b_layout_int4(N_full, K):
     output-channel count (2*inter_dim for gemm1 gate+up, model_dim for gemm2);
     ``K`` is the contraction dim in int8 elements (model_dim / inter_dim)."""
     from flydsl.expr import arith as _lay_arith
-
     from kernels.common.mma.mfma_preshuffle_pipeline import make_preshuffle_b_layout
 
-    return make_preshuffle_b_layout(
-        _lay_arith, c_n=fx.Index(int(N_full)), c_k=fx.Index(int(K)), kpack_bytes=8
-    ).layout_b
+    return make_preshuffle_b_layout(_lay_arith, c_n=fx.Index(int(N_full)), c_k=fx.Index(int(K)), kpack_bytes=8).layout_b
 
 
 def load_weight_int4_frag(bt_raw, b_layout, frag, expert_off_bytes, col_base, kb, tid, ki_reps):

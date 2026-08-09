@@ -229,9 +229,7 @@ def _build_moe_gemm1_fp8_gateup(
                 fxh.load_weight_int4_frag(
                     b_raw, b_layout_i4, bl_frag_bufs[s], _expert_off, _col_gate, kb, tid, _ki_reps
                 )
-                fxh.load_weight_int4_frag(
-                    b_raw, b_layout_i4, br_frag_bufs[s], _expert_off, _col_up, kb, tid, _ki_reps
-                )
+                fxh.load_weight_int4_frag(b_raw, b_layout_i4, br_frag_bufs[s], _expert_off, _col_up, kb, tid, _ki_reps)
             else:
                 fx.copy(buf_cp_atom_r, bl_g2r[None, None, None, kb], bl_ret_bufs[s])
                 fx.copy(buf_cp_atom_r, br_g2r[None, None, None, kb], br_ret_bufs[s])
