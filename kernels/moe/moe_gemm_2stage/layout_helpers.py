@@ -149,12 +149,12 @@ def make_preshuffle_b_layout_int4(N_full, K):
     return make_preshuffle_b_layout(_lay_arith, c_n=fx.Index(int(N_full)), c_k=fx.Index(int(K)), kpack_bytes=8).layout_b
 
 
-def load_weight_int4_frag(bt_raw, b_layout, frag, expert_off_bytes, col_base, kb, tid, ki_reps):
+def load_weight_int4_frag(bt_i32, b_layout, frag, expert_off_dwords, col_base, kb, tid, ki_reps):
     """Fill an int8 MFMA A-fragment from packed-int4 weight bytes, ki-correct.
 
-    ``bt_raw`` is a buffer_tensor over the raw packed weight bytes; one expert's
-    slab starts at byte offset ``expert_off_bytes``. ``b_layout`` is
-    ``make_preshuffle_b_layout_int4(N_full, K)``. ``frag`` is
+    ``bt_i32`` is a buffer_tensor over the packed weight reinterpreted as i32
+    dwords; one expert's slab starts at dword offset ``expert_off_dwords``.
+    ``b_layout`` is ``make_preshuffle_b_layout_int4(N_full, K)``. ``frag`` is
     ``tiled_mma.make_fragment_A(...)`` with logical shape ``(8, m_reps, (2, ki_reps))``.
     ``col_base`` is the tile's first output channel (blk_n*contiguous_n for a plain
     tile; + inter_dim for the gemm1 up-half). ``kb`` is the K-tile index (fx.Int32,
@@ -166,10 +166,10 @@ def load_weight_int4_frag(bt_raw, b_layout, frag, expert_off_bytes, col_base, kb
       n_blk    = col//16 ; n_intra = col%16
       k0       = kb*ki_reps + ki                         (64-byte K super-step)
       k1       = lane//16 (0..3)                          (kpack lane group)
-      k2_base  = k*4       (byte half within the 8-byte kpack)
-      byte_off = crd2idx((n_blk, k0, k1, n_intra, 0), b_layout) + k2_base + expert_off
-    Load 4 packed bytes at byte_off, 7-op nibble-unpack (even={v0..v3},
-    odd={v4..v7}), store the 8 recovered int8 lanes into frag[None, m, (k, ki)]."""
+      byte_off = crd2idx((n_blk, k0, k1, n_intra, 0), b_layout)  (8-byte kpack base)
+    The two MFMA k-halves are the two dwords of the 8-byte kpack, so read both in
+    one place (dword base = byte_off//4): dword 0 -> k=0, dword 1 -> k=1. 7-op
+    nibble-unpack each (even={v0..v3}, odd={v4..v7}) into frag[None, m, (k, ki)]."""
     m_reps = fx.get_shape(frag)[1].to_py_value()
     lane = tid % fx.Int32(64)
     lane_mod_16 = lane % fx.Int32(16)
@@ -178,26 +178,25 @@ def load_weight_int4_frag(bt_raw, b_layout, frag, expert_off_bytes, col_base, kb
     c_08 = fx.Int32(0x08080808)
     c_0f = fx.Int32(0x0F0F0F0F)
     c_1e = fx.Int32(0x1E)
-    # expert_off_bytes may be a Python int or a runtime fx.Int32 (expert_id*slab).
-    eoff = fx.Int32(expert_off_bytes) if isinstance(expert_off_bytes, int) else expert_off_bytes
+    # expert_off_dwords may be a Python int or a runtime fx.Int32 (expert_id*slab).
+    eoff = fx.Int32(expert_off_dwords) if isinstance(expert_off_dwords, int) else expert_off_dwords
+
+    def _unpack(packed):
+        even = (packed & c_0f) | ((packed & c_08) * c_1e)
+        t = packed >> fx.Int32(4)
+        odd = (t & c_0f) | ((t & c_08) * c_1e)
+        return Vec.from_elements([even, odd], fx.Int32).bitcast(fx.Int8)
+
     for m in range_constexpr(m_reps):
         col = col_base + fx.Int32(m * 64) + wave * fx.Int32(16) + lane_mod_16
         n_blk = col // fx.Int32(16)
         n_intra = col % fx.Int32(16)
         for ki in range_constexpr(ki_reps):
             k0 = kb * fx.Int32(ki_reps) + fx.Int32(ki)
-            for k in range_constexpr(2):
-                coord = (n_blk, k0, lane_div_16, n_intra, fx.Int32(0))
-                addr = fx.get_scalar(fx.crd2idx(coord, b_layout)).to(fx.Int32) + fx.Int32(k * 4) + eoff
-                b0 = bt_raw[addr]
-                b1 = bt_raw[addr + fx.Int32(1)]
-                b2 = bt_raw[addr + fx.Int32(2)]
-                b3 = bt_raw[addr + fx.Int32(3)]
-                packed = Vec.from_elements([b0, b1, b2, b3], fx.Int8).bitcast(fx.Int32)[0]
-                even = (packed & c_0f) | ((packed & c_08) * c_1e)
-                t = packed >> fx.Int32(4)
-                odd = (t & c_0f) | ((t & c_08) * c_1e)
-                frag[None, m, (k, ki)].store(Vec.from_elements([even, odd], fx.Int32).bitcast(fx.Int8))
+            coord = (n_blk, k0, lane_div_16, n_intra, fx.Int32(0))
+            dw = (fx.get_scalar(fx.crd2idx(coord, b_layout)).to(fx.Int32) >> fx.Int32(2)) + eoff
+            frag[None, m, (0, ki)].store(_unpack(bt_i32[dw]))
+            frag[None, m, (1, ki)].store(_unpack(bt_i32[dw + fx.Int32(1)]))
 
 
 def read_sorted_index(tiled_copy_index, tid, lds_index, index_size, index_offset=0):

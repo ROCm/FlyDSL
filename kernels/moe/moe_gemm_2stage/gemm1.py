@@ -176,9 +176,20 @@ def _build_moe_gemm1_fp8_gateup(
             # cannot reproduce, so drive an explicit ki-correct preshuffle-address
             # loader (fxh.load_weight_int4_frag). Gate/up are separate absolute channel
             # ranges: col_base_gate = blk_n*contiguous_n, col_base_up = + inter_dim.
-            b_raw = fx.rocdl.make_buffer_tensor(arg_p_weight, max_size=False)
+            # Read packed weight as i32 dwords (one dword = 4 packed bytes = 8 int4).
+            # The packed weight base is >=16B-aligned; recast the (align-1 int8) iter
+            # to an align-4 i32 pointer so the dword buffer_load is legal.
+            _w_i8_iter = fx.get_iter(arg_p_weight)
+            _w_i32_ptr = fx.PointerType.get(fx.Int32.ir_type, _w_i8_iter.memspace, 4)
+            b_raw = fx.rocdl.make_buffer_tensor(
+                fx.make_view(
+                    fx.recast_iter(_w_i32_ptr, _w_i8_iter),
+                    fx.make_layout((fx.Int32(experts * N_e * (K // 2) // 4),), (1,)),
+                ),
+                max_size=False,
+            )
             b_layout_i4 = fxh.make_preshuffle_b_layout_int4(N_e, K)
-            _expert_off = expert_id * fx.Int32((N_e * K) // 2)
+            _expert_off = expert_id * fx.Int32((N_e * K) // 8)  # dwords per expert slab
             _col_gate = blk_n * fx.Int32(contiguous_n)
             _col_up = _col_gate + fx.Int32(inter_dim)
             # Fragment shape from a fake int8 (contiguous_n, TILE_K) weight tile.
@@ -187,9 +198,13 @@ def _build_moe_gemm1_fp8_gateup(
                 max_size=False,
             )
             _wtile = fx.flat_divide(_wfake, fx.make_tile(contiguous_n, TILE_K))[None, None, 0, 0]
-            bl_frag_bufs = [tiled_mma.make_fragment_A(_wtile) for _ in range(2)]
-            br_frag_bufs = [tiled_mma.make_fragment_A(_wtile) for _ in range(2)]
-            _b_loads_per_tile = 0  # int4 loads are scalar buffer reads, not prefetched dwordx4
+            # Single weight buffer (no B ping-pong): the explicit int4 load is
+            # serialized against its own dword buffer_loads, so a second buffer only
+            # inflates VGPR (occupancy-bound) without adding overlap. A-LDS keeps its
+            # ping-pong. Load the tile's weight right before its MFMA in the loop.
+            bl_frag_bufs = [tiled_mma.make_fragment_A(_wtile)]
+            br_frag_bufs = [tiled_mma.make_fragment_A(_wtile)]
+            _b_loads_per_tile = 0  # A-gather-only wait (int4 weight loaded just-in-time)
         else:
             bl_tile = fx.flat_divide(b_tensor, fx.make_tile(contiguous_n, TILE_K))[None, None, blk_n * 2 + 0, None]
             br_tile = fx.flat_divide(b_tensor, fx.make_tile(contiguous_n, TILE_K))[None, None, blk_n * 2 + 1, None]
@@ -221,18 +236,22 @@ def _build_moe_gemm1_fp8_gateup(
         num_tiles = K // TILE_K
 
         def _load_gmem(kt, s):
-            """Issue global A-gather + B(gate/up) loads for K-tile kt into stage s."""
+            """Issue global A-gather (+ generic B gate/up loads) for K-tile kt, stage s.
+
+            int4 loads its weight just-in-time in the loop (single buffer), so here it
+            only issues the A-gather -- the s_waitcnt then awaits just the gather."""
             kb = fx.Int32(kt)
             a_idx.copy(buf_cp_atom_r, kb, a_cp_frag_bufs[s])
-            if const_expr(is_int4):
-                # Explicit ki-correct packed-int4 weight load (gate + up).
-                fxh.load_weight_int4_frag(
-                    b_raw, b_layout_i4, bl_frag_bufs[s], _expert_off, _col_gate, kb, tid, _ki_reps
-                )
-                fxh.load_weight_int4_frag(b_raw, b_layout_i4, br_frag_bufs[s], _expert_off, _col_up, kb, tid, _ki_reps)
-            else:
+            if const_expr(not is_int4):
                 fx.copy(buf_cp_atom_r, bl_g2r[None, None, None, kb], bl_ret_bufs[s])
                 fx.copy(buf_cp_atom_r, br_g2r[None, None, None, kb], br_ret_bufs[s])
+
+        def _load_weight_i4(kt):
+            """Explicit ki-correct packed-int4 gate/up weight load for K-tile kt into
+            the single weight buffer (int4 only), issued right before its MFMA."""
+            kb = fx.Int32(kt)
+            fxh.load_weight_int4_frag(b_raw, b_layout_i4, bl_frag_bufs[0], _expert_off, _col_gate, kb, tid, _ki_reps)
+            fxh.load_weight_int4_frag(b_raw, b_layout_i4, br_frag_bufs[0], _expert_off, _col_up, kb, tid, _ki_reps)
 
         def _write_a_lds(s):
             fx.copy(uni_cp_atom, a_cp_frag_retile_bufs[s], a_lds_w_bufs[s])
@@ -244,6 +263,8 @@ def _build_moe_gemm1_fp8_gateup(
                 fx.copy(uni_cp_atom, a_lds_r_bufs[s][None, None, ki], a_frag_retile_bufs[s][None, None, ki])
 
         def _mfma(s):
+            # int4 uses a single weight buffer (bs=0); A keeps its ping-pong (s).
+            bs = 0 if const_expr(is_int4) else s
             for ki in range_constexpr(k_iters):
                 for n in range_constexpr(_n_reps):
                     for m in range_constexpr(_m_reps):
@@ -251,14 +272,14 @@ def _build_moe_gemm1_fp8_gateup(
                             fx.mma_atom_call(
                                 mma_atom,
                                 c_gate[None, m, n],
-                                bl_frag_bufs[s][None, m, (k, ki)],
+                                bl_frag_bufs[bs][None, m, (k, ki)],
                                 a_frag_bufs[s][None, n, (k, ki)],
                                 c_gate[None, m, n],
                             )
                             fx.mma_atom_call(
                                 mma_atom,
                                 c_up[None, m, n],
-                                br_frag_bufs[s][None, m, (k, ki)],
+                                br_frag_bufs[bs][None, m, (k, ki)],
                                 a_frag_bufs[s][None, n, (k, ki)],
                                 c_up[None, m, n],
                             )
@@ -272,9 +293,9 @@ def _build_moe_gemm1_fp8_gateup(
         gpu.barrier()
         _read_a_lds(0)
 
-        # Unrolled ping-pong: compute tile kt on `cur` while prefetching kt+1 (A+B)
-        # into `nxt`. gemm1 is low-VGPR (134 -> 3 blocks/CU), so it keeps this
-        # cross-tile overlap; rolling to a single buffer (like stage2) regresses ~17%.
+        # Unrolled ping-pong: compute tile kt on `cur` while prefetching kt+1's A into
+        # `nxt`. fp8/int8 also prefetch B; int4 loads its (single-buffer) weight
+        # just-in-time before each MFMA to keep VGPR/occupancy up.
         for kt in range_constexpr(num_tiles):
             cur = kt % 2
             if kt + 1 < num_tiles:
@@ -282,10 +303,14 @@ def _build_moe_gemm1_fp8_gateup(
                 _load_gmem(kt + 1, nxt)
                 rocdl.s_waitcnt(fxh._encode_waitcnt(vmcnt=_b_loads_per_tile))
                 _write_a_lds(nxt)
+                if const_expr(is_int4):
+                    _load_weight_i4(kt)
                 _mfma(cur)
                 gpu.barrier()
                 _read_a_lds(nxt)
             else:
+                if const_expr(is_int4):
+                    _load_weight_i4(kt)
                 _mfma(cur)
         return c_gate, c_up
 

@@ -186,9 +186,18 @@ def _build_moe_gemm2_fp8(
         if const_expr(is_int4):
             # W4A8: packed-int4 weight through the explicit ki-correct preshuffle
             # loader (see gemm1 / fxh.load_weight_int4_frag). col_base = blk_n*contiguous_n.
-            b_raw = fx.rocdl.make_buffer_tensor(arg_p_weight, max_size=False)
+            # Read as i32 dwords (align-4) so each buffer_load pulls 4 packed bytes.
+            _w_i8_iter = fx.get_iter(arg_p_weight)
+            _w_i32_ptr = fx.PointerType.get(fx.Int32.ir_type, _w_i8_iter.memspace, 4)
+            b_raw = fx.rocdl.make_buffer_tensor(
+                fx.make_view(
+                    fx.recast_iter(_w_i32_ptr, _w_i8_iter),
+                    fx.make_layout((fx.Int32(experts * N * (K // 2) // 4),), (1,)),
+                ),
+                max_size=False,
+            )
             b_layout_i4 = fxh.make_preshuffle_b_layout_int4(N, K)
-            _expert_off = expert_id * fx.Int32((N * K) // 2)
+            _expert_off = expert_id * fx.Int32((N * K) // 8)  # dwords per expert slab
             _col_base = blk_n * fx.Int32(contiguous_n)
             _wfake = fx.rocdl.make_buffer_tensor(
                 fx.make_view(fx.get_iter(arg_p_input), fx.make_layout((contiguous_n, TILE_K), (TILE_K, 1))),
