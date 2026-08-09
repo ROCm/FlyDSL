@@ -6,12 +6,13 @@
 ported from the aiter reference kernel to this repo's ``fx.*`` surface."""
 
 import flydsl.expr as fx
-from flydsl._mlir.dialects import rocdl
+from flydsl._mlir.dialects import rocdl, scf
 from flydsl.compiler.ast_rewriter import ASTRewriter
 from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as _raw
+from kernels.common.kernels_common import _if_then
 
 
 def reps(tensor, mode):
@@ -242,28 +243,41 @@ class _TensorWithIndex:
         for m in range_constexpr(rep_m):
             if const_expr(atomic is not None):
                 tok = self.index_frag[0, m] & 0xFFFFFF
-                if const_expr(row_limit is not None):
-                    tok = (tok < row_limit).select(tok, fx.Int32(0))
-                row_base_i32 = tok * fx.Int32(row_stride) + fx.Int32(k_idx) * fx.Int32(self.tile_k)
-                for k in range_constexpr(rep_k):
-                    offset_block = fx.crd2idx((0, m, k), layout).to_py_value()
-                    offset_block_k = offset_block // self.tile_m
-                    chan_off = offset_block_k + self.offset_thread_k
-                    # `valid` = this grid slot maps inside the real (tile_m, tile_k) block.
-                    guard_full = fx.crd2idx((0, m, k), self.guard_layout).to_py_value() + self.guard_offset
-                    g_row = guard_full % fx.Int32(self._guard_rows)
-                    g_col = guard_full // fx.Int32(self._guard_rows)
-                    valid = (g_row < fx.Int32(self.tile_m)) & (g_col < fx.Int32(self.tile_k))
-                    reg_vec = frag[None, m, k].load()
-                    # Out-of-tile lanes -> OOB element index so the buffer bounds-check DROPS
-                    # the atomic; redirecting them to out[0] serializes padding lanes (~600x).
-                    _va = reg_vec.numel
-                    aligned = (row_base_i32 + chan_off) & fx.Int32(~(_va - 1))
-                    elem_idx = valid.select(aligned, fx.Int32(row_limit) * fx.Int32(row_stride))
-                    if const_expr(atomic == "f32"):
-                        _buffer_atomic_f32(atomic_rsrc, elem_idx, reg_vec)
-                    else:
-                        _buffer_atomic_pk(atomic_rsrc, elem_idx, reg_vec, out_bytes)
+                # Row-uniform padding skip (mirrors legacy c_shuffle_epilog): with the
+                # channel-major CShuffle TV layout `tok` is uniform across each 32-lane
+                # group, so this branch is (near) wave-uniform. Padding rows (sentinel
+                # token id >= row_limit) previously still issued atomics that the buffer
+                # bounds-check dropped -- but the dropped atomics STILL counted as L2
+                # TCC_ATOMIC traffic (~4.25x inflation on prefill). Skipping the whole
+                # row here removes that traffic entirely instead of relying on the clamp.
+                row_valid = tok < fx.Int32(row_limit) if const_expr(row_limit is not None) else (tok >= fx.Int32(0))
+
+                def _atomic_row():
+                    row_base_i32 = tok * fx.Int32(row_stride) + fx.Int32(k_idx) * fx.Int32(self.tile_k)
+                    for k in range_constexpr(rep_k):
+                        offset_block = fx.crd2idx((0, m, k), layout).to_py_value()
+                        offset_block_k = offset_block // self.tile_m
+                        chan_off = offset_block_k + self.offset_thread_k
+                        # `valid` = this grid slot maps inside the real (tile_m, tile_k) block.
+                        guard_full = fx.crd2idx((0, m, k), self.guard_layout).to_py_value() + self.guard_offset
+                        g_row = guard_full % fx.Int32(self._guard_rows)
+                        g_col = guard_full // fx.Int32(self._guard_rows)
+                        valid = (g_row < fx.Int32(self.tile_m)) & (g_col < fx.Int32(self.tile_k))
+                        reg_vec = frag[None, m, k].load()
+                        # Out-of-tile grid slots (channel-major tiles usually divide evenly,
+                        # but keep the guard) -> OOB element index so the buffer bounds-check
+                        # DROPS the atomic.
+                        _va = reg_vec.numel
+                        aligned = (row_base_i32 + chan_off) & fx.Int32(~(_va - 1))
+                        elem_idx = valid.select(aligned, fx.Int32(row_limit) * fx.Int32(row_stride))
+                        if const_expr(atomic == "f32"):
+                            _buffer_atomic_f32(atomic_rsrc, elem_idx, reg_vec)
+                        else:
+                            _buffer_atomic_pk(atomic_rsrc, elem_idx, reg_vec, out_bytes)
+
+                _if_row = scf.IfOp(fx.as_ir_value(row_valid))
+                with _if_then(_if_row):
+                    _atomic_row()
                 continue
             if const_expr(rank == 2):
                 tensor_sub_block = tensor_block[None, self.index_frag[0, m] & 0xFFFFFF]

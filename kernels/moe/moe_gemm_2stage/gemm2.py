@@ -435,18 +435,72 @@ def _build_moe_gemm2_fp8(
                     fx.make_layout((tokens, fx.Int32(TOPK), fx.Int32(N)), (fx.Int32(TOPK * N), fx.Int32(N), 1)),
                 )
             out_tensor = fx.rocdl.make_buffer_tensor(arg_p_output, max_size=False)
-            buf_atom_w128 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), out_elem)
             _c_vec = 128 // out_elem.width  # values per 128b atom (f16/bf16=8, f32=4)
-            # CShuffle read/scatter: 4-wave 2x2 thread grid over (BM x contiguous_n).
+            # CShuffle read/scatter TV layout: CHANNEL-MAJOR, mirroring the legacy
+            # c_shuffle_epilog (mfma_epilogues.py). `_cshuffle_nlane`=32 lanes each walk
+            # `_e_vec` contiguous channels of ONE row, so a 32-lane group covers
+            # 32*_e_vec contiguous output channels -> maximal atomic/store coalescing.
+            # The remaining 256/32=8 threads index the row (token) dim. Consecutive tid
+            # -> consecutive channel group within the same row; the row changes only
+            # every 32 lanes. This replaces the old row-straddling grid whose t1 mode
+            # (stride 1 = one row) put a 64-lane wave across 16 rows (4x atomic traffic).
+            _cshuffle_nlane = 32
+            _n_row_thr = 256 // _cshuffle_nlane  # 8 threads on the row (token) dim
+            # e_vec mirrors legacy exactly (mfma_epilogues.py ~780):
+            #   * atomic  -> 2. Each buffer_atomic_pk instruction is ONE pk pair (2 elems),
+            #     so with e_vec=2 the 32 lanes of that single SIMD instruction hit 32*2=64
+            #     CONTIGUOUS channels (fully coalesced, 2x 64B lines). A wider e_vec would
+            #     make _buffer_atomic_pk emit multiple pk pairs per lane at stride-e_vec
+            #     channel spacing -> each pk-pair instruction becomes lane-strided and
+            #     uncoalesced (the observed 4.25x TCC_ATOMIC inflation).
+            #   * reduce  -> 8 when contiguous_n%256==0 (wide coalesced buffer store), else 2.
+            if const_expr(accumulate):
+                _e_vec = 2
+            else:
+                _e_vec = _c_vec if (contiguous_n % (_cshuffle_nlane * _c_vec) == 0) else 2
+            _n_chan_tile = _cshuffle_nlane * _e_vec  # contiguous channels per copy tile
+            assert (
+                contiguous_n % _n_chan_tile == 0
+            ), f"tile_n={contiguous_n} must be a multiple of {_n_chan_tile} (32 lanes x {_e_vec} chan)"
+            assert BM % _n_row_thr == 0, f"tile_m={BM} must be a multiple of {_n_row_thr} for the channel-major epilogue"
+            # Copy atoms sized to the per-thread contiguous value count (_e_vec), not a
+            # fixed 128b: common case _e_vec==_c_vec keeps a full 128b vector; the
+            # e_vec==2 path (contiguous_n not a 256-multiple) uses a narrower atom so the
+            # read fragment / non-atomic store width matches the layout's value mode.
+            _epi_bits = _e_vec * out_elem.width
+            _buf_atom_ctor = {
+                16: fx.rocdl.BufferCopy16b,
+                32: fx.rocdl.BufferCopy32b,
+                64: fx.rocdl.BufferCopy64b,
+                128: fx.rocdl.BufferCopy128b,
+            }[_epi_bits]
+            _uni_atom_ctor = {
+                16: fx.UniversalCopy16b,
+                32: fx.UniversalCopy32b,
+                64: fx.UniversalCopy64b,
+                128: fx.UniversalCopy128b,
+            }[_epi_bits]
+            buf_atom_w128 = fx.make_copy_atom(_buf_atom_ctor(), out_elem)
+            # tile = (rows=_n_row_thr, cols=_n_chan_tile); linear idx = row + _n_row_thr*col.
+            # thread modes ((nlane, n_row_thr), e_vec):
+            #   lane (size 32, stride n_row_thr*e_vec): each lane steps e_vec columns
+            #   row-thr (size n_row_thr, stride 1): each steps one row
+            # val (size e_vec, stride n_row_thr): e_vec contiguous columns (channels)
             c_rw_copy = fx.make_tiled_copy(
                 buf_atom_w128,
-                fx.make_layout(((4, 16, 2, 2), _c_vec), ((256, 1, 16, 1024), 32)),
-                fx.make_tile(32, 64),
+                fx.make_layout(
+                    ((_cshuffle_nlane, _n_row_thr), _e_vec),
+                    ((_n_row_thr * _e_vec, 1), _n_row_thr),
+                ),
+                fx.make_tile(_n_row_thr, _n_chan_tile),
             )
+            # Row (token) index copy: same row mapping as c_rw_copy. Only the row-thread
+            # part of tid selects the row; the 32 channel-lanes all read the same row
+            # (stride 0), val size 1. rep_m = BM/_n_row_thr matches c_rw_copy exactly.
             c_index_copy = fx.make_tiled_copy(
                 fx.make_copy_atom(fx.UniversalCopy32b(), fx.Int32),
-                fx.make_layout(((4, 16, 2, 2), 1), ((0, 1, 16, 0), 0)),
-                fx.make_tile(32),
+                fx.make_layout(((_cshuffle_nlane, _n_row_thr), 1), ((0, 1), 0)),
+                fx.make_tile(_n_row_thr),
             )
             c_out_index_frag = fxh.read_sorted_index(c_index_copy, tid, lds.sorted_lds, BM)
             c_out = fxh.make_tensor_with_index(
@@ -480,7 +534,7 @@ def _build_moe_gemm2_fp8(
             _, _tiled_mma = fxh.make_1x4_tiled_mma(fp8_t)
             _log2_vec = 3 if out_bytes == 2 else 2  # 8 (2B) or 4 (4B) elems per 128b
             cshuf_atom_w = fx.make_copy_atom(fx.UniversalCopy64b(), out_elem)
-            cshuf_atom_r = fx.make_copy_atom(fx.UniversalCopy128b(), out_elem)
+            cshuf_atom_r = fx.make_copy_atom(_uni_atom_ctor(), out_elem)
             cshuf_ptr = fx.recast_iter(out_elem, lds.gemm.region.ptr)
             swz_c = fx.SwizzleType.get(3, _log2_vec, 3)
             lds_c_store = fx.make_view(
@@ -594,7 +648,8 @@ def compile_moe_gemm2(
     _arch = get_rocm_arch()
     _cdna = "gfx94" in _arch or "gfx95" in _arch
     _g942_bf16_atomic = "gfx94" in _arch and accumulate and str(out_dtype).strip().lower() in ("bf16", "bfloat16")
-    if in_dtype == "fp8" and group_size <= 0 and _cdna and not _g942_bf16_atomic:
+    _force_legacy = os.environ.get("MOE_FORCE_LEGACY_G2_FP8", "0") == "1"  # TEMP A/B toggle - remove before merge
+    if in_dtype == "fp8" and group_size <= 0 and _cdna and not _g942_bf16_atomic and not _force_legacy:
         _out_s = str(out_dtype).strip().lower()
         if _out_s not in ("f16", "fp16", "half", "bf16", "bfloat16", "f32", "fp32", "float"):
             raise ValueError(f"out_dtype must be 'f16', 'bf16', or 'f32', got {out_dtype!r}")
