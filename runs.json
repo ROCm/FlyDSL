@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-09T15:10:03Z",
+ "updated": "2026-08-09T15:30:28Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "worktree-agent-moe-2stage-port",
    "event": "pull_request",
    "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8 (gfx942 + gfx950)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31320272340",
    "created_at": "2026-08-09T15:07:39Z",
-   "updated_at": "2026-08-09T15:08:03Z",
+   "updated_at": "2026-08-09T15:24:40Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-09T15:24:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31320272340/job/93263935584"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-09T15:25:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31320272340/job/93263935599"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-09T15:25:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31320272340/job/93263935606"
+    }
+   ]
   },
   {
    "run_id": 31319820733,
@@ -40,11 +68,11 @@
    "branch": "ci/upgrade-rocm-7.14",
    "event": "pull_request",
    "title": "CI: upgrade PyTorch images to ROCm 7.14",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31319798308",
    "created_at": "2026-08-09T14:57:01Z",
-   "updated_at": "2026-08-09T14:58:37Z",
+   "updated_at": "2026-08-09T15:21:39Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -70,13 +98,41 @@
    "branch": "fp4-gemm-4wave-perf",
    "event": "pull_request",
    "title": "[fp4_gemm_4wave] MXFP4 GEMM perf optimize",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31312171739",
    "created_at": "2026-08-09T11:59:54Z",
-   "updated_at": "2026-08-09T14:52:31Z",
+   "updated_at": "2026-08-09T15:23:57Z",
    "actor": "benenzhu",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-09T15:23:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31312171739/job/93263767894"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-09T15:23:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31312171739/job/93263767896"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-09T15:23:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31312171739/job/93263767897"
+    }
+   ]
   },
   {
    "run_id": 31310479740,
