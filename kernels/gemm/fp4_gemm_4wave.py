@@ -43,18 +43,11 @@ from kernels.gemm.fp8_gemm_utils import (
     swizzle_128,
 )
 
-_N_WAVES = 4  # block is always 256 threads -> 4 waves (compile-time constant)
+_N_WAVES = 4
 
 
 def _global_swizzle(lane_id, wave_id, K, n_rounds, preshuffled):
-    """``fp8_gemm_utils.compute_global_swizzle`` with the wave count pinned.
-
-    Identical arithmetic; the only difference is that ``n_waves`` is the
-    compile-time ``_N_WAVES`` instead of ``fx.block_dim.x // 64``. The runtime read
-    is a kernarg ``s_load`` of hidden_group_size_x, and because it lands after the
-    other kernarg loads it costs a SECOND ``s_waitcnt lgkmcnt(0)`` that every g2s
-    address VGPR then waits behind.
-    """
+    """``fp8_gemm_utils.compute_global_swizzle`` with the wave count pinned."""
     offsets = []
     for round in range_constexpr(n_rounds):
         if const_expr(preshuffled):
@@ -78,19 +71,6 @@ N_TILES_B = 256 // 4 // 16
 
 
 class _Buf:
-    """LDS sub-buffer handle over the ONE contiguous LDS array.
-
-    Holds the shared base pointer plus this buffer's compile-time byte offset
-    SEPARATELY (not pre-added). Keeping the buffer offset as an int lets the ds_read
-    path build the address as ``(base + dynamic_swizzle) + const(buffer_off+tile)``
-    so the constant outer GEP folds into the ds_read 16-bit offset: field. (Pre-adding
-    buffer_off into .ptr made the dynamic swizzle the outermost term -> ptrtoint +
-    int-add -> unfoldable, leaving ~24 address VGPRs materialized.)
-
-    ``.ptr`` (base + buffer_off) is still provided for G2SLoaderAsm, which needs the
-    actual per-buffer LDS base for m0.
-    """
-
     def __init__(self, base_ptr, byte_off):
         self.base_ptr = base_ptr
         self.byte_off = byte_off
@@ -115,16 +95,7 @@ def _asm_void(operands, asm_string, constraints, clobbers=""):
 
 
 def _cvt_pk_bf16(a, b):
-    """Pack two f32 into 2xbf16 (i32), as ``arith.truncf <2xf32> -> <2xbf16>``.
-
-    Selects to the same single ``v_cvt_pk_bf16_f32`` on gfx950 as
-    ``rocdl.cvt_pk_bf16_f32``, but that helper is inline asm (ROCDL has no op for
-    this instruction -- see expr/rocdl/inline_asm.py), which plants an
-    ASMSTART/ASMEND wall the machine scheduler cannot move across. 128 of them in
-    the epilogue. Going through arith.truncf lets the backend select it as a
-    normal SSA value: identical 128 v_cvt_pk_bf16_f32, identical 2578 instrs and
-    440/256/66 VGPR/AGPR/SGPR, only epilogue scheduling differs.
-    """
+    """same as rocdl.cvt_pk_bf16_f32, but no inline asm to give compiler more freedom"""
     v2f32 = _ir.VectorType.get([2], fx.Float32.ir_type)
     vec = Vec.from_elements([fx.Float32(a), fx.Float32(b)], fx.Float32)
     src = arith._to_raw(vec)
@@ -134,81 +105,33 @@ def _cvt_pk_bf16(a, b):
     return _llvm.BitcastOp(fx.Int32.ir_type, _arith_d.TruncFOp(v2bf16, src).result).result
 
 
-# Any inline asm that writes m0 must say so. Only the FP4_DMA_INTRINSIC=0 fallback
-# still has such asm, but the omission was a live bug: once the BACKEND materializes
-# m0 for each buffer_load...lds it hoists those s_mov_b32 m0 freely, an undeclared
-# writer stomps one, and the DMA lands at the wrong LDS address (cos=nan).
+# for FP4_DMA_INTRINSIC=1 path, don't let compiler reorder the m0 set
 _M0_CLOBBER = "~{m0}"
 
 
 def _enc_waitcnt_gfx9(vm, lgkm=15, exp=7):
-    """gfx9/CDNA ``s_waitcnt`` SIMM16 encoding: ``vmcnt[3:0] | expcnt[6:4] | lgkmcnt[11:8] | vmcnt[15:14]``.
-
-    The split-field mess is why gfx12 replaced it with s_wait_loadcnt/dscnt/storecnt,
-    but those intrinsics are gfx12+ only ("Cannot select" on gfx950).
-    """
+    """encode vmcnt & lgkmcnt together"""
     return (vm & 0xF) | ((exp & 0x7) << 4) | ((lgkm & 0xF) << 8) | (((vm >> 4) & 0x3) << 14)
 
 
 def wait_barrier(count):
-    """``s_waitcnt vmcnt(count) lgkmcnt(0)`` + ``s_barrier``.
+    """``s_waitcnt vmcnt(count) lgkmcnt(0)`` + ``s_barrier``"""
 
-    The lgkmcnt(0) is not redundant with the barrier: it makes the barrier also
-    drain every outstanding ds_read, which lets the backend drop the standalone
-    per-consumer lgkmcnt waits (60 -> 8 s_waitcnt in the hot loop). It only pays
-    off because every s2r fragment is read one segment before it is consumed --
-    see the b1 carry in ``_one_step``.
-
-    Same semantics as ``fp8_gemm_utils.wait_barrier`` but emitted as ROCDL ops
-    instead of inline asm: inline asm plants hard ``ASMSTART``/``ASMEND`` walls
-    the machine scheduler cannot move instructions across, costing us prologue
-    scheduling freedom. Hot-loop ISA is unchanged.
-    """
     _rocdl.s_waitcnt(_enc_waitcnt_gfx9(count, lgkm=0))
     _rocdl.s_barrier()
 
 
-# Emit g2s AND the scale gather as inline asm rather than the real
-# rocdl.raw.ptr.buffer.load.lds intrinsic. DEFAULT ON; FP4_DMA_INTRINSIC=1 gets
-# the intrinsic + LLVM-alias-scope path back.
-#
-# gfx9 `buffer_load ... lds` has no LDS-address field -- the destination can ONLY
-# come from m0. The asm sets m0 once per load group and advances it with
-# s_add_u32; the intrinsic hands m0 to the backend, which materializes one
-# s_mov_b32 m0 per load unconditionally. Hot loop: s_mov_b32 20 vs 68 (49
-# s_add_u32 replacing them), 911 vs 915 instrs. Measured +0.9% at 16384^3
-# (5475/5484/5470 vs 5432/5415/5427, 3 alternating pairs).
-#
-# The intrinsic path was the default for a while, deliberately eating that cost:
-# inline asm is opaque to the scheduler and hides real dependencies (a missing m0
-# clobber in the scale gather silently corrupted every DMA once the backend
-# started managing m0 -- see _M0_CLOBBER). Reverted because ~1% is too much to
-# pay for it here. Closing the gap needs the backend to amortize m0 across loads.
-#
-# What the intrinsic path needs to stay viable, if it is ever revived: the alias
-# scopes. Without them LLVM cannot prove the DMA misses the ds_reads and drops a
-# `s_waitcnt vmcnt(0)` in front of every one. See _lds_scopes.
+# use intrinsic not the inline asm
 _USE_DMA_INTRINSIC = os.environ.get("FP4_DMA_INTRINSIC", "0") == "1"
 _LDS_BUF_BYTES = 16384  # one of the 8 A/B tile buffers; asserted against a_lds_size
 _LDS_DOMAIN = '#llvm.alias_scope_domain<id = "fp4_gemm_4wave.lds">'
-# One scope per disjoint LDS region: the 8 A/B tile buffers, then the two scale
-# gather regions (separate allocation entirely).
+# 10 lds scope names
 _LDS_SCOPE_NAMES = [f"buf.{i}" for i in range(8)] + ["Asc", "Bsc"]
 _SC_ASC = 8
 _SC_BSC = 9
 
 
 def _lds_scopes():
-    """One ``#llvm.alias_scope`` per disjoint LDS region, in a shared domain.
-
-    si-insert-waitcnts asks, for every LDS access, whether it may alias any
-    outstanding LDS DMA. With alias info it checks them one at a time and waits
-    only on the overlapping ones; without it, it conservatively waits on all of
-    them, which for this loop means a full ``s_waitcnt vmcnt(0)`` immediately
-    ahead of every ds_read. Our 8 buffers ping-pong so a ds_read never overlaps
-    an in-flight DMA -- but every address is ptrtoint arithmetic off ONE 128 KB
-    addrspace(3) symbol, which the backend cannot see through.
-    """
     return [
         _ir.Attribute.parse(f'#llvm.alias_scope<id = "fp4_gemm_4wave.{n}", domain = {_LDS_DOMAIN}>')
         for n in _LDS_SCOPE_NAMES
@@ -216,14 +139,7 @@ def _lds_scopes():
 
 
 def _tag_alias(op, scopes, slot):
-    """Mark ``op`` as touching only LDS region(s) ``slot``, and no other.
-
-    ``slot`` may be a tuple when the region is not statically known -- the scale
-    gather writes A's or B's region depending on wave_id, so it claims both. What
-    matters is that it still promises to miss all 8 tile buffers.
-    """
-    if os.environ.get("FP4_NO_ALIAS"):
-        return
+    """ascale & bscale lds loads use this wave0/1 for ascale & wave2/3 for bscale"""
     slots = slot if isinstance(slot, tuple) else (slot,)
     op = getattr(op, "owner", op)
     op.attributes["alias_scopes"] = _ir.ArrayAttr.get([scopes[s] for s in slots])
@@ -239,94 +155,42 @@ def _uniform_i32(value):
 
 
 class G2SLoaderAsm:
-    """Global->LDS DMA via ``buffer_load_dwordx4 ... lds`` instead of the
-    BufferCopyLDS128b copy atom.
-
-    The problem this class exists to solve: with the 8 LDS buffers merged into ONE
-    symbol (so ds_read cross-buffer offsets fold into the 16-bit imm), LLVM cannot
-    prove the g2s LDS writes don't alias the ds_reads, and inserts a spurious
-    ``s_waitcnt vmcnt(0)`` before every ds_read.
-
-    Two ways out, selected by ``scopes``:
-
-    * DEFAULT (``scopes`` set, _USE_DMA_INTRINSIC): the real
-      rocdl.raw.ptr.buffer.load.lds intrinsic, tagged with per-buffer alias scopes
-      so LLVM *can* prove the DMA misses the ds_reads. LLVM sees the write and
-      still emits no drain.
-    * FALLBACK (``scopes`` None): opaque inline asm, so LLVM sees no LDS write at
-      all and has nothing to be conservative about.
-
-    Either way vmcnt ordering is owned by our explicit ``wait_barrier``, and either
-    way hardware still counts the load toward vmcnt, so the manual counts stay
-    correct.
-
-    Each ``buffer_load_dwordx4 vN, rsrc, soffset offen lds`` writes 16 bytes to the
-    LDS address in m0; m0 holds the per-step LDS byte base (wave-uniform via
-    readfirstlane), the per-lane swizzle is the voffset VGPR (loop-invariant), and
-    the K-step offset is the scalar soffset operand (hardware-free add).
-    """
-
     def __init__(self, rsrc, gl_offsets, n_load_steps, wave_id, scopes=None, base_ptr=None):
         self.rsrc = arith._to_raw(rsrc)
         self.gl_offsets = gl_offsets
         self.n_load_steps = n_load_steps
         self.wave_id = wave_id
-        # When `scopes` is given, emit the real rocdl.raw.ptr.buffer.load.lds
-        # intrinsic tagged with per-buffer alias scopes instead of opaque inline
-        # asm: the compiler then sees the LDS write, but the scopes prove it does
-        # not alias the ds_reads, so it still emits no drain -- while gaining the
-        # freedom to schedule the loads (inline asm is an immovable barrier).
         self.scopes = scopes
         self.base_ptr = base_ptr
 
     @property
     def _step_stride(self):
-        # m0 (LDS byte) advance between consecutive steps of one load. Must be a
-        # Python int (baked into the asm string), so use the compile-time wave count
-        # (block is always 256 -> 4 waves) rather than the runtime block_dim value.
+        # m0 (LDS byte) advance per step.
         return _N_WAVES * 1024
 
     def set_wave_base(self, base_ptr):
-        # Precompute the wave-uniform LDS base (ptrtoint(base) + wave_id*1024) into an
-        # SGPR ONCE. _lds_base_sgpr then adds the per-buffer compile-time byte_off with
-        # scalar arithmetic, so the step-0 m0 needs NO per-load readfirstlane (was 8/
-        # iter: the m0 base came from wave_id, a VGPR, forcing readfirstlane).
+        # The wave-uniform LDS base, readfirstlane'd into an SGPR ONCE.
         wb = fx.Int32(fx.ptrtoint(base_ptr)) + fx.Int32(self.wave_id * 1024)
         self._wave_base_s = _rocdl.readfirstlane(_T.i32, arith._to_raw(wb))
 
     def _lds_base_sgpr(self, lds_dst):
-        # Step-0 LDS byte base (wave-uniform) = precomputed wave base (SGPR) + this
-        # buffer's compile-time byte_off. Scalar -> no readfirstlane. Later steps add
-        # _step_stride to m0.
         m0 = fx.Int32(self._wave_base_s) + fx.Int32(lds_dst.byte_off)
         return arith._to_raw(m0)
 
     def _voffset(self, step):
-        # Per-lane global byte offset = swizzle only (loop-invariant). The K-step
-        # offset is NOT added here -- it goes in the buffer instruction's scalar
-        # soffset field (hardware-free add), so voffset is a constant VGPR reused
-        # across all K iterations instead of an `v_add k_offset` every step.
+        # Swizzle only: the K-step goes in the scalar soffset field, so this VGPR is
+        # loop-invariant instead of needing a `v_add k_offset` every step.
         return arith._to_raw(fx.Int32(self.gl_offsets[step]))
 
     def _emit(self, lds_dst, k_offset, step):
-        # m0 idiom (gcnasm async_copy): set m0 once for step 0, then advance it with
-        # s_add for later steps instead of recomputing readfirstlane+s_mov per step.
-        # The N_TILES steps of one load are issued back-to-back (interleaved into one
-        # MFMA cluster, in order), so the m0 add-chain stays coherent; s_add m0 is
-        # volatile inline-asm so the compiler can't reorder across it. Cuts the
-        # per-step v_readfirstlane (32->8/main-loop) and turns s_mov into s_add,
-        # freeing scalar-issue slots so the MFMAs pack tighter (toward cyc/mfma 16).
+        # m0 idiom (gcnasm async_copy): set m0 for step 0, then s_add for the rest.
         voff = self._voffset(step)
-        soff = _uniform_i32(k_offset)  # scalar soffset (K-step), folded by hardware
+        soff = _uniform_i32(k_offset)  # scalar soffset (K-step)
         stride = self._step_stride
         if self.scopes is not None:
-            # Intrinsic form: the LDS destination is an explicit addrspace(3) pointer
-            # (no m0 juggling -- the backend materializes m0 itself), and the alias
-            # scope tells si-insert-waitcnts this DMA touches only buffer `slot`.
             slot = lds_dst.byte_off // _LDS_BUF_BYTES
-            # Build off the ONE readfirstlane'd wave base (set_wave_base) rather than
-            # ptrtoint(base)+wave_id*1024: wave_id is a VGPR, so the latter makes the
-            # backend emit a v_readfirstlane per load to get m0 into an SGPR.
+            # Off the readfirstlane'd wave base, not ptrtoint(base)+wave_id*1024:
+            # wave_id is a VGPR, which would cost a v_readfirstlane per load.
             addr = fx.Int64(fx.Int32(self._wave_base_s) + fx.Int32(lds_dst.byte_off + step * stride))
             lds_ptr = _llvm.inttoptr(_lds_ptr_t(), arith._to_raw(addr))
             dma = _rocdl.raw_ptr_buffer_load_lds(self.rsrc, lds_ptr, fx.Int32(16), voff, soff, fx.Int32(0), fx.Int32(0))
@@ -367,25 +231,8 @@ class S2RLoaderFp4:
         self.scopes = scopes
 
     def _vec_load_16xf8(self, lds_src, dyn_offset, const_offset):
-        # Plain LLVM ds_read (NOT inline-asm). The single-symbol LDS layout would
-        # normally make the compiler insert an s_waitcnt vmcnt(0) drain before each
-        # ds_read (it can't prove the g2s global->LDS DMA writes don't alias) -- see
-        # G2SLoaderAsm for the two ways that is avoided (alias scopes by default).
-        # And being a REAL LDS load, the
-        # compiler tracks it with fine-grained lgkmcnt (matching the 8-symbol
-        # baseline's sync) instead of the conservative per-MFMA VMEM vmcnt it would
-        # insert for an opaque inline-asm block.
-        #
-        # Address folding: the per-lane vaddr VGPR carries only the DYNAMIC part
-        # (symbol base + 64KB-window half + lane swizzle); the constant (buffer +
-        # tile) byte offset folds into the ds_read 16-bit offset: immediate via the
-        # inttoptr + GEP(static) below. ds offset is 16-bit (max 0xFFFF=64KB) but the
-        # 8 buffers span 0x1d800 (>64KB), so split into two windows: buffers 0-3
-        # (base+0) and 4-7 (base+0x10000). imm = buffer_off - window_base + tile*2048
-        # stays <= 0xc000+0x1800 = 0xd800 < 0xFFFF. The window base (0 or 0x10000) is
-        # the only buffer-dependent term left in the dynamic vaddr, so all 8 buffers
-        # collapse to 2 base VGPRs per (operand, step) -- 4 total in the hot loop.
         total_off = lds_src.byte_off + const_offset
+        # cute to two windows cause imm is 16-bit
         window_base = (total_off // 0x10000) * 0x10000
         imm = total_off - window_base
         assert 0 <= imm <= 0xFFFF
@@ -450,11 +297,7 @@ def _g2s_thunks(g2s, dst, gl_off, n_steps):
 
 
 def _riffle(glb, lds):
-    """Interleave the global and LDS thunk lists proportionally instead of
-    concatenating them. Concatenated, the 4 g2s issue back-to-back and each stalls
-    on a full TA queue (ATT: buffer_load ARBITER_WIN_EX 53%); riffled, LDS reads sit
-    between consecutive global loads so the TA queue drains. aiter's loop is built
-    the same way -- its sequence alternates global and LDS, never 4 global in a row."""
+    """Interleave the global and LDS thunk lists proportionally like aiter's asm"""
     if not glb or not lds:
         return list(glb) + list(lds)
     out = []
@@ -488,15 +331,7 @@ def _min(a, b):
 
 
 def _divmod_nonneg(a, b):
-    """``divmod(a, b)`` where ``a >= 0`` is known and ``b`` may be a constant.
-
-    Everything in ``_xcd_swizzle`` derives from ``block_idx.x``, so it is always
-    non-negative -- but its type is signed i32, so plain ``//`` and ``%`` lower to
-    ``floordivsi``/``floormodsi``, and those carry a sign-correction chain
-    (``s_ashr 31`` / ``s_lshr`` / ``s_add`` / ``s_ashr``, plus a ``s_cmp`` +
-    ``s_cselect`` + ``s_subb`` fixup) that is dead code here. For a power-of-two
-    divisor the whole thing collapses to one shift and one mask.
-    """
+    """``divmod(a, b)`` where ``a >= 0`` is known and ``b`` may be a constant."""
     if const_expr(isinstance(b, int) and b > 0 and (b & (b - 1)) == 0):
         sh = b.bit_length() - 1
         return (a >> sh, a & (b - 1)) if const_expr(sh > 0) else (a, 0)
@@ -519,11 +354,6 @@ def _xcd_swizzle(num_pid_m, num_pid_n):
     group_id, intra_group = _divmod_nonneg(wgid_remap, num_wgid_in_group)
     first_pid_m = group_id * WGM
     if const_expr(isinstance(num_pid_m, int) and num_pid_m % WGM == 0):
-        # group_id < num_pid_m/WGM, so first_pid_m <= num_pid_m - WGM and the min is
-        # always WGM. Worth special-casing: a variable group_size_m makes the divmod
-        # below a RUNTIME divide, and gfx950 has no scalar divider -- it becomes a
-        # ~45-instruction v_rcp_iflag_f32 Newton sequence sitting in front of every
-        # address, hence in front of the first buffer_load.
         group_size_m = WGM
     else:
         group_size_m = _min(num_pid_m - first_pid_m, WGM)
@@ -532,8 +362,6 @@ def _xcd_swizzle(num_pid_m, num_pid_n):
 
     use_simple = (num_wg < SWIZZLE_THRESHOLD) | (num_wg % NUM_XCDS != 0)
     if const_expr(isinstance(use_simple, bool)):
-        # num_pid_m/n are compile-time (M/N pinned), so the whole predicate folds
-        # and only one of the two mappings needs to be emitted.
         return (simple_m, simple_n) if use_simple else (pid_m, pid_n)
     return (arith.select(use_simple, simple_m, pid_m), arith.select(use_simple, simple_n, pid_n))
 
@@ -573,35 +401,11 @@ class Mfma16x16x128Fp4:
         return i * N_TILES_B + j
 
     def _order(self):
-        """(i, j) emission order for one ksub.
-
-        The plain ``for i: for j:`` sweep holds one operand fixed across a whole
-        row and cycles the other, so the cycled side never hits: the XDL operand
-        buffer is 8 registers per side = 2 slots of v[n:n+3], and a row of
-        n_tiles_b=4 distinct operands evicts each entry before it is reused.
-
-        A 2x2 tile touches exactly 2 distinct i and 2 distinct j, which is what
-        those 2 slots hold, so of the 4 MFMAs only the first fetches on either
-        side::
-
-            (i,j) (i,j+1) (i+1,j) (i+1,j+1)   ->  2 A fetches + 2 B fetches
-            row sweep, 4 wide                 ->  4 A fetches + 1 B fetch
-
-        The j0 sweep is serpentine (0,2 then 2,0) rather than restarting at 0 for
-        every i0 row: at the row turn the previous row's last 2x2 tile holds the
-        same B pair the new row starts with, so that tile's two B fetches become
-        hits, and the same carry then survives across the call boundary into the
-        next quadrant. Plain 2x2 restarts at j0=0 and evicts it.
-
-        Modelled over the full 512-MFMA body: 640 (row sweep) -> 384 (plain 2x2)
-        -> 320 (serpentine), which is the floor for pure reordering under the
-        four-quadrant call structure. Order only; the (i,j) set and each
-        accumulator's operands are unchanged.
-        """
+        """xdl buffer emission order learn from aiter's asm"""
         order = []
         j0s = list(range(0, N_TILES_B, 2))
         for n, i0 in enumerate(range(0, N_TILES_A, 2)):
-            for j0 in (reversed(j0s) if n % 2 else j0s):
+            for j0 in reversed(j0s) if n % 2 else j0s:
                 order += [(i0 + di, j0 + dj) for di in range(2) for dj in range(2)]
         return order
 
@@ -628,13 +432,6 @@ class Mfma16x16x128Fp4:
         nth = [0]  # python-level counter (compile-time), not loop-carried
         mth = [0]  # MFMA counter, indexes into ``slots``
         order = self._order()
-        # Thunk placement. A fixed stride (the previous scheme) packs every thunk
-        # into the first stride*len(thunks) MFMAs and leaves the rest of the call a
-        # bare back-to-back MFMA tail -- ATT showed those tail MFMAs stalling 12 cyc
-        # each while the interleaved region cost a few hundred cycles in total.
-        # Spread thunks evenly over ALL n_mfma slots so every one gets the same
-        # execute-shadow and no tail is left uncovered: thunk t goes after MFMA
-        # floor(t * n_mfma / n_thunks). Max MFMA run drops 8 -> 3.
         n_mfma = _FP4_PACK * len(order)
         slots = {(t * n_mfma) // len(thunks) for t in range(len(thunks))} if thunks else set()
         for ksub in range_constexpr(_FP4_PACK):
@@ -663,25 +460,14 @@ class Mfma16x16x128Fp4:
     def _mfma_agpr(self, a_op, b_op, acc, sa_v, sb_v, ksub, ia, jb):
         # Build the op_sel / op_sel_hi suffix (compile-time). op_sel[2]/hi[2]=0.
         #
-        # ``swap_operands`` feeds (B, A) instead of (A, B). Since C^T = B^T A^T,
-        # the accumulator then holds the transpose: lane L owns C[L%16, 4 cols]
-        # -- row-contiguous -- instead of C[4 rows, L%16]. That is what lets the
-        # epilogue store wide (dwordx4) instead of one bf16 at a time.
-        #
-        # MFMA's two source operands have symmetric lane layouts (M/N from
-        # lane%16, K from lane//16), so swapping needs no change to the S2R
-        # loaders. Only the op_sel byte-select and the scale operands follow the
-        # data to the other side.
+        # feeds (B, A) instead of (A, B). Since C^T = B^T A^T,
         a_op, b_op = b_op, a_op
         sa_v, sb_v = sb_v, sa_v
         ia, jb = jb, ia
         opsel = f"op_sel:[{ia},{jb},0]"
         opsel_hi = f"op_sel_hi:[{ksub},{ksub},0]"
-        # acc=None -> src2 is the literal 0 (C = A*B, not A*B + C). Used for the
-        # first K-sub of the first K-step so the 256 v_accvgpr_write_b32 that
-        # would zero the accumulators disappear entirely.
         src2 = "$0" if acc is not None else "0"
-        asm = f"v_mfma_scale_f32_16x16x128_f8f6f4 $0, $1, $2, {src2}, $3, $4 " f"{opsel} {opsel_hi} cbsz:4 blgp:4"
+        asm = f"v_mfma_scale_f32_16x16x128_f8f6f4 $0, $1, $2, {src2}, $3, $4 {opsel} {opsel_hi} cbsz:4 blgp:4"
         ops = [
             arith._to_raw(a_op),
             arith._to_raw(b_op),
@@ -695,27 +481,6 @@ class Mfma16x16x128Fp4:
         return _llvm.inline_asm(self.res_ty, ops, asm, cons, has_side_effects=True)
 
 
-# Scale-LDS geometry. A block's scales for one K-step are 8 blocks (256 B) for A
-# (BLOCK_M/32) and 8 for B, i.e. 2048 B each -- and one buffer_load_dwordx4...lds
-# is 64 lanes x 16 B = 1024 B = 4 blocks. So the whole block-tile's scales are
-# exactly FOUR gathers, and the 4 waves take one each:
-#
-#   wave 0 -> A groups {G,G+1,G+4,G+5}   wave 2 -> B, same shape
-#   wave 1 -> A groups {G+2,G+3,G+6,G+7} wave 3 -> B, same shape
-#
-# (each quarter is one wave_i/wave_j's 64 rows of BOTH M/N halves, i.e. the same
-# 4 blocks that wave_i would have fetched for itself before.)
-#
-# Every wave then reads all four quarters (its own A half + its own B half),
-# which the existing wait_barrier already orders -- same cross-wave visibility
-# the 8 tile buffers rely on. Having each wave gather its own A *and* B copy
-# instead would fetch each quarter twice (waves 0/1 share wave_i, 2/3 share
-# wave_j) and cost 4 extra buffer_load + 4 s_mov m0 per K-step.
-#
-# Layout per slot: [A 2048][B 2048], each half two 1024 B wave quarters, so the
-# gather destination is just slot_base + wave_id*1024. Slots are kstep%_SCALE_SLOTS;
-# 4 K-steps are live at once (carry[kc], read[kc+1], gather[kc+2], gather[kc+3])
-# so 4 slots are needed or one is overwritten before its read (3 -> nan).
 _SCALE_QUARTER_BYTES = 1024  # one gather = 4 blocks = one wave's share of one operand
 _SCALE_REGION_BYTES = 2 * _SCALE_QUARTER_BYTES  # all of A (or all of B) for one K-step
 _SCALE_SLOT_BYTES = _N_WAVES * _SCALE_QUARTER_BYTES  # 4096
@@ -726,18 +491,9 @@ _SCALE_B_REGION = _SCALE_REGION_BYTES
 
 
 class ScaleGatherLDS:
-    """The block-tile's whole scale gather for one K-step: FOUR
-    ``buffer_load_dwordx4 ... lds``, one per wave, no duplication.
-
-    Which quarter a wave fetches is picked by wave_id -- operand from ``wave_id
-    // 2`` and 64-row group from ``wave_id % 2``. Both selectors are
-    wave-uniform, so this is scalar select (SGPR), NOT divergent control flow:
-    every wave still executes exactly one straight-line DMA, which is what lets
-    the gather stay a thunk inside the MFMA interleave.
-    """
 
     def __init__(self, a_scale, b_scale, K, lane_id, wave_id, lds_base_ptr, scopes=None):
-        self.row_i32 = (K // 256) * 64  # i32 per N1 group
+        self.row_i32 = (K // 256) * 64
         self.wave_id = wave_id
         self.scopes = scopes
         self.a_rsrc = arith._to_raw(_buffer_ops.create_buffer_resource(a_scale, max_size=True))
@@ -748,18 +504,11 @@ class ScaleGatherLDS:
         self._lds_base = fx.Int32(fx.ptrtoint(lds_base_ptr))
 
     def set_wave_base(self, a_base_tile, b_base_tile):
-        """Resolve this wave's share ONCE into SGPRs: the LDS quarter it writes,
-        the operand resource it reads, and that operand's base row/col. Keeps
-        gather() free of both readfirstlane and any re-selection."""
-        # readfirstlane FIRST: wave_id descends from thread_idx, so without this the
-        # uniformity analysis calls the resource select divergent and wraps every
-        # gather in a readfirstlane waterfall loop (s_and_saveexec / s_cbranch_execnz)
-        # -- a branch inside the MFMA block, which destroys the thunk interleave.
+
         wid = fx.Int32(_rocdl.readfirstlane(_T.i32, arith._to_raw(self.wave_id)))
-        # LDS: quarter wave_id of the slot -- [A q0][A q1][B q0][B q1].
+
         self._wave_base_s = arith._to_raw(self._lds_base + wid * fx.Int32(_SCALE_QUARTER_BYTES))
-        # Operand: waves 0/1 -> A, waves 2/3 -> B. Quarter q = wave_id % 2 selects
-        # the 64-row group, matching the wave_i / wave_j the readers use.
+
         is_a = wid < fx.Int32(2)
         q = wid % fx.Int32(2)
         base_tile = arith.select(is_a, a_base_tile + q * fx.Int32(64), b_base_tile + q * fx.Int32(64))
@@ -769,11 +518,6 @@ class ScaleGatherLDS:
         self._soff0 = _uniform_i32(fx.Int32(0))
 
     def gather(self, kstep, slot):
-        """ONE buffer_load_dwordx4...lds writing this wave's quarter of scale-LDS
-        ``slot``. vmcnt accounting is owned by wait_barrier."""
-        # The LDS side is not addressable: lane L's 16 B always lands at m0 + L*16.
-        # So lane L must READ the global data destined for there: block (L//16),
-        # i32 chunk (L%16)*4..+3. block blk -> group G + (blk//2)*4 + (blk%2).
         grp = fx.Int32(self._G) + (self._blk // 2) * fx.Int32(4) + (self._blk % 2)
         i32_off = grp * fx.Int32(self.row_i32) + fx.Int32(kstep) * fx.Int32(64) + self._in16 * fx.Int32(4)
         voff = arith._to_raw(i32_off * fx.Int32(4))  # bytes
@@ -793,27 +537,13 @@ class ScaleGatherLDS:
 
 
 class ScaleLoaderLDS:
-    """Per-lane ``ds_read_b32`` of one operand's ``shuffle_scale_w4``-PRESHUFFLED
-    per-1x32 E8M0 scales out of scale LDS. (Replaced 8 per-step
-    ``buffer_load_dword``, each with a dur-6 voffset v_add -- the #1 exposed
-    hot-loop cost.) ScaleGatherLDS fills the LDS.
-
-    Layout (gate_up=False): per (N1 group, K-step) the e8m0 form a 64-i32
-    (256 B) block ``[K_Lane(4), N_Lane(16)]`` in which lane L's MFMA scale is
-    element L. A wave's 4 blocks are groups ``{G, G+1, G+4, G+5}`` (G+4 == the
-    second M/N half's group, since LDS_BLOCK/32 == 4) -- exactly the quarter
-    some wave gathered, so the read needs no cross-quarter addressing.
-    """
 
     def __init__(self, n_tiles, lane_id, quarter, lds_base_ptr, region_off, scopes=None, slot_id=None):
         assert n_tiles % _FP4_PACK == 0
-        self.n_groups = n_tiles // _FP4_PACK  # pack-groups per M/N half (=2)
+        self.n_groups = n_tiles // _FP4_PACK
         self.lane_id = lane_id
         self.scopes = scopes
         self.slot_id = slot_id
-        # This operand's quarter: wave_i for A, wave_j for B. The gather wave that
-        # wrote it (wave_id = operand*2 + quarter) is a different wave in general;
-        # wait_barrier is what makes the write visible.
         self._region_base = (
             fx.Int32(fx.ptrtoint(lds_base_ptr)) + fx.Int32(region_off) + quarter * fx.Int32(_SCALE_QUARTER_BYTES)
         )
@@ -822,11 +552,6 @@ class ScaleLoaderLDS:
         return self._region_base + fx.Int32(slot) * fx.Int32(_SCALE_SLOT_BYTES)
 
     def read_half(self, slot, half):
-        """Per-lane ds_read of ONE half (2 blocks) -> list[n_groups] of i32.
-        Split from read() so half-1 can be issued as a thunk in an MFMA shadow
-        (half-0 feeds c00/c01, half-1 feeds c10/c11 -- two MFMA clusters later)."""
-        # Inverse of gather's m0 + L*16 write: block-elem e of block blk sits at
-        # LDS byte blk*256 + (e//4)*16 + (e%4)*4. MFMA lane L wants elem L.
         L = self.lane_id
         base = self._slot_wave_byte(slot) + fx.Int32((L // 4) * 16 + (L % 4) * 4)
         grp_list = []
@@ -847,7 +572,6 @@ class ScaleLoaderLDS:
 
 
 class StoreCFp4:
-
     def __init__(
         self,
         C,
@@ -894,18 +618,6 @@ class StoreCFp4:
         fx.copy(self.out_atom_8, self.reg_bf16_8, fx.slice(self.c_div, (None, fx.Int32(c_index))))
 
     def thunks(self, c_frag, base_row, base_col):
-        """One zero-arg thunk per ``buffer_store_dwordx4`` (8 for a quadrant).
-
-        Handed to ``Mfma16x16x128Fp4.call(interleave=...)`` so a later quadrant's
-        MFMAs sit between this quadrant's stores. Back-to-back stores queue up on
-        L1 rather than on bandwidth, so spacing them out is what pays -- the MFMAs
-        are free filler, and the accumulator reads / bf16 converts that each thunk
-        drags along get hidden in the MFMA execute shadow too.
-
-        The body reads ``c_frag`` when the thunk RUNS, not when it is built, but
-        the caller always builds a quadrant's thunks after that quadrant's
-        ``mfma.call`` has returned, so the values are final either way.
-        """
         return [
             (lambda ti=ti, tj=tj: self._store_one(c_frag, base_row, base_col, ti, tj))
             for ti in range_constexpr(N_TILES_A)
@@ -924,19 +636,7 @@ def compile_fp4_gemm_4w(
     MN: tuple = None,
 ):
     """``MN=(M, N)`` bakes the output shape in as a compile-time constant.
-
-    The kernel still takes c_m/c_n as arguments (the signature is unchanged); they
-    are simply ignored, so the caller must pass the same M/N it compiled for.
-
-    Worth doing because c_m/c_n only ever feed integer DIVISIONS -- ceildiv to a
-    block count, then four divmods in ``_xcd_swizzle`` -- and a runtime scalar
-    divide is a ~20-instruction software sequence with no divider in hardware.
-    That whole dependency chain sits in front of the first buffer_load, so the
-    wave issues nothing to memory until it finishes: 272 instructions (199 SALU)
-    before the first global load, vs 168 (107 SALU) with M/N pinned.
-
-    +1.0% at 8192x8192x4096 (4662-4688 vs 4607-4633 TFLOPS, non-overlapping over
-    4 alternating pairs); neutral at 16384^3, where the fixed cost is amortized.
+    miss it is ok for this kernel.
     """
     BLOCK_K = 256
     BLOCK_K_BYTES = BLOCK_K // 2
@@ -1062,12 +762,6 @@ def compile_fp4_gemm_4w(
         a_s2r = S2RLoaderFp4(wave_i, N_TILES_A, scopes=_sc)
         b_s2r = S2RLoaderFp4(wave_j, N_TILES_B, scopes=_sc)
 
-        # Prologue. Scale gathers for step 0/1/2 go FIRST (before the 32 g2s) so they
-        # are the OLDEST outstanding VMEM -- the main loop's wait_barrier then
-        # drains them naturally (vs issuing them last, where the vmcnt cannot reach
-        # them past the 32 newer g2s -> step-0 read got un-landed LDS -> big-K nan).
-        # DEPTH-3: scale[0] feeds the initial VGPR carry, scale[1]/scale[2] are read
-        # (into carry) during step 0/1; step kc then gathers scale[kc+3].
         _gather_scales(0, _slot(0))
         _gather_scales(1, _slot(1))
         _gather_scales(2, _slot(2))
@@ -1096,20 +790,8 @@ def compile_fp4_gemm_4w(
         sc0_sbC0, sc0_sbC1 = b_scale_ld.read(_slot(0))
         sc0 = (sc0_saR0, sc0_saR1, sc0_sbC0, sc0_sbC1)
 
-        # A step issues 16 g2s + 1 gather = 17 VMEM, in cluster order
-        #   [4 g2s][4 g2s][4 g2s + gather][4 g2s]
-        # and consumes what step kc-2 wrote (g2s prefetches kc+2; scale[X] is
-        # gathered at step X-3 and read at X-1). vmcnt(16) leaves at most 16
-        # outstanding at the top of a step, i.e. one short of a full step, so
-        # everything through step kc-2 -- gather included -- has landed.
-        # (Was 17 of 18 when every wave gathered both operands: same one-load
-        # margin, since dropping the duplicate gather shrank the step by one.)
-        _MAIN_VMCNT = int(os.environ.get("FP4_MAIN_VMCNT", "16"))
-        # The seg-2 barrier needs a tighter count than seg-1: it guards the b1
-        # fragment read for step kc+1, whose g2s went out in the PREVIOUS step's
-        # call3 and so has only 12 newer VMEM ops behind it (vs 21/17 for a0n/b0n,
-        # issued in call1/call2). 16 would let those 4 loads still be in flight.
-        _SEG2_VMCNT = int(os.environ.get("FP4_SEG2_VMCNT", "12"))
+        _MAIN_VMCNT = 16  # maybe higher here?
+        _SEG2_VMCNT = 12
 
         def _read_scale_thunks(kc_idx, holder):
             """4 thunks, each doing one half-read of scale[kc_idx] into holder
@@ -1131,11 +813,6 @@ def compile_fp4_gemm_4w(
         def _one_step(kc, a0f, b0f, b1f_in, sc, accs, bufs, zero_acc=False):
             # bufs = (a_cur0, a_cur1, a_next0, a_next1, b_cur0, b_cur1, b_next0, b_next1)
             ac0, ac1, an0, an1, bc0, bc1, bn0, bn1 = bufs
-            # DEPTH-3 scale + VGPR carry: ``sc`` = scale[kc] ALREADY in VGPR (read in
-            # the prior step's MFMA shadow), so there is NO scale ds_read / lgkmcnt
-            # wait at the top of this step. This step (a) reads scale[kc+1] into the
-            # next carry inside the MFMA shadow, and (b) gathers scale[kc+3] (depth-3,
-            # so scale[kc+1] -- gathered at step kc-2 -- is landed at the barrier here).
             saR0, saR1, sbC0, sbC1 = sc
             c00f, c01f, c10f, c11f = accs
             kc_i = fx.Int32(kc)
@@ -1152,25 +829,11 @@ def compile_fp4_gemm_4w(
             b0_off = fx.Int32(B0_gl_offset) + bk
             b1_off = fx.Int32(B1_gl_offset) + bk
 
-            # Next-step scale carry: read scale[kc+1] in the MFMA shadow (4 thunks).
             _scn = [None, None, None, None]  # saR0, saR1, sbC0, sbC1 for kc+1
             _rd_scn = _read_scale_thunks(kc_i + 1, _scn)
-            # Scale[kc+3] gather (depth-3), co-issued in the MFMA shadow (2 thunks).
-            # Clamp to K_ITERS-1: the last loop step would gather scale[K_ITERS] (OOB
-            # -> memory fault); the clamped extra gather re-reads scale[K_ITERS-1]
-            # into the same slot (idempotent, its result is never consumed).
             _gk = _min(kc_i + fx.Int32(3), fx.Int32(K_ITERS - 1))
             _sc_gather = _gather_scale_thunks(_gk, _slot(_gk))
 
-            # b1 is a loop carry (read in the PREVIOUS step's seg 2), exactly like
-            # a0/b0. That is what keeps every s2r read separated from its consumer
-            # by a barrier: with b1 read here in seg 1 and consumed by c01 in the
-            # same segment, the backend had to emit a standalone lgkmcnt wait for
-            # it (20 per hot loop). All four fragments now cross the barrier's
-            # lgkmcnt(0) instead, so those waits disappear.
-            #
-            # Only a1 is still read-and-used inside one segment, but its read sits
-            # in seg 1 and its use in seg 2 -- a barrier apart.
             wait_barrier(_MAIN_VMCNT)
             il = (
                 _riffle(_g2s_thunks(a_g2s, ac0, a0_off, N_TILES_A), _s2r_thunks(a_s2r, ac1, _a1, N_TILES_A, False))
@@ -1232,12 +895,6 @@ def compile_fp4_gemm_4w(
             o += n_gb
             return (saR0, saR1, sbC0, sbC1)
 
-        # Steps 0 and 1 are peeled out of the scf.for so step 0 can run with
-        # ``zero_acc``: its ksub-0 MFMAs take the literal 0 as src2 (C = A*B), which
-        # removes the 256 v_accvgpr_write_b32 that would otherwise zero the
-        # accumulators before the loop. Two steps are peeled (not one) to keep the
-        # LDS ping-pong identity -- the pointer pairs swap twice, so the loop body
-        # still sees ``bufs0``.
         _accs0 = ([None] * N_ACCUMS, [None] * N_ACCUMS, [None] * N_ACCUMS, [None] * N_ACCUMS)
         a0f, b0f, b1f, sc, accs, _ = _one_step(0, a0_frag, b0_frag, b1_frag, sc0, _accs0, bufs0, zero_acc=True)
         a0f, b0f, b1f, sc, accs, _ = _one_step(1, a0f, b0f, b1f, sc, accs, _swap_bufs(bufs0))
@@ -1356,24 +1013,6 @@ def compile_fp4_gemm_4w(
             c_cols=c_n,
             c_idx_fn=mfma.idx,
         )
-        # Each quadrant's 8 stores ride in a LATER quadrant's MFMA slots. Issuing
-        # all 32 buffer_stores back to back queues them on L1 (not on bandwidth),
-        # so the win is spacing them out; the MFMAs are free filler and the
-        # accvgpr_read / cvt_pk_bf16 each thunk drags along hide in the MFMA
-        # execute shadow.
-        #
-        # The sched_barrier(0) after each call is load-bearing, not a hint.
-        # ``_mfma_agpr`` emits the MFMA as inline asm, so GCNHazardRecognizer
-        # cannot see the AGPR write and inserts no nops for the MFMA ->
-        # v_accvgpr_read RAW hazard. Without the barrier the machine scheduler
-        # sinks a c00 MFMA to 2 instructions before the thunk that reads that same
-        # accumulator, and the epilogue reads stale data (cos 0.999999 ->
-        # 0.999512). The barrier pins every quadrant's MFMAs ahead of the stores
-        # that read them, leaving a full 32-MFMA call in between.
-        #
-        # Stores go two calls back, not one: one call back still let a tail MFMA
-        # land inside the hazard window (cos 0.999877). c10/c11 have no later call
-        # to hide in.
         il = _s2r_thunks(a_s2r, a_cur1, _a1, N_TILES_A, False)
         c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, saR0, sbC0, interleave=il)
         a1_frag = _a1
