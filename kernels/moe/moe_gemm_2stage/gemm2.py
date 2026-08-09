@@ -57,7 +57,8 @@ def _build_moe_gemm2_fp8(
     """
     # int8smooth applies its smooth scale host-side to A2 before quant, so stage2
     # sees plain int8 A2 + a per-route scale -- identical to the int8 path here.
-    is_int8 = in_dtype in ("int8", "int8smooth")
+    is_int4 = in_dtype == "int4"  # W4A8: int8 activations x packed-int4 weights
+    is_int8 = in_dtype in ("int8", "int8smooth") or is_int4
     elem_t = fx.Int8 if is_int8 else fx.Float8E4M3FNUZ
     acc_dtype = fx.Int32 if is_int8 else None
     MFMA_K = 32
@@ -122,7 +123,7 @@ def _build_moe_gemm2_fp8(
     _thrs_m = 256 // _thrs_k
     _m_per_wave = _thrs_m // 4
 
-    def _gemm_1x4(blk_n, arg_p_input, arg_p_weight, lds, M):
+    def _gemm_1x4(blk_n, arg_p_input, arg_p_weight, lds, M, expert_id):
         """B-first native-fp8 down-projection GEMM with A-gather + LDS ping-pong."""
         tid = gpu.thread_idx.x
         mma_atom, tiled_mma = fxh.make_1x4_tiled_mma(in_t, acc_dtype)
@@ -181,13 +182,29 @@ def _build_moe_gemm2_fp8(
 
         # B (weight): single tile per block (no gate/up split); direct global->register,
         # prefetched one K-tile ahead into a ping-pong pair of fragments.
-        b_tile = fx.flat_divide(b_tensor, fx.make_tile(contiguous_n, TILE_K))[None, None, blk_n, None]
-        b_g2r = fx.make_tiled_copy_A(buf_cp_atom_r, tiled_mma).get_slice(tid)
-        b_g2r_s = b_g2r.partition_S(b_tile)
-        b_frag_bufs = [tiled_mma.make_fragment_A(b_tile[None, None, 0]) for _ in range(2)]
-        b_ret_bufs = [b_g2r.retile(f) for f in b_frag_bufs]
+        _ki_reps = TILE_K // 64  # 64-byte K super-steps per tile
+        if const_expr(is_int4):
+            # W4A8: packed-int4 weight through the explicit ki-correct preshuffle
+            # loader (see gemm1 / fxh.load_weight_int4_frag). col_base = blk_n*contiguous_n.
+            b_raw = fx.rocdl.make_buffer_tensor(arg_p_weight, max_size=False)
+            b_layout_i4 = fxh.make_preshuffle_b_layout_int4(N, K)
+            _expert_off = expert_id * fx.Int32((N * K) // 2)
+            _col_base = blk_n * fx.Int32(contiguous_n)
+            _wfake = fx.rocdl.make_buffer_tensor(
+                fx.make_view(fx.get_iter(arg_p_input), fx.make_layout((contiguous_n, TILE_K), (TILE_K, 1))),
+                max_size=False,
+            )
+            _wtile = fx.flat_divide(_wfake, fx.make_tile(contiguous_n, TILE_K))[None, None, 0, 0]
+            b_frag_bufs = [tiled_mma.make_fragment_A(_wtile) for _ in range(2)]
+            _b_loads_per_tile = 0  # int4 loads are scalar buffer reads, not prefetched dwordx4
+        else:
+            b_tile = fx.flat_divide(b_tensor, fx.make_tile(contiguous_n, TILE_K))[None, None, blk_n, None]
+            b_g2r = fx.make_tiled_copy_A(buf_cp_atom_r, tiled_mma).get_slice(tid)
+            b_g2r_s = b_g2r.partition_S(b_tile)
+            b_frag_bufs = [tiled_mma.make_fragment_A(b_tile[None, None, 0]) for _ in range(2)]
+            b_ret_bufs = [b_g2r.retile(f) for f in b_frag_bufs]
 
-        _b_loads_per_tile = fx.size(fx.get_shape(b_frag_bufs[0])).to_py_value() // _val_per_thr
+            _b_loads_per_tile = fx.size(fx.get_shape(b_frag_bufs[0])).to_py_value() // _val_per_thr
 
         c_fake_buf = fx.rocdl.make_buffer_tensor(
             fx.make_view(fx.get_iter(arg_p_input), fx.make_layout((contiguous_n, BM), (BM, 1))), max_size=False
@@ -202,7 +219,12 @@ def _build_moe_gemm2_fp8(
         def _load_gmem(kb, s):
             # kb is an fx.Int32 K-tile index (may be a runtime scf.for value).
             a_idx.copy(buf_cp_atom_r, kb, a_cp_frag_bufs[s])
-            fx.copy(buf_cp_atom_r, b_g2r_s[None, None, None, kb], b_ret_bufs[s])
+            if const_expr(is_int4):
+                fxh.load_weight_int4_frag(
+                    b_raw, b_layout_i4, b_frag_bufs[s], _expert_off, _col_base, kb, tid, _ki_reps
+                )
+            else:
+                fx.copy(buf_cp_atom_r, b_g2r_s[None, None, None, kb], b_ret_bufs[s])
 
         def _write_a_lds(s):
             fx.copy(uni_cp_atom, a_cp_frag_retile_bufs[s], a_lds_w_bufs[s])
@@ -380,7 +402,12 @@ def _build_moe_gemm2_fp8(
             expert_id = fxh.view_as_torch_tensor(fx.get_iter(arg_expert_ids), (1,), fx.Int32)[e_idx]
 
             w_ptr = fx.recast_iter(in_t, fx.get_iter(arg_w))
-            arg_p_weight = fxh.make_weight_view(w_ptr, expert_id, N, K)
+            if const_expr(is_int4):
+                # Packed-int4: raw byte view of the whole weight; the explicit
+                # ki-correct loader in _gemm_1x4 indexes per-expert.
+                arg_p_weight = fx.make_view(w_ptr, fx.make_layout((fx.Int32(experts * N * (K // 2)),), (1,)))
+            else:
+                arg_p_weight = fxh.make_weight_view(w_ptr, expert_id, N, K)
 
             # Seed sorted ids into LDS (A-gather + output scatter index).
             sorted_ids_buf = fx.rocdl.make_buffer_tensor(arg_p_sorted_ids, max_size=False)
@@ -486,7 +513,7 @@ def _build_moe_gemm2_fp8(
             asc_idx = fx.make_fragment_like(asc_thr)
             fx.copy(fx.make_copy_atom(fx.UniversalCopy32b(), fx.Int32), asc_thr, asc_idx)
 
-            c_frag = _gemm_1x4(blk_n, arg_p_input, arg_p_weight, lds, M)
+            c_frag = _gemm_1x4(blk_n, arg_p_input, arg_p_weight, lds, M, expert_id)
 
             # dequant: a_scale (per row) * w_scale (per channel), folded into C. int8 also
             # converts the i32 acc to f32 here and returns a fresh f32 fragment.
@@ -596,8 +623,10 @@ def compile_moe_gemm2(
 ):
     """Compile stage2 down-projection kernel (``moe_gemm2``) and return it.
 
-    A2/W are fp8 (E4M3) or int8 on gfx94*/gfx95*. int8 shares the fp8 pipeline
-    (i32 MFMA acc, f32 dequant). ``out_dtype`` output element:
+    A2/W are fp8 (E4M3), int8, or W4A8 (``int4``: int8 A2 x packed-int4 weight) on
+    gfx94*/gfx95*. int8/int4 share the fp8 pipeline (i32 MFMA acc, f32 dequant);
+    int4 swaps the weight load for an explicit ki-correct preshuffle-address loader.
+    ``out_dtype`` output element:
       - "f16": fp16 half2 atomics (fast, can overflow to +/-inf for bf16 workloads)
       - "bf16": bf16 atomics (buffer on gfx95+, global_atomic_pk_add_bf16 on gfx942)
       - "f32": fp32 scalar atomics (slower, avoids fp16 atomic overflow)
@@ -611,8 +640,8 @@ def compile_moe_gemm2(
     _out_s = str(out_dtype).strip().lower()
     if _out_s not in ("f16", "fp16", "half", "bf16", "bfloat16", "f32", "fp32", "float"):
         raise ValueError(f"out_dtype must be 'f16', 'bf16', or 'f32', got {out_dtype!r}")
-    if in_dtype not in ("fp8", "int8", "int8smooth"):
-        raise ValueError(f"in_dtype must be 'fp8', 'int8', or 'int8smooth', got {in_dtype!r}")
+    if in_dtype not in ("fp8", "int8", "int8smooth", "int4"):
+        raise ValueError(f"in_dtype must be 'fp8', 'int8', 'int8smooth', or 'int4', got {in_dtype!r}")
     if (not bool(accumulate)) and _out_s in ("f32", "fp32", "float"):
         raise ValueError("compile_moe_gemm2(accumulate=False) only supports out_dtype in {'f16','bf16'}")
     return _build_moe_gemm2_fp8(

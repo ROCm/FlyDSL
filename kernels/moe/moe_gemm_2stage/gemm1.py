@@ -45,8 +45,9 @@ def _build_moe_gemm1_fp8_gateup(
     ``token = fused & 0xFFFFFF``, ``slot = fused >> 24``). This is the ONLY
     difference from int8 -- it touches the A-gather and the activation-scale load.
     """
+    is_int4 = in_dtype == "int4"  # W4A8: int8 activations x packed-int4 weights
     is_int8smooth = in_dtype == "int8smooth"
-    is_int8 = in_dtype == "int8" or is_int8smooth
+    is_int8 = in_dtype == "int8" or is_int8smooth or is_int4
     elem_t = fx.Int8 if is_int8 else fx.Float8E4M3FNUZ
     acc_dtype = fx.Int32 if is_int8 else None
     MFMA_K = 32
@@ -91,7 +92,7 @@ def _build_moe_gemm1_fp8_gateup(
     _thrs_m = 256 // _thrs_k
     _m_per_wave = _thrs_m // 4
 
-    def _gemm_1x4(blk_n, arg_p_input, arg_p_weight, lds, M):
+    def _gemm_1x4(blk_n, arg_p_input, arg_p_weight, lds, M, expert_id):
         """B-first native-fp8 gate/up GEMM with A-gather + LDS ping-pong."""
         tid = gpu.thread_idx.x
         mma_atom, tiled_mma = fxh.make_1x4_tiled_mma(in_t, acc_dtype)
@@ -168,20 +169,42 @@ def _build_moe_gemm1_fp8_gateup(
 
         # B (weight gate/up): direct global->register, prefetched one K-tile ahead
         # into a ping-pong pair of fragments so weight VMEM overlaps the MFMA.
-        bl_tile = fx.flat_divide(b_tensor, fx.make_tile(contiguous_n, TILE_K))[None, None, blk_n * 2 + 0, None]
-        br_tile = fx.flat_divide(b_tensor, fx.make_tile(contiguous_n, TILE_K))[None, None, blk_n * 2 + 1, None]
-        b_g2r = fx.make_tiled_copy_A(buf_cp_atom_r, tiled_mma).get_slice(tid)
-        bl_g2r = b_g2r.partition_S(bl_tile)
-        br_g2r = b_g2r.partition_S(br_tile)
-        bl_frag_bufs = [tiled_mma.make_fragment_A(bl_tile[None, None, 0]) for _ in range(2)]
-        br_frag_bufs = [tiled_mma.make_fragment_A(br_tile[None, None, 0]) for _ in range(2)]
-        bl_ret_bufs = [b_g2r.retile(f) for f in bl_frag_bufs]
-        br_ret_bufs = [b_g2r.retile(f) for f in br_frag_bufs]
+        _ki_reps = TILE_K // 64  # 64-byte K super-steps per tile
+        if const_expr(is_int4):
+            # W4A8: weight is packed int4 (2 nibbles/byte). The int8 MFMA A-fragment
+            # reads K in ki-SEPARATED kpack groups that a generic half-width tiled_copy
+            # cannot reproduce, so drive an explicit ki-correct preshuffle-address
+            # loader (fxh.load_weight_int4_frag). Gate/up are separate absolute channel
+            # ranges: col_base_gate = blk_n*contiguous_n, col_base_up = + inter_dim.
+            b_raw = fx.rocdl.make_buffer_tensor(arg_p_weight, max_size=False)
+            b_layout_i4 = fxh.make_preshuffle_b_layout_int4(N_e, K)
+            _expert_off = expert_id * fx.Int32((N_e * K) // 2)
+            _col_gate = blk_n * fx.Int32(contiguous_n)
+            _col_up = _col_gate + fx.Int32(inter_dim)
+            # Fragment shape from a fake int8 (contiguous_n, TILE_K) weight tile.
+            _wfake = fx.rocdl.make_buffer_tensor(
+                fx.make_view(fx.get_iter(arg_p_input), fx.make_layout((contiguous_n, TILE_K), (TILE_K, 1))),
+                max_size=False,
+            )
+            _wtile = fx.flat_divide(_wfake, fx.make_tile(contiguous_n, TILE_K))[None, None, 0, 0]
+            bl_frag_bufs = [tiled_mma.make_fragment_A(_wtile) for _ in range(2)]
+            br_frag_bufs = [tiled_mma.make_fragment_A(_wtile) for _ in range(2)]
+            _b_loads_per_tile = 0  # int4 loads are scalar buffer reads, not prefetched dwordx4
+        else:
+            bl_tile = fx.flat_divide(b_tensor, fx.make_tile(contiguous_n, TILE_K))[None, None, blk_n * 2 + 0, None]
+            br_tile = fx.flat_divide(b_tensor, fx.make_tile(contiguous_n, TILE_K))[None, None, blk_n * 2 + 1, None]
+            b_g2r = fx.make_tiled_copy_A(buf_cp_atom_r, tiled_mma).get_slice(tid)
+            bl_g2r = b_g2r.partition_S(bl_tile)
+            br_g2r = b_g2r.partition_S(br_tile)
+            bl_frag_bufs = [tiled_mma.make_fragment_A(bl_tile[None, None, 0]) for _ in range(2)]
+            br_frag_bufs = [tiled_mma.make_fragment_A(br_tile[None, None, 0]) for _ in range(2)]
+            bl_ret_bufs = [b_g2r.retile(f) for f in bl_frag_bufs]
+            br_ret_bufs = [b_g2r.retile(f) for f in br_frag_bufs]
 
-        # 128b buffer_loads per thread for the B (gate+up) tile. Feeds a targeted
-        # s_waitcnt that awaits only the A-gather (issued first) while leaving the
-        # prefetched B loads in flight to overlap the MFMA. gate+up => 2 fragments.
-        _b_loads_per_tile = 2 * (fx.size(fx.get_shape(bl_frag_bufs[0])).to_py_value() // _val_per_thr)
+            # 128b buffer_loads per thread for the B (gate+up) tile. Feeds a targeted
+            # s_waitcnt that awaits only the A-gather (issued first) while leaving the
+            # prefetched B loads in flight to overlap the MFMA. gate+up => 2 fragments.
+            _b_loads_per_tile = 2 * (fx.size(fx.get_shape(bl_frag_bufs[0])).to_py_value() // _val_per_thr)
 
         c_fake_buf = fx.rocdl.make_buffer_tensor(
             fx.make_view(fx.get_iter(arg_p_input), fx.make_layout((contiguous_n, BM), (BM, 1))), max_size=False
@@ -201,8 +224,17 @@ def _build_moe_gemm1_fp8_gateup(
             """Issue global A-gather + B(gate/up) loads for K-tile kt into stage s."""
             kb = fx.Int32(kt)
             a_idx.copy(buf_cp_atom_r, kb, a_cp_frag_bufs[s])
-            fx.copy(buf_cp_atom_r, bl_g2r[None, None, None, kb], bl_ret_bufs[s])
-            fx.copy(buf_cp_atom_r, br_g2r[None, None, None, kb], br_ret_bufs[s])
+            if const_expr(is_int4):
+                # Explicit ki-correct packed-int4 weight load (gate + up).
+                fxh.load_weight_int4_frag(
+                    b_raw, b_layout_i4, bl_frag_bufs[s], _expert_off, _col_gate, kb, tid, _ki_reps
+                )
+                fxh.load_weight_int4_frag(
+                    b_raw, b_layout_i4, br_frag_bufs[s], _expert_off, _col_up, kb, tid, _ki_reps
+                )
+            else:
+                fx.copy(buf_cp_atom_r, bl_g2r[None, None, None, kb], bl_ret_bufs[s])
+                fx.copy(buf_cp_atom_r, br_g2r[None, None, None, kb], br_ret_bufs[s])
 
         def _write_a_lds(s):
             fx.copy(uni_cp_atom, a_cp_frag_retile_bufs[s], a_lds_w_bufs[s])
@@ -383,7 +415,12 @@ def _build_moe_gemm1_fp8_gateup(
             expert_id = fxh.view_as_torch_tensor(fx.get_iter(arg_expert_ids), (1,), fx.Int32)[e_idx]
 
             w_ptr = fx.recast_iter(in_t, fx.get_iter(arg_w))
-            arg_p_weight = fxh.make_gateup_weight_view(w_ptr, expert_id, contiguous_n, N_e, K)
+            if const_expr(is_int4):
+                # Packed-int4: pass a raw byte view of the whole weight; the
+                # explicit ki-correct loader in _gemm_1x4 indexes per-expert.
+                arg_p_weight = fx.make_view(w_ptr, fx.make_layout((fx.Int32(experts * N_e * (K // 2)),), (1,)))
+            else:
+                arg_p_weight = fxh.make_gateup_weight_view(w_ptr, expert_id, contiguous_n, N_e, K)
 
             # Seed sorted ids into LDS (A-gather + output scatter index). The TV
             # layouts read up to 256/(tile_k/16) M-rows (32 at tile_k=128), which
@@ -438,7 +475,7 @@ def _build_moe_gemm1_fp8_gateup(
             asc_idx = fx.make_fragment_like(asc_thr)
             fx.copy(fx.make_copy_atom(fx.UniversalCopy32b(), fx.Int32), asc_thr, asc_idx)
 
-            c_gate_frag, c_up_frag = _gemm_1x4(blk_n, arg_p_input, arg_p_weight, lds, M)
+            c_gate_frag, c_up_frag = _gemm_1x4(blk_n, arg_p_input, arg_p_weight, lds, M, expert_id)
 
             # dequant: sx (per token) * sw (per channel), folded into gate/up. int8 also
             # converts the i32 acc to f32 here and returns fresh f32 fragments.
@@ -539,13 +576,11 @@ def compile_moe_gemm1(
     fp16/bf16 output type. int8/int8smooth share the fp8 pipeline (i32 MFMA acc,
     f32 dequant); int8smooth adds slot-major A/scale_x indexing.
 
-    ``int4`` (W4A8) is accepted by the arg validation but currently raises
-    NotImplementedError: the int8-activation path is reused as-is, but feeding the
-    packed-int4 weight through the B-first pipeline's generic tiled_copy in the
-    int8 MFMA A-fragment's ki-separated layout is unsolved (the recorded A-operand
-    *compiler* blocker is gone -- verified -- but the weight-load *layout* needs an
-    explicit preshuffle-address loader). See make_gateup_weight_view_int4 /
-    unpack_int4_weight_frag in layout_helpers for the scaffolding.
+    ``int4`` (W4A8) shares the whole int8-activation pipeline; only the weight load
+    differs. The packed-int4 weight is driven through an explicit ki-correct
+    preshuffle-address loader (``fxh.load_weight_int4_frag``) that reproduces the
+    int8 MFMA A-fragment's ki-separated kpack addressing, then 7-op nibble-unpacks
+    each dword into the A-fragment (weight stays the A-operand).
     """
     _arch = get_rocm_arch()
     if not ("gfx95" in _arch or "gfx94" in _arch):
@@ -554,18 +589,6 @@ def compile_moe_gemm1(
         raise ValueError(f"out_dtype must be 'f16' or 'bf16', got {out_dtype!r}")
     if in_dtype not in ("fp8", "int8", "int8smooth", "int4"):
         raise ValueError(f"in_dtype must be 'fp8', 'int8', 'int8smooth', or 'int4', got {in_dtype!r}")
-    if in_dtype == "int4":
-        # W4A8 (int4) is scaffolded but NOT yet numerically correct: the packed-int4
-        # weight cannot be fed through the B-first pipeline's generic tiled_copy in
-        # the int8 MFMA A-fragment's ki-separated layout (proven by exhaustive
-        # probing -- the recorded A-operand *compiler* blocker is gone, but the
-        # weight-load *layout* needs the explicit preshuffle-address loader that the
-        # legacy kernel uses). Fail fast rather than return wrong results.
-        raise NotImplementedError(
-            "W4A8 (in_dtype='int4') stage1 is not yet supported in moe_gemm_2stage: "
-            "the packed-int4 weight load needs an explicit ki-correct preshuffle "
-            "loader (see make_gateup_weight_view_int4 / unpack_int4_weight_frag)."
-        )
 
     return _build_moe_gemm1_fp8_gateup(
         model_dim=model_dim,

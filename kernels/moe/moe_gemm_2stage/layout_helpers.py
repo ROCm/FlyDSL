@@ -133,80 +133,74 @@ def make_weight_view(p_weight, expert_id, N, K):
     )
 
 
-def make_gateup_weight_view_int4(p_weight, expert_id, contiguous_n, N, K):
-    """W4A8 packed-int4 analog of make_gateup_weight_view. Storage is bytes (2
-    signed int4 nibbles each), preshuffled THEN packed 2-values/byte, so the K
-    dimension is measured in packed bytes (Kb = K//2). This is int8's view with
-    every BYTE stride halved: the N-block stride 16*K -> 16*Kb, and the kpack
-    group holds 16 values as 8 packed bytes so element_num=8 (int8's 16 halved),
-    inner stride 16*element_num = 128 (int8's 256 halved). Channel strides
-    (N, N//2, contiguous_n) are unchanged (they count output channels, not K).
+def make_preshuffle_b_layout_int4(N_full, K):
+    """W4A8 packed-int4 preshuffle address layout (per expert).
 
-    NOTE (known-incomplete): this view addresses the packed K contiguously, but
-    the MFMA A tiled_copy splits int8's K into ki-separated kpack groups that a
-    half-width packed load cannot reproduce (see the W4A8 report / probes). The
-    weight load in gemm1/gemm2 is gated off until the explicit ki-correct loader
-    (mirroring the legacy ``load_b_pack_k32`` preshuffle addressing) is added."""
-    Kb = K // 2
-    element_num = 8
-    group_layout_silu = fx.make_layout(
-        ((contiguous_n, 2, N // (contiguous_n * 2)), Kb),
-        ((1, N // 2, contiguous_n), N),
-    )
-    return fx.make_view(
-        p_weight + fx.Int64(expert_id * N * Kb),
-        fx.composition(
-            fx.make_layout(
-                ((16, N // 16), (element_num, Kb // element_num)),
-                ((element_num, 16 * Kb), (1, 16 * element_num)),
-            ),
-            group_layout_silu,
-        ),
-    )
+    Returns the CK/aiter preshuffle B layout the legacy W4A8 kernel uses
+    (``make_preshuffle_b_layout(c_n=N_full, c_k=K, kpack_bytes=8)``), over the
+    packed-int4 weight bytes: shape ``(N_full/16, K_bytes/64, 4, 16, 8)``. Its
+    ``crd2idx`` reproduces the int8 MFMA A-fragment's ki-separated kpack byte
+    addressing (see ``load_weight_int4_frag``). ``N_full`` is the full per-expert
+    output-channel count (2*inter_dim for gemm1 gate+up, model_dim for gemm2);
+    ``K`` is the contraction dim in int8 elements (model_dim / inter_dim)."""
+    from flydsl.expr import arith as _lay_arith
+
+    from kernels.common.mma.mfma_preshuffle_pipeline import make_preshuffle_b_layout
+
+    return make_preshuffle_b_layout(
+        _lay_arith, c_n=fx.Index(int(N_full)), c_k=fx.Index(int(K)), kpack_bytes=8
+    ).layout_b
 
 
-def make_weight_view_int4(p_weight, expert_id, N, K):
-    """W4A8 packed-int4 analog of make_weight_view (stage2; N=model_dim, K=inter_dim).
-    K is in packed bytes (Kb=K//2), element_num=8 (see make_gateup_weight_view_int4)."""
-    Kb = K // 2
-    element_num = 8
-    return fx.make_view(
-        p_weight + fx.Int64(expert_id * N * Kb),
-        fx.make_layout(
-            ((16, N // 16), (element_num, Kb // element_num)),
-            ((element_num, 16 * Kb), (1, 16 * element_num)),
-        ),
-    )
+def load_weight_int4_frag(bt_raw, b_layout, frag, expert_off_bytes, col_base, kb, tid, ki_reps):
+    """Fill an int8 MFMA A-fragment from packed-int4 weight bytes, ki-correct.
 
+    ``bt_raw`` is a buffer_tensor over the raw packed weight bytes; one expert's
+    slab starts at byte offset ``expert_off_bytes``. ``b_layout`` is
+    ``make_preshuffle_b_layout_int4(N_full, K)``. ``frag`` is
+    ``tiled_mma.make_fragment_A(...)`` with logical shape ``(8, m_reps, (2, ki_reps))``.
+    ``col_base`` is the tile's first output channel (blk_n*contiguous_n for a plain
+    tile; + inter_dim for the gemm1 up-half). ``kb`` is the K-tile index (fx.Int32,
+    may be a runtime scf.for value).
 
-def unpack_int4_weight_frag(pk_frag, int8_frag):
-    """W4A8 in-register nibble unpack: packed-int4 staging fragment -> int8 A-frag.
-
-    ``pk_frag`` holds packed bytes (half the elements of ``int8_frag``); each 4
-    packed bytes (one i32 dword) hold 8 signed int4 values v0..v7 as
-    ``byte_j = v_j | (v_{j+4} << 4)`` (low nibbles v0..v3, high v4..v7), matching
-    the reference ``pack_shuffled_int8_to_packed_int4_no_perm``. The 7-op unpack
-    sign-extends into two i8 dwords even={v0..v3}, odd={v4..v7}; concatenating
-    even++odd recovers the 8 contiguous int8 lanes the MFMA operand expects.
-
-    Feeding these COMPUTED values into the MFMA A-fragment lowers cleanly on the
-    current toolchain (verified bit-exact); no B-operand restructuring needed.
-    """
+    Address math (validated bit-exact vs the generic int8 A-load for contiguous_n
+    64/128, tile_k 128/256, every N-block and K-tile):
+      col      = col_base + m*64 + wave*16 + lane%16    (channel this lane feeds)
+      n_blk    = col//16 ; n_intra = col%16
+      k0       = kb*ki_reps + ki                         (64-byte K super-step)
+      k1       = lane//16 (0..3)                          (kpack lane group)
+      k2_base  = k*4       (byte half within the 8-byte kpack)
+      byte_off = crd2idx((n_blk, k0, k1, n_intra, 0), b_layout) + k2_base + expert_off
+    Load 4 packed bytes at byte_off, 7-op nibble-unpack (even={v0..v3},
+    odd={v4..v7}), store the 8 recovered int8 lanes into frag[None, m, (k, ki)]."""
+    m_reps = fx.get_shape(frag)[1].to_py_value()
+    lane = tid % fx.Int32(64)
+    lane_mod_16 = lane % fx.Int32(16)
+    lane_div_16 = lane // fx.Int32(16)
+    wave = (tid // fx.Int32(64)) % fx.Int32(4)
     c_08 = fx.Int32(0x08080808)
     c_0f = fx.Int32(0x0F0F0F0F)
     c_1e = fx.Int32(0x1E)
-    n_pk = fx.size(fx.get_shape(pk_frag)).to_py_value()  # packed bytes / lane
-    n_dw = n_pk // 4  # packed dwords / lane; each -> 8 int8 (2 out dwords)
-    packed = pk_frag.load().bitcast(fx.Int32)  # n_dw i32
-    outs = []
-    for d in range_constexpr(n_dw):
-        p = packed[d]
-        even = (p & c_0f) | ((p & c_08) * c_1e)
-        t = p >> fx.Int32(4)
-        odd = (t & c_0f) | ((t & c_08) * c_1e)
-        outs.append(even)
-        outs.append(odd)
-    int8_frag.store(Vec.from_elements(outs, fx.Int32).bitcast(fx.Int8))
+    # expert_off_bytes may be a Python int or a runtime fx.Int32 (expert_id*slab).
+    eoff = fx.Int32(expert_off_bytes) if isinstance(expert_off_bytes, int) else expert_off_bytes
+    for m in range_constexpr(m_reps):
+        col = col_base + fx.Int32(m * 64) + wave * fx.Int32(16) + lane_mod_16
+        n_blk = col // fx.Int32(16)
+        n_intra = col % fx.Int32(16)
+        for ki in range_constexpr(ki_reps):
+            k0 = kb * fx.Int32(ki_reps) + fx.Int32(ki)
+            for k in range_constexpr(2):
+                coord = (n_blk, k0, lane_div_16, n_intra, fx.Int32(0))
+                addr = fx.get_scalar(fx.crd2idx(coord, b_layout)).to(fx.Int32) + fx.Int32(k * 4) + eoff
+                b0 = bt_raw[addr]
+                b1 = bt_raw[addr + fx.Int32(1)]
+                b2 = bt_raw[addr + fx.Int32(2)]
+                b3 = bt_raw[addr + fx.Int32(3)]
+                packed = Vec.from_elements([b0, b1, b2, b3], fx.Int8).bitcast(fx.Int32)[0]
+                even = (packed & c_0f) | ((packed & c_08) * c_1e)
+                t = packed >> fx.Int32(4)
+                odd = (t & c_0f) | ((t & c_08) * c_1e)
+                frag[None, m, (k, ki)].store(Vec.from_elements([even, odd], fx.Int32).bitcast(fx.Int8))
 
 
 def read_sorted_index(tiled_copy_index, tid, lds_index, index_size, index_offset=0):
