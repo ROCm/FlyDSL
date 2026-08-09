@@ -6,19 +6,13 @@
 """
 Numeric correctness tests for the ``moe_gemm_2stage`` fp8 2-stage kernels.
 
-Covers stage1 (gate-up + silu, ``compile_moe_gemm1``) and stage2
-(down-projection, ``compile_moe_gemm2``) against torch fp8 references, checking
-cosine similarity (not just that the builders trace/lower). The package is
-fp8-only on CDNA3 (gfx94*) / CDNA4 (gfx95*).
+Covers stage1 (gate-up + silu) and stage2 (down-projection) against torch fp8
+references by cosine similarity. fp8-only on CDNA3 (gfx94*) / CDNA4 (gfx95*).
 
-Stage2 is exercised in both atomic (``accumulate=True``) and reduce
-(``accumulate=False``) modes, across f16/bf16/f32 outputs (f32 is atomic-only),
-and at two tile_m values (16 = decode-ish, 64 = prefill-ish).
-
-Input construction (routing/sorting, per-token fp8 quant, weight preshuffle)
-and the torch references are harvested from the proven standalone harness that
-scored cos=1.0 across a wide sweep; helpers come from ``tests/utils`` and
-``tests/kernels/test_ref`` rather than being reimplemented inline.
+Stage2 runs both atomic (``accumulate=True``) and reduce (``accumulate=False``)
+modes, f16/bf16/f32 outputs (f32 atomic-only), and two tile_m values (16 decode,
+64 prefill). Routing/quant/preshuffle helpers come from ``tests/utils`` and
+``tests/kernels/test_ref``.
 """
 
 import math
@@ -327,41 +321,27 @@ _SHAPE = dict(model_dim=256, inter_dim=128, experts=4, topk=2)
 
 @_requires_fp8
 @pytest.mark.parametrize("out_dtype", ["f16", "bf16"])
-def test_moe_gemm1_numeric_prefill(out_dtype):
-    """Stage1 gate-up + silu matches the torch fp8 reference (prefill tile_m=64)."""
-    out, ref = _run_gemm1(
-        tokens=128,
-        **_SHAPE,
-        tile_m=64,
-        tile_n=64,
-        tile_k=128,
-        out_dtype=out_dtype,
-    )
-    cos = _cosine_sim(out, ref)
-    assert cos > 0.99, f"stage1 cos={cos:.5f} (out_dtype={out_dtype}, tile_m=64)"
+@pytest.mark.parametrize("tile_m,tokens", [(64, 128), (16, 8)])
+def test_moe_gemm1_numeric(out_dtype, tile_m, tokens):
+    """Stage1 gate-up + silu matches the torch fp8 reference (prefill tile_m=64,
+    decode tile_m=16).
 
-
-@_requires_fp8
-@pytest.mark.parametrize("out_dtype", ["f16", "bf16"])
-def test_moe_gemm1_numeric_decode(out_dtype):
-    """Stage1 gate-up + silu matches the torch fp8 reference (decode tile_m=16).
-
-    Regression guard for the decode-path gather/scatter bug: the A-gather and
-    output-scatter TV layouts read 32 M-rows even when BM=16, so un-seeded
-    sorted_lds slots (16..31) decoded to a valid token 0 / slot 0 and piled
-    garbage onto the first-routed token. Fixed by seeding a sentinel token id
-    (== M, hardware-OOB) into every readable LDS slot before the real ids.
+    The tile_m=16 case is the decode-path gather/scatter regression guard: the
+    A-gather and output-scatter TV layouts read 32 M-rows even when BM=16, so
+    un-seeded sorted_lds slots (16..31) decoded to a valid token 0 / slot 0 and
+    piled garbage onto the first-routed token. Fixed by seeding a sentinel token
+    id (== M, hardware-OOB) into every readable LDS slot before the real ids.
     """
     out, ref = _run_gemm1(
-        tokens=8,
+        tokens=tokens,
         **_SHAPE,
-        tile_m=16,
+        tile_m=tile_m,
         tile_n=64,
         tile_k=128,
         out_dtype=out_dtype,
     )
     cos = _cosine_sim(out, ref)
-    assert cos > 0.99, f"stage1 cos={cos:.5f} (out_dtype={out_dtype}, tile_m=16)"
+    assert cos > 0.99, f"stage1 cos={cos:.5f} (out_dtype={out_dtype}, tile_m={tile_m})"
 
 
 @_requires_fp8
