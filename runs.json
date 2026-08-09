@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-09T06:34:26Z",
+ "updated": "2026-08-09T06:38:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -74,11 +74,11 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31294175437",
    "created_at": "2026-08-09T04:15:24Z",
-   "updated_at": "2026-08-09T04:35:09Z",
+   "updated_at": "2026-08-09T06:36:39Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -93,9 +93,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-09T04:35:09Z",
+     "started_at": "2026-08-09T06:36:39Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31294175437/job/93198226964"
     },
@@ -160,11 +160,11 @@
    "branch": "skill-cleanup-v0.3.1",
    "event": "pull_request",
    "title": "Release: bump version to 0.3.1",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31293954279",
    "created_at": "2026-08-09T04:09:08Z",
-   "updated_at": "2026-08-09T05:22:20Z",
+   "updated_at": "2026-08-09T06:36:16Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -179,10 +179,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-09T05:22:19Z",
-     "completed_at": null,
+     "completed_at": "2026-08-09T06:36:15Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31293954279/job/93197468972"
     },
     {
