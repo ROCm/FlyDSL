@@ -112,6 +112,18 @@ def _build_moe_gemm2_fp8(
     out_elem = fx.Float32 if out_is_f32 else (fx.BFloat16 if out_is_bf16 else fx.Float16)
     out_bytes = 4 if out_is_f32 else 2
 
+    # bf16 atomic accumulation: gfx95+/gfx12+ have buffer_atomic_pk_add_bf16 (buffer
+    # atomics); gfx942 (CDNA3) only has global_atomic_pk_add_bf16, so the bf16+accumulate
+    # combo there must use GLOBAL (!llvm.ptr) atomics. f16/f32 always use buffer atomics.
+    _gpu_arch = get_rocm_arch()
+    _has_buffer_atomic_bf16 = str(_gpu_arch).startswith(("gfx95", "gfx12"))
+    _needs_global_atomic_bf16 = out_is_bf16 and accumulate and not _has_buffer_atomic_bf16
+    if out_is_bf16 and accumulate and not supports_bf16_global_atomics(_gpu_arch):
+        raise ValueError(
+            f"out_dtype='bf16' with accumulate requires bf16 atomics "
+            f"({bf16_global_atomics_arch_description()}), got arch={_gpu_arch!r}"
+        )
+
     assert TILE_K in (128, 256), f"native stage2 needs tile_k in (128,256), got {TILE_K}"
     assert K % TILE_K == 0, f"K(inter_dim)={K} must be a multiple of TILE_K={TILE_K}"
     assert 64 <= BN <= 256 and BN % 64 == 0, f"tile_n must be in [64,256] multiple of 64, got {BN}"
@@ -556,7 +568,12 @@ def _build_moe_gemm2_fp8(
             if const_expr(not accumulate):
                 c_out.copy(buf_atom_w128, blk_n, rd)
             else:
-                _atomic_mode = "f32" if out_is_f32 else "pk"
+                if const_expr(_needs_global_atomic_bf16):
+                    _atomic_mode = "pk_global"
+                elif const_expr(out_is_f32):
+                    _atomic_mode = "f32"
+                else:
+                    _atomic_mode = "pk"
                 c_out.copy(
                     buf_atom_w128,
                     blk_n,
@@ -566,6 +583,7 @@ def _build_moe_gemm2_fp8(
                     out_bytes=out_bytes,
                     row_stride=N,
                     row_limit=tokens,
+                    atomic_dst=arg_p_output,
                 )
 
     @flyc.jit
@@ -644,14 +662,14 @@ def compile_moe_gemm2(
     `use_cshuffle_epilog` controls whether we use the LDS CShuffle epilogue before
     global atomics (recommended for performance).
     """
-    # Native fp8 (new pipeline), non-groupwise, CDNA3/CDNA4. gfx942 carve-out: CDNA3
-    # lacks buffer_atomic_pk_add_bf16, so atomic+bf16-output stays on legacy (global
-    # bf16 atomics) there; every other fp8 combo uses the new path. bf16 not routed yet.
+    # Native fp8 (new pipeline), non-groupwise, CDNA3/CDNA4. The new builder handles
+    # every fp8 combo, including gfx942 bf16+accumulate (CDNA3 lacks
+    # buffer_atomic_pk_add_bf16, so _build_moe_gemm2_fp8 emits global_atomic_pk_add_bf16
+    # there via the "pk_global" epilogue path).
     _arch = get_rocm_arch()
     _cdna = "gfx94" in _arch or "gfx95" in _arch
-    _g942_bf16_atomic = "gfx94" in _arch and accumulate and str(out_dtype).strip().lower() in ("bf16", "bfloat16")
     _force_legacy = os.environ.get("MOE_FORCE_LEGACY_G2_FP8", "0") == "1"  # TEMP A/B toggle - remove before merge
-    if in_dtype == "fp8" and group_size <= 0 and _cdna and not _g942_bf16_atomic and not _force_legacy:
+    if in_dtype == "fp8" and group_size <= 0 and _cdna and not _force_legacy:
         _out_s = str(out_dtype).strip().lower()
         if _out_s not in ("f16", "fp16", "half", "bf16", "bfloat16", "f32", "fp32", "float"):
             raise ValueError(f"out_dtype must be 'f16', 'bf16', or 'f32', got {out_dtype!r}")

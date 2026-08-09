@@ -77,6 +77,18 @@ def _buffer_atomic_f32(rsrc, elem_idx, reg_vec):
         buffer_atomic_add(reg_vec[i], rsrc, byte_off, _z, _z)
 
 
+def _global_atomic_pk(dst, elem_idx, reg_vec, elem_bytes):
+    """Pairwise GLOBAL atomic-add of an f16/bf16 vector into dst[elem_idx..]
+    (raw !llvm.ptr atomicrmw fadd; lowers to global_atomic_pk_add_bf16 on gfx942,
+    which lacks buffer_atomic_pk_add_bf16). Unlike the buffer variant there is NO
+    hardware bounds-check, so callers MUST predicate out invalid lanes explicitly."""
+    from kernels.common.mem_ops import atomic_add
+
+    for i in range_constexpr(reg_vec.numel // 2):
+        pair = Vec.from_elements([reg_vec[i * 2], reg_vec[i * 2 + 1]], reg_vec.dtype)
+        atomic_add(dst, elem_idx + fx.Int32(i * 2), pair, dtype_bytes=elem_bytes, alignment=4)
+
+
 def make_1x4_tiled_mma(weight_dtype):
     """B-first 1x4 tiled_mma (weight=A, activation=B; 4 waves tile the M/channel dim).
     fp8 and gfx950 bf16 both use native MFMA(16,16,32), same k_perm, differing only in dtype."""
@@ -227,10 +239,16 @@ class _TensorWithIndex:
         out_bytes=None,
         row_stride=None,
         row_limit=None,
+        atomic_dst=None,
     ):
-        """Gather/scatter per-thread tiles: plain buffer-view store, or (atomic in
-        {"pk","f32"}) buffer atomic-add into atomic_rsrc at tok*row_stride+k_idx*tile_k
-        +chan; sentinel/out-of-tile lanes go OOB (dropped by the buffer clamp)."""
+        """Gather/scatter per-thread tiles: plain buffer-view store, or atomic-add at
+        tok*row_stride+k_idx*tile_k+chan. ``atomic`` selects the mechanism:
+          * "pk"/"f32" -> BUFFER atomic into atomic_rsrc; sentinel/out-of-tile lanes
+            go OOB (dropped by the buffer bounds-check).
+          * "pk_global" -> GLOBAL (!llvm.ptr) bf16 pk atomic into atomic_dst, for
+            gfx942 which lacks buffer_atomic_pk_add_bf16. Global atomics have NO
+            hardware bounds-check, so every out-of-tile lane is predicated off
+            explicitly (the OOB-redirect trick is unavailable)."""
         layout = fx.get_layout(self.fake_tensor_thr)
         rep_m = reps(self.fake_tensor_thr, 1)
         rep_k = reps(self.fake_tensor_thr, 2)
@@ -264,16 +282,28 @@ class _TensorWithIndex:
                         g_col = guard_full // fx.Int32(self._guard_rows)
                         valid = (g_row < fx.Int32(self.tile_m)) & (g_col < fx.Int32(self.tile_k))
                         reg_vec = frag[None, m, k].load()
-                        # Out-of-tile grid slots (channel-major tiles usually divide evenly,
-                        # but keep the guard) -> OOB element index so the buffer bounds-check
-                        # DROPS the atomic.
                         _va = reg_vec.numel
                         aligned = (row_base_i32 + chan_off) & fx.Int32(~(_va - 1))
-                        elem_idx = valid.select(aligned, fx.Int32(row_limit) * fx.Int32(row_stride))
-                        if const_expr(atomic == "f32"):
-                            _buffer_atomic_f32(atomic_rsrc, elem_idx, reg_vec)
+                        if const_expr(atomic == "pk_global"):
+                            # Global atomics have NO hardware bounds-check: an out-of-tile
+                            # element index would corrupt memory. Predicate the atomic on
+                            # the in-tile `valid` guard (the buffer OOB-redirect trick is
+                            # unavailable here). Padding ROWS are already skipped by the
+                            # row-uniform `row_valid` branch above.
+                            def _global_pk():
+                                _global_atomic_pk(atomic_dst, aligned, reg_vec, out_bytes)
+
+                            _if_slot = scf.IfOp(fx.as_ir_value(valid))
+                            with _if_then(_if_slot):
+                                _global_pk()
                         else:
-                            _buffer_atomic_pk(atomic_rsrc, elem_idx, reg_vec, out_bytes)
+                            # Buffer path: out-of-tile grid slots -> OOB element index so the
+                            # buffer bounds-check DROPS the atomic.
+                            elem_idx = valid.select(aligned, fx.Int32(row_limit) * fx.Int32(row_stride))
+                            if const_expr(atomic == "f32"):
+                                _buffer_atomic_f32(atomic_rsrc, elem_idx, reg_vec)
+                            else:
+                                _buffer_atomic_pk(atomic_rsrc, elem_idx, reg_vec, out_bytes)
 
                 _if_row = scf.IfOp(fx.as_ir_value(row_valid))
                 with _if_then(_if_row):
