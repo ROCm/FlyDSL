@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-09T16:08:50Z",
+ "updated": "2026-08-09T16:33:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -83,11 +83,11 @@
    "branch": "ci/upgrade-rocm-7.14",
    "event": "pull_request",
    "title": "CI: upgrade PyTorch images to ROCm 7.14",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31319798308",
    "created_at": "2026-08-09T14:57:01Z",
-   "updated_at": "2026-08-09T15:51:37Z",
+   "updated_at": "2026-08-09T16:32:20Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -111,9 +111,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-09T15:51:37Z",
+     "started_at": "2026-08-09T16:32:19Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31319798308/job/93266917449"
     }
@@ -141,11 +141,11 @@
    "branch": "fp4-gemm-4wave-perf",
    "event": "pull_request",
    "title": "[fp4_gemm_4wave] MXFP4 GEMM perf optimize",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31312171739",
    "created_at": "2026-08-09T11:59:54Z",
-   "updated_at": "2026-08-09T15:23:57Z",
+   "updated_at": "2026-08-09T16:31:56Z",
    "actor": "benenzhu",
    "jobs": [
     {
@@ -169,10 +169,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-09T15:23:46Z",
-     "completed_at": null,
+     "completed_at": "2026-08-09T16:31:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31312171739/job/93263767897"
     }
    ]
