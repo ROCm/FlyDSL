@@ -4,21 +4,19 @@
 """MoE topk-reduction kernel (FlyDSL, layout API).
 
 ``Y[t, d] = sum_k X[t, k, d]``, optionally gated by the EP validity mask
-(``valid[t,k] = expert_mask[topk_ids[t,k]] != 0``). Epilogue of stage2
-``mode="reduce"``, shared by every dtype's reduce path. Extracted from the
-legacy ``reduction.py``. Build a per-shape launcher with ``compile_moe_reduction``
-(cached); the kernel's compile-time params are ``Constexpr`` so flyc specializes
-per shape/dtype.
+(``valid[t,k] = expert_mask[topk_ids[t,k]] != 0``). Stage2 ``mode="reduce"``
+epilogue, shared by every dtype's reduce path. Build a per-shape launcher with
+``compile_moe_reduction`` (cached, Constexpr-specialized per shape/dtype).
 
-``dtype_str="fp8"`` reduces MXFP8 route-out rows (a flat uint8 buffer of
-``[model_dim fp8 bytes | model_dim/8 e8m0 scale bytes]`` per row): each fp8
-value is scaled by its e8m0 microscale, accumulated in f32 and written to
-``out_dtype_str`` (bf16/f16). The dense (f32/f16/bf16) path reduces a
-contiguous ``X[tokens, topk, model_dim]`` tensor.
+``dtype_str="fp8"`` reduces MXFP8 route-out rows (flat uint8, per row
+``[model_dim fp8 bytes | model_dim/8 e8m0 scale bytes]``): each fp8 value scaled
+by its e8m0 microscale, accumulated in f32, written to ``out_dtype_str``
+(bf16/f16). The dense (f32/f16/bf16) path reduces contiguous ``X[tokens, topk,
+model_dim]``.
 
-The launcher takes ``fx.Pointer`` args; dispatch it through
-``kernels.common.tensor_shim._run_compiled`` (each shape is a distinct launcher
-object, so the shim's per-exe ``_cf`` cache stays correct).
+The launcher takes ``fx.Pointer`` args; dispatch via
+``kernels.common.tensor_shim._run_compiled`` (distinct launcher object per shape,
+so the shim's per-exe ``_cf`` cache stays correct).
 """
 
 import functools
@@ -46,11 +44,10 @@ def moe_reduction_kernel(
     num_experts: fx.Constexpr[int],
     out_dtype_str: fx.Constexpr[str],
 ):
-    # One tiled-copy reduce for every dtype. Dense (f16/bf16/f32) loads V elems
-    # and extends to f32; fp8 route-out loads 8 fp8 bytes + their e8m0 microscale
-    # and decodes to f32. Both then run the same masked f32 topk-accumulate
-    # (uniform soffset = k*row_stride) and truncating store. row_stride differs:
-    # an fp8 row is padded with its N/8 scale bytes ([N fp8 | N/8 e8m0]).
+    # One tiled-copy reduce for every dtype. Dense (f16/bf16/f32) loads V elems and
+    # extends to f32; fp8 loads 8 fp8 bytes + e8m0 microscale and decodes to f32.
+    # Both run the same masked f32 topk-accumulate (uniform soffset = k*row_stride)
+    # and truncating store. row_stride differs: fp8 rows carry N/8 trailing scale bytes.
     is_fp8 = dtype_str == "fp8"
     if const_expr(is_fp8):
         in_elem, in_bytes, V = fx.Int8, 1, FP8_VEC
@@ -129,8 +126,8 @@ def moe_reduction_kernel(
     def _reduce_tile():
         p_src = thr_load.partition_S(fx.slice(fx.zipped_divide(xbuf, tile_mn), (None, (0, tile))))
         p_dst = thr_store.partition_D(fx.slice(fx.zipped_divide(ybuf, tile_mn), (None, (0, tile))))
-        # topk rows share one per-thread voffset via a uniform scalar
-        # soffset = k*row_stride, so the loads issue back-to-back.
+        # topk rows share one per-thread voffset via a uniform scalar soffset =
+        # k*row_stride, so the loads issue back-to-back.
         frags = [fx.make_fragment_like(p_src) for _ in range_constexpr(topk)]
         for k in range_constexpr(topk):
             fx.copy(load_atom, p_src, frags[k], soffset=fx.Int32(k * row_stride))
@@ -176,9 +173,7 @@ def compile_moe_reduction(
     """Compile the topk-reduce launcher for one Constexpr set (cached per shape).
 
     Returns a ``@flyc.jit`` taking ``(X, Y, expert_mask, topk_ids, i32_m_tokens,
-    stream)``; dispatch it through ``kernels.common.tensor_shim._run_compiled``.
-    The launcher is a distinct object per shape, so the shim's per-exe ``_cf``
-    cache stays correct.
+    stream)``; dispatch via ``kernels.common.tensor_shim._run_compiled``.
     """
     V = FP8_VEC if dtype_str == "fp8" else 128 // (32 if dtype_str == "f32" else 16)
     gy = (model_dim + BLOCK * V - 1) // (BLOCK * V)

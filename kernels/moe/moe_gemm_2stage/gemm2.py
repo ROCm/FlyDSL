@@ -3,8 +3,7 @@
 
 """MoE GEMM stage2 (down-projection MFMA) fp8 kernel builder.
 
-Layout-API fp8 pipeline (make_buffer_tensor + SharedAllocator + tiled
-copy/MMA). fp8-only: A2/W are fp8 (E4M3) on CDNA3 (gfx94*) / CDNA4 (gfx95*).
+fp8-only layout-API pipeline: A2/W are fp8 (E4M3) on CDNA3 (gfx94*) / CDNA4 (gfx95*).
 """
 
 import functools
@@ -22,7 +21,7 @@ try:
         supports_bf16_global_atomics,
     )
 except ImportError:
-    # Backward compatibility for runtime.device versions that only expose get_rocm_arch.
+    # Fallback for runtime.device versions exposing only get_rocm_arch.
     def supports_bf16_global_atomics(arch: str) -> bool:
         return str(arch).startswith(("gfx94", "gfx95", "gfx12"))
 
@@ -48,8 +47,8 @@ def _build_moe_gemm2_fp8(
     accumulate: bool,
 ):
     """Native stage2 down-projection (B-first MFMA, fp8); out=(A2@W2^T)*a_scale*w_scale.
-    Epilogue: atomic (out f16/bf16/f32) or reduce; prefer reduce (atomic is occupancy-bound
-    on compute-bound -- mitigated by the rolled k-loop below -- and memory-bound on decode).
+    Epilogue: atomic (f16/bf16/f32) or reduce; prefer reduce (atomic is
+    occupancy-bound on compute and memory-bound on decode).
     """
     elem_t = fx.Float8E4M3FNUZ
     MFMA_K = 32
@@ -68,9 +67,9 @@ def _build_moe_gemm2_fp8(
     out_elem = fx.Float32 if out_is_f32 else (fx.BFloat16 if out_is_bf16 else fx.Float16)
     out_bytes = 4 if out_is_f32 else 2
 
-    # bf16 atomic accumulation: gfx95+/gfx12+ have buffer_atomic_pk_add_bf16 (buffer
-    # atomics); gfx942 (CDNA3) only has global_atomic_pk_add_bf16, so the bf16+accumulate
-    # combo there must use GLOBAL (!llvm.ptr) atomics. f16/f32 always use buffer atomics.
+    # bf16 atomic accumulation: gfx95+/gfx12+ have buffer_atomic_pk_add_bf16; gfx942
+    # (CDNA3) only has global_atomic_pk_add_bf16, so bf16+accumulate there must use
+    # GLOBAL (!llvm.ptr) atomics. f16/f32 always use buffer atomics.
     _gpu_arch = get_rocm_arch()
     _has_buffer_atomic_bf16 = str(_gpu_arch).startswith(("gfx95", "gfx12"))
     _needs_global_atomic_bf16 = out_is_bf16 and accumulate and not _has_buffer_atomic_bf16
@@ -85,19 +84,17 @@ def _build_moe_gemm2_fp8(
     assert 64 <= BN <= 256 and BN % 64 == 0, f"tile_n must be in [64,256] multiple of 64, got {BN}"
     assert 16 <= BM <= 256 and BM % 16 == 0, f"tile_m must be a 16-multiple in [16,256], got {BM}"
 
-    # The B-first tiled_mma puts all 4 waves on the output (N) dim at 16 channels/wave,
-    # so each block must cover >=64 output channels. tile_n>=64 already satisfies this.
+    # B-first tiled_mma puts all 4 waves on the output (N) dim at 16 channels/wave,
+    # so each block covers >=64 output channels (tile_n>=64 satisfies this).
     contiguous_n = BN
     assert contiguous_n % 64 == 0, f"tile_n={BN} must be a 64-multiple for the 4-wave B-first MMA"
     assert model_dim % contiguous_n == 0, f"model_dim={model_dim} must be divisible by tile_n={BN}"
 
     fp8_t = elem_t
-    # A LDS holds BM*TILE_K activation elements; byte size scales with elem width.
-    a_lds_bytes = BM * TILE_K * elem_bytes
-    # CShuffle staging reuses the A LDS bytes; f32 output needs BM*BN*4 bytes there.
-    cshuf_bytes = BM * BN * out_bytes
-    # Single LDS region: the A ping/pong pair (2*a_lds) during the loop, reused by the
-    # CShuffle epilogue (cshuf) after. max() of the two fits CDNA3's 64KB (vs CDNA4 160KB)
+    a_lds_bytes = BM * TILE_K * elem_bytes  # A LDS: BM*TILE_K activation elems
+    cshuf_bytes = BM * BN * out_bytes  # CShuffle staging reuses the A LDS bytes
+    # Single LDS region: A ping/pong pair (2*a_lds) during the loop, reused by the
+    # CShuffle epilogue after. max() of the two must fit CDNA3's 64KB (CDNA4 160KB)
     # for large f32 tiles. ping = region[0:], pong = +a_lds.
     region_bytes = max(2 * a_lds_bytes, cshuf_bytes)
 
@@ -111,8 +108,7 @@ def _build_moe_gemm2_fp8(
         gemm: GemmBuffers
 
     _val_per_thr = 16 // elem_bytes  # elements per 128b buffer_load (fp8=16)
-    # A-LDS swizzle (matches preshuffle_gemm): 8-bit (fp8) uses (3,4,3).
-    _swz_params = (3, 4, 3)
+    _swz_params = (3, 4, 3)  # A-LDS swizzle, 8-bit fp8 (matches preshuffle_gemm)
     _thrs_k = TILE_K // _val_per_thr
     _thrs_m = 256 // _thrs_k
     _m_per_wave = _thrs_m // 4
@@ -223,8 +219,8 @@ def _build_moe_gemm2_fp8(
                             )
 
         # Rolled single-buffer scf.for: the unrolled ping-pong kept both buffers live
-        # over the whole unroll (196 VGPR, 2 blocks/CU) and couldn't hide the atomic
-        # drain tail; rolling drops VGPR to 130 (3 blocks/CU), keeping intra-tile overlap.
+        # (196 VGPR, 2 blocks/CU) and couldn't hide the atomic drain tail; rolling
+        # drops VGPR to 130 (3 blocks/CU) while keeping intra-tile overlap.
         for iv in range(0, num_tiles, 1):
             kb = arith.index_cast(T.i32, iv)
             _load_gmem(kb, 0)
@@ -347,11 +343,10 @@ def _build_moe_gemm2_fp8(
         M = tokens * fx.Int32(TOPK)
 
         in_ptr = fx.recast_iter(fp8_t, fx.get_iter(arg_x))
-        # A2 is [tokens, topk, inter(K)] flattened; the A-gather decodes the sorted
-        # id into (token, slot), so the gather view MUST be rank-3 (a rank-2 view
-        # would drop the slot and read slot-0 of every token -- correct only when
-        # all topk slots of a token are near-identical, which masks the bug on tame
-        # data). Row = token*topk + slot.
+        # A2 is [tokens, topk, inter(K)] flattened. The A-gather decodes the sorted id
+        # into (token, slot), so the gather view MUST be rank-3; a rank-2 view drops
+        # the slot and reads slot-0 of every token (silently correct only when a
+        # token's topk slots are near-identical). Row = token*topk + slot.
         arg_p_input = fx.make_view(
             in_ptr,
             fx.make_layout((tokens, fx.Int32(TOPK), fx.Int32(K)), (fx.Int32(TOPK * K), fx.Int32(K), 1)),
@@ -380,11 +375,10 @@ def _build_moe_gemm2_fp8(
                 lds_view[tid] = sorted_ids_buf[tid]
             gpu.barrier()
 
-            # Output tensor: reduce -> [tokens*topk, model_dim] buffer tensor for
-            # BufferCopy128b stores. Atomic -> a rank-2 [tokens, model_dim] buffer
-            # resource; scatter issues buffer_atomic_add at explicit element indices
-            # (out_tensor here only supplies the tile_m/tile_k shape to the index
-            # helper; its blocks are unused on the atomic path).
+            # Output tensor: reduce -> [tokens*topk, model_dim] buffer for BufferCopy128b
+            # stores. Atomic -> rank-2 [tokens, model_dim] buffer resource; scatter
+            # issues buffer_atomic_add at explicit element indices (out_tensor here only
+            # supplies the tile shape to the index helper; its blocks go unused).
             out_atomic_rsrc = None
             if const_expr(accumulate):
                 out_atomic_rsrc = buffer_ops.create_buffer_resource(
@@ -403,24 +397,19 @@ def _build_moe_gemm2_fp8(
                 )
             out_tensor = fx.rocdl.make_buffer_tensor(arg_p_output, max_size=False)
             _c_vec = 128 // out_elem.width  # values per 128b atom (f16/bf16=8, f32=4)
-            # CShuffle read/scatter TV layout: CHANNEL-MAJOR, mirroring the legacy
-            # c_shuffle_epilog (mfma_epilogues.py). `_cshuffle_nlane`=32 lanes each walk
-            # `_e_vec` contiguous channels of ONE row, so a 32-lane group covers
-            # 32*_e_vec contiguous output channels -> maximal atomic/store coalescing.
-            # The remaining 256/32=8 threads index the row (token) dim. Consecutive tid
-            # -> consecutive channel group within the same row; the row changes only
-            # every 32 lanes. This replaces the old row-straddling grid whose t1 mode
-            # (stride 1 = one row) put a 64-lane wave across 16 rows (4x atomic traffic).
+            # CShuffle read/scatter TV layout MUST be CHANNEL-MAJOR: the 32 lanes each
+            # walk _e_vec contiguous channels of ONE row (32*_e_vec contiguous output
+            # channels/group -> maximal coalescing); the other 8 threads index the row.
+            # A row-major lane map instead straddles 16 rows per wave and destroys
+            # atomic coalescing (4x traffic).
             _cshuffle_nlane = 32
             _n_row_thr = 256 // _cshuffle_nlane  # 8 threads on the row (token) dim
-            # e_vec mirrors legacy exactly (mfma_epilogues.py ~780):
-            #   * atomic  -> 2. Each buffer_atomic_pk instruction is ONE pk pair (2 elems),
-            #     so with e_vec=2 the 32 lanes of that single SIMD instruction hit 32*2=64
-            #     CONTIGUOUS channels (fully coalesced, 2x 64B lines). A wider e_vec would
-            #     make _buffer_atomic_pk emit multiple pk pairs per lane at stride-e_vec
-            #     channel spacing -> each pk-pair instruction becomes lane-strided and
-            #     uncoalesced (the observed 4.25x TCC_ATOMIC inflation).
-            #   * reduce  -> 8 when contiguous_n%256==0 (wide coalesced buffer store), else 2.
+            # e_vec (mirrors legacy mfma_epilogues.py):
+            #   * atomic -> MUST be NARROW (2). _buffer_atomic_pk emits ONE pk-pair per
+            #     instruction, so e_vec=2 makes the 32 lanes hit 32*2=64 CONTIGUOUS
+            #     channels (coalesced). A wider e_vec strides each lane's pk-pairs apart
+            #     -> uncoalesced atomics (observed 4.25x TCC_ATOMIC inflation).
+            #   * reduce -> 8 when contiguous_n%256==0 (wide coalesced store), else 2.
             if const_expr(accumulate):
                 _e_vec = 2
             else:
@@ -432,10 +421,8 @@ def _build_moe_gemm2_fp8(
             assert (
                 BM % _n_row_thr == 0
             ), f"tile_m={BM} must be a multiple of {_n_row_thr} for the channel-major epilogue"
-            # Copy atoms sized to the per-thread contiguous value count (_e_vec), not a
-            # fixed 128b: common case _e_vec==_c_vec keeps a full 128b vector; the
-            # e_vec==2 path (contiguous_n not a 256-multiple) uses a narrower atom so the
-            # read fragment / non-atomic store width matches the layout's value mode.
+            # Copy atoms sized to _e_vec: e_vec==_c_vec keeps a full 128b vector; the
+            # e_vec==2 path uses a narrower atom matching the layout's value mode.
             _epi_bits = _e_vec * out_elem.width
             _buf_atom_ctor = {
                 16: fx.rocdl.BufferCopy16b,
@@ -451,10 +438,8 @@ def _build_moe_gemm2_fp8(
             }[_epi_bits]
             buf_atom_w128 = fx.make_copy_atom(_buf_atom_ctor(), out_elem)
             # tile = (rows=_n_row_thr, cols=_n_chan_tile); linear idx = row + _n_row_thr*col.
-            # thread modes ((nlane, n_row_thr), e_vec):
-            #   lane (size 32, stride n_row_thr*e_vec): each lane steps e_vec columns
-            #   row-thr (size n_row_thr, stride 1): each steps one row
-            # val (size e_vec, stride n_row_thr): e_vec contiguous columns (channels)
+            # thread ((nlane 32 @ stride n_row_thr*e_vec, row-thr @ stride 1), val e_vec
+            # @ stride n_row_thr): each lane steps e_vec columns, each row-thr one row.
             c_rw_copy = fx.make_tiled_copy(
                 buf_atom_w128,
                 fx.make_layout(
@@ -464,8 +449,8 @@ def _build_moe_gemm2_fp8(
                 fx.make_tile(_n_row_thr, _n_chan_tile),
             )
             # Row (token) index copy: same row mapping as c_rw_copy. Only the row-thread
-            # part of tid selects the row; the 32 channel-lanes all read the same row
-            # (stride 0), val size 1. rep_m = BM/_n_row_thr matches c_rw_copy exactly.
+            # part of tid selects the row; the 32 channel-lanes read the same row
+            # (stride 0), val size 1. rep_m = BM/_n_row_thr matches c_rw_copy.
             c_index_copy = fx.make_tiled_copy(
                 fx.make_copy_atom(fx.UniversalCopy32b(), fx.Int32),
                 fx.make_layout(((_cshuffle_nlane, _n_row_thr), 1), ((0, 1), 0)),
@@ -496,8 +481,8 @@ def _build_moe_gemm2_fp8(
 
             c_out_frag = _c_to_out_frag(c_frag)
 
-            # CShuffle epilogue: stage output to LDS (transpose, swz 3,3,3 for 2B / 3,2,3 for 4B),
-            # read back channel-contiguous, scatter to out via the sorted-id index.
+            # CShuffle epilogue: stage output to LDS (transpose, swz 3,3,3 for 2B /
+            # 3,2,3 for 4B), read back channel-contiguous, scatter via sorted-id index.
             _, _tiled_mma = fxh.make_1x4_tiled_mma(fp8_t)
             _log2_vec = 3 if out_bytes == 2 else 2  # 8 (2B) or 4 (4B) elems per 128b
             cshuf_atom_w = fx.make_copy_atom(fx.UniversalCopy64b(), out_elem)
@@ -595,18 +580,13 @@ def compile_moe_gemm2(
 ):
     """Compile stage2 down-projection kernel (``moe_gemm2``) and return it.
 
-    fp8-only: A2/W are fp8 (E4M3), CDNA3 (gfx94*) / CDNA4 (gfx95*). Non-fp8
-    dtypes, split-K, and groupwise scales were removed; see the package
-    docstring.
-
-    ``out_dtype`` output element:
+    fp8-only (A2/W fp8 E4M3, gfx94*/gfx95*). ``out_dtype`` output element:
       - "f16": fp16 half2 atomics (fast, can overflow to +/-inf for bf16 workloads)
       - "bf16": bf16 atomics (buffer on gfx95+, global_atomic_pk_add_bf16 on gfx942)
       - "f32": fp32 scalar atomics (slower, avoids fp16 atomic overflow)
 
-    ``accumulate=True`` uses global atomics (atomic mode); ``accumulate=False``
-    writes per-(token,slot) partials for a separate reduce kernel and supports
-    only f16/bf16 output.
+    ``accumulate=True`` uses atomics; ``accumulate=False`` writes per-(token,slot)
+    partials for a separate reduce kernel and supports only f16/bf16 output.
     """
     _arch = get_rocm_arch()
     if not ("gfx94" in _arch or "gfx95" in _arch):

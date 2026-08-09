@@ -2,8 +2,7 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 # Portions Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
-"""Layout-API helper layer for the MoE 2-stage MFMA kernels (gemm1.py / gemm2.py),
-ported from the aiter reference kernel to this repo's ``fx.*`` surface."""
+"""Layout-API helper layer for the MoE 2-stage MFMA kernels (gemm1.py / gemm2.py)."""
 
 import flydsl.expr as fx
 from flydsl._mlir.dialects import rocdl, scf
@@ -49,15 +48,11 @@ def view_as_torch_tensor(ptr, shape, dtype=None):
     return fx.make_view(ptr, torch_layout(*shape))
 
 
-# ── Native-fp8 (MFMA 16x16x32) gate-up building blocks ───────────────────────
-# Ported from the aiter reference kernel's native-fp8 prefill_1x4 gate-up path,
-# with the compile-time closures (N, K, TOPK, BLOCK_M, weight_dtype) made
-# explicit args so the helpers are reusable across tile configs.
-
-
 def _buffer_atomic_pk(rsrc, elem_idx, reg_vec, elem_bytes):
     """Pairwise buffer atomic-add of an f16/bf16 vector into out[elem_idx..]
-    (buffer rsrc + byte offset; OOB lanes dropped by hardware clamp)."""
+    (buffer rsrc + byte offset; OOB lanes dropped by hardware clamp).
+    One pk-pair per instruction: keep the source vector NARROW (e_vec=2) or the
+    lanes' pairs stride apart and every atomic goes uncoalesced (4.8x regression)."""
     from kernels.common.mem_ops import buffer_atomic_add
 
     _z = fx.Int32(0)
@@ -80,8 +75,8 @@ def _buffer_atomic_f32(rsrc, elem_idx, reg_vec):
 def _global_atomic_pk(dst, elem_idx, reg_vec, elem_bytes):
     """Pairwise GLOBAL atomic-add of an f16/bf16 vector into dst[elem_idx..]
     (raw !llvm.ptr atomicrmw fadd; lowers to global_atomic_pk_add_bf16 on gfx942,
-    which lacks buffer_atomic_pk_add_bf16). Unlike the buffer variant there is NO
-    hardware bounds-check, so callers MUST predicate out invalid lanes explicitly."""
+    which lacks buffer_atomic_pk_add_bf16). NO hardware bounds-check (unlike buffer
+    atomics), so callers MUST predicate out invalid lanes explicitly."""
     from kernels.common.mem_ops import atomic_add
 
     for i in range_constexpr(reg_vec.numel // 2):
@@ -90,8 +85,7 @@ def _global_atomic_pk(dst, elem_idx, reg_vec, elem_bytes):
 
 
 def make_1x4_tiled_mma(weight_dtype):
-    """B-first 1x4 tiled_mma (weight=A, activation=B; 4 waves tile the M/channel dim).
-    fp8 and gfx950 bf16 both use native MFMA(16,16,32), same k_perm, differing only in dtype."""
+    """B-first 1x4 tiled_mma (weight=A, activation=B; 4 waves tile the M/channel dim)."""
     mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, weight_dtype))
     k_perm = fx.make_layout((8, 4, 2), (1, 16, 8))
     tiled_mma = fx.make_tiled_mma(
@@ -103,8 +97,8 @@ def make_1x4_tiled_mma(weight_dtype):
 
 
 def make_gateup_weight_view(p_weight, expert_id, contiguous_n, N, K):
-    """Per-expert logical (N,K) view over the shuffle_weight-ordered weight, composed
-    with the gate/up silu grouping (N = 2*inter_dim)."""
+    """Per-expert (N,K) view over shuffle_weight-ordered weight, composed with the
+    gate/up silu grouping (N = 2*inter_dim)."""
     group_layout_silu = fx.make_layout(
         ((contiguous_n, 2, N // (contiguous_n * 2)), K),
         ((1, N // 2, contiguous_n), N),
@@ -123,8 +117,8 @@ def make_gateup_weight_view(p_weight, expert_id, contiguous_n, N, K):
 
 
 def make_weight_view(p_weight, expert_id, N, K):
-    """Per-expert logical (N,K) view over shuffle_weight-ordered weight, no gate/up
-    grouping (stage2 analog of make_gateup_weight_view; N=model_dim, K=inter_dim)."""
+    """Per-expert (N,K) view over shuffle_weight-ordered weight, no gate/up grouping
+    (stage2 analog of make_gateup_weight_view; N=model_dim, K=inter_dim)."""
     element_num = 16 // (p_weight.dtype.width // 8)
     return fx.make_view(
         p_weight + fx.Int64(expert_id * N * K),
@@ -136,8 +130,8 @@ def make_weight_view(p_weight, expert_id, N, K):
 
 
 def read_sorted_index(tiled_copy_index, tid, lds_index, index_size, index_offset=0):
-    """Read the sorted M-row index from LDS into a per-thread fragment (explicit so it
-    happens before the CShuffle epilogue overwrites sorted_lds)."""
+    """Read the sorted M-row index from LDS into a per-thread fragment (read early,
+    before the CShuffle epilogue overwrites sorted_lds)."""
     lds = fx.make_view(lds_index.ptr + index_offset, fx.make_layout(index_size, 1))
     cp_atom_lds = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Int32)
     lds_thr = tiled_copy_index.get_slice(tid).partition_S(lds)
@@ -149,7 +143,7 @@ def read_sorted_index(tiled_copy_index, tid, lds_index, index_size, index_offset
 def silu_pair_bf16(gate_frag, up_frag, gate_scale=None, up_scale=None, a_scale=None, out_dtype=fx.BFloat16):
     """silu(gate)*up -> out_dtype (optional fp8 weight/act scales folded in pre-silu).
     out_dtype MUST match the caller's CShuffle staging/store dtype: the fragment holds
-    raw bits, so a mismatch silently reinterprets them (1024.0 bf16 0x4480 -> f16 4.5)."""
+    raw bits, so a mismatch silently reinterprets them (bf16 0x4480 == 1024.0 -> f16 4.5)."""
     log2_exp1 = -1.4426950408889634
     round_bit = fx.Uint32(0x8000)
     out_frag = fx.make_fragment_like(gate_frag, dtype=out_dtype)
@@ -217,8 +211,8 @@ class _TensorWithIndex:
         self.offset_thread_k = offset_thread // tile_m
         # Row-guard fake: a tall column-major tile whose row count exceeds any
         # tiled_copy grid, so partitioning does NOT wrap OOB grid rows into the
-        # column dim. Lets the atomic epilogue detect grid slots whose row is
-        # outside [0, tile_m) (the plain-store path ignores this via buffer OOB).
+        # column dim -- lets the atomic epilogue detect grid slots whose row is
+        # outside [0, tile_m) (the plain-store path relies on buffer OOB instead).
         self._guard_rows = 256
         guard_fake = fx.make_view(ptr, fx.make_layout((self._guard_rows, tile_k), (1, self._guard_rows)))
         guard_thr = (
@@ -243,12 +237,11 @@ class _TensorWithIndex:
     ):
         """Gather/scatter per-thread tiles: plain buffer-view store, or atomic-add at
         tok*row_stride+k_idx*tile_k+chan. ``atomic`` selects the mechanism:
-          * "pk"/"f32" -> BUFFER atomic into atomic_rsrc; sentinel/out-of-tile lanes
-            go OOB (dropped by the buffer bounds-check).
-          * "pk_global" -> GLOBAL (!llvm.ptr) bf16 pk atomic into atomic_dst, for
-            gfx942 which lacks buffer_atomic_pk_add_bf16. Global atomics have NO
-            hardware bounds-check, so every out-of-tile lane is predicated off
-            explicitly (the OOB-redirect trick is unavailable)."""
+          * "pk"/"f32" -> BUFFER atomic into atomic_rsrc; out-of-tile lanes go OOB
+            (dropped by the buffer bounds-check).
+          * "pk_global" -> GLOBAL (!llvm.ptr) bf16 pk atomic into atomic_dst (gfx942,
+            no buffer_atomic_pk_add_bf16). No hardware bounds-check, so out-of-tile
+            lanes are predicated off explicitly."""
         layout = fx.get_layout(self.fake_tensor_thr)
         rep_m = reps(self.fake_tensor_thr, 1)
         rep_k = reps(self.fake_tensor_thr, 2)
@@ -261,13 +254,11 @@ class _TensorWithIndex:
         for m in range_constexpr(rep_m):
             if const_expr(atomic is not None):
                 tok = self.index_frag[0, m] & 0xFFFFFF
-                # Row-uniform padding skip (mirrors legacy c_shuffle_epilog): with the
-                # channel-major CShuffle TV layout `tok` is uniform across each 32-lane
-                # group, so this branch is (near) wave-uniform. Padding rows (sentinel
-                # token id >= row_limit) previously still issued atomics that the buffer
-                # bounds-check dropped -- but the dropped atomics STILL counted as L2
-                # TCC_ATOMIC traffic (~4.25x inflation on prefill). Skipping the whole
-                # row here removes that traffic entirely instead of relying on the clamp.
+                # Row-uniform padding skip: with the channel-major CShuffle TV layout
+                # `tok` is uniform across each 32-lane group, so this branch is
+                # near-wave-uniform. Skipping padding rows (sentinel tok >= row_limit)
+                # avoids their dropped-but-still-counted L2 atomic traffic (~4.25x
+                # inflation on prefill) rather than relying on the buffer clamp.
                 row_valid = tok < fx.Int32(row_limit) if const_expr(row_limit is not None) else (tok >= fx.Int32(0))
 
                 def _atomic_row():
@@ -276,7 +267,7 @@ class _TensorWithIndex:
                         offset_block = fx.crd2idx((0, m, k), layout).to_py_value()
                         offset_block_k = offset_block // self.tile_m
                         chan_off = offset_block_k + self.offset_thread_k
-                        # `valid` = this grid slot maps inside the real (tile_m, tile_k) block.
+                        # valid = this grid slot maps inside the real (tile_m, tile_k) block.
                         guard_full = fx.crd2idx((0, m, k), self.guard_layout).to_py_value() + self.guard_offset
                         g_row = guard_full % fx.Int32(self._guard_rows)
                         g_col = guard_full // fx.Int32(self._guard_rows)
@@ -285,11 +276,9 @@ class _TensorWithIndex:
                         _va = reg_vec.numel
                         aligned = (row_base_i32 + chan_off) & fx.Int32(~(_va - 1))
                         if const_expr(atomic == "pk_global"):
-                            # Global atomics have NO hardware bounds-check: an out-of-tile
-                            # element index would corrupt memory. Predicate the atomic on
-                            # the in-tile `valid` guard (the buffer OOB-redirect trick is
-                            # unavailable here). Padding ROWS are already skipped by the
-                            # row-uniform `row_valid` branch above.
+                            # Global atomics have NO bounds-check: an out-of-tile element
+                            # index corrupts memory, so predicate on the in-tile `valid`
+                            # guard (padding ROWS already dropped by `row_valid` above).
                             def _global_pk():
                                 _global_atomic_pk(atomic_dst, aligned, reg_vec, out_bytes)
 
@@ -297,7 +286,7 @@ class _TensorWithIndex:
                             with _if_then(_if_slot):
                                 _global_pk()
                         else:
-                            # Buffer path: out-of-tile grid slots -> OOB element index so the
+                            # Buffer path: out-of-tile slots -> OOB element index so the
                             # buffer bounds-check DROPS the atomic.
                             elem_idx = valid.select(aligned, fx.Int32(row_limit) * fx.Int32(row_stride))
                             if const_expr(atomic == "f32"):
