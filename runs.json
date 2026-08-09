@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-09T00:37:13Z",
+ "updated": "2026-08-09T02:30:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "gfx1250/gemm-opt-0805",
    "event": "pull_request",
    "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31265730584",
    "created_at": "2026-08-08T15:56:47Z",
-   "updated_at": "2026-08-08T16:00:25Z",
+   "updated_at": "2026-08-09T02:28:12Z",
    "actor": "aoli26",
    "jobs": [
     {
@@ -29,9 +29,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-08T16:00:25Z",
+     "started_at": "2026-08-09T02:28:11Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31265730584/job/93123802760"
     },
@@ -53,20 +53,20 @@
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
    "title": "[LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31257973184",
    "created_at": "2026-08-08T12:45:37Z",
-   "updated_at": "2026-08-08T13:26:28Z",
+   "updated_at": "2026-08-09T02:28:09Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-08T13:26:28Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-09T01:39:21Z",
+     "completed_at": "2026-08-09T02:28:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31257973184/job/93108105665"
     },
     {
