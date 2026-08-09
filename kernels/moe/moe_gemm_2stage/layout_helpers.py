@@ -133,6 +133,73 @@ def make_weight_view(p_weight, expert_id, N, K):
     )
 
 
+def make_gateup_weight_view_int4(p_weight, expert_id, contiguous_n, N, K):
+    """W4A8 packed-int4 analog of make_gateup_weight_view. Storage is bytes (2
+    signed int4 nibbles each), preshuffled THEN packed 2-values/byte, so the K
+    dimension is measured in packed bytes (Kb = K//2) and the 16x16 preshuffle
+    tile holds 16 values = 8 packed bytes (element_num=8 vs 16 for int8)."""
+    Kb = K // 2
+    element_num = 8
+    group_layout_silu = fx.make_layout(
+        ((contiguous_n, 2, N // (contiguous_n * 2)), Kb),
+        ((1, N // 2, contiguous_n), N),
+    )
+    return fx.make_view(
+        p_weight + fx.Int64(expert_id * N * Kb),
+        fx.composition(
+            fx.make_layout(
+                ((16, N // 16), (element_num, Kb // element_num)),
+                ((element_num, 16 * Kb), (1, 16 * element_num)),
+            ),
+            group_layout_silu,
+        ),
+    )
+
+
+def make_weight_view_int4(p_weight, expert_id, N, K):
+    """W4A8 packed-int4 analog of make_weight_view (stage2; N=model_dim, K=inter_dim).
+    K is in packed bytes (Kb=K//2), element_num=8 (16 values = 8 packed bytes)."""
+    Kb = K // 2
+    element_num = 8
+    return fx.make_view(
+        p_weight + fx.Int64(expert_id * N * Kb),
+        fx.make_layout(
+            ((16, N // 16), (element_num, Kb // element_num)),
+            ((element_num, 16 * Kb), (1, 16 * element_num)),
+        ),
+    )
+
+
+def unpack_int4_weight_frag(pk_frag, int8_frag):
+    """W4A8 in-register nibble unpack: packed-int4 staging fragment -> int8 A-frag.
+
+    ``pk_frag`` holds packed bytes (half the elements of ``int8_frag``); each 4
+    packed bytes (one i32 dword) hold 8 signed int4 values v0..v7 as
+    ``byte_j = v_j | (v_{j+4} << 4)`` (low nibbles v0..v3, high v4..v7), matching
+    the reference ``pack_shuffled_int8_to_packed_int4_no_perm``. The 7-op unpack
+    sign-extends into two i8 dwords even={v0..v3}, odd={v4..v7}; concatenating
+    even++odd recovers the 8 contiguous int8 lanes the MFMA operand expects.
+
+    Feeding these COMPUTED values into the MFMA A-fragment lowers cleanly on the
+    current toolchain (verified bit-exact); no B-operand restructuring needed.
+    """
+    c_08 = fx.Int32(0x08080808)
+    c_0f = fx.Int32(0x0F0F0F0F)
+    c_1e = fx.Int32(0x1E)
+    n_pk = fx.size(fx.get_shape(pk_frag)).to_py_value()  # packed bytes / lane
+    n_dw = n_pk // 4  # packed dwords / lane; each -> 8 int8 (2 out dwords)
+    packed = pk_frag.load().bitcast(fx.Int32)  # n_dw i32
+    outs = []
+    for d in range_constexpr(n_dw):
+        p = packed[d]
+        even = (p & c_0f) | ((p & c_08) * c_1e)
+        t = p >> fx.Int32(4)
+        odd = (t & c_0f) | ((t & c_08) * c_1e)
+        outs.append(even)
+        outs.append(odd)
+    int8_frag.store(Vec.from_elements(outs, fx.Int32).bitcast(fx.Int8))
+
+
 def read_sorted_index(tiled_copy_index, tid, lds_index, index_size, index_offset=0):
     """Read the sorted M-row index from LDS into a per-thread fragment (read early,
     before the CShuffle epilogue overwrites sorted_lds)."""
