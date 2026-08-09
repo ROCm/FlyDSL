@@ -201,6 +201,22 @@ def read_sorted_index(tiled_copy_index, tid, lds_index, index_size, index_offset
     return index_frag
 
 
+def load_sorted_weight_frag(arg_sorted_weights, e_idx, BM, tid):
+    """Load the per-sorted-row routed weight tile (one f32 per token_rep) for the
+    doweight epilogue, shared by gemm1/gemm2."""
+    sw_ptr = fx.recast_iter(fx.Float32, fx.get_iter(arg_sorted_weights) + e_idx * fx.Int32(BM))
+    tw_view = fx.make_view(sw_ptr, fx.make_layout(BM, 1))
+    tw_copy = fx.make_tiled_copy(
+        fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32),
+        fx.make_layout(((16, 4, 4), 1), ((1, 0, 0), 0)),
+        fx.make_tile(16),
+    )
+    tw_thr = tw_copy.get_slice(tid).partition_S(tw_view)
+    tw_frag = fx.make_fragment_like(tw_thr)
+    fx.copy(fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32), tw_thr, tw_frag)
+    return tw_frag
+
+
 def silu_pair_bf16(gate_frag, up_frag, gate_scale=None, up_scale=None, a_scale=None, out_dtype=fx.BFloat16):
     """silu(gate)*up -> out_dtype (optional fp8 weight/act scales folded in pre-silu).
     out_dtype MUST match the caller's CShuffle staging/store dtype: the fragment holds

@@ -317,16 +317,7 @@ def _build_moe_gemm2_fp8(
         # Per-sorted-row routed weight (one per token_rep n).
         m_reps = fxh.reps(c_frag, 1)
         n_reps = fxh.reps(c_frag, 2)
-        sw_ptr = fx.recast_iter(fx.Float32, fx.get_iter(arg_sorted_weights) + e_idx * fx.Int32(BM))
-        tw_view = fx.make_view(sw_ptr, fx.make_layout(BM, 1))
-        tw_copy = fx.make_tiled_copy(
-            fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32),
-            fx.make_layout(((16, 4, 4), 1), ((1, 0, 0), 0)),
-            fx.make_tile(16),
-        )
-        tw_thr = tw_copy.get_slice(tid).partition_S(tw_view)
-        tw_frag = fx.make_fragment_like(tw_thr)
-        fx.copy(fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32), tw_thr, tw_frag)
+        tw_frag = fxh.load_sorted_weight_frag(arg_sorted_weights, e_idx, BM, tid)
         for n in range_constexpr(n_reps):
             tw = tw_frag[0, n]
             for m in range_constexpr(m_reps):
