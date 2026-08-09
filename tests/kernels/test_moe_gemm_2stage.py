@@ -933,5 +933,455 @@ def test_moe_gemm2_shapes(in_dtype, accumulate, model_dim, inter_dim, tile_m, ti
     )
 
 
+# ===========================================================================
+# TASK B: direct M-dimension out-of-bounds tests.
+#
+# These target the kernel's M-safety mechanisms head-on rather than incidentally:
+#   * num_records_bytes on the buffer tensors (hardware OOB clamp)      -> poison
+#   * the sentinel LDS seed sorted_lds[tid]=M over the full 256 slots   -> sentinel
+#   * the num_valid_id / num_valid_ids block guard                      -> nvi
+#   * the atomic epilogue OOB-redirect for out-of-tile lanes            -> canary
+#
+# Two historical bugs this family must catch:
+#   (a) unwritten sorted_lds slots read as 0 -> decode to VALID token0/slot0,
+#       escaping the OOB clamp and corrupting the first-routed token.
+#   (b) num_records_bytes computed in ELEMENTS not BYTES -> descriptor under-sized
+#       2x, so reads past M/2 alias real rows.
+# ===========================================================================
+
+_CANARY_ROWS = 4  # extra output rows beyond `tokens` used as a write guard region.
+_POISON_ROWS = 8  # extra input rows beyond `tokens` filled with poison.
+
+
+def _prep_gemm1(*, tokens, model_dim, inter_dim, experts, topk, tile_m, seed, in_dtype, out_dtype):
+    """Build stage1 kernel inputs + torch reference, exposing tensors for OOB tests."""
+    device = torch.device("cuda")
+    _qd = _quant_dtype(in_dtype)
+    _is_int4 = in_dtype == "int4"
+    topk_ids, topk_weights, routing = _make_routing(tokens, experts, topk, tile_m, device, seed)
+
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
+    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (
+        1.0 / math.sqrt(model_dim)
+    )
+    x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=_qd)
+    w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=_qd, **({"dtypeMax": 7} if _is_int4 else {}))
+    w1_shuffled_flat = shuffle_weight(w1_q).view(experts * (2 * inter_dim), model_dim).contiguous()
+    if _is_int4:
+        w1_shuffled_flat = _pack_shuffled_int8_to_packed_int4(w1_shuffled_flat)
+    w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
+    scale_w1_flat = scale_w1.view(experts * (2 * inter_dim), 1)
+    x_q = x_q.contiguous().view(tokens, model_dim)
+
+    ref = torch_moe_gemm1(
+        x_q,
+        w1_q_flat,
+        scale_x,
+        scale_w1_flat,
+        topk_ids.to(torch.int64),
+        topk_weights,
+        inter_dim=inter_dim,
+        doweight_stage1=False,
+    )
+    exe = compile_moe_gemm1(
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=64,
+        tile_k=128,
+        doweight_stage1=False,
+        out_dtype=out_dtype,
+        in_dtype=in_dtype,
+    )
+    return dict(
+        exe=exe,
+        x_q=x_q,
+        w=w1_shuffled_flat,
+        scale_x=scale_x,  # [tokens, 1]
+        scale_w=scale_w1_flat,
+        routing=routing,
+        ref=ref,
+        out_dt=_out_torch_dtype(out_dtype),
+    )
+
+
+def _prep_gemm2(*, tokens, model_dim, inter_dim, experts, topk, tile_m, seed, in_dtype, out_dtype, accumulate):
+    """Build stage2 kernel inputs + torch reference, exposing tensors for OOB tests."""
+    device = torch.device("cuda")
+    _qd = _quant_dtype(in_dtype)
+    _is_int4 = in_dtype == "int4"
+    _wmax = {"dtypeMax": 7} if _is_int4 else {}
+    topk_ids, topk_weights, routing = _make_routing(tokens, experts, topk, tile_m, device, seed)
+
+    s = 0.2
+    x_fp32 = torch.rand((tokens, model_dim), device=device, dtype=torch.float32) * s
+    w1_fp32 = torch.rand((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (
+        s / math.sqrt(model_dim)
+    )
+    w2_fp32 = torch.rand((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (
+        s / math.sqrt(inter_dim)
+    )
+    x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=_qd)
+    w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=_qd, **_wmax)
+    w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=_qd, **_wmax)
+    w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
+    scale_w1_flat = scale_w1.view(experts * (2 * inter_dim), 1)
+    out1_ref = torch_moe_gemm1(
+        x_q,
+        w1_q_flat,
+        scale_x,
+        scale_w1_flat,
+        topk_ids.to(torch.int64),
+        topk_weights,
+        inter_dim=inter_dim,
+        doweight_stage1=False,
+    )
+    a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=_qd)  # [tokens, topk, inter], [tokens, topk, 1]
+    w2_kernel = shuffle_weight(w2_q).view(experts * model_dim, inter_dim).contiguous().view(-1)
+    if _is_int4:
+        w2_kernel = _pack_shuffled_int8_to_packed_int4(w2_kernel)
+    w2_scale_flat = scale_w2.view(experts * model_dim, 1)
+
+    ref = torch_moe_gemm2(
+        a2_q,
+        w2_q,
+        a2_scale,
+        scale_w2,
+        topk_ids.to(torch.int64),
+        topk_weights,
+        model_dim=model_dim,
+        doweight_stage2=True,
+    )
+    exe = compile_moe_gemm2(
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=64,
+        tile_k=128,
+        doweight_stage2=True,
+        out_dtype=out_dtype,
+        accumulate=accumulate,
+        in_dtype=in_dtype,
+    )
+    return dict(
+        exe=exe,
+        a2_q=a2_q,  # [tokens, topk, inter]
+        a2_scale=a2_scale,  # [tokens, topk, 1] -> flattened row = token*topk + slot
+        w=w2_kernel,
+        scale_w=w2_scale_flat,
+        routing=routing,
+        ref=ref,
+        out_dt=_out_torch_dtype(out_dtype),
+    )
+
+
+def _canary_fill(t, start_row):
+    """Fill rows [start_row:] of a 2D/3D tensor with a distinctive canary pattern
+    and return a bit-exact clone of the guard region for later comparison."""
+    flat = t.view(t.shape[0], -1)
+    guard = flat[start_row:]
+    # Distinctive, dtype-safe pattern (bit-identical to reproduce): row-varying ints.
+    idx = torch.arange(guard.shape[0], device=t.device).view(-1, 1) + 1
+    guard.copy_((idx * 1337 % 251 - 125).to(t.dtype).expand_as(guard))
+    return guard.clone()
+
+
+# ---------------------------------------------------------------------------
+# B.1 + B.3: output canary / guard region (+ ragged tail).
+# ---------------------------------------------------------------------------
+@_requires_fp8
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int4"])
+@pytest.mark.parametrize("tile_m,tokens", [(16, 7), (64, 33)])
+def test_moe_gemm1_output_canary(in_dtype, tile_m, tokens):
+    """Stage1 must not write any output row >= tokens. Allocate the [tokens, topk,
+    inter] output with _CANARY_ROWS extra token-rows, seed a distinctive pattern in
+    the guard region, run, and assert the guard region is BIT-IDENTICAL afterwards.
+    tokens is a ragged tail (not a multiple of tile_m) so the last block is partial.
+    A larger allocation must not change behavior (record bound derives from tokens)."""
+    d = _prep_gemm1(
+        tokens=tokens, model_dim=256, inter_dim=128, experts=8, topk=2, tile_m=tile_m, seed=0,
+        in_dtype=in_dtype, out_dtype="bf16",
+    )
+    topk = 2
+    out = torch.zeros((tokens + _CANARY_ROWS, topk, 128), device="cuda", dtype=d["out_dt"])
+    guard0 = _canary_fill(out, tokens)
+    _launch(
+        d["exe"], out, x=d["x_q"], w=d["w"], scale_x=d["scale_x"], scale_w=d["scale_w"],
+        routing=d["routing"], dim0=128, dim1=256, tokens=tokens,
+    )
+    guard1 = out.view(out.shape[0], -1)[tokens:]
+    assert torch.equal(guard1, guard0), "stage1 wrote into the output guard region (row >= tokens)"
+    cos = _cosine_sim(out[:tokens], d["ref"])
+    assert cos > 0.99, f"stage1 canary numerics cos={cos:.5f} (in={in_dtype}, tile_m={tile_m}, tokens={tokens})"
+
+
+@_requires_fp8
+@pytest.mark.parametrize("accumulate", [True, False])
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int4"])
+@pytest.mark.parametrize("tile_m,tokens", [(16, 7), (64, 33)])
+def test_moe_gemm2_output_canary(accumulate, in_dtype, tile_m, tokens):
+    """Stage2 must not write any output row >= tokens. Covers atomic ([tokens,
+    model_dim]) and reduce ([tokens*topk, model_dim]) epilogues: over-allocate the
+    guard rows, seed a canary, run, assert bit-identical guard afterwards. Ragged
+    tail (tokens % tile_m != 0). Directly exercises the atomic OOB-redirect and the
+    num_records_bytes-derived output record bound."""
+    topk, model_dim = 2, 256
+    d = _prep_gemm2(
+        tokens=tokens, model_dim=model_dim, inter_dim=128, experts=8, topk=topk, tile_m=tile_m, seed=0,
+        in_dtype=in_dtype, out_dtype="bf16", accumulate=accumulate,
+    )
+    n_rows = tokens if accumulate else tokens * topk
+    out = torch.zeros((n_rows + _CANARY_ROWS, model_dim), device="cuda", dtype=d["out_dt"])
+    # Atomic epilogue accumulates -> valid rows must be pre-zeroed, but DO NOT touch
+    # the guard region (that's the canary). So zero valid rows here, seed the guard,
+    # and launch with zero_out=False (which would zero the whole buffer).
+    out[:n_rows].zero_()
+    guard0 = _canary_fill(out, n_rows)
+    _launch(
+        d["exe"], out, x=d["a2_q"], w=d["w"], scale_x=d["a2_scale"], scale_w=d["scale_w"],
+        routing=d["routing"], dim0=model_dim, dim1=128, tokens=tokens, zero_out=False,
+    )
+    guard1 = out[n_rows:]
+    assert torch.equal(guard1, guard0), "stage2 wrote into the output guard region (row >= valid rows)"
+    got = out[:tokens] if accumulate else out[: tokens * topk].view(tokens, topk, model_dim).sum(dim=1)
+    cos = _cosine_sim(got, d["ref"])
+    mode = "atomic" if accumulate else "reduce"
+    assert cos > 0.99, f"stage2 canary numerics cos={cos:.5f} ({mode}, in={in_dtype}, tile_m={tile_m}, tokens={tokens})"
+
+
+# ---------------------------------------------------------------------------
+# B.2: input poison beyond M (targets num_records_bytes sizing directly).
+# ---------------------------------------------------------------------------
+@_requires_fp8
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int4"])
+@pytest.mark.parametrize("tile_m,tokens", [(16, 7), (64, 33)])
+def test_moe_gemm1_input_poison(in_dtype, tile_m, tokens):
+    """Fill stage1 input rows >= tokens (x AND scale_x) with poison and assert the
+    output is BIT-IDENTICAL to a clean-padded run. Any unclamped read past M that
+    reaches a valid output row would pull poison and diverge.
+
+    NOTE (measured, see PR report): stage1 M-safety is defense-in-depth -- the A
+    num_records clamp, the scale-tensor num_records clamp, AND the output-scatter
+    OOB drop (sentinel token id == M scatters to an OOB output row) each
+    independently drop padding contributions. Over-sizing A and/or scale_x
+    num_records alone does NOT make this test red; the output-scatter guard still
+    defends. This test is therefore a regression *tripwire* for the combination, not
+    an isolation of num_records_bytes. The bytes-vs-elements descriptor bug (b) is
+    isolated by test_moe_gemm2_output_canary (atomic output descriptor)."""
+    d = _prep_gemm1(
+        tokens=tokens, model_dim=256, inter_dim=128, experts=8, topk=2, tile_m=tile_m, seed=0,
+        in_dtype=in_dtype, out_dtype="bf16",
+    )
+    model_dim, topk = 256, 2
+    qd = _quant_dtype(in_dtype)
+
+    def _run(poison):
+        x = torch.zeros((tokens + _POISON_ROWS, model_dim), device="cuda", dtype=qd)
+        x[:tokens] = d["x_q"]
+        sx = torch.zeros((tokens + _POISON_ROWS, 1), device="cuda", dtype=torch.float32)
+        sx[:tokens] = d["scale_x"]
+        if poison:
+            # int8/int4 activations are int8: poison with saturated magnitudes; fp8
+            # tolerates NaN. scale poison uses NaN + huge to amplify any leak.
+            if qd == torch.int8:
+                x[tokens:] = 127
+            else:
+                x[tokens:] = torch.finfo(qd).max
+            sx[tokens:] = float("nan")
+        out = torch.zeros((tokens, topk, 128), device="cuda", dtype=d["out_dt"])
+        _launch(
+            d["exe"], out, x=x, w=d["w"], scale_x=sx, scale_w=d["scale_w"],
+            routing=d["routing"], dim0=128, dim1=256, tokens=tokens,
+        )
+        return out.clone()
+
+    clean = _run(poison=False)
+    poisoned = _run(poison=True)
+    assert torch.equal(clean, poisoned), (
+        f"stage1 output changed when padding rows were poisoned -> unclamped read past M "
+        f"(in={in_dtype}, tile_m={tile_m}, tokens={tokens})"
+    )
+    assert _cosine_sim(clean[:tokens], d["ref"]) > 0.99
+
+
+@_requires_fp8
+@pytest.mark.parametrize("accumulate", [True, False])
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int4"])
+@pytest.mark.parametrize("tile_m,tokens", [(16, 7), (64, 33)])
+def test_moe_gemm2_input_poison(accumulate, in_dtype, tile_m, tokens):
+    """Fill stage2 input rows >= tokens (a2 AND a2_scale) with poison and assert the
+    output is BIT-IDENTICAL to a clean-padded run. a2 is [tokens, topk, inter]; the
+    poison rows are extra tokens.
+
+    NOTE (measured, see PR report): stage2 also has a per-row scale validity guard
+    (dequant does `valid = tok < tokens; sc = valid.select(scale, 0)`), so even an
+    over-sized A num_records that reads poison contributes 0. Like the stage1 poison
+    test this is a regression *tripwire*, not a single-factor num_records isolation;
+    the bytes-vs-elements bug (b) is isolated by test_moe_gemm2_output_canary."""
+    topk, model_dim, inter_dim = 2, 256, 128
+    d = _prep_gemm2(
+        tokens=tokens, model_dim=model_dim, inter_dim=inter_dim, experts=8, topk=topk, tile_m=tile_m, seed=0,
+        in_dtype=in_dtype, out_dtype="bf16", accumulate=accumulate,
+    )
+    qd = _quant_dtype(in_dtype)
+
+    def _run(poison):
+        a2 = torch.zeros((tokens + _POISON_ROWS, topk, inter_dim), device="cuda", dtype=qd)
+        a2[:tokens] = d["a2_q"]
+        sa = torch.zeros((tokens + _POISON_ROWS, topk, 1), device="cuda", dtype=torch.float32)
+        sa[:tokens] = d["a2_scale"]
+        if poison:
+            if qd == torch.int8:
+                a2[tokens:] = 127
+            else:
+                a2[tokens:] = torch.finfo(qd).max
+            sa[tokens:] = float("nan")
+        n_rows = tokens if accumulate else tokens * topk
+        out = torch.zeros((n_rows, model_dim), device="cuda", dtype=d["out_dt"])
+        _launch(
+            d["exe"], out, x=a2, w=d["w"], scale_x=sa, scale_w=d["scale_w"],
+            routing=d["routing"], dim0=model_dim, dim1=inter_dim, tokens=tokens, zero_out=True,
+        )
+        return out.clone()
+
+    clean = _run(poison=False)
+    poisoned = _run(poison=True)
+    assert torch.equal(clean, poisoned), (
+        f"stage2 output changed when padding rows were poisoned -> unclamped read past M "
+        f"({'atomic' if accumulate else 'reduce'}, in={in_dtype}, tile_m={tile_m}, tokens={tokens})"
+    )
+
+
+# ---------------------------------------------------------------------------
+# B.4: sentinel-row regression guard (the exact token-0 corruption case).
+# ---------------------------------------------------------------------------
+def _routing_token0_with_padding(tokens, experts, topk, tile_m, device):
+    """Deterministic routing where token 0 is routed with packed sorted id == 0
+    (token_id==0 AND slot==0) and padding rows are present. This is the exact case
+    where an un-seeded LDS slot (decoding to token0/slot0) would corrupt token 0.
+
+    Assign every token's slot-0 route to expert 0 (so token 0 is the FIRST entry of
+    expert 0's block -> packed id 0), and spread the remaining slots across other
+    experts. Because tokens < tile_m for the small cases, each expert block has real
+    tokens + padding rows in the same block."""
+    topk_ids = torch.zeros((tokens, topk), dtype=torch.int64, device=device)
+    for t in range(tokens):
+        topk_ids[t, 0] = 0  # slot 0 -> expert 0 for all tokens (token 0 lands first)
+        for s in range(1, topk):
+            topk_ids[t, s] = (1 + (t + s) % max(1, experts - 1)) % experts
+    # Deduplicate within a token (topk experts must be distinct); nudge collisions.
+    for t in range(tokens):
+        seen = set()
+        for s in range(topk):
+            e = int(topk_ids[t, s])
+            while e in seen:
+                e = (e + 1) % experts
+            topk_ids[t, s] = e
+            seen.add(e)
+    topk_weights = torch.full((tokens, topk), 1.0 / topk, dtype=torch.float32, device=device)
+    routing = _build_routing(topk_ids, topk_weights, experts=experts, tile_m=tile_m)
+    # Confirm the construction: packed id 0 must appear in the sorted buffer.
+    sorted_token_ids = routing[0]
+    assert (sorted_token_ids == 0).any().item(), "routing did not place packed sorted id 0 (token0/slot0)"
+    return topk_ids, topk_weights, routing
+
+
+@_requires_fp8
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int4"])
+@pytest.mark.parametrize("tile_m", [16, 64])
+def test_moe_gemm1_sentinel_token0(in_dtype, tile_m):
+    """Sentinel-row regression: token 0 IS routed (packed id 0) with padding rows in
+    the same block. Un-seeded sorted_lds slots decode to token0/slot0 and would pile
+    garbage onto token 0's output. The sentinel seed (sorted_lds[tid]=M over the full
+    256-slot range) must keep token 0 correct. Covered for all four dtypes here (the
+    original catch only hit one)."""
+    device = torch.device("cuda")
+    model_dim, inter_dim, experts, topk = 256, 128, 8, 2
+    tokens = 6  # < tile_m for both 16 and 64: real tokens + padding share a block
+    _qd = _quant_dtype(in_dtype)
+    _is_int4 = in_dtype == "int4"
+    topk_ids, topk_weights, routing = _routing_token0_with_padding(tokens, experts, topk, tile_m, device)
+
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
+    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (
+        1.0 / math.sqrt(model_dim)
+    )
+    x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=_qd)
+    w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=_qd, **({"dtypeMax": 7} if _is_int4 else {}))
+    w1_shuf = shuffle_weight(w1_q).view(experts * (2 * inter_dim), model_dim).contiguous()
+    if _is_int4:
+        w1_shuf = _pack_shuffled_int8_to_packed_int4(w1_shuf)
+    w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
+    scale_w1_flat = scale_w1.view(experts * (2 * inter_dim), 1)
+    x_q = x_q.contiguous().view(tokens, model_dim)
+
+    out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.bfloat16)
+    exe = compile_moe_gemm1(
+        model_dim=model_dim, inter_dim=inter_dim, experts=experts, topk=topk, tile_m=tile_m,
+        tile_n=64, tile_k=128, doweight_stage1=False, out_dtype="bf16", in_dtype=in_dtype,
+    )
+    _launch(
+        exe, out, x=x_q, w=w1_shuf, scale_x=scale_x, scale_w=scale_w1_flat, routing=routing,
+        dim0=inter_dim, dim1=model_dim, tokens=tokens,
+    )
+    ref = torch_moe_gemm1(
+        x_q, w1_q_flat, scale_x, scale_w1_flat, topk_ids.to(torch.int64), topk_weights,
+        inter_dim=inter_dim, doweight_stage1=False,
+    )
+    # Token 0 specifically must be clean (the sentinel bug corrupted exactly this row).
+    cos_tok0 = _cosine_sim(out[0], ref[0])
+    cos_all = _cosine_sim(out, ref)
+    assert cos_tok0 > 0.99, f"token-0 corrupted (sentinel guard): cos={cos_tok0:.5f} (in={in_dtype}, tile_m={tile_m})"
+    assert cos_all > 0.99, f"stage1 sentinel cos={cos_all:.5f} (in={in_dtype}, tile_m={tile_m})"
+
+
+# ---------------------------------------------------------------------------
+# B.5: num_valid_ids shorter than the padded sorted buffer (block guard / EP path).
+# ---------------------------------------------------------------------------
+@_requires_fp8
+@pytest.mark.parametrize("accumulate", [True, False])
+@pytest.mark.parametrize("tile_m,tokens", [(16, 8), (64, 40)])
+def test_moe_gemm2_num_valid_ids_guard(accumulate, tile_m, tokens):
+    """num_valid_ids shorter than the padded sorted buffer must gate whole M-blocks
+    off (gemm2 guard: e_idx*BM < num_valid_id). Force a truncated num_valid_ids so
+    the trailing sorted M-blocks are non-valid, plus poison those trailing sorted
+    ids to VALID-looking tokens. If the block guard is honored the poisoned trailing
+    blocks are never processed and the output matches the clean reference; if it
+    leaks, those tokens get spurious atomic contributions."""
+    device = torch.device("cuda")
+    model_dim, inter_dim, experts, topk = 256, 128, 8, 2
+    d = _prep_gemm2(
+        tokens=tokens, model_dim=model_dim, inter_dim=inter_dim, experts=experts, topk=topk, tile_m=tile_m,
+        seed=0, in_dtype="int8", out_dtype="bf16", accumulate=accumulate,
+    )
+    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, blocks = d["routing"]
+
+    # Poison the sorted ids beyond num_valid_ids to VALID-looking tokens (token 1,
+    # slot 0). The block guard must keep them from being processed.
+    nvi = int(num_valid_ids[0].item())
+    poisoned_ids = sorted_token_ids.clone()
+    if nvi < poisoned_ids.numel():
+        poisoned_ids[nvi:] = 1  # packed: token 1, slot 0 -> would be a real write if leaked
+    routing_poison = (poisoned_ids, sorted_weights, sorted_expert_ids, num_valid_ids, blocks)
+
+    n_rows = tokens if accumulate else tokens * topk
+    out = torch.zeros((n_rows, model_dim), device="cuda", dtype=d["out_dt"])
+    _launch(
+        d["exe"], out, x=d["a2_q"], w=d["w"], scale_x=d["a2_scale"], scale_w=d["scale_w"],
+        routing=routing_poison, dim0=model_dim, dim1=inter_dim, tokens=tokens, zero_out=True,
+    )
+    got = out[:tokens] if accumulate else out.view(tokens, topk, model_dim).sum(dim=1)
+    cos = _cosine_sim(got, d["ref"])
+    mode = "atomic" if accumulate else "reduce"
+    assert cos > 0.99, (
+        f"stage2 num_valid_ids block guard leaked poisoned trailing blocks: cos={cos:.5f} "
+        f"({mode}, tile_m={tile_m}, tokens={tokens})"
+    )
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
