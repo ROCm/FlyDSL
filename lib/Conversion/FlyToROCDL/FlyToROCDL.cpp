@@ -402,10 +402,11 @@ public:
     if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace())) {
       BufferFatPtr bp(flyPtrTy, ptr);
       Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
+      auto auxAttr = rewriter.getI32IntegerAttr(0);
       ArrayAttr noAttrs;
       Value loaded = ROCDL::RawPtrBufferLoadOp::create(
           rewriter, loc, loadTy, bp.bufferRsrc(rewriter, loc), bp.swizzleByteOffset(rewriter, loc),
-          zero, zero, noAttrs, noAttrs, noAttrs);
+          zero, auxAttr, noAttrs, noAttrs, noAttrs);
       rewriter.replaceOp(op, loaded);
       return success();
     } else {
@@ -447,10 +448,11 @@ public:
     if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace())) {
       BufferFatPtr bp(flyPtrTy, ptr);
       Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
+      auto auxAttr = rewriter.getI32IntegerAttr(0);
       ArrayAttr noAttrs;
       ROCDL::RawPtrBufferStoreOp::create(rewriter, loc, value, bp.bufferRsrc(rewriter, loc),
-                                         bp.swizzleByteOffset(rewriter, loc), zero, zero, noAttrs,
-                                         noAttrs, noAttrs);
+                                         bp.swizzleByteOffset(rewriter, loc), zero, auxAttr,
+                                         noAttrs, noAttrs, noAttrs);
       rewriter.eraseOp(op);
       return success();
     } else {
