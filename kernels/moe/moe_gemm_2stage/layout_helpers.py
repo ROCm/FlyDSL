@@ -183,20 +183,32 @@ def silu_pair_bf16(gate_frag, up_frag, gate_scale=None, up_scale=None, a_scale=N
     return out_frag
 
 
-def make_tensor_with_index(view, tile_m, tile_k, index_frag, tiled_copy, tid, topk, is_read_from_mem=True):
+def make_tensor_with_index(
+    view, tile_m, tile_k, index_frag, tiled_copy, tid, topk, is_read_from_mem=True, token_slot_tokens=None
+):
     """MoE gather/scatter helper: returns an object whose ``.copy(copy_atom, k_idx, frag)``
-    gathers/scatters per-thread tiles by ``index_frag`` (packed token|slot ids)."""
-    return _TensorWithIndex(view, tile_m, tile_k, index_frag, tiled_copy, tid, topk, is_read_from_mem)
+    gathers/scatters per-thread tiles by ``index_frag`` (packed token|slot ids).
+
+    ``token_slot_tokens`` (int8smooth): when set, the rank-2 gather row is decoded
+    slot-major as ``slot*token_slot_tokens + token`` instead of plain ``token`` (X
+    pre-expanded to [topk*tokens, K])."""
+    return _TensorWithIndex(
+        view, tile_m, tile_k, index_frag, tiled_copy, tid, topk, is_read_from_mem, token_slot_tokens
+    )
 
 
 class _TensorWithIndex:
-    def __init__(self, view, tile_m, tile_k, index_frag, tiled_copy, tid, topk, is_read_from_mem=True):
+    def __init__(
+        self, view, tile_m, tile_k, index_frag, tiled_copy, tid, topk, is_read_from_mem=True, token_slot_tokens=None
+    ):
         self.view = view
         self.tile_m = tile_m
         self.tile_k = tile_k
         self.is_read_from_mem = is_read_from_mem
         self.TOPK = topk
         self.index_frag = index_frag
+        # int8smooth slot-major row = slot*tokens + token; None -> plain token gather.
+        self.token_slot_tokens = token_slot_tokens
 
         rank = fx.get_shape(self.view).rank
         dims = [1] * (rank - 1)
@@ -303,7 +315,13 @@ class _TensorWithIndex:
                     _atomic_row()
                 continue
             if const_expr(rank == 2):
-                tensor_sub_block = tensor_block[None, self.index_frag[0, m] & 0xFFFFFF]
+                if const_expr(self.token_slot_tokens is not None):
+                    # int8smooth slot-major A-gather: row_ts = slot*tokens + token.
+                    packed = self.index_frag[0, m]
+                    row_ts = (packed >> 24) * fx.Int32(self.token_slot_tokens) + (packed & 0xFFFFFF)
+                    tensor_sub_block = tensor_block[None, row_ts]
+                else:
+                    tensor_sub_block = tensor_block[None, self.index_frag[0, m] & 0xFFFFFF]
             else:
                 tensor_sub_block = tensor_block[
                     None,

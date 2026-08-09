@@ -38,8 +38,15 @@ def _build_moe_gemm1_fp8_gateup(
     same per-token/per-channel scale algebra); it only swaps the MFMA atom to
     ``mfma_i32_16x16x32_i8`` with an i32 accumulator and converts that i32 acc to
     f32 in the dequant step before applying ``sx * sw``.
+
+    ``int8smooth`` is int8 with slot-major activations: X is pre-expanded to
+    [topk*tokens, K] and scale_x to [topk*tokens], both indexed by
+    ``row_ts = slot*tokens + token`` (the fused sorted id decodes as
+    ``token = fused & 0xFFFFFF``, ``slot = fused >> 24``). This is the ONLY
+    difference from int8 -- it touches the A-gather and the activation-scale load.
     """
-    is_int8 = in_dtype == "int8"
+    is_int8smooth = in_dtype == "int8smooth"
+    is_int8 = in_dtype == "int8" or is_int8smooth
     elem_t = fx.Int8 if is_int8 else fx.Float8E4M3FNUZ
     acc_dtype = fx.Int32 if is_int8 else None
     MFMA_K = 32
@@ -90,9 +97,11 @@ def _build_moe_gemm1_fp8_gateup(
         mma_atom, tiled_mma = fxh.make_1x4_tiled_mma(in_t, acc_dtype)
 
         # Explicit record bound so sentinel-row gathers (token_id == M padding) read
-        # 0 via hardware OOB instead of garbage/NaN.
+        # 0 via hardware OOB instead of garbage/NaN. int8smooth expands X to
+        # [topk*M, K] (slot-major), so the record bound covers all topk*M rows.
+        a_rows = fx.Int64(TOPK) * fx.Int64(M) if const_expr(is_int8smooth) else fx.Int64(M)
         a_tensor = fx.rocdl.make_buffer_tensor(
-            arg_p_input, max_size=False, num_records_bytes=fx.Int64(M) * fx.Int64(K) * fx.Int64(elem_bytes)
+            arg_p_input, max_size=False, num_records_bytes=a_rows * fx.Int64(K) * fx.Int64(elem_bytes)
         )
         b_tensor = fx.rocdl.make_buffer_tensor(arg_p_weight, max_size=False)
 
@@ -114,7 +123,17 @@ def _build_moe_gemm1_fp8_gateup(
             fx.make_tile(_thrs_m),
         )
         a_index_frag = fxh.read_sorted_index(tiled_copy_sortid_a, tid, lds.sorted_lds, BM)
-        a_idx = fxh.make_tensor_with_index(a_tensor, BM, TILE_K, a_index_frag, a_mem_cp_g2r, tid, TOPK)
+        # int8smooth: slot-major A-gather row_ts = slot*tokens + token (X is [topk*M,K]).
+        a_idx = fxh.make_tensor_with_index(
+            a_tensor,
+            BM,
+            TILE_K,
+            a_index_frag,
+            a_mem_cp_g2r,
+            tid,
+            TOPK,
+            token_slot_tokens=(M if is_int8smooth else None),
+        )
         a_mem_thr = a_mem_cp_g2r.get_slice(tid).partition_S(a_tile)
         a_cp_frag = fx.make_fragment_like(a_mem_thr[None, None, None, 0])
         gpu.barrier()  # sorted_lds reads done before overwriting with A tile
@@ -270,12 +289,19 @@ def _build_moe_gemm1_fp8_gateup(
         fx.copy(cp_atom_scale, sg_thr, gate_scale)
         fx.copy(cp_atom_scale, su_thr, up_scale)
 
+        # int8smooth: scale_x is [topk*M] slot-major, indexed slot*tokens + token.
+        asc_rows = fx.Int32(TOPK) * M if const_expr(is_int8smooth) else M
         a_scale_tensor = fx.rocdl.make_buffer_tensor(
-            fx.make_view(fx.recast_iter(fx.Float32, fx.get_iter(arg_scale_x)), fx.make_layout(M, 1)),
+            fx.make_view(fx.recast_iter(fx.Float32, fx.get_iter(arg_scale_x)), fx.make_layout(asc_rows, 1)),
             max_size=False,
-            num_records_bytes=fx.Int64(M) * fx.Int64(4),
+            num_records_bytes=fx.Int64(asc_rows) * fx.Int64(4),
         )
-        a_sc_n = [a_scale_tensor[asc_idx[0, n] & 0xFFFFFF] for n in range_constexpr(n_reps)]
+        if const_expr(is_int8smooth):
+            a_sc_n = [
+                a_scale_tensor[(asc_idx[0, n] >> 24) * M + (asc_idx[0, n] & 0xFFFFFF)] for n in range_constexpr(n_reps)
+            ]
+        else:
+            a_sc_n = [a_scale_tensor[asc_idx[0, n] & 0xFFFFFF] for n in range_constexpr(n_reps)]
         for m in range_constexpr(m_reps):
             sg_v = gate_scale[None, m].load()
             su_v = up_scale[None, m].load()
@@ -509,16 +535,17 @@ def compile_moe_gemm1(
 ):
     """Compile stage1 gate-up kernel (``moe_gemm1``) and return the executable.
 
-    X/W are fp8 (E4M3) or int8 on gfx94*/gfx95*. ``out_dtype`` is the fp16/bf16
-    output type. int8 shares the fp8 pipeline (i32 MFMA acc, f32 dequant).
+    X/W are fp8 (E4M3), int8, or int8smooth on gfx94*/gfx95*. ``out_dtype`` is the
+    fp16/bf16 output type. int8/int8smooth share the fp8 pipeline (i32 MFMA acc,
+    f32 dequant); int8smooth adds slot-major A/scale_x indexing.
     """
     _arch = get_rocm_arch()
     if not ("gfx95" in _arch or "gfx94" in _arch):
         raise ValueError(f"moe_gemm_2stage supports gfx94*/gfx95* (CDNA3/CDNA4); got arch={_arch!r}")
     if out_dtype not in ("f16", "bf16"):
         raise ValueError(f"out_dtype must be 'f16' or 'bf16', got {out_dtype!r}")
-    if in_dtype not in ("fp8", "int8"):
-        raise ValueError(f"in_dtype must be 'fp8' or 'int8', got {in_dtype!r}")
+    if in_dtype not in ("fp8", "int8", "int8smooth"):
+        raise ValueError(f"in_dtype must be 'fp8', 'int8', or 'int8smooth', got {in_dtype!r}")
 
     return _build_moe_gemm1_fp8_gateup(
         model_dim=model_dim,

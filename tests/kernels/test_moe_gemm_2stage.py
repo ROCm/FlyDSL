@@ -53,8 +53,8 @@ _requires_fp8 = pytest.mark.skipif(not _fp8_supported(), reason="fp8 2-stage MoE
 
 
 def _quant_dtype(in_dtype: str) -> torch.dtype:
-    """Kernel input torch dtype for the given ``in_dtype`` ('fp8' or 'int8')."""
-    return torch.int8 if in_dtype == "int8" else _DTYPE_FP8
+    """Kernel input torch dtype for the given ``in_dtype``."""
+    return torch.int8 if in_dtype in ("int8", "int8smooth") else _DTYPE_FP8
 
 
 def _cosine_sim(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -374,6 +374,133 @@ def test_moe_gemm1_numeric(in_dtype, out_dtype, tile_m, tokens):
     assert cos > 0.99, f"stage1 cos={cos:.5f} (in_dtype={in_dtype}, out_dtype={out_dtype}, tile_m={tile_m})"
 
 
+# ---------------------------------------------------------------------------
+# Stage1 int8smooth: X is pre-expanded per route and stored SLOT-MAJOR
+# ([topk*tokens, K], row = slot*tokens + token), with a per-(token,slot) scale
+# in the same order. The kernel decodes the fused sorted id (slot<<24 | token)
+# and gathers X / scale_x at slot*tokens + token. Only stage1 differs from int8.
+# ---------------------------------------------------------------------------
+def _build_stage1_int8smooth(x_fp32, w1_fp32, topk_ids):
+    """Slot-major int8smooth stage1 inputs (mirrors CK moe_smoothquant output)."""
+    device = x_fp32.device
+    tokens, model_dim = x_fp32.shape
+    topk = topk_ids.shape[1]
+    experts = w1_fp32.shape[0]
+
+    smooth = 0.75 + 0.5 * torch.rand((experts, model_dim), device=device, dtype=torch.float32)
+    x_route = x_fp32[:, None, :].expand(tokens, topk, model_dim) * smooth[topk_ids.to(torch.int64)]
+    amax = torch.amax(torch.abs(x_route), dim=-1, keepdim=True)
+    scale_x = amax / 127.0
+    scale_x[scale_x == 0] = 1.0
+    x_q = (x_route / scale_x).to(torch.int8)
+    # slot-major [topk, tokens, K] / [topk, tokens, 1]
+    x_q_sm = x_q.permute(1, 0, 2).contiguous()
+    sx_sm = scale_x.permute(1, 0, 2).contiguous()
+
+    w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
+    w1_q_flat = w1_q.view(experts * (2 * w1_fp32.shape[1] // 2), model_dim)
+    scale_w1_flat = scale_w1.view(-1, 1)
+    w1_kernel = shuffle_weight(w1_q).view(w1_q_flat.shape[0], model_dim).contiguous()
+
+    return dict(
+        x_q=x_q_sm.view(tokens * topk, model_dim).contiguous(),
+        scale_x_1d=sx_sm.view(-1).contiguous(),
+        x_ref=x_q.contiguous(),  # token-major [tokens, topk, K] for the reference
+        sx_ref=scale_x.contiguous(),  # token-major [tokens, topk, 1]
+        w1_q_flat=w1_q_flat,
+        w1_kernel=w1_kernel,
+        scale_w1_flat=scale_w1_flat,
+        scale_w1_1d=scale_w1_flat.view(-1).contiguous(),
+    )
+
+
+def _run_gemm1_int8smooth(*, tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k, out_dtype, seed=0):
+    device = torch.device("cuda")
+    doweight_stage1 = False
+    topk_ids, topk_weights, routing = _make_routing(tokens, experts, topk, tile_m, device, seed)
+    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, blocks = routing
+
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
+    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (
+        1.0 / math.sqrt(model_dim)
+    )
+
+    d = _build_stage1_int8smooth(x_fp32, w1_fp32, topk_ids)
+    sorted_weights_1d = sorted_weights.contiguous().view(-1)
+    out = torch.empty((tokens, topk, inter_dim), device=device, dtype=_out_torch_dtype(out_dtype))
+
+    exe = compile_moe_gemm1(
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        doweight_stage1=doweight_stage1,
+        out_dtype=out_dtype,
+        in_dtype="int8smooth",
+    )
+
+    def _args(o):
+        return (
+            o,
+            d["x_q"].view(-1),
+            d["w1_kernel"].view(-1),
+            d["scale_x_1d"],
+            d["scale_w1_1d"],
+            sorted_token_ids,
+            sorted_expert_ids,
+            sorted_weights_1d,
+            num_valid_ids,
+            tokens,
+            inter_dim,
+            model_dim,
+            int(blocks),
+            torch.cuda.current_stream(),
+        )
+
+    compiled = flyc.compile(exe, *_args(out))
+    compiled(*_args(out))
+    torch.cuda.synchronize()
+
+    ref = torch_moe_gemm1(
+        d["x_ref"],
+        d["w1_q_flat"],
+        d["sx_ref"],
+        d["scale_w1_flat"],
+        topk_ids.to(torch.int64),
+        topk_weights,
+        inter_dim=inter_dim,
+        doweight_stage1=doweight_stage1,
+    )
+    return out, ref
+
+
+@_requires_fp8
+@pytest.mark.parametrize("out_dtype", ["f16", "bf16"])
+@pytest.mark.parametrize("tile_m,tokens", [(64, 128), (16, 8)])
+def test_moe_gemm1_int8smooth_numeric(out_dtype, tile_m, tokens):
+    """Stage1 int8smooth (slot-major A/scale_x gather) matches the torch reference.
+
+    int8smooth differs from int8 ONLY in stage1: X is pre-expanded to
+    [topk*tokens, K] in slot-major order and both the A-gather and the
+    activation-scale load index row = slot*tokens + token (fused id: slot<<24 |
+    token). Swapping that decode back to plain ``token`` breaks this test (cosine
+    drops below 0.99), which is the whole point of the feature.
+    """
+    out, ref = _run_gemm1_int8smooth(
+        tokens=tokens,
+        **_SHAPE,
+        tile_m=tile_m,
+        tile_n=64,
+        tile_k=128,
+        out_dtype=out_dtype,
+    )
+    cos = _cosine_sim(out, ref)
+    assert cos > 0.99, f"stage1 int8smooth cos={cos:.5f} (out_dtype={out_dtype}, tile_m={tile_m})"
+
+
 @_requires_fp8
 @pytest.mark.parametrize("in_dtype", ["fp8", "int8"])
 @pytest.mark.parametrize(
@@ -408,6 +535,123 @@ def test_moe_gemm2_numeric(accumulate, out_dtype, tile_m, tokens, in_dtype):
     cos = _cosine_sim(got, ref)
     mode = "atomic" if accumulate else "reduce"
     assert cos > 0.99, f"stage2 cos={cos:.5f} ({mode}, in_dtype={in_dtype}, out_dtype={out_dtype}, tile_m={tile_m})"
+
+
+def _run_gemm2_int8smooth(*, tokens, model_dim, inter_dim, experts, topk, tile_m, out_dtype, accumulate, seed=0):
+    """Stage2 int8smooth: the smooth scale is applied host-side to A2 before quant,
+    so the kernel sees plain int8 A2 + a per-route scale -- identical to the int8
+    path in gemm2. This exercises that in_dtype='int8smooth' routes to that path."""
+    device = torch.device("cuda")
+    doweight_stage2 = True
+    topk_ids, topk_weights, routing = _make_routing(tokens, experts, topk, tile_m, device, seed)
+    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, blocks = routing
+
+    s = 0.2
+    x_fp32 = torch.rand((tokens, model_dim), device=device, dtype=torch.float32) * s
+    w1_fp32 = torch.rand((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (
+        s / math.sqrt(model_dim)
+    )
+    w2_fp32 = torch.rand((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (
+        s / math.sqrt(inter_dim)
+    )
+
+    x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
+    w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
+    w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
+    w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
+    scale_w1_flat = scale_w1.view(experts * (2 * inter_dim), 1)
+    out1_ref = torch_moe_gemm1(
+        x_q,
+        w1_q_flat,
+        scale_x,
+        scale_w1_flat,
+        topk_ids.to(torch.int64),
+        topk_weights,
+        inter_dim=inter_dim,
+        doweight_stage1=False,
+    )  # [tokens, topk, inter_dim] fp32
+
+    # int8smooth: per-expert smooth scale folded into A2 before per-(token,slot) quant.
+    smooth2 = 0.75 + 0.5 * torch.rand((experts, inter_dim), device=device, dtype=torch.float32)
+    a2_in = out1_ref * smooth2[topk_ids.to(torch.int64)]
+    a2_q, a2_scale = pertoken_quant(a2_in, quant_dtype=torch.int8)
+
+    w2_kernel = shuffle_weight(w2_q).view(experts * model_dim, inter_dim).contiguous().view(-1)
+    a2_scale_1d = a2_scale.view(-1).contiguous()
+    w2_scale_1d = scale_w2.view(experts * model_dim, 1).view(-1).contiguous()
+    sorted_weights_1d = sorted_weights.contiguous().view(-1)
+
+    out_dt = _out_torch_dtype(out_dtype)
+    out = torch.zeros((tokens, model_dim) if accumulate else (tokens * topk, model_dim), device=device, dtype=out_dt)
+
+    exe = compile_moe_gemm2(
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=64,
+        tile_k=128,
+        doweight_stage2=doweight_stage2,
+        out_dtype=out_dtype,
+        accumulate=accumulate,
+        in_dtype="int8smooth",
+    )
+
+    def _args(o):
+        return (
+            o,
+            a2_q.view(-1),
+            w2_kernel.view(-1),
+            a2_scale_1d,
+            w2_scale_1d,
+            sorted_token_ids,
+            sorted_expert_ids,
+            sorted_weights_1d,
+            num_valid_ids,
+            tokens,
+            model_dim,
+            inter_dim,
+            int(blocks),
+            torch.cuda.current_stream(),
+        )
+
+    compiled = flyc.compile(exe, *_args(out))
+    out.zero_()
+    compiled(*_args(out))
+    torch.cuda.synchronize()
+
+    ref = torch_moe_gemm2(
+        a2_q,
+        w2_q,
+        a2_scale,
+        scale_w2,
+        topk_ids.to(torch.int64),
+        topk_weights,
+        model_dim=model_dim,
+        doweight_stage2=doweight_stage2,
+    )
+    got = out if accumulate else out.view(tokens, topk, model_dim).sum(dim=1)
+    return got, ref
+
+
+@_requires_fp8
+@pytest.mark.parametrize("accumulate,out_dtype", [(True, "f16"), (True, "bf16")])
+@pytest.mark.parametrize("tile_m,tokens", [(16, 8), (64, 128)])
+def test_moe_gemm2_int8smooth_numeric(accumulate, out_dtype, tile_m, tokens):
+    """Stage2 int8smooth matches the torch reference. int8smooth shares the int8
+    stage2 path (smooth scale is baked into A2 host-side); this checks the dtype
+    routes correctly."""
+    got, ref = _run_gemm2_int8smooth(
+        tokens=tokens,
+        **_SHAPE,
+        tile_m=tile_m,
+        out_dtype=out_dtype,
+        accumulate=accumulate,
+    )
+    cos = _cosine_sim(got, ref)
+    mode = "atomic" if accumulate else "reduce"
+    assert cos > 0.99, f"stage2 int8smooth cos={cos:.5f} ({mode}, out_dtype={out_dtype}, tile_m={tile_m})"
 
 
 @_requires_fp8

@@ -55,7 +55,9 @@ def _build_moe_gemm2_fp8(
     int8 shares the fp8 pipeline: it swaps the MFMA atom to ``mfma_i32_16x16x32_i8``
     with an i32 accumulator and converts that i32 acc to f32 in the dequant step.
     """
-    is_int8 = in_dtype == "int8"
+    # int8smooth applies its smooth scale host-side to A2 before quant, so stage2
+    # sees plain int8 A2 + a per-route scale -- identical to the int8 path here.
+    is_int8 = in_dtype in ("int8", "int8smooth")
     elem_t = fx.Int8 if is_int8 else fx.Float8E4M3FNUZ
     acc_dtype = fx.Int32 if is_int8 else None
     MFMA_K = 32
@@ -609,8 +611,8 @@ def compile_moe_gemm2(
     _out_s = str(out_dtype).strip().lower()
     if _out_s not in ("f16", "fp16", "half", "bf16", "bfloat16", "f32", "fp32", "float"):
         raise ValueError(f"out_dtype must be 'f16', 'bf16', or 'f32', got {out_dtype!r}")
-    if in_dtype not in ("fp8", "int8"):
-        raise ValueError(f"in_dtype must be 'fp8' or 'int8', got {in_dtype!r}")
+    if in_dtype not in ("fp8", "int8", "int8smooth"):
+        raise ValueError(f"in_dtype must be 'fp8', 'int8', or 'int8smooth', got {in_dtype!r}")
     if (not bool(accumulate)) and _out_s in ("f32", "fp32", "float"):
         raise ValueError("compile_moe_gemm2(accumulate=False) only supports out_dtype in {'f16','bf16'}")
     return _build_moe_gemm2_fp8(
