@@ -1,8 +1,42 @@
 {
  "schema": 1,
- "updated": "2026-08-09T05:24:59Z",
+ "updated": "2026-08-09T05:26:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31296560849,
+   "pr": 989,
+   "commit": "3dc1392e2b3ee4960009a2ee74ca3b483c2ea4f2",
+   "branch": "ci/upgrade-rocm-7.14",
+   "event": "pull_request",
+   "title": "CI: upgrade PyTorch images to ROCm 7.14",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31296560849",
+   "created_at": "2026-08-09T05:22:54Z",
+   "updated_at": "2026-08-09T05:23:33Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-09T05:23:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31296560849/job/93202543406"
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-09T05:23:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31296560849/job/93202543414"
+    }
+   ]
+  },
   {
    "run_id": 31296538878,
    "pr": 989,
@@ -10,11 +44,11 @@
    "branch": "ci/upgrade-rocm-7.14",
    "event": "pull_request",
    "title": "CI: upgrade PyTorch images to ROCm 7.14",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31296538878",
    "created_at": "2026-08-09T05:22:17Z",
-   "updated_at": "2026-08-09T05:22:49Z",
+   "updated_at": "2026-08-09T05:22:56Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1994,67 +2028,6 @@
      "started_at": "2026-08-06T10:27:39Z",
      "completed_at": "2026-08-06T11:22:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31089787031/job/92582294315"
-    }
-   ]
-  },
-  {
-   "run_id": 31086859764,
-   "pr": 954,
-   "commit": "99ef71051cf8471783087809df887a50ea2570b8",
-   "branch": "mega_moe_v1",
-   "event": "pull_request",
-   "title": "BugFix for MegaMoE",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31086859764",
-   "created_at": "2026-08-06T08:54:53Z",
-   "updated_at": "2026-08-07T00:06:06Z",
-   "actor": "GwilliamHu",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-06T09:54:26Z",
-     "completed_at": "2026-08-06T11:00:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31086859764/job/92581572832"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-06T09:57:25Z",
-     "completed_at": "2026-08-06T11:27:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31086859764/job/92581572845"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-06T18:05:08Z",
-     "completed_at": "2026-08-06T19:09:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31086859764/job/92581572847"
-    },
-    {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-06T19:11:12Z",
-     "completed_at": "2026-08-06T19:43:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31086859764/job/92699928071"
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-06T23:10:54Z",
-     "completed_at": "2026-08-07T00:06:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31086859764/job/92699928075"
     }
    ]
   }
