@@ -628,10 +628,3 @@ def compile_moe_gemm2(
         out_dtype=out_dtype,
         accumulate=accumulate,
     )
-
-
-class MoeGemm2Mode:
-    """Execution mode for MoE GEMM2."""
-
-    ATOMIC = "atomic"  # Use atomic accumulation (default)
-    REDUCE = "reduce"  # Use non-atomic write + reduce kernel

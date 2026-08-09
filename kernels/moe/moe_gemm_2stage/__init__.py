@@ -10,11 +10,10 @@ kernel over the topk dimension.
 """
 
 from kernels.moe.moe_gemm_2stage.gemm1 import compile_moe_gemm1
-from kernels.moe.moe_gemm_2stage.gemm2 import MoeGemm2Mode, compile_moe_gemm2
+from kernels.moe.moe_gemm_2stage.gemm2 import compile_moe_gemm2
 from kernels.moe.moe_gemm_2stage.moe_reduce import compile_moe_reduction
 
 __all__ = [
-    "MoeGemm2Mode",
     "compile_moe_gemm1",
     "compile_moe_gemm2",
     "compile_moe_reduction",
