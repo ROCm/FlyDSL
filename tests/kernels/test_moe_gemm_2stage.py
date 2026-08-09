@@ -154,6 +154,38 @@ def _make_routing(tokens, experts, topk, tile_m, device, seed):
     return topk_ids, topk_weights, routing
 
 
+def _launch(exe, out, *, x, w, scale_x, scale_w, routing, dim0, dim1, tokens, zero_out=False):
+    """Compile + run a stage kernel with the shared positional arg layout.
+
+    ``dim0``/``dim1`` fill the two shape slots (gemm1: inter_dim, model_dim;
+    gemm2: model_dim, inter_dim). All 1D operands are flattened here."""
+    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, blocks = routing
+
+    def _args(o):
+        return (
+            o,
+            x.view(-1),
+            w.view(-1),
+            scale_x.view(-1).contiguous(),
+            scale_w.view(-1).contiguous(),
+            sorted_token_ids,
+            sorted_expert_ids,
+            sorted_weights.contiguous().view(-1),
+            num_valid_ids,
+            tokens,
+            dim0,
+            dim1,
+            int(blocks),
+            torch.cuda.current_stream(),
+        )
+
+    compiled = flyc.compile(exe, *_args(out))
+    if zero_out:
+        out.zero_()
+    compiled(*_args(out))
+    torch.cuda.synchronize()
+
+
 # ---------------------------------------------------------------------------
 # Stage1 (gate-up + silu).
 # ---------------------------------------------------------------------------
@@ -165,7 +197,6 @@ def _run_gemm1(
     _qd = _quant_dtype(in_dtype)
 
     topk_ids, topk_weights, routing = _make_routing(tokens, experts, topk, tile_m, device, seed)
-    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, blocks = routing
 
     # randn inputs: silu(gate)*up compresses tiny activations and amplifies
     # relative fp8 error, so use unit-variance data (matches the upstream harness).
@@ -179,18 +210,13 @@ def _run_gemm1(
     # W4A8 weight is quantized to signed int4 range [-8, 7] (dtypeMax=7).
     w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=_qd, **({"dtypeMax": 7} if _is_int4 else {}))
 
-    w1_shuffled = shuffle_weight(w1_q)
-    w1_shuffled_flat = w1_shuffled.view(experts * (2 * inter_dim), model_dim).contiguous()
+    w1_shuffled_flat = shuffle_weight(w1_q).view(experts * (2 * inter_dim), model_dim).contiguous()
     if _is_int4:
         # Preshuffled int8 -> packed 2 int4/byte; the reference still uses w1_q_flat.
         w1_shuffled_flat = _pack_shuffled_int8_to_packed_int4(w1_shuffled_flat)
     w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
     scale_w1_flat = scale_w1.view(experts * (2 * inter_dim), 1)
-
     x_q = x_q.contiguous().view(tokens, model_dim)
-    scale_x_1d = scale_x.view(-1).contiguous()
-    scale_w1_1d = scale_w1_flat.view(-1).contiguous()
-    sorted_weights_1d = sorted_weights.contiguous().view(-1)
 
     out = torch.empty((tokens, topk, inter_dim), device=device, dtype=_out_torch_dtype(out_dtype))
 
@@ -206,28 +232,18 @@ def _run_gemm1(
         out_dtype=out_dtype,
         in_dtype=in_dtype,
     )
-
-    def _args(o):
-        return (
-            o,
-            x_q.view(-1),
-            w1_shuffled_flat.view(-1),
-            scale_x_1d,
-            scale_w1_1d,
-            sorted_token_ids,
-            sorted_expert_ids,
-            sorted_weights_1d,
-            num_valid_ids,
-            tokens,
-            inter_dim,
-            model_dim,
-            int(blocks),
-            torch.cuda.current_stream(),
-        )
-
-    compiled = flyc.compile(exe, *_args(out))
-    compiled(*_args(out))
-    torch.cuda.synchronize()
+    _launch(
+        exe,
+        out,
+        x=x_q,
+        w=w1_shuffled_flat,
+        scale_x=scale_x,
+        scale_w=scale_w1_flat,
+        routing=routing,
+        dim0=inter_dim,
+        dim1=model_dim,
+        tokens=tokens,
+    )
 
     ref = torch_moe_gemm1(
         x_q,
@@ -266,7 +282,6 @@ def _run_gemm2(
     _qd = _quant_dtype(in_dtype)
 
     topk_ids, topk_weights, routing = _make_routing(tokens, experts, topk, tile_m, device, seed)
-    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, blocks = routing
 
     s = 0.2
     x_fp32 = torch.rand((tokens, model_dim), device=device, dtype=torch.float32) * s
@@ -298,19 +313,13 @@ def _run_gemm2(
     )
     a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=_qd)
 
-    w2_shuffled = shuffle_weight(w2_q)
-    w2_kernel = w2_shuffled.view(experts * model_dim, inter_dim).contiguous().view(-1)
+    w2_kernel = shuffle_weight(w2_q).view(experts * model_dim, inter_dim).contiguous().view(-1)
     if _is_int4:
         w2_kernel = _pack_shuffled_int8_to_packed_int4(w2_kernel)
-    a2_scale_1d = a2_scale.view(-1).contiguous()
-    w2_scale_1d = scale_w2.view(experts * model_dim, 1).view(-1).contiguous()
-    sorted_weights_1d = sorted_weights.contiguous().view(-1)
+    w2_scale_flat = scale_w2.view(experts * model_dim, 1)
 
     out_dt = _out_torch_dtype(out_dtype)
-    if accumulate:
-        out = torch.zeros((tokens, model_dim), device=device, dtype=out_dt)
-    else:
-        out = torch.zeros((tokens * topk, model_dim), device=device, dtype=out_dt)
+    out = torch.zeros((tokens, model_dim) if accumulate else (tokens * topk, model_dim), device=device, dtype=out_dt)
 
     exe = compile_moe_gemm2(
         model_dim=model_dim,
@@ -325,29 +334,19 @@ def _run_gemm2(
         accumulate=accumulate,
         in_dtype=in_dtype,
     )
-
-    def _args(o):
-        return (
-            o,
-            a2_q.view(-1),
-            w2_kernel.view(-1),
-            a2_scale_1d,
-            w2_scale_1d,
-            sorted_token_ids,
-            sorted_expert_ids,
-            sorted_weights_1d,
-            num_valid_ids,
-            tokens,
-            model_dim,
-            inter_dim,
-            int(blocks),
-            torch.cuda.current_stream(),
-        )
-
-    compiled = flyc.compile(exe, *_args(out))
-    out.zero_()
-    compiled(*_args(out))
-    torch.cuda.synchronize()
+    _launch(
+        exe,
+        out,
+        x=a2_q,
+        w=w2_kernel,
+        scale_x=a2_scale,
+        scale_w=w2_scale_flat,
+        routing=routing,
+        dim0=model_dim,
+        dim1=inter_dim,
+        tokens=tokens,
+        zero_out=True,
+    )
 
     ref = torch_moe_gemm2(
         a2_q,
@@ -516,7 +515,6 @@ def _run_gemm1_int8smooth(*, tokens, model_dim, inter_dim, experts, topk, tile_m
     device = torch.device("cuda")
     doweight_stage1 = False
     topk_ids, topk_weights, routing = _make_routing(tokens, experts, topk, tile_m, device, seed)
-    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, blocks = routing
 
     x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
     w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (
@@ -524,7 +522,6 @@ def _run_gemm1_int8smooth(*, tokens, model_dim, inter_dim, experts, topk, tile_m
     )
 
     d = _build_stage1_int8smooth(x_fp32, w1_fp32, topk_ids)
-    sorted_weights_1d = sorted_weights.contiguous().view(-1)
     out = torch.empty((tokens, topk, inter_dim), device=device, dtype=_out_torch_dtype(out_dtype))
 
     exe = compile_moe_gemm1(
@@ -539,28 +536,18 @@ def _run_gemm1_int8smooth(*, tokens, model_dim, inter_dim, experts, topk, tile_m
         out_dtype=out_dtype,
         in_dtype="int8smooth",
     )
-
-    def _args(o):
-        return (
-            o,
-            d["x_q"].view(-1),
-            d["w1_kernel"].view(-1),
-            d["scale_x_1d"],
-            d["scale_w1_1d"],
-            sorted_token_ids,
-            sorted_expert_ids,
-            sorted_weights_1d,
-            num_valid_ids,
-            tokens,
-            inter_dim,
-            model_dim,
-            int(blocks),
-            torch.cuda.current_stream(),
-        )
-
-    compiled = flyc.compile(exe, *_args(out))
-    compiled(*_args(out))
-    torch.cuda.synchronize()
+    _launch(
+        exe,
+        out,
+        x=d["x_q"],
+        w=d["w1_kernel"],
+        scale_x=d["scale_x_1d"],
+        scale_w=d["scale_w1_1d"],
+        routing=routing,
+        dim0=inter_dim,
+        dim1=model_dim,
+        tokens=tokens,
+    )
 
     ref = torch_moe_gemm1(
         d["x_ref"],
@@ -643,7 +630,6 @@ def _run_gemm2_int8smooth(*, tokens, model_dim, inter_dim, experts, topk, tile_m
     device = torch.device("cuda")
     doweight_stage2 = True
     topk_ids, topk_weights, routing = _make_routing(tokens, experts, topk, tile_m, device, seed)
-    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, blocks = routing
 
     s = 0.2
     x_fp32 = torch.rand((tokens, model_dim), device=device, dtype=torch.float32) * s
@@ -676,9 +662,7 @@ def _run_gemm2_int8smooth(*, tokens, model_dim, inter_dim, experts, topk, tile_m
     a2_q, a2_scale = pertoken_quant(a2_in, quant_dtype=torch.int8)
 
     w2_kernel = shuffle_weight(w2_q).view(experts * model_dim, inter_dim).contiguous().view(-1)
-    a2_scale_1d = a2_scale.view(-1).contiguous()
-    w2_scale_1d = scale_w2.view(experts * model_dim, 1).view(-1).contiguous()
-    sorted_weights_1d = sorted_weights.contiguous().view(-1)
+    w2_scale_flat = scale_w2.view(experts * model_dim, 1)
 
     out_dt = _out_torch_dtype(out_dtype)
     out = torch.zeros((tokens, model_dim) if accumulate else (tokens * topk, model_dim), device=device, dtype=out_dt)
@@ -696,29 +680,19 @@ def _run_gemm2_int8smooth(*, tokens, model_dim, inter_dim, experts, topk, tile_m
         accumulate=accumulate,
         in_dtype="int8smooth",
     )
-
-    def _args(o):
-        return (
-            o,
-            a2_q.view(-1),
-            w2_kernel.view(-1),
-            a2_scale_1d,
-            w2_scale_1d,
-            sorted_token_ids,
-            sorted_expert_ids,
-            sorted_weights_1d,
-            num_valid_ids,
-            tokens,
-            model_dim,
-            inter_dim,
-            int(blocks),
-            torch.cuda.current_stream(),
-        )
-
-    compiled = flyc.compile(exe, *_args(out))
-    out.zero_()
-    compiled(*_args(out))
-    torch.cuda.synchronize()
+    _launch(
+        exe,
+        out,
+        x=a2_q,
+        w=w2_kernel,
+        scale_x=a2_scale,
+        scale_w=w2_scale_flat,
+        routing=routing,
+        dim0=model_dim,
+        dim1=inter_dim,
+        tokens=tokens,
+        zero_out=True,
+    )
 
     ref = torch_moe_gemm2(
         a2_q,
