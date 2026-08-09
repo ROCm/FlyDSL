@@ -44,10 +44,10 @@ def moe_reduction_kernel(
     num_experts: fx.Constexpr[int],
     out_dtype_str: fx.Constexpr[str],
 ):
-    # One tiled-copy reduce for every dtype. Dense (f16/bf16/f32) loads V elems and
-    # extends to f32; fp8 loads 8 fp8 bytes + e8m0 microscale and decodes to f32.
-    # Both run the same masked f32 topk-accumulate (uniform soffset = k*row_stride)
-    # and truncating store. row_stride differs: fp8 rows carry N/8 trailing scale bytes.
+    # One tiled-copy reduce for every dtype: dense (f16/bf16/f32) loads V elems and
+    # extends to f32; fp8 loads 8 bytes + e8m0 microscale and decodes to f32. Both run
+    # the same masked f32 topk-accumulate + truncating store. fp8 rows carry N/8
+    # trailing scale bytes (larger row_stride).
     is_fp8 = dtype_str == "fp8"
     if const_expr(is_fp8):
         in_elem, in_bytes, V = fx.Int8, 1, FP8_VEC

@@ -3,8 +3,8 @@
 
 """MoE GEMM stage1 (gate-up MFMA) fp8/int8 kernel builder.
 
-Layout-API pipeline: X/W are fp8 (E4M3) or int8 on CDNA3 (gfx94*) / CDNA4 (gfx95*).
-int8 shares the fp8 path via an i32 MFMA accumulator (converted to f32 in dequant).
+Layout-API pipeline: X/W are fp8 (E4M3) or int8 on CDNA3/CDNA4 (gfx94*/gfx95*).
+int8 shares the fp8 path via an i32 MFMA acc (converted to f32 in dequant).
 """
 
 import functools
@@ -34,16 +34,10 @@ def _build_moe_gemm1_fp8_gateup(
     """Native gate-up GEMM (B-first MFMA, fp8/int8): out[t,slot,inter] =
     silu(gate*sx*sw_g)*(up*sx*sw_u)[*routed], scattered by sorted token ids.
 
-    int8 shares the whole fp8 pipeline (1-byte elems, same 16x16x32 MFMA geometry,
-    same per-token/per-channel scale algebra); it only swaps the MFMA atom to
-    ``mfma_i32_16x16x32_i8`` with an i32 accumulator and converts that i32 acc to
-    f32 in the dequant step before applying ``sx * sw``.
-
-    ``int8smooth`` is int8 with slot-major activations: X is pre-expanded to
-    [topk*tokens, K] and scale_x to [topk*tokens], both indexed by
-    ``row_ts = slot*tokens + token`` (the fused sorted id decodes as
-    ``token = fused & 0xFFFFFF``, ``slot = fused >> 24``). This is the ONLY
-    difference from int8 -- it touches the A-gather and the activation-scale load.
+    int8 shares the fp8 pipeline; it only swaps the MFMA atom to an i32 accumulator
+    and converts to f32 in dequant. ``int8smooth`` is int8 with slot-major
+    activations (X/scale_x pre-expanded to [topk*tokens, ...], indexed
+    row_ts = slot*tokens + token); it only changes the A-gather and act-scale load.
     """
     is_int4 = in_dtype == "int4"  # W4A8: int8 activations x packed-int4 weights
     is_int8smooth = in_dtype == "int8smooth"
@@ -97,9 +91,8 @@ def _build_moe_gemm1_fp8_gateup(
         tid = gpu.thread_idx.x
         mma_atom, tiled_mma = fxh.make_1x4_tiled_mma(in_t, acc_dtype)
 
-        # Explicit record bound so sentinel-row gathers (token_id == M padding) read
-        # 0 via hardware OOB instead of garbage/NaN. int8smooth expands X to
-        # [topk*M, K] (slot-major), so the record bound covers all topk*M rows.
+        # Record bound so sentinel-row gathers (token_id == M padding) read 0 via
+        # hardware OOB. int8smooth covers all topk*M slot-major rows.
         a_rows = fx.Int64(TOPK) * fx.Int64(M) if const_expr(is_int8smooth) else fx.Int64(M)
         a_tensor = fx.rocdl.make_buffer_tensor(
             arg_p_input, max_size=False, num_records_bytes=a_rows * fx.Int64(K) * fx.Int64(elem_bytes)
@@ -124,7 +117,6 @@ def _build_moe_gemm1_fp8_gateup(
             fx.make_tile(_thrs_m),
         )
         a_index_frag = fxh.read_sorted_index(tiled_copy_sortid_a, tid, lds.sorted_lds, BM)
-        # int8smooth: slot-major A-gather row_ts = slot*tokens + token (X is [topk*M,K]).
         a_idx = fxh.make_tensor_with_index(
             a_tensor,
             BM,
@@ -171,14 +163,12 @@ def _build_moe_gemm1_fp8_gateup(
         # into a ping-pong pair of fragments so weight VMEM overlaps the MFMA.
         _ki_reps = TILE_K // 64  # 64-byte K super-steps per tile
         if const_expr(is_int4):
-            # W4A8: weight is packed int4 (2 nibbles/byte). The int8 MFMA A-fragment
-            # reads K in ki-SEPARATED kpack groups that a generic half-width tiled_copy
-            # cannot reproduce, so drive an explicit ki-correct preshuffle-address
-            # loader (fxh.load_weight_int4_frag). Gate/up are separate absolute channel
-            # ranges: col_base_gate = blk_n*contiguous_n, col_base_up = + inter_dim.
-            # Read packed weight as i32 dwords (one dword = 4 packed bytes = 8 int4).
-            # The packed weight base is >=16B-aligned; recast the (align-1 int8) iter
-            # to an align-4 i32 pointer so the dword buffer_load is legal.
+            # W4A8: packed int4 (2 nibbles/byte). The int8 MFMA A-fragment reads K in
+            # ki-SEPARATED kpack groups that a generic half-width tiled_copy cannot
+            # reproduce, so use the explicit ki-correct loader (load_weight_int4_frag).
+            # Gate/up are separate channel ranges (col_gate, col_up = +inter_dim).
+            # Read as i32 dwords (4 packed bytes = 8 int4); recast the align-1 int8
+            # iter to an align-4 i32 pointer so the dword buffer_load is legal.
             _w_i8_iter = fx.get_iter(arg_p_weight)
             _w_i32_ptr = fx.PointerType.get(fx.Int32.ir_type, _w_i8_iter.memspace, 4)
             b_raw = fx.rocdl.make_buffer_tensor(
@@ -198,10 +188,9 @@ def _build_moe_gemm1_fp8_gateup(
                 max_size=False,
             )
             _wtile = fx.flat_divide(_wfake, fx.make_tile(contiguous_n, TILE_K))[None, None, 0, 0]
-            # Single weight buffer (no B ping-pong): the explicit int4 load is
-            # serialized against its own dword buffer_loads, so a second buffer only
-            # inflates VGPR (occupancy-bound) without adding overlap. A-LDS keeps its
-            # ping-pong. Load the tile's weight right before its MFMA in the loop.
+            # Single weight buffer (no B ping-pong): a second buffer only inflates VGPR
+            # (occupancy-bound) without overlap. A-LDS keeps its ping-pong; the tile's
+            # weight is loaded just-in-time before its MFMA.
             bl_frag_bufs = [tiled_mma.make_fragment_A(_wtile)]
             br_frag_bufs = [tiled_mma.make_fragment_A(_wtile)]
             _b_loads_per_tile = 0  # A-gather-only wait (int4 weight loaded just-in-time)
@@ -216,9 +205,8 @@ def _build_moe_gemm1_fp8_gateup(
             bl_ret_bufs = [b_g2r.retile(f) for f in bl_frag_bufs]
             br_ret_bufs = [b_g2r.retile(f) for f in br_frag_bufs]
 
-            # 128b buffer_loads per thread for the B (gate+up) tile. Feeds a targeted
-            # s_waitcnt that awaits only the A-gather (issued first) while leaving the
-            # prefetched B loads in flight to overlap the MFMA. gate+up => 2 fragments.
+            # 128b B (gate+up) loads/thread; feeds the s_waitcnt that awaits only the
+            # A-gather while B stays in flight to overlap the MFMA. gate+up => x2.
             _b_loads_per_tile = 2 * (fx.size(fx.get_shape(bl_frag_bufs[0])).to_py_value() // _val_per_thr)
 
         c_fake_buf = fx.rocdl.make_buffer_tensor(
@@ -236,10 +224,7 @@ def _build_moe_gemm1_fp8_gateup(
         num_tiles = K // TILE_K
 
         def _load_gmem(kt, s):
-            """Issue global A-gather (+ generic B gate/up loads) for K-tile kt, stage s.
-
-            int4 loads its weight just-in-time in the loop (single buffer), so here it
-            only issues the A-gather -- the s_waitcnt then awaits just the gather."""
+            """A-gather (+ B gate/up loads for non-int4) for K-tile kt, stage s."""
             kb = fx.Int32(kt)
             a_idx.copy(buf_cp_atom_r, kb, a_cp_frag_bufs[s])
             if const_expr(not is_int4):
@@ -247,8 +232,7 @@ def _build_moe_gemm1_fp8_gateup(
                 fx.copy(buf_cp_atom_r, br_g2r[None, None, None, kb], br_ret_bufs[s])
 
         def _load_weight_i4(kt):
-            """Explicit ki-correct packed-int4 gate/up weight load for K-tile kt into
-            the single weight buffer (int4 only), issued right before its MFMA."""
+            """ki-correct packed-int4 gate/up weight load for K-tile kt (int4 only)."""
             kb = fx.Int32(kt)
             fxh.load_weight_int4_frag(b_raw, b_layout_i4, bl_frag_bufs[0], _expert_off, _col_gate, kb, tid, _ki_reps)
             fxh.load_weight_int4_frag(b_raw, b_layout_i4, br_frag_bufs[0], _expert_off, _col_up, kb, tid, _ki_reps)
@@ -257,8 +241,7 @@ def _build_moe_gemm1_fp8_gateup(
             fx.copy(uni_cp_atom, a_cp_frag_retile_bufs[s], a_lds_w_bufs[s])
 
         def _read_a_lds(s):
-            """LDS A-reads issued separately from the MFMA (right after the validating
-            barrier, ahead of next iter's MFMA) so ds_read latency hides."""
+            """LDS A-reads issued ahead of the next MFMA so ds_read latency hides."""
             for ki in range_constexpr(k_iters):
                 fx.copy(uni_cp_atom, a_lds_r_bufs[s][None, None, ki], a_frag_retile_bufs[s][None, None, ki])
 
@@ -284,9 +267,8 @@ def _build_moe_gemm1_fp8_gateup(
                                 c_up[None, m, n],
                             )
 
-        # Prologue: stage-0 global loads + LDS write for K-tile 0. Await only the
-        # A-gather (issued before B) so ds_write sees valid A; tile-0 B loads stay in
-        # flight to overlap the first MFMA. Pre-read tile-0 A from LDS to hide ds_read.
+        # Prologue: stage-0 loads + LDS write for K-tile 0. Wait only on the A-gather
+        # (B stays in flight for the first MFMA); pre-read tile-0 A from LDS.
         _load_gmem(0, 0)
         rocdl.s_waitcnt(fxh._encode_waitcnt(vmcnt=_b_loads_per_tile))
         _write_a_lds(0)
@@ -294,8 +276,7 @@ def _build_moe_gemm1_fp8_gateup(
         _read_a_lds(0)
 
         # Unrolled ping-pong: compute tile kt on `cur` while prefetching kt+1's A into
-        # `nxt`. fp8/int8 also prefetch B; int4 loads its (single-buffer) weight
-        # just-in-time before each MFMA to keep VGPR/occupancy up.
+        # `nxt`. fp8/int8 also prefetch B; int4 loads its single-buffer weight JIT.
         for kt in range_constexpr(num_tiles):
             cur = kt % 2
             if kt + 1 < num_tiles:
@@ -317,9 +298,8 @@ def _build_moe_gemm1_fp8_gateup(
     _gemm_1x4 = ASTRewriter.transform(_gemm_1x4)
 
     def _apply_dequant(c_gate_frag, c_up_frag, tid, expert_id, blk_n, asc_idx, M, arg_scale_w, arg_scale_x):
-        # ptpc: per-channel weight scale (gate [0,inter), up [inter,2inter)), per-token act scale.
-        # fp8: c_*_frag are f32, dequant folds sx*sw in place. int8: c_*_frag are the i32
-        # MFMA acc, so convert to f32 into fresh f32 out fragments (returned to the caller).
+        # ptpc: per-channel weight scale (gate [0,inter), up [inter,2inter)), per-token
+        # act scale. fp8 folds in place; int8 converts the i32 acc to fresh f32 frags.
         m_reps = fxh.reps(c_gate_frag, 1)
         n_reps = fxh.reps(c_gate_frag, 2)
         if const_expr(is_int8):
@@ -344,7 +324,7 @@ def _build_moe_gemm1_fp8_gateup(
         fx.copy(cp_atom_scale, sg_thr, gate_scale)
         fx.copy(cp_atom_scale, su_thr, up_scale)
 
-        # int8smooth: scale_x is [topk*M] slot-major, indexed slot*tokens + token.
+        # int8smooth: scale_x is [topk*M] slot-major (row = slot*tokens + token).
         asc_rows = fx.Int32(TOPK) * M if const_expr(is_int8smooth) else M
         a_scale_tensor = fx.rocdl.make_buffer_tensor(
             fx.make_view(fx.recast_iter(fx.Float32, fx.get_iter(arg_scale_x)), fx.make_layout(asc_rows, 1)),
@@ -439,19 +419,16 @@ def _build_moe_gemm1_fp8_gateup(
 
             w_ptr = fx.recast_iter(in_t, fx.get_iter(arg_w))
             if const_expr(is_int4):
-                # Packed-int4: pass a raw byte view of the whole weight; the
-                # explicit ki-correct loader in _gemm_1x4 indexes per-expert.
+                # Packed-int4: raw byte view; the ki-correct loader indexes per-expert.
                 arg_p_weight = fx.make_view(w_ptr, fx.make_layout((fx.Int32(experts * N_e * (K // 2)),), (1,)))
             else:
                 arg_p_weight = fxh.make_gateup_weight_view(w_ptr, expert_id, contiguous_n, N_e, K)
 
-            # Seed sorted ids into LDS (A-gather + output scatter index). The TV
-            # layouts read up to 256/(tile_k/16) M-rows (32 at tile_k=128), which
-            # EXCEEDS BM on decode (BM=16). Un-seeded slots decode to a VALID token
-            # 0 / slot 0 (zero id bits), so out-of-tile lanes would pile garbage onto
-            # token 0 instead of being dropped. Seed every readable slot with the
-            # sentinel token id == M (out of range -> hardware OOB clamp drops the
-            # gather/scatter), then overwrite the real rows.
+            # BUG GUARD: the A-gather/scatter TV layouts read up to 256/(tile_k/16)
+            # M-rows (32 at tile_k=128), EXCEEDING BM on decode (BM=16). Un-seeded
+            # slots decode to a VALID token 0 / slot 0, piling garbage onto token 0.
+            # Seed every readable slot (full 256 range, not just BM) with sentinel id
+            # == M (out of range -> hardware OOB clamp drops it), then write real rows.
             sorted_ids_buf = fx.rocdl.make_buffer_tensor(arg_p_sorted_ids, max_size=False)
             sentinel_view = fx.make_view(lds.sorted_lds.ptr, fx.make_layout(256, 1))
             sentinel_view[tid] = M
@@ -461,7 +438,7 @@ def _build_moe_gemm1_fp8_gateup(
                 lds_view[tid] = sorted_ids_buf[tid]
             gpu.barrier()
 
-            # Output [M, TOPK, inter] fp16/bf16; scatter index seeded from sorted_lds now.
+            # Output [M, TOPK, inter] fp16/bf16; scatter index from sorted_lds.
             out_elem = fx.BFloat16 if out_bf16 else fx.Float16
             arg_p_output = fx.make_view(
                 fx.recast_iter(out_elem, fx.get_iter(arg_out)),
@@ -500,8 +477,7 @@ def _build_moe_gemm1_fp8_gateup(
 
             c_gate_frag, c_up_frag = _gemm_1x4(blk_n, arg_p_input, arg_p_weight, lds, M, expert_id)
 
-            # dequant: sx (per token) * sw (per channel), folded into gate/up. int8 also
-            # converts the i32 acc to f32 here and returns fresh f32 fragments.
+            # dequant: sx (per token) * sw (per channel); int8 also i32->f32 here.
             c_gate_frag, c_up_frag = _apply_dequant(
                 c_gate_frag, c_up_frag, tid, expert_id, blk_n, asc_idx, M, arg_scale_w, arg_scale_x
             )
@@ -511,11 +487,11 @@ def _build_moe_gemm1_fp8_gateup(
                 _apply_doweight(c_gate_frag, c_up_frag, tid, e_idx, arg_sorted_weights)
 
             # silu output dtype MUST match the CShuffle staging/store dtype (out_elem)
-            # or the raw fragment bits are reinterpreted (bf16 0x4480==1024.0 -> f16 4.5).
+            # or the raw fragment bits are reinterpreted (bf16 0x4480 -> f16 4.5).
             c_out_bf16 = fxh.silu_pair_bf16(c_gate_frag, c_up_frag, out_dtype=out_elem)
 
-            # CShuffle epilogue: stage silu output to LDS (transpose, swz 3,3,3), read back
-            # channel-contiguous, scatter to out[t, slot, inter] via the sorted-id index.
+            # CShuffle epilogue: stage silu to LDS (transpose, swz 3,3,3), read back
+            # channel-contiguous, scatter to out[t, slot, inter] via sorted-id index.
             _, _tiled_mma = fxh.make_1x4_tiled_mma(in_t, acc_dtype)
             cshuf_atom_w = fx.make_copy_atom(fx.UniversalCopy64b(), out_elem)
             cshuf_atom_r = fx.make_copy_atom(fx.UniversalCopy128b(), out_elem)
@@ -556,8 +532,7 @@ def _build_moe_gemm1_fp8_gateup(
     ):
         inter_in = arith.index_cast(T.index, i32_inter_in)
         size_expert_ids_in = arith.index_cast(T.index, i32_size_expert_ids_in)
-        # Each block produces `contiguous_n` output channels (gate/up silu-combine to
-        # one output per channel pair), so gx = inter / contiguous_n.
+        # Each block produces `contiguous_n` output channels, so gx = inter / contiguous_n.
         gx = inter_in // fx.Index(contiguous_n)
         gy = size_expert_ids_in
         moe_gemm1_fp8_gateup(
@@ -595,15 +570,10 @@ def compile_moe_gemm1(
 ):
     """Compile stage1 gate-up kernel (``moe_gemm1``) and return the executable.
 
-    X/W are fp8 (E4M3), int8, or int8smooth on gfx94*/gfx95*. ``out_dtype`` is the
-    fp16/bf16 output type. int8/int8smooth share the fp8 pipeline (i32 MFMA acc,
-    f32 dequant); int8smooth adds slot-major A/scale_x indexing.
-
-    ``int4`` (W4A8) shares the whole int8-activation pipeline; only the weight load
-    differs. The packed-int4 weight is driven through an explicit ki-correct
-    preshuffle-address loader (``fxh.load_weight_int4_frag``) that reproduces the
-    int8 MFMA A-fragment's ki-separated kpack addressing, then 7-op nibble-unpacks
-    each dword into the A-fragment (weight stays the A-operand).
+    X/W are fp8 (E4M3), int8, int8smooth, or int4 (W4A8) on gfx94*/gfx95*;
+    ``out_dtype`` is f16/bf16. int8 variants share the fp8 pipeline (i32 MFMA acc,
+    f32 dequant); int8smooth adds slot-major A/scale_x indexing; int4 swaps the
+    weight load for the ki-correct packed-int4 loader (``load_weight_int4_frag``).
     """
     _arch = get_rocm_arch()
     if not ("gfx95" in _arch or "gfx94" in _arch):

@@ -87,9 +87,8 @@ def _global_atomic_pk(dst, elem_idx, reg_vec, elem_bytes):
 def make_1x4_tiled_mma(weight_dtype, acc_dtype=None):
     """B-first 1x4 tiled_mma (weight=A, activation=B; 4 waves tile the M/channel dim).
 
-    ``acc_dtype`` sets the MFMA accumulator element type. fp8 leaves it at the atom
-    default (f32); int8 MUST pass ``fx.Int32`` -- a default-f32 accumulator on the
-    Int8 MFMA hard-aborts CDNA verification (integer MFMA requires an i32 acc)."""
+    BUG GUARD (#5): int8 MUST pass ``acc_dtype=fx.Int32`` -- a default-f32 accumulator
+    on the Int8 MFMA hard-aborts CDNA verification. fp8 leaves it at the atom default."""
     mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, weight_dtype, acc_dtype))
     k_perm = fx.make_layout((8, 4, 2), (1, 16, 8))
     tiled_mma = fx.make_tiled_mma(
@@ -134,15 +133,11 @@ def make_weight_view(p_weight, expert_id, N, K):
 
 
 def make_preshuffle_b_layout_int4(N_full, K):
-    """W4A8 packed-int4 preshuffle address layout (per expert).
-
-    Returns the CK/aiter preshuffle B layout the legacy W4A8 kernel uses
-    (``make_preshuffle_b_layout(c_n=N_full, c_k=K, kpack_bytes=8)``), over the
-    packed-int4 weight bytes: shape ``(N_full/16, K_bytes/64, 4, 16, 8)``. Its
-    ``crd2idx`` reproduces the int8 MFMA A-fragment's ki-separated kpack byte
-    addressing (see ``load_weight_int4_frag``). ``N_full`` is the full per-expert
-    output-channel count (2*inter_dim for gemm1 gate+up, model_dim for gemm2);
-    ``K`` is the contraction dim in int8 elements (model_dim / inter_dim)."""
+    """W4A8 packed-int4 preshuffle address layout (per expert), shape
+    ``(N_full/16, K_bytes/64, 4, 16, 8)``. Its ``crd2idx`` reproduces the int8 MFMA
+    A-fragment's ki-separated kpack byte addressing (see ``load_weight_int4_frag``).
+    ``N_full`` = per-expert output channels (2*inter_dim gemm1 / model_dim gemm2);
+    ``K`` = contraction dim in int8 elems."""
     from flydsl.expr import arith as _lay_arith
     from kernels.common.mma.mfma_preshuffle_pipeline import make_preshuffle_b_layout
 
@@ -152,24 +147,20 @@ def make_preshuffle_b_layout_int4(N_full, K):
 def load_weight_int4_frag(bt_i32, b_layout, frag, expert_off_dwords, col_base, kb, tid, ki_reps):
     """Fill an int8 MFMA A-fragment from packed-int4 weight bytes, ki-correct.
 
-    ``bt_i32`` is a buffer_tensor over the packed weight reinterpreted as i32
-    dwords; one expert's slab starts at dword offset ``expert_off_dwords``.
-    ``b_layout`` is ``make_preshuffle_b_layout_int4(N_full, K)``. ``frag`` is
-    ``tiled_mma.make_fragment_A(...)`` with logical shape ``(8, m_reps, (2, ki_reps))``.
-    ``col_base`` is the tile's first output channel (blk_n*contiguous_n for a plain
-    tile; + inter_dim for the gemm1 up-half). ``kb`` is the K-tile index (fx.Int32,
-    may be a runtime scf.for value).
+    ``bt_i32``: buffer_tensor over the packed weight as i32 dwords, expert slab at
+    ``expert_off_dwords``. ``b_layout`` = ``make_preshuffle_b_layout_int4``. ``frag``
+    = make_fragment_A, shape ``(8, m_reps, (2, ki_reps))``. ``col_base`` = tile's
+    first output channel (+inter_dim for the gemm1 up-half). ``kb`` = K-tile index.
 
-    Address math (validated bit-exact vs the generic int8 A-load for contiguous_n
-    64/128, tile_k 128/256, every N-block and K-tile):
+    Address math (validated bit-exact vs the generic int8 A-load):
       col      = col_base + m*64 + wave*16 + lane%16    (channel this lane feeds)
       n_blk    = col//16 ; n_intra = col%16
       k0       = kb*ki_reps + ki                         (64-byte K super-step)
       k1       = lane//16 (0..3)                          (kpack lane group)
       byte_off = crd2idx((n_blk, k0, k1, n_intra, 0), b_layout)  (8-byte kpack base)
-    The two MFMA k-halves are the two dwords of the 8-byte kpack, so read both in
-    one place (dword base = byte_off//4): dword 0 -> k=0, dword 1 -> k=1. 7-op
-    nibble-unpack each (even={v0..v3}, odd={v4..v7}) into frag[None, m, (k, ki)]."""
+    The two MFMA k-halves are the two dwords of the 8-byte kpack (dword base =
+    byte_off//4): dword 0 -> k=0, dword 1 -> k=1. 7-op nibble-unpack each
+    (BUG GUARD #6: even={v0..v3}, odd={v4..v7}) into frag[None, m, (k, ki)]."""
     m_reps = fx.get_shape(frag)[1].to_py_value()
     lane = tid % fx.Int32(64)
     lane_mod_16 = lane % fx.Int32(16)
@@ -292,8 +283,7 @@ class _TensorWithIndex:
         self.offset_thread = offset_thread
         self.offset_thread_k = offset_thread // tile_m
         # Row-guard fake: a tall column-major tile whose row count exceeds any
-        # tiled_copy grid, so partitioning does NOT wrap OOB grid rows into the
-        # column dim -- lets the atomic epilogue detect grid slots whose row is
+        # tiled_copy grid, so the atomic epilogue can detect grid slots whose row is
         # outside [0, tile_m) (the plain-store path relies on buffer OOB instead).
         self._guard_rows = 256
         guard_fake = fx.make_view(ptr, fx.make_layout((self._guard_rows, tile_k), (1, self._guard_rows)))
@@ -336,11 +326,9 @@ class _TensorWithIndex:
         for m in range_constexpr(rep_m):
             if const_expr(atomic is not None):
                 tok = self.index_frag[0, m] & 0xFFFFFF
-                # Row-uniform padding skip: with the channel-major CShuffle TV layout
-                # `tok` is uniform across each 32-lane group, so this branch is
-                # near-wave-uniform. Skipping padding rows (sentinel tok >= row_limit)
-                # avoids their dropped-but-still-counted L2 atomic traffic (~4.25x
-                # inflation on prefill) rather than relying on the buffer clamp.
+                # Skip padding rows (sentinel tok >= row_limit) to avoid their
+                # dropped-but-still-counted L2 atomic traffic (~4.25x inflation on
+                # prefill). Near-wave-uniform under the channel-major TV layout.
                 row_valid = tok < fx.Int32(row_limit) if const_expr(row_limit is not None) else (tok >= fx.Int32(0))
 
                 def _atomic_row():
@@ -358,9 +346,9 @@ class _TensorWithIndex:
                         _va = reg_vec.numel
                         aligned = (row_base_i32 + chan_off) & fx.Int32(~(_va - 1))
                         if const_expr(atomic == "pk_global"):
-                            # Global atomics have NO bounds-check: an out-of-tile element
-                            # index corrupts memory, so predicate on the in-tile `valid`
-                            # guard (padding ROWS already dropped by `row_valid` above).
+                            # BUG GUARD #4: global atomics have NO bounds-check, so
+                            # predicate on the in-tile `valid` guard (padding rows
+                            # already dropped by `row_valid`).
                             def _global_pk():
                                 _global_atomic_pk(atomic_dst, aligned, reg_vec, out_bytes)
 
@@ -368,8 +356,8 @@ class _TensorWithIndex:
                             with _if_then(_if_slot):
                                 _global_pk()
                         else:
-                            # Buffer path: out-of-tile slots -> OOB element index so the
-                            # buffer bounds-check DROPS the atomic.
+                            # Buffer path: out-of-tile slots -> OOB index, dropped by
+                            # the buffer bounds-check.
                             elem_idx = valid.select(aligned, fx.Int32(row_limit) * fx.Int32(row_stride))
                             if const_expr(atomic == "f32"):
                                 _buffer_atomic_f32(atomic_rsrc, elem_idx, reg_vec)

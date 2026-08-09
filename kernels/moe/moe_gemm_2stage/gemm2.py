@@ -3,8 +3,8 @@
 
 """MoE GEMM stage2 (down-projection MFMA) fp8/int8 kernel builder.
 
-Layout-API pipeline: A2/W are fp8 (E4M3) or int8 on CDNA3 (gfx94*) / CDNA4 (gfx95*).
-int8 shares the fp8 path via an i32 MFMA accumulator (converted to f32 in dequant).
+Layout-API pipeline: A2/W are fp8 (E4M3) or int8 on CDNA3/CDNA4 (gfx94*/gfx95*).
+int8 shares the fp8 path via an i32 MFMA acc (converted to f32 in dequant).
 """
 
 import functools
@@ -49,14 +49,10 @@ def _build_moe_gemm2_fp8(
     in_dtype: str = "fp8",
 ):
     """Native stage2 down-projection (B-first MFMA, fp8/int8); out=(A2@W2^T)*a_scale*w_scale.
-    Epilogue: atomic (f16/bf16/f32) or reduce; prefer reduce (atomic is
-    occupancy-bound on compute and memory-bound on decode).
-
-    int8 shares the fp8 pipeline: it swaps the MFMA atom to ``mfma_i32_16x16x32_i8``
-    with an i32 accumulator and converts that i32 acc to f32 in the dequant step.
+    Epilogue: atomic (f16/bf16/f32) or reduce (prefer reduce). int8 shares the fp8
+    pipeline via an i32 MFMA acc converted to f32 in dequant. int8smooth bakes its
+    smooth scale into A2 host-side, so stage2 sees plain int8 -- same path as int8.
     """
-    # int8smooth applies its smooth scale host-side to A2 before quant, so stage2
-    # sees plain int8 A2 + a per-route scale -- identical to the int8 path here.
     is_int4 = in_dtype == "int4"  # W4A8: int8 activations x packed-int4 weights
     is_int8 = in_dtype in ("int8", "int8smooth") or is_int4
     elem_t = fx.Int8 if is_int8 else fx.Float8E4M3FNUZ
@@ -77,9 +73,9 @@ def _build_moe_gemm2_fp8(
     out_elem = fx.Float32 if out_is_f32 else (fx.BFloat16 if out_is_bf16 else fx.Float16)
     out_bytes = 4 if out_is_f32 else 2
 
-    # bf16 atomic accumulation: gfx95+/gfx12+ have buffer_atomic_pk_add_bf16; gfx942
-    # (CDNA3) only has global_atomic_pk_add_bf16, so bf16+accumulate there must use
-    # GLOBAL (!llvm.ptr) atomics. f16/f32 always use buffer atomics.
+    # bf16 atomics: gfx95+/gfx12+ have buffer_atomic_pk_add_bf16; gfx942 has only
+    # global_atomic_pk_add_bf16, so bf16+accumulate there uses GLOBAL (!llvm.ptr)
+    # atomics. f16/f32 always use buffer atomics.
     _gpu_arch = get_rocm_arch()
     _has_buffer_atomic_bf16 = str(_gpu_arch).startswith(("gfx95", "gfx12"))
     _needs_global_atomic_bf16 = out_is_bf16 and accumulate and not _has_buffer_atomic_bf16
@@ -103,9 +99,8 @@ def _build_moe_gemm2_fp8(
     in_t = elem_t
     a_lds_bytes = BM * TILE_K * elem_bytes  # A LDS: BM*TILE_K activation elems
     cshuf_bytes = BM * BN * out_bytes  # CShuffle staging reuses the A LDS bytes
-    # Single LDS region: A ping/pong pair (2*a_lds) during the loop, reused by the
-    # CShuffle epilogue after. max() of the two must fit CDNA3's 64KB (CDNA4 160KB)
-    # for large f32 tiles. ping = region[0:], pong = +a_lds.
+    # Single LDS region: A ping/pong (2*a_lds) in the loop, reused by the CShuffle
+    # epilogue. max() must fit CDNA3 64KB / CDNA4 160KB. ping=region[0:], pong=+a_lds.
     region_bytes = max(2 * a_lds_bytes, cshuf_bytes)
 
     @fx.struct
@@ -180,12 +175,11 @@ def _build_moe_gemm2_fp8(
             for f in a_cp_frag_bufs
         ]
 
-        # B (weight): single tile per block (no gate/up split); direct global->register,
-        # prefetched one K-tile ahead into a ping-pong pair of fragments.
+        # B (weight): single tile per block; global->register, prefetched one K-tile
+        # ahead into a ping-pong pair of fragments.
         _ki_reps = TILE_K // 64  # 64-byte K super-steps per tile
         if const_expr(is_int4):
-            # W4A8: packed-int4 weight through the explicit ki-correct preshuffle
-            # loader (see gemm1 / fxh.load_weight_int4_frag). col_base = blk_n*contiguous_n.
+            # W4A8: packed-int4 weight via the ki-correct loader (load_weight_int4_frag).
             # Read as i32 dwords (align-4) so each buffer_load pulls 4 packed bytes.
             _w_i8_iter = fx.get_iter(arg_p_weight)
             _w_i32_ptr = fx.PointerType.get(fx.Int32.ir_type, _w_i8_iter.memspace, 4)
@@ -256,9 +250,9 @@ def _build_moe_gemm2_fp8(
                                 c_frag[None, m, n],
                             )
 
-        # Rolled single-buffer scf.for: the unrolled ping-pong kept both buffers live
+        # Rolled single-buffer scf.for: unrolled ping-pong kept both buffers live
         # (196 VGPR, 2 blocks/CU) and couldn't hide the atomic drain tail; rolling
-        # drops VGPR to 130 (3 blocks/CU) while keeping intra-tile overlap.
+        # drops to 130 VGPR (3 blocks/CU) while keeping intra-tile overlap.
         for iv in range(0, num_tiles, 1):
             kb = arith.index_cast(T.i32, iv)
             _load_gmem(kb, 0)
@@ -273,10 +267,8 @@ def _build_moe_gemm2_fp8(
     _gemm_1x4 = ASTRewriter.transform(_gemm_1x4)
 
     def _apply_dequant(c_frag, tid, expert_id, blk_n, asc_idx, M, arg_scale_w, arg_scale_x):
-        # ptpc: per-channel (model_dim) weight scale, per-row act scale.
-        # Sentinel rows (token id decode invalid) get a_scale=0 so their atomic contribution is 0.
-        # fp8: c_frag is f32, folded in place. int8: c_frag is the i32 MFMA acc, so convert
-        # to f32 into a fresh f32 out fragment (returned to the caller).
+        # ptpc: per-channel (model_dim) weight scale, per-row act scale. Sentinel rows
+        # get a_scale=0 (zero atomic contribution). fp8 folds in place; int8 i32->f32.
         m_reps = fxh.reps(c_frag, 1)
         n_reps = fxh.reps(c_frag, 2)
         out = fx.make_fragment_like(c_frag, dtype=fx.Float32) if const_expr(is_int8) else c_frag
@@ -386,10 +378,9 @@ def _build_moe_gemm2_fp8(
         M = tokens * fx.Int32(TOPK)
 
         in_ptr = fx.recast_iter(in_t, fx.get_iter(arg_x))
-        # A2 is [tokens, topk, inter(K)] flattened. The A-gather decodes the sorted id
-        # into (token, slot), so the gather view MUST be rank-3; a rank-2 view drops
-        # the slot and reads slot-0 of every token (silently correct only when a
-        # token's topk slots are near-identical). Row = token*topk + slot.
+        # A2 is [tokens, topk, inter(K)] flattened. The A-gather decodes (token, slot),
+        # so the view MUST be rank-3; a rank-2 view drops the slot and reads slot-0 of
+        # every token. Row = token*topk + slot.
         arg_p_input = fx.make_view(
             in_ptr,
             fx.make_layout((tokens, fx.Int32(TOPK), fx.Int32(K)), (fx.Int32(TOPK * K), fx.Int32(K), 1)),
@@ -410,8 +401,7 @@ def _build_moe_gemm2_fp8(
 
             w_ptr = fx.recast_iter(in_t, fx.get_iter(arg_w))
             if const_expr(is_int4):
-                # Packed-int4: raw byte view of the whole weight; the explicit
-                # ki-correct loader in _gemm_1x4 indexes per-expert.
+                # Packed-int4: raw byte view; the ki-correct loader indexes per-expert.
                 arg_p_weight = fx.make_view(w_ptr, fx.make_layout((fx.Int32(experts * N * (K // 2)),), (1,)))
             else:
                 arg_p_weight = fxh.make_weight_view(w_ptr, expert_id, N, K)
@@ -423,10 +413,9 @@ def _build_moe_gemm2_fp8(
                 lds_view[tid] = sorted_ids_buf[tid]
             gpu.barrier()
 
-            # Output tensor: reduce -> [tokens*topk, model_dim] buffer for BufferCopy128b
-            # stores. Atomic -> rank-2 [tokens, model_dim] buffer resource; scatter
-            # issues buffer_atomic_add at explicit element indices (out_tensor here only
-            # supplies the tile shape to the index helper; its blocks go unused).
+            # Output: reduce -> [tokens*topk, model_dim] buffer for BufferCopy128b
+            # stores; atomic -> rank-2 [tokens, model_dim] buffer resource (scatter via
+            # buffer_atomic_add at explicit element indices; out_tensor supplies shape).
             out_atomic_rsrc = None
             if const_expr(accumulate):
                 out_atomic_rsrc = buffer_ops.create_buffer_resource(
@@ -445,19 +434,17 @@ def _build_moe_gemm2_fp8(
                 )
             out_tensor = fx.rocdl.make_buffer_tensor(arg_p_output, max_size=False)
             _c_vec = 128 // out_elem.width  # values per 128b atom (f16/bf16=8, f32=4)
-            # CShuffle read/scatter TV layout MUST be CHANNEL-MAJOR: the 32 lanes each
-            # walk _e_vec contiguous channels of ONE row (32*_e_vec contiguous output
-            # channels/group -> maximal coalescing); the other 8 threads index the row.
-            # A row-major lane map instead straddles 16 rows per wave and destroys
+            # BUG GUARD (#2): CShuffle read/scatter TV layout MUST be CHANNEL-MAJOR --
+            # the 32 lanes each walk _e_vec contiguous channels of ONE row (max
+            # coalescing); a row-major lane map straddles 16 rows/wave and destroys
             # atomic coalescing (4x traffic).
             _cshuffle_nlane = 32
             _n_row_thr = 256 // _cshuffle_nlane  # 8 threads on the row (token) dim
-            # e_vec (mirrors legacy mfma_epilogues.py):
-            #   * atomic -> MUST be NARROW (2). _buffer_atomic_pk emits ONE pk-pair per
-            #     instruction, so e_vec=2 makes the 32 lanes hit 32*2=64 CONTIGUOUS
-            #     channels (coalesced). A wider e_vec strides each lane's pk-pairs apart
-            #     -> uncoalesced atomics (observed 4.25x TCC_ATOMIC inflation).
-            #   * reduce -> 8 when contiguous_n%256==0 (wide coalesced store), else 2.
+            # BUG GUARD (#1): e_vec MUST be NARROW (2) on the atomic path --
+            # _buffer_atomic_pk emits ONE pk-pair/instruction, so e_vec=2 keeps the 32
+            # lanes on 64 CONTIGUOUS channels; wider strides pairs apart -> uncoalesced
+            # atomics (4.25x TCC_ATOMIC, 4.8x regression). reduce -> 8 when
+            # contiguous_n%256==0 (wide coalesced store), else 2.
             if const_expr(accumulate):
                 _e_vec = 2
             else:
@@ -469,8 +456,7 @@ def _build_moe_gemm2_fp8(
             assert (
                 BM % _n_row_thr == 0
             ), f"tile_m={BM} must be a multiple of {_n_row_thr} for the channel-major epilogue"
-            # Copy atoms sized to _e_vec: e_vec==_c_vec keeps a full 128b vector; the
-            # e_vec==2 path uses a narrower atom matching the layout's value mode.
+            # Copy atoms sized to _e_vec (full 128b vector, or a narrower atom for e_vec==2).
             _epi_bits = _e_vec * out_elem.width
             _buf_atom_ctor = {
                 16: fx.rocdl.BufferCopy16b,
@@ -485,9 +471,8 @@ def _build_moe_gemm2_fp8(
                 128: fx.UniversalCopy128b,
             }[_epi_bits]
             buf_atom_w128 = fx.make_copy_atom(_buf_atom_ctor(), out_elem)
-            # tile = (rows=_n_row_thr, cols=_n_chan_tile); linear idx = row + _n_row_thr*col.
-            # thread ((nlane 32 @ stride n_row_thr*e_vec, row-thr @ stride 1), val e_vec
-            # @ stride n_row_thr): each lane steps e_vec columns, each row-thr one row.
+            # tile = (rows=_n_row_thr, cols=_n_chan_tile); each lane steps e_vec columns,
+            # each row-thr one row (channel-major, per BUG GUARD #2 above).
             c_rw_copy = fx.make_tiled_copy(
                 buf_atom_w128,
                 fx.make_layout(
@@ -496,9 +481,8 @@ def _build_moe_gemm2_fp8(
                 ),
                 fx.make_tile(_n_row_thr, _n_chan_tile),
             )
-            # Row (token) index copy: same row mapping as c_rw_copy. Only the row-thread
-            # part of tid selects the row; the 32 channel-lanes read the same row
-            # (stride 0), val size 1. rep_m = BM/_n_row_thr matches c_rw_copy.
+            # Row (token) index copy: same row mapping as c_rw_copy; only the row-thread
+            # part of tid selects the row, the 32 channel-lanes share it (stride 0).
             c_index_copy = fx.make_tiled_copy(
                 fx.make_copy_atom(fx.UniversalCopy32b(), fx.Int32),
                 fx.make_layout(((_cshuffle_nlane, _n_row_thr), 1), ((0, 1), 0)),
@@ -522,8 +506,7 @@ def _build_moe_gemm2_fp8(
 
             c_frag = _gemm_1x4(blk_n, arg_p_input, arg_p_weight, lds, M, expert_id)
 
-            # dequant: a_scale (per row) * w_scale (per channel), folded into C. int8 also
-            # converts the i32 acc to f32 here and returns a fresh f32 fragment.
+            # dequant: a_scale (per row) * w_scale (per channel); int8 also i32->f32 here.
             c_frag = _apply_dequant(c_frag, tid, expert_id, blk_n, asc_idx, M, arg_scale_w, arg_scale_x)
             if const_expr(doweight_stage2):
                 _apply_doweight(c_frag, tid, e_idx, arg_sorted_weights)
@@ -630,11 +613,10 @@ def compile_moe_gemm2(
 ):
     """Compile stage2 down-projection kernel (``moe_gemm2``) and return it.
 
-    A2/W are fp8 (E4M3), int8, or W4A8 (``int4``: int8 A2 x packed-int4 weight) on
-    gfx94*/gfx95*. int8/int4 share the fp8 pipeline (i32 MFMA acc, f32 dequant);
-    int4 swaps the weight load for an explicit ki-correct preshuffle-address loader.
-    ``out_dtype`` output element:
-      - "f16": fp16 half2 atomics (fast, can overflow to +/-inf for bf16 workloads)
+    A2/W are fp8 (E4M3), int8, int8smooth, or int4 (W4A8) on gfx94*/gfx95*; int8
+    variants share the fp8 pipeline (i32 MFMA acc, f32 dequant), int4 swaps in the
+    ki-correct packed-int4 loader. ``out_dtype``:
+      - "f16": fp16 half2 atomics (fast, can overflow to +/-inf)
       - "bf16": bf16 atomics (buffer on gfx95+, global_atomic_pk_add_bf16 on gfx942)
       - "f32": fp32 scalar atomics (slower, avoids fp16 atomic overflow)
 
