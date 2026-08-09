@@ -462,7 +462,9 @@ def _build_moe_gemm2_fp8(
             assert (
                 contiguous_n % _n_chan_tile == 0
             ), f"tile_n={contiguous_n} must be a multiple of {_n_chan_tile} (32 lanes x {_e_vec} chan)"
-            assert BM % _n_row_thr == 0, f"tile_m={BM} must be a multiple of {_n_row_thr} for the channel-major epilogue"
+            assert (
+                BM % _n_row_thr == 0
+            ), f"tile_m={BM} must be a multiple of {_n_row_thr} for the channel-major epilogue"
             # Copy atoms sized to the per-thread contiguous value count (_e_vec), not a
             # fixed 128b: common case _e_vec==_c_vec keeps a full 128b vector; the
             # e_vec==2 path (contiguous_n not a 256-multiple) uses a narrower atom so the

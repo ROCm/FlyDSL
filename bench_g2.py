@@ -17,7 +17,7 @@ import math
 import os
 import statistics
 import sys
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
 
@@ -169,9 +169,7 @@ def build_inputs(args):
         num_valid_ids,
         sorted_size,
         blocks,
-    ) = build_routing_buffers_torch(
-        topk_ids=topk_ids, topk_weights=topk_weights, experts=experts, tile_m=tile_m
-    )
+    ) = build_routing_buffers_torch(topk_ids=topk_ids, topk_weights=topk_weights, experts=experts, tile_m=tile_m)
 
     # Quantize (fp8 per-token/per-row).
     x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)
@@ -360,9 +358,7 @@ def main():
     if bool(args.accumulate):
         out = torch.zeros((args.tokens, args.model_dim), device=inp["device"], dtype=inp["out_torch_dtype"])
     else:
-        out = torch.zeros(
-            (args.tokens * args.topk, args.model_dim), device=inp["device"], dtype=inp["out_torch_dtype"]
-        )
+        out = torch.zeros((args.tokens * args.topk, args.model_dim), device=inp["device"], dtype=inp["out_torch_dtype"])
 
     launch, exe = make_launch(inp, args, out)
 
