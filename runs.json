@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-08-09T03:53:29Z",
+ "updated": "2026-08-09T04:16:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31294093158,
+   "pr": null,
+   "commit": "421935cc6f09fd9b27d5d5ae52e0960e18834bd5",
+   "branch": "main",
+   "event": "push",
+   "title": "Release: bump version to 0.3.1 (#988)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31294093158",
+   "created_at": "2026-08-09T04:13:05Z",
+   "updated_at": "2026-08-09T04:14:00Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 31293954279,
+   "pr": 988,
+   "commit": "fba9d882bc0096361aeeecf0cdd9c4289887f9fb",
+   "branch": "skill-cleanup-v0.3.1",
+   "event": "pull_request",
+   "title": "Release: bump version to 0.3.1",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31293954279",
+   "created_at": "2026-08-09T04:09:08Z",
+   "updated_at": "2026-08-09T04:11:19Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 31293665399,
+   "pr": null,
+   "commit": "494b2cbd474d4c2511f19b74263d791f23bcfda4",
+   "branch": "main",
+   "event": "push",
+   "title": "[LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR AP\u2026",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31293665399",
+   "created_at": "2026-08-09T04:01:25Z",
+   "updated_at": "2026-08-09T04:13:38Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 31265730584,
    "pr": 971,
@@ -220,7 +265,7 @@
   },
   {
    "run_id": 31249658888,
-   "pr": 945,
+   "pr": null,
    "commit": "c212abb7c037264d6ed31a5c1d5b3d4f1ea45a5a",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
@@ -263,7 +308,7 @@
   },
   {
    "run_id": 31249528615,
-   "pr": 945,
+   "pr": null,
    "commit": "84f3026fdc3c3f158ee37370b37db5e8c54c8529",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
@@ -840,7 +885,7 @@
   },
   {
    "run_id": 31163858482,
-   "pr": 945,
+   "pr": null,
    "commit": "48c732be7fd6450b8725a4950856aa7e85ff849e",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
@@ -987,7 +1032,7 @@
   },
   {
    "run_id": 31158486047,
-   "pr": 945,
+   "pr": null,
    "commit": "69523e627f4c052334ce5d3aeceea696a1aff34d",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
@@ -1030,7 +1075,7 @@
   },
   {
    "run_id": 31158435799,
-   "pr": 945,
+   "pr": null,
    "commit": "9e029b6eec1d4503b7130dc5a277bd49c6889d6b",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
@@ -1045,7 +1090,7 @@
   },
   {
    "run_id": 31158408609,
-   "pr": 945,
+   "pr": null,
    "commit": "d8763a8ce339770d7e2946ee51ae77acdd375a5e",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
@@ -1451,7 +1496,7 @@
   },
   {
    "run_id": 31140855969,
-   "pr": 945,
+   "pr": null,
    "commit": "67b0bda47f498c565611c53f489f996acf92001b",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
@@ -1494,7 +1539,7 @@
   },
   {
    "run_id": 31135298153,
-   "pr": 945,
+   "pr": null,
    "commit": "2fe5e75c8e5802329278a4e1d1389bc984316a24",
    "branch": "jli/update-llvm-basemain",
    "event": "pull_request",
@@ -2000,107 +2045,6 @@
      "started_at": "2026-08-06T18:33:26Z",
      "completed_at": "2026-08-06T19:16:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31083451920/job/92693730206"
-    }
-   ]
-  },
-  {
-   "run_id": 31082436865,
-   "pr": null,
-   "commit": "0e86e529ae3273930d05c38a5b7ab28d874d02e3",
-   "branch": "cleanup/fx-copy-and-llvm-ptr",
-   "event": "pull_request",
-   "title": "[cleanup] Migrate kernels to fx.copy / .llvm_ptr; expand kernel-code-cleanup skill",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31082436865",
-   "created_at": "2026-08-06T07:50:01Z",
-   "updated_at": "2026-08-06T08:08:21Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 31081796824,
-   "pr": 973,
-   "commit": "819a94c2e1d4b56feb84d1f91faa0a4b7eaef375",
-   "branch": "worktree-fix-numeric-64bit-gaps",
-   "event": "pull_request",
-   "title": "[Fix] Implement integer wrap-around, wide unsigned constants",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31081796824",
-   "created_at": "2026-08-06T07:40:00Z",
-   "updated_at": "2026-08-06T14:56:35Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-06T08:39:04Z",
-     "completed_at": "2026-08-06T09:39:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31081796824/job/92561039803"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-06T08:22:55Z",
-     "completed_at": "2026-08-06T09:37:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31081796824/job/92561039809"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-06T14:02:32Z",
-     "completed_at": "2026-08-06T14:56:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31081796824/job/92561039857"
-    }
-   ]
-  },
-  {
-   "run_id": 31079676495,
-   "pr": 972,
-   "commit": "11196dedb999163763900d80a101b1def9371bde",
-   "branch": "mega_moe_a4w4",
-   "event": "pull_request",
-   "title": "add A4W4 and FP8 P2P transport support to MegaMoE v2",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31079676495",
-   "created_at": "2026-08-06T07:06:47Z",
-   "updated_at": "2026-08-06T08:05:30Z",
-   "actor": "Yaowu-Xiong",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-06T07:58:18Z",
-     "completed_at": "2026-08-06T08:05:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31079676495/job/92555717027"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-06T07:57:43Z",
-     "completed_at": "2026-08-06T08:05:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31079676495/job/92555717056"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-06T07:57:43Z",
-     "completed_at": "2026-08-06T08:05:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31079676495/job/92555717058"
     }
    ]
   }
