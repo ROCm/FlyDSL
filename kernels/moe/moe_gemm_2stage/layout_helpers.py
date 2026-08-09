@@ -136,8 +136,17 @@ def make_weight_view(p_weight, expert_id, N, K):
 def make_gateup_weight_view_int4(p_weight, expert_id, contiguous_n, N, K):
     """W4A8 packed-int4 analog of make_gateup_weight_view. Storage is bytes (2
     signed int4 nibbles each), preshuffled THEN packed 2-values/byte, so the K
-    dimension is measured in packed bytes (Kb = K//2) and the 16x16 preshuffle
-    tile holds 16 values = 8 packed bytes (element_num=8 vs 16 for int8)."""
+    dimension is measured in packed bytes (Kb = K//2). This is int8's view with
+    every BYTE stride halved: the N-block stride 16*K -> 16*Kb, and the kpack
+    group holds 16 values as 8 packed bytes so element_num=8 (int8's 16 halved),
+    inner stride 16*element_num = 128 (int8's 256 halved). Channel strides
+    (N, N//2, contiguous_n) are unchanged (they count output channels, not K).
+
+    NOTE (known-incomplete): this view addresses the packed K contiguously, but
+    the MFMA A tiled_copy splits int8's K into ki-separated kpack groups that a
+    half-width packed load cannot reproduce (see the W4A8 report / probes). The
+    weight load in gemm1/gemm2 is gated off until the explicit ki-correct loader
+    (mirroring the legacy ``load_b_pack_k32`` preshuffle addressing) is added."""
     Kb = K // 2
     element_num = 8
     group_layout_silu = fx.make_layout(
@@ -158,7 +167,7 @@ def make_gateup_weight_view_int4(p_weight, expert_id, contiguous_n, N, K):
 
 def make_weight_view_int4(p_weight, expert_id, N, K):
     """W4A8 packed-int4 analog of make_weight_view (stage2; N=model_dim, K=inter_dim).
-    K is in packed bytes (Kb=K//2), element_num=8 (16 values = 8 packed bytes)."""
+    K is in packed bytes (Kb=K//2), element_num=8 (see make_gateup_weight_view_int4)."""
     Kb = K // 2
     element_num = 8
     return fx.make_view(
