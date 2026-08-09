@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-08-09T08:12:17Z",
+ "updated": "2026-08-09T09:32:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31305944807,
+   "pr": 971,
+   "commit": "48a0bb0b3dd34357c027a1d6565391b771c7f8f8",
+   "branch": "gfx1250/gemm-opt-0805",
+   "event": "pull_request",
+   "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31305944807",
+   "created_at": "2026-08-09T09:27:22Z",
+   "updated_at": "2026-08-09T09:29:36Z",
+   "actor": "aoli26",
+   "jobs": []
+  },
+  {
+   "run_id": 31304982361,
+   "pr": 989,
+   "commit": "9c61b76a4bc78c0a40c11a2055d47c760f7f8765",
+   "branch": "ci/upgrade-rocm-7.14",
+   "event": "pull_request",
+   "title": "CI: upgrade PyTorch images to ROCm 7.14",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31304982361",
+   "created_at": "2026-08-09T09:03:06Z",
+   "updated_at": "2026-08-09T09:22:29Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-09T09:21:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31304982361/job/93225653587"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-09T09:22:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31304982361/job/93225653597"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-09T09:21:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31304982361/job/93225653834"
+    }
+   ]
+  },
   {
    "run_id": 31301689535,
    "pr": 989,
@@ -1991,36 +2049,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31103367193/job/92623638101"
     }
    ]
-  },
-  {
-   "run_id": 31094859946,
-   "pr": 975,
-   "commit": "4cfe6a4fd62dd4f248eb63f9883ce392070db59f",
-   "branch": "xyt/hgemm_layout",
-   "event": "pull_request",
-   "title": "Replace legacy HGEMM kernels with gfx950 A16W16 universe GEMM",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31094859946",
-   "created_at": "2026-08-06T10:50:39Z",
-   "updated_at": "2026-08-06T10:51:56Z",
-   "actor": "xytpai",
-   "jobs": []
-  },
-  {
-   "run_id": 31093012631,
-   "pr": 891,
-   "commit": "a1438c2355d7f5c3fba9a4002863ed914b1be4e9",
-   "branch": "add-wmma-tests-gfx1250",
-   "event": "pull_request",
-   "title": "[Test] Add gfx1250 WMMA lowering tests for additional dtypes",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31093012631",
-   "created_at": "2026-08-06T10:22:50Z",
-   "updated_at": "2026-08-06T10:22:50Z",
-   "actor": "AiyyappanMR",
-   "jobs": []
   }
  ]
 }
