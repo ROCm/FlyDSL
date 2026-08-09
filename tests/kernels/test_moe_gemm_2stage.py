@@ -869,7 +869,9 @@ def test_moe_gemm2_shapes_fast(accumulate, tokens, experts, topk, tile_m, tile_n
     )
     cos = _cosine_sim(got, ref)
     mode = "atomic" if accumulate else "reduce"
-    assert cos > 0.99, f"stage2 fast cos={cos:.5f} ({mode}, tile=({tile_m},{tile_n},{tile_k}), M=({tokens},{experts},{topk}))"
+    assert (
+        cos > 0.99
+    ), f"stage2 fast cos={cos:.5f} ({mode}, tile=({tile_m},{tile_n},{tile_k}), M=({tokens},{experts},{topk}))"
 
 
 @pytest.mark.large_shape
@@ -1103,15 +1105,30 @@ def test_moe_gemm1_output_canary(in_dtype, tile_m, tokens):
     tokens is a ragged tail (not a multiple of tile_m) so the last block is partial.
     A larger allocation must not change behavior (record bound derives from tokens)."""
     d = _prep_gemm1(
-        tokens=tokens, model_dim=256, inter_dim=128, experts=8, topk=2, tile_m=tile_m, seed=0,
-        in_dtype=in_dtype, out_dtype="bf16",
+        tokens=tokens,
+        model_dim=256,
+        inter_dim=128,
+        experts=8,
+        topk=2,
+        tile_m=tile_m,
+        seed=0,
+        in_dtype=in_dtype,
+        out_dtype="bf16",
     )
     topk = 2
     out = torch.zeros((tokens + _CANARY_ROWS, topk, 128), device="cuda", dtype=d["out_dt"])
     guard0 = _canary_fill(out, tokens)
     _launch(
-        d["exe"], out, x=d["x_q"], w=d["w"], scale_x=d["scale_x"], scale_w=d["scale_w"],
-        routing=d["routing"], dim0=128, dim1=256, tokens=tokens,
+        d["exe"],
+        out,
+        x=d["x_q"],
+        w=d["w"],
+        scale_x=d["scale_x"],
+        scale_w=d["scale_w"],
+        routing=d["routing"],
+        dim0=128,
+        dim1=256,
+        tokens=tokens,
     )
     guard1 = out.view(out.shape[0], -1)[tokens:]
     assert torch.equal(guard1, guard0), "stage1 wrote into the output guard region (row >= tokens)"
@@ -1131,8 +1148,16 @@ def test_moe_gemm2_output_canary(accumulate, in_dtype, tile_m, tokens):
     num_records_bytes-derived output record bound."""
     topk, model_dim = 2, 256
     d = _prep_gemm2(
-        tokens=tokens, model_dim=model_dim, inter_dim=128, experts=8, topk=topk, tile_m=tile_m, seed=0,
-        in_dtype=in_dtype, out_dtype="bf16", accumulate=accumulate,
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=128,
+        experts=8,
+        topk=topk,
+        tile_m=tile_m,
+        seed=0,
+        in_dtype=in_dtype,
+        out_dtype="bf16",
+        accumulate=accumulate,
     )
     n_rows = tokens if accumulate else tokens * topk
     out = torch.zeros((n_rows + _CANARY_ROWS, model_dim), device="cuda", dtype=d["out_dt"])
@@ -1142,8 +1167,17 @@ def test_moe_gemm2_output_canary(accumulate, in_dtype, tile_m, tokens):
     out[:n_rows].zero_()
     guard0 = _canary_fill(out, n_rows)
     _launch(
-        d["exe"], out, x=d["a2_q"], w=d["w"], scale_x=d["a2_scale"], scale_w=d["scale_w"],
-        routing=d["routing"], dim0=model_dim, dim1=128, tokens=tokens, zero_out=False,
+        d["exe"],
+        out,
+        x=d["a2_q"],
+        w=d["w"],
+        scale_x=d["a2_scale"],
+        scale_w=d["scale_w"],
+        routing=d["routing"],
+        dim0=model_dim,
+        dim1=128,
+        tokens=tokens,
+        zero_out=False,
     )
     guard1 = out[n_rows:]
     assert torch.equal(guard1, guard0), "stage2 wrote into the output guard region (row >= valid rows)"
@@ -1173,8 +1207,15 @@ def test_moe_gemm1_input_poison(in_dtype, tile_m, tokens):
     an isolation of num_records_bytes. The bytes-vs-elements descriptor bug (b) is
     isolated by test_moe_gemm2_output_canary (atomic output descriptor)."""
     d = _prep_gemm1(
-        tokens=tokens, model_dim=256, inter_dim=128, experts=8, topk=2, tile_m=tile_m, seed=0,
-        in_dtype=in_dtype, out_dtype="bf16",
+        tokens=tokens,
+        model_dim=256,
+        inter_dim=128,
+        experts=8,
+        topk=2,
+        tile_m=tile_m,
+        seed=0,
+        in_dtype=in_dtype,
+        out_dtype="bf16",
     )
     model_dim, topk = 256, 2
     qd = _quant_dtype(in_dtype)
@@ -1194,8 +1235,16 @@ def test_moe_gemm1_input_poison(in_dtype, tile_m, tokens):
             sx[tokens:] = float("nan")
         out = torch.zeros((tokens, topk, 128), device="cuda", dtype=d["out_dt"])
         _launch(
-            d["exe"], out, x=x, w=d["w"], scale_x=sx, scale_w=d["scale_w"],
-            routing=d["routing"], dim0=128, dim1=256, tokens=tokens,
+            d["exe"],
+            out,
+            x=x,
+            w=d["w"],
+            scale_x=sx,
+            scale_w=d["scale_w"],
+            routing=d["routing"],
+            dim0=128,
+            dim1=256,
+            tokens=tokens,
         )
         return out.clone()
 
@@ -1224,8 +1273,16 @@ def test_moe_gemm2_input_poison(accumulate, in_dtype, tile_m, tokens):
     the bytes-vs-elements bug (b) is isolated by test_moe_gemm2_output_canary."""
     topk, model_dim, inter_dim = 2, 256, 128
     d = _prep_gemm2(
-        tokens=tokens, model_dim=model_dim, inter_dim=inter_dim, experts=8, topk=topk, tile_m=tile_m, seed=0,
-        in_dtype=in_dtype, out_dtype="bf16", accumulate=accumulate,
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=8,
+        topk=topk,
+        tile_m=tile_m,
+        seed=0,
+        in_dtype=in_dtype,
+        out_dtype="bf16",
+        accumulate=accumulate,
     )
     qd = _quant_dtype(in_dtype)
 
@@ -1243,8 +1300,17 @@ def test_moe_gemm2_input_poison(accumulate, in_dtype, tile_m, tokens):
         n_rows = tokens if accumulate else tokens * topk
         out = torch.zeros((n_rows, model_dim), device="cuda", dtype=d["out_dt"])
         _launch(
-            d["exe"], out, x=a2, w=d["w"], scale_x=sa, scale_w=d["scale_w"],
-            routing=d["routing"], dim0=model_dim, dim1=inter_dim, tokens=tokens, zero_out=True,
+            d["exe"],
+            out,
+            x=a2,
+            w=d["w"],
+            scale_x=sa,
+            scale_w=d["scale_w"],
+            routing=d["routing"],
+            dim0=model_dim,
+            dim1=inter_dim,
+            tokens=tokens,
+            zero_out=True,
         )
         return out.clone()
 
@@ -1321,16 +1387,38 @@ def test_moe_gemm1_sentinel_token0(in_dtype, tile_m):
 
     out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.bfloat16)
     exe = compile_moe_gemm1(
-        model_dim=model_dim, inter_dim=inter_dim, experts=experts, topk=topk, tile_m=tile_m,
-        tile_n=64, tile_k=128, doweight_stage1=False, out_dtype="bf16", in_dtype=in_dtype,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=64,
+        tile_k=128,
+        doweight_stage1=False,
+        out_dtype="bf16",
+        in_dtype=in_dtype,
     )
     _launch(
-        exe, out, x=x_q, w=w1_shuf, scale_x=scale_x, scale_w=scale_w1_flat, routing=routing,
-        dim0=inter_dim, dim1=model_dim, tokens=tokens,
+        exe,
+        out,
+        x=x_q,
+        w=w1_shuf,
+        scale_x=scale_x,
+        scale_w=scale_w1_flat,
+        routing=routing,
+        dim0=inter_dim,
+        dim1=model_dim,
+        tokens=tokens,
     )
     ref = torch_moe_gemm1(
-        x_q, w1_q_flat, scale_x, scale_w1_flat, topk_ids.to(torch.int64), topk_weights,
-        inter_dim=inter_dim, doweight_stage1=False,
+        x_q,
+        w1_q_flat,
+        scale_x,
+        scale_w1_flat,
+        topk_ids.to(torch.int64),
+        topk_weights,
+        inter_dim=inter_dim,
+        doweight_stage1=False,
     )
     # Token 0 specifically must be clean (the sentinel bug corrupted exactly this row).
     cos_tok0 = _cosine_sim(out[0], ref[0])
@@ -1352,11 +1440,18 @@ def test_moe_gemm2_num_valid_ids_guard(accumulate, tile_m, tokens):
     ids to VALID-looking tokens. If the block guard is honored the poisoned trailing
     blocks are never processed and the output matches the clean reference; if it
     leaks, those tokens get spurious atomic contributions."""
-    device = torch.device("cuda")
     model_dim, inter_dim, experts, topk = 256, 128, 8, 2
     d = _prep_gemm2(
-        tokens=tokens, model_dim=model_dim, inter_dim=inter_dim, experts=experts, topk=topk, tile_m=tile_m,
-        seed=0, in_dtype="int8", out_dtype="bf16", accumulate=accumulate,
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        seed=0,
+        in_dtype="int8",
+        out_dtype="bf16",
+        accumulate=accumulate,
     )
     sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, blocks = d["routing"]
 
@@ -1371,8 +1466,17 @@ def test_moe_gemm2_num_valid_ids_guard(accumulate, tile_m, tokens):
     n_rows = tokens if accumulate else tokens * topk
     out = torch.zeros((n_rows, model_dim), device="cuda", dtype=d["out_dt"])
     _launch(
-        d["exe"], out, x=d["a2_q"], w=d["w"], scale_x=d["a2_scale"], scale_w=d["scale_w"],
-        routing=routing_poison, dim0=model_dim, dim1=inter_dim, tokens=tokens, zero_out=True,
+        d["exe"],
+        out,
+        x=d["a2_q"],
+        w=d["w"],
+        scale_x=d["a2_scale"],
+        scale_w=d["scale_w"],
+        routing=routing_poison,
+        dim0=model_dim,
+        dim1=inter_dim,
+        tokens=tokens,
+        zero_out=True,
     )
     got = out[:tokens] if accumulate else out.view(tokens, topk, model_dim).sum(dim=1)
     cos = _cosine_sim(got, d["ref"])
