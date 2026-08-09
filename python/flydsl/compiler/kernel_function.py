@@ -3,7 +3,7 @@
 
 import inspect
 import threading
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -12,7 +12,6 @@ from .._mlir.dialects import arith, gpu
 from ..expr.meta import capture_user_location, file_location, tracing_context
 from ..expr.numeric import Index, Integer
 from ..expr.typing import Constexpr, as_ir_value
-from ..expr.utils.arith import fastmath as fastmath_ctx
 from .ast_rewriter import ASTRewriter
 from .diagnostics import install_excepthook, warn_annotation_value_mismatch, warn_invalid_annotations
 from .jit_argument import is_type_param_annotation, resolve_signature
@@ -590,10 +589,13 @@ class KernelFunction:
 
                     dsl_args.update(constexpr_values)
 
-                    fastmath_flag = effective_fastmath_hint(CompilationContext.get_compile_hints())
-                    fastmath_scope = fastmath_ctx(fastmath_flag) if fastmath_flag is not None else nullcontext()
-                    # Bound the call-site boundary at the kernel body.
-                    with tracing_context(self._func), fastmath_scope:
+                    # Bound the call-site boundary at the kernel body and carry
+                    # the ambient tracing options into it.
+                    with tracing_context(
+                        self._func,
+                        fastmath=effective_fastmath_hint(CompilationContext.get_compile_hints()),
+                        known_block_size=tuple(known_block_size) if known_block_size is not None else None,
+                    ):
                         if bound_self is not None:
                             self._func(bound_self, **dsl_args)
                         else:

@@ -4,7 +4,7 @@
 """Target-neutral implementations of the random library."""
 
 from ...expr.math import cos, log, sin, sqrt
-from ...expr.numeric import Float32, Int32, Uint32, Uint64, as_numeric
+from ...expr.numeric import Float32, Int32, Int64, Uint32, Uint64, Uint128, as_numeric
 
 __all__ = [
     "randint",
@@ -16,10 +16,11 @@ __all__ = [
 ]
 
 
-def _require_32bit(word, what):
+def _word_width(word, what):
     width = as_numeric(word).dtype.width
-    if width != 32:
-        raise NotImplementedError(f"{what} is only implemented for 32-bit words, got {width}")
+    if width not in (32, 64):
+        raise NotImplementedError(f"{what} is only implemented for 32- or 64-bit words, got {width}")
+    return width
 
 
 def _offset_words(offset):
@@ -35,32 +36,34 @@ def _offset_words(offset):
 
 
 def philox_impl(c0, c1, c2, c3, k0, k1, n_rounds: int = 10):
-    """Run *n_rounds* Philox 4x32 rounds over counter ``(c0..c3)`` and key ``(k0, k1)``.
+    """Run *n_rounds* Philox 4x32 or 4x64 rounds.
 
-    Each round does two widening 32x32 to 64 bit multiplies and keeps the high
-    half, which is what Triton's ``umulhi`` computes.
+    The counter word width selects the variant. Each round does two widening
+    multiplies and keeps both halves, matching Triton's ``umulhi`` plus wrapping
+    ``mul`` operations.
     """
-    _require_32bit(c0, "philox")  # TODO(64-bit): support philox 4x64 variant
+    if _word_width(c0, "philox") == 32:
+        word_type, wide_type = Uint32, Uint64
+        PHILOX_KEY_A, PHILOX_KEY_B = 0x9E3779B9, 0xBB67AE85
+        PHILOX_ROUND_A, PHILOX_ROUND_B = 0xD2511F53, 0xCD9E8D57
+    else:
+        word_type, wide_type = Uint64, Uint128
+        PHILOX_KEY_A, PHILOX_KEY_B = 0x9E3779B97F4A7C15, 0xBB67AE8584CAA73B
+        PHILOX_ROUND_A, PHILOX_ROUND_B = 0xD2E7470EE14C6C93, 0xCA5A826395121157
 
-    # Philox 4x32 round and key constants, as used by Triton.
-    PHILOX_KEY_A = 0x9E3779B9
-    PHILOX_KEY_B = 0xBB67AE85
-    PHILOX_ROUND_A = 0xD2511F53
-    PHILOX_ROUND_B = 0xCD9E8D57
-
-    c0, c1, c2, c3 = Uint32(c0), Uint32(c1), Uint32(c2), Uint32(c3)
-    k0, k1 = Uint32(k0), Uint32(k1)
-    mul_a, mul_b = Uint64(PHILOX_ROUND_A), Uint64(PHILOX_ROUND_B)
-    step_a, step_b = Uint32(PHILOX_KEY_A), Uint32(PHILOX_KEY_B)
-    shift = Uint64(32)
+    c0, c1, c2, c3 = word_type(c0), word_type(c1), word_type(c2), word_type(c3)
+    k0, k1 = word_type(k0), word_type(k1)
+    mul_a, mul_b = wide_type(PHILOX_ROUND_A), wide_type(PHILOX_ROUND_B)
+    step_a, step_b = word_type(PHILOX_KEY_A), word_type(PHILOX_KEY_B)
+    shift = wide_type(word_type.width)
 
     for _ in range(n_rounds):
-        prod_b = Uint64(c2) * mul_b
-        prod_a = Uint64(c0) * mul_a
-        c0 = Uint32(prod_b >> shift) ^ c1 ^ k0
-        c2 = Uint32(prod_a >> shift) ^ c3 ^ k1
-        c1 = Uint32(prod_b)
-        c3 = Uint32(prod_a)
+        prod_b = wide_type(c2) * mul_b
+        prod_a = wide_type(c0) * mul_a
+        c0 = word_type(prod_b >> shift) ^ c1 ^ k0
+        c2 = word_type(prod_a >> shift) ^ c3 ^ k1
+        c1 = word_type(prod_b)
+        c3 = word_type(prod_a)
         k0 = k0 + step_a
         k1 = k1 + step_b
 
@@ -70,11 +73,15 @@ def philox_impl(c0, c1, c2, c3, k0, k1, n_rounds: int = 10):
 def philox(seed, c0, c1, c2, c3, n_rounds: int = 10):
     """Key a Philox counter with *seed* and run it.
 
-    The seed splits across both key words, so a signed seed sign-extends into
-    the high one, matching Triton.
+    For 32-bit counters the seed splits across both key words. For 64-bit
+    counters it fills the low key word and the high key word is zero, matching
+    Triton.
     """
     wide = Uint64(seed)
-    k0, k1 = Uint32(wide), Uint32(wide >> Uint64(32))
+    if _word_width(c0, "philox") == 32:
+        k0, k1 = Uint32(wide), Uint32(wide >> Uint64(32))
+    else:
+        k0, k1 = wide, Uint64(0)
     return philox_impl(c0, c1, c2, c3, k0, k1, n_rounds)
 
 
@@ -103,16 +110,20 @@ def randint(seed, offset, n_rounds: int = 10):
 
 
 def uint_to_uniform_float(word):
-    """Map a random 32-bit *word* to a ``Float32`` uniformly drawn from [0, 1).
+    """Map a random 32- or 64-bit *word* to a ``Float32`` in [0, 1).
 
     The word is reinterpreted as a signed integer and negatives fold onto the
-    positive range, so every bit pattern maps to a distinct value below 1.0.
+    positive range, keeping the rounded result below 1.0.
     """
-    UNIFORM_SCALE = 4.6566127342e-10
-    _require_32bit(word, "uniform conversion")
+    if _word_width(word, "uniform conversion") == 32:
+        signed_type = Int32
+        UNIFORM_SCALE = 4.6566127342e-10
+    else:
+        signed_type = Int64
+        UNIFORM_SCALE = 1.0842020432385337e-19
 
-    signed = Int32(word)
-    folded = (signed < Int32(0)).select(-signed - Int32(1), signed)
+    signed = signed_type(word)
+    folded = (signed < signed_type(0)).select(-signed - signed_type(1), signed)
     return Float32(folded) * Float32(UNIFORM_SCALE)
 
 
