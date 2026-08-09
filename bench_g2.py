@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-# Standalone MoE stage2 (gemm2) benchmark for the fp8 new-vs-legacy A/B toggle.
+# Standalone MoE stage2 (gemm2) fp8 benchmark.
 #
 # NOT a pytest file. Self-contained: reuses the reference input-build/routing
 # logic from the deleted test harness run_moe_stage2 (copied inline), and the
 # math reference helpers from tests/* (pertoken_quant, shuffle_weight,
 # torch_moe_gemm1/2), which are NOT part of the deleted test.
 #
-# The A/B variant is selected by the env var MOE_FORCE_LEGACY_G2_FP8:
-#   unset / "0" -> new layout-API fp8 path (_build_moe_gemm2_fp8)
-#   "1"         -> legacy body
-# See kernels/moe/moe_gemm_2stage/gemm2.py::compile_moe_gemm2.
+# Exercises the layout-API fp8 stage2 kernel (_build_moe_gemm2_fp8) via
+# kernels/moe/moe_gemm_2stage/gemm2.py::compile_moe_gemm2.
 
 import argparse
 import math
@@ -245,15 +243,12 @@ def make_launch(inp, args, out_buf):
         inter_dim=args.inter_dim,
         experts=args.experts,
         topk=args.topk,
-        in_dtype="fp8",
         out_dtype=args.out_dtype,
-        group_size=-1,
         tile_m=args.tile_m,
         tile_n=args.tile_n,
         tile_k=args.tile_k,
         doweight_stage2=bool(inp["doweight_stage2"]),
         accumulate=bool(args.accumulate),
-        scale_is_bf16=False,
     )
 
     def _args(o):
@@ -344,7 +339,7 @@ def main():
         print("CUDA/ROCm not available.", file=sys.stderr)
         sys.exit(1)
 
-    variant = "legacy" if os.environ.get("MOE_FORCE_LEGACY_G2_FP8", "0") == "1" else "new"
+    variant = "new"
     shape_id = (
         f"t{args.tokens}_md{args.model_dim}_id{args.inter_dim}_E{args.experts}_"
         f"tk{args.topk}_bm{args.tile_m}_tn{args.tile_n}_tk{args.tile_k}_"
