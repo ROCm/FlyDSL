@@ -243,5 +243,9 @@ def bench_vs_aiter(M, N, K):
 
 
 if __name__ == "__main__":
-    for shape in ((8192, 8192, 8192), (8192, 8192, 16384), (16384, 16384, 8192), (16384, 16384, 16384)):
-        bench_vs_aiter(*shape)
+    if "--vs-aiter" in sys.argv:
+        for shape in ((8192, 8192, 8192), (8192, 8192, 16384), (16384, 16384, 8192), (16384, 16384, 16384)):
+            bench_vs_aiter(*shape)
+    else:
+        _bench_fp4_gemm(8192, 8192, 8192)
+        _bench_fp4_gemm(16384, 16384, 16384)
