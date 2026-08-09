@@ -4,10 +4,11 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 """
-Numeric correctness tests for the ``moe_gemm_2stage`` fp8 2-stage kernels.
+Numeric correctness tests for the ``moe_gemm_2stage`` fp8/int8 2-stage kernels.
 
-Covers stage1 (gate-up + silu) and stage2 (down-projection) against torch fp8
-references by cosine similarity. fp8-only on CDNA3 (gfx94*) / CDNA4 (gfx95*).
+Covers stage1 (gate-up + silu) and stage2 (down-projection) against torch
+references by cosine similarity, for both fp8 and int8 inputs, on CDNA3 (gfx94*)
+/ CDNA4 (gfx95*).
 
 Stage2 runs both atomic (``accumulate=True``) and reduce (``accumulate=False``)
 modes, f16/bf16/f32 outputs (f32 atomic-only), and two tile_m values (16 decode,
@@ -49,6 +50,11 @@ def _fp8_supported() -> bool:
 
 
 _requires_fp8 = pytest.mark.skipif(not _fp8_supported(), reason="fp8 2-stage MoE requires gfx94*/gfx95*")
+
+
+def _quant_dtype(in_dtype: str) -> torch.dtype:
+    """Kernel input torch dtype for the given ``in_dtype`` ('fp8' or 'int8')."""
+    return torch.int8 if in_dtype == "int8" else _DTYPE_FP8
 
 
 def _cosine_sim(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -133,9 +139,12 @@ def _make_routing(tokens, experts, topk, tile_m, device, seed):
 # ---------------------------------------------------------------------------
 # Stage1 (gate-up + silu).
 # ---------------------------------------------------------------------------
-def _run_gemm1(*, tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k, out_dtype, seed=0):
+def _run_gemm1(
+    *, tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k, out_dtype, in_dtype="fp8", seed=0
+):
     device = torch.device("cuda")
     doweight_stage1 = False
+    _qd = _quant_dtype(in_dtype)
 
     topk_ids, topk_weights, routing = _make_routing(tokens, experts, topk, tile_m, device, seed)
     sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, blocks = routing
@@ -147,8 +156,8 @@ def _run_gemm1(*, tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, t
         1.0 / math.sqrt(model_dim)
     )
 
-    x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=_DTYPE_FP8)
-    w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=_DTYPE_FP8)
+    x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=_qd)
+    w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=_qd)
 
     w1_shuffled = shuffle_weight(w1_q)
     w1_shuffled_flat = w1_shuffled.view(experts * (2 * inter_dim), model_dim).contiguous()
@@ -172,6 +181,7 @@ def _run_gemm1(*, tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, t
         tile_k=tile_k,
         doweight_stage1=doweight_stage1,
         out_dtype=out_dtype,
+        in_dtype=in_dtype,
     )
 
     def _args(o):
@@ -212,10 +222,25 @@ def _run_gemm1(*, tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, t
 # ---------------------------------------------------------------------------
 # Stage2 (down-projection).
 # ---------------------------------------------------------------------------
-def _run_gemm2(*, tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k, out_dtype, accumulate, seed=0):
+def _run_gemm2(
+    *,
+    tokens,
+    model_dim,
+    inter_dim,
+    experts,
+    topk,
+    tile_m,
+    tile_n,
+    tile_k,
+    out_dtype,
+    accumulate,
+    in_dtype="fp8",
+    seed=0,
+):
     device = torch.device("cuda")
     doweight_stage1 = False
     doweight_stage2 = not doweight_stage1
+    _qd = _quant_dtype(in_dtype)
 
     topk_ids, topk_weights, routing = _make_routing(tokens, experts, topk, tile_m, device, seed)
     sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, blocks = routing
@@ -229,9 +254,9 @@ def _run_gemm2(*, tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, t
         s / math.sqrt(inter_dim)
     )
 
-    x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=_DTYPE_FP8)
-    w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=_DTYPE_FP8)
-    w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=_DTYPE_FP8)
+    x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=_qd)
+    w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=_qd)
+    w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=_qd)
 
     # Stage2 input A2 = quantized reference stage1 output.
     w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
@@ -246,7 +271,7 @@ def _run_gemm2(*, tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, t
         inter_dim=inter_dim,
         doweight_stage1=doweight_stage1,
     )
-    a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=_DTYPE_FP8)
+    a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=_qd)
 
     w2_shuffled = shuffle_weight(w2_q)
     w2_kernel = w2_shuffled.view(experts * model_dim, inter_dim).contiguous().view(-1)
@@ -271,6 +296,7 @@ def _run_gemm2(*, tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, t
         doweight_stage2=doweight_stage2,
         out_dtype=out_dtype,
         accumulate=accumulate,
+        in_dtype=in_dtype,
     )
 
     def _args(o):
@@ -320,17 +346,20 @@ _SHAPE = dict(model_dim=256, inter_dim=128, experts=4, topk=2)
 
 
 @_requires_fp8
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8"])
 @pytest.mark.parametrize("out_dtype", ["f16", "bf16"])
 @pytest.mark.parametrize("tile_m,tokens", [(64, 128), (16, 8)])
-def test_moe_gemm1_numeric(out_dtype, tile_m, tokens):
-    """Stage1 gate-up + silu matches the torch fp8 reference (prefill tile_m=64,
-    decode tile_m=16).
+def test_moe_gemm1_numeric(in_dtype, out_dtype, tile_m, tokens):
+    """Stage1 gate-up + silu matches the torch reference (prefill tile_m=64,
+    decode tile_m=16), for both fp8 and int8 inputs.
 
     The tile_m=16 case is the decode-path gather/scatter regression guard: the
     A-gather and output-scatter TV layouts read 32 M-rows even when BM=16, so
     un-seeded sorted_lds slots (16..31) decoded to a valid token 0 / slot 0 and
     piled garbage onto the first-routed token. Fixed by seeding a sentinel token
     id (== M, hardware-OOB) into every readable LDS slot before the real ids.
+
+    int8 shares the fp8 pipeline (i32 MFMA acc converted to f32 in dequant).
     """
     out, ref = _run_gemm1(
         tokens=tokens,
@@ -339,12 +368,14 @@ def test_moe_gemm1_numeric(out_dtype, tile_m, tokens):
         tile_n=64,
         tile_k=128,
         out_dtype=out_dtype,
+        in_dtype=in_dtype,
     )
     cos = _cosine_sim(out, ref)
-    assert cos > 0.99, f"stage1 cos={cos:.5f} (out_dtype={out_dtype}, tile_m={tile_m})"
+    assert cos > 0.99, f"stage1 cos={cos:.5f} (in_dtype={in_dtype}, out_dtype={out_dtype}, tile_m={tile_m})"
 
 
 @_requires_fp8
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8"])
 @pytest.mark.parametrize(
     "accumulate,out_dtype",
     [
@@ -356,12 +387,13 @@ def test_moe_gemm1_numeric(out_dtype, tile_m, tokens):
     ],
 )
 @pytest.mark.parametrize("tile_m,tokens", [(16, 8), (64, 128)])
-def test_moe_gemm2_numeric(accumulate, out_dtype, tile_m, tokens):
-    """Stage2 down-projection matches the torch fp8 reference (cosine).
+def test_moe_gemm2_numeric(accumulate, out_dtype, tile_m, tokens, in_dtype):
+    """Stage2 down-projection matches the torch reference (cosine), for both fp8
+    and int8 inputs.
 
     Covers atomic (accumulate=True) and reduce (accumulate=False) modes, all
     supported output dtypes, and both decode-ish (tile_m=16) and prefill-ish
-    (tile_m=64) paths.
+    (tile_m=64) paths. int8 shares the fp8 pipeline (i32 MFMA acc, f32 dequant).
     """
     got, ref = _run_gemm2(
         tokens=tokens,
@@ -371,10 +403,11 @@ def test_moe_gemm2_numeric(accumulate, out_dtype, tile_m, tokens):
         tile_k=128,
         out_dtype=out_dtype,
         accumulate=accumulate,
+        in_dtype=in_dtype,
     )
     cos = _cosine_sim(got, ref)
     mode = "atomic" if accumulate else "reduce"
-    assert cos > 0.99, f"stage2 cos={cos:.5f} ({mode}, out_dtype={out_dtype}, tile_m={tile_m})"
+    assert cos > 0.99, f"stage2 cos={cos:.5f} ({mode}, in_dtype={in_dtype}, out_dtype={out_dtype}, tile_m={tile_m})"
 
 
 @_requires_fp8

@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""MoE GEMM stage1 (gate-up MFMA) fp8 kernel builder.
+"""MoE GEMM stage1 (gate-up MFMA) fp8/int8 kernel builder.
 
-fp8-only layout-API pipeline: X/W are fp8 (E4M3) on CDNA3 (gfx94*) / CDNA4 (gfx95*).
+Layout-API pipeline: X/W are fp8 (E4M3) or int8 on CDNA3 (gfx94*) / CDNA4 (gfx95*).
+int8 shares the fp8 path via an i32 MFMA accumulator (converted to f32 in dequant).
 """
 
 import functools
@@ -28,13 +29,21 @@ def _build_moe_gemm1_fp8_gateup(
     tile_k: int,
     doweight_stage1: bool,
     out_dtype: str,
+    in_dtype: str = "fp8",
 ):
-    """Native gate-up GEMM (B-first MFMA, fp8): out[t,slot,inter] =
+    """Native gate-up GEMM (B-first MFMA, fp8/int8): out[t,slot,inter] =
     silu(gate*sx*sw_g)*(up*sx*sw_u)[*routed], scattered by sorted token ids.
+
+    int8 shares the whole fp8 pipeline (1-byte elems, same 16x16x32 MFMA geometry,
+    same per-token/per-channel scale algebra); it only swaps the MFMA atom to
+    ``mfma_i32_16x16x32_i8`` with an i32 accumulator and converts that i32 acc to
+    f32 in the dequant step before applying ``sx * sw``.
     """
-    elem_t = fx.Float8E4M3FNUZ
+    is_int8 = in_dtype == "int8"
+    elem_t = fx.Int8 if is_int8 else fx.Float8E4M3FNUZ
+    acc_dtype = fx.Int32 if is_int8 else None
     MFMA_K = 32
-    elem_bytes = elem_t.width // 8  # fp8=1
+    elem_bytes = elem_t.width // 8  # fp8/int8=1
 
     K = int(model_dim)
     N_e = int(2 * inter_dim)  # per-expert output cols (gate+up)
@@ -56,13 +65,13 @@ def _build_moe_gemm1_fp8_gateup(
         f"contiguous_n={contiguous_n} (from tile_n={BN})"
     )
 
-    fp8_t = elem_t
+    in_t = elem_t
     a_lds_size = BM * TILE_K
 
     @fx.struct
     class GemmBuffers:
-        a_ping: fx.Array[fp8_t, a_lds_size, 16]
-        a_pong: fx.Array[fp8_t, a_lds_size, 16]
+        a_ping: fx.Array[in_t, a_lds_size, 16]
+        a_pong: fx.Array[in_t, a_lds_size, 16]
 
     @fx.union
     class SharedStorage:
@@ -78,7 +87,7 @@ def _build_moe_gemm1_fp8_gateup(
     def _gemm_1x4(blk_n, arg_p_input, arg_p_weight, lds, M):
         """B-first native-fp8 gate/up GEMM with A-gather + LDS ping-pong."""
         tid = gpu.thread_idx.x
-        mma_atom, tiled_mma = fxh.make_1x4_tiled_mma(fp8_t)
+        mma_atom, tiled_mma = fxh.make_1x4_tiled_mma(in_t, acc_dtype)
 
         # Explicit record bound so sentinel-row gathers (token_id == M padding) read
         # 0 via hardware OOB instead of garbage/NaN.
@@ -92,7 +101,7 @@ def _build_moe_gemm1_fp8_gateup(
             fx.make_view(fx.get_iter(arg_p_input), fx.make_layout((BM, K), (K, 1))), max_size=False
         )
         a_tile = fx.flat_divide(a_size_buf, fx.make_tile(BM, TILE_K))[None, None, 0, None]
-        buf_cp_atom_r = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fp8_t)
+        buf_cp_atom_r = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), in_t)
         g2r_tv_layout = fx.make_layout(
             ((_thrs_k, _thrs_m), (1, _val_per_thr)),
             ((_thrs_m * _val_per_thr, 1), (1, _thrs_m)),
@@ -113,7 +122,7 @@ def _build_moe_gemm1_fp8_gateup(
         # 2-stage A LDS ping-pong: overlap the next K-tile's global load + LDS write
         # with the current tile's MFMA. a_ping/a_pong alternate each K-tile.
         swz = fx.SwizzleType.get(*_swz_params)
-        uni_cp_atom = fx.make_copy_atom(fx.UniversalCopy128b(), fp8_t)
+        uni_cp_atom = fx.make_copy_atom(fx.UniversalCopy128b(), in_t)
         a_lds_bufs = []
         a_lds_w_bufs = []
         a_lds_r_bufs = []
@@ -233,10 +242,18 @@ def _build_moe_gemm1_fp8_gateup(
 
     _gemm_1x4 = ASTRewriter.transform(_gemm_1x4)
 
-    def _apply_fp8_dequant(c_gate_frag, c_up_frag, tid, expert_id, blk_n, asc_idx, M, arg_scale_w, arg_scale_x):
+    def _apply_dequant(c_gate_frag, c_up_frag, tid, expert_id, blk_n, asc_idx, M, arg_scale_w, arg_scale_x):
         # ptpc: per-channel weight scale (gate [0,inter), up [inter,2inter)), per-token act scale.
+        # fp8: c_*_frag are f32, dequant folds sx*sw in place. int8: c_*_frag are the i32
+        # MFMA acc, so convert to f32 into fresh f32 out fragments (returned to the caller).
         m_reps = fxh.reps(c_gate_frag, 1)
         n_reps = fxh.reps(c_gate_frag, 2)
+        if const_expr(is_int8):
+            og = fx.make_fragment_like(c_gate_frag, dtype=fx.Float32)
+            ou = fx.make_fragment_like(c_up_frag, dtype=fx.Float32)
+        else:
+            og = c_gate_frag
+            ou = c_up_frag
         sw_ptr = fx.recast_iter(fx.Float32, fx.get_iter(arg_scale_w))
         scale_gate = fx.make_view(sw_ptr + expert_id * N_e + blk_n * contiguous_n, fx.make_layout(contiguous_n, 1))
         scale_up = fx.make_view(
@@ -269,12 +286,15 @@ def _build_moe_gemm1_fp8_gateup(
                 cg_items = []
                 cu_items = []
                 for v in range_constexpr(4):
-                    cg_items.append(cg[v] * sg_v[v] * a_sc)
-                    cu_items.append(cu[v] * su_v[v] * a_sc)
-                c_gate_frag[None, m, n].store(fxh.Vec.from_elements(cg_items, fx.Float32))
-                c_up_frag[None, m, n].store(fxh.Vec.from_elements(cu_items, fx.Float32))
+                    g = cg[v].to(fx.Float32) if const_expr(is_int8) else cg[v]
+                    u = cu[v].to(fx.Float32) if const_expr(is_int8) else cu[v]
+                    cg_items.append(g * sg_v[v] * a_sc)
+                    cu_items.append(u * su_v[v] * a_sc)
+                og[None, m, n].store(fxh.Vec.from_elements(cg_items, fx.Float32))
+                ou[None, m, n].store(fxh.Vec.from_elements(cu_items, fx.Float32))
+        return og, ou
 
-    _apply_fp8_dequant = ASTRewriter.transform(_apply_fp8_dequant)
+    _apply_dequant = ASTRewriter.transform(_apply_dequant)
 
     def _apply_doweight(c_gate_frag, c_up_frag, tid, e_idx, arg_sorted_weights):
         # Per-sorted-row routed weight (one per token_rep n), folded into gate.
@@ -320,7 +340,7 @@ def _build_moe_gemm1_fp8_gateup(
         M = i32_tokens_in
 
         # Pointers / views.
-        in_ptr = fx.recast_iter(fp8_t, fx.get_iter(arg_x))
+        in_ptr = fx.recast_iter(in_t, fx.get_iter(arg_x))
         arg_p_input = fx.make_view(in_ptr, fx.make_layout((M, fx.Int32(K)), (fx.Int32(K), 1)))
 
         max_valid_id = fxh.view_as_torch_tensor(fx.get_iter(arg_max_token_ids), (1,), fx.Int32)[0]
@@ -336,7 +356,7 @@ def _build_moe_gemm1_fp8_gateup(
             )
             expert_id = fxh.view_as_torch_tensor(fx.get_iter(arg_expert_ids), (1,), fx.Int32)[e_idx]
 
-            w_ptr = fx.recast_iter(fp8_t, fx.get_iter(arg_w))
+            w_ptr = fx.recast_iter(in_t, fx.get_iter(arg_w))
             arg_p_weight = fxh.make_gateup_weight_view(w_ptr, expert_id, contiguous_n, N_e, K)
 
             # Seed sorted ids into LDS (A-gather + output scatter index). The TV
@@ -394,8 +414,11 @@ def _build_moe_gemm1_fp8_gateup(
 
             c_gate_frag, c_up_frag = _gemm_1x4(blk_n, arg_p_input, arg_p_weight, lds, M)
 
-            # fp8 dequant: sx (per token) * sw (per channel), folded into gate/up.
-            _apply_fp8_dequant(c_gate_frag, c_up_frag, tid, expert_id, blk_n, asc_idx, M, arg_scale_w, arg_scale_x)
+            # dequant: sx (per token) * sw (per channel), folded into gate/up. int8 also
+            # converts the i32 acc to f32 here and returns fresh f32 fragments.
+            c_gate_frag, c_up_frag = _apply_dequant(
+                c_gate_frag, c_up_frag, tid, expert_id, blk_n, asc_idx, M, arg_scale_w, arg_scale_x
+            )
 
             # Optional routed-weight scale (per sorted row).
             if const_expr(doweight_stage1):
@@ -407,7 +430,7 @@ def _build_moe_gemm1_fp8_gateup(
 
             # CShuffle epilogue: stage silu output to LDS (transpose, swz 3,3,3), read back
             # channel-contiguous, scatter to out[t, slot, inter] via the sorted-id index.
-            _, _tiled_mma = fxh.make_1x4_tiled_mma(fp8_t)
+            _, _tiled_mma = fxh.make_1x4_tiled_mma(in_t, acc_dtype)
             cshuf_atom_w = fx.make_copy_atom(fx.UniversalCopy64b(), out_elem)
             cshuf_atom_r = fx.make_copy_atom(fx.UniversalCopy128b(), out_elem)
             cshuf_ptr = fx.recast_iter(out_elem, lds.gemm.a_ping.ptr)
@@ -482,16 +505,20 @@ def compile_moe_gemm1(
     tile_k: int,
     doweight_stage1: bool,
     out_dtype: str = "f16",
+    in_dtype: str = "fp8",
 ):
     """Compile stage1 gate-up kernel (``moe_gemm1``) and return the executable.
 
-    fp8-only (X/W fp8 E4M3, gfx94*/gfx95*). ``out_dtype`` is the fp16/bf16 output type.
+    X/W are fp8 (E4M3) or int8 on gfx94*/gfx95*. ``out_dtype`` is the fp16/bf16
+    output type. int8 shares the fp8 pipeline (i32 MFMA acc, f32 dequant).
     """
     _arch = get_rocm_arch()
     if not ("gfx95" in _arch or "gfx94" in _arch):
-        raise ValueError(f"moe_gemm_2stage is fp8-only and supports gfx94*/gfx95* (CDNA3/CDNA4); got arch={_arch!r}")
+        raise ValueError(f"moe_gemm_2stage supports gfx94*/gfx95* (CDNA3/CDNA4); got arch={_arch!r}")
     if out_dtype not in ("f16", "bf16"):
         raise ValueError(f"out_dtype must be 'f16' or 'bf16', got {out_dtype!r}")
+    if in_dtype not in ("fp8", "int8"):
+        raise ValueError(f"in_dtype must be 'fp8' or 'int8', got {in_dtype!r}")
 
     return _build_moe_gemm1_fp8_gateup(
         model_dim=model_dim,
@@ -503,4 +530,5 @@ def compile_moe_gemm1(
         tile_k=tile_k,
         doweight_stage1=doweight_stage1,
         out_dtype=out_dtype,
+        in_dtype=in_dtype,
     )

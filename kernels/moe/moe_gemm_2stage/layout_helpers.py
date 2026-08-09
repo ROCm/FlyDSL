@@ -84,9 +84,13 @@ def _global_atomic_pk(dst, elem_idx, reg_vec, elem_bytes):
         atomic_add(dst, elem_idx + fx.Int32(i * 2), pair, dtype_bytes=elem_bytes, alignment=4)
 
 
-def make_1x4_tiled_mma(weight_dtype):
-    """B-first 1x4 tiled_mma (weight=A, activation=B; 4 waves tile the M/channel dim)."""
-    mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, weight_dtype))
+def make_1x4_tiled_mma(weight_dtype, acc_dtype=None):
+    """B-first 1x4 tiled_mma (weight=A, activation=B; 4 waves tile the M/channel dim).
+
+    ``acc_dtype`` sets the MFMA accumulator element type. fp8 leaves it at the atom
+    default (f32); int8 MUST pass ``fx.Int32`` -- a default-f32 accumulator on the
+    Int8 MFMA hard-aborts CDNA verification (integer MFMA requires an i32 acc)."""
+    mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, weight_dtype, acc_dtype))
     k_perm = fx.make_layout((8, 4, 2), (1, 16, 8))
     tiled_mma = fx.make_tiled_mma(
         mma_atom,
