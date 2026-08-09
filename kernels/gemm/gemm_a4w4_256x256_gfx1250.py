@@ -84,6 +84,7 @@ def launch_gemm_a4w4_256x256(
     block = num_waves * WAVE
     LDS_PAD_A = 16
     A_LDS_ROW = PACK_TK + LDS_PAD_A
+    C_LDS_ROW = tile_n + 8
     B_LDS_ROW = PACK_TK * 16
     STAGE_A = tile_m * A_LDS_ROW
     STAGE_B = (tile_n // 16) * B_LDS_ROW
@@ -96,7 +97,7 @@ def launch_gemm_a4w4_256x256(
     PLANAR_B_BASE = ((PLANAR_SB_BASE + num_buffers * STAGE_SB + 65535) // 65536) * 65536
     PLANAR_END = PLANAR_B_BASE + num_buffers * STAGE_B
 
-    ARENA_B = PLANAR_END
+    ARENA_B = max(PLANAR_END, tile_m * C_LDS_ROW * 2)
     check_smem_capacity(ARENA_B, str(get_hip_arch()))
 
     @flyc.kernel(known_block_size=[block, 1, 1])
@@ -601,18 +602,18 @@ def launch_gemm_a4w4_256x256(
                 for half in range_constexpr(2):
                     col_rel = wnb + wn * 32 + half * 16 + kgrp * 8
                     h = acc.shuffle(acc, list(range(half * 8, half * 8 + 8))).to(oc)
-                    fx.ptr_store(h.bitcast(fx.Int8), base_ptr + (row_rel * tile_n + col_rel) * 2)
+                    fx.ptr_store(h.bitcast(fx.Int8), base_ptr + (row_rel * C_LDS_ROW + col_rel) * 2)
         workgroup_barrier(use_cluster=False)
         c_off_rt = blk_m64 * ldc64 + blk_n64
         gC_base = fx.recast_iter(fx.PointerType.get(oc.ir_type, arg_c.address_space), arg_c)
-        gtC = _gv(gC_base, c_off_rt, (tile_m, tile_n), (tile_n, 1))
+        gtC = _gv(gC_base, c_off_rt, (tile_m, C_LDS_ROW), (C_LDS_ROW, 1))
         atomC = fx.rocdl.make_tdm_atom(
             gtC,
-            [mn_oob, None],
+            [mn_oob, tile_n],
             strides=[ldc64, None],
             num_warps=num_waves,
         )
-        fx.copy(atomC, _view(fx.recast_iter(oc, base_ptr), (tile_m, tile_n), (tile_n, 1)), gtC)
+        fx.copy(atomC, _view(fx.recast_iter(oc, base_ptr), (tile_m, C_LDS_ROW), (C_LDS_ROW, 1)), gtC)
         tdm_ops.tensor_wait(0)
 
     gx = (i32_m + (tile_m - 1)) // tile_m

@@ -133,7 +133,7 @@ _MODES = {
     "a4w4_256x256": dict(
         launch=launch_gemm_a4w4_256x256, fp4_w=True, scale="mx32", a8w8=False, tail=(), wrap=_i8,
         scale_exp=(127, 132), f16_kw=dict(scale_exp=(127, 127)), fp4_act=True,
-        profile=_A4W4_256_PROFILE, smoke=(1024, 1024, 256, 256, 256, 2, 2),
+        profile=_A4W4_256_PROFILE, smoke=(1024, 1024, 256, 256, 256, 2, 2), k_whole_rev=True,
     ),
     "a8w8_mx32": dict(
         launch=launch_gemm_a8w8, fp4_w=False, scale="mx32", a8w8=True, tail=(True, 32), wrap=_i8,
@@ -161,6 +161,8 @@ def _skip_reason(spec, M, N, K, tile_cfg, cluster):
             return f"the {cluster[0]}x{cluster[1]} cluster needs whole clusters of {tile_m}x{tile_n} tiles"
         if spec.get("k_pair") and K % (tile_k * 2):
             return f"K={K} must divide {tile_k * 2}: one TDM covers two K-tiles"
+        if spec.get("k_whole_rev") and (K // tile_k) % num_buffers:
+            return f"K={K} must cover whole {num_buffers}-K-tile revolutions"
     if N % tile_n or K % tile_k:
         return f"N={N} / K={K} must divide tile_n={tile_n} / tile_k={tile_k} (the kernel does not pad)"
     if K // tile_k < num_buffers:
