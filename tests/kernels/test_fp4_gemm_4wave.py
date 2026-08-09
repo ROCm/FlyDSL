@@ -157,15 +157,6 @@ BENCH_SETS = int(os.environ.get("FP4_BENCH_SETS", "5"))
 
 
 def _steady_state_us(step, base):
-    """Mean us/iter over ``BENCH_ITERS`` back-to-back calls under ONE event pair.
-
-    Two deliberate omissions. No per-iteration events: those need a sync each
-    time, which drains the pipe and measures single-launch latency plus event
-    overhead instead of steady-state throughput. And no sync between warmup and
-    the timed region: leaving the queue full means the CPU stays ahead of the
-    GPU, so the timed region has no launch-gap bubble at its start. The events
-    are still ordered in the stream, so what they bracket is pure GPU time.
-    """
     st, en = torch.cuda.Event(True), torch.cuda.Event(True)
     for n in range(BENCH_WARMUP):
         step(base + n)
@@ -178,26 +169,12 @@ def _steady_state_us(step, base):
 
 
 def _make_bench_steps(aiter, M, N, K):
-    """Build ``BENCH_SETS`` input sets; return (fly_step, aiter_step).
-
-    Each step takes an iteration index and issues one GEMM on set ``i %
-    BENCH_SETS``. Rotating the inputs is the point: at 16384^3 one set's A+B is
-    268 MB and five sets are 1.34 GB, far past the 256 MB MALL, so by the time a
-    set comes around again it has been evicted. Timing a single input set
-    back-to-back instead measures the cache-resident path, and at 8192^3
-    (A+B = 67 MB) it fits in MALL entirely -- so 8192 and 16384 would not be
-    measuring the same thing.
-    """
     from aiter.ops.shuffle import shuffle_weight
 
     device = torch.device("cuda")
     quant = aiter.get_triton_quant(aiter.QuantType.per_1x32)
     stream = torch.cuda.current_stream()
     fly_args, ait_args = [], []
-    # One C, reused: rotating it would add 512 MB per set at 16384^3 without
-    # changing what is measured -- C is write-only and streams past the cache
-    # either way. (aiter's gemm_a4w4 has no ``out``; it allocates its own, which
-    # the caching allocator serves from the same block every call.)
     c = torch.zeros(M * N, dtype=OUT_DTYPE, device=device)
 
     for s in range(BENCH_SETS):
@@ -236,18 +213,6 @@ def _make_bench_steps(aiter, M, N, K):
 
 
 def bench_vs_aiter(M, N, K):
-    """Steady-state TFLOPS, interleaved against aiter's hand-written asm.
-
-    fly and aiter are timed as separate BENCH_ITERS-long blocks but alternated
-    BENCH_PAIRS times over the same rotation indices, so clock and power drift
-    are spread across both sides rather than favouring whoever ran first. Both
-    report their best pair.
-
-    BENCH_WARMUP=500 is not padding: at 200 the first pair came out 1.6% off the
-    other two (and in a different direction run to run) while aiter was already
-    stable, so we were reading our own warmup transient. At 500 the three pairs
-    land within 0.04% at 16384^3, tight enough to A/B a single optimization.
-    """
     import aiter
 
     assert ARCH == "gfx950", f"FP4 4-wave GEMM requires gfx950, got {ARCH}"
@@ -278,9 +243,5 @@ def bench_vs_aiter(M, N, K):
 
 
 if __name__ == "__main__":
-    if "--vs-aiter" in sys.argv:
-        for shape in ((8192, 8192, 8192), (8192, 8192, 16384), (16384, 16384, 8192), (16384, 16384, 16384)):
-            bench_vs_aiter(*shape)
-    else:
-        _bench_fp4_gemm(8192, 8192, 8192)
-        _bench_fp4_gemm(16384, 16384, 16384)
+    for shape in ((8192, 8192, 8192), (8192, 8192, 16384), (16384, 16384, 8192), (16384, 16384, 16384)):
+        bench_vs_aiter(*shape)
