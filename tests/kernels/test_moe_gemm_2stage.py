@@ -4,13 +4,13 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 """
-Basic smoke tests for the ported ``moe_gemm_2stage`` fp8 2-stage kernels.
+Basic smoke tests for the ``moe_gemm_2stage`` fp8 2-stage kernels.
 
 These verify that the stage1 (``compile_moe_gemm1``) and stage2
-(``compile_moe_gemm2``) builders trace and lower without error for small,
-tile-valid shapes on both the fp8 and bf16 paths. Full numerical / e2e
-coverage lives in the routing-based MoE tests; this file just guards the
-port's builders against API drift after the layout-API migration.
+(``compile_moe_gemm2``) builders trace and lower without error for a small,
+tile-valid fp8 shape. The package is fp8-only; full numerical / e2e coverage
+lives in the routing-based MoE tests. This file just guards the builders
+against API drift.
 """
 
 import os
@@ -45,10 +45,9 @@ def _fp8_supported() -> bool:
 _SHAPE = dict(model_dim=256, inter_dim=128, experts=4, topk=2)
 
 
-@pytest.mark.parametrize("in_dtype", ["fp8", "bf16"])
-def test_moe_gemm1_builds(in_dtype: str):
-    """Stage1 builder traces/lowers for a small tile-valid shape."""
-    if in_dtype == "fp8" and not _fp8_supported():
+def test_moe_gemm1_builds():
+    """Stage1 fp8 builder traces/lowers for a small tile-valid shape."""
+    if not _fp8_supported():
         pytest.skip("fp8 stage1 requires gfx94*/gfx95*")
 
     exe = compile_moe_gemm1(
@@ -57,16 +56,14 @@ def test_moe_gemm1_builds(in_dtype: str):
         tile_n=64,
         tile_k=128,
         doweight_stage1=False,
-        in_dtype=in_dtype,
         out_dtype="f16",
     )
     assert callable(exe)
 
 
-@pytest.mark.parametrize("in_dtype", ["fp8", "bf16"])
-def test_moe_gemm2_builds(in_dtype: str):
-    """Stage2 builder traces/lowers for a small tile-valid shape."""
-    if in_dtype == "fp8" and not _fp8_supported():
+def test_moe_gemm2_builds():
+    """Stage2 fp8 builder traces/lowers for a small tile-valid shape."""
+    if not _fp8_supported():
         pytest.skip("fp8 stage2 requires gfx94*/gfx95*")
 
     exe = compile_moe_gemm2(
@@ -75,7 +72,6 @@ def test_moe_gemm2_builds(in_dtype: str):
         tile_n=64,
         tile_k=128,
         doweight_stage2=False,
-        in_dtype=in_dtype,
         out_dtype="f16",
     )
     assert callable(exe)

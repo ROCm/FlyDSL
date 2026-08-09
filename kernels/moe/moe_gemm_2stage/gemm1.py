@@ -493,9 +493,7 @@ def compile_moe_gemm1(
     """
     _arch = get_rocm_arch()
     if not ("gfx95" in _arch or "gfx94" in _arch):
-        raise ValueError(
-            f"moe_gemm_2stage is fp8-only and supports gfx94*/gfx95* (CDNA3/CDNA4); got arch={_arch!r}"
-        )
+        raise ValueError(f"moe_gemm_2stage is fp8-only and supports gfx94*/gfx95* (CDNA3/CDNA4); got arch={_arch!r}")
     if out_dtype not in ("f16", "bf16"):
         raise ValueError(f"out_dtype must be 'f16' or 'bf16', got {out_dtype!r}")
 
