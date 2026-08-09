@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-09T07:42:44Z",
+ "updated": "2026-08-09T07:45:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "ci/upgrade-rocm-7.14",
    "event": "pull_request",
    "title": "CI: upgrade PyTorch images to ROCm 7.14",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31301689535",
    "created_at": "2026-08-09T07:40:13Z",
-   "updated_at": "2026-08-09T07:40:48Z",
+   "updated_at": "2026-08-09T07:43:13Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -89,11 +89,11 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31294175437",
    "created_at": "2026-08-09T04:15:24Z",
-   "updated_at": "2026-08-09T06:36:39Z",
+   "updated_at": "2026-08-09T07:43:31Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -108,10 +108,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-09T06:36:39Z",
-     "completed_at": null,
+     "completed_at": "2026-08-09T07:43:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31294175437/job/93198226964"
     },
     {
@@ -132,11 +132,11 @@
    "branch": "main",
    "event": "push",
    "title": "Release: bump version to 0.3.1 (#988)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31294093158",
    "created_at": "2026-08-09T04:13:05Z",
-   "updated_at": "2026-08-09T04:32:35Z",
+   "updated_at": "2026-08-09T07:44:06Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -160,9 +160,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-09T04:32:35Z",
+     "started_at": "2026-08-09T07:44:05Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31294093158/job/93197998978"
     }
