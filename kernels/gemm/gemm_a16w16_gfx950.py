@@ -1126,6 +1126,7 @@ def gemm_a16w16_hti_gfx950_kernel(
         splitk_protocol.wait_until_initialized()
         store_half_tile_to_global(0, 0)
         store_half_tile_to_global(0, 1)
+        rocdl.s_barrier()
         store_half_tile_to_global(1, 0)
         store_half_tile_to_global(1, 1)
         splitk_protocol.finish_split(split_k)
