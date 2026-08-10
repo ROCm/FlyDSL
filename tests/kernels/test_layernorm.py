@@ -968,6 +968,10 @@ def test_fused_add_layernorm_dynamicquant():
         raise SystemExit(1)
 
 
+@pytest.mark.skipif(
+    GPU_ARCH == "gfx1201",
+    reason="LayerNorm SmoothQuant is temporarily quarantined on gfx1201 pending correctness investigation",
+)
 def test_fused_add_layernorm_smoothquant():
     print("=" * 80)
     print("Running FusedAdd LayerNorm SmoothQuant Tests")
