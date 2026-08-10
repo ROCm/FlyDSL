@@ -251,11 +251,18 @@ def _build_moe_gemm1_fp8_gateup(
             for ki in range_constexpr(k_iters):
                 fx.copy(uni_cp_atom, a_lds_r_bufs[s][None, None, ki], a_frag_retile_bufs[s][None, None, ki])
 
+        # int4 at inter_dim=8192: a K-major serpentine traversal hides MFMA
+        # read-after-write hazards slightly better than the default schedule --
+        # 22.05ms vs 22.40ms (~1.6%, reproducible, non-overlapping ranges), and is
+        # neutral at inter_dim=256. fp8/int8 measured best at the default on both
+        # shape families, so only int4 overrides.
+        _g1_trav = "kmn_serpentine" if is_int4 else None
+
         def _mfma(s):
             # int4 uses a single weight buffer (bs=0); A keeps its ping-pong (s).
             bs = 0 if const_expr(is_int4) else s
-            fx.gemm(mma_atom, c_gate, bl_frag_bufs[bs], a_frag_bufs[s], c_gate)
-            fx.gemm(mma_atom, c_up, br_frag_bufs[bs], a_frag_bufs[s], c_up)
+            fx.gemm(mma_atom, c_gate, bl_frag_bufs[bs], a_frag_bufs[s], c_gate, traversal_order=_g1_trav)
+            fx.gemm(mma_atom, c_up, br_frag_bufs[bs], a_frag_bufs[s], c_up, traversal_order=_g1_trav)
 
         # Prologue: stage-0 loads + LDS write for K-tile 0. Wait only on the A-gather
         # (B stays in flight for the first MFMA); pre-read tile-0 A from LDS.

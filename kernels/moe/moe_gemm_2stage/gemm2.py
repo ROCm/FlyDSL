@@ -237,6 +237,11 @@ def _build_moe_gemm2_fp8(
         _m_reps = fxh.reps(c_frag, 1)
         _n_reps = fxh.reps(c_frag, 2)
 
+        # gemm2 keeps the explicit mma_atom_call loop: no single fx.gemm
+        # traversal_order wins across dtypes. At the official big shape
+        # kmn_serpentine matches the loop for fp8 (10.16 vs 10.23ms) but costs int4
+        # 6.4% (10.85 vs 10.20), while knm wins int4 8.2% (9.36) and costs fp8 5.0%
+        # (10.74). The loop is best-or-near-best on every cell, so it stays.
         def _mfma(s):
             for ki in range_constexpr(k_iters):
                 for n in range_constexpr(_n_reps):
