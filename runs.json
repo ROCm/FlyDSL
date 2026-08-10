@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-10T09:51:25Z",
+ "updated": "2026-08-10T10:27:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31379038974,
+   "pr": 971,
+   "commit": "84f4194e8d2aa1a9e6dd84fe0db0538959c144e2",
+   "branch": "gfx1250/gemm-opt-0805",
+   "event": "pull_request",
+   "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31379038974",
+   "created_at": "2026-08-10T10:25:10Z",
+   "updated_at": "2026-08-10T10:26:12Z",
+   "actor": "aoli26",
+   "jobs": []
+  },
   {
    "run_id": 31371018664,
    "pr": 996,
@@ -130,11 +145,11 @@
    "branch": "gfx1250/gemm-opt-0805",
    "event": "pull_request",
    "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31362005080",
    "created_at": "2026-08-10T06:26:46Z",
-   "updated_at": "2026-08-10T09:00:25Z",
+   "updated_at": "2026-08-10T10:25:41Z",
    "actor": "aoli26",
    "jobs": []
   },
@@ -1705,21 +1720,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31212634116",
    "created_at": "2026-08-07T19:42:17Z",
    "updated_at": "2026-08-07T19:44:34Z",
-   "actor": "peterjunpark",
-   "jobs": []
-  },
-  {
-   "run_id": 31210492295,
-   "pr": 981,
-   "commit": "a6da798cc1deb70615e7dabeff03f37029eaa7e9",
-   "branch": "docs/setup-rtd",
-   "event": "pull_request",
-   "title": "docs: Update configs for documentation to host on Read the Docs",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31210492295",
-   "created_at": "2026-08-07T19:13:04Z",
-   "updated_at": "2026-08-07T19:14:10Z",
    "actor": "peterjunpark",
    "jobs": []
   }
