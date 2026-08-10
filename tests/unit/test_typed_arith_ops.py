@@ -270,3 +270,24 @@ def test_ceildiv_rejects_non_integer_boolean_and_index_inputs():
         _static(lambda: fx.ceildiv(fx.Boolean(True), fx.Boolean(True)))
     with pytest.raises(TypeError, match="does not support Index"):
         _static(lambda: fx.ceildiv(fx.Index(3), fx.Index(2)))
+
+
+@pytest.mark.l0_backend_agnostic
+def test_kernel_cdiv_keeps_host_path_and_uses_typed_dynamic_op():
+    from kernels.common.utils import cdiv
+
+    assert cdiv(7, 3) == 3
+
+    def build(lhs, rhs):
+        result = cdiv(fx.Int32(lhs), fx.Int32(rhs))
+        assert isinstance(result, fx.Int32)
+
+    text = _build_module(
+        build,
+        [
+            lambda: ir.IntegerType.get_signless(32),
+            lambda: ir.IntegerType.get_signless(32),
+        ],
+    )
+    assert "arith.ceildivsi" in text
+    assert "arith.addi" not in text

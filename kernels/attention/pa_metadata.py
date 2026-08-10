@@ -971,7 +971,7 @@ def compile_pa_metadata_v1(
             # number of partition_size-token partitions for this batch =
             # ceil(context_len[batch_idx] / kv_granularity)
             ctxv = _load(ctx_rsrc, batch_idx)
-            return fx.Int32(arith.ceildivui(ctxv.ir_value(), c_kvg.ir_value()))
+            return fx.Int32(fx.ceildiv(fx.Uint32(ctxv), fx.Uint32(c_kvg)))
 
         def _store(rsrc, off, val):
             # NOTE: no masked stores — masked buffer_store sets OOB offset

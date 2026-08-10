@@ -41,7 +41,10 @@ def exp2_f32_fast(value):
     return exp2_amdgcn_scalar(raw)
 
 
-def cdiv(numer: int, denom: int) -> int:
+def cdiv(numer, denom):
+    """Ceiling division for host integers and typed DSL integer values."""
+    if isinstance(numer, (fx.Numeric, fx.Vector)) or isinstance(denom, (fx.Numeric, fx.Vector)):
+        return fx.ceildiv(numer, denom)
     return (numer + denom - 1) // denom
 
 
