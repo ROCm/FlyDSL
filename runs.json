@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-10T04:13:42Z",
+ "updated": "2026-08-10T04:31:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31355636597,
+   "pr": 947,
+   "commit": "cbd788c6ace6e39d750ce365261f3331bc2fdeb9",
+   "branch": "worktree-agent-moe-2stage-port",
+   "event": "pull_request",
+   "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8 (gfx942 + gfx950)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31355636597",
+   "created_at": "2026-08-10T04:29:24Z",
+   "updated_at": "2026-08-10T04:29:50Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 31354674985,
    "pr": 992,
@@ -40,11 +55,11 @@
    "branch": "worktree-agent-moe-2stage-port",
    "event": "pull_request",
    "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8 (gfx942 + gfx950)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31352475165",
    "created_at": "2026-08-10T03:23:45Z",
-   "updated_at": "2026-08-10T03:26:30Z",
+   "updated_at": "2026-08-10T04:29:50Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -259,29 +274,29 @@
    "branch": "ci/upgrade-rocm-7.14",
    "event": "pull_request",
    "title": "CI: upgrade PyTorch images to ROCm 7.14",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31319798308",
    "created_at": "2026-08-09T14:57:01Z",
-   "updated_at": "2026-08-10T02:03:10Z",
+   "updated_at": "2026-08-10T04:22:23Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-10T02:03:00Z",
-     "completed_at": null,
+     "completed_at": "2026-08-10T04:22:23Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31319798308/job/93335319086"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-10T02:03:09Z",
-     "completed_at": null,
+     "completed_at": "2026-08-10T04:16:21Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31319798308/job/93335319104"
     },
     {
@@ -292,6 +307,24 @@
      "started_at": "2026-08-10T02:02:39Z",
      "completed_at": "2026-08-10T03:23:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31319798308/job/93335319136"
+    },
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-10T04:23:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31319798308/job/93353675049"
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-10T04:22:23Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31319798308/job/93353675054"
     }
    ]
   },
@@ -1938,21 +1971,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31153738166",
    "created_at": "2026-08-07T06:22:57Z",
    "updated_at": "2026-08-07T06:24:35Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 31153702468,
-   "pr": null,
-   "commit": "7199242aef2b97f807604847e2a2b1b900d5459f",
-   "branch": "feat/rdna3-gemm-tiled-api",
-   "event": "pull_request",
-   "title": "[Kernel] Fix the RDNA3 GEMM grid swizzle and migrate it to the tiled copy/MMA API",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31153702468",
-   "created_at": "2026-08-07T06:22:20Z",
-   "updated_at": "2026-08-07T06:23:34Z",
    "actor": "coderfeli",
    "jobs": []
   }
