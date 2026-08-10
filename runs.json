@@ -1,11 +1,26 @@
 {
  "schema": 1,
- "updated": "2026-08-10T18:14:43Z",
+ "updated": "2026-08-10T18:37:03Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 31417741316,
+   "run_id": 31418205930,
    "pr": 960,
+   "commit": "82d2cc06de3d03fa2bd32dbba1d7525d542cf171",
+   "branch": "new_bias_alibi_sink_attention",
+   "event": "pull_request",
+   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31418205930",
+   "created_at": "2026-08-10T18:16:03Z",
+   "updated_at": "2026-08-10T18:25:50Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
+  {
+   "run_id": 31417741316,
+   "pr": null,
    "commit": "fdb2fe6910e179ea5cc7789757f1b22d89b8792a",
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
@@ -25,11 +40,11 @@
    "branch": "xyt/gemm16_950",
    "event": "pull_request",
    "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31401177825",
    "created_at": "2026-08-10T14:59:41Z",
-   "updated_at": "2026-08-10T17:10:58Z",
+   "updated_at": "2026-08-10T18:24:23Z",
    "actor": "xytpai",
    "jobs": [
     {
@@ -53,9 +68,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-10T17:10:58Z",
+     "started_at": "2026-08-10T18:24:22Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31401177825/job/93534452591"
     }
@@ -93,10 +108,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-10T17:27:30Z",
-     "completed_at": null,
+     "completed_at": "2026-08-10T18:23:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31394603239/job/93499523463"
     },
     {
@@ -476,13 +491,41 @@
    "branch": "fix/rmsnorm",
    "event": "pull_request",
    "title": "[fix] Resolve normalization-related CI regressions",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31364042726",
    "created_at": "2026-08-10T06:59:04Z",
-   "updated_at": "2026-08-10T17:12:55Z",
+   "updated_at": "2026-08-10T18:24:56Z",
    "actor": "cschenjunlin",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-10T18:27:23Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31364042726/job/93554734277"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-10T18:24:55Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31364042726/job/93554734292"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-10T18:24:55Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31364042726/job/93554734394"
+    }
+   ]
   },
   {
    "run_id": 31362005080,
@@ -1652,21 +1695,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31249658888/job/93085869969"
     }
    ]
-  },
-  {
-   "run_id": 31249528615,
-   "pr": null,
-   "commit": "84f3026fdc3c3f158ee37370b37db5e8c54c8529",
-   "branch": "jli/update-llvm-basemain",
-   "event": "pull_request",
-   "title": "[LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31249528615",
-   "created_at": "2026-08-08T08:57:49Z",
-   "updated_at": "2026-08-08T09:01:42Z",
-   "actor": "jli-melchior",
-   "jobs": []
   }
  ]
 }
