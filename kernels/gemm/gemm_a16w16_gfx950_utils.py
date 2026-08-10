@@ -222,6 +222,7 @@ class SplitKProtocol:
                             "v,v",
                             has_side_effects=True,
                         )
+            rocdl.s_waitcnt(0)
             gpu.barrier()
             if self.tid == 0:
                 signal_ptr = get_llvm_ptr(
