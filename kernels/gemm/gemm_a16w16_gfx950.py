@@ -670,7 +670,7 @@ def gemm_a16w16_gfx950_kernel(
         sC_write[row, col] = frag_C_out[i]
 
     if const_expr(is_split_k):
-        splitk_protocol.split_k_barrier(split_k)
+        splitk_protocol.wait_until_initialized()
     else:
         gpu.barrier()
 
@@ -704,6 +704,8 @@ def gemm_a16w16_gfx950_kernel(
                     is_split_k,
                     param.out_dtype_id == GEMM_A16W16_DTYPE_FP32,
                 )
+    if const_expr(is_split_k):
+        splitk_protocol.finish_split(split_k)
 
 
 @flyc.kernel
@@ -1121,11 +1123,12 @@ def gemm_a16w16_hti_gfx950_kernel(
         rocdl.s_barrier()
         store_half_tile_to_lds(1, 0, c10)
         store_half_tile_to_lds(1, 1, c11)
-        splitk_protocol.split_k_barrier(split_k)
+        splitk_protocol.wait_until_initialized()
         store_half_tile_to_global(0, 0)
         store_half_tile_to_global(0, 1)
         store_half_tile_to_global(1, 0)
         store_half_tile_to_global(1, 1)
+        splitk_protocol.finish_split(split_k)
     else:
         __barrier(0)
         store_half_tile_to_global(0, 0)
