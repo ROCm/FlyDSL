@@ -237,7 +237,6 @@ class SplitKProtocol:
                     ordering=llvm.AtomicOrdering.release,
                     syncscope="agent",
                 )
-            gpu.barrier()
 
     @flyc.jit
     def wait_until_initialized(self):
