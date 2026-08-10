@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-10T04:12:18Z",
+ "updated": "2026-08-10T04:13:42Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "xyt/gemm16_950",
    "event": "pull_request",
    "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31354674985",
    "created_at": "2026-08-10T04:10:43Z",
-   "updated_at": "2026-08-10T04:11:26Z",
+   "updated_at": "2026-08-10T04:12:35Z",
    "actor": "xytpai",
    "jobs": []
   },
