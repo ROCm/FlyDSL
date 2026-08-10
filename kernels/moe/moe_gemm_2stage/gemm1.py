@@ -59,15 +59,13 @@ def _build_moe_gemm1_fp8_gateup(
     assert 64 <= BN <= 256 and BN % 64 == 0, f"tile_n must be in [64,256] multiple of 64, got {BN}"
     assert 16 <= BM <= 256 and BM % 16 == 0, f"tile_m must be a 16-multiple in [16,256], got {BM}"
 
-    # 4 waves tile the N (channel) dim at 16 ch/wave/rep. fp8/int8 use a
-    # 128-channel block (num_acc_n=2) instead of the older BN//2 tile: at the big
-    # shape (tile_n=128) this halves the grid (128->64 blocks/row), cutting wave
-    # count 2x and the barrier/LDS-sync overhead that made stage1 fp8 ~30% slower
-    # than v0.3.0. Cap at 128 so tile_n=256 stays at 2 blocks/row (num_acc_n=2):
-    # collapsing to a single 256-channel block regresses the inter_dim=256 shape
-    # ~40% (grid too small, register pressure). int4 keeps the narrower BN//2 tile:
-    # its single just-in-time weight buffer cannot feed a doubled per-block N
-    # without spilling (measured +63% at BN=128), so it stays at 64 channels.
+    # 4 waves tile the N (channel) dim at 16 ch/wave/rep. fp8/int8 use a 128-channel
+    # block (num_acc_n=2), not the older BN//2 tile: at tile_n=128 this halves the
+    # grid (128->64 blocks/row), 2x fewer waves and less barrier/LDS-sync overhead
+    # (fixed fp8 ~30% slowdown vs v0.3.0). Capped at 128 so tile_n=256 stays 2
+    # blocks/row; a single 256-channel block regresses inter_dim=256 ~40% (grid too
+    # small, register pressure). int4 keeps BN//2: its single just-in-time weight
+    # buffer spills feeding a doubled per-block N (+63% at BN=128), so it stays 64.
     contiguous_n = max(BN // 2, 64) if is_int4 else min(max(BN, 64), 128)
     assert inter_dim % contiguous_n == 0, (
         f"inter_dim={inter_dim} must be divisible by the effective channel tile "
