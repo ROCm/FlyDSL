@@ -11,7 +11,7 @@ _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, _project_root)
 sys.path.insert(0, os.path.join(_project_root, "python"))
 
-import flydsl
+import flydsl  # noqa: E402
 
 version = release = flydsl.__version__
 
@@ -80,6 +80,4 @@ myst_heading_anchors = 3
 #   {{ ROCM_VERSION }} | |ROCM_VERSION|
 #   ```                | ```
 myst_substitutions = {"FLYDSL_VERSION": version}
-rst_prolog = "\n".join(
-    f".. |{key}| replace:: {val}" for key, val in myst_substitutions.items()
-)
+rst_prolog = "\n".join(f".. |{key}| replace:: {val}" for key, val in myst_substitutions.items())
