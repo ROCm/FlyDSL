@@ -117,7 +117,7 @@ def _scales_ptpc(a_f32, b_f32, M, N, K, _fp4_w, _scale_exp, scale_scale):
 
 _SCALES = {"mx32": _scales_mx32, "mx128": _scales_mx128, "ptpc": _scales_ptpc}
 
-_A8W4_256_PROFILE = (256, 256, 128, 2, 2, 4, 4, 4)
+_A8W4_256_PROFILE = (256, 256, 128, 2, 2, 3, 4, 4)
 _A4W4_256_PROFILE = (256, 256, 256, 2, 2, 4, 4, 4)
 
 _MODES = {
@@ -128,7 +128,7 @@ _MODES = {
     "a8w4_256x256": dict(
         launch=launch_gemm_a8w4_256x256, fp4_w=True, scale="mx32", a8w8=False, tail=(), wrap=_i8,
         scale_exp=(127, 132), f16_kw=dict(scale_exp=(127, 127)),
-        profile=_A8W4_256_PROFILE, smoke=(1024, 512, 256, 256, 128, 2, 2), k_pair=True,
+        profile=_A8W4_256_PROFILE, smoke=(1024, 512, 256, 256, 128, 2, 2), k_pair=2,
     ),
     "a4w4_256x256": dict(
         launch=launch_gemm_a4w4_256x256, fp4_w=True, scale="mx32", a8w8=False, tail=(), wrap=_i8,
@@ -159,8 +159,9 @@ def _skip_reason(spec, M, N, K, tile_cfg, cluster):
             return f"this kernel hand-schedules one profile, {profile}"
         if N % (tile_n * cluster[1]):
             return f"the {cluster[0]}x{cluster[1]} cluster needs N whole clusters of {tile_n}-wide tiles"
-        if spec.get("k_pair") and K % (tile_k * 2):
-            return f"K={K} must divide {tile_k * 2}: one TDM covers two K-tiles"
+        kp = spec.get("k_pair")
+        if kp and K % (tile_k * kp):
+            return f"K={K} must divide {tile_k * kp}: one TDM covers {kp} K-tiles"
         if spec.get("k_whole_rev") and (K // tile_k) % num_buffers:
             return f"K={K} must cover whole {num_buffers}-K-tile revolutions"
     if N % tile_n or K % tile_k:
@@ -282,9 +283,10 @@ def _assert_case(mode, M, N, K, *tile_cfg, **kwargs):
 def _run_case(mode, M, N, K, *tile_cfg, **kwargs):
     _require_gpu()
     profile = _MODES[mode].get("profile")
-    if profile is not None:  # sweeps that do not parametrize the cluster get the tuned one
+    if profile is not None:  # sweeps that do not parametrize the cluster/buffers get the tuned ones
         kwargs.setdefault("cluster_m", profile[6])
         kwargs.setdefault("cluster_n", profile[7])
+        tile_cfg = (*tile_cfg[:5], profile[5])
     cluster = (kwargs.get("cluster_m", 1), kwargs.get("cluster_n", 1))
     reason = _skip_reason(_MODES[mode], M, N, K, tile_cfg, cluster)
     if reason:

@@ -54,10 +54,10 @@ def launch_gemm_a8w4_256x256(
         128,
         2,
         2,
+        3,
         4,
         4,
-        4,
-    ), "only the tuned 256x256x128, 2x2-wave, 4-buffer profile with a 4x4 cluster is supported"
+    ), "only the tuned 256x256x128, 2x2-wave, 3-buffer profile with a 4x4 cluster is supported"
     cluster_sync_revs = 8
     m_run_max, m_run_min = 32, 8
     WMMA_M = WMMA_N = 16
@@ -74,10 +74,9 @@ def launch_gemm_a8w4_256x256(
     n_acc = wmma_m_rep * wmma_n_rep
     num_waves = m_warp * n_warp
     block = num_waves * WAVE
-    # A slot holds KPAIR K-tiles side by side in each LDS row
+    # Each of the num_buffers slots holds KPAIR K-tiles side by side in every LDS row
     KPAIR = 2
-    num_super = num_buffers - 1
-    UNROLL = KPAIR * num_super
+    UNROLL = KPAIR * num_buffers
     SUPER_K = tile_k * KPAIR
     LDS_PAD_A = 16
     A_LDS_ROW = SUPER_K + LDS_PAD_A
@@ -89,10 +88,10 @@ def launch_gemm_a8w4_256x256(
     STAGE_SB = SB_SUPERS * SUPER_K
     # B first so it keeps a 64-KiB-aligned base; the rest packs behind it.
     PLANAR_B_BASE = 0
-    PLANAR_A_BASE = PLANAR_B_BASE + num_super * STAGE_B
-    PLANAR_SA_BASE = PLANAR_A_BASE + num_super * STAGE_A
-    PLANAR_SB_BASE = PLANAR_SA_BASE + num_super * STAGE_SA
-    PLANAR_END = PLANAR_SB_BASE + num_super * STAGE_SB
+    PLANAR_A_BASE = PLANAR_B_BASE + num_buffers * STAGE_B
+    PLANAR_SA_BASE = PLANAR_A_BASE + num_buffers * STAGE_A
+    PLANAR_SB_BASE = PLANAR_SA_BASE + num_buffers * STAGE_SA
+    PLANAR_END = PLANAR_SB_BASE + num_buffers * STAGE_SB
 
     ARENA_B = max(PLANAR_END, tile_m * C_LDS_ROW * 2)
     check_smem_capacity(ARENA_B, str(get_hip_arch()))
@@ -702,22 +701,22 @@ def launch_gemm_a8w4_256x256(
             _mma_block(0, half_n, a_top, b_right, sa_k, sb_k)
             _mma_block(half_m, half_n, a_bottom, b_right, sa_k, sb_k)
 
-        # Keep every slot in flight and statically expand one revolution of KPAIR*num_super
+        # Keep every slot in flight and statically expand one revolution of KPAIR*num_buffers
         # K-tiles.  One TDM covers a whole slot, so it is issued once per KPAIR stages.
         SUPERS = K_TILES // KPAIR
         last_delta = (SUPERS - 1) * tdm_global_step
-        for i in range_constexpr(num_super):
+        for i in range_constexpr(num_buffers):
             seed_delta = fx.Int32(i) * tdm_global_step
             seed_delta = (seed_delta < last_delta).select(seed_delta, last_delta)
             tdm_ops.tensor_load_2d(_prepare_tdm(i, seed_delta))
-        pipeline_fence(outstanding=num_super - 1, use_cluster=False)
+        pipeline_fence(outstanding=num_buffers - 1, use_cluster=False)
         _load_seed_a(0, 0)
         _load_seed_b(0, 0)
         rocdl.s_wait_dscnt(0)
 
-        n_full = (SUPERS + num_super - 1) // num_super - 1
-        drain_s = SUPERS - n_full * num_super  # 1..num_super
-        slot_delta = [fx.Int32(c + num_super) * tdm_global_step for c in range_constexpr(num_super)]
+        n_full = (SUPERS + num_buffers - 1) // num_buffers - 1
+        drain_s = SUPERS - n_full * num_buffers  # 1..num_buffers
+        slot_delta = [fx.Int32(c + num_buffers) * tdm_global_step for c in range_constexpr(num_buffers)]
 
         def _stage_args(g, rev_delta, fence_outstanding):
             slot = g // KPAIR
@@ -727,9 +726,9 @@ def launch_gemm_a8w4_256x256(
 
         def _run_steady(owner_parity):
             for rev in range(n_full):
-                rev_delta = (rev * num_super) * tdm_global_step
+                rev_delta = (rev * num_buffers) * tdm_global_step
                 for g in range_constexpr(UNROLL):
-                    args = _stage_args(g, rev_delta, num_super - 2)
+                    args = _stage_args(g, rev_delta, num_buffers - 2)
                     boundary = g % KPAIR == KPAIR - 1
                     if const_expr(owner_parity == 0):
                         _compute_even_stage(*args, boundary)
@@ -764,7 +763,7 @@ def launch_gemm_a8w4_256x256(
                     (g + 1) % 2,
                     g // KPAIR,
                     None,
-                    num_super - 2 - g // KPAIR,
+                    num_buffers - 2 - g // KPAIR,
                     g < UNROLL - 1,
                     False,
                     g % KPAIR == KPAIR - 1,

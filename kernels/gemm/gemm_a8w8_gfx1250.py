@@ -261,7 +261,8 @@ def launch_gemm_a8w8(
             return v01.shuffle(v23, list(range(16)))
 
         def _bcast_byte(byte):
-            return byte.to(fx.Int32) * fx.Int32(0x01010101)
+            w = byte.to(fx.Int32)
+            return fx.Int32(rocdl.perm_b32(w, w, 0))
 
         def load_sa(buf, pbuf, wm, ks):
             row = wmb + wm * 16 + lane16
