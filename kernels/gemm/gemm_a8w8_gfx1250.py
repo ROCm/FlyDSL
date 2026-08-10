@@ -86,7 +86,9 @@ def launch_gemm_a8w8(
     SCALE_PITCH = ((SB_OFF + STAGE_SB + 1023) // 1024) * 1024
     PITCH = SCALE_PITCH if is_mxscale else AB_PITCH
     out_cls = fx.Float16 if out_is_f16 else fx.BFloat16
-    C_STORE_B = (tile_m * tile_n * 2 + 127) // 128 * 128
+    C_PAD = 8 if tile_n >= 128 else 0
+    C_LDS_ROW = tile_n + C_PAD
+    C_STORE_B = (tile_m * C_LDS_ROW * 2 + 127) // 128 * 128
     ARENA_B = max(num_buffers * PITCH, C_STORE_B)
     check_smem_capacity(ARENA_B, str(get_hip_arch()))
     use_quadrant = (wmma_m_rep % 2 == 0) and (wmma_n_rep % 2 == 0) and (n_acc >= 8)
@@ -523,20 +525,20 @@ def launch_gemm_a8w8(
             for wn in range_constexpr(wmma_n_rep):
                 col_rel = wnb + wn * 16 + kgrp * 8
                 h = accs[wm * wmma_n_rep + wn].to(out_cls)
-                fx.ptr_store(h.bitcast(fx.Int8), base_ptr + (row_rel * tile_n + col_rel) * 2)
+                fx.ptr_store(h.bitcast(fx.Int8), base_ptr + (row_rel * C_LDS_ROW + col_rel) * 2)
         workgroup_barrier(use_cluster=False)
         c_off_rt = blk_m64 * ldc64 + blk_n64
-        gtC = _gv(gC_base, c_off_rt, (tile_m, tile_n), (tile_n, 1))
+        gtC = _gv(gC_base, c_off_rt, (tile_m, C_LDS_ROW), (C_LDS_ROW, 1))
         atomC = fx.rocdl.make_tdm_atom(
             gtC,
-            [mn_oob, None],
+            [mn_oob, tile_n if C_PAD else None],
             strides=[ldc64, None],
             num_warps=num_waves,
             early_timeout=False,
         )
         fx.copy(
             atomC,
-            _lv(fx.recast_iter(out_cls, base_ptr), (tile_m, tile_n), (tile_n, 1)),
+            _lv(fx.recast_iter(out_cls, base_ptr), (tile_m, C_LDS_ROW), (C_LDS_ROW, 1)),
             gtC,
         )
         tdm_ops.tensor_wait(0)

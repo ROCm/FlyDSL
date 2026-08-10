@@ -402,17 +402,26 @@ def test_256x256_cluster4x4(mode, M, N, K):
 
 _RAGGED_M_GUARD_ROWS = 5 * 256  # > worst case (gx padded up 3 tiles), for any M
 
-_M_GUARD_SWEEP = (512, 513, 769, 1025, 1536, 2305, 12289)
+_M_GUARD_SWEEP = (255, 512, 513, 769, 1025, 12289)
+
+_GUARD_CASES = [(m, *_MODES[m]["smoke"][:2], _MODES[m]["profile"]) for m in _PROFILE_MODES] + [
+    ("a8w8_mx128", 1536, 1024, tile + (1, 1))
+    for tile in [
+        (256, 256, 128, 2, 2, 4),
+        (128, 192, 128, 2, 2, 2),
+        (128, 128, 256, 2, 2, 2),
+        (64, 64, 128, 2, 2, 2),
+        (32, 32, 512, 2, 2, 2),
+    ]
+]
 
 
 @pytest.mark.parametrize("M", _M_GUARD_SWEEP)
-@pytest.mark.parametrize("mode", _PROFILE_MODES)
-def test_256x256_ragged_m_no_oob_store(mode, M):
-    profile = _MODES[mode]["profile"]
-    N, K = _MODES[mode]["smoke"][:2]
-    _run_case(
-        mode, M, N, K, *profile[:6], cluster_m=profile[6], cluster_n=profile[7], c_guard_rows=_RAGGED_M_GUARD_ROWS
-    )
+@pytest.mark.parametrize(
+    "mode, N, K, cfg", _GUARD_CASES, ids=[f"{m}-t{c[0]}x{c[1]}x{c[2]}" for m, _, _, c in _GUARD_CASES]
+)
+def test_ragged_m_no_oob_store(mode, N, K, cfg, M):
+    _run_case(mode, M, N, K, *cfg[:6], cluster_m=cfg[6], cluster_n=cfg[7], c_guard_rows=_RAGGED_M_GUARD_ROWS)
 
 
 @pytest.mark.parametrize("mode, K", [("a8w4_256x256", 4608), ("a4w4_256x256", 4096)])
