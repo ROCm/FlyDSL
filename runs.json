@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-10T07:54:19Z",
+ "updated": "2026-08-10T08:24:37Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31369777404,
+   "pr": 992,
+   "commit": "26419932d19d8ce508d3f20e86d522282976cdc3",
+   "branch": "xyt/gemm16_950",
+   "event": "pull_request",
+   "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31369777404",
+   "created_at": "2026-08-10T08:22:25Z",
+   "updated_at": "2026-08-10T08:22:39Z",
+   "actor": "xytpai",
+   "jobs": []
+  },
+  {
+   "run_id": 31369333681,
+   "pr": 992,
+   "commit": "99d11d44e74cebb2b4a26b8f1a57a756318cb39f",
+   "branch": "xyt/gemm16_950",
+   "event": "pull_request",
+   "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31369333681",
+   "created_at": "2026-08-10T08:16:19Z",
+   "updated_at": "2026-08-10T08:22:27Z",
+   "actor": "xytpai",
+   "jobs": []
+  },
   {
    "run_id": 31367655623,
    "pr": 947,
@@ -14,7 +44,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31367655623",
    "created_at": "2026-08-10T07:52:48Z",
-   "updated_at": "2026-08-10T07:52:49Z",
+   "updated_at": "2026-08-10T07:53:39Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -119,10 +149,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-10T07:31:36Z",
-     "completed_at": null,
+     "completed_at": "2026-08-10T07:53:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31360402177/job/93384922700"
     },
     {
@@ -1691,36 +1721,6 @@
    "created_at": "2026-08-07T18:39:51Z",
    "updated_at": "2026-08-07T18:41:38Z",
    "actor": "peterjunpark",
-   "jobs": []
-  },
-  {
-   "run_id": 31207941130,
-   "pr": 981,
-   "commit": "2a84fa455189449753ea13b7bf18ce0a45c13f35",
-   "branch": "docs/setup-rtd",
-   "event": "pull_request",
-   "title": "docs: Update configs for documentation to host on Read the Docs",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31207941130",
-   "created_at": "2026-08-07T18:39:16Z",
-   "updated_at": "2026-08-07T18:40:09Z",
-   "actor": "peterjunpark",
-   "jobs": []
-  },
-  {
-   "run_id": 31203005906,
-   "pr": 931,
-   "commit": "3cee3e2ab5604a976dd47dac0cdaa4d6746e6d68",
-   "branch": "rchamber/flex_attention",
-   "event": "pull_request",
-   "title": "Add flex_attention (score_mod / mask_mod) on the generic flash-attention kernel",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31203005906",
-   "created_at": "2026-08-07T17:35:26Z",
-   "updated_at": "2026-08-07T17:38:01Z",
-   "actor": "RichardChamberlain1",
    "jobs": []
   }
  ]
