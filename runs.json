@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-10T06:01:27Z",
+ "updated": "2026-08-10T06:47:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31362005080,
+   "pr": 971,
+   "commit": "9a61bf136088f5284fcf5cea923dcf816f3f59cc",
+   "branch": "gfx1250/gemm-opt-0805",
+   "event": "pull_request",
+   "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31362005080",
+   "created_at": "2026-08-10T06:26:46Z",
+   "updated_at": "2026-08-10T06:28:22Z",
+   "actor": "aoli26",
+   "jobs": []
+  },
   {
    "run_id": 31360402177,
    "pr": 987,
@@ -10,11 +25,11 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31360402177",
    "created_at": "2026-08-10T06:00:16Z",
-   "updated_at": "2026-08-10T06:00:31Z",
+   "updated_at": "2026-08-10T06:03:06Z",
    "actor": "Boss2002n",
    "jobs": []
   },
@@ -1816,49 +1831,6 @@
      "started_at": "2026-08-07T13:31:56Z",
      "completed_at": "2026-08-07T14:01:48Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31163693061/job/92880420676"
-    }
-   ]
-  },
-  {
-   "run_id": 31159580754,
-   "pr": 976,
-   "commit": "feb45ce0cd3a2d45d48fec6a7f09776d2e51a695",
-   "branch": "pr/nvvm-target",
-   "event": "pull_request",
-   "title": "[Feat] Add an experimental cuda nvvm backend",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31159580754",
-   "created_at": "2026-08-07T07:55:29Z",
-   "updated_at": "2026-08-07T16:24:17Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-07T12:38:02Z",
-     "completed_at": "2026-08-07T14:24:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31159580754/job/92867343123"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-07T15:07:44Z",
-     "completed_at": "2026-08-07T16:24:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31159580754/job/92867343205"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-07T08:21:57Z",
-     "completed_at": "2026-08-07T09:05:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31159580754/job/92867343800"
     }
    ]
   }
