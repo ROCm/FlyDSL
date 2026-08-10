@@ -286,13 +286,16 @@ def _run_gemm2(
 
     topk_ids, topk_weights, routing = _make_routing(tokens, experts, topk, tile_m, device, seed)
 
-    s = 0.2
-    x_fp32 = torch.rand((tokens, model_dim), device=device, dtype=torch.float32) * s
-    w1_fp32 = torch.rand((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (
-        s / math.sqrt(model_dim)
+    # SIGNED, zero-mean inputs: weights (and the A2 silu output) are genuinely
+    # signed in practice. All-positive weights let a within-group nibble reorder
+    # barely change the dot-product sum, so an int4 de-interleave bug stays green
+    # -- see test_moe_gemm2_int4_perturb. randn spans the full int4 [-8,7] range.
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
+    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (
+        1.0 / math.sqrt(model_dim)
     )
-    w2_fp32 = torch.rand((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (
-        s / math.sqrt(inter_dim)
+    w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (
+        1.0 / math.sqrt(inter_dim)
     )
 
     _is_int4 = in_dtype == "int4"
@@ -637,6 +640,114 @@ def test_moe_gemm2_numeric(accumulate, out_dtype, tile_m, tokens, in_dtype):
     assert cos > 0.99, f"stage2 cos={cos:.5f} ({mode}, in_dtype={in_dtype}, out_dtype={out_dtype}, tile_m={tile_m})"
 
 
+@_requires_fp8
+def test_moe_gemm2_int4_perturb():
+    """gemm2 W4A8 de-interleave order is load-bearing, mirroring the gemm1 guard.
+
+    gemm1 and gemm2 share ``load_weight_int4_frag`` but use different weight views
+    and N/K mappings (gemm1 N=2*inter_dim gate/up; gemm2 N=model_dim, K=inter_dim),
+    so gemm1's passing perturb test does NOT prove gemm2's addressing. This runs the
+    SAME gemm2 kernel with the correct packing and with the low/high nibble halves of
+    every packed byte swapped, and asserts the perturbed cosine collapses.
+
+    The discriminating data is essential: with SIGNED, zero-mean weights (randn,
+    spanning the full int4 [-8,7] range) a wrong nibble order collapses cosine to
+    ~0. The historical all-positive uniform fixture masked this -- a within-group
+    reorder of all-positive values barely changes the dot-product sum, so the swap
+    stayed green (cos ~1.0). Cosine is scale-invariant, so this also reports the
+    max absolute relative error over non-trivial elements as a stricter check.
+    """
+    device = torch.device("cuda")
+    tokens, tile_m = 128, 64
+    model_dim, inter_dim, experts, topk = (_SHAPE[k] for k in ("model_dim", "inter_dim", "experts", "topk"))
+    topk_ids, topk_weights, routing = _make_routing(tokens, experts, topk, tile_m, device, 0)
+
+    # Signed weights spanning the full int4 range so a reorder changes the result.
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
+    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device) * (1.0 / math.sqrt(model_dim))
+    w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device) * (1.0 / math.sqrt(inter_dim))
+
+    x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
+    w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
+    w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
+
+    w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
+    scale_w1_flat = scale_w1.view(experts * (2 * inter_dim), 1)
+    out1_ref = torch_moe_gemm1(
+        x_q,
+        w1_q_flat,
+        scale_x,
+        scale_w1_flat,
+        topk_ids.to(torch.int64),
+        topk_weights,
+        inter_dim=inter_dim,
+        doweight_stage1=False,
+    )
+    a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=torch.int8)
+
+    w2_shuf = shuffle_weight(w2_q).view(experts * model_dim, inter_dim).contiguous().view(-1)
+    packed_ok = _pack_shuffled_int8_to_packed_int4(w2_shuf)
+    # Perturbation: swap low/high nibble of every byte (even/odd de-interleave swap).
+    _b = packed_ok.to(torch.int16) & 0xFF
+    packed_bad = (((_b & 0xF) << 4) | ((_b >> 4) & 0xF)).to(torch.uint8).to(torch.int8)
+    w2_scale_flat = scale_w2.view(experts * model_dim, 1)
+
+    exe = compile_moe_gemm2(
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=64,
+        tile_k=128,
+        doweight_stage2=True,
+        out_dtype="bf16",
+        accumulate=True,
+        in_dtype="int4",
+    )
+
+    def _run(packed_w):
+        out = torch.zeros((tokens, model_dim), device=device, dtype=torch.bfloat16)
+        _launch(
+            exe,
+            out,
+            x=a2_q,
+            w=packed_w,
+            scale_x=a2_scale,
+            scale_w=w2_scale_flat,
+            routing=routing,
+            dim0=model_dim,
+            dim1=inter_dim,
+            tokens=tokens,
+            zero_out=True,
+        )
+        return out
+
+    ref = torch_moe_gemm2(
+        a2_q,
+        w2_q,
+        a2_scale,
+        scale_w2,
+        topk_ids.to(torch.int64),
+        topk_weights,
+        model_dim=model_dim,
+        doweight_stage2=True,
+    )
+
+    def _max_rel_err(got):
+        g = got.to(torch.float32).reshape(-1)
+        r = ref.to(torch.float32).reshape(-1)
+        mask = r.abs() >= 0.05 * r.abs().max()  # judge only non-trivial elements
+        return float(((g[mask] - r[mask]).abs() / r[mask].abs()).max())
+
+    got_ok, got_bad = _run(packed_ok), _run(packed_bad)
+    cos_ok, cos_bad = _cosine_sim(got_ok, ref), _cosine_sim(got_bad, ref)
+    mre_ok, mre_bad = _max_rel_err(got_ok), _max_rel_err(got_bad)
+    assert cos_ok > 0.99, f"correct W4A8 packing should match: cos={cos_ok:.5f}"
+    assert mre_ok < 0.2, f"correct W4A8 packing max-rel-err too high: {mre_ok:.4f}"
+    assert cos_bad < 0.5, f"perturbed gemm2 nibble de-interleave should break: cos={cos_bad:.5f} (mre={mre_bad:.4f})"
+
+
 def _run_gemm2_int8smooth(
     *, tokens, model_dim, inter_dim, experts, topk, tile_m, out_dtype, accumulate, tile_n=64, tile_k=128, seed=0
 ):
@@ -647,13 +758,14 @@ def _run_gemm2_int8smooth(
     doweight_stage2 = True
     topk_ids, topk_weights, routing = _make_routing(tokens, experts, topk, tile_m, device, seed)
 
-    s = 0.2
-    x_fp32 = torch.rand((tokens, model_dim), device=device, dtype=torch.float32) * s
-    w1_fp32 = torch.rand((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (
-        s / math.sqrt(model_dim)
+    # Signed, zero-mean weights (see _run_gemm2): more realistic and strictly more
+    # sensitive to sign/ordering errors than the old all-positive uniform data.
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
+    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (
+        1.0 / math.sqrt(model_dim)
     )
-    w2_fp32 = torch.rand((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (
-        s / math.sqrt(inter_dim)
+    w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (
+        1.0 / math.sqrt(inter_dim)
     )
 
     x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
@@ -1154,13 +1266,14 @@ def _prep_gemm2(*, tokens, model_dim, inter_dim, experts, topk, tile_m, seed, in
     _wmax = {"dtypeMax": 7} if _is_int4 else {}
     topk_ids, topk_weights, routing = _make_routing(tokens, experts, topk, tile_m, device, seed)
 
-    s = 0.2
-    x_fp32 = torch.rand((tokens, model_dim), device=device, dtype=torch.float32) * s
-    w1_fp32 = torch.rand((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (
-        s / math.sqrt(model_dim)
+    # Signed, zero-mean weights (see _run_gemm2): realistic and sensitive to
+    # sign/ordering errors; the OOB tests here also assert numeric cosine.
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
+    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (
+        1.0 / math.sqrt(model_dim)
     )
-    w2_fp32 = torch.rand((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (
-        s / math.sqrt(inter_dim)
+    w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (
+        1.0 / math.sqrt(inter_dim)
     )
     x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=_qd)
     w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=_qd, **_wmax)
