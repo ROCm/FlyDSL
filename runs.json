@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-10T20:26:08Z",
+ "updated": "2026-08-10T21:25:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "fix/rmsnorm",
    "event": "pull_request",
    "title": "[fix] Resolve normalization-related CI regressions",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31428842146",
    "created_at": "2026-08-10T20:24:09Z",
-   "updated_at": "2026-08-10T20:24:11Z",
+   "updated_at": "2026-08-10T20:27:17Z",
    "actor": "cschenjunlin",
    "jobs": []
   },
@@ -50,10 +50,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-10T20:23:00Z",
-     "completed_at": null,
+     "completed_at": "2026-08-10T21:21:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31418205930/job/93577584090"
     },
     {
@@ -156,11 +156,11 @@
    "branch": "docs/setup-rtd",
    "event": "pull_request",
    "title": "docs: Update configs for documentation to host on Read the Docs",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31394603239",
    "created_at": "2026-08-10T13:46:28Z",
-   "updated_at": "2026-08-10T17:27:31Z",
+   "updated_at": "2026-08-10T21:23:31Z",
    "actor": "peterjunpark",
    "jobs": [
     {
@@ -184,10 +184,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-10T16:59:57Z",
-     "completed_at": null,
+     "completed_at": "2026-08-10T21:23:29Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31394603239/job/93499523534"
     }
    ]
