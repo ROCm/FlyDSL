@@ -246,7 +246,7 @@ def build_gqa_attn(
             ST_PER_ROW = 4
             crd = fx.make_int_tuple((i32(row_offset), i32(col_in_sub)))
             lane_elems = i32(fx.get_scalar(fx.crd2idx(crd, _v_smem_layout)))
-            fx.add_offset(smem_ptr, fx.make_int_tuple(lane_elems))
+            base_ptr = fx.add_offset(smem_ptr, fx.make_int_tuple(lane_elems))
             vreg = [[None] * 4 for _ in range_constexpr(4)]
             for i in range_constexpr(4):
                 for j in range_constexpr(4):
