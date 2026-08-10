@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-10T07:41:10Z",
+ "updated": "2026-08-10T07:54:19Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31367655623,
+   "pr": 947,
+   "commit": "b084f3e4dd925fbd118b3c0fa28326b9981bbe2a",
+   "branch": "worktree-agent-moe-2stage-port",
+   "event": "pull_request",
+   "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8 (gfx942 + gfx950)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31367655623",
+   "created_at": "2026-08-10T07:52:48Z",
+   "updated_at": "2026-08-10T07:52:49Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 31366801444,
    "pr": 947,
@@ -10,11 +25,11 @@
    "branch": "worktree-agent-moe-2stage-port",
    "event": "pull_request",
    "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8 (gfx942 + gfx950)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31366801444",
    "created_at": "2026-08-10T07:40:14Z",
-   "updated_at": "2026-08-10T07:40:24Z",
+   "updated_at": "2026-08-10T07:52:50Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1707,49 +1722,6 @@
    "updated_at": "2026-08-07T17:38:01Z",
    "actor": "RichardChamberlain1",
    "jobs": []
-  },
-  {
-   "run_id": 31191024109,
-   "pr": 960,
-   "commit": "4252dbd076603c59418f7c715d913cf77d352331",
-   "branch": "new_bias_alibi_sink_attention",
-   "event": "pull_request",
-   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31191024109",
-   "created_at": "2026-08-07T15:07:15Z",
-   "updated_at": "2026-08-07T17:48:53Z",
-   "actor": "amd-nprotaso",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-07T15:14:39Z",
-     "completed_at": "2026-08-07T16:04:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31191024109/job/92909143055"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-07T16:24:57Z",
-     "completed_at": "2026-08-07T17:48:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31191024109/job/92909143070"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-07T15:14:00Z",
-     "completed_at": "2026-08-07T16:13:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31191024109/job/92909143203"
-    }
-   ]
   }
  ]
 }
