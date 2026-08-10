@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-10T14:08:37Z",
+ "updated": "2026-08-10T14:48:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31399711656,
+   "pr": 901,
+   "commit": "8c565d1dcb45fb3dab2c896bef33213dcbb3d578",
+   "branch": "moe_sorting_optimization",
+   "event": "pull_request",
+   "title": "Add Optimized MoE Routing Path",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31399711656",
+   "created_at": "2026-08-10T14:43:34Z",
+   "updated_at": "2026-08-10T14:46:45Z",
+   "actor": "amd-wsung102",
+   "jobs": []
+  },
   {
    "run_id": 31394603239,
    "pr": 981,
@@ -10,11 +25,11 @@
    "branch": "docs/setup-rtd",
    "event": "pull_request",
    "title": "docs: Update configs for documentation to host on Read the Docs",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31394603239",
    "created_at": "2026-08-10T13:46:28Z",
-   "updated_at": "2026-08-10T13:48:48Z",
+   "updated_at": "2026-08-10T14:19:11Z",
    "actor": "peterjunpark",
    "jobs": []
   },
@@ -40,13 +55,41 @@
    "branch": "gfx1250/gemm-opt-0805",
    "event": "pull_request",
    "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31392773966",
    "created_at": "2026-08-10T13:25:03Z",
-   "updated_at": "2026-08-10T13:33:24Z",
+   "updated_at": "2026-08-10T14:22:43Z",
    "actor": "aoli26",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-10T14:22:43Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31392773966/job/93484988075"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-10T14:22:43Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31392773966/job/93484988154"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-10T14:23:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31392773966/job/93484988182"
+    }
+   ]
   },
   {
    "run_id": 31391542269,
@@ -55,13 +98,41 @@
    "branch": "main",
    "event": "pull_request",
    "title": "[Kernel]Remove recast iter from sliding window attention kernel.",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31391542269",
    "created_at": "2026-08-10T13:10:25Z",
-   "updated_at": "2026-08-10T13:26:19Z",
+   "updated_at": "2026-08-10T14:17:47Z",
    "actor": "amd-nprotaso",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-10T14:19:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31391542269/job/93483511847"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-10T14:24:26Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31391542269/job/93483511867"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-10T14:17:47Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31391542269/job/93483511888"
+    }
+   ]
   },
   {
    "run_id": 31381795197,
@@ -1612,67 +1683,6 @@
      "started_at": "2026-08-09T04:20:41Z",
      "completed_at": "2026-08-09T05:00:03Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31241169768/job/93196876148"
-    }
-   ]
-  },
-  {
-   "run_id": 31239378308,
-   "pr": null,
-   "commit": "3ea5221753c021d420504971d0bdbc7f42921432",
-   "branch": "megamoe_perf",
-   "event": "pull_request",
-   "title": "Optimize megamoe performance",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239378308",
-   "created_at": "2026-08-08T04:24:44Z",
-   "updated_at": "2026-08-08T06:20:31Z",
-   "actor": "yanboshao",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-08T04:29:22Z",
-     "completed_at": "2026-08-08T05:37:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239378308/job/93058026322"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-08T05:38:07Z",
-     "completed_at": "2026-08-08T05:46:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239378308/job/93058026323"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-08T04:29:22Z",
-     "completed_at": "2026-08-08T05:55:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239378308/job/93058026346"
-    },
-    {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-08T05:56:29Z",
-     "completed_at": "2026-08-08T06:18:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239378308/job/93066294545"
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-08T05:56:21Z",
-     "completed_at": "2026-08-08T06:20:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239378308/job/93066294548"
     }
    ]
   }
