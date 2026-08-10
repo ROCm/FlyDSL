@@ -130,17 +130,6 @@ fp8,8192,8192,8192,128,256,128,2
 int8,9728,8192,8320,128,256,128,2
 '
 
-# SplitK HGEMM shapes:
-# "dtype,M,N,K,tile_m,tile_n,tile_k,stages,split_k,block_m_warps,block_n_warps,block_k_warps"
-HGEMM_SHAPES_GFX950='
-fp16,2048,2048,2048,128,128,64,4,1,4,4,1
-bf16,32,384,7168,32,64,64,5,16,2,2,1
-'
-HGEMM_SHAPES_CDNA3='
-fp16,4096,4096,4096,128,128,64,2,1,2,2,1
-bf16,32,384,7168,16,64,128,2,14,1,2,1
-'
-
 # FP8 8-wave row-scale GEMM shapes (gfx950 only):
 # "M,N,K,tile_m,tile_n,preshuffle_b"
 FP8_GEMM_8WAVE_ROWSCALE_SHAPES='
@@ -213,7 +202,7 @@ Usage:
 
 Supported ops:
   softmax | layernorm | rmsnorm | flash_attn | mla | gemm | moe
-  (gemm includes preshuffle GEMM, SplitK HGEMM, and FP8 8-wave row-scale GEMM)
+  (gemm includes preshuffle GEMM and FP8 8-wave row-scale GEMM)
 USAGE
 }
 
@@ -817,54 +806,6 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     row="$(_py_parse_and_emit gemm_async "${shape_tag}" "${dtype}" "${log}")"
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
-  done
-
-  if [ -n "${HGEMM_SHAPES:-}" ]; then
-    hgemm_shapes="${HGEMM_SHAPES}"
-  else
-    case "${GPU_ARCH}" in
-      gfx95*) hgemm_shapes="${HGEMM_SHAPES_GFX950}" ;;
-      *) hgemm_shapes="${HGEMM_SHAPES_CDNA3}" ;;
-    esac
-  fi
-
-  for shape in $hgemm_shapes; do
-    oldIFS=$IFS
-    IFS=,
-    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
-    set -- $shape
-    IFS=$oldIFS
-    dtype=$1; M=$2; N=$3; K=$4; tile_m=$5; tile_n=$6; tile_k=$7
-    stages=$8; split_k=$9; block_m_warps=${10}; block_n_warps=${11}; block_k_warps=${12}
-    log="${BENCH_LOG_DIR}/hgemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}_s${stages}_sk${split_k}.log"
-    if python3 tests/kernels/test_hgemm_splitk.py \
-      --dtype "$dtype" \
-      --num_warmup 3 \
-      --num_iters 50 \
-      -m "$M" \
-      -n "$N" \
-      -k "$K" \
-      --TILE_M "$tile_m" \
-      --TILE_N "$tile_n" \
-      --TILE_K "$tile_k" \
-      --STAGES "$stages" \
-      --SPLIT_K "$split_k" \
-      --BLOCK_M_WARPS "$block_m_warps" \
-      --BLOCK_N_WARPS "$block_n_warps" \
-      --BLOCK_K_WARPS "$block_k_warps" >"${log}" 2>&1; then
-      if grep -q "Skipped:" "${log}"; then
-        shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_sk${split_k}"
-        _emit_row "hgemm" "${shape_tag}" "${dtype}" "skip" "skip"
-      else
-        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-        shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_sk${split_k}"
-        row="$(_py_parse_and_emit hgemm "${shape_tag}" "${dtype}" "${log}")"
-        set -- $row
-        _emit_row "$1" "$2" "$3" "$4" "$5"
-      fi
-    else
-      _fail_or_skip "${log}" "hgemm"
-    fi
   done
 
   if [ -n "${FP8_GEMM_8WAVE_ROWSCALE_SHAPES:-}" ]; then
