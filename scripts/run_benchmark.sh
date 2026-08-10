@@ -131,10 +131,11 @@ int8,9728,8192,8320,128,256,128,2
 '
 
 # A16W16 GEMM shapes:
-# "dtype,M,N,K,tile_m,tile_n,tile_k,stages,split_k,m_waves,n_waves,k_waves"
+# "dtype,M,N,K,tile_m,tile_n,tile_k,stages,split_k,m_waves,n_waves,k_waves[,use_hti]"
 HGEMM_SHAPES_GFX950='
 fp16,2048,2048,2048,128,128,64,4,1,4,4,1
 bf16,32,384,7168,32,64,64,5,16,2,2,1
+bf16,8192,8192,8192,256,256,64,2,1,2,4,1,true
 '
 HGEMM_SHAPES_CDNA3='
 fp16,4096,4096,4096,128,128,64,2,1,2,2,1
@@ -836,7 +837,14 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     IFS=$oldIFS
     dtype=$1; M=$2; N=$3; K=$4; tile_m=$5; tile_n=$6; tile_k=$7
     stages=$8; split_k=$9; m_waves=${10}; n_waves=${11}; k_waves=${12}
-    log="${BENCH_LOG_DIR}/hgemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}_s${stages}_sk${split_k}.log"
+    use_hti="${13:-false}"
+    hti_flag="--no-hti"
+    hti_tag=""
+    if [ "${use_hti}" = "1" ] || [ "${use_hti}" = "true" ]; then
+      hti_flag="--hti"
+      hti_tag="_hti"
+    fi
+    log="${BENCH_LOG_DIR}/hgemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}_s${stages}_sk${split_k}${hti_tag}.log"
     if python3 tests/kernels/test_gemm_a16w16_gfx950.py \
       --dtype "$dtype" \
       --num_warmup 3 \
@@ -852,13 +860,13 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       --BLOCK_M_WARPS "$m_waves" \
       --BLOCK_N_WARPS "$n_waves" \
       --BLOCK_K_WARPS "$k_waves" \
-      --no-hti >"${log}" 2>&1; then
+      "${hti_flag}" >"${log}" 2>&1; then
       if grep -q "Skipped:" "${log}"; then
-        shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_sk${split_k}"
+        shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_sk${split_k}${hti_tag}"
         _emit_row "hgemm" "${shape_tag}" "${dtype}" "skip" "skip"
       else
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-        shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_sk${split_k}"
+        shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_sk${split_k}${hti_tag}"
         row="$(_py_parse_and_emit hgemm "${shape_tag}" "${dtype}" "${log}")"
         set -- $row
         _emit_row "$1" "$2" "$3" "$4" "$5"

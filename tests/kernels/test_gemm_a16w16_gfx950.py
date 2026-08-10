@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
+import os
+import sys
 from dataclasses import dataclass
 
 import pytest
@@ -11,6 +13,10 @@ try:
     import torch
 except ImportError:
     torch = None
+
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
