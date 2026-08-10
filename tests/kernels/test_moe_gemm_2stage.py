@@ -4,11 +4,14 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 """
-Numeric correctness tests for the ``moe_gemm_2stage`` fp8/int8 2-stage kernels.
+Numeric correctness tests for the ``moe_gemm_2stage`` 2-stage kernels.
 
 Covers stage1 (gate-up + silu) and stage2 (down-projection) against torch
-references by cosine similarity, for both fp8 and int8 inputs, on CDNA3 (gfx94*)
-/ CDNA4 (gfx95*).
+references by cosine similarity, for all four input dtypes -- fp8, int8,
+int8smooth, and int4 (W4A8) -- on CDNA3 (gfx94*) / CDNA4 (gfx95*). int8smooth is
+a distinct stage1 path (slot-major A/scale_x gather) but routes through the int8
+path in stage2 (bit-identical), so stage2 pins its dispatch equivalence once
+rather than re-sweeping it.
 
 Stage2 runs both atomic (``accumulate=True``) and reduce (``accumulate=False``)
 modes, f16/bf16/f32 outputs (f32 atomic-only), and two tile_m values (16 decode,
@@ -562,6 +565,17 @@ def _run_gemm1_int8smooth(*, tokens, model_dim, inter_dim, experts, topk, tile_m
     return out, ref
 
 
+def _run_gemm1_any(*, in_dtype, **kw):
+    """Dispatch stage1 to the int8smooth slot-major runner or the shared runner.
+
+    int8smooth is a genuinely distinct stage1 path (slot-major A/scale_x gather),
+    so it must use ``_run_gemm1_int8smooth``; the other three dtypes share
+    ``_run_gemm1``."""
+    if in_dtype == "int8smooth":
+        return _run_gemm1_int8smooth(**kw)
+    return _run_gemm1(in_dtype=in_dtype, **kw)
+
+
 @_requires_fp8
 @pytest.mark.parametrize("out_dtype", ["f16", "bf16"])
 @pytest.mark.parametrize("tile_m,tokens", [(64, 128), (16, 8)])
@@ -623,7 +637,9 @@ def test_moe_gemm2_numeric(accumulate, out_dtype, tile_m, tokens, in_dtype):
     assert cos > 0.99, f"stage2 cos={cos:.5f} ({mode}, in_dtype={in_dtype}, out_dtype={out_dtype}, tile_m={tile_m})"
 
 
-def _run_gemm2_int8smooth(*, tokens, model_dim, inter_dim, experts, topk, tile_m, out_dtype, accumulate, seed=0):
+def _run_gemm2_int8smooth(
+    *, tokens, model_dim, inter_dim, experts, topk, tile_m, out_dtype, accumulate, tile_n=64, tile_k=128, seed=0
+):
     """Stage2 int8smooth: the smooth scale is applied host-side to A2 before quant,
     so the kernel sees plain int8 A2 + a per-route scale -- identical to the int8
     path in gemm2. This exercises that in_dtype='int8smooth' routes to that path."""
@@ -673,8 +689,8 @@ def _run_gemm2_int8smooth(*, tokens, model_dim, inter_dim, experts, topk, tile_m
         experts=experts,
         topk=topk,
         tile_m=tile_m,
-        tile_n=64,
-        tile_k=128,
+        tile_n=tile_n,
+        tile_k=tile_k,
         doweight_stage2=doweight_stage2,
         out_dtype=out_dtype,
         accumulate=accumulate,
@@ -725,6 +741,40 @@ def test_moe_gemm2_int8smooth_numeric(accumulate, out_dtype, tile_m, tokens):
     cos = _cosine_sim(got, ref)
     mode = "atomic" if accumulate else "reduce"
     assert cos > 0.99, f"stage2 int8smooth cos={cos:.5f} ({mode}, out_dtype={out_dtype}, tile_m={tile_m})"
+
+
+def _run_gemm2_any(*, in_dtype, **kw):
+    """Dispatch stage2 to the int8smooth fixture or the shared runner.
+
+    In stage2 int8smooth is bit-identical to int8 (the kernel routes it through the
+    int8 path), but its host-side fixture differs (the smooth scale is folded into
+    A2 before quant), so it uses ``_run_gemm2_int8smooth``; the other three dtypes
+    share ``_run_gemm2``."""
+    if in_dtype == "int8smooth":
+        return _run_gemm2_int8smooth(**kw)
+    return _run_gemm2(in_dtype=in_dtype, **kw)
+
+
+@_requires_fp8
+@pytest.mark.parametrize("accumulate", [True, False])
+def test_moe_gemm2_int8smooth_dispatch_equiv(accumulate):
+    """Pin the stage2 int8smooth dispatch equivalence (why it is NOT swept over shapes
+    in test_moe_gemm2_shapes_fast): in stage2 the kernel routes int8smooth through the
+    int8 path bit-for-bit (gemm2.py: ``is_int8 = in_dtype in ("int8","int8smooth")``).
+    The smooth scale is baked into A2 host-side, so the kernel sees plain int8 + a
+    per-route scale. This runs the int8smooth fixture and asserts it matches the torch
+    reference for a single tile config; the full stage2 dtype coverage lives in the
+    (int8) fast shape sweep and the large_shape sweep."""
+    got, ref = _run_gemm2_int8smooth(
+        tokens=8,
+        **_SHAPE,
+        tile_m=16,
+        out_dtype="bf16",
+        accumulate=accumulate,
+    )
+    cos = _cosine_sim(got, ref)
+    mode = "atomic" if accumulate else "reduce"
+    assert cos > 0.99, f"stage2 int8smooth dispatch cos={cos:.5f} ({mode})"
 
 
 @_requires_fp8
@@ -787,16 +837,28 @@ def _skip_if_invalid_gemm2(*, model_dim, inter_dim, tile_m, tile_n, tile_k):
 # variety lives in tokens (ragged M), experts, topk, and the tile_* triples.
 #
 # Split into a small FAST core (default CI) and an exhaustive `large_shape` sweep.
+#
+# The fast core is crossed over ALL FOUR input dtypes (fp8, int8, int8smooth,
+# int4) so the CI-default selection exercises every code path, not just int8.
+# To keep the dtype dimension inside the ~2min fast budget the shape list is
+# TRIMMED to a ragged-M core (tokens not a multiple of tile_m -- the M-safety
+# that this coverage exists for); the full shape x tile x dim cross lives in the
+# `large_shape` sweep below.
 
-# FAST core: (tokens, experts, topk, tile_m, tile_n, tile_k). Each row targets a
-# distinct M-stress: ragged tails, padding-heavy routing, topk extremes, tile_k=256.
+_FAST_DTYPES = ["fp8", "int8", "int8smooth", "int4"]
+# gemm2 has only THREE distinct code paths: fp8 (E4M3 elem), int8 (i32 acc), int4
+# (packed-int4 weight loader). int8smooth routes to the int8 path bit-for-bit
+# (gemm2.py: is_int8 = in_dtype in ("int8","int8smooth")), so it is NOT swept over
+# shapes here; its dispatch equivalence is pinned once in
+# test_moe_gemm2_int8smooth_dispatch_equiv below.
+_FAST_DTYPES_GEMM2 = ["fp8", "int8", "int4"]
+
+# FAST core: (tokens, experts, topk, tile_m, tile_n, tile_k). Each row is a ragged
+# M tail against its tile_m, spanning tile_m 16/32/64 and both narrow/wide tile_n.
 _FAST_GEMM1 = [
-    (1, 8, 1, 16, 64, 128),  # single token, topk=1: almost all sorted slots padding
     (3, 4, 2, 16, 64, 128),  # tiny, ragged vs tile_m=16
     (7, 8, 2, 32, 64, 128),  # ragged tail vs tile_m=32
-    (31, 32, 6, 64, 128, 128),  # not a multiple of tile_m=64; many experts, topk=6
-    (33, 8, 2, 64, 128, 128),  # just over 32
-    (129, 128, 8, 128, 256, 128),  # just over 128; 128 experts, topk=8
+    (33, 8, 2, 64, 128, 128),  # just over 32, ragged vs tile_m=64; wide tile_n
 ]
 # gemm2 fast core reuses the same M/tile rows plus a tile_k=256 case (needs inter_dim=256).
 _FAST_GEMM2 = _FAST_GEMM1 + [
@@ -826,12 +888,16 @@ _DIM_CASES = [
 
 
 @_requires_fp8
+@pytest.mark.parametrize("in_dtype", _FAST_DTYPES)
 @pytest.mark.parametrize("tokens,experts,topk,tile_m,tile_n,tile_k", _FAST_GEMM1)
-def test_moe_gemm1_shapes_fast(tokens, experts, topk, tile_m, tile_n, tile_k):
-    """FAST stage1 shape coverage: ragged M tails, varied experts/topk, tile triples.
-    One dtype (int8) to stay quick; the dtype x shape cross is in the large_shape sweep."""
+def test_moe_gemm1_shapes_fast(in_dtype, tokens, experts, topk, tile_m, tile_n, tile_k):
+    """FAST stage1 shape coverage across all four input dtypes (fp8, int8,
+    int8smooth, int4): ragged M tails against tile_m 16/32/64. int8smooth uses the
+    slot-major A/scale_x gather path. The shape list is trimmed (dtype x shape must
+    fit the fast budget); the full shape x tile x dim cross is in the large_shape sweep."""
     _skip_if_invalid_gemm1(model_dim=256, inter_dim=128, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k)
-    out, ref = _run_gemm1(
+    out, ref = _run_gemm1_any(
+        in_dtype=in_dtype,
         tokens=tokens,
         model_dim=256,
         inter_dim=128,
@@ -841,18 +907,24 @@ def test_moe_gemm1_shapes_fast(tokens, experts, topk, tile_m, tile_n, tile_k):
         tile_n=tile_n,
         tile_k=tile_k,
         out_dtype="bf16",
-        in_dtype="int8",
     )
     cos = _cosine_sim(out, ref)
-    assert cos > 0.99, f"stage1 fast cos={cos:.5f} (tile=({tile_m},{tile_n},{tile_k}), M=({tokens},{experts},{topk}))"
+    assert cos > 0.99, (
+        f"stage1 fast cos={cos:.5f} (in={in_dtype}, tile=({tile_m},{tile_n},{tile_k}), "
+        f"M=({tokens},{experts},{topk}))"
+    )
 
 
 @_requires_fp8
+@pytest.mark.parametrize("in_dtype", _FAST_DTYPES_GEMM2)
 @pytest.mark.parametrize("accumulate", [True, False])
 @pytest.mark.parametrize("tokens,experts,topk,tile_m,tile_n,tile_k", _FAST_GEMM2)
-def test_moe_gemm2_shapes_fast(accumulate, tokens, experts, topk, tile_m, tile_n, tile_k):
-    """FAST stage2 shape coverage (atomic + reduce): ragged M tails, varied
-    experts/topk, tile triples. inter_dim=256 so tile_k in (128,256) both apply."""
+def test_moe_gemm2_shapes_fast(in_dtype, accumulate, tokens, experts, topk, tile_m, tile_n, tile_k):
+    """FAST stage2 shape coverage (atomic + reduce) across the three distinct gemm2
+    dtype paths (fp8, int8, int4): ragged M tails, varied experts/topk, tile triples.
+    inter_dim=256 so tile_k in (128,256) both apply. int8smooth is deliberately absent
+    here -- in stage2 it is bit-identical to int8 (see _FAST_DTYPES_GEMM2), pinned by
+    test_moe_gemm2_int8smooth_dispatch_equiv instead of re-swept."""
     _skip_if_invalid_gemm2(model_dim=256, inter_dim=256, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k)
     got, ref = _run_gemm2(
         tokens=tokens,
@@ -865,26 +937,29 @@ def test_moe_gemm2_shapes_fast(accumulate, tokens, experts, topk, tile_m, tile_n
         tile_k=tile_k,
         out_dtype="bf16",
         accumulate=accumulate,
-        in_dtype="int8",
+        in_dtype=in_dtype,
     )
     cos = _cosine_sim(got, ref)
     mode = "atomic" if accumulate else "reduce"
-    assert (
-        cos > 0.99
-    ), f"stage2 fast cos={cos:.5f} ({mode}, tile=({tile_m},{tile_n},{tile_k}), M=({tokens},{experts},{topk}))"
+    assert cos > 0.99, (
+        f"stage2 fast cos={cos:.5f} ({mode}, in={in_dtype}, tile=({tile_m},{tile_n},{tile_k}), "
+        f"M=({tokens},{experts},{topk}))"
+    )
 
 
 @pytest.mark.large_shape
 @_requires_fp8
-@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int4"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int8smooth", "int4"])
 @pytest.mark.parametrize("model_dim,inter_dim", _DIM_CASES)
 @pytest.mark.parametrize("tile_m,tile_n,tile_k", _TILE_CASES)
 @pytest.mark.parametrize("tokens,experts,topk", _M_CASES)
 def test_moe_gemm1_shapes(in_dtype, model_dim, inter_dim, tile_m, tile_n, tile_k, tokens, experts, topk):
-    """Exhaustive stage1 shape sweep across all four dtype-capable inputs, dims,
-    tile triples, and ragged M cases (large_shape: excluded from fast CI)."""
+    """Exhaustive stage1 shape sweep across all four dtype-capable inputs (fp8, int8,
+    int8smooth, int4), dims, tile triples, and ragged M cases (large_shape: excluded
+    from fast CI). int8smooth uses the slot-major A/scale_x gather path."""
     _skip_if_invalid_gemm1(model_dim=model_dim, inter_dim=inter_dim, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k)
-    out, ref = _run_gemm1(
+    out, ref = _run_gemm1_any(
+        in_dtype=in_dtype,
         tokens=tokens,
         model_dim=model_dim,
         inter_dim=inter_dim,
@@ -894,7 +969,6 @@ def test_moe_gemm1_shapes(in_dtype, model_dim, inter_dim, tile_m, tile_n, tile_k
         tile_n=tile_n,
         tile_k=tile_k,
         out_dtype="bf16",
-        in_dtype=in_dtype,
     )
     cos = _cosine_sim(out, ref)
     assert cos > 0.99, (
@@ -912,9 +986,13 @@ def test_moe_gemm1_shapes(in_dtype, model_dim, inter_dim, tile_m, tile_n, tile_k
 @pytest.mark.parametrize("tokens,experts,topk", _M_CASES)
 def test_moe_gemm2_shapes(in_dtype, accumulate, model_dim, inter_dim, tile_m, tile_n, tile_k, tokens, experts, topk):
     """Exhaustive stage2 shape sweep (atomic + reduce) across all four dtype-capable
-    inputs, dims, tile triples, and ragged M cases (large_shape: excluded from fast CI)."""
+    inputs (fp8, int8, int8smooth, int4), dims, tile triples, and ragged M cases
+    (large_shape: excluded from fast CI). int8smooth shares the int8 stage2 path but
+    is built from a distinct host-side (smooth-folded A2) fixture, so it is swept here
+    (in the fast CI it is pinned once by test_moe_gemm2_int8smooth_dispatch_equiv)."""
     _skip_if_invalid_gemm2(model_dim=model_dim, inter_dim=inter_dim, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k)
-    got, ref = _run_gemm2(
+    got, ref = _run_gemm2_any(
+        in_dtype=in_dtype,
         tokens=tokens,
         model_dim=model_dim,
         inter_dim=inter_dim,
@@ -925,7 +1003,6 @@ def test_moe_gemm2_shapes(in_dtype, accumulate, model_dim, inter_dim, tile_m, ti
         tile_k=tile_k,
         out_dtype="bf16",
         accumulate=accumulate,
-        in_dtype=in_dtype,
     )
     cos = _cosine_sim(got, ref)
     mode = "atomic" if accumulate else "reduce"
@@ -944,11 +1021,24 @@ def test_moe_gemm2_shapes(in_dtype, accumulate, model_dim, inter_dim, tile_m, ti
 #   * the num_valid_id / num_valid_ids block guard                      -> nvi
 #   * the atomic epilogue OOB-redirect for out-of-tile lanes            -> canary
 #
-# Two historical bugs this family must catch:
+# Bug class (a) this family catches, and the bytes-vs-elements class (b):
 #   (a) unwritten sorted_lds slots read as 0 -> decode to VALID token0/slot0,
-#       escaping the OOB clamp and corrupting the first-routed token.
-#   (b) num_records_bytes computed in ELEMENTS not BYTES -> descriptor under-sized
-#       2x, so reads past M/2 alias real rows.
+#       escaping the OOB clamp and corrupting the first-routed token. Directly
+#       caught by test_moe_gemm1_sentinel_token0 (all four dtypes).
+#   (b) bytes-vs-elements in a buffer descriptor's num_records_bytes. The ORIGINAL
+#       historical instance was on gemm1's INPUT A descriptor, which under-sized it
+#       2x for BF16 input (elem_bytes=2 counted as 1). BF16 input NO LONGER EXISTS
+#       in this package: every surviving input dtype (fp8, int8, packed int4) has
+#       elem_bytes == 1, so multiplying by elem_bytes is a no-op and that exact bug
+#       is now UNREPRODUCIBLE on the input descriptors. The same MISTAKE CLASS still
+#       has teeth at a DIFFERENT site -- the atomic OUTPUT descriptor, whose element
+#       is 2 bytes (f16/bf16) or 4 bytes (f32): num_records_bytes = tokens * N *
+#       out_bytes (gemm2.py). Dropping out_bytes there under-sizes the output
+#       descriptor and (verified) turns ~13 tests red while the reduce cases -- which
+#       do not use that atomic descriptor -- correctly stay green. That output-side
+#       instance is what test_moe_gemm2_output_canary isolates; the input poison
+#       tests are combination tripwires, NOT single-factor num_records isolations
+#       (see their docstrings).
 # ===========================================================================
 
 _CANARY_ROWS = 4  # extra output rows beyond `tokens` used as a write guard region.
@@ -956,16 +1046,61 @@ _POISON_ROWS = 8  # extra input rows beyond `tokens` filled with poison.
 
 
 def _prep_gemm1(*, tokens, model_dim, inter_dim, experts, topk, tile_m, seed, in_dtype, out_dtype):
-    """Build stage1 kernel inputs + torch reference, exposing tensors for OOB tests."""
+    """Build stage1 kernel inputs + torch reference, exposing tensors for OOB tests.
+
+    For int8smooth the activation X/scale_x are SLOT-MAJOR ([topk*tokens, K] / [topk*
+    tokens], row = slot*tokens + token). The returned ``is_smooth`` flag and the
+    slot-major ``x_q``/``scale_x`` change how the OOB tests over-allocate poison rows
+    (beyond topk*tokens, not tokens); the token-major output ([tokens, topk, inter])
+    is identical to the other dtypes, so the canary guard is unchanged."""
     device = torch.device("cuda")
     _qd = _quant_dtype(in_dtype)
     _is_int4 = in_dtype == "int4"
+    _is_smooth = in_dtype == "int8smooth"
     topk_ids, topk_weights, routing = _make_routing(tokens, experts, topk, tile_m, device, seed)
 
     x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
     w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (
         1.0 / math.sqrt(model_dim)
     )
+
+    if _is_smooth:
+        d = _build_stage1_int8smooth(x_fp32, w1_fp32, topk_ids)
+        ref = torch_moe_gemm1(
+            d["x_ref"],
+            d["w1_q_flat"],
+            d["sx_ref"],
+            d["scale_w1_flat"],
+            topk_ids.to(torch.int64),
+            topk_weights,
+            inter_dim=inter_dim,
+            doweight_stage1=False,
+        )
+        exe = compile_moe_gemm1(
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts=experts,
+            topk=topk,
+            tile_m=tile_m,
+            tile_n=64,
+            tile_k=128,
+            doweight_stage1=False,
+            out_dtype=out_dtype,
+            in_dtype=in_dtype,
+        )
+        return dict(
+            exe=exe,
+            is_smooth=True,
+            topk=topk,
+            x_q=d["x_q"],  # slot-major [topk*tokens, K]
+            w=d["w1_kernel"],
+            scale_x=d["scale_x_1d"].view(-1, 1),  # slot-major [topk*tokens, 1]
+            scale_w=d["scale_w1_flat"],
+            routing=routing,
+            ref=ref,
+            out_dt=_out_torch_dtype(out_dtype),
+        )
+
     x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=_qd)
     w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=_qd, **({"dtypeMax": 7} if _is_int4 else {}))
     w1_shuffled_flat = shuffle_weight(w1_q).view(experts * (2 * inter_dim), model_dim).contiguous()
@@ -999,6 +1134,8 @@ def _prep_gemm1(*, tokens, model_dim, inter_dim, experts, topk, tile_m, seed, in
     )
     return dict(
         exe=exe,
+        is_smooth=False,
+        topk=topk,
         x_q=x_q,
         w=w1_shuffled_flat,
         scale_x=scale_x,  # [tokens, 1]
@@ -1096,14 +1233,16 @@ def _canary_fill(t, start_row):
 # B.1 + B.3: output canary / guard region (+ ragged tail).
 # ---------------------------------------------------------------------------
 @_requires_fp8
-@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int4"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int8smooth", "int4"])
 @pytest.mark.parametrize("tile_m,tokens", [(16, 7), (64, 33)])
 def test_moe_gemm1_output_canary(in_dtype, tile_m, tokens):
     """Stage1 must not write any output row >= tokens. Allocate the [tokens, topk,
     inter] output with _CANARY_ROWS extra token-rows, seed a distinctive pattern in
     the guard region, run, and assert the guard region is BIT-IDENTICAL afterwards.
     tokens is a ragged tail (not a multiple of tile_m) so the last block is partial.
-    A larger allocation must not change behavior (record bound derives from tokens)."""
+    A larger allocation must not change behavior (record bound derives from tokens).
+    Covers all four input dtypes; the output layout is token-major for every dtype
+    (int8smooth only changes the slot-major A/scale_x inputs), so the guard is shared."""
     d = _prep_gemm1(
         tokens=tokens,
         model_dim=256,
@@ -1145,7 +1284,15 @@ def test_moe_gemm2_output_canary(accumulate, in_dtype, tile_m, tokens):
     model_dim]) and reduce ([tokens*topk, model_dim]) epilogues: over-allocate the
     guard rows, seed a canary, run, assert bit-identical guard afterwards. Ragged
     tail (tokens % tile_m != 0). Directly exercises the atomic OOB-redirect and the
-    num_records_bytes-derived output record bound."""
+    num_records_bytes-derived output record bound.
+
+    This is where the bytes-vs-elements mistake class (header bug (b)) has TEETH in
+    the current package: the atomic path's num_records_bytes = tokens * N * out_bytes
+    (gemm2.py), and out_bytes is 2 (f16/bf16) or 4 (f32). Dropping out_bytes there
+    under-sizes the output descriptor and (verified) reddens the atomic cases here
+    while the reduce cases -- which don't use that descriptor -- stay green. The old
+    input-A instance of the same mistake is unreproducible now (all inputs are 1
+    byte); see the TASK B header."""
     topk, model_dim = 2, 256
     d = _prep_gemm2(
         tokens=tokens,
@@ -1187,16 +1334,62 @@ def test_moe_gemm2_output_canary(accumulate, in_dtype, tile_m, tokens):
     assert cos > 0.99, f"stage2 canary numerics cos={cos:.5f} ({mode}, in={in_dtype}, tile_m={tile_m}, tokens={tokens})"
 
 
+@_requires_fp8
+def test_moe_gemm2_output_canary_int8smooth():
+    """int8smooth output-guard equivalence (why the canary sweep above is not 4x'd for
+    it): in stage2 int8smooth routes through the int8 path bit-for-bit, and the output
+    canary/OOB-redirect it exercises is entirely dtype-independent. So instead of
+    re-sweeping accumulate x tile_m x tokens, this pins ONE atomic case with the
+    int8smooth-compiled kernel over the same int8 fixture, asserting the guard still
+    holds. _prep_gemm2 builds plain int8 data for in_dtype='int8smooth' (they share
+    the stage2 fixture)."""
+    tile_m, tokens = 16, 7
+    topk, model_dim = 2, 256
+    d = _prep_gemm2(
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=128,
+        experts=8,
+        topk=topk,
+        tile_m=tile_m,
+        seed=0,
+        in_dtype="int8smooth",
+        out_dtype="bf16",
+        accumulate=True,
+    )
+    out = torch.zeros((tokens + _CANARY_ROWS, model_dim), device="cuda", dtype=d["out_dt"])
+    out[:tokens].zero_()
+    guard0 = _canary_fill(out, tokens)
+    _launch(
+        d["exe"],
+        out,
+        x=d["a2_q"],
+        w=d["w"],
+        scale_x=d["a2_scale"],
+        scale_w=d["scale_w"],
+        routing=d["routing"],
+        dim0=model_dim,
+        dim1=128,
+        tokens=tokens,
+        zero_out=False,
+    )
+    assert torch.equal(out[tokens:], guard0), "stage2 int8smooth wrote into the output guard region"
+    assert _cosine_sim(out[:tokens], d["ref"]) > 0.99
+
+
 # ---------------------------------------------------------------------------
 # B.2: input poison beyond M (targets num_records_bytes sizing directly).
 # ---------------------------------------------------------------------------
 @_requires_fp8
-@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int4"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int8smooth", "int4"])
 @pytest.mark.parametrize("tile_m,tokens", [(16, 7), (64, 33)])
 def test_moe_gemm1_input_poison(in_dtype, tile_m, tokens):
-    """Fill stage1 input rows >= tokens (x AND scale_x) with poison and assert the
-    output is BIT-IDENTICAL to a clean-padded run. Any unclamped read past M that
-    reaches a valid output row would pull poison and diverge.
+    """Fill stage1 input rows beyond the valid A-row count (x AND scale_x) with poison
+    and assert the output is BIT-IDENTICAL to a clean-padded run. Any unclamped read
+    past M that reaches a valid output row would pull poison and diverge.
+
+    The valid A-row count is ``tokens`` for the token-major dtypes and ``topk*tokens``
+    for int8smooth (slot-major A/scale_x); poison rows are appended past that boundary.
 
     NOTE (measured, see PR report): stage1 M-safety is defense-in-depth -- the A
     num_records clamp, the scale-tensor num_records clamp, AND the output-scatter
@@ -1219,20 +1412,23 @@ def test_moe_gemm1_input_poison(in_dtype, tile_m, tokens):
     )
     model_dim, topk = 256, 2
     qd = _quant_dtype(in_dtype)
+    # int8smooth A/scale_x are slot-major [topk*tokens, ...]; the valid boundary
+    # past which poison is appended is topk*tokens, not tokens.
+    a_rows = topk * tokens if d["is_smooth"] else tokens
 
     def _run(poison):
-        x = torch.zeros((tokens + _POISON_ROWS, model_dim), device="cuda", dtype=qd)
-        x[:tokens] = d["x_q"]
-        sx = torch.zeros((tokens + _POISON_ROWS, 1), device="cuda", dtype=torch.float32)
-        sx[:tokens] = d["scale_x"]
+        x = torch.zeros((a_rows + _POISON_ROWS, model_dim), device="cuda", dtype=qd)
+        x[:a_rows] = d["x_q"].view(a_rows, model_dim)
+        sx = torch.zeros((a_rows + _POISON_ROWS, 1), device="cuda", dtype=torch.float32)
+        sx[:a_rows] = d["scale_x"].view(a_rows, 1)
         if poison:
             # int8/int4 activations are int8: poison with saturated magnitudes; fp8
             # tolerates NaN. scale poison uses NaN + huge to amplify any leak.
             if qd == torch.int8:
-                x[tokens:] = 127
+                x[a_rows:] = 127
             else:
-                x[tokens:] = torch.finfo(qd).max
-            sx[tokens:] = float("nan")
+                x[a_rows:] = torch.finfo(qd).max
+            sx[a_rows:] = float("nan")
         out = torch.zeros((tokens, topk, 128), device="cuda", dtype=d["out_dt"])
         _launch(
             d["exe"],
@@ -1322,6 +1518,55 @@ def test_moe_gemm2_input_poison(accumulate, in_dtype, tile_m, tokens):
     )
 
 
+@_requires_fp8
+def test_moe_gemm2_input_poison_int8smooth():
+    """int8smooth input-poison equivalence (why the poison sweep above is not 4x'd for
+    it): in stage2 int8smooth routes through the int8 path bit-for-bit, and the A/scale
+    num_records clamp + per-row scale validity guard it exercises are dtype-independent.
+    Rather than re-sweeping accumulate x tile_m x tokens, this pins ONE atomic case with
+    the int8smooth-compiled kernel over the shared int8 fixture."""
+    tile_m, tokens = 16, 7
+    topk, model_dim, inter_dim = 2, 256, 128
+    d = _prep_gemm2(
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=8,
+        topk=topk,
+        tile_m=tile_m,
+        seed=0,
+        in_dtype="int8smooth",
+        out_dtype="bf16",
+        accumulate=True,
+    )
+
+    def _run(poison):
+        a2 = torch.zeros((tokens + _POISON_ROWS, topk, inter_dim), device="cuda", dtype=torch.int8)
+        a2[:tokens] = d["a2_q"]
+        sa = torch.zeros((tokens + _POISON_ROWS, topk, 1), device="cuda", dtype=torch.float32)
+        sa[:tokens] = d["a2_scale"]
+        if poison:
+            a2[tokens:] = 127
+            sa[tokens:] = float("nan")
+        out = torch.zeros((tokens, model_dim), device="cuda", dtype=d["out_dt"])
+        _launch(
+            d["exe"],
+            out,
+            x=a2,
+            w=d["w"],
+            scale_x=sa,
+            scale_w=d["scale_w"],
+            routing=d["routing"],
+            dim0=model_dim,
+            dim1=inter_dim,
+            tokens=tokens,
+            zero_out=True,
+        )
+        return out.clone()
+
+    assert torch.equal(_run(poison=False), _run(poison=True)), "stage2 int8smooth output changed under poison"
+
+
 # ---------------------------------------------------------------------------
 # B.4: sentinel-row regression guard (the exact token-0 corruption case).
 # ---------------------------------------------------------------------------
@@ -1357,33 +1602,47 @@ def _routing_token0_with_padding(tokens, experts, topk, tile_m, device):
 
 
 @_requires_fp8
-@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int4"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int8smooth", "int4"])
 @pytest.mark.parametrize("tile_m", [16, 64])
 def test_moe_gemm1_sentinel_token0(in_dtype, tile_m):
     """Sentinel-row regression: token 0 IS routed (packed id 0) with padding rows in
     the same block. Un-seeded sorted_lds slots decode to token0/slot0 and would pile
     garbage onto token 0's output. The sentinel seed (sorted_lds[tid]=M over the full
-    256-slot range) must keep token 0 correct. Covered for all four dtypes here (the
-    original catch only hit one)."""
+    256-slot range) must keep token 0 correct. Covered for all four dtypes here
+    (fp8, int8, int8smooth, int4); the original catch only hit one. int8smooth uses
+    the slot-major A/scale_x gather but the sentinel decode/scatter it guards is
+    dtype-independent."""
     device = torch.device("cuda")
     model_dim, inter_dim, experts, topk = 256, 128, 8, 2
     tokens = 6  # < tile_m for both 16 and 64: real tokens + padding share a block
     _qd = _quant_dtype(in_dtype)
     _is_int4 = in_dtype == "int4"
+    _is_smooth = in_dtype == "int8smooth"
     topk_ids, topk_weights, routing = _routing_token0_with_padding(tokens, experts, topk, tile_m, device)
 
     x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
     w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (
         1.0 / math.sqrt(model_dim)
     )
-    x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=_qd)
-    w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=_qd, **({"dtypeMax": 7} if _is_int4 else {}))
-    w1_shuf = shuffle_weight(w1_q).view(experts * (2 * inter_dim), model_dim).contiguous()
-    if _is_int4:
-        w1_shuf = _pack_shuffled_int8_to_packed_int4(w1_shuf)
-    w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
-    scale_w1_flat = scale_w1.view(experts * (2 * inter_dim), 1)
-    x_q = x_q.contiguous().view(tokens, model_dim)
+    if _is_smooth:
+        sm = _build_stage1_int8smooth(x_fp32, w1_fp32, topk_ids)
+        x_launch = sm["x_q"]  # slot-major [topk*tokens, K]
+        w1_shuf = sm["w1_kernel"]
+        scale_x_launch = sm["scale_x_1d"]
+        scale_w1_flat = sm["scale_w1_flat"]
+        # token-major references for torch_moe_gemm1
+        x_ref, sx_ref, w1_q_flat = sm["x_ref"], sm["sx_ref"], sm["w1_q_flat"]
+    else:
+        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=_qd)
+        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=_qd, **({"dtypeMax": 7} if _is_int4 else {}))
+        w1_shuf = shuffle_weight(w1_q).view(experts * (2 * inter_dim), model_dim).contiguous()
+        if _is_int4:
+            w1_shuf = _pack_shuffled_int8_to_packed_int4(w1_shuf)
+        w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
+        scale_w1_flat = scale_w1.view(experts * (2 * inter_dim), 1)
+        x_q = x_q.contiguous().view(tokens, model_dim)
+        x_launch, scale_x_launch = x_q, scale_x
+        x_ref, sx_ref = x_q, scale_x
 
     out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.bfloat16)
     exe = compile_moe_gemm1(
@@ -1401,9 +1660,9 @@ def test_moe_gemm1_sentinel_token0(in_dtype, tile_m):
     _launch(
         exe,
         out,
-        x=x_q,
+        x=x_launch,
         w=w1_shuf,
-        scale_x=scale_x,
+        scale_x=scale_x_launch,
         scale_w=scale_w1_flat,
         routing=routing,
         dim0=inter_dim,
@@ -1411,9 +1670,9 @@ def test_moe_gemm1_sentinel_token0(in_dtype, tile_m):
         tokens=tokens,
     )
     ref = torch_moe_gemm1(
-        x_q,
+        x_ref,
         w1_q_flat,
-        scale_x,
+        sx_ref,
         scale_w1_flat,
         topk_ids.to(torch.int64),
         topk_weights,
@@ -1431,15 +1690,20 @@ def test_moe_gemm1_sentinel_token0(in_dtype, tile_m):
 # B.5: num_valid_ids shorter than the padded sorted buffer (block guard / EP path).
 # ---------------------------------------------------------------------------
 @_requires_fp8
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int4"])
 @pytest.mark.parametrize("accumulate", [True, False])
 @pytest.mark.parametrize("tile_m,tokens", [(16, 8), (64, 40)])
-def test_moe_gemm2_num_valid_ids_guard(accumulate, tile_m, tokens):
+def test_moe_gemm2_num_valid_ids_guard(in_dtype, accumulate, tile_m, tokens):
     """num_valid_ids shorter than the padded sorted buffer must gate whole M-blocks
     off (gemm2 guard: e_idx*BM < num_valid_id). Force a truncated num_valid_ids so
     the trailing sorted M-blocks are non-valid, plus poison those trailing sorted
     ids to VALID-looking tokens. If the block guard is honored the poisoned trailing
     blocks are never processed and the output matches the clean reference; if it
-    leaks, those tokens get spurious atomic contributions."""
+    leaks, those tokens get spurious atomic contributions.
+
+    Swept over the three distinct gemm2 dtype paths (fp8, int8, int4); int8smooth is
+    bit-identical to int8 in stage2, so its equivalence is pinned once by
+    test_moe_gemm2_num_valid_ids_guard_int8smooth rather than re-swept."""
     model_dim, inter_dim, experts, topk = 256, 128, 8, 2
     d = _prep_gemm2(
         tokens=tokens,
@@ -1449,7 +1713,7 @@ def test_moe_gemm2_num_valid_ids_guard(accumulate, tile_m, tokens):
         topk=topk,
         tile_m=tile_m,
         seed=0,
-        in_dtype="int8",
+        in_dtype=in_dtype,
         out_dtype="bf16",
         accumulate=accumulate,
     )
@@ -1483,8 +1747,54 @@ def test_moe_gemm2_num_valid_ids_guard(accumulate, tile_m, tokens):
     mode = "atomic" if accumulate else "reduce"
     assert cos > 0.99, (
         f"stage2 num_valid_ids block guard leaked poisoned trailing blocks: cos={cos:.5f} "
-        f"({mode}, tile_m={tile_m}, tokens={tokens})"
+        f"({mode}, in={in_dtype}, tile_m={tile_m}, tokens={tokens})"
     )
+
+
+@_requires_fp8
+def test_moe_gemm2_num_valid_ids_guard_int8smooth():
+    """int8smooth num_valid_ids block-guard equivalence: in stage2 int8smooth routes
+    through the int8 path bit-for-bit, and the num_valid_ids block guard is
+    dtype-independent, so it is pinned once here rather than re-swept in
+    test_moe_gemm2_num_valid_ids_guard. _prep_gemm2 builds plain int8 data for
+    in_dtype='int8smooth'."""
+    tile_m, tokens = 16, 8
+    model_dim, inter_dim, experts, topk = 256, 128, 8, 2
+    d = _prep_gemm2(
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        seed=0,
+        in_dtype="int8smooth",
+        out_dtype="bf16",
+        accumulate=True,
+    )
+    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, blocks = d["routing"]
+    nvi = int(num_valid_ids[0].item())
+    poisoned_ids = sorted_token_ids.clone()
+    if nvi < poisoned_ids.numel():
+        poisoned_ids[nvi:] = 1
+    routing_poison = (poisoned_ids, sorted_weights, sorted_expert_ids, num_valid_ids, blocks)
+
+    out = torch.zeros((tokens, model_dim), device="cuda", dtype=d["out_dt"])
+    _launch(
+        d["exe"],
+        out,
+        x=d["a2_q"],
+        w=d["w"],
+        scale_x=d["a2_scale"],
+        scale_w=d["scale_w"],
+        routing=routing_poison,
+        dim0=model_dim,
+        dim1=inter_dim,
+        tokens=tokens,
+        zero_out=True,
+    )
+    cos = _cosine_sim(out[:tokens], d["ref"])
+    assert cos > 0.99, f"stage2 int8smooth num_valid_ids block guard leaked: cos={cos:.5f}"
 
 
 if __name__ == "__main__":
