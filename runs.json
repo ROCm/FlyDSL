@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-10T13:27:10Z",
+ "updated": "2026-08-10T13:33:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "gfx1250/gemm-opt-0805",
    "event": "pull_request",
    "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31392773966",
    "created_at": "2026-08-10T13:25:03Z",
-   "updated_at": "2026-08-10T13:25:26Z",
+   "updated_at": "2026-08-10T13:26:33Z",
    "actor": "aoli26",
    "jobs": []
   },
@@ -25,11 +25,11 @@
    "branch": "main",
    "event": "pull_request",
    "title": "[Kernel]Remove recast iter from sliding window attention kernel.",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31391542269",
    "created_at": "2026-08-10T13:10:25Z",
-   "updated_at": "2026-08-10T13:12:16Z",
+   "updated_at": "2026-08-10T13:26:19Z",
    "actor": "amd-nprotaso",
    "jobs": []
   },
@@ -319,11 +319,11 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31360402177",
    "created_at": "2026-08-10T06:00:16Z",
-   "updated_at": "2026-08-10T09:00:41Z",
+   "updated_at": "2026-08-10T13:31:48Z",
    "actor": "Boss2002n",
    "jobs": [
     {
@@ -347,10 +347,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-10T09:00:40Z",
-     "completed_at": null,
+     "completed_at": "2026-08-10T13:31:47Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31360402177/job/93384922740"
     }
    ]
@@ -372,10 +372,10 @@
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-10T11:32:18Z",
-     "completed_at": null,
+     "completed_at": "2026-08-10T13:32:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31360217600/job/93384665295"
     },
     {
