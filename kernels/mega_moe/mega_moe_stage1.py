@@ -23,12 +23,38 @@ from .dispatch import (
     emit_dispatch_group,
     emit_dispatch_payload,
     emit_dispatch_plan,
+    emit_exact_total_recv,
 )
-from .gemm1 import _LdsF32View, build_fused_gemm1
-from .gemm_util import _buffer_load, _buffer_store, _make_buffer, _make_buffer_from_addr
+from .gemm1 import _LdsF32View, build_fused_gemm1, build_fused_int8_gemm1
+from .gemm_util import (
+    _buffer_load,
+    _buffer_store,
+    _make_buffer,
+    _make_buffer_from_addr,
+    wait_all,
+)
 
 _SC0_CACHE = 1
 _BUFFER_OFFSET_ABI_BYTES = 1 << 32
+
+
+def _stage1_quant_traits(quant_mode: str, inter_dim: int, tile_n: int):
+    """Return compile-time Stage1 geometry for a quant mode."""
+    if quant_mode not in ("a8w4", "a8w4smooth", "w8a8smooth"):
+        raise ValueError(f"unsupported Stage1 quant_mode={quant_mode!r}")
+    is_int8 = quant_mode in ("a8w4smooth", "w8a8smooth")
+    gemm_n = int(inter_dim) if is_int8 else 2 * int(inter_dim)
+    if tile_n <= 0 or gemm_n % int(tile_n):
+        raise ValueError(
+            f"Stage1 N={gemm_n} must tile evenly by tile_n={tile_n}"
+        )
+    return {
+        "is_int8": is_int8,
+        "packed_int4": quant_mode == "a8w4smooth",
+        "gemm_n": gemm_n,
+        "n_tiles": gemm_n // int(tile_n),
+        "uses_mx_scale_lds": not is_int8,
+    }
 
 
 def _use_direct_fixed_slot(enabled, npes, experts_per_rank, max_tokens_per_rank, cap, tile_m):
@@ -66,18 +92,20 @@ def compile_mega_moe_stage1(
     waves_per_eu_hint: int = 2, num_cu: int = 256, num_dispatch_cu: int = 32, b_nt: int = -1,
     work_shards: int | None = None, external_grouping: bool | None = None,
     external_counting: bool | None = None, payload_chunk_rows: int = 0, payload_tile_ready: bool = False,
-    swiglu_limit: float = 0.0,
+    swiglu_limit: float = 0.0, quant_mode: str = "a8w4",
 ):
     arch = str(get_rocm_arch() or "")
     if not arch.startswith("gfx95"):
         raise RuntimeError(f"MegaMoE v2 stage1 requires CDNA4 (gfx95x), got {arch or 'unknown'}")
+    traits = _stage1_quant_traits(quant_mode, inter_dim, tile_n)
+    is_int8 = traits["is_int8"]
+    packed_int4 = traits["packed_int4"]
     NUM_WAVES = int(num_waves)
     assert NUM_WAVES > 1, "planner needs one communication wave and at least one grouping wave"
     assert 1 <= waves_per_eu_hint <= 4
     assert tile_n % NUM_WAVES == 0
     n_per_wave = tile_n // NUM_WAVES
-    assert (2 * inter_dim) % tile_n == 0, "2*inter_dim must tile evenly by tile_n"
-    N_TILES = (2 * inter_dim) // tile_n
+    N_TILES = traits["n_tiles"]
     GRID_MULT_VALUES = (1, 2, 3, 4, 6, 8, 12, 16, 24, 32)
     assert grid_mult in GRID_MULT_VALUES, "grid_mult out of range"
     grid_epoch_slot = GRID_MULT_VALUES.index(grid_mult)
@@ -98,8 +126,8 @@ def compile_mega_moe_stage1(
     NUM_ACC_N = n_per_wave // 16
     assert NUM_ACC_N % 2 == 0 and M_REPEAT % 2 == 0
 
-    TILE_K_BYTES = tile_k // 2
-    assert TILE_K_BYTES % 128 == 0
+    TILE_K_BYTES = tile_k if is_int8 else tile_k // 2
+    assert TILE_K_BYTES % (64 if is_int8 else 128) == 0
     A_K_STEP_BYTES = tile_k
     assert A_K_STEP_BYTES == 256, "MegaMoE v2 GEMM1 requires tile_k=256"
     K_ITERS = model_dim // tile_k
@@ -111,10 +139,12 @@ def compile_mega_moe_stage1(
 
     a_lds_size = sort_block_m * A_K_STEP_BYTES
     a_lds_i32 = a_lds_size // 4
-    cs_tile_n = tile_n // 2
+    cs_tile_n = tile_n if is_int8 else tile_n // 2
     cs_size = sort_block_m * cs_tile_n
     lds_pool_bytes = max(2 * a_lds_size, cs_size * 4)
-    n_scale_bytes = sort_block_m * (model_dim // 32)
+    # Smooth INT8 has one f32 scale per row, consumed once in the epilogue.
+    # Do not reserve or populate the MX per-K scale LDS.
+    n_scale_bytes = 16 if is_int8 else sort_block_m * (model_dim // 32)
 
     fz_npes, fz_epr, fz_k = int(fuse_npes), int(experts_per_rank), int(fuse_topk)
     fz_cap, fz_mtpr, fz_rank = int(fuse_cap), int(fuse_mtpr), int(rank)
@@ -154,20 +184,22 @@ def compile_mega_moe_stage1(
     dispatch_path = "fixedslot" if fixed_slot_dispatch else "compact"
     swiglu_suffix = "" if swiglu_limit <= 0 else f"_sl{str(float(swiglu_limit)).replace('.', 'p')}"
     kernel_name = (
-        f"megamoe_stage1_{dispatch_path}_t{sort_block_m}x{tile_n}x{tile_k}"
+        f"megamoe_stage1_{quant_mode}_{dispatch_path}_t{sort_block_m}x{tile_n}x{tile_k}"
         f"_w{NUM_WAVES}_gm{grid_mult}"
         f"_dcu{dispatch_blocks}_pw{int(pipe_weights)}ma{int(mfma_amajor)}sw{int(swizzle_a)}"
         f"aa{int(async_a_copy)}"
         f"_tr{int(use_tile_resource)}wpe{waves_per_eu_hint}_bnt{b_cache_modifier}_ws{WORK_SHARDS}"
         f"_pc{payload_chunk_rows}"
         f"_ptr{int(payload_tile_ready)}"
-        f"{swiglu_suffix}"
+        f"_qp{int(packed_int4)}{swiglu_suffix}"
     )
 
     @flyc.kernel(name=kernel_name, known_block_size=[TOTAL_THREADS, 1, 1])
     def kernel(
         out: fx.Tensor, x: fx.Tensor, w: fx.Tensor, scale_x: fx.Tensor, scale_w: fx.Tensor,
         sorted_token_ids: fx.Tensor, expert_ids: fx.Tensor, num_valid_ids: fx.Tensor, out_scale: fx.Tensor,
+        compact_src: fx.Tensor, compact_experts: fx.Tensor, compact_weights: fx.Tensor,
+        qscale_w: fx.Tensor, qzero_w: fx.Tensor,
         tokens: fx.Int32, addr_disp: fx.Int64, i32_cur_tok: fx.Int32, addr_in_tok: fx.Int64,
         addr_in_idx: fx.Int64, addr_in_wts: fx.Int64, addr_in_sc: fx.Int64, addr_parity: fx.Int64,
         addr_expected: fx.Int64,
@@ -253,13 +285,13 @@ def compile_mega_moe_stage1(
                         _buffer_store(group_done_rsrc, fx.Int32(destination), fx.Int32(0), fx.Int32)
             fx.barrier()
             if tid == fx.Int32(0):
-                fx.rocdl.s_waitcnt(0)
+                wait_all()
                 comm_ops.fence_agent_release()
                 _buffer_store(parity_rsrc, fx.Int32(0), next_parity, fx.Int32)
-                fx.rocdl.s_waitcnt(0)
+                wait_all()
                 comm_ops.fence_agent_release()
                 comm_ops.store_i32_system(gate_addr, fx.Int32(0), gate_epoch)
-            fx.rocdl.s_waitcnt(0)
+            wait_all()
             fx.barrier()
         else:
             if tid == fx.Int32(0):
@@ -271,6 +303,13 @@ def compile_mega_moe_stage1(
         payload_expected = _buffer_load(expected_rsrc, payload_parity, fx.Int32, cache_modifier=_SC0_CACHE)
 
         if compact_owner:  # noqa: SIM102 - keep the device and compile-time branches separate.
+            if const_expr(is_int8):
+                emit_exact_total_recv(
+                    num_waves=NUM_WAVES, fz_npes=fz_npes, fz_epr=fz_epr,
+                    fz_k=fz_k, fz_total_experts=fz_total_experts, fz_rank=fz_rank,
+                    addr_disp=addr_disp, i32_cur_tok=i32_cur_tok,
+                    addr_in_idx=addr_in_idx,
+                )
             if const_expr(not direct_fixed_slot):
                 emit_dispatch_plan(
                     num_waves=NUM_WAVES, fz_npes=fz_npes, fz_epr=fz_epr, fz_k=fz_k, fz_mtpr=fz_mtpr,
@@ -288,7 +327,8 @@ def compile_mega_moe_stage1(
                     num_waves=NUM_WAVES, fz_npes=fz_npes, fz_epr=fz_epr, fz_k=fz_k, fz_cap=fz_cap,
                     fz_mtpr=fz_mtpr, fz_rank=fz_rank, fz_total_experts=fz_total_experts, fz_nbytes=fz_nbytes,
                     fz_n_i32=fz_n_i32,
-                    fz_scale_n_i32=fz_scale_n_i32, fz_enable_scales=fz_enable_scales, addr_disp=addr_disp,
+                    fz_scale_n_i32=fz_scale_n_i32, fz_enable_scales=fz_enable_scales,
+                    fz_route_payload=is_int8, addr_disp=addr_disp,
                     addr_in_tok=addr_in_tok, addr_in_idx=addr_in_idx, addr_in_wts=addr_in_wts, addr_in_sc=addr_in_sc,
                     i32_cur_tok=i32_cur_tok, dispatch_blocks=dispatch_blocks, producer_slot=producer_slot,
                     parity=payload_parity, expected=payload_expected,
@@ -331,7 +371,8 @@ def compile_mega_moe_stage1(
                         num_waves=NUM_WAVES, fz_epr=fz_epr, fz_k=fz_k, fz_mtpr=fz_mtpr, fz_rank=fz_rank,
                         fz_total_experts=fz_total_experts, fz_nbytes=fz_nbytes, fz_n_i32=fz_n_i32,
                         fz_safe_end_i32=fz_safe_end_i32, fz_scale_n_i32=fz_scale_n_i32,
-                        fz_enable_scales=fz_enable_scales, addr_disp=addr_disp, addr_in_tok=addr_in_tok,
+                        fz_enable_scales=fz_enable_scales, fz_route_payload=is_int8,
+                        addr_disp=addr_disp, addr_in_tok=addr_in_tok,
                         addr_in_wts=addr_in_wts, addr_in_sc=addr_in_sc, dispatch_blocks=dispatch_blocks,
                         producer_slot=producer_slot, parity=payload_parity, expected=payload_expected,
                         producers_per_destination=producers_per_destination, payload_chunk_rows=payload_chunk_rows,
@@ -354,34 +395,92 @@ def compile_mega_moe_stage1(
         wave_id = fx.thread_idx.x // 64
 
         w_rsrc = _make_buffer(w, fx.Int32, 4)
-        sx_rsrc = _make_buffer(scale_x, fx.Int32, 4)
-        sw_rsrc = _make_buffer(scale_w, fx.Int32)
         trb_rsrc = _make_buffer(sorted_token_ids, fx.Int32)
         expert_rsrc = _make_buffer(expert_ids, fx.Int32)
         nv_rsrc = _make_buffer(num_valid_ids, fx.Int32)
-        scale_cols = (inter_dim // 32 + 7) // 8 * 8
-        os_nbytes = tokens * fx.Int32(scale_cols) + fx.Int32(8192)
-        if const_expr(use_tile_resource):
-            out_rsrc = None
+        if const_expr(is_int8):
+            sx_rsrc = _make_buffer(scale_x, fx.Float32)
+            sw_rsrc = _make_buffer(scale_w, fx.Float32)
+            out_rsrc = _make_buffer(
+                out,
+                fx.Float16,
+                max_size=False,
+                num_records_bytes=fx.Int32(fz_npes * fz_mtpr * fz_k * inter_dim * 2),
+            )
+            qscale_rsrc = _make_buffer(qscale_w, fx.Int32)
+            qzero_rsrc = _make_buffer(qzero_w, fx.Int32)
+            compact_src_rsrc = _make_buffer(
+                compact_src,
+                fx.Int32,
+                max_size=False,
+                num_records_bytes=tokens * fx.Int32(4),
+            )
+            compact_expert_rsrc = _make_buffer(
+                compact_experts,
+                fx.Int32,
+                max_size=False,
+                num_records_bytes=ceildiv(tokens, fx.Int32(sort_block_m))
+                * fx.Int32(4),
+            )
+            compact_weight_rsrc = _make_buffer(
+                compact_weights,
+                fx.Float32,
+                max_size=False,
+                num_records_bytes=tokens * fx.Int32(4),
+            )
+            srcmap_rsrc = _make_buffer_from_addr(_disp_ptr(DispatchSlot.SRCMAP), fx.Int32)
+            p2p_weight_rsrc = _make_buffer_from_addr(
+                _disp_ptr(DispatchSlot.P2P_WEIGHT), fx.Int64
+            )
+            weight_rsrc = _make_buffer_from_addr(
+                _buffer_load(p2p_weight_rsrc, fx.Int32(fz_rank), fx.Int64),
+                fx.Float32,
+            )
         else:
-            out_nbytes = tokens * fx.Int32(inter_dim)
-            out_rsrc = _make_buffer(out, fx.Int16, max_size=False, num_records_bytes=out_nbytes)
-        os_rsrc = _make_buffer(out_scale, fx.Int8, max_size=False, num_records_bytes=os_nbytes)
+            sx_rsrc = _make_buffer(scale_x, fx.Int32, 4)
+            sw_rsrc = _make_buffer(scale_w, fx.Int32)
+            scale_cols = (inter_dim // 32 + 7) // 8 * 8
+            os_nbytes = tokens * fx.Int32(scale_cols) + fx.Int32(8192)
+            if const_expr(use_tile_resource):
+                out_rsrc = None
+            else:
+                out_nbytes = tokens * fx.Int32(inter_dim)
+                out_rsrc = _make_buffer(out, fx.Int16, max_size=False, num_records_bytes=out_nbytes)
+            os_rsrc = _make_buffer(out_scale, fx.Int8, max_size=False, num_records_bytes=os_nbytes)
 
-        expert_of_flat, _do_scheduled_tile = build_fused_gemm1(
-            x_tensor=x, w_rsrc=w_rsrc,
-            sw_rsrc=sw_rsrc, sx_rsrc=sx_rsrc, out_rsrc=out_rsrc, os_rsrc=os_rsrc,
-            trb_rsrc=trb_rsrc, expert_rsrc=expert_rsrc, out_tensor=out,
-            a_buf=a_buf, a_scale_lds=a_scale_lds, c_tile=c_tile,
-            model_dim=model_dim, inter_dim=inter_dim, sort_block_m=sort_block_m,
-            tile_n=tile_n, num_waves=NUM_WAVES, n_per_wave=n_per_wave, wave_id=wave_id,
-            m_repeat=M_REPEAT, num_acc_n=NUM_ACC_N, a_k_step_bytes=A_K_STEP_BYTES,
-            total_threads=TOTAL_THREADS, k_iters=K_ITERS, a_lds_i32=a_lds_i32,
-            n_tiles=N_TILES, expert_offset=fz_rank * fz_epr, b_cache_modifier=b_cache_modifier,
-            swizzle_a=swizzle_a, pipe_weights=pipe_weights, mfma_amajor=mfma_amajor,
-            async_a_copy=async_a_copy, use_tile_resource=use_tile_resource,
-            swiglu_limit=swiglu_limit,
-        )
+        if const_expr(is_int8):
+            expert_of_flat, _do_scheduled_tile = build_fused_int8_gemm1(
+                x_tensor=x, w_rsrc=w_rsrc, qscale_rsrc=qscale_rsrc,
+                qzero_rsrc=qzero_rsrc, sx_rsrc=sx_rsrc, sw_rsrc=sw_rsrc,
+                out_rsrc=out_rsrc, trb_rsrc=trb_rsrc, expert_rsrc=expert_rsrc,
+                srcmap_rsrc=srcmap_rsrc, weight_rsrc=weight_rsrc,
+                compact_src_rsrc=compact_src_rsrc,
+                compact_expert_rsrc=compact_expert_rsrc,
+                compact_weight_rsrc=compact_weight_rsrc, a_buf=a_buf, c_tile=c_tile,
+                model_dim=model_dim, inter_dim=inter_dim, sort_block_m=sort_block_m,
+                tile_n=tile_n, num_waves=NUM_WAVES, n_per_wave=n_per_wave,
+                wave_id=wave_id, m_repeat=M_REPEAT, num_acc_n=NUM_ACC_N,
+                total_threads=TOTAL_THREADS, k_iters=K_ITERS, n_tiles=N_TILES,
+                expert_offset=fz_rank * fz_epr, b_cache_modifier=b_cache_modifier,
+                swizzle_a=swizzle_a, packed_int4=packed_int4,
+                atom_tokens=fz_npes * fz_mtpr, topk=fz_k,
+                swiglu_limit=swiglu_limit,
+            )
+        else:
+            expert_of_flat, _do_scheduled_tile = build_fused_gemm1(
+                x_tensor=x, w_rsrc=w_rsrc,
+                sw_rsrc=sw_rsrc, sx_rsrc=sx_rsrc, out_rsrc=out_rsrc, os_rsrc=os_rsrc,
+                trb_rsrc=trb_rsrc, expert_rsrc=expert_rsrc, out_tensor=out,
+                a_buf=a_buf, a_scale_lds=a_scale_lds, c_tile=c_tile,
+                model_dim=model_dim, inter_dim=inter_dim, sort_block_m=sort_block_m,
+                tile_n=tile_n, num_waves=NUM_WAVES, n_per_wave=n_per_wave, wave_id=wave_id,
+                m_repeat=M_REPEAT, num_acc_n=NUM_ACC_N, a_k_step_bytes=A_K_STEP_BYTES,
+                total_threads=TOTAL_THREADS, k_iters=K_ITERS, a_lds_i32=a_lds_i32,
+                n_tiles=N_TILES, expert_offset=fz_rank * fz_epr, b_cache_modifier=b_cache_modifier,
+                swizzle_a=swizzle_a, pipe_weights=pipe_weights, mfma_amajor=mfma_amajor,
+                async_a_copy=async_a_copy, use_tile_resource=use_tile_resource,
+                swiglu_limit=swiglu_limit,
+            )
 
         if tid == fx.Int32(0):
             local_plan_ready = _buffer_load(disp_rsrc, fx.Int32(int(DispatchSlot.PLAN_READY)), fx.Int64)
@@ -445,12 +544,15 @@ def compile_mega_moe_stage1(
     def launch(
         out: fx.Tensor, x: fx.Tensor, w: fx.Tensor, scale_x: fx.Tensor, scale_w: fx.Tensor,
         sorted_token_ids: fx.Tensor, expert_ids: fx.Tensor, num_valid_ids: fx.Tensor, out_scale: fx.Tensor,
+        compact_src: fx.Tensor, compact_experts: fx.Tensor, compact_weights: fx.Tensor,
+        qscale_w: fx.Tensor, qzero_w: fx.Tensor,
         tokens: fx.Int32, addr_disp: fx.Int64, i32_cur_tok: fx.Int32, addr_in_tok: fx.Int64,
         addr_in_idx: fx.Int64, addr_in_wts: fx.Int64, addr_in_sc: fx.Int64, addr_parity: fx.Int64,
         addr_expected: fx.Int64, stream: fx.Stream,
     ):
         kernel(
-            out, x, w, scale_x, scale_w, sorted_token_ids, expert_ids, num_valid_ids, out_scale, tokens,
+            out, x, w, scale_x, scale_w, sorted_token_ids, expert_ids, num_valid_ids, out_scale,
+            compact_src, compact_experts, compact_weights, qscale_w, qzero_w, tokens,
             addr_disp, i32_cur_tok, addr_in_tok, addr_in_idx, addr_in_wts, addr_in_sc, addr_parity, addr_expected,
             value_attrs={
                 "rocdl.waves_per_eu": waves_per_eu_hint,
@@ -469,7 +571,9 @@ def run_mega_moe_stage1(out, x, w, scale_x, scale_w, sorted_token_ids, expert_id
     mfma_amajor=False, swizzle_a=True, async_a_copy=False, num_dispatch_cu=32,
     use_tile_resource=True, waves_per_eu_hint=2,
     b_nt=-1, work_shards=None, external_grouping=None, external_counting=None,
-    payload_chunk_rows=0, payload_tile_ready=False, swiglu_limit=0.0):
+    payload_chunk_rows=0, payload_tile_ready=False, swiglu_limit=0.0,
+    quant_mode="a8w4", compact_src=None, compact_experts=None, compact_weights=None,
+    qscale_w=None, qzero_w=None):
     launch = compile_mega_moe_stage1(
         model_dim=model_dim, inter_dim=inter_dim, rank=rank, experts_per_rank=experts_per_rank,
         fuse_npes=fuse_npes, fuse_topk=fuse_topk, fuse_cap=fuse_cap, fuse_mtpr=fuse_mtpr,
@@ -482,10 +586,18 @@ def run_mega_moe_stage1(out, x, w, scale_x, scale_w, sorted_token_ids, expert_id
         external_counting=external_counting, payload_chunk_rows=payload_chunk_rows,
         payload_tile_ready=payload_tile_ready,
         swiglu_limit=swiglu_limit,
+        quant_mode=quant_mode,
     )
+    # These tensors are compile-time dead on the established a8w4 branch.
+    compact_src = sorted_token_ids if compact_src is None else compact_src
+    compact_experts = expert_ids if compact_experts is None else compact_experts
+    compact_weights = scale_w if compact_weights is None else compact_weights
+    qscale_w = scale_w if qscale_w is None else qscale_w
+    qzero_w = scale_w if qzero_w is None else qzero_w
     _run_compiled(
         launch, out, x, w, scale_x, scale_w, sorted_token_ids, expert_ids, num_valid_ids, out_scale,
-        tokens, addr_disp, i32_cur_tok, addr_in_tok, addr_in_idx, addr_in_wts, addr_in_sc,
+        compact_src, compact_experts, compact_weights, qscale_w, qzero_w, tokens,
+        addr_disp, i32_cur_tok, addr_in_tok, addr_in_idx, addr_in_wts, addr_in_sc,
         addr_parity, addr_expected, stream,
     )
 # fmt: on

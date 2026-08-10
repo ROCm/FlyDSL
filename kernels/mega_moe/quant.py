@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
-"""FlyDSL 1x32 MXFP4/MXFP8 quantization with E8M0 scales."""
+"""Quantization helpers used by MegaMoE host orchestration."""
+
+from functools import lru_cache
 
 import torch
 
@@ -18,6 +20,149 @@ GROUP = 32
 # fp32 bits of 1/max_pos for RoundUp ceil_pow2(amax/max_pos): fp4 max_pos=6, fp8 e4m3=448.
 _FP4_INV_MAX_POS_BITS = 0x3E2AAAAB
 _FP8_E4M3_INV_MAX_POS_BITS = 0x3B124925
+
+
+@lru_cache(maxsize=1)
+def _aiter_smooth_per_token_scaled_quant():
+    """Resolve AITER lazily so MX quant users do not depend on AITER."""
+    try:
+        from aiter.ops.quant import smooth_per_token_scaled_quant as impl
+    except (ImportError, AttributeError) as exc:
+        raise RuntimeError(
+            "smooth_per_token_scaled_quant requires "
+            "aiter.ops.quant.smooth_per_token_scaled_quant"
+        ) from exc
+    return impl
+
+
+@lru_cache(maxsize=1)
+def _aiter_moe_smooth_per_token_scaled_quant():
+    """Resolve AITER's metadata-aware MoE requantizer lazily."""
+    try:
+        from aiter import moe_smooth_per_token_scaled_quant as impl
+    except (ImportError, AttributeError) as exc:
+        raise RuntimeError(
+            "moe_smooth_per_token_scaled_quant requires "
+            "aiter.moe_smooth_per_token_scaled_quant"
+        ) from exc
+    return impl
+
+
+def smooth_per_token_scaled_quant(*args, **kwargs):
+    """Lazy passthrough to AITER's front smooth-per-token quantizer."""
+    return _aiter_smooth_per_token_scaled_quant()(*args, **kwargs)
+
+
+def moe_smooth_per_token_scaled_quant(*args, **kwargs):
+    """Lazy passthrough to AITER's sorted-MoE requantizer."""
+    return _aiter_moe_smooth_per_token_scaled_quant()(*args, **kwargs)
+
+
+def convert_aiter_lqq_to_megamoe(u4, scale_u8, zero_u8):
+    """Convert raw AITER LQQ tensors to MegaMoE's packed host layout.
+
+    AITER supplies an unpacked uint4 payload ``[E, rows, K]`` and uint8
+    scale/zero tensors ``[E, rows, K // 64]``. MegaMoE consumes a flattened
+    signed-byte weight payload and qparams shaped
+    ``[E, rows // 16, K // 256, 16]``. Each qparam int32 packs four adjacent
+    K64 bytes in little-endian order. This is a host/load-time layout change;
+    it does not alter the LQQ dequantization formula.
+    """
+    if not all(isinstance(t, torch.Tensor) for t in (u4, scale_u8, zero_u8)):
+        raise TypeError("u4, scale_u8, and zero_u8 must be torch tensors")
+    if u4.ndim != 3:
+        raise ValueError(f"AITER LQQ u4 must be [E, rows, K], got {tuple(u4.shape)}")
+    experts, rows, k_dim = u4.shape
+    if rows % 16 != 0 or k_dim % 256 != 0:
+        raise ValueError(
+            "AITER LQQ conversion requires rows % 16 == 0 and K % 256 == 0, "
+            f"got rows={rows}, K={k_dim}"
+        )
+    qparam_shape = (experts, rows, k_dim // 64)
+    if tuple(scale_u8.shape) != qparam_shape or tuple(zero_u8.shape) != qparam_shape:
+        raise ValueError(
+            "LQQ scale/zero must both have shape "
+            f"{qparam_shape}, got {tuple(scale_u8.shape)} and {tuple(zero_u8.shape)}"
+        )
+    if u4.dtype != torch.uint8 or scale_u8.dtype != torch.uint8 or zero_u8.dtype != torch.uint8:
+        raise ValueError("LQQ u4, scale, and zero tensors must all use torch.uint8")
+    if scale_u8.device != u4.device or zero_u8.device != u4.device:
+        raise ValueError("LQQ u4, scale, and zero tensors must be on the same device")
+
+    # Base (16, 16) int4 preshuffle followed by the legacy K64 interleave.
+    x = (u4 & 0xF).contiguous()
+    shuffled = (
+        x.view(experts, rows // 16, 16, k_dim // 32, 1, 32)
+        .permute(0, 1, 3, 4, 2, 5)
+        .contiguous()
+        .view(experts, rows, k_dim)
+    )
+    x128 = shuffled.view(experts, rows, k_dim // 128, 128)
+    interleaved = torch.empty_like(x128)
+    interleaved[..., 0::2] = x128[..., :64]
+    interleaved[..., 1::2] = x128[..., 64:]
+
+    nibbles = interleaved.view(-1, 8)
+    packed = torch.empty(
+        (nibbles.shape[0], 4), dtype=torch.uint8, device=u4.device
+    )
+    packed[:, 0] = nibbles[:, 0] | (nibbles[:, 1] << 4)
+    packed[:, 1] = nibbles[:, 2] | (nibbles[:, 3] << 4)
+    packed[:, 2] = nibbles[:, 4] | (nibbles[:, 5] << 4)
+    packed[:, 3] = nibbles[:, 6] | (nibbles[:, 7] << 4)
+    packed_weight = packed.view(-1).view(torch.int8).contiguous()
+
+    blocks_n = rows // 16
+    groups_k = k_dim // 256
+
+    def pack_qparam(qparam):
+        q5 = (
+            qparam.contiguous()
+            .view(experts, blocks_n, 16, groups_k, 4)
+            .permute(0, 1, 3, 2, 4)
+            .contiguous()
+            .to(torch.int32)
+        )
+        return (
+            q5[..., 0]
+            | (q5[..., 1] << 8)
+            | (q5[..., 2] << 16)
+            | (q5[..., 3] << 24)
+        ).contiguous()
+
+    return packed_weight, pack_qparam(scale_u8), pack_qparam(zero_u8)
+
+
+def repack_megamoe_lqq_for_int8_loader(packed_weight, rows: int, k_dim: int):
+    """Reorder legacy MegaMoE packed LQQ bytes into direct K64 loader order."""
+    if packed_weight.dtype != torch.int8:
+        raise ValueError(f"packed LQQ weight must be int8, got {packed_weight.dtype}")
+    if rows % 16 or k_dim % 256:
+        raise ValueError(f"repack requires rows%16==0 and K%256==0, got {rows=}, K={k_dim}")
+    elems_per_expert = rows * k_dim // 2
+    if packed_weight.numel() % elems_per_expert:
+        raise ValueError(
+            f"packed weight size {packed_weight.numel()} is not divisible by {elems_per_expert}"
+        )
+    experts = packed_weight.numel() // elems_per_expert
+    packed = packed_weight.contiguous().view(torch.uint8)
+    interleaved = torch.empty(
+        packed.numel() * 2, dtype=torch.uint8, device=packed.device
+    )
+    interleaved[0::2] = packed & 0xF
+    interleaved[1::2] = packed >> 4
+    interleaved = interleaved.view(experts, rows, k_dim // 128, 128)
+    shuffled = torch.empty_like(interleaved)
+    shuffled[..., :64] = interleaved[..., 0::2]
+    shuffled[..., 64:] = interleaved[..., 1::2]
+    base = shuffled.view(experts, rows // 16, k_dim // 32, 16, 2, 16)
+    full_i8_layout = (
+        base.permute(0, 1, 2, 4, 3, 5)
+        .contiguous()
+        .view(experts, rows // 16, k_dim // 64, 4, 16, 16)
+    )
+    paired = full_i8_layout[:, :, 0::2] | (full_i8_layout[:, :, 1::2] << 4)
+    return paired.contiguous().view(-1).view(torch.int8)
 
 
 def build_per_1x32_mx_quant_module(n: int, quant_mode: str):

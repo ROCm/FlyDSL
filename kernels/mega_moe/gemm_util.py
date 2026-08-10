@@ -2,6 +2,8 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 """A8W4 GEMM utilities for MegaMoE v2 stage1."""
 
+import inspect
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
@@ -9,6 +11,44 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
 _PACK = 2  # fp4 micro-scale pack (per-32 E8M0): pack_M = pack_N = pack_K = 2
+
+try:
+    _S_WAITCNT_HAS_KEYWORDS = (
+        "vmcnt" in inspect.signature(fx.rocdl.s_waitcnt).parameters
+    )
+except (TypeError, ValueError):
+    _S_WAITCNT_HAS_KEYWORDS = False
+
+
+def _normalize_mfma_k64(op):
+    """Normalize raw and operands-list K64 MFMA bindings."""
+    if op is None:
+        return None
+    try:
+        params = list(inspect.signature(op).parameters.values())
+        if len(params) >= 2 and params[1].name == "operands":
+            return op
+    except (TypeError, ValueError):
+        pass
+    split = getattr(rocdl, "_split_mfma_operands", None)
+
+    def wrapped(result_type, operands, *, loc=None, ip=None):
+        if split is not None:
+            try:
+                a, b, c, cbsz, abid, blgp = split(operands, loc=loc)
+            except TypeError:
+                a, b, c, cbsz, abid, blgp = split(operands)
+        else:
+            a, b, c = operands[:3]
+            cbsz = int(operands[3]) if len(operands) > 3 else 0
+            abid = int(operands[4]) if len(operands) > 4 else 0
+            blgp = int(operands[5]) if len(operands) > 5 else 0
+        result = op(
+            result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip
+        )
+        return getattr(result, "result", result)
+
+    return wrapped
 
 
 def _make_buffer(tensor, elem_ty, width=1, *, max_size=True, num_records_bytes=None):
@@ -44,9 +84,21 @@ def _buffer_store(buffer, group_index, value, elem_ty, width=1, cache_modifier=0
 
 def wait_lds_barrier(vmcnt=63):
     """Drain LDS writes and optionally older VMEM while preserving newer loads."""
-    waitcnt = (vmcnt & 0xF) | ((vmcnt & 0x30) << 10) | (7 << 4)
-    fx.rocdl.s_waitcnt(waitcnt)
+    if _S_WAITCNT_HAS_KEYWORDS:
+        fx.rocdl.s_waitcnt(vmcnt=vmcnt, lgkmcnt=0)
+    else:
+        # Compatibility boundary for older FlyDSL without named counters.
+        waitcnt = (vmcnt & 0xF) | ((vmcnt & 0x30) << 10) | (7 << 4)
+        fx.rocdl.s_waitcnt(waitcnt)
     fx.barrier()
+
+
+def wait_all():
+    """Drain all memory counters across current and legacy FlyDSL APIs."""
+    if _S_WAITCNT_HAS_KEYWORDS:
+        fx.rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
+    else:
+        fx.rocdl.s_waitcnt(0)
 
 
 class TileScheduler:
@@ -487,6 +539,349 @@ class MfmaScaleGU:
                         ni % _PACK,
                     )
         return acc
+
+
+class Int8AS2RLoader:
+    """Load a row-major LDS operand for gfx950 K64 INT8 MFMA."""
+
+    def __init__(self, *, k_step_bytes, swizzle=False):
+        self._k_step_bytes = k_step_bytes
+        self._swizzle = swizzle
+        self._lane = fx.thread_idx.x % 64
+
+    def load_operand(self, lds_src, mi, ksub, base_i32=0):
+        row = fx.Int32(mi * 16) + self._lane % fx.Int32(16)
+        col = (self._lane // fx.Int32(16)) * fx.Int32(16) + fx.Int32(ksub * 64)
+        if const_expr(self._swizzle):
+            col = col ^ ((row & fx.Int32(15)) * fx.Int32(16))
+        off_i32 = fx.Int32(base_i32) + row * fx.Int32(self._k_step_bytes // 4) + col // fx.Int32(4)
+        ptr = fx.recast_iter(
+            fx.Int8,
+            fx.add_offset(
+                lds_src.ptr,
+                fx.make_int_tuple(off_i32 * fx.Int32(4)),
+            ),
+        )
+        return Vec(fx.make_view(ptr, fx.make_layout(16, 1)).load()).bitcast(fx.Int32)
+
+
+class Int8BWeightLoader:
+    """Load full INT8 or packed-INT4+LQQ K64 operands."""
+
+    def __init__(
+        self,
+        *,
+        w_rsrc,
+        qscale_rsrc,
+        qzero_rsrc,
+        num_acc_n,
+        model_dim,
+        packed_int4,
+        cache_modifier=0,
+    ):
+        self._w_rsrc = w_rsrc
+        self._qs_rsrc = qscale_rsrc
+        self._qz_rsrc = qzero_rsrc
+        self._num_acc_n = num_acc_n
+        self._model_dim = model_dim
+        self._packed_int4 = bool(packed_int4)
+        self._cache_modifier = int(cache_modifier)
+        lane = fx.thread_idx.x % 64
+        self._lane_row = lane % fx.Int32(16)
+        self._lane_k = lane // fx.Int32(16)
+
+    def _load_full(self, row_base_i32, ni, kstep_i32, ksub):
+        n_block = row_base_i32 // fx.Int32(16) + fx.Int32(ni)
+        k_block = kstep_i32 * fx.Int32(4) + fx.Int32(ksub)
+        byte = (
+            n_block * fx.Int32(self._model_dim * 16)
+            + k_block * fx.Int32(1024)
+            + self._lane_k * fx.Int32(256)
+            + self._lane_row * fx.Int32(16)
+        )
+        return _buffer_load(
+            self._w_rsrc,
+            byte // fx.Int32(16),
+            fx.Int32,
+            4,
+            self._cache_modifier,
+        )
+
+    def _load_packed(self, row_base_i32, ni, kstep_i32, ksub):
+        n_block = row_base_i32 // fx.Int32(16) + fx.Int32(ni)
+        pack_group = kstep_i32 * fx.Int32(2) + fx.Int32(ksub // 2)
+        byte = (
+            n_block * fx.Int32(self._model_dim * 8)
+            + pack_group * fx.Int32(1024)
+            + self._lane_k * fx.Int32(256)
+            + self._lane_row * fx.Int32(16)
+        )
+        packed = _buffer_load(
+            self._w_rsrc,
+            byte // fx.Int32(16),
+            fx.Int32,
+            4,
+            self._cache_modifier,
+        )
+        qindex = (
+            (n_block * fx.Int32(self._model_dim // 256) + kstep_i32) * fx.Int32(16)
+            + self._lane_row
+        )
+        qs_word = _buffer_load(self._qs_rsrc, qindex, fx.Int32)
+        qz_word = _buffer_load(self._qz_rsrc, qindex, fx.Int32)
+        shift = fx.Int32((ksub & 3) * 8)
+        qs = (qs_word >> shift) & fx.Int32(0xFF)
+        qz = (qz_word >> shift) & fx.Int32(0xFF)
+        qz4 = qz * fx.Int32(0x01010101)
+        values = []
+        for item in range_constexpr(4):
+            word = packed[item]
+            nibble = (
+                word & fx.Int32(0x0F0F0F0F)
+                if const_expr((ksub & 1) == 0)
+                else (word >> fx.Int32(4)) & fx.Int32(0x0F0F0F0F)
+            )
+            values.append((nibble * qs + qz4) ^ fx.Int32(0x80808080))
+        return Vec.from_elements(values, fx.Int32)
+
+    def load_step(self, gate_row_i32, up_row_i32, kstep_i32):
+        gate = []
+        up = []
+        for ksub in range_constexpr(4):
+            gate.append([])
+            up.append([])
+            for ni in range_constexpr(self._num_acc_n):
+                if const_expr(self._packed_int4):
+                    gate[ksub].append(self._load_packed(gate_row_i32, ni, kstep_i32, ksub))
+                    up[ksub].append(self._load_packed(up_row_i32, ni, kstep_i32, ksub))
+                else:
+                    gate[ksub].append(self._load_full(gate_row_i32, ni, kstep_i32, ksub))
+                    up[ksub].append(self._load_full(up_row_i32, ni, kstep_i32, ksub))
+        return gate, up
+
+    def load_single_step(self, row_base_i32, kstep_i32):
+        """Load one Stage2 projection for a 256-K INT8 step."""
+        out = []
+        for ksub in range_constexpr(4):
+            out.append([])
+            for ni in range_constexpr(self._num_acc_n):
+                if const_expr(self._packed_int4):
+                    out[ksub].append(
+                        self._load_packed(row_base_i32, ni, kstep_i32, ksub)
+                    )
+                else:
+                    out[ksub].append(
+                        self._load_full(row_base_i32, ni, kstep_i32, ksub)
+                    )
+        return out
+
+
+class MfmaInt8GU:
+    """gfx950 signed INT8 K64 MFMA with i32 accumulation."""
+
+    def __init__(self, *, m_repeat, num_acc_n):
+        self._m_repeat = m_repeat
+        self._num_acc_n = num_acc_n
+        self._op = _normalize_mfma_k64(
+            getattr(rocdl, "mfma_i32_16x16x64_i8", None)
+        )
+        if self._op is None:
+            raise AttributeError(
+                "gfx950 INT8 Stage1 requires rocdl.mfma_i32_16x16x64_i8"
+            )
+        self._result_type = T.vec(4, T.i32)
+        self.zero_value = Vec.filled(4, 0, fx.Int32)
+
+    def _mfma(self, a_op, b_op, acc):
+        result = self._op(
+            self._result_type,
+            [
+                Vec(a_op).ir_value(),
+                Vec(b_op).ir_value(),
+                Vec(acc).ir_value(),
+                0,
+                0,
+                0,
+            ],
+        )
+        return Vec(result)
+
+    def call(self, a_load, gate_b, up_b, gate_acc, up_acc):
+        for ksub in range_constexpr(4):
+            for mi in range_constexpr(self._m_repeat):
+                a_op = a_load(mi, ksub)
+                for ni in range_constexpr(self._num_acc_n):
+                    index = mi * self._num_acc_n + ni
+                    gate_acc[index] = self._mfma(
+                        a_op, gate_b[ksub][ni], gate_acc[index]
+                    )
+                    up_acc[index] = self._mfma(
+                        a_op, up_b[ksub][ni], up_acc[index]
+                    )
+        return gate_acc, up_acc
+
+    def call_single(self, a_load, b_step, acc):
+        """Accumulate one Stage2 projection."""
+        for ksub in range_constexpr(4):
+            for mi in range_constexpr(self._m_repeat):
+                a_op = a_load(mi, ksub)
+                for ni in range_constexpr(self._num_acc_n):
+                    index = mi * self._num_acc_n + ni
+                    acc[index] = self._mfma(a_op, b_step[ksub][ni], acc[index])
+        return acc
+
+
+class SiluF16AtomEpilogue:
+    """Scale INT8 accumulators and scatter f16 SwiGLU output to ATOM rows."""
+
+    def __init__(
+        self,
+        *,
+        out_rsrc,
+        sx_rsrc,
+        sw_rsrc,
+        srcmap_rsrc,
+        weight_rsrc,
+        compact_src_rsrc,
+        compact_expert_rsrc,
+        compact_weight_rsrc,
+        atom_tokens,
+        topk,
+        inter_dim,
+        m_repeat,
+        num_acc_n,
+        sort_block_m,
+        tile_n,
+        num_waves,
+        lds_out,
+        swiglu_limit=0.0,
+    ):
+        self._out = out_rsrc
+        self._sx = sx_rsrc
+        self._sw = sw_rsrc
+        self._srcmap = srcmap_rsrc
+        self._weight = weight_rsrc
+        self._compact_src = compact_src_rsrc
+        self._compact_expert = compact_expert_rsrc
+        self._compact_weight = compact_weight_rsrc
+        self._atom_tokens = atom_tokens
+        self._topk = topk
+        self._inter_dim = inter_dim
+        self._m_repeat = m_repeat
+        self._num_acc_n = num_acc_n
+        self._sort_block_m = sort_block_m
+        self._tile_n = tile_n
+        self._num_waves = num_waves
+        self._lds = lds_out
+        self._swiglu_limit = float(swiglu_limit)
+
+    def _silu(self, value):
+        exp = (value * fx.Float32(-1.4426950408889634)).exp2()
+        return value / (fx.Float32(1.0) + exp)
+
+    def store(
+        self,
+        gate_acc,
+        up_acc,
+        tile_i32,
+        tile_row_base_i32,
+        n_tile_base_i32,
+        expert_i32,
+    ):
+        tx = fx.thread_idx.x
+        wave = tx // fx.Int32(64)
+        lane = tx % fx.Int32(64)
+        lane16 = lane % fx.Int32(16)
+        row4 = (lane // fx.Int32(16)) * fx.Int32(4)
+        n_per_wave = self._tile_n // self._num_waves
+        wave_col_base = wave * fx.Int32(n_per_wave)
+        expert_base = expert_i32 * fx.Int32(2 * self._inter_dim)
+
+        for mi in range_constexpr(self._m_repeat):
+            for ni in range_constexpr(self._num_acc_n):
+                index = mi * self._num_acc_n + ni
+                gv = Vec(gate_acc[index])
+                uv = Vec(up_acc[index])
+                column = wave_col_base + fx.Int32(ni * 16) + lane16
+                global_column = n_tile_base_i32 + column
+                sw_gate = _buffer_load(
+                    self._sw, expert_base + global_column, fx.Float32
+                )
+                sw_up = _buffer_load(
+                    self._sw,
+                    expert_base + fx.Int32(self._inter_dim) + global_column,
+                    fx.Float32,
+                )
+                for item in range_constexpr(4):
+                    row = fx.Int32(mi * 16) + row4 + fx.Int32(item)
+                    physical_row = tile_row_base_i32 + row
+                    sx = _buffer_load(self._sx, physical_row, fx.Float32)
+                    gate = gv[item].to(fx.Float32) * sx * sw_gate
+                    up = uv[item].to(fx.Float32) * sx * sw_up
+                    if const_expr(self._swiglu_limit > 0):
+                        limit = fx.Float32(self._swiglu_limit)
+                        gate = -(-gate).maximumf(-limit)
+                        up = fx.clampf(up, -limit, limit)
+                    value = self._silu(gate) * up
+                    ptr = fx.add_offset(
+                        self._lds.ptr,
+                        fx.make_int_tuple(row * fx.Int32(self._tile_n) + column),
+                    )
+                    fx.ptr_store(Vec.from_elements([value], fx.Float32), ptr)
+        gpu.barrier()
+
+        total_threads = self._num_waves * 64
+        for base in range_constexpr(
+            0, self._sort_block_m * self._tile_n, total_threads
+        ):
+            linear = tx + fx.Int32(base)
+            row = linear // fx.Int32(self._tile_n)
+            column = linear - row * fx.Int32(self._tile_n)
+            physical_row = tile_row_base_i32 + row
+            source = _buffer_load(self._srcmap, physical_row, fx.Int32)
+            token = source & fx.Int32(0xFFFFFF)
+            slot = source >> fx.Int32(24)
+            valid = token < fx.Int32(self._atom_tokens)
+            value = Vec(
+                fx.make_view(
+                    fx.add_offset(
+                        self._lds.ptr,
+                        fx.make_int_tuple(row * fx.Int32(self._tile_n) + column),
+                    ),
+                    fx.make_layout(1, 1),
+                ).load()
+            )[0]
+            atom_row = token * fx.Int32(self._topk) + slot
+            out_index = (
+                atom_row * fx.Int32(self._inter_dim)
+                + n_tile_base_i32
+                + column
+            )
+            out_index = valid.select(out_index, fx.Int32(0x40000000))
+            _buffer_store(
+                self._out, out_index, value.to(fx.Float16), fx.Float16
+            )
+
+        valid_meta_row = tx < fx.Int32(self._sort_block_m)
+        safe_row = valid_meta_row.select(tx, fx.Int32(0))
+        physical_row = tile_row_base_i32 + safe_row
+        compact_row = tile_i32 * fx.Int32(self._sort_block_m) + safe_row
+        # Keep the masked byte offset below 4 GiB; 0x40000000 i32
+        # elements wraps to byte offset zero in the buffer-resource ABI.
+        compact_row = valid_meta_row.select(compact_row, fx.Int32(0x3FFFFFFF))
+        source = _buffer_load(self._srcmap, physical_row, fx.Int32)
+        weight = _buffer_load(self._weight, physical_row, fx.Float32)
+        _buffer_store(self._compact_src, compact_row, source, fx.Int32)
+        _buffer_store(
+            self._compact_weight, compact_row, weight, fx.Float32
+        )
+        expert_index = (tx == fx.Int32(0)).select(
+            tile_i32, fx.Int32(0x3FFFFFFF)
+        )
+        _buffer_store(
+            self._compact_expert, expert_index, expert_i32, fx.Int32
+        )
+        wait_lds_barrier()
 
 
 class SiluQuantEpilogue:

@@ -26,6 +26,7 @@ from .flydsl_dispatch_combine_intranode_kernel import (
 
 # Reject unsupported token dtypes at construction, not deep in JIT codegen.
 _SUPPORTED_TOK_DTYPES = (
+    torch.int8,
     torch.bfloat16,
     torch.float32,
     torch.float8_e4m3fn,

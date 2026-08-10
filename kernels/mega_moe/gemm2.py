@@ -14,6 +14,12 @@ from flydsl.expr.typing import (
 )
 from flydsl.expr.typing import Vector as Vec
 from kernels.common import buffer_ops
+from kernels.mega_moe.gemm_util import (
+    Int8BWeightLoader,
+    MfmaInt8GU,
+    _make_buffer_from_addr,
+    wait_lds_barrier,
+)
 from kernels.moe.mxfp_moe.mxfp4_gemm_common import (
     flat_buffer_view,
     global_typed_ptr,
@@ -23,6 +29,7 @@ from kernels.moe.mxfp_moe.mxfp4_gemm_common import (
     lds_dma_dst,
     lds_swizzle_mask,
     lds_swizzle_mask_f8,
+    lds_typed_ptr,
     lds_vec_load,
 )
 
@@ -135,6 +142,157 @@ def issue_a_load_lds_dt(
         off = fx.Int32(slot * (BM * KH_TILE_A)) + lds_row * KH_TILE_A
         v_e = (voffset + kt * KH_TILE_A) // 4  # per-lane i32-elem index
         fx.copy(atom, src[v_e, None], lds_dma_dst(base_i32, off, elem_ty=T.i32, align=16))
+
+
+@flyc.jit
+def gemm2_compute_int8(
+    lds_base_i32,
+    arg_aq,
+    arg_ascale,
+    arg_bq,
+    arg_bscale,
+    arg_qscale,
+    arg_qzero,
+    arg_eids,
+    arg_stids,
+    bx_i32,
+    lane,
+    wave,
+    i32_inter,
+    i32_hidden,
+    *,
+    BM,
+    BN,
+    BK,
+    SBM,
+    INTER_DIM,
+    TOPK,
+    ATOM_TOKENS,
+    packed_int4,
+    use_nt,
+):
+    """Run the independent gfx950 INT8 GEMM2 K64/i32 path."""
+    if BK != 256:
+        raise AssertionError(f"INT8 GEMM2 requires BK=256, got {BK}")
+    if BM != 32:
+        raise AssertionError(f"INT8 GEMM2 requires BM=32, got {BM}")
+    if BN != 128:
+        raise AssertionError(f"INT8 GEMM2 requires BN=128, got {BN}")
+
+    num_n_blocks = fx.Int32(i32_hidden) // fx.Int32(BN)
+    m_block_idx = bx_i32 // num_n_blocks
+    n_block_idx = bx_i32 - m_block_idx * num_n_blocks
+    m_row = m_block_idx * fx.Int32(BM)
+    sort_block_idx = m_row // fx.Int32(SBM)
+    expert = rocdl.readfirstlane(
+        T.i32, global_typed_ptr(arg_eids, T.i32)[sort_block_idx]
+    )
+
+    m_repeat = BM // 16
+    num_acc_n = (BN // 4) // 16
+    k_iters = fx.Int32(i32_inter) // fx.Int32(BK)
+    a_rsrc = buffer_ops.create_buffer_resource_from_addr(arg_aq)
+    stids_rsrc = buffer_ops.create_buffer_resource_from_addr(arg_stids)
+    w_rsrc = _make_buffer_from_addr(arg_bq, fx.Int32, 4)
+    qs_rsrc = _make_buffer_from_addr(arg_qscale, fx.Int32)
+    qz_rsrc = _make_buffer_from_addr(arg_qzero, fx.Int32)
+    b_loader = Int8BWeightLoader(
+        w_rsrc=w_rsrc,
+        qscale_rsrc=qs_rsrc,
+        qzero_rsrc=qz_rsrc,
+        num_acc_n=num_acc_n,
+        model_dim=INTER_DIM,
+        packed_int4=packed_int4,
+        cache_modifier=2 if use_nt else 0,
+    )
+    mfma = MfmaInt8GU(m_repeat=m_repeat, num_acc_n=num_acc_n)
+    acc = [mfma.zero_value for _ in range(m_repeat * num_acc_n)]
+
+    chunks_per_row = BK // 16
+    chunks_per_thread = BM * chunks_per_row // 256
+    mask24 = fx.Int32(0x00FFFFFF)
+
+    for step_i, state in range(
+        fx.Int32(0),
+        k_iters,
+        fx.Int32(1),
+        init=list(acc),
+    ):
+        acc = [Vec(value) for value in state]
+        step = fx.Int32(step_i)
+        gpu.barrier()
+        for rep in range_constexpr(chunks_per_thread):
+            linear = fx.thread_idx.x + fx.Int32(rep * 256)
+            row = linear // fx.Int32(chunks_per_row)
+            chunk = linear - row * fx.Int32(chunks_per_row)
+            sorted_row = m_row + row
+            fused = buffer_ops.buffer_load(
+                stids_rsrc, sorted_row, vec_width=1, dtype=T.i32
+            )
+            token = fused & mask24
+            slot = fused >> fx.Int32(24)
+            valid = (token < fx.Int32(ATOM_TOKENS)) & (slot < fx.Int32(TOPK))
+            atom_row = token * fx.Int32(TOPK) + slot
+            atom_row = valid.select(atom_row, fx.Int32(0))
+            src_byte = (
+                atom_row * fx.Int32(INTER_DIM)
+                + step * fx.Int32(BK)
+                + chunk * fx.Int32(16)
+            )
+            raw = Vec(
+                buffer_ops.buffer_load(
+                    a_rsrc,
+                    src_byte // fx.Int32(4),
+                    vec_width=4,
+                    dtype=T.i32,
+                )
+            )
+            raw = Vec.from_elements(
+                [valid.select(raw[item], fx.Int32(0)) for item in range_constexpr(4)],
+                fx.Int32,
+            )
+            lds_byte = row * fx.Int32(BK) + chunk * fx.Int32(16)
+            for item in range_constexpr(4):
+                fx.ptr_store(
+                    raw[item],
+                    lds_typed_ptr(
+                        lds_base_i32 + lds_byte + fx.Int32(item * 4),
+                        T.i32,
+                        align=4,
+                    ),
+                )
+        wait_lds_barrier()
+
+        row_base = (
+            expert * fx.Int32(i32_hidden)
+            + n_block_idx * fx.Int32(BN)
+            + wave * fx.Int32(BN // 4)
+        )
+        b_step = b_loader.load_single_step(row_base, step)
+
+        def a_load(mi, ksub):
+            row = fx.Int32(mi * 16) + lane % fx.Int32(16)
+            col = (lane // fx.Int32(16)) * fx.Int32(16) + fx.Int32(ksub * 64)
+            return Vec(
+                lds_vec_load(
+                    lds_base_i32,
+                    row * fx.Int32(BK) + col,
+                    Vec.make_type(4, fx.Int32),
+                    fx.Int32,
+                    align=16,
+                )
+            )
+
+        acc = mfma.call_single(a_load, b_step, acc)
+        state = yield list(acc)
+
+    acc = [Vec(value) for value in state]
+    gpu.barrier()
+    accm_vecs = [
+        [acc[mi * num_acc_n + ni] for ni in range(num_acc_n)]
+        for mi in range(m_repeat)
+    ]
+    return accm_vecs, m_row, n_block_idx, fx.Int32(i32_hidden)
 
 
 @flyc.jit

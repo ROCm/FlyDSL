@@ -3,7 +3,7 @@
 """Static MegaMoEV2 configuration rules for MI355X."""
 
 from bisect import bisect_left
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cache
 
 TOKEN_BUCKETS = (1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768)
@@ -285,11 +285,30 @@ def _select_large_stage2(bucket: int, sort_block_m: int, model_dim: int) -> Stag
 
 @cache
 def _select_bucket_config(
-    bucket: int, mtpr_class: int, experts_per_rank: int, model_dim: int, inter_dim: int
+    bucket: int,
+    mtpr_class: int,
+    experts_per_rank: int,
+    model_dim: int,
+    inter_dim: int,
+    quant_mode: str,
 ) -> MegaMoEConfig:
     if mtpr_class == MAX_MTPR_CLASS:
         stage1 = _select_large_stage1(bucket, experts_per_rank, inter_dim)
         stage2 = _select_large_stage2(bucket, stage1.sort_block_m, model_dim)
+        if quant_mode == "a8w4smooth" and bucket == 2048:
+            stage1 = replace(
+                stage1,
+                external_grouping=False,
+                external_counting=False,
+                payload_chunk_rows=0,
+                payload_tile_ready=False,
+            )
+            stage2 = replace(stage2, persist_cu=240)
+        elif quant_mode == "a8w4smooth" and bucket == 4096:
+            stage1 = replace(stage1, sort_block_m=64)
+            stage2 = replace(stage2, block_m=32)
+        if quant_mode in ("a8w4smooth", "w8a8smooth") and bucket == 128:
+            stage2 = replace(stage2, block_m=32, block_n=128, block_k=256)
         return MegaMoEConfig(stage1=stage1, stage2=stage2, p2p_quant="fp8_blockwise_1x32")
 
     fixed_slot = mtpr_class <= FIXED_SLOT_MAX_MTPR
@@ -298,6 +317,18 @@ def _select_bucket_config(
     else:
         stage1 = _select_bounded_stage1(bucket, mtpr_class, experts_per_rank, inter_dim)
     stage2 = _select_bounded_stage2(bucket, fixed_slot, mtpr_class, stage1.sort_block_m, model_dim)
+    if quant_mode == "a8w4smooth" and fixed_slot and bucket <= 8:
+        stage1 = replace(
+            stage1,
+            grid_mult=1,
+            num_dispatch_cu=_scale_dispatch_cu(64, experts_per_rank),
+            b_nt=0 if bucket <= 4 else 3,
+        )
+        stage2 = replace(stage2, use_nt=False)
+    elif quant_mode == "a8w4smooth" and bucket == 512:
+        stage2 = replace(stage2, persist_cu=224)
+    if quant_mode in ("a8w4smooth", "w8a8smooth") and bucket == 128:
+        stage2 = replace(stage2, block_m=32, block_n=128, block_k=256)
     return MegaMoEConfig(stage1=stage1, stage2=stage2, p2p_quant="none")
 
 
@@ -308,6 +339,7 @@ def select_mega_moe_config(
     experts_per_rank: int = REFERENCE_EXPERTS_PER_RANK,
     model_dim: int = 7168,
     inter_dim: int = 3072,
+    quant_mode: str = "a8w4",
 ) -> MegaMoEConfig:
     if mtpr <= 0 or mtpr & (mtpr - 1):
         raise ValueError(f"mtpr={mtpr} must be a positive power of two")
@@ -317,10 +349,19 @@ def select_mega_moe_config(
         raise ValueError(f"experts_per_rank must be positive, got {experts_per_rank}")
     if model_dim <= 0 or inter_dim <= 0:
         raise ValueError(f"invalid model shape {model_dim}x{inter_dim}")
+    if quant_mode not in ("a8w4", "a8w4smooth", "w8a8smooth"):
+        raise ValueError(f"unsupported quant_mode={quant_mode!r}")
     bucket = nearest_token_bucket(tokens)
     mtpr_class = mtpr_config_class(mtpr)
     if mtpr_class <= FIXED_SLOT_MAX_MTPR and bucket > 128:
         raise ValueError(f"fixed-slot does not support token bucket {bucket}")
     if mtpr_class <= FIXED_SLOT_MAX_MTPR and experts_per_rank > 64:
         raise ValueError("fixed-slot supports at most 64 experts per rank")
-    return _select_bucket_config(bucket, mtpr_class, expert_config_class(experts_per_rank), model_dim, inter_dim)
+    return _select_bucket_config(
+        bucket,
+        mtpr_class,
+        expert_config_class(experts_per_rank),
+        model_dim,
+        inter_dim,
+        quant_mode,
+    )
