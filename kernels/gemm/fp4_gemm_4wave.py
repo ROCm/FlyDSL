@@ -30,9 +30,8 @@ import os
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir as _ir
-from flydsl._mlir.dialects import arith as _arith_d
 from flydsl._mlir.dialects import llvm as _llvm
-from flydsl.expr import arith, const_expr, range_constexpr
+from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr import rocdl as _rocdl
 from flydsl.expr.typing import T as _T
 from flydsl.expr.typing import Vector as Vec
@@ -98,26 +97,22 @@ def _cvt_pk_bf16(a, b):
     """same as rocdl.cvt_pk_bf16_f32, but no inline asm to give compiler more freedom"""
     v2f32 = _ir.VectorType.get([2], fx.Float32.ir_type)
     vec = Vec.from_elements([fx.Float32(a), fx.Float32(b)], fx.Float32)
-    src = arith._to_raw(vec)
+    src = fx.as_ir_value(vec)
     if src.type != v2f32:
-        src = _llvm.BitcastOp(v2f32, src).result
+        src = fx.arith.bitcast(v2f32, src)
     v2bf16 = _ir.VectorType.get([2], fx.BFloat16.ir_type)
-    return _llvm.BitcastOp(fx.Int32.ir_type, _arith_d.TruncFOp(v2bf16, src).result).result
+    # llvm.bitcast, not arith.bitcast: the latter requires operand and result to
+    # have the same shape, and this one is <2xbf16> -> i32.
+    return _llvm.BitcastOp(fx.Int32.ir_type, fx.arith.trunc_f(v2bf16, src)).result
 
 
 # for FP4_DMA_INTRINSIC=1 path, don't let compiler reorder the m0 set
 _M0_CLOBBER = "~{m0}"
 
 
-def _enc_waitcnt_gfx9(vm, lgkm=15, exp=7):
-    """encode vmcnt & lgkmcnt together"""
-    return (vm & 0xF) | ((exp & 0x7) << 4) | ((lgkm & 0xF) << 8) | (((vm >> 4) & 0x3) << 14)
-
-
 def wait_barrier(count):
     """``s_waitcnt vmcnt(count) lgkmcnt(0)`` + ``s_barrier``"""
-
-    _rocdl.s_waitcnt(_enc_waitcnt_gfx9(count, lgkm=0))
+    _rocdl.s_waitcnt(vmcnt=count, lgkmcnt=0)
     _rocdl.s_barrier()
 
 
@@ -148,15 +143,15 @@ def _tag_alias(op, scopes, slot):
 
 def _uniform_i32(value):
     """Cast to i32 and force a wave-uniform SGPR value for scalar inline-asm operands."""
-    raw = arith._to_raw(value) if not isinstance(value, _ir.Value) else value
+    raw = fx.as_ir_value(value) if not isinstance(value, _ir.Value) else value
     if raw.type != _T.i32:
-        raw = arith._to_raw(fx.Int32(raw))
+        raw = fx.as_ir_value(fx.Int32(raw))
     return _rocdl.readfirstlane(_T.i32, raw)
 
 
 class G2SLoaderAsm:
     def __init__(self, rsrc, gl_offsets, n_load_steps, wave_id, scopes=None, base_ptr=None):
-        self.rsrc = arith._to_raw(rsrc)
+        self.rsrc = fx.as_ir_value(rsrc)
         self.gl_offsets = gl_offsets
         self.n_load_steps = n_load_steps
         self.wave_id = wave_id
@@ -171,16 +166,16 @@ class G2SLoaderAsm:
     def set_wave_base(self, base_ptr):
         # The wave-uniform LDS base, readfirstlane'd into an SGPR ONCE.
         wb = fx.Int32(fx.ptrtoint(base_ptr)) + fx.Int32(self.wave_id * 1024)
-        self._wave_base_s = _rocdl.readfirstlane(_T.i32, arith._to_raw(wb))
+        self._wave_base_s = _rocdl.readfirstlane(_T.i32, fx.as_ir_value(wb))
 
     def _lds_base_sgpr(self, lds_dst):
         m0 = fx.Int32(self._wave_base_s) + fx.Int32(lds_dst.byte_off)
-        return arith._to_raw(m0)
+        return fx.as_ir_value(m0)
 
     def _voffset(self, step):
         # Swizzle only: the K-step goes in the scalar soffset field, so this VGPR is
         # loop-invariant instead of needing a `v_add k_offset` every step.
-        return arith._to_raw(fx.Int32(self.gl_offsets[step]))
+        return fx.as_ir_value(fx.Int32(self.gl_offsets[step]))
 
     def _emit(self, lds_dst, k_offset, step):
         # m0 idiom (gcnasm async_copy): set m0 for step 0, then s_add for the rest.
@@ -192,7 +187,7 @@ class G2SLoaderAsm:
             # Off the readfirstlane'd wave base, not ptrtoint(base)+wave_id*1024:
             # wave_id is a VGPR, which would cost a v_readfirstlane per load.
             addr = fx.Int64(fx.Int32(self._wave_base_s) + fx.Int32(lds_dst.byte_off + step * stride))
-            lds_ptr = _llvm.inttoptr(_lds_ptr_t(), arith._to_raw(addr))
+            lds_ptr = _llvm.inttoptr(_lds_ptr_t(), fx.as_ir_value(addr))
             dma = _rocdl.raw_ptr_buffer_load_lds(self.rsrc, lds_ptr, fx.Int32(16), voff, soff, fx.Int32(0), fx.Int32(0))
             _tag_alias(dma, self.scopes, slot)
             return
@@ -237,7 +232,7 @@ class S2RLoaderFp4:
         imm = total_off - window_base
         assert 0 <= imm <= 0xFFFF
         vaddr = fx.Int32(fx.ptrtoint(lds_src.base_ptr)) + fx.Int32(window_base + dyn_offset)
-        lds_ptr = _llvm.inttoptr(_lds_ptr_t(), arith._to_raw(vaddr))
+        lds_ptr = _llvm.inttoptr(_lds_ptr_t(), fx.as_ir_value(vaddr))
         if imm != 0:
             lds_ptr = _gep(lds_ptr, static_byte_offset=imm)
         vec4_i32 = _ir.VectorType.get([4], fx.Int32.ir_type)
@@ -278,11 +273,11 @@ class S2RLoaderFp4:
 def _flat_frag(frag):
     """fragment [tile][ksub] -> flat list of raw i32x4 ir.Values (2*n_tiles).
     scf.for loop-carried args must be raw ir.Values (the dispatch reads .type),
-    so unwrap Vec/ArithValue via arith._to_raw."""
+    so unwrap Vec/ArithValue via as_ir_value."""
     out = []
     for t in frag:
-        out.append(arith._to_raw(t[0]))
-        out.append(arith._to_raw(t[1]))
+        out.append(fx.as_ir_value(t[0]))
+        out.append(fx.as_ir_value(t[1]))
     return out
 
 
@@ -327,7 +322,7 @@ def _s2r_thunks(s2r, src, holder, n, pre):
 
 
 def _min(a, b):
-    return arith.select(a < b, a, b)
+    return fx.arith.select(a < b, a, b)
 
 
 def _divmod_nonneg(a, b):
@@ -363,7 +358,7 @@ def _xcd_swizzle(num_pid_m, num_pid_n):
     use_simple = (num_wg < SWIZZLE_THRESHOLD) | (num_wg % NUM_XCDS != 0)
     if const_expr(isinstance(use_simple, bool)):
         return (simple_m, simple_n) if use_simple else (pid_m, pid_n)
-    return (arith.select(use_simple, simple_m, pid_m), arith.select(use_simple, simple_n, pid_n))
+    return (fx.arith.select(use_simple, simple_m, pid_m), fx.arith.select(use_simple, simple_n, pid_n))
 
 
 # ── FP4 scaled MFMA ──────────────────────────────────────────────────────────
@@ -469,14 +464,14 @@ class Mfma16x16x128Fp4:
         src2 = "$0" if acc is not None else "0"
         asm = f"v_mfma_scale_f32_16x16x128_f8f6f4 $0, $1, $2, {src2}, $3, $4 {opsel} {opsel_hi} cbsz:4 blgp:4"
         ops = [
-            arith._to_raw(a_op),
-            arith._to_raw(b_op),
-            arith._to_raw(sa_v),
-            arith._to_raw(sb_v),
+            fx.as_ir_value(a_op),
+            fx.as_ir_value(b_op),
+            fx.as_ir_value(sa_v),
+            fx.as_ir_value(sb_v),
         ]
         cons = "=a,v,v,v,v"
         if acc is not None:
-            ops.append(arith._to_raw(acc))
+            ops.append(fx.as_ir_value(acc))
             cons += ",0"
         return _llvm.inline_asm(self.res_ty, ops, asm, cons, has_side_effects=True)
 
@@ -492,12 +487,19 @@ _SCALE_B_REGION = _SCALE_REGION_BYTES
 
 class ScaleGatherLDS:
 
-    def __init__(self, a_scale, b_scale, K, lane_id, wave_id, lds_base_ptr, scopes=None):
+    def __init__(self, a_scale, b_scale, K, lane_id, wave_id, lds_base_ptr, a_rows, b_rows, scopes=None):
         self.row_i32 = (K // 256) * 64
         self.wave_id = wave_id
         self.scopes = scopes
-        self.a_rsrc = arith._to_raw(_buffer_ops.create_buffer_resource(a_scale, max_size=True))
-        self.b_rsrc = arith._to_raw(_buffer_ops.create_buffer_resource(b_scale, max_size=True))
+        # Exact num_records so the hardware OOB check is real: one e8m0 per 32
+        # elements, i.e. K//32 bytes per row.
+        row_bytes = K // 32
+        self.a_rsrc = fx.as_ir_value(
+            _buffer_ops.create_buffer_resource(a_scale, max_size=False, num_records_bytes=a_rows * row_bytes)
+        )
+        self.b_rsrc = fx.as_ir_value(
+            _buffer_ops.create_buffer_resource(b_scale, max_size=False, num_records_bytes=b_rows * row_bytes)
+        )
         # Per-lane block / within-block index (loop-invariant).
         self._blk = lane_id // 16  # 0..3 -> which of the 4 blocks
         self._in16 = lane_id % 16  # 0..15 -> which 4-i32 chunk within the block
@@ -505,26 +507,26 @@ class ScaleGatherLDS:
 
     def set_wave_base(self, a_base_tile, b_base_tile):
 
-        wid = fx.Int32(_rocdl.readfirstlane(_T.i32, arith._to_raw(self.wave_id)))
+        wid = fx.Int32(_rocdl.readfirstlane(_T.i32, fx.as_ir_value(self.wave_id)))
 
-        self._wave_base_s = arith._to_raw(self._lds_base + wid * fx.Int32(_SCALE_QUARTER_BYTES))
+        self._wave_base_s = fx.as_ir_value(self._lds_base + wid * fx.Int32(_SCALE_QUARTER_BYTES))
 
         is_a = wid < fx.Int32(2)
         q = wid % fx.Int32(2)
-        base_tile = arith.select(is_a, a_base_tile + q * fx.Int32(64), b_base_tile + q * fx.Int32(64))
+        base_tile = fx.arith.select(is_a, a_base_tile + q * fx.Int32(64), b_base_tile + q * fx.Int32(64))
         self._G = _uniform_i32(base_tile // fx.Int32(32))
-        self._rsrc = _llvm.SelectOp(arith._to_raw(is_a), self.a_rsrc, self.b_rsrc).result
+        self._rsrc = fx.arith.select(is_a, self.a_rsrc, self.b_rsrc)
         # soffset=0 as a wave-uniform SGPR (readfirstlane'd once, reused every gather).
         self._soff0 = _uniform_i32(fx.Int32(0))
 
     def gather(self, kstep, slot):
         grp = fx.Int32(self._G) + (self._blk // 2) * fx.Int32(4) + (self._blk % 2)
         i32_off = grp * fx.Int32(self.row_i32) + fx.Int32(kstep) * fx.Int32(64) + self._in16 * fx.Int32(4)
-        voff = arith._to_raw(i32_off * fx.Int32(4))  # bytes
+        voff = fx.as_ir_value(i32_off * fx.Int32(4))  # bytes
         # m0 = precomputed wave quarter (SGPR) + slot*4096 (scalar): no readfirstlane.
         addr = fx.Int32(self._wave_base_s) + fx.Int32(slot) * fx.Int32(_SCALE_SLOT_BYTES)
         if self.scopes is not None:
-            lds_ptr = _llvm.inttoptr(_lds_ptr_t(), arith._to_raw(fx.Int64(addr)))
+            lds_ptr = _llvm.inttoptr(_lds_ptr_t(), fx.as_ir_value(fx.Int64(addr)))
             dma = _rocdl.raw_ptr_buffer_load_lds(
                 self._rsrc, lds_ptr, fx.Int32(16), voff, self._soff0, fx.Int32(0), fx.Int32(0)
             )
@@ -533,7 +535,7 @@ class ScaleGatherLDS:
             _tag_alias(dma, self.scopes, (_SC_ASC, _SC_BSC))
             return
         asm = "s_mov_b32 m0, $0\nbuffer_load_dwordx4 $1, $2, $3 offen lds"
-        _asm_void([arith._to_raw(addr), voff, self._rsrc, self._soff0], asm, "s,v,s,s", _M0_CLOBBER)
+        _asm_void([fx.as_ir_value(addr), voff, self._rsrc, self._soff0], asm, "s,v,s,s", _M0_CLOBBER)
 
 
 class ScaleLoaderLDS:
@@ -558,7 +560,7 @@ class ScaleLoaderLDS:
         for gi in range_constexpr(self.n_groups):
             blk = half * 2 + gi
             vaddr = base + fx.Int32(blk * 256)
-            lds_ptr = _llvm.inttoptr(_lds_ptr_t(), arith._to_raw(vaddr))
+            lds_ptr = _llvm.inttoptr(_lds_ptr_t(), fx.as_ir_value(vaddr))
             load = _llvm.LoadOp(fx.Int32.ir_type, lds_ptr, alignment=4)
             if self.scopes is not None:
                 _tag_alias(load, self.scopes, self.slot_id)
@@ -602,7 +604,7 @@ class StoreCFp4:
 
         def _permlane16_swap(d_a, d_b):
             pair_ty = _ir.Type.parse("!llvm.struct<(i32, i32)>")
-            res = _rocdl.permlane16_swap(pair_ty, arith._to_raw(d_a), arith._to_raw(d_b), False, False)
+            res = _rocdl.permlane16_swap(pair_ty, fx.as_ir_value(d_a), fx.as_ir_value(d_b), False, False)
             return _llvm.extractvalue(_T.i32, res, [0]), _llvm.extractvalue(_T.i32, res, [1])
 
         a0, b0 = _permlane16_swap(a0, b0)
@@ -717,7 +719,7 @@ def compile_fp4_gemm_4w(
         _sc = _lds_scopes() if _USE_DMA_INTRINSIC else None
         # One gather per wave covering the whole block-tile (see the geometry note
         # above); every wave reads its own wave_i / wave_j quarter back out.
-        scale_gather = ScaleGatherLDS(A_scale, B_scale, K, lane_id, wave_id, _scale_base_ptr, _sc)
+        scale_gather = ScaleGatherLDS(A_scale, B_scale, K, lane_id, wave_id, _scale_base_ptr, c_m, c_n, _sc)
         scale_gather.set_wave_base(tile_i * BLOCK_M, tile_j * BLOCK_N)
         a_scale_ld = ScaleLoaderLDS(N_TILES_A, lane_id, wave_i, _scale_base_ptr, _SCALE_A_REGION, _sc, _SC_ASC)
         b_scale_ld = ScaleLoaderLDS(N_TILES_B, lane_id, wave_j, _scale_base_ptr, _SCALE_B_REGION, _sc, _SC_BSC)
@@ -749,10 +751,10 @@ def compile_fp4_gemm_4w(
         gl_off_a = _global_swizzle(lane_id, wave_id, K_BYTES, N_LDS_ROUNDS, False)
         gl_off_b = _global_swizzle(lane_id, wave_id, K_BYTES, N_LDS_ROUNDS, True)
 
-        # g2s (see G2SLoaderAsm): needs the raw buffer resource. Build it
-        # once from the i8 buffer tensor (max_size OOB check; all addresses in-bounds).
-        a_rsrc = _buffer_ops.create_buffer_resource(A, max_size=True)
-        b_rsrc = _buffer_ops.create_buffer_resource(B_T, max_size=True)
+        # g2s (see G2SLoaderAsm): needs the raw buffer resource. Exact num_records
+        # so the hardware OOB check is real (max_size=True would set 0xFFFFFFFF).
+        a_rsrc = _buffer_ops.create_buffer_resource(A, max_size=False, num_records_bytes=c_m * K_BYTES)
+        b_rsrc = _buffer_ops.create_buffer_resource(B_T, max_size=False, num_records_bytes=c_n * K_BYTES)
         a_g2s = G2SLoaderAsm(a_rsrc, gl_off_a, N_TILES_A, wave_id, scopes=_sc, base_ptr=_base_ptr)
         b_g2s = G2SLoaderAsm(b_rsrc, gl_off_b, N_TILES_B, wave_id, scopes=_sc, base_ptr=_base_ptr)
         # Precompute the g2s wave-uniform LDS base into SGPR once (all 8 buffers share
@@ -877,7 +879,7 @@ def compile_fp4_gemm_4w(
         n_ga = N_TILES_A // _FP4_PACK  # scale groups per A half (=len(saR0))
         n_gb = N_TILES_B // _FP4_PACK
         n_sc = 2 * n_ga + 2 * n_gb  # sc = (saR0,saR1,sbC0,sbC1) flattened
-        _R = arith._to_raw
+        _R = fx.as_ir_value
 
         def _flat_sc(sc):
             saR0, saR1, sbC0, sbC1 = sc

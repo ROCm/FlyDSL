@@ -150,10 +150,10 @@ def test_fp4_gemm_4wave(M, N, K):
 #
 #     python3 tests/kernels/test_fp4_gemm_4wave.py --vs-aiter
 
-BENCH_PAIRS = int(os.environ.get("FP4_BENCH_PAIRS", "3"))
-BENCH_ITERS = int(os.environ.get("FP4_BENCH_ITERS", "500"))
-BENCH_WARMUP = int(os.environ.get("FP4_BENCH_WARMUP", "500"))
-BENCH_SETS = int(os.environ.get("FP4_BENCH_SETS", "5"))
+BENCH_PAIRS = 3
+BENCH_ITERS = 500
+BENCH_WARMUP = 500
+BENCH_SETS = 5  # rotated per iteration so the inputs do not stay MALL-resident
 
 
 def _steady_state_us(step, base):
