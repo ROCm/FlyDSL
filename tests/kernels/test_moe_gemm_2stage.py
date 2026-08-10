@@ -1910,5 +1910,354 @@ def test_moe_gemm2_num_valid_ids_guard_int8smooth():
     assert cos > 0.99, f"stage2 int8smooth num_valid_ids block guard leaked: cos={cos:.5f}"
 
 
+# ---------------------------------------------------------------------------
+# Benchmark CLI (run_benchmark.sh driver).
+#
+# When invoked with args (e.g. `python test_moe_gemm_2stage.py --in_dtype fp8
+# -dim 8192,8192 -t 32768 ...`) this file becomes a benchmark harness for the
+# moe_gemm_2stage package: it times stage1, and stage2 in both atomic and reduce
+# modes, printing the log lines that scripts/run_benchmark.sh already parses
+# (see _emit_moe_s2_rows and the stage1 grep block in that script). With no args
+# it falls back to pytest so `pytest` and direct invocation both keep working.
+# ---------------------------------------------------------------------------
+
+
+def _flat_or_2d(t):
+    """Flatten to 1D, but keep a 2D contiguous view when numel exceeds int32.
+
+    The kernel consumes weight/activation operands via ``fx.get_iter`` (raw data
+    pointer), so tensor shape is irrelevant to correctness. The JIT ABI, however,
+    packs each shape dim as int32 (MemRefSpec, jit_argument.py). A 1D ``view(-1)``
+    of the big-shape weight (experts*2*inter_dim*model_dim > 2^31 elements) would
+    overflow that i32 slot, so fall back to a 2D contiguous shape whose per-dim
+    extents stay < 2^31."""
+    if t.numel() <= 2_147_483_647:
+        return t.contiguous().view(-1)
+    flat = t.contiguous().view(-1)
+    n = flat.numel()
+    # Factor into two < 2^31 dims. model_dim / inter_dim divide the weight numel,
+    # so a stride-1 last dim of 8192 keeps both extents small; fall back to a
+    # square-ish split if that does not divide.
+    for d1 in (8192, 4096, 2048, 1024, 512, 256, 128):
+        if n % d1 == 0 and (n // d1) < 2_147_483_647:
+            return flat.view(n // d1, d1)
+    import math as _m
+
+    d1 = 1 << (int(_m.isqrt(n)).bit_length())
+    while n % d1 != 0:
+        d1 //= 2
+    return flat.view(n // d1, d1)
+
+
+def _bench_args(out, *, x, w, scale_x, scale_w, routing, dim0, dim1, tokens):
+    """Positional launch-arg tuple, mirroring _launch's _args (line ~167)."""
+    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, blocks = routing
+    return (
+        out,
+        _flat_or_2d(x),
+        _flat_or_2d(w),
+        scale_x.view(-1).contiguous(),
+        scale_w.view(-1).contiguous(),
+        sorted_token_ids,
+        sorted_expert_ids,
+        sorted_weights.contiguous().view(-1),
+        num_valid_ids,
+        tokens,
+        dim0,
+        dim1,
+        int(blocks),
+        torch.cuda.current_stream(),
+    )
+
+
+def _time_launch(compiled, args, *, num_warmup, num_iters):
+    """Median-free mean of CUDA-event-timed launches; returns microseconds."""
+    for _ in range(int(num_warmup)):
+        compiled(*args)
+    torch.cuda.synchronize()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(int(num_iters)):
+        compiled(*args)
+    end.record()
+    torch.cuda.synchronize()
+    ms_total = start.elapsed_time(end)
+    return (ms_total / max(int(num_iters), 1)) * 1e3  # us
+
+
+def _bytes_stage1(*, tokens, model_dim, inter_dim, topk, in_dtype, out_dt):
+    """Approximate stage1 traffic: A + W (per routed row) + output."""
+    rows = tokens * topk
+    a_elt = 0.5 if in_dtype == "int4" else 1.0  # activations are int8/fp8 (1B); W int4 is 0.5B
+    w_elt = 0.5 if in_dtype == "int4" else 1.0
+    a_bytes = rows * model_dim * a_elt
+    w_bytes = rows * (2 * inter_dim) * model_dim * w_elt
+    o_bytes = rows * inter_dim * out_dt.itemsize
+    return a_bytes + w_bytes + o_bytes
+
+
+def _bytes_stage2(*, tokens, model_dim, inter_dim, topk, in_dtype, out_dt):
+    """Approximate stage2 traffic: A2 + W2 (per routed row) + output."""
+    rows = tokens * topk
+    a_elt = 1.0
+    w_elt = 0.5 if in_dtype == "int4" else 1.0
+    a_bytes = rows * inter_dim * a_elt
+    w_bytes = rows * model_dim * inter_dim * w_elt
+    o_bytes = rows * model_dim * out_dt.itemsize
+    return a_bytes + w_bytes + o_bytes
+
+
+def _bench_stage1(args, *, dtype_tag):
+    """Build fixture (mirrors _prep_gemm1 with CLI tiles), time, print log line."""
+    tokens = args.tokens
+    model_dim, inter_dim = args.model_dim, args.inter_dim
+    experts, topk = args.experts, args.topk
+    device = torch.device("cuda")
+    in_dtype = args.in_dtype
+    out_dtype = args.out_dtype
+    _qd = _quant_dtype(in_dtype)
+    _is_int4 = in_dtype == "int4"
+    _is_smooth = in_dtype == "int8smooth"
+
+    topk_ids, topk_weights, routing = _make_routing(tokens, experts, topk, args.tile_m, device, args.seed)
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
+    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (
+        1.0 / math.sqrt(model_dim)
+    )
+
+    if _is_smooth:
+        d = _build_stage1_int8smooth(x_fp32, w1_fp32, topk_ids)
+        x_q = d["x_q"]
+        w = d["w1_kernel"]
+        scale_x = d["scale_x_1d"].view(-1, 1)
+        scale_w = d["scale_w1_flat"]
+        ref = torch_moe_gemm1(
+            d["x_ref"],
+            d["w1_q_flat"],
+            d["sx_ref"],
+            d["scale_w1_flat"],
+            topk_ids.to(torch.int64),
+            topk_weights,
+            inter_dim=inter_dim,
+            doweight_stage1=False,
+        )
+    else:
+        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=_qd)
+        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=_qd, **({"dtypeMax": 7} if _is_int4 else {}))
+        w = shuffle_weight(w1_q).view(experts * (2 * inter_dim), model_dim).contiguous()
+        if _is_int4:
+            w = _pack_shuffled_int8_to_packed_int4(w)
+        w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
+        scale_w = scale_w1.view(experts * (2 * inter_dim), 1)
+        x_q = x_q.contiguous().view(tokens, model_dim)
+        ref = torch_moe_gemm1(
+            x_q,
+            w1_q_flat,
+            scale_x,
+            scale_w,
+            topk_ids.to(torch.int64),
+            topk_weights,
+            inter_dim=inter_dim,
+            doweight_stage1=False,
+        )
+
+    out_dt = _out_torch_dtype(out_dtype)
+    out = torch.empty((tokens, topk, inter_dim), device=device, dtype=out_dt)
+    exe = compile_moe_gemm1(
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=args.tile_m,
+        tile_n=args.tile_n,
+        tile_k=args.tile_k,
+        doweight_stage1=False,
+        out_dtype=out_dtype,
+        in_dtype=in_dtype,
+    )
+    launch_args = _bench_args(
+        out,
+        x=x_q,
+        w=w,
+        scale_x=scale_x,
+        scale_w=scale_w,
+        routing=routing,
+        dim0=inter_dim,
+        dim1=model_dim,
+        tokens=tokens,
+    )
+    compiled = flyc.compile(exe, *launch_args)
+
+    cos = float("nan")
+    if not args.skip_ref:
+        compiled(*launch_args)
+        torch.cuda.synchronize()
+        cos = _cosine_sim(out, ref)
+
+    us = _time_launch(compiled, launch_args, num_warmup=args.num_warmup, num_iters=args.num_iters)
+    flops = 2.0 * (tokens * topk) * (2 * inter_dim) * model_dim
+    tb = _bytes_stage1(
+        tokens=tokens, model_dim=model_dim, inter_dim=inter_dim, topk=topk, in_dtype=in_dtype, out_dt=out_dt
+    )
+    tflops = flops / (us * 1e-6) / 1e12
+    tbps = tb / (us * 1e-6) / 1e12
+    print(
+        f"FlyDSL MoE stage1[{dtype_tag}]: cos={cos:.5f} | "
+        f"t{tokens}-d{model_dim}x{inter_dim}-e{experts}k{topk} | "
+        f"{us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s"
+    )
+
+
+def _bench_stage2(args, *, dtype_tag, accumulate):
+    """Build fixture (mirrors _prep_gemm2 with CLI tiles), time, print log line."""
+    tokens = args.tokens
+    model_dim, inter_dim = args.model_dim, args.inter_dim
+    experts, topk = args.experts, args.topk
+    device = torch.device("cuda")
+    in_dtype = args.in_dtype
+    out_dtype = args.out_dtype
+    _qd = _quant_dtype(in_dtype)
+    _is_int4 = in_dtype == "int4"
+    _wmax = {"dtypeMax": 7} if _is_int4 else {}
+
+    topk_ids, topk_weights, routing = _make_routing(tokens, experts, topk, args.tile_m, device, args.seed)
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
+    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (
+        1.0 / math.sqrt(model_dim)
+    )
+    w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (
+        1.0 / math.sqrt(inter_dim)
+    )
+    x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=_qd)
+    w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=_qd, **_wmax)
+    w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=_qd, **_wmax)
+    w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
+    scale_w1_flat = scale_w1.view(experts * (2 * inter_dim), 1)
+    out1_ref = torch_moe_gemm1(
+        x_q,
+        w1_q_flat,
+        scale_x,
+        scale_w1_flat,
+        topk_ids.to(torch.int64),
+        topk_weights,
+        inter_dim=inter_dim,
+        doweight_stage1=False,
+    )
+    a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=_qd)
+    w2_kernel = shuffle_weight(w2_q).view(experts * model_dim, inter_dim).contiguous().view(-1)
+    if _is_int4:
+        w2_kernel = _pack_shuffled_int8_to_packed_int4(w2_kernel)
+    w2_scale_flat = scale_w2.view(experts * model_dim, 1)
+
+    out_dt = _out_torch_dtype(out_dtype)
+    out = torch.zeros((tokens, model_dim) if accumulate else (tokens * topk, model_dim), device=device, dtype=out_dt)
+    exe = compile_moe_gemm2(
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=args.tile_m,
+        tile_n=args.tile_n2,
+        tile_k=args.tile_k2,
+        doweight_stage2=True,
+        out_dtype=out_dtype,
+        accumulate=accumulate,
+        in_dtype=in_dtype,
+    )
+    launch_args = _bench_args(
+        out,
+        x=a2_q,
+        w=w2_kernel,
+        scale_x=a2_scale,
+        scale_w=w2_scale_flat,
+        routing=routing,
+        dim0=model_dim,
+        dim1=inter_dim,
+        tokens=tokens,
+    )
+    compiled = flyc.compile(exe, *launch_args)
+
+    cos = float("nan")
+    if not args.skip_ref:
+        ref = torch_moe_gemm2(
+            a2_q,
+            w2_q,
+            a2_scale,
+            scale_w2,
+            topk_ids.to(torch.int64),
+            topk_weights,
+            model_dim=model_dim,
+            doweight_stage2=True,
+        )
+        out.zero_()
+        compiled(*launch_args)
+        torch.cuda.synchronize()
+        got = out if accumulate else out.view(tokens, topk, model_dim).sum(dim=1)
+        cos = _cosine_sim(got, ref)
+
+    us = _time_launch(compiled, launch_args, num_warmup=args.num_warmup, num_iters=args.num_iters)
+    flops = 2.0 * (tokens * topk) * model_dim * inter_dim
+    tb = _bytes_stage2(
+        tokens=tokens, model_dim=model_dim, inter_dim=inter_dim, topk=topk, in_dtype=in_dtype, out_dt=out_dt
+    )
+    tflops = flops / (us * 1e-6) / 1e12
+    tbps = tb / (us * 1e-6) / 1e12
+    mode = "atomic" if accumulate else "reduce"
+    shape = f"t{tokens}-d{model_dim}x{inter_dim}-e{experts}k{topk}"
+    print(
+        f"FlyDSL MoE stage2 [moe_gemm2] {dtype_tag} {mode} | {shape} | "
+        f"cos={cos:.5f} | {us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s"
+    )
+
+
+def _bench_main(argv):
+    import argparse
+
+    torch.set_default_device("cuda")
+
+    def _dim(v):
+        parts = [p.strip() for p in str(v).split(",") if p.strip()]
+        if len(parts) != 2:
+            raise argparse.ArgumentTypeError(f"invalid -dim {v!r}; expected 'model_dim,inter_dim'")
+        return int(parts[0]), int(parts[1])
+
+    p = argparse.ArgumentParser(description="Benchmark the moe_gemm_2stage package (stage1 + stage2 atomic/reduce).")
+    p.add_argument("--in_dtype", type=str, default="fp8", choices=["fp8", "int8", "int8smooth", "int4"])
+    p.add_argument("-dim", dest="dim", type=_dim, default=(256, 128), help="model_dim,inter_dim (e.g. -dim 8192,8192)")
+    p.add_argument("-t", "--tokens", dest="tokens", type=int, default=32)
+    p.add_argument("-e", "--experts", dest="experts", type=int, default=8)
+    p.add_argument("-k", "--topk", dest="topk", type=int, default=2)
+    p.add_argument("--tile_m", type=int, default=64, help="Stage1+stage2 M tile (routing block).")
+    p.add_argument("--tile_n", type=int, default=64, help="Stage1 N tile.")
+    p.add_argument("--tile_k", type=int, default=128, help="Stage1 K tile.")
+    p.add_argument("--tile_n2", type=int, default=None, help="Stage2 N tile (default: tile_n).")
+    p.add_argument("--tile_k2", type=int, default=None, help="Stage2 K tile (default: tile_k).")
+    p.add_argument("--out_dtype", type=str, default="bf16", choices=["f16", "bf16", "f32"])
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--num_warmup", type=int, default=10)
+    p.add_argument("--num_iters", type=int, default=100)
+    p.add_argument("--skip_ref", action="store_true", default=False)
+    args = p.parse_args(argv)
+
+    args.model_dim, args.inter_dim = args.dim
+    if args.tile_n2 is None:
+        args.tile_n2 = args.tile_n
+    if args.tile_k2 is None:
+        args.tile_k2 = args.tile_k
+    dtype_tag = args.in_dtype
+
+    _bench_stage1(args, dtype_tag=dtype_tag)
+    # Stage2: atomic then reduce. reduce mode does not support f32 output.
+    _bench_stage2(args, dtype_tag=dtype_tag, accumulate=True)
+    if args.out_dtype in ("f32", "fp32", "float"):
+        print("[skip] stage2 reduce mode does not support out_dtype='f32'")
+    else:
+        _bench_stage2(args, dtype_tag=dtype_tag, accumulate=False)
+
+
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    if len(sys.argv) > 1:
+        _bench_main(sys.argv[1:])
+    else:
+        sys.exit(pytest.main([__file__, "-v"]))

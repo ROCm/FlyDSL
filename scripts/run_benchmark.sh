@@ -161,6 +161,14 @@ MOE_SHAPES='
 64,6144,1024,128,8,16,64,256,64,256
 '
 
+# MoE 2-stage shapes (kernels/moe/moe_gemm_2stage; stage1 + stage2 atomic/reduce):
+# same 10-field format as MOE_SHAPES. Reuse the official MOE_SHAPES entries so the
+# stage1/stage2 rows are directly comparable with the moe_gemm1/moe_gemm2 rows.
+MOE_2STAGE_SHAPES='
+32768,8192,8192,16,4,64,128,128,256,128
+64,6144,1024,128,8,16,64,256,64,256
+'
+
 # MoE FP4 shapes (requires --in_dtype fp4, gfx950 only): same format as MOE_SHAPES
 MOE_FP4_SHAPES='
 16,7168,256,257,9,64,256,256,256,256
@@ -212,8 +220,9 @@ Usage:
   bash scripts/run_benchmark.sh --list
 
 Supported ops:
-  softmax | layernorm | rmsnorm | flash_attn | mla | gemm | moe
+  softmax | layernorm | rmsnorm | flash_attn | mla | gemm | moe | moe2stage
   (gemm includes preshuffle GEMM, SplitK HGEMM, and FP8 8-wave row-scale GEMM)
+  (moe2stage = moe_gemm_2stage package: stage1 + stage2 atomic/reduce, fp8/int8/int8smooth/int4)
 USAGE
 }
 
@@ -318,6 +327,7 @@ RUN_FLASH_ATTN=1
 RUN_MLA=1
 RUN_PRESHUFFLE_GEMM=1
 RUN_MOE=1
+RUN_MOE_2STAGE=1
 
 _enable_only_ops() {
   RUN_SOFTMAX=0
@@ -327,6 +337,7 @@ _enable_only_ops() {
   RUN_MLA=0
   RUN_PRESHUFFLE_GEMM=0
   RUN_MOE=0
+  RUN_MOE_2STAGE=0
   for op in "$@"; do
     op="$(_normalize_op "${op}")"
     case "${op}" in
@@ -337,6 +348,7 @@ _enable_only_ops() {
       mla) RUN_MLA=1 ;;
       gemm) RUN_PRESHUFFLE_GEMM=1 ;;
       moe) RUN_MOE=1 ;;
+      moe2stage) RUN_MOE_2STAGE=1 ;;
       "" ) ;;
       *) _die "unknown op '${op}'" ;;
     esac
@@ -375,6 +387,7 @@ if [ "$#" -gt 0 ]; then
         echo "mla"
         echo "gemm"
         echo "moe"
+        echo "moe2stage"
         exit 0
         ;;
       --only)
@@ -1161,6 +1174,51 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
         _show_fail_log "${log}" "moe_a8w4"
       fi
     fi
+  done
+fi
+
+# MoE 2-stage (kernels/moe/moe_gemm_2stage; CDNA only — uses MFMA).
+# Benchmarks stage1 and stage2 (atomic + reduce) via the test_moe_gemm_2stage.py
+# CLI. Uses in_dtype=fp8 to match the moe_gemm1/moe_gemm2 rows above.
+if [ "${RUN_MOE_2STAGE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
+  for shape in $MOE_2STAGE_SHAPES; do
+    [ -z "$shape" ] && continue
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    tokens=$1; model_dim=$2; inter_dim=$3; experts=$4; topk=$5; tile_m=$6; tile_n=$7; tile_k=$8; tile_n2=$9; tile_k2=${10}
+    log="${BENCH_LOG_DIR}/moe2stage_t${tokens}_md${model_dim}_id${inter_dim}_e${experts}_k${topk}.log"
+    if FLYDSL_RUNTIME_ENABLE_CACHE=0 python3 tests/kernels/test_moe_gemm_2stage.py \
+      --in_dtype fp8 \
+      -dim "$model_dim,$inter_dim" \
+      -t "$tokens" \
+      -e "$experts" \
+      -k "$topk" \
+      --tile_m "$tile_m" \
+      --tile_n "$tile_n" \
+      --tile_k "$tile_k" \
+      --tile_n2 "$tile_n2" \
+      --tile_k2 "$tile_k2" \
+      --num_warmup 10 \
+      --num_iters 100 >"${log}" 2>&1; then
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+      _fail_or_skip "${log}" "moe2stage"
+    fi
+    shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
+
+    dt_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
+    tf_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    tb_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
+      _emit_row "moe2stage_gemm1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
+    fi
+
+    _emit_moe_s2_rows "moe2stage_gemm2" "${shape_moe}" "${log}" | while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf; do
+      _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}"
+    done
   done
 fi
 
