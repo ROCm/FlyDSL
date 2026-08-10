@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-08-10T06:47:51Z",
+ "updated": "2026-08-10T07:20:19Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31365282675,
+   "pr": 947,
+   "commit": "6c63231c7d1ba9574887ae0eced194ca2cdb9aac",
+   "branch": "worktree-agent-moe-2stage-port",
+   "event": "pull_request",
+   "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8 (gfx942 + gfx950)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31365282675",
+   "created_at": "2026-08-10T07:17:46Z",
+   "updated_at": "2026-08-10T07:18:32Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 31364678789,
+   "pr": 995,
+   "commit": "b542340711bab61c5a103cad464e95495546c1ec",
+   "branch": "feature/typed-arithmetic-modernization",
+   "event": "pull_request",
+   "title": "Add type-aware extrema and integer ceil-division APIs",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31364678789",
+   "created_at": "2026-08-10T07:08:58Z",
+   "updated_at": "2026-08-10T07:10:27Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 31364042726,
+   "pr": 991,
+   "commit": "8615dae97dcdced591c401ee9b6b00fba314b6d7",
+   "branch": "fix/rmsnorm",
+   "event": "pull_request",
+   "title": "[fix] Resolve normalization-related CI regressions",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31364042726",
+   "created_at": "2026-08-10T06:59:04Z",
+   "updated_at": "2026-08-10T07:00:36Z",
+   "actor": "cschenjunlin",
+   "jobs": []
+  },
   {
    "run_id": 31362005080,
    "pr": 971,
@@ -70,11 +115,11 @@
    "branch": "worktree-agent-moe-2stage-port",
    "event": "pull_request",
    "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8 (gfx942 + gfx950)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31360026531",
    "created_at": "2026-08-10T05:53:20Z",
-   "updated_at": "2026-08-10T05:55:49Z",
+   "updated_at": "2026-08-10T07:18:20Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1684,153 +1729,6 @@
      "started_at": "2026-08-07T14:32:48Z",
      "completed_at": "2026-08-07T15:07:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31177603525/job/92863858271"
-    }
-   ]
-  },
-  {
-   "run_id": 31172521237,
-   "pr": 971,
-   "commit": "0a4eb7777dce97ffcc5d2ad685fc43cb7a5f60b5",
-   "branch": "gfx1250/gemm-opt-0805",
-   "event": "pull_request",
-   "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31172521237",
-   "created_at": "2026-08-07T11:03:12Z",
-   "updated_at": "2026-08-07T14:32:29Z",
-   "actor": "aoli26",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-07T11:45:24Z",
-     "completed_at": "2026-08-07T12:57:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31172521237/job/92855924849"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-07T11:45:19Z",
-     "completed_at": "2026-08-07T12:34:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31172521237/job/92855924911"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-07T13:35:09Z",
-     "completed_at": "2026-08-07T14:32:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31172521237/job/92855924927"
-    }
-   ]
-  },
-  {
-   "run_id": 31163858482,
-   "pr": null,
-   "commit": "48c732be7fd6450b8725a4950856aa7e85ff849e",
-   "branch": "jli/update-llvm-basemain",
-   "event": "pull_request",
-   "title": "[LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31163858482",
-   "created_at": "2026-08-07T08:57:26Z",
-   "updated_at": "2026-08-07T13:34:28Z",
-   "actor": "Boss2002n",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-07T09:15:18Z",
-     "completed_at": "2026-08-07T10:09:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31163858482/job/92823895589"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-07T13:30:39Z",
-     "completed_at": "2026-08-07T13:34:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31163858482/job/92823895592"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-07T09:15:18Z",
-     "completed_at": "2026-08-07T09:57:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31163858482/job/92823895695"
-    }
-   ]
-  },
-  {
-   "run_id": 31163693061,
-   "pr": 972,
-   "commit": "ee9fb4fcd55b1eb10aeba2a47898342316623c6c",
-   "branch": "mega_moe_a4w4",
-   "event": "pull_request",
-   "title": "add A4W4 and FP8 P2P transport support to MegaMoE v2",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31163693061",
-   "created_at": "2026-08-07T08:55:00Z",
-   "updated_at": "2026-08-07T14:01:49Z",
-   "actor": "yanboshao",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-07T09:00:03Z",
-     "completed_at": "2026-08-07T09:50:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31163693061/job/92820527051"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-07T08:59:58Z",
-     "completed_at": "2026-08-07T10:09:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31163693061/job/92820527069"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-07T12:34:02Z",
-     "completed_at": "2026-08-07T13:30:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31163693061/job/92820527078"
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-07T13:31:15Z",
-     "completed_at": "2026-08-07T13:39:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31163693061/job/92880420667"
-    },
-    {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-07T13:31:56Z",
-     "completed_at": "2026-08-07T14:01:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31163693061/job/92880420676"
     }
    ]
   }
