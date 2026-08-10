@@ -11,8 +11,11 @@ _LAZY = {
     "Stage1Config": "mega_moe_config",
     "Stage2Config": "mega_moe_config",
     "compile_gemm1": "gemm1",
+    "convert_aiter_lqq_to_megamoe": "quant",
     "gemm1_kernel": "gemm1",
+    "moe_smooth_per_token_scaled_quant": "quant",
     "select_mega_moe_config": "mega_moe_config",
+    "smooth_per_token_scaled_quant": "quant",
 }
 
 __all__ = list(_LAZY)

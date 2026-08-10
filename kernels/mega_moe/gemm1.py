@@ -17,7 +17,11 @@ from .gemm_util import (
     ATileLoader,
     BScaleLoader,
     BWeightLoader,
+    Int8AS2RLoader,
+    Int8BWeightLoader,
+    MfmaInt8GU,
     MfmaScaleGU,
+    SiluF16AtomEpilogue,
     SiluQuantEpilogue,
     TileScheduler,
     _buffer_load,
@@ -29,6 +33,148 @@ from .gemm_util import (
 class _LdsF32View:
     def __init__(self, ptr):
         self.ptr = ptr
+
+
+@flyc.jit
+# fmt: off
+def do_int8_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, mfma, epi,
+    a_buf, K_ITERS, M_REPEAT, NUM_ACC_N, A_K_STEP_BYTES, trb_rsrc):
+# fmt: on
+    """Run one gfx950 INT8 tile with uniform, split-safe barriers."""
+    tile_row_base = _buffer_load(trb_rsrc, m_tile, fx.Int32)
+    wave = fx.thread_idx.x // fx.Int32(64)
+    wave_n_base = wave * fx.Int32(epi._tile_n // epi._num_waves)
+    gate_row = sched.gate_base_row(expert) + n_tile_base + wave_n_base
+    up_row = gate_row + fx.Int32(epi._inter_dim)
+    a_gather.for_tile(tile_row_base)
+    gate_acc = [mfma.zero_value for _ in range(M_REPEAT * NUM_ACC_N)]
+    up_acc = [mfma.zero_value for _ in range(M_REPEAT * NUM_ACC_N)]
+
+    for step_i, state in range(
+        0,
+        K_ITERS,
+        1,
+        init=list(gate_acc) + list(up_acc),
+    ):
+        step = fx.Int32(step_i)
+        gate_acc = [Vec(value) for value in state[: M_REPEAT * NUM_ACC_N]]
+        up_acc = [Vec(value) for value in state[M_REPEAT * NUM_ACC_N :]]
+        a_gather.store(
+            a_buf,
+            a_gather.load_regs(step * fx.Int32(A_K_STEP_BYTES)),
+            fx.Int32(0),
+        )
+        wait_lds_barrier()
+        gate_b, up_b = b_loader.load_step(gate_row, up_row, step)
+
+        def a_load(mi, ksub):
+            return a_s2r.load_operand(a_buf, mi, ksub, fx.Int32(0))
+
+        gate_acc, up_acc = mfma.call(
+            a_load, gate_b, up_b, gate_acc, up_acc
+        )
+        state = yield list(gate_acc) + list(up_acc)
+
+    gate_acc = [Vec(value) for value in state[: M_REPEAT * NUM_ACC_N]]
+    up_acc = [Vec(value) for value in state[M_REPEAT * NUM_ACC_N :]]
+    wait_lds_barrier()
+    epi.store(
+        gate_acc,
+        up_acc,
+        m_tile,
+        tile_row_base,
+        n_tile_base,
+        expert,
+    )
+
+
+# fmt: off
+def build_fused_int8_gemm1(*, x_tensor, w_rsrc, qscale_rsrc, qzero_rsrc, sx_rsrc, sw_rsrc,
+    out_rsrc, trb_rsrc, expert_rsrc, srcmap_rsrc, weight_rsrc, compact_src_rsrc,
+    compact_expert_rsrc, compact_weight_rsrc, a_buf, c_tile, model_dim, inter_dim, sort_block_m, tile_n,
+    num_waves, n_per_wave, wave_id, m_repeat, num_acc_n, total_threads, k_iters,
+    n_tiles, expert_offset, b_cache_modifier, swizzle_a, packed_int4, atom_tokens,
+    topk, swiglu_limit=0.0):
+# fmt: on
+    """Build the independent INT8 Stage1 compute branch."""
+    sched = TileScheduler(
+        expert_rsrc=expert_rsrc,
+        inter_dim=inter_dim,
+        expert_offset=expert_offset,
+    )
+    a_gather = ATileLoader(
+        row_bytes=model_dim,
+        sort_block_m=sort_block_m,
+        k_step_bytes=256,
+        total_threads=total_threads,
+        swizzle=swizzle_a,
+        x_tensor=x_tensor,
+        async_copy=False,
+    )
+    a_s2r = Int8AS2RLoader(k_step_bytes=256, swizzle=swizzle_a)
+    b_loader = Int8BWeightLoader(
+        w_rsrc=w_rsrc,
+        qscale_rsrc=qscale_rsrc,
+        qzero_rsrc=qzero_rsrc,
+        num_acc_n=num_acc_n,
+        model_dim=model_dim,
+        packed_int4=packed_int4,
+        cache_modifier=b_cache_modifier,
+    )
+    mfma = MfmaInt8GU(m_repeat=m_repeat, num_acc_n=num_acc_n)
+    epi = SiluF16AtomEpilogue(
+        out_rsrc=out_rsrc,
+        sx_rsrc=sx_rsrc,
+        sw_rsrc=sw_rsrc,
+        srcmap_rsrc=srcmap_rsrc,
+        weight_rsrc=weight_rsrc,
+        compact_src_rsrc=compact_src_rsrc,
+        compact_expert_rsrc=compact_expert_rsrc,
+        compact_weight_rsrc=compact_weight_rsrc,
+        atom_tokens=atom_tokens,
+        topk=topk,
+        inter_dim=inter_dim,
+        m_repeat=m_repeat,
+        num_acc_n=num_acc_n,
+        sort_block_m=sort_block_m,
+        tile_n=tile_n,
+        num_waves=num_waves,
+        lds_out=c_tile,
+        swiglu_limit=swiglu_limit,
+    )
+
+    def _decode(flat):
+        m_tile = flat // fx.Int32(n_tiles)
+        n_tile = flat - m_tile * fx.Int32(n_tiles)
+        return m_tile, n_tile
+
+    def expert_of_flat(flat):
+        m_tile, _ = _decode(flat)
+        return sched.expert_of(m_tile)
+
+    def run_tile(flat):
+        m_tile, n_tile = _decode(flat)
+        n_tile_base = n_tile * fx.Int32(tile_n)
+        expert = sched.expert_of(m_tile)
+        do_int8_tile(
+            m_tile,
+            n_tile_base,
+            expert,
+            sched,
+            a_gather,
+            a_s2r,
+            b_loader,
+            mfma,
+            epi,
+            a_buf,
+            k_iters,
+            m_repeat,
+            num_acc_n,
+            256,
+            trb_rsrc,
+        )
+
+    return expert_of_flat, run_tile
 
 
 @flyc.jit

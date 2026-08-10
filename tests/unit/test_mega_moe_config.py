@@ -75,7 +75,43 @@ def test_fixed_and_bounded_compact_profiles_remain_specialized():
     assert not fixed.stage1.payload_tile_ready and fixed.p2p_quant == "none"
     assert (bounded.stage1.sort_block_m, bounded.stage1.grid_mult) == (64, 2)
     assert bounded.stage1.num_dispatch_cu == 128
+    assert bounded.stage2.persist_cu == 240
     assert not bounded.stage1.payload_tile_ready and bounded.p2p_quant == "none"
+
+
+def test_small_fixed_slot_profiles_use_low_overhead_geometry():
+    generic = [select_mega_moe_config(tokens, tokens) for tokens in (1, 4, 8)]
+    tuned = [
+        select_mega_moe_config(tokens, tokens, quant_mode="a8w4smooth")
+        for tokens in (1, 4, 8)
+    ]
+
+    assert [config.stage1.num_dispatch_cu for config in generic] == [64, 128, 128]
+    assert [config.stage1.grid_mult for config in generic] == [1, 1, 2]
+    assert all(config.stage2.use_nt for config in generic)
+    assert [config.stage1.num_dispatch_cu for config in tuned] == [64, 64, 64]
+    assert [config.stage1.grid_mult for config in tuned] == [1, 1, 1]
+    assert [config.stage1.b_nt for config in tuned] == [0, 0, 3]
+    assert not any(config.stage2.use_nt for config in tuned)
+
+
+def test_a8w4smooth_large_bucket_tuning_is_quant_specific():
+    generic512 = select_mega_moe_config(512, 512)
+    tuned512 = select_mega_moe_config(512, 512, quant_mode="a8w4smooth")
+    assert generic512.stage2.persist_cu == 240
+    assert tuned512.stage2.persist_cu == 224
+
+    generic2048 = select_mega_moe_config(2048, 2048)
+    tuned2048 = select_mega_moe_config(2048, 2048, quant_mode="a8w4smooth")
+    assert generic2048.stage1.external_grouping and generic2048.stage1.external_counting
+    assert generic2048.stage1.payload_tile_ready and generic2048.stage2.persist_cu == 256
+    assert not tuned2048.stage1.external_grouping and not tuned2048.stage1.external_counting
+    assert not tuned2048.stage1.payload_tile_ready and tuned2048.stage2.persist_cu == 240
+
+    generic4096 = select_mega_moe_config(4096, 4096)
+    tuned4096 = select_mega_moe_config(4096, 4096, quant_mode="a8w4smooth")
+    assert (generic4096.stage1.sort_block_m, generic4096.stage2.block_m) == (128, 64)
+    assert (tuned4096.stage1.sort_block_m, tuned4096.stage2.block_m) == (64, 32)
 
 
 def test_large_mtpr_protocol_is_rank_invariant_across_token_buckets():
@@ -108,6 +144,25 @@ def test_model_geometry_selects_tile_widths():
 
     assert config.stage1.tile_n == 256
     assert config.stage2.block_n == 128
+
+
+@pytest.mark.parametrize("quant_mode", ["a8w4smooth", "w8a8smooth"])
+def test_m13_token128_int8_uses_validated_tiles_without_p2p_quant(quant_mode):
+    config = select_mega_moe_config(
+        128,
+        128,
+        experts_per_rank=48,
+        model_dim=3584,
+        inter_dim=1280,
+        quant_mode=quant_mode,
+    )
+
+    assert (
+        config.stage2.block_m,
+        config.stage2.block_n,
+        config.stage2.block_k,
+    ) == (32, 128, 256)
+    assert config.p2p_quant == "none"
 
 
 def test_nearby_tokens_share_the_bucket_config():
