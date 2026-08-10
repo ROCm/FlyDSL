@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-10T20:23:32Z",
+ "updated": "2026-08-10T20:26:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31428842146,
+   "pr": 991,
+   "commit": "110ab76fc66ac4b3875f1d151ddcefecc1d63c6a",
+   "branch": "fix/rmsnorm",
+   "event": "pull_request",
+   "title": "[fix] Resolve normalization-related CI regressions",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31428842146",
+   "created_at": "2026-08-10T20:24:09Z",
+   "updated_at": "2026-08-10T20:24:11Z",
+   "actor": "cschenjunlin",
+   "jobs": []
+  },
   {
    "run_id": 31428621165,
    "pr": 991,
@@ -10,11 +25,11 @@
    "branch": "fix/rmsnorm",
    "event": "pull_request",
    "title": "[fix] Resolve normalization-related CI regressions",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31428621165",
    "created_at": "2026-08-10T20:21:28Z",
-   "updated_at": "2026-08-10T20:22:15Z",
+   "updated_at": "2026-08-10T20:24:11Z",
    "actor": "cschenjunlin",
    "jobs": []
   },
@@ -25,19 +40,19 @@
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31418205930",
    "created_at": "2026-08-10T18:16:03Z",
-   "updated_at": "2026-08-10T19:49:00Z",
+   "updated_at": "2026-08-10T20:23:01Z",
    "actor": "amd-nprotaso",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-10T19:49:00Z",
+     "started_at": "2026-08-10T20:23:00Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31418205930/job/93577584090"
     },
@@ -1650,49 +1665,6 @@
      "started_at": "2026-08-08T10:09:29Z",
      "completed_at": "2026-08-08T11:02:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31252005513/job/93090010391"
-    }
-   ]
-  },
-  {
-   "run_id": 31251931419,
-   "pr": 971,
-   "commit": "3120216f341f4863e5c6c76fe267aa910b39bbac",
-   "branch": "gfx1250/gemm-opt-0805",
-   "event": "pull_request",
-   "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31251931419",
-   "created_at": "2026-08-08T10:03:04Z",
-   "updated_at": "2026-08-08T11:22:22Z",
-   "actor": "aoli26",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-08T10:34:46Z",
-     "completed_at": "2026-08-08T11:22:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31251931419/job/93089812138"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-08T10:07:19Z",
-     "completed_at": "2026-08-08T10:57:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31251931419/job/93089812140"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-08T10:07:18Z",
-     "completed_at": "2026-08-08T11:13:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31251931419/job/93089812147"
     }
    ]
   }
