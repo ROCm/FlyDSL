@@ -10,7 +10,11 @@ from kernels.comm.flydsl_dispatch_combine_intranode_op import FlyDSLDispatchComb
 from kernels.mega_moe import (
     convert_aiter_lqq_to_megamoe as exported_convert_aiter_lqq_to_megamoe,
 )
-from kernels.mega_moe.mega_moe import MegaMoEV2, _dispatch_quant_config
+from kernels.mega_moe.mega_moe import (
+    MegaMoEV2,
+    _combine_launch_geometry,
+    _dispatch_quant_config,
+)
 from kernels.mega_moe.quant import (
     convert_aiter_lqq_to_megamoe,
     repack_megamoe_lqq_for_int8_loader,
@@ -32,6 +36,22 @@ def test_quant_mode_dispatch_contract(quant, expected):
 def test_unknown_quant_mode_is_rejected():
     with pytest.raises(ValueError, match="unsupported quant"):
         _dispatch_quant_config("int8", 256)
+
+
+@pytest.mark.parametrize(
+    "quant,mtpr,expected",
+    [
+        ("a8w4smooth", 1, (64, 4)),
+        ("a8w4smooth", 2, (32, 4)),
+        ("a8w4smooth", 4, (32, 4)),
+        ("a8w4smooth", 8, (64, 4)),
+        ("a8w4smooth", 16, (None, None)),
+        ("w8a8smooth", 4, (None, None)),
+        ("a8w4", 4, (None, None)),
+    ],
+)
+def test_small_a8w4_combine_geometry(quant, mtpr, expected):
+    assert _combine_launch_geometry(quant, mtpr) == expected
 
 
 def test_int8_combine_config_contract():

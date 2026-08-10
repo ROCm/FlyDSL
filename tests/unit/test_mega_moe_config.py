@@ -88,9 +88,11 @@ def test_small_fixed_slot_profiles_use_low_overhead_geometry():
 
     assert [config.stage1.num_dispatch_cu for config in generic] == [64, 128, 128]
     assert [config.stage1.grid_mult for config in generic] == [1, 1, 2]
+    assert [config.stage1.tile_n for config in generic] == [256, 256, 256]
     assert all(config.stage2.use_nt for config in generic)
     assert [config.stage1.num_dispatch_cu for config in tuned] == [64, 64, 64]
     assert [config.stage1.grid_mult for config in tuned] == [1, 1, 1]
+    assert [config.stage1.tile_n for config in tuned] == [128, 128, 128]
     assert [config.stage1.b_nt for config in tuned] == [0, 0, 3]
     assert not any(config.stage2.use_nt for config in tuned)
 
