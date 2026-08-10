@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-10T03:25:02Z",
+ "updated": "2026-08-10T04:00:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31353902104,
+   "pr": 992,
+   "commit": "02d7e60d14ecae67328d04e63ae4a91fead52d04",
+   "branch": "xyt/gemm16_950",
+   "event": "pull_request",
+   "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31353902104",
+   "created_at": "2026-08-10T03:54:23Z",
+   "updated_at": "2026-08-10T03:55:39Z",
+   "actor": "xytpai",
+   "jobs": []
+  },
   {
    "run_id": 31352475165,
    "pr": 947,
@@ -10,11 +25,11 @@
    "branch": "worktree-agent-moe-2stage-port",
    "event": "pull_request",
    "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8 (gfx942 + gfx950)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31352475165",
    "created_at": "2026-08-10T03:23:45Z",
-   "updated_at": "2026-08-10T03:23:59Z",
+   "updated_at": "2026-08-10T03:26:30Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1968,21 +1983,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31153598433/job/92788918299"
     }
    ]
-  },
-  {
-   "run_id": 31148123498,
-   "pr": null,
-   "commit": "9550c8beaf768b7323eee03797c19267ab7c5a31",
-   "branch": "feat/rdna3-gemm-tile-autotune",
-   "event": "pull_request",
-   "title": "[Perf] Choose the RDNA3 GEMM tile from the shape",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31148123498",
-   "created_at": "2026-08-07T04:40:04Z",
-   "updated_at": "2026-08-07T04:42:03Z",
-   "actor": "vlluvia",
-   "jobs": []
   }
  ]
 }
