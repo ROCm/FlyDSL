@@ -60,8 +60,16 @@ def _build_moe_gemm1_fp8_gateup(
     assert 64 <= BN <= 256 and BN % 64 == 0, f"tile_n must be in [64,256] multiple of 64, got {BN}"
     assert 16 <= BM <= 256 and BM % 16 == 0, f"tile_m must be a 16-multiple in [16,256], got {BM}"
 
-    # 4 waves tile the channel dim at 16 ch/wave, so a block needs >=64 real channels.
-    contiguous_n = max(BN // 2, 64)
+    # 4 waves tile the N (channel) dim at 16 ch/wave/rep. fp8/int8 use a
+    # 128-channel block (num_acc_n=2) instead of the older BN//2 tile: at the big
+    # shape (tile_n=128) this halves the grid (128->64 blocks/row), cutting wave
+    # count 2x and the barrier/LDS-sync overhead that made stage1 fp8 ~30% slower
+    # than v0.3.0. Cap at 128 so tile_n=256 stays at 2 blocks/row (num_acc_n=2):
+    # collapsing to a single 256-channel block regresses the inter_dim=256 shape
+    # ~40% (grid too small, register pressure). int4 keeps the narrower BN//2 tile:
+    # its single just-in-time weight buffer cannot feed a doubled per-block N
+    # without spilling (measured +63% at BN=128), so it stays at 64 channels.
+    contiguous_n = max(BN // 2, 64) if is_int4 else min(max(BN, 64), 128)
     assert inter_dim % contiguous_n == 0, (
         f"inter_dim={inter_dim} must be divisible by the effective channel tile "
         f"contiguous_n={contiguous_n} (from tile_n={BN})"
@@ -218,8 +226,6 @@ def _build_moe_gemm1_fp8_gateup(
         c_gate.fill(0)
         c_up.fill(0)
 
-        _m_reps = fxh.reps(c_gate, 1)
-        _n_reps = fxh.reps(c_gate, 2)
         k_iters = TILE_K // (2 * MFMA_K)
         num_tiles = K // TILE_K
 
@@ -248,24 +254,8 @@ def _build_moe_gemm1_fp8_gateup(
         def _mfma(s):
             # int4 uses a single weight buffer (bs=0); A keeps its ping-pong (s).
             bs = 0 if const_expr(is_int4) else s
-            for ki in range_constexpr(k_iters):
-                for n in range_constexpr(_n_reps):
-                    for m in range_constexpr(_m_reps):
-                        for k in range_constexpr(2):
-                            fx.mma_atom_call(
-                                mma_atom,
-                                c_gate[None, m, n],
-                                bl_frag_bufs[bs][None, m, (k, ki)],
-                                a_frag_bufs[s][None, n, (k, ki)],
-                                c_gate[None, m, n],
-                            )
-                            fx.mma_atom_call(
-                                mma_atom,
-                                c_up[None, m, n],
-                                br_frag_bufs[bs][None, m, (k, ki)],
-                                a_frag_bufs[s][None, n, (k, ki)],
-                                c_up[None, m, n],
-                            )
+            fx.gemm(mma_atom, c_gate, bl_frag_bufs[bs], a_frag_bufs[s], c_gate)
+            fx.gemm(mma_atom, c_up, br_frag_bufs[bs], a_frag_bufs[s], c_up)
 
         # Prologue: stage-0 loads + LDS write for K-tile 0. Wait only on the A-gather
         # (B stays in flight for the first MFMA); pre-read tile-0 A from LDS.

@@ -234,21 +234,8 @@ def _build_moe_gemm2_fp8(
             for ki in range_constexpr(k_iters):
                 fx.copy(uni_cp_atom, a_lds_r_bufs[s][None, None, ki], a_frag_retile_bufs[s][None, None, ki])
 
-        _m_reps = fxh.reps(c_frag, 1)
-        _n_reps = fxh.reps(c_frag, 2)
-
         def _mfma(s):
-            for ki in range_constexpr(k_iters):
-                for n in range_constexpr(_n_reps):
-                    for m in range_constexpr(_m_reps):
-                        for k in range_constexpr(2):
-                            fx.mma_atom_call(
-                                mma_atom,
-                                c_frag[None, m, n],
-                                b_frag_bufs[s][None, m, (k, ki)],
-                                a_frag_bufs[s][None, n, (k, ki)],
-                                c_frag[None, m, n],
-                            )
+            fx.gemm(mma_atom, c_frag, b_frag_bufs[s], a_frag_bufs[s], c_frag)
 
         # Rolled single-buffer scf.for: unrolled ping-pong kept both buffers live
         # (196 VGPR, 2 blocks/CU) and couldn't hide the atomic drain tail; rolling
