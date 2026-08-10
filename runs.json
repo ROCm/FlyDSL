@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-10T13:33:38Z",
+ "updated": "2026-08-10T13:43:48Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31394069980,
+   "pr": 981,
+   "commit": "af295bc92749d67802ab9a28028f63378b3ba5b6",
+   "branch": "docs/setup-rtd",
+   "event": "pull_request",
+   "title": "docs: Update configs for documentation to host on Read the Docs",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31394069980",
+   "created_at": "2026-08-10T13:40:22Z",
+   "updated_at": "2026-08-10T13:41:45Z",
+   "actor": "peterjunpark",
+   "jobs": []
+  },
   {
    "run_id": 31392773966,
    "pr": 971,
@@ -10,11 +25,11 @@
    "branch": "gfx1250/gemm-opt-0805",
    "event": "pull_request",
    "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31392773966",
    "created_at": "2026-08-10T13:25:03Z",
-   "updated_at": "2026-08-10T13:26:33Z",
+   "updated_at": "2026-08-10T13:33:24Z",
    "actor": "aoli26",
    "jobs": []
   },
@@ -1677,49 +1692,6 @@
      "started_at": "2026-08-08T04:22:47Z",
      "completed_at": "2026-08-08T04:25:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239204180/job/93057310446"
-    }
-   ]
-  },
-  {
-   "run_id": 31239082336,
-   "pr": 971,
-   "commit": "4d33be498ddec5dd07ca59c9e8b1e81173a98f97",
-   "branch": "gfx1250/gemm-opt-0805",
-   "event": "pull_request",
-   "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239082336",
-   "created_at": "2026-08-08T04:16:41Z",
-   "updated_at": "2026-08-08T05:37:50Z",
-   "actor": "aoli26",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-08T04:21:36Z",
-     "completed_at": "2026-08-08T05:27:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239082336/job/93057279891"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-08T04:21:35Z",
-     "completed_at": "2026-08-08T05:09:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239082336/job/93057279907"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-08T05:34:08Z",
-     "completed_at": "2026-08-08T05:37:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31239082336/job/93057279914"
     }
    ]
   }
