@@ -18,6 +18,8 @@ LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/llvm-build-info.json"
 LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['upstream']['llvm_hash'])")
 LLVM_REF="${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}"
 LLVM_PATCH="${REPO_ROOT}/thirdparty/llvm-rocdl-lld-argv0.patch"
+LLVM_ENABLE_PROJECTS="${LLVM_ENABLE_PROJECTS:-mlir;clang;lld}"
+LLVM_ENABLE_RUNTIMES="${LLVM_ENABLE_RUNTIMES-compiler-rt}"
 
 echo "Base directory: $BASE_DIR"
 echo "LLVM Source:    $LLVM_SRC_DIR"
@@ -25,6 +27,9 @@ echo "LLVM Build:     $LLVM_BUILD_DIR"
 echo "LLVM Install:   $LLVM_INSTALL_DIR"
 echo "LLVM Tarball:   $LLVM_INSTALL_TGZ"
 echo "LLVM Ref:       $LLVM_REF"
+echo "LLVM Projects:  $LLVM_ENABLE_PROJECTS"
+echo "LLVM Targets:   ${LLVM_TARGETS_TO_BUILD:-X86;NVPTX;AMDGPU}"
+echo "LLVM Runtimes:  ${LLVM_ENABLE_RUNTIMES:-<none>}"
 
 # 1. Clone LLVM
 LLVM_REMOTE="${LLVM_REMOTE:-https://github.com/llvm/llvm-project.git}"
@@ -89,9 +94,9 @@ NANOBIND_DIR=$(python3 -c "import nanobind; import os; print(os.path.dirname(nan
 cmake -G "$GENERATOR" \
     -S "$LLVM_SRC_DIR/llvm" \
     -B "$LLVM_BUILD_DIR" \
-    -DLLVM_ENABLE_PROJECTS="mlir;clang;lld" \
+    -DLLVM_ENABLE_PROJECTS="${LLVM_ENABLE_PROJECTS}" \
     -DLLVM_TARGETS_TO_BUILD="${LLVM_TARGETS_TO_BUILD:-X86;NVPTX;AMDGPU}" \
-    -DLLVM_ENABLE_RUNTIMES="compiler-rt" \
+    -DLLVM_ENABLE_RUNTIMES="${LLVM_ENABLE_RUNTIMES}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CXX_STANDARD=17 \
     -DLLVM_ENABLE_ASSERTIONS=ON \
