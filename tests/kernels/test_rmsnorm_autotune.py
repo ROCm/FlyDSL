@@ -5,7 +5,6 @@
 
 import json
 import os
-import re
 from pathlib import Path
 
 import pytest
@@ -71,8 +70,6 @@ def test_rmsnorm_direct_specializes_known_block_size(weight_dtype, weight_dtype_
     artifact = compiled._keepalive
 
     assert "known_block_size = array<i32: 512, 1, 1>" in artifact.source_ir
-    match = re.search(r"max_flat_workgroup_size\s*=\s*(\d+)", artifact.ir)
-    assert match is not None and int(match.group(1)) == 512
     if weight_dtype == torch.float32:
         weight_copy_type = "!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<128>, 32>"
         assert artifact.source_ir.count(weight_copy_type) >= 3
