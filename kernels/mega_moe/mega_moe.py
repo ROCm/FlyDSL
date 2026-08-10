@@ -45,6 +45,13 @@ def _dispatch_quant_config(quant: str, model_dim: int):
     return torch.int8, 1, 4
 
 
+def _combine_launch_geometry(quant: str, mtpr: int):
+    """Return low-overhead combine geometry for tiny A8W4 decode buckets."""
+    if quant != "a8w4smooth" or mtpr > 8:
+        return None, None
+    return (32 if mtpr in (2, 4) else 64), 4
+
+
 def _as_packed_i32(tensor):
     tensor = tensor.contiguous()
     return tensor if tensor.dtype == torch.int32 else tensor.view(torch.int32)
@@ -143,10 +150,14 @@ class MegaMoEV2:
         capacity_tile_m = 128 if compact else 32
         self._s1_fixed_slot = not compact
         self._s1_scale_dim = scale_dim
+        combine_block_num, combine_warp_num = _combine_launch_geometry(
+            quant, self.mtpr
+        )
         # fmt: off
         self.comb_cfg = FlyDSLDispatchCombineConfig(rank=self.rank, world_size=self.world_size,
             hidden_dim=self.model_dim, max_num_inp_token_per_rank=self.mtpr, num_experts_per_rank=self.epr,
             num_experts_per_token=self.topk, combine_dtype=torch.bfloat16,
+            combine_block_num=combine_block_num, combine_warp_num_per_block=combine_warp_num,
             dispatch_dtype=dispatch_dtype, scale_dim=self._s1_scale_dim, scale_type_size=scale_type_size,
             enable_std_moe=False, enable_group_major=True, gm_unit_size=capacity_tile_m,
             gm_scheme=mega_scheme, gm_compact=compact, max_total_recv_tokens=self.world_size)

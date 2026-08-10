@@ -320,6 +320,7 @@ def _select_bucket_config(
     if quant_mode == "a8w4smooth" and fixed_slot and bucket <= 8:
         stage1 = replace(
             stage1,
+            tile_n=128,
             grid_mult=1,
             num_dispatch_cu=_scale_dispatch_cu(64, experts_per_rank),
             b_nt=0 if bucket <= 4 else 3,
