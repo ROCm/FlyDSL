@@ -751,8 +751,6 @@ def compile_fp4_gemm_4w(
         gl_off_a = _global_swizzle(lane_id, wave_id, K_BYTES, N_LDS_ROUNDS, False)
         gl_off_b = _global_swizzle(lane_id, wave_id, K_BYTES, N_LDS_ROUNDS, True)
 
-        # g2s (see G2SLoaderAsm): needs the raw buffer resource. Exact num_records
-        # so the hardware OOB check is real (max_size=True would set 0xFFFFFFFF).
         a_rsrc = _buffer_ops.create_buffer_resource(A, max_size=False, num_records_bytes=c_m * K_BYTES)
         b_rsrc = _buffer_ops.create_buffer_resource(B_T, max_size=False, num_records_bytes=c_n * K_BYTES)
         a_g2s = G2SLoaderAsm(a_rsrc, gl_off_a, N_TILES_A, wave_id, scopes=_sc, base_ptr=_base_ptr)
