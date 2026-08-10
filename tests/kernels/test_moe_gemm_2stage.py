@@ -19,6 +19,7 @@ modes, f16/bf16/f32 outputs (f32 atomic-only), and two tile_m values (16 decode,
 ``tests/kernels/test_ref``.
 """
 
+import argparse
 import math
 import os
 import sys
@@ -1986,6 +1987,17 @@ def _time_launch(compiled, args, *, num_warmup, num_iters):
     return (ms_total / max(int(num_iters), 1)) * 1e3  # us
 
 
+def _str2bool(v):
+    """Accept the value form the benchmark harness uses (--skip_ref false)."""
+    if isinstance(v, bool):
+        return v
+    if str(v).strip().lower() in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if str(v).strip().lower() in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"invalid bool: {v!r}")
+
+
 def _bytes_stage1(*, tokens, model_dim, inter_dim, experts, topk, in_dtype, out_dt):
     """Stage1 traffic: gathered A (per routed row) + UNIQUE W + output.
 
@@ -2254,7 +2266,11 @@ def _bench_main(argv):
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--num_warmup", type=int, default=10)
     p.add_argument("--num_iters", type=int, default=100)
-    p.add_argument("--skip_ref", action="store_true", default=False)
+    # run_benchmark.sh passes "--skip_ref false" (value form, as in v0.3.0), so accept
+    # both that and a bare --skip_ref.
+    p.add_argument("--skip_ref", type=_str2bool, nargs="?", const=True, default=False)
+    # Accepted and ignored: v0.3.0's moe section passes it; there is no CK path here.
+    p.add_argument("--compare_aiter_ck", type=_str2bool, nargs="?", const=True, default=False)
     args = p.parse_args(argv)
 
     args.model_dim, args.inter_dim = args.dim
