@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-10T18:45:49Z",
+ "updated": "2026-08-10T20:23:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31428621165,
+   "pr": 991,
+   "commit": "7bdca39964b2294c481677524408b5f38cd3d145",
+   "branch": "fix/rmsnorm",
+   "event": "pull_request",
+   "title": "[fix] Resolve normalization-related CI regressions",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31428621165",
+   "created_at": "2026-08-10T20:21:28Z",
+   "updated_at": "2026-08-10T20:22:15Z",
+   "actor": "cschenjunlin",
+   "jobs": []
+  },
   {
    "run_id": 31418205930,
    "pr": 960,
@@ -10,13 +25,41 @@
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31418205930",
    "created_at": "2026-08-10T18:16:03Z",
-   "updated_at": "2026-08-10T18:25:50Z",
+   "updated_at": "2026-08-10T19:49:00Z",
    "actor": "amd-nprotaso",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-10T19:49:00Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31418205930/job/93577584090"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-10T19:50:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31418205930/job/93577584127"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-10T19:50:23Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31418205930/job/93577584150"
+    }
+   ]
   },
   {
    "run_id": 31417741316,
@@ -68,10 +111,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-10T18:24:22Z",
-     "completed_at": null,
+     "completed_at": "2026-08-10T19:23:50Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31401177825/job/93534452591"
     }
    ]
@@ -117,10 +160,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-10T15:12:12Z",
-     "completed_at": null,
+     "completed_at": "2026-08-10T19:02:44Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31394603239/job/93499523478"
     },
     {
@@ -491,38 +534,38 @@
    "branch": "fix/rmsnorm",
    "event": "pull_request",
    "title": "[fix] Resolve normalization-related CI regressions",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31364042726",
    "created_at": "2026-08-10T06:59:04Z",
-   "updated_at": "2026-08-10T18:24:56Z",
+   "updated_at": "2026-08-10T20:22:03Z",
    "actor": "cschenjunlin",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-10T18:27:23Z",
-     "completed_at": null,
+     "completed_at": "2026-08-10T20:21:42Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31364042726/job/93554734277"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-10T18:44:51Z",
-     "completed_at": null,
+     "completed_at": "2026-08-10T20:21:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31364042726/job/93554734292"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-10T18:24:55Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-08-10T19:24:32Z",
+     "completed_at": "2026-08-10T20:22:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31364042726/job/93554734394"
     }
    ]
@@ -1650,49 +1693,6 @@
      "started_at": "2026-08-08T10:07:18Z",
      "completed_at": "2026-08-08T11:13:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31251931419/job/93089812147"
-    }
-   ]
-  },
-  {
-   "run_id": 31249658888,
-   "pr": null,
-   "commit": "c212abb7c037264d6ed31a5c1d5b3d4f1ea45a5a",
-   "branch": "jli/update-llvm-basemain",
-   "event": "pull_request",
-   "title": "[LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31249658888",
-   "created_at": "2026-08-08T09:01:12Z",
-   "updated_at": "2026-08-08T10:34:33Z",
-   "actor": "Boss2002n",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-08T09:28:56Z",
-     "completed_at": "2026-08-08T10:34:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31249658888/job/93085869955"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-08T09:23:24Z",
-     "completed_at": "2026-08-08T10:16:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31249658888/job/93085869961"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-08T09:23:24Z",
-     "completed_at": "2026-08-08T10:02:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31249658888/job/93085869969"
     }
    ]
   }
