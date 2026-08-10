@@ -20,7 +20,9 @@ except ImportError:
 
 
 _PHILOX_ZERO_VECTOR = (0x6627E8D5, 0xE169C58D, 0xBC57AC4C, 0x9B00DBD8)
+_PHILOX64_ZERO_VECTOR = (0x16554D9ECA36314C, 0xDB20FE9D672D0FDC, 0xD7E772CEE186176B, 0x7E68B68AEC7BA23B)
 _UNIFORM_SCALE = np.float32(4.6566127342e-10)
+_UNIFORM64_SCALE = np.float32(1.0842020432385337e-19)
 
 
 def _philox_reference(seed, offsets, n_rounds=10):
@@ -55,6 +57,23 @@ def _philox_reference(seed, offsets, n_rounds=10):
     return c0, c1, c2, c3
 
 
+def _philox64_reference(counter, key, n_rounds=10):
+    """Scalar Philox 4x64 reference using Triton's constants and round order."""
+    mask = (1 << 64) - 1
+    c0, c1, c2, c3 = (int(word) & mask for word in counter)
+    k0, k1 = (int(word) & mask for word in key)
+    for _ in range(n_rounds):
+        prod_b = c2 * 0xCA5A826395121157
+        prod_a = c0 * 0xD2E7470EE14C6C93
+        c0 = ((prod_b >> 64) ^ c1 ^ k0) & mask
+        c2 = ((prod_a >> 64) ^ c3 ^ k1) & mask
+        c1 = prod_b & mask
+        c3 = prod_a & mask
+        k0 = (k0 + 0x9E3779B97F4A7C15) & mask
+        k1 = (k1 + 0xBB67AE8584CAA73B) & mask
+    return c0, c1, c2, c3
+
+
 def _uniform_reference(words):
     """Numpy version of Triton's ``uint_to_uniform_float``."""
     signed = np.asarray(words, dtype=np.uint32).view(np.int32)
@@ -86,6 +105,57 @@ def test_randint4x_reference_vector():
     assert tuple(int(word.value) for word in different_seed) != _PHILOX_ZERO_VECTOR
 
 
+@pytest.mark.l0_backend_agnostic
+def test_philox_4x64_matches_triton_reference():
+    """The internal 64-bit path uses Triton's Philox 4x64 constants and key layout."""
+    zero = fx.Uint64(0)
+    words = fx.random.universal.philox(zero, zero, zero, zero, zero)
+    assert tuple(int(word.value) for word in words) == _PHILOX64_ZERO_VECTOR
+    assert all(word.dtype is fx.Uint64 for word in words)
+
+    counter = (0xFFFFFFFFFFFFFFFF, 0x123456789ABCDEF0, 0x0FEDCBA987654321, 7)
+    seed = 0x89ABCDEF01234567
+    expected = _philox64_reference(counter, (seed, 0))
+    actual = fx.random.universal.philox(fx.Uint64(seed), *(fx.Uint64(word) for word in counter))
+    assert tuple(int(word.value) for word in actual) == expected
+
+    key = (seed, 0x76543210FEDCBA98)
+    expected = _philox64_reference(counter, key)
+    actual = fx.random.universal.philox_impl(
+        *(fx.Uint64(word) for word in counter),
+        *(fx.Uint64(word) for word in key),
+    )
+    assert tuple(int(word.value) for word in actual) == expected
+
+
+@pytest.mark.l1a_compile_no_target_dialect
+def test_philox_4x64_dynamic_path_builds_widening_ir():
+    @flyc.jit
+    def body(seed: fx.Uint64, c0: fx.Uint64):
+        zero = fx.Uint64(0)
+        words = fx.random.universal.philox(seed, c0, zero, zero, zero)
+        for word in words:
+            word.ir_value()
+        fx.random.universal.uint_to_uniform_float(words[0]).ir_value()
+
+    body(7, 11)
+    source = body._last_compiled[1].source_ir
+    assert "arith.muli" in source
+    assert "i128" in source
+    assert "arith.sitofp" in source
+
+
+@pytest.mark.l0_backend_agnostic
+@pytest.mark.parametrize("word", [0, 1, 2**63 - 1, 2**63, 2**64 - 1])
+def test_uint64_to_uniform_float_matches_triton(word):
+    signed = word if word < 2**63 else word - 2**64
+    folded = -signed - 1 if signed < 0 else signed
+    expected = np.float32(folded) * _UNIFORM64_SCALE
+    actual = fx.random.universal.uint_to_uniform_float(fx.Uint64(word))
+    assert actual.dtype is fx.Float32
+    assert float(actual.value) == float(expected)
+
+
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
@@ -106,6 +176,27 @@ def test_randint4x_reference_vector_device():
     launch(out, stream=torch.cuda.Stream())
     torch.cuda.synchronize()
     assert tuple(int(value) & 0xFFFFFFFF for value in out.cpu().tolist()) == _PHILOX_ZERO_VECTOR
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
+def test_philox_4x64_reference_vector_device():
+    @flyc.kernel(known_block_size=[1, 1, 1])
+    def kernel(Out: fx.Tensor, seed: fx.Uint64):
+        zero = fx.Uint64(0)
+        words = fx.random.universal.philox(seed, seed, zero, zero, zero)
+        for i in fx.range_constexpr(4):
+            Out[i] = words[i]
+
+    @flyc.jit
+    def launch(Out: fx.Tensor, seed: fx.Uint64, stream: fx.Stream = fx.Stream(None)):
+        kernel(Out, seed).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream)
+
+    out = torch.empty(4, dtype=torch.int64, device="cuda")
+    launch(out, 0, stream=torch.cuda.Stream())
+    torch.cuda.synchronize()
+    assert tuple(int(value) & 0xFFFFFFFFFFFFFFFF for value in out.cpu().tolist()) == _PHILOX64_ZERO_VECTOR
 
 
 @pytest.mark.l2_device
