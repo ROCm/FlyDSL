@@ -3347,10 +3347,10 @@ class DualwaveKernelContext:
         lds = fx.SharedAllocator().allocate(shared_storage).peek()
         self.lds = lds
         self.lds_kv_base_idx = fx.Index(fx.ptrtoint(lds.kv.ptr))
-        self.lds_kv_base_ptr = buffer_ops.create_llvm_ptr(self.lds_kv_base_idx, address_space=3)
+        self.lds_kv_base_ptr = lds.kv.ptr.llvm_ptr
         if const_expr(self.traits.PAGED):
             self.lds_bt_base_idx = fx.Index(fx.ptrtoint(lds.bt.ptr))
-            self.lds_bt_base_ptr = buffer_ops.create_llvm_ptr(self.lds_bt_base_idx, address_space=3)
+            self.lds_bt_base_ptr = lds.bt.ptr.llvm_ptr
         else:
             self.lds_bt_base_ptr = None
 
@@ -4443,11 +4443,11 @@ class DualwaveFp8KernelContext:
         lds = fx.SharedAllocator().allocate(shared_storage).peek()
         self.lds = lds
         self.lds_kv_base_idx = fx.Index(fx.ptrtoint(lds.kv.ptr))
-        self.lds_kv_base_ptr = buffer_ops.create_llvm_ptr(self.lds_kv_base_idx, address_space=3)
+        self.lds_kv_base_ptr = lds.kv.ptr.llvm_ptr
         self.lds_vt_base_idx = fx.Index(fx.ptrtoint(lds.vt.ptr))
-        self.lds_vt_base_ptr = buffer_ops.create_llvm_ptr(self.lds_vt_base_idx, address_space=3)
+        self.lds_vt_base_ptr = lds.vt.ptr.llvm_ptr
         self.lds_q_base_idx = fx.Index(fx.ptrtoint(lds.q.ptr))
-        self.lds_q_base_ptr = buffer_ops.create_llvm_ptr(self.lds_q_base_idx, address_space=3)
+        self.lds_q_base_ptr = lds.q.ptr.llvm_ptr
 
     def init_thread_mapping(self):
         _init_dualwave_thread_mapping(self)
@@ -4692,16 +4692,18 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
         # Wide fp8 QK: mfma_scale (32x32x64) with unit E8M0 scales, i32x8 operands.
         return rocdl.mfma_scale_f32_32x32x64_f8f6f4(
             self.v16f32_type,
-            as_mlir_value(a_i32x8),
-            as_mlir_value(b_i32x8),
-            as_mlir_value(c_v16),
-            0,
-            0,
-            0,
-            as_mlir_value(fx.Int32(0x7F7F7F7F)),
-            0,
-            as_mlir_value(fx.Int32(0x7F7F7F7F)),
-        ).result
+            [
+                as_mlir_value(a_i32x8),
+                as_mlir_value(b_i32x8),
+                as_mlir_value(c_v16),
+                0,
+                0,
+                0,
+                as_mlir_value(fx.Int32(0x7F7F7F7F)),
+                0,
+                as_mlir_value(fx.Int32(0x7F7F7F7F)),
+            ],
+        )
 
     def _mfma_acc_bf16(self, a_v8, b_v8, c_v16):
         return fly.mma_atom_call_ssa([self.v16f32_type], self.bf16_mma_atom, a_v8, b_v8, c_v16)

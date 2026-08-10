@@ -27,14 +27,12 @@ using namespace mlir::fly;
 
 namespace llvm {
 
-template <> struct DenseMapInfo<mlir::fly::MakePtrOp> : DenseMapInfo<mlir::Operation *> {
-  using Base = DenseMapInfo<mlir::Operation *>;
-
-  static mlir::fly::MakePtrOp getEmptyKey() { return mlir::fly::MakePtrOp(Base::getEmptyKey()); }
-
-  static mlir::fly::MakePtrOp getTombstoneKey() {
-    return mlir::fly::MakePtrOp(Base::getTombstoneKey());
+template <> struct DenseMapInfo<mlir::fly::MakePtrOp> {
+  static unsigned getHashValue(mlir::fly::MakePtrOp op) {
+    return DenseMapInfo<void *>::getHashValue(op.getAsOpaquePointer());
   }
+
+  static bool isEqual(mlir::fly::MakePtrOp lhs, mlir::fly::MakePtrOp rhs) { return lhs == rhs; }
 };
 
 } // namespace llvm

@@ -285,3 +285,74 @@ class TestKnownBlockSizeLaunchMismatch:
 
         source_ir = _get_source_ir(_launch_big, self.x)
         assert "known_block_size = array<i32: 512, 1, 1>" in source_ir
+
+
+class TestKnownBlockSizeTraceAccessor:
+    """Verify the trace-time ``fx.known_block_size()`` view of the same value."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self):
+        self.x = torch.zeros(64, device="cuda", dtype=torch.float32)
+
+    def test_raises_outside_a_kernel(self):
+        with pytest.raises(RuntimeError, match="no compile-time block size"):
+            fx.known_block_size()
+
+    def test_sees_the_declared_size(self):
+        seen = []
+
+        @flyc.kernel(known_block_size=[128, 4, 2])
+        def _kn(x: fx.Tensor):
+            seen.append(fx.known_block_size())
+
+        @flyc.jit
+        def _launch(x: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
+            _kn(x).launch(grid=(1, 1, 1), block=(128, 4, 2), stream=stream)
+
+        _get_source_ir(_launch, self.x)
+        assert seen == [(128, 4, 2)]
+
+    def test_sees_the_size_inferred_from_static_launch_dims(self):
+        seen = []
+
+        @flyc.kernel
+        def _kn(x: fx.Tensor):
+            seen.append(fx.known_block_size())
+
+        @flyc.jit
+        def _launch(x: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
+            _kn(x).launch(grid=(1, 1, 1), block=(256, 1, 1), stream=stream)
+
+        _get_source_ir(_launch, self.x)
+        assert seen == [(256, 1, 1)]
+
+    def test_raises_for_a_dynamic_launch(self):
+        @flyc.kernel
+        def _kn(x: fx.Tensor, nthreads: fx.Int32):
+            fx.known_block_size()
+
+        @flyc.jit
+        def _launch(x: fx.Tensor, nthreads: fx.Int32):
+            _kn(x, nthreads).launch(grid=(1, 1, 1), block=(nthreads, 1, 1))
+
+        with pytest.raises(RuntimeError, match="no compile-time block size"):
+            _launch(self.x, 64)
+
+    def test_is_visible_from_a_nested_jit_helper(self):
+        """An inner tracing frame carries no size of its own and inherits the kernel's."""
+        seen = []
+
+        @flyc.jit
+        def _helper():
+            seen.append(fx.known_block_size())
+
+        @flyc.kernel(known_block_size=[64, 1, 1])
+        def _kn(x: fx.Tensor):
+            _helper()
+
+        @flyc.jit
+        def _launch(x: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
+            _kn(x).launch(grid=(1, 1, 1), block=(64, 1, 1), stream=stream)
+
+        _get_source_ir(_launch, self.x)
+        assert seen == [(64, 1, 1)]

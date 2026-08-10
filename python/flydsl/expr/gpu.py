@@ -21,7 +21,7 @@ from .._mlir.dialects import gpu
 from .._mlir.dialects._fly_enum_gen import AddressSpace
 from ..compiler.protocol import dsl_align_of, dsl_size_of
 from .math import dsl_math_wrap_result
-from .meta import dsl_loc_tracing
+from .meta import dsl_loc_tracing, tracing_option
 from .numeric import Int32, Numeric, Uint8
 from .primitive import get_dyn_shared, make_ptr
 from .struct import (
@@ -45,6 +45,7 @@ __all__ = [
     "shuffle_up",
     "shuffle_down",
     "shuffle_idx",
+    "known_block_size",
     "SharedAllocator",
 ]
 
@@ -101,6 +102,17 @@ def shuffle_down(value, offset, width):
 def shuffle_idx(value, lane, width):
     """``shuffle`` in ``"idx"`` mode: every lane reads lane ``lane``."""
     return shuffle(value, lane, width, mode="idx")
+
+
+def known_block_size():
+    """Return the compile-time block dimensions as ``(x, y, z)`` Python ints.
+
+    Raises ``RuntimeError`` when no block size is in scope.
+    """
+    size = tracing_option("known_block_size")
+    if size is None:
+        raise RuntimeError("no compile-time block size is in scope.")
+    return size
 
 
 thread_idx = Tuple3D(gpu.thread_id)

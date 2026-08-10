@@ -5,8 +5,8 @@
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import const_expr, range_constexpr, rocdl, tdm_ops
-from flydsl.expr.rocdl import cluster
+from flydsl.expr import const_expr, range_constexpr, rocdl
+from flydsl.expr.rocdl import cluster, tdm_ops
 from flydsl.expr.typing import Constexpr, T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -116,10 +116,12 @@ def launch_gemm_a8w4_mxscale(
         mn_oob = i32_m - blk_m  # valid M rows (A / C)
         sa_oob = (i32_m + 31) // 32 - blk_m // 32  # valid M-supers (scale-A)
 
-        base_ptr = fx.SharedAllocator(static=False).allocate(ARENA_B)._ptr
+        arena = fx.SharedAllocator(static=False)
+        arena.allocate(ARENA_B)
+        base_ptr = arena.base_ptr
 
         def _bidx(p):
-            return fx.index_cast(T.index, fx.ptrtoint(p))
+            return fx.Int64(fx.ptrtoint(p))
 
         def _buf_ptr(s):
             return fx.add_offset(base_ptr, s * PITCH)
@@ -213,7 +215,7 @@ def launch_gemm_a8w4_mxscale(
 
         def load_a(buf, wm, ks):
             row = wmb + wm * 16 + lane16
-            b0 = fx.index_cast(T.index, row * A_LDS_ROW + ks * WMMA_K + kgrp * 16)
+            b0 = fx.Int64(row * A_LDS_ROW + ks * WMMA_K + kgrp * 16)
             v = [Vec(lds_load_b128(buf, b0 + 32 * j)) for j in range_constexpr(4)]
             v01 = v[0].shuffle(v[1], list(range(8)))
             v23 = v[2].shuffle(v[3], list(range(8)))
@@ -221,7 +223,7 @@ def launch_gemm_a8w4_mxscale(
 
         def load_b(buf, wn, ks):
             nbl = wnb // 16 + wn
-            b0 = fx.index_cast(T.index, STAGE_A + nbl * B_LDS_ROW + ks * 1024 + kgrp * 256 + lane16 * 16)
+            b0 = fx.Int64(STAGE_A + nbl * B_LDS_ROW + ks * 1024 + kgrp * 256 + lane16 * 16)
             v0 = Vec(lds_load_b128(buf, b0))
             v1 = Vec(lds_load_b128(buf, b0 + 512))
             return v0.shuffle(v1, list(range(8)))
@@ -229,19 +231,19 @@ def launch_gemm_a8w4_mxscale(
         def load_sa(buf, wm, ks):
             row = wmb + wm * 16 + lane16
             word = (row // 32) * SC_WORDS + ks * 32 + (row % 32)
-            return lds_load_b32(buf, fx.index_cast(T.index, SA_OFF + word * 4))[0]
+            return lds_load_b32(buf, fx.Int64(SA_OFF + word * 4))[0]
 
         def load_sb(buf, wn, ks):
             col = wnb + wn * 16 + lane16
             word = (col // 32) * SC_WORDS + ks * 32 + (col % 32)
-            return lds_load_b32(buf, fx.index_cast(T.index, SB_OFF + word * 4))[0]
+            return lds_load_b32(buf, fx.Int64(SB_OFF + word * 4))[0]
 
         wmma_atom = fx.make_mma_atom(
             fx.rocdl.WMMAScale(WMMA_M, WMMA_N, WMMA_K, fx.Float4E2M1FN, fx.Float8E4M3FN, fx.Float32)
         )
         c_frags = [fx.make_rmem_tensor(8, fx.Float32) for _ in range_constexpr(n_acc)]
         for cf in c_frags:
-            cf.store(fx.constant_vector(0.0, T.vec(8, T.f32)))
+            cf.store(Vec.filled(8, 0.0, fx.Float32))
 
         def _rmem(n, v):
             t = fx.make_rmem_tensor(n, fx.Int32)
