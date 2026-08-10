@@ -6,6 +6,8 @@ from typing import Any, Callable
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir import ir
+from flydsl._mlir.dialects import llvm, scf, vector
 from flydsl.expr import (
     arith,
     const_expr,
@@ -14,8 +16,6 @@ from flydsl.expr import (
     rocdl,
 )
 from flydsl.expr.typing import T
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm, scf, vector
 from kernels.common.mem_ops import get_llvm_ptr
 
 GFX950_DMA_BYTES = 16
@@ -176,9 +176,7 @@ class SplitKProtocol:
         self.semaphore_buf = rocdl.make_buffer_tensor(semaphore_ptr)
         self.signal_buf = rocdl.make_buffer_tensor(signal_ptr)
         if const_expr(self.HAS_BIAS):
-            self.bias_vecs = fx.logical_divide(
-                self.bias_buf, fx.make_layout(self.STG_VEC_SIZE, 1)
-            )
+            self.bias_vecs = fx.logical_divide(self.bias_buf, fx.make_layout(self.STG_VEC_SIZE, 1))
 
     @flyc.jit
     def zero_c(self):
@@ -192,9 +190,7 @@ class SplitKProtocol:
                 global_n_idx = self.block_n_offset + n_local_idx
                 safe_global_n_idx = (global_n_idx < self.n).select(global_n_idx, 0)
                 if const_expr(self.HAS_BIAS):
-                    init_vec = self.bias_vecs[
-                        None, safe_global_n_idx // self.STG_VEC_SIZE
-                    ].load()
+                    init_vec = self.bias_vecs[None, safe_global_n_idx // self.STG_VEC_SIZE].load()
                     if const_expr(self.C_DTYPE_BYTES == 4):
                         init_vec = init_vec.to(self.out_dtype_)
                 else:
@@ -214,9 +210,7 @@ class SplitKProtocol:
                         elif const_expr(self.STG_VEC_SIZE == 8):
                             store_asm = "global_store_dwordx4 $0, $1, off sc0 sc1"
                         else:
-                            raise NotImplementedError(
-                                f"STG_VEC_SIZE={self.STG_VEC_SIZE}"
-                            )
+                            raise NotImplementedError(f"STG_VEC_SIZE={self.STG_VEC_SIZE}")
                         c_ptr = get_llvm_ptr(
                             self.c_ptr,
                             c_offset,

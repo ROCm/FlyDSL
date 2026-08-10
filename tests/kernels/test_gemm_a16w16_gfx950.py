@@ -27,9 +27,10 @@ if _ARCH != "gfx950" and not (_IS_CLI and _ARCH == "gfx942"):
         allow_module_level=True,
     )
 
+from torch.profiler import ProfilerActivity, profile  # noqa: E402
+
 from kernels.gemm.gemm_a16w16_gfx950 import gemm_a16w16  # noqa: E402
 from kernels.gemm.gemm_a16w16_gfx950_utils import GFX950_DMA_BYTES  # noqa: E402
-from torch.profiler import ProfilerActivity, profile  # noqa: E402
 
 DEFAULT_BENCH_ITERS = 50
 DEFAULT_BENCH_WARMUP = 3
