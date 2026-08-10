@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-10T15:56:17Z",
+ "updated": "2026-08-10T17:00:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "xyt/gemm16_950",
    "event": "pull_request",
    "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31401177825",
    "created_at": "2026-08-10T14:59:41Z",
-   "updated_at": "2026-08-10T15:01:29Z",
+   "updated_at": "2026-08-10T15:55:40Z",
    "actor": "xytpai",
    "jobs": []
   },
@@ -98,11 +98,11 @@
    "branch": "gfx1250/gemm-opt-0805",
    "event": "pull_request",
    "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31392773966",
    "created_at": "2026-08-10T13:25:03Z",
-   "updated_at": "2026-08-10T14:22:43Z",
+   "updated_at": "2026-08-10T16:04:51Z",
    "actor": "aoli26",
    "jobs": [
     {
@@ -117,19 +117,19 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-10T14:22:43Z",
+     "started_at": "2026-08-10T16:04:50Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31392773966/job/93484988154"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-10T14:23:37Z",
-     "completed_at": null,
+     "completed_at": "2026-08-10T16:36:56Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31392773966/job/93484988182"
     }
    ]
@@ -169,10 +169,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-10T14:59:25Z",
-     "completed_at": null,
+     "completed_at": "2026-08-10T16:04:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31391542269/job/93483511888"
     }
    ]
@@ -199,11 +199,11 @@
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31381295073",
    "created_at": "2026-08-10T10:56:05Z",
-   "updated_at": "2026-08-10T13:26:00Z",
+   "updated_at": "2026-08-10T16:58:06Z",
    "actor": "amd-nprotaso",
    "jobs": [
     {
@@ -218,19 +218,19 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-10T12:12:23Z",
-     "completed_at": null,
+     "completed_at": "2026-08-10T16:56:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31381295073/job/93449063545"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-10T13:21:01Z",
-     "completed_at": null,
+     "completed_at": "2026-08-10T16:58:05Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31381295073/job/93449063601"
     }
    ]
