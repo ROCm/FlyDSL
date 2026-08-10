@@ -22,7 +22,7 @@ concurrency:
 env:
   DOCKER_IMAGE: "rocm/pytorch:rocm7.14_ubuntu24.04_py3.12_pytorch_release_2.12.0@sha256:c38eeda81d85f00fbe35d3d50ce42ce59c524e87d810624f4eb5c52fddb3b9ad"
   # Bump when the container or LLVM build environment changes incompatibly.
-  MLIR_CACHE_VERSION: "rocm7.14-ubuntu24.04-py3.12-v1"
+  MLIR_CACHE_VERSION: "rocm7.14-ubuntu24.04-py3.12-v2"
   GITHUB_REPO_NAME: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
   GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.event.head_commit.id || github.sha }}
   # PRs compare against their exact base; main pushes compare against the previous commit.
@@ -147,7 +147,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: mlir_install.tgz
-          key: mlir-install-${{ runner.os }}-${{ runner.arch }}-${{ env.MLIR_CACHE_VERSION }}-${{ hashFiles('flydsl-test/thirdparty/llvm-build-info.json', 'flydsl-test/scripts/build_llvm.sh') }}
+          key: mlir-install-${{ runner.os }}-${{ runner.arch }}-${{ env.MLIR_CACHE_VERSION }}-${{ hashFiles('flydsl-test/thirdparty/llvm-build-info.json', 'flydsl-test/thirdparty/llvm-rocdl-lld-argv0.patch', 'flydsl-test/scripts/build_llvm.sh') }}
 
       - name: Start MLIR build container
         if: steps.mlir-cache.outputs.cache-hit != 'true'
@@ -177,7 +177,7 @@ jobs:
         if: steps.mlir-cache.outputs.cache-hit != 'true'
         run: |
           set -ex
-          docker exec flydsl_mlir_cache bash -c "cd /flydsl-test && bash scripts/build_llvm.sh"
+          docker exec flydsl_mlir_cache bash -c 'export ROCM_PATH="$(rocm-sdk path --root)" && cd /flydsl-test && bash scripts/build_llvm.sh'
           docker exec flydsl_mlir_cache bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
           docker cp flydsl_mlir_cache:/llvm-project/mlir_install.tgz ./mlir_install.tgz
           test -s ./mlir_install.tgz
