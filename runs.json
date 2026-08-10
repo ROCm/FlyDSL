@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-10T10:27:16Z",
+ "updated": "2026-08-10T10:31:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "gfx1250/gemm-opt-0805",
    "event": "pull_request",
    "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31379038974",
    "created_at": "2026-08-10T10:25:10Z",
-   "updated_at": "2026-08-10T10:26:12Z",
+   "updated_at": "2026-08-10T10:26:43Z",
    "actor": "aoli26",
    "jobs": []
   },
@@ -40,11 +40,11 @@
    "branch": "xyt/gemm16_950",
    "event": "pull_request",
    "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31369777404",
    "created_at": "2026-08-10T08:22:25Z",
-   "updated_at": "2026-08-10T08:23:42Z",
+   "updated_at": "2026-08-10T10:26:39Z",
    "actor": "xytpai",
    "jobs": []
   },
@@ -115,11 +115,11 @@
    "branch": "feature/typed-arithmetic-modernization",
    "event": "pull_request",
    "title": "Add type-aware extrema and integer ceil-division APIs [wip]",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31364678789",
    "created_at": "2026-08-10T07:08:58Z",
-   "updated_at": "2026-08-10T08:59:44Z",
+   "updated_at": "2026-08-10T10:30:12Z",
    "actor": "Phil-amd",
    "jobs": []
   },
