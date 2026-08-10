@@ -12,8 +12,7 @@ import functools
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.ast_rewriter import ASTRewriter
-from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
-from flydsl.expr.typing import T
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.runtime.device import get_rocm_arch
 from kernels.moe.moe_gemm_2stage import layout_helpers as fxh
 
@@ -518,11 +517,9 @@ def _build_moe_gemm1_fp8_gateup(
         i32_size_expert_ids_in: fx.Int32,
         stream: fx.Stream,
     ):
-        inter_in = arith.index_cast(T.index, i32_inter_in)
-        size_expert_ids_in = arith.index_cast(T.index, i32_size_expert_ids_in)
         # Each block produces `contiguous_n` output channels, so gx = inter / contiguous_n.
-        gx = inter_in // fx.Index(contiguous_n)
-        gy = size_expert_ids_in
+        gx = fx.Int64(i32_inter_in) // fx.Int64(contiguous_n)
+        gy = fx.Int64(i32_size_expert_ids_in)
         moe_gemm1_fp8_gateup(
             arg_out,
             arg_x,

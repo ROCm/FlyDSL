@@ -12,8 +12,7 @@ import functools
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.ast_rewriter import ASTRewriter
-from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
-from flydsl.expr.typing import T
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.runtime.device import get_rocm_arch
 
 try:
@@ -30,7 +29,6 @@ except ImportError:
         return "gfx94+/gfx95+/gfx12+"
 
 
-from kernels.common import buffer_ops
 from kernels.moe.moe_gemm_2stage import layout_helpers as fxh
 
 
@@ -259,7 +257,7 @@ def _build_moe_gemm2_fp8(
         # (196 VGPR, 2 blocks/CU) and couldn't hide the atomic drain tail; rolling
         # drops to 130 VGPR (3 blocks/CU) while keeping intra-tile overlap.
         for iv in range(0, num_tiles, 1):
-            kb = arith.index_cast(T.i32, iv)
+            kb = fx.Int32(iv)
             _load_gmem(kb, 0)
             rocdl.s_waitcnt(fxh._encode_waitcnt(vmcnt=_b_loads_per_tile))
             gpu.barrier()  # WAR: all waves finished reading the prior tile's A-LDS
@@ -414,10 +412,14 @@ def _build_moe_gemm2_fp8(
             # buffer_atomic_add at explicit element indices; out_tensor supplies shape).
             out_atomic_rsrc = None
             if const_expr(accumulate):
-                out_atomic_rsrc = buffer_ops.create_buffer_resource(
-                    arg_out,
-                    max_size=False,
-                    num_records_bytes=(fx.Index(tokens) * fx.Index(N * out_bytes)),
+                out_atomic_rsrc = fx.rocdl.get_buffer_rsrc(
+                    fx.get_iter(
+                        fx.rocdl.make_buffer_tensor(
+                            arg_out,
+                            max_size=False,
+                            num_records_bytes=(fx.Int64(tokens) * fx.Int64(N * out_bytes)),
+                        )
+                    )
                 )
                 arg_p_output = fx.make_view(
                     fx.recast_iter(out_elem, fx.get_iter(arg_out)),
@@ -569,10 +571,8 @@ def _build_moe_gemm2_fp8(
         i32_size_expert_ids_in: fx.Int32,
         stream: fx.Stream,
     ):
-        n_in = arith.index_cast(T.index, i32_n_in)
-        size_expert_ids_in = arith.index_cast(T.index, i32_size_expert_ids_in)
-        gx = n_in // fx.Index(contiguous_n)
-        gy = size_expert_ids_in
+        gx = fx.Int64(i32_n_in) // fx.Int64(contiguous_n)
+        gy = fx.Int64(i32_size_expert_ids_in)
         moe_gemm2(
             arg_out,
             arg_x,

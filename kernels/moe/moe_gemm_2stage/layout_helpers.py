@@ -5,13 +5,12 @@
 """Layout-API helper layer for the MoE 2-stage MFMA kernels (gemm1.py / gemm2.py)."""
 
 import flydsl.expr as fx
-from flydsl._mlir.dialects import rocdl, scf
+from flydsl._mlir.dialects import rocdl
 from flydsl.compiler.ast_rewriter import ASTRewriter
 from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as _raw
-from kernels.common.kernels_common import _if_then
 
 
 def reps(tensor, mode):
@@ -365,12 +364,8 @@ class _TensorWithIndex:
                             # BUG GUARD #4: global atomics have NO bounds-check, so
                             # predicate on the in-tile `valid` guard (padding rows
                             # already dropped by `row_valid`).
-                            def _global_pk():
+                            if valid:
                                 _global_atomic_pk(atomic_dst, aligned, reg_vec, out_bytes)
-
-                            _if_slot = scf.IfOp(fx.as_ir_value(valid))
-                            with _if_then(_if_slot):
-                                _global_pk()
                         else:
                             # Buffer path: out-of-tile slots -> OOB index, dropped by
                             # the buffer bounds-check.
@@ -380,8 +375,7 @@ class _TensorWithIndex:
                             else:
                                 _buffer_atomic_pk(atomic_rsrc, elem_idx, reg_vec, out_bytes)
 
-                _if_row = scf.IfOp(fx.as_ir_value(row_valid))
-                with _if_then(_if_row):
+                if row_valid:
                     _atomic_row()
                 continue
             if const_expr(rank == 2):
