@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-10T21:31:59Z",
+ "updated": "2026-08-10T22:00:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "fix/rmsnorm",
    "event": "pull_request",
    "title": "[fix] Resolve normalization-related CI regressions",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31428842146",
    "created_at": "2026-08-10T20:24:09Z",
-   "updated_at": "2026-08-10T20:27:17Z",
+   "updated_at": "2026-08-10T21:57:43Z",
    "actor": "cschenjunlin",
    "jobs": []
   },
@@ -108,10 +108,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-10T17:13:09Z",
-     "completed_at": null,
+     "completed_at": "2026-08-10T21:44:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31401177825/job/93534452522"
     },
     {
@@ -533,7 +533,7 @@
    "commit": "b542340711bab61c5a103cad464e95495546c1ec",
    "branch": "feature/typed-arithmetic-modernization",
    "event": "pull_request",
-   "title": "Add type-aware extrema and integer ceil-division APIs [wip]",
+   "title": "[wip] Add type-aware extrema and integer ceil-division APIs",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31364678789",
