@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-10T10:32:17Z",
+ "updated": "2026-08-10T10:46:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31380412216,
+   "pr": 992,
+   "commit": "86392797a56936d91ef0fbb1dc8686ff937103a4",
+   "branch": "xyt/gemm16_950",
+   "event": "pull_request",
+   "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31380412216",
+   "created_at": "2026-08-10T10:44:05Z",
+   "updated_at": "2026-08-10T10:44:24Z",
+   "actor": "xytpai",
+   "jobs": []
+  },
   {
    "run_id": 31379038974,
    "pr": 971,
@@ -10,11 +25,11 @@
    "branch": "gfx1250/gemm-opt-0805",
    "event": "pull_request",
    "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31379038974",
    "created_at": "2026-08-10T10:25:10Z",
-   "updated_at": "2026-08-10T10:26:43Z",
+   "updated_at": "2026-08-10T10:32:45Z",
    "actor": "aoli26",
    "jobs": []
   },
@@ -25,11 +40,11 @@
    "branch": "coop-library",
    "event": "pull_request",
    "title": "[Feat] Add fx.num_warp_threads() as constant accessor",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31371018664",
    "created_at": "2026-08-10T08:39:11Z",
-   "updated_at": "2026-08-10T08:40:45Z",
+   "updated_at": "2026-08-10T10:31:54Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -40,11 +55,11 @@
    "branch": "xyt/gemm16_950",
    "event": "pull_request",
    "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31369777404",
    "created_at": "2026-08-10T08:22:25Z",
-   "updated_at": "2026-08-10T10:26:39Z",
+   "updated_at": "2026-08-10T10:44:24Z",
    "actor": "xytpai",
    "jobs": []
   },
@@ -1707,21 +1722,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31213845139/job/92988604808"
     }
    ]
-  },
-  {
-   "run_id": 31212634116,
-   "pr": 981,
-   "commit": "da659955db1b8d09fd02d1a14fb793895e78ad43",
-   "branch": "docs/setup-rtd",
-   "event": "pull_request",
-   "title": "docs: Update configs for documentation to host on Read the Docs",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31212634116",
-   "created_at": "2026-08-07T19:42:17Z",
-   "updated_at": "2026-08-07T19:44:34Z",
-   "actor": "peterjunpark",
-   "jobs": []
   }
  ]
 }
