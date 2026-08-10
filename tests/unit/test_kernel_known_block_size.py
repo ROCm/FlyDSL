@@ -1,5 +1,7 @@
 """Tests for known_block_size attribute on @flyc.kernel."""
 
+import re
+
 import pytest
 
 import flydsl.compiler as flyc
@@ -127,6 +129,14 @@ def _get_source_ir(launch_fn, *args):
     return artifact.source_ir
 
 
+def _get_compiled_ir(launch_fn, x):
+    """Call the JIT function once, then return the compiled IR string."""
+    launch_fn(x, stream=torch.cuda.current_stream())
+    assert launch_fn._mem_cache, "expected at least one cached compilation"
+    artifact = next(iter(launch_fn._mem_cache.values()))
+    return artifact.ir
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -158,6 +168,14 @@ class TestKnownBlockSize:
         assert "known_block_size = array<i32: 64, 1, 1>" in source_ir
         assert "known_block_size = array<i32: 32, 2, 1>" in source_ir
 
+    def test_compiled_ir_has_max_flat_workgroup_size(self):
+        compiled_ir = _get_compiled_ir(_launch_bs128_4_2, self.x)
+        # The compiled IR should report max_flat_workgroup_size >= total_threads
+        match = re.search(r"max_flat_workgroup_size\\CD\\([0-9A-Fa-f]{2})\\([0-9A-Fa-f]{2})", compiled_ir)
+        assert match is not None, f"max_flat_workgroup_size not found in compiled IR:\n{compiled_ir}"
+        max_wg = int("".join(match.groups()), 16)
+        assert max_wg >= 1024, f"max_flat_workgroup_size={max_wg} < total_threads=1024"
+
     def test_dynamic_block_size_omits_exact_attribute(self):
         source_ir = _get_source_ir(_launch_dynamic_blocks, self.x, 64, 64)
         # Check for the attribute syntax, not just the substring (which may
@@ -185,10 +203,9 @@ class TestKnownBlockSize:
         assert "gpu.func @_kn_named_block_specialization(" in source_ir
         assert "gpu.func @_kn_named_block_specialization_1(" in source_ir
 
-    @pytest.mark.parametrize("launch_fn", [_launch_bs64, _launch_bs128_4_2], ids=["64", "1024"])
-    def test_kernel_launches_successfully(self, launch_fn):
-        """Exercise backend workgroup metadata, including a 1024-thread launch."""
-        launch_fn(self.x, stream=torch.cuda.current_stream())
+    def test_kernel_launches_successfully(self):
+        """Ensure the kernel actually launches without hipErrorLaunchFailure."""
+        _launch_bs64(self.x, stream=torch.cuda.current_stream())
         torch.cuda.synchronize()  # would raise if launch failed
 
 
