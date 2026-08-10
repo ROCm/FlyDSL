@@ -335,7 +335,7 @@ def build_flash_attn_dualwave_swp_module(
             gran = _seq_pad_score_threshold(traits, g * _BIAS_VEC) // _bias_gran_elems + _bias_half_grans * h
             sel = gran * _bias_gran_bytes + buf * _BIAS_BUF_BYTES
             crd = fx.make_int_tuple(fx.Int32(_bias_lane_base + fx.Index(sel)))
-            off = fx.get_scalar(fx.crd2idx(fx.make_int_tuple(fx.Int32(_bias_lane_base + fx.Index(sel))), _bias_swz_layout))
+            off = fx.get_scalar(fx.crd2idx(crd, _bias_swz_layout))
             return _load_bias_frag_lds(_bias_lds_base_ptr, fx.Int32(off), _bias_frag_ty, _bias_frag_align)
 
         def _score_bias_half(s_h, tile_idx, h, buf):
