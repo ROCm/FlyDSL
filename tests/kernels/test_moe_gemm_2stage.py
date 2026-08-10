@@ -1986,24 +1986,29 @@ def _time_launch(compiled, args, *, num_warmup, num_iters):
     return (ms_total / max(int(num_iters), 1)) * 1e3  # us
 
 
-def _bytes_stage1(*, tokens, model_dim, inter_dim, topk, in_dtype, out_dt):
-    """Approximate stage1 traffic: A + W (per routed row) + output."""
+def _bytes_stage1(*, tokens, model_dim, inter_dim, experts, topk, in_dtype, out_dt):
+    """Stage1 traffic: gathered A (per routed row) + UNIQUE W + output.
+
+    Weights are counted once per expert, not per routed row: a tile-block reads an
+    expert's weights once and shares them across its rows. Counting them per row
+    inflates TB/s by orders of magnitude. Matches the convention in test_moe_gemm.py.
+    """
     rows = tokens * topk
-    a_elt = 0.5 if in_dtype == "int4" else 1.0  # activations are int8/fp8 (1B); W int4 is 0.5B
-    w_elt = 0.5 if in_dtype == "int4" else 1.0
+    a_elt = 1.0  # activations are int8/fp8 (1B) for every supported dtype
+    w_elt = 0.5 if in_dtype == "int4" else 1.0  # W4A8 packs 2 weights per byte
     a_bytes = rows * model_dim * a_elt
-    w_bytes = rows * (2 * inter_dim) * model_dim * w_elt
+    w_bytes = experts * (2 * inter_dim) * model_dim * w_elt
     o_bytes = rows * inter_dim * out_dt.itemsize
     return a_bytes + w_bytes + o_bytes
 
 
-def _bytes_stage2(*, tokens, model_dim, inter_dim, topk, in_dtype, out_dt):
-    """Approximate stage2 traffic: A2 + W2 (per routed row) + output."""
+def _bytes_stage2(*, tokens, model_dim, inter_dim, experts, topk, in_dtype, out_dt):
+    """Stage2 traffic: A2 (per routed row) + UNIQUE W2 + output. See _bytes_stage1."""
     rows = tokens * topk
     a_elt = 1.0
     w_elt = 0.5 if in_dtype == "int4" else 1.0
     a_bytes = rows * inter_dim * a_elt
-    w_bytes = rows * model_dim * inter_dim * w_elt
+    w_bytes = experts * model_dim * inter_dim * w_elt
     o_bytes = rows * model_dim * out_dt.itemsize
     return a_bytes + w_bytes + o_bytes
 
@@ -2098,7 +2103,13 @@ def _bench_stage1(args, *, dtype_tag):
     us = _time_launch(compiled, launch_args, num_warmup=args.num_warmup, num_iters=args.num_iters)
     flops = 2.0 * (tokens * topk) * (2 * inter_dim) * model_dim
     tb = _bytes_stage1(
-        tokens=tokens, model_dim=model_dim, inter_dim=inter_dim, topk=topk, in_dtype=in_dtype, out_dt=out_dt
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        in_dtype=in_dtype,
+        out_dt=out_dt,
     )
     tflops = flops / (us * 1e-6) / 1e12
     tbps = tb / (us * 1e-6) / 1e12
@@ -2199,7 +2210,13 @@ def _bench_stage2(args, *, dtype_tag, accumulate):
     us = _time_launch(compiled, launch_args, num_warmup=args.num_warmup, num_iters=args.num_iters)
     flops = 2.0 * (tokens * topk) * model_dim * inter_dim
     tb = _bytes_stage2(
-        tokens=tokens, model_dim=model_dim, inter_dim=inter_dim, topk=topk, in_dtype=in_dtype, out_dt=out_dt
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        in_dtype=in_dtype,
+        out_dt=out_dt,
     )
     tflops = flops / (us * 1e-6) / 1e12
     tbps = tb / (us * 1e-6) / 1e12
