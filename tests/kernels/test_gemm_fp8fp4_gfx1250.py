@@ -157,8 +157,8 @@ def _skip_reason(spec, M, N, K, tile_cfg, cluster):
     if profile is not None:
         if (*tile_cfg, *cluster) != profile:
             return f"this kernel hand-schedules one profile, {profile}"
-        if N % (tile_n * cluster[1]) or (-(-M // tile_m)) % cluster[0]:
-            return f"the {cluster[0]}x{cluster[1]} cluster needs whole clusters of {tile_m}x{tile_n} tiles"
+        if N % (tile_n * cluster[1]):
+            return f"the {cluster[0]}x{cluster[1]} cluster needs N whole clusters of {tile_n}-wide tiles"
         if spec.get("k_pair") and K % (tile_k * 2):
             return f"K={K} must divide {tile_k * 2}: one TDM covers two K-tiles"
         if spec.get("k_whole_rev") and (K // tile_k) % num_buffers:
@@ -197,6 +197,7 @@ def _build_case(
     cluster_n=1,
     scale_exp=None,
     scale_scale=1.0,
+    c_guard_rows=0,
 ):
     spec = _MODES[mode]
     torch.manual_seed(0)
@@ -217,14 +218,18 @@ def _build_case(
     )
 
     lda, ldc = K + lda_extra, N + ldc_extra
+    c_gpu = (
+        torch.full((M + c_guard_rows, ldc), float("nan"), dtype=_DT[out_dtype], device="cuda")
+        if c_guard_rows
+        else torch.zeros(M, ldc, dtype=_DT[out_dtype], device="cuda")
+    )
     dev = [
-        torch.zeros(M, ldc, dtype=_DT[out_dtype], device="cuda"),
+        c_gpu,
         _with_strided_a(a, a_cols, lda if a_cols == K else lda // 2).cuda(),
         gemm_common_utils.preshuffle_b_16x16(b, N, b_cols).cuda(),
         a_s.cuda(),
         b_s.cuda(),
     ]
-    c_gpu = dev[0]
 
     def make_args(stream):
         w = spec["wrap"]
@@ -255,15 +260,22 @@ def _build_case(
 
 
 def _assert_case(mode, M, N, K, *tile_cfg, **kwargs):
-    """Build inputs, compile+run once, assert against the reference.
+    """Build inputs, compile+run once, assert against the reference (and any C guard band).
 
     Returns (c_gpu, make_args, compiled) so the perf CLI can replay the same
     compiled kernel without rebuilding it.
     """
+    guard_rows = kwargs.get("c_guard_rows", 0)
     c_gpu, make_args, ref, (rtol, atol) = _build_case(mode, M, N, K, *tile_cfg, **kwargs)
     compiled = flyc.compile(_MODES[mode]["launch"], *make_args(torch.cuda.current_stream()))
     torch.cuda.synchronize()
-    torch.testing.assert_close(c_gpu[:M, :N].float().cpu(), ref.float(), rtol=rtol, atol=atol)
+    out = c_gpu[:M, :N].float()
+    if guard_rows:
+        assert not torch.isnan(out).any(), "OOB load reached the accumulator (NaN in the real output)"
+    torch.testing.assert_close(out.cpu(), ref.float(), rtol=rtol, atol=atol)
+    if guard_rows:
+        clobbered = int((~torch.isnan(c_gpu[M:].float())).sum())
+        assert clobbered == 0, f"M={M}: {clobbered} elements written at/after row {M} (store OOB clamp failed)"
     return c_gpu, make_args, compiled
 
 
@@ -358,29 +370,49 @@ def test_gemm_cluster(mode, M, cluster_m, cluster_n, num_buffers):
     _run_smoke(mode, M, num_buffers=num_buffers, cluster_m=cluster_m, cluster_n=cluster_n)
 
 
-@pytest.mark.parametrize("knob", range(len(_A8W4_256_PROFILE)))
-def test_a8w4_256x256_rejects_other_profiles(knob):
+_PROFILE_MODES = [m for m in _MODE_IDS if _MODES[m].get("profile")]
+
+
+@pytest.mark.parametrize("knob", range(8))
+@pytest.mark.parametrize("mode", _PROFILE_MODES)
+def test_256x256_rejects_other_profiles(mode, knob):
+    """Both kernels hand-schedule one hardcoded profile and assert on any other."""
     _require_gpu()
-    cfg = list(_A8W4_256_PROFILE)
+    cfg = list(_MODES[mode]["profile"])
     cfg[knob] = cfg[knob] * 2
-    _, make_args, _, _ = _build_case("a8w4_256x256", 256, 512, 512, *cfg[:6], cluster_m=cfg[6], cluster_n=cfg[7])
+    _, make_args, _, _ = _build_case(mode, 256, 512, 512, *cfg[:6], cluster_m=cfg[6], cluster_n=cfg[7])
     with pytest.raises(AssertionError, match="only the tuned"):
-        flyc.compile(launch_gemm_a8w4_256x256, *make_args(torch.cuda.current_stream()))
+        flyc.compile(_MODES[mode]["launch"], *make_args(torch.cuda.current_stream()))
 
 
-# K/256 mod 3 selects the drain length, so 1024 / 1280 / 1536 walk all three tails.
-@pytest.mark.parametrize("M, N, K", [(1024, 1024, 1024), (2048, 1024, 1280), (1024, 2048, 1536)])
-def test_a8w4_256x256_cluster4x4(M, N, K):
+_CLUSTER4X4_SHAPES = {
+    # K/256 mod 3 selects the drain length, so 1024 / 1280 / 1536 walk all three tails.
+    "a8w4_256x256": [(1024, 1024, 1024), (2048, 1024, 1280), (1024, 2048, 1536)],
+    "a4w4_256x256": [(1024, 1024, 1024), (2048, 1024, 3072), (1000, 2048, 4096)],
+}
+
+
+@pytest.mark.parametrize(
+    "mode, M, N, K", [(mode, *mnk) for mode, shapes in _CLUSTER4X4_SHAPES.items() for mnk in shapes]
+)
+def test_256x256_cluster4x4(mode, M, N, K):
     """The 4x4 cluster multicasts A across four workgroups and B across four more."""
-    _require_gpu()
-    _run_case("a8w4_256x256", M, N, K, *_A8W4_256_PROFILE[:6], cluster_m=4, cluster_n=4)
+    _run_case(mode, M, N, K, *_MODES[mode]["profile"][:6], cluster_m=4, cluster_n=4)
 
 
-@pytest.mark.parametrize("M, N, K", [(1024, 1024, 1024), (2048, 1024, 3072), (1000, 2048, 4096)])
-def test_a4w4_256x256_cluster4x4(M, N, K):
-    """The 4x4 cluster multicasts A across four workgroups and B across four more."""
-    _require_gpu()
-    _run_case("a4w4_256x256", M, N, K, *_A4W4_256_PROFILE[:6], cluster_m=4, cluster_n=4)
+_RAGGED_M_GUARD_ROWS = 5 * 256  # > worst case (gx padded up 3 tiles), for any M
+
+_M_GUARD_SWEEP = (512, 513, 769, 1025, 1536, 2305, 12289)
+
+
+@pytest.mark.parametrize("M", _M_GUARD_SWEEP)
+@pytest.mark.parametrize("mode", _PROFILE_MODES)
+def test_256x256_ragged_m_no_oob_store(mode, M):
+    profile = _MODES[mode]["profile"]
+    N, K = _MODES[mode]["smoke"][:2]
+    _run_case(
+        mode, M, N, K, *profile[:6], cluster_m=profile[6], cluster_n=profile[7], c_guard_rows=_RAGGED_M_GUARD_ROWS
+    )
 
 
 @pytest.mark.parametrize("mode, K", [("a8w4_256x256", 4608), ("a4w4_256x256", 4096)])

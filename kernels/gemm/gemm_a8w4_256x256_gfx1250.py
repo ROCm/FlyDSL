@@ -46,8 +46,7 @@ def launch_gemm_a8w4_256x256(
     cluster_m: Constexpr[int],
     cluster_n: Constexpr[int],
 ):
-    """N must divide 1024 and ceil(M/256) must be a multiple of 4 (M itself may be ragged);
-    K divides 256 and is at least 512."""
+    """N must divide 1024; M is unrestricted; K divides 256 and is at least 512."""
 
     assert (tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, cluster_m, cluster_n) == (
         256,
@@ -794,6 +793,7 @@ def launch_gemm_a8w4_256x256(
 
     gx = (i32_m + (tile_m - 1)) // tile_m
     gy = (N + (tile_n - 1)) // tile_n
+    gx = (((gx > 0).select(gx, fx.Int32(1)) + (cluster_m - 1)) // cluster_m) * cluster_m
     # Split gx exactly, so no workgroup is left over to recompute a duplicate tile.
     pow2 = gx & -gx
     capped = (pow2 < m_run_max).select(pow2, fx.Int32(m_run_max))

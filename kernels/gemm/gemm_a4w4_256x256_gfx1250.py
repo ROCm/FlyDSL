@@ -47,8 +47,7 @@ def launch_gemm_a4w4_256x256(
 ):
     """Launch the A4W4 kernel.
 
-    N must divide 1024 and ceil(M/256) must be a multiple of 4 (M itself may be ragged);
-    K must be divisible by 1024, with K >= 1024.
+    N must divide 1024; M is unrestricted; K must be divisible by 1024, with K >= 1024.
     """
 
     assert (tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, cluster_m, cluster_n) == (
@@ -178,7 +177,7 @@ def launch_gemm_a4w4_256x256(
                 stride, mask, bound, pad, early = i32_k, a_mask, sa_oob, 0, True
             else:
                 tensor, offset, shape, lds_stride = gSB, PLANAR_SB_BASE, (SB_SUPERS, tile_k), tile_k
-                stride, mask, bound, pad, early = i32_k, b_mask, None, 0, False
+                stride, mask, bound, pad, early = i32_k, b_mask, None, 0, True
             desc = tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=tensor,
                 lds_memref=_view(fx.add_offset(base_ptr, offset), shape, (lds_stride, 1)),
@@ -618,6 +617,7 @@ def launch_gemm_a4w4_256x256(
 
     gx = (i32_m + (tile_m - 1)) // tile_m
     gy = (N + (tile_n - 1)) // tile_n
+    gx = (((gx > 0).select(gx, fx.Int32(1)) + (cluster_m - 1)) // cluster_m) * cluster_m
     # Split gx exactly, so no workgroup is left over to recompute a duplicate tile.
     pow2 = gx & -gx
     capped = (pow2 < m_run_max).select(pow2, fx.Int32(m_run_max))
