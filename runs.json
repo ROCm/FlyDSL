@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-10T05:57:57Z",
+ "updated": "2026-08-10T05:59:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31360217600,
+   "pr": 989,
+   "commit": "42709ef2fd73e969cc8aa1284e054265d56fe4f0",
+   "branch": "ci/upgrade-rocm-7.14",
+   "event": "pull_request",
+   "title": "CI: upgrade PyTorch images to ROCm 7.14",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31360217600",
+   "created_at": "2026-08-10T05:56:52Z",
+   "updated_at": "2026-08-10T05:57:54Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 31360053749,
    "pr": 992,
@@ -349,11 +364,11 @@
    "branch": "ci/upgrade-rocm-7.14",
    "event": "pull_request",
    "title": "CI: upgrade PyTorch images to ROCm 7.14",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31319798308",
    "created_at": "2026-08-09T14:57:01Z",
-   "updated_at": "2026-08-10T04:41:23Z",
+   "updated_at": "2026-08-10T05:57:09Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -386,19 +401,19 @@
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-10T04:23:42Z",
-     "completed_at": null,
+     "completed_at": "2026-08-10T05:57:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31319798308/job/93353675049"
     },
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-10T04:41:22Z",
-     "completed_at": null,
+     "completed_at": "2026-08-10T05:57:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31319798308/job/93353675054"
     }
    ]
@@ -1874,21 +1889,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31158486047/job/92807964774"
     }
    ]
-  },
-  {
-   "run_id": 31158435799,
-   "pr": null,
-   "commit": "9e029b6eec1d4503b7130dc5a277bd49c6889d6b",
-   "branch": "jli/update-llvm-basemain",
-   "event": "pull_request",
-   "title": "[LLVM][FlyDSL] Bump up LLVM and Adapt FlyDSL to upstream LLVM/MLIR API changes",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31158435799",
-   "created_at": "2026-08-07T07:38:14Z",
-   "updated_at": "2026-08-07T07:39:16Z",
-   "actor": "jli-melchior",
-   "jobs": []
   }
  ]
 }
