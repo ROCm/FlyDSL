@@ -20,7 +20,8 @@ if torch is None or not torch.cuda.is_available():
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 
 _ARCH = str(get_rocm_arch() or "")
-if _ARCH != "gfx950":
+_IS_CLI = __name__ == "__main__"
+if _ARCH != "gfx950" and not (_IS_CLI and _ARCH == "gfx942"):
     pytest.skip(
         f"GFX950 A16W16 GEMM tests require gfx950, got {_ARCH}",
         allow_module_level=True,
@@ -30,6 +31,8 @@ from kernels.gemm.gemm_a16w16_gfx950 import gemm_a16w16  # noqa: E402
 from kernels.gemm.gemm_a16w16_gfx950_utils import GFX950_DMA_BYTES  # noqa: E402
 from torch.profiler import ProfilerActivity, profile  # noqa: E402
 
+DEFAULT_BENCH_ITERS = 50
+DEFAULT_BENCH_WARMUP = 3
 ROTARY_INPUTS_TARGET_BYTES = 8 * 1024**3
 
 
@@ -1156,3 +1159,179 @@ def test_gemm_a16w16_benchmark_smoke(
         layout,
     )
     benchmark(args)
+
+
+def run_gemm_a16w16_cli_benchmark(
+    dtype: str,
+    m: int,
+    n: int,
+    k: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    stages: int,
+    split_k: int,
+    m_waves: int,
+    n_waves: int,
+    k_waves: int,
+    *,
+    group_m: int = 0,
+    use_half_tile_interleaved: bool = True,
+    layout: str = "nt",
+    bench_iters: int = DEFAULT_BENCH_ITERS,
+    bench_warmup: int = DEFAULT_BENCH_WARMUP,
+    test_graph: bool = False,
+):
+    """Benchmark one A16W16 policy using the legacy HGEMM CLI contract."""
+    from tests.test_common import run_perftest, verify_output
+
+    if _ARCH not in ("gfx942", "gfx950"):
+        pytest.skip(f"A16W16 GEMM benchmark requires gfx942 or gfx950, got {_ARCH}")
+    if _ARCH == "gfx942" and (layout != "nt" or use_half_tile_interleaved):
+        pytest.skip("gfx942 benchmark supports only the non-HTI NT path")
+
+    bench_iters = max(2, int(bench_iters))
+    bench_warmup = max(0, int(bench_warmup))
+    torch_dtype = torch.bfloat16 if dtype == "bf16" else torch.float16
+
+    a = empty_layout_matrix(m, k, torch_dtype, is_t=layout[0] == "t")
+    b = empty_layout_matrix(k, n, torch_dtype, is_t=layout[1] == "t")
+    a.uniform_(-1, 1)
+    b.uniform_(-1, 1)
+    out = torch.empty((m, n), dtype=torch_dtype, device="cuda")
+
+    kwargs = {
+        "block_m": block_m,
+        "block_n": block_n,
+        "block_k": block_k,
+        "stages": stages,
+        "split_k": split_k,
+        "m_waves": m_waves,
+        "n_waves": n_waves,
+        "k_waves": k_waves,
+        "group_m": group_m,
+        "use_half_tile_interleaved": use_half_tile_interleaved,
+    }
+
+    def run_torch_bench(a_, b_):
+        return torch.mm(a_, b_)
+
+    _, ref_us = run_perftest(
+        run_torch_bench,
+        a,
+        b,
+        num_iters=bench_iters,
+        num_warmup=bench_warmup,
+        testGraph=test_graph,
+    )
+    torch.cuda.synchronize()
+    ref = torch.mm(a.float(), b.float())
+
+    gemm_a16w16(a, b, out, user_kwargs=kwargs, layout=layout)
+    print(f"Kernel prepared: {kwargs}")
+
+    def launch_kernel(out_, a_, b_, kwargs_):
+        return gemm_a16w16(a_, b_, out_, user_kwargs=kwargs_, layout=layout)
+
+    _, us = run_perftest(
+        launch_kernel,
+        out,
+        a,
+        b,
+        kwargs,
+        num_iters=bench_iters,
+        num_warmup=bench_warmup,
+        testGraph=test_graph,
+    )
+    torch.cuda.synchronize()
+    assert verify_output(out.float(), ref, rtol=0.1, atol=0.1)
+
+    bytes_moved = (m * k + k * n + m * n) * a.element_size()
+    flops = 2 * m * n * k
+    tflops = flops / (us / 1e6) / 1e12
+    tbps = bytes_moved / (us / 1e6) / 1e12
+    speedup = ref_us / us
+    print(
+        f"[flyc] Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, "
+        f"BW: {tbps:.3f} TB/s, Torch(us): {ref_us:.1f}, Speedup: {speedup:.3f}"
+    )
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="A16W16 GEMM benchmark")
+    parser.add_argument("--dtype", default="bf16", choices=["fp16", "bf16"])
+    parser.add_argument("-m", type=int, default=8192)
+    parser.add_argument("-n", type=int, default=8192)
+    parser.add_argument("-k", type=int, default=8192)
+    parser.add_argument("--TILE_M", "--block_m", dest="block_m", type=int, default=256)
+    parser.add_argument("--TILE_N", "--block_n", dest="block_n", type=int, default=256)
+    parser.add_argument("--TILE_K", "--block_k", dest="block_k", type=int, default=64)
+    parser.add_argument("--STAGES", "--stages", dest="stages", type=int, default=2)
+    parser.add_argument("--SPLIT_K", "--split_k", dest="split_k", type=int, default=1)
+    parser.add_argument(
+        "--BLOCK_M_WARPS",
+        "--m_waves",
+        dest="m_waves",
+        type=int,
+        default=2,
+    )
+    parser.add_argument(
+        "--BLOCK_N_WARPS",
+        "--n_waves",
+        dest="n_waves",
+        type=int,
+        default=4,
+    )
+    parser.add_argument(
+        "--BLOCK_K_WARPS",
+        "--k_waves",
+        dest="k_waves",
+        type=int,
+        default=1,
+    )
+    parser.add_argument("--group_m", type=int, default=0)
+    hti_group = parser.add_mutually_exclusive_group()
+    hti_group.add_argument(
+        "--use_half_tile_interleaved",
+        "--hti",
+        dest="use_half_tile_interleaved",
+        action="store_true",
+    )
+    hti_group.add_argument(
+        "--no-use_half_tile_interleaved",
+        "--no-hti",
+        dest="use_half_tile_interleaved",
+        action="store_false",
+    )
+    parser.set_defaults(use_half_tile_interleaved=True)
+    parser.add_argument("--layout", choices=["nn", "nt", "tn", "tt"], default="nt")
+    parser.add_argument("--num_warmup", type=int, default=DEFAULT_BENCH_WARMUP)
+    parser.add_argument("--num_iters", type=int, default=DEFAULT_BENCH_ITERS)
+    parser.add_argument("--test_graph", "-tg", action="store_true")
+    args = parser.parse_args()
+
+    try:
+        run_gemm_a16w16_cli_benchmark(
+            args.dtype,
+            args.m,
+            args.n,
+            args.k,
+            args.block_m,
+            args.block_n,
+            args.block_k,
+            args.stages,
+            args.split_k,
+            args.m_waves,
+            args.n_waves,
+            args.k_waves,
+            group_m=args.group_m,
+            use_half_tile_interleaved=bool(args.use_half_tile_interleaved),
+            layout=args.layout,
+            bench_iters=args.num_iters,
+            bench_warmup=args.num_warmup,
+            test_graph=bool(args.test_graph),
+        )
+    except pytest.skip.Exception as exc:
+        print(f"Skipped: {exc}")
