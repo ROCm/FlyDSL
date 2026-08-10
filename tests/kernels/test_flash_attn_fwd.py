@@ -383,7 +383,7 @@ def bias_fits(rows, cols, elem_size=2):
 
 
 def _block_table_from_indices(kv_indptr_cpu, kv_indices_cpu, batch_size, max_num_pages_per_seq):
-    block_table_cpu = torch.zeros((batch_size, max_num_pages_per_seq), dtype=torch.int32)
+    block_table_cpu = torch.zeros((batch_size, max_num_pages_per_seq), dtype=torch.int32, device="cpu")
     for b in range(batch_size):
         start = kv_indptr_cpu[b].item()
         end = kv_indptr_cpu[b + 1].item()
@@ -469,8 +469,10 @@ def _build_paged_kv_for_test(
 
     kv_lens_cpu = torch.tensor(kv_lens, dtype=torch.int32, device="cpu")
     kv_num_used_pages = torch.div(kv_lens_cpu + page_size - 1, page_size, rounding_mode="floor").int()
-    kv_indptr_cpu = torch.cumsum(torch.cat((torch.tensor([0], dtype=torch.int32), kv_num_used_pages)), dim=0).int()
-    kv_indices_cpu = torch.nn.functional.pad(torch.randperm(total_num_pages).int(), (0, 128), value=0)
+    kv_indptr_cpu = torch.cumsum(
+        torch.cat((torch.tensor([0], dtype=torch.int32, device="cpu"), kv_num_used_pages)), dim=0
+    ).int()
+    kv_indices_cpu = torch.nn.functional.pad(torch.randperm(total_num_pages, device="cpu").int(), (0, 128), value=0)
     kv_last_page_len_cpu = ((kv_lens_cpu - 1) % page_size + 1).int()
     block_table_cpu = _block_table_from_indices(
         kv_indptr_cpu,
@@ -564,7 +566,7 @@ def _build_paged_kv_from_logical_for_aiter(inputs, page_size=16):
     v_cache_4d = torch.zeros_like(k_cache_4d)
     kv_num_used_pages = []
     kv_indices = []
-    block_table_cpu = torch.zeros((batch_size, max_num_pages_per_seq), dtype=torch.int32)
+    block_table_cpu = torch.zeros((batch_size, max_num_pages_per_seq), dtype=torch.int32, device="cpu")
 
     for b, kv_len in enumerate(kv_lens):
         num_pages = _ceil_div(kv_len, page_size)
@@ -573,6 +575,7 @@ def _build_paged_kv_from_logical_for_aiter(inputs, page_size=16):
             b * max_num_pages_per_seq,
             b * max_num_pages_per_seq + num_pages,
             dtype=torch.int32,
+            device="cpu",
         )
         kv_indices.extend(page_ids.tolist())
         block_table_cpu[b, :num_pages] = page_ids
@@ -604,10 +607,14 @@ def _build_paged_kv_from_logical_for_aiter(inputs, page_size=16):
     else:
         k_cache, v_cache = k_cache_4d, v_cache_4d
 
-    kv_num_used_pages_cpu = torch.tensor(kv_num_used_pages, dtype=torch.int32)
-    kv_indptr_cpu = torch.cumsum(torch.cat((torch.tensor([0], dtype=torch.int32), kv_num_used_pages_cpu)), dim=0)
-    kv_indices_cpu = torch.nn.functional.pad(torch.tensor(kv_indices, dtype=torch.int32), (0, 128), value=0)
-    kv_lens_cpu = torch.tensor(kv_lens, dtype=torch.int32)
+    kv_num_used_pages_cpu = torch.tensor(kv_num_used_pages, dtype=torch.int32, device="cpu")
+    kv_indptr_cpu = torch.cumsum(
+        torch.cat((torch.tensor([0], dtype=torch.int32, device="cpu"), kv_num_used_pages_cpu)), dim=0
+    )
+    kv_indices_cpu = torch.nn.functional.pad(
+        torch.tensor(kv_indices, dtype=torch.int32, device="cpu"), (0, 128), value=0
+    )
+    kv_lens_cpu = torch.tensor(kv_lens, dtype=torch.int32, device="cpu")
     kv_last_page_len_cpu = ((kv_lens_cpu - 1) % page_size + 1).int()
     return {
         "k_cache": k_cache,
