@@ -65,10 +65,7 @@ def _skip_unsupported_accuracy_layout(args: _TestArgs):
     if args.layout[0] == "t":
         a_vec_size = _a_dma_vec_size(args.dtype)
         if args.m % a_vec_size != 0:
-            pytest.skip(
-                "column-major A requires M divisible by "
-                f"{a_vec_size} for GFX950 DMA; got M={args.m}"
-            )
+            pytest.skip("column-major A requires M divisible by " f"{a_vec_size} for GFX950 DMA; got M={args.m}")
 
 
 def empty_layout_matrix(rows: int, cols: int, dtype: torch.dtype, is_t: bool):
@@ -219,9 +216,7 @@ def benchmark(args: _TestArgs, warmup: int = 500, niters: int = 600):
     rotary_inputs = get_rotary_inputs(sample_inputs, sample_outputs)
     inputs = [sample_inputs] + [create_inputs(args) for _ in range(rotary_inputs - 1)]
     ref_inputs = [create_inputs(args) for _ in range(rotary_inputs)]
-    outputs = [sample_outputs] + [
-        create_outputs(args) for _ in range(rotary_inputs - 1)
-    ]
+    outputs = [sample_outputs] + [create_outputs(args) for _ in range(rotary_inputs - 1)]
     ref_outputs = [create_outputs(args) for _ in range(rotary_inputs)]
     triton_maxautotune_func = make_triton_maxautotune_func()
     global ROTARY_INPUTS_TARGET_BYTES
@@ -1047,8 +1042,7 @@ def test_gemm_a16w16_rejects_unsupported_k_partitioning(
 
 
 @pytest.mark.parametrize(
-    "m, n, k, block_m, block_n, block_k, stages, split_k, "
-    "m_waves, n_waves, k_waves, group_m, has_bias",
+    "m, n, k, block_m, block_n, block_k, stages, split_k, " "m_waves, n_waves, k_waves, group_m, has_bias",
     [
         # fmt: off
         #    M,    N,    K,  BM,  BN,  BK, S, SK, MW, NW, KW, GM,  Bias
