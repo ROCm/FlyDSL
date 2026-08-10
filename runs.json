@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-10T09:00:09Z",
+ "updated": "2026-08-10T09:51:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -55,11 +55,11 @@
    "branch": "worktree-agent-moe-2stage-port",
    "event": "pull_request",
    "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8 (gfx942 + gfx950)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31367655623",
    "created_at": "2026-08-10T07:52:48Z",
-   "updated_at": "2026-08-10T07:53:39Z",
+   "updated_at": "2026-08-10T09:00:57Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -100,11 +100,11 @@
    "branch": "feature/typed-arithmetic-modernization",
    "event": "pull_request",
    "title": "Add type-aware extrema and integer ceil-division APIs [wip]",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31364678789",
    "created_at": "2026-08-10T07:08:58Z",
-   "updated_at": "2026-08-10T07:10:27Z",
+   "updated_at": "2026-08-10T08:59:44Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -130,11 +130,11 @@
    "branch": "gfx1250/gemm-opt-0805",
    "event": "pull_request",
    "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31362005080",
    "created_at": "2026-08-10T06:26:46Z",
-   "updated_at": "2026-08-10T06:28:22Z",
+   "updated_at": "2026-08-10T09:00:25Z",
    "actor": "aoli26",
    "jobs": []
   },
@@ -145,11 +145,11 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31360402177",
    "created_at": "2026-08-10T06:00:16Z",
-   "updated_at": "2026-08-10T07:31:09Z",
+   "updated_at": "2026-08-10T09:00:41Z",
    "actor": "Boss2002n",
    "jobs": [
     {
@@ -173,9 +173,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-10T07:31:09Z",
+     "started_at": "2026-08-10T09:00:40Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31360402177/job/93384922740"
     }
