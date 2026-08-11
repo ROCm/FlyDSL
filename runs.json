@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-11T02:56:16Z",
+ "updated": "2026-08-11T03:19:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31454950546,
+   "pr": 991,
+   "commit": "e4792e1b6814a81980f0f233a2e2b417f0b554d8",
+   "branch": "fix/rmsnorm",
+   "event": "pull_request",
+   "title": "[fix] Resolve normalization-related CI regressions",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546",
+   "created_at": "2026-08-11T03:17:19Z",
+   "updated_at": "2026-08-11T03:18:28Z",
+   "actor": "cschenjunlin",
+   "jobs": []
+  },
   {
    "run_id": 31453311133,
    "pr": 992,
@@ -134,7 +149,7 @@
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31428842146",
    "created_at": "2026-08-10T20:24:09Z",
-   "updated_at": "2026-08-10T21:57:43Z",
+   "updated_at": "2026-08-11T03:17:46Z",
    "actor": "cschenjunlin",
    "jobs": []
   },
@@ -1435,21 +1450,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31296538878",
    "created_at": "2026-08-09T05:22:17Z",
    "updated_at": "2026-08-09T05:22:56Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 31296396503,
-   "pr": 989,
-   "commit": "3dc1392e2b3ee4960009a2ee74ca3b483c2ea4f2",
-   "branch": "ci/upgrade-rocm-7.14",
-   "event": "pull_request",
-   "title": "CI: upgrade PyTorch images to ROCm 7.14",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31296396503",
-   "created_at": "2026-08-09T05:18:17Z",
-   "updated_at": "2026-08-09T05:22:40Z",
    "actor": "coderfeli",
    "jobs": []
   }
