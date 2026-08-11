@@ -525,7 +525,7 @@ def _gemm2_body(
                 lds_row = lane_row + fx.Int32(i * 16)
                 byte_off = fx.Int32(slot * _slot_bytes) + lds_row * fx.Int32(KH_TILE) + lds_col
                 r = fx.make_rmem_tensor(lds_a_read_lay, fx.Int32)
-                fx.copy_atom_call(lds_a_read_atom, fx.slice(s_aq_i32x4_tiles, (None, byte_off // fx.Int32(16))), r)
+                fx.copy(lds_a_read_atom, fx.slice(s_aq_i32x4_tiles, (None, byte_off // fx.Int32(16))), r)
                 a[i][k] = r
         return a
 

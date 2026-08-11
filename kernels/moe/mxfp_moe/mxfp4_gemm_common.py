@@ -103,7 +103,7 @@ def _global_i32_load(tiles, idx):
     # Atom/types must be built with an active MLIR trace context, not as globals.
     atom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Int32)
     r = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
-    fx.copy_atom_call(atom, fx.slice(tiles, (None, idx)), r)
+    fx.copy(atom, fx.slice(tiles, (None, idx)), r)
     return r.load()[0]
 
 
@@ -122,7 +122,7 @@ def _scalar_store(tiles, idx, value, numeric_cls):
     atom = fx.make_copy_atom(fx.UniversalCopy(numeric_cls.width), numeric_cls)
     r = fx.make_rmem_tensor(fx.make_layout(1, 1), numeric_cls)
     r.store(fx.Vector.from_elements([numeric_cls(value)], numeric_cls))
-    fx.copy_atom_call(atom, r, fx.slice(tiles, (None, idx)))
+    fx.copy(atom, r, fx.slice(tiles, (None, idx)))
 
 
 def _layout_idx(layout, *coords):

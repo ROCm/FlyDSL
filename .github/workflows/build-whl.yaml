@@ -103,7 +103,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: mlir_install.tgz
-          key: mlir-install-manylinux228-${{ hashFiles('flydsl/thirdparty/llvm-hash.txt', 'flydsl/scripts/build_llvm.sh', 'flydsl/CMakeLists.txt') }}
+          key: mlir-install-manylinux228-${{ hashFiles('flydsl/thirdparty/llvm-build-info.json', 'flydsl/scripts/build_llvm.sh', 'flydsl/CMakeLists.txt') }}
 
       - name: Use cached MLIR install tarball
         if: steps.mlir-cache.outputs.cache-hit == 'true'
@@ -163,7 +163,7 @@ jobs:
           SUMMARY_RELEASE_TYPE: ${{ inputs.release_type }}
           SUMMARY_WHEEL_DIR: dist
         run: |
-          SUMMARY_LLVM_COMMIT="$(tr -d '[:space:]' < flydsl/thirdparty/llvm-hash.txt)"
+          SUMMARY_LLVM_COMMIT="$(python3 -c "import json; print(json.load(open('flydsl/thirdparty/llvm-build-info.json'))['upstream']['llvm_hash'])")"
           export SUMMARY_LLVM_COMMIT
           python3 flydsl/scripts/generate_summary.py build
 

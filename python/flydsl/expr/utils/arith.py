@@ -77,6 +77,25 @@ def recast_type(src_type, res_elem_type) -> ir.Type:
     return res_elem_type
 
 
+def _as_signed_bits(value, ty):
+    """Reinterpret *value* as the signed integer with the same bits in *ty*.
+
+    ``ir.IntegerAttr.get`` takes a signed C integer for widths up to 64, so an
+    unsigned value at or above ``2**63`` throws before it reaches the attribute.
+    Wider types go through the APInt path and are unaffected, as is ``index``.
+    Values that already fit ``int64_t`` are passed through untouched, so this
+    only changes what used to fail.
+    """
+    if not isinstance(ty, ir.IntegerType) or ty.width > 64:
+        return value
+    value = int(value)
+    if -(1 << 63) <= value < (1 << 63):
+        return value
+    span = 1 << ty.width
+    value &= span - 1
+    return value - span if value >= span >> 1 else value
+
+
 @dsl_loc_tracing
 def arith_const(value, ty=None):
     if isinstance(value, ir.Value):
@@ -95,12 +114,12 @@ def arith_const(value, ty=None):
     if isinstance(ty, ir.VectorType):
         elem_ty = element_type(ty)
         if isinstance(elem_ty, ir.IntegerType):
-            attr = ir.IntegerAttr.get(elem_ty, int(value))
+            attr = ir.IntegerAttr.get(elem_ty, _as_signed_bits(value, elem_ty))
         else:
             attr = ir.FloatAttr.get(elem_ty, float(value))
         value = ir.DenseElementsAttr.get_splat(ty, attr)
     elif is_integer_like_type(ty):
-        value = int(value)
+        value = _as_signed_bits(int(value), ty)
     elif is_float_type(ty):
         value = float(value)
     else:
@@ -578,6 +597,8 @@ def constant(value, *, type=None, index=False):
         raise ValueError(f"unsupported constant type: {builtins.type(value)}")
     if isinstance(mlir_type, (ir.F16Type, ir.F32Type, ir.F64Type, ir.BF16Type)):
         value = float(value)
+    elif isinstance(value, int):
+        value = _as_signed_bits(value, mlir_type)
     return arith.constant(mlir_type, value)
 
 
@@ -594,7 +615,7 @@ def constant_vector(element_value, vector_type):
     if is_float_type(elem_ty):
         attr = ir.FloatAttr.get(elem_ty, float(element_value))
     else:
-        attr = ir.IntegerAttr.get(elem_ty, int(element_value))
+        attr = ir.IntegerAttr.get(elem_ty, _as_signed_bits(int(element_value), elem_ty))
     dense = ir.DenseElementsAttr.get_splat(vector_type, attr)
     return arith.constant(vector_type, dense)
 

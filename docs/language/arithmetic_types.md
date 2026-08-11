@@ -1,7 +1,7 @@
-# Arithmetic Types
+# Arithmetic types
 
-The arithmetic layer is the set of scalar (`Numeric`) and SIMD (`Vector`) values
-a kernel computes with: the types themselves, their public operations.
+The arithmetic layer defines the scalar (`Numeric`) and SIMD (`Vector`) types
+that a kernel computes with, along with their public operations.
 
 ## The type tower
 
@@ -24,7 +24,7 @@ casts to) a `Float32`.
 
 ### Public methods
 
-Common to `Numeric` and `Vector`, elementwise for `Vector`:
+The following methods apply to both `Numeric` and `Vector`, and are elementwise for `Vector`:
 
 | Method | Meaning | Example |
 |--------|---------|---------|
@@ -75,6 +75,29 @@ and emits no MLIR (`Int32(3) + Int32(4)` ⇒ `Int32` holding `7`). As soon as on
 operand is run-time, the result is run-time and an MLIR op is emitted. This
 holds uniformly across arithmetic, comparison, bitwise, and shift operators.
 
+### Integer wrap-around
+
+Folding is *not* unbounded Python arithmetic. Constructing an integer — whether
+from a Python `int`, from another integer type, or as the result of a fold —
+reduces the value modulo `2**width`, sign-extending or truncating exactly as the
+corresponding C cast would. This is what keeps a folded result equal to what the
+run-time op would have computed, since `arith.addi` / `muli` / `trunci` wrap on
+their own.
+
+| Expression | Result |
+|---|---|
+| `Uint32(0xFFFFFFFF) + Uint32(2)` | `Uint32` holding `1` |
+| `Uint64(0xFFFFFFFFFFFFFFFF) + Uint64(2)` | `Uint64` holding `1` |
+| `Uint64(-1)` | `0xFFFFFFFFFFFFFFFF` |
+| `Int8(200)` | `-56` |
+| `Uint8(Int32(-1))` | `255` (sign-extend, then truncate) |
+| `Uint64(Uint128(2**100 + 7))` | `7` |
+| `Int4(20)` | `4` |
+
+The reduction applies at every width, including `Int4` / `Int128` / `Uint128`
+and values that exceed any machine integer. `Boolean` is the one exception: it
+is one bit wide and signed, but normalizes to `0` / `1` rather than `0` / `-1`.
+
 ### Python literals
 
 A bare literal stays plain Python while it only meets other Python values
@@ -93,7 +116,7 @@ forced to a Python value.
 
 ## Type interoperability
 
-How a binary operation between two DSL numeric values determines the type its
+A binary operation between two DSL numeric values determines the type that its
 operands are converted to (the *common type*) and the type it produces (the
 *result type*). The rules are the same whether operands are scalar (`Numeric`),
 `Vector`, or a mix of the two; `Vector ⊗ Vector` additionally broadcasts shapes,
@@ -183,7 +206,7 @@ The keyword applies elementwise to a `Vector` as well.
 
 *Fast-math* flags relax IEEE-754 semantics so the compiler may reorder,
 contract, or approximate eligible operations. Consequently, they affect only
-runtime, a.k.a. MLIR, operations with floating-point semantics. An all
+runtime (that is, MLIR) operations with floating-point semantics. An all
 compile-time result is folded on the host and emits no op.
 
 ### Flags and their meanings

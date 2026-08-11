@@ -1653,6 +1653,132 @@ class TestCompileTimeVsRuntime:
         run(body, 3, 4)
 
 
+class TestIntegerWrapAround:
+    """Constructing or folding an integer reduces it mod 2**width (spec:
+    "Compile-time and run-time values" → integer wrap-around), so the folded
+    result matches what the equivalent run-time op would compute."""
+
+    @pytest.mark.parametrize(
+        "dtype, value, expected",
+        [
+            (fx.Uint32, 2**32 + 5, 5),
+            (fx.Uint32, -1, 0xFFFFFFFF),
+            (fx.Int32, 2**31, -(2**31)),
+            (fx.Uint64, 2**64 + 5, 5),  # above every machine integer
+            (fx.Uint64, -1, 0xFFFFFFFFFFFFFFFF),
+            (fx.Int64, 2**63, -(2**63)),
+            (fx.Int8, 200, -56),
+            (fx.Int4, 20, 4),  # no numpy dtype
+            (fx.Uint128, 2**128 + 9, 9),  # no numpy dtype
+        ],
+    )
+    def test_python_int_wraps_to_width(self, dtype, value, expected):
+        def body():
+            r = dtype(value)
+            assert r.is_static()
+            assert int(r) == expected
+
+        run(body)
+
+    @pytest.mark.parametrize(
+        "op, rhs, expected",
+        [
+            (operator.add, 2, 1),
+            (operator.sub, -2, 1),
+            (operator.mul, 3, 0xFFFFFFFFFFFFFFFD),
+        ],
+    )
+    def test_uint64_fold_wraps_like_uint32(self, op, rhs, expected):
+        """The 64-bit static fold must not overflow where the 32-bit one wraps."""
+
+        def body():
+            lhs = fx.Uint64(0xFFFFFFFFFFFFFFFF)
+            assert int(op(fx.Uint32(0xFFFFFFFF), fx.Uint32(rhs))) == expected & 0xFFFFFFFF
+            r = op(lhs, fx.Uint64(rhs))
+            assert r.is_static()
+            assert int(r) == expected
+
+        run(body)
+
+    @pytest.mark.parametrize(
+        "src, dst, value, expected",
+        [
+            (fx.Uint32, fx.Uint64, 7, 7),
+            (fx.Int32, fx.Uint8, -1, 255),  # sign-extend, then truncate
+            (fx.Int8, fx.Uint32, -1, 0xFFFFFFFF),
+            (fx.Uint64, fx.Uint32, 2**40 + 3, 3),
+            (fx.Uint128, fx.Uint64, 2**100 + 7, 7),  # source has no numpy dtype
+            (fx.Uint64, fx.Int4, 20, 4),  # destination has no numpy dtype
+        ],
+    )
+    def test_static_narrowing_truncates(self, src, dst, value, expected):
+        def body():
+            r = dst(src(value))
+            assert r.is_static()
+            assert int(r) == expected
+
+        run(body)
+
+    def test_boolean_is_not_reduced_to_minus_one(self):
+        """``Boolean`` is width 1 and signed; reducing it would map True to -1."""
+
+        def body():
+            assert int(fx.Boolean(True)) == 1
+            assert int(fx.Boolean(5)) == 1
+            assert int(fx.Boolean(False)) == 0
+
+        run(body)
+
+
+class TestWideIntegerConstants:
+    """An unsigned constant at or above ``2**63`` must reach the IR with its
+    bits intact — ``ir.IntegerAttr`` takes a signed C integer for widths up to
+    64, so it has to be reinterpreted host-side first."""
+
+    KEY = 0x9E3779B97F4A7C15
+    KEY_AS_SIGNED = KEY - (1 << 64)
+
+    def test_uint64_constant_materializes(self):
+        def body():
+            fx.Uint64(self.KEY).ir_value()
+
+        assert f"arith.constant {self.KEY_AS_SIGNED} : i64" in source_ir(body)
+
+    def test_all_ones_uint64_constant_materializes(self):
+        def body():
+            fx.Uint64(0xFFFFFFFFFFFFFFFF).ir_value()
+
+        assert "arith.constant -1 : i64" in source_ir(body)
+
+    def test_arith_const_helpers_accept_wide_unsigned(self):
+        from flydsl.expr.utils.arith import arith_const, constant, constant_vector
+
+        def body():
+            arith_const(self.KEY, ir.IntegerType.get_signless(64))
+            constant(self.KEY, type=ir.IntegerType.get_signless(64))
+            constant_vector(self.KEY, ir.VectorType.get([2], ir.IntegerType.get_signless(64)))
+
+        text = source_ir(body)
+        assert f"arith.constant {self.KEY_AS_SIGNED} : i64" in text
+        assert f"dense<{self.KEY_AS_SIGNED}> : vector<2xi64>" in text
+
+    def test_narrower_and_wider_constants_are_unchanged(self):
+        """Regression guard: only the i64 path needed reinterpretation."""
+        from flydsl.expr.utils.arith import arith_const
+
+        def body():
+            arith_const(0xFFFFFFFF, ir.IntegerType.get_signless(32))
+            arith_const(-1, ir.IntegerType.get_signless(64))
+            arith_const(0xD2E7470EE14C6C93, ir.IntegerType.get_signless(128))
+            arith_const(5, ir.IndexType.get())
+
+        text = source_ir(body)
+        assert "arith.constant -1 : i32" in text
+        assert "arith.constant -1 : i64" in text
+        assert "arith.constant 15197193596820024467 : i128" in text
+        assert "arith.constant 5 : index" in text
+
+
 class TestCompileTimeAsPython:
     """A compile-time ``Numeric`` is usable wherever Python expects a value; a
     run-time one raises when forced to Python."""
