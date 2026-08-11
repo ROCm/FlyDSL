@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-11T12:26:03Z",
+ "updated": "2026-08-11T12:28:37Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31491222281,
+   "pr": null,
+   "commit": "d22ff399cbebe03d716a0b1a9115d56ae3643801",
+   "branch": "main",
+   "event": "push",
+   "title": "docs: Update docs style to fit style guide (#982)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31491222281",
+   "created_at": "2026-08-11T12:26:27Z",
+   "updated_at": "2026-08-11T12:26:53Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 31485780752,
    "pr": 992,
@@ -98,11 +113,11 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31471176613",
    "created_at": "2026-08-11T07:58:20Z",
-   "updated_at": "2026-08-11T10:57:46Z",
+   "updated_at": "2026-08-11T12:26:18Z",
    "actor": "Boss2002n",
    "jobs": [
     {
@@ -126,9 +141,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-11T10:57:46Z",
+     "started_at": "2026-08-11T12:26:17Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31471176613/job/93756692904"
     }
@@ -141,38 +156,38 @@
    "branch": "main",
    "event": "push",
    "title": "[Kernel]Remove recast iter from sliding window attention kernel. (#997)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31470290261",
    "created_at": "2026-08-11T07:45:41Z",
-   "updated_at": "2026-08-11T10:52:05Z",
+   "updated_at": "2026-08-11T12:26:42Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-11T10:52:05Z",
-     "completed_at": null,
+     "completed_at": "2026-08-11T12:26:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31470290261/job/93755417041"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-11T11:03:34Z",
-     "completed_at": null,
+     "completed_at": "2026-08-11T12:26:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31470290261/job/93755417045"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-11T10:53:16Z",
-     "completed_at": null,
+     "completed_at": "2026-08-11T12:26:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31470290261/job/93755417175"
     }
    ]
@@ -280,7 +295,7 @@
   },
   {
    "run_id": 31462743574,
-   "pr": 982,
+   "pr": null,
    "commit": "cd11d4825bc644e2f1710d11b5866914ccf57e72",
    "branch": "docs-style",
    "event": "pull_request",
@@ -323,7 +338,7 @@
   },
   {
    "run_id": 31462580810,
-   "pr": 982,
+   "pr": null,
    "commit": "7e6761ea472b8d3b881ad6205a9b72651bbb6de9",
    "branch": "docs-style",
    "event": "pull_request",
@@ -1577,21 +1592,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31349502648/job/93338726882"
     }
    ]
-  },
-  {
-   "run_id": 31342846600,
-   "pr": 991,
-   "commit": "f7c80216f623d4ad3bd71163a4da3cfe251d5b74",
-   "branch": "fix/rmsnorm",
-   "event": "pull_request",
-   "title": "[fix] Resolve normalization-related CI regressions",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31342846600",
-   "created_at": "2026-08-09T23:49:39Z",
-   "updated_at": "2026-08-09T23:51:02Z",
-   "actor": "cschenjunlin",
-   "jobs": []
   }
  ]
 }
