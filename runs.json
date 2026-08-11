@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-11T12:31:34Z",
+ "updated": "2026-08-11T12:34:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -53,11 +53,11 @@
    "branch": "xyt/gemm16_950",
    "event": "pull_request",
    "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31485780752",
    "created_at": "2026-08-11T11:14:58Z",
-   "updated_at": "2026-08-11T11:16:27Z",
+   "updated_at": "2026-08-11T12:31:00Z",
    "actor": "xytpai",
    "jobs": []
   },
@@ -78,9 +78,9 @@
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-11T12:29:18Z",
+     "started_at": "2026-08-11T12:31:00Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31476253355/job/93778693349"
     },
@@ -534,11 +534,11 @@
    "branch": "ci/upgrade-rocm-7.14",
    "event": "pull_request",
    "title": "CI: upgrade PyTorch images to ROCm 7.14",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31452686608",
    "created_at": "2026-08-11T02:32:30Z",
-   "updated_at": "2026-08-11T10:55:43Z",
+   "updated_at": "2026-08-11T12:31:40Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -571,9 +571,9 @@
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-11T10:55:42Z",
+     "started_at": "2026-08-11T12:31:39Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31452686608/job/93756230017"
     },
@@ -1187,7 +1187,7 @@
   },
   {
    "run_id": 31367655623,
-   "pr": 947,
+   "pr": null,
    "commit": "b084f3e4dd925fbd118b3c0fa28326b9981bbe2a",
    "branch": "worktree-agent-moe-2stage-port",
    "event": "pull_request",
@@ -1202,7 +1202,7 @@
   },
   {
    "run_id": 31366801444,
-   "pr": 947,
+   "pr": null,
    "commit": "bce3a38e5af146003aeab9b5e021c1dba2333c49",
    "branch": "worktree-agent-moe-2stage-port",
    "event": "pull_request",
@@ -1217,7 +1217,7 @@
   },
   {
    "run_id": 31365282675,
-   "pr": 947,
+   "pr": null,
    "commit": "6c63231c7d1ba9574887ae0eced194ca2cdb9aac",
    "branch": "worktree-agent-moe-2stage-port",
    "event": "pull_request",
@@ -1406,7 +1406,7 @@
   },
   {
    "run_id": 31360026531,
-   "pr": 947,
+   "pr": null,
    "commit": "e486ba568fa38ffb169f828f4155a0413331e9ab",
    "branch": "worktree-agent-moe-2stage-port",
    "event": "pull_request",
@@ -1466,7 +1466,7 @@
   },
   {
    "run_id": 31355636597,
-   "pr": 947,
+   "pr": null,
    "commit": "cbd788c6ace6e39d750ce365261f3331bc2fdeb9",
    "branch": "worktree-agent-moe-2stage-port",
    "event": "pull_request",
@@ -1511,7 +1511,7 @@
   },
   {
    "run_id": 31352475165,
-   "pr": 947,
+   "pr": null,
    "commit": "d9696e84c6d2cf3d949e7f011430a1bc327acf59",
    "branch": "worktree-agent-moe-2stage-port",
    "event": "pull_request",
@@ -1599,7 +1599,7 @@
   },
   {
    "run_id": 31349502648,
-   "pr": 947,
+   "pr": null,
    "commit": "864b5803562f45007977eb43365a41f9e4dc3649",
    "branch": "worktree-agent-moe-2stage-port",
    "event": "pull_request",
