@@ -1,0 +1,112 @@
+name: Net probe
+
+# Throwaway diagnostic: compares egress from the self-hosted GPU runners against
+# a GitHub-hosted runner, GitHub hosts against other hosts, and IPv4 against
+# IPv6. Push to the `ci/net-probe` branch to run it. Delete once the network
+# question is settled.
+on:
+  push:
+    branches:
+      - ci/net-probe
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: probe (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - linux-flydsl-mi325-1
+          - ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      LLVM_SHA: e2a39f504fee836e4def9581bed817ecc327b9dc
+    steps:
+      - name: Host and network configuration
+        run: |
+          echo "runner=${{ matrix.runner }} host=$(hostname)"
+          echo "proxy: http=${http_proxy:-unset} https=${https_proxy:-unset} no_proxy=${no_proxy:-unset}"
+          echo "proxy: HTTP=${HTTP_PROXY:-unset} HTTPS=${HTTPS_PROXY:-unset}"
+          echo "--- addresses ---"
+          ip -brief addr 2>/dev/null || true
+          echo "--- default routes ---"
+          ip route show default 2>/dev/null || true
+          ip -6 route show default 2>/dev/null || echo "(no IPv6 default route)"
+          echo "--- MTU ---"
+          ip -brief link 2>/dev/null | awk '{print $1, $NF}' || true
+          echo "--- resolv.conf ---"
+          head -20 /etc/resolv.conf 2>/dev/null || true
+
+      # Per-host timing breakdown. Compare `dns`/`conn`/`tls` across hosts to
+      # separate name resolution and handshake problems from throughput ones.
+      - name: Connection timings by host
+        run: |
+          fmt='  http=%{http_code} ip=%{remote_ip} dns=%{time_namelookup} conn=%{time_connect} tls=%{time_appconnect} ttfb=%{time_starttransfer} total=%{time_total}\n'
+          for url in \
+            https://github.com/ \
+            https://codeload.github.com/ \
+            https://objects.githubusercontent.com/ \
+            https://pypi.org/simple/ \
+            https://repo.amd.com/rocm/ \
+            https://registry-1.docker.io/v2/ ; do
+            echo "${url}"
+            curl -sS -o /dev/null --max-time 30 -w "${fmt}" "${url}" || echo "  FAILED (exit $?)"
+          done
+
+      # A broken-but-advertised IPv6 route is a classic cause of "some hosts are
+      # slow": every connection burns the happy-eyeballs timeout before falling
+      # back. If -4 is fast and -6 is slow or fails, that is the answer.
+      - name: IPv4 vs IPv6 to GitHub
+        run: |
+          fmt='  http=%{http_code} ip=%{remote_ip} conn=%{time_connect} tls=%{time_appconnect} total=%{time_total}\n'
+          for family in -4 -6; do
+            echo "curl ${family} https://codeload.github.com/"
+            curl -sS ${family} -o /dev/null --max-time 20 -w "${fmt}" https://codeload.github.com/ \
+              || echo "  FAILED (exit $?)"
+          done
+
+      # Sustained throughput, not just handshake latency. Each download is
+      # capped at 20s; curl reports speed_download even when it hits the cap,
+      # so the useful number is speed, not whether it completed.
+      - name: Sustained download throughput
+        run: |
+          fmt='  got=%{size_download}B speed=%{speed_download}B/s total=%{time_total}\n'
+          echo "codeload.github.com (llvm-project tarball @ ${LLVM_SHA})"
+          curl -sS -o /dev/null --max-time 20 -w "${fmt}" \
+            "https://codeload.github.com/llvm/llvm-project/tar.gz/${LLVM_SHA}" || true
+          echo "pypi (torch wheel, for a non-GitHub comparison)"
+          curl -sS -o /dev/null --max-time 20 -w "${fmt}" \
+            "https://pypi.org/simple/torch/" || true
+          echo "repo.amd.com (rocm index)"
+          curl -sS -o /dev/null --max-time 20 -w "${fmt}" \
+            "https://repo.amd.com/rocm/whl-multi-arch/" || true
+
+      # The git protocol specifically: negotiation (ls-remote) is separated from
+      # pack transfer (fetch). A small repo isolates "big pack" effects from
+      # "git over HTTPS is slow here".
+      - name: git protocol timings
+        run: |
+          echo "--- ls-remote llvm-project (negotiation only) ---"
+          time git ls-remote https://github.com/llvm/llvm-project.git HEAD
+
+          echo "--- shallow fetch of a small repo ---"
+          rm -rf /tmp/probe-small && mkdir -p /tmp/probe-small && cd /tmp/probe-small
+          time git clone --depth 1 -q https://github.com/git/git.git . || echo "FAILED"
+          du -sh .git 2>/dev/null || true
+
+      # The actual operation that is slow in prepare-mlir, capped so the probe
+      # stays short. git prints transfer rate on stderr even when interrupted.
+      - name: Shallow fetch llvm-project at the pinned SHA (180s cap)
+        run: |
+          rm -rf /tmp/probe-llvm && mkdir -p /tmp/probe-llvm && cd /tmp/probe-llvm
+          git init -q .
+          git remote add origin https://github.com/llvm/llvm-project.git
+          start=$(date +%s)
+          timeout 180 git fetch --depth 1 --progress origin "${LLVM_SHA}" 2>&1 | tail -8 || true
+          echo "elapsed=$(( $(date +%s) - start ))s (cap 180s)"
+          du -sh .git 2>/dev/null || true
