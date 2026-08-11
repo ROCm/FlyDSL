@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-11T01:37:55Z",
+ "updated": "2026-08-11T02:34:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31452686608,
+   "pr": 989,
+   "commit": "4e1a69d320f3e79e532d95348ab23092093d5414",
+   "branch": "ci/upgrade-rocm-7.14",
+   "event": "pull_request",
+   "title": "CI: upgrade PyTorch images to ROCm 7.14",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31452686608",
+   "created_at": "2026-08-11T02:32:30Z",
+   "updated_at": "2026-08-11T02:32:58Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 31449758991,
    "pr": 989,
@@ -10,11 +25,11 @@
    "branch": "ci/upgrade-rocm-7.14",
    "event": "pull_request",
    "title": "CI: upgrade PyTorch images to ROCm 7.14",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31449758991",
    "created_at": "2026-08-11T01:35:18Z",
-   "updated_at": "2026-08-11T01:36:34Z",
+   "updated_at": "2026-08-11T02:32:58Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -1463,49 +1478,6 @@
      "started_at": "2026-08-09T05:03:43Z",
      "completed_at": "2026-08-09T06:04:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31294175437/job/93198226970"
-    }
-   ]
-  },
-  {
-   "run_id": 31294093158,
-   "pr": null,
-   "commit": "421935cc6f09fd9b27d5d5ae52e0960e18834bd5",
-   "branch": "main",
-   "event": "push",
-   "title": "Release: bump version to 0.3.1 (#988)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31294093158",
-   "created_at": "2026-08-09T04:13:05Z",
-   "updated_at": "2026-08-09T07:54:56Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-09T04:33:25Z",
-     "completed_at": "2026-08-09T05:45:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31294093158/job/93197998960"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-09T04:33:25Z",
-     "completed_at": "2026-08-09T05:30:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31294093158/job/93197998970"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-09T07:44:05Z",
-     "completed_at": "2026-08-09T07:54:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31294093158/job/93197998978"
     }
    ]
   }
