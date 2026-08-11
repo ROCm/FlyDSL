@@ -24,6 +24,7 @@ from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.gemm.gemm_a4w4_256x256_gfx1250 import launch_gemm_a4w4_256x256  # noqa: E402
 from kernels.gemm.gemm_a8w4_256x256_gfx1250 import launch_gemm_a8w4_256x256  # noqa: E402
 from kernels.gemm.gemm_a8w4_mxscale_gfx1250 import launch_gemm_a8w4_mxscale  # noqa: E402
+from kernels.gemm.gemm_a8w8_256x256_gfx1250 import launch_gemm_a8w8_256x256  # noqa: E402
 from kernels.gemm.gemm_a8w8_gfx1250 import launch_gemm_a8w8  # noqa: E402
 from tests.kernels.utils import gemm_common_utils  # noqa: E402
 
@@ -52,6 +53,24 @@ def _i8(t):
 def _random_fp8_bytes(rows: int, cols: int) -> torch.Tensor:
     """Finite FP8 E4M3 bytes (avoids the 0x7F/0xFF NaN encodings)."""
     return torch.randint(0, 126, (rows, cols), dtype=torch.uint8)
+
+
+def _make_quant_input(rows: int, K: int, fp4: bool, const_val: float | None):
+    if const_val is None:
+        q = gemm_common_utils.random_fp4_packed(rows, K) if fp4 else _random_fp8_bytes(rows, K)
+    else:
+        codes = torch.arange(16 if fp4 else 126, dtype=torch.uint8).view(1, -1)
+        vals = gemm_common_utils.mxfp4_to_f32(codes)[0, ::2] if fp4 else gemm_common_utils.fp8_e4m3_to_f32(codes)[0]
+        match = (vals == const_val).nonzero()
+        if not len(match):
+            raise ValueError(f"{const_val} is not exactly representable")
+        code = int(match[0, 0])
+        q = (
+            torch.full((rows, K // 2), code | (code << 4), dtype=torch.uint8)
+            if fp4
+            else torch.full((rows, K), code, dtype=torch.uint8)
+        )
+    return (q, gemm_common_utils.mxfp4_to_f32(q), K // 2) if fp4 else (q, gemm_common_utils.fp8_e4m3_to_f32(q), K)
 
 
 def _with_strided_a(a: torch.Tensor, K: int, lda: int) -> torch.Tensor:
@@ -119,6 +138,9 @@ _SCALES = {"mx32": _scales_mx32, "mx128": _scales_mx128, "ptpc": _scales_ptpc}
 
 _A8W4_256_PROFILE = (256, 256, 128, 2, 2, 3, 4, 4)
 _A4W4_256_PROFILE = (256, 256, 256, 2, 2, 4, 4, 4)
+_A8W8_256_PROFILE = (256, 256, 128, 2, 2, 4, 4, 4)
+_A8W8_256_PROFILE_KPAIR = (256, 256, 128, 2, 2, 2, 4, 4)
+_A8W8_SMOKE = (1024, 1024, 256, 256, 128, 2, 2)
 
 _MODES = {
     "a8w4_mx32": dict(
@@ -134,6 +156,26 @@ _MODES = {
         launch=launch_gemm_a4w4_256x256, fp4_w=True, scale="mx32", a8w8=False, tail=(), wrap=_i8,
         scale_exp=(127, 132), f16_kw=dict(scale_exp=(127, 127)), fp4_act=True,
         profile=_A4W4_256_PROFILE, smoke=(1024, 1024, 256, 256, 256, 2, 2), k_whole_rev=True,
+    ),
+    "a8w8_256x256": dict(
+        launch=launch_gemm_a8w8_256x256, fp4_w=False, scale="mx32", a8w8=True, tail=(True, 32), wrap=_i8,
+        scale_exp=(126, 129), f16_kw=dict(const_val=0.25),
+        profile=_A8W8_256_PROFILE, smoke=_A8W8_SMOKE,
+    ),
+    "a8w8_256x256_mx128": dict(
+        launch=launch_gemm_a8w8_256x256, fp4_w=False, scale="mx128", a8w8=True, tail=(True, 128), wrap=_i8,
+        scale_exp=(126, 129), f16_kw=dict(const_val=0.25),
+        profile=_A8W8_256_PROFILE, smoke=_A8W8_SMOKE,
+    ),
+    "a8w8_256x256_kpair": dict(
+        launch=launch_gemm_a8w8_256x256, fp4_w=False, scale="mx32", a8w8=True, tail=(True, 32), wrap=_i8,
+        scale_exp=(126, 129), f16_kw=dict(const_val=0.25),
+        profile=_A8W8_256_PROFILE_KPAIR, smoke=_A8W8_SMOKE, k_pair=2,
+    ),
+    "a8w8_256x256_kpair_mx128": dict(
+        launch=launch_gemm_a8w8_256x256, fp4_w=False, scale="mx128", a8w8=True, tail=(True, 128), wrap=_i8,
+        scale_exp=(126, 129), f16_kw=dict(const_val=0.25),
+        profile=_A8W8_256_PROFILE_KPAIR, smoke=_A8W8_SMOKE, k_pair=2,
     ),
     "a8w8_mx32": dict(
         launch=launch_gemm_a8w8, fp4_w=False, scale="mx32", a8w8=True, tail=(True, 32), wrap=_i8,
@@ -199,21 +241,12 @@ def _build_case(
     scale_exp=None,
     scale_scale=1.0,
     c_guard_rows=0,
+    const_val=None,
 ):
     spec = _MODES[mode]
     torch.manual_seed(0)
-    if spec.get("fp4_act"):
-        a = gemm_common_utils.random_fp4_packed(M, K)  # [M, K//2], two E2M1 nibbles per byte
-        a_f32, a_cols = gemm_common_utils.mxfp4_to_f32(a), K // 2
-    else:
-        a = _random_fp8_bytes(M, K)
-        a_f32, a_cols = gemm_common_utils.fp8_e4m3_to_f32(a), K
-    if spec["fp4_w"]:
-        b = gemm_common_utils.random_fp4_packed(N, K)  # [N, K//2], two E2M1 nibbles per byte
-        b_f32, b_cols = gemm_common_utils.mxfp4_to_f32(b), K // 2
-    else:
-        b = _random_fp8_bytes(N, K)
-        b_f32, b_cols = gemm_common_utils.fp8_e4m3_to_f32(b), K
+    a, a_f32, a_cols = _make_quant_input(M, K, bool(spec.get("fp4_act")), const_val)
+    b, b_f32, b_cols = _make_quant_input(N, K, spec["fp4_w"], const_val)
     a_s, b_s, ask, ref, tol = _SCALES[spec["scale"]](
         a_f32, b_f32, M, N, K, spec["fp4_w"], scale_exp or spec["scale_exp"], scale_scale
     )
@@ -261,11 +294,7 @@ def _build_case(
 
 
 def _assert_case(mode, M, N, K, *tile_cfg, **kwargs):
-    """Build inputs, compile+run once, assert against the reference (and any C guard band).
-
-    Returns (c_gpu, make_args, compiled) so the perf CLI can replay the same
-    compiled kernel without rebuilding it.
-    """
+    """Compile+run once and return replay handles."""
     guard_rows = kwargs.get("c_guard_rows", 0)
     c_gpu, make_args, ref, (rtol, atol) = _build_case(mode, M, N, K, *tile_cfg, **kwargs)
     compiled = flyc.compile(_MODES[mode]["launch"], *make_args(torch.cuda.current_stream()))
@@ -378,27 +407,30 @@ _PROFILE_MODES = [m for m in _MODE_IDS if _MODES[m].get("profile")]
 @pytest.mark.parametrize("knob", range(8))
 @pytest.mark.parametrize("mode", _PROFILE_MODES)
 def test_256x256_rejects_other_profiles(mode, knob):
-    """Both kernels hand-schedule one hardcoded profile and assert on any other."""
     _require_gpu()
     cfg = list(_MODES[mode]["profile"])
-    cfg[knob] = cfg[knob] * 2
+    cfg[knob] = cfg[knob] * 2 + 1  # do not land on the other valid a8w8 profile
     _, make_args, _, _ = _build_case(mode, 256, 512, 512, *cfg[:6], cluster_m=cfg[6], cluster_n=cfg[7])
     with pytest.raises(AssertionError, match="only the tuned"):
         flyc.compile(_MODES[mode]["launch"], *make_args(torch.cuda.current_stream()))
 
 
-_CLUSTER4X4_SHAPES = {
-    # K/256 mod 3 selects the drain length, so 1024 / 1280 / 1536 walk all three tails.
+_A8W8_CLUSTER4X4 = [(1024, 1024, 1024), (2048, 1024, 1152), (1024, 2048, 1280), (1000, 1024, 1408)]
+_A8W8_KPAIR_CLUSTER4X4 = [(1024, 1024, 1024), (2048, 1024, 1280), (1024, 2048, 1536), (1000, 1024, 1792)]
+_CLUSTER4X4_SPECIAL = {
     "a8w4_256x256": [(1024, 1024, 1024), (2048, 1024, 1280), (1024, 2048, 1536)],
     "a4w4_256x256": [(1024, 1024, 1024), (2048, 1024, 3072), (1000, 2048, 4096)],
 }
 
 
-@pytest.mark.parametrize(
-    "mode, M, N, K", [(mode, *mnk) for mode, shapes in _CLUSTER4X4_SHAPES.items() for mnk in shapes]
-)
+def _cluster4x4_shapes(mode):
+    if mode.startswith("a8w8_256x256"):
+        return _A8W8_KPAIR_CLUSTER4X4 if _MODES[mode].get("k_pair") else _A8W8_CLUSTER4X4
+    return _CLUSTER4X4_SPECIAL[mode]
+
+
+@pytest.mark.parametrize("mode, M, N, K", [(m, *mnk) for m in _PROFILE_MODES for mnk in _cluster4x4_shapes(m)])
 def test_256x256_cluster4x4(mode, M, N, K):
-    """The 4x4 cluster multicasts A across four workgroups and B across four more."""
     _run_case(mode, M, N, K, *_MODES[mode]["profile"][:6], cluster_m=4, cluster_n=4)
 
 
@@ -426,9 +458,14 @@ def test_ragged_m_no_oob_store(mode, N, K, cfg, M):
     _run_case(mode, M, N, K, *cfg[:6], cluster_m=cfg[6], cluster_n=cfg[7], c_guard_rows=_RAGGED_M_GUARD_ROWS)
 
 
-@pytest.mark.parametrize("mode, K", [("a8w4_256x256", 4608), ("a4w4_256x256", 4096)])
+def _determinism_k(mode):
+    if mode == "a4w4_256x256":
+        return 4096
+    return 4608 if mode == "a8w4_256x256" or _MODES[mode].get("k_pair") else 4736
+
+
+@pytest.mark.parametrize("mode, K", [(m, _determinism_k(m)) for m in _PROFILE_MODES])
 def test_256x256_back_to_back_determinism(mode, K):
-    """A drifting result across relaunches means a pipeline race, not quantization noise."""
     _require_gpu()
     profile = _MODES[mode]["profile"]
     c_gpu, make_args, compiled = _assert_case(
@@ -443,32 +480,28 @@ def test_256x256_back_to_back_determinism(mode, K):
 
 
 def _bench_us(launch, output: torch.Tensor, *, warmup: int = 10, iters: int = 100) -> float:
-    """Median per-launch latency (us) via hipGraph capture/replay."""
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
-        for _ in range(warmup):
-            launch()
-    torch.cuda.current_stream().wait_stream(stream)
-    torch.cuda.synchronize()
-
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.stream(stream), torch.cuda.graph(graph, stream=stream):
+    """Median per-launch latency (us), timed over direct launches."""
+    for _ in range(warmup):
         launch()
     torch.cuda.synchronize()
-    if output.abs().max().item() == 0:
-        raise RuntimeError("hipGraph replay produced an all-zero output")
 
-    starts = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-    ends = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-    with torch.cuda.stream(stream):
-        for start, end in zip(starts, ends):
-            start.record()
-            graph.replay()
-            end.record()
+    output.zero_()
+    launch()
     torch.cuda.synchronize()
-    samples = sorted(start.elapsed_time(end) * 1e3 for start, end in zip(starts, ends))
-    return samples[len(samples) // 2]
+    if output.abs().max().item() == 0:
+        raise RuntimeError("the launch produced an all-zero output; it is not running")
+
+    batch = max(1, iters // 10)
+    samples = []
+    for _ in range(10):
+        start, end = (torch.cuda.Event(enable_timing=True) for _ in range(2))
+        start.record()
+        for _ in range(batch):
+            launch()
+        end.record()
+        torch.cuda.synchronize()
+        samples.append(start.elapsed_time(end) * 1e3 / batch)
+    return sorted(samples)[len(samples) // 2]
 
 
 def _main():
@@ -492,10 +525,13 @@ def _main():
     parser.add_argument("-cluster", type=ints(2, "-cluster"), default=[1, 1], help="cluster_m,cluster_n")
     parser.add_argument("-out-dtype", default="bf16", choices=sorted(_DT))
     parser.add_argument("-bench", action="store_true", help="also measure perf")
+    parser.add_argument("-const", type=float, default=None, help="fill A/B with a representable constant")
     args = parser.parse_args()
 
     M, N, K = args.mnk
     kwargs = dict(zip(("cluster_m", "cluster_n"), args.cluster))
+    if args.const is not None:
+        kwargs["const_val"] = args.const
     if args.out_dtype == "f16":
         kwargs.update(out_dtype="f16", **(_MODES[args.mode]["f16_kw"] or {}))
     c_gpu, make_args, compiled = _assert_case(args.mode, M, N, K, *args.tiles, *args.warps, args.nb, **kwargs)
