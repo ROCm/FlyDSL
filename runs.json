@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-11T04:19:07Z",
+ "updated": "2026-08-11T04:21:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31458103711,
+   "pr": 992,
+   "commit": "17238afe68c31fdc87b03c21be60aa9b10cd638b",
+   "branch": "xyt/gemm16_950",
+   "event": "pull_request",
+   "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31458103711",
+   "created_at": "2026-08-11T04:19:13Z",
+   "updated_at": "2026-08-11T04:20:31Z",
+   "actor": "xytpai",
+   "jobs": []
+  },
   {
    "run_id": 31454950546,
    "pr": 991,
@@ -26,10 +41,10 @@
    "event": "pull_request",
    "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
    "status": "completed",
-   "conclusion": "failure",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31453311133",
    "created_at": "2026-08-11T02:45:10Z",
-   "updated_at": "2026-08-11T04:17:31Z",
+   "updated_at": "2026-08-11T04:19:15Z",
    "actor": "xytpai",
    "jobs": []
   },
@@ -1437,21 +1452,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31296560849/job/93214366180"
     }
    ]
-  },
-  {
-   "run_id": 31296538878,
-   "pr": 989,
-   "commit": "3dc1392e2b3ee4960009a2ee74ca3b483c2ea4f2",
-   "branch": "ci/upgrade-rocm-7.14",
-   "event": "pull_request",
-   "title": "CI: upgrade PyTorch images to ROCm 7.14",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31296538878",
-   "created_at": "2026-08-09T05:22:17Z",
-   "updated_at": "2026-08-09T05:22:56Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
