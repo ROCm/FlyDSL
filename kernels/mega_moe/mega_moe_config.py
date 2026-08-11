@@ -283,6 +283,84 @@ def _select_large_stage2(bucket: int, sort_block_m: int, model_dim: int) -> Stag
     )
 
 
+def _apply_m13_a8w4smooth_fixed_tuning(
+    bucket: int,
+    stage1: Stage1Config,
+    stage2: Stage2Config,
+) -> tuple[Stage1Config, Stage2Config]:
+    """Apply EP8 M13 A8W4smooth settings validated with CUDAGraph."""
+    stage1_overrides = {
+        8: dict(
+            sort_block_m=32,
+            tile_n=256,
+            num_waves=8,
+            grid_mult=1,
+            num_dispatch_cu=192,
+            b_nt=0,
+            waves_per_eu_hint=2,
+            work_shards=2,
+            swizzle_a=False,
+        ),
+        16: dict(
+            sort_block_m=32,
+            tile_n=128,
+            num_waves=4,
+            grid_mult=2,
+            num_dispatch_cu=96,
+            b_nt=0,
+            waves_per_eu_hint=1,
+            work_shards=2,
+            swizzle_a=True,
+        ),
+        32: dict(
+            sort_block_m=32,
+            tile_n=128,
+            num_waves=4,
+            grid_mult=2,
+            num_dispatch_cu=192,
+            b_nt=0,
+            waves_per_eu_hint=2,
+            work_shards=8,
+            swizzle_a=False,
+        ),
+        64: dict(
+            sort_block_m=32,
+            tile_n=128,
+            num_waves=4,
+            grid_mult=2,
+            num_dispatch_cu=128,
+            b_nt=0,
+            waves_per_eu_hint=1,
+            work_shards=8,
+            swizzle_a=True,
+        ),
+        128: dict(
+            sort_block_m=32,
+            tile_n=128,
+            num_waves=4,
+            grid_mult=2,
+            num_dispatch_cu=192,
+            b_nt=0,
+            waves_per_eu_hint=2,
+            work_shards=8,
+            swizzle_a=False,
+        ),
+    }
+    if bucket in stage1_overrides:
+        stage1 = replace(stage1, **stage1_overrides[bucket])
+    if bucket == 128:
+        stage2 = replace(
+            stage2,
+            persist=True,
+            persist_cu=96,
+            persist_strided=False,
+            skew_cu=0,
+            spatial_partition=402,
+            use_nt=True,
+        )
+    return stage1, stage2
+
+
 @cache
 def _select_bucket_config(
     bucket: int,
@@ -330,6 +408,31 @@ def _select_bucket_config(
         stage2 = replace(stage2, persist_cu=224)
     if quant_mode in ("a8w4smooth", "w8a8smooth") and bucket == 128:
         stage2 = replace(stage2, block_m=32, block_n=128, block_k=256)
+    is_m13_a8w4smooth = (
+        quant_mode == "a8w4smooth"
+        and experts_per_rank == 64
+        and model_dim == 3584
+        and inter_dim == 1280
+    )
+    if is_m13_a8w4smooth:
+        # INT Stage1 has separate gate/up B fragments, so carrying a full
+        # next-B step more than doubles the live B state and loses occupancy.
+        # Keep the mature MX-style A register prefetch/LDS ping-pong, which is
+        # faster than either next-B variant and than direct-to-LDS DMA at M13.
+        stage1 = replace(stage1, pipe_weights=False, async_a_copy=False)
+        if bucket == 512:
+            # EP8 CUDAGraph median: 364.7 us versus 367.9 us for the generic
+            # bounded profile.  More dispatch CUs shorten the GEMM1 tail;
+            # one grid wave and cached B reads give the best critical path.
+            stage1 = replace(
+                stage1,
+                grid_mult=1,
+                num_dispatch_cu=224,
+                b_nt=0,
+                waves_per_eu_hint=1,
+            )
+    if is_m13_a8w4smooth and fixed_slot:
+        stage1, stage2 = _apply_m13_a8w4smooth_fixed_tuning(bucket, stage1, stage2)
     return MegaMoEConfig(stage1=stage1, stage2=stage2, p2p_quant="none")
 
 

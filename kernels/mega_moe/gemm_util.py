@@ -133,6 +133,7 @@ class ATileLoader:
         swizzle=False,
         x_tensor=None,
         async_copy=False,
+        async_elem_ty=fx.Float8E4M3FN,
     ):
         self._sort_block_m = sort_block_m
         self._k_step_bytes = k_step_bytes
@@ -143,6 +144,7 @@ class ATileLoader:
         self._wave = self._tx // 64
         self._x_tensor = x_tensor
         self._async_copy = bool(async_copy)
+        self._async_elem_ty = async_elem_ty
         assert x_tensor is not None
         if const_expr(self._async_copy):
             assert total_threads % 64 == 0
@@ -219,8 +221,8 @@ class ATileLoader:
         """Issue swizzled direct global-to-LDS copies with a wave-uniform LDS base."""
         koff = fx.Int32(k_step_byte_off)
         base_bytes = fx.Int32(base_i32) * fx.Int32(4)
-        lds_f8 = fx.recast_iter(
-            fx.Float8E4M3FN,
+        lds_elem = fx.recast_iter(
+            self._async_elem_ty,
             lds_dst.ptr,
         )
         total_chunks = self._sort_block_m * 16
@@ -243,7 +245,7 @@ class ATileLoader:
             )
             wave_base = base_bytes + fx.Int32((round_base + self._wave * 64) * 16)
             dst = fx.make_view(
-                fx.add_offset(lds_f8, wave_base),
+                fx.add_offset(lds_elem, wave_base),
                 fx.make_layout(1, 1),
             )
             fx.copy(self._dma_atom, src, dst)
@@ -607,9 +609,23 @@ class Int8BWeightLoader:
             self._cache_modifier,
         )
 
-    def _load_packed(self, row_base_i32, ni, kstep_i32, ksub):
+    def _load_lqq_metadata(self, row_base_i32, ni, kstep_i32):
         n_block = row_base_i32 // fx.Int32(16) + fx.Int32(ni)
-        pack_group = kstep_i32 * fx.Int32(2) + fx.Int32(ksub // 2)
+        qindex = (
+            (n_block * fx.Int32(self._model_dim // 256) + kstep_i32) * fx.Int32(16)
+            + self._lane_row
+        )
+        return (
+            _buffer_load(self._qs_rsrc, qindex, fx.Int32),
+            _buffer_load(self._qz_rsrc, qindex, fx.Int32),
+        )
+
+    def _load_packed_pair(
+        self, row_base_i32, ni, kstep_i32, pair, qs_word, qz_word
+    ):
+        """Load one packed 128-K group and return its two K64 operands."""
+        n_block = row_base_i32 // fx.Int32(16) + fx.Int32(ni)
+        pack_group = kstep_i32 * fx.Int32(2) + fx.Int32(pair)
         byte = (
             n_block * fx.Int32(self._model_dim * 8)
             + pack_group * fx.Int32(1024)
@@ -623,57 +639,76 @@ class Int8BWeightLoader:
             4,
             self._cache_modifier,
         )
-        qindex = (
-            (n_block * fx.Int32(self._model_dim // 256) + kstep_i32) * fx.Int32(16)
-            + self._lane_row
+        operands = []
+        for high_nibble in range_constexpr(2):
+            ksub = pair * 2 + high_nibble
+            shift = fx.Int32(ksub * 8)
+            qs = (qs_word >> shift) & fx.Int32(0xFF)
+            qz = (qz_word >> shift) & fx.Int32(0xFF)
+            qz4 = qz * fx.Int32(0x01010101)
+            values = []
+            for item in range_constexpr(4):
+                word = packed[item]
+                nibble = (
+                    word & fx.Int32(0x0F0F0F0F)
+                    if const_expr(high_nibble == 0)
+                    else (word >> fx.Int32(4)) & fx.Int32(0x0F0F0F0F)
+                )
+                values.append((nibble * qs + qz4) ^ fx.Int32(0x80808080))
+            operands.append(Vec.from_elements(values, fx.Int32))
+        return operands
+
+    def _load_packed_step(self, row_base_i32, ni, kstep_i32):
+        """Load/dequant all four K64 operands, hoisting shared LQQ metadata."""
+        qs_word, qz_word = self._load_lqq_metadata(
+            row_base_i32, ni, kstep_i32
         )
-        qs_word = _buffer_load(self._qs_rsrc, qindex, fx.Int32)
-        qz_word = _buffer_load(self._qz_rsrc, qindex, fx.Int32)
-        shift = fx.Int32((ksub & 3) * 8)
-        qs = (qs_word >> shift) & fx.Int32(0xFF)
-        qz = (qz_word >> shift) & fx.Int32(0xFF)
-        qz4 = qz * fx.Int32(0x01010101)
-        values = []
-        for item in range_constexpr(4):
-            word = packed[item]
-            nibble = (
-                word & fx.Int32(0x0F0F0F0F)
-                if const_expr((ksub & 1) == 0)
-                else (word >> fx.Int32(4)) & fx.Int32(0x0F0F0F0F)
+        operands = []
+        for pair in range_constexpr(2):
+            operands += self._load_packed_pair(
+                row_base_i32, ni, kstep_i32, pair, qs_word, qz_word
             )
-            values.append((nibble * qs + qz4) ^ fx.Int32(0x80808080))
-        return Vec.from_elements(values, fx.Int32)
+        return operands
+
+    def _load_projection_ni(self, row_base_i32, ni, kstep_i32):
+        if const_expr(self._packed_int4):
+            return self._load_packed_step(row_base_i32, ni, kstep_i32)
+        return [
+            self._load_full(row_base_i32, ni, kstep_i32, ksub)
+            for ksub in range_constexpr(4)
+        ]
 
     def load_step(self, gate_row_i32, up_row_i32, kstep_i32):
-        gate = []
-        up = []
-        for ksub in range_constexpr(4):
-            gate.append([])
-            up.append([])
-            for ni in range_constexpr(self._num_acc_n):
-                if const_expr(self._packed_int4):
-                    gate[ksub].append(self._load_packed(gate_row_i32, ni, kstep_i32, ksub))
-                    up[ksub].append(self._load_packed(up_row_i32, ni, kstep_i32, ksub))
-                else:
-                    gate[ksub].append(self._load_full(gate_row_i32, ni, kstep_i32, ksub))
-                    up[ksub].append(self._load_full(up_row_i32, ni, kstep_i32, ksub))
-        return gate, up
+        """Load Stage1 gate/up, reusing each packed pair and LQQ word."""
+        gate_by_ni = [
+            self._load_projection_ni(gate_row_i32, ni, kstep_i32)
+            for ni in range_constexpr(self._num_acc_n)
+        ]
+        up_by_ni = [
+            self._load_projection_ni(up_row_i32, ni, kstep_i32)
+            for ni in range_constexpr(self._num_acc_n)
+        ]
+        return (
+            [
+                [gate_by_ni[ni][ksub] for ni in range_constexpr(self._num_acc_n)]
+                for ksub in range_constexpr(4)
+            ],
+            [
+                [up_by_ni[ni][ksub] for ni in range_constexpr(self._num_acc_n)]
+                for ksub in range_constexpr(4)
+            ],
+        )
 
     def load_single_step(self, row_base_i32, kstep_i32):
         """Load one Stage2 projection for a 256-K INT8 step."""
-        out = []
-        for ksub in range_constexpr(4):
-            out.append([])
-            for ni in range_constexpr(self._num_acc_n):
-                if const_expr(self._packed_int4):
-                    out[ksub].append(
-                        self._load_packed(row_base_i32, ni, kstep_i32, ksub)
-                    )
-                else:
-                    out[ksub].append(
-                        self._load_full(row_base_i32, ni, kstep_i32, ksub)
-                    )
-        return out
+        by_ni = [
+            self._load_projection_ni(row_base_i32, ni, kstep_i32)
+            for ni in range_constexpr(self._num_acc_n)
+        ]
+        return [
+            [by_ni[ni][ksub] for ni in range_constexpr(self._num_acc_n)]
+            for ksub in range_constexpr(4)
+        ]
 
 
 class MfmaInt8GU:

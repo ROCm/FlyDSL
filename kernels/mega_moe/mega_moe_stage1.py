@@ -464,6 +464,7 @@ def compile_mega_moe_stage1(
                 expert_offset=fz_rank * fz_epr, b_cache_modifier=b_cache_modifier,
                 swizzle_a=swizzle_a, packed_int4=packed_int4,
                 atom_tokens=fz_npes * fz_mtpr, topk=fz_k,
+                async_a_copy=async_a_copy,
                 swiglu_limit=swiglu_limit,
             )
         else:

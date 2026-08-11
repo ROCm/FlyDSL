@@ -167,6 +167,111 @@ def test_m13_token128_int8_uses_validated_tiles_without_p2p_quant(quant_mode):
     assert config.p2p_quant == "none"
 
 
+@pytest.mark.parametrize(
+    "tokens,stage1_expected,persist_cu",
+    [
+        (8, (32, 256, 8, 1, 192, 0, 2, 2, False), 0),
+        (16, (32, 128, 4, 2, 96, 0, 1, 2, True), 0),
+        (32, (32, 128, 4, 2, 192, 0, 2, 8, False), 0),
+        (64, (32, 128, 4, 2, 128, 0, 1, 8, True), 0),
+        (128, (32, 128, 4, 2, 192, 0, 2, 8, False), 96),
+    ],
+)
+def test_m13_a8w4smooth_fixed_slot_uses_cudagraph_tuning(
+    tokens, stage1_expected, persist_cu
+):
+    config = select_mega_moe_config(
+        tokens,
+        tokens,
+        experts_per_rank=48,
+        model_dim=3584,
+        inter_dim=1280,
+        quant_mode="a8w4smooth",
+    )
+    stage1 = config.stage1
+
+    assert (
+        stage1.sort_block_m,
+        stage1.tile_n,
+        stage1.num_waves,
+        stage1.grid_mult,
+        stage1.num_dispatch_cu,
+        stage1.b_nt,
+        stage1.waves_per_eu_hint,
+        stage1.work_shards,
+        stage1.swizzle_a,
+    ) == stage1_expected
+    assert config.stage2.persist_cu == persist_cu
+
+
+def test_m13_a8w4smooth_tuning_is_shape_and_quant_specific():
+    tuned = select_mega_moe_config(
+        8,
+        8,
+        experts_per_rank=48,
+        model_dim=3584,
+        inter_dim=1280,
+        quant_mode="a8w4smooth",
+    )
+    different_inter_dim = select_mega_moe_config(
+        8,
+        8,
+        experts_per_rank=48,
+        model_dim=3584,
+        inter_dim=1536,
+        quant_mode="a8w4smooth",
+    )
+    different_quant = select_mega_moe_config(
+        8,
+        8,
+        experts_per_rank=48,
+        model_dim=3584,
+        inter_dim=1280,
+        quant_mode="w8a8smooth",
+    )
+
+    assert tuned.stage1.num_dispatch_cu == 192
+    assert different_inter_dim.stage1.num_dispatch_cu == 64
+    assert different_quant.stage1.num_dispatch_cu == 128
+
+
+@pytest.mark.parametrize("tokens", [8, 16, 32, 64, 128, 256, 512, 1024])
+def test_m13_a8w4smooth_uses_low_pressure_int_pipeline(tokens):
+    config = select_mega_moe_config(
+        tokens,
+        tokens,
+        experts_per_rank=64,
+        model_dim=3584,
+        inter_dim=1280,
+        quant_mode="a8w4smooth",
+    )
+
+    assert config.stage1.pipe_weights is False
+    assert config.stage1.async_a_copy is False
+
+
+def test_m13_a8w4smooth_token512_uses_cudagraph_tuning():
+    config = select_mega_moe_config(
+        512,
+        512,
+        experts_per_rank=48,
+        model_dim=3584,
+        inter_dim=1280,
+        quant_mode="a8w4smooth",
+    )
+
+    assert (
+        config.stage1.sort_block_m,
+        config.stage1.tile_n,
+        config.stage1.num_waves,
+        config.stage1.grid_mult,
+        config.stage1.num_dispatch_cu,
+        config.stage1.b_nt,
+        config.stage1.waves_per_eu_hint,
+        config.stage1.work_shards,
+    ) == (64, 256, 8, 1, 224, 0, 1, 8)
+
+
 def test_nearby_tokens_share_the_bucket_config():
     assert select_mega_moe_config(500, 8192) is select_mega_moe_config(512, 32768)
 

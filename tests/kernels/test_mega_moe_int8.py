@@ -44,7 +44,9 @@ TOPK = 8
 WORLD = 8
 EXPERTS_PER_RANK = EXPERTS // WORLD
 WEIGHT_SCALE = 1.0e-3
-REL_L2_LIMIT = 0.10
+REL_L2_LIMIT = 0.01
+STAGE1_REL_L2_LIMIT = 0.001
+GRAPH_REPLAY_REL_L2_LIMIT = 1.0e-6
 LEGACY_TARGET_US = 212.0
 
 
@@ -398,6 +400,33 @@ def _run_bucket(
         e2e_graph = None
     else:
         e2e_graph = _capture_graph(e2e_body)
+
+    if e2e_graph is None:
+        replay_rel_l2_all = []
+        replay_rel_l2_max = 0.0
+        replay_stable = True
+    else:
+        replay_reference = holder["output"][:tokens].float().clone()
+        local_replay_rel_l2 = 0.0
+        for _ in range(3):
+            e2e_graph.replay()
+            torch.cuda.synchronize()
+            ms.shmem_barrier_all()
+            replay_output = holder["output"][:tokens].float()
+            replay_rel_l2 = float(
+                (
+                    torch.linalg.vector_norm(replay_output - replay_reference)
+                    / torch.linalg.vector_norm(replay_reference).clamp_min(1e-12)
+                ).item()
+            )
+            local_replay_rel_l2 = max(local_replay_rel_l2, replay_rel_l2)
+        local_replay_rel = torch.tensor(local_replay_rel_l2, dtype=torch.float64, device=device)
+        gathered_replay_rel = [torch.empty_like(local_replay_rel) for _ in range(WORLD)]
+        dist.all_gather(gathered_replay_rel, local_replay_rel)
+        replay_rel_l2_all = [float(value.item()) for value in gathered_replay_rel]
+        replay_rel_l2_max = max(replay_rel_l2_all)
+        replay_stable = replay_rel_l2_max < GRAPH_REPLAY_REL_L2_LIMIT
+
     output = holder["output"][:tokens].float()
     finite = bool(torch.isfinite(output).all())
     rel_l2 = -1.0
@@ -422,6 +451,7 @@ def _run_bucket(
     if skip_acc:
         rel_l2_all = []
         rel_l2_max = -1.0
+        stage1_rel_l2_max = -1.0
     else:
         local_rel = torch.tensor(rel_l2, dtype=torch.float64, device=device)
         gathered_rel = [torch.empty_like(local_rel) for _ in range(WORLD)]
@@ -432,6 +462,7 @@ def _run_bucket(
         gathered_stage1_rel = [torch.empty_like(local_stage1_rel) for _ in range(WORLD)]
         dist.all_gather(gathered_stage1_rel, local_stage1_rel)
         stage1_rel_l2_all = [float(value.item()) for value in gathered_stage1_rel]
+        stage1_rel_l2_max = max(stage1_rel_l2_all)
     finite_all = _all_min_bool(device, finite)
 
     stage1_us = stage2_us = e2e_us = -1.0
@@ -479,7 +510,13 @@ def _run_bucket(
             )
         )
 
-    passed = finite_all and (skip_acc or rel_l2_max < REL_L2_LIMIT)
+    passed = finite_all and replay_stable and (
+        skip_acc
+        or (
+            rel_l2_max < REL_L2_LIMIT
+            and stage1_rel_l2_max < STAGE1_REL_L2_LIMIT
+        )
+    )
     if rank == 0:
         accuracy = "skip" if skip_acc else f"{rel_l2_max:.4e}"
         perf = "skip"
@@ -491,7 +528,9 @@ def _run_bucket(
             )
         print(
             f"[M13-INT8] mode={mode} bs={tokens} relL2max={accuracy} "
-            f"finite={finite_all} graph_replay=PASS {perf} "
+            f"stage1RelL2max={'skip' if skip_acc else f'{stage1_rel_l2_max:.4e}'} "
+            f"finite={finite_all} graphReplayRelL2max={replay_rel_l2_max:.4e} "
+            f"graph_replay={'PASS' if replay_stable else 'FAIL'} {perf} "
             f"=> {'PASS' if passed else 'FAIL'}",
             flush=True,
         )
@@ -503,6 +542,12 @@ def _run_bucket(
             print(
                 "  8-rank stage1 relL2: "
                 + " ".join(f"r{index}={value:.4e}" for index, value in enumerate(stage1_rel_l2_all)),
+                flush=True,
+            )
+        if replay_rel_l2_all:
+            print(
+                "  8-rank graph replay relL2: "
+                + " ".join(f"r{index}={value:.4e}" for index, value in enumerate(replay_rel_l2_all)),
                 flush=True,
             )
     del e2e_graph
@@ -647,7 +692,7 @@ def test_m13_int8_8gpu_e2e(mode):
             "--mode",
             mode,
             "--bs-list",
-            os.environ.get("MEGAMOE_INT8_PYTEST_BS", "32,128"),
+            os.environ.get("MEGAMOE_INT8_PYTEST_BS", "32,128,256"),
             "--iters",
             os.environ.get("MEGAMOE_INT8_PYTEST_ITERS", "20"),
             "--measure-perf",

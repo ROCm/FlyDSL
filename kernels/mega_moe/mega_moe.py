@@ -603,7 +603,7 @@ class MegaMoEV2:
             pipe_weights=False,
             mfma_amajor=False,
             swizzle_a=config.swizzle_a,
-            async_a_copy=False,
+            async_a_copy=config.async_a_copy,
             num_dispatch_cu=config.num_dispatch_cu,
             use_tile_resource=False,
             waves_per_eu_hint=config.waves_per_eu_hint,

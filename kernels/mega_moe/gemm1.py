@@ -38,9 +38,10 @@ class _LdsF32View:
 @flyc.jit
 # fmt: off
 def do_int8_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, mfma, epi,
-    a_buf, K_ITERS, M_REPEAT, NUM_ACC_N, A_K_STEP_BYTES, trb_rsrc):
+    a_buf, A_LDS_I32, K_ITERS, M_REPEAT, NUM_ACC_N, A_K_STEP_BYTES,
+    async_a_copy, trb_rsrc):
 # fmt: on
-    """Run one gfx950 INT8 tile with uniform, split-safe barriers."""
+    """Run one gfx950 INT8 tile with the MX-style next-A pipeline."""
     tile_row_base = _buffer_load(trb_rsrc, m_tile, fx.Int32)
     wave = fx.thread_idx.x // fx.Int32(64)
     wave_n_base = wave * fx.Int32(epi._tile_n // epi._num_waves)
@@ -50,6 +51,18 @@ def do_int8_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, 
     gate_acc = [mfma.zero_value for _ in range(M_REPEAT * NUM_ACC_N)]
     up_acc = [mfma.zero_value for _ in range(M_REPEAT * NUM_ACC_N)]
 
+    # Keep the A-side software pipeline identical to the mature MX path.  INT
+    # gate/up needs twice the B state, so carrying next-B across K steps costs
+    # enough VGPR/occupancy to lose against loading B in the current step.
+    if const_expr(async_a_copy):
+        a_gather.prefetch_to_lds(fx.Int32(0), a_buf, fx.Int32(0))
+    else:
+        a_gather.store(
+            a_buf,
+            a_gather.load_regs(fx.Int32(0)),
+            fx.Int32(0),
+        )
+    wait_lds_barrier(0 if async_a_copy else 63)
     for step_i, state in range(
         0,
         K_ITERS,
@@ -59,20 +72,38 @@ def do_int8_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, 
         step = fx.Int32(step_i)
         gate_acc = [Vec(value) for value in state[: M_REPEAT * NUM_ACC_N]]
         up_acc = [Vec(value) for value in state[M_REPEAT * NUM_ACC_N :]]
-        a_gather.store(
-            a_buf,
-            a_gather.load_regs(step * fx.Int32(A_K_STEP_BYTES)),
-            fx.Int32(0),
+        a_off = (step & fx.Int32(1)) * fx.Int32(A_LDS_I32)
+        next_off = ((step + fx.Int32(1)) & fx.Int32(1)) * fx.Int32(A_LDS_I32)
+        last = fx.Int32(K_ITERS - 1)
+        step_next = (step + fx.Int32(1) < last).select(
+            step + fx.Int32(1), last
         )
-        wait_lds_barrier()
         gate_b, up_b = b_loader.load_step(gate_row, up_row, step)
 
-        def a_load(mi, ksub):
-            return a_s2r.load_operand(a_buf, mi, ksub, fx.Int32(0))
+        def a_load(mi, ksub, _base=a_off):
+            return a_s2r.load_operand(a_buf, mi, ksub, _base)
+
+        if const_expr(async_a_copy):
+            rocdl.sched_barrier(0)
+            a_gather.prefetch_to_lds(
+                step_next * fx.Int32(A_K_STEP_BYTES),
+                a_buf,
+                next_off,
+            )
+            rocdl.sched_barrier(0)
+        else:
+            next_a_regs = a_gather.load_regs(
+                step_next * fx.Int32(A_K_STEP_BYTES)
+            )
 
         gate_acc, up_acc = mfma.call(
             a_load, gate_b, up_b, gate_acc, up_acc
         )
+        if const_expr(async_a_copy):
+            wait_lds_barrier(0)
+        else:
+            a_gather.store(a_buf, next_a_regs, next_off)
+            wait_lds_barrier()
         state = yield list(gate_acc) + list(up_acc)
 
     gate_acc = [Vec(value) for value in state[: M_REPEAT * NUM_ACC_N]]
@@ -94,7 +125,7 @@ def build_fused_int8_gemm1(*, x_tensor, w_rsrc, qscale_rsrc, qzero_rsrc, sx_rsrc
     compact_expert_rsrc, compact_weight_rsrc, a_buf, c_tile, model_dim, inter_dim, sort_block_m, tile_n,
     num_waves, n_per_wave, wave_id, m_repeat, num_acc_n, total_threads, k_iters,
     n_tiles, expert_offset, b_cache_modifier, swizzle_a, packed_int4, atom_tokens,
-    topk, swiglu_limit=0.0):
+    topk, async_a_copy, swiglu_limit=0.0):
 # fmt: on
     """Build the independent INT8 Stage1 compute branch."""
     sched = TileScheduler(
@@ -109,7 +140,8 @@ def build_fused_int8_gemm1(*, x_tensor, w_rsrc, qscale_rsrc, qzero_rsrc, sx_rsrc
         total_threads=total_threads,
         swizzle=swizzle_a,
         x_tensor=x_tensor,
-        async_copy=False,
+        async_copy=async_a_copy,
+        async_elem_ty=fx.Int8,
     )
     a_s2r = Int8AS2RLoader(k_step_bytes=256, swizzle=swizzle_a)
     b_loader = Int8BWeightLoader(
@@ -167,10 +199,12 @@ def build_fused_int8_gemm1(*, x_tensor, w_rsrc, qscale_rsrc, qzero_rsrc, sx_rsrc
             mfma,
             epi,
             a_buf,
+            sort_block_m * 256 // 4,
             k_iters,
             m_repeat,
             num_acc_n,
             256,
+            async_a_copy,
             trb_rsrc,
         )
 
