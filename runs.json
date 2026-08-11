@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-11T03:41:21Z",
+ "updated": "2026-08-11T03:55:48Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -85,11 +85,11 @@
    "branch": "fp4-gemm-4wave-perf",
    "event": "pull_request",
    "title": "[fp4_gemm_4wave] MXFP4 GEMM perf optimize",
-   "status": "completed",
-   "conclusion": "action_required",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31448928321",
    "created_at": "2026-08-11T01:19:06Z",
-   "updated_at": "2026-08-11T01:19:06Z",
+   "updated_at": "2026-08-11T03:48:58Z",
    "actor": "coderfeli",
    "jobs": []
   },
