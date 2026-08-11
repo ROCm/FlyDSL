@@ -47,7 +47,7 @@ to GPU/ROCDL.
 
       * :doc:`FlyDSL Python DSL <api/dsl>`
 
-      * :doc:`Compiler and pipeline <api/dsl>`
+      * :doc:`Compiler and pipeline <api/compiler>`
 
       * :doc:`Prebuilt kernels <api/kernels>`
 
