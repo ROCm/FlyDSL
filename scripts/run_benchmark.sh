@@ -100,6 +100,25 @@ DEFAULT_FLASH_ATTN_FUNC_SHAPES='
 3,65,3,3,128,bf16,false
 '
 FLASH_ATTN_FUNC_SHAPES="${FLASH_ATTN_FUNC_SHAPES:-${DEFAULT_FLASH_ATTN_FUNC_SHAPES}}"
+# flex_attention shapes: "batch,seq_len,num_heads,num_kv_heads,head_dim,dtype,case"
+#   case: alibi | sliding_window | causal_via_mask | no_mod
+DEFAULT_FLEX_ATTENTION_SHAPES='
+2,2048,32,32,128,bf16,no_mod
+2,2048,32,32,128,bf16,alibi
+2,2048,32,32,128,bf16,sliding_window
+2,2048,32,32,128,bf16,causal_via_mask
+2,4096,32,32,128,bf16,no_mod
+2,4096,32,32,128,bf16,alibi
+2,4096,32,32,128,bf16,sliding_window
+2,4096,32,32,128,bf16,causal_via_mask
+2,8192,32,32,128,bf16,no_mod
+2,8192,32,32,128,bf16,alibi
+2,8192,32,32,128,bf16,sliding_window
+2,8192,32,32,128,bf16,causal_via_mask
+2,4096,32,8,128,bf16,no_mod
+2,4096,32,8,128,bf16,causal_via_mask
+'
+FLEX_ATTENTION_SHAPES="${FLEX_ATTENTION_SHAPES:-${DEFAULT_FLEX_ATTENTION_SHAPES}}"
 # MLA decode shapes: "batch,ctx_len" (DeepSeek MLA, fp8 Q/KV, nh=128).
 DEFAULT_MLA_DECODE_SHAPES='
 32,8192
@@ -212,7 +231,7 @@ Usage:
   bash scripts/run_benchmark.sh --list
 
 Supported ops:
-  softmax | layernorm | rmsnorm | flash_attn | mla | gemm | moe
+  softmax | layernorm | rmsnorm | flash_attn | flex_attention | mla | gemm | moe
   (gemm includes preshuffle GEMM, SplitK HGEMM, and FP8 8-wave row-scale GEMM)
 USAGE
 }
@@ -304,17 +323,19 @@ _normalize_op() {
   case "${op}" in
     layernorm) echo "layernorm" ;;
     flash|flash_attn|flash-attn|flash_attn_func|fmha) echo "flash_attn" ;;
+    flex|flex_attn|flex-attn|flex_attention) echo "flex_attention" ;;
     mla|mla_decode|mla-decode) echo "mla" ;;
     *) echo "${op}" ;;
   esac
 }
 
 # Default: run softmax, norms, attention, GEMM, and MoE unless user selected a subset.
-# Use positional args or --only to enable others: softmax, layernorm, rmsnorm, flash_attn, mla, gemm, moe
+# Use positional args or --only to enable others: softmax, layernorm, rmsnorm, flash_attn, flex_attention, mla, gemm, moe
 RUN_SOFTMAX=1
 RUN_LAYERNORM=1
 RUN_RMSNORM=1
 RUN_FLASH_ATTN=1
+RUN_FLEX_ATTENTION=1
 RUN_MLA=1
 RUN_PRESHUFFLE_GEMM=1
 RUN_MOE=1
@@ -324,6 +345,7 @@ _enable_only_ops() {
   RUN_LAYERNORM=0
   RUN_RMSNORM=0
   RUN_FLASH_ATTN=0
+  RUN_FLEX_ATTENTION=0
   RUN_MLA=0
   RUN_PRESHUFFLE_GEMM=0
   RUN_MOE=0
@@ -334,6 +356,7 @@ _enable_only_ops() {
       layernorm) RUN_LAYERNORM=1 ;;
       rmsnorm) RUN_RMSNORM=1 ;;
       flash_attn) RUN_FLASH_ATTN=1 ;;
+      flex_attention) RUN_FLEX_ATTENTION=1 ;;
       mla) RUN_MLA=1 ;;
       gemm) RUN_PRESHUFFLE_GEMM=1 ;;
       moe) RUN_MOE=1 ;;
@@ -372,6 +395,7 @@ if [ "$#" -gt 0 ]; then
         echo "layernorm"
         echo "rmsnorm"
         echo "flash_attn"
+        echo "flex_attention"
         echo "mla"
         echo "gemm"
         echo "moe"
@@ -716,6 +740,38 @@ if [ "${RUN_FLASH_ATTN}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     fi
     shape_tag="B${batch}S${seq_len}H${heads}Hkv${kv_heads}D${head_dim}_${causal_tag}"
     row="$(_py_parse_and_emit flash_attn "${shape_tag}" "${dtype}" "${log}")"
+    set -- $row
+    _emit_row "$1" "$2" "$3" "$4" "$5"
+  done
+fi
+
+# flex_attention (score_mod / mask_mod on the generic kernel)
+if [ "${RUN_FLEX_ATTENTION}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
+  for shape in $FLEX_ATTENTION_SHAPES; do
+    [ -z "$shape" ] && continue
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    batch=$1; seq_len=$2; heads=$3; kv_heads=$4; head_dim=$5; dtype=$6; case_name=$7
+    log="${BENCH_LOG_DIR}/flex_attention_B${batch}_S${seq_len}_H${heads}_Hkv${kv_heads}_D${head_dim}_${dtype}_${case_name}.log"
+    if python3 tests/kernels/test_flex_attention.py \
+      --batch "$batch" \
+      --seq_len "$seq_len" \
+      --num_heads "$heads" \
+      --num_kv_heads "$kv_heads" \
+      --head_dim "$head_dim" \
+      --dtype "$dtype" \
+      --case "$case_name" \
+      --warmup 10 \
+      --iters 100 >"${log}" 2>&1; then
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+      _fail_or_skip "${log}" "flex_attention"
+    fi
+    shape_tag="B${batch}S${seq_len}H${heads}Hkv${kv_heads}D${head_dim}_${case_name}"
+    row="$(_py_parse_and_emit flex_attention "${shape_tag}" "${dtype}" "${log}")"
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
   done
