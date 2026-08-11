@@ -21,8 +21,9 @@ concurrency:
 
 env:
   DOCKER_IMAGE: "rocm/pytorch:rocm7.14_ubuntu24.04_py3.12_pytorch_release_2.12.0@sha256:c38eeda81d85f00fbe35d3d50ce42ce59c524e87d810624f4eb5c52fddb3b9ad"
+  LLVM_BUILD_PROFILE: "amd-minimal"
   # Bump when the container or LLVM build environment changes incompatibly.
-  MLIR_CACHE_VERSION: "rocm7.14-ubuntu24.04-py3.12-amd-minimal-v1"
+  MLIR_CACHE_VERSION: "rocm7.14-ubuntu24.04-py3.12-v1"
   GITHUB_REPO_NAME: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
   GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.event.head_commit.id || github.sha }}
   # PRs compare against their exact base; main pushes compare against the previous commit.
@@ -147,7 +148,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: mlir_install.tgz
-          key: mlir-install-${{ runner.os }}-${{ runner.arch }}-${{ env.MLIR_CACHE_VERSION }}-${{ hashFiles('flydsl-test/thirdparty/llvm-build-info.json', 'flydsl-test/thirdparty/llvm-rocdl-lld-argv0.patch', 'flydsl-test/scripts/build_llvm.sh') }}
+          key: mlir-install-${{ runner.os }}-${{ runner.arch }}-${{ env.MLIR_CACHE_VERSION }}-${{ env.LLVM_BUILD_PROFILE }}-${{ hashFiles('flydsl-test/thirdparty/llvm-build-info.json', 'flydsl-test/thirdparty/llvm-rocdl-lld-argv0.patch', 'flydsl-test/scripts/build_llvm.sh') }}
 
       - name: Start MLIR build container
         run: |
@@ -170,6 +171,10 @@ jobs:
           docker exec flydsl_mlir_cache bash -c "python3 -m pip install ninja>=1.11.1"
           docker exec flydsl_mlir_cache bash -c "python3 -m pip install --index-url https://repo.amd.com/rocm/whl-multi-arch/ 'rocm[devel]==7.14.0' && rocm-sdk init"
           docker exec flydsl_mlir_cache bash -c "git config --global --add safe.directory /flydsl-test"
+          sdk_root="$(docker exec flydsl_mlir_cache rocm-sdk path --root)"
+          test -n "${sdk_root}"
+          docker exec flydsl_mlir_cache test -d "${sdk_root}"
+          printf 'ROCM_PATH=%s\n' "${sdk_root}" >>"${GITHUB_ENV}"
 
       - name: Use cached MLIR install
         if: steps.mlir-cache.outputs.cache-hit == 'true'
@@ -181,13 +186,13 @@ jobs:
 
       - name: Build LLVM once
         if: steps.mlir-cache.outputs.cache-hit != 'true'
+        # A cold LLVM build measures ~10 min on these runners. Fail fast instead
+        # of letting a stalled fetch or build hold the GPU runner until the
+        # job-level timeout.
+        timeout-minutes: 45
         run: |
           set -ex
-          docker exec flydsl_mlir_cache bash -c '
-            export ROCM_PATH="$(rocm-sdk path --root)"
-            export LLVM_ENABLE_PROJECTS=mlir
-            export LLVM_TARGETS_TO_BUILD="X86;AMDGPU"
-            export LLVM_ENABLE_RUNTIMES=
+          docker exec -e LLVM_BUILD_PROFILE -e ROCM_PATH flydsl_mlir_cache bash -c '
             cd /flydsl-test
             bash scripts/build_llvm.sh
           '
@@ -200,9 +205,9 @@ jobs:
           docker exec \
             -e BASE_REPO_NAME \
             -e BASE_COMMIT_SHA \
+            -e ROCM_PATH \
             flydsl_mlir_cache bash -c '
               export MLIR_PATH=/llvm-project/mlir_install
-              export ROCM_PATH="$(rocm-sdk path --root)"
               export PATH="$(rocm-sdk path --bin):$PATH"
               export CMAKE_PREFIX_PATH="$(rocm-sdk path --cmake)${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
               cd /flydsl-test
@@ -210,7 +215,11 @@ jobs:
             '
           docker cp flydsl_mlir_cache:/tmp/flydsl-ci-wheels ./flydsl-ci-wheels
           (cd flydsl-ci-wheels/pr && sha256sum -c SHA256SUMS)
-          (cd flydsl-ci-wheels/base && sha256sum -c SHA256SUMS)
+          if [ -d flydsl-ci-wheels/base ]; then
+            (cd flydsl-ci-wheels/base && sha256sum -c SHA256SUMS)
+          else
+            echo "::warning title=Baseline wheel unavailable::Uploading PR wheel without an exact base benchmark."
+          fi
           (cd flydsl-ci-wheels/tools && sha256sum -c SHA256SUMS)
 
       - name: Save shared MLIR cache
@@ -232,7 +241,6 @@ jobs:
           path: flydsl-ci-wheels
           if-no-files-found: error
           retention-days: 1
-          compression-level: 0
 
       - name: Clean up MLIR build container
         if: always()
@@ -293,7 +301,11 @@ jobs:
       - name: Verify FlyDSL CI wheels
         run: |
           (cd flydsl-ci-wheels/pr && sha256sum -c SHA256SUMS)
-          (cd flydsl-ci-wheels/base && sha256sum -c SHA256SUMS)
+          if [ -d flydsl-ci-wheels/base ]; then
+            (cd flydsl-ci-wheels/base && sha256sum -c SHA256SUMS)
+          else
+            echo "::warning title=Baseline wheel unavailable::Exact base benchmark will be skipped."
+          fi
           (cd flydsl-ci-wheels/tools && sha256sum -c SHA256SUMS)
 
       - name: Start CI container
@@ -335,13 +347,18 @@ jobs:
           docker exec flydsl_test bash -c "python3 -m pip install --index-url https://repo.amd.com/rocm/whl-multi-arch/ 'rocm[devel]==7.14.0' && rocm-sdk init"
           docker exec flydsl_test bash -c "python3 -m pip install -U 'hypothesis>=6.82.0'"
           docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl-test && cd /flydsl-test && git log"
+          sdk_root="$(docker exec flydsl_test rocm-sdk path --root)"
+          test -n "${sdk_root}"
+          docker exec flydsl_test test -d "${sdk_root}"
+          printf 'ROCM_PATH=%s\n' "${sdk_root}" >>"${GITHUB_ENV}"
 
       - name: Install FlyDSL CI wheel
         run: |
           docker exec flydsl_test bash -c "python3 -m pip install --force-reinstall --no-deps /flydsl-ci-wheels/pr/*.whl"
           docker exec flydsl_test bash -c "mkdir -p /flydsl-test/build-fly/bin && cp /flydsl-ci-wheels/pr/fly-opt /flydsl-test/build-fly/bin/fly-opt && chmod +x /flydsl-test/build-fly/bin/fly-opt"
           docker exec flydsl_test bash -c "cp /flydsl-ci-wheels/tools/FileCheck /usr/local/bin/FileCheck && chmod +x /usr/local/bin/FileCheck"
-          docker exec flydsl_test bash -c 'export ROCM_PATH="$(rocm-sdk path --root)" && python3 -c "import flydsl; from flydsl._mlir.ir import Context; print(\"Installed FlyDSL CI wheel\")"'
+          docker exec -e ROCM_PATH flydsl_test bash -c "/flydsl-test/build-fly/bin/fly-opt --version"
+          docker exec -e ROCM_PATH flydsl_test bash -c 'python3 -c "import flydsl; from flydsl._mlir.ir import Context; print(\"Installed FlyDSL CI wheel\")"'
 
       - name: Prepare aiter
         if: ${{ !contains(matrix.runners, 'navi') }}
@@ -353,7 +370,7 @@ jobs:
       - name: Run tests
         timeout-minutes: 60
         run: |
-          docker exec flydsl_test bash -c 'export ROCM_PATH="$(rocm-sdk path --root)" && export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /flydsl-test && RUN_TESTS_FULL=1 bash scripts/run_tests.sh'
+          docker exec -e ROCM_PATH flydsl_test bash -c 'export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /flydsl-test && RUN_TESTS_FULL=1 bash scripts/run_tests.sh'
 
       - name: Show tests logs
         if: failure()
@@ -370,9 +387,8 @@ jobs:
       - name: Run benchmarks
         id: benchmarks
         run: |
-          docker exec -i flydsl_test bash <<'BASH'
+          docker exec -i -e ROCM_PATH flydsl_test bash <<'BASH'
           set -e -o pipefail
-          export ROCM_PATH="$(rocm-sdk path --root)"
           export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-}
           export AITER_REPO=/tmp/aiter
           cd /flydsl-test
@@ -388,6 +404,7 @@ jobs:
           docker exec -i \
             -e BASE_REPO_NAME \
             -e BASE_COMMIT_SHA \
+            -e ROCM_PATH \
             flydsl_test bash <<'BASH'
           set -u
           cd /flydsl-test
@@ -396,7 +413,9 @@ jobs:
           git worktree prune || true
           base_repo_url="https://github.com/${BASE_REPO_NAME}.git"
 
-          if git fetch "${base_repo_url}" "${BASE_COMMIT_SHA}" --no-tags --depth=1; then
+          if [ ! -d /flydsl-ci-wheels/base ]; then
+            echo "::warning title=Benchmark baseline unavailable::Base wheel was not produced; skipping exact main comparison."
+          elif git fetch "${base_repo_url}" "${BASE_COMMIT_SHA}" --no-tags --depth=1; then
             commit="$(git rev-parse FETCH_HEAD)"
             label="main"
             worktree="/tmp/flydsl-bench-main"
@@ -415,7 +434,6 @@ jobs:
                 mkdir -p build-fly/bin
                 cp /flydsl-ci-wheels/base/fly-opt build-fly/bin/fly-opt
                 chmod +x build-fly/bin/fly-opt
-                export ROCM_PATH="$(rocm-sdk path --root)"
                 export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-}
                 export AITER_REPO=/tmp/aiter
                 BENCH_LOG_DIR="${log_dir}" bash scripts/run_benchmark.sh 2>&1 | tee "${output}"
@@ -452,7 +470,6 @@ jobs:
                   set -e -o pipefail
                   cd "${worktree}"
                   python3 -m pip install --only-binary=:all: "flydsl==${package_version}" 2>&1 | tail -5
-                  export ROCM_PATH="$(rocm-sdk path --root)"
                   export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-}
                   export AITER_REPO=/tmp/aiter
                   BENCH_LOG_DIR="${log_dir}" bash scripts/run_benchmark.sh 2>&1 | tee "${output}"
@@ -533,9 +550,9 @@ jobs:
   # fail-fast: false ensures both runners always complete even if one fails.
   # ---------------------------------------------------------------------------
   multi-gpu:
-    needs: [test, detect-changes]
+    needs: [test, detect-changes, prepare-mlir]
     name: Multi-GPU Communication Operator Tests (${{ matrix.runners }})
-    timeout-minutes: 240
+    timeout-minutes: 120
     env:
       # Keep checkout independent of runner-local git-cache rewrites.
       GIT_CONFIG_GLOBAL: /dev/null
@@ -544,7 +561,7 @@ jobs:
     # detect-changes failure falls back to running).
     if: |
       !cancelled() &&
-      needs.test.result == 'success' &&
+      needs.prepare-mlir.result == 'success' &&
       (needs.detect-changes.result != 'success' ||
        needs.detect-changes.outputs.code_changed == 'true') && (
         (github.event_name == 'pull_request' &&
@@ -580,7 +597,11 @@ jobs:
       - name: Verify FlyDSL CI wheels
         run: |
           (cd flydsl-ci-wheels/pr && sha256sum -c SHA256SUMS)
-          (cd flydsl-ci-wheels/base && sha256sum -c SHA256SUMS)
+          if [ -d flydsl-ci-wheels/base ]; then
+            (cd flydsl-ci-wheels/base && sha256sum -c SHA256SUMS)
+          else
+            echo "::warning title=Baseline wheel unavailable::Exact base benchmark will be skipped."
+          fi
           (cd flydsl-ci-wheels/tools && sha256sum -c SHA256SUMS)
 
       - name: Start CI container
@@ -616,18 +637,23 @@ jobs:
           docker exec flydsl_test bash -c "python3 -m pip install --index-url https://repo.amd.com/rocm/whl-multi-arch/ 'rocm[devel]==7.14.0' && rocm-sdk init"
           docker exec flydsl_test bash -c "python3 -m pip install -U 'hypothesis>=6.82.0'"
           docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl-test && cd /flydsl-test && git log"
+          sdk_root="$(docker exec flydsl_test rocm-sdk path --root)"
+          test -n "${sdk_root}"
+          docker exec flydsl_test test -d "${sdk_root}"
+          printf 'ROCM_PATH=%s\n' "${sdk_root}" >>"${GITHUB_ENV}"
 
       - name: Install FlyDSL CI wheel
         run: |
           docker exec flydsl_test bash -c "python3 -m pip install --force-reinstall --no-deps /flydsl-ci-wheels/pr/*.whl"
           docker exec flydsl_test bash -c "mkdir -p /flydsl-test/build-fly/bin && cp /flydsl-ci-wheels/pr/fly-opt /flydsl-test/build-fly/bin/fly-opt && chmod +x /flydsl-test/build-fly/bin/fly-opt"
           docker exec flydsl_test bash -c "cp /flydsl-ci-wheels/tools/FileCheck /usr/local/bin/FileCheck && chmod +x /usr/local/bin/FileCheck"
-          docker exec flydsl_test bash -c 'export ROCM_PATH="$(rocm-sdk path --root)" && python3 -c "import flydsl; from flydsl._mlir.ir import Context; print(\"Installed FlyDSL CI wheel\")"'
+          docker exec -e ROCM_PATH flydsl_test bash -c "/flydsl-test/build-fly/bin/fly-opt --version"
+          docker exec -e ROCM_PATH flydsl_test bash -c 'python3 -c "import flydsl; from flydsl._mlir.ir import Context; print(\"Installed FlyDSL CI wheel\")"'
 
       - name: Install mori (for shmem regression test)
         timeout-minutes: 15
         run: |
-          docker exec flydsl_test bash -c "
+          docker exec -e ROCM_PATH flydsl_test bash -c "
             apt-get install -y libpci-dev libibverbs-dev libgrpc++1.51 libgrpc29 &&
             python3 -m pip install amd_mori &&
             MORI_PRECOMPILE=1 python3 -c 'import mori'
@@ -636,8 +662,7 @@ jobs:
       - name: Run multi-GPU shmem regression test
         timeout-minutes: 10
         run: |
-          docker exec flydsl_test bash -c "
-            export ROCM_PATH=\$(rocm-sdk path --root)
+          docker exec -e ROCM_PATH flydsl_test bash -c "
             cd /flydsl-test
             python3 -m pytest tests/kernels/test_flydsl_shmem.py \
               -m multi_gpu -v --no-header --tb=short
@@ -646,8 +671,7 @@ jobs:
       - name: Run multi-GPU dispatch/combine CI sweep (8-GPU, accuracy + cudagraph perf)
         timeout-minutes: 30
         run: |
-          docker exec flydsl_test bash -c "
-            export ROCM_PATH=\$(rocm-sdk path --root) &&
+          docker exec -e ROCM_PATH flydsl_test bash -c "
             cd /flydsl-test &&
             MORI_SOCKET_IFNAME=lo python tests/kernels/test_profiler_dispatch_combine.py \
               --ci-sweep \
@@ -661,8 +685,7 @@ jobs:
       - name: Run multi-GPU MegaMoEV2 A8W4 v4_pro accuracy tests
         timeout-minutes: 45
         run: |
-          docker exec flydsl_test bash -c "
-            export ROCM_PATH=\$(rocm-sdk path --root) &&
+          docker exec -e ROCM_PATH flydsl_test bash -c "
             cd /flydsl-test &&
             python3 -c 'import torch; n = torch.cuda.device_count(); assert n >= 8, f\"requires 8 GPUs, found {n}\"' &&
             python3 -m pytest \
@@ -673,8 +696,7 @@ jobs:
       - name: Run multi-GPU allreduce tests
         timeout-minutes: 30
         run: |
-          docker exec flydsl_test bash -c "
-            export ROCM_PATH=\$(rocm-sdk path --root)
+          docker exec -e ROCM_PATH flydsl_test bash -c "
             cd /flydsl-test
             python3 -m pytest tests/kernels/test_allreduce.py \
               -m multi_gpu -v --no-header --tb=short
@@ -683,8 +705,7 @@ jobs:
       - name: Run allreduce benchmark (PR)
         timeout-minutes: 30
         run: |
-          docker exec flydsl_test bash -c "
-            export ROCM_PATH=\$(rocm-sdk path --root)
+          docker exec -e ROCM_PATH flydsl_test bash -c "
             cd /flydsl-test
             python3 tests/kernels/test_allreduce.py \
               --world_size 8 --iters 51 --warmup 5 \
@@ -703,6 +724,10 @@ jobs:
             -e BASE_COMMIT_SHA \
             flydsl_test bash -c "
             set -e -o pipefail
+            if [ ! -d /flydsl-ci-wheels/base ]; then
+              echo '::warning title=Benchmark baseline unavailable::Base wheel was not produced.'
+              exit 1
+            fi
             cd /flydsl-test
             git fetch \"https://github.com/\${BASE_REPO_NAME}.git\" \"\${BASE_COMMIT_SHA}\" --no-tags --depth=1
             git worktree add --detach /tmp/flydsl-main FETCH_HEAD
@@ -719,8 +744,7 @@ jobs:
         timeout-minutes: 30
         continue-on-error: true
         run: |
-          docker exec flydsl_test bash -c "
-            export ROCM_PATH=\$(rocm-sdk path --root)
+          docker exec -e ROCM_PATH flydsl_test bash -c "
             cp /flydsl-test/tests/kernels/test_allreduce.py \
                /tmp/flydsl-main/tests/kernels/test_allreduce.py
             cd /tmp/flydsl-main
