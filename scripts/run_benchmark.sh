@@ -130,11 +130,12 @@ fp8,8192,8192,8192,128,256,128,2
 int8,9728,8192,8320,128,256,128,2
 '
 
-# SplitK HGEMM shapes:
-# "dtype,M,N,K,tile_m,tile_n,tile_k,stages,split_k,block_m_warps,block_n_warps,block_k_warps"
+# A16W16 GEMM shapes:
+# "dtype,M,N,K,tile_m,tile_n,tile_k,stages,split_k,m_waves,n_waves,k_waves[,use_hti]"
 HGEMM_SHAPES_GFX950='
 fp16,2048,2048,2048,128,128,64,4,1,4,4,1
 bf16,32,384,7168,32,64,64,5,16,2,2,1
+bf16,8192,8192,8192,256,256,64,2,1,2,4,1,true
 '
 HGEMM_SHAPES_CDNA3='
 fp16,4096,4096,4096,128,128,64,2,1,2,2,1
@@ -213,7 +214,7 @@ Usage:
 
 Supported ops:
   softmax | layernorm | rmsnorm | flash_attn | mla | gemm | moe
-  (gemm includes preshuffle GEMM, SplitK HGEMM, and FP8 8-wave row-scale GEMM)
+  (gemm includes preshuffle GEMM, A16W16 GEMM, and FP8 8-wave row-scale GEMM)
 USAGE
 }
 
@@ -819,14 +820,16 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     _emit_row "$1" "$2" "$3" "$4" "$5"
   done
 
-  if [ -n "${HGEMM_SHAPES:-}" ]; then
-    hgemm_shapes="${HGEMM_SHAPES}"
-  else
-    case "${GPU_ARCH}" in
-      gfx95*) hgemm_shapes="${HGEMM_SHAPES_GFX950}" ;;
-      *) hgemm_shapes="${HGEMM_SHAPES_CDNA3}" ;;
-    esac
-  fi
+  hgemm_shapes=""
+  case "${GPU_ARCH}" in
+    gfx95*)
+      if [ -n "${HGEMM_SHAPES:-}" ]; then
+        hgemm_shapes="${HGEMM_SHAPES}"
+      else
+        hgemm_shapes="${HGEMM_SHAPES_GFX950}"
+      fi
+      ;;
+  esac
 
   for shape in $hgemm_shapes; do
     oldIFS=$IFS
@@ -835,9 +838,16 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     set -- $shape
     IFS=$oldIFS
     dtype=$1; M=$2; N=$3; K=$4; tile_m=$5; tile_n=$6; tile_k=$7
-    stages=$8; split_k=$9; block_m_warps=${10}; block_n_warps=${11}; block_k_warps=${12}
-    log="${BENCH_LOG_DIR}/hgemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}_s${stages}_sk${split_k}.log"
-    if python3 tests/kernels/test_hgemm_splitk.py \
+    stages=$8; split_k=$9; m_waves=${10}; n_waves=${11}; k_waves=${12}
+    use_hti="${13:-false}"
+    hti_flag="--no-hti"
+    hti_tag=""
+    if [ "${use_hti}" = "1" ] || [ "${use_hti}" = "true" ]; then
+      hti_flag="--hti"
+      hti_tag="_hti"
+    fi
+    log="${BENCH_LOG_DIR}/hgemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}_s${stages}_sk${split_k}${hti_tag}.log"
+    if python3 tests/kernels/test_gemm_a16w16_gfx950.py \
       --dtype "$dtype" \
       --num_warmup 3 \
       --num_iters 50 \
@@ -849,15 +859,16 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       --TILE_K "$tile_k" \
       --STAGES "$stages" \
       --SPLIT_K "$split_k" \
-      --BLOCK_M_WARPS "$block_m_warps" \
-      --BLOCK_N_WARPS "$block_n_warps" \
-      --BLOCK_K_WARPS "$block_k_warps" >"${log}" 2>&1; then
+      --BLOCK_M_WARPS "$m_waves" \
+      --BLOCK_N_WARPS "$n_waves" \
+      --BLOCK_K_WARPS "$k_waves" \
+      "${hti_flag}" >"${log}" 2>&1; then
       if grep -q "Skipped:" "${log}"; then
-        shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_sk${split_k}"
+        shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_sk${split_k}${hti_tag}"
         _emit_row "hgemm" "${shape_tag}" "${dtype}" "skip" "skip"
       else
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-        shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_sk${split_k}"
+        shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_sk${split_k}${hti_tag}"
         row="$(_py_parse_and_emit hgemm "${shape_tag}" "${dtype}" "${log}")"
         set -- $row
         _emit_row "$1" "$2" "$3" "$4" "$5"

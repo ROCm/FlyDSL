@@ -363,7 +363,6 @@ What operation do you need?
 | File | Description |
 |---|---|
 | `kernels/gemm/preshuffle_gemm.py` | GEMM (preshuffle layout) |
-| `kernels/gemm/hgemm_splitk.py` | FP16 GEMM split-K |
 | `kernels/moe/moe_gemm_2stage.py` | MoE GEMM 2-stage (gate/up + reduce) |
 | `kernels/moe/mxfp_moe/` | Fused a4w4/a8w4 MoE 2-stage GEMM (device fp4 re-quant) |
 | `kernels/attention/pa_decode_fp8.py` | Paged attention decode (FP8) |
@@ -391,7 +390,6 @@ What operation do you need?
 | File | Tests |
 |---|---|
 | `tests/kernels/test_preshuffle_gemm.py` | GEMM fp8/int8/fp16/bf16 |
-| `tests/kernels/test_hgemm_splitk.py` | FP16 GEMM split-K |
 | `tests/kernels/test_moe_gemm.py` | MoE GEMM |
 | `tests/kernels/test_moe_reduce.py` | MoE reduce kernel |
 | `tests/kernels/test_pa.py` | Paged attention decode |

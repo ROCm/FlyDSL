@@ -17,6 +17,26 @@ LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/llvm-build-info.json"
 LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['upstream']['llvm_hash'])")
 LLVM_REF="${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}"
+LLVM_PATCH="${REPO_ROOT}/thirdparty/llvm-rocdl-lld-argv0.patch"
+LLVM_BUILD_PROFILE="${LLVM_BUILD_PROFILE:-full}"
+
+case "${LLVM_BUILD_PROFILE}" in
+  full)
+    LLVM_ENABLE_PROJECTS="${LLVM_ENABLE_PROJECTS:-mlir;clang;lld}"
+    LLVM_TARGETS_TO_BUILD="${LLVM_TARGETS_TO_BUILD:-X86;NVPTX;AMDGPU}"
+    # Use `-` rather than `:-` so callers can explicitly disable runtimes.
+    LLVM_ENABLE_RUNTIMES="${LLVM_ENABLE_RUNTIMES-compiler-rt}"
+    ;;
+  amd-minimal)
+    LLVM_ENABLE_PROJECTS="mlir"
+    LLVM_TARGETS_TO_BUILD="X86;AMDGPU"
+    LLVM_ENABLE_RUNTIMES=
+    ;;
+  *)
+    echo "Unknown LLVM_BUILD_PROFILE: ${LLVM_BUILD_PROFILE}" >&2
+    exit 2
+    ;;
+esac
 
 echo "Base directory: $BASE_DIR"
 echo "LLVM Source:    $LLVM_SRC_DIR"
@@ -24,9 +44,22 @@ echo "LLVM Build:     $LLVM_BUILD_DIR"
 echo "LLVM Install:   $LLVM_INSTALL_DIR"
 echo "LLVM Tarball:   $LLVM_INSTALL_TGZ"
 echo "LLVM Ref:       $LLVM_REF"
+echo "LLVM Profile:   $LLVM_BUILD_PROFILE"
+echo "LLVM Projects:  $LLVM_ENABLE_PROJECTS"
+echo "LLVM Targets:   $LLVM_TARGETS_TO_BUILD"
+echo "LLVM Runtimes:  ${LLVM_ENABLE_RUNTIMES:-<none>}"
 
 # 1. Clone LLVM
 LLVM_REMOTE="${LLVM_REMOTE:-https://github.com/llvm/llvm-project.git}"
+
+# A leftover partial ("promisor") clone is unusable here: every checkout, patch
+# and rev-parse would trigger per-blob lazy fetches against github.com. Unsetting
+# the config does not bring the missing blobs back, so start over instead.
+if [ -d "$LLVM_SRC_DIR/.git" ] && \
+   [ -n "$(git -C "$LLVM_SRC_DIR" config --get remote.origin.promisor || true)" ]; then
+    echo "Discarding partial (promisor) llvm-project checkout at ${LLVM_SRC_DIR} ..."
+    rm -rf "$LLVM_SRC_DIR"
+fi
 
 if [ ! -d "$LLVM_SRC_DIR" ]; then
     echo "Preparing llvm-project checkout for ${LLVM_REF} ..."
@@ -37,17 +70,37 @@ else
     pushd "$LLVM_SRC_DIR"
 fi
 
+# Plain shallow fetch. Do NOT add --filter=blob:none here: a blob-filtered fetch
+# of an arbitrary SHA makes the server build an uncached pack, and the checkout
+# that follows then lazily re-fetches every file in the tree one batch at a time.
+# Measured on CI: `--depth 1` alone downloads llvm-project in ~100s, while
+# `--depth 1 --filter=blob:none` did not finish within 100 minutes.
+LLVM_FETCH_ARGS=(--depth 1)
+
 if [[ "$LLVM_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    echo "Checking for local LLVM commit ${LLVM_REF} ..."
     if ! git cat-file -e "${LLVM_REF}^{commit}" 2>/dev/null; then
         echo "Fetching commit ${LLVM_REF} ..."
-        git fetch --depth 1 origin "${LLVM_REF}"
+        git fetch "${LLVM_FETCH_ARGS[@]}" origin "${LLVM_REF}"
+    else
+        echo "LLVM commit ${LLVM_REF} is already available locally."
     fi
+    echo "Checking out LLVM commit ${LLVM_REF} ..."
     git checkout "${LLVM_REF}"
 else
     echo "Fetching ref ${LLVM_REF} ..."
-    git fetch --depth 1 origin "${LLVM_REF}"
+    git fetch "${LLVM_FETCH_ARGS[@]}" origin "${LLVM_REF}"
     git checkout FETCH_HEAD
 fi
+
+if git apply --reverse --check "${LLVM_PATCH}" >/dev/null 2>&1; then
+    echo "LLVM patch already applied: ${LLVM_PATCH}"
+else
+    echo "Applying LLVM patch: ${LLVM_PATCH}"
+    git apply --check "${LLVM_PATCH}"
+    git apply "${LLVM_PATCH}"
+fi
+
 LLVM_COMMIT_RESOLVED=$(git rev-parse HEAD)
 popd
 echo "LLVM Commit:    $LLVM_COMMIT_RESOLVED"
@@ -72,16 +125,16 @@ else
     echo "Ninja not found. Using Unix Makefiles (this might be slower)."
 fi
 
-# Build only MLIR and necessary Clang tools, targeting native architecture, in Release mode
+# Build the selected LLVM projects and targets in Release mode.
 # Explicitly set nanobind directory if found to help CMake locate it
 NANOBIND_DIR=$(python3 -c "import nanobind; import os; print(os.path.dirname(nanobind.__file__) + '/cmake')")
 
 cmake -G "$GENERATOR" \
     -S "$LLVM_SRC_DIR/llvm" \
     -B "$LLVM_BUILD_DIR" \
-    -DLLVM_ENABLE_PROJECTS="mlir;clang;lld" \
-    -DLLVM_TARGETS_TO_BUILD="${LLVM_TARGETS_TO_BUILD:-X86;NVPTX;AMDGPU}" \
-    -DLLVM_ENABLE_RUNTIMES="compiler-rt" \
+    -DLLVM_ENABLE_PROJECTS="${LLVM_ENABLE_PROJECTS}" \
+    -DLLVM_TARGETS_TO_BUILD="${LLVM_TARGETS_TO_BUILD}" \
+    -DLLVM_ENABLE_RUNTIMES="${LLVM_ENABLE_RUNTIMES}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CXX_STANDARD=17 \
     -DLLVM_ENABLE_ASSERTIONS=ON \
