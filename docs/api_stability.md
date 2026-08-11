@@ -1,7 +1,7 @@
 # API Stability
 
-This document defines which `flydsl` APIs may be relied on across releases and
-the compatibility commitments that apply when they are changed. Its scope is
+This document defines which `flydsl` APIs you can rely on across releases and
+the compatibility commitments that apply when they change. Its scope is
 limited to `python/flydsl/`. Below, `fx` refers to `flydsl.expr`.
 
 A release means a minor-version increment (for example, `0.3` → `0.4`). A
@@ -26,8 +26,8 @@ non-underscore members and Python special methods are stable when reached
 through that result. This rule applies recursively to objects returned by those
 members.
 
-The concrete implementation class, its constructor, and its import path are not
-promised by this rule. They may change if the replacement preserves the result
+This rule does not promise the concrete implementation class, its constructor,
+or its import path. They may change if the replacement preserves the result
 interface's public members, signatures, and semantics. For example,
 `flyc.from_torch_tensor(x).mark_shape_dynamic(0)` is stable, while
 `flyc.from_torch_tensor(x)._ensure_spec()` is unstable.
@@ -149,12 +149,12 @@ APIs remain compatible but are intentionally excluded from this catalog.
 
 The APIs in the table below satisfy the stable rules in §2 but are marked as
 deprecated. They remain stable during the §5 window; new code must not use
-them, and a replacement must be provided before removal.
+them, and you must provide a replacement before removal.
 
 For direct-child module exports under §2.1, the deprecated status in this table
 also applies to `fx.<name>`, `fx.<module>.<name>`, and direct-import forms.
-This table is maintained separately as the compatibility-debt list and is
-excluded from the catalog above.
+FlyDSL maintains this table separately as the compatibility-debt list and
+excludes it from the catalog above.
 
 | API | Replacement or required work before removal | Declared removal release |
 |---|---|---|

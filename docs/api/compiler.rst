@@ -1,5 +1,5 @@
-Compiler & Pipeline
-===================
+Compiler and pipeline
+=====================
 
 FlyDSL includes a JIT compiler that traces Python kernel functions into MLIR
 and lowers them through the Fly dialect pipeline to GPU binaries.
@@ -35,15 +35,15 @@ The primary API for defining and compiling kernels:
   On first call it triggers JIT compilation; subsequent calls with the same type
   signature use a cached compiled artifact.
 
-Compilation Flow
+Compilation flow
 -----------------
 
 On first call, ``@flyc.jit`` runs the following pipeline:
 
-1. **AST Rewriting**: The Python source is parsed and rewritten to emit MLIR ops.
-2. **MLIR Module Construction**: Kernel body is traced into ``fly``, ``gpu``,
+1. **AST rewriting**: The Python source is parsed and rewritten to emit MLIR ops.
+2. **MLIR module construction**: The kernel body is traced into ``fly``, ``gpu``,
    ``arith``, ``scf``, ``memref``, and ``vector`` dialect ops.
-3. **Fly Pass Pipeline**: The module is lowered through three pass stages,
+3. **Fly pass pipeline**: The module is lowered through three pass stages,
    defined in ``RocmBackend._pipeline_parts()``
    (``python/flydsl/compiler/backends/rocm.py``). See
    :doc:`../architecture_guide` §3 for the per-pass table.
@@ -77,11 +77,11 @@ On first call, ``@flyc.jit`` runs the following pipeline:
 
       - ``gpu-module-to-binary{format=fatbin opts="..."}``
 
-4. **Cached Artifact**: The compiled binary is cached to disk
+4. **Cached artifact**: The compiled binary is cached to disk
    (``~/.flydsl/cache/``) keyed by the compiler toolchain hash and kernel
    type signature.
 
-Tensor Arguments
+Tensor arguments
 -----------------
 
 Use ``flyc.from_dlpack`` to convert PyTorch tensors into FlyDSL tensor
@@ -96,14 +96,14 @@ descriptors with layout metadata:
    )
    launch(tA, B, n, stream=torch.cuda.Stream())
 
-ROCDL Operations
+ROCDL operations
 -----------------
 
 The ``flydsl.expr.rocdl`` module provides AMD-specific operations:
 
 - **fx.rocdl.make_buffer_tensor** -- create buffer resource descriptor from tensor (CDNA buffer copy)
 - **fx.rocdl.BufferCopy32b** / **BufferCopy128b** -- buffer copy atoms
-- **fx.rocdl.MFMA** -- MFMA instruction atoms (CDNA3/CDNA4; e.g., ``MFMA(16, 16, 4, fx.Float32)``)
+- **fx.rocdl.MFMA** -- MFMA instruction atoms (CDNA3/CDNA4; for example, ``MFMA(16, 16, 4, fx.Float32)``)
 - **fx.rocdl.WMMA** / **fx.rocdl.WMMAScale** -- wave32 WMMA MMA atoms; ``WMMA`` is arch-dispatched (gfx11 / gfx120x RDNA4 / gfx1250), ``WMMAScale`` is the gfx1250 E8M0 MX-scaled form
 - **fx.rocdl.make_tdm_atom** / **fx.rocdl.TDM** -- gfx1250 TDM async Global↔LDS whole-tile copy atom (1–5D; base from the copy operand, per-dim extent/stride/imm_offset/mask as atom state)
 

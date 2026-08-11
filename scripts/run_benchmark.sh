@@ -971,7 +971,10 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     IFS=$oldIFS
     tokens=$1; model_dim=$2; inter_dim=$3; experts=$4; topk=$5; tile_m=$6; tile_n=$7; tile_k=$8; tile_n2=$9; tile_k2=${10}
     log="${BENCH_LOG_DIR}/moe_t${tokens}_md${model_dim}_id${inter_dim}_e${experts}_k${topk}.log"
-    if python3 tests/kernels/test_moe_gemm.py \
+    # fp8 MOE_SHAPES drive kernels/moe/moe_gemm_2stage (as in v0.3.0). #948 rerouted
+    # test_moe_gemm.py to mxfp_moe, which silently dropped these rows (exit 0, no
+    # output), so this points at the package's own CLI instead.
+    if FLYDSL_RUNTIME_ENABLE_CACHE=0 python3 tests/kernels/test_moe_gemm_2stage.py \
       --in_dtype fp8 \
       -dim "$model_dim,$inter_dim" \
       -t "$tokens" \
@@ -984,8 +987,7 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       --tile_k "$tile_k" \
       --tile_n2 "$tile_n2" \
       --tile_k2 "$tile_k2" \
-      --skip_ref false \
-      --compare_aiter_ck false >"${log}" 2>&1; then
+      --skip_ref false >"${log}" 2>&1; then
       SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
       _fail_or_skip "${log}" "moe"
@@ -1163,6 +1165,10 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     fi
   done
 fi
+
+# MoE 2-stage (kernels/moe/moe_gemm_2stage; CDNA only — uses MFMA).
+# Benchmarks stage1 and stage2 (atomic + reduce) via the test_moe_gemm_2stage.py
+# CLI. Uses in_dtype=fp8 to match the moe_gemm1/moe_gemm2 rows above.
 
 # RDNA WMMA GEMM benchmarks (gfx11* or gfx12*, via benchmark_common.py).
 # FP8 WMMA is gfx12-only and is skipped inside run_wmma_sweep on gfx11*.
