@@ -396,7 +396,7 @@ def test_gemm_a16w16_acc_main_loop(
         (1024, 128, 6144, 64, 64, 256, 2, 6, 2, 2, 1, True, 0, True),
         (1216, 64, 7168, 64, 64, 256, 2, 7, 2, 2, 1, False, 0, True),
         (1280, 64, 4096, 64, 64, 256, 2, 8, 2, 2, 1, False, 0, True),
-        # HTI split-K stress variants for timing-sensitive and boundary paths.
+        # Split-K stress variants for timing-sensitive and boundary paths.
         (1024, 64, 4096, 64, 64, 256, 2, 8, 2, 2, 1, False, 0, True),
         (1272, 64, 4096, 64, 64, 256, 2, 8, 2, 2, 1, False, 0, True),
         (1280, 72, 4096, 64, 64, 256, 2, 8, 2, 2, 1, False, 0, True),
@@ -404,6 +404,13 @@ def test_gemm_a16w16_acc_main_loop(
         (1280, 64, 4096, 64, 64, 256, 2, 8, 2, 2, 1, True, 0, True),
         (1280, 64, 4096, 64, 64, 128, 2, 8, 2, 2, 1, False, 0, True),
         (1280, 64, 4096, 64, 64, 256, 2, 4, 2, 2, 1, False, 0, True),
+        (1024, 64, 4096, 64, 64, 256, 2, 8, 2, 2, 1, False, 0, False),
+        (1272, 64, 4096, 64, 64, 256, 2, 8, 2, 2, 1, False, 0, False),
+        (1280, 72, 4096, 64, 64, 256, 2, 8, 2, 2, 1, False, 0, False),
+        (1280, 128, 4096, 64, 64, 256, 2, 8, 2, 2, 1, False, 0, False),
+        (1280, 64, 4096, 64, 64, 256, 2, 8, 2, 2, 1, True, 0, False),
+        (1280, 64, 4096, 64, 64, 128, 2, 8, 2, 2, 1, False, 0, False),
+        (1280, 64, 4096, 64, 64, 256, 2, 4, 2, 2, 1, False, 0, False),
     ],
 )
 def test_gemm_a16w16_acc_split_k(

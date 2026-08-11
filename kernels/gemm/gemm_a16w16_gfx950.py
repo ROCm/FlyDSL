@@ -125,7 +125,7 @@ def make_gemm_a16w16_gfx950_param(
         assert stg_work_size_per_m_step % cshuffle_r2g_vec_size == 0
         assert half_block_n % cshuffle_r2g_vec_size == 0
     else:
-        cshuffle_r2g_vec_size = max_cshuffle_r2g_vec_size
+        cshuffle_r2g_vec_size = min(max_cshuffle_r2g_vec_size, 4) if split_k > 1 else max_cshuffle_r2g_vec_size
         assert block_n % cshuffle_r2g_vec_size == 0
     smem_bytes = stages * (block_m + block_n) * block_k * in_dbytes
     smem_bytes = max(smem_bytes, k_waves * block_m * block_n * in_dbytes)
@@ -1081,6 +1081,8 @@ def gemm_a16w16_hti_gfx950_kernel(
 
     k_tile = main_loop_end
     # 0
+    if const_expr(is_split_k):
+        __barrier(0)
     b0 = load_b_fragment(0, 0)
     a0 = load_a_fragment(0, 0)
     async_load_a_to_lds(1, k_tile + 1, 1)

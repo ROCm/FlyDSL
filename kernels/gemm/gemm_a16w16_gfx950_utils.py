@@ -23,6 +23,16 @@ GFX950_WAVE_SIZE = 64
 SPLIT_K_SEMAPHORE_MAX_LEN = 256
 
 
+def __barrier(vmcnt=0):
+    llvm.InlineAsmOp(
+        None,
+        [],
+        f"s_waitcnt vmcnt({vmcnt})\n\ts_barrier",
+        "",
+        has_side_effects=True,
+    )
+
+
 _compiled_cache_lock = Lock()
 
 
@@ -222,7 +232,7 @@ class SplitKProtocol:
                             "v,v",
                             has_side_effects=True,
                         )
-            gpu.barrier()
+            __barrier(0)
             if self.tid == 0:
                 signal_ptr = get_llvm_ptr(
                     self.signal_ptr,
@@ -234,7 +244,7 @@ class SplitKProtocol:
                     arith.constant(1, type=T.i32),
                     signal_ptr,
                     alignment=4,
-                    ordering=llvm.AtomicOrdering.release,
+                    ordering=llvm.AtomicOrdering.monotonic,
                     syncscope="agent",
                 )
 
@@ -264,7 +274,7 @@ class SplitKProtocol:
                     T.i32,
                     signal_ptr,
                     alignment=4,
-                    ordering=llvm.AtomicOrdering.acquire,
+                    ordering=llvm.AtomicOrdering.monotonic,
                     syncscope="agent",
                 ).result
                 scf.YieldOp([cur])
@@ -370,16 +380,6 @@ def transposed_contiguous_idx(idx, k_idx, layout, rows):
     # vector that belongs at that position.
     elem_offset = fx.get_scalar(fx.crd2idx((idx, k_idx), layout))
     return elem_offset % rows
-
-
-def __barrier(vmcnt=0):
-    llvm.InlineAsmOp(
-        None,
-        [],
-        f"s_waitcnt vmcnt({vmcnt})\n\ts_barrier",
-        "",
-        has_side_effects=True,
-    )
 
 
 def buffer_load_lds_inline(rsrc, lds_ptr, global_offset, DMA_BYTES):
