@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-11T14:54:17Z",
+ "updated": "2026-08-11T15:11:24Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31505500173,
+   "pr": 960,
+   "commit": "ebeaa5eee9798f6315a21da00f802a8f70c9a4f3",
+   "branch": "new_bias_alibi_sink_attention",
+   "event": "pull_request",
+   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31505500173",
+   "created_at": "2026-08-11T15:09:30Z",
+   "updated_at": "2026-08-11T15:10:17Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
+  {
+   "run_id": 31504375912,
+   "pr": 971,
+   "commit": "f5482e98816a26b146ef52e9f733db9e9dc525ea",
+   "branch": "gfx1250/gemm-opt-0805",
+   "event": "pull_request",
+   "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31504375912",
+   "created_at": "2026-08-11T14:57:11Z",
+   "updated_at": "2026-08-11T14:59:05Z",
+   "actor": "aoli26",
+   "jobs": []
+  },
   {
    "run_id": 31503614621,
    "pr": 971,
@@ -25,13 +55,41 @@
    "branch": "feature/typed-arithmetic-modernization",
    "event": "pull_request",
    "title": "[wip] Add type-aware extrema and integer ceil-division APIs",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492623191",
    "created_at": "2026-08-11T12:43:46Z",
-   "updated_at": "2026-08-11T13:51:05Z",
+   "updated_at": "2026-08-11T15:05:36Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-11T15:06:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492623191/job/93824733702"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-11T15:08:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492623191/job/93824733922"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-11T15:05:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492623191/job/93824733956"
+    }
+   ]
   },
   {
    "run_id": 31492613020,
@@ -59,10 +117,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-11T14:47:53Z",
-     "completed_at": null,
+     "completed_at": "2026-08-11T15:01:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492613020/job/93816366516"
     },
     {
@@ -98,28 +156,28 @@
    "branch": "main",
    "event": "push",
    "title": "CI: upgrade PyTorch images to ROCm 7.14 (#989)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492517857",
    "created_at": "2026-08-11T12:42:29Z",
-   "updated_at": "2026-08-11T13:50:27Z",
+   "updated_at": "2026-08-11T15:07:39Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-11T13:51:51Z",
-     "completed_at": null,
+     "completed_at": "2026-08-11T15:08:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492517857/job/93801446133"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-11T13:50:27Z",
+     "started_at": "2026-08-11T15:07:30Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492517857/job/93801446160"
     },
@@ -445,16 +503,16 @@
   },
   {
    "run_id": 31468523970,
-   "pr": 960,
+   "pr": null,
    "commit": "10b38d032eeb1edec5e62161ceab280b0a5e87a3",
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31468523970",
    "created_at": "2026-08-11T07:20:03Z",
-   "updated_at": "2026-08-11T11:02:04Z",
+   "updated_at": "2026-08-11T15:10:17Z",
    "actor": "amd-nprotaso",
    "jobs": [
     {
@@ -478,10 +536,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-11T11:02:03Z",
-     "completed_at": null,
+     "completed_at": "2026-08-11T15:10:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31468523970/job/93736712949"
     }
    ]
@@ -1635,36 +1693,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31356714967",
    "created_at": "2026-08-10T04:49:53Z",
    "updated_at": "2026-08-10T05:54:18Z",
-   "actor": "xytpai",
-   "jobs": []
-  },
-  {
-   "run_id": 31356320795,
-   "pr": null,
-   "commit": "1e30a16cad1040aae9d4f8d3d3c0e63d4589d658",
-   "branch": "xyt/gemm16_950",
-   "event": "pull_request",
-   "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31356320795",
-   "created_at": "2026-08-10T04:42:13Z",
-   "updated_at": "2026-08-10T04:43:34Z",
-   "actor": "xytpai",
-   "jobs": []
-  },
-  {
-   "run_id": 31356035418,
-   "pr": null,
-   "commit": "459a1bb81be59f2c4edd7b4586b5aa30ea0acbde",
-   "branch": "xyt/gemm16_950",
-   "event": "pull_request",
-   "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31356035418",
-   "created_at": "2026-08-10T04:36:47Z",
-   "updated_at": "2026-08-10T04:38:00Z",
    "actor": "xytpai",
    "jobs": []
   }
