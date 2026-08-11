@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-11T12:28:37Z",
+ "updated": "2026-08-11T12:31:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "main",
    "event": "push",
    "title": "docs: Update docs style to fit style guide (#982)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31491222281",
    "created_at": "2026-08-11T12:26:27Z",
-   "updated_at": "2026-08-11T12:26:53Z",
+   "updated_at": "2026-08-11T12:29:06Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-11T12:29:01Z",
+     "completed_at": "2026-08-11T12:29:03Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31491222281/job/93778339020"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-11T12:29:01Z",
+     "completed_at": "2026-08-11T12:29:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31491222281/job/93778339035"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-11T12:29:01Z",
+     "completed_at": "2026-08-11T12:29:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31491222281/job/93778339064"
+    }
+   ]
   },
   {
    "run_id": 31485780752,
@@ -40,13 +68,32 @@
    "branch": "mega_moe_a4w4",
    "event": "pull_request",
    "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31476253355",
    "created_at": "2026-08-11T09:07:06Z",
-   "updated_at": "2026-08-11T10:58:48Z",
+   "updated_at": "2026-08-11T12:29:18Z",
    "actor": "Yaowu-Xiong",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-11T12:29:18Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31476253355/job/93778693349"
+    },
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-11T12:29:18Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31476253355/job/93778693462"
+    }
+   ]
   },
   {
    "run_id": 31474702073,
@@ -1209,9 +1256,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-11T11:00:19Z",
+     "started_at": "2026-08-11T12:29:13Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31364678789/job/93757280656"
     },
