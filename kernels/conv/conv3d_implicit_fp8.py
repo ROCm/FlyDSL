@@ -1,486 +1,42 @@
-"""8-wave double-buffered implicit-GEMM conv3d (FP8, CDNA4 only).
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
 
-x: (N, C, D, H, W) bf16 NCDHW, weight: (K, C, T, R, S) bf16 KCTRS.
-Returns (N, K, Do, Ho, Wo) bf16. Requires gfx95x; C%128==0, CRS%128==0, NPQ%128==0.
+"""Implicit-GEMM conv3d (FP8, CDNA4) on the ``fp8_gemm_8wave`` pipeline.
+
+Only the A-operand loader is conv-specific: it computes im2col addresses into the
+swizzled half-block LDS layout ``S2RLoader`` reads. B (weight) is a plain KTRSC
+``(k, crs)`` matrix, so ``G2SLoader`` is reused verbatim.
+
+x: (N, C, D, H, W) fp8 E4M3FN, weight: (K, C, T, R, S) fp8. Returns
+(N, K, Do, Ho, Wo) bf16. No scales, no split-K. Requires ``c % 16 == 0``;
+N-partial, K-partial and tiny-K shapes are handled via OOB/masked zeros.
 """
 
 import functools
+import os
 import weakref
 
 import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir import ir as _ir
 from flydsl._mlir.dialects import llvm
+from flydsl._mlir.dialects import llvm as _llvm
+from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TAS
 from flydsl.expr import arith, const_expr, range_constexpr
-from flydsl.expr.typing import T
+from flydsl.expr.typing import Vector as Vec
+from flydsl.expr.utils.arith import ArithValue as _ArithValue
 from kernels.common import buffer_ops
-from kernels.common.mem_ops import buffer_atomic_add
-from kernels.gemm.fp8_gemm_utils import make_fp8_buffer_tensor, pack_i32x4_i32x8
-
-TILE_M = 128
-TILE_N = 128
-TILE_K = 128
-STAGES = 2
-
-WAVE_M = 2
-WAVE_N = 4
-WARP_SIZE = 64
-BLOCK_THREADS = WAVE_M * WAVE_N * WARP_SIZE
-
-MFMA_M = 16
-MFMA_N = 16
-MFMA_C_VALUES = 4
-
-HALF_M = TILE_M // 2
-HALF_N = TILE_N // 2
-QM_STEPS = HALF_M // WAVE_M // MFMA_M
-QN_STEPS = HALF_N // WAVE_N // MFMA_N
-N_SUB = QM_STEPS * QN_STEPS
-
-assert QM_STEPS == 2 and QN_STEPS == 1
-
-LDG_VEC = 16
-HALF_TILE_VECS = HALF_M * TILE_K // (LDG_VEC * BLOCK_THREADS)
-assert HALF_TILE_VECS == 1
-
-LDS_A_SIZE = STAGES * TILE_M * TILE_K
-LDS_B_SIZE = STAGES * TILE_N * TILE_K
-PACK_BLOCK_THREADS = 256
-
-PACK_TR_TILE = 64
-PACK_TR_VEC = 8
-PACK_TR_THREADS = 256
-PACK_TR_VPL = PACK_TR_TILE // PACK_TR_VEC
-PACK_TR_ITERS = (PACK_TR_TILE * PACK_TR_TILE) // (PACK_TR_VEC * PACK_TR_THREADS)
-PACK_TR_PAD = 8
-PACK_TR_LDS_S = PACK_TR_TILE + PACK_TR_PAD
-
-_WEIGHT_FP8_CACHE = {}
-
-
-@functools.lru_cache(maxsize=64)
-def compile_pack_activation_ncdhw_bf16_to_ndhwc_fp8(n, c, d, h, width):
-    """Pack activation BF16 NCDHW -> FP8 bytes in NDHWC order (transpose + cast)."""
-    assert c % PACK_TR_VEC == 0, f"tiled FP8 pack needs C % {PACK_TR_VEC} == 0, got C={c}"
-    dhw = d * h * width
-    assert dhw % PACK_TR_VEC == 0, f"tiled FP8 pack needs DHW % {PACK_TR_VEC} == 0, got DHW={dhw}"
-    total_bytes = n * c * dhw
-    grid_s = (dhw + PACK_TR_TILE - 1) // PACK_TR_TILE
-    grid_c = (c + PACK_TR_TILE - 1) // PACK_TR_TILE
-    elem_ty = fx.BFloat16
-
-    @flyc.kernel(known_block_size=[PACK_TR_THREADS, 1, 1])
-    def pack_x_kernel(out: fx.Tensor, x: fx.Tensor):
-        out_rsrc = buffer_ops.create_buffer_resource(out, max_size=False, num_records_bytes=total_bytes)
-        x_rsrc = buffer_ops.create_buffer_resource(x, max_size=False, num_records_bytes=total_bytes * 2)
-        lds_alloc = fx.SharedAllocator(static=False)
-        lds = lds_alloc.allocate(fx.Array[elem_ty, PACK_TR_TILE * PACK_TR_LDS_S, 16]).peek()
-
-        Vec = fx.Vector
-
-        class Vec8Ty:
-            ir_type = Vec.make_type(PACK_TR_VEC, elem_ty)
-
-        class BF16Ty:
-            ir_type = elem_ty.ir_type
-
-        tid = fx.thread_idx.x
-        s0 = fx.block_idx.x * PACK_TR_TILE
-        c0 = fx.block_idx.y * PACK_TR_TILE
-        nb = fx.block_idx.z
-        in_base = nb * c * dhw
-        out_base = nb * dhw * c
-
-        def lds_store_vec8(elem_offset, value):
-            base = fx.Int64(fx.ptrtoint(lds.ptr)) + fx.Int64(elem_offset * 2)
-            ptr = buffer_ops.create_llvm_ptr(base, address_space=3)
-            llvm.StoreOp(value, ptr, alignment=16)
-
-        def lds_load_scalar(elem_offset):
-            u8 = fx.recast_iter(fx.Uint8, lds.ptr)
-            return fx.ptr_load(u8 + fx.Int32(elem_offset * 2), result_type=BF16Ty)
-
-        # Read coalesced along contiguous S from NCDHW into LDS[c_local, s_local].
-        for i in range_constexpr(PACK_TR_ITERS):
-            lin = tid + i * PACK_TR_THREADS
-            rc = lin // PACK_TR_VPL
-            sv = (lin % PACK_TR_VPL) * PACK_TR_VEC
-            cc = c0 + rc
-            ss = s0 + sv
-            valid = (cc < c) & (ss < dhw)
-            g = fx.Int32(in_base + cc * dhw + ss)
-            safe = arith.select(valid, g, fx.Int32(0))
-            v = buffer_ops.buffer_load(x_rsrc, safe, vec_width=PACK_TR_VEC, dtype=elem_ty)
-            lds_store_vec8(rc * PACK_TR_LDS_S + sv, v)
-
-        llvm.InlineAsmOp(None, [], "s_waitcnt lgkmcnt(0)\n\ts_barrier", "", has_side_effects=True)
-
-        # Read LDS transposed and store FP8-packed dwords along contiguous C.
-        for i in range_constexpr(PACK_TR_ITERS):
-            lin = tid + i * PACK_TR_THREADS
-            rs = lin // PACK_TR_VPL
-            cv = (lin % PACK_TR_VPL) * PACK_TR_VEC
-            ss = s0 + rs
-            cc = c0 + cv
-            valid = (ss < dhw) & (cc < c)
-            if valid:
-                scalars = [
-                    lds_load_scalar((cv + j) * PACK_TR_LDS_S + rs).to(fx.Float32) for j in range_constexpr(PACK_TR_VEC)
-                ]
-                lo0 = fx.rocdl.cvt_pk_fp8_f32(T.i32, scalars[0], scalars[1], fx.Int32(0), False)
-                p0 = fx.rocdl.cvt_pk_fp8_f32(T.i32, scalars[2], scalars[3], lo0, True)
-                lo1 = fx.rocdl.cvt_pk_fp8_f32(T.i32, scalars[4], scalars[5], fx.Int32(0), False)
-                p1 = fx.rocdl.cvt_pk_fp8_f32(T.i32, scalars[6], scalars[7], lo1, True)
-                packed = fx.Vector.from_elements([p0, p1], fx.Int32)
-                byte_off = out_base + ss * c + cc
-                buffer_ops.buffer_store(packed, out_rsrc, byte_off, offset_is_bytes=True)
-
-    @flyc.jit
-    def launch(out: fx.Tensor, x: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
-        pack_x_kernel(out, x).launch(
-            grid=(grid_s, grid_c, n),
-            block=(PACK_TR_THREADS, 1, 1),
-            stream=stream,
-        )
-
-    return launch
-
-
-@functools.lru_cache(maxsize=64)
-def compile_pack_weight_kctrs_bf16_to_ktrsc_fp8(k, c, kt, kh, kw):
-    """Pack weight BF16 KCTRS -> FP8 bytes in KTRSC order (transpose + cast)."""
-    assert c % 4 == 0, f"FP8 pack stores 4 channels per dword, got C={c}"
-    trs = kt * kh * kw
-    total_bytes = k * c * trs
-    total_packs = total_bytes // 4
-    grid_x = (total_packs + PACK_BLOCK_THREADS - 1) // PACK_BLOCK_THREADS
-
-    @flyc.kernel(known_block_size=[PACK_BLOCK_THREADS, 1, 1])
-    def pack_w_kernel(out: fx.Tensor, weight: fx.Tensor):
-        out_rsrc = buffer_ops.create_buffer_resource(out, max_size=False, num_records_bytes=total_bytes)
-        w_rsrc = buffer_ops.create_buffer_resource(weight, max_size=False, num_records_bytes=total_bytes * 2)
-
-        pack_idx = fx.block_idx.x * PACK_BLOCK_THREADS + fx.thread_idx.x
-        if pack_idx < fx.Index(total_packs):
-            c_pack = pack_idx % (c // 4)
-            rest = pack_idx // (c // 4)
-            c_base = c_pack * 4
-            k_idx = rest // trs
-            trs_idx = rest % trs
-
-            src_base = (k_idx * c + c_base) * trs + trs_idx
-            v0 = buffer_ops.buffer_load(w_rsrc, src_base, vec_width=1, dtype=fx.BFloat16).extf(T.f32)
-            v1 = buffer_ops.buffer_load(w_rsrc, src_base + fx.Index(trs), vec_width=1, dtype=fx.BFloat16).extf(T.f32)
-            v2 = buffer_ops.buffer_load(w_rsrc, src_base + fx.Index(2 * trs), vec_width=1, dtype=fx.BFloat16).extf(
-                T.f32
-            )
-            v3 = buffer_ops.buffer_load(w_rsrc, src_base + fx.Index(3 * trs), vec_width=1, dtype=fx.BFloat16).extf(
-                T.f32
-            )
-            lo = fx.rocdl.cvt_pk_fp8_f32(T.i32, v0, v1, fx.Int32(0), False)
-            packed = fx.rocdl.cvt_pk_fp8_f32(T.i32, v2, v3, lo, True)
-            buffer_ops.buffer_store(packed, out_rsrc, pack_idx * 4, offset_is_bytes=True)
-
-    @flyc.jit
-    def launch(out: fx.Tensor, weight: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
-        pack_w_kernel(out, weight).launch(
-            grid=(grid_x, 1, 1),
-            block=(PACK_BLOCK_THREADS, 1, 1),
-            stream=stream,
-        )
-
-    return launch
-
-
-@functools.lru_cache(maxsize=64)
-def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias=False, splitk=1):
-    """Compile the FP8 conv: x is NDHWC FP8 bytes, weight is KTRSC FP8 bytes."""
-    do = (d + 2 * pt - kt) // st + 1
-    ho = (h + 2 * ph - kh) // sh + 1
-    wo = (width + 2 * pw - kw) // sw + 1
-    dhw = do * ho * wo
-    hw_o = ho * wo
-    npq = n * dhw
-    crs = c * kt * kh * kw
-    k_tiles = (crs + TILE_K - 1) // TILE_K
-
-    assert c % LDG_VEC == 0, f"FP8 vector load needs C % {LDG_VEC} == 0, got C={c}"
-    assert k_tiles >= 1
-
-    splitk = max(1, min(splitk, k_tiles))
-    while k_tiles % splitk != 0:
-        splitk -= 1
-    tiles_per_split = k_tiles // splitk
-    use_splitk = splitk > 1
-
-    grid_m = (npq + TILE_M - 1) // TILE_M
-    grid_n = (k + TILE_N - 1) // TILE_N
-    # Padded M rows only exist when npq is not tile-aligned; mirrors _row_chk in
-    # the BF16 kernel so aligned shapes emit no extra compare.
-    row_chk = npq % TILE_M != 0
-    elem_ty = fx.Float8E4M3FN
-
-    @flyc.kernel(known_block_size=[BLOCK_THREADS, 1, 1])
-    def conv3d_8wave_fp8_kernel(y: fx.Tensor, x: fx.Tensor, weight: fx.Tensor, bias: fx.Tensor):
-        x_num_records = n * d * h * width * c
-        y_rsrc = buffer_ops.create_buffer_resource(
-            y, max_size=False, num_records_bytes=npq * k * (4 if const_expr(use_splitk) else 2)
-        )
-        if const_expr(has_bias):
-            bias_rsrc = buffer_ops.create_buffer_resource(bias, max_size=False, num_records_bytes=k * 4)
-
-        f8_ir_t = elem_ty.ir_type
-        x_buf = make_fp8_buffer_tensor(x, f8_ir_t)
-        x_div = fx.logical_divide(x_buf, fx.make_layout(1, 1))
-        w_buf = make_fp8_buffer_tensor(weight, f8_ir_t)
-        w_div = fx.logical_divide(w_buf, fx.make_layout(1, 1))
-
-        lds_alloc = fx.SharedAllocator(static=False)
-        a_lds = lds_alloc.allocate(fx.Array[elem_ty, LDS_A_SIZE, 16]).peek()
-        b_lds = lds_alloc.allocate(fx.Array[elem_ty, LDS_B_SIZE, 16]).peek()
-
-        tid = fx.thread_idx.x
-        m_offset = fx.block_idx.x * TILE_M
-        n_offset = fx.block_idx.y * TILE_N
-        if const_expr(use_splitk):
-            k_off = fx.block_idx.z * (tiles_per_split * TILE_K)
-        else:
-            k_off = fx.Index(0)
-
-        wid = tid // WARP_SIZE
-        lane = tid % WARP_SIZE
-        wave_m = wid // WAVE_N
-        wave_n = wid % WAVE_N
-        lane_div_16 = lane // MFMA_N
-        lane_mod_16 = lane % MFMA_N
-        c_m_vec = lane_div_16 * MFMA_C_VALUES
-        c_n = lane_mod_16
-
-        # 16x16x128 FP8 MFMA via the layout API, built in-kernel (a tiled_mma
-        # kernel-arg compiles warm but fails cold-compile).
-        mma_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, elem_ty))
-        Vec = fx.Vector
-        mfma_zero = Vec.filled(MFMA_C_VALUES, 0.0, fx.Float32)
-        acc00 = [mfma_zero for _ in range_constexpr(N_SUB)]
-        acc01 = [mfma_zero for _ in range_constexpr(N_SUB)]
-        acc10 = [mfma_zero for _ in range_constexpr(N_SUB)]
-        acc11 = [mfma_zero for _ in range_constexpr(N_SUB)]
-
-        class Vec16U8Ty:
-            ir_type = Vec.make_type(16, fx.Uint8)
-
-        def barrier():
-            # Wait for the in-flight global->LDS copies (vmcnt) and LDS reads
-            # (lgkmcnt) of this stage before the next stage reuses the buffers.
-            llvm.InlineAsmOp(None, [], "s_waitcnt vmcnt(0) lgkmcnt(0)\n\ts_barrier", "", has_side_effects=True)
-
-        def a_lds_off(stage, row, col):
-            return (fx.Index(stage) * TILE_M + row) * TILE_K + col
-
-        def b_lds_off(stage, row, col):
-            return (fx.Index(stage) * TILE_N + row) * TILE_K + col
-
-        def in_range(v, hi):
-            return (v >= 0) & (v < fx.Index(hi))
-
-        g2s_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
-        LdsPtrTy = fx.PointerType.get(f8_ir_t, 2, 512)
-
-        def copy_g2s(src_div, lds_array, elem_offset, src_elem):
-            lds_byte_addr = fx.Int32(fx.ptrtoint(lds_array.ptr)) + fx.Int32(elem_offset)
-            lds_ptr = fx.inttoptr(LdsPtrTy, lds_byte_addr)
-            dst = fx.make_view(lds_ptr, fx.make_layout(1, 1))
-            src = fx.slice(src_div, (None, fx.Int32(src_elem)))
-            fx.copy(g2s_atom, src, dst)
-
-        # ---- 3D im2col gather: global FP8 -> LDS (direct async copy) ----
-        def g2s_a_half(stage, m_half, k_base):
-            linear = tid * LDG_VEC
-            local_m = linear // TILE_K
-            local_k = linear % TILE_K
-            row = m_offset + m_half * HALF_M + local_m
-            row_valid = row < fx.Index(npq)
-            n_idx = row // dhw
-            rem = row % dhw
-            ot = rem // hw_o
-            rem2 = rem % hw_o
-            oh = rem2 // wo
-            ow = rem2 % wo
-            lds_elem = a_lds_off(stage, fx.Index(m_half * HALF_M) + local_m, local_k)
-            k_abs = fx.Index(k_base) + fx.Index(local_k)
-            cc = k_abs % c
-            ckk = k_abs // c
-            kw_i = ckk % kw
-            ckk2 = ckk // kw
-            kh_i = ckk2 % kh
-            kt_i = ckk2 // kh
-            in_t = ot * st + kt_i - pt
-            in_h = oh * sh + kh_i - ph
-            in_w = ow * sw + kw_i - pw
-            k_valid = k_abs < fx.Index(crs)
-            valid_data = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, width)
-            g_elem = (((n_idx * d + in_t) * h + in_h) * width + in_w) * c + cc
-            g_elem_i = fx.Int32(g_elem)
-            safe_elem = arith.select(valid_data, g_elem_i, fx.Int32(x_num_records))
-            copy_g2s(x_div, a_lds, lds_elem, safe_elem)
-
-        def g2s_b_half(stage, n_half, k_base):
-            linear = tid * LDG_VEC
-            local_n = linear // TILE_K
-            local_k = linear % TILE_K
-            col = n_offset + fx.Index(n_half * HALF_N) + local_n
-            lds_elem = b_lds_off(stage, fx.Index(n_half * HALF_N) + local_n, local_k)
-            g_elem = col * crs + (fx.Index(k_base) + fx.Index(local_k))
-            g_elem_i = fx.Int32(g_elem)
-            copy_g2s(w_div, b_lds, lds_elem, g_elem_i)
-
-        def g2s_full_tile(stage, k_base):
-            g2s_a_half(stage, 0, k_base)
-            g2s_a_half(stage, 1, k_base)
-            g2s_b_half(stage, 0, k_base)
-            g2s_b_half(stage, 1, k_base)
-
-        def lds_load_vec16(lds_array, elem_offset):
-            u8_ptr = fx.recast_iter(fx.Uint8, lds_array.ptr)
-            return fx.ptr_load(u8_ptr + fx.Int32(elem_offset), result_type=Vec16U8Ty)
-
-        def lds_load_pack(lds_array, elem_offset):
-            lo = lds_load_vec16(lds_array, elem_offset).bitcast(fx.Int32)
-            hi = lds_load_vec16(lds_array, elem_offset + fx.Index(64)).bitcast(fx.Int32)
-            return pack_i32x4_i32x8(lo, hi)
-
-        def read_a_vec(stage, m_half, wm):
-            a_row = m_half * HALF_M + wave_m * (HALF_M // WAVE_M) + wm * MFMA_M + lane_mod_16
-            a_col = lane_div_16 * 16
-            return lds_load_pack(a_lds, a_lds_off(stage, fx.Index(a_row), fx.Index(a_col)))
-
-        def read_b_vec(stage, n_half, wn):
-            b_row = n_half * HALF_N + wave_n * (HALF_N // WAVE_N) + wn * MFMA_N + lane_mod_16
-            b_col = lane_div_16 * 16
-            return lds_load_pack(b_lds, b_lds_off(stage, fx.Index(b_row), fx.Index(b_col)))
-
-        def setprio(level):
-            llvm.InlineAsmOp(None, [], f"s_setprio {level}", "", has_side_effects=True)
-
-        def _do_mma(a, b, c):
-            # split-16@64 packed i32x8 fragments feed the MFMA_Scale atom via fx.gemm.
-            a_frag = fx.make_rmem_tensor(8, fx.Int32)
-            a_frag.store(Vec(a))
-            b_frag = fx.make_rmem_tensor(8, fx.Int32)
-            b_frag.store(Vec(b))
-            c_frag = fx.make_rmem_tensor(MFMA_C_VALUES, fx.Float32)
-            c_frag.store(Vec(c))
-            fx.gemm(mma_atom, c_frag, a_frag, b_frag, c_frag)
-            return c_frag.load().ir_value()
-
-        def mfma_one(a, b, c_acc):
-            out = _do_mma(a, b, c_acc)
-            fx.rocdl.sched_mfma(1)
-            return out
-
-        # ---- software-pipelined main loop ----
-        stage = 0
-        next_stage = 1
-        g2s_full_tile(stage, k_off)
-        barrier()
-        a0_0 = read_a_vec(stage, 0, 0)
-        a0_1 = read_a_vec(stage, 0, 1)
-        b0_0 = read_b_vec(stage, 0, 0)
-        fx.rocdl.sched_dsrd(3)
-
-        for kt_idx in range_constexpr(tiles_per_split):
-            # prefetch next tile: global -> LDS (async)
-            if const_expr(kt_idx + 1 < tiles_per_split):
-                g2s_full_tile(next_stage, k_off + (kt_idx + 1) * TILE_K)
-
-            setprio(1)
-            # acc00 = a0 . b0
-            acc00[0] = mfma_one(a0_0, b0_0, acc00[0])
-            b1_0 = read_b_vec(stage, 1, 0)
-            fx.rocdl.sched_dsrd(1)
-            acc00[1] = mfma_one(a0_1, b0_0, acc00[1])
-
-            # acc01 = a0 . b1
-            acc01[0] = mfma_one(a0_0, b1_0, acc01[0])
-            a1_0 = read_a_vec(stage, 1, 0)
-            fx.rocdl.sched_dsrd(1)
-            acc01[1] = mfma_one(a0_1, b1_0, acc01[1])
-            a1_1 = read_a_vec(stage, 1, 1)
-            fx.rocdl.sched_dsrd(1)
-
-            # acc10 = a1 . b0
-            acc10[0] = mfma_one(a1_0, b0_0, acc10[0])
-            acc10[1] = mfma_one(a1_1, b0_0, acc10[1])
-
-            # acc11 = a1 . b1
-            acc11[0] = mfma_one(a1_0, b1_0, acc11[0])
-            acc11[1] = mfma_one(a1_1, b1_0, acc11[1])
-            setprio(0)
-
-            if const_expr(kt_idx + 1 < tiles_per_split):
-                barrier()
-                stage = next_stage
-                next_stage = (stage + 1) % STAGES
-                a0_0 = read_a_vec(stage, 0, 0)
-                a0_1 = read_a_vec(stage, 0, 1)
-                b0_0 = read_b_vec(stage, 0, 0)
-                fx.rocdl.sched_dsrd(3)
-
-        def store_half_pair(acc0, acc1, m_half):
-            for wm in range_constexpr(QM_STEPS):
-                row_base = m_offset + m_half * HALF_M + wave_m * (HALF_M // WAVE_M) + wm * MFMA_M + c_m_vec
-                for n_half in range_constexpr(2):
-                    acc = acc0 if const_expr(n_half == 0) else acc1
-                    for wn in range_constexpr(QN_STEPS):
-                        col = n_offset + fx.Index(n_half * HALF_N + wave_n * (HALF_N // WAVE_N) + wn * MFMA_N) + c_n
-                        col_valid = col < fx.Index(k)
-                        if const_expr(has_bias and not use_splitk):
-                            bias_val = fx.Float32(buffer_ops.buffer_load(bias_rsrc, col, vec_width=1, dtype=fx.Float32))
-                        acc_vec = Vec(acc[wm * QN_STEPS + wn])
-                        for i in range_constexpr(MFMA_C_VALUES):
-                            row = row_base + i
-                            out = acc_vec[i]
-                            if const_expr(use_splitk):
-                                # Atomics ignore hardware OOB suppression; guard explicitly.
-                                valid = (col < fx.Index(k)) & (row < fx.Index(npq))
-                                if valid:
-                                    off_b = fx.Int32((row * k + col) * 4)
-                                    z0 = fx.Int32(0)
-                                    buffer_atomic_add(out, y_rsrc, off_b, z0, z0)
-                            else:
-                                if const_expr(has_bias):
-                                    out = out + bias_val
-                                # NCDHW output[n_idx, col, sp]: n_idx*(k*dhw) + col*dhw + sp.
-                                # n==1 fast path: n_idx=0, sp=row, no integer division.
-                                if const_expr(n == 1):
-                                    off_ncdhw = col * dhw + row
-                                else:
-                                    n_idx = row // dhw
-                                    sp = row % dhw
-                                    off_ncdhw = n_idx * (k * dhw) + col * dhw + sp
-                                # Padded M rows (npq..grid_m*TILE_M) must not store: with the
-                                # n==1 layout col*dhw+row they alias real elements of a later
-                                # column and race legitimate stores from another block.
-                                store_mask = col_valid
-                                if const_expr(row_chk):
-                                    store_mask = col_valid & (row < fx.Index(npq))
-                                buffer_ops.buffer_store(out.to(fx.BFloat16), y_rsrc, off_ncdhw, mask=store_mask)
-
-        store_half_pair(acc00, acc01, 0)
-        store_half_pair(acc10, acc11, 1)
-
-    @flyc.jit
-    def launch(y: fx.Tensor, x: fx.Tensor, weight: fx.Tensor, bias: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
-        conv3d_8wave_fp8_kernel(
-            y,
-            x,
-            weight,
-            bias,
-            value_attrs={"rocdl.waves_per_eu": 2, "rocdl.flat_work_group_size": "512,512"},
-        ).launch(grid=(grid_m, grid_n, splitk), block=(BLOCK_THREADS, 1, 1), stream=stream)
-
-    return launch
+from kernels.gemm.fp8_gemm_utils import (
+    G2SLoader,
+    Mfma16x16x128,
+    S2RLoader,
+    compute_global_swizzle,
+    make_fp8_buffer_tensor,
+    swizzle_128,
+    wait_barrier,
+)
 
 
 def _normalize_3(v):
@@ -490,111 +46,669 @@ def _normalize_3(v):
     return tuple(v)
 
 
-def _choose_splitk(npq, crs, k, device):
-    if npq % TILE_M != 0 or k % TILE_N != 0 or crs % TILE_K != 0:
-        return 1
-    base = (npq // TILE_M) * (k // TILE_N)
-    k_tiles = (crs + TILE_K - 1) // TILE_K
-    if npq < 4096 or k_tiles < 16:
-        return 1
-    try:
-        num_cu = torch.cuda.get_device_properties(device).multi_processor_count
-    except Exception:
-        num_cu = 256
-    if base >= (3 * num_cu) // 4:
-        return 1
-    sk = min(4, max(1, num_cu // base), k_tiles)
-    while sk > 1 and k_tiles % sk != 0:
-        sk -= 1
-    return sk
+def _make_fp8_buffer_tensor_from_addr(addr_i64, fp8_ir_t, ref_buf_tensor):
+    """Rebase an FP8 buffer tensor onto a raw i64 byte address.
 
+    The 2 GB num_records bound ensures OOB-routed padding taps read zero.
+    """
+    from flydsl.expr.rocdl.universal import make_ptr
 
-def _resolve_splitk(splitk, npq, crs, k, device):
-    sk = _choose_splitk(npq, crs, k, device) if splitk is None else max(1, int(splitk))
-    k_tiles = (crs + TILE_K - 1) // TILE_K
-    sk = max(1, min(sk, k_tiles))
-    while sk > 1 and k_tiles % sk != 0:
-        sk -= 1
-    MAX_TILES_PER_SPLIT = 54
-    tiles_per_split = k_tiles // sk
-    if tiles_per_split > MAX_TILES_PER_SPLIT:
-        min_sk = (k_tiles + MAX_TILES_PER_SPLIT - 1) // MAX_TILES_PER_SPLIT
-        for candidate in range(min_sk, k_tiles + 1):
-            if k_tiles % candidate == 0 and k_tiles // candidate <= MAX_TILES_PER_SPLIT:
-                sk = candidate
-                break
-    return sk
-
-
-def pack_activation_ncdhw_bf16_to_ndhwc_fp8(x: torch.Tensor, stream=None) -> torch.Tensor:
-    """BF16 NCDHW activation -> int8 storage of FP8 E4M3FN in NDHWC order."""
-    assert x.dtype == torch.bfloat16, f"expected BF16 activation, got {x.dtype}"
-    n, c, d, h, width = x.shape
-    s = d * h * width
-    out_numel = n * d * h * width * c
-    if not (x.is_contiguous() and c % PACK_TR_VEC == 0 and s % PACK_TR_VEC == 0):
-        return x.to(torch.float8_e4m3fn).permute(0, 2, 3, 4, 1).contiguous().view(torch.int8).view(-1)
-    out = torch.empty((out_numel,), device=x.device, dtype=torch.int8)
-    exe = compile_pack_activation_ncdhw_bf16_to_ndhwc_fp8(n, c, d, h, width)
-    exe(
-        flyc.from_torch_tensor(out),
-        flyc.from_torch_tensor(x.contiguous()),
-        torch.cuda.current_stream() if stream is None else stream,
+    BIG_ASYNC_NR = 0x80000000  # 2 GB
+    alignment = fx.PointerType(fx.get_iter(ref_buf_tensor).type).alignment
+    f8_ptr_ty = fx.PointerType.get(
+        elem_ty=fp8_ir_t,
+        address_space=_TAS.BufferDesc,
+        alignment=alignment,
     )
-    return out
-
-
-def pack_weight_kctrs_bf16_to_ktrsc_fp8(weight: torch.Tensor, stream=None) -> torch.Tensor:
-    """BF16 KCTRS weight -> int8 storage of FP8 E4M3FN in KTRSC order."""
-    assert weight.dtype == torch.bfloat16, f"expected BF16 weight, got {weight.dtype}"
-    k, c, kt, kh, kw = weight.shape
-    assert c % 4 == 0, f"FP8 pack stores 4 channels per dword, got C={c}"
-    out_numel = k * c * kt * kh * kw
-    out = torch.empty((out_numel,), device=weight.device, dtype=torch.int8)
-    exe = compile_pack_weight_kctrs_bf16_to_ktrsc_fp8(k, c, kt, kh, kw)
-    exe(
-        flyc.from_torch_tensor(out),
-        flyc.from_torch_tensor(weight.contiguous()),
-        torch.cuda.current_stream() if stream is None else stream,
+    llvm_ptr_ty = _ir.Type.parse("!llvm.ptr")
+    addr_val = addr_i64.ir_value() if hasattr(addr_i64, "ir_value") else addr_i64
+    base_ptr = _llvm.IntToPtrOp(llvm_ptr_ty, addr_val).result
+    buf_ptr = make_ptr(
+        f8_ptr_ty,
+        [
+            _ArithValue(base_ptr),
+            fx.Int16(0).ir_value(),
+            fx.Int64(BIG_ASYNC_NR).ir_value(),
+            fx.Int32(buffer_ops._get_buffer_flags()).ir_value(),
+        ],
     )
-    return out
+    return fx.Tensor(fx.make_view(buf_ptr, fx.get_layout(ref_buf_tensor)))
 
 
-def _prep_weight_fp8(weight: torch.Tensor, stream=None) -> torch.Tensor:
-    """Pack + cache the FP8 weight by source tensor identity (weights are reused)."""
+_WEIGHT_FP8_CACHE = {}
+
+C_ALIGN = 16
+
+
+def _pad_channels(c):
+    return (c + C_ALIGN - 1) // C_ALIGN * C_ALIGN
+
+
+def _pad_c_dim(t, c, cp):
+    return t if cp == c else torch.nn.functional.pad(t, (0, 0, 0, 0, 0, 0, 0, cp - c))
+
+
+def _prep_weight_fp8(weight: torch.Tensor) -> torch.Tensor:
+    """Reorder + cache the FP8 weight (KCTRS -> KTRSC) by source identity."""
+    assert weight.dtype == torch.float8_e4m3fn, f"expected FP8 E4M3FN weight, got {weight.dtype}"
     key = id(weight)
     ent = _WEIGHT_FP8_CACHE.get(key)
     if ent is not None and ent[0]() is weight:
         return ent[1]
-    out = pack_weight_kctrs_bf16_to_ktrsc_fp8(weight, stream=stream)
+    c = weight.shape[1]
+    wsrc = _pad_c_dim(weight, c, _pad_channels(c))
+    out = wsrc.permute(0, 2, 3, 4, 1).contiguous().view(torch.int8).view(-1)
     _WEIGHT_FP8_CACHE[key] = (weakref.ref(weight), out)
     return out
 
 
-def conv3d_implicit_fp8(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=None):
-    """FP8 (E4M3FN) implicit conv3d. Same interface as the BF16 v6mb kernel.
+# Rigid 8-wave GEMM design: 512 threads, BLOCK_M=BLOCK_N=256, BLOCK_K=128.
+BLOCK_M = 256
+BLOCK_N = 256
+BLOCK_K = 128
+WARP_SIZE = 64
+N_WAVES = 8
+BLOCK_THREADS = N_WAVES * WARP_SIZE  # 512
 
-    x: (N, C, D, H, W) bf16, weight: (K, C, T, R, S) bf16. Inputs are packed once
-    to FP8 (NDHWC activation / cached KTRSC weight), then run through the CDNA4
-    16x16x128 MFMA conv with a software-pipelined loop and optional split-K.
-    Returns bf16 (N, K, Do, Ho, Wo). splitk=None auto-dispatches."""
-    n, c, d, h, width = x.shape
-    k, wc, kt, kh, kw = weight.shape
-    assert c == wc, f"in-channel mismatch: x has {c}, weight has {wc}"
-    assert x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16
-    st, sh, sw = _normalize_3(stride)
-    pt, ph, pw = _normalize_3(padding)
+LDS_BLOCK_M = BLOCK_M // 2  # 128
+LDS_BLOCK_N = BLOCK_N // 2  # 128
+N_TILES_A = BLOCK_M // 64  # 4
+N_TILES_B = BLOCK_N // 128  # 2
+N_ACCUMS = N_TILES_A * N_TILES_B  # 8
+N_LDS_STEPS_A = LDS_BLOCK_M // 64  # 2
+N_LDS_STEPS_B = LDS_BLOCK_N // 64  # 2
+N_LDS_ROUNDS = max(N_LDS_STEPS_A, N_LDS_STEPS_B)  # 2
+
+# ---- Tiled fp8 NCDHW->NDHWC transpose (byte-native, no cast) ----
+TR_TILE = 64
+TR_VEC = 16  # 16 fp8 bytes per vectorized load/store
+TR_THREADS = 256
+TR_VPL = TR_TILE // TR_VEC  # vecs per LDS row
+TR_ITERS = (TR_TILE * TR_TILE) // (TR_VEC * TR_THREADS)
+TR_PAD = 16
+TR_LDS_S = TR_TILE + TR_PAD
+
+
+@functools.lru_cache(maxsize=64)
+def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
+    """Transpose flat fp8 (N, C, S) -> (N, S, C), S == D*H*W. Requires c%16==0, s%4==0."""
+    assert c % TR_VEC == 0, f"fp8 transpose needs C % {TR_VEC} == 0, got C={c}"
+    assert s % 4 == 0, f"fp8 transpose reads the input in dwords, needs s % 4 == 0, got s={s}"
+    total_bytes = n * c * s
+    grid_s = (s + TR_TILE - 1) // TR_TILE
+    grid_c = (c + TR_TILE - 1) // TR_TILE
+    u8 = fx.Uint8
+    # >2 GB byte offsets overflow the i32 buffer offset; use raw i64 pointers instead.
+    TR_BIG = total_bytes > 0x7FFFFFFF
+
+    @flyc.kernel(known_block_size=[TR_THREADS, 1, 1])
+    def transpose_kernel(out: fx.Tensor, inp: fx.Tensor):
+        in_rsrc = buffer_ops.create_buffer_resource(inp, max_size=False, num_records_bytes=total_bytes)
+        out_rsrc = buffer_ops.create_buffer_resource(out, max_size=False, num_records_bytes=total_bytes)
+        if const_expr(TR_BIG):
+            in_base_addr = fx.Int64(buffer_ops.extract_base_index(inp))
+            out_base_addr = fx.Int64(buffer_ops.extract_base_index(out))
+        lds_alloc = fx.SharedAllocator(static=False)
+        lds = lds_alloc.allocate(fx.Array[u8, TR_TILE * TR_LDS_S, 16]).peek()
+
+        tid = fx.thread_idx.x
+        s0 = fx.block_idx.x * TR_TILE
+        c0 = fx.block_idx.y * TR_TILE
+        nb = fx.block_idx.z
+        in_base = nb * c * s
+        out_base = nb * s * c
+
+        # v16i8 is not a legal backend vector width, so move 16B chunks as dwordx4.
+        def lds_store_i32x4(elem_offset, value_i32x4):
+            base = fx.Int64(fx.ptrtoint(lds.ptr)) + fx.Int64(elem_offset)
+            ptr = buffer_ops.create_llvm_ptr(base, address_space=3)
+            llvm.StoreOp(value_i32x4, ptr, alignment=16)
+
+        def lds_load_scalar(elem_offset):
+            u8p = fx.recast_iter(u8, lds.ptr)
+            return fx.ptr_load(u8p + fx.Int32(elem_offset), result_type=u8)
+
+        # Read coalesced along contiguous S into LDS[c_local][s_local].
+        for i in range_constexpr(TR_ITERS):
+            lin = tid + i * TR_THREADS
+            rc = lin // TR_VPL
+            sv = (lin % TR_VPL) * TR_VEC
+            cc = c0 + rc
+            ss = s0 + sv
+            valid = (cc < fx.Index(c)) & (ss < fx.Index(s))
+            if const_expr(TR_BIG):
+                # Clamp OOB coords to 0 so the raw load never dereferences past the tensor.
+                cc_s = fx.Index(arith.select(valid, fx.Int64(cc), fx.Int64(0)))
+                ss_s = fx.Index(arith.select(valid, fx.Int64(ss), fx.Int64(0)))
+                addr = in_base_addr + (fx.Int64(nb) * fx.Int64(c) + fx.Int64(cc_s)) * fx.Int64(s) + fx.Int64(ss_s)
+                ptr = buffer_ops.create_llvm_ptr(addr, address_space=1)
+                v = llvm.LoadOp(fx.Vector.make_type(4, fx.Int32), ptr, alignment=16).result
+            else:
+                # buffer_load offset is in i32 elements; the byte offset is 16B-aligned.
+                g = fx.Int32((in_base + cc * s + ss) // 4)
+                safe = arith.select(valid, g, fx.Int32(0))
+                v = buffer_ops.buffer_load(in_rsrc, safe, vec_width=4, dtype=fx.Int32)  # dwordx4 = 16B
+            lds_store_i32x4(rc * TR_LDS_S + sv, v.ir_value() if hasattr(v, "ir_value") else v)
+
+        llvm.InlineAsmOp(None, [], "s_waitcnt lgkmcnt(0)\n\ts_barrier", "", has_side_effects=True)
+
+        # Read LDS transposed, store 16 contiguous channels per S along C as dwordx4.
+        for i in range_constexpr(TR_ITERS):
+            lin = tid + i * TR_THREADS
+            rs = lin // TR_VPL
+            cv = (lin % TR_VPL) * TR_VEC
+            ss = s0 + rs
+            cc = c0 + cv
+            valid = (ss < fx.Index(s)) & (cc < fx.Index(c))
+            if valid:
+                scalars = [lds_load_scalar((cv + j) * TR_LDS_S + rs) for j in range_constexpr(TR_VEC)]
+                packed_u8 = fx.Vector.from_elements(scalars, dtype=u8)
+                packed = packed_u8.bitcast(fx.Int32)  # v16u8 -> v4i32
+                if const_expr(TR_BIG):
+                    addr = out_base_addr + (fx.Int64(nb) * fx.Int64(s) + fx.Int64(ss)) * fx.Int64(c) + fx.Int64(cc)
+                    ptr = buffer_ops.create_llvm_ptr(addr, address_space=1)
+                    llvm.StoreOp(packed.ir_value() if hasattr(packed, "ir_value") else packed, ptr, alignment=16)
+                else:
+                    byte_off = out_base + ss * c + cc
+                    buffer_ops.buffer_store(packed, out_rsrc, byte_off, offset_is_bytes=True)
+
+    @flyc.jit
+    def launch(out: fx.Tensor, inp: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
+        transpose_kernel(out, inp).launch(grid=(grid_s, grid_c, n), block=(TR_THREADS, 1, 1), stream=stream)
+
+    return launch
+
+
+def _transpose_activation_fp8(x_fp8):
+    """Fast tiled NCDHW->NDHWC fp8 transpose; falls back to torch for odd shapes."""
+    n, c, d, h, w = x_fp8.shape
+    s = d * h * w
+    if not (x_fp8.is_contiguous() and c % TR_VEC == 0 and s % 4 == 0):
+        return x_fp8.permute(0, 2, 3, 4, 1).contiguous().view(torch.int8).view(-1)
+    out = torch.empty((n * s * c,), device=x_fp8.device, dtype=torch.int8)
+    exe = compile_transpose_ncdhw_ndhwc_fp8(n, c, s)
+    exe(
+        flyc.from_torch_tensor(out),
+        flyc.from_torch_tensor(x_fp8.view(torch.int8).view(-1)),
+        torch.cuda.current_stream(),
+    )
+    return out
+
+
+FP8_BYTES = 1
+
+
+@functools.lru_cache(maxsize=256)
+def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias=False, wgm=1):
+    WGM = max(1, int(wgm))
     do = (d + 2 * pt - kt) // st + 1
     ho = (h + 2 * ph - kh) // sh + 1
     wo = (width + 2 * pw - kw) // sw + 1
-    npq = n * do * ho * wo
+    dhw = do * ho * wo
+    hw_o = ho * wo
+    npq = n * dhw
     crs = c * kt * kh * kw
+    # K-partial: round the k-loop up to whole 128-wide tiles. The tail tile's columns in
+    # [crs, crs_pad) are zeroed on A via the im2col mask and on B via a host zero-pad.
+    # The 3-stage pipeline needs K_ITERS >= 2, so tiny-K is padded up to 2 tiles.
+    crs_pad = max(2 * BLOCK_K, ((crs + BLOCK_K - 1) // BLOCK_K) * BLOCK_K)
+    K_ITERS = crs_pad // BLOCK_K
 
-    assert c % LDG_VEC == 0, f"FP8 vector load needs C % {LDG_VEC} == 0, got C={c}"
+    assert c % 16 == 0, f"FP8 needs C % 16 == 0, got C={c}"
+    assert K_ITERS >= 2, f"pipeline needs crs_pad//128 >= 2, got {K_ITERS}"
+
+    BIG_IN = (n * c * d * h * width) > 0x7FFFFFFF
+    BIG_OUT = (n * k * do * ho * wo * 2) > 0x7FFFFFFF
+    temporal_only_fast = (
+        kh == 1
+        and kw == 1
+        and st == 1
+        and sh == 1
+        and sw == 1
+        and ph == 0
+        and pw == 0
+        and do == d
+        and ho == h
+        and wo == width
+    )
+
+    # A degenerate axis (size 1, no pad, stride 1, out==in) can never go out of bounds,
+    # so skip its in_range check to trim VALU/cndmask pressure in the hot im2col path.
+    need_t_check = not (kt == 1 and pt == 0 and st == 1 and do == d)
+    need_h_check = not (kh == 1 and ph == 0 and sh == 1 and ho == h)
+    need_w_check = not (kw == 1 and pw == 0 and sw == 1 and wo == width)
+
+    grid_m = (npq + BLOCK_M - 1) // BLOCK_M
+    grid_n = (k + BLOCK_N - 1) // BLOCK_N  # ceil: N-partial (k%256!=0) needs the tail n-tile
+
+    a_lds_size = LDS_BLOCK_M * BLOCK_K  # 16384
+    b_lds_size = LDS_BLOCK_N * BLOCK_K
+
+    elem_ty = fx.Float8E4M3FN
+
+    @fx.struct
+    class SharedStorage:
+        A_lds_cur_0: fx.Array[elem_ty, a_lds_size, 16]
+        A_lds_cur_1: fx.Array[elem_ty, a_lds_size, 16]
+        A_lds_next_0: fx.Array[elem_ty, a_lds_size, 16]
+        A_lds_next_1: fx.Array[elem_ty, a_lds_size, 16]
+        B_lds_cur_0: fx.Array[elem_ty, b_lds_size, 16]
+        B_lds_cur_1: fx.Array[elem_ty, b_lds_size, 16]
+        B_lds_next_0: fx.Array[elem_ty, b_lds_size, 16]
+        B_lds_next_1: fx.Array[elem_ty, b_lds_size, 16]
+
+    @flyc.kernel(known_block_size=[BLOCK_THREADS, 1, 1])
+    def conv3d_implicit_fp8_kernel(y: fx.Tensor, x: fx.Tensor, weight: fx.Tensor, bias: fx.Tensor):
+        f8_ir_t = elem_ty.ir_type
+        # Sentinel offset for padded / OOB im2col taps; the hardware bounds check treats
+        # it as unsigned, so it must exceed the BIG_IN resource's 2 GB num_records.
+        # A value < 0x80000000 would be in-bounds there and read live data as padding.
+        OOB_SENTINEL_ELEM = 0xF0000000
+
+        y_rsrc = buffer_ops.create_buffer_resource(y, max_size=False, num_records_bytes=npq * k * 2)
+        if const_expr(has_bias):
+            bias_rsrc = buffer_ops.create_buffer_resource(bias, max_size=False, num_records_bytes=k * 4)
+
+        x_buf = make_fp8_buffer_tensor(x, f8_ir_t)
+        x_div = fx.logical_divide(x_buf, fx.make_layout(1, 1))
+        w_buf = make_fp8_buffer_tensor(weight, f8_ir_t)
+        b_div = fx.logical_divide(w_buf, fx.make_layout(1, 1))
+
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        a_cur0 = lds.A_lds_cur_0
+        a_cur1 = lds.A_lds_cur_1
+        a_next0 = lds.A_lds_next_0
+        a_next1 = lds.A_lds_next_1
+        b_cur0 = lds.B_lds_cur_0
+        b_cur1 = lds.B_lds_cur_1
+        b_next0 = lds.B_lds_next_0
+        b_next1 = lds.B_lds_next_1
+
+        tid = fx.thread_idx.x
+        lane_id = tid % WARP_SIZE
+        wave_id = tid // WARP_SIZE
+        wave_m = wave_id // 4
+        wave_n = wave_id % 4
+        if const_expr(WGM > 1):
+            # Grouped-M L2-swizzle: visit WGM consecutive m-tiles across all n-tiles
+            # before advancing, keeping the weight tile hot in L2. Mirrors the bf16 kernel.
+            pid = fx.Index(fx.block_idx.x) + fx.Index(fx.block_idx.y) * fx.Index(grid_m)
+            blocks_per_group = fx.Index(WGM * grid_n)
+            group_id = pid // blocks_per_group
+            first_m = group_id * fx.Index(WGM)
+            group_rows = fx.Index(grid_m) - first_m
+            group_rows = fx.Index(arith.select(group_rows < fx.Index(WGM), group_rows, fx.Index(WGM)))
+            local = pid % blocks_per_group
+            block_m = fx.Index(first_m + (local % group_rows))
+            block_n = fx.Index(local // group_rows)
+        else:
+            block_m = fx.block_idx.x
+            block_n = fx.block_idx.y
+
+        m_offset = block_m * BLOCK_M
+
+        # Rebase the activation buffer to this block's (nbase, base_t) origin so the
+        # per-tile relative i32 element offsets do not overflow.
+        if const_expr(BIG_IN):
+            nbase = m_offset // dhw
+            ot_base0 = (m_offset % dhw) // hw_o
+            base_t = ot_base0 - fx.Index(pt)
+            base_t = arith.select(base_t < fx.Index(0), fx.Index(0), base_t)
+            x_base_byte = ((nbase * fx.Index(d) + base_t) * fx.Index(h)) * fx.Index(width) * fx.Index(c)
+            x_addr = fx.Int64(buffer_ops.extract_base_index(x)) + fx.Int64(x_base_byte)
+            x_div = fx.logical_divide(
+                _make_fp8_buffer_tensor_from_addr(x_addr, f8_ir_t, x_buf),
+                fx.make_layout(1, 1),
+            )
+
+        def in_range(v, hi):
+            return (v >= fx.Index(0)) & (v < fx.Index(hi))
+
+        # ---- im2col address for a (M-row, K-col) chunk of 16 contiguous channels ----
+        # k_col is 16-aligned and c % 16 == 0, so the 16 elements at k_col are consecutive
+        # channels of ONE (kt,kh,kw) tap: one spatial address + a contiguous channel base.
+        #
+        # The output-spatial decomposition of m_row is loop-invariant across the K loop
+        # but costs 4 div/mods, so it is precomputed once per (half, step) and reused.
+        def _spatial_of_row(m_row):
+            row_valid = m_row < fx.Index(npq)
+            if const_expr(temporal_only_fast):
+                out_t = (m_row // hw_o) % d
+                return (row_valid, out_t, m_row)
+            n_idx = m_row // dhw
+            rem = m_row % dhw
+            ot = rem // hw_o
+            rem2 = rem % hw_o
+            oh = rem2 // wo
+            ow = rem2 % wo
+            return (row_valid, n_idx, ot, oh, ow)
+
+        K_PARTIAL = crs != crs_pad
+
+        def im2col_safe_elem_pre(spatial, k_col, k_iter):
+            cc = k_col % c
+            # K-partial: only the tail tile can have columns >= crs (which decode a bogus
+            # tap), so gate on k_iter and mask those to the OOB sentinel.
+            k_in_range = True
+            if const_expr(K_PARTIAL and k_iter == K_ITERS - 1):
+                k_in_range = k_col < fx.Index(crs)
+            if const_expr(temporal_only_fast):
+                row_valid, out_t, m_row = spatial
+                kt_i = k_col // c
+                temporal_delta = kt_i - pt
+                in_t = out_t + temporal_delta
+                valid = row_valid & in_range(in_t, d)
+                if const_expr(K_PARTIAL and k_iter == K_ITERS - 1):
+                    valid = valid & k_in_range
+                if const_expr(BIG_IN):
+                    g_elem = ((m_row + temporal_delta * hw_o) - (nbase * dhw + base_t * hw_o)) * c + cc
+                else:
+                    g_elem = (m_row + temporal_delta * hw_o) * c + cc
+            else:
+                row_valid, n_idx, ot, oh, ow = spatial
+                ckk = k_col // c
+                kw_i = ckk % kw
+                ckk2 = ckk // kw
+                kh_i = ckk2 % kh
+                kt_i = ckk2 // kh
+                in_t = ot * st + kt_i - pt
+                in_h = oh * sh + kh_i - ph
+                in_w = ow * sw + kw_i - pw
+                valid = row_valid
+                if const_expr(need_t_check):
+                    valid = valid & in_range(in_t, d)
+                if const_expr(need_h_check):
+                    valid = valid & in_range(in_h, h)
+                if const_expr(need_w_check):
+                    valid = valid & in_range(in_w, width)
+                if const_expr(K_PARTIAL and k_iter == K_ITERS - 1):
+                    valid = valid & k_in_range
+                if const_expr(BIG_IN):
+                    di = n_idx - nbase
+                    g_elem = (((di * d + (in_t - base_t)) * h + in_h) * width + in_w) * c + cc
+                else:
+                    g_elem = (((n_idx * d + in_t) * h + in_h) * width + in_w) * c + cc
+            g_elem_i = fx.Int32(g_elem)
+            return arith.select(valid, g_elem_i, fx.Int32(OOB_SENTINEL_ELEM))
+
+        # ---- conv A G2S: deposit im2col chunks into the GEMM half-block LDS layout ----
+        # The physical LDS byte this lane owns equals the plain flatten of its logical
+        # (row_g, col_g), so the element stored must be A[swizzle_128(row_g, col_g)] for
+        # S2RLoader to round-trip. Mirrors G2SLoader._lds_dst_at exactly.
+        g2s_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
+        LdsPtr_t = fx.PointerType.get(f8_ir_t, 2, 512)
+
+        # Diagnostic only: swap the im2col address for a plain linear GEMM read to isolate
+        # the pure-GEMM cost. Produces INCORRECT output.
+        STRIP_IM2COL = os.environ.get("CONV_STRIP_IM2COL", "0") in ("1", "true", "yes")
+
+        # Loop-invariant per (half, step): LDS byte offset and m_row's spatial decomposition.
+        # Computed once here so the SSA values dominate every conv_a_g2s call.
+        def _conv_a_g2s_pre(half):
+            m_half_base = m_offset + fx.Index(half * LDS_BLOCK_M)
+            steps = []
+            for step in range_constexpr(N_LDS_STEPS_A):
+                row_g = lane_id // 8 + wave_id * 8 + step * (N_WAVES * 8)
+                col_g = (lane_id % 8) * 16
+                r, cc = swizzle_128(row_g, col_g)
+                m_row = m_half_base + r
+                step_off = wave_id * 1024 + step * (N_WAVES * 1024)
+                if const_expr(STRIP_IM2COL):
+                    steps.append((step_off, cc, m_row, None))
+                else:
+                    steps.append((step_off, cc, m_row, _spatial_of_row(m_row)))
+            return steps
+
+        _a_g2s_pre = [_conv_a_g2s_pre(0), _conv_a_g2s_pre(1)]
+
+        def conv_a_g2s(lds_dst, half, k_iter):
+            k_base = fx.Index(k_iter * BLOCK_K)
+            for step_off, cc, m_row, spatial in _a_g2s_pre[half]:
+                if const_expr(STRIP_IM2COL):
+                    k_col = k_base + cc
+                    lin = m_row * crs + k_col
+                    safe = fx.Int32(arith.select(m_row < fx.Index(npq), lin, fx.Index(OOB_SENTINEL_ELEM)))
+                else:
+                    safe = im2col_safe_elem_pre(spatial, k_base + cc, k_iter)
+                base_i32 = fx.Int32(fx.ptrtoint(lds_dst.ptr)) + fx.Int32(step_off)
+                lds_ptr = fx.inttoptr(LdsPtr_t, base_i32)
+                dst = fx.make_view(lds_ptr, fx.make_layout(1, 1))
+                src = fx.slice(x_div, (None, fx.Int32(safe)))
+                fx.copy(g2s_atom, src, dst)
+
+        # ---- B G2S: plain KTRSC (k, crs_pad) matrix -> reuse the GEMM loader verbatim ----
+        # Row stride is crs_pad, so the tail tile reads the host's zero-pad.
+        gl_off_b = compute_global_swizzle(lane_id, wave_id, crs_pad, N_LDS_ROUNDS, preshuffled=False)
+        b_g2s = G2SLoader(b_div, gl_off_b, N_LDS_STEPS_B, f8_ir_t, wave_id)
+        B0_gl_offset = (block_n * BLOCK_N) * crs_pad
+        B1_gl_offset = (block_n * BLOCK_N + LDS_BLOCK_N) * crs_pad
+
+        a_s2r = S2RLoader(wave_m, N_TILES_A)
+        b_s2r = S2RLoader(wave_n, N_TILES_B)
+        mfma = Mfma16x16x128(N_TILES_A, N_TILES_B)
+
+        c00_frag = [mfma.zero_value] * N_ACCUMS
+        c01_frag = [mfma.zero_value] * N_ACCUMS
+        c10_frag = [mfma.zero_value] * N_ACCUMS
+        c11_frag = [mfma.zero_value] * N_ACCUMS
+
+        # ---- prologue: fill cur (k=0) and next (k=1) ----
+        b_g2s.load(b_cur0, B0_gl_offset + 0 * BLOCK_K)
+        conv_a_g2s(a_cur0, 0, 0)
+        b_g2s.load(b_cur1, B1_gl_offset + 0 * BLOCK_K)
+        conv_a_g2s(a_cur1, 1, 0)
+
+        if wave_m == 1:
+            fx.rocdl.s_barrier()
+
+        wait_barrier(N_LDS_STEPS_A + N_LDS_STEPS_B)
+
+        b_g2s.load(b_next0, B0_gl_offset + 1 * BLOCK_K)
+        conv_a_g2s(a_next0, 0, 1)
+        b_g2s.load(b_next1, B1_gl_offset + 1 * BLOCK_K)
+
+        wait_barrier(N_LDS_STEPS_A + 2 * N_LDS_STEPS_B)
+
+        # ---- main loop (mirror kernel_gemm, A loads swapped for conv_a_g2s) ----
+        for ki in range_constexpr(K_ITERS - 2):
+            b0_frag = b_s2r.load(b_cur0)
+            a0_frag = a_s2r.load(a_cur0)
+            conv_a_g2s(a_next1, 1, ki + 1)
+            fx.rocdl.s_barrier()
+
+            c00_frag = mfma.call(a0_frag, b0_frag, c00_frag)
+
+            b1_frag = b_s2r.load(b_cur1)
+            b_g2s.load(b_cur0, B0_gl_offset + (ki + 2) * BLOCK_K)
+            fx.rocdl.s_barrier()
+
+            c01_frag = mfma.call(a0_frag, b1_frag, c01_frag)
+
+            a1_frag = a_s2r.load(a_cur1)
+            conv_a_g2s(a_cur0, 0, ki + 2)
+            fx.rocdl.s_barrier()
+
+            c10_frag = mfma.call(a1_frag, b0_frag, c10_frag)
+
+            b_g2s.load(b_cur1, B1_gl_offset + (ki + 2) * BLOCK_K)
+            wait_barrier(2 * N_LDS_STEPS_A + N_LDS_STEPS_B)
+
+            c11_frag = mfma.call(a1_frag, b1_frag, c11_frag)
+
+            a_cur0, a_next0 = a_next0, a_cur0
+            a_cur1, a_next1 = a_next1, a_cur1
+            b_cur0, b_next0 = b_next0, b_cur0
+            b_cur1, b_next1 = b_next1, b_cur1
+
+        # ---- step k = K_ITERS - 2 ----
+        b0_frag = b_s2r.load(b_cur0)
+        a0_frag = a_s2r.load(a_cur0)
+        fx.rocdl.s_barrier()
+
+        c00_frag = mfma.call(a0_frag, b0_frag, c00_frag)
+
+        b1_frag = b_s2r.load(b_cur1)
+        fx.rocdl.s_barrier()
+
+        c01_frag = mfma.call(a0_frag, b1_frag, c01_frag)
+
+        a1_frag = a_s2r.load(a_cur1)
+        conv_a_g2s(a_next1, 1, K_ITERS - 1)
+        fx.rocdl.s_barrier()
+
+        c10_frag = mfma.call(a1_frag, b0_frag, c10_frag)
+
+        b0_frag = b_s2r.load(b_next0)
+        fx.rocdl.s_barrier()
+
+        c11_frag = mfma.call(a1_frag, b1_frag, c11_frag)
+
+        a_cur0, a_next0 = a_next0, a_cur0
+        a_cur1, a_next1 = a_next1, a_cur1
+        b_cur0, b_next0 = b_next0, b_cur0
+        b_cur1, b_next1 = b_next1, b_cur1
+
+        # ---- step k = K_ITERS - 1 ----
+        a0_frag = a_s2r.load(a_cur0)
+        wait_barrier(0)
+
+        c00_frag = mfma.call(a0_frag, b0_frag, c00_frag)
+
+        b1_frag = b_s2r.load(b_cur1)
+        fx.rocdl.s_barrier()
+
+        c01_frag = mfma.call(a0_frag, b1_frag, c01_frag)
+
+        a1_frag = a_s2r.load(a_cur1)
+        fx.rocdl.s_barrier()
+
+        fx.rocdl.s_setprio(1)
+        c10_frag = mfma.call(a1_frag, b0_frag, c10_frag, set_prio=False)
+        c11_frag = mfma.call(a1_frag, b1_frag, c11_frag, set_prio=False)
+        fx.rocdl.s_setprio(0)
+        fx.rocdl.s_barrier()
+
+        # ---- epilogue: direct store, map (M=npq row, N=k_out col) -> conv output ----
+        if const_expr(BIG_OUT):
+            y_elem_base = fx.Int64(buffer_ops.extract_base_index(y))
+
+        def _big_store(off_elem, value):
+            addr = y_elem_base + fx.Int64(off_elem) * fx.Int64(2)
+            ptr = buffer_ops.create_llvm_ptr(addr, address_space=1)
+            v = value.ir_value() if hasattr(value, "ir_value") else value
+            llvm.StoreOp(v, ptr, alignment=2)
+
+        # When n == 1 the 4 accumulator rows a lane owns are contiguous in the output,
+        # so one 4xbf16 store replaces four buffer_store_short. dhw % 4 == 0 keeps the
+        # wave's row range 4-row-group aligned.
+        _vec_store = (n == 1) and (dhw % 4 == 0) and (not BIG_OUT)
+
+        def store_cfrag(c_frag, base_row, base_col):
+            for ti in range_constexpr(N_TILES_A):
+                for tj in range_constexpr(N_TILES_B):
+                    col = base_col + fx.Index(tj * 16) + lane_id % 16
+                    col_valid = col < fx.Index(k)
+                    if const_expr(has_bias):
+                        col_i = fx.Int32(arith.select(col_valid, col, fx.Index(0)))
+                        bias_val = fx.Float32(buffer_ops.buffer_load(bias_rsrc, col_i, vec_width=1, dtype=fx.Float32))
+                    vec_f32 = Vec(c_frag[mfma.idx(ti, tj)])
+                    row_base = base_row + fx.Index(ti * 16) + (lane_id // 16) * 4
+
+                    if const_expr(_vec_store):
+                        off0 = col * dhw + row_base
+                        row_ok = col_valid & (row_base + fx.Index(3) < fx.Index(npq))
+                        if row_ok:
+                            vals = []
+                            for i in range_constexpr(4):
+                                o = vec_f32[i] + bias_val if const_expr(has_bias) else vec_f32[i]
+                                vals.append(o.to(fx.BFloat16))
+                            v4 = fx.Vector.from_elements(vals, dtype=fx.BFloat16)
+                            buffer_ops.buffer_store(v4, y_rsrc, off0)
+                        continue
+
+                    for i in range_constexpr(4):
+                        row = row_base + fx.Index(i)
+                        out = vec_f32[i]
+                        if const_expr(has_bias):
+                            out = out + bias_val
+                        valid = col_valid & (row < fx.Index(npq))
+                        if const_expr(n == 1):
+                            off_ncdhw = col * dhw + row
+                        else:
+                            n_idx = row // dhw
+                            sp = row % dhw
+                            off_ncdhw = n_idx * (k * dhw) + col * dhw + sp
+                        if const_expr(BIG_OUT):
+                            if valid:
+                                _big_store(off_ncdhw, out.to(fx.BFloat16))
+                        else:
+                            buffer_ops.buffer_store(out.to(fx.BFloat16), y_rsrc, off_ncdhw, mask=valid)
+
+        wave_m_offset = wave_m * (N_TILES_A * 16)
+        wave_n_offset = wave_n * (N_TILES_B * 16)
+        base_row = m_offset + fx.Index(wave_m_offset)
+        base_col = block_n * BLOCK_N + fx.Index(wave_n_offset)
+
+        store_cfrag(c00_frag, base_row, base_col)
+        store_cfrag(c01_frag, base_row, base_col + fx.Index(LDS_BLOCK_N))
+        store_cfrag(c10_frag, base_row + fx.Index(LDS_BLOCK_M), base_col)
+        store_cfrag(c11_frag, base_row + fx.Index(LDS_BLOCK_M), base_col + fx.Index(LDS_BLOCK_N))
+
+    @flyc.jit
+    def launch(y: fx.Tensor, x: fx.Tensor, weight: fx.Tensor, bias: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
+        conv3d_implicit_fp8_kernel(
+            y,
+            x,
+            weight,
+            bias,
+            value_attrs={
+                "rocdl.waves_per_eu": 2,
+                "rocdl.flat_work_group_size": f"{BLOCK_THREADS},{BLOCK_THREADS}",
+            },
+        ).launch(grid=(grid_m, grid_n, 1), block=(BLOCK_THREADS, 1, 1), stream=stream)
+
+    return launch
+
+
+def _autotune_enabled():
+    return os.environ.get("FLYDSL_CONV3D_AUTOTUNE", "0").lower() in ("1", "true", "yes")
+
+
+def _conv3d_impl_fp8(x, weight, bias=None, stride=1, padding=0, stream=None, wgm=None, autotune=None):
+    """FP8 (E4M3FN) 3D implicit-GEMM conv (fp8_gemm 8-wave pipeline).
+
+    The only tunable is WGM (L2-swizzle grouping): wgm=<int> forces it; autotune=True
+    (or FLYDSL_CONV3D_AUTOTUNE=1) sweeps WGM_VALUES and caches the winner per shape."""
+    n, c, d, h, width = x.shape
+    k, wc, kt, kh, kw = weight.shape
+    assert c == wc, f"in-channel mismatch: x has {c}, weight has {wc}"
+    assert (
+        x.dtype == torch.float8_e4m3fn and weight.dtype == torch.float8_e4m3fn
+    ), f"expected FP8 E4M3FN x/weight, got x={x.dtype}, weight={weight.dtype}"
+    st, sh, sw = _normalize_3(stride)
+    pt, ph, pw = _normalize_3(padding)
+
+    do = (d + 2 * pt - kt) // st + 1
+    ho = (h + 2 * ph - kh) // sh + 1
+    wo = (width + 2 * pw - kw) // sw + 1
+
+    # Zero-pad C to the gather's vector width; padded channels see zero weights.
+    cp = _pad_channels(c)
+    x = _pad_c_dim(x, c, cp)
+    c = cp
 
     launch_stream = torch.cuda.current_stream() if stream is None else stream
-    x_arg = pack_activation_ncdhw_bf16_to_ndhwc_fp8(x, stream=launch_stream)
-    w_arg = _prep_weight_fp8(weight, stream=launch_stream)
+    x_arg = _transpose_activation_fp8(x)
+    w_arg = _prep_weight_fp8(weight)
+
+    # The k-loop runs over crs_pad, so zero-pad the weight's crs dimension to match.
+    crs = c * kt * kh * kw
+    crs_pad = max(2 * 128, ((crs + 128 - 1) // 128) * 128)
+    if crs_pad != crs:
+        w_mat = w_arg.view(k, crs)
+        w_padded = torch.zeros((k, crs_pad), device=w_mat.device, dtype=w_mat.dtype)
+        w_padded[:, :crs] = w_mat
+        w_arg = w_padded.view(-1)
 
     has_bias = bias is not None
     bias_arg = (
@@ -605,26 +719,68 @@ def conv3d_implicit_fp8(x, weight, bias=None, stride=1, padding=0, splitk=None, 
     if has_bias:
         assert bias_arg.numel() == k, f"bias must have {k} elements, got {bias_arg.numel()}"
 
-    sk = _resolve_splitk(splitk, npq, crs, k, x.device)
-    use_splitk = sk > 1
-    if use_splitk:
-        y = torch.zeros((npq, k), device=x.device, dtype=torch.float32)
-    else:
+    x_arg_t = flyc.from_torch_tensor(x_arg)
+    w_arg_t = flyc.from_torch_tensor(w_arg)
+    bias_t = flyc.from_torch_tensor(bias_arg)
+
+    def _run(the_wgm):
         y = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
-    exe = compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, sk)
-    exe(
-        flyc.from_torch_tensor(y.view(-1)),
-        flyc.from_torch_tensor(x_arg),
-        flyc.from_torch_tensor(w_arg),
-        flyc.from_torch_tensor(bias_arg),
-        launch_stream,
-    )
-    if use_splitk:
-        if has_bias:
-            y = y + bias_arg.view(1, k)
-        y = y.to(torch.bfloat16)
-        return y.view(n, do, ho, wo, k).permute(0, 4, 1, 2, 3)
-    return y
+        exe = compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, the_wgm)
+        exe(flyc.from_torch_tensor(y.view(-1)), x_arg_t, w_arg_t, bias_t, launch_stream)
+        return y
+
+    if wgm is not None:
+        return _run(int(wgm))
+    if autotune or (autotune is None and _autotune_enabled()):
+        from kernels.conv.conv3d_autotune import WGM_VALUES, autotune_conv3d
+
+        # Fixed 256x256x128 tile; only WGM varies. The tile marker keeps the shared
+        # (candidate, wgm) autotune cache key well-formed.
+        candidates = [((256, 256, 8, 4), w) for w in WGM_VALUES]
+        shape = (n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias)
+        best = autotune_conv3d("fp8", shape, "fp8", candidates, x.device, lambda cand: _run(cand[1]))
+        return _run(best[1])
+    return _run(8)  # default WGM
 
 
-__all__ = ["conv3d_implicit_fp8"]
+def _conv2d_impl_fp8(x, weight, bias=None, stride=1, padding=0, **kwargs):
+    assert x.dim() == 4 and weight.dim() == 4, "conv2d fp8 expects (N,C,H,W) / (K,C,R,S)"
+    sh, sw = (stride, stride) if isinstance(stride, int) else stride
+    ph, pw = (padding, padding) if isinstance(padding, int) else padding
+    n, c, hh, ww = x.shape
+    k, wc, r, s = weight.shape
+    x5 = x.reshape(n, c, 1, hh, ww)
+    w5 = weight.reshape(k, wc, 1, r, s)
+    y5 = _conv3d_impl_fp8(x5, w5, bias=bias, stride=(1, sh, sw), padding=(0, ph, pw), **kwargs)
+    return y5.reshape(y5.shape[0], y5.shape[1], y5.shape[3], y5.shape[4])
+
+
+def _conv1d_impl_fp8(x, weight, bias=None, stride=1, padding=0, **kwargs):
+    assert x.dim() == 3 and weight.dim() == 3, "conv1d fp8 expects (N,C,W) / (K,C,S)"
+    sw = stride if isinstance(stride, int) else stride[0]
+    pw = padding if isinstance(padding, int) else padding[0]
+    n, c, ww = x.shape
+    k, wc, s = weight.shape
+    x5 = x.reshape(n, c, 1, 1, ww)
+    w5 = weight.reshape(k, wc, 1, 1, s)
+    y5 = _conv3d_impl_fp8(x5, w5, bias=bias, stride=(1, 1, sw), padding=(0, 0, pw), **kwargs)
+    return y5.reshape(y5.shape[0], y5.shape[1], y5.shape[4])
+
+
+def conv3d_implicit_fp8(x, weight, bias=None, stride=1, padding=0, **kwargs):
+    """FP8 implicit-GEMM conv; dispatches 1D/2D/3D by filter rank.
+
+    x/weight are FP8 E4M3FN; requires c % 16 == 0. Returns bf16.
+    """
+    assert x.dim() == weight.dim(), f"x rank {x.dim()} != weight rank {weight.dim()}"
+    spatial_rank = weight.dim() - 2
+    if spatial_rank == 3:
+        return _conv3d_impl_fp8(x, weight, bias=bias, stride=stride, padding=padding, **kwargs)
+    if spatial_rank == 2:
+        return _conv2d_impl_fp8(x, weight, bias=bias, stride=stride, padding=padding, **kwargs)
+    if spatial_rank == 1:
+        return _conv1d_impl_fp8(x, weight, bias=bias, stride=stride, padding=padding, **kwargs)
+    raise ValueError(f"conv3d_implicit_fp8 supports 1D/2D/3D; got filter rank {weight.dim()}")
+
+
+__all__ = ["conv3d_implicit_fp8", "compile_conv3d_implicit_fp8"]

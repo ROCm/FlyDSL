@@ -3,8 +3,9 @@
 
 """Double-buffered implicit-GEMM conv3d (BF16).
 
-x: (N, C, D, H, W) bf16 NCDHW, weight: (K, C, T, R, S) bf16 KCTRS.
-Returns (N, K, Do, Ho, Wo) bf16. Supports stride, padding, bias, and split-K.
+x: (N, C, D, H, W) bf16 NCDHW, weight: (K, C/groups, T, R, S) bf16 KCTRS.
+Returns (N, K, Do, Ho, Wo) bf16. Supports stride, padding (int, per-axis tuple, or
+torch's "same" / "valid"), padding_mode, dilation, bias, groups, and split-K.
 """
 
 import functools
@@ -15,9 +16,10 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
+from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, range_constexpr, rocdl
-from flydsl.expr.rocdl.universal import make_buffer_ptr
 from flydsl.expr.typing import T
 from kernels.common import buffer_ops
 from kernels.common.mem_ops import buffer_atomic_add
@@ -38,6 +40,40 @@ BF16_BYTES = 2
 
 DEFAULT_TILE = (128, 128, 2, 4)
 
+# Same set torch's nn.ConvNd accepts. All four are resolved inside the im2col gather:
+# "zeros" masks an out-of-range tap, the rest remap it onto a real input coordinate.
+PADDING_MODES = ("zeros", "reflect", "replicate", "circular")
+
+# Applied around both tracing and flyc.compile so the hinted and the fast-dispatch
+# paths lower identically. Keys are the ones rocm.py reads: waves_per_eu, maxnreg,
+# fast_fp_math, unsafe_fp_math, llvm_options.
+#
+# Deliberately empty. Swept on gfx950 over five shapes (g in {1,2,4,8}, small and
+# large): fast_fp_math is a wash -- MFMA does the arithmetic and the epilogue is a
+# single f32->bf16 convert, so there is nothing to reassociate -- and waves_per_eu
+# of 1/2 measured 3%/11% slower, 4 within noise. Left as the hook the launchers
+# already thread through, not as a tuning knob that currently pays.
+CONV_COMPILE_HINTS = {}
+
+
+def _as_stream(stream):
+    return stream if hasattr(stream, "_is_stream_param") else fx.Stream(stream)
+
+
+def _dispatch(exe, *args, stream=None):
+    """Run a builder's launcher, pre-compiling on first use.
+
+    ``exe.compile(...)`` both compiles and executes, and hands back a
+    ``CompiledFunction`` whose call path skips signature binding and cache lookup
+    (~5 us vs ~35 us for the @flyc.jit wrapper). Cached on the launcher, which is
+    itself memoized per problem shape by the builder's lru_cache.
+    """
+    cf = getattr(exe, "_cf", None)
+    if cf is None:
+        exe._cf = exe.compile(*args, stream=stream)
+        return
+    cf(*args, _as_stream(stream))
+
 
 def _autotune_enabled():
     return os.environ.get("FLYDSL_CONV3D_AUTOTUNE", "0").lower() in ("1", "true", "yes")
@@ -46,13 +82,51 @@ def _autotune_enabled():
 _WEIGHT_CACHE = {}
 
 
-def _prep_weight(w, k, kt, kh, kw, c):
-    key = id(w)
+def _pad_channels(c):
+    return (c + LDG_VEC - 1) // LDG_VEC * LDG_VEC
+
+
+def _big_in(n, c, groups, d, h, w, pt, ph, pw):
+    """Whether the kernel's 64-bit BIG_IN address path would engage for this input.
+
+    Mirrors the kernel's own test, but on the padded channel count and the worst-case
+    (pre-padded) spatial extents, so a "no" here holds for either lowering.
+    """
+    cp = _pad_channels(c // groups) * groups
+    return n * cp * (d + 2 * pt) * (h + 2 * ph) * (w + 2 * pw) > 0x7FFFFFFF
+
+
+def _evict_weight(key, _ref):
+    """weakref callback: drop the entry the dead weight was pinning."""
     ent = _WEIGHT_CACHE.get(key)
-    if ent is not None and ent[0]() is w:
+    if ent is not None and ent[0]() is None:
+        del _WEIGHT_CACHE[key]
+
+
+def _prep_weight(w, k, kt, kh, kw, c):
+    """Pack (K, C, T, R, S) -> (K, T*R*S*Cpad), memoized on the source weight.
+
+    The memo has to notice an in-place update: an optimizer step or a load_state_dict
+    into existing storage leaves both ``id(w)`` and ``data_ptr()`` unchanged, so a key
+    built from either alone would keep returning the previous step's packed weights.
+    The stamp therefore carries torch's version counter, which is the same signal
+    autograd uses to detect mutation -- this is exactly as sensitive as PyTorch's own
+    checks, no more and no less. (Mutation through ``w.data`` escapes the version
+    counter by design, which is why torch documents it as unsafe; it is invisible here
+    for the same reason it is invisible to autograd.)
+
+    Entries do not outlive their weight: the weakref carries a callback that removes
+    its own key, so neither the dict nor the packed GPU tensors it pins accumulate.
+    """
+    key = w.data_ptr()
+    stamp = (w._version, tuple(w.shape), w.stride(), w.dtype)
+    ent = _WEIGHT_CACHE.get(key)
+    if ent is not None and ent[0]() is w and ent[2] == stamp:
         return ent[1]
-    wk = w.permute(0, 2, 3, 4, 1).contiguous().reshape(k, kt * kh * kw * c)
-    _WEIGHT_CACHE[key] = (weakref.ref(w), wk)
+    cp = _pad_channels(c)
+    wsrc = torch.nn.functional.pad(w, (0, 0, 0, 0, 0, 0, 0, cp - c)) if cp != c else w
+    wk = wsrc.permute(0, 2, 3, 4, 1).contiguous().reshape(k, kt * kh * kw * cp)
+    _WEIGHT_CACHE[key] = (weakref.ref(w, functools.partial(_evict_weight, key)), wk, stamp)
     return wk
 
 
@@ -64,10 +138,19 @@ _TR_ITERS = (TR_TILE * TR_TILE) // (TR_VEC * TR_THREADS)
 _TR_PAD = 8
 _TR_LDS_S = TR_TILE + _TR_PAD
 
+# Largest S = D*H*W the transpose kernel can address on its 64-bit (BIG) path. That path
+# rebases the descriptor per (channel, spatial) tile, but the per-thread read offset
+# `rc * s + sv` still carries the full row stride in 32 bits, with rc up to TR_TILE-1 and
+# sv up to TR_TILE-TR_VEC. Beyond this the product wraps and the gather silently reads
+# the wrong rows, so _ncdhw_to_ndhwc hands those copies to torch instead. Folding the row
+# term into the 64-bit base is not possible here: rc varies per lane and a buffer
+# descriptor has to be wave-uniform.
+TR_MAX_BIG_S = (0x7FFFFFFF - (TR_TILE - TR_VEC)) // (TR_TILE - 1)
+
 
 @functools.lru_cache(maxsize=64)
 def compile_transpose_ncdhw_ndhwc(n, c, s):
-    """Transpose flat (N, C, S) -> (N, S, C) (S == T*H*W). Requires c%8==0, s%8==0."""
+    """Transpose flat (N, C, S) -> (N, S, C) (S == T*H*W). Requires c%8==0."""
     grid_s = (s + TR_TILE - 1) // TR_TILE
     grid_c = (c + TR_TILE - 1) // TR_TILE
     elem_ty = fx.BFloat16
@@ -75,6 +158,7 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
 
     @flyc.kernel(known_block_size=[TR_THREADS, 1, 1])
     def transpose_kernel(out: fx.Tensor, inp: fx.Tensor):
+        # max_size: an exact num_records would zero the whole straddling tail read.
         in_rsrc = buffer_ops.create_buffer_resource(inp)
         out_rsrc = buffer_ops.create_buffer_resource(out)
         lds_alloc = fx.SharedAllocator(static=False)
@@ -149,24 +233,59 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
             stream=stream,
         )
 
-    return launch_transpose
+    def _launch(out, inp, stream=None):
+        with CompilationContext.compile_hints(CONV_COMPILE_HINTS):
+            return launch_transpose(out, inp, stream=_as_stream(stream))
+
+    def _compile(out, inp, stream=None):
+        with CompilationContext.compile_hints(CONV_COMPILE_HINTS):
+            return flyc.compile(launch_transpose, out, inp, _as_stream(stream))
+
+    _launch.compile = _compile
+    return _launch
 
 
 def _ncdhw_to_ndhwc(x, stream):
     """Fast NCDHW->NDHWC via the tiled transpose kernel; falls back to torch."""
     n, c, t, h, w = x.shape
     s = t * h * w
-    if not (x.is_contiguous() and x.dtype == torch.bfloat16 and c % 8 == 0 and s % 8 == 0):
+    big = n * c * s > 0x7FFFFFFF
+    if not (x.is_contiguous() and x.dtype == torch.bfloat16 and c % TR_VEC == 0):
+        return x.permute(0, 2, 3, 4, 1).contiguous()
+    if big and s > TR_MAX_BIG_S:
         return x.permute(0, 2, 3, 4, 1).contiguous()
     out = torch.empty((n, t, h, w, c), device=x.device, dtype=x.dtype)
     exe = compile_transpose_ncdhw_ndhwc(n, c, s)
-    exe(out, x, torch.cuda.current_stream() if stream is None else stream)
+    _dispatch(exe, out, x, stream=torch.cuda.current_stream() if stream is None else stream)
     return out
 
 
 @functools.lru_cache(maxsize=256)
 def compile_conv3d_implicit(
-    n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias=False, splitk=1, tile=DEFAULT_TILE, wgm=1
+    n,
+    c,
+    d,
+    h,
+    w,
+    k,
+    kt,
+    kh,
+    kw,
+    st,
+    sh,
+    sw,
+    pt,
+    ph,
+    pw,
+    dt=1,
+    dh=1,
+    dw=1,
+    pad_mode="zeros",
+    has_bias=False,
+    splitk=1,
+    tile=DEFAULT_TILE,
+    wgm=1,
+    groups=1,
 ):
     TILE_M, TILE_N, WAVE_M, WAVE_N = tile
     BLOCK_THREADS = WAVE_M * WAVE_N * WARP_SIZE
@@ -180,29 +299,38 @@ def compile_conv3d_implicit(
     LDG_A_COUNT = TILE_M * TILE_K // BLOCK_VECS
     LDG_B_COUNT = TILE_N * TILE_K // BLOCK_VECS
 
+    # `c` is the padded TOTAL channel count and stays the NDHWC row stride. CGP is the
+    # per-group channel count and is what the GEMM K axis decomposes against; the two
+    # coincide only when groups == 1.
+    CGP = c // groups
+    KG = k // groups
+
     assert TILE_K == 32
     assert TILE_M % (WAVE_M * MFMA_M) == 0, f"TILE_M={TILE_M} not divisible by WAVE_M*16"
     assert TILE_N % (WAVE_N * MFMA_N) == 0, f"TILE_N={TILE_N} not divisible by WAVE_N*16"
     assert (TILE_M * TILE_K) % BLOCK_VECS == 0, f"A tile {TILE_M}x{TILE_K} not a multiple of {BLOCK_VECS} vecs"
     assert (TILE_N * TILE_K) % BLOCK_VECS == 0, f"B tile {TILE_N}x{TILE_K} not a multiple of {BLOCK_VECS} vecs"
     assert LDG_A_COUNT >= 1 and LDG_B_COUNT >= 1
-    assert c % LDG_VEC == 0
+    assert c % groups == 0, f"c={c} not divisible by groups={groups}"
+    assert k % groups == 0, f"k={k} not divisible by groups={groups}"
+    assert CGP % LDG_VEC == 0, f"c/groups={CGP} must be a multiple of LDG_VEC={LDG_VEC}; use _conv3d_impl to pad"
     assert BLOCK_THREADS <= 1024, f"BLOCK_THREADS={BLOCK_THREADS} exceeds 1024"
 
-    do = (d + 2 * pt - kt) // st + 1
-    ho = (h + 2 * ph - kh) // sh + 1
-    wo = (w + 2 * pw - kw) // sw + 1
+    # Dilation only stretches the filter's footprint; the K axis (CRS) is unchanged.
+    do = (d + 2 * pt - (dt * (kt - 1) + 1)) // st + 1
+    ho = (h + 2 * ph - (dh * (kh - 1) + 1)) // sh + 1
+    wo = (w + 2 * pw - (dw * (kw - 1) + 1)) // sw + 1
     dhw = do * ho * wo
     hw_o = ho * wo
     npq = n * dhw
-    crs = c * kt * kh * kw
+    crs = CGP * kt * kh * kw
     k_tiles = (crs + TILE_K - 1) // TILE_K
 
     BIG_IN = (n * c * d * h * w) > 0x7FFFFFFF
     BIG_OUT = (n * k * do * ho * wo * BF16_BYTES) > 0x7FFFFFFF
 
     X_BYTES = n * c * d * h * w * BF16_BYTES
-    W_BYTES = k * c * kt * kh * kw * BF16_BYTES
+    W_BYTES = k * crs * BF16_BYTES
     OOB_SENTINEL_ELEM = 0x7FFFFF80  # *2 = 0xFFFFFF00 bytes (~4.2950 GB), just under 2^32
     OOB_SENTINEL_BYTES = OOB_SENTINEL_ELEM * BF16_BYTES
     BIG_IN_NR = 0x80000000  # 2 GB num_records for the rebased BIG_IN resource
@@ -210,14 +338,49 @@ def compile_conv3d_implicit(
     assert X_BYTES < OOB_SENTINEL_BYTES or BIG_IN, f"input {X_BYTES}B exceeds limit"
     BIG_IN_N1 = BIG_IN and n == 1
     BIG_IN_NM = BIG_IN and n > 1
+
+    # BIG_IN_N1 rebases the descriptor to the block's own origin and addresses everything
+    # from there in 32 bits, so the block's reachable footprint has to fit the window.
+    # Rebasing on D alone leaves a whole H*W*C slice in the offset, which is itself past
+    # 2 GiB on a large 2D input, so the origin drops to H as well. Rows run
+    # (n, ot, oh, ow), so oh is monotone within a block and only restarts when the block
+    # crosses an ot boundary -- which cannot happen when the ot windows are a whole number
+    # of tiles. The two bounds below are the worst case over every block: sound in both
+    # cases, and tight in the aligned one.
+    _t_aligned = BIG_IN_N1 and hw_o % TILE_M == 0
+    if BIG_IN_N1:
+        _ot_span = (TILE_M - 1) // hw_o + (1 if _t_aligned else 2)
+        _t_span = min(d - 1, (_ot_span - 1) * st + dt * (kt - 1))
+        _h_span = min(h - 1, ((TILE_M - 1) // wo + 1) * sh + dh * (kh - 1)) if _t_aligned else h - 1
+        _span = (((_t_span * h + _h_span) * w + (w - 1)) * c + c) * BF16_BYTES
+        assert _span <= BIG_IN_NR, (
+            f"input sample too large for the 32-bit gather: a {TILE_M}-row tile reaches "
+            f"{_span / 2**30:.2f} GiB from its rebased origin, past the "
+            f"{BIG_IN_NR / 2**30:.0f} GiB the buffer descriptor addresses. Split the batch "
+            f"over N, or pass a narrower tile=(TILE_M, ...)."
+        )
+    assert pad_mode in PADDING_MODES, f"pad_mode must be one of {PADDING_MODES}, got {pad_mode!r}"
+    # BIG_IN_N1 rebases the buffer to the block's first input row, and a reflected tap can
+    # resolve below that base; _conv3d_impl keeps non-zero modes off the BIG_IN path.
+    assert pad_mode == "zeros" or not BIG_IN, "non-zero pad_mode requires the non-BIG_IN address path"
     X_SAMPLE_BYTES = c * d * h * w * BF16_BYTES
 
-    n_tail = k % TILE_N != 0
-    grid_n = (k + TILE_N - 1) // TILE_N
+    # A tile must never straddle a group boundary -- every column in it shares one A tile in
+    # LDS, and different groups need different input channels. So the N grid is
+    # over-provisioned per group and the per-group tail is masked.
+    tiles_per_group = (KG + TILE_N - 1) // TILE_N
+    n_tail = KG % TILE_N != 0
+    grid_n = groups * tiles_per_group
 
     splitk = max(1, min(splitk, k_tiles))
     tiles_per_split = k_tiles // splitk
     use_splitk = splitk > 1
+    # The bound _resolve_splitk applies, restated where the unsafe arithmetic actually
+    # lives so a caller reaching this builder directly fails loudly instead of silently
+    # wrapping the epilogue's 32-bit atomic offset.
+    assert (
+        not use_splitk or npq * k * 4 <= SPLITK_MAX_STAGING_BYTES
+    ), f"split-K staging {npq * k * 4}B exceeds the {SPLITK_MAX_STAGING_BYTES}B buffer window"
 
     # Software-pipeline depth. 4 stages is optimal across all shapes on gfx950 --
     # even short-K, memory-bound 3x1x1 depends more (not less) on deep prefetch to
@@ -228,7 +391,24 @@ def compile_conv3d_implicit(
     LDS_B_SIZE = PIPE_STAGES * TILE_N * TILE_K
 
     grid_m = (npq + TILE_M - 1) // TILE_M
-    WGM = max(1, int(wgm))
+
+    # HSA's dispatch packet carries grid_size_x as a uint32 *work-item* count, not a block
+    # count, so grid.x * block.x has to stay under 2^32 -- about 2^30 output rows at any
+    # tile size. Past that hipModuleLaunchKernel rejects the launch, and FlyDSL's wrapper
+    # only prints that to stderr, so the kernel would hand back its uninitialised output
+    # as if it had run. The surplus M tiles therefore spill onto grid.z, which is a plain
+    # block count; grid.z already carries split-K, so the two are packed into it together.
+    MAX_GRID_X = 0xFFFFFFFF // BLOCK_THREADS
+    MAX_GRID_YZ = 65535
+    grid_x = min(grid_m, MAX_GRID_X)
+    m_chunks = (grid_m + grid_x - 1) // grid_x
+    assert grid_n <= MAX_GRID_YZ, f"grid.y = {grid_n} exceeds the {MAX_GRID_YZ}-block limit"
+    assert (
+        m_chunks * splitk <= MAX_GRID_YZ
+    ), f"grid.z = {m_chunks} M-chunks x {splitk} splits exceeds the {MAX_GRID_YZ}-block limit"
+    # The block swizzle mixes grid.x and grid.y and has no meaning once M is split across
+    # two axes; it is a locality tweak, so drop it rather than complicate the mapping.
+    WGM = 1 if m_chunks > 1 else max(1, int(wgm))
     elem_ty = fx.BFloat16
     mfma_fn = rocdl.mfma_f32_16x16x32_bf16
     temporal_only_fast = (
@@ -246,16 +426,10 @@ def compile_conv3d_implicit(
 
     @flyc.kernel(known_block_size=[BLOCK_THREADS, 1, 1])
     def conv3d_implicit_kernel(y: fx.Tensor, x: fx.Tensor, weight: fx.Tensor, bias: fx.Tensor):
-        y_rsrc = buffer_ops.create_buffer_resource(y)
-        # Buffer tensors for the im2col gather, flattened to a 1-D element view so the
-        # per-thread flat gather offset indexes elements (multi-dim views would not).
-        w_buf0 = fx.rocdl.make_buffer_tensor(weight, max_size=False)
-        w_buf = fx.Tensor(fx.make_view(fx.get_iter(w_buf0), fx.make_layout(k * crs, 1)))
-        w_div = fx.logical_divide(w_buf, fx.make_layout(1, 1))
+        w_rsrc = buffer_ops.create_buffer_resource(weight, num_records_bytes=W_BYTES)
         if const_expr(not BIG_IN):
-            x_buf0 = fx.rocdl.make_buffer_tensor(x, max_size=False)
-            x_buf = fx.Tensor(fx.make_view(fx.get_iter(x_buf0), fx.make_layout(n * c * d * h * w, 1)))
-            x_div = fx.logical_divide(x_buf, fx.make_layout(1, 1))
+            x_rsrc = buffer_ops.create_buffer_resource(x, num_records_bytes=X_BYTES)
+        y_rsrc = buffer_ops.create_buffer_resource(y)
         if const_expr(has_bias):
             bias_rsrc = buffer_ops.create_buffer_resource(bias)
 
@@ -264,43 +438,63 @@ def compile_conv3d_implicit(
         b_lds = lds_alloc.allocate(fx.Array[elem_ty, LDS_B_SIZE, 16]).peek()
 
         tid = fx.thread_idx.x
-        if const_expr(WGM > 1):
+        if const_expr(m_chunks > 1):
+            # grid.z packs (split, m_chunk); the M tiles that did not fit grid.x live here.
+            m_chunk = fx.Index(fx.block_idx.z) % fx.Index(m_chunks)
+            m_offset = (fx.Index(fx.block_idx.x) + m_chunk * fx.Index(grid_x)) * TILE_M
+            n_tile = fx.block_idx.y
+        elif const_expr(WGM > 1):
             pid = fx.Index(fx.block_idx.x) + fx.Index(fx.block_idx.y) * fx.Index(grid_m)
-            blocks_per_group = fx.Index(WGM * grid_n)
-            group_id = pid // blocks_per_group
-            first_m = group_id * fx.Index(WGM)
-            group_rows = fx.Index(grid_m) - first_m
-            group_rows = fx.Index(arith.select(group_rows < fx.Index(WGM), group_rows, fx.Index(WGM)))
-            local = pid % blocks_per_group
-            m_offset = fx.Index(first_m + (local % group_rows)) * TILE_M
-            n_offset = fx.Index(local // group_rows) * TILE_N
+            blocks_per_swizzle = fx.Index(WGM * grid_n)
+            swizzle_id = pid // blocks_per_swizzle
+            first_m = swizzle_id * fx.Index(WGM)
+            swizzle_rows = fx.Index(grid_m) - first_m
+            swizzle_rows = fx.Index(arith.select(swizzle_rows < fx.Index(WGM), swizzle_rows, fx.Index(WGM)))
+            local = pid % blocks_per_swizzle
+            m_offset = fx.Index(first_m + (local % swizzle_rows)) * TILE_M
+            n_tile = fx.Index(local // swizzle_rows)
         else:
             m_offset = fx.block_idx.x * TILE_M
-            n_offset = fx.block_idx.y * TILE_N
+            n_tile = fx.block_idx.y
+        # n_offset is the GLOBAL output-channel base (drives the B row and the store),
+        # n_local is the base within this group (drives every tail check), and ch_base is
+        # this group's first input channel. All three are block-uniform.
+        if const_expr(groups > 1):
+            gi = n_tile // tiles_per_group
+            n_local = (n_tile % tiles_per_group) * TILE_N
+            n_offset = gi * KG + n_local
+            ch_base = gi * CGP
+        else:
+            n_offset = n_tile * TILE_N
+            n_local = n_offset
         if const_expr(use_splitk):
-            k_off = fx.block_idx.z * (tiles_per_split * TILE_K)
+            if const_expr(m_chunks > 1):
+                split_idx = fx.Index(fx.block_idx.z) // fx.Index(m_chunks)
+            else:
+                split_idx = fx.Index(fx.block_idx.z)
+            k_off = split_idx * (tiles_per_split * TILE_K)
         else:
             k_off = 0
 
-        # BIG_IN (>2GB): flat buffer tensor from a rebased address with explicit ~2GB
-        # num_records (same mechanism as x_div, replacing create_buffer_resource_from_addr).
-        GXPtrTy = fx.PointerType.get(elem_ty.ir_type, 1, BF16_BYTES) if const_expr(BIG_IN) else None
-
-        def _x_div_from_addr(addr_i64):
-            gptr = fx.inttoptr(GXPtrTy, addr_i64)
-            buf_ptr = make_buffer_ptr(gptr, num_records_bytes=BIG_IN_NR)
-            # 1-D element view so the flat im2col gather offset indexes elements.
-            buf = fx.Tensor(fx.make_view(buf_ptr, fx.make_layout(BIG_IN_NR // BF16_BYTES, 1)))
-            return fx.logical_divide(buf, fx.make_layout(1, 1))
-
         if const_expr(BIG_IN_N1):
             nbase = m_offset // dhw
-            ot_base0 = (m_offset % dhw) // hw_o
-            base_t = ot_base0 - fx.Index(pt)
+            rem0 = m_offset % dhw
+            ot_base0 = rem0 // hw_o
+            # ot*st - pt is the first input row this ot can read; every later row in the
+            # block has ot >= ot_base0, so this is a lower bound for the whole block.
+            base_t = ot_base0 * fx.Index(st) - fx.Index(pt)
             base_t = arith.select(base_t < fx.Index(0), fx.Index(0), base_t)
-            x_base_elem = ((nbase * fx.Index(d) + base_t) * fx.Index(h) + fx.Index(0)) * fx.Index(w) * fx.Index(c)
+            if const_expr(_t_aligned):
+                # An ot window is a whole number of tiles, so oh cannot restart mid-block
+                # and the same argument carries to H.
+                oh_base0 = (rem0 % hw_o) // wo
+                base_h = oh_base0 * fx.Index(sh) - fx.Index(ph)
+                base_h = arith.select(base_h < fx.Index(0), fx.Index(0), base_h)
+            else:
+                base_h = fx.Index(0)
+            x_base_elem = ((nbase * fx.Index(d) + base_t) * fx.Index(h) + base_h) * fx.Index(w) * fx.Index(c)
             x_addr = fx.Int64(buffer_ops.extract_base_index(x)) + fx.Int64(x_base_elem) * fx.Int64(2)
-            x_div_big = _x_div_from_addr(x_addr)
+            x_rsrc = buffer_ops.create_buffer_resource_from_addr(x_addr, num_records_bytes=BIG_IN_NR)
         if const_expr(BIG_IN_NM):
             x_base_addr = fx.Int64(buffer_ops.extract_base_index(x))
 
@@ -346,6 +540,54 @@ def compile_conv3d_implicit(
         def in_range(v, hi):
             return (v >= 0) & (v < fx.Index(hi))
 
+        def dil(tap, factor):
+            # Filter tap -> input offset. Kept off the multiply when undilated.
+            scaled = tap * factor if const_expr(factor != 1) else tap
+            return scaled
+
+        def pad_coord(v, ext, pad):
+            """Tap coordinate -> in-bounds input coordinate; returns (coord, mask).
+
+            "zeros" leaves the coordinate alone and returns a range mask, which the
+            caller folds into the OOB-sentinel routing so the load reads as zero. Every
+            other mode resolves the coordinate into [0, ext) instead and returns no mask
+            -- the three range checks the zeros path needs disappear, which offsets most
+            of what the remap costs. One step is enough because torch caps reflect at
+            pad < ext and circular at pad <= ext (both asserted host-side), so a
+            coordinate can never wrap past the far edge.
+
+            Index compares here lower to UNSIGNED predicates, so a negative coordinate
+            reads as a huge value and `v < 0` would fold to false. Everything below is
+            therefore expressed on u = v + pad, which is >= 0 by construction (v is
+            ot*stride - pad + tap, so u is ot*stride + tap). Both the tests and every
+            branch value stay non-negative, which makes the unsigned semantics correct
+            rather than merely lucky. The +pad cancels against the -pad already inside
+            v, so it costs nothing once folded.
+            """
+            if const_expr(pad_mode == "zeros"):
+                return v, in_range(v, ext)
+            u = v + fx.Index(pad)
+            low = u < fx.Index(pad)  # v < 0
+            high = u >= fx.Index(pad + ext)  # v >= ext
+            mid = u - fx.Index(pad)  # v, where in range
+            if const_expr(pad_mode == "replicate"):
+                r = arith.select(high, fx.Index(ext - 1), mid)
+                r = arith.select(low, fx.Index(0), r)
+            elif const_expr(pad_mode == "reflect"):
+                # [a b c d e] pad 2 -> [c b a b c d e d c]: -v near, 2*(ext-1) - v far.
+                r = arith.select(high, fx.Index(2 * (ext - 1) + pad) - u, mid)
+                r = arith.select(low, fx.Index(pad) - u, r)
+            else:  # circular: v + ext near, v - ext far
+                r = arith.select(high, u - fx.Index(pad + ext), mid)
+                r = arith.select(low, u + fx.Index(ext - pad), r)
+            return fx.Index(r), None
+
+        def gather_valid(base, *masks):
+            for m in masks:
+                if const_expr(m is not None):
+                    base = base & m
+            return base
+
         # ---- Per-thread row decomposition (loop-invariant across K) ----
         _row_dec = []  # per-i tuple of precomputed row terms
         for i in range_constexpr(LDG_A_COUNT):
@@ -375,55 +617,63 @@ def compile_conv3d_implicit(
                 else:
                     _row_dec.append((local_k, row_valid, n_idx, in_t0, in_h0, in_w0))
 
-        SCALAR_K = c % TILE_K == 0
+        SCALAR_K = CGP % TILE_K == 0
 
         # ---- 3D im2col address math ----
+        # The K axis decomposes against CGP (per-group channels) while every g_off below
+        # keeps `c` (padded total channels) as the NDHWC row stride. `cc` is the absolute
+        # input channel: the group base plus the offset within the group.
         def _a_addr(i, kbase_i, cc_base, ckk_base):
             dec = _row_dec[i]
             local_k = dec[0]
             k_abs = kbase_i + fx.Index(local_k)
             if const_expr(SCALAR_K):
-                cc = cc_base + fx.Index(local_k)
+                cc = cc_base + fx.Index(local_k)  # cc_base already carries ch_base
             else:
-                cc = k_abs % c
+                cc = k_abs % CGP
+                if const_expr(groups > 1):
+                    cc = ch_base + cc
             k_valid = k_abs < fx.Index(crs)
             if const_expr(temporal_only_fast):
                 _, row, row_valid, out_t = dec
-                kt_i = ckk_base if const_expr(SCALAR_K) else k_abs // c
-                temporal_delta = kt_i - pt
-                in_t = out_t + temporal_delta
-                valid = row_valid & k_valid & in_range(in_t, d)
+                kt_i = ckk_base if const_expr(SCALAR_K) else k_abs // CGP
+                temporal_delta = dil(kt_i, dt) - pt
+                in_t, m_t = pad_coord(out_t + temporal_delta, d, pt)
+                valid = gather_valid(row_valid & k_valid, m_t)
+                # `row` already encodes out_t, so the gather shifts it by the resolved
+                # delta; under a remap that is no longer the raw tap offset.
+                delta = temporal_delta if const_expr(pad_mode == "zeros") else (in_t - out_t)
                 if const_expr(BIG_IN_N1):
-                    g_off = ((row + temporal_delta * hw_o) - (fx.Index(nbase) * dhw + base_t * hw_o)) * c + cc
+                    g_off = ((row + delta * hw_o) - (fx.Index(nbase) * dhw + base_t * hw_o)) * c + cc
                 else:
-                    g_off = (row + temporal_delta * hw_o) * c + cc
+                    g_off = (row + delta * hw_o) * c + cc
             else:
-                ckk = ckk_base if const_expr(SCALAR_K) else k_abs // c
+                ckk = ckk_base if const_expr(SCALAR_K) else k_abs // CGP
                 kw_i = ckk % kw
                 ckk2 = ckk // kw
                 kh_i = ckk2 % kh
                 kt_i = ckk2 // kh
                 if const_expr(BIG_IN_N1):
                     _, row_valid, di, in_t0, in_h0, in_w0 = dec
-                    in_t = in_t0 + kt_i
-                    in_h = in_h0 + kh_i
-                    in_w = in_w0 + kw_i
-                    valid = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, w)
-                    g_off = (((di * d + (in_t - base_t)) * h + in_h) * w + in_w) * c + cc
+                    in_t, m_t = pad_coord(in_t0 + dil(kt_i, dt), d, pt)
+                    in_h, m_h = pad_coord(in_h0 + dil(kh_i, dh), h, ph)
+                    in_w, m_w = pad_coord(in_w0 + dil(kw_i, dw), w, pw)
+                    valid = gather_valid(row_valid & k_valid, m_t, m_h, m_w)
+                    g_off = (((di * d + (in_t - base_t)) * h + (in_h - base_h)) * w + in_w) * c + cc
                 elif const_expr(BIG_IN_NM):
                     _, row_valid, n_idx, in_t0, in_h0, in_w0 = dec
-                    in_t = in_t0 + kt_i
-                    in_h = in_h0 + kh_i
-                    in_w = in_w0 + kw_i
-                    valid = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, w)
+                    in_t, m_t = pad_coord(in_t0 + dil(kt_i, dt), d, pt)
+                    in_h, m_h = pad_coord(in_h0 + dil(kh_i, dh), h, ph)
+                    in_w, m_w = pad_coord(in_w0 + dil(kw_i, dw), w, pw)
+                    valid = gather_valid(row_valid & k_valid, m_t, m_h, m_w)
                     g_off = ((in_t * h + in_h) * w + in_w) * c + cc
                     return fx.Int32(g_off), valid, n_idx
                 else:
                     _, row_valid, n_idx, in_t0, in_h0, in_w0 = dec
-                    in_t = in_t0 + kt_i
-                    in_h = in_h0 + kh_i
-                    in_w = in_w0 + kw_i
-                    valid = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, w)
+                    in_t, m_t = pad_coord(in_t0 + dil(kt_i, dt), d, pt)
+                    in_h, m_h = pad_coord(in_h0 + dil(kh_i, dh), h, ph)
+                    in_w, m_w = pad_coord(in_w0 + dil(kw_i, dw), w, pw)
+                    valid = gather_valid(row_valid & k_valid, m_t, m_h, m_w)
                     g_off = (((n_idx * d + in_t) * h + in_h) * w + in_w) * c + cc
             return fx.Int32(g_off), valid
 
@@ -433,64 +683,66 @@ def compile_conv3d_implicit(
             local_k = linear % TILE_K
             col = n_offset + fx.Index(local_n)
             g_off = fx.Int32(col * crs + (fx.Index(k_base) + fx.Index(local_k)))
-            col_valid = (col < fx.Index(k)) if const_expr(n_tail) else None
+            # Tail is per group: the N grid is over-provisioned to groups*tiles_per_group.
+            col_valid = ((n_local + fx.Index(local_n)) < fx.Index(KG)) if const_expr(n_tail) else None
             return g_off, col_valid
 
         # ---- global -> LDS DMA copy, masking via OOB routing ----
-        # OOB sentinel element indices: a gather past num_records makes the buffer
-        # hardware return 0, reproducing the padding/halo zeroing.
-        X_ELEMS = fx.Int32(n * c * d * h * w)
-        W_ELEMS = fx.Int32(k * c * kt * kh * kw)
-        BIG_OOB_ELEM = fx.Int32(BIG_IN_NR // BF16_BYTES)
+        DMA_BYTES = LDG_VEC * BF16_BYTES  # 16
+        OOB_ELEM = fx.Int32(OOB_SENTINEL_ELEM)
 
-        # global->LDS DMA (BufferCopyLDS128b): gather offset as a flat element index;
-        # OOB padding routes past-end. Used for both non-BIG and BIG_IN gathers.
-        g2s_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
-        LdsPtrTy = fx.PointerType.get(elem_ty.ir_type, 2, 512)
+        def _lds_dma_ptr(lds_array, stage_tile, i):
+            off_elems = fx.Index(stage_tile) + (fx.Index(tid) + fx.Index(i * BLOCK_THREADS)) * fx.Index(LDG_VEC)
+            base_bytes = off_elems * fx.Index(BF16_BYTES)
+            addr = fx.Int64(fx.ptrtoint(lds_array.ptr)) + fx.Int64(base_bytes)
+            addr = rocdl.readfirstlane(T.i64, arith.index_cast(T.i64, addr.ir_value()))
+            return llvm.inttoptr(ir.Type.parse("!llvm.ptr<3>"), addr)
 
-        def _copy_g2s(src_div, lds_array, stage_tile, i, src_elem):
-            off_elems = fx.Int32(stage_tile) + (fx.Int32(tid) + fx.Int32(i * BLOCK_THREADS)) * fx.Int32(LDG_VEC)
-            lds_byte_addr = fx.Int32(fx.ptrtoint(lds_array.ptr)) + off_elems * fx.Int32(BF16_BYTES)
-            lds_ptr = fx.inttoptr(LdsPtrTy, lds_byte_addr)
-            dst = fx.make_view(lds_ptr, fx.make_layout(1, 1))
-            src = fx.slice(src_div, (None, fx.Int32(src_elem)))
-            fx.copy(g2s_atom, src, dst)
+        def _dma_to_lds(rsrc, lds_ptr, voff_elem):
+            voff_b = (voff_elem * fx.Int32(BF16_BYTES)).ir_value()
+            rocdl.raw_ptr_buffer_load_lds(
+                rsrc,
+                lds_ptr,
+                arith.constant(DMA_BYTES, type=T.i32),
+                voff_b,
+                arith.constant(0, type=T.i32),
+                arith.constant(0, type=T.i32),
+                arith.constant(0, type=T.i32),
+            )
 
         def _load_a(stage, k_base):
             kbase_i = fx.Index(k_base)
             cc_base = ckk_base = None
             if const_expr(SCALAR_K):
-                cc_base = kbase_i % c
-                ckk_base = kbase_i // c
+                # Loop-invariant and block-uniform, so folding ch_base in here costs no
+                # per-load instructions on the SCALAR_K path.
+                cc_base = kbase_i % CGP
+                if const_expr(groups > 1):
+                    cc_base = ch_base + cc_base
+                ckk_base = kbase_i // CGP
             stage_tile = fx.Index(stage) * TILE_M * TILE_K
             for i in range_constexpr(LDG_A_COUNT):
                 if const_expr(BIG_IN_NM):
-                    # Rebase the buffer tensor per load to the sample base.
                     addr_ret = _a_addr(i, kbase_i, cc_base, ckk_base)
                     g_off_i, valid, n_idx_i = addr_ret
                     sample_addr = x_base_addr + fx.Int64(n_idx_i) * fx.Int64(X_SAMPLE_BYTES)
-                    x_div_i = _x_div_from_addr(sample_addr)
-                    voff = fx.Int32(arith.select(valid, g_off_i, BIG_OOB_ELEM))
-                    _copy_g2s(x_div_i, a_lds, stage_tile, i, voff)
-                elif const_expr(BIG_IN):
-                    # BIG_IN_N1: rebased buffer tensor (built once above).
-                    g_off_i, valid = _a_addr(i, kbase_i, cc_base, ckk_base)
-                    voff = fx.Int32(arith.select(valid, g_off_i, BIG_OOB_ELEM))
-                    _copy_g2s(x_div_big, a_lds, stage_tile, i, voff)
+                    x_rsrc_i = buffer_ops.create_buffer_resource_from_addr(sample_addr, num_records_bytes=BIG_IN_NR)
+                    voff = fx.Int32(arith.select(valid, g_off_i, OOB_ELEM))
+                    _dma_to_lds(x_rsrc_i, _lds_dma_ptr(a_lds, stage_tile, i), voff)
                 else:
                     g_off_i, valid = _a_addr(i, kbase_i, cc_base, ckk_base)
-                    voff = fx.Int32(arith.select(valid, g_off_i, X_ELEMS))
-                    _copy_g2s(x_div, a_lds, stage_tile, i, voff)
+                    voff = fx.Int32(arith.select(valid, g_off_i, OOB_ELEM))
+                    _dma_to_lds(x_rsrc, _lds_dma_ptr(a_lds, stage_tile, i), voff)
 
         def _load_b(stage, k_base):
             stage_tile = fx.Index(stage) * TILE_N * TILE_K
             for i in range_constexpr(LDG_B_COUNT):
                 g_off, col_valid = _b_addr(i, k_base)
                 if const_expr(n_tail):
-                    voff = fx.Int32(arith.select(col_valid, g_off, W_ELEMS))
+                    voff = fx.Int32(arith.select(col_valid, g_off, OOB_ELEM))
                 else:
                     voff = g_off
-                _copy_g2s(w_div, b_lds, stage_tile, i, voff)
+                _dma_to_lds(w_rsrc, _lds_dma_ptr(b_lds, stage_tile, i), voff)
 
         # ---- single-vec ds_read (LDS -> register), indexed by per-wave MFMA row ----
         def read_a_vec(stage, mi):
@@ -551,7 +803,9 @@ def compile_conv3d_implicit(
                 rocdl.sched_vmem(LDG_A_COUNT + LDG_B_COUNT)
             acc = do_compute(acc, a_frags, b_frags)
 
-        _row_chk = npq % TILE_M != 0
+        # grid.x x grid.z over-provisions the M axis whenever the tiles do not divide
+        # evenly between them, so those blocks have to be masked out even at a tail-free npq.
+        _row_chk = (npq % TILE_M != 0) or (grid_x * m_chunks > grid_m)
         _need_chk = _row_chk or n_tail
         _vec_store = (n == 1) and (not use_splitk) and (dhw % MFMA_C_VALUES == 0) and (not BIG_OUT)
 
@@ -563,25 +817,29 @@ def compile_conv3d_implicit(
             ptr = buffer_ops.create_llvm_ptr(addr, address_space=1)
             llvm.StoreOp(value.ir_value() if hasattr(value, "ir_value") else value, ptr, alignment=2)
 
-        def _valid_raw(row, col):
+        # col_loc is the column within its group; the tail check is per group because the N
+        # grid is over-provisioned. At groups == 1 it is the same value as col.
+        def _valid_raw(row, col_loc):
             if const_expr(_row_chk and n_tail):
-                return arith.andi(row < fx.Index(npq), col < fx.Index(k))
+                return arith.andi(row < fx.Index(npq), col_loc < fx.Index(KG))
             if const_expr(_row_chk):
                 v = row < fx.Index(npq)
                 return arith.andi(v, v)
-            v = col < fx.Index(k)
+            v = col_loc < fx.Index(KG)
             return arith.andi(v, v)
 
         def store_acc():
             for mi in range_constexpr(MI_M):
                 row_base = m_offset + wave_m * WARP_M + mi * MFMA_M + c_m_vec
                 for ni in range_constexpr(MI_N):
-                    col = n_offset + fx.Index(wave_n * WARP_N + ni * MFMA_N + c_n)
+                    col_off = fx.Index(wave_n * WARP_N + ni * MFMA_N + c_n)
+                    col = n_offset + col_off
+                    col_loc = (n_local + col_off) if const_expr(groups > 1) else col
                     a = Vec(acc[mi * MI_N + ni])
                     if const_expr(has_bias and not use_splitk):
-                        col_i = fx.Int32(col)
+                        col_i = fx.Int32(col)  # bias is indexed by the global out-channel
                         if const_expr(n_tail):
-                            col_i = arith.select(col < fx.Index(k), col_i, fx.Int32(0))
+                            col_i = arith.select(col_loc < fx.Index(KG), col_i, fx.Int32(0))
                         bias_val = fx.Float32(buffer_ops.buffer_load(bias_rsrc, col_i, vec_width=1, dtype=fx.Float32))
 
                     if const_expr(_vec_store):
@@ -597,7 +855,7 @@ def compile_conv3d_implicit(
                             buffer_ops.buffer_store(v4, y_rsrc, off_nk0)
 
                         if const_expr(_need_chk):
-                            if _valid_raw(row0, col):
+                            if _valid_raw(row0, col_loc):
                                 _emit_vec()
                         else:
                             _emit_vec()
@@ -627,7 +885,7 @@ def compile_conv3d_implicit(
                                     buffer_ops.buffer_store(cval, y_rsrc, off_nk)
 
                         if const_expr(_need_chk):
-                            if _valid_raw(row, col):
+                            if _valid_raw(row, col_loc):
                                 _emit()
                         else:
                             _emit()
@@ -637,21 +895,46 @@ def compile_conv3d_implicit(
     @flyc.jit
     def launch(y: fx.Tensor, x: fx.Tensor, weight: fx.Tensor, bias: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
         conv3d_implicit_kernel(y, x, weight, bias).launch(
-            grid=(grid_m, grid_n, splitk), block=(BLOCK_THREADS, 1, 1), stream=stream
+            grid=(grid_x, grid_n, m_chunks * splitk), block=(BLOCK_THREADS, 1, 1), stream=stream
         )
 
-    return launch
+    def _launch(y, x, weight, bias, stream=None):
+        with CompilationContext.compile_hints(CONV_COMPILE_HINTS):
+            return launch(y, x, weight, bias, stream=_as_stream(stream))
+
+    def _compile(y, x, weight, bias, stream=None):
+        with CompilationContext.compile_hints(CONV_COMPILE_HINTS):
+            return flyc.compile(launch, y, x, weight, bias, _as_stream(stream))
+
+    _launch.compile = _compile
+    return _launch
 
 
-def _resolve_splitk(splitk, npq, crs, k, device, tile=DEFAULT_TILE):
+# Split-K accumulates into an (npq, k) f32 staging buffer through a buffer atomic, and
+# that atomic's voffset is an unsigned 32-bit BYTE offset while the descriptor's
+# num_records caps the window at 0xFFFFFFFF. Past 4 GB of staging `off_sk * 4` truncates
+# and the high rows wrap onto the start of the buffer, accumulating into unrelated
+# outputs; exactly at 4 GB the last element instead lands outside num_records and its
+# atomic is dropped. Both are silent, so refuse split-K rather than teach the epilogue
+# 64-bit addressing: split-K only pays when the tile grid is too small to fill the device,
+# and an npq*k this large is already tens of thousands of tiles.
+SPLITK_MAX_STAGING_BYTES = 0xFFFFFFFF
+
+
+def _resolve_splitk(splitk, npq, crs, k, device, tile=DEFAULT_TILE, groups=1):
     k_tiles = (crs + TILE_K - 1) // TILE_K
+    # Correctness bound, so it has to gate an explicit splitk too -- the auto branch's own
+    # staging term below is a stricter memory-traffic heuristic, not this limit.
+    if npq * k * 4 > SPLITK_MAX_STAGING_BYTES:
+        return 1
     if splitk is None:
         tile_m, tile_n = tile[0], tile[1]
-        base = ((npq + tile_m - 1) // tile_m) * ((k + tile_n - 1) // tile_n)
+        kg = k // groups
+        base = ((npq + tile_m - 1) // tile_m) * groups * ((kg + tile_n - 1) // tile_n)
         if (
             npq < 4096
             or k_tiles < 16
-            or k % tile_n != 0
+            or kg % tile_n != 0
             or npq % tile_m != 0
             or crs % TILE_K != 0
             or npq * k * 4 > 0x7FFFFFFF
@@ -673,16 +956,148 @@ def _resolve_splitk(splitk, npq, crs, k, device, tile=DEFAULT_TILE):
     return sk
 
 
-def _conv3d_impl(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=None, tile=None, autotune=None):
+def _as_tuple(v, rank, name):
+    """Normalize torch's int / length-1 / length-``rank`` sequence forms to a tuple.
+
+    torch broadcasts a length-1 sequence across every spatial axis, so ``stride=(2,)``
+    on a 3D conv means ``(2, 2, 2)``. Unpacking the sequence directly instead would
+    raise ValueError on that form.
+    """
+    if isinstance(v, int):
+        return (v,) * rank
+    t = tuple(v)
+    if len(t) == 1:
+        return t * rank
+    assert len(t) == rank, f"{name} must be an int or a sequence of 1 or {rank} ints, got {tuple(v)}"
+    return t
+
+
+def _resolve_padding(padding, kernel, stride, dilation):
+    """Normalize torch's ``padding`` argument to a (low, high) pair of per-axis triples.
+
+    An int or a triple is symmetric, so both sides come back the same. The two strings
+    torch accepts are resolved here instead: "valid" is no padding, and "same" holds the
+    output extent equal to the input's, which takes ``dilation * (kernel - 1)`` elements
+    per axis. When that total is odd it cannot be split evenly and torch puts the extra
+    element on the high side, so the two returned triples differ -- see ``_conv3d_impl``
+    for how that case is lowered. "same" is only defined at stride 1, matching torch.
+    """
+    if not isinstance(padding, str):
+        p = _as_tuple(padding, 3, "padding")
+        assert min(p) >= 0, f"negative padding is not supported, got (pt, ph, pw) = {p}"
+        return p, p
+    if padding == "valid":
+        return (0, 0, 0), (0, 0, 0)
+    if padding != "same":
+        raise ValueError(f"padding string must be 'same' or 'valid', got {padding!r}")
+    assert all(
+        s == 1 for s in stride
+    ), f"padding='same' is not supported for strided convolutions, got stride {tuple(stride)}"
+    total = [dl * (kn - 1) for kn, dl in zip(kernel, dilation)]
+    return tuple(t // 2 for t in total), tuple(t - t // 2 for t in total)
+
+
+def _conv3d_impl(
+    x,
+    weight,
+    bias=None,
+    stride=1,
+    padding=0,
+    dilation=1,
+    groups=1,
+    padding_mode="zeros",
+    splitk=None,
+    stream=None,
+    tile=None,
+    autotune=None,
+):
     n, c, d, h, w = x.shape
     k, wc, kt, kh, kw = weight.shape
-    assert c == wc
-    assert x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16
-    st, sh, sw = (stride, stride, stride) if isinstance(stride, int) else stride
-    pt, ph, pw = (padding, padding, padding) if isinstance(padding, int) else padding
+    # Device and dtype first: everything below this point either launches a kernel or
+    # allocates on x.device, and a host tensor reaching that far faults the GPU instead
+    # of raising.
+    for name, t in (("x", x), ("weight", weight), ("bias", bias)):
+        assert t is None or t.is_cuda, f"conv3d_implicit needs GPU tensors; {name} is on {t.device}"
+    assert x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16, (
+        f"conv3d_implicit is a bf16-only kernel; got x={x.dtype}, weight={weight.dtype}"
+    )
+    assert bias is None or (bias.dim() == 1 and bias.numel() == k), (
+        f"bias must be a 1-D tensor of {k} elements, one per output channel; "
+        f"got shape {tuple(bias.shape)}"
+    )
+    groups = int(groups)
+    assert groups >= 1, f"groups must be >= 1, got {groups}"
+    assert c % groups == 0, f"in-channels {c} not divisible by groups {groups}"
+    assert k % groups == 0, f"out-channels {k} not divisible by groups {groups}"
+    assert wc == c // groups, f"weight in-channels {wc} != C/groups = {c // groups}"
+    st, sh, sw = _as_tuple(stride, 3, "stride")
+    # Both of these are torch errors, and validating them here is what makes them say so:
+    # stride 0 would otherwise divide by zero computing the output extent below, and a
+    # negative stride or padding would collapse that extent and trip the unrelated
+    # "dilated filter is larger than the padded input" assertion. The 1D/2D entries widen
+    # their argument to three axes with 1s, so the triple reported here can be longer than
+    # the one that was passed in.
+    assert min(st, sh, sw) >= 1, f"non-positive stride is not supported, got (st, sh, sw) = {(st, sh, sw)}"
+    dt, dh, dw = _as_tuple(dilation, 3, "dilation")
+    assert min(dt, dh, dw) >= 1, f"dilation must be >= 1, got {(dt, dh, dw)}"
+    pad_lo, pad_hi = _resolve_padding(padding, (kt, kh, kw), (st, sh, sw), (dt, dh, dw))
+    pt, ph, pw = pad_lo
+    assert padding_mode in PADDING_MODES, f"padding_mode must be one of {PADDING_MODES}, got {padding_mode!r}"
+
+    # The bounds torch enforces inside its own pad. They also make the kernel's remap a
+    # single step, so check them up front on both paths for one consistent message. An
+    # uneven "same" pad is checked on its wider side, which is the one that can overrun.
+    if padding_mode in ("reflect", "circular"):
+        for ax, (p, ext) in enumerate(zip(map(max, pad_lo, pad_hi), (d, h, w))):
+            if padding_mode == "reflect":
+                assert p < ext, f"reflect padding {p} must be < input extent {ext} on spatial axis {ax}"
+            else:
+                assert p <= ext, f"circular padding {p} must be <= input extent {ext} on spatial axis {ax}"
+
+    # An odd "same" total splits unevenly, and the kernel carries one pad per axis. Torch
+    # has the same limitation and resolves it the same way -- by materializing a padded
+    # copy of the input, which it warns about. Under "zeros" only the surplus on the high
+    # side has to exist, because a zero tap past the high edge is already what the
+    # gather's range mask produces; pad that side alone and keep convolving with pad_lo.
+    # The other modes fill the whole border in one call, matching nn.ConvNd, because two
+    # chained pads do not compose (reflecting by 1 then by 2 is not reflecting by 3).
+    if pad_lo != pad_hi:
+        if padding_mode == "zeros":
+            x = torch.nn.functional.pad(x, (0, pad_hi[2] - pw, 0, pad_hi[1] - ph, 0, pad_hi[0] - pt))
+        else:
+            x = torch.nn.functional.pad(x, (pw, pad_hi[2], ph, pad_hi[1], pt, pad_hi[0]), mode=padding_mode)
+            pt = ph = pw = 0
+        n, c, d, h, w = x.shape
+
+    # Non-zero modes are resolved inside the im2col gather, which remaps an out-of-range
+    # tap onto a real input coordinate instead of masking it to zero. No border is
+    # materialized, so this costs no extra memory traffic.
+    #
+    # BIG_IN is the exception: that path rebases the input buffer per block to keep
+    # offsets in 32 bits, and a reflected tap can resolve below the block's base. Those
+    # inputs (> 2^31 elements) fall back to torch's pre-pad, which is always correct.
+    inline_pad = padding_mode != "zeros" and bool(pt or ph or pw)
+    if inline_pad and _big_in(n, c, groups, d, h, w, pt, ph, pw):
+        x = torch.nn.functional.pad(x, (pw, pw, ph, ph, pt, pt), mode=padding_mode)
+        n, c, d, h, w = x.shape
+        pt = ph = pw = 0
+        inline_pad = False
+    pad_mode = padding_mode if inline_pad else "zeros"
 
     # 1x1x1 fast path: y[n,k,dhw] = sum_c weight[k,c] * x[n,c,dhw] — pure channel GEMM.
-    if kt == 1 and kh == 1 and kw == 1 and st == 1 and sh == 1 and sw == 1 and pt == 0 and ph == 0 and pw == 0:
+    # Grouped 1x1x1 is block-diagonal, so it goes through the kernel instead.
+    if (
+        groups == 1
+        and kt == 1
+        and kh == 1
+        and kw == 1
+        and st == 1
+        and sh == 1
+        and sw == 1
+        and pt == 0
+        and ph == 0
+        and pw == 0
+    ):
         wm = weight.reshape(k, c)
         if n == 1:
             y = torch.matmul(wm, x.reshape(c, d * h * w)).reshape(n, k, d, h, w)
@@ -692,94 +1107,178 @@ def _conv3d_impl(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=
             y = y + bias.to(y.dtype).view(1, k, 1, 1, 1)
         return y
 
-    do = (d + 2 * pt - kt) // st + 1
-    ho = (h + 2 * ph - kh) // sh + 1
-    wo = (w + 2 * pw - kw) // sw + 1
+    do = (d + 2 * pt - (dt * (kt - 1) + 1)) // st + 1
+    ho = (h + 2 * ph - (dh * (kh - 1) + 1)) // sh + 1
+    wo = (w + 2 * pw - (dw * (kw - 1) + 1)) // sw + 1
+    assert min(do, ho, wo) >= 1, f"dilated filter is larger than the padded input: output ({do}, {ho}, {wo})"
     npq = n * do * ho * wo
-    crs = c * kt * kh * kw
+
+    # An empty batch would launch the transpose with grid.z == 0 and the conv with grid.x == 0;
+    # both return hipErrorInvalidValue and leave the HIP context unusable. Return the empty
+    # output torch produces instead, before any launch.
+    if n == 0:
+        return torch.empty((0, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
+
+    # Zero-pad C to the gather's vector width; padded channels see zero weights. The pad is
+    # PER GROUP, since the gather vectorizes along channels and must not cross into the next
+    # group. _prep_weight pads the weight's own C the same way, so the two stay aligned.
+    cg = c // groups
+    cgp = _pad_channels(cg)
+    if cgp != cg:
+        x = torch.nn.functional.pad(x.reshape(n, groups, cg, d, h, w), (0, 0, 0, 0, 0, 0, 0, cgp - cg))
+        x = x.reshape(n, groups * cgp, d, h, w)
+    c = groups * cgp
+    crs = cgp * kt * kh * kw
 
     launch_stream = torch.cuda.current_stream() if stream is None else stream
     has_bias = bias is not None
     bias_arg = bias.to(torch.float32).contiguous() if has_bias else torch.empty(1, device=x.device, dtype=torch.float32)
 
     x_ndhwc = _ncdhw_to_ndhwc(x, stream)
-    w_packed = _prep_weight(weight, k, kt, kh, kw, c)
+    w_packed = _prep_weight(weight, k, kt, kh, kw, wc)
 
-    shape = (n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias)
+    shape = (n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, dt, dh, dw, pad_mode, has_bias, groups)
 
     def _run(the_tile, the_wgm=1):
-        sk = _resolve_splitk(splitk, npq, crs, k, x.device, the_tile)
+        sk = _resolve_splitk(splitk, npq, crs, k, x.device, the_tile, groups)
         if sk > 1:
             y = torch.zeros((npq, k), device=x.device, dtype=torch.float32)
         else:
             y = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
         exe = compile_conv3d_implicit(
-            n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, sk, the_tile, the_wgm
+            n,
+            c,
+            d,
+            h,
+            w,
+            k,
+            kt,
+            kh,
+            kw,
+            st,
+            sh,
+            sw,
+            pt,
+            ph,
+            pw,
+            dt,
+            dh,
+            dw,
+            pad_mode,
+            has_bias,
+            sk,
+            the_tile,
+            the_wgm,
+            groups,
         )
-        exe(y, x_ndhwc, w_packed, bias_arg, launch_stream)
+        _dispatch(exe, y, x_ndhwc, w_packed, bias_arg, stream=launch_stream)
         return y, sk
 
     if tile is not None:
         chosen_tile = tuple(tile)
         chosen_wgm = 1
     elif autotune or (autotune is None and _autotune_enabled()):
-        from kernels.conv.conv3d_implicit_autotune import BF16_CANDIDATES, WGM_VALUES, autotune_conv3d
+        from kernels.conv.conv3d_autotune import BF16_CANDIDATES, WGM_VALUES, autotune_conv3d
 
         candidates = [(t, w) for t in BF16_CANDIDATES for w in WGM_VALUES]
         best = autotune_conv3d("bf16", shape, "bf16", candidates, x.device, lambda tw: _run(tw[0], tw[1])[0])
         chosen_tile, chosen_wgm = best
     else:
-        chosen_tile = DEFAULT_TILE
+        # A tile never spans groups, so a 128-wide N tile sits mostly empty when K/groups is
+        # small; drop to the narrowest legal candidate. Autotune picks properly when enabled.
+        chosen_tile = (64, 64, 2, 2) if (groups > 1 and k // groups < DEFAULT_TILE[1]) else DEFAULT_TILE
         chosen_wgm = 1
 
     y, sk = _run(chosen_tile, chosen_wgm)
     if sk > 1:
         if has_bias:
             y = y + bias_arg.view(1, k)
-        y = y.to(torch.bfloat16)
-        return y.view(n, do, ho, wo, k).permute(0, 4, 1, 2, 3)
+        # The split-K accumulator is the raw GEMM shape, i.e. NDHWC, so the permute below is
+        # a metadata-only relabel and leaves the data channels-last. Materialize contiguous
+        # NCDHW so the memory format does not depend on whether split-K ran. copy_ folds the
+        # f32 -> bf16 cast into the transpose, keeping this to the single pass the cast cost
+        # anyway.
+        out = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
+        out.copy_(y.view(n, do, ho, wo, k).permute(0, 4, 1, 2, 3))
+        return out
     return y
 
 
-def _conv2d_impl(x, weight, bias=None, stride=1, padding=0, **kwargs):
+def _conv2d_impl(x, weight, bias=None, stride=1, padding=0, dilation=1, **kwargs):
     assert x.dim() == 4 and weight.dim() == 4, "conv2d expects (N,C,H,W) / (K,C,R,S)"
-    sh, sw = (stride, stride) if isinstance(stride, int) else stride
-    ph, pw = (padding, padding) if isinstance(padding, int) else padding
+    sh, sw = _as_tuple(stride, 2, "stride")
+    dh, dw = _as_tuple(dilation, 2, "dilation")
+    # A padding string stays a string: the degenerate depth axis is a single 1-tap slice,
+    # so "same" resolves to no padding on it anyway.
+    if isinstance(padding, str):
+        p3 = padding
+    else:
+        ph, pw = _as_tuple(padding, 2, "padding")
+        p3 = (0, ph, pw)
     n, c, h, w = x.shape
     k, wc, r, s = weight.shape
     x5 = x.reshape(n, c, 1, h, w)
     w5 = weight.reshape(k, wc, 1, r, s)
-    y5 = _conv3d_impl(x5, w5, bias=bias, stride=(1, sh, sw), padding=(0, ph, pw), **kwargs)
+    y5 = _conv3d_impl(x5, w5, bias=bias, stride=(1, sh, sw), padding=p3, dilation=(1, dh, dw), **kwargs)
     return y5.reshape(y5.shape[0], y5.shape[1], y5.shape[3], y5.shape[4])
 
 
-def _conv1d_impl(x, weight, bias=None, stride=1, padding=0, **kwargs):
+def _conv1d_impl(x, weight, bias=None, stride=1, padding=0, dilation=1, **kwargs):
     assert x.dim() == 3 and weight.dim() == 3, "conv1d expects (N,C,W) / (K,C,S)"
-    sw = stride if isinstance(stride, int) else stride[0]
-    pw = padding if isinstance(padding, int) else padding[0]
+    (sw,) = _as_tuple(stride, 1, "stride")
+    (dw,) = _as_tuple(dilation, 1, "dilation")
+    if isinstance(padding, str):
+        p3 = padding
+    else:
+        p3 = (0, 0, _as_tuple(padding, 1, "padding")[0])
     n, c, w = x.shape
     k, wc, s = weight.shape
     x5 = x.reshape(n, c, 1, 1, w)
     w5 = weight.reshape(k, wc, 1, 1, s)
-    y5 = _conv3d_impl(x5, w5, bias=bias, stride=(1, 1, sw), padding=(0, 0, pw), **kwargs)
+    y5 = _conv3d_impl(x5, w5, bias=bias, stride=(1, 1, sw), padding=p3, dilation=(1, 1, dw), **kwargs)
     return y5.reshape(y5.shape[0], y5.shape[1], y5.shape[4])
 
 
-def conv3d_implicit(x, weight, bias=None, stride=1, padding=0, **kwargs):
+def conv3d_implicit(x, weight, bias=None, stride=1, padding=0, dilation=1, **kwargs):
     """Main implicit-GEMM conv entry; dispatches 1D/2D/3D by filter rank.
 
-    Rank is taken from the filter (weight.dim() - 2): 3 -> 3D (N,C,D,H,W)/(K,C,T,R,S),
-    2 -> 2D (N,C,H,W)/(K,C,R,S), 1 -> 1D (N,C,W)/(K,C,S); x and weight must match.
-    True 3D calls run the implementation directly; 2D/1D reshape to the degenerate
-    5D case. stride/padding/bias and extra kwargs (splitk, tile, autotune, stream)
-    forward to the chosen path.
+    Rank is taken from the filter (weight.dim() - 2): 3 -> 3D (N,C,D,H,W)/(K,C,T,R,S).
+
+    ``padding`` takes an int, a per-axis tuple, or one of torch's two strings. "valid" is
+    no padding. "same" pads so the output keeps the input's spatial extent, which needs
+    ``dilation * (kernel - 1)`` elements per axis and, like torch, is only defined at
+    stride 1. That total is normally even and costs nothing beyond an ordinary symmetric
+    pad. An even-length filter under odd dilation makes it odd, and torch's rule of
+    putting the extra element on the high side then asks for a pad the kernel cannot
+    express with one value per axis; that case materializes a padded input first, exactly
+    as torch does (it warns about the same copy). ``padding_mode`` applies to "same" too.
+
+    ``dilation`` follows torch semantics: it spaces the filter taps by that factor
+    over the input, shrinking the output to
+    ``(D + 2*pad - dilation*(T-1) - 1)//stride + 1`` per axis. It costs nothing in the
+    GEMM -- the K axis is still C/groups*T*R*S -- it only stretches the im2col gather,
+    so a dilated filter reads a wider input footprint per output row and gets less
+    reuse out of cache than the same filter undilated.
+
+    ``groups`` follows torch semantics: C and K must both be divisible by it and the
+    weight's channel dim is C/groups. Groups map onto the N grid axis, one tile never
+    spanning two groups, so efficiency tracks how well K/groups fills TILE_N. Measured
+    on gfx950 vs torch/MIOpen, moderate cardinality wins across the board (1.5-2.0x for
+    K/groups in [8, 256]). True depthwise (groups == C, so C/groups == 1) is the one
+    weak case at ~0.5x: C/groups=1 pads to the gather's 8-wide vector, wasting 7/8 of
+    the K axis, while K/groups=1 leaves all but one column of the N tile masked.
+    Narrower tiles recover little there -- depthwise wants its own kernel, not this
+    single-GEMM mapping.
     """
-    assert x.dim() == weight.dim(), f"x rank {x.dim()} != weight rank {weight.dim()}"
     spatial_rank = weight.dim() - 2
-    if spatial_rank == 3:
-        return _conv3d_impl(x, weight, bias=bias, stride=stride, padding=padding, **kwargs)
-    if spatial_rank == 2:
-        return _conv2d_impl(x, weight, bias=bias, stride=stride, padding=padding, **kwargs)
-    if spatial_rank == 1:
-        return _conv1d_impl(x, weight, bias=bias, stride=stride, padding=padding, **kwargs)
-    raise ValueError(f"conv3d_implicit supports 1D/2D/3D; got filter rank {weight.dim()}")
+    if spatial_rank not in (1, 2, 3):
+        raise ValueError(f"conv3d_implicit supports 1D/2D/3D; got filter rank {weight.dim()}")
+    # An unbatched (C, *spatial) input runs as a batch of one and loses the dim again on
+    # the way out, matching torch.
+    unbatched = x.dim() == weight.dim() - 1
+    if unbatched:
+        x = x.unsqueeze(0)
+    assert x.dim() == weight.dim(), f"x rank {x.dim()} != weight rank {weight.dim()}"
+    impl = {3: _conv3d_impl, 2: _conv2d_impl, 1: _conv1d_impl}[spatial_rank]
+    y = impl(x, weight, bias=bias, stride=stride, padding=padding, dilation=dilation, **kwargs)
+    return y.squeeze(0) if unbatched else y
