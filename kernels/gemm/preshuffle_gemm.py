@@ -459,8 +459,8 @@ def compile_preshuffle_gemm(
 
         # ── Pipeline stage (double-buffered B via split fragments) ─
         def mma_kloop(a_stage, cur_frag_B):
+            fx.copy(uni_copy, pA_s2r_stages[a_stage], frag_A_retile)
             for ki in range_constexpr(k_iters):
-                fx.copy(uni_copy, pA_s2r_stages[a_stage][None, None, ki], frag_A_retile[None, None, ki])
                 k_coord = ki if (use_mfma_scale_128 or use_mfma_k32) else (None, ki)
                 fx.gemm(tiled_mma, frag_C, frag_A[None, None, k_coord], cur_frag_B[None, None, k_coord], frag_C)
 
@@ -578,7 +578,7 @@ def compile_preshuffle_gemm(
                 s_b = []
                 for ni in range_constexpr(num_acc_n):
                     f = fx.make_rmem_tensor(1, Float32)
-                    fx.copy_atom_call(
+                    fx.copy(
                         epi_copy_32b,
                         sb_buf[None, fx.Int32(by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16)],
                         f,
@@ -592,7 +592,7 @@ def compile_preshuffle_gemm(
                 for mi in range_constexpr(m_repeat):
                     f = fx.make_rmem_tensor(4, Float32)
                     grp = (bx_m + mi * 16 + lane_div_16 * 4) // 4
-                    fx.copy_atom_call(epi_copy_128b, sa_buf[None, fx.Int32(grp)], f)
+                    fx.copy(epi_copy_128b, sa_buf[None, fx.Int32(grp)], f)
                     s_a.append(Vec(f.load()))
             if const_expr(_has_bias):
                 # Per-column bias (out_dtype), one scalar per N-block, shared across rows.
@@ -600,7 +600,7 @@ def compile_preshuffle_gemm(
                 bias = []
                 for ni in range_constexpr(num_acc_n):
                     f = fx.make_rmem_tensor(1, out_elem_cls)
-                    fx.copy_atom_call(
+                    fx.copy(
                         epi_copy_16b,
                         bias_buf[None, fx.Int32(by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16)],
                         f,
