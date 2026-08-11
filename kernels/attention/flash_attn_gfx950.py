@@ -162,7 +162,7 @@ def build_flash_attn_dualwave_swp_module(
         class SharedStorage:
             kv: fx.Array[_lds_elem_dtype, traits.LDS_KV_TOTAL_SIZE, 16]
             bt: fx.Array[fx.Int32, traits.PAGED_BT_LDS_SIZE, 16]
-            bias: fx.Array[_lds_elem_dtype, _BIAS_LDS_ELEMS, 16]
+            bias: fx.Array[_lds_elem_dtype, _BIAS_LDS_ELEMS, 128]
 
     elif const_expr(traits.PAGED):
 
@@ -176,7 +176,7 @@ def build_flash_attn_dualwave_swp_module(
         @fx.struct
         class SharedStorage:
             kv: fx.Array[_lds_elem_dtype, traits.LDS_KV_TOTAL_SIZE, 16]
-            bias: fx.Array[_lds_elem_dtype, _BIAS_LDS_ELEMS, 16]
+            bias: fx.Array[_lds_elem_dtype, _BIAS_LDS_ELEMS, 128]
 
     else:
 
@@ -268,7 +268,6 @@ def build_flash_attn_dualwave_swp_module(
             _bias_frag_align = _BIAS_VEC * traits.BF16_BYTES
             _bias_log2e = Vec.filled(_BIAS_VEC, BIAS_LOG2E, fx.Float32)
             _bias_lds_base_idx = fx.Index(fx.ptrtoint(ctx.lds.bias.ptr))
-            _bias_lds_base_ptr = _make_bias_lds_ptr(_bias_lds_base_idx)
             _bias_gran_bytes = traits.DMA_BYTES
             _bias_gran_elems = traits.DMA_BYTES // traits.BF16_BYTES
             _bias_half_grans = traits.K_SUB_N // _bias_gran_elems
@@ -282,6 +281,9 @@ def build_flash_attn_dualwave_swp_module(
             )
             _bias_lane_base = fx.Index(
                 _bias_lds_lane_base(traits, 0, ctx.wave_id, ctx.lane_mod_32, ctx.lane_div_32, _BIAS_VEC)
+            )
+            _bias_addr_base = _bias_lds_base_idx + fx.Index(
+                fx.get_scalar(fx.crd2idx(fx.make_int_tuple(fx.Int32(_bias_lane_base)), _bias_swz_layout))
             )
 
         # ---------------- ALiBi ----------------
@@ -331,12 +333,9 @@ def build_flash_attn_dualwave_swp_module(
                 )
 
         def _read_bias_frag(h, g, buf):
-            """Read one 4-element bias fragment for score half `h`, group `g` from LDS."""
             gran = _seq_pad_score_threshold(traits, g * _BIAS_VEC) // _bias_gran_elems + _bias_half_grans * h
-            sel = gran * _bias_gran_bytes + buf * _BIAS_BUF_BYTES
-            crd = fx.make_int_tuple(fx.Int32(_bias_lane_base + fx.Index(sel)))
-            off = fx.get_scalar(fx.crd2idx(crd, _bias_swz_layout))
-            return _load_bias_frag_lds(_bias_lds_base_ptr, fx.Int32(off), _bias_frag_ty, _bias_frag_align)
+            ptr = _make_bias_lds_ptr(_bias_addr_base ^ fx.Index(gran * _bias_gran_bytes))
+            return _load_bias_frag_lds(ptr, fx.Int32(buf * _BIAS_BUF_BYTES), _bias_frag_ty, _bias_frag_align)
 
         def _score_bias_half(s_h, tile_idx, h, buf):
             src = Vec(s_h)
