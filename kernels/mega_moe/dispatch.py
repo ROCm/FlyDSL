@@ -10,7 +10,9 @@ import mori.ir.flydsl as mori_shmem
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import const_expr, range_constexpr
+from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
+from flydsl.expr.utils.arith import ArithValue
 from kernels.comm import communication_ops_utils as comm_ops
 from kernels.common import buffer_ops
 
@@ -62,6 +64,21 @@ class DispatchSlot(IntEnum):
 
 
 DISPATCH_TABLE_SIZE = max(DispatchSlot) + 1
+
+
+def _slot_ptr(rdisp, slot):
+    """Read one 64-bit pointer out of the dispatch table into SGPRs.
+
+    The slot index is a compile-time constant and ``rdisp`` is wave-uniform, so
+    the pointer is the same in every lane. A vector load still leaves it in
+    VGPRs, and codegen then wraps *every* buffer access built from it in a
+    scalarization waterfall (readfirstlane / v_cmp_eq_u64 / saveexec loop).
+    Scalar loads land the halves in SGPRs, so the descriptor is uniform by
+    construction. Offsets are in i32 elements, hence the 2x on the i64 slot.
+    """
+    lo = buffer_ops.buffer_load(rdisp, fx.Int32(2 * slot), vec_width=1, is_scalar=True)
+    hi = buffer_ops.buffer_load(rdisp, fx.Int32(2 * slot + 1), vec_width=1, is_scalar=True)
+    return _raw(ArithValue(lo).extui(T.i64) | (ArithValue(hi).extui(T.i64) << 32))
 
 
 @flyc.jit
@@ -188,7 +205,7 @@ def emit_direct_fixed_slot_payload(
     rdisp = crfa(addr_disp)
 
     def dp(i):
-        return buffer_ops.buffer_load(rdisp, fx.Int32(i), vec_width=1, dtype=fx.Int64)
+        return _slot_ptr(rdisp, i)
 
     p_rx = dp(DispatchSlot.P2P_TOKEN)
     p_sc = dp(DispatchSlot.P2P_SCALE)
@@ -296,7 +313,7 @@ def emit_direct_fixed_slot_finalize(
     rdisp = crfa(addr_disp)
 
     def dp(i):
-        return buffer_ops.buffer_load(rdisp, fx.Int32(i), vec_width=1, dtype=fx.Int64)
+        return _slot_ptr(rdisp, i)
 
     a_se = dp(DispatchSlot.SORTED_EXPERT)
     a_trb = dp(DispatchSlot.TILE_ROW_BASE)
@@ -380,7 +397,7 @@ def emit_dispatch_plan(
     rdisp = crfa(addr_disp)
 
     def dp(i):
-        return buffer_ops.buffer_load(rdisp, fx.Int32(i), vec_width=1, dtype=fx.Int64)
+        return _slot_ptr(rdisp, i)
 
     a_pair_base = dp(DispatchSlot.PAIR_BASE)
     a_se = dp(DispatchSlot.SORTED_EXPERT)
@@ -639,7 +656,7 @@ def emit_dispatch_group(
     rdisp = crfa(addr_disp)
 
     def dp(i):
-        return buffer_ops.buffer_load(rdisp, fx.Int32(i), vec_width=1, dtype=fx.Int64)
+        return _slot_ptr(rdisp, i)
 
     a_pair_ready = dp(DispatchSlot.PAIR_READY)
     a_pair_order_ready = dp(DispatchSlot.PAIR_ORDER_READY)
@@ -714,7 +731,7 @@ def emit_dispatch_payload(
     rdisp = crfa(addr_disp)
 
     def dp(i):
-        return buffer_ops.buffer_load(rdisp, fx.Int32(i), vec_width=1, dtype=fx.Int64)
+        return _slot_ptr(rdisp, i)
 
     p_rx = dp(DispatchSlot.P2P_TOKEN)
     p_sc = dp(DispatchSlot.P2P_SCALE)

@@ -406,7 +406,7 @@ def apply_mega_moe_quant_config(config: MegaMoEConfig, tokens: int, a_dtype: str
         if tokens >= 256:
             stage1_overrides["waves_per_eu_hint"] = 1
         if bucket == 512:
-            stage1_overrides.update(b_nt=0, num_dispatch_cu=160)
+            stage1_overrides.update(b_nt=0, num_dispatch_cu=64)
         elif bucket == 1024:
             stage1_overrides.update(sort_block_m=128, num_dispatch_cu=88)
             stage2_overrides["block_m"] = 64
