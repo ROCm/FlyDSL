@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-11T16:43:25Z",
+ "updated": "2026-08-11T17:40:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31506045411",
    "created_at": "2026-08-11T15:15:35Z",
-   "updated_at": "2026-08-11T15:17:29Z",
+   "updated_at": "2026-08-11T16:46:28Z",
    "actor": "amd-nprotaso",
    "jobs": []
   },
@@ -302,11 +302,11 @@
    "branch": "xyt/gemm16_950",
    "event": "pull_request",
    "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31485780752",
    "created_at": "2026-08-11T11:14:58Z",
-   "updated_at": "2026-08-11T14:39:34Z",
+   "updated_at": "2026-08-11T17:39:18Z",
    "actor": "xytpai",
    "jobs": [
     {
@@ -321,10 +321,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-11T14:39:34Z",
-     "completed_at": null,
+     "completed_at": "2026-08-11T17:39:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31485780752/job/93800059517"
     },
     {
