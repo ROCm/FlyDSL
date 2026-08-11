@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-11T08:47:57Z",
+ "updated": "2026-08-11T09:39:54Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31476253355,
+   "pr": 972,
+   "commit": "0369a804db95d9804c1d9ef520f56f25ff3d537f",
+   "branch": "mega_moe_a4w4",
+   "event": "pull_request",
+   "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31476253355",
+   "created_at": "2026-08-11T09:07:06Z",
+   "updated_at": "2026-08-11T09:09:05Z",
+   "actor": "Yaowu-Xiong",
+   "jobs": []
+  },
   {
    "run_id": 31474702073,
    "pr": 980,
@@ -10,11 +25,11 @@
    "branch": "feat/rdna3-gemm-tile-autotune",
    "event": "pull_request",
    "title": "[Perf] Choose the RDNA3 GEMM tile from the shape",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31474702073",
    "created_at": "2026-08-11T08:46:30Z",
-   "updated_at": "2026-08-11T08:47:01Z",
+   "updated_at": "2026-08-11T08:48:09Z",
    "actor": "vlluvia",
    "jobs": []
   },
@@ -40,11 +55,11 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31471176613",
    "created_at": "2026-08-11T07:58:20Z",
-   "updated_at": "2026-08-11T08:00:15Z",
+   "updated_at": "2026-08-11T09:34:11Z",
    "actor": "Boss2002n",
    "jobs": []
   },
@@ -55,11 +70,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Kernel]Remove recast iter from sliding window attention kernel. (#997)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31470290261",
    "created_at": "2026-08-11T07:45:41Z",
-   "updated_at": "2026-08-11T07:46:29Z",
+   "updated_at": "2026-08-11T09:29:28Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -70,13 +85,41 @@
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31468523970",
    "created_at": "2026-08-11T07:20:03Z",
-   "updated_at": "2026-08-11T08:13:13Z",
+   "updated_at": "2026-08-11T09:32:38Z",
    "actor": "amd-nprotaso",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-11T09:32:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31468523970/job/93736712910"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-11T09:33:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31468523970/job/93736712948"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-11T09:32:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31468523970/job/93736712949"
+    }
+   ]
   },
   {
    "run_id": 31463119006,
@@ -272,29 +315,29 @@
    "branch": "fix/rmsnorm",
    "event": "pull_request",
    "title": "[fix] Resolve normalization-related CI regressions",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546",
    "created_at": "2026-08-11T03:17:19Z",
-   "updated_at": "2026-08-11T04:50:23Z",
+   "updated_at": "2026-08-11T09:28:18Z",
    "actor": "cschenjunlin",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-11T04:50:22Z",
-     "completed_at": null,
+     "completed_at": "2026-08-11T09:16:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546/job/93680491540"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-11T04:50:11Z",
-     "completed_at": null,
+     "completed_at": "2026-08-11T09:28:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546/job/93680491550"
     },
     {
@@ -422,10 +465,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-11T05:07:39Z",
-     "completed_at": null,
+     "completed_at": "2026-08-11T09:36:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31448928321/job/93683065810"
     },
     {
@@ -1015,11 +1058,11 @@
    "branch": "feature/typed-arithmetic-modernization",
    "event": "pull_request",
    "title": "[wip] Add type-aware extrema and integer ceil-division APIs",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31364678789",
    "created_at": "2026-08-10T07:08:58Z",
-   "updated_at": "2026-08-11T08:31:44Z",
+   "updated_at": "2026-08-11T09:38:30Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -1419,49 +1462,6 @@
    "updated_at": "2026-08-09T16:07:00Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 31320272340,
-   "pr": 947,
-   "commit": "60976ac4ad85ca93ebf3096126aaeb6662959c32",
-   "branch": "worktree-agent-moe-2stage-port",
-   "event": "pull_request",
-   "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8 (gfx942 + gfx950)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31320272340",
-   "created_at": "2026-08-09T15:07:39Z",
-   "updated_at": "2026-08-09T15:43:22Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-09T15:24:40Z",
-     "completed_at": "2026-08-09T15:43:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31320272340/job/93263935584"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-09T15:25:22Z",
-     "completed_at": "2026-08-09T15:43:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31320272340/job/93263935599"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-09T15:25:08Z",
-     "completed_at": "2026-08-09T15:43:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31320272340/job/93263935606"
-    }
-   ]
   }
  ]
 }
