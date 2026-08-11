@@ -43,6 +43,7 @@ html_theme_options = {
     "repository_url": "https://github.com/ROCm/FlyDSL",
     "use_repository_button": True,
     "use_issues_button": True,
+    "use_source_button": True,
     "use_download_button": True,
 }
 
