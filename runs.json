@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-08-11T06:38:18Z",
+ "updated": "2026-08-11T08:00:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31471176613,
+   "pr": 987,
+   "commit": "586e238f069e0694053f76e30efbdbcf25b9731b",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31471176613",
+   "created_at": "2026-08-11T07:58:20Z",
+   "updated_at": "2026-08-11T07:59:14Z",
+   "actor": "Boss2002n",
+   "jobs": []
+  },
+  {
+   "run_id": 31470290261,
+   "pr": null,
+   "commit": "b4251455f93e519a42dbcd8ad6016f482bf81919",
+   "branch": "main",
+   "event": "push",
+   "title": "[Kernel]Remove recast iter from sliding window attention kernel. (#997)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31470290261",
+   "created_at": "2026-08-11T07:45:41Z",
+   "updated_at": "2026-08-11T07:46:29Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 31468523970,
+   "pr": 960,
+   "commit": "10b38d032eeb1edec5e62161ceab280b0a5e87a3",
+   "branch": "new_bias_alibi_sink_attention",
+   "event": "pull_request",
+   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31468523970",
+   "created_at": "2026-08-11T07:20:03Z",
+   "updated_at": "2026-08-11T07:21:46Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
   {
    "run_id": 31463119006,
    "pr": 987,
@@ -10,11 +55,11 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31463119006",
    "created_at": "2026-08-11T05:52:48Z",
-   "updated_at": "2026-08-11T05:53:55Z",
+   "updated_at": "2026-08-11T07:58:22Z",
    "actor": "jli-melchior",
    "jobs": []
   },
@@ -255,13 +300,41 @@
    "branch": "ci/upgrade-rocm-7.14",
    "event": "pull_request",
    "title": "CI: upgrade PyTorch images to ROCm 7.14",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31452686608",
    "created_at": "2026-08-11T02:32:30Z",
-   "updated_at": "2026-08-11T05:54:01Z",
+   "updated_at": "2026-08-11T06:55:16Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-11T06:55:16Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31452686608/job/93701536483"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-11T06:55:16Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31452686608/job/93701536508"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-11T06:55:16Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31452686608/job/93701536516"
+    }
+   ]
   },
   {
    "run_id": 31449758991,
@@ -413,7 +486,7 @@
   },
   {
    "run_id": 31418205930,
-   "pr": 960,
+   "pr": null,
    "commit": "82d2cc06de3d03fa2bd32dbba1d7525d542cf171",
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
@@ -804,9 +877,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-11T06:29:27Z",
+     "started_at": "2026-08-11T07:11:45Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31371018664/job/93696784052"
     },
@@ -1435,79 +1508,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31319798308/job/93353675054"
     }
    ]
-  },
-  {
-   "run_id": 31312762075,
-   "pr": 947,
-   "commit": "2c714ba8a9949efa6672c522846ef7efa751887d",
-   "branch": "worktree-agent-moe-2stage-port",
-   "event": "pull_request",
-   "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8 (gfx942 + gfx950)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31312762075",
-   "created_at": "2026-08-09T12:13:56Z",
-   "updated_at": "2026-08-09T13:25:23Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 31312171739,
-   "pr": null,
-   "commit": "ed7a9b5446e35d710a71c74908b701d95f8ad040",
-   "branch": "fp4-gemm-4wave-perf",
-   "event": "pull_request",
-   "title": "[fp4_gemm_4wave] MXFP4 GEMM perf optimize",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31312171739",
-   "created_at": "2026-08-09T11:59:54Z",
-   "updated_at": "2026-08-09T16:31:56Z",
-   "actor": "benenzhu",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-09T15:23:56Z",
-     "completed_at": "2026-08-09T16:07:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31312171739/job/93263767894"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-09T15:23:56Z",
-     "completed_at": "2026-08-09T16:07:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31312171739/job/93263767896"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-09T15:23:46Z",
-     "completed_at": "2026-08-09T16:31:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31312171739/job/93263767897"
-    }
-   ]
-  },
-  {
-   "run_id": 31310479740,
-   "pr": 947,
-   "commit": "68cd96f78d62dcf89513e39607a96381b0877642",
-   "branch": "worktree-agent-moe-2stage-port",
-   "event": "pull_request",
-   "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8 (gfx942 + gfx950)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31310479740",
-   "created_at": "2026-08-09T11:18:55Z",
-   "updated_at": "2026-08-09T12:13:57Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
