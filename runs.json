@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-11T05:53:54Z",
+ "updated": "2026-08-11T06:38:18Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31463119006",
    "created_at": "2026-08-11T05:52:48Z",
-   "updated_at": "2026-08-11T05:52:48Z",
+   "updated_at": "2026-08-11T05:53:55Z",
    "actor": "jli-melchior",
    "jobs": []
   },
@@ -225,10 +225,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-11T04:49:18Z",
-     "completed_at": null,
+     "completed_at": "2026-08-11T06:21:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546/job/93680491559"
     }
    ]
@@ -255,11 +255,11 @@
    "branch": "ci/upgrade-rocm-7.14",
    "event": "pull_request",
    "title": "CI: upgrade PyTorch images to ROCm 7.14",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31452686608",
    "created_at": "2026-08-11T02:32:30Z",
-   "updated_at": "2026-08-11T05:52:11Z",
+   "updated_at": "2026-08-11T05:54:01Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -300,19 +300,19 @@
    "branch": "fp4-gemm-4wave-perf",
    "event": "pull_request",
    "title": "[fp4_gemm_4wave] MXFP4 GEMM perf optimize",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31448928321",
    "created_at": "2026-08-11T01:19:06Z",
-   "updated_at": "2026-08-11T05:06:13Z",
+   "updated_at": "2026-08-11T06:23:00Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-11T05:06:13Z",
+     "started_at": "2026-08-11T06:22:59Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31448928321/job/93683065804"
     },
@@ -794,21 +794,30 @@
    "branch": "coop-library",
    "event": "pull_request",
    "title": "[Feat] Add fx.num_warp_threads() as constant accessor",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31371018664",
    "created_at": "2026-08-10T08:39:11Z",
-   "updated_at": "2026-08-10T15:54:11Z",
+   "updated_at": "2026-08-11T06:29:27Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-10T11:50:12Z",
-     "completed_at": "2026-08-10T15:08:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31371018664/job/93443819926"
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-11T06:29:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31371018664/job/93696784052"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-11T06:29:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31371018664/job/93696784074"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -817,16 +826,7 @@
      "conclusion": "success",
      "started_at": "2026-08-10T12:13:10Z",
      "completed_at": "2026-08-10T15:54:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31371018664/job/93443819952"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-10T11:48:58Z",
-     "completed_at": "2026-08-10T12:58:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31371018664/job/93443819976"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31371018664/job/93696784831"
     }
    ]
   },
