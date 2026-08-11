@@ -560,12 +560,13 @@ def launch_gemm_a4w4_256x256(
 
         def _run_all(parity):
             for rev in range(n_steady // num_buffers):
+                do_sync = (rev % cluster_sync_revs) == (cluster_sync_revs - 1)
                 for s in range_constexpr(num_buffers):
                     kt = rev * num_buffers + s
                     _compute_stage(
                         s, (s + 1) % num_buffers, s % 2, (s + 1) % 2, s, kt + num_buffers, num_buffers - 2, True, parity
                     )
-                if rev % cluster_sync_revs == cluster_sync_revs - 1:
+                if do_sync:
                     cluster.cluster_barrier()
             for j in range_constexpr(num_buffers):
                 # No refills left, so the drain must ratchet the TDM allowance down: stage j

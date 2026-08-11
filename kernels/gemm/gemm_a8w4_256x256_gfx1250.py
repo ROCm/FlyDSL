@@ -173,7 +173,7 @@ def launch_gemm_a8w4_256x256(
                 stride, mask, bound, pad, early = i32_k, a_mask, sa_oob, 0, True
             else:
                 tensor, offset, shape, lds_stride = gSB, PLANAR_SB_BASE, (SB_SUPERS, SUPER_K), SUPER_K
-                stride, mask, bound, pad, early = i32_k, b_mask, None, 0, False
+                stride, mask, bound, pad, early = i32_k, b_mask, None, 0, True
             desc = tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=tensor,
                 lds_memref=_view(fx.add_offset(base_ptr, offset), shape, (lds_stride, 1)),
