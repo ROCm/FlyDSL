@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-11T09:39:54Z",
+ "updated": "2026-08-11T10:14:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -40,11 +40,11 @@
    "branch": "xyt/gemm16_950",
    "event": "pull_request",
    "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31473689119",
    "created_at": "2026-08-11T08:32:51Z",
-   "updated_at": "2026-08-11T08:34:28Z",
+   "updated_at": "2026-08-11T09:42:55Z",
    "actor": "xytpai",
    "jobs": []
   },
@@ -401,10 +401,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-11T08:10:59Z",
-     "completed_at": null,
+     "completed_at": "2026-08-11T09:41:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31452686608/job/93701536516"
     }
    ]
@@ -446,11 +446,11 @@
    "branch": "fp4-gemm-4wave-perf",
    "event": "pull_request",
    "title": "[fp4_gemm_4wave] MXFP4 GEMM perf optimize",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31448928321",
    "created_at": "2026-08-11T01:19:06Z",
-   "updated_at": "2026-08-11T06:23:00Z",
+   "updated_at": "2026-08-11T10:13:12Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -474,10 +474,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-11T05:33:51Z",
-     "completed_at": null,
+     "completed_at": "2026-08-11T10:13:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31448928321/job/93683065811"
     }
    ]
