@@ -255,7 +255,7 @@ copy_op = rocdl.BufferCopy64b()    # 64-bit buffer copy
 copy_op = rocdl.BufferCopy32b()    # 32-bit buffer copy
 ```
 
-See [gfx1250 WMMA & TDM atoms](#gfx1250-wmma--tdm-atoms-wave32) below for the
+See [gfx1250 WMMA & TDM atoms](#gfx1250-wmma-tdm-atoms-wave32) below for the
 gfx1250 WMMA (incl. MX-scaled) MMA atoms and the TDM async copy atom.
 
 #### MFMA Instructions

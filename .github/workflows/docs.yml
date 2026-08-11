@@ -35,25 +35,6 @@ jobs:
         with:
           ref: ${{ (github.event_name == 'push' && github.ref_name == 'ci_dashboard') && 'main' || '' }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-
-      - name: Install documentation dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r docs/requirements.txt
-
-      - name: Install FlyDSL (best effort)
-        run: |
-          pip install -e . 2>/dev/null || true
-
-      - name: Build Sphinx documentation
-        run: |
-          cd docs
-          make html
-
       # The static dashboard (html/js/css/vendor/png) is kept OFF main to keep
       # the repo lean; it lives on the ci_dashboard branch. Fetch it into the
       # /ci-dashboard subdir of the built site.
