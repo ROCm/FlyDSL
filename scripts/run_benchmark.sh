@@ -820,14 +820,16 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     _emit_row "$1" "$2" "$3" "$4" "$5"
   done
 
-  if [ -n "${HGEMM_SHAPES:-}" ]; then
-    hgemm_shapes="${HGEMM_SHAPES}"
-  else
-    case "${GPU_ARCH}" in
-      gfx95*) hgemm_shapes="${HGEMM_SHAPES_GFX950}" ;;
-      *) hgemm_shapes="${HGEMM_SHAPES_CDNA3}" ;;
-    esac
-  fi
+  hgemm_shapes=""
+  case "${GPU_ARCH}" in
+    gfx95*)
+      if [ -n "${HGEMM_SHAPES:-}" ]; then
+        hgemm_shapes="${HGEMM_SHAPES}"
+      else
+        hgemm_shapes="${HGEMM_SHAPES_GFX950}"
+      fi
+      ;;
+  esac
 
   for shape in $hgemm_shapes; do
     oldIFS=$IFS
