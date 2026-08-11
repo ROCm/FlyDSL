@@ -4,192 +4,199 @@
 import pytest
 
 from kernels.mega_moe.mega_moe_config import (
+    MAX_MTPR_CLASS,
     TOKEN_BUCKETS,
     apply_mega_moe_quant_config,
+    expert_config_class,
+    mtpr_config_class,
     nearest_token_bucket,
     select_mega_moe_config,
 )
 
-_STANDARD_PROFILES = {
-    1: (32, 256, 4, 1, 64, 0, 1, 2, 32, 256, 0, 0, 0, "none"),
-    4: (32, 256, 4, 1, 128, 0, 1, 2, 32, 256, 0, 0, 0, "none"),
-    8: (32, 256, 4, 2, 128, 0, 1, 2, 32, 128, 0, 0, 0, "none"),
-    16: (32, 128, 4, 4, 96, 0, 1, 1, 32, 128, 0, 0, 0, "none"),
-    32: (32, 128, 4, 3, 128, 0, 0, 2, 32, 128, 0, 0, 0, "none"),
-    64: (32, 128, 4, 3, 208, 0, 0, 2, 32, 256, 0, 0, 0, "none"),
-    128: (32, 128, 4, 3, 224, 0, 0, 2, 32, 128, 1, 240, 0, "none"),
-    256: (64, 512, 8, 1, 160, 1, 1, 2, 32, 128, 1, 128, 0, "none"),
-    512: (64, 512, 8, 2, 128, 1, 0, 2, 32, 128, 1, 240, 1, "none"),
-    1024: (64, 512, 8, 2, 128, 1, 0, 2, 32, 256, 1, 240, 1, "none"),
-    2048: (64, 512, 8, 1, 32, 1, 1, 2, 32, 256, 1, 240, 1, "fp8_blockwise_1x32"),
-    4096: (128, 512, 8, 1, 32, 1, 0, 2, 64, 256, 1, 256, 0, "fp8_blockwise_1x32"),
-    8192: (128, 512, 8, 1, 32, 1, 0, 2, 64, 256, 1, 240, 0, "fp8_blockwise_1x32"),
-    16384: (128, 512, 8, 1, 32, 1, 1, 2, 64, 256, 1, 256, 0, "fp8_blockwise_1x32"),
-    32768: (128, 512, 8, 1, 32, 1, 1, 2, 64, 256, 1, 240, 0, "fp8_blockwise_1x32"),
-}
-
-
-def _profile(config):
-    stage1 = config.stage1
-    stage2 = config.stage2
-    return (
-        stage1.sort_block_m,
-        stage1.tile_n,
-        stage1.num_waves,
-        stage1.grid_mult,
-        stage1.num_dispatch_cu,
-        int(stage1.mfma_amajor),
-        int(stage1.use_tile_resource),
-        stage1.waves_per_eu_hint,
-        stage2.block_m,
-        stage2.block_n,
-        int(stage2.persist),
-        stage2.persist_cu,
-        int(stage2.persist_strided),
-        config.p2p_quant,
-    )
-
-
-@pytest.mark.parametrize("tokens,expected", _STANDARD_PROFILES.items())
-def test_standard_profiles_match_tuned_artifacts(tokens, expected):
-    config = select_mega_moe_config(tokens, max(16, tokens))
-    stage1 = config.stage1
-    stage2 = config.stage2
-
-    assert _profile(config) == expected
-    assert stage1.async_a_copy == (tokens >= 256 and tokens != 2048)
-    assert stage1.b_nt == (0 if tokens == 1 or tokens >= 1024 else 3)
-    assert stage1.work_shards == (4 if tokens >= 8192 else 8)
-    assert stage1.external_grouping == (tokens >= 2048)
-    assert stage1.external_counting == (tokens >= 8192)
-    assert stage1.pipe_weights and stage1.swizzle_a
-    assert stage2.use_nt == (tokens <= 128)
-    assert stage2.b_hoist
-    assert stage2.ascale_prefetch
-    assert stage2.spatial_partition == 402
-    expected_deep_a = stage2.block_n == 256 and tokens >= 1024
-    assert stage2.deep_a_pipeline == expected_deep_a
-    assert not stage2.deep_a_pipeline or stage2.b2stage
-
 
 @pytest.mark.parametrize(
     "tokens,bucket",
-    [
-        (2, 1),
-        (3, 4),
-        (6, 8),
-        (16300, 16384),
-        (16400, 16384),
-        (24576, 32768),
-        (65536, 32768),
-    ],
+    [(2, 1), (3, 4), (6, 8), (16300, 16384), (16400, 16384), (24576, 32768), (65536, 32768)],
 )
 def test_nearest_token_bucket_prefers_larger_on_ties(tokens, bucket):
     assert nearest_token_bucket(tokens) == bucket
 
 
-def test_mtpr_selects_fixed_or_compact_configs():
+@pytest.mark.parametrize("mtpr", [2048, 4096, 8192, 16384, 32768, 65536])
+def test_large_mtpr_uses_one_config_class(mtpr):
+    assert mtpr_config_class(mtpr) == MAX_MTPR_CLASS
+
+
+@pytest.mark.parametrize("tokens", [1, 8, 32, 128, 256, 512, 1024, 2048])
+def test_large_mtpr_configs_are_capacity_invariant(tokens):
+    reference = select_mega_moe_config(tokens, 2048)
+    for mtpr in (4096, 8192, 16384, 32768):
+        if tokens <= mtpr:
+            assert select_mega_moe_config(tokens, mtpr) is reference
+
+
+@pytest.mark.parametrize(
+    "tokens,sbm,dispatch_cu,work_shards,persist_cu,stage2_bm,skew_cu,payload_rows,payload_ready",
+    [
+        (1, 32, 224, 1, 240, 32, 0, 384, True),
+        (32, 32, 64, 1, 240, 32, 0, 384, True),
+        (128, 32, 192, 4, 240, 32, 0, 384, True),
+        (256, 64, 160, 4, 240, 32, 0, 384, True),
+        (512, 64, 64, 4, 240, 32, 96, 384, True),
+        (1024, 64, 64, 4, 224, 32, 96, 384, True),
+        (2048, 64, 64, 8, 240, 64, 0, 0, False),
+        (4096, 128, 64, 4, 240, 64, 96, 384, True),
+        (8192, 128, 96, 4, 240, 64, 96, 384, True),
+        (16384, 128, 32, 4, 192, 64, 96, 1536, True),
+        (32768, 128, 32, 4, 256, 64, 0, 768, True),
+    ],
+)
+def test_large_mtpr_profiles_follow_geometry_rules(
+    tokens,
+    sbm,
+    dispatch_cu,
+    work_shards,
+    persist_cu,
+    stage2_bm,
+    skew_cu,
+    payload_rows,
+    payload_ready,
+):
+    config = select_mega_moe_config(tokens, max(2048, tokens))
+    stage1, stage2 = config.stage1, config.stage2
+
+    assert stage1.sort_block_m == sbm
+    assert stage1.num_dispatch_cu == dispatch_cu
+    assert stage1.work_shards == work_shards
+    assert stage1.grid_mult == 1
+    assert stage1.use_tile_resource
+    assert stage1.payload_chunk_rows == payload_rows
+    assert stage1.payload_tile_ready == payload_ready
+    assert stage2.block_m == stage2_bm
+    assert stage2.persist_cu == persist_cu
+    assert stage2.skew_cu == skew_cu
+    assert config.p2p_quant == "fp8_blockwise_1x32"
+
+
+def test_fixed_and_bounded_compact_profiles_remain_specialized():
     fixed = select_mega_moe_config(128, 128)
-    compact = select_mega_moe_config(128, 8192)
+    bounded = select_mega_moe_config(512, 512)
 
-    assert (
-        fixed.stage1.tile_n,
-        fixed.stage1.num_waves,
-        fixed.stage1.num_dispatch_cu,
-    ) == (128, 4, 224)
-    assert (
-        compact.stage1.tile_n,
-        compact.stage1.num_waves,
-        compact.stage1.num_dispatch_cu,
-    ) == (512, 8, 192)
-    for tokens in (8, 16, 32):
-        assert select_mega_moe_config(tokens, 128).stage2.block_n == 128
-        assert select_mega_moe_config(tokens, 8192).stage2.block_n == 256
+    assert (fixed.stage1.tile_n, fixed.stage1.num_waves, fixed.stage1.num_dispatch_cu) == (128, 4, 224)
+    assert not fixed.stage1.payload_tile_ready and fixed.p2p_quant == "none"
+    assert (bounded.stage1.sort_block_m, bounded.stage1.grid_mult) == (64, 2)
+    assert bounded.stage1.num_dispatch_cu == 128
+    assert not bounded.stage1.payload_tile_ready and bounded.p2p_quant == "none"
 
 
-@pytest.mark.parametrize(
-    "tokens,mtpr,stage1,stage2",
-    [
-        (8, 8192, (32, 1, 192, False, 3, 1), (32, 256, 240, False)),
-        (256, 8192, (64, 1, 160, True, 3, 4), (32, 128, 240, False)),
-        (512, 8192, (64, 1, 64, True, 0, 4), (32, 256, 240, True)),
-        (1024, 32768, (64, 1, 64, True, 0, 4), (32, 256, 224, True)),
-        (2048, 16384, (64, 1, 64, True, 0, 4), (32, 256, 256, True)),
-        (4096, 8192, (128, 1, 64, False, 0, 4), (64, 256, 240, False)),
-    ],
-)
-def test_oversized_capacity_profiles_match_tuned_rules(tokens, mtpr, stage1, stage2):
-    config = select_mega_moe_config(tokens, mtpr)
-    s1 = config.stage1
-    s2 = config.stage2
+def test_large_mtpr_protocol_is_rank_invariant_across_token_buckets():
+    configs = {tokens: select_mega_moe_config(tokens, 32768) for tokens in TOKEN_BUCKETS}
 
-    assert (
-        s1.sort_block_m,
-        s1.grid_mult,
-        s1.num_dispatch_cu,
-        s1.use_tile_resource,
-        s1.b_nt,
-        s1.work_shards,
-    ) == stage1
-    assert (s2.block_m, s2.block_n, s2.persist_cu, s2.persist_strided) == stage2
-    assert s2.persist
+    assert {config.p2p_quant for config in configs.values()} == {"fp8_blockwise_1x32"}
+    assert (configs[2048].stage1.payload_chunk_rows, configs[2048].stage1.payload_tile_ready) == (0, False)
+    assert configs[16384].stage1.payload_chunk_rows == 1536
+    assert configs[32768].stage1.payload_chunk_rows == 768
+    for tokens, config in configs.items():
+        if tokens not in (2048, 16384, 32768):
+            assert (config.stage1.payload_chunk_rows, config.stage1.payload_tile_ready) == (384, True)
 
 
-@pytest.mark.parametrize("mtpr", [16384, 32768])
-@pytest.mark.parametrize("tokens", [1, 128, 512, 1024, 2048, 4096])
-def test_large_capacity_uses_safe_tile_resource_addressing(tokens, mtpr):
-    assert select_mega_moe_config(tokens, mtpr).stage1.use_tile_resource
+def test_non_v4_pro_keeps_generic_large_rules():
+    config = select_mega_moe_config(2048, 2048, model_dim=3584, inter_dim=1536)
 
-
-@pytest.mark.parametrize("mtpr", [2048, 4096, 8192, 16384, 32768])
-def test_requested_oversized_capacity_matrix_is_valid(mtpr):
-    for tokens in (bucket for bucket in TOKEN_BUCKETS if bucket <= mtpr // 2):
-        config = select_mega_moe_config(tokens, mtpr)
-
-        assert config.stage2.block_m <= config.stage1.sort_block_m
-        assert config.stage1.sort_block_m % config.stage2.block_m == 0
-        assert config.p2p_quant == "fp8_blockwise_1x32"
+    assert (config.stage1.payload_chunk_rows, config.stage1.payload_tile_ready) == (0, False)
+    assert (config.stage2.block_m, config.stage2.block_n, config.stage2.persist_cu, config.stage2.skew_cu) == (
+        64,
+        128,
+        240,
+        0,
+    )
 
 
 @pytest.mark.parametrize(
-    "tokens,mtpr,expected",
+    "a_dtype,p2p_quant",
     [
-        (4, 2048, (128, 8, False, False)),
-        (1, 4096, (224, 1, False, False)),
-        (64, 4096, (160, 1, False, False)),
-        (1, 8192, (224, 1, False, False)),
-        (8, 8192, (192, 1, False, False)),
-        (64, 8192, (160, 4, False, False)),
-        (4, 16384, (224, 8, False, False)),
-        (32, 16384, (192, 4, False, False)),
-        (16, 32768, (64, 1, False, False)),
-        (32, 32768, (64, 2, False, False)),
+        ("fp4", "none"),
+        ("fp4", "fp8_blockwise_1x32"),
+        ("fp8", "none"),
+        ("fp8", "fp8_blockwise_1x32"),
     ],
 )
-def test_oversized_small_tail_matches_tuned_rules(tokens, mtpr, expected):
-    stage1 = select_mega_moe_config(tokens, mtpr).stage1
+def test_v4_pro_bs2048_rule_is_transport_and_dtype_invariant(a_dtype, p2p_quant):
+    config = apply_mega_moe_quant_config(
+        select_mega_moe_config(2048, 2048, p2p_quant, a_dtype=a_dtype),
+        2048,
+        a_dtype,
+    )
+
+    assert (config.stage1.payload_chunk_rows, config.stage1.payload_tile_ready) == (0, False)
+    assert (
+        config.stage2.block_m,
+        config.stage2.block_n,
+        config.stage2.persist_cu,
+        config.stage2.persist_strided,
+        config.stage2.skew_cu,
+    ) == (64, 256, 240, True, 0)
+
+
+@pytest.mark.parametrize("p2p_quant", ["none", "fp8_blockwise_1x32"])
+def test_a8_bs2_uses_two_grid_epochs(p2p_quant):
+    config = apply_mega_moe_quant_config(
+        select_mega_moe_config(2, 16, p2p_quant, a_dtype="fp8"),
+        2,
+        "fp8",
+    )
+
+    assert config.stage1.grid_mult == 2
+
+
+@pytest.mark.parametrize("p2p_quant", ["none", "fp8_blockwise_1x32"])
+@pytest.mark.parametrize(
+    "tokens,expected",
+    [
+        (4096, (1, 72, True, 0, False)),
+        (8192, (2, 32, False, 0, False)),
+    ],
+)
+def test_a4_large_stage1_overrides_are_transport_invariant(tokens, expected, p2p_quant):
+    config = apply_mega_moe_quant_config(
+        select_mega_moe_config(tokens, tokens, p2p_quant, a_dtype="fp4"),
+        tokens,
+        "fp4",
+    )
+    stage1 = config.stage1
 
     assert (
+        stage1.grid_mult,
         stage1.num_dispatch_cu,
-        stage1.work_shards,
-        stage1.external_grouping,
-        stage1.external_counting,
+        stage1.swizzle_a,
+        stage1.payload_chunk_rows,
+        stage1.payload_tile_ready,
     ) == expected
 
 
-@pytest.mark.parametrize(
-    "mtpr,expected",
-    [
-        (128, "none"),
-        (1024, "none"),
-        (2048, "fp8_blockwise_1x32"),
-        (8192, "fp8_blockwise_1x32"),
-    ],
-)
-def test_p2p_quant_is_rank_invariant_for_an_mtpr(mtpr, expected):
-    configs = [select_mega_moe_config(tokens, mtpr) for tokens in TOKEN_BUCKETS if tokens <= mtpr]
+@pytest.mark.parametrize("experts_per_rank", [48, 52, 56, 64])
+def test_redundant_experts_share_one_wave_geometry(experts_per_rank):
+    base = select_mega_moe_config(8192, 32768, experts_per_rank=48)
+    redundant = select_mega_moe_config(8192, 32768, experts_per_rank=experts_per_rank)
 
-    assert {config.p2p_quant for config in configs} == {expected}
+    assert expert_config_class(experts_per_rank) == 64
+    assert redundant is base
+
+
+def test_multiple_expert_waves_scale_payload_producers():
+    base = select_mega_moe_config(4096, 32768, experts_per_rank=48)
+    wide = select_mega_moe_config(4096, 32768, experts_per_rank=80)
+
+    assert wide.stage1.num_dispatch_cu == 2 * base.stage1.num_dispatch_cu
+    assert wide.stage2 == base.stage2
+
+
+def test_model_geometry_selects_tile_widths():
+    config = select_mega_moe_config(8192, 32768, model_dim=3584, inter_dim=1536)
+
+    assert config.stage1.tile_n == 256
+    assert config.stage2.block_n == 128
 
 
 def test_a4_auto_p2p_restores_fp8_at_mtpr_1024_without_losing_rank_invariance():
@@ -233,7 +240,7 @@ def test_fp8_transport_restores_tuned_medium_stage2_profiles(a_dtype, tokens, pe
 
 
 def test_nearby_tokens_share_the_bucket_config():
-    assert select_mega_moe_config(500, 512) is select_mega_moe_config(512, 512)
+    assert select_mega_moe_config(500, 8192) is select_mega_moe_config(512, 32768)
 
 
 def test_a4_config_overrides_are_quant_specific():
@@ -252,6 +259,14 @@ def test_a4_config_overrides_are_quant_specific():
     a4_256 = apply_mega_moe_quant_config(select_mega_moe_config(256, 256), 256, "fp4")
     assert a4_256.stage1.waves_per_eu_hint == 1
     assert not select_mega_moe_config(256, 256, "none").stage2.deep_a_pipeline
+
+    a4_fp8_1024 = apply_mega_moe_quant_config(
+        select_mega_moe_config(1024, 1024, "fp8_blockwise_1x32", a_dtype="fp4"),
+        1024,
+        "fp4",
+    )
+    assert a4_fp8_1024.stage1.grid_mult == 1
+    assert a4_fp8_1024.stage2.persist_cu == 224
 
     a4_fixed_256 = apply_mega_moe_quant_config(
         select_mega_moe_config(256, 8192, a_dtype="fp4"),
@@ -284,12 +299,23 @@ def test_a4_fixed_mtpr_profiles_support_async_copy(tokens, expected_sort_block_m
     assert stage1.sort_block_m == expected_sort_block_m
     assert stage1.async_a_copy
     assert (stage1.sort_block_m * (a_k_step_bytes // 16)) % total_threads == 0
+    assert not stage1.payload_chunk_rows or stage1.payload_chunk_rows % stage1.sort_block_m == 0
 
 
-@pytest.mark.parametrize("tokens,mtpr", [(0, 16), (17, 16), (1, 0), (1, 24)])
-def test_invalid_shape_is_rejected(tokens, mtpr):
+@pytest.mark.parametrize(
+    "tokens,mtpr,kwargs",
+    [
+        (0, 16, {}),
+        (17, 16, {}),
+        (1, 0, {}),
+        (1, 24, {}),
+        (1, 16, {"experts_per_rank": 0}),
+        (1, 16, {"model_dim": 0}),
+    ],
+)
+def test_invalid_shape_is_rejected(tokens, mtpr, kwargs):
     with pytest.raises(ValueError):
-        select_mega_moe_config(tokens, mtpr)
+        select_mega_moe_config(tokens, mtpr, **kwargs)
 
 
 def test_invalid_p2p_quant_is_rejected():

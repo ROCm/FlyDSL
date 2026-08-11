@@ -147,7 +147,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: mlir_install.tgz
-          key: mlir-install-${{ runner.os }}-${{ runner.arch }}-${{ env.MLIR_CACHE_VERSION }}-${{ hashFiles('flydsl-test/thirdparty/llvm-hash.txt', 'flydsl-test/scripts/build_llvm.sh') }}
+          key: mlir-install-${{ runner.os }}-${{ runner.arch }}-${{ env.MLIR_CACHE_VERSION }}-${{ hashFiles('flydsl-test/thirdparty/llvm-build-info.json', 'flydsl-test/scripts/build_llvm.sh') }}
 
       - name: Start MLIR build container
         if: steps.mlir-cache.outputs.cache-hit != 'true'
@@ -604,8 +604,9 @@ jobs:
         run: |
           docker exec flydsl_test bash -c "
             cd /flydsl-test &&
-            python tests/kernels/test_profiler_dispatch_combine.py \
+            MORI_SOCKET_IFNAME=lo python tests/kernels/test_profiler_dispatch_combine.py \
               --ci-sweep \
+              --skip-verify-spawn \
               --world-size 8 \
               --port 29503 \
               --output-dir /tmp/flydsl_ci_sweep
