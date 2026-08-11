@@ -1,0 +1,168 @@
+W0811 05:42:00.427000 1808388 torch/distributed/run.py:852] 
+W0811 05:42:00.427000 1808388 torch/distributed/run.py:852] *****************************************
+W0811 05:42:00.427000 1808388 torch/distributed/run.py:852] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0811 05:42:00.427000 1808388 torch/distributed/run.py:852] *****************************************
+[aiter] import [module_aiter_enum] under /home/ghu/aiter_universe/aiter/aiter/jit/module_aiter_enum.so
+[aiter] import [module_aiter_enum] under /home/ghu/aiter_universe/aiter/aiter/jit/module_aiter_enum.so
+[aiter] import [module_aiter_enum] under /home/ghu/aiter_universe/aiter/aiter/jit/module_aiter_enum.so
+[aiter] import [module_aiter_enum] under /home/ghu/aiter_universe/aiter/aiter/jit/module_aiter_enum.so
+[aiter] import [module_aiter_enum] under /home/ghu/aiter_universe/aiter/aiter/jit/module_aiter_enum.so
+[aiter] import [module_aiter_enum] under /home/ghu/aiter_universe/aiter/aiter/jit/module_aiter_enum.so
+[aiter] import [module_aiter_enum] under /home/ghu/aiter_universe/aiter/aiter/jit/module_aiter_enum.so
+[aiter] import [module_aiter_enum] under /home/ghu/aiter_universe/aiter/aiter/jit/module_aiter_enum.so
+[Gloo] Rank 0 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 1 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7[Gloo] Rank 
+2 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 4 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank [Gloo] Rank 6 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+3 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 5 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 7 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+ionic ver: 1.117.5-a-56
+Ionic _ccqe_enabled: False lib_support False nic_support: False
+ionic ver: 1.117.5-a-56
+Ionic _ccqe_enabled: False lib_support False nic_support: False
+ionic ver: 1.117.5-a-56
+Ionic _ccqe_enabled: False lib_support False nic_support: False
+ionic ver: 1.117.5-a-56
+Ionic _ccqe_enabled: False lib_support False nic_support: False
+ionic ver: 1.117.5-a-56
+ionic ver: 1.117.5-a-56
+Ionic _ccqe_enabled: False lib_support False nic_support: False
+Ionic _ccqe_enabled: False lib_support False nic_support: False
+ionic ver: 1.117.5-a-56
+Ionic _ccqe_enabled: False lib_support False nic_support: False
+ionic ver: 1.117.5-a-56
+Ionic _ccqe_enabled: False lib_support False nic_support: False
+/home/ghu/FlyDSL_bk/tests/kernels/test_megamoe_smoothquant.py:84: UserWarning: expandable_segments not supported on this platform (Triggered internally at /pytorch/c10/hip/HIPAllocatorConfig.h:40.)
+  u4_unshuf = torch.randint(0, 16, (experts, rows_per_expert, K), device=device, dtype=torch.uint8)
+/home/ghu/FlyDSL_bk/tests/kernels/test_megamoe_smoothquant.py:84: UserWarning: expandable_segments not supported on this platform (Triggered internally at /pytorch/c10/hip/HIPAllocatorConfig.h:40.)
+  u4_unshuf = torch.randint(0, 16, (experts, rows_per_expert, K), device=device, dtype=torch.uint8)
+/home/ghu/FlyDSL_bk/tests/kernels/test_megamoe_smoothquant.py:84: UserWarning: expandable_segments not supported on this platform (Triggered internally at /pytorch/c10/hip/HIPAllocatorConfig.h:40.)
+  u4_unshuf = torch.randint(0, 16, (experts, rows_per_expert, K), device=device, dtype=torch.uint8)
+/home/ghu/FlyDSL_bk/tests/kernels/test_megamoe_smoothquant.py:84: UserWarning: expandable_segments not supported on this platform (Triggered internally at /pytorch/c10/hip/HIPAllocatorConfig.h:40.)
+  u4_unshuf = torch.randint(0, 16, (experts, rows_per_expert, K), device=device, dtype=torch.uint8)
+/home/ghu/FlyDSL_bk/tests/kernels/test_megamoe_smoothquant.py:84: UserWarning: expandable_segments not supported on this platform (Triggered internally at /pytorch/c10/hip/HIPAllocatorConfig.h:40.)
+  u4_unshuf = torch.randint(0, 16, (experts, rows_per_expert, K), device=device, dtype=torch.uint8)
+/home/ghu/FlyDSL_bk/tests/kernels/test_megamoe_smoothquant.py:84: UserWarning: expandable_segments not supported on this platform (Triggered internally at /pytorch/c10/hip/HIPAllocatorConfig.h:40.)
+  u4_unshuf = torch.randint(0, 16, (experts, rows_per_expert, K), device=device, dtype=torch.uint8)
+/home/ghu/FlyDSL_bk/tests/kernels/test_megamoe_smoothquant.py:84: UserWarning: expandable_segments not supported on this platform (Triggered internally at /pytorch/c10/hip/HIPAllocatorConfig.h:40.)
+  u4_unshuf = torch.randint(0, 16, (experts, rows_per_expert, K), device=device, dtype=torch.uint8)
+/home/ghu/FlyDSL_bk/tests/kernels/test_megamoe_smoothquant.py:84: UserWarning: expandable_segments not supported on this platform (Triggered internally at /pytorch/c10/hip/HIPAllocatorConfig.h:40.)
+  u4_unshuf = torch.randint(0, 16, (experts, rows_per_expert, K), device=device, dtype=torch.uint8)
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=5 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=5 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=5 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=5 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=5 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=5 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=5 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=5 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+[MegaGemm2] auto-config tile table (sort_block_m=64): {8: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 16: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 32: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 64: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 2048: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 4096: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 128: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 256: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 512: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 1024: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}}
+[aiter] import [module_quant] under /home/ghu/aiter_universe/aiter/aiter/jit/module_quant.so
+[aiter] import [module_quant] under /home/ghu/aiter_universe/aiter/aiter/jit/module_quant.so
+[aiter] import [module_quant] under /home/ghu/aiter_universe/aiter/aiter/jit/module_quant.so
+[aiter] import [module_quant] under /home/ghu/aiter_universe/aiter/aiter/jit/module_quant.so
+[aiter] import [module_quant] under /home/ghu/aiter_universe/aiter/aiter/jit/module_quant.so
+[aiter] import [module_quant] under /home/ghu/aiter_universe/aiter/aiter/jit/module_quant.so
+[aiter] import [module_quant] under /home/ghu/aiter_universe/aiter/aiter/jit/module_quant.so
+[aiter] import [module_quant] under /home/ghu/aiter_universe/aiter/aiter/jit/module_quant.so
+[aiter] type hints mismatch, override to --> smooth_per_token_scaled_quant(out: torch.Tensor, input: torch.Tensor, scales: torch.Tensor, smooth_scale: torch.Tensor, smooth_scale_map: Optional[torch.Tensor] = None, shuffle_scale: bool = False, num_rows: Optional[torch.Tensor] = None, num_rows_factor: int | typing.SupportsIndex = 1, smooth_scale_map_hash: Optional[torch.Tensor] = None, enable_ps: bool = True) -> None
+[aiter] type hints mismatch, override to --> smooth_per_token_scaled_quant(out: torch.Tensor, input: torch.Tensor, scales: torch.Tensor, smooth_scale: torch.Tensor, smooth_scale_map: Optional[torch.Tensor] = None, shuffle_scale: bool = False, num_rows: Optional[torch.Tensor] = None, num_rows_factor: int | typing.SupportsIndex = 1, smooth_scale_map_hash: Optional[torch.Tensor] = None, enable_ps: bool = True) -> None
+[aiter] type hints mismatch, override to --> smooth_per_token_scaled_quant(out: torch.Tensor, input: torch.Tensor, scales: torch.Tensor, smooth_scale: torch.Tensor, smooth_scale_map: Optional[torch.Tensor] = None, shuffle_scale: bool = False, num_rows: Optional[torch.Tensor] = None, num_rows_factor: int | typing.SupportsIndex = 1, smooth_scale_map_hash: Optional[torch.Tensor] = None, enable_ps: bool = True) -> None
+[aiter] type hints mismatch, override to --> smooth_per_token_scaled_quant(out: torch.Tensor, input: torch.Tensor, scales: torch.Tensor, smooth_scale: torch.Tensor, smooth_scale_map: Optional[torch.Tensor] = None, shuffle_scale: bool = False, num_rows: Optional[torch.Tensor] = None, num_rows_factor: int | typing.SupportsIndex = 1, smooth_scale_map_hash: Optional[torch.Tensor] = None, enable_ps: bool = True) -> None
+[aiter] type hints mismatch, override to --> smooth_per_token_scaled_quant(out: torch.Tensor, input: torch.Tensor, scales: torch.Tensor, smooth_scale: torch.Tensor, smooth_scale_map: Optional[torch.Tensor] = None, shuffle_scale: bool = False, num_rows: Optional[torch.Tensor] = None, num_rows_factor: int | typing.SupportsIndex = 1, smooth_scale_map_hash: Optional[torch.Tensor] = None, enable_ps: bool = True) -> None
+[aiter] type hints mismatch, override to --> smooth_per_token_scaled_quant(out: torch.Tensor, input: torch.Tensor, scales: torch.Tensor, smooth_scale: torch.Tensor, smooth_scale_map: Optional[torch.Tensor] = None, shuffle_scale: bool = False, num_rows: Optional[torch.Tensor] = None, num_rows_factor: int | typing.SupportsIndex = 1, smooth_scale_map_hash: Optional[torch.Tensor] = None, enable_ps: bool = True) -> None
+[aiter] type hints mismatch, override to --> smooth_per_token_scaled_quant(out: torch.Tensor, input: torch.Tensor, scales: torch.Tensor, smooth_scale: torch.Tensor, smooth_scale_map: Optional[torch.Tensor] = None, shuffle_scale: bool = False, num_rows: Optional[torch.Tensor] = None, num_rows_factor: int | typing.SupportsIndex = 1, smooth_scale_map_hash: Optional[torch.Tensor] = None, enable_ps: bool = True) -> None
+[aiter] type hints mismatch, override to --> smooth_per_token_scaled_quant(out: torch.Tensor, input: torch.Tensor, scales: torch.Tensor, smooth_scale: torch.Tensor, smooth_scale_map: Optional[torch.Tensor] = None, shuffle_scale: bool = False, num_rows: Optional[torch.Tensor] = None, num_rows_factor: int | typing.SupportsIndex = 1, smooth_scale_map_hash: Optional[torch.Tensor] = None, enable_ps: bool = True) -> None
+[aiter] type hints mismatch, override to --> moe_smooth_per_token_scaled_quant_v2(out: torch.Tensor, input: torch.Tensor, scales: torch.Tensor, smooth_scale: torch.Tensor, sorted_token_ids: torch.Tensor, sorted_expert_ids: torch.Tensor, num_valid_ids: torch.Tensor, block_m: int | typing.SupportsIndex, shuffle_scale: bool = False, transpose_out: bool = False) -> None
+[aiter] type hints mismatch, override to --> moe_smooth_per_token_scaled_quant_v2(out: torch.Tensor, input: torch.Tensor, scales: torch.Tensor, smooth_scale: torch.Tensor, sorted_token_ids: torch.Tensor, sorted_expert_ids: torch.Tensor, num_valid_ids: torch.Tensor, block_m: int | typing.SupportsIndex, shuffle_scale: bool = False, transpose_out: bool = False) -> None
+[aiter] type hints mismatch, override to --> moe_smooth_per_token_scaled_quant_v2(out: torch.Tensor, input: torch.Tensor, scales: torch.Tensor, smooth_scale: torch.Tensor, sorted_token_ids: torch.Tensor, sorted_expert_ids: torch.Tensor, num_valid_ids: torch.Tensor, block_m: int | typing.SupportsIndex, shuffle_scale: bool = False, transpose_out: bool = False) -> None
+[aiter] type hints mismatch, override to --> moe_smooth_per_token_scaled_quant_v2(out: torch.Tensor, input: torch.Tensor, scales: torch.Tensor, smooth_scale: torch.Tensor, sorted_token_ids: torch.Tensor, sorted_expert_ids: torch.Tensor, num_valid_ids: torch.Tensor, block_m: int | typing.SupportsIndex, shuffle_scale: bool = False, transpose_out: bool = False) -> None
+[aiter] type hints mismatch, override to --> moe_smooth_per_token_scaled_quant_v2(out: torch.Tensor, input: torch.Tensor, scales: torch.Tensor, smooth_scale: torch.Tensor, sorted_token_ids: torch.Tensor, sorted_expert_ids: torch.Tensor, num_valid_ids: torch.Tensor, block_m: int | typing.SupportsIndex, shuffle_scale: bool = False, transpose_out: bool = False) -> None
+[aiter] type hints mismatch, override to --> moe_smooth_per_token_scaled_quant_v2(out: torch.Tensor, input: torch.Tensor, scales: torch.Tensor, smooth_scale: torch.Tensor, sorted_token_ids: torch.Tensor, sorted_expert_ids: torch.Tensor, num_valid_ids: torch.Tensor, block_m: int | typing.SupportsIndex, shuffle_scale: bool = False, transpose_out: bool = False) -> None
+[aiter] type hints mismatch, override to --> moe_smooth_per_token_scaled_quant_v2(out: torch.Tensor, input: torch.Tensor, scales: torch.Tensor, smooth_scale: torch.Tensor, sorted_token_ids: torch.Tensor, sorted_expert_ids: torch.Tensor, num_valid_ids: torch.Tensor, block_m: int | typing.SupportsIndex, shuffle_scale: bool = False, transpose_out: bool = False) -> None
+[aiter] type hints mismatch, override to --> moe_smooth_per_token_scaled_quant_v2(out: torch.Tensor, input: torch.Tensor, scales: torch.Tensor, smooth_scale: torch.Tensor, sorted_token_ids: torch.Tensor, sorted_expert_ids: torch.Tensor, num_valid_ids: torch.Tensor, block_m: int | typing.SupportsIndex, shuffle_scale: bool = False, transpose_out: bool = False) -> None
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+
+=== MegaMoE a8w4smooth DECODE (md=3584 inter=1280 experts=384 topk=8, EP8) ===
+      bs   relL2max   ok   graph us  front-q  disp+g1  requant    gemm2  combine   (relL2max/ok are over ALL 8 ranks; per-rank relL2 printed under each row)
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=5 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=5 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=5 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=5 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=5 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=5 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=5 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=5 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+[MegaGemm2] auto-config tile table (sort_block_m=64): {8: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 16: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 32: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 64: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 2048: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 4096: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 128: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 256: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 512: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 1024: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}}
+       8   2.87e-03    Y      133.9      4.6     79.5      5.8     29.3      7.1
+         8-rank relL2: r0=2.53e-03 r1=2.11e-03 r2=2.87e-03 r3=2.07e-03 r4=1.98e-03 r5=2.34e-03 r6=2.46e-03 r7=2.16e-03
+[MegaGemm2] auto-config tile table (sort_block_m=64): {8: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 16: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 32: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 64: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 2048: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 4096: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 128: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 256: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 512: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 1024: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}}
+      16   3.03e-03    Y      143.0      4.6     83.6      6.2     31.0     10.9
+         8-rank relL2: r0=3.03e-03 r1=2.56e-03 r2=1.97e-03 r3=2.43e-03 r4=2.13e-03 r5=2.94e-03 r6=2.30e-03 r7=2.23e-03
+[MegaGemm2] auto-config tile table (sort_block_m=64): {8: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 16: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 32: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 64: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 2048: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 4096: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 128: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 256: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 512: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 1024: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}}
+      32   2.91e-03    Y      152.8      4.4     84.9      6.4     32.2     12.8
+         8-rank relL2: r0=2.48e-03 r1=2.91e-03 r2=2.35e-03 r3=2.49e-03 r4=2.19e-03 r5=1.77e-03 r6=2.38e-03 r7=2.11e-03
+[MegaGemm2] auto-config tile table (sort_block_m=64): {8: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 16: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 32: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 64: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 2048: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 4096: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 128: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 256: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 512: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 1024: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}}
+      64   2.53e-03    Y      157.8      4.7     90.7      6.6     34.3     13.4
+         8-rank relL2: r0=2.32e-03 r1=2.35e-03 r2=2.40e-03 r3=1.79e-03 r4=2.36e-03 r5=1.96e-03 r6=2.53e-03 r7=2.11e-03
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=10 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=10 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=10 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=10 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=10 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=10 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=10 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+/home/ghu/FlyDSL_bk/kernels/moe/mega_moe.py:848: UserWarning: XCD swizzle DISABLED: gx=10 is not a divisor of 8 (or cu=256 % gx != 0).
+  warnings.warn(
+[MegaGemm2] auto-config tile table (sort_block_m=128): {8: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 16: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 32: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 64: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 2048: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 4096: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 128: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 256: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 512: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 1024: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}}
+     128   2.29e-03    Y      242.1      5.4    147.6     10.7     59.5     13.6
+         8-rank relL2: r0=1.98e-03 r1=2.29e-03 r2=2.14e-03 r3=2.16e-03 r4=2.04e-03 r5=2.02e-03 r6=2.10e-03 r7=2.15e-03
+[MegaGemm2] auto-config tile table (sort_block_m=128): {8: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 16: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 32: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 64: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 2048: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 4096: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 128: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 256: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 512: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 1024: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}}
+     256   2.32e-03    Y      272.2      8.0    156.9     10.9     72.0     16.2
+         8-rank relL2: r0=2.32e-03 r1=2.18e-03 r2=2.23e-03 r3=2.29e-03 r4=2.17e-03 r5=2.13e-03 r6=2.23e-03 r7=2.13e-03
+[MegaGemm2] auto-config tile table (sort_block_m=128): {8: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 16: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 32: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 64: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 2048: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 4096: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 128: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 256: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 512: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 1024: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}}
+     512   2.35e-03    Y      350.7     11.4    179.5     11.3    118.5     21.7
+         8-rank relL2: r0=2.14e-03 r1=2.32e-03 r2=2.34e-03 r3=2.27e-03 r4=2.35e-03 r5=2.16e-03 r6=2.27e-03 r7=2.30e-03
+[MegaGemm2] auto-config tile table (sort_block_m=128): {8: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 16: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 32: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 64: {'tile_m': 32, 'tile_n': 128, 'tile_k': 256}, 2048: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 4096: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 128: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 256: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 512: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}, 1024: {'tile_m': 64, 'tile_n': 128, 'tile_k': 256}}
+    1024   2.38e-03    Y      582.7     18.1    327.9     14.3    185.5     34.6
+         8-rank relL2: r0=2.15e-03 r1=2.38e-03 r2=2.15e-03 r3=2.16e-03 r4=2.14e-03 r5=2.22e-03 r6=2.18e-03 r7=2.25e-03
