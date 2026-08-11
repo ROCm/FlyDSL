@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-11T00:36:26Z",
+ "updated": "2026-08-11T00:52:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -70,11 +70,11 @@
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31418205930",
    "created_at": "2026-08-10T18:16:03Z",
-   "updated_at": "2026-08-10T20:23:01Z",
+   "updated_at": "2026-08-11T00:51:35Z",
    "actor": "amd-nprotaso",
    "jobs": [
     {
@@ -98,10 +98,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-10T19:50:23Z",
-     "completed_at": null,
+     "completed_at": "2026-08-11T00:51:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31418205930/job/93577584150"
     }
    ]
