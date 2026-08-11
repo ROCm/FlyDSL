@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-11T15:38:47Z",
+ "updated": "2026-08-11T16:05:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -40,11 +40,11 @@
    "branch": "gfx1250/gemm-opt-0805",
    "event": "pull_request",
    "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31504375912",
    "created_at": "2026-08-11T14:57:11Z",
-   "updated_at": "2026-08-11T15:21:20Z",
+   "updated_at": "2026-08-11T16:03:55Z",
    "actor": "aoli26",
    "jobs": []
   },
