@@ -1,20 +1,35 @@
 {
  "schema": 1,
- "updated": "2026-08-11T15:11:24Z",
+ "updated": "2026-08-11T15:17:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 31505500173,
+   "run_id": 31506045411,
    "pr": 960,
-   "commit": "ebeaa5eee9798f6315a21da00f802a8f70c9a4f3",
+   "commit": "fe6db3fc2d643ef8956295b29d7fcd2bf7709219",
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
    "status": "queued",
    "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31506045411",
+   "created_at": "2026-08-11T15:15:35Z",
+   "updated_at": "2026-08-11T15:15:38Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
+  {
+   "run_id": 31505500173,
+   "pr": null,
+   "commit": "ebeaa5eee9798f6315a21da00f802a8f70c9a4f3",
+   "branch": "new_bias_alibi_sink_attention",
+   "event": "pull_request",
+   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31505500173",
    "created_at": "2026-08-11T15:09:30Z",
-   "updated_at": "2026-08-11T15:10:17Z",
+   "updated_at": "2026-08-11T15:15:38Z",
    "actor": "amd-nprotaso",
    "jobs": []
   },
@@ -98,11 +113,11 @@
    "branch": "coop-library",
    "event": "pull_request",
    "title": "[Feat] Add fx.num_warp_threads() as constant accessor",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492613020",
    "created_at": "2026-08-11T12:43:38Z",
-   "updated_at": "2026-08-11T14:38:44Z",
+   "updated_at": "2026-08-11T15:13:21Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -126,9 +141,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-11T14:38:44Z",
+     "started_at": "2026-08-11T15:13:07Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492613020/job/93816367090"
     }
@@ -1679,21 +1694,6 @@
    "created_at": "2026-08-10T05:53:20Z",
    "updated_at": "2026-08-10T07:18:20Z",
    "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 31356714967,
-   "pr": null,
-   "commit": "9e2dde2bedae5d1d29a3f4c82eaa105420e5bde8",
-   "branch": "xyt/gemm16_950",
-   "event": "pull_request",
-   "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31356714967",
-   "created_at": "2026-08-10T04:49:53Z",
-   "updated_at": "2026-08-10T05:54:18Z",
-   "actor": "xytpai",
    "jobs": []
   }
  ]
