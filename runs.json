@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-11T12:40:57Z",
+ "updated": "2026-08-11T12:44:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31492556629,
+   "pr": 972,
+   "commit": "972e1a947df53e8c058229d76deafd2da4bb6f69",
+   "branch": "mega_moe_a4w4",
+   "event": "pull_request",
+   "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492556629",
+   "created_at": "2026-08-11T12:42:57Z",
+   "updated_at": "2026-08-11T12:43:38Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 31492517857,
+   "pr": null,
+   "commit": "b8ed73fe6d9e17e101093324b1a7af518b1a0f29",
+   "branch": "main",
+   "event": "push",
+   "title": "CI: upgrade PyTorch images to ROCm 7.14 (#989)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492517857",
+   "created_at": "2026-08-11T12:42:29Z",
+   "updated_at": "2026-08-11T12:42:31Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 31492166321,
    "pr": null,
@@ -10,11 +40,11 @@
    "branch": "main",
    "event": "push",
    "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel (#992)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492166321",
    "created_at": "2026-08-11T12:38:05Z",
-   "updated_at": "2026-08-11T12:39:26Z",
+   "updated_at": "2026-08-11T12:42:31Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -25,11 +55,11 @@
    "branch": "mega_moe_a4w4",
    "event": "pull_request",
    "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492067034",
    "created_at": "2026-08-11T12:36:50Z",
-   "updated_at": "2026-08-11T12:39:17Z",
+   "updated_at": "2026-08-11T12:42:59Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -635,7 +665,7 @@
   },
   {
    "run_id": 31449758991,
-   "pr": 989,
+   "pr": null,
    "commit": "30ff7cafe7ee52f975b83864627b7761b3fc3309",
    "branch": "ci/upgrade-rocm-7.14",
    "event": "pull_request",
@@ -723,7 +753,7 @@
   },
   {
    "run_id": 31442756019,
-   "pr": 989,
+   "pr": null,
    "commit": "197f7f9cbd264f62e4804c8b249770d73e724b56",
    "branch": "ci/upgrade-rocm-7.14",
    "event": "pull_request",
@@ -738,7 +768,7 @@
   },
   {
    "run_id": 31439852860,
-   "pr": 989,
+   "pr": null,
    "commit": "3c784385202ce907ec6482e33af89bd50ddae70f",
    "branch": "ci/upgrade-rocm-7.14",
    "event": "pull_request",
@@ -1301,19 +1331,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-11T12:29:13Z",
-     "completed_at": null,
+     "completed_at": "2026-08-11T12:44:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31364678789/job/93757280656"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-11T11:00:19Z",
-     "completed_at": null,
+     "completed_at": "2026-08-11T12:43:47Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31364678789/job/93757280659"
     }
    ]
@@ -1421,7 +1451,7 @@
   },
   {
    "run_id": 31360217600,
-   "pr": 989,
+   "pr": null,
    "commit": "42709ef2fd73e969cc8aa1284e054265d56fe4f0",
    "branch": "ci/upgrade-rocm-7.14",
    "event": "pull_request",
@@ -1552,36 +1582,6 @@
    "created_at": "2026-08-10T03:54:23Z",
    "updated_at": "2026-08-10T04:10:44Z",
    "actor": "xytpai",
-   "jobs": []
-  },
-  {
-   "run_id": 31352475165,
-   "pr": null,
-   "commit": "d9696e84c6d2cf3d949e7f011430a1bc327acf59",
-   "branch": "worktree-agent-moe-2stage-port",
-   "event": "pull_request",
-   "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8 (gfx942 + gfx950)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31352475165",
-   "created_at": "2026-08-10T03:23:45Z",
-   "updated_at": "2026-08-10T04:29:50Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 31350454452,
-   "pr": null,
-   "commit": "3b14103d945a4236b3da593714cdcff6e2245401",
-   "branch": "fp4-gemm-4wave-perf",
-   "event": "pull_request",
-   "title": "[fp4_gemm_4wave] MXFP4 GEMM perf optimize",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31350454452",
-   "created_at": "2026-08-10T02:41:06Z",
-   "updated_at": "2026-08-11T02:53:08Z",
-   "actor": "benenzhu",
    "jobs": []
   }
  ]
