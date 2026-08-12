@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-12T16:47:06Z",
+ "updated": "2026-08-12T17:01:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -213,12 +213,12 @@
    "commit": "f83d89990103d5b611d3fbdf7bd4c2be399f903e",
    "branch": "xyt/citest",
    "event": "pull_request",
-   "title": "Test torch reference ops",
-   "status": "in_progress",
-   "conclusion": null,
+   "title": "Use stable torch reference API for a16w16 GFX950 GEMM testing",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31599284701",
    "created_at": "2026-08-12T13:01:06Z",
-   "updated_at": "2026-08-12T15:06:36Z",
+   "updated_at": "2026-08-12T16:58:12Z",
    "actor": "xytpai",
    "jobs": [
     {
@@ -242,10 +242,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-12T15:06:36Z",
-     "completed_at": null,
+     "completed_at": "2026-08-12T16:58:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31599284701/job/94160107023"
     }
    ]
@@ -480,7 +480,7 @@
    "commit": "882d198890dde700048c9d723903958fa53a7544",
    "branch": "xyt/citest",
    "event": "pull_request",
-   "title": "Test torch reference ops",
+   "title": "Use stable torch reference API for a16w16 GFX950 GEMM testing",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31566833673",
@@ -523,7 +523,7 @@
    "commit": "2a47ff8b8408103a8d4afea60e0c4276c6e64bc4",
    "branch": "xyt/citest",
    "event": "pull_request",
-   "title": "Test torch reference ops",
+   "title": "Use stable torch reference API for a16w16 GFX950 GEMM testing",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31566447072",
@@ -566,7 +566,7 @@
    "commit": "434bcd6563e6893c583e6ad2f868b172e46fb703",
    "branch": "xyt/citest",
    "event": "pull_request",
-   "title": "Test torch reference ops",
+   "title": "Use stable torch reference API for a16w16 GFX950 GEMM testing",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31566303938",
