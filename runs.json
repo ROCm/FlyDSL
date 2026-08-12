@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-12T06:49:43Z",
+ "updated": "2026-08-12T07:21:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -83,11 +83,11 @@
    "branch": "dsl-ify-arith",
    "event": "pull_request",
    "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31561190239",
    "created_at": "2026-08-12T03:47:50Z",
-   "updated_at": "2026-08-12T06:20:44Z",
+   "updated_at": "2026-08-12T07:17:10Z",
    "actor": "xudoyuan",
    "jobs": []
   },
@@ -138,7 +138,7 @@
   },
   {
    "run_id": 31506045411,
-   "pr": 960,
+   "pr": null,
    "commit": "fe6db3fc2d643ef8956295b29d7fcd2bf7709219",
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
@@ -890,9 +890,18 @@
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546",
    "created_at": "2026-08-11T03:17:19Z",
-   "updated_at": "2026-08-11T09:28:18Z",
+   "updated_at": "2026-08-12T07:19:50Z",
    "actor": "cschenjunlin",
    "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-12T07:18:36Z",
+     "completed_at": "2026-08-12T07:19:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546/job/94039899663"
+    },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
@@ -900,7 +909,7 @@
      "conclusion": "success",
      "started_at": "2026-08-11T04:50:22Z",
      "completed_at": "2026-08-11T09:16:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546/job/93680491540"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546/job/94039900129"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -909,16 +918,7 @@
      "conclusion": "success",
      "started_at": "2026-08-11T04:50:11Z",
      "completed_at": "2026-08-11T09:28:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546/job/93680491550"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-11T04:49:18Z",
-     "completed_at": "2026-08-11T06:21:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546/job/93680491559"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546/job/94039900276"
     }
    ]
   },
