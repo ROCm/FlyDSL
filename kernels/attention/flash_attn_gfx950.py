@@ -264,6 +264,7 @@ def build_flash_attn_dualwave_swp_module(
             )
             _BIAS_VEC = 8 if const_expr(traits.KV_VECTORIZED) else 4
             _BIAS_GROUPS = 16 // _BIAS_VEC
+            _BIAS_READ_BATCH = min(4, _BIAS_GROUPS)
             _bias_frag_ty = Vec.make_type(_BIAS_VEC, ctx.elem_dtype)
             _bias_frag_align = _BIAS_VEC * traits.BF16_BYTES
             _bias_log2e = Vec.filled(_BIAS_VEC, BIAS_LOG2E, fx.Float32)
@@ -309,6 +310,14 @@ def build_flash_attn_dualwave_swp_module(
 
                 return Vec(_sink_frag.load(), (1,), fx.Float32)[0] * fx.Float32(BIAS_LOG2E)
 
+        # vmcnt budget for a bias fragment read: every qk_scored consumes the bias tile
+        # DMA'd by the previous one, and that call issues its own DMA only after its
+        # reads, so the only VMEM still in flight ahead of the read is the K and V
+        # prefetch of the two memory clusters in between. Epilogue C9 is the one site
+        # with no K prefetch between.
+        _BIAS_VMCNT = ctx.NUM_DMA_K + ctx.NUM_DMA_V
+        _BIAS_VMCNT_NO_K = ctx.NUM_DMA_V
+
         def _issue_bias_dma(tile_idx, buf):
             """Coalesced global->LDS DMA of this wave's bias tile into buffer `buf`."""
             # Same value as ctx.q_start_pos_i32 (set later, by q_loader.load_all()), but
@@ -351,26 +360,40 @@ def build_flash_attn_dualwave_swp_module(
                     out[r] = fmath.absf(d) * _alibi_neg_slope + out[r]
 
             if const_expr(HAS_BIAS):
-                for g in range_constexpr(_BIAS_GROUPS):
-                    bv = Vec(Vec(_read_bias_frag(h, g, buf), (_BIAS_VEC,), ctx.elem_dtype).to(fx.Float32))
-                    r0 = g * _BIAS_VEC
-                    acc = Vec.from_elements([out[r0 + e] for e in range_constexpr(_BIAS_VEC)], fx.Float32)
-                    fused = bv * _bias_log2e + acc
-                    for e in range_constexpr(_BIAS_VEC):
-                        out[r0 + e] = fused[e]
+                # Issue the fragment reads of a batch back to back so the backend can
+                # cover them with one counted lgkmcnt instead of draining after each
+                # ds_read. The batch is deliberately small: every extra fragment in
+                # flight is another live VGPR pair, and this kernel is at the wall.
+                for gb in range_constexpr(0, _BIAS_GROUPS, _BIAS_READ_BATCH):
+                    raw = [_read_bias_frag(h, gb + k, buf) for k in range_constexpr(_BIAS_READ_BATCH)]
+                    for k in range_constexpr(_BIAS_READ_BATCH):
+                        bv = Vec(Vec(raw[k], (_BIAS_VEC,), ctx.elem_dtype).to(fx.Float32))
+                        r0 = (gb + k) * _BIAS_VEC
+                        acc = Vec.from_elements([out[r0 + e] for e in range_constexpr(_BIAS_VEC)], fx.Float32)
+                        fused = bv * _bias_log2e + acc
+                        for e in range_constexpr(_BIAS_VEC):
+                            out[r0 + e] = fused[e]
 
             return Vec.from_elements(out, fx.Float32)
 
-        def qk_scored(v_k, q_all_scaled_bf16, tile_idx, buf=0):
+        def qk_scored(v_k, q_all_scaled_bf16, tile_idx, buf=0, bias_vmcnt=_BIAS_VMCNT):
             if const_expr(not (HAS_BIAS or HAS_ALIBI)):
                 return gemm_helper.qk(v_k, q_all_scaled_bf16)
-            if const_expr(HAS_BIAS):
-                _issue_bias_dma(tile_idx + fx.Index(1), 1 - buf)
             v_s_lo, v_s_hi = gemm_helper.qk(v_k, q_all_scaled_bf16)
-            return (
+            if const_expr(HAS_BIAS):
+                # The bias tile read below was DMA'd one qk_scored call ago; everything
+                # issued since is the in-flight K/V prefetch. Retire exactly that batch
+                # instead of letting the backend fall back to vmcnt(0), which would also
+                # drain the prefetch pipeline.
+                _waitcnt_vm_n(bias_vmcnt)
+            scored = (
                 _score_bias_half(v_s_lo, tile_idx, 0, buf),
                 _score_bias_half(v_s_hi, tile_idx, 1, buf),
             )
+            if const_expr(HAS_BIAS):
+                # Issued after the reads so it is not part of the batch they wait on.
+                _issue_bias_dma(tile_idx + fx.Index(1), 1 - buf)
+            return scored
 
         def _main_body():
             # Paged: stage the block-table row into LDS before any page-id ds_read.
@@ -791,7 +814,7 @@ def build_flash_attn_dualwave_swp_module(
             _dualwave_sync_barrier()
 
             # Epilogue C9 computes the last-tile MMA0, folds rescale_e7 into l_row, and finishes v_p_0.
-            v_s_1 = qk_scored(v_k, q_all_scaled_bf16, max_m1, buf=1)
+            v_s_1 = qk_scored(v_k, q_all_scaled_bf16, max_m1, buf=1, bias_vmcnt=_BIAS_VMCNT_NO_K)
             l_row = softmax_helper.apply_l_rescale(l_row, rescale_e7)
             v_p_0 = softmax_helper.exp2(v_p_0, 16, 16)
             l_row = softmax_helper.reduce_sum(l_row, v_p_0)

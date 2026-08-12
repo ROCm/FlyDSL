@@ -727,8 +727,18 @@ def _make_bias_lds_ptr(lds_bias_base_idx):
 
 
 def _load_bias_frag_lds(lds_bias_base_ptr, byte_offset, frag_type, align):
+    # The alias scope is what stops SIInsertWaitcnts from treating this as a read of
+    # "some LDS-DMA destination" and forcing a full vmcnt(0) drain before it; the bias
+    # tile is instead guarded by the explicit counted wait the caller emits. Only the
+    # scope's presence matters here -- the LDS-DMA stores carry no AAInfo, so a finer
+    # per-double-buffer scope would not give the backend anything more to prove.
     ptr = buffer_ops.get_element_ptr(lds_bias_base_ptr, byte_offset=byte_offset, elem_type=T.i8)
-    return llvm.LoadOp(frag_type, ptr, alignment=align).result
+    return llvm.LoadOp(
+        frag_type,
+        ptr,
+        alignment=align,
+        alias_scopes=_dualwave_lds_alias_scopes(_dualwave_lds_scope("bias", 0)),
+    ).result
 
 
 def _ws_store_f32(f32_val, local_elem_index, rsrc):
