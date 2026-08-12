@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-12T00:41:39Z",
+ "updated": "2026-08-12T02:04:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31555409859,
+   "pr": 980,
+   "commit": "588c0450d00acc50d0cd65b91cdad75ef98eae0a",
+   "branch": "feat/rdna3-gemm-tile-autotune",
+   "event": "pull_request",
+   "title": "[Perf] Choose the RDNA3 GEMM tile from the shape",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31555409859",
+   "created_at": "2026-08-12T01:59:20Z",
+   "updated_at": "2026-08-12T02:02:10Z",
+   "actor": "vlluvia",
+   "jobs": []
+  },
+  {
+   "run_id": 31554224918,
+   "pr": 987,
+   "commit": "a6417925d1583e59b19cba0c4ed0064081246526",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31554224918",
+   "created_at": "2026-08-12T01:37:40Z",
+   "updated_at": "2026-08-12T01:41:07Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 31506045411,
    "pr": 960,
@@ -113,30 +143,30 @@
    "branch": "coop-library",
    "event": "pull_request",
    "title": "[Feat] Add fx.num_warp_threads() as constant accessor",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492613020",
    "created_at": "2026-08-11T12:43:38Z",
-   "updated_at": "2026-08-11T16:41:33Z",
+   "updated_at": "2026-08-12T01:35:12Z",
    "actor": "coderfeli",
    "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-11T14:40:17Z",
-     "completed_at": "2026-08-11T16:06:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492613020/job/93816366226"
-    },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
      "status": "completed",
      "conclusion": "failure",
-     "started_at": "2026-08-11T14:47:53Z",
-     "completed_at": "2026-08-11T15:01:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492613020/job/93816366516"
+     "started_at": "2026-08-12T01:34:51Z",
+     "completed_at": "2026-08-12T01:53:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492613020/job/93982633954"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-12T01:35:11Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492613020/job/93982633969"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -145,7 +175,7 @@
      "conclusion": "success",
      "started_at": "2026-08-11T15:13:07Z",
      "completed_at": "2026-08-11T16:41:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492613020/job/93816367090"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492613020/job/93982634659"
     }
    ]
   },
@@ -374,7 +404,7 @@
   },
   {
    "run_id": 31474702073,
-   "pr": 980,
+   "pr": null,
    "commit": "76b2399f0f569cb2dcdf6b05d021a8d675ae03f6",
    "branch": "feat/rdna3-gemm-tile-autotune",
    "event": "pull_request",
@@ -1664,36 +1694,6 @@
    "created_at": "2026-08-10T05:56:52Z",
    "updated_at": "2026-08-10T22:49:25Z",
    "actor": "Phil-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 31360053749,
-   "pr": null,
-   "commit": "c9fd216d9f03f4e050c23b38eea69ad4ef3f37d7",
-   "branch": "xyt/gemm16_950",
-   "event": "pull_request",
-   "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31360053749",
-   "created_at": "2026-08-10T05:53:51Z",
-   "updated_at": "2026-08-10T07:26:29Z",
-   "actor": "xytpai",
-   "jobs": []
-  },
-  {
-   "run_id": 31360026531,
-   "pr": null,
-   "commit": "e486ba568fa38ffb169f828f4155a0413331e9ab",
-   "branch": "worktree-agent-moe-2stage-port",
-   "event": "pull_request",
-   "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8 (gfx942 + gfx950)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31360026531",
-   "created_at": "2026-08-10T05:53:20Z",
-   "updated_at": "2026-08-10T07:18:20Z",
-   "actor": "coderfeli",
    "jobs": []
   }
  ]
