@@ -21,6 +21,10 @@ subtrees:
     entries:
       - file: language/arithmetic_types
         title: Arithmetic types
+      - file: language/composite_types
+        title: Composite types
+      - file: language/storage_and_allocator
+        title: Storage and allocator
   - caption: Guides
     entries:
       - file: architecture_guide

@@ -115,7 +115,7 @@ def _storage_layout(schema: type) -> tuple[int, int, dict[str, int]]:
             return dsl_size_of(field.type_spec), dsl_align_of(field.type_spec)
         except TypeError as exc:
             raise TypeError(
-                f"Cannot compute layout for schema {_display_name(schema)}: field '{field.name}' has type "
+                f"Cannot compute layout for type {_display_name(schema)}: field '{field.name}' has type "
                 f"{_type_name(field.type_spec)} which does not implement the Storable protocol."
             ) from exc
 
@@ -161,14 +161,14 @@ def _resolve_field(schema: type, key: int | str) -> FieldDef:
     fields = schema.__dsl_field_defs__
     if isinstance(key, int):
         if key < 0 or key >= len(fields):
-            raise IndexError(f"Index {key} out of range for schema {_display_name(schema)} with {len(fields)} fields.")
+            raise IndexError(f"Index {key} out of range for type {_display_name(schema)} with {len(fields)} fields.")
         return fields[key]
     if isinstance(key, str):
         for f in fields:
             if f.name == key:
                 return f
         available = [f.name for f in fields]
-        raise KeyError(f"Field '{key}' not found in schema {_display_name(schema)}. Available fields: {available}.")
+        raise KeyError(f"Field '{key}' not found in type {_display_name(schema)}. Available fields: {available}.")
 
 
 def _type_cache_key(type_spec: Any):
@@ -299,19 +299,19 @@ def _ir_value_count_from_type(type_spec: Any) -> int:
     return 1
 
 
-def _normalize_inline_fields(params) -> tuple[FieldDef, ...]:
+def _normalize_inline_fields(params, display: str) -> tuple[FieldDef, ...]:
     if not isinstance(params, tuple):
         params = (params,)
     if len(params) == 0:
-        raise ValueError("inline schema requires at least one field")
+        raise ValueError("inline type requires at least one field")
     fields = []
     seen: set[str] = set()
     for idx, item in enumerate(params):
         if isinstance(item, slice):
             if not isinstance(item.start, str) or item.stop is None:
-                raise TypeError("named inline fields must use Schema['name': Type] syntax")
+                raise TypeError(f"named inline fields must use {display}['name': Type] syntax")
             name = item.start
-            _validate_field_name(name, "inline schema")
+            _validate_field_name(name, "inline type")
             type_spec = item.stop
         else:
             name = f"_{idx}"
@@ -465,7 +465,7 @@ def _make_composite_class(
                 continue
             if name not in offsets:
                 raise TypeError(
-                    f"Cannot peek field '{name}' in schema {_display_name(cls)} because it has no storage offset."
+                    f"Cannot peek field '{name}' in type {_display_name(cls)} because it has no storage offset."
                 )
             values[name] = peek_from_ptr(eff_type, add_offset(ptr, offsets[name]))
         return cls(**values)
@@ -488,7 +488,7 @@ def _make_composite_class(
                 continue
             if field.name not in offsets:
                 raise TypeError(
-                    f"Cannot poke field '{field.name}' in schema {_display_name(cls)} because it has no storage offset."
+                    f"Cannot poke field '{field.name}' in type {_display_name(cls)} because it has no storage offset."
                 )
             poke_into_ptr(eff_type, add_offset(ptr, offsets[field.name]), getattr(value, field.name))
 
@@ -556,7 +556,7 @@ class CompositeMeta(type):
         return wrap(klass)
 
     def __getitem__(cls, params):
-        fields = _normalize_inline_fields(params)
+        fields = _normalize_inline_fields(params, cls._display)
         display_name = _inline_display_name(cls._display, params, fields)
         return _make_composite_class(
             name=f"_Dsl{cls._display}_{abs(hash(_make_type_identity(cls._policy, fields)))}",
