@@ -85,6 +85,15 @@ def dtype_to_elem_type(dtype_str: str):
     raise ValueError(f"unsupported dtype: {dtype_str!r} (expected 'f32', 'f16', 'bf16', or 'fp8')")
 
 
+def cvt_sr_f32_to_bf16(x, rand):
+    """Stochastically convert f32 to bf16 using raw random bits.
+
+    The add-then-truncate conversion matches AMD's non-saturating behavior.
+    """
+    bits = fx.Float32(x).bitcast(fx.Uint32) + (fx.Uint32(rand) & fx.Uint32(0xFFFF))
+    return fx.Uint16(bits >> fx.Uint32(16)).bitcast(fx.BFloat16)
+
+
 def get_warp_size(arch=None):
     """Return the wavefront/warp size for the given GPU architecture.
 

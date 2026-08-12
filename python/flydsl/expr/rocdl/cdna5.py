@@ -8,6 +8,12 @@ from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaOpGFX1250_WMMAScaleType
 from ..._mlir.dialects.fly_rocdl import CopyOpGFX1250TDMType
 from ..typing import Int32, Int64, Tensor
 
+__all__ = [
+    "WMMAScale",
+    "TDM",
+    "make_tdm_atom",
+]
+
 
 def WMMAScale(
     m,

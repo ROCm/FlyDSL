@@ -37,22 +37,22 @@ and the call device's product name, target architecture, and compute-unit
 count. Use a globally unique name for each kernel/config schema. The JSON is
 self-describing; its filename is an identity digest.
 
-The declared `key` is the single owner of portable tuning axes. Include every
+The declared `key` owns the portable tuning axes. Include every
 shape, dtype, layout, or mode that can change the winner. Keep structural knobs
 as JIT `Constexpr` parameters on the existing entry point; offline tuning does
 not need a build factory or a second key callback.
 
 Artifacts intentionally do not include a compiler or kernel-source fingerprint.
-Treat them as reviewed deployment inputs and retune after a compiler, kernel,
+Treat them as reviewed deployment inputs, and retune after a compiler, kernel,
 compile-hint, or search-space change that can affect the winner.
 
 ## Failure behavior
 
-Missing, unreadable, mismatched, or structurally invalid artifacts are ignored,
-and normal lookup continues to the default or search path. Artifact config
-values cannot overwrite arguments supplied by the caller or declared key axes.
-Values must preserve their types when encoded as JSON. `Config.pre_hook` is
-process-local code, so it blocks forced artifact generation.
+FlyDSL ignores missing, unreadable, mismatched, or structurally invalid
+artifacts and continues normal lookup to the default or search path. Artifact
+config values cannot overwrite arguments that the caller supplies or declared
+key axes. Values must preserve their types when encoded as JSON. `Config.pre_hook`
+is process-local code, so it blocks forced artifact generation.
 
 Once a matching artifact has been accepted, its compile, launch, and runtime
 errors propagate normally; FlyDSL does not hide them by retrying the default.
