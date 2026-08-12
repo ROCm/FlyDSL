@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-12T10:40:00Z",
+ "updated": "2026-08-12T12:05:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
    "title": "[WIP][GFX1250] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31587429526",
    "created_at": "2026-08-12T10:26:33Z",
-   "updated_at": "2026-08-12T10:28:53Z",
+   "updated_at": "2026-08-12T10:38:55Z",
    "actor": "jli-melchior",
    "jobs": []
   },
@@ -130,11 +130,11 @@
    "branch": "feature/typed-arithmetic-modernization",
    "event": "pull_request",
    "title": "[wip] Add type-aware extrema and integer ceil-division APIs",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31578608800",
    "created_at": "2026-08-12T08:30:10Z",
-   "updated_at": "2026-08-12T09:33:40Z",
+   "updated_at": "2026-08-12T12:03:57Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -1054,11 +1054,11 @@
    "branch": "fix/rmsnorm",
    "event": "pull_request",
    "title": "[fix] Resolve normalization-related CI regressions",
-   "status": "completed",
-   "conclusion": "cancelled",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546",
    "created_at": "2026-08-11T03:17:19Z",
-   "updated_at": "2026-08-12T09:31:02Z",
+   "updated_at": "2026-08-12T11:41:43Z",
    "actor": "cschenjunlin",
    "jobs": []
   },
