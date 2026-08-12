@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-12T04:13:41Z",
+ "updated": "2026-08-12T04:19:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -174,11 +174,11 @@
    "branch": "coop-library",
    "event": "pull_request",
    "title": "[Feat] Add fx.num_warp_threads() as constant accessor",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492613020",
    "created_at": "2026-08-11T12:43:38Z",
-   "updated_at": "2026-08-12T01:35:12Z",
+   "updated_at": "2026-08-12T04:16:57Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -193,10 +193,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-12T01:35:11Z",
-     "completed_at": null,
+     "completed_at": "2026-08-12T04:16:56Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492613020/job/93982633969"
     },
     {
