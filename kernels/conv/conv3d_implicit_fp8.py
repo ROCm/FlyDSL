@@ -24,7 +24,6 @@ from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, const_expr, range_constexpr
 from flydsl.expr.rocdl.universal import make_buffer_ptr
 from flydsl.expr.typing import Vector as Vec
-from kernels.common import buffer_ops
 from kernels.gemm.fp8_gemm_8wave import TiledMmaDriver
 from kernels.gemm.fp8_gemm_utils import (
     G2SLoader,
@@ -133,11 +132,21 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
 
     @flyc.kernel(known_block_size=[TR_THREADS, 1, 1])
     def transpose_kernel(out: fx.Tensor, inp: fx.Tensor):
-        in_rsrc = buffer_ops.create_buffer_resource(inp, max_size=False, num_records_bytes=total_bytes)
-        out_rsrc = buffer_ops.create_buffer_resource(out, max_size=False, num_records_bytes=total_bytes)
         if const_expr(TR_BIG):
             in_base_addr = fx.Int64(fx.ptrtoint(fx.get_iter(inp)))
             out_base_addr = fx.Int64(fx.ptrtoint(fx.get_iter(out)))
+        else:
+            # u8 elements, so the copy-atom element offsets below are byte offsets.
+            in_div = fx.logical_divide(
+                fx.rocdl.make_buffer_tensor(inp, max_size=False, num_records_bytes=total_bytes),
+                fx.make_layout(1, 1),
+            )
+            out_div = fx.logical_divide(
+                fx.rocdl.make_buffer_tensor(out, max_size=False, num_records_bytes=total_bytes),
+                fx.make_layout(1, 1),
+            )
+            tr_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), u8)
+            tr_reg = fx.make_rmem_tensor(TR_VEC, u8)
         lds_alloc = fx.SharedAllocator(static=False)
         lds = lds_alloc.allocate(fx.Array[u8, TR_TILE * TR_LDS_S, 16]).peek()
 
@@ -173,10 +182,11 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
                 ptr = _global_ptr_from_addr(addr, u8.ir_type, inp).llvm_ptr
                 v = llvm.LoadOp(fx.Vector.make_type(4, fx.Int32), ptr, alignment=16).result
             else:
-                # buffer_load offset is in i32 elements; the byte offset is 16B-aligned.
-                g = fx.Int32((in_base + cc * s + ss) // 4)
+                # u8 tensor: the copy-atom offset is the byte offset directly.
+                g = fx.Int32(in_base + cc * s + ss)
                 safe = arith.select(valid, g, fx.Int32(0))
-                v = buffer_ops.buffer_load(in_rsrc, safe, vec_width=4, dtype=fx.Int32)  # dwordx4 = 16B
+                fx.copy(tr_atom, fx.slice(in_div, (None, safe)), tr_reg)
+                v = fx.memref_load_vec(tr_reg).bitcast(fx.Int32)  # v16u8 -> v4i32
             lds_store_i32x4(rc * TR_LDS_S + sv, v.ir_value() if hasattr(v, "ir_value") else v)
 
         llvm.InlineAsmOp(None, [], "s_waitcnt lgkmcnt(0)\n\ts_barrier", "", has_side_effects=True)
@@ -192,14 +202,15 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
             if valid:
                 scalars = [lds_load_scalar((cv + j) * TR_LDS_S + rs) for j in range_constexpr(TR_VEC)]
                 packed_u8 = fx.Vector.from_elements(scalars, dtype=u8)
-                packed = packed_u8.bitcast(fx.Int32)  # v16u8 -> v4i32
                 if const_expr(TR_BIG):
+                    packed = packed_u8.bitcast(fx.Int32)  # v16u8 -> v4i32
                     addr = out_base_addr + (fx.Int64(nb) * fx.Int64(s) + fx.Int64(ss)) * fx.Int64(c) + fx.Int64(cc)
                     ptr = _global_ptr_from_addr(addr, u8.ir_type, out).llvm_ptr
                     llvm.StoreOp(packed.ir_value() if hasattr(packed, "ir_value") else packed, ptr, alignment=16)
                 else:
                     byte_off = out_base + ss * c + cc
-                    buffer_ops.buffer_store(packed, out_rsrc, byte_off, offset_is_bytes=True)
+                    fx.memref_store_vec(packed_u8, tr_reg)
+                    fx.copy(tr_atom, tr_reg, fx.slice(out_div, (None, fx.Int32(byte_off))))
 
     @flyc.jit
     def launch(out: fx.Tensor, inp: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
@@ -248,6 +259,10 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
 
     BIG_IN = (n * c * d * h * width) > 0x7FFFFFFF
     BIG_OUT = (n * k * do * ho * wo * 2) > 0x7FFFFFFF
+    # When n == 1 the 4 accumulator rows a lane owns are contiguous in the output,
+    # so one 4xbf16 store replaces four 16-bit stores. dhw % 4 == 0 keeps the
+    # wave's row range 4-row-group aligned.
+    _vec_store = (n == 1) and (dhw % 4 == 0) and (not BIG_OUT)
     temporal_only_fast = (
         kh == 1
         and kw == 1
@@ -294,9 +309,22 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
         # A value < 0x80000000 would be in-bounds there and read live data as padding.
         OOB_SENTINEL_ELEM = 0xF0000000
 
-        y_rsrc = buffer_ops.create_buffer_resource(y, max_size=False, num_records_bytes=npq * k * 2)
+        y_div = fx.logical_divide(
+            fx.rocdl.make_buffer_tensor(y, max_size=False, num_records_bytes=npq * k * 2),
+            fx.make_layout(1, 1),
+        )
+        y_atom_1 = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), fx.BFloat16)
+        y_reg_1 = fx.make_rmem_tensor(1, fx.BFloat16)
+        if const_expr(_vec_store):
+            y_atom_4 = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), fx.BFloat16)
+            y_reg_4 = fx.make_rmem_tensor(4, fx.BFloat16)
         if const_expr(has_bias):
-            bias_rsrc = buffer_ops.create_buffer_resource(bias, max_size=False, num_records_bytes=k * 4)
+            bias_div = fx.logical_divide(
+                fx.rocdl.make_buffer_tensor(bias, max_size=False, num_records_bytes=k * 4),
+                fx.make_layout(1, 1),
+            )
+            bias_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+            bias_reg = fx.make_rmem_tensor(1, fx.Float32)
 
         x_buf = make_fp8_buffer_tensor(x, f8_ir_t)
         x_div = fx.logical_divide(x_buf, fx.make_layout(1, 1))
@@ -593,11 +621,6 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
             v = value.ir_value() if hasattr(value, "ir_value") else value
             llvm.StoreOp(v, ptr, alignment=2)
 
-        # When n == 1 the 4 accumulator rows a lane owns are contiguous in the output,
-        # so one 4xbf16 store replaces four buffer_store_short. dhw % 4 == 0 keeps the
-        # wave's row range 4-row-group aligned.
-        _vec_store = (n == 1) and (dhw % 4 == 0) and (not BIG_OUT)
-
         def store_cfrag(c_frag, base_row, base_col):
             for ti in range_constexpr(N_TILES_A):
                 for tj in range_constexpr(N_TILES_B):
@@ -605,7 +628,8 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
                     col_valid = col < fx.Index(k)
                     if const_expr(has_bias):
                         col_i = fx.Int32(arith.select(col_valid, col, fx.Index(0)))
-                        bias_val = fx.Float32(buffer_ops.buffer_load(bias_rsrc, col_i, vec_width=1, dtype=fx.Float32))
+                        fx.copy(bias_atom, fx.slice(bias_div, (None, col_i)), bias_reg)
+                        bias_val = fx.Float32(fx.memref_load_vec(bias_reg)[0])
                     vec_f32 = Vec(c_frag[mfma.idx(ti, tj)])
                     row_base = base_row + fx.Index(ti * 16) + (lane_id // 16) * 4
 
@@ -618,7 +642,8 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
                                 o = vec_f32[i] + bias_val if const_expr(has_bias) else vec_f32[i]
                                 vals.append(o.to(fx.BFloat16))
                             v4 = fx.Vector.from_elements(vals, dtype=fx.BFloat16)
-                            buffer_ops.buffer_store(v4, y_rsrc, off0)
+                            fx.memref_store_vec(v4, y_reg_4)
+                            fx.copy(y_atom_4, y_reg_4, fx.slice(y_div, (None, fx.Int32(off0))))
                         continue
 
                     for i in range_constexpr(4):
@@ -637,7 +662,11 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
                             if valid:
                                 _big_store(off_ncdhw, out.to(fx.BFloat16))
                         else:
-                            buffer_ops.buffer_store(out.to(fx.BFloat16), y_rsrc, off_ncdhw, mask=valid)
+                            # Route masked-off lanes one element past the end; the
+                            # descriptor's num_records bound drops them in hardware.
+                            off_i = fx.Int32(arith.select(valid, off_ncdhw, fx.Index(npq * k)))
+                            fx.memref_store_vec(Vec.filled(1, out.to(fx.BFloat16), fx.BFloat16), y_reg_1)
+                            fx.copy(y_atom_1, y_reg_1, fx.slice(y_div, (None, off_i)))
 
         wave_m_offset = wave_m * (N_TILES_A * 16)
         wave_n_offset = wave_n * (N_TILES_B * 16)
