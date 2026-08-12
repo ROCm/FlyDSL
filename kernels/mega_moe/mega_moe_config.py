@@ -4,27 +4,14 @@
 
 from bisect import bisect_left
 from dataclasses import dataclass, replace
-from functools import lru_cache
+from functools import cache
 
-TOKEN_BUCKETS = (
-    1,
-    4,
-    8,
-    16,
-    32,
-    64,
-    128,
-    256,
-    512,
-    1024,
-    2048,
-    4096,
-    8192,
-    16384,
-    32768,
-)
+TOKEN_BUCKETS = (1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768)
 P2P_FP8_MIN_MTPR = 1024
 FIXED_SLOT_MAX_MTPR = 255
+MAX_MTPR_CLASS = 32768
+REFERENCE_EXPERTS_PER_RANK = 48
+EXPERT_CONFIG_GRANULARITY = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +32,8 @@ class Stage1Config:
     work_shards: int = 8
     external_grouping: bool = False
     external_counting: bool = False
+    payload_chunk_rows: int = 0
+    payload_tile_ready: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,11 +44,13 @@ class Stage2Config:
     persist_cu: int
     use_nt: bool
     persist_strided: bool = False
+    skew_cu: int = 0
     block_k: int = 256
     b_hoist: bool = True
     b2stage: bool = True
     ascale_prefetch: bool = True
     spatial_partition: int = 402
+    bf16_lds: bool = False
     deep_a_pipeline: bool = False
 
 
@@ -76,75 +67,10 @@ class MegaMoEConfig:
             raise ValueError(f"Stage2 block_m={bm} must divide Stage1 sort_block_m={sbm}")
         if self.p2p_quant not in ("none", "fp8_blockwise_1x32"):
             raise ValueError(f"unsupported p2p_quant={self.p2p_quant!r}")
-
-
-_FIXED_GEOMETRY = {
-    1: (1, 64, True, 2, 0),
-    4: (1, 128, True, 2, 3),
-    8: (2, 128, True, 2, 3),
-    16: (4, 96, True, 1, 3),
-    32: (3, 128, False, 2, 3),
-    64: (3, 208, False, 2, 3),
-    128: (3, 224, False, 2, 3),
-}
-
-_COMPACT_SMALL_DISPATCH_CU = {
-    1: 224,
-    4: 128,
-    8: 192,
-    16: 64,
-    32: 128,
-    64: 192,
-    128: 128,
-}
-
-_OVERSIZED_SMALL_DISPATCH_CU = {
-    4096: {4: 224, 8: 128},
-    16384: {1: 128, 4: 224, 8: 64, 64: 64},
-    32768: {4: 224, 8: 128, 128: 64},
-}
-
-# work shards, external grouping, external counting
-_OVERSIZED_SMALL_PROTOCOL = {
-    2048: {
-        4: (8, False, False),
-        32: (8, False, False),
-        128: (8, False, False),
-    },
-    4096: {
-        1: (1, False, False),
-        32: (8, False, False),
-        64: (1, False, False),
-        128: (8, False, False),
-    },
-    8192: {
-        1: (1, False, False),
-        4: (1, True, False),
-        8: (1, False, False),
-        16: (1, False, False),
-        32: (1, False, False),
-        64: (4, False, False),
-        128: (4, False, False),
-    },
-    16384: {
-        1: (1, True, False),
-        4: (8, False, False),
-        8: (2, True, False),
-        16: (2, True, False),
-        32: (4, False, False),
-        64: (1, False, False),
-        128: (4, False, False),
-    },
-    32768: {
-        1: (1, False, False),
-        4: (1, True, False),
-        8: (1, True, False),
-        16: (1, False, False),
-        32: (2, False, False),
-        64: (4, False, False),
-        128: (4, False, False),
-    },
-}
+        if self.p2p_quant != "none" and self.stage2.bf16_lds:
+            raise ValueError("FP8 P2P requires Stage2 bf16_lds=False")
+        if self.stage2.deep_a_pipeline and not self.stage2.b2stage:
+            raise ValueError("Stage2 deep_a_pipeline requires b2stage=True")
 
 
 def nearest_token_bucket(tokens: int) -> int:
@@ -159,187 +85,252 @@ def nearest_token_bucket(tokens: int) -> int:
     return upper if upper - tokens <= tokens - lower else lower
 
 
-def _select_stage1(bucket: int, fixed_slot: bool, mtpr: int) -> Stage1Config:
-    if fixed_slot:
-        grid_mult, dispatch_cu, tile_resource, waves_per_eu, b_nt = _FIXED_GEOMETRY[bucket]
-        config = Stage1Config(
-            sort_block_m=32,
-            tile_n=256 if bucket <= 8 else 128,
-            num_waves=4,
-            grid_mult=grid_mult,
-            num_dispatch_cu=dispatch_cu,
-            mfma_amajor=False,
-            async_a_copy=False,
-            use_tile_resource=tile_resource,
-            b_nt=b_nt,
-            waves_per_eu_hint=waves_per_eu,
-        )
-    elif bucket <= 4:
-        config = Stage1Config(
-            sort_block_m=32,
-            tile_n=256,
-            num_waves=4,
-            grid_mult=1,
-            num_dispatch_cu=_COMPACT_SMALL_DISPATCH_CU[bucket],
-            mfma_amajor=False,
-            async_a_copy=False,
-            use_tile_resource=False,
-            b_nt=0 if bucket == 1 else 3,
-        )
-    elif bucket <= 128:
-        config = Stage1Config(
-            sort_block_m=32,
-            tile_n=512,
-            num_waves=8,
-            grid_mult=1,
-            num_dispatch_cu=_COMPACT_SMALL_DISPATCH_CU[bucket],
-            mfma_amajor=True,
-            async_a_copy=True,
-            use_tile_resource=False,
-            b_nt=3,
-        )
-    elif bucket <= 1024:
-        config = Stage1Config(
-            sort_block_m=64,
-            tile_n=512,
-            num_waves=8,
-            grid_mult=1 if bucket == 256 else 2,
-            num_dispatch_cu=160 if bucket == 256 else 128,
-            mfma_amajor=True,
-            async_a_copy=True,
-            use_tile_resource=bucket == 256,
-            b_nt=3 if bucket <= 512 else 0,
-        )
-    elif bucket == 2048:
-        config = Stage1Config(
-            sort_block_m=64,
-            tile_n=512,
-            num_waves=8,
-            grid_mult=1,
-            num_dispatch_cu=32,
-            mfma_amajor=True,
-            async_a_copy=False,
-            use_tile_resource=True,
-            b_nt=0,
-        )
-    else:
-        config = Stage1Config(
-            sort_block_m=128,
-            tile_n=512,
-            num_waves=8,
-            grid_mult=1,
-            num_dispatch_cu=32,
-            mfma_amajor=True,
-            async_a_copy=True,
-            use_tile_resource=bucket >= 16384,
-            b_nt=0,
-        )
+def mtpr_config_class(mtpr: int) -> int:
+    return mtpr if mtpr <= P2P_FP8_MIN_MTPR else MAX_MTPR_CLASS
 
-    oversized_capacity = not fixed_slot and mtpr > bucket
-    if oversized_capacity:
-        dispatch_cu = _OVERSIZED_SMALL_DISPATCH_CU.get(mtpr, {}).get(bucket)
-        if dispatch_cu is not None:
-            config = replace(config, num_dispatch_cu=dispatch_cu)
-        elif bucket == 32:
-            config = replace(config, num_dispatch_cu=192 if mtpr in (4096, 16384) else 64)
-        elif bucket == 64:
-            config = replace(config, num_dispatch_cu=160)
-        elif bucket == 128:
-            config = replace(config, num_dispatch_cu=192)
-        elif bucket == 256 and mtpr >= 16384:
-            config = replace(config, sort_block_m=32, grid_mult=1, num_dispatch_cu=64)
-        elif bucket == 512:
-            config = replace(
-                config,
-                sort_block_m=64,
-                grid_mult=2 if mtpr >= 32768 else 1,
-                num_dispatch_cu=64,
-                use_tile_resource=mtpr != 4096,
-                b_nt=3 if mtpr >= 16384 else 0,
-            )
-        elif bucket == 1024:
-            config = replace(
-                config,
-                sort_block_m=64,
-                grid_mult=1,
-                num_dispatch_cu=64,
-                use_tile_resource=True,
-                b_nt=0,
-            )
-        elif bucket == 2048 and mtpr >= 4096:
-            config = replace(
-                config,
-                grid_mult=1 if mtpr >= 16384 else 2,
-                num_dispatch_cu=64,
-                async_a_copy=mtpr != 8192,
-            )
-        elif bucket == 4096:
-            config = replace(
-                config,
-                grid_mult=1 if mtpr == 8192 else 2,
-                num_dispatch_cu=64 if mtpr == 8192 else 32,
-                use_tile_resource=mtpr >= 16384,
-            )
 
-    if mtpr >= 16384:
-        config = replace(config, use_tile_resource=True)
-    external_grouping = not fixed_slot and mtpr >= 2048
-    work_shards = 4 if mtpr >= 8192 or (bucket == 1024 and mtpr >= 4096) else 8
-    external_counting = external_grouping and (mtpr >= 8192 or (bucket == 1024 and mtpr >= 4096))
-    if oversized_capacity and bucket <= 128:
-        work_shards, external_grouping, external_counting = _OVERSIZED_SMALL_PROTOCOL.get(mtpr, {}).get(
-            bucket, (work_shards, external_grouping, external_counting)
-        )
-    if bucket == 2048 and mtpr == 8192:
-        work_shards = 2
-    elif bucket == 4096 and mtpr == 16384:
-        work_shards, external_counting = 1, False
-    return replace(
-        config,
-        work_shards=work_shards,
-        external_grouping=external_grouping,
-        external_counting=external_counting,
+def expert_config_class(experts_per_rank: int) -> int:
+    return ((experts_per_rank + EXPERT_CONFIG_GRANULARITY - 1) // EXPERT_CONFIG_GRANULARITY) * EXPERT_CONFIG_GRANULARITY
+
+
+def _scale_dispatch_cu(dispatch_cu: int, experts_per_rank: int) -> int:
+    expert_waves = (experts_per_rank + 63) // 64
+    return min(224, dispatch_cu * expert_waves)
+
+
+def _fixed_dispatch_cu(bucket: int) -> int:
+    if bucket <= 1:
+        return 64
+    if bucket <= 8:
+        return 128
+    if bucket <= 16:
+        return 96
+    if bucket <= 32:
+        return 128
+    return min(224, 16 * (bucket.bit_length() + 7))
+
+
+def _compact_dispatch_cu(bucket: int) -> int:
+    if bucket <= 1:
+        return 224
+    if bucket <= 4:
+        return 128
+    if bucket <= 8:
+        return 192
+    if bucket <= 16:
+        return 64
+    if bucket <= 32:
+        return 128
+    if bucket <= 64:
+        return 192
+    return 128
+
+
+def _large_dispatch_cu(bucket: int) -> int:
+    if bucket <= 1:
+        return 224
+    if bucket <= 4:
+        return 128
+    if bucket <= 8:
+        return 192
+    if bucket <= 32:
+        return 64
+    if bucket <= 64:
+        return 160
+    if bucket <= 128:
+        return 192
+    if bucket <= 256:
+        return 160
+    if bucket == 8192:
+        return 96
+    if bucket >= 16384:
+        return 32
+    return 64
+
+
+def _select_fixed_stage1(bucket: int, experts_per_rank: int) -> Stage1Config:
+    grid_mult = max(1, bucket // 4) if bucket <= 16 else 3
+    return Stage1Config(
+        sort_block_m=32,
+        tile_n=256 if bucket <= 8 else 128,
+        num_waves=4,
+        grid_mult=grid_mult,
+        num_dispatch_cu=_scale_dispatch_cu(_fixed_dispatch_cu(bucket), experts_per_rank),
+        mfma_amajor=False,
+        async_a_copy=False,
+        use_tile_resource=bucket <= 16,
+        b_nt=0 if bucket == 1 else 3,
+        waves_per_eu_hint=1 if bucket == 16 else 2,
     )
 
 
-def _select_stage2(bucket: int, fixed_slot: bool, mtpr: int, sort_block_m: int) -> Stage2Config:
+def _select_bounded_stage1(bucket: int, mtpr: int, experts_per_rank: int, inter_dim: int) -> Stage1Config:
+    if bucket <= 4:
+        sort_block_m, tile_n, num_waves = 32, 256, 4
+        grid_mult, mfma_amajor, async_a_copy = 1, False, False
+    elif bucket <= 128:
+        sort_block_m = 32
+        tile_n, num_waves = (512 if inter_dim >= 2048 else 256), 8
+        grid_mult, mfma_amajor, async_a_copy = 1, True, True
+    elif bucket <= 1024:
+        sort_block_m = 64
+        tile_n, num_waves = (512 if inter_dim >= 2048 else 256), 8
+        grid_mult, mfma_amajor, async_a_copy = (1 if bucket == 256 else 2), True, True
+    else:
+        raise ValueError(f"bounded MTPR does not support token bucket {bucket}")
+
+    dispatch_cu = _compact_dispatch_cu(bucket) if bucket <= 128 else 160 if bucket == 256 else 128
+    tile_resource = bucket == 256
+    b_nt = 0 if bucket == 1 or bucket >= 1024 else 3
+    if mtpr > bucket:
+        if bucket == 32:
+            dispatch_cu = 64
+        elif bucket == 64:
+            dispatch_cu = 160
+        elif bucket == 128:
+            dispatch_cu = 192
+        elif bucket == 512:
+            grid_mult, dispatch_cu, tile_resource, b_nt = 1, 64, True, 0
+    return Stage1Config(
+        sort_block_m=sort_block_m,
+        tile_n=tile_n,
+        num_waves=num_waves,
+        grid_mult=grid_mult,
+        num_dispatch_cu=_scale_dispatch_cu(dispatch_cu, experts_per_rank),
+        mfma_amajor=mfma_amajor,
+        async_a_copy=async_a_copy,
+        use_tile_resource=tile_resource,
+        b_nt=b_nt,
+    )
+
+
+def _large_payload_geometry(bucket: int) -> tuple[int, bool]:
+    if bucket == 2048:
+        return 0, False
+    if bucket == 16384:
+        return 1536, True
+    if bucket == 32768:
+        return 768, True
+    return 384, True
+
+
+def _select_large_stage1(
+    bucket: int,
+    experts_per_rank: int,
+    inter_dim: int,
+) -> Stage1Config:
+    if bucket <= 4:
+        sort_block_m, tile_n, num_waves = 32, 256, 4
+        mfma_amajor, async_a_copy = False, False
+    elif bucket <= 128:
+        sort_block_m = 32
+        tile_n, num_waves = (512 if inter_dim >= 2048 else 256), 8
+        mfma_amajor, async_a_copy = True, True
+    elif bucket <= 2048:
+        sort_block_m = 64
+        tile_n, num_waves = (512 if inter_dim >= 2048 else 256), 8
+        mfma_amajor, async_a_copy = True, True
+    else:
+        sort_block_m = 128
+        tile_n, num_waves = (512 if inter_dim >= 2048 else 256), 8
+        mfma_amajor, async_a_copy = True, True
+
+    work_shards = 1 if bucket <= 32 else 4
+    if bucket == 2048:
+        work_shards = 8
+    payload_chunk_rows, payload_tile_ready = _large_payload_geometry(bucket)
+    return Stage1Config(
+        sort_block_m=sort_block_m,
+        tile_n=tile_n,
+        num_waves=num_waves,
+        grid_mult=1,
+        num_dispatch_cu=_scale_dispatch_cu(_large_dispatch_cu(bucket), experts_per_rank),
+        mfma_amajor=mfma_amajor,
+        async_a_copy=async_a_copy,
+        use_tile_resource=True,
+        b_nt=3 if 1 < bucket <= 256 else 0,
+        work_shards=work_shards,
+        external_grouping=bucket == 4 or bucket >= 256,
+        external_counting=bucket >= 256,
+        payload_chunk_rows=payload_chunk_rows,
+        payload_tile_ready=payload_tile_ready,
+    )
+
+
+def _select_bounded_stage2(bucket: int, fixed_slot: bool, mtpr: int, sort_block_m: int, model_dim: int) -> Stage2Config:
     if not fixed_slot and mtpr > bucket:
-        if bucket == 128 and mtpr == 4096:
-            persist_cu = 128
-        elif bucket == 256 and mtpr >= 32768:
-            persist_cu = 256
-        else:
-            persist_cu = {1024: 224, 2048: 256, 8192: 256, 16384: 192}.get(bucket, 240)
         return Stage2Config(
             block_m=64 if sort_block_m == 128 else 32,
             block_n=128 if bucket == 256 and sort_block_m == 64 else 256,
             persist=True,
-            persist_cu=persist_cu,
+            persist_cu=240,
             use_nt=bucket <= 128,
-            persist_strided=bucket in (512, 1024, 2048),
+            persist_strided=512 <= bucket <= 2048,
         )
-    block_m = 64 if bucket >= 4096 else 32
-    block_n = 256 if bucket in (1, 4, 64) or bucket >= 1024 or (not fixed_slot and bucket < 128) else 128
+    block_n = 256 if bucket in (1, 4, 64) or bucket >= 1024 or not fixed_slot and bucket < 128 else 128
+    if model_dim < 4096:
+        block_n = 128
     persist = bucket >= 128
-    persist_cu = 0
-    if persist:
-        persist_cu = 128 if bucket == 256 else 256 if bucket in (4096, 16384) else 240
     return Stage2Config(
-        block_m=block_m,
+        block_m=64 if bucket >= 4096 else 32,
         block_n=block_n,
         persist=persist,
-        persist_cu=persist_cu,
+        persist_cu=128 if bucket == 256 else 240 if persist else 0,
         use_nt=bucket <= 128,
-        persist_strided=bucket in (512, 1024, 2048),
+        persist_strided=512 <= bucket <= 2048,
         deep_a_pipeline=bucket >= 1024 and block_n == 256,
     )
 
 
-@lru_cache(maxsize=None)
-def _select_bucket_config(bucket: int, mtpr: int, p2p_quant: str) -> MegaMoEConfig:
-    fixed_slot = mtpr <= FIXED_SLOT_MAX_MTPR
-    stage1 = _select_stage1(bucket, fixed_slot, mtpr)
-    stage2 = _select_stage2(bucket, fixed_slot, mtpr, stage1.sort_block_m)
+def _select_large_stage2(
+    bucket: int,
+    sort_block_m: int,
+    model_dim: int,
+) -> Stage2Config:
+    persist_cu = {1024: 224, 16384: 192, 32768: 256}.get(bucket, 240)
+    block_n = 128 if bucket == 256 or model_dim < 4096 else 256
+    block_m = 64 if sort_block_m == 128 or bucket == 2048 else 32
+    skew_cu = 96 if bucket >= 512 and bucket not in (2048, 32768) else 0
+    return Stage2Config(
+        block_m=block_m,
+        block_n=block_n,
+        persist=True,
+        persist_cu=persist_cu,
+        use_nt=bucket <= 128,
+        persist_strided=512 <= bucket <= 2048,
+        skew_cu=skew_cu,
+        deep_a_pipeline=bucket >= 1024 and block_n == 256,
+    )
+
+
+@cache
+def _select_bucket_config(
+    bucket: int,
+    mtpr_class: int,
+    experts_per_rank: int,
+    model_dim: int,
+    inter_dim: int,
+    p2p_quant: str,
+) -> MegaMoEConfig:
+    if mtpr_class == MAX_MTPR_CLASS:
+        stage1 = _select_large_stage1(
+            bucket,
+            experts_per_rank,
+            inter_dim,
+        )
+        stage2 = _select_large_stage2(
+            bucket,
+            stage1.sort_block_m,
+            model_dim,
+        )
+        return MegaMoEConfig(stage1=stage1, stage2=stage2, p2p_quant=p2p_quant)
+
+    fixed_slot = mtpr_class <= FIXED_SLOT_MAX_MTPR
+    if fixed_slot:
+        stage1 = _select_fixed_stage1(bucket, experts_per_rank)
+    else:
+        stage1 = _select_bounded_stage1(bucket, mtpr_class, experts_per_rank, inter_dim)
+    stage2 = _select_bounded_stage2(bucket, fixed_slot, mtpr_class, stage1.sort_block_m, model_dim)
     return MegaMoEConfig(stage1=stage1, stage2=stage2, p2p_quant=p2p_quant)
 
 
@@ -349,6 +340,9 @@ def select_mega_moe_config(
     p2p_quant: str = "auto",
     *,
     a_dtype: str = "fp8",
+    experts_per_rank: int = REFERENCE_EXPERTS_PER_RANK,
+    model_dim: int = 7168,
+    inter_dim: int = 3072,
 ) -> MegaMoEConfig:
     if mtpr <= 0 or mtpr & (mtpr - 1):
         raise ValueError(f"mtpr={mtpr} must be a positive power of two")
@@ -356,17 +350,30 @@ def select_mega_moe_config(
         raise ValueError(f"tokens={tokens} exceeds mtpr={mtpr}")
     if a_dtype not in ("fp4", "fp8"):
         raise ValueError(f"unsupported activation dtype={a_dtype!r}")
+    if experts_per_rank <= 0:
+        raise ValueError(f"experts_per_rank must be positive, got {experts_per_rank}")
+    if model_dim <= 0 or inter_dim <= 0:
+        raise ValueError(f"invalid model shape {model_dim}x{inter_dim}")
     bucket = nearest_token_bucket(tokens)
-    fixed_slot = mtpr <= FIXED_SLOT_MAX_MTPR
-    if fixed_slot and bucket not in _FIXED_GEOMETRY:
+    mtpr_class = mtpr_config_class(mtpr)
+    if mtpr_class <= FIXED_SLOT_MAX_MTPR and bucket > 128:
         raise ValueError(f"fixed-slot does not support token bucket {bucket}")
+    if mtpr_class <= FIXED_SLOT_MAX_MTPR and experts_per_rank > 64:
+        raise ValueError("fixed-slot supports at most 64 experts per rank")
     if p2p_quant == "auto":
         # MTPR is rank-invariant; local token counts need not be.
         use_fp8 = mtpr >= P2P_FP8_MIN_MTPR if a_dtype == "fp4" else mtpr > P2P_FP8_MIN_MTPR
         p2p_quant = "fp8_blockwise_1x32" if use_fp8 else "none"
     elif p2p_quant not in ("none", "fp8_blockwise_1x32"):
         raise ValueError(f"unsupported p2p_quant={p2p_quant!r}")
-    return _select_bucket_config(bucket, mtpr, p2p_quant)
+    return _select_bucket_config(
+        bucket,
+        mtpr_class,
+        expert_config_class(experts_per_rank),
+        model_dim,
+        inter_dim,
+        p2p_quant,
+    )
 
 
 def apply_mega_moe_quant_config(config: MegaMoEConfig, tokens: int, a_dtype: str) -> MegaMoEConfig:
@@ -389,21 +396,43 @@ def apply_mega_moe_quant_config(config: MegaMoEConfig, tokens: int, a_dtype: str
         )
 
     if a_dtype == "fp8":
-        if not stage2_overrides:
-            return config
-        return replace(config, stage2=replace(config.stage2, **stage2_overrides))
-
-    if bucket <= 128 and config.stage1.async_a_copy:
-        # FP4 halves the A K-step bytes. The 8-wave compact kernel therefore
-        # needs SBM64 so every thread owns one or more 16-byte async copies.
-        stage1_overrides["sort_block_m"] = 64
-    if tokens >= 256:
-        stage1_overrides["waves_per_eu_hint"] = 1
-    if bucket == 512:
-        stage1_overrides.update(b_nt=0, num_dispatch_cu=160)
-    elif bucket == 1024:
-        stage1_overrides.update(sort_block_m=128, num_dispatch_cu=88)
-        stage2_overrides["block_m"] = 64
+        if tokens == 2:
+            stage1_overrides["grid_mult"] = 2
+    else:
+        if tokens == 2:
+            stage1_overrides["grid_mult"] = 2
+        elif tokens == 4:
+            stage1_overrides["grid_mult"] = 4
+        elif tokens == 16:
+            stage1_overrides["grid_mult"] = 3
+        if bucket <= 128 and config.stage1.async_a_copy:
+            # FP4 halves the A K-step bytes. The 8-wave compact kernel therefore
+            # needs SBM64 so every thread owns one or more 16-byte async copies.
+            stage1_overrides["sort_block_m"] = 64
+        if tokens >= 256:
+            stage1_overrides["waves_per_eu_hint"] = 1
+        if bucket == 512:
+            stage1_overrides.update(b_nt=0, num_dispatch_cu=160)
+        elif bucket == 1024:
+            stage1_overrides.update(sort_block_m=128, num_dispatch_cu=88)
+            stage2_overrides["block_m"] = 64
+            if config.p2p_quant == "fp8_blockwise_1x32":
+                stage1_overrides["grid_mult"] = 1
+                stage2_overrides["persist_cu"] = 224
+        elif bucket == 4096:
+            stage1_overrides.update(
+                num_dispatch_cu=72,
+                payload_chunk_rows=0,
+                payload_tile_ready=False,
+            )
+        elif bucket == 8192:
+            stage1_overrides.update(
+                grid_mult=2,
+                num_dispatch_cu=32,
+                swizzle_a=False,
+                payload_chunk_rows=0,
+                payload_tile_ready=False,
+            )
 
     if not stage1_overrides and not stage2_overrides:
         return config
