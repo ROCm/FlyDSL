@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-12T07:33:46Z",
+ "updated": "2026-08-12T08:07:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31576298595,
+   "pr": 960,
+   "commit": "ebabfd0a78ea744ec8d6202caa692e759aa2f642",
+   "branch": "new_bias_alibi_sink_attention",
+   "event": "pull_request",
+   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31576298595",
+   "created_at": "2026-08-12T07:59:16Z",
+   "updated_at": "2026-08-12T08:00:51Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
   {
    "run_id": 31566833673,
    "pr": 1000,
@@ -10,11 +25,11 @@
    "branch": "xyt/citest",
    "event": "pull_request",
    "title": "Just test ci",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31566833673",
    "created_at": "2026-08-12T05:31:42Z",
-   "updated_at": "2026-08-12T05:34:40Z",
+   "updated_at": "2026-08-12T08:05:02Z",
    "actor": "xytpai",
    "jobs": []
   },
@@ -83,11 +98,11 @@
    "branch": "dsl-ify-arith",
    "event": "pull_request",
    "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31561190239",
    "created_at": "2026-08-12T03:47:50Z",
-   "updated_at": "2026-08-12T07:17:10Z",
+   "updated_at": "2026-08-12T07:59:59Z",
    "actor": "xudoyuan",
    "jobs": []
   },
@@ -138,7 +153,7 @@
   },
   {
    "run_id": 31506045411,
-   "pr": 960,
+   "pr": null,
    "commit": "fe6db3fc2d643ef8956295b29d7fcd2bf7709219",
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
@@ -886,41 +901,13 @@
    "branch": "fix/rmsnorm",
    "event": "pull_request",
    "title": "[fix] Resolve normalization-related CI regressions",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546",
    "created_at": "2026-08-11T03:17:19Z",
-   "updated_at": "2026-08-12T07:31:46Z",
+   "updated_at": "2026-08-12T08:00:43Z",
    "actor": "cschenjunlin",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-12T07:30:56Z",
-     "completed_at": "2026-08-12T07:31:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546/job/94042680950"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-11T04:50:22Z",
-     "completed_at": "2026-08-11T09:16:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546/job/94042681424"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-11T04:50:11Z",
-     "completed_at": "2026-08-11T09:28:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546/job/94042681813"
-    }
-   ]
+   "jobs": []
   },
   {
    "run_id": 31453311133,
@@ -1622,21 +1609,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31366801444",
    "created_at": "2026-08-10T07:40:14Z",
    "updated_at": "2026-08-10T07:52:50Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 31365282675,
-   "pr": null,
-   "commit": "6c63231c7d1ba9574887ae0eced194ca2cdb9aac",
-   "branch": "worktree-agent-moe-2stage-port",
-   "event": "pull_request",
-   "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8 (gfx942 + gfx950)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31365282675",
-   "created_at": "2026-08-10T07:17:46Z",
-   "updated_at": "2026-08-10T07:40:15Z",
    "actor": "coderfeli",
    "jobs": []
   }
