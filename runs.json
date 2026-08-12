@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-12T15:39:04Z",
+ "updated": "2026-08-12T15:49:28Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31613381709,
+   "pr": 1004,
+   "commit": "358cc1903cdd60c96d7c0950126316a2f9c0d801",
+   "branch": "pr/docs-composite-storage",
+   "event": "pull_request",
+   "title": "[Docs] Elaboration for composite type and storage",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31613381709",
+   "created_at": "2026-08-12T15:38:14Z",
+   "updated_at": "2026-08-12T15:41:01Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 31607854197,
    "pr": 960,
@@ -38,10 +53,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-12T15:25:06Z",
-     "completed_at": null,
+     "completed_at": "2026-08-12T15:38:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31607854197/job/94165149897"
     }
    ]
@@ -227,11 +242,11 @@
    "branch": "mega_moe_a4w4",
    "event": "pull_request",
    "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582596158",
    "created_at": "2026-08-12T09:22:22Z",
-   "updated_at": "2026-08-12T15:05:37Z",
+   "updated_at": "2026-08-12T15:47:20Z",
    "actor": "Yaowu-Xiong",
    "jobs": [
     {
@@ -264,19 +279,19 @@
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-12T15:05:36Z",
-     "completed_at": null,
+     "completed_at": "2026-08-12T15:46:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582596158/job/94159429937"
     },
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-12T15:05:36Z",
-     "completed_at": null,
+     "completed_at": "2026-08-12T15:47:19Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582596158/job/94159429945"
     }
    ]
@@ -1642,21 +1657,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31401177825/job/93534452591"
     }
    ]
-  },
-  {
-   "run_id": 31399711656,
-   "pr": 901,
-   "commit": "8c565d1dcb45fb3dab2c896bef33213dcbb3d578",
-   "branch": "moe_sorting_optimization",
-   "event": "pull_request",
-   "title": "Add Optimized MoE Routing Path",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31399711656",
-   "created_at": "2026-08-10T14:43:34Z",
-   "updated_at": "2026-08-10T14:46:45Z",
-   "actor": "amd-wsung102",
-   "jobs": []
   }
  ]
 }
