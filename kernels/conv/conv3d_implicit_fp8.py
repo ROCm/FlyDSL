@@ -43,15 +43,25 @@ def _normalize_3(v):
     return tuple(v)
 
 
+def _global_ptr_from_addr(addr_i64, elem_ty, ref_tensor):
+    """Reinterpret a raw i64 byte address as a global pointer to ``elem_ty``.
+
+    Alignment is inherited from ``ref_tensor``'s iterator so the resulting
+    ``!llvm.ptr`` keeps the tensor's guarantees.
+    """
+    alignment = fx.PointerType(fx.get_iter(ref_tensor).type).alignment
+    ptr_ty = fx.PointerType.get(elem_ty=elem_ty, address_space=1, alignment=alignment)
+    return fx.inttoptr(ptr_ty, addr_i64)
+
+
 def _make_fp8_buffer_tensor_from_addr(addr_i64, fp8_ir_t, ref_buf_tensor):
     """Rebase an FP8 buffer tensor onto a raw i64 byte address.
 
     The 2 GB num_records bound ensures OOB-routed padding taps read zero.
     """
     BIG_ASYNC_NR = 0x80000000  # 2 GB
-    alignment = fx.PointerType(fx.get_iter(ref_buf_tensor).type).alignment
-    g_ptr_ty = fx.PointerType.get(elem_ty=fp8_ir_t, address_space=1, alignment=alignment)
-    buf_ptr = make_buffer_ptr(fx.inttoptr(g_ptr_ty, addr_i64), num_records_bytes=BIG_ASYNC_NR)
+    g_ptr = _global_ptr_from_addr(addr_i64, fp8_ir_t, ref_buf_tensor)
+    buf_ptr = make_buffer_ptr(g_ptr, num_records_bytes=BIG_ASYNC_NR)
     return fx.Tensor(fx.make_view(buf_ptr, fx.get_layout(ref_buf_tensor)))
 
 
@@ -126,8 +136,8 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
         in_rsrc = buffer_ops.create_buffer_resource(inp, max_size=False, num_records_bytes=total_bytes)
         out_rsrc = buffer_ops.create_buffer_resource(out, max_size=False, num_records_bytes=total_bytes)
         if const_expr(TR_BIG):
-            in_base_addr = fx.Int64(buffer_ops.extract_base_index(inp))
-            out_base_addr = fx.Int64(buffer_ops.extract_base_index(out))
+            in_base_addr = fx.Int64(fx.ptrtoint(fx.get_iter(inp)))
+            out_base_addr = fx.Int64(fx.ptrtoint(fx.get_iter(out)))
         lds_alloc = fx.SharedAllocator(static=False)
         lds = lds_alloc.allocate(fx.Array[u8, TR_TILE * TR_LDS_S, 16]).peek()
 
@@ -140,8 +150,7 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
 
         # v16i8 is not a legal backend vector width, so move 16B chunks as dwordx4.
         def lds_store_i32x4(elem_offset, value_i32x4):
-            base = fx.Int64(fx.ptrtoint(lds.ptr)) + fx.Int64(elem_offset)
-            ptr = buffer_ops.create_llvm_ptr(base, address_space=3)
+            ptr = (fx.recast_iter(u8, lds.ptr) + fx.Int32(elem_offset)).llvm_ptr
             llvm.StoreOp(value_i32x4, ptr, alignment=16)
 
         def lds_load_scalar(elem_offset):
@@ -161,7 +170,7 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
                 cc_s = fx.Index(arith.select(valid, fx.Int64(cc), fx.Int64(0)))
                 ss_s = fx.Index(arith.select(valid, fx.Int64(ss), fx.Int64(0)))
                 addr = in_base_addr + (fx.Int64(nb) * fx.Int64(c) + fx.Int64(cc_s)) * fx.Int64(s) + fx.Int64(ss_s)
-                ptr = buffer_ops.create_llvm_ptr(addr, address_space=1)
+                ptr = _global_ptr_from_addr(addr, u8.ir_type, inp).llvm_ptr
                 v = llvm.LoadOp(fx.Vector.make_type(4, fx.Int32), ptr, alignment=16).result
             else:
                 # buffer_load offset is in i32 elements; the byte offset is 16B-aligned.
@@ -186,7 +195,7 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
                 packed = packed_u8.bitcast(fx.Int32)  # v16u8 -> v4i32
                 if const_expr(TR_BIG):
                     addr = out_base_addr + (fx.Int64(nb) * fx.Int64(s) + fx.Int64(ss)) * fx.Int64(c) + fx.Int64(cc)
-                    ptr = buffer_ops.create_llvm_ptr(addr, address_space=1)
+                    ptr = _global_ptr_from_addr(addr, u8.ir_type, out).llvm_ptr
                     llvm.StoreOp(packed.ir_value() if hasattr(packed, "ir_value") else packed, ptr, alignment=16)
                 else:
                     byte_off = out_base + ss * c + cc
@@ -335,7 +344,7 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
             base_t = ot_base0 - fx.Index(pt)
             base_t = arith.select(base_t < fx.Index(0), fx.Index(0), base_t)
             x_base_byte = ((nbase * fx.Index(d) + base_t) * fx.Index(h)) * fx.Index(width) * fx.Index(c)
-            x_addr = fx.Int64(buffer_ops.extract_base_index(x)) + fx.Int64(x_base_byte)
+            x_addr = fx.Int64(fx.ptrtoint(fx.get_iter(x))) + fx.Int64(x_base_byte)
             x_div = fx.logical_divide(
                 _make_fp8_buffer_tensor_from_addr(x_addr, f8_ir_t, x_buf),
                 fx.make_layout(1, 1),
@@ -576,11 +585,11 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
 
         # ---- epilogue: direct store, map (M=npq row, N=k_out col) -> conv output ----
         if const_expr(BIG_OUT):
-            y_elem_base = fx.Int64(buffer_ops.extract_base_index(y))
+            y_elem_base = fx.Int64(fx.ptrtoint(fx.get_iter(y)))
 
         def _big_store(off_elem, value):
             addr = y_elem_base + fx.Int64(off_elem) * fx.Int64(2)
-            ptr = buffer_ops.create_llvm_ptr(addr, address_space=1)
+            ptr = _global_ptr_from_addr(addr, fx.BFloat16.ir_type, y).llvm_ptr
             v = value.ir_value() if hasattr(value, "ir_value") else value
             llvm.StoreOp(v, ptr, alignment=2)
 
