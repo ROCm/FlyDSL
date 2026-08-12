@@ -117,15 +117,19 @@ def MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
 def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
     """Create an arch-appropriate WMMA atom.
 
-    Supported kwargs (integer paths only — iu8 / iu4):
-        sign_a (bool, default False): treat A operand as signed.
-        sign_b (bool, default False): treat B operand as signed.
-        clamp  (bool, default False): saturate integer accumulator.
+    Supported kwargs:
+        sign_a  (bool, default False): treat A operand as signed (iu8/iu4 only).
+        sign_b  (bool, default False): treat B operand as signed (iu8/iu4 only).
+        clamp   (bool, default False): saturate integer accumulator (iu8/iu4 only).
+        mod_c   (int,  default 0):     I16 C-operand modifier (gfx1250 only).
+        reuse_a (bool, default False): operand-reuse scheduler hint (gfx1250 only).
+        reuse_b (bool, default False): operand-reuse scheduler hint (gfx1250 only).
     Forwarded to the arch-specific WMMA atom (MmaOpGFX11_WMMAType on gfx11,
     MmaOpGFX120X_WMMAType on gfx120x, MmaOpGFX1250_WMMAType on gfx1250); the
-    atom's verify() rejects them on the float (fp16/bf16/fp8) paths, where the
-    intrinsic has no such operands. Future WMMA ops for new architectures
-    should extend kwargs here rather than growing the positional signature.
+    atom's verify() rejects sign_a/sign_b/clamp on the float (fp16/bf16/fp8)
+    paths, where the intrinsic has no such operands. Future WMMA ops for new
+    architectures should extend kwargs here rather than growing the positional
+    signature.
     """
     ty_ab = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
     if elem_ty_acc is None:
@@ -155,6 +159,9 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
             sign_a=bool(kwargs.get("sign_a", False)),
             sign_b=bool(kwargs.get("sign_b", False)),
             clamp=bool(kwargs.get("clamp", False)),
+            mod_c=int(kwargs.get("mod_c", 0)),
+            reuse_a=bool(kwargs.get("reuse_a", False)),
+            reuse_b=bool(kwargs.get("reuse_b", False)),
         )
     if arch.startswith("gfx120"):
         return MmaOpGFX120X_WMMAType.get(
