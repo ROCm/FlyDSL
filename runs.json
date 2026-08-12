@@ -1,22 +1,95 @@
 {
  "schema": 1,
- "updated": "2026-08-12T13:29:34Z",
+ "updated": "2026-08-12T15:04:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31607854197,
+   "pr": 960,
+   "commit": "bd4e7bb325ce71a729b47d3071c5efcb78ae019e",
+   "branch": "new_bias_alibi_sink_attention",
+   "event": "pull_request",
+   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31607854197",
+   "created_at": "2026-08-12T14:38:02Z",
+   "updated_at": "2026-08-12T14:40:29Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
+  {
+   "run_id": 31604202127,
+   "pr": 1003,
+   "commit": "4612cf450a56ab0432b4b431c8322c41c35967ae",
+   "branch": "kefan.cao/list-branch-state",
+   "event": "pull_request",
+   "title": "[compiler] isolate mutable state across dynamic if branches",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31604202127",
+   "created_at": "2026-08-12T13:57:57Z",
+   "updated_at": "2026-08-12T13:57:57Z",
+   "actor": "kefan203",
+   "jobs": []
+  },
+  {
+   "run_id": 31603808114,
+   "pr": 848,
+   "commit": "2aefe4a0d1b5cd5d4d76d2edd47f185d79bf0b95",
+   "branch": "cjl/norm_perf",
+   "event": "pull_request",
+   "title": "[Perf] Optimize rmsnorm/layernorm",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31603808114",
+   "created_at": "2026-08-12T13:53:32Z",
+   "updated_at": "2026-08-12T13:58:15Z",
+   "actor": "cschenjunlin",
+   "jobs": []
+  },
   {
    "run_id": 31599284701,
    "pr": 1000,
    "commit": "f83d89990103d5b611d3fbdf7bd4c2be399f903e",
    "branch": "xyt/citest",
    "event": "pull_request",
-   "title": "Just test ci",
+   "title": "Test torch reference ops",
    "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31599284701",
    "created_at": "2026-08-12T13:01:06Z",
-   "updated_at": "2026-08-12T13:05:03Z",
+   "updated_at": "2026-08-12T14:51:08Z",
    "actor": "xytpai",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-12T14:51:07Z",
+     "completed_at": "2026-08-12T15:03:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31599284701/job/94154965157"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-12T14:50:57Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31599284701/job/94154965271"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-12T14:51:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31599284701/job/94154965496"
+    }
+   ]
   },
   {
    "run_id": 31587429526,
@@ -25,38 +98,38 @@
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
    "title": "[WIP][GFX1250] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31587429526",
    "created_at": "2026-08-12T10:26:33Z",
-   "updated_at": "2026-08-12T13:21:59Z",
+   "updated_at": "2026-08-12T15:02:41Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-12T13:21:58Z",
-     "completed_at": null,
+     "completed_at": "2026-08-12T13:33:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31587429526/job/94116284653"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-12T12:39:25Z",
-     "completed_at": null,
+     "completed_at": "2026-08-12T14:34:19Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31587429526/job/94116284684"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-12T12:39:25Z",
-     "completed_at": null,
+     "completed_at": "2026-08-12T15:02:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31587429526/job/94116284751"
     }
    ]
@@ -117,10 +190,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-12T12:36:30Z",
-     "completed_at": null,
+     "completed_at": "2026-08-12T14:34:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582596158/job/94115550767"
     },
     {
@@ -211,7 +284,7 @@
   },
   {
    "run_id": 31576298595,
-   "pr": 960,
+   "pr": null,
    "commit": "ebabfd0a78ea744ec8d6202caa692e759aa2f642",
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
@@ -230,7 +303,7 @@
    "commit": "882d198890dde700048c9d723903958fa53a7544",
    "branch": "xyt/citest",
    "event": "pull_request",
-   "title": "Just test ci",
+   "title": "Test torch reference ops",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31566833673",
@@ -273,7 +346,7 @@
    "commit": "2a47ff8b8408103a8d4afea60e0c4276c6e64bc4",
    "branch": "xyt/citest",
    "event": "pull_request",
-   "title": "Just test ci",
+   "title": "Test torch reference ops",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31566447072",
@@ -316,7 +389,7 @@
    "commit": "434bcd6563e6893c583e6ad2f868b172e46fb703",
    "branch": "xyt/citest",
    "event": "pull_request",
-   "title": "Just test ci",
+   "title": "Test torch reference ops",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31566303938",
@@ -1510,107 +1583,6 @@
    "updated_at": "2026-08-10T14:46:45Z",
    "actor": "amd-wsung102",
    "jobs": []
-  },
-  {
-   "run_id": 31394603239,
-   "pr": 981,
-   "commit": "06a6b6092f047c3e3fc6d9db73f6b09dd7cd0ec8",
-   "branch": "docs/setup-rtd",
-   "event": "pull_request",
-   "title": "docs: Update configs for documentation to host on Read the Docs",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31394603239",
-   "created_at": "2026-08-10T13:46:28Z",
-   "updated_at": "2026-08-10T21:23:31Z",
-   "actor": "peterjunpark",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-10T17:27:30Z",
-     "completed_at": "2026-08-10T18:23:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31394603239/job/93499523463"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-10T15:12:12Z",
-     "completed_at": "2026-08-10T19:02:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31394603239/job/93499523478"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-10T16:59:57Z",
-     "completed_at": "2026-08-10T21:23:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31394603239/job/93499523534"
-    }
-   ]
-  },
-  {
-   "run_id": 31394069980,
-   "pr": null,
-   "commit": "af295bc92749d67802ab9a28028f63378b3ba5b6",
-   "branch": "docs/setup-rtd",
-   "event": "pull_request",
-   "title": "docs: Update configs for documentation to host on Read the Docs",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31394069980",
-   "created_at": "2026-08-10T13:40:22Z",
-   "updated_at": "2026-08-10T13:41:45Z",
-   "actor": "peterjunpark",
-   "jobs": []
-  },
-  {
-   "run_id": 31392773966,
-   "pr": 971,
-   "commit": "59c124eb8ecb481da78a82484bd4b01e5a59dfcb",
-   "branch": "gfx1250/gemm-opt-0805",
-   "event": "pull_request",
-   "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31392773966",
-   "created_at": "2026-08-10T13:25:03Z",
-   "updated_at": "2026-08-10T18:43:28Z",
-   "actor": "aoli26",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-10T15:11:51Z",
-     "completed_at": "2026-08-10T18:43:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31392773966/job/93484988075"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-10T16:04:50Z",
-     "completed_at": "2026-08-10T17:27:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31392773966/job/93484988154"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-10T14:23:37Z",
-     "completed_at": "2026-08-10T16:36:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31392773966/job/93484988182"
-    }
-   ]
   }
  ]
 }
