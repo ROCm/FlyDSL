@@ -1,20 +1,50 @@
 {
  "schema": 1,
- "updated": "2026-08-12T09:17:11Z",
+ "updated": "2026-08-12T09:26:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 31582023351,
+   "run_id": 31582678294,
    "pr": 1001,
-   "commit": "3c8ecc78d381d90a0c6c0a8810c77c83a1313b36",
+   "commit": "c70676b823a4216b7abcf6c4f96e7b1916aade10",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
    "title": "[WIP][GFX1250] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
    "status": "in_progress",
    "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582678294",
+   "created_at": "2026-08-12T09:23:26Z",
+   "updated_at": "2026-08-12T09:24:50Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 31582596158,
+   "pr": 972,
+   "commit": "c1fdd494018993aabe2998c50d5649f89d2d9648",
+   "branch": "mega_moe_a4w4",
+   "event": "pull_request",
+   "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582596158",
+   "created_at": "2026-08-12T09:22:22Z",
+   "updated_at": "2026-08-12T09:24:23Z",
+   "actor": "Yaowu-Xiong",
+   "jobs": []
+  },
+  {
+   "run_id": 31582023351,
+   "pr": null,
+   "commit": "3c8ecc78d381d90a0c6c0a8810c77c83a1313b36",
+   "branch": "jli/gfx1250/fix-mma-atom",
+   "event": "pull_request",
+   "title": "[WIP][GFX1250] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582023351",
    "created_at": "2026-08-12T09:14:36Z",
-   "updated_at": "2026-08-12T09:15:34Z",
+   "updated_at": "2026-08-12T09:23:27Z",
    "actor": "jli-melchior",
    "jobs": []
   },
@@ -1523,64 +1553,6 @@
      "started_at": "2026-08-10T13:21:01Z",
      "completed_at": "2026-08-10T16:58:05Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31381295073/job/93449063601"
-    }
-   ]
-  },
-  {
-   "run_id": 31380412216,
-   "pr": null,
-   "commit": "86392797a56936d91ef0fbb1dc8686ff937103a4",
-   "branch": "xyt/gemm16_950",
-   "event": "pull_request",
-   "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31380412216",
-   "created_at": "2026-08-10T10:44:05Z",
-   "updated_at": "2026-08-10T11:03:21Z",
-   "actor": "xytpai",
-   "jobs": []
-  },
-  {
-   "run_id": 31379038974,
-   "pr": 971,
-   "commit": "84f4194e8d2aa1a9e6dd84fe0db0538959c144e2",
-   "branch": "gfx1250/gemm-opt-0805",
-   "event": "pull_request",
-   "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31379038974",
-   "created_at": "2026-08-10T10:25:10Z",
-   "updated_at": "2026-08-10T13:25:23Z",
-   "actor": "aoli26",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-10T11:51:10Z",
-     "completed_at": "2026-08-10T13:25:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31379038974/job/93443993730"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-10T12:59:31Z",
-     "completed_at": "2026-08-10T13:25:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31379038974/job/93443993733"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-10T11:50:57Z",
-     "completed_at": "2026-08-10T13:25:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31379038974/job/93443993766"
     }
    ]
   }
