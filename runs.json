@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-12T18:37:39Z",
+ "updated": "2026-08-12T19:30:18Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31632717873,
+   "pr": 960,
+   "commit": "af2cf88df61205d43bd923ff39892ca5cec7bf5b",
+   "branch": "new_bias_alibi_sink_attention",
+   "event": "pull_request",
+   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31632717873",
+   "created_at": "2026-08-12T19:27:13Z",
+   "updated_at": "2026-08-12T19:28:42Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
   {
    "run_id": 31618801908,
    "pr": 1005,
@@ -48,34 +63,34 @@
   },
   {
    "run_id": 31616254440,
-   "pr": 960,
+   "pr": null,
    "commit": "445137f5a1d0fdcd7873411f6f3fdd42545a15a1",
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31616254440",
    "created_at": "2026-08-12T16:10:31Z",
-   "updated_at": "2026-08-12T17:42:38Z",
+   "updated_at": "2026-08-12T19:27:42Z",
    "actor": "amd-nprotaso",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-12T17:42:37Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-08-12T19:01:47Z",
+     "completed_at": "2026-08-12T19:27:29Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31616254440/job/94205549051"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-12T17:43:48Z",
-     "completed_at": null,
+     "completed_at": "2026-08-12T19:27:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31616254440/job/94205549069"
     },
     {
@@ -1641,21 +1656,6 @@
    "created_at": "2026-08-10T22:48:56Z",
    "updated_at": "2026-08-10T23:28:00Z",
    "actor": "Phil-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 31428842146,
-   "pr": 991,
-   "commit": "110ab76fc66ac4b3875f1d151ddcefecc1d63c6a",
-   "branch": "fix/rmsnorm",
-   "event": "pull_request",
-   "title": "[fix] Resolve normalization-related CI regressions",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31428842146",
-   "created_at": "2026-08-10T20:24:09Z",
-   "updated_at": "2026-08-11T03:17:46Z",
-   "actor": "cschenjunlin",
    "jobs": []
   }
  ]
