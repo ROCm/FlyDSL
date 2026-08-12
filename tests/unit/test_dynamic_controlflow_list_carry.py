@@ -74,6 +74,46 @@ def test_if_carries_list():
         assert "-> (i32, i32)" in text
 
 
+def test_if_inplace_list_updates_do_not_contaminate_branches():
+    with Context(), Location.unknown():
+        module = Module.create()
+        i1 = IntegerType.get_signless(1)
+        with InsertionPoint(module.body):
+            f = func.FuncOp("if_inplace_list", FunctionType.get([i1], []))
+            entry = f.add_entry_block()
+            with InsertionPoint(entry):
+                cond = entry.arguments[0]
+                original_first = _i32(1)
+                lst = [original_first, _i32(2)]
+                branch_inputs = []
+
+                def then_branch(names, branch_lst):
+                    branch_inputs.append(branch_lst)
+                    branch_lst[0] = _i32(10)
+                    return {"lst": branch_lst}
+
+                def else_branch(names, branch_lst):
+                    branch_inputs.append(branch_lst)
+                    assert branch_lst[0].ir_value().owner == original_first.ir_value().owner
+                    return {"lst": branch_lst}
+
+                out = ReplaceIfWithDispatch.scf_if_dispatch(
+                    cond,
+                    then_branch,
+                    else_branch,
+                    result_names=("lst",),
+                    result_values=(lst,),
+                )
+                assert lst[0] is original_first
+                assert branch_inputs[0] is not lst
+                assert branch_inputs[1] is not lst
+                assert branch_inputs[0] is not branch_inputs[1]
+                assert isinstance(out, list) and len(out) == 2
+                func.ReturnOp([])
+
+        assert module.operation.verify()
+
+
 def test_if_carries_nested_list():
     with Context(), Location.unknown():
         module = Module.create()
