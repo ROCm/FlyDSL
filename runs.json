@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-08-12T16:30:08Z",
+ "updated": "2026-08-12T16:47:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31618801908,
+   "pr": 1005,
+   "commit": "9c134fc77ca888f365e10b618bd0e0b8b3971d7e",
+   "branch": "docs-fix",
+   "event": "pull_request",
+   "title": "docs: add rocm-docs-core package to requirements",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31618801908",
+   "created_at": "2026-08-12T16:40:57Z",
+   "updated_at": "2026-08-12T16:45:28Z",
+   "actor": "nhaehnle",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-12T16:44:15Z",
+     "completed_at": "2026-08-12T16:44:18Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31618801908/job/94189027130"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-12T16:44:14Z",
+     "completed_at": "2026-08-12T16:44:18Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31618801908/job/94189027156"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-12T16:45:24Z",
+     "completed_at": "2026-08-12T16:45:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31618801908/job/94189027165"
+    }
+   ]
+  },
   {
    "run_id": 31616254440,
    "pr": 960,
@@ -1584,21 +1627,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31428842146",
    "created_at": "2026-08-10T20:24:09Z",
    "updated_at": "2026-08-11T03:17:46Z",
-   "actor": "cschenjunlin",
-   "jobs": []
-  },
-  {
-   "run_id": 31428621165,
-   "pr": 991,
-   "commit": "7bdca39964b2294c481677524408b5f38cd3d145",
-   "branch": "fix/rmsnorm",
-   "event": "pull_request",
-   "title": "[fix] Resolve normalization-related CI regressions",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31428621165",
-   "created_at": "2026-08-10T20:21:28Z",
-   "updated_at": "2026-08-10T20:24:11Z",
    "actor": "cschenjunlin",
    "jobs": []
   }
