@@ -15,7 +15,7 @@ using namespace mlir::fly_rocdl;
 LogicalResult GetBufferRsrcOp::inferReturnTypes(MLIRContext *context,
                                                 std::optional<Location> location,
                                                 ValueRange operands, DictionaryAttr attributes,
-                                                OpaqueProperties properties, RegionRange regions,
+                                                PropertyRef properties, RegionRange regions,
                                                 SmallVectorImpl<Type> &inferredReturnTypes) {
   auto ptrTy = dyn_cast<PointerType>(operands[0].getType());
   if (!ptrTy)

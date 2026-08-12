@@ -1,10 +1,8 @@
-# Kernel Authoring Guide
+# Kernel authoring guide
 
-> Writing GPU kernels with FlyDSL: `@flyc.jit`, `@flyc.kernel`, expression API, launch configuration, shared memory, and synchronization.
+This guide covers writing GPU kernels with FlyDSL: the `@flyc.jit` and `@flyc.kernel` decorators, expression API, launch configuration, shared memory, and synchronization. It documents the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`).
 
-> **API**: This guide documents the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`).
-
-## Quick Reference
+## Quick reference
 
 | Concept | API | Description |
 |---|---|---|
@@ -24,7 +22,7 @@
 
 ---
 
-## 1. Basic Kernel Pattern
+## 1. Basic kernel pattern
 
 ### 1.1 `@flyc.kernel` + `@flyc.jit`
 
@@ -68,7 +66,7 @@ C = torch.empty(1024, device="cuda", dtype=torch.float32)
 vec_add(A, B, C, 1024)
 ```
 
-### 1.2 How It Works
+### 1.2 How it works
 
 1. `@flyc.kernel` wraps the function as a `KernelFunction`
 2. `@flyc.jit` wraps the function as a `JitFunction`
@@ -76,15 +74,15 @@ vec_add(A, B, C, 1024)
    - AST rewriting (Python loops/ifs → MLIR scf ops)
    - MLIR module creation with `gpu.container_module`
    - Tracing the jit function body to generate MLIR ops
-   - Calling `vec_add_kernel(...)` emits a `gpu.func` in `gpu.module`
-   - `.launch()` emits `gpu.launch_func`
+   - Calling `vec_add_kernel(...)` captures a pending kernel call
+   - `.launch()` emits the specialized `gpu.func` and `gpu.launch_func`
    - `MlirCompiler.compile()` runs the full pass pipeline
    - `JITCFunction` wraps the resulting ExecutionEngine
 4. Subsequent calls with the same type signature use the cached binary
 
 ---
 
-## 2. Parameter Types
+## 2. Parameter types
 
 ### 2.1 `fx.Tensor`
 
@@ -97,11 +95,11 @@ def my_kernel(input: fx.Tensor, output: fx.Tensor):
     ...
 ```
 
-At the host boundary, `torch.Tensor` is automatically converted via `TensorAdaptor`.
+At the host boundary, `torch.Tensor` is converted via `TensorAdaptor`.
 
 ### 2.2 `fx.Constexpr[T]`
 
-Compile-time constant. Value is embedded directly in the generated IR:
+Compile-time constant. The value is embedded directly in the generated IR:
 
 ```python
 @flyc.kernel
@@ -122,7 +120,7 @@ def launch(data: fx.Tensor, size: fx.Int32, stream: fx.Stream = fx.Stream(None))
     ...
 ```
 
-Python `int` values are automatically converted to `Int32` via the `JitArgumentRegistry`.
+Python `int` values are converted to `Int32` via the `JitArgumentRegistry`.
 
 ### 2.4 `fx.Stream`
 
@@ -138,7 +136,7 @@ stream = torch.cuda.Stream()
 launch(data, stream=fx.Stream(stream))
 ```
 
-### 2.5 Custom Argument Types
+### 2.5 Custom argument types
 
 Register new Python types for the JIT boundary:
 
@@ -159,7 +157,7 @@ class MyCustomAdaptor:
 
 ---
 
-## 3. Thread / Block Hierarchy
+## 3. Thread / block hierarchy
 
 ```python
 from flydsl.expr import gpu
@@ -188,7 +186,7 @@ raw_bid = gpu.block_id("x")
 
 ## 4. Expression API (`flydsl.expr`)
 
-### 4.1 Arithmetic and Numeric Types
+### 4.1 Arithmetic and numeric types
 
 ```python
 import flydsl.expr as fx
@@ -219,7 +217,7 @@ result = a << 4
 
 Use direct `arith.*FOp(..., fastmath=...)` only where explicit fastmath flags are performance-critical.
 
-### 4.2 Vector Values (`Vector`)
+### 4.2 Vector values (`Vector`)
 
 ```python
 from flydsl.expr.typing import Vector as Vec
@@ -236,9 +234,9 @@ as_i32 = vec.bitcast(fx.Int32)
 as_bf16 = vec.to(fx.BFloat16)
 ```
 
-### 4.3 ROCm Intrinsics (`fx.rocdl`)
+### 4.3 ROCm intrinsics (`fx.rocdl`)
 
-#### High-Level Helpers
+#### High-level helpers
 
 ```python
 from flydsl.expr import rocdl
@@ -255,10 +253,10 @@ copy_op = rocdl.BufferCopy64b()    # 64-bit buffer copy
 copy_op = rocdl.BufferCopy32b()    # 32-bit buffer copy
 ```
 
-See [gfx1250 WMMA & TDM atoms](#gfx1250-wmma--tdm-atoms-wave32) below for the
+See [gfx1250 WMMA & TDM atoms](#gfx1250-wmma-tdm-atoms-wave32) below for the
 gfx1250 WMMA (incl. MX-scaled) MMA atoms and the TDM async copy atom.
 
-#### MFMA Instructions
+#### MFMA instructions
 
 Signature: `(result_type, [a, b, c, cbsz, abid, blgp])` — trailing ints default to 0.
 
@@ -274,7 +272,7 @@ result = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
 )
 ```
 
-#### Instruction Scheduling Barriers
+#### Instruction scheduling barriers
 
 Control instruction scheduling for performance tuning:
 
@@ -285,7 +283,7 @@ rocdl.sched_dsrd(cnt)    # wait for cnt DS (LDS) reads to complete
 rocdl.sched_dswr(cnt)    # wait for cnt DS (LDS) writes to complete
 ```
 
-#### Math Intrinsics
+#### Math intrinsics
 
 Single-instruction hardware math (guaranteed 1 VALU cycle, lower precision than `math.*`):
 
@@ -297,7 +295,7 @@ result = rocdl.exp2(T.f32, x)
 result = rocdl.rcp(T.f32, x)
 ```
 
-#### Low-Level Ops
+#### Low-level ops
 
 ```python
 # Warp shuffle
@@ -379,13 +377,13 @@ rocdl.tdm_ops.tensor_wait(0)                          # await the async DMA (s_w
 fx.copy(atom, g2d, lds2d, imm_offset=k_tile * k_stride_bytes)
 ```
 
-`rocdl.TDM(rank, num_warps, ...)` (in `rocdl.cdna5`) builds just the atom *type*
+`rocdl.TDM(rank, num_warps, ...)` (in `rocdl.cdna5`) builds the atom *type* alone
 when you want to set the descriptor state manually. Pass `tensor_extents` smaller
 than the tile for ragged edges (HW OOB clamp) and `strides=` for a dynamic/true
 global stride that differs from the packed tile stride. Unlike the CDNA buffer copy,
 TDM needs a **raw VA** — do not wrap the global tensor in `make_buffer_tensor`.
 
-### 4.4 GPU Operations (`fx.gpu`)
+### 4.4 GPU operations (`fx.gpu`)
 
 ```python
 from flydsl.expr import gpu
@@ -400,11 +398,11 @@ addrspace_int = gpu.smem_space(int=True)
 
 ---
 
-## 5. Control Flow
+## 5. Control flow
 
-### 5.1 Python Loops
+### 5.1 Python loops
 
-The `ASTRewriter` automatically transforms Python `for` loops:
+The `ASTRewriter` transforms Python `for` loops:
 
 ```python
 @flyc.kernel
@@ -435,7 +433,7 @@ def my_kernel(data: fx.Tensor, N: fx.Constexpr[int]):
 
 ---
 
-## 6. Shared Memory (LDS)
+## 6. Shared memory (LDS)
 
 ### 6.1 `fx.SharedAllocator` + `@fx.struct`
 
@@ -479,7 +477,7 @@ tracks byte offsets manually (`_align` / `finalize` / `get_base`) and its
 `finalize()` must be called inside the `gpu.module` body. Prefer
 `fx.SharedAllocator` for new kernels.
 
-### 6.3 LDS Capacity
+### 6.3 LDS capacity
 
 | Architecture | LDS per CU |
 |---|---|
@@ -490,7 +488,7 @@ tracks byte offsets manually (`_align` / `finalize` / `get_base`) and its
 
 ---
 
-## 7. Launch Configuration
+## 7. Launch configuration
 
 ### 7.1 `KernelLauncher.launch()`
 
@@ -510,7 +508,7 @@ Grid and block dimensions accept:
 - `ir.Value` — dynamic MLIR value
 - Tuple of 1–3 values — missing dimensions default to 1
 
-### 7.2 Dynamic Grid/Block Dimensions
+### 7.2 Dynamic grid/block dimensions
 
 ```python
 @flyc.jit
@@ -536,9 +534,9 @@ gpu.barrier()
 
 ---
 
-## 9. Compilation & Caching
+## 9. Compilation and caching
 
-### 9.1 Automatic Caching
+### 9.1 Automatic caching
 
 JIT-compiled functions are cached automatically:
 
@@ -546,15 +544,15 @@ JIT-compiled functions are cached automatically:
 - **Disk cache** — stored in `~/.flydsl/cache/` (configurable via `FLYDSL_RUNTIME_CACHE_DIR`)
 - **Cache key** includes: source code hash, dependency sources, closure values, FlyDSL version, LLVM version
 
-### 9.2 Cache Invalidation
+### 9.2 Cache invalidation
 
-Cache is invalidated when:
+The cache is invalidated when:
 - Source code of the function or its dependencies changes
 - Argument types change (different tensor shapes/dtypes)
 - `Constexpr` values change
 - FlyDSL or LLVM version changes
 
-### 9.3 Disk Cache Invalidation
+### 9.3 Disk cache invalidation
 
 The JIT disk cache auto-invalidates when kernel source code or closure values change. Set `FLYDSL_RUNTIME_ENABLE_CACHE=0` only when modifying C++ passes or non-closure helper functions:
 
@@ -562,7 +560,7 @@ The JIT disk cache auto-invalidates when kernel source code or closure values ch
 FLYDSL_RUNTIME_ENABLE_CACHE=0 python my_script.py  # or: rm -rf ~/.flydsl/cache
 ```
 
-### 9.4 Compile-Only Mode
+### 9.4 Compile-only mode
 
 ```bash
 COMPILE_ONLY=1 python my_script.py
@@ -589,7 +587,7 @@ compiled_func.print_ir()              # compiled MLIR IR
 compiled_func.print_ir(compiled=False) # original IR before passes
 ```
 
-### 10.3 AST Diff
+### 10.3 AST diff
 
 ```bash
 FLYDSL_DEBUG_AST_DIFF=1 python my_script.py
@@ -599,7 +597,7 @@ Shows the diff between original and rewritten AST for debugging control flow tra
 
 ---
 
-## 11. Complete Example: Preshuffle GEMM
+## 11. Complete example: Preshuffle GEMM
 
 From `kernels/gemm/preshuffle_gemm.py`:
 
@@ -655,12 +653,12 @@ def compile_preshuffle_gemm(*, N, K, tile_m, tile_n, tile_k,
 ```
 
 `M` is a runtime argument (`i32_m` / `M_val`), not a compile-time parameter, so
-one compiled kernel serves any `M`. Output post-processing is selected with
+one compiled kernel serves any `M`. Select output post-processing with
 `epilogue=` (`"none"`, `"bias"`, `"bias_relu"`, `"bias_silu"`, `"bias_gelu"`).
 
 ---
 
-## 12. Decision Tree
+## 12. Decision tree
 
 ```
 Writing a new kernel?
@@ -691,7 +689,7 @@ Writing a new kernel?
 
 ---
 
-## 13. Source Files
+## 13. Source files
 
 | File | Description |
 |---|---|
