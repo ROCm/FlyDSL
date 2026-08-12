@@ -310,18 +310,11 @@ def build_flash_attn_dualwave_swp_module(
 
                 return Vec(_sink_frag.load(), (1,), fx.Float32)[0] * fx.Float32(BIAS_LOG2E)
 
-        # vmcnt budget for a bias fragment read: every qk_scored consumes the bias tile
-        # DMA'd by the previous one, and that call issues its own DMA only after its
-        # reads, so the only VMEM still in flight ahead of the read is the K and V
-        # prefetch of the two memory clusters in between. Epilogue C9 is the one site
-        # with no K prefetch between.
         _BIAS_VMCNT = ctx.NUM_DMA_K + ctx.NUM_DMA_V
         _BIAS_VMCNT_NO_K = ctx.NUM_DMA_V
 
         def _issue_bias_dma(tile_idx, buf):
             """Coalesced global->LDS DMA of this wave's bias tile into buffer `buf`."""
-            # Same value as ctx.q_start_pos_i32 (set later, by q_loader.load_all()), but
-            # built from the uniform wave_id_uni so the row base stays wave-uniform.
             row_base = ctx.q_start + ctx.wave_id_uni * traits.ROWS_PER_WAVE
             if const_expr(VARLEN):
                 row_base = row_base + ctx.q_tok_base
@@ -360,10 +353,6 @@ def build_flash_attn_dualwave_swp_module(
                     out[r] = fmath.absf(d) * _alibi_neg_slope + out[r]
 
             if const_expr(HAS_BIAS):
-                # Issue the fragment reads of a batch back to back so the backend can
-                # cover them with one counted lgkmcnt instead of draining after each
-                # ds_read. The batch is deliberately small: every extra fragment in
-                # flight is another live VGPR pair, and this kernel is at the wall.
                 for gb in range_constexpr(0, _BIAS_GROUPS, _BIAS_READ_BATCH):
                     raw = [_read_bias_frag(h, gb + k, buf) for k in range_constexpr(_BIAS_READ_BATCH)]
                     for k in range_constexpr(_BIAS_READ_BATCH):
@@ -381,10 +370,6 @@ def build_flash_attn_dualwave_swp_module(
                 return gemm_helper.qk(v_k, q_all_scaled_bf16)
             v_s_lo, v_s_hi = gemm_helper.qk(v_k, q_all_scaled_bf16)
             if const_expr(HAS_BIAS):
-                # The bias tile read below was DMA'd one qk_scored call ago; everything
-                # issued since is the in-flight K/V prefetch. Retire exactly that batch
-                # instead of letting the backend fall back to vmcnt(0), which would also
-                # drain the prefetch pipeline.
                 _waitcnt_vm_n(bias_vmcnt)
             scored = (
                 _score_bias_half(v_s_lo, tile_idx, 0, buf),

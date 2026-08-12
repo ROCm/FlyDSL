@@ -673,13 +673,6 @@ def _num_bias_dma(traits):
 
 
 def _bias_dma_m0_base(traits, buf, d, wave_id_uni, lds_bias_base_idx):
-    """Wave-uniform M0 base for DMA batch `d` of this wave's bias tile.
-
-    Already scalar by construction: the LDS base is a compile-time global address and
-    `wave_id_uni` is `readfirstlane`-derived, so every term is uniform. A `readfirstlane`
-    here would be a round trip -- the intrinsic takes a VGPR operand, so the backend has
-    to copy SGPR->VGPR and back, and the copy stays live across the whole KV-tile loop.
-    """
     lds_addr = (
         lds_bias_base_idx
         + buf * _bias_buf_bytes(traits)
@@ -690,18 +683,6 @@ def _bias_dma_m0_base(traits, buf, d, wave_id_uni, lds_bias_base_idx):
 
 
 def _bias_dma_src_elem(traits, row_base, tile_col_base, d, lane_in_warp, bias_stride0_v):
-    """Per-lane global element index for DMA batch `d`; 8 lanes cover one 64-col row.
-
-    Kept in i32 end to end: the consumer (`_buffer_load_lds_128`) feeds this to a buffer
-    `voffset`, which is 32-bit, so a wider intermediate is truncated anyway. Bias tensors
-    above the i32 element range are rejected on the host side.
-
-    The address also splits into a wave-uniform part (row base, batch offset, tile column)
-    pinned to an SGPR by `readfirstlane`, plus a per-lane part that is the same for every
-    `d`. The four DMA batches therefore share one VGPR instead of four full addresses.
-    `row_base` may be built from non-uniform-looking pieces (VARLEN's `q_tok_base`); the
-    `readfirstlane` is what makes the uniformity visible to the register allocator.
-    """
     lanes_per_row = _bias_lanes_per_row(traits)
     stride = fx.Int32(bias_stride0_v)
     lane_i32 = fx.Int32(lane_in_warp)
@@ -713,7 +694,6 @@ def _bias_dma_src_elem(traits, row_base, tile_col_base, d, lane_in_warp, bias_st
 
 
 def _bias_lds_lane_base(traits, buf, wave_id, lane_mod_32, lane_div_32, vec_elems):
-    """Per-lane byte base of this wave's bias tile in LDS buffer `buf` (granule 0)."""
     return (
         buf * _bias_buf_bytes(traits)
         + wave_id * _bias_wave_bytes(traits)
@@ -727,11 +707,6 @@ def _make_bias_lds_ptr(lds_bias_base_idx):
 
 
 def _load_bias_frag_lds(lds_bias_base_ptr, byte_offset, frag_type, align):
-    # The alias scope is what stops SIInsertWaitcnts from treating this as a read of
-    # "some LDS-DMA destination" and forcing a full vmcnt(0) drain before it; the bias
-    # tile is instead guarded by the explicit counted wait the caller emits. Only the
-    # scope's presence matters here -- the LDS-DMA stores carry no AAInfo, so a finer
-    # per-double-buffer scope would not give the backend anything more to prove.
     ptr = buffer_ops.get_element_ptr(lds_bias_base_ptr, byte_offset=byte_offset, elem_type=T.i8)
     return llvm.LoadOp(
         frag_type,
