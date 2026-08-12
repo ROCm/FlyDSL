@@ -311,7 +311,9 @@ def build_flash_attn_dualwave_swp_module(
 
         def _issue_bias_dma(tile_idx, buf):
             """Coalesced global->LDS DMA of this wave's bias tile into buffer `buf`."""
-            row_base = ctx.q_start + ctx.wave_q_offset
+            # Same value as ctx.q_start_pos_i32 (set later, by q_loader.load_all()), but
+            # built from the uniform wave_id_uni so the row base stays wave-uniform.
+            row_base = ctx.q_start + ctx.wave_id_uni * traits.ROWS_PER_WAVE
             if const_expr(VARLEN):
                 row_base = row_base + ctx.q_tok_base
             tile_col_base = tile_idx * fx.Index(traits.BLOCK_N)
@@ -325,7 +327,7 @@ def build_flash_attn_dualwave_swp_module(
                         tile_col_base,
                         d,
                         lane_in_warp=ctx.lane_in_warp,
-                        bias_stride0_v=fx.Index(bias_stride0),
+                        bias_stride0_v=bias_stride0,
                     ),
                     0,
                     _dma_atom=ctx.dma_atom,
