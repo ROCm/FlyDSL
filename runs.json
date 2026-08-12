@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-12T17:01:12Z",
+ "updated": "2026-08-12T18:30:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -53,13 +53,41 @@
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31616254440",
    "created_at": "2026-08-12T16:10:31Z",
-   "updated_at": "2026-08-12T16:14:54Z",
+   "updated_at": "2026-08-12T17:42:38Z",
    "actor": "amd-nprotaso",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-12T17:42:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31616254440/job/94205549051"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-12T17:43:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31616254440/job/94205549069"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-12T17:43:32Z",
+     "completed_at": "2026-08-12T17:57:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31616254440/job/94205549072"
+    }
+   ]
   },
   {
    "run_id": 31614890110,
@@ -68,11 +96,11 @@
    "branch": "pr/docs-composite-storage",
    "event": "pull_request",
    "title": "[Docs] Elaboration for composite type and storage",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31614890110",
    "created_at": "2026-08-12T15:55:03Z",
-   "updated_at": "2026-08-12T15:57:59Z",
+   "updated_at": "2026-08-12T18:28:30Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -214,30 +242,30 @@
    "branch": "xyt/citest",
    "event": "pull_request",
    "title": "Use stable torch reference API for a16w16 GFX950 GEMM testing",
-   "status": "completed",
-   "conclusion": "cancelled",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31599284701",
    "created_at": "2026-08-12T13:01:06Z",
-   "updated_at": "2026-08-12T16:58:12Z",
+   "updated_at": "2026-08-12T17:04:25Z",
    "actor": "xytpai",
    "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-12T14:51:08Z",
-     "completed_at": "2026-08-12T15:05:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31599284701/job/94160106786"
-    },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
      "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-12T14:50:57Z",
-     "completed_at": "2026-08-12T15:05:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31599284701/job/94160106990"
+     "conclusion": "success",
+     "started_at": "2026-08-12T17:03:41Z",
+     "completed_at": "2026-08-12T17:19:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31599284701/job/94194365275"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-12T17:04:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31599284701/job/94194365360"
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -246,7 +274,7 @@
      "conclusion": "success",
      "started_at": "2026-08-12T15:06:36Z",
      "completed_at": "2026-08-12T16:58:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31599284701/job/94160107023"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31599284701/job/94194366077"
     }
    ]
   },
