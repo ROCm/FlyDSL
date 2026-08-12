@@ -399,6 +399,12 @@ def apply_mega_moe_quant_config(config: MegaMoEConfig, tokens: int, a_dtype: str
         if tokens == 2:
             stage1_overrides["grid_mult"] = 2
     else:
+        if tokens == 2:
+            stage1_overrides["grid_mult"] = 2
+        elif tokens == 4:
+            stage1_overrides["grid_mult"] = 4
+        elif tokens == 16:
+            stage1_overrides["grid_mult"] = 3
         if bucket <= 128 and config.stage1.async_a_copy:
             # FP4 halves the A K-step bytes. The 8-wave compact kernel therefore
             # needs SBM64 so every thread owns one or more 16-byte async copies.

@@ -914,16 +914,18 @@ _MEGA_PERF_BASELINE = {
     "v4_pro:a8w4:2048": 1.6634,
     "v4_pro:a8w4:4096": 3.1158,
     "v4_pro:a8w4:8192": 6.0063,
-    "v4_pro:a4w4:512": 0.5350,
-    "v4_pro:a4w4:1024": 0.7050,
-    "v4_pro:a4w4:8:mtpr8192": 0.4317,
-    "v4_pro:a4w4:32:mtpr8192": 0.5476,
-    "v4_pro:a4w4:64:mtpr8192": 0.5437,
-    "v4_pro:a4w4:128:mtpr8192": 0.4759,
-    "v4_pro:a4w4:256:mtpr8192": 0.4209,
-    "v4_pro:a4w4:1024:mtpr8192": 0.7031,
-    "v4_pro:a4w4:4096:mtpr8192": 1.8450,
-    "v4_pro:a4w4:8192:mtpr8192": 3.4728,
+    "v4_pro:a4w4:2": 0.1484,
+    "v4_pro:a4w4:4": 0.2057,
+    "v4_pro:a4w4:8": 0.2433,
+    "v4_pro:a4w4:16": 0.2975,
+    "v4_pro:a4w4:32": 0.3145,
+    "v4_pro:a4w4:64": 0.3261,
+    "v4_pro:a4w4:128": 0.3401,
+    "v4_pro:a4w4:256": 0.4400,
+    "v4_pro:a4w4:512": 0.5551,
+    "v4_pro:a4w4:1024": 0.7363,
+    "v4_pro:a4w4:4096": 1.9211,
+    "v4_pro:a4w4:8192": 3.5759,
 }
 
 
@@ -1299,10 +1301,12 @@ def _run_mega_only(
     _s2_ms_max = max(0.0, stage2_max_ms)
     _active_sbm = int(getattr(moe, "_s1_active_tile_m", -1))
     _active_g2_bm = int(moe._g2_active_block_m) if not stage1_only else -1
+    _active_grid_mult = int(moe._active_config.stage1.grid_mult)
     if rank == 0:
         _acc_s = f"{_acc_label}={_relL2_max:.3e} (floor~{_acc_floor})" if check_acc else "acc:skip"
         _perf_s = (
             f"SBM={_active_sbm} G2_BM={_active_g2_bm} "
+            f"GRID={_active_grid_mult} "
             f"stage1={stage1_ms:.4f}/{_s1_ms_max:.4f}ms "
             f"stage2={stage2_ms:.4f}/{_s2_ms_max:.4f}ms "
             f"prequant_e2e={prequant_ms:.4f}/{_prequant_ms_max:.4f}ms "
@@ -1324,6 +1328,7 @@ def _run_mega_only(
         mega_only_relL2=relL2,
         mega_sorted_block_m=_active_sbm,
         mega_gemm2_block_m=_active_g2_bm,
+        mega_stage1_grid_mult=_active_grid_mult,
         mega_stage1_ms=stage1_ms,
         mega_stage1_max_ms=stage1_max_ms,
         mega_stage2_ms=stage2_ms,
@@ -1758,13 +1763,13 @@ def _run_mega_8gpu(
 # (network, quant, bs_list) v4_pro accuracy shapes covered by committed tuning artifacts.
 _MEGA_ACC_PARAMS = [
     ("v4_pro", "a8w4", "2048,8192"),
-    ("v4_pro", "a4w4", "128,512,2048"),
+    ("v4_pro", "a4w4", "2,4,16,128,512,2048"),
 ]
 
 # (network, quant, bs_list) perf-relevant batch sizes for the benchmark (golden) gate.
 _MEGA_BENCH_PARAMS = [
     ("v4_pro", "a8w4", "4096,8192"),
-    ("v4_pro", "a4w4", "512,1024"),
+    ("v4_pro", "a4w4", "2,4,8,16,32,64,128,256,512,1024,4096,8192"),
 ]
 
 
@@ -1803,22 +1808,6 @@ def test_mega_moe_8gpu_a4w4_fixed_mtpr_accuracy():
         bs_list=_MEGA_A4_FIXED_MTPR_BS,
         mtpr=_MEGA_A4_FIXED_MTPR,
         iters=5,
-    )
-
-
-@pytest.mark.multi_gpu
-@pytest.mark.benchmark
-def test_mega_moe_8gpu_a4w4_fixed_mtpr_benchmark():
-    """Measure production-style dynamic batches using one maximum-capacity configuration."""
-    _skip_unless_mega_8gpu()
-    _run_mega_8gpu(
-        network="v4_pro",
-        quant="a4w4",
-        bs_list=_MEGA_A4_FIXED_MTPR_BS,
-        mtpr=_MEGA_A4_FIXED_MTPR,
-        iters=20,
-        measure_perf=True,
-        skip_acc=True,
     )
 
 

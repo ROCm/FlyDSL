@@ -139,15 +139,28 @@ def test_v4_pro_bs2048_rule_is_transport_and_dtype_invariant(a_dtype, p2p_quant)
     ) == (64, 256, 240, True, 0)
 
 
+@pytest.mark.parametrize("a_dtype", ["fp4", "fp8"])
 @pytest.mark.parametrize("p2p_quant", ["none", "fp8_blockwise_1x32"])
-def test_a8_bs2_uses_two_grid_epochs(p2p_quant):
+def test_bs2_uses_two_grid_epochs_for_both_activation_dtypes(a_dtype, p2p_quant):
     config = apply_mega_moe_quant_config(
-        select_mega_moe_config(2, 16, p2p_quant, a_dtype="fp8"),
+        select_mega_moe_config(2, 16, p2p_quant, a_dtype=a_dtype),
         2,
-        "fp8",
+        a_dtype,
     )
 
     assert config.stage1.grid_mult == 2
+
+
+@pytest.mark.parametrize("tokens,grid_mult", [(4, 4), (16, 3)])
+@pytest.mark.parametrize("p2p_quant", ["none", "fp8_blockwise_1x32"])
+def test_a4_small_decode_grid_overrides_are_transport_invariant(tokens, grid_mult, p2p_quant):
+    config = apply_mega_moe_quant_config(
+        select_mega_moe_config(tokens, 16, p2p_quant, a_dtype="fp4"),
+        tokens,
+        "fp4",
+    )
+
+    assert config.stage1.grid_mult == grid_mult
 
 
 @pytest.mark.parametrize("p2p_quant", ["none", "fp8_blockwise_1x32"])
