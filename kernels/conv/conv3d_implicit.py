@@ -78,8 +78,9 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
     elem_ty = fx.BFloat16
     BIG = (n * c * s) > 0x7FFFFFFF
 
-    # 1-D element view so the flat gather/scatter offsets below index elements.
-    # max_size: an exact num_records would zero the whole straddling tail read.
+    # 1-D element view so the flat gather/scatter offsets index elements. Both
+    # descriptors stay max_size: an exact num_records would zero the whole
+    # straddling tail read.
     _TR_FLAT = n * c * s
     _TR_REBASED_FLAT = 0xFFFFFFFF // BF16_BYTES
 

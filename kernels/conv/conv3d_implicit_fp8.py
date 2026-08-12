@@ -136,7 +136,6 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
             in_base_addr = fx.Int64(fx.ptrtoint(fx.get_iter(inp)))
             out_base_addr = fx.Int64(fx.ptrtoint(fx.get_iter(out)))
         else:
-            # u8 elements, so the copy-atom element offsets below are byte offsets.
             in_div = fx.logical_divide(
                 fx.rocdl.make_buffer_tensor(inp, max_size=False, num_records_bytes=total_bytes),
                 fx.make_layout(1, 1),
@@ -182,7 +181,7 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
                 ptr = _global_ptr_from_addr(addr, u8.ir_type, inp).llvm_ptr
                 v = llvm.LoadOp(fx.Vector.make_type(4, fx.Int32), ptr, alignment=16).result
             else:
-                # u8 tensor: the copy-atom offset is the byte offset directly.
+                # u8 elements, so the copy-atom offset is the byte offset directly.
                 g = fx.Int32(in_base + cc * s + ss)
                 safe = arith.select(valid, g, fx.Int32(0))
                 fx.copy(tr_atom, fx.slice(in_div, (None, safe)), tr_reg)
