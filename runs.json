@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-12T15:57:07Z",
+ "updated": "2026-08-12T16:13:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31616254440,
+   "pr": 960,
+   "commit": "445137f5a1d0fdcd7873411f6f3fdd42545a15a1",
+   "branch": "new_bias_alibi_sink_attention",
+   "event": "pull_request",
+   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31616254440",
+   "created_at": "2026-08-12T16:10:31Z",
+   "updated_at": "2026-08-12T16:11:05Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
   {
    "run_id": 31614890110,
    "pr": 1004,
@@ -10,11 +25,11 @@
    "branch": "pr/docs-composite-storage",
    "event": "pull_request",
    "title": "[Docs] Elaboration for composite type and storage",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31614890110",
    "created_at": "2026-08-12T15:55:03Z",
-   "updated_at": "2026-08-12T15:55:04Z",
+   "updated_at": "2026-08-12T15:57:59Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -50,34 +65,34 @@
   },
   {
    "run_id": 31607854197,
-   "pr": 960,
+   "pr": null,
    "commit": "bd4e7bb325ce71a729b47d3071c5efcb78ae019e",
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
    "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31607854197",
    "created_at": "2026-08-12T14:38:02Z",
-   "updated_at": "2026-08-12T15:25:07Z",
+   "updated_at": "2026-08-12T16:11:05Z",
    "actor": "amd-nprotaso",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-12T15:23:53Z",
-     "completed_at": null,
+     "completed_at": "2026-08-12T16:11:04Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31607854197/job/94165149769"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-12T15:23:56Z",
-     "completed_at": null,
+     "completed_at": "2026-08-12T16:11:04Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31607854197/job/94165149883"
     },
     {
@@ -1586,49 +1601,6 @@
    "updated_at": "2026-08-10T20:24:11Z",
    "actor": "cschenjunlin",
    "jobs": []
-  },
-  {
-   "run_id": 31418205930,
-   "pr": null,
-   "commit": "82d2cc06de3d03fa2bd32dbba1d7525d542cf171",
-   "branch": "new_bias_alibi_sink_attention",
-   "event": "pull_request",
-   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31418205930",
-   "created_at": "2026-08-10T18:16:03Z",
-   "updated_at": "2026-08-11T00:51:35Z",
-   "actor": "amd-nprotaso",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-10T20:23:00Z",
-     "completed_at": "2026-08-10T21:21:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31418205930/job/93577584090"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-10T19:50:59Z",
-     "completed_at": "2026-08-11T00:26:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31418205930/job/93577584127"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-10T19:50:23Z",
-     "completed_at": "2026-08-11T00:51:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31418205930/job/93577584150"
-    }
-   ]
   }
  ]
 }
