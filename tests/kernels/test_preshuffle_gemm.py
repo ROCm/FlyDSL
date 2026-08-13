@@ -1026,3 +1026,14 @@ def test_preshuffle_async_copy_2byte_dtypes(in_dtype, tile_k):
         test_graph=False,
         run_aiter_bench=False,
     )
+
+
+@pytest.mark.parametrize("bad", [(1,), (1, 2, 3), (-1, 0), (0, -1), 4])
+def test_preshuffle_preload_validation(bad):
+    """preload is a public knob, so reject malformed values instead of emitting bad hints."""
+    if get_rocm_arch() not in ("gfx942", "gfx950"):
+        pytest.skip(f"v2 preshuffle GEMM requires gfx942/gfx950, got {get_rocm_arch()}")
+    with pytest.raises((ValueError, TypeError)):
+        compile_preshuffle_gemm(
+            N=1024, K=2048, tile_m=128, tile_n=256, tile_k=64, in_dtype="bf16", out_dtype="bf16", preload=bad
+        )

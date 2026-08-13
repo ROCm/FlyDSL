@@ -151,6 +151,11 @@ def compile_preshuffle_gemm(
     gpu_arch = get_rocm_arch()
     is_gfx942 = str(gpu_arch).startswith("gfx942")
     is_gfx950 = str(gpu_arch).startswith("gfx950")
+    if use_async_copy and not is_gfx950:
+        # buffer_load_lds only lowers on gfx950; without this the failure surfaces much
+        # later as an unactionable legalization error.
+        raise ValueError(f"use_async_copy requires gfx950, got {gpu_arch}")
+
     use_mfma_scale_128 = is_fp8 and is_gfx950 and (tile_k % 128 == 0)
     use_mfma_k32 = is_f16_or_bf16 and is_gfx950
 
@@ -193,7 +198,9 @@ def compile_preshuffle_gemm(
     num_ds_load = (tile_m * tile_k * elem_bytes) // 64 // 16  # A LDS reads per wave
     num_gmem_loads = num_a_loads + num_b_loads
     if preload is not None:
-        dsrd_preload, dvmem_preload = preload
+        if len(preload) != 2 or any(not isinstance(v, int) or v < 0 for v in preload):
+            raise ValueError(f"preload must be a pair of non-negative ints, got {preload!r}")
+        dsrd_preload, dvmem_preload = (int(v) for v in preload)
     elif is_8bit and is_gfx950:
         dsrd_preload, dvmem_preload = _get_preload(tile_m, tile_n, tile_k)
     else:
