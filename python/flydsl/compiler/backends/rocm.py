@@ -21,6 +21,12 @@ BINARY_PASS_NAME = "fly-emit-gpu-binary"
 #: packaged build output.  Absent when CMake could not locate a ROCm install.
 BUNDLED_ROCM_PATH = Path(__file__).resolve().parents[2] / "_mlir" / "_rocm"
 
+#: ``True`` when FlyDSL was built with in-process LLD (``FLYDSL_HAS_LLD_LIBRARY``).
+#: CMake writes a ``.has_inprocess_lld`` marker next to the bundled bitcode.
+#: When False, ``toolkit=`` must not point at the bundled directory (which has
+#: no ``llvm/bin/ld.lld``), because upstream would use it for the lld lookup.
+HAS_INPROCESS_LLD = (BUNDLED_ROCM_PATH / ".has_inprocess_lld").is_file()
+
 
 def _has_device_bitcode(root: Path) -> bool:
     return (root / "amdgcn" / "bitcode" / "ocml.bc").is_file()
@@ -35,13 +41,18 @@ def rocm_toolkit_path() -> str:
     tree is preferred over the environment so that a container that installs
     ROCm somewhere unexpected still compiles kernels that call ``__ocml_*``.
 
+    When in-process LLD is **not** available (``HAS_INPROCESS_LLD`` is False),
+    the bundled directory is skipped because it has no ``llvm/bin/ld.lld`` and
+    setting ``toolkit=`` to it would break upstream's linker lookup.
+
     Returns an empty string when nothing is found, which leaves the upstream
     ``ROCM_PATH`` lookup in place rather than forcing a bad path on it.
     """
     candidates: List[Tuple[str, Path]] = []
     if env.compile.rocm_path:
         candidates.append(("FLYDSL_COMPILE_ROCM_PATH", Path(env.compile.rocm_path)))
-    candidates.append(("bundled with flydsl", BUNDLED_ROCM_PATH))
+    if HAS_INPROCESS_LLD:
+        candidates.append(("bundled with flydsl", BUNDLED_ROCM_PATH))
     for var in ("ROCM_PATH", "ROCM_ROOT", "ROCM_HOME"):
         value = os.environ.get(var)
         if value:
