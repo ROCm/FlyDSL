@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-13T04:05:48Z",
+ "updated": "2026-08-13T04:10:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31666000306,
+   "pr": 1001,
+   "commit": "44bfe884307707b1cc74d7acac0910950da0c99c",
+   "branch": "jli/gfx1250/fix-mma-atom",
+   "event": "pull_request",
+   "title": "[WIP][GFX1250] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31666000306",
+   "created_at": "2026-08-13T04:07:13Z",
+   "updated_at": "2026-08-13T04:08:32Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 31665169196,
    "pr": 980,
@@ -10,11 +25,11 @@
    "branch": "feat/rdna3-gemm-tile-autotune",
    "event": "pull_request",
    "title": "[Perf] Choose the RDNA3 GEMM tile from the shape",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31665169196",
    "created_at": "2026-08-13T03:51:15Z",
-   "updated_at": "2026-08-13T03:53:53Z",
+   "updated_at": "2026-08-13T04:04:37Z",
    "actor": "vlluvia",
    "jobs": []
   },
@@ -63,16 +78,16 @@
   },
   {
    "run_id": 31660219863,
-   "pr": 1001,
+   "pr": null,
    "commit": "f4f8267a0a320244024a1a0011d935efd7324ae4",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
    "title": "[WIP][GFX1250] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31660219863",
    "created_at": "2026-08-13T02:14:35Z",
-   "updated_at": "2026-08-13T03:59:50Z",
+   "updated_at": "2026-08-13T04:07:20Z",
    "actor": "jli-melchior",
    "jobs": []
   },
@@ -1706,49 +1721,6 @@
      "started_at": "2026-08-11T08:15:38Z",
      "completed_at": "2026-08-11T08:33:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31458103711/job/93686463066"
-    }
-   ]
-  },
-  {
-   "run_id": 31454950546,
-   "pr": 991,
-   "commit": "e4792e1b6814a81980f0f233a2e2b417f0b554d8",
-   "branch": "fix/rmsnorm",
-   "event": "pull_request",
-   "title": "[fix] Resolve normalization-related CI regressions",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546",
-   "created_at": "2026-08-11T03:17:19Z",
-   "updated_at": "2026-08-12T13:27:00Z",
-   "actor": "cschenjunlin",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-12T12:09:04Z",
-     "completed_at": "2026-08-12T13:26:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546/job/94108391438"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-12T12:08:48Z",
-     "completed_at": "2026-08-12T13:01:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546/job/94108391439"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-12T12:09:02Z",
-     "completed_at": "2026-08-12T13:21:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31454950546/job/94108391461"
     }
    ]
   }
