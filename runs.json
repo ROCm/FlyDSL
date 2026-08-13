@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-08-13T06:05:04Z",
+ "updated": "2026-08-13T06:43:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31674712052,
+   "pr": 930,
+   "commit": "345e41aaf2f94f08d353a089bcb01fdf39b84636",
+   "branch": "dsl-ify-arith",
+   "event": "pull_request",
+   "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31674712052",
+   "created_at": "2026-08-13T06:40:23Z",
+   "updated_at": "2026-08-13T06:42:16Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
+  {
+   "run_id": 31674648878,
+   "pr": 996,
+   "commit": "8d7bce7702b8cf78c40d1b5b9cbc2d1123f2f6f6",
+   "branch": "coop-library",
+   "event": "pull_request",
+   "title": "[Feat] Add fx.num_warp_threads() as constant accessor",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31674648878",
+   "created_at": "2026-08-13T06:39:24Z",
+   "updated_at": "2026-08-13T06:41:58Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 31673258278,
+   "pr": 1004,
+   "commit": "5276d509632e44f3cdf1ec1ef4fb772fd045335b",
+   "branch": "pr/docs-composite-storage",
+   "event": "pull_request",
+   "title": "[Docs] Elaboration for composite type and storage",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31673258278",
+   "created_at": "2026-08-13T06:16:52Z",
+   "updated_at": "2026-08-13T06:27:34Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 31671988869,
    "pr": 987,
@@ -10,13 +55,41 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31671988869",
    "created_at": "2026-08-13T05:55:30Z",
-   "updated_at": "2026-08-13T05:57:58Z",
+   "updated_at": "2026-08-13T06:38:47Z",
    "actor": "Boss2002n",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T06:38:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31671988869/job/94366030203"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T06:38:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31671988869/job/94366030233"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T06:37:44Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31671988869/job/94366030237"
+    }
+   ]
   },
   {
    "run_id": 31669063948,
@@ -82,7 +155,7 @@
    "commit": "44bfe884307707b1cc74d7acac0910950da0c99c",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
-   "title": "[WIP][GFX1250] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31666000306",
@@ -126,30 +199,21 @@
    "branch": "feat/rdna3-gemm-tile-autotune",
    "event": "pull_request",
    "title": "[Perf] Choose the RDNA3 GEMM tile from the shape",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31665169196",
    "created_at": "2026-08-13T03:51:15Z",
-   "updated_at": "2026-08-13T06:00:00Z",
+   "updated_at": "2026-08-13T06:27:49Z",
    "actor": "vlluvia",
    "jobs": [
     {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T04:47:37Z",
-     "completed_at": "2026-08-13T05:05:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31665169196/job/94345178141"
-    },
-    {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-13T04:36:49Z",
-     "completed_at": "2026-08-13T05:13:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31665169196/job/94345178144"
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T06:27:49Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31665169196/job/94361473079"
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -158,7 +222,16 @@
      "conclusion": "success",
      "started_at": "2026-08-13T04:36:49Z",
      "completed_at": "2026-08-13T05:59:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31665169196/job/94345178157"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31665169196/job/94361473523"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-13T04:47:37Z",
+     "completed_at": "2026-08-13T05:05:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31665169196/job/94361473580"
     }
    ]
   },
@@ -211,7 +284,7 @@
    "commit": "f4f8267a0a320244024a1a0011d935efd7324ae4",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
-   "title": "[WIP][GFX1250] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31660219863",
@@ -226,7 +299,7 @@
    "commit": "27056e1fde21e66a931c386abe562d10c89868e0",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
-   "title": "[WIP][GFX1250] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31660168987",
@@ -703,7 +776,7 @@
    "commit": "e6cbc6c9300becb3da945618a50a8e95103087b3",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
-   "title": "[WIP][GFX1250] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31587429526",
@@ -746,7 +819,7 @@
    "commit": "ed93792186ae31abb0e6496f281bd13ba82e8768",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
-   "title": "[WIP][GFX1250] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31586091547",
@@ -761,7 +834,7 @@
    "commit": "c70676b823a4216b7abcf6c4f96e7b1916aade10",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
-   "title": "[WIP][GFX1250] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582678294",
@@ -837,7 +910,7 @@
    "commit": "3c8ecc78d381d90a0c6c0a8810c77c83a1313b36",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
-   "title": "[WIP][GFX1250] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582023351",
@@ -852,7 +925,7 @@
    "commit": "cb7b0fa44d6813a18f8c5bdd3b4b4db5fc475ce1",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
-   "title": "[WIP][GFX1250] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31581294710",
@@ -867,7 +940,7 @@
    "commit": "85d6c212ea0b978555aa64a9ab53226399f49ca4",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
-   "title": "[WIP][GFX1250] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31579694195",
@@ -882,7 +955,7 @@
    "commit": "eb8aa80997b631f21de327ecb9fcc5212910bb89",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
-   "title": "[WIP][GFX1250] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31579198376",
@@ -1057,11 +1130,11 @@
    "branch": "dsl-ify-arith",
    "event": "pull_request",
    "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31561190239",
    "created_at": "2026-08-12T03:47:50Z",
-   "updated_at": "2026-08-13T05:35:09Z",
+   "updated_at": "2026-08-13T06:40:46Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -1094,19 +1167,19 @@
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-13T05:35:09Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-08-13T06:17:16Z",
+     "completed_at": "2026-08-13T06:40:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31561190239/job/94354884609"
     },
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-13T05:45:58Z",
-     "completed_at": null,
+     "completed_at": "2026-08-13T06:12:14Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31561190239/job/94354884654"
     }
    ]
@@ -1666,107 +1739,6 @@
      "started_at": "2026-08-11T10:53:16Z",
      "completed_at": "2026-08-11T12:26:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31470290261/job/93755417175"
-    }
-   ]
-  },
-  {
-   "run_id": 31468523970,
-   "pr": null,
-   "commit": "10b38d032eeb1edec5e62161ceab280b0a5e87a3",
-   "branch": "new_bias_alibi_sink_attention",
-   "event": "pull_request",
-   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31468523970",
-   "created_at": "2026-08-11T07:20:03Z",
-   "updated_at": "2026-08-11T15:10:17Z",
-   "actor": "amd-nprotaso",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-11T10:56:28Z",
-     "completed_at": "2026-08-11T12:00:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31468523970/job/93736712910"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-11T09:33:48Z",
-     "completed_at": "2026-08-11T12:20:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31468523970/job/93736712948"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-11T11:02:03Z",
-     "completed_at": "2026-08-11T15:10:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31468523970/job/93736712949"
-    }
-   ]
-  },
-  {
-   "run_id": 31463119006,
-   "pr": 987,
-   "commit": "cfbf897230cd0f2be7b003170734a400df4a84f5",
-   "branch": "jli/fix-lld-issue",
-   "event": "pull_request",
-   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31463119006",
-   "created_at": "2026-08-11T05:52:48Z",
-   "updated_at": "2026-08-11T07:58:22Z",
-   "actor": "jli-melchior",
-   "jobs": []
-  },
-  {
-   "run_id": 31462992298,
-   "pr": 982,
-   "commit": "a8460169e13af473ffee772a3edcab71f10b4906",
-   "branch": "docs-style",
-   "event": "pull_request",
-   "title": "docs: Update docs style to fit style guide",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31462992298",
-   "created_at": "2026-08-11T05:50:31Z",
-   "updated_at": "2026-08-11T05:52:02Z",
-   "actor": "peterjunpark",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-11T05:51:57Z",
-     "completed_at": "2026-08-11T05:52:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31462992298/job/93690323220"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-11T05:51:56Z",
-     "completed_at": "2026-08-11T05:52:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31462992298/job/93690323223"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-11T05:51:56Z",
-     "completed_at": "2026-08-11T05:51:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31462992298/job/93690323230"
     }
    ]
   }
