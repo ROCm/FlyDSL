@@ -1323,6 +1323,8 @@ def _run_mega_only(
         network=args.network,
         quant=quant,
         tokens=run_tokens,
+        world_size=world,
+        experts_per_rank=epr,
         max_tok_per_rank=mtpr,
         perf_mtpr=int(args.mtpr),
         mega_only_relL2=relL2,
@@ -1344,6 +1346,8 @@ def _run_mega_only(
 def run_one(args, rank, world, dev):
     net = NETWORKS[args.network]
     model_dim, inter_dim, experts = net["model_dim"], net["inter_dim"], net["experts"]
+    if int(args.experts_per_rank) > 0:
+        experts = int(args.experts_per_rank) * world
     swiglu_limit = float(net.get("swiglu_limit", 0.0))
     # topk: --topk>0 overrides; else use the network's native topk (r1_v3=8, v4_*=6).
     topk = int(args.topk) if int(args.topk) > 0 else int(net["topk"])
@@ -1449,6 +1453,12 @@ def main():
         type=int,
         default=-1,
         help="-1 (default) = use the network's native topk (r1_v3=8, v4_*=6); >0 overrides",
+    )
+    p.add_argument(
+        "--experts-per-rank",
+        type=int,
+        default=0,
+        help="override total experts as world_size*N so local expert count stays fixed across world sizes",
     )
     p.add_argument("--waves-per-eu", type=int, default=4)
     p.add_argument("--async-copy", action=argparse.BooleanOptionalAction, default=True)
