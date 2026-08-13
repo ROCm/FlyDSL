@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-13T00:42:04Z",
+ "updated": "2026-08-13T00:45:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -494,11 +494,11 @@
    "branch": "feature/typed-arithmetic-modernization",
    "event": "pull_request",
    "title": "Add type-aware extrema and integer ceil-division APIs",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31578608800",
    "created_at": "2026-08-12T08:30:10Z",
-   "updated_at": "2026-08-12T23:37:19Z",
+   "updated_at": "2026-08-13T00:43:18Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -513,10 +513,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-12T23:36:34Z",
-     "completed_at": null,
+     "completed_at": "2026-08-13T00:43:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31578608800/job/94296439809"
     },
     {
