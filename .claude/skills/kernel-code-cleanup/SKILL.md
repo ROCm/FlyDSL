@@ -427,7 +427,7 @@ def _run_compiled(exe, *args):             # in-tree
 ```
 
 - Pass flat scalars/pointers (`data_ptr()`, `stride(i)`, sizes, `stream`) — it
-  bypasses DLPack. See `pa_decode_fp8.py`, `hgemm_splitk.py`.
+  bypasses DLPack. See `pa_decode_fp8.py`.
 - Reuse the shim; don't add a second copy.
 - Worth it for small kernels in tight loops, not cold one-shot launches. Arg
   order/types must match the compiled signature — verify.
