@@ -1,8 +1,210 @@
 {
  "schema": 1,
- "updated": "2026-08-13T00:45:12Z",
+ "updated": "2026-08-13T02:16:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31660219863,
+   "pr": 1001,
+   "commit": "f4f8267a0a320244024a1a0011d935efd7324ae4",
+   "branch": "jli/gfx1250/fix-mma-atom",
+   "event": "pull_request",
+   "title": "[WIP][GFX1250] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31660219863",
+   "created_at": "2026-08-13T02:14:35Z",
+   "updated_at": "2026-08-13T02:14:48Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 31660168987,
+   "pr": null,
+   "commit": "27056e1fde21e66a931c386abe562d10c89868e0",
+   "branch": "jli/gfx1250/fix-mma-atom",
+   "event": "pull_request",
+   "title": "[WIP][GFX1250] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31660168987",
+   "created_at": "2026-08-13T02:13:34Z",
+   "updated_at": "2026-08-13T02:14:37Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 31658557819,
+   "pr": 987,
+   "commit": "7e80b071685686aa47021e1dae547dbbde2831af",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31658557819",
+   "created_at": "2026-08-13T01:42:37Z",
+   "updated_at": "2026-08-13T02:14:05Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-13T02:14:05Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31658557819/job/94323222204"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-13T02:14:05Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31658557819/job/94323222206"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-13T02:14:05Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31658557819/job/94323222224"
+    }
+   ]
+  },
+  {
+   "run_id": 31655638442,
+   "pr": 995,
+   "commit": "9ab8a9d7eae99bad632aaef31b4e3392d06e4efd",
+   "branch": "feature/typed-arithmetic-modernization",
+   "event": "pull_request",
+   "title": "Add type-aware extrema and integer ceil-division APIs",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655638442",
+   "created_at": "2026-08-13T00:48:00Z",
+   "updated_at": "2026-08-13T01:37:16Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T01:19:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655638442/job/94314405673"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T01:19:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655638442/job/94314405721"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-13T01:37:15Z",
+     "completed_at": "2026-08-13T02:02:22Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655638442/job/94314405758"
+    }
+   ]
+  },
+  {
+   "run_id": 31655621039,
+   "pr": 860,
+   "commit": "f25e5a4c267b73bc93849c3f080a51e806da04c7",
+   "branch": "jiacao/conv3d-gemm-port",
+   "event": "pull_request",
+   "title": "[Kernel] fp8 conv3d: 8-wave GEMM pipeline + BIG_IN fix",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655621039",
+   "created_at": "2026-08-13T00:47:40Z",
+   "updated_at": "2026-08-13T02:03:58Z",
+   "actor": "jiacao-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T01:19:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655621039/job/94314529164"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T01:19:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655621039/job/94314529173"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T02:03:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655621039/job/94314529278"
+    }
+   ]
+  },
+  {
+   "run_id": 31655537976,
+   "pr": null,
+   "commit": "9b76c0c403ba0d75b79643d4719606446861bd50",
+   "branch": "main",
+   "event": "push",
+   "title": "Use stable torch reference API for a16w16 GFX950 GEMM testing (#1000)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655537976",
+   "created_at": "2026-08-13T00:46:08Z",
+   "updated_at": "2026-08-13T01:18:17Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-13T01:18:04Z",
+     "completed_at": "2026-08-13T01:35:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655537976/job/94314330779"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T01:18:14Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655537976/job/94314330802"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T01:18:16Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655537976/job/94314330833"
+    }
+   ]
+  },
   {
    "run_id": 31632717873,
    "pr": 960,
@@ -295,7 +497,7 @@
   },
   {
    "run_id": 31587429526,
-   "pr": 1001,
+   "pr": null,
    "commit": "e6cbc6c9300becb3da945618a50a8e95103087b3",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
@@ -547,7 +749,7 @@
   },
   {
    "run_id": 31566833673,
-   "pr": 1000,
+   "pr": null,
    "commit": "882d198890dde700048c9d723903958fa53a7544",
    "branch": "xyt/citest",
    "event": "pull_request",
@@ -590,7 +792,7 @@
   },
   {
    "run_id": 31566447072,
-   "pr": 1000,
+   "pr": null,
    "commit": "2a47ff8b8408103a8d4afea60e0c4276c6e64bc4",
    "branch": "xyt/citest",
    "event": "pull_request",
@@ -633,7 +835,7 @@
   },
   {
    "run_id": 31566303938,
-   "pr": 1000,
+   "pr": null,
    "commit": "434bcd6563e6893c583e6ad2f868b172e46fb703",
    "branch": "xyt/citest",
    "event": "pull_request",
@@ -663,7 +865,7 @@
   },
   {
    "run_id": 31560514862,
-   "pr": 860,
+   "pr": null,
    "commit": "c6d30130077368eed0fa93450a392843c03b4506",
    "branch": "jiacao/conv3d-gemm-port",
    "event": "pull_request",
@@ -1567,124 +1769,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31452686608/job/93756230023"
     }
    ]
-  },
-  {
-   "run_id": 31449758991,
-   "pr": null,
-   "commit": "30ff7cafe7ee52f975b83864627b7761b3fc3309",
-   "branch": "ci/upgrade-rocm-7.14",
-   "event": "pull_request",
-   "title": "CI: upgrade PyTorch images to ROCm 7.14",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31449758991",
-   "created_at": "2026-08-11T01:35:18Z",
-   "updated_at": "2026-08-11T02:32:58Z",
-   "actor": "Phil-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 31449167103,
-   "pr": 947,
-   "commit": "13bfb269e22752f4887cadbf11960c2297d4c7f5",
-   "branch": "worktree-agent-moe-2stage-port",
-   "event": "pull_request",
-   "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014 fp8 (gfx942 + gfx950)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31449167103",
-   "created_at": "2026-08-11T01:23:49Z",
-   "updated_at": "2026-08-11T02:54:16Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 31448928321,
-   "pr": 990,
-   "commit": "f0a35d0babb63e0310865444cdd42382ba90db10",
-   "branch": "fp4-gemm-4wave-perf",
-   "event": "pull_request",
-   "title": "[fp4_gemm_4wave] MXFP4 GEMM perf optimize",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31448928321",
-   "created_at": "2026-08-11T01:19:06Z",
-   "updated_at": "2026-08-11T10:13:12Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-11T06:22:59Z",
-     "completed_at": "2026-08-11T08:14:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31448928321/job/93683065804"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-11T05:07:39Z",
-     "completed_at": "2026-08-11T09:36:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31448928321/job/93683065810"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-11T05:33:51Z",
-     "completed_at": "2026-08-11T10:13:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31448928321/job/93683065811"
-    }
-   ]
-  },
-  {
-   "run_id": 31448862166,
-   "pr": null,
-   "commit": "b94ab6e6d519e34a7a18834e206d9c921650ef5a",
-   "branch": "main",
-   "event": "push",
-   "title": "docs: Update configs for documentation to host on Read the Docs (#981)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31448862166",
-   "created_at": "2026-08-11T01:17:47Z",
-   "updated_at": "2026-08-11T02:50:08Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 31442756019,
-   "pr": null,
-   "commit": "197f7f9cbd264f62e4804c8b249770d73e724b56",
-   "branch": "ci/upgrade-rocm-7.14",
-   "event": "pull_request",
-   "title": "CI: upgrade PyTorch images to ROCm 7.14",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31442756019",
-   "created_at": "2026-08-10T23:32:52Z",
-   "updated_at": "2026-08-11T01:35:46Z",
-   "actor": "Phil-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 31439852860,
-   "pr": null,
-   "commit": "3c784385202ce907ec6482e33af89bd50ddae70f",
-   "branch": "ci/upgrade-rocm-7.14",
-   "event": "pull_request",
-   "title": "CI: upgrade PyTorch images to ROCm 7.14",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31439852860",
-   "created_at": "2026-08-10T22:48:56Z",
-   "updated_at": "2026-08-10T23:28:00Z",
-   "actor": "Phil-amd",
-   "jobs": []
   }
  ]
 }
