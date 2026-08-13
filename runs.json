@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-13T06:51:10Z",
+ "updated": "2026-08-13T08:00:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31676223615,
+   "pr": 995,
+   "commit": "6a5783c293d14715bff96fd415dbe0a7d242eb27",
+   "branch": "feature/typed-arithmetic-modernization",
+   "event": "pull_request",
+   "title": "[Feat] Add type-aware extrema and integer ceiling division",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31676223615",
+   "created_at": "2026-08-13T07:03:38Z",
+   "updated_at": "2026-08-13T07:05:20Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 31674712052,
    "pr": 930,
@@ -10,11 +25,11 @@
    "branch": "dsl-ify-arith",
    "event": "pull_request",
    "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31674712052",
    "created_at": "2026-08-13T06:40:23Z",
-   "updated_at": "2026-08-13T06:42:16Z",
+   "updated_at": "2026-08-13T07:03:26Z",
    "actor": "xudoyuan",
    "jobs": []
   },
@@ -25,11 +40,11 @@
    "branch": "coop-library",
    "event": "pull_request",
    "title": "[Feat] Add fx.num_warp_threads() as constant accessor",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31674648878",
    "created_at": "2026-08-13T06:39:24Z",
-   "updated_at": "2026-08-13T06:42:59Z",
+   "updated_at": "2026-08-13T07:57:30Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -40,13 +55,41 @@
    "branch": "pr/docs-composite-storage",
    "event": "pull_request",
    "title": "[Docs] Elaboration for composite type and storage",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31673258278",
    "created_at": "2026-08-13T06:16:52Z",
-   "updated_at": "2026-08-13T06:27:34Z",
+   "updated_at": "2026-08-13T07:01:45Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T07:03:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31673258278/job/94370887936"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-13T07:01:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31673258278/job/94370887954"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-13T07:02:46Z",
+     "completed_at": "2026-08-13T07:20:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31673258278/job/94370888096"
+    }
+   ]
   },
   {
    "run_id": 31671988869,
@@ -83,10 +126,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-13T06:37:44Z",
-     "completed_at": null,
+     "completed_at": "2026-08-13T07:00:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31671988869/job/94366030237"
     }
    ]
@@ -357,7 +400,7 @@
    "commit": "9ab8a9d7eae99bad632aaef31b4e3392d06e4efd",
    "branch": "feature/typed-arithmetic-modernization",
    "event": "pull_request",
-   "title": "[Feat] Add type-aware extrema and integer ceil-division APIs",
+   "title": "[Feat] Add type-aware extrema and integer ceiling division",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655638442",
@@ -850,13 +893,22 @@
    "branch": "mega_moe_a4w4",
    "event": "pull_request",
    "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582596158",
    "created_at": "2026-08-12T09:22:22Z",
-   "updated_at": "2026-08-12T15:47:20Z",
+   "updated_at": "2026-08-13T07:10:45Z",
    "actor": "Yaowu-Xiong",
    "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T07:10:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582596158/job/94372393733"
+    },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
@@ -864,16 +916,7 @@
      "conclusion": "success",
      "started_at": "2026-08-12T12:36:33Z",
      "completed_at": "2026-08-12T15:03:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582596158/job/94115550690"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-12T12:36:30Z",
-     "completed_at": "2026-08-12T14:34:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582596158/job/94115550767"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582596158/job/94372394270"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -882,25 +925,7 @@
      "conclusion": "success",
      "started_at": "2026-08-12T13:02:29Z",
      "completed_at": "2026-08-12T13:21:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582596158/job/94115550776"
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-12T15:05:36Z",
-     "completed_at": "2026-08-12T15:46:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582596158/job/94159429937"
-    },
-    {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-12T15:05:36Z",
-     "completed_at": "2026-08-12T15:47:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582596158/job/94159429945"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582596158/job/94372394500"
     }
    ]
   },
@@ -970,7 +995,7 @@
    "commit": "75d29e01ce503e00b361a47c2af02f77c5145532",
    "branch": "feature/typed-arithmetic-modernization",
    "event": "pull_request",
-   "title": "[Feat] Add type-aware extrema and integer ceil-division APIs",
+   "title": "[Feat] Add type-aware extrema and integer ceiling division",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31578608800",
@@ -1295,7 +1320,7 @@
    "commit": "2741b7f8bac05b89d98ec0d296b5edb760b3f001",
    "branch": "feature/typed-arithmetic-modernization",
    "event": "pull_request",
-   "title": "[Feat] Add type-aware extrema and integer ceil-division APIs",
+   "title": "[Feat] Add type-aware extrema and integer ceiling division",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492623191",
@@ -1696,49 +1721,6 @@
      "started_at": "2026-08-11T12:26:17Z",
      "completed_at": "2026-08-11T14:09:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31471176613/job/93756692904"
-    }
-   ]
-  },
-  {
-   "run_id": 31470290261,
-   "pr": null,
-   "commit": "b4251455f93e519a42dbcd8ad6016f482bf81919",
-   "branch": "main",
-   "event": "push",
-   "title": "[Kernel]Remove recast iter from sliding window attention kernel. (#997)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31470290261",
-   "created_at": "2026-08-11T07:45:41Z",
-   "updated_at": "2026-08-11T12:26:42Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-11T10:52:05Z",
-     "completed_at": "2026-08-11T12:26:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31470290261/job/93755417041"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-11T11:03:34Z",
-     "completed_at": "2026-08-11T12:26:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31470290261/job/93755417045"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-11T10:53:16Z",
-     "completed_at": "2026-08-11T12:26:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31470290261/job/93755417175"
     }
    ]
   }
