@@ -273,10 +273,33 @@ def test_ceildiv_rejects_non_integer_boolean_and_index_inputs():
 
 
 @pytest.mark.l0_backend_agnostic
-def test_kernel_cdiv_keeps_host_path_and_uses_typed_dynamic_op():
+@pytest.mark.parametrize(
+    ("numer", "denom", "expected"),
+    [
+        (7, 2, 4),
+        (7, -2, -3),
+        (-7, 2, -3),
+        (-7, -2, 4),
+        (0, -3, 0),
+    ],
+)
+def test_kernel_cdiv_host_path_rounds_toward_positive_infinity(numer, denom, expected):
     from kernels.common.utils import cdiv
 
-    assert cdiv(7, 3) == 3
+    assert cdiv(numer, denom) == expected
+
+
+@pytest.mark.l0_backend_agnostic
+def test_kernel_cdiv_host_path_rejects_zero_divisor():
+    from kernels.common.utils import cdiv
+
+    with pytest.raises(ZeroDivisionError):
+        cdiv(1, 0)
+
+
+@pytest.mark.l0_backend_agnostic
+def test_kernel_cdiv_uses_typed_dynamic_op():
+    from kernels.common.utils import cdiv
 
     def build(lhs, rhs):
         result = cdiv(fx.Int32(lhs), fx.Int32(rhs))
