@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-13T03:04:48Z",
+ "updated": "2026-08-13T03:09:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -169,11 +169,11 @@
    "branch": "jiacao/conv3d-gemm-port",
    "event": "pull_request",
    "title": "[Kernel] fp8 conv3d: 8-wave GEMM pipeline + BIG_IN fix",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655621039",
    "created_at": "2026-08-13T00:47:40Z",
-   "updated_at": "2026-08-13T02:03:58Z",
+   "updated_at": "2026-08-13T03:07:21Z",
    "actor": "jiacao-amd",
    "jobs": [
     {
@@ -188,10 +188,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-13T01:19:56Z",
-     "completed_at": null,
+     "completed_at": "2026-08-13T03:07:20Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655621039/job/94314529173"
     },
     {
