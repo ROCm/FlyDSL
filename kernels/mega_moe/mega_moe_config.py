@@ -9,6 +9,7 @@ from functools import cache
 
 # ---- Domain vocabulary and hardware constants ---------------------------------
 
+
 class TokenBucket(IntEnum):
     BS1 = 1
     BS4 = 4
@@ -83,6 +84,7 @@ EXACT_TUNING_TOKENS = frozenset((1, 2, 4, 16))
 
 
 # ---- Resolved kernel configuration types --------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class Stage1Config:
@@ -189,6 +191,7 @@ def _validate_activation_dtype(a_dtype: str) -> None:
 
 # ---- Sparse measured residuals ------------------------------------------------
 
+
 def _patch(
     *,
     stage1: dict[str, object] | None = None,
@@ -200,8 +203,7 @@ def _patch(
     unknown_stage2 = stage2.keys() - _STAGE2_PATCH_FIELDS
     if unknown_stage1 or unknown_stage2:
         raise ValueError(
-            f"invalid tuning patch fields: stage1={sorted(unknown_stage1)}, "
-            f"stage2={sorted(unknown_stage2)}"
+            f"invalid tuning patch fields: stage1={sorted(unknown_stage1)}, " f"stage2={sorted(unknown_stage2)}"
         )
     return ConfigPatch(
         tuple(stage1.items()),
@@ -241,17 +243,12 @@ def _fixed_slot_token_patch(a_dtype: str, tokens: int) -> ConfigPatch | None:
         return None
     return _patch(stage1={"grid_mult": grid_mult})
 
-_A4_ASYNC_COPY_SAFETY_PATCH = _patch(
-    stage1={"sort_block_m": BLOCK_M_MEDIUM}
-)
-_A4_WIDE_BATCH_OCCUPANCY_PATCH = _patch(
-    stage1={"waves_per_eu_hint": WAVES_PER_EU_LOW}
-)
+
+_A4_ASYNC_COPY_SAFETY_PATCH = _patch(stage1={"sort_block_m": BLOCK_M_MEDIUM})
+_A4_WIDE_BATCH_OCCUPANCY_PATCH = _patch(stage1={"waves_per_eu_hint": WAVES_PER_EU_LOW})
 
 _A4_BUCKET_PATCHES = {
-    TokenBucket.BS512: _patch(
-        stage1={"b_nt": B_NT_DISABLED, "num_dispatch_cu": 160}
-    ),
+    TokenBucket.BS512: _patch(stage1={"b_nt": B_NT_DISABLED, "num_dispatch_cu": 160}),
     TokenBucket.BS1024: _patch(
         stage1={"sort_block_m": BLOCK_M_LARGE, "num_dispatch_cu": 88},
         stage2={"block_m": BLOCK_M_MEDIUM},
@@ -281,15 +278,9 @@ _A4_FP8_P2P_BUCKET_PATCHES = {
     )
 }
 
-_A4_FIXED8192_SINGLE_TOKEN_PATCH = _patch(
-    stage1={"num_dispatch_cu": 160}
-)
-_A4_FIXED8192_COMPACT_DISPATCH_PATCH = _patch(
-    stage1={"num_dispatch_cu": 32}
-)
-_A4_FIXED8192_BS8_STAGE2_PATCH = _patch(
-    stage2={"block_m": BLOCK_M_MEDIUM}
-)
+_A4_FIXED8192_SINGLE_TOKEN_PATCH = _patch(stage1={"num_dispatch_cu": 160})
+_A4_FIXED8192_COMPACT_DISPATCH_PATCH = _patch(stage1={"num_dispatch_cu": 32})
+_A4_FIXED8192_BS8_STAGE2_PATCH = _patch(stage2={"block_m": BLOCK_M_MEDIUM})
 
 
 def _a4_fixed8192_sync_patch(bucket: int, grid_mult: int) -> ConfigPatch:
@@ -306,12 +297,11 @@ def _a4_fixed8192_sync_patch(bucket: int, grid_mult: int) -> ConfigPatch:
     )
 
 
-_A4_FIXED8192_SYNC_BUCKETS = frozenset(
-    (TokenBucket.BS16, TokenBucket.BS32, TokenBucket.BS64, TokenBucket.BS128)
-)
+_A4_FIXED8192_SYNC_BUCKETS = frozenset((TokenBucket.BS16, TokenBucket.BS32, TokenBucket.BS64, TokenBucket.BS128))
 
 
 # ---- Formula-derived base configuration ---------------------------------------
+
 
 def nearest_token_bucket(tokens: int) -> int:
     if tokens <= 0:
@@ -390,11 +380,7 @@ def _large_dispatch_cu(bucket: int) -> int:
 
 
 def _select_fixed_stage1(bucket: int, experts_per_rank: int) -> Stage1Config:
-    grid_mult = (
-        max(GRID_MULT_SINGLE_EPOCH, bucket // TokenBucket.BS4)
-        if bucket <= TokenBucket.BS16
-        else 3
-    )
+    grid_mult = max(GRID_MULT_SINGLE_EPOCH, bucket // TokenBucket.BS4) if bucket <= TokenBucket.BS16 else 3
     return Stage1Config(
         sort_block_m=BLOCK_M_SMALL,
         tile_n=TILE_N_BASE if bucket <= TokenBucket.BS8 else TILE_N_NARROW,
@@ -440,18 +426,12 @@ def _select_bounded_stage1(bucket: int, mtpr: int, experts_per_rank: int, inter_
         inter_dim,
         large_compact=False,
     )
-    grid_mult = (
-        GRID_MULT_SINGLE_EPOCH
-        if bucket <= TokenBucket.BS256
-        else 2
-    )
+    grid_mult = GRID_MULT_SINGLE_EPOCH if bucket <= TokenBucket.BS256 else 2
 
     dispatch_cu = (
         _compact_dispatch_cu(bucket)
         if bucket <= TokenBucket.BS128
-        else _large_dispatch_cu(bucket)
-        if bucket == TokenBucket.BS256
-        else 128
+        else _large_dispatch_cu(bucket) if bucket == TokenBucket.BS256 else 128
     )
     tile_resource = bucket == TokenBucket.BS256
     b_nt = B_NT_DISABLED if bucket == TokenBucket.BS1 or bucket >= TokenBucket.BS1024 else B_NT_ENABLED
@@ -519,28 +499,20 @@ def _select_large_stage1(
     )
 
 
-_BOUNDED_BASE_BLOCK_N_BUCKETS = frozenset(
-    (TokenBucket.BS1, TokenBucket.BS4, TokenBucket.BS64)
-)
+_BOUNDED_BASE_BLOCK_N_BUCKETS = frozenset((TokenBucket.BS1, TokenBucket.BS4, TokenBucket.BS64))
 _LARGE_PERSIST_CU_RESIDUALS = {
     TokenBucket.BS1024: 224,
     TokenBucket.BS16384: 192,
     TokenBucket.BS32768: 256,
 }
-_LARGE_STAGE2_NO_SKEW_BUCKETS = frozenset(
-    (TokenBucket.BS2048, TokenBucket.BS32768)
-)
+_LARGE_STAGE2_NO_SKEW_BUCKETS = frozenset((TokenBucket.BS2048, TokenBucket.BS32768))
 
 
 def _select_bounded_stage2(bucket: int, fixed_slot: bool, mtpr: int, sort_block_m: int, model_dim: int) -> Stage2Config:
     if not fixed_slot and mtpr > bucket:
         return Stage2Config(
             block_m=BLOCK_M_MEDIUM if sort_block_m == BLOCK_M_LARGE else BLOCK_M_SMALL,
-            block_n=(
-                TILE_N_NARROW
-                if bucket == TokenBucket.BS256 and sort_block_m == BLOCK_M_MEDIUM
-                else TILE_N_BASE
-            ),
+            block_n=(TILE_N_NARROW if bucket == TokenBucket.BS256 and sort_block_m == BLOCK_M_MEDIUM else TILE_N_BASE),
             persist=True,
             persist_cu=PERSIST_CU_DEFAULT,
             use_nt=bucket <= TokenBucket.BS128,
@@ -561,13 +533,7 @@ def _select_bounded_stage2(bucket: int, fixed_slot: bool, mtpr: int, sort_block_
         block_m=BLOCK_M_MEDIUM if bucket >= TokenBucket.BS4096 else BLOCK_M_SMALL,
         block_n=block_n,
         persist=persist,
-        persist_cu=(
-            128
-            if bucket == TokenBucket.BS256
-            else PERSIST_CU_DEFAULT
-            if persist
-            else 0
-        ),
+        persist_cu=(128 if bucket == TokenBucket.BS256 else PERSIST_CU_DEFAULT if persist else 0),
         use_nt=bucket <= TokenBucket.BS128,
         persist_strided=TokenBucket.BS512 <= bucket <= TokenBucket.BS2048,
         deep_a_pipeline=bucket >= TokenBucket.BS1024 and block_n == TILE_N_BASE,
@@ -581,16 +547,8 @@ def _select_large_stage2(
 ) -> Stage2Config:
     persist_cu = _LARGE_PERSIST_CU_RESIDUALS.get(bucket, PERSIST_CU_DEFAULT)
     block_n = TILE_N_NARROW if bucket == TokenBucket.BS256 or model_dim < WIDE_MODEL_DIM_MIN else TILE_N_BASE
-    block_m = (
-        BLOCK_M_MEDIUM
-        if sort_block_m == BLOCK_M_LARGE or bucket == TokenBucket.BS2048
-        else BLOCK_M_SMALL
-    )
-    skew_cu = (
-        LARGE_STAGE2_SKEW_CU
-        if bucket >= TokenBucket.BS512 and bucket not in _LARGE_STAGE2_NO_SKEW_BUCKETS
-        else 0
-    )
+    block_m = BLOCK_M_MEDIUM if sort_block_m == BLOCK_M_LARGE or bucket == TokenBucket.BS2048 else BLOCK_M_SMALL
+    skew_cu = LARGE_STAGE2_SKEW_CU if bucket >= TokenBucket.BS512 and bucket not in _LARGE_STAGE2_NO_SKEW_BUCKETS else 0
     return Stage2Config(
         block_m=block_m,
         block_n=block_n,
@@ -635,6 +593,7 @@ def _select_bucket_config(
 
 
 # ---- Request normalization and public resolution ------------------------------
+
 
 def _normalize_config_request(
     tokens: int,
@@ -772,11 +731,7 @@ def _select_tuning_patches(
         if context.bucket == TokenBucket.BS8 and context.p2p_quant == P2P_QUANT_FP8_BLOCKWISE:
             patches.append(_A4_FIXED8192_BS8_STAGE2_PATCH)
         elif context.bucket in _A4_FIXED8192_SYNC_BUCKETS:
-            grid_mult = (
-                2
-                if context.bucket == TokenBucket.BS16
-                else GRID_MULT_SINGLE_EPOCH
-            )
+            grid_mult = 2 if context.bucket == TokenBucket.BS16 else GRID_MULT_SINGLE_EPOCH
             patches.append(_a4_fixed8192_sync_patch(context.bucket, grid_mult))
 
     return tuple(patches)
