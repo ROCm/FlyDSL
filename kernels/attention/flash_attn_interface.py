@@ -28,8 +28,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F  # noqa: F401  (imported for callers' convenience)
 
-# Re-export so callers only need to import from this module.
-from kernels.attention.flash_attn_utils import dualwave_splitk_workspace_elems
+from kernels.attention.flash_attn_utils import bias_addressing_error, dualwave_splitk_workspace_elems
 
 __all__ = ["flydsl_flash_attn_func", "dualwave_splitk_workspace_elems"]
 
@@ -476,7 +475,8 @@ def _flydsl_flash_attn_paged(
 
     # Per-batch KV lengths differ in general → bottom-right cross-length masking. Varlen
     # paged always uses cross masking (per-batch seqlen_q/seqlen_kv come from cu_seqlens).
-    skv = int(max_seqlen_kv) if max_seqlen_kv is not None else int(seqlen_k.max().item())
+    _kv_lens = seqlen_k.reshape(-1).tolist() if max_seqlen_kv is None or (bias is not None and not varlen) else None
+    skv = int(max_seqlen_kv) if max_seqlen_kv is not None else int(max(_kv_lens))
     max_kv_pages = (skv + page_size - 1) // page_size
     max_pages_per_split = (max_kv_pages + int(num_kv_splits) - 1) // int(num_kv_splits)
     if max_pages_per_split > _PAGED_BT_LDS_SIZE:
@@ -491,6 +491,14 @@ def _flydsl_flash_attn_paged(
     else:
         cross = skv != Sq
     if bias is not None:
+        if not varlen:
+            if min(_kv_lens) != max(_kv_lens):
+                raise NotImplementedError(
+                    f"flydsl_flash_attn_func: dense paged bias requires uniform seqlen_k, got lengths in "
+                    f"[{min(_kv_lens)}, {max(_kv_lens)}]; the dense paged kernel receives only "
+                    f"max_seqlen_kv. Use the varlen paged path (cu_seqlens_q/cu_seqlens_kv) for "
+                    f"ragged KV lengths."
+                )
         # Same convention as non-paged: rows are q tokens, columns are batch-local
         # logical key positions (the block table only redirects the K/V fetch).
         _bias_rows = int(q.shape[0]) if varlen else Sq
@@ -652,13 +660,13 @@ def flydsl_flash_attn_func(
     # Split-K (gfx950 only, seq_len >= 384, D=64/128, bf16/f16).
     num_kv_splits: int = 1,
     # Additive attention bias, folded into the scores after sm_scale and before
-    # masking. gfx950 DUALWAVE_SWP only (dense / varlen / split-K).
+    # masking. gfx950 DUALWAVE_SWP only (dense / varlen / split-K / paged KV).
     bias: Optional[torch.Tensor] = None,
     # Per-head ALiBi slope table, computed analytically into the scores. Same
-    # path and restrictions as `bias`; the two may be combined.
+    # path as `bias` but no paged-KV support; may be combined with `bias`.
     alibi_slopes: Optional[torch.Tensor] = None,
     # Per-head attention-sink logit: one extra softmax denominator term with no
-    # matching V row. Same path and restrictions as `bias`; freely combinable.
+    # matching V row. Same path and restrictions as `alibi_slopes`; combinable.
     sink: Optional[torch.Tensor] = None,
     # fp8 dense ABI: per-tensor descales for pre-quantized e4m3fn Q/K/V.
     q_descale: Optional[torch.Tensor] = None,
@@ -709,23 +717,37 @@ def flydsl_flash_attn_func(
             seqlen_q != seqlen_kv per batch.
         cross_seqlen: Whether seqlen_q and seqlen_kv differ. Required in varlen mode;
             dense mode infers it from ``q.shape[1] != k.shape[1]``.
-        block_table / seqlen_k: vLLM-style 2D block table metadata.
+        block_table / seqlen_k: vLLM-style 2D block table metadata. Enables the
+            native paged-KV path, which supports ``bias`` but not
+            ``alibi_slopes``, ``sink``, ``return_lse``, or fp8.
         num_kv_splits: Split-K factor (>1: gfx950 only, D=64/128, bf16/f16, seq>=384).
         bias: Additive attention bias with the same dtype as q, folded in as
             ``softmax(q @ k^T * sm_scale + bias)`` -- after the scale, before the
             causal/padding mask. Dense: ``[Sq, Skv]``, broadcast over batch and
             head. Varlen: ``[total_q, max_seqlen_kv]``, where the row is the
             *global* packed q token index and the column is the *per-batch-local*
-            key index, broadcast over head. Routes to the gfx950 DUALWAVE_SWP
-            kernel; paged KV and fp8 raise NotImplementedError rather than
-            silently dropping the bias.
+            key index, broadcast over head. Varlen self-attention leaves
+            ``max_seqlen_kv`` unset, so its column bound is ``max_seqlen_q``.
+            Routes to the gfx950 DUALWAVE_SWP kernel; fp8 raises
+            NotImplementedError rather than silently dropping the bias.
+            Paged KV is supported (dense, varlen, and paged split-K) with the
+            same row/column convention: rows are ``seq_len_q`` (dense) or
+            ``total_q`` (varlen) q tokens, columns are batch-local key indices
+            and must number at least ``max_seqlen_kv``. Dense paged
+            additionally requires a uniform ``seqlen_k`` across the batch --
+            the dense paged launch only receives ``max_seqlen_kv``, so ragged
+            lengths would address the wrong bias columns and raise
+            ``NotImplementedError``; use the varlen paged path
+            (``cu_seqlens_q``/``cu_seqlens_kv``) for ragged KV.
         alibi_slopes: fp32 ALiBi slope table, ``[H]`` (broadcast over batch) or
             ``[B, H]``, values positive. Adds
             ``-slope * |i + seqlen_kv - seqlen_q - j|`` to the scores after the
             1/sqrt(D) scaling (the slope is not divided by it), bottom-right
             aligned like the causal mask. Positions are measured *within* the
             sequence, so varlen does not offset by the packed-token base. Same
-            kernel path and restrictions as ``bias``; the two may be combined.
+            kernel path as ``bias`` and may be combined with it, but unlike
+            ``bias`` it is not supported with paged KV (raises
+            NotImplementedError), nor with fp8.
         sink: fp32 ``[H]`` per-head attention-sink logit -- one extra softmax
             denominator term that has no matching V row::
 
@@ -735,8 +757,9 @@ def flydsl_flash_attn_func(
             post-sm_scale logit space as the scores. Applied in the epilogue, so
             it touches no score element; under split-K the per-split partials
             stay sink-free and the combine pass folds it in exactly once. Same
-            kernel path and restrictions as ``bias``; freely combinable with it
-            and with ``alibi_slopes``.
+            kernel path and restrictions as ``alibi_slopes`` -- not supported
+            with paged KV or fp8 -- but freely combinable with ``bias`` and
+            ``alibi_slopes``.
         q_descale / k_descale / v_descale: fp32 shape-[1] descales required
             for dense fp8 e4m3fn inputs.
         out: Optional pre-allocated output tensor. For fp8, output is bf16;
@@ -790,6 +813,9 @@ def flydsl_flash_attn_func(
             raise ValueError(f"flydsl_flash_attn_func: bias dtype must match q dtype {q.dtype}, got {bias.dtype}")
         if bias.dim() != 2:
             raise ValueError(f"flydsl_flash_attn_func: bias must be 2D, got {bias.dim()}D")
+        _bias_err = bias_addressing_error(bias.shape[0] * bias.shape[1], bias.element_size())
+        if _bias_err is not None:
+            raise ValueError(f"flydsl_flash_attn_func: bias {tuple(bias.shape)} {_bias_err}")
     if has_alibi:
         if alibi_slopes.dtype != torch.float32:
             raise ValueError(f"flydsl_flash_attn_func: alibi_slopes must be float32, got {alibi_slopes.dtype}")
@@ -890,9 +916,11 @@ def flydsl_flash_attn_func(
                     f"flydsl_flash_attn_func: varlen bias must be [total_q, max_seqlen_kv] with "
                     f"total_q={q.shape[0]}, got {tuple(bias.shape)}"
                 )
-            if max_seqlen_kv is not None and bias.shape[1] < int(max_seqlen_kv):
+            _bias_cols_min = int(max_seqlen_kv) if cross else Sq
+            if bias.shape[1] < _bias_cols_min:
+                _bound = "max_seqlen_kv" if cross else "max_seqlen_q, the self-attention KV maximum"
                 raise ValueError(
-                    f"flydsl_flash_attn_func: varlen bias needs >= max_seqlen_kv={int(max_seqlen_kv)} "
+                    f"flydsl_flash_attn_func: varlen bias needs >= {_bound}={_bias_cols_min} "
                     f"columns, got {bias.shape[1]}"
                 )
         elif tuple(bias.shape) != (Sq, Skv):

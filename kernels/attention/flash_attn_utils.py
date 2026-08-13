@@ -692,6 +692,29 @@ def _bias_dma_src_elem(traits, row_base, tile_col_base, d, lane_in_warp, bias_st
     uni_s = rocdl.readfirstlane(T.i32, as_mlir_value(uni))
     return fx.Int32(uni_s) + row_in_group * stride + gran * fx.Int32(_bias_gran_elems(traits))
 
+BIAS_MAX_OFFSET_ELEMS = 2**31 - 1
+BIAS_MAX_DESCRIPTOR_BYTES = 0xFFFFFFFF
+
+
+def bias_addressing_error(elems, elem_size):
+    """Reason an `elems`-element bias cannot be addressed, or None if it fits.
+
+    A bias past either limit wraps the i32 offset or overruns the descriptor, so
+    the kernel would silently read the wrong rows instead of failing. Callers
+    prefix their own entry-point name and the bias shape.
+    """
+    if elems > BIAS_MAX_OFFSET_ELEMS:
+        return (
+            f"has {elems} elements, exceeding the {BIAS_MAX_OFFSET_ELEMS} "
+            f"addressable by the kernel's i32 bias element offsets"
+        )
+    if elems * elem_size > BIAS_MAX_DESCRIPTOR_BYTES:
+        return (
+            f"occupies {elems * elem_size} bytes, exceeding the "
+            f"{BIAS_MAX_DESCRIPTOR_BYTES} byte range of the bias buffer descriptor"
+        )
+    return None
+
 
 def _bias_lds_lane_base(traits, buf, wave_id, lane_mod_32, lane_div_32, vec_elems):
     return (
@@ -4236,7 +4259,7 @@ class DualwaveStoreHelper(DualwaveKernelContext):
             for g in range_constexpr(2):
                 self._store_splitk_partial_o_quad(v_o, dc, g, local_opart_row_base, opart_rsrc)
 
-    def zero_o_block_if_needed(self, causal_end_raw_i32=None):
+    def zero_o_block_if_needed(self, causal_end_raw_i32=None, sink_log2=None):
         if causal_end_raw_i32 is None:
             causal_end_raw_i32 = self.causal_end_raw_i32
         traits = self.traits
@@ -4244,6 +4267,9 @@ class DualwaveStoreHelper(DualwaveKernelContext):
         wave_q_offset = self.wave_q_offset
         lane_mod_32 = self.lane_mod_32
         seq_len_v = self.seq_len_v
+
+        lse_m_z = self.c_zero_f if sink_log2 is None else sink_log2
+        lse_l_z = self.c_zero_f if sink_log2 is None else fx.Float32(1.0)
 
         @flyc.jit
         def _zero_o_block_if_needed():
@@ -4262,6 +4288,8 @@ class DualwaveStoreHelper(DualwaveKernelContext):
                                 _store_atom_128=self.store_atom_128,
                                 o_div=self.o_div,
                             )
+                    if const_expr(traits.RETURN_LSE):
+                        self._store_lse_row(lse_m_z, lse_l_z, q_row_z)
 
         _zero_o_block_if_needed()
 

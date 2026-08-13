@@ -33,7 +33,13 @@ if not torch.cuda.is_available():
 import pytest  # noqa: E402
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
+from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module  # noqa: E402
 from kernels.attention.flash_attn_interface import flydsl_flash_attn_func  # noqa: E402
+from kernels.attention.flash_attn_utils import (  # noqa: E402
+    BIAS_MAX_DESCRIPTOR_BYTES,
+    BIAS_MAX_OFFSET_ELEMS,
+    bias_addressing_error,
+)
 from tests.test_common import run_perftest  # noqa: E402
 
 UNIFORM_RANGE = (-1, 1)
@@ -41,9 +47,6 @@ DEFAULT_SEED = 123
 PAGED_KV_MIN_CONTEXT_LENGTH = 16384
 # Target share of the softmax mass placed on the attention sink (see calibrate_sink).
 DEFAULT_SINK_SHARE = 0.5
-# Attention-bias addressing limits (see bias_fits).
-BIAS_BUFFER_MAX_BYTES = 0xFFFFFFFF  # buffer descriptor num_records clamp
-BIAS_I32_MAX_ELEMS = 2**31 - 1  # kernel computes bias element offsets in i32
 # fp8 correctness gate (fixed; fp8 is lossy).
 FP8_MAX_ERR = 5e-2
 FP8_MIN_COS = 0.98
@@ -374,12 +377,9 @@ def _ceil_div(a, b):
 
 
 def bias_fits(rows, cols, elem_size=2):
-    elems = rows * cols
-    if elems > BIAS_I32_MAX_ELEMS:
-        return False, f"bias {rows}x{cols} = {elems:.3g} elems exceeds i32 offset range"
-    if elems * elem_size > BIAS_BUFFER_MAX_BYTES:
-        return False, f"bias {elems * elem_size / 2**30:.1f} GiB exceeds 4 GiB buffer limit"
-    return True, ""
+    """Skip predicate mirroring the kernel's own bias addressing limits."""
+    why = bias_addressing_error(rows * cols, elem_size)
+    return why is None, why or ""
 
 
 def _block_table_from_indices(kv_indptr_cpu, kv_indices_cpu, batch_size, max_num_pages_per_seq):
@@ -867,6 +867,7 @@ def _precompute_paged_kv_inputs_and_ref(
     page_size,
     kv_cache_layout,
     trigger_lazy_else=False,
+    use_bias=False,
 ):
     invalid_layout = _validate_kv_cache_layout(kv_cache_layout, page_size, head_dim, dtype)
     if invalid_layout is not None:
@@ -888,7 +889,11 @@ def _precompute_paged_kv_inputs_and_ref(
         page_size=page_size,
         kv_cache_layout=kv_cache_layout,
         trigger_lazy_else=trigger_lazy_else,
+        use_bias=use_bias,
     )
+    # ref_t folds in inputs["bias"]; a None here would compare the biased kernel
+    # run against an unbiased reference and report a meaningless PASS.
+    assert not use_bias or inputs["bias"] is not None, "use_bias=True produced no paged bias tensor"
     return inputs, ref_t, None
 
 
@@ -1162,6 +1167,10 @@ def run_attn_config(
     bias_t = precomputed_inputs["bias"]
     alibi_t = precomputed_inputs["alibi_slopes"]
     sink_t = precomputed_inputs["sink"]
+    # ref_t is built from these same inputs, so a missing bias makes both sides
+    # unbiased and the comparison vacuous. Fail loudly instead.
+    if use_bias and bias_t is None:
+        return {"err": "use_bias=True but the precomputed inputs carry no bias"}
 
     debug_counts = torch.zeros(2, dtype=torch.float32, device=device) if debug_lazy else None
     o_t = torch.zeros_like(q_t)
@@ -2594,8 +2603,9 @@ def main():
         action="store_true",
         help="Add an additive attention bias to the scores: softmax(q@k^T * sm_scale + bias). "
         "Dense bias is [Sq, Skv] broadcast over batch and head; varlen bias is packed "
-        "[total_q, max_seqlen_kv] with global q rows and batch-local key columns. "
-        "gfx950 bf16/f16 D=64/128 only; incompatible with --block-table and fp8. Rows whose "
+        "[total_q, max_seqlen_kv] with global q rows and batch-local key columns. Combines "
+        "with --block-table, where columns stay the logical (batch-local) key positions. "
+        "gfx950 bf16/f16 D=64/128 only; incompatible with fp8. Rows whose "
         "bias exceeds the i32 offset / 4 GiB buffer limits are SKIPped.",
     )
     parser.add_argument(
@@ -2846,6 +2856,7 @@ def main():
                                 page_size=args.page_size,
                                 kv_cache_layout=kv_cache_layout or "linear",
                                 trigger_lazy_else=args.trigger_lazy_else,
+                                use_bias=args.bias,
                             )
                             if precompute_status is not None:
                                 rows.append((cfg, precompute_status, precompute_status, {"skip": True}))
@@ -3121,6 +3132,7 @@ def main():
                                     seed=args.seed,
                                     page_size=args.page_size,
                                     kv_cache_layout=kv_cache_layout or "linear",
+                                    use_bias=args.bias,
                                 )
                                 if precompute_status is not None:
                                     varlen_cmp_rows.append(
@@ -3300,6 +3312,7 @@ def main():
                                         page_size=args.page_size,
                                         kv_cache_layout=kv_cache_layout or "linear",
                                         trigger_lazy_else=args.trigger_lazy_else,
+                                        use_bias=args.bias,
                                     )
                                 )
                                 if precompute_status is not None:
@@ -3437,6 +3450,7 @@ def main():
                                             seed=args.seed,
                                             page_size=args.page_size,
                                             kv_cache_layout=kv_cache_layout or "linear",
+                                            use_bias=args.bias,
                                         )
                                     )
                                     if precompute_status is not None:
@@ -3831,8 +3845,8 @@ def test_bias_paged(causal, kv_cache_layout):
     """
     dtype = torch.bfloat16
     B, Sq, H, Hkv, D = 2, 512, 8, 4, 128
-    # Uniform KV lengths: ragged per-batch seqlen_k on the dense paged path already
-    # disagrees with this reference without any bias, so keep that out of scope here.
+    # Uniform KV lengths: the dense paged path forwards only max_seqlen_kv, so ragged
+    # lengths are rejected outright (see test_bias_paged_rejects_ragged_seqlen_k).
     kv_lens = [Sq, Sq]
     max_kv = max(kv_lens)
     setup_seed(DEFAULT_SEED)
@@ -3872,6 +3886,303 @@ def test_bias_paged(causal, kv_cache_layout):
     out_nb = flydsl_flash_attn_func(q, kv_cache["k_cache"], kv_cache["v_cache"], **paged_kw)
     torch.cuda.synchronize()
     assert (out_nb.float() - out.float()).abs().max().item() > 1e-2, "bias had no effect on the paged output"
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+def test_bias_paged_rejects_ragged_seqlen_k(causal):
+    """Dense paged bias rejects ragged per-batch seqlen_k instead of answering wrongly.
+
+    The dense paged launch reduces seqlen_k to a single max_seqlen_kv and never
+    forwards the per-batch lengths, so a shorter batch would attend KV slots it
+    does not own and mask against the wrong bottom-right offset.
+    """
+    dtype = torch.bfloat16
+    B, Sq, H, Hkv, D = 2, 512, 8, 4, 128
+    kv_lens = [256, 512]
+    max_kv = max(kv_lens)
+    setup_seed(DEFAULT_SEED)
+    q = torch.empty(B, Sq, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    ragged = _build_paged_kv_for_test(B, max_kv, 64, Hkv, D, kv_lens, dtype, "cuda", "linear")
+    bias = torch.empty(Sq, max_kv, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    paged_kw = dict(causal=causal, num_kv_heads=Hkv, max_seqlen_kv=max_kv, kv_cache_layout="linear")
+
+    with pytest.raises(NotImplementedError, match="uniform seqlen_k"):
+        flydsl_flash_attn_func(
+            q,
+            ragged["k_cache"],
+            ragged["v_cache"],
+            bias=bias,
+            block_table=ragged["block_table"],
+            seqlen_k=ragged["seqlen_k"],
+            **paged_kw,
+        )
+
+    # The guard is about raggedness alone: identical shapes with uniform lengths run.
+    uniform = _build_paged_kv_for_test(B, max_kv, 64, Hkv, D, [max_kv] * B, dtype, "cuda", "linear")
+    flydsl_flash_attn_func(
+        q,
+        uniform["k_cache"],
+        uniform["v_cache"],
+        bias=bias,
+        block_table=uniform["block_table"],
+        seqlen_k=uniform["seqlen_k"],
+        **paged_kw,
+    )
+    torch.cuda.synchronize()
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+def test_bias_paged_varlen_ragged_seqlen_k(causal):
+    """The varlen paged path -- what the dense rejection points callers at -- is correct.
+
+    cu_seqlens_kv carries the per-batch KV lengths into the kernel, so ragged
+    lengths mask and bottom-right-align per batch instead of against one global max.
+    """
+    dtype = torch.bfloat16
+    H, Hkv, D = 8, 4, 128
+    sq, skv = [512, 512], [256, 512]
+    setup_seed(DEFAULT_SEED)
+    cu_q = torch.tensor([0, sq[0], sum(sq)], dtype=torch.int32, device="cuda")
+    cu_kv = torch.tensor([0, skv[0], sum(skv)], dtype=torch.int32, device="cuda")
+    total_q, max_q, max_kv = sum(sq), max(sq), max(skv)
+    q = torch.empty(total_q, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    kv_cache = _build_paged_kv_for_test(len(sq), max_kv, 64, Hkv, D, skv, dtype, "cuda", "linear")
+    bias = torch.empty(total_q, max_kv, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+
+    out = flydsl_flash_attn_func(
+        q,
+        kv_cache["k_cache"],
+        kv_cache["v_cache"],
+        causal=causal,
+        num_kv_heads=Hkv,
+        cu_seqlens_q=cu_q,
+        cu_seqlens_kv=cu_kv,
+        max_seqlen_q=max_q,
+        max_seqlen_kv=max_kv,
+        cross_seqlen=True,
+        block_table=kv_cache["block_table"],
+        seqlen_k=kv_cache["seqlen_k"],
+        kv_cache_layout="linear",
+        bias=bias,
+    )
+    torch.cuda.synchronize()
+
+    for b, n in enumerate(skv):
+        s0, s1 = int(cu_q[b]), int(cu_q[b + 1])
+        kb, vb = _logical_kv_from_pages(
+            kv_cache["k_cache"][_page_ids_for_batch(kv_cache, b)],
+            kv_cache["v_cache"][_page_ids_for_batch(kv_cache, b)],
+            "linear",
+            n,
+        )
+        ref = pytorch_ref_attention_qkv_diff(
+            q[s0:s1].unsqueeze(0).float(),
+            kb.unsqueeze(0).float(),
+            vb.unsqueeze(0).float(),
+            causal=causal,
+            bias=bias[s0:s1, :n],
+        ).squeeze(0)
+        _, _, passed = _acc_metric(out[s0:s1].float().reshape(-1), ref.float().reshape(-1), D)
+        assert passed, f"varlen paged batch {b} (Sq={sq[b]}, Skv={n}, causal={causal}) does not match"
+
+
+# ── attention bias: addressing limits ────────────────────────────────────────
+#
+# The kernel computes bias element offsets as `row * stride + column` in signed
+# i32 and describes the bias with a 32-bit-num_records buffer descriptor. A bias
+# past either limit is unrepresentable, so it must be rejected up front instead
+# of silently reading the wrong rows.
+
+# 2^31 elements at row 32768, and 4,295,098,368 bytes: over both limits at once.
+_OVERSIZED_BIAS_SHAPE = (32769, 65536)
+_OVERSIZED_BIAS_MATCH = "i32 bias element offsets"
+
+
+def _unbacked_bias(rows, cols, dtype=torch.bfloat16):
+    """A [rows, cols] bias with zero-stride storage: shape without the allocation."""
+    return torch.zeros(1, 1, dtype=dtype, device="cuda").expand(rows, cols)
+
+
+@pytest.mark.parametrize(
+    "rows,cols,elem_size,expect",
+    [
+        # The i32 element offset is the binding limit for the 2-byte bias dtypes.
+        (*_OVERSIZED_BIAS_SHAPE, 2, "i32 bias element offsets"),
+        (BIAS_MAX_OFFSET_ELEMS + 1, 1, 2, "i32 bias element offsets"),
+        (BIAS_MAX_OFFSET_ELEMS, 1, 2, None),  # exactly at the limit still fits
+        (46340, 46340, 2, None),  # ~4 GiB, the largest square bias that fits
+        (65536, 32768, 2, "i32 bias element offsets"),  # exactly 2^31 elements: one over
+        # A 4-byte element trips the descriptor limit while the offset still fits.
+        (BIAS_MAX_OFFSET_ELEMS, 1, 4, "bias buffer descriptor"),
+        (BIAS_MAX_DESCRIPTOR_BYTES // 4, 1, 4, None),
+    ],
+)
+def test_bias_addressing_error_limits(rows, cols, elem_size, expect):
+    why = bias_addressing_error(rows * cols, elem_size)
+    if expect is None:
+        assert why is None, f"bias {rows}x{cols} ({elem_size}B) should fit, got: {why}"
+    else:
+        assert why is not None, f"bias {rows}x{cols} ({elem_size}B) should be rejected"
+        assert expect in why, f"unexpected reason for {rows}x{cols} ({elem_size}B): {why}"
+
+
+def test_bias_dense_rejects_unaddressable():
+    dtype = torch.bfloat16
+    B, S, H, D = 1, 128, 4, 128
+    q = torch.zeros(B, S, H, D, dtype=dtype, device="cuda")
+    bias = _unbacked_bias(*_OVERSIZED_BIAS_SHAPE, dtype=dtype)
+    with pytest.raises(ValueError, match=_OVERSIZED_BIAS_MATCH):
+        flydsl_flash_attn_func(q, q.clone(), q.clone(), causal=False, num_kv_heads=H, bias=bias)
+
+
+def test_bias_varlen_rejects_unaddressable():
+    dtype = torch.bfloat16
+    seqs = [128, 128]
+    total, max_s = sum(seqs), max(seqs)
+    H, Hkv, D = 4, 4, 128
+    cu = torch.tensor([0, seqs[0], total], dtype=torch.int32, device="cuda")
+    q = torch.zeros(total, H, D, dtype=dtype, device="cuda")
+    kv = torch.zeros(total, Hkv, D, dtype=dtype, device="cuda")
+    bias = _unbacked_bias(*_OVERSIZED_BIAS_SHAPE, dtype=dtype)
+    with pytest.raises(ValueError, match=_OVERSIZED_BIAS_MATCH):
+        flydsl_flash_attn_func(
+            q,
+            kv,
+            kv.clone(),
+            causal=False,
+            num_kv_heads=Hkv,
+            cu_seqlens_q=cu,
+            cu_seqlens_kv=cu,
+            max_seqlen_q=max_s,
+            max_seqlen_kv=max_s,
+            cross_seqlen=False,
+            bias=bias,
+        )
+
+
+@_requires_gfx950
+def test_bias_varlen_self_attn_rejects_narrow_bias():
+    """Varlen self-attention bounds bias columns by max_seqlen_q, not max_seqlen_kv.
+
+    max_seqlen_kv is legitimately None when cross_seqlen=False, so a too-narrow
+    bias used to pass validation: the kernel then indexes key column j with
+    bias_stride0 = bias.shape[1], reading the following bias rows instead of failing.
+    """
+    dtype = torch.bfloat16
+    seqs = [512, 384]
+    total, max_s = sum(seqs), max(seqs)
+    H, Hkv, D = 8, 4, 128
+    setup_seed(DEFAULT_SEED)
+    cu = torch.tensor([0, seqs[0], total], dtype=torch.int32, device="cuda")
+    q = torch.empty(total, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    k = torch.empty(total, Hkv, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    v = torch.empty(total, Hkv, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    self_attn_kw = dict(
+        causal=False,
+        num_kv_heads=Hkv,
+        cu_seqlens_q=cu,
+        cu_seqlens_kv=cu,
+        max_seqlen_q=max_s,
+        cross_seqlen=False,
+    )
+
+    for cols in (1, max_s - 1):
+        narrow = torch.zeros(total, cols, dtype=dtype, device="cuda")
+        with pytest.raises(ValueError, match="self-attention KV maximum"):
+            flydsl_flash_attn_func(q, k, v, bias=narrow, **self_attn_kw)
+
+    # A bias exactly at the bound still runs, and matches the per-batch reference.
+    bias = torch.empty(total, max_s, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    out = flydsl_flash_attn_func(q, k, v, bias=bias, **self_attn_kw)
+    torch.cuda.synchronize()
+    for b, n in enumerate(seqs):
+        s0, s1 = int(cu[b]), int(cu[b + 1])
+        ref = pytorch_ref_attention(
+            q[s0:s1].unsqueeze(0).float(),
+            k[s0:s1].unsqueeze(0).float(),
+            v[s0:s1].unsqueeze(0).float(),
+            causal=False,
+            bias=bias[s0:s1, :n],
+        ).squeeze(0)
+        _, _, passed = _acc_metric(out[s0:s1].float().reshape(-1), ref.float().reshape(-1), D)
+        assert passed, f"varlen self-attention batch {b} (seqlen {n}) does not match the biased reference"
+
+
+def test_bias_paged_rejects_unaddressable():
+    dtype = torch.bfloat16
+    B, Sq, H, Hkv, D = 1, 128, 4, 4, 128
+    q = torch.zeros(B, Sq, H, D, dtype=dtype, device="cuda")
+    kv_cache = _build_paged_kv_for_test(B, Sq, 64, Hkv, D, [Sq], dtype, "cuda", "linear")
+    bias = _unbacked_bias(*_OVERSIZED_BIAS_SHAPE, dtype=dtype)
+    with pytest.raises(ValueError, match=_OVERSIZED_BIAS_MATCH):
+        flydsl_flash_attn_func(
+            q,
+            kv_cache["k_cache"],
+            kv_cache["v_cache"],
+            causal=True,
+            num_kv_heads=Hkv,
+            max_seqlen_kv=Sq,
+            block_table=kv_cache["block_table"],
+            seqlen_k=kv_cache["seqlen_k"],
+            kv_cache_layout="linear",
+            bias=bias,
+        )
+
+
+def test_precompute_paged_bias_reaches_inputs_and_reference():
+    """`--block-table --bias` must generate a bias AND fold it into the reference.
+
+    The helper used to ignore use_bias, so the paged benchmark ran unbiased and
+    compared against an unbiased reference: a PASS that measured nothing.
+    """
+    kw = dict(
+        batch=1,
+        seqlen_q=256,
+        seqlen_kv=None,
+        varlen_seqlens_q=None,
+        varlen_seqlens_kv=None,
+        num_heads=4,
+        head_dim=128,
+        num_kv_heads=4,
+        dtype=torch.bfloat16,
+        causal=False,
+        seed=DEFAULT_SEED,
+        page_size=64,
+        kv_cache_layout="linear",
+    )
+    biased_inputs, biased_ref, biased_status = _precompute_paged_kv_inputs_and_ref(**kw, use_bias=True)
+    plain_inputs, plain_ref, plain_status = _precompute_paged_kv_inputs_and_ref(**kw)
+    assert biased_status is None and plain_status is None
+    assert biased_inputs["bias"] is not None, "use_bias=True must generate a paged bias"
+    assert plain_inputs["bias"] is None, "use_bias defaults to no bias"
+
+    # The bias is drawn after Q/K/V, so the same seed leaves the inputs identical
+    # and any reference difference is the bias alone.
+    for key in ("q_t", "k_t", "v_t"):
+        assert torch.equal(biased_inputs[key], plain_inputs[key]), f"{key} must not depend on use_bias"
+    assert (
+        biased_ref.float() - plain_ref.float()
+    ).abs().max().item() > 1e-2, "the paged reference must fold in the generated bias"
+
+
+@_requires_gfx950
+def test_bias_launcher_rejects_unaddressable():
+    """The kernel launcher guards too, for callers that bypass flydsl_flash_attn_func.
+
+    The guard also has to fire before the launcher's ``bias.contiguous()``, which
+    would otherwise materialize gigabytes on the way to a guaranteed failure.
+    """
+    dtype = torch.bfloat16
+    B, S, H, D = 1, 384, 4, 128
+    launch = build_flash_attn_dualwave_swp_module(num_heads=H, head_dim=D, causal=False, has_bias=True)
+    q, k, v, o = (torch.zeros(B, S, H, D, dtype=dtype, device="cuda") for _ in range(4))
+    bias = _unbacked_bias(*_OVERSIZED_BIAS_SHAPE, dtype=dtype)
+    free_before = torch.cuda.mem_get_info()[0]
+    with pytest.raises(ValueError, match=_OVERSIZED_BIAS_MATCH):
+        launch(q, k, v, o, B, S, bias=bias)
+    assert torch.cuda.mem_get_info()[0] > free_before - 2**30, "rejected bias must not be materialized"
 
 
 # ── ALiBi ────────────────────────────────────────────────────────────────────
@@ -4135,3 +4446,38 @@ def test_sink_splitk_counted_once(num_kv_splits):
     # A sink counted once per split would shift LSE by ~ln(num_kv_splits); assert
     # we are nowhere near that, so the test cannot pass on a double-count.
     assert (lsek - lse1).abs().max().item() < 0.5 * math.log(num_kv_splits)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("Sq,Skv", [(512, 128), (512, 160)])
+def test_sink_lse_cross_attn_skipped_blocks(Sq, Skv):
+    """Causal cross-attention with Skv < Sq skips whole q blocks that see no key.
+
+    A skipped block never reaches the main body's fold_sink, so the skip path has
+    to write those rows' LSE itself: it is the per-head sink, not -inf and not
+    whatever the caller's output buffer happened to hold. Skv=160 also puts some
+    all-masked rows inside an active block, covering both paths at once.
+    """
+    dtype = torch.bfloat16
+    B, H, D = 2, 8, 128
+    setup_seed(DEFAULT_SEED)
+    q = torch.empty(B, Sq, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    k = torch.empty(B, Skv, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    v = torch.empty(B, Skv, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    sink = _sink_for(q, k, True)
+
+    out, lse = flydsl_flash_attn_func(q, k, v, causal=True, sink=sink, return_lse=True)
+    torch.cuda.synchronize()
+
+    # Sink-inclusive LSE = ln(exp(LSE_no_sink) + exp(sink)); -inf rows collapse to sink.
+    lse_ref_ns = _reference_lse(q, k, True, H)  # B, H, Sq
+    assert bool((~torch.isfinite(lse_ref_ns)).any()), "test setup should produce fully-masked q rows"
+    lse_ref = torch.logaddexp(lse_ref_ns, sink.view(1, H, 1).expand_as(lse_ref_ns))
+    diff = (lse.float() - lse_ref).abs().max().item()
+    assert diff <= _ATOL_BF16, f"sink-inclusive LSE max abs diff {diff:.3e} exceeds atol {_ATOL_BF16:.3e}"
+
+    # The all-masked rows are the regression: their whole denominator is the sink.
+    n_masked = Sq - Skv
+    masked_lse = lse[:, :, :n_masked].float()
+    assert (masked_lse - sink.view(1, H, 1)).abs().max().item() <= 1e-4, "all-masked rows must carry the sink LSE"
+    assert out[:, :n_masked].abs().max().item() == 0.0, "all-masked rows must have zero output"

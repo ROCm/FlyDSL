@@ -59,6 +59,7 @@ from kernels.attention.flash_attn_utils import (
     _v_pair_to_vec32,
     _v_vec32_to_pair,
     _waitcnt_vm_n,
+    bias_addressing_error,
 )
 from kernels.common.kernels_common import dtype_to_elem_type
 
@@ -365,7 +366,7 @@ def build_flash_attn_dualwave_swp_module(
 
             return Vec.from_elements(out, fx.Float32)
 
-        def qk_scored(v_k, q_all_scaled_bf16, tile_idx, buf=0, bias_vmcnt=_BIAS_VMCNT):
+        def qk_scored(v_k, q_all_scaled_bf16, tile_idx, buf=0, bias_vmcnt=_BIAS_VMCNT, prefetch_next=True):
             if const_expr(not (HAS_BIAS or HAS_ALIBI)):
                 return gemm_helper.qk(v_k, q_all_scaled_bf16)
             v_s_lo, v_s_hi = gemm_helper.qk(v_k, q_all_scaled_bf16)
@@ -376,8 +377,10 @@ def build_flash_attn_dualwave_swp_module(
                 _score_bias_half(v_s_hi, tile_idx, 1, buf),
             )
             if const_expr(HAS_BIAS):
-                # Issued after the reads so it is not part of the batch they wait on.
-                _issue_bias_dma(tile_idx + fx.Index(1), 1 - buf)
+                if const_expr(prefetch_next):
+                    _issue_bias_dma(tile_idx + fx.Index(1), 1 - buf)
+                else:
+                    _sched_barrier(0)
             return scored
 
         def _main_body():
@@ -799,7 +802,7 @@ def build_flash_attn_dualwave_swp_module(
             _dualwave_sync_barrier()
 
             # Epilogue C9 computes the last-tile MMA0, folds rescale_e7 into l_row, and finishes v_p_0.
-            v_s_1 = qk_scored(v_k, q_all_scaled_bf16, max_m1, buf=1, bias_vmcnt=_BIAS_VMCNT_NO_K)
+            v_s_1 = qk_scored(v_k, q_all_scaled_bf16, max_m1, buf=1, bias_vmcnt=_BIAS_VMCNT_NO_K, prefetch_next=False)
             l_row = softmax_helper.apply_l_rescale(l_row, rescale_e7)
             v_p_0 = softmax_helper.exp2(v_p_0, 16, 16)
             l_row = softmax_helper.reduce_sum(l_row, v_p_0)
@@ -873,7 +876,9 @@ def build_flash_attn_dualwave_swp_module(
                 output_store.store_splitk_partial_o(v_o, m_row, l_row, ctx.q_row)
 
         if const_expr(traits.CAUSAL and traits.CROSS_SEQLEN and not traits.SPLITK):
-            output_store.zero_o_block_if_needed()
+            output_store.zero_o_block_if_needed(
+                sink_log2=_load_sink_log2() if const_expr(HAS_SINK and traits.RETURN_LSE) else None
+            )
 
         if active is None:
             _main_body()
@@ -1017,6 +1022,24 @@ def build_flash_attn_dualwave_swp_module(
         },
     }
 
+    def _prep_bias(bias, bias_stride0, placeholder):
+        if bias is None:
+            if HAS_BIAS:
+                raise ValueError(
+                    "flash_attn_dualwave_swp was built with has_bias=True but no `bias` tensor was "
+                    "provided; pass a [total_q, max_seqlen_kv] bias (varlen) or a "
+                    "[seq_len, seq_len_kv] bias (dense), with the same dtype as q."
+                )
+            return placeholder, 0
+        if HAS_BIAS:
+            bias_err = bias_addressing_error(bias.numel(), bias.element_size())
+            if bias_err is not None:
+                raise ValueError(f"flash_attn_dualwave_swp: bias {tuple(bias.shape)} {bias_err}")
+        bias = bias.contiguous()
+        if bias_stride0 is None:
+            bias_stride0 = bias.stride(0)
+        return bias.view(-1), bias_stride0
+
     def _prep_alibi(alibi_slopes, placeholder):
         if alibi_slopes is None:
             if HAS_ALIBI:
@@ -1126,20 +1149,7 @@ def build_flash_attn_dualwave_swp_module(
             block_table = O
         if block_table_stride is None:
             block_table_stride = 0
-        if bias is None:
-            if HAS_BIAS:
-                raise ValueError(
-                    "flash_attn_dualwave_swp was built with has_bias=True but no `bias` tensor was "
-                    "provided; pass a [total_q, max_seqlen_kv] bias (varlen) or a "
-                    "[seq_len, seq_len_kv] bias (dense), with the same dtype as q."
-                )
-            bias = O
-            bias_stride0 = 0
-        else:
-            bias = bias.contiguous()
-            if bias_stride0 is None:
-                bias_stride0 = bias.stride(0)
-            bias = bias.view(-1)
+        bias, bias_stride0 = _prep_bias(bias, bias_stride0, O)
         alibi_slopes, alibi_stride_b = _prep_alibi(alibi_slopes, O)
         sink = _prep_sink(sink, O)
         with CompilationContext.compile_hints(_dualwave_swp_compile_hints):
@@ -1246,20 +1256,7 @@ def build_flash_attn_dualwave_swp_module(
         if block_table_stride is None:
             block_table_stride = 0
 
-        if bias is None:
-            if HAS_BIAS:
-                raise ValueError(
-                    "flash_attn_dualwave_swp was built with has_bias=True but no `bias` tensor was "
-                    "provided; pass a [total_q, max_seqlen_kv] bias (varlen) or a "
-                    "[seq_len, seq_len_kv] bias (dense), with the same dtype as q."
-                )
-            bias = O
-            bias_stride0 = 0
-        else:
-            bias = bias.contiguous()
-            if bias_stride0 is None:
-                bias_stride0 = bias.stride(0)
-            bias = bias.view(-1)
+        bias, bias_stride0 = _prep_bias(bias, bias_stride0, O)
         alibi_slopes, alibi_stride_b = _prep_alibi(alibi_slopes, O)
         sink = _prep_sink(sink, O)
         with CompilationContext.compile_hints(_dualwave_swp_compile_hints):
