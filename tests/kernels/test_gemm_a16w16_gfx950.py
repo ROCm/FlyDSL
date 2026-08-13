@@ -112,17 +112,13 @@ def create_outputs(args: _TestArgs):
 
 def ref_func(*args):
     a, b, bias, c, _layout = args
-    if c.dtype == a.dtype:
-        if bias is None:
-            torch.mm(a, b, out=c)
-        else:
-            torch.addmm(bias, a, b, out=c)
-    else:
-        if bias is None:
-            ref = torch.mm(a.float(), b.float())
-        else:
-            ref = torch.addmm(bias.float(), a.float(), b.float())
-        c.copy_(ref)
+    a_ref = a if c.dtype == a.dtype else a.float()
+    b_ref = b if c.dtype == b.dtype else b.float()
+    ref = torch.mm(a_ref, b_ref)
+    if bias is not None:
+        bias_ref = bias if ref.dtype == bias.dtype else bias.float()
+        ref.add_(bias_ref)
+    c.copy_(ref)
 
 
 def make_triton_maxautotune_func():
