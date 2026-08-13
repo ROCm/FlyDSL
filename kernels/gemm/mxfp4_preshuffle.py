@@ -326,12 +326,12 @@ def launch_gemm(
             for ni in range_constexpr(num_acc_n):
                 for kh in range_constexpr(k_halves):
                     lo = fx.make_rmem_tensor(4, Int32)
-                    fx.copy_atom_call(b_copy, bq_views[ni][lane_div_16, lane_mod_16, kt, kh, 0, None], lo)
+                    fx.copy(b_copy, bq_views[ni][lane_div_16, lane_mod_16, kt, kh, 0, None], lo)
                     if const_expr(b_dtype == "fp4"):
                         ops.append(lo)
                     else:  # fp8: lo ++ hi -> i32[B_NDW]
                         hi = fx.make_rmem_tensor(4, Int32)
-                        fx.copy_atom_call(b_copy, bq_views[ni][lane_div_16, lane_mod_16, kt, kh, 1, None], hi)
+                        fx.copy(b_copy, bq_views[ni][lane_div_16, lane_mod_16, kt, kh, 1, None], hi)
                         t = fx.make_rmem_tensor(B_NDW, Int32)
                         t.store(Vec(fx.memref_load_vec(lo)).shuffle(Vec(fx.memref_load_vec(hi)), list(range(B_NDW))))
                         ops.append(t)

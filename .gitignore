@@ -39,7 +39,6 @@ lib/python*/site-packages/
 .vscode/
 .cursor/
 .idea/
-.claude/
 *.swp
 *.swo
 *~
@@ -65,6 +64,7 @@ Thumbs.db
 # Sphinx documentation build
 docs/_build/
 python/flydsl/_mlir
+_toc.yml
 
 # Benchmark/accuracy CSVs emitted by tests/kernels harnesses
 fmha_perf_*.csv

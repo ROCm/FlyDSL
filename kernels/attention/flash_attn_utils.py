@@ -31,6 +31,9 @@ from kernels.common import buffer_ops
 from kernels.common.kernels_common import dtype_to_elem_type
 
 _LOG2E = host_math.log2(host_math.e)
+# gfx950 (MI350/MI355X): 8 XCDs, each with a private ~4 MB L2.
+NUM_XCD_GFX950 = 8
+MIN_Q_BLOCKS_XCD_SWIZZLE = 64
 # s_waitcnt bitfield encoding
 _VMCNT_LO_MASK = 0xF
 _LGKMCNT_EXPCNT_BASE = 0x3F70
@@ -408,7 +411,9 @@ def _score_pair_max(v_s, neg_inf, fm_fast):
 
 
 def _score_pair_sum(v_s, zero_f, fm_fast):
-    return _lane_pair_reduce(_reduce_score_pair(v_s, zero_f, _fadd, fm_fast), _fadd, fm_fast)
+    s_lo, s_hi = _score_lists_to_vecs(v_s)
+    tile = Vec(s_lo) + Vec(s_hi)
+    return _lane_pair_reduce(tile.reduce("add", init_val=zero_f, fastmath=fm_fast), _fadd, fm_fast)
 
 
 def _sub_score_pair(v_s, row_max, fm_fast):
@@ -433,9 +438,11 @@ def _scale_sub_score_pair(v_s, row_max_raw, scale, zero_f, fm_fast):
     """
     s_lo, s_hi = v_s
     neg_scaled_max = _fsub(zero_f, _fmul(scale, row_max_raw, fm_fast), fm_fast)
-    lo = [fmath.fma(s_lo[r], scale, neg_scaled_max, fastmath=fm_fast) for r in range_constexpr(16)]
-    hi = [fmath.fma(s_hi[r], scale, neg_scaled_max, fastmath=fm_fast) for r in range_constexpr(16)]
-    return Vec.from_elements(lo, fx.Float32).ir_value(), Vec.from_elements(hi, fx.Float32).ir_value()
+    scale_v = Vec.from_elements([scale], fx.Float32).broadcast_to(16)
+    nsm_v = Vec.from_elements([neg_scaled_max], fx.Float32).broadcast_to(16)
+    lo = fmath.fma(Vec(s_lo), scale_v, nsm_v, fastmath=fm_fast)
+    hi = fmath.fma(Vec(s_hi), scale_v, nsm_v, fastmath=fm_fast)
+    return as_mlir_value(lo), as_mlir_value(hi)
 
 
 def _exp2_score_slice(v_s, start, length):
@@ -910,8 +917,22 @@ def _init_dualwave_thread_mapping(ctx):
 
     Shared verbatim by DualwaveKernelContext and DualwaveFp8KernelContext."""
     traits = ctx.traits
-    ctx.h_idx = fx.Index(gpu.block_idx.x)
-    ctx.q_block_idx = fx.Index(gpu.block_idx.y)
+    # Swizzled Head-first Mapping (arXiv:2511.02132): the grid is head-fast, so one
+    # head's q-blocks scatter across all XCDs and each re-streams its K/V. Re-derive
+    # (head, q_block) with head as the slow axis to keep them on one XCD. Bijective,
+    # so output is bit-identical; split-K's third grid axis would not survive it.
+    # Non-causal only: under a causal mask q-block i does work proportional to i, so
+    # making q_block the fast axis clusters unequal work and costs 7% (measured).
+    if const_expr(
+        traits.XCD_SWIZZLE and not traits.SPLITK and not traits.CAUSAL and traits.NUM_HEADS_Q % NUM_XCD_GFX950 == 0
+    ):
+        num_q_blocks = fx.Index(gpu.grid_dim.y)
+        linear_wg = fx.Index(gpu.block_idx.x) + fx.Index(gpu.block_idx.y) * fx.Index(traits.NUM_HEADS_Q)
+        ctx.h_idx = linear_wg // num_q_blocks
+        ctx.q_block_idx = linear_wg % num_q_blocks
+    else:
+        ctx.h_idx = fx.Index(gpu.block_idx.x)
+        ctx.q_block_idx = fx.Index(gpu.block_idx.y)
     if const_expr(traits.SPLITK):
         ctx.bz_idx = fx.Index(gpu.block_idx.z)
         ctx.batch_idx = ctx.bz_idx // traits.NUM_KV_SPLITS
@@ -1473,6 +1494,7 @@ class DualwaveSwpTraits:
     NEG_INF_F32_BITS: int
     LGKMCNT_0_ONLY: int
     RETURN_LSE: bool = False
+    XCD_SWIZZLE: bool = False
 
     @property
     def cache_tag(self):
@@ -1496,6 +1518,7 @@ class DualwaveSwpTraits:
             self.KV_CACHE_LAYOUT,
             self.KV_VECTORIZED,
             self.RETURN_LSE,
+            self.XCD_SWIZZLE,
         )
 
 
@@ -1518,6 +1541,7 @@ def _make_dualwave_swp_traits(
     kv_cache_layout="linear",
     kv_vectorized=None,
     return_lse=False,
+    xcd_swizzle=False,
 ):
     """Build gfx950 DUALWAVE_SWP compile-time layout traits."""
     # Tile shape and wave geometry follow the gfx950 dual-wave 8-wave CTA.
@@ -1668,6 +1692,7 @@ def _make_dualwave_swp_traits(
         NEG_INF_F32_BITS=0xFF800000,
         LGKMCNT_0_ONLY=0xC07F,
         RETURN_LSE=bool(return_lse),
+        XCD_SWIZZLE=bool(xcd_swizzle),
     )
 
 
@@ -1753,6 +1778,7 @@ class DualwaveSwpFp8Traits:
     LDS_SCOPE_NAMES: tuple[str, str, str, str]
     NEG_INF_F32_BITS: int
     LGKMCNT_0_ONLY: int
+    XCD_SWIZZLE: bool = False
 
     @property
     def cache_tag(self):
@@ -1785,6 +1811,7 @@ class DualwaveSwpFp8Traits:
             self.BN128_PF,
             self.QREG,
             self.VDMA,
+            self.XCD_SWIZZLE,
         )
 
 
@@ -1802,6 +1829,7 @@ def _make_dualwave_swp_fp8_traits(
     num_kv_splits=1,
     varlen=False,
     cross_seqlen=False,
+    xcd_swizzle=False,
 ):
     """Build gfx950 DUALWAVE_SWP fp8 compile-time layout traits (dtype fixed to fp8)."""
     # Tile shape and wave geometry follow the gfx950 dual-wave 8-wave CTA.
@@ -1949,6 +1977,7 @@ def _make_dualwave_swp_fp8_traits(
         LDS_SCOPE_NAMES=("lds_k0", "lds_k1", "lds_v0", "lds_v1"),
         NEG_INF_F32_BITS=0xFF800000,
         LGKMCNT_0_ONLY=0xC07F,
+        XCD_SWIZZLE=bool(xcd_swizzle),
     )
 
 
@@ -3314,10 +3343,10 @@ class DualwaveKernelContext:
         lds = fx.SharedAllocator().allocate(shared_storage).peek()
         self.lds = lds
         self.lds_kv_base_idx = fx.Index(fx.ptrtoint(lds.kv.ptr))
-        self.lds_kv_base_ptr = buffer_ops.create_llvm_ptr(self.lds_kv_base_idx, address_space=3)
+        self.lds_kv_base_ptr = lds.kv.ptr.llvm_ptr
         if const_expr(self.traits.PAGED):
             self.lds_bt_base_idx = fx.Index(fx.ptrtoint(lds.bt.ptr))
-            self.lds_bt_base_ptr = buffer_ops.create_llvm_ptr(self.lds_bt_base_idx, address_space=3)
+            self.lds_bt_base_ptr = lds.bt.ptr.llvm_ptr
         else:
             self.lds_bt_base_ptr = None
 
@@ -4402,11 +4431,11 @@ class DualwaveFp8KernelContext:
         lds = fx.SharedAllocator().allocate(shared_storage).peek()
         self.lds = lds
         self.lds_kv_base_idx = fx.Index(fx.ptrtoint(lds.kv.ptr))
-        self.lds_kv_base_ptr = buffer_ops.create_llvm_ptr(self.lds_kv_base_idx, address_space=3)
+        self.lds_kv_base_ptr = lds.kv.ptr.llvm_ptr
         self.lds_vt_base_idx = fx.Index(fx.ptrtoint(lds.vt.ptr))
-        self.lds_vt_base_ptr = buffer_ops.create_llvm_ptr(self.lds_vt_base_idx, address_space=3)
+        self.lds_vt_base_ptr = lds.vt.ptr.llvm_ptr
         self.lds_q_base_idx = fx.Index(fx.ptrtoint(lds.q.ptr))
-        self.lds_q_base_ptr = buffer_ops.create_llvm_ptr(self.lds_q_base_idx, address_space=3)
+        self.lds_q_base_ptr = lds.q.ptr.llvm_ptr
 
     def init_thread_mapping(self):
         _init_dualwave_thread_mapping(self)
@@ -4651,16 +4680,18 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
         # Wide fp8 QK: mfma_scale (32x32x64) with unit E8M0 scales, i32x8 operands.
         return rocdl.mfma_scale_f32_32x32x64_f8f6f4(
             self.v16f32_type,
-            as_mlir_value(a_i32x8),
-            as_mlir_value(b_i32x8),
-            as_mlir_value(c_v16),
-            0,
-            0,
-            0,
-            as_mlir_value(fx.Int32(0x7F7F7F7F)),
-            0,
-            as_mlir_value(fx.Int32(0x7F7F7F7F)),
-        ).result
+            [
+                as_mlir_value(a_i32x8),
+                as_mlir_value(b_i32x8),
+                as_mlir_value(c_v16),
+                0,
+                0,
+                0,
+                as_mlir_value(fx.Int32(0x7F7F7F7F)),
+                0,
+                as_mlir_value(fx.Int32(0x7F7F7F7F)),
+            ],
+        )
 
     def _mfma_acc_bf16(self, a_v8, b_v8, c_v16):
         return fly.mma_atom_call_ssa([self.v16f32_type], self.bf16_mma_atom, a_v8, b_v8, c_v16)
@@ -4670,7 +4701,7 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
         return [f32[i] for i in range_constexpr(8)]
 
     def _pack_fp8_i32x8(self, f32_vals):
-        c0 = as_mlir_value(fx.Int32(0))
+        c0 = llvm.mlir_poison(T.i32)
         words = []
         for g in range_constexpr(8):
             base = g * 4
