@@ -1,11 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-08-13T16:49:27Z",
+ "updated": "2026-08-13T18:39:24Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 31712148880,
+   "run_id": 31723810762,
    "pr": 960,
+   "commit": "1a5d018b7062d71a5640d91cbe14e72f23b00a92",
+   "branch": "new_bias_alibi_sink_attention",
+   "event": "pull_request",
+   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31723810762",
+   "created_at": "2026-08-13T17:03:41Z",
+   "updated_at": "2026-08-13T17:32:02Z",
+   "actor": "amd-nprotaso",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T17:31:47Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31723810762/job/94534594754"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-13T17:31:29Z",
+     "completed_at": "2026-08-13T17:49:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31723810762/job/94534594797"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T17:32:01Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31723810762/job/94534594869"
+    }
+   ]
+  },
+  {
+   "run_id": 31712148880,
+   "pr": null,
    "commit": "44fc566667c3a07e4f55a7b06bcbe6fed7684fa8",
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
@@ -1827,21 +1870,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492517857/job/93801446435"
     }
    ]
-  },
-  {
-   "run_id": 31492166321,
-   "pr": null,
-   "commit": "8bd4c5355150010507c31a4e49c6aaa8fd64bd4d",
-   "branch": "main",
-   "event": "push",
-   "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel (#992)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492166321",
-   "created_at": "2026-08-11T12:38:05Z",
-   "updated_at": "2026-08-11T12:42:31Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
