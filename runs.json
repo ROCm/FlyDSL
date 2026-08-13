@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-13T08:00:29Z",
+ "updated": "2026-08-13T08:25:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31681364265,
+   "pr": null,
+   "commit": "ac227c35029d2008282cbf035caa5923b769d37e",
+   "branch": "main",
+   "event": "push",
+   "title": "Fix GitHub Pages docs deployment (#1006)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31681364265",
+   "created_at": "2026-08-13T08:16:53Z",
+   "updated_at": "2026-08-13T08:18:12Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 31681184248,
+   "pr": 1006,
+   "commit": "ba198a476cdcf302cff4908ba246f6d8570b5533",
+   "branch": "fix-docs-pages-deploy",
+   "event": "pull_request",
+   "title": "Fix GitHub Pages docs deployment",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31681184248",
+   "created_at": "2026-08-13T08:14:22Z",
+   "updated_at": "2026-08-13T08:15:48Z",
+   "actor": "gyohuangxin",
+   "jobs": []
+  },
   {
    "run_id": 31676223615,
    "pr": 995,
@@ -10,11 +40,11 @@
    "branch": "feature/typed-arithmetic-modernization",
    "event": "pull_request",
    "title": "[Feat] Add type-aware extrema and integer ceiling division",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31676223615",
    "created_at": "2026-08-13T07:03:38Z",
-   "updated_at": "2026-08-13T07:05:20Z",
+   "updated_at": "2026-08-13T08:11:52Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -25,13 +55,41 @@
    "branch": "dsl-ify-arith",
    "event": "pull_request",
    "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31674712052",
    "created_at": "2026-08-13T06:40:23Z",
-   "updated_at": "2026-08-13T07:03:26Z",
+   "updated_at": "2026-08-13T08:10:46Z",
    "actor": "xudoyuan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T08:11:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31674712052/job/94385924471"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T08:11:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31674712052/job/94385924534"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-13T08:10:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31674712052/job/94385924557"
+    }
+   ]
   },
   {
    "run_id": 31674648878,
@@ -55,11 +113,11 @@
    "branch": "pr/docs-composite-storage",
    "event": "pull_request",
    "title": "[Docs] Elaboration for composite type and storage",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31673258278",
    "created_at": "2026-08-13T06:16:52Z",
-   "updated_at": "2026-08-13T07:01:45Z",
+   "updated_at": "2026-08-13T07:59:15Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -74,9 +132,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-13T07:01:45Z",
+     "started_at": "2026-08-13T07:59:14Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31673258278/job/94370887954"
     },
@@ -242,20 +300,20 @@
    "branch": "feat/rdna3-gemm-tile-autotune",
    "event": "pull_request",
    "title": "[Perf] Choose the RDNA3 GEMM tile from the shape",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31665169196",
    "created_at": "2026-08-13T03:51:15Z",
-   "updated_at": "2026-08-13T06:27:49Z",
+   "updated_at": "2026-08-13T08:23:38Z",
    "actor": "vlluvia",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-13T06:27:49Z",
-     "completed_at": null,
+     "completed_at": "2026-08-13T08:23:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31665169196/job/94361473079"
     },
     {
@@ -1637,92 +1695,6 @@
    "updated_at": "2026-08-11T12:23:51Z",
    "actor": "vlluvia",
    "jobs": []
-  },
-  {
-   "run_id": 31473689119,
-   "pr": null,
-   "commit": "23f87e41c3ec79a55732138031dc493507b544ed",
-   "branch": "xyt/gemm16_950",
-   "event": "pull_request",
-   "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31473689119",
-   "created_at": "2026-08-11T08:32:51Z",
-   "updated_at": "2026-08-11T11:15:18Z",
-   "actor": "xytpai",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-11T11:01:57Z",
-     "completed_at": "2026-08-11T11:14:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31473689119/job/93757660750"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-11T11:09:32Z",
-     "completed_at": "2026-08-11T11:15:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31473689119/job/93757660785"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-11T11:01:57Z",
-     "completed_at": "2026-08-11T11:14:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31473689119/job/93757660805"
-    }
-   ]
-  },
-  {
-   "run_id": 31471176613,
-   "pr": 987,
-   "commit": "586e238f069e0694053f76e30efbdbcf25b9731b",
-   "branch": "jli/fix-lld-issue",
-   "event": "pull_request",
-   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31471176613",
-   "created_at": "2026-08-11T07:58:20Z",
-   "updated_at": "2026-08-11T14:09:37Z",
-   "actor": "Boss2002n",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-11T10:58:36Z",
-     "completed_at": "2026-08-11T11:56:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31471176613/job/93756692833"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-11T12:00:41Z",
-     "completed_at": "2026-08-11T13:32:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31471176613/job/93756692889"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-11T12:26:17Z",
-     "completed_at": "2026-08-11T14:09:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31471176613/job/93756692904"
-    }
-   ]
   }
  ]
 }
