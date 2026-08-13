@@ -294,6 +294,10 @@ def emit_direct_fixed_slot_payload(
     destination_groups = 2
     assert dispatch_blocks % destination_groups == 0, "direct fixed-slot dispatch needs even producer groups"
     producers_per_group = dispatch_blocks // destination_groups
+    completion_cohort = 8
+    completion_cohorts = (
+        producers_per_group + completion_cohort - 1
+    ) // completion_cohort
     producer_group = producer_slot % fx.Int32(destination_groups)
     group_slot = producer_slot // fx.Int32(destination_groups)
     route = group_slot * fx.Int32(num_waves) + warp
@@ -360,14 +364,57 @@ def emit_direct_fixed_slot_payload(
     wait_all()
     fx.barrier()
     if tid == fx.Int32(0):
-        comm_ops.fence_system_release()
-        done = fx.Int32(
-            comm_ops.atomic_add_agent(
-                a_producer_done + fx.Int64(producer_group) * fx.Int64(4), fx.Int32(1)
-            )
+        active_producers = (
+            route_limit + fx.Int32(num_waves - 1)
+        ) // fx.Int32(num_waves)
+        active_producers = (active_producers < fx.Int32(producers_per_group)).select(
+            active_producers, fx.Int32(producers_per_group)
         )
-        if done == fx.Int32(producers_per_group - 1):
-            comm_ops.fence_agent_acquire()
+        producer_active = group_slot < active_producers
+        if producer_active:
+            comm_ops.store_i32_system(
+                a_producer_done, producer_slot, expected
+            )
+        cohort = group_slot // fx.Int32(completion_cohort)
+        cohort_leader = producer_active & (
+            group_slot == cohort * fx.Int32(completion_cohort)
+        )
+        if cohort_leader:
+            for member in range_constexpr(completion_cohort):
+                member_group_slot = (
+                    cohort * fx.Int32(completion_cohort) + fx.Int32(member)
+                )
+                if member_group_slot < active_producers:
+                    member_slot = (
+                        producer_group
+                        + member_group_slot * fx.Int32(destination_groups)
+                    )
+                    mori_shmem.int32_wait_until_equals(
+                        a_producer_done + fx.Int64(member_slot) * fx.Int64(4),
+                        expected,
+                    )
+            comm_ops.fence_system_acquire()
+            summary_slot = (
+                fx.Int32(dispatch_blocks)
+                + producer_group * fx.Int32(completion_cohorts)
+                + cohort
+            )
+            comm_ops.store_i32_system(a_producer_done, summary_slot, expected)
+        if group_slot == fx.Int32(0):
+            active_cohorts = (
+                active_producers + fx.Int32(completion_cohort - 1)
+            ) // fx.Int32(completion_cohort)
+            for cohort_index in range(fx.Int32(0), active_cohorts, 1):
+                summary_slot = (
+                    fx.Int32(dispatch_blocks)
+                    + producer_group * fx.Int32(completion_cohorts)
+                    + cohort_index
+                )
+                mori_shmem.int32_wait_until_equals(
+                    a_producer_done + fx.Int64(summary_slot) * fx.Int64(4),
+                    expected,
+                )
+            comm_ops.fence_system_acquire()
             done_index = parity * fx.Int32(fz_npes) + fx.Int32(fz_rank)
             for destination in range_constexpr(fz_npes):
                 if producer_group == fx.Int32(destination % destination_groups):

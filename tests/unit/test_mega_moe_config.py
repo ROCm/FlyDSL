@@ -81,10 +81,7 @@ def test_fixed_and_bounded_compact_profiles_remain_specialized():
 
 def test_small_fixed_slot_profiles_use_low_overhead_geometry():
     generic = [select_mega_moe_config(tokens, tokens) for tokens in (1, 4, 8)]
-    tuned = [
-        select_mega_moe_config(tokens, tokens, quant_mode="a8w4smooth")
-        for tokens in (1, 4, 8)
-    ]
+    tuned = [select_mega_moe_config(tokens, tokens, quant_mode="a8w4smooth") for tokens in (1, 4, 8)]
 
     assert [config.stage1.num_dispatch_cu for config in generic] == [64, 128, 128]
     assert [config.stage1.grid_mult for config in generic] == [1, 1, 2]
@@ -175,11 +172,11 @@ def test_m13_token128_int8_uses_validated_tiles_without_p2p_quant(quant_mode):
         (32, (32, 128, 4, 2, 192, 0, 2, 8, False), 0),
         (64, (32, 128, 4, 2, 128, 0, 1, 8, True), 0),
         (128, (32, 128, 4, 2, 192, 0, 2, 8, False), 96),
+        (256, (64, 256, 8, 3, 224, 0, 2, 8, True), 128),
+        (512, (64, 256, 8, 1, 208, 0, 1, 4, True), 240),
     ],
 )
-def test_m13_a8w4smooth_fixed_slot_uses_cudagraph_tuning(
-    tokens, stage1_expected, persist_cu
-):
+def test_m13_a8w4smooth_fixed_slot_uses_cudagraph_tuning(tokens, stage1_expected, persist_cu):
     config = select_mega_moe_config(
         tokens,
         tokens,
@@ -202,6 +199,43 @@ def test_m13_a8w4smooth_fixed_slot_uses_cudagraph_tuning(
         stage1.swizzle_a,
     ) == stage1_expected
     assert config.stage2.persist_cu == persist_cu
+
+
+def test_narrow_int_stage2_residency_tracks_route_pressure():
+    common = dict(
+        experts_per_rank=48,
+        model_dim=3584,
+        inter_dim=1280,
+        quant_mode="a8w4smooth",
+    )
+    token128 = select_mega_moe_config(128, 128, **common)
+    token256 = select_mega_moe_config(256, 256, **common)
+    token512 = select_mega_moe_config(512, 512, **common)
+
+    assert [
+        token128.stage2.persist_cu,
+        token256.stage2.persist_cu,
+        token512.stage2.persist_cu,
+    ] == [96, 128, 240]
+    assert token128.stage2.use_nt and token256.stage2.use_nt
+    assert not token512.stage2.use_nt
+
+
+def test_route_density_not_ep_count_drives_narrow_int_tuning():
+    common = dict(
+        experts_per_rank=48,
+        model_dim=3584,
+        inter_dim=1280,
+        quant_mode="a8w4smooth",
+    )
+    ep8 = select_mega_moe_config(256, 256, world_size=8, **common)
+    ep4 = select_mega_moe_config(256, 256, world_size=4, **common)
+    lower_topk = select_mega_moe_config(256, 256, world_size=8, topk=4, **common)
+
+    assert ep4 == ep8
+    assert lower_topk.stage1 == ep8.stage1
+    assert lower_topk.stage2.persist_cu == 96
+    assert ep8.stage2.persist_cu == 128
 
 
 def test_m13_a8w4smooth_tuning_is_shape_and_quant_specific():
@@ -269,7 +303,7 @@ def test_m13_a8w4smooth_token512_uses_cudagraph_tuning():
         config.stage1.b_nt,
         config.stage1.waves_per_eu_hint,
         config.stage1.work_shards,
-    ) == (64, 256, 8, 1, 224, 0, 1, 8)
+    ) == (64, 256, 8, 1, 208, 0, 1, 4)
 
 
 def test_nearby_tokens_share_the_bucket_config():

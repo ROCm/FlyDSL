@@ -281,8 +281,16 @@ def compile_mega_moe_stage1(
                 _buffer_store(_make_buffer_from_addr(a_work_tail, fx.Int32), fx.Int32(0), fx.Int32(0), fx.Int32)
                 if const_expr(external_grouping or direct_fixed_slot):
                     group_done_rsrc = _make_buffer_from_addr(a_group_done, fx.Int32)
-                    for destination in range_constexpr(fz_npes if direct_fixed_slot else 1):
-                        _buffer_store(group_done_rsrc, fx.Int32(destination), fx.Int32(0), fx.Int32)
+                    # Direct completion slots carry the epoch value and do not
+                    # need a reset. Compact external grouping retains its
+                    # rank-local counter protocol in slot 0.
+                    if const_expr(not direct_fixed_slot):
+                        _buffer_store(
+                            group_done_rsrc,
+                            fx.Int32(0),
+                            fx.Int32(0),
+                            fx.Int32,
+                        )
             fx.barrier()
             if tid == fx.Int32(0):
                 wait_all()
@@ -296,7 +304,10 @@ def compile_mega_moe_stage1(
         else:
             if tid == fx.Int32(0):
                 mori_shmem.int32_wait_until_equals(gate_addr, gate_epoch)
-                comm_ops.fence_agent_acquire()
+                if const_expr(direct_fixed_slot):
+                    comm_ops.fence_system_acquire()
+                else:
+                    comm_ops.fence_agent_acquire()
             fx.barrier()
 
         payload_parity = _buffer_load(parity_rsrc, fx.Int32(0), fx.Int32, cache_modifier=_SC0_CACHE)
@@ -488,7 +499,10 @@ def compile_mega_moe_stage1(
             ready_index = payload_parity * fx.Int32(fz_npes) + fx.Int32(fz_rank)
             mori_shmem.int32_wait_until_equals(
                 local_plan_ready + fx.Int64(ready_index) * fx.Int64(4), payload_expected)
-            comm_ops.fence_agent_acquire()
+            if const_expr(direct_fixed_slot):
+                comm_ops.fence_system_acquire()
+            else:
+                comm_ops.fence_agent_acquire()
         fx.barrier()
 
         num_valid = _buffer_load(nv_rsrc, fx.Int32(0), fx.Int32)

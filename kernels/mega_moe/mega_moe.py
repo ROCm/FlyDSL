@@ -15,9 +15,9 @@ from kernels.comm.flydsl_dispatch_combine_intranode_op import (
 
 from .dispatch import DISPATCH_TABLE_SIZE, DispatchSlot
 from .mega_moe_config import (
-    FIXED_SLOT_MAX_MTPR,
     MegaMoEConfig,
     Stage1Config,
+    fixed_slot_max_mtpr,
     select_mega_moe_config,
 )
 from .quant import (
@@ -146,7 +146,15 @@ class MegaMoEV2:
             raise ValueError("swiglu_limit must be non-negative")
         self.dev = torch.device("cuda", rank)
         self.max_recv = self.world_size * self.mtpr
-        compact = self.mtpr > FIXED_SLOT_MAX_MTPR
+        fixed_slot_limit = fixed_slot_max_mtpr(
+            self.quant,
+            self.epr,
+            self.model_dim,
+            self.inter_dim,
+            self.world_size,
+            self.topk,
+        )
+        compact = self.mtpr > fixed_slot_limit
         capacity_tile_m = 128 if compact else 32
         self._s1_fixed_slot = not compact
         self._s1_scale_dim = scale_dim
@@ -347,7 +355,9 @@ class MegaMoEV2:
             "active_payload_blocks": torch.zeros(1, dtype=torch.int32, device=self.dev),
             "payload_blocks_per_destination": torch.zeros(self.world_size, dtype=torch.int32, device=self.dev),
             "payload_chunks_per_destination": torch.zeros(self.world_size, dtype=torch.int32, device=self.dev),
-            "group_done": torch.zeros(1, dtype=torch.int32, device=self.dev),
+            # Direct fixed-slot uses per-producer epoch flags plus hierarchical
+            # summaries; compact external grouping uses slot 0 as its counter.
+            "group_done": torch.zeros(self._s1_num_cu, dtype=torch.int32, device=self.dev),
             "dest_counter": torch.zeros(self.world_size, dtype=torch.int32, device=self.dev),
         }
         workspace["bigcnt"] = op._sym((self.world_size * self.epr,), torch.int32)
@@ -437,6 +447,9 @@ class MegaMoEV2:
             model_dim=self.model_dim,
             inter_dim=self.inter_dim,
             quant_mode=self.quant,
+            world_size=self.world_size,
+            topk=self.topk,
+            num_cu=self._s1_num_cu,
         )
         self._active_config = config
         return config
