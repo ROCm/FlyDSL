@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-08-13T21:33:47Z",
+ "updated": "2026-08-13T22:50:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31751481800,
+   "pr": 1008,
+   "commit": "15c0fa7ddecb4f132ea5ae405933cc3d229108ff",
+   "branch": "feat/preshuffle-async-copy-f16",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Enable the gmem->LDS async copy for f16/bf16 preshuffle GEMM",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31751481800",
+   "created_at": "2026-08-13T22:49:09Z",
+   "updated_at": "2026-08-13T22:50:03Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
+  {
+   "run_id": 31750962203,
+   "pr": 1008,
+   "commit": "9ad598b9a0badf04a4eec81725174e4dfe785f2d",
+   "branch": "feat/preshuffle-async-copy-f16",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Enable the gmem->LDS async copy for f16/bf16 preshuffle GEMM",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31750962203",
+   "created_at": "2026-08-13T22:41:23Z",
+   "updated_at": "2026-08-13T22:49:15Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
+  {
+   "run_id": 31750920773,
+   "pr": 1007,
+   "commit": "e1f206173705a0b2917aa5c3d7271dac110c210b",
+   "branch": "fix/preshuffle-a-tile-bugs",
+   "event": "pull_request",
+   "title": "[Bugfix] Fix two A-tile loading bugs in the preshuffle GEMM",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31750920773",
+   "created_at": "2026-08-13T22:40:46Z",
+   "updated_at": "2026-08-13T22:43:51Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 31723810762,
    "pr": 960,
@@ -1831,109 +1876,6 @@
      "completed_at": "2026-08-11T18:07:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492623191/job/93824733956",
      "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 31492613020,
-   "pr": 996,
-   "commit": "af67a2764b42ac8b20842209247c54846dd2231a",
-   "branch": "coop-library",
-   "event": "pull_request",
-   "title": "[Feat] Add fx.num_warp_threads() as constant accessor",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492613020",
-   "created_at": "2026-08-11T12:43:38Z",
-   "updated_at": "2026-08-13T04:46:25Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-13T04:46:06Z",
-     "completed_at": "2026-08-13T04:46:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492613020/job/94344809594"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-13T04:34:55Z",
-     "completed_at": "2026-08-13T04:35:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492613020/job/94344809606"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-11T15:13:07Z",
-     "completed_at": "2026-08-11T16:41:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492613020/job/94344809907",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 31492556629,
-   "pr": 972,
-   "commit": "972e1a947df53e8c058229d76deafd2da4bb6f69",
-   "branch": "mega_moe_a4w4",
-   "event": "pull_request",
-   "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492556629",
-   "created_at": "2026-08-11T12:42:57Z",
-   "updated_at": "2026-08-11T15:20:10Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 31492517857,
-   "pr": null,
-   "commit": "b8ed73fe6d9e17e101093324b1a7af518b1a0f29",
-   "branch": "main",
-   "event": "push",
-   "title": "CI: upgrade PyTorch images to ROCm 7.14 (#989)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492517857",
-   "created_at": "2026-08-11T12:42:29Z",
-   "updated_at": "2026-08-11T16:39:53Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-11T13:51:51Z",
-     "completed_at": "2026-08-11T15:08:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492517857/job/93801446133"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-11T15:07:30Z",
-     "completed_at": "2026-08-11T16:39:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492517857/job/93801446160",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-11T14:27:10Z",
-     "completed_at": "2026-08-11T14:46:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492517857/job/93801446435"
     }
    ]
   }
