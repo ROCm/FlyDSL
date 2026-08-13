@@ -980,3 +980,26 @@ def test_fused_epilogue_correctness(epilogue):
         f"✓ Fused epilogue {epilogue} correctness verified: "
         f"max_abs_diff={max_diff:.4f}, max_rel={rel:.4f}, ref_max={ref.abs().max().item():.2f}"
     )
+
+
+@pytest.mark.parametrize("tile_m", [48, 80, 112, 144])
+def test_preshuffle_rejects_partial_a_tile(tile_m):
+    """Reject tile_m values that leave a partial 16B A load per thread.
+
+    Each of the 256 threads copies tile_m * tile_k * elem_bytes / 256 bytes of the A
+    tile in 16B chunks. When that is not a multiple of 16 the chunk count truncates and
+    the tail of the A tile is never fetched, which used to yield wrong results with no
+    diagnostic. For bf16 with tile_k=64 the product must be a multiple of 4096.
+    """
+    if get_rocm_arch() not in ("gfx942", "gfx950"):
+        pytest.skip(f"v2 preshuffle GEMM requires gfx942/gfx950, got {get_rocm_arch()}")
+    with pytest.raises(ValueError, match=r"must be a multiple of"):
+        compile_preshuffle_gemm(N=1024, K=2048, tile_m=tile_m, tile_n=256, tile_k=64, in_dtype="bf16", out_dtype="bf16")
+
+
+@pytest.mark.parametrize("tile_m", [64, 96, 128, 160])
+def test_preshuffle_accepts_whole_a_tile(tile_m):
+    """tile_m values that divide the A tile evenly across threads must still compile."""
+    if get_rocm_arch() not in ("gfx942", "gfx950"):
+        pytest.skip(f"v2 preshuffle GEMM requires gfx942/gfx950, got {get_rocm_arch()}")
+    compile_preshuffle_gemm(N=1024, K=2048, tile_m=tile_m, tile_n=256, tile_k=64, in_dtype="bf16", out_dtype="bf16")

@@ -179,6 +179,19 @@ def compile_preshuffle_gemm(
     a_load_bytes = 16
     bytes_per_thread_a = (tile_m * tile_k * elem_bytes) // total_threads
     num_a_loads = bytes_per_thread_a // a_load_bytes
+    # The A tile is copied by total_threads threads in a_load_bytes chunks, and both
+    # divisions above truncate. Any remainder leaves the tail of the tile unfetched and
+    # the kernel then computes on stale LDS, so check the exact condition on the tile
+    # size itself rather than on either truncated intermediate.
+    a_tile_bytes = tile_m * tile_k * elem_bytes
+    a_copy_granularity = total_threads * a_load_bytes
+    if a_tile_bytes % a_copy_granularity != 0:
+        raise ValueError(
+            f"tile_m * tile_k * elem_bytes must be a multiple of {a_copy_granularity} "
+            f"(total_threads * a_load_bytes); got tile_m={tile_m}, tile_k={tile_k}, "
+            f"elem_bytes={elem_bytes} -> {a_tile_bytes} bytes, leaving "
+            f"{a_tile_bytes % a_copy_granularity} bytes of the A tile unloaded"
+        )
     num_b_loads = (tile_n * tile_k * elem_bytes) // total_threads // 16
     num_ds_load = (tile_m * tile_k * elem_bytes) // 64 // 16  # A LDS reads per wave
     num_gmem_loads = num_a_loads + num_b_loads
@@ -459,8 +472,12 @@ def compile_preshuffle_gemm(
 
         # ── Pipeline stage (double-buffered B via split fragments) ─
         def mma_kloop(a_stage, cur_frag_B):
-            fx.copy(uni_copy, pA_s2r_stages[a_stage], frag_A_retile)
+            # Issue the A-fragment LDS reads per k-step. Semantically this is the same as
+            # one whole-tile copy, but the single copy leaves the scheduler no room to
+            # interleave the reads with the MFMAs that consume them, which costs 3.3x on
+            # bf16 tile_k=256 (see the commit message for the measurement).
             for ki in range_constexpr(k_iters):
+                fx.copy(uni_copy, pA_s2r_stages[a_stage][None, None, ki], frag_A_retile[None, None, ki])
                 k_coord = ki if (use_mfma_scale_128 or use_mfma_k32) else (None, ki)
                 fx.gemm(tiled_mma, frag_C, frag_A[None, None, k_coord], cur_frag_B[None, None, k_coord], frag_C)
 
