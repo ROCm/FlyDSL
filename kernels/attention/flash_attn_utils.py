@@ -692,6 +692,7 @@ def _bias_dma_src_elem(traits, row_base, tile_col_base, d, lane_in_warp, bias_st
     uni_s = rocdl.readfirstlane(T.i32, as_mlir_value(uni))
     return fx.Int32(uni_s) + row_in_group * stride + gran * fx.Int32(_bias_gran_elems(traits))
 
+
 BIAS_MAX_OFFSET_ELEMS = 2**31 - 1
 BIAS_MAX_DESCRIPTOR_BYTES = 0xFFFFFFFF
 
