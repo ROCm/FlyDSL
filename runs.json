@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-13T04:49:16Z",
+ "updated": "2026-08-13T05:07:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31669063948,
+   "pr": 987,
+   "commit": "514b933df4d794e61915ca5c6cc4c830b8482ebf",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31669063948",
+   "created_at": "2026-08-13T05:04:28Z",
+   "updated_at": "2026-08-13T05:05:39Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 31669014962,
+   "pr": 987,
+   "commit": "f10b3051f0283ec88cc08b8d10e5b83a534653a7",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31669014962",
+   "created_at": "2026-08-13T05:03:38Z",
+   "updated_at": "2026-08-13T05:04:45Z",
+   "actor": "Boss2002n",
+   "jobs": []
+  },
   {
    "run_id": 31666000306,
    "pr": 1001,
@@ -10,19 +40,19 @@
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
    "title": "[WIP][GFX1250] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31666000306",
    "created_at": "2026-08-13T04:07:13Z",
-   "updated_at": "2026-08-13T04:37:16Z",
+   "updated_at": "2026-08-13T05:05:31Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-13T04:37:16Z",
+     "started_at": "2026-08-13T05:05:30Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31666000306/job/94345376674"
     },
@@ -63,10 +93,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-13T04:47:37Z",
-     "completed_at": null,
+     "completed_at": "2026-08-13T05:05:05Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31665169196/job/94345178141"
     },
     {
@@ -211,7 +241,7 @@
    "commit": "9ab8a9d7eae99bad632aaef31b4e3392d06e4efd",
    "branch": "feature/typed-arithmetic-modernization",
    "event": "pull_request",
-   "title": "Add type-aware extrema and integer ceil-division APIs",
+   "title": "[Feat] Add type-aware extrema and integer ceil-division APIs",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655638442",
@@ -824,7 +854,7 @@
    "commit": "75d29e01ce503e00b361a47c2af02f77c5145532",
    "branch": "feature/typed-arithmetic-modernization",
    "event": "pull_request",
-   "title": "Add type-aware extrema and integer ceil-division APIs",
+   "title": "[Feat] Add type-aware extrema and integer ceil-division APIs",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31578608800",
@@ -1131,7 +1161,7 @@
    "commit": "2741b7f8bac05b89d98ec0d296b5edb760b3f001",
    "branch": "feature/typed-arithmetic-modernization",
    "event": "pull_request",
-   "title": "Add type-aware extrema and integer ceil-division APIs",
+   "title": "[Feat] Add type-aware extrema and integer ceil-division APIs",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492623191",
@@ -1719,92 +1749,6 @@
      "started_at": "2026-08-11T05:48:23Z",
      "completed_at": "2026-08-11T05:48:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31462743574/job/93689738562"
-    }
-   ]
-  },
-  {
-   "run_id": 31462580810,
-   "pr": null,
-   "commit": "7e6761ea472b8d3b881ad6205a9b72651bbb6de9",
-   "branch": "docs-style",
-   "event": "pull_request",
-   "title": "docs: Update docs style to fit style guide",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31462580810",
-   "created_at": "2026-08-11T05:43:08Z",
-   "updated_at": "2026-08-11T05:44:49Z",
-   "actor": "peterjunpark",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-11T05:44:40Z",
-     "completed_at": "2026-08-11T05:44:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31462580810/job/93689143370"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-11T05:44:40Z",
-     "completed_at": "2026-08-11T05:44:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31462580810/job/93689143396"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-11T05:44:46Z",
-     "completed_at": "2026-08-11T05:44:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31462580810/job/93689143409"
-    }
-   ]
-  },
-  {
-   "run_id": 31458103711,
-   "pr": null,
-   "commit": "17238afe68c31fdc87b03c21be60aa9b10cd638b",
-   "branch": "xyt/gemm16_950",
-   "event": "pull_request",
-   "title": "Refactor gfx950 A16W16 GEMM to use the universal kernel",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31458103711",
-   "created_at": "2026-08-11T04:19:13Z",
-   "updated_at": "2026-08-11T08:33:09Z",
-   "actor": "xytpai",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-11T05:30:12Z",
-     "completed_at": "2026-08-11T08:11:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31458103711/job/93686463048"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-11T05:34:56Z",
-     "completed_at": "2026-08-11T08:33:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31458103711/job/93686463062"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-11T08:15:38Z",
-     "completed_at": "2026-08-11T08:33:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31458103711/job/93686463066"
     }
    ]
   }
