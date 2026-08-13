@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-13T13:51:33Z",
+ "updated": "2026-08-13T14:47:18Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31711390062,
+   "pr": 960,
+   "commit": "f7fb3d3750ac7f2390b9eb7702cf1dcc1341f1ae",
+   "branch": "new_bias_alibi_sink_attention",
+   "event": "pull_request",
+   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31711390062",
+   "created_at": "2026-08-13T14:42:01Z",
+   "updated_at": "2026-08-13T14:44:18Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
   {
    "run_id": 31690678602,
    "pr": 996,
@@ -819,7 +834,7 @@
   },
   {
    "run_id": 31632717873,
-   "pr": 960,
+   "pr": null,
    "commit": "af2cf88df61205d43bd923ff39892ca5cec7bf5b",
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
@@ -1797,21 +1812,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492067034",
    "created_at": "2026-08-11T12:36:50Z",
    "updated_at": "2026-08-11T12:42:59Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 31491758289,
-   "pr": null,
-   "commit": "5cb8c3c3fa1e143e0bd025e5c8705c51a54d713f",
-   "branch": "main",
-   "event": "push",
-   "title": "[MoE] Port moe_gemm_2stage (stage1+stage2) to the new fx.* pipeline \u2014\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31491758289",
-   "created_at": "2026-08-11T12:32:59Z",
-   "updated_at": "2026-08-11T12:38:07Z",
    "actor": "coderfeli",
    "jobs": []
   }
