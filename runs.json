@@ -1,11 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-08-13T14:47:18Z",
+ "updated": "2026-08-13T15:38:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 31711390062,
+   "run_id": 31712148880,
    "pr": 960,
+   "commit": "44fc566667c3a07e4f55a7b06bcbe6fed7684fa8",
+   "branch": "new_bias_alibi_sink_attention",
+   "event": "pull_request",
+   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31712148880",
+   "created_at": "2026-08-13T14:50:19Z",
+   "updated_at": "2026-08-13T15:21:23Z",
+   "actor": "amd-nprotaso",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-13T15:20:58Z",
+     "completed_at": "2026-08-13T15:37:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31712148880/job/94496773292"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T15:21:23Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31712148880/job/94496773320"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T15:21:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31712148880/job/94496773322"
+    }
+   ]
+  },
+  {
+   "run_id": 31711390062,
+   "pr": null,
    "commit": "f7fb3d3750ac7f2390b9eb7702cf1dcc1341f1ae",
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
@@ -1797,21 +1840,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492166321",
    "created_at": "2026-08-11T12:38:05Z",
    "updated_at": "2026-08-11T12:42:31Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 31492067034,
-   "pr": 972,
-   "commit": "9baf8cec2ea0f6f2efdd0c8b4af6ff35940276e3",
-   "branch": "mega_moe_a4w4",
-   "event": "pull_request",
-   "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492067034",
-   "created_at": "2026-08-11T12:36:50Z",
-   "updated_at": "2026-08-11T12:42:59Z",
    "actor": "coderfeli",
    "jobs": []
   }
