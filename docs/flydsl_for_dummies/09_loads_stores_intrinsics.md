@@ -94,6 +94,180 @@ normalization kernels.
 > **HIP/CK-Tile → FlyDSL.** `copy_atom_call` is writing the single `buffer_load`
 > yourself; `fx.copy` is the CK-Tile `load_tile` that loops it over a tile window.
 
+## `fx.ptr_load` / `fx.ptr_store`: the single-element primitive
+
+All of the copy paths above work on tiles and fragments. `fx.ptr_load` and
+`fx.ptr_store` work on **individual elements** through a raw typed pointer
+(`Pointer`). They are not a distinct hardware path — they are the one-element
+primitive that everything else compiles through.
+
+### The pointer type and its origin
+
+A `Pointer` (`python/flydsl/expr/typing.py:877`) is a layout-free typed pointer to
+any address space (global, shared, register). You get one from:
+
+- `fx.get_iter(tensor)` — strip the layout from a `Tensor`, returning a pointer to
+  its first element (used internally; also reachable from
+  `tensor.ptr + offset` patterns).
+- `fx.get_dyn_shared(dtype)` — the base of the kernel's dynamic LDS allocation
+  (`primitive.py:1144`).
+- `fx.recast_iter(dtype, ptr)` — reinterpret a pointer's element type (like
+  `reinterpret_cast<T*>`).
+- `ptr + offset` — element-count pointer arithmetic, emitting `fly.add_offset`
+  (`primitive.py:1188`).
+
+### `ptr_load` and `ptr_store`
+
+```python
+# primitive.py:1207
+v = fx.ptr_load(ptr)                       # load ptr's element type
+v = fx.ptr_load(ptr, result_type=fx.Int64) # load as a specific type/width
+
+fx.ptr_store(value, ptr)                   # store value into ptr
+```
+
+`Pointer` objects also expose these as methods: `ptr.load()`, `ptr.store(v)`, and
+`ptr[offset]` (load after arithmetic shift). They lower to `fly.ptr_load` /
+`fly.ptr_store`, which the `PtrLoadOpLowering` and `PtrStoreOpLowering` patterns in
+`FlyToROCDL.cpp:351` turn into:
+
+- `LLVM::LoadOp` / `LLVM::StoreOp` for global (→ `global_load_*`) and shared (→
+  `ds_read_*` / `ds_write_*`) address spaces.
+- `ROCDL::RawPtrBufferLoadOp` when the address space is `BufferDesc` (→
+  `buffer_load_*`).
+
+### ptr_load/ptr_store are how high-level ops compile internally
+
+This is the important structural point. `MemrefLowering.td` rewrites high-level
+tensor indexing through `ptr_load`/`ptr_store`:
+
+```
+T[coord]  →  fly.memref_load(T, coord)
+          →  fly.ptr_load(fly.add_offset(fly.get_iter(T), fly.crd2idx(coord, layout(T))))
+          →  llvm.load (→ ISA)
+```
+
+So `ptr_load`/`ptr_store` sit at level 2 in the stack, between the layout algebra
+(which computes the address) and LLVM:
+
+```
+Level 3: fx.copy / fx.copy_atom_call / T[coord]   — tile/fragment or indexed element
+Level 2: fly.ptr_load / fly.ptr_store             — pointer + load/store
+Level 1: llvm.load / ROCDL buffer load            — address-space-aware instruction
+```
+
+### When to use them directly
+
+Reach for `ptr_load`/`ptr_store` when you have a pointer with a hand-computed
+byte/element offset and no layout to index through — typically LDS staging in
+attention kernels where per-thread addressing is non-standard:
+
+```python
+# kernels/attention/pa_decode_swa.py — write packed fp8 into LDS at a lane-computed offset
+v01 = fx.Vector.from_elements([q_w0, q_w1], dtype=fx.Int32)
+fx.ptr_store(v01, logits_base + lds_q_base)     # logits_base is a Pointer, + shifts it
+
+# read back as a different element type (recast)
+q_v1 = fx.ptr_load(
+    fx.recast_iter(fx.Int64, logits_base) + lds_rd,
+    result_type=fx.Vector.make_type(1, fx.Int64),
+)
+```
+
+### Worked example: replacing ptr_load/ptr_store with the high-level path
+
+When the access *does* fit a layout — a global tile, an LDS staging buffer with a
+regular shape — the copy-atom + TiledCopy path is simpler, portable, and gives the
+compiler more to optimize. Here is the *same* kernel written both ways, staging a
+tile through LDS (global → LDS → registers → global). Both compile, run, and produce
+`B == A`; the complete runnable file is
+`examples/06-lds_staging_lowlevel_vs_highlevel.py`.
+
+The problem: one block owns an `8×8 = 64`-element tile, one thread per element. Each
+thread copies its element global → LDS, the block barriers, then reads it back
+LDS → global.
+
+**Low-level — raw `ptr_load`/`ptr_store` with hand-computed offsets:**
+
+```python
+BM, BN = 8, 8   # 64-element tile, 64 threads
+
+@flyc.kernel
+def stage_lowlevel(A: fx.Tensor, B: fx.Tensor, N: fx.Constexpr):
+    tid = fx.thread_idx.x                    # 0..63 within the block
+    bid = fx.block_idx.x                     # which 8-column block
+    r = tid // fx.Int32(BN)                  # row inside the tile
+    c = tid % fx.Int32(BN)                   # column inside the tile
+    g = r * fx.Int32(N) + (bid * fx.Int32(BN) + c)   # global row-major index
+
+    x = fx.ptr_load(fx.get_iter(A) + g)      # global -> reg  (global_load)
+    smem = fx.get_dyn_shared(fx.Float32)     # raw LDS base pointer
+    fx.ptr_store(x, smem + tid)              # reg -> LDS     (ds_write_b32)
+    fx.gpu.barrier()
+    y = fx.ptr_load(smem + tid)              # LDS -> reg     (ds_read_b32)
+    fx.ptr_store(y, fx.get_iter(B) + g)      # reg -> global  (global_store)
+```
+
+Every address is arithmetic you compute and must keep correct: the `r * N + …`
+global index, the `smem + tid` LDS slot. Nothing records that this is a tile.
+
+**High-level — a layouted LDS view driven by `fx.copy`:**
+
+```python
+@flyc.kernel
+def stage_highlevel(A: fx.Tensor, B: fx.Tensor):
+    tid = fx.thread_idx.x
+    bid = fx.block_idx.x
+
+    A = fx.rocdl.make_buffer_tensor(A)
+    B = fx.rocdl.make_buffer_tensor(B)
+    bA = fx.slice(fx.zipped_divide(A, (BM, BN)), (None, bid))   # this block's tile
+    bB = fx.slice(fx.zipped_divide(B, (BM, BN)), (None, bid))
+
+    smem = fx.get_dyn_shared(fx.Float32)
+    sT = fx.make_view(smem, fx.make_layout((BM, BN), (BN, 1)))  # LDS tile, given a layout
+
+    thr_layout = fx.make_layout((BM, BN), (BN, 1))              # tid -> (row, col)
+    val_layout = fx.make_layout((1, 1), (1, 1))                 # one element per thread
+    tile_mn, tv = fx.make_layout_tv(thr_layout, val_layout)
+
+    gcopy = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)  # global path
+    scopy = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)     # LDS path
+    tc_g = fx.make_tiled_copy(gcopy, tv, tile_mn).get_slice(tid)
+    tc_s = fx.make_tiled_copy(scopy, tv, tile_mn).get_slice(tid)
+
+    frag = fx.make_fragment_like(tc_g.partition_S(bA))
+    fx.copy(gcopy, tc_g.partition_S(bA), frag)      # global -> reg
+    fx.copy(scopy, frag, tc_s.partition_D(sT))      # reg -> LDS
+    fx.gpu.barrier()
+    fx.copy(scopy, tc_s.partition_S(sT), frag)      # LDS -> reg
+    fx.copy(gcopy, frag, tc_g.partition_D(bB))      # reg -> global
+```
+
+The two kernels emit the same `ds_write_b32`/`ds_read_b32` (and the LDS legs go
+through `ptr_store`/`ptr_load` internally — the high-level version *is* the low-level
+one after lowering). What changed is where the addressing lives:
+
+| | Low-level | High-level |
+|---|-----------|------------|
+| Global index | manual `r*N + bid*BN + c` | `zipped_divide` + `slice` |
+| LDS slot | manual `smem + tid` | `partition_S/D` over `sT`'s layout |
+| Thread→element map | implicit in your arithmetic | the `tv` layout object |
+| OOB handling | you check it | free via the buffer tensor |
+| Bank conflicts | you swizzle by hand | add a swizzle to `sT`'s layout, calls unchanged |
+| Change the tile shape | rewrite the index math | change `(BM, BN)` and the layouts |
+
+The high-level version costs more lines here because the tile is trivial; the payoff
+grows with the kernel — the layout objects compose with tiling, MMA fragments
+(Chapter 10), and swizzle without touching the copy calls.
+
+> **HIP/CK-Tile → FlyDSL.** `fx.ptr_load(ptr)` / `fx.ptr_store(v, ptr)` is the typed
+> `*ptr` dereference — the plain load/store you write in HIP against a `__shared__`
+> or `__device__` pointer with a hand-computed index. `fx.copy` is CK-Tile's
+> `load_tile` / `store_tile`: the same instruction wrapped in a distribution + layout.
+> Reach for `ptr_load`/`ptr_store` when the addressing is genuinely irregular; use
+> `fx.copy` when it is a regular tile or fragment.
+
 ## Registers are memory, too
 
 The destination of a load is usually a **register-space tensor** — a fragment. FlyDSL
@@ -166,6 +340,15 @@ fx.copy(UniversalCopy128b(), frag, lds_view)   → llvm.store → ds_write_b128
 fx.copy(UniversalCopy128b(), lds_view, frag)   → llvm.load  → ds_read_b128
 fx.copy(BufferCopyLDS128b(), gA_buf, lds_view) → rocdl.raw.ptr.buffer.load.lds
                                                 → buffer_load_dwordx4 … lds
+
+T[coord]  (tensor element access)
+  → fly.memref_load(T, coord)   (MemrefLowering.td)
+  → fly.ptr_load(add_offset(get_iter(T), crd2idx(coord, layout(T))))
+  → llvm.load / rocdl.raw.ptr.buffer.load
+
+fx.ptr_store(v, ptr) / fx.ptr_load(ptr)   (raw pointer, no layout)
+  → fly.ptr_store / fly.ptr_load          (PtrStoreOpLowering / PtrLoadOpLowering)
+  → llvm.store / llvm.load  →  ds_write_* / ds_read_* / global_store / global_load
 ```
 
 To *see* it for any kernel, dump the IR after Stage A: `FLYDSL_DUMP_IR=1` (§2.8)

@@ -20,7 +20,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
 
 OUT="${1:-flydsl_for_dummies.pdf}"
-ENGINE="${PDF_ENGINE:-xelatex}"
+# PDF engine: honor an explicit PDF_ENGINE if set, otherwise auto-detect below
+# (prefer xelatex if installed, else fall back to the self-contained typst).
+ENGINE="${PDF_ENGINE:-}"
+
+# Stamp the cover page with the build date (overrides `date:` in metadata.yaml).
+# Override with e.g. BUILD_DATE="2026" for a reproducible build.
+BUILD_DATE="${BUILD_DATE:-$(date +'%B %-d, %Y')}"
 
 # Chapters, in order. Keep this list in sync with new files.
 CHAPTERS=(
@@ -45,6 +51,7 @@ if [[ "${1:-}" == "--html" ]]; then
   OUT="flydsl_for_dummies.html"
   echo "Rendering HTML -> $OUT"
   pandoc metadata.yaml "${CHAPTERS[@]}" \
+    -M date="$BUILD_DATE" \
     --standalone --toc --toc-depth=2 --number-sections \
     --highlight-style=tango \
     -o "$OUT"
@@ -57,12 +64,31 @@ if ! command -v pandoc >/dev/null 2>&1; then
   exit 1
 fi
 
+# Auto-detect a PDF engine when PDF_ENGINE was not set explicitly: prefer xelatex
+# (LaTeX rendering) if installed, else the self-contained typst binary.
+if [[ -z "$ENGINE" ]]; then
+  if command -v xelatex >/dev/null 2>&1; then
+    ENGINE="xelatex"
+  elif command -v typst >/dev/null 2>&1; then
+    ENGINE="typst"
+  else
+    echo "ERROR: no PDF engine found (looked for xelatex, typst)." >&2
+    echo "  Install one of:" >&2
+    echo "    - typst (no LaTeX):  pip install typst   (plus a 'typst' CLI on PATH)" >&2
+    echo "    - xelatex:           apt-get install texlive-xetex texlive-latex-recommended" >&2
+    echo "  Or render HTML instead and print-to-PDF: $0 --html" >&2
+    exit 1
+  fi
+  echo "Auto-detected PDF engine: $ENGINE (override with PDF_ENGINE=...)"
+fi
+
 # The typst engine is a single self-contained binary (no system LaTeX needed).
 # It reads link colors as hex strings, so we layer metadata_typst.yaml on top of
 # metadata.yaml to replace the LaTeX color names (RoyalBlue, ...) used by xelatex.
 if [[ "$ENGINE" == "typst" ]]; then
   echo "Rendering PDF (typst) -> $OUT"
   pandoc metadata.yaml metadata_typst.yaml "${CHAPTERS[@]}" \
+    -M date="$BUILD_DATE" \
     --pdf-engine=typst \
     --toc --toc-depth=2 --number-sections \
     --syntax-highlighting=tango \
@@ -73,6 +99,7 @@ fi
 
 echo "Rendering PDF ($ENGINE) -> $OUT"
 pandoc metadata.yaml "${CHAPTERS[@]}" \
+  -M date="$BUILD_DATE" \
   --pdf-engine="$ENGINE" \
   --toc --toc-depth=2 --number-sections \
   --highlight-style=tango \

@@ -14,14 +14,14 @@ one hardware MFMA shape; `M == N` is required. The shape plus the operand dtype 
 to exactly one `rocdl.mfma.*` op and one `__builtin_amdgcn_mfma_*` builtin (dispatch
 table in `lib/Dialect/FlyROCDL/CDNA3/MmaAtom.cpp:170`). The shapes this book uses:
 
-| FlyDSL constructor | `rocdl` op | HIP builtin |
-|--------------------|------------|-------------|
-| `MFMA(16,16,4, f32)` | `mfma.f32.16x16x4f32` | `__builtin_amdgcn_mfma_f32_16x16x4f32` |
-| `MFMA(16,16,16, f16)` | `mfma.f32.16x16x16f16` | `…_mfma_f32_16x16x16f16` |
-| `MFMA(16,16,16, bf16)` | `mfma.f32.16x16x16bf16.1k` | `…_mfma_f32_16x16x16bf16_1k` |
-| `MFMA(32,32,8, f16)` | `mfma.f32.32x32x8f16` | `…_mfma_f32_32x32x8f16` |
-| `MFMA(16,16,32, fp8)` | `mfma.f32.16x16x32.fp8.fp8` | `…_mfma_f32_16x16x32_fp8_fp8` |
-| `MFMA(16,16,32, i8, i32)` | `mfma.i32.16x16x32.i8` | `…_mfma_i32_16x16x32i8` |
+| FlyDSL constructor | `rocdl` op |
+|--------------------|------------|
+| `MFMA(16,16,4, f32)` | `mfma.f32.16x16x4f32` |
+| `MFMA(16,16,16, f16)` | `mfma.f32.16x16x16f16` |
+| `MFMA(16,16,16, bf16)` | `mfma.f32.16x16x16bf16.1k` |
+| `MFMA(32,32,8, f16)` | `mfma.f32.32x32x8f16` | 
+| `MFMA(16,16,32, fp8)` | `mfma.f32.16x16x32.fp8.fp8` | 
+| `MFMA(16,16,32, i8, i32)` | `mfma.i32.16x16x32.i8` | 
 
 (gfx950 adds wider-K shapes like `16x16x32 f16` and `32x32x16 f16`; the full list is
 in the dispatch table.)
@@ -86,6 +86,133 @@ builtin's argument types.
 > `c = __builtin_amdgcn_mfma_...(a, b, c, 0, 0, 0)` call, and `fx.mma_atom_call` is
 > that single builtin when you drive the loop yourself. `make_fragment_*` ≡ declaring
 > the operand/accumulator VGPR arrays in ISA-mandated order.
+
+## Worked example: one 16×16×16 MFMA, high and low
+
+Here is a single `16×16×16` bf16 MFMA — one wavefront computing `D = A · Bᵀ` on
+16×16 tiles — written three ways that all produce the identical result. The complete
+runnable file is `examples/07-single_mfma_lowlevel_vs_highlevel.py`; `A` is 16×16
+row-major (M×K), `B` is 16×16 row-major (N×K, so the MFMA sees `A · Bᵀ`), `D` is
+16×16 f32.
+
+**High-level — the MMA atom hides the VGPR layout:**
+
+```python
+A = fx.rocdl.make_buffer_tensor(A)                        # M x K
+B = fx.rocdl.make_buffer_tensor(B)                        # N x K
+C = fx.rocdl.make_buffer_tensor(C)                        # M x N
+# bA / bB / bC: this block's 16x16 tiles (one block here, so tile 0).
+# zipped_divide + slice give them a *static* shape, which the fragments need.
+bA = fx.slice(fx.zipped_divide(A, (M, K)), (None, 0))
+bB = fx.slice(fx.zipped_divide(B, (N, K)), (None, 0))
+bC = fx.slice(fx.zipped_divide(C, (M, N)), (None, 0))
+
+mma_atom  = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.BFloat16))
+tiled_mma = fx.make_tiled_mma(mma_atom, fx.make_layout((1, 1, 1), (0, 0, 0)))
+thr_mma   = tiled_mma.thr_slice(tid)
+
+# copy atoms + this thread's slice of the A/B/C tiled copies, derived from the MMA
+# so the load order matches the operand layout (that is what retile relies on).
+acopy = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), fx.BFloat16)   # bf16 operands
+ccopy = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)    # f32 accumulator
+tcA = fx.make_tiled_copy_A(acopy, tiled_mma).get_slice(tid)
+tcB = fx.make_tiled_copy_B(acopy, tiled_mma).get_slice(tid)
+tcC = fx.make_tiled_copy_C(ccopy, tiled_mma).get_slice(tid)
+
+frag_A = thr_mma.make_fragment_A(bA)   # vector<4xbf16> per lane
+frag_B = thr_mma.make_fragment_B(bB)   # vector<4xbf16> per lane
+frag_C = thr_mma.make_fragment_C(bC)   # vector<4xf32>  per lane
+
+fx.copy(acopy, tcA.partition_S(bA), tcA.retile(frag_A))   # load A operand
+fx.copy(acopy, tcB.partition_S(bB), tcB.retile(frag_B))   # load B operand
+frag_C.fill(0)
+fx.gemm(mma_atom, frag_C, frag_A, frag_B, frag_C)         # -> rocdl.mfma...bf16_1k
+fx.copy(ccopy, tcC.retile(frag_C), tcC.partition_S(bC))   # store C
+```
+
+Here **`bA`/`bB`/`bC`** are the block's 16×16 input/output tiles (from
+`zipped_divide` + `slice`, Chapter 6), and **`tcA`/`tcB`/`tcC`** are this thread's
+slices of the A/B/C tiled copies — built from the *same* `tiled_mma` via
+`make_tiled_copy_A/B/C` so the copy fills the fragments in the exact order the atom
+expects. You never name a lane or a register: `make_fragment_A/B/C` allocate the
+operand and accumulator VGPRs *in the atom's layout*, and `retile` re-expresses the
+copy in that layout.
+
+**Low-level — fill the VGPRs by hand and call the raw op.** Now you must reproduce
+the operand ABI from §"The fragment contract" yourself. For `16×16×16` on 64 lanes:
+lane `l` holds `A[m, kg*4+i]` with `m = l%16`, `kg = l//16`, `i∈0..3`; `B[n, kg*4+i]`
+with `n = l%16`; and the accumulator lane owns `C[kg*4+i, n]`.
+
+```python
+lane = fx.thread_idx.x
+m = lane % fx.Int32(16); n = lane % fx.Int32(16); kg = lane // fx.Int32(16)
+aptr, bptr, cptr = fx.get_iter(A), fx.get_iter(B), fx.get_iter(C)
+
+a_el, b_el = [], []
+for i in fx.range_constexpr(4):                    # 4 K-elements per lane
+    k = kg * fx.Int32(4) + fx.Int32(i)
+    a_el.append(fx.ptr_load(aptr + (m * fx.Int32(K) + k)))   # A[m, k]
+    b_el.append(fx.ptr_load(bptr + (n * fx.Int32(K) + k)))   # B[n, k]
+
+# rocdl mfma...bf16_1k takes the bf16 operands as i16 lanes
+a = fx.Vector.from_elements(a_el, dtype=fx.BFloat16).bitcast(fx.Int16)
+b = fx.Vector.from_elements(b_el, dtype=fx.BFloat16).bitcast(fx.Int16)
+c0 = fx.Vector.filled(4, 0.0, fx.Float32)
+
+acc = rocdl.mfma_f32_16x16x16bf16_1k(                # the raw intrinsic
+    fx.Vector.make_type(4, fx.Float32),
+    [a.ir_value(), b.ir_value(), c0.ir_value()],
+)
+acc = fx.Vector(acc, (4,), fx.Float32)
+
+for i in fx.range_constexpr(4):                     # scatter accumulator back
+    mrow = kg * fx.Int32(4) + fx.Int32(i)
+    fx.ptr_store(acc[i], cptr + (mrow * fx.Int32(N) + n))    # C[mrow, n]
+```
+
+The `rocdl.mfma_f32_16x16x16bf16_1k(result_type, [a, b, c])` call is the FlyDSL
+spelling of `__builtin_amdgcn_mfma_f32_16x16x16bf16_1k`. Get the lane→element map
+wrong and it still runs — it just computes the wrong matrix (the "plausible garbage"
+trap). This is precisely the bookkeeping the atom does for you.
+
+**Bridging the two — go from fragments to the raw op and back.** You do not have to
+pick one level for the whole kernel. A fragment's registers *are* the MFMA operand
+VGPRs, so `frag.load()` hands them straight to the raw intrinsic, and `frag.store()`
+pushes a raw result back into fragment form. This reuses the same `bA`/`bB`/`bC`
+tiles, `thr_mma`, and `tcA`/`tcB`/`tcC` copy slices set up in the high-level version
+above:
+
+```python
+frag_A = thr_mma.make_fragment_A(bA)     # build operands the high-level way
+frag_B = thr_mma.make_fragment_B(bB)
+frag_C = thr_mma.make_fragment_C(bC)
+fx.copy(acopy, tcA.partition_S(bA), tcA.retile(frag_A))
+fx.copy(acopy, tcB.partition_S(bB), tcB.retile(frag_B))
+
+# HIGH -> LOW: pull raw vectors out and call the intrinsic directly
+a_vec = frag_A.load()                     # vector<4xbf16>
+b_vec = frag_B.load()
+acc = rocdl.mfma_f32_16x16x16bf16_1k(
+    fx.Vector.make_type(4, fx.Float32),
+    [a_vec.bitcast(fx.Int16).ir_value(),
+     b_vec.bitcast(fx.Int16).ir_value(),
+     fx.Vector.filled(4, 0.0, fx.Float32).ir_value()],
+)
+# LOW -> HIGH: push the raw accumulator back into the fragment
+frag_C.store(fx.Vector(acc, (4, ), fx.Float32))
+fx.copy(ccopy, tcC.retile(frag_C), tcC.partition_S(bC))
+```
+
+This is the useful escape hatch: keep the high-level fragment/copy machinery for
+loading and storing (where the layout algebra earns its keep), and drop to the raw
+`rocdl.mfma_*` only for the instruction itself — for example to pass an `op_sel`
+modifier, pin the accumulator in an AGPR, or issue an instruction the atom does not
+yet cover (Chapter 11).
+
+> **HIP/CK-Tile → FlyDSL.** `frag.load()` / `frag.store()` around a raw
+> `rocdl.mfma_*` is the CK-Tile move of reading a `WarpGemm`'s register spans as a
+> plain `fp32x4` / `bf16x4`, calling `__builtin_amdgcn_mfma_*` yourself, and writing
+> the result back into the accumulator span.
 
 ## Accumulating over K, at the register level
 
