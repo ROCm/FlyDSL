@@ -1035,7 +1035,7 @@ def make_copy_atom(copy_op_type, elem_type):
     else:
         raise TypeError(f"make_copy_atom: elem_type must be NumericType, ir.Type, or int, got {type(elem_type)}")
     copy_atom_ty = CopyAtomType.get(copy_op=copy_op_type, val_bits=val_bits)
-    return fly.make_copy_atom(copy_atom_ty, val_bits=val_bits)
+    return fly.make_copy_atom(copy_atom_ty, [], val_bits=val_bits)
 
 
 @dsl_loc_tracing
@@ -1107,7 +1107,7 @@ def mma_make_fragment(operand_id, tiled_mma, input, *, stages=None):
 
 @dsl_loc_tracing
 def copy(copy_atom, src, dst, *, pred=None, **kwargs):
-    return fly.copy(copy_atom.set_value(kwargs), src, dst, pred=pred)
+    return fly.copy(copy_atom.set_value(kwargs) if kwargs else copy_atom, src, dst, pred=pred)
 
 
 @dsl_loc_tracing

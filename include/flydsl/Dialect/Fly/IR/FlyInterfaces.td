@@ -35,6 +35,20 @@ def Fly_StatefulOpTypeInterface : TypeInterface<"StatefulOpTypeInterface"> {
       "::mlir::Value", "getDefaultState",
       (ins "::mlir::OpBuilder &":$builder, "::mlir::Location":$loc)>,
     InterfaceMethod<
+      "Build the initial state value for an atom materialized with `args`.",
+      "::mlir::Value", "getAtomState",
+      (ins "::mlir::OpBuilder &":$builder, "::mlir::Location":$loc,
+           "::mlir::ValueRange":$args),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        if (!args.empty()) {
+          ::mlir::emitError(loc) << "this atom takes no construction arguments, got "
+                                 << args.size();
+          return nullptr;
+        }
+        return $_type.getDefaultState(builder, loc);
+      }]>,
+    InterfaceMethod<
       "Insert the given value to a field of this stateful op. "
       "Returns the updated struct value after setting the field.",
       "::mlir::Value",

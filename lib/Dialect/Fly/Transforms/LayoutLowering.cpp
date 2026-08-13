@@ -2170,8 +2170,6 @@ public:
     Value dst = op.getDst();
     Value pred = op.getPred();
 
-    auto srcMemRefTy = cast<fly::MemRefType>(src.getType());
-    auto dstMemRefTy = cast<fly::MemRefType>(dst.getType());
     auto predMemRefTy = pred ? cast<fly::MemRefType>(pred.getType()) : nullptr;
 
     std::function<LayoutAttr(Attribute)> getLayoutAttr = [&](Attribute attr) -> LayoutAttr {
@@ -2179,9 +2177,20 @@ public:
         return layout;
       return getLayoutAttr(cast<ComposedLayoutAttr>(attr).getOuter());
     };
+    // An operand is a memref or a coordinate tensor -- a TMA-style atom is addressed by
+    // a coordinate, and only its layout is needed to decide how the tile decomposes.
+    auto tensorLikeLayout = [&](Type ty) -> LayoutAttr {
+      if (auto memref = dyn_cast<fly::MemRefType>(ty))
+        return getLayoutAttr(memref.getLayout());
+      if (auto coord = dyn_cast<fly::CoordTensorType>(ty))
+        return getLayoutAttr(coord.getLayout());
+      return nullptr;
+    };
 
-    LayoutAttr srcLayoutAttr = getLayoutAttr(srcMemRefTy.getLayout());
-    LayoutAttr dstLayoutAttr = getLayoutAttr(dstMemRefTy.getLayout());
+    LayoutAttr srcLayoutAttr = tensorLikeLayout(src.getType());
+    LayoutAttr dstLayoutAttr = tensorLikeLayout(dst.getType());
+    if (!srcLayoutAttr || !dstLayoutAttr)
+      return rewriter.notifyMatchFailure(op, "src/dst are not tensor-like");
     LayoutAttr predLayoutAttr = nullptr;
     if (pred)
       predLayoutAttr = getLayoutAttr(predMemRefTy.getLayout());
@@ -2192,13 +2201,27 @@ public:
     if (srcRank != dstRank)
       return rewriter.notifyMatchFailure(op, "src/dst ranks mismatch");
 
-    // A whole-tile copy atom (e.g. the gfx1250 TDM DMA) moves the entire N-D tile
-    // in one call and reads its geometry from the operand memref layout, so emit a
-    // single call on the tile instead of decomposing it per element. The atom's own
-    // emitAtomCall verifies the operand rank matches the tile. Detected via a
-    // boundary-safe type trait rather than a concrete cross-dialect cast.
+    // tests `size(src) == NumValSrc` *before* it peels or loops: a call is
+    // issued the moment the operand holds exactly one atom's worth of values.
+    // Without that test the decomposition below keeps descending until the
+    // shape is a leaf, which is only accidentally right -- it is wrong for
+    // every atom whose values are a nested tuple.
+    // TODO: need a better solution for this.
+    LayoutBuilder<LayoutAttr> layoutBuilder(ctx);
+    auto sizeOf = [&](LayoutAttr layout) {
+      return intTupleProduct(layoutBuilder, layout.getShape()).getLeafAsInt();
+    };
+    auto numValOf = [&](Attribute thrVal) { return sizeOf(cast<LayoutAttr>(thrVal).at(1)); };
     if (auto copyAtomTy = dyn_cast<CopyAtomType>(copyAtomVal.getType())) {
-      if (copyAtomTy.getCopyOp().hasTrait<WholeTileCopy>()) {
+      IntAttr srcVals = sizeOf(srcLayoutAttr);
+      IntAttr dstVals = sizeOf(dstLayoutAttr);
+      IntAttr atomSrcVals = numValOf(copyAtomTy.getThrValLayoutSrc());
+      IntAttr atomDstVals = numValOf(copyAtomTy.getThrValLayoutDst());
+      bool singleAtomCall = srcVals.isStatic() && dstVals.isStatic() && atomSrcVals.isStatic() &&
+                            atomDstVals.isStatic() &&
+                            srcVals.getValue() == atomSrcVals.getValue() &&
+                            dstVals.getValue() == atomDstVals.getValue();
+      if (singleAtomCall || copyAtomTy.getCopyOp().hasTrait<WholeTileCopy>()) {
         CopyAtomCall::create(rewriter, loc, copyAtomVal, src, dst, pred);
         rewriter.eraseOp(op);
         return success();

@@ -1,17 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""gfx1250-specific ROCDL atom builders (MX-scaled WMMA + N-D TDM copy)."""
+"""CDNA5 / gfx1250 ROCDL atom builders."""
 
 from ..._mlir import ir
 from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaOpGFX1250_WMMAScaleType
-from ..._mlir.dialects.fly_rocdl import CopyOpGFX1250TDMType
+from ..._mlir.dialects import fly_rocdl
 from ..typing import Int32, Int64, Tensor
 
 __all__ = [
     "WMMAScale",
+    "TensorLoad",
+    "TensorStore",
     "TDM",
     "make_tdm_atom",
+    "make_tiled_tdm_atom",
+    "tdm_partition",
 ]
 
 
@@ -67,6 +71,36 @@ def WMMAScale(
     )
 
 
+class TensorLoad:
+    """CDNA5 TDM Global -> LDS DMA (``TENSOR_LOAD_TO_LDS``).
+
+    Current atom state:
+    - `workgroup_mask` (i32): the workgroup mask.
+    - `early_timeout` (i32): the early timeout mask.
+    - `atomic_barrier_addr` (shared ptr): *which* LDS barrier this copy arrives on.
+      *Whether* it arrives on one is the atom's type, so only ``atomic_barrier=True``
+      has the field.
+    - `boundary_check` (int_tuple): per mode boundary check, congruent with the global tensor.
+    """
+
+    def __init__(self, cache_modifier=0):
+        self.cache_modifier = cache_modifier
+
+
+class TensorStore:
+    """CDNA5 TDM LDS -> Global DMA (``TENSOR_STORE_FROM_LDS``).
+
+    Current atom state:
+    - `atomic_barrier_addr` (shared ptr): *which* LDS barrier this copy arrives on.
+      *Whether* it arrives on one is the atom's type, so only ``atomic_barrier=True``
+      has the field.
+    - `boundary_check` (int_tuple): per mode boundary check, congruent with the global tensor.
+    """
+
+    def __init__(self, cache_modifier=0):
+        self.cache_modifier = cache_modifier
+
+
 def TDM(
     rank,
     num_warps,
@@ -91,7 +125,7 @@ def TDM(
     MCAST ``workgroup_mask`` are runtime atom state set via ``fx.atom.set_value``.
     :func:`make_tdm_atom` builds the atom and populates the descriptor from a tensor.
     """
-    return CopyOpGFX1250TDMType.get(
+    return fly_rocdl.CopyOpGFX1250TDMType.get(
         rank,
         num_warps,
         pad_interval,
@@ -148,7 +182,7 @@ def make_tdm_atom(
     if len(strides) != rank:
         raise ValueError(f"make_tdm_atom: expected {rank} strides, got {len(strides)}")
 
-    copy_op = CopyOpGFX1250TDMType.get(
+    copy_op = fly_rocdl.CopyOpGFX1250TDMType.get(
         rank,
         num_warps,
         pad_interval,
@@ -173,3 +207,131 @@ def make_tdm_atom(
         )
         atom = atom_set_value(atom, f"stride_{i}", st)
     return atom
+
+
+def make_tiled_tdm_atom(
+    op,
+    tensor: Tensor,
+    smem_layout,
+    tdm_tile,
+    num_warps=1,
+    *,
+    init_boundary_check=True,
+    atomic_barrier=False,
+    internal_type=None,
+):
+    """Build a wave-scoped CDNA5 TDM copy atom and its coordinate tensor.
+
+    * ``op`` — a ``TensorLoad(...)`` or ``TensorStore(...)`` instance.
+    * ``tensor`` — the global tensor.
+    * ``smem_layout`` — the LDS tile layout.
+    * ``tdm_tile`` — the tiler: how many elements to take from each global mode.
+    * ``num_warps`` — how many warps of the workgroup split this tile. The same
+      number must be handed to :func:`tdm_partition` as the size of its warp
+      layout.
+    * ``init_boundary_check`` — The *initial* ``boundary_check`` state.
+    * ``atomic_barrier`` — whether this atom arrives on the atomic barrier when finished.
+    * ``internal_type`` — the unit the *descriptor* counts in, which may be
+      wider than the tensor's element (its width must be a multiple). It
+      is what lets a sub-byte element ride on a ``data_size`` the hardware can
+      encode.
+
+    Example:
+        Loading a 128x64 tile of a row-major ``gA`` into LDS.
+
+            sA_layout = fx.make_layout((128, 64), (64, 1))
+            atom, mA = make_tiled_tdm_atom(TensorLoad(), gA, sA_layout, (128, 64))
+
+            mA = fx.zipped_divide(mA, (128, 64))[None, (bid_x, bid_y)]
+            sA = fx.Tensor(fx.make_view(smem_ptr, sA_layout))
+
+            tAsA, tAgA = tdm_partition(atom, warp_coord, warp_layout, sA, mA)
+            fx.copy(atom, tAgA, tAsA)
+
+    Choosing ``sA_layout``:
+        The layouts below all hold that same 128x64 tile and differ only in how
+        it sits in LDS.
+
+            # Plain row-major. No skip, so the atom carries no padding fields.
+            fx.make_layout((128, 64), (64, 1))
+
+            # 8 elements of slack after every 64-element row -- the usual bank-conflict
+            # dodge. The atom picks it up as `padInterval = 64, padAmount = 8`.
+            fx.make_layout((128, 64), (72, 1))
+
+            # The same addresses with M split 8x16.
+            fx.make_layout(((8, 16), 64), ((72, 576), 1))
+
+            # This pads once every 8 rows (`padInterval = 512, padAmount = 64`)
+            # instead of once every row.
+            fx.make_layout(((8, 16), 64), ((64, 576), 1))
+
+        An LDS tile may also be column-major, but that is a property it has to share
+        with the tensor: the innermost descriptor dim is the one TDM reads
+        contiguously from global memory, so a column-major tile wants a column-major
+        ``gA`` and is refused over the row-major one above.
+    """
+    from ..primitive import make_tile
+
+    if not isinstance(op, (TensorLoad, TensorStore)):
+        raise TypeError(
+            f"make_tiled_tdm_atom: first argument must be a TensorLoad() or " f"TensorStore() instance, got {op!r}"
+        )
+
+    smem_layout = smem_layout.layout if isinstance(smem_layout, Tensor) else smem_layout
+    # An `!fly.tile` operand, like `smem_layout`: it is entirely static, so it lives in the
+    # value's type and the derivation reads it there.
+    tiler = tdm_tile if isinstance(tdm_tile, ir.Value) else make_tile(*tdm_tile)
+
+    common = dict(
+        init_boundary_check=ir.BoolAttr.get(init_boundary_check),
+        num_warps=num_warps,
+        cache_modifier=op.cache_modifier,
+        atomic_barrier=bool(atomic_barrier),
+        internal_type=(
+            None
+            if internal_type is None
+            else (internal_type.ir_type if hasattr(internal_type, "ir_type") else internal_type)
+        ),
+    )
+    if isinstance(op, TensorLoad):
+        atom, tdm_tensor = fly_rocdl.make_tiled_tdm_load_atom(tensor, smem_layout, tiler, **common)
+    else:
+        atom, tdm_tensor = fly_rocdl.make_tiled_tdm_store_atom(tensor, smem_layout, tiler, **common)
+    return atom, tdm_tensor
+
+
+def tdm_partition(
+    atom,
+    warp_coord,
+    warp_layout,
+    stensor,
+    gtensor,
+):
+    """Cut an LDS tile and a coordinate tile into the calls the atom makes.
+
+    Both tiles come out shaped ``((ATOM), (ITER))`` -- mode 0 is one call's worth of
+    values and mode 1 counts the calls.
+
+    ``warp_coord`` / ``warp_layout`` say how the warps split the tile: each
+    issues one instruction over its own share, and the assembled tile belongs to
+    the whole workgroup. Pass ``0`` and ``make_layout(1)`` when a single warp
+    does the copy. There is no thread index and no per-lane slice, so within a
+    warp every lane sees the same partition.
+    """
+    from ..primitive import composition, crd2idx, size
+    from ..typing import static
+
+    n_warps = size(warp_layout).unpack()
+
+    layout_V = static(fly_rocdl.tdm_partition_layout(atom.type, stensor.type, gtensor.type, n_warps))
+    if n_warps == 1:
+        return composition(stensor, layout_V), composition(gtensor, layout_V)
+
+    # The multicast coordinate is sliced out of the middle mode: the warps take equal
+    # contiguous chunks of the LDS order, and this one is `warp_coord`'s.
+    warp_id = crd2idx(warp_coord, warp_layout)
+    return (
+        composition(stensor, layout_V)[None, warp_id, None],
+        composition(gtensor, layout_V)[None, warp_id, None],
+    )
