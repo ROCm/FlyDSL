@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-13T09:50:19Z",
+ "updated": "2026-08-13T09:52:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -40,11 +40,11 @@
    "branch": "gfx1250/gemm-opt-0805",
    "event": "pull_request",
    "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31683858468",
    "created_at": "2026-08-13T08:50:28Z",
-   "updated_at": "2026-08-13T08:52:44Z",
+   "updated_at": "2026-08-13T09:48:53Z",
    "actor": "aoli26",
    "jobs": []
   },
@@ -70,11 +70,11 @@
    "branch": "fix-docs-pages-deploy",
    "event": "pull_request",
    "title": "Fix GitHub Pages docs deployment",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31681184248",
    "created_at": "2026-08-13T08:14:22Z",
-   "updated_at": "2026-08-13T08:54:36Z",
+   "updated_at": "2026-08-13T09:49:16Z",
    "actor": "gyohuangxin",
    "jobs": [
     {
@@ -98,9 +98,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-13T08:54:36Z",
+     "started_at": "2026-08-13T09:49:16Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31681184248/job/94396244575"
     }
@@ -175,10 +175,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-13T08:11:36Z",
-     "completed_at": null,
+     "completed_at": "2026-08-13T09:49:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31674712052/job/94385924534"
     },
     {
