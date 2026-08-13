@@ -120,6 +120,7 @@ def compile_preshuffle_gemm(
     use_async_copy: bool = False,
     xcd_swizzle: int = 0,
     lds_stage: int = 2,
+    preload: Optional[tuple[int, int]] = None,
 ):
     """Compile preshuffle GEMM (fp8/int8/fp16/bf16).
     Signature: fn(C, A, B, scale_a, scale_b, bias, M, N, stream). bias is the fused
@@ -146,10 +147,6 @@ def compile_preshuffle_gemm(
     is_f16_or_bf16 = is_f16 or is_bf16
     is_8bit = is_fp8 or is_int8
     elem_bytes = 1 if is_8bit else 2
-
-    # The async gmem->LDS DMA (buffer_load_lds 128b) only lowers for 8-bit inputs.
-    if use_async_copy and not is_8bit:
-        raise ValueError("use_async_copy is only supported for 8-bit inputs (fp8/int8)")
 
     gpu_arch = get_rocm_arch()
     is_gfx942 = str(gpu_arch).startswith("gfx942")
@@ -195,9 +192,13 @@ def compile_preshuffle_gemm(
     num_b_loads = (tile_n * tile_k * elem_bytes) // total_threads // 16
     num_ds_load = (tile_m * tile_k * elem_bytes) // 64 // 16  # A LDS reads per wave
     num_gmem_loads = num_a_loads + num_b_loads
-    if is_8bit and is_gfx950:
+    if preload is not None:
+        dsrd_preload, dvmem_preload = preload
+    elif is_8bit and is_gfx950:
         dsrd_preload, dvmem_preload = _get_preload(tile_m, tile_n, tile_k)
     else:
+        # _TILE_PRELOAD_TABLE only covers 8-bit tiles, so other dtypes emit no
+        # sched_vmem/sched_dsrd hints unless the caller supplies them via preload=.
         dsrd_preload, dvmem_preload = (0, 0)
 
     a_lds_elems = tile_m * tile_k
@@ -273,15 +274,23 @@ def compile_preshuffle_gemm(
         thr_g2r_B = fx.make_tiled_copy_B(buf_copy, tiled_mma).get_slice(tid)
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        if const_expr(is_8bit):
+        # dma_a_to_lds writes A with k_swz derived from k_blocks16, so whenever the DMA
+        # is used the LDS view must be swizzled the same way or the reader unswizzles at
+        # a different width. The sync path writes through this same view and is
+        # self-consistent under any swizzle, and measurably prefers the fixed one
+        # (bf16 tile_k=256: 1011 TF/s fixed vs 417 derived), so it keeps Swizzle<3,3,3>.
+        if const_expr(is_8bit or use_async_copy):
             k_blocks16 = (tile_k * elem_bytes) // 16
             if k_blocks16 <= 0 or (k_blocks16 & (k_blocks16 - 1)) != 0:
                 raise ValueError(
-                    f"Unsupported tile_k for 8-bit LDS swizzle: tile_k={tile_k}, elem_bytes={elem_bytes} (k_blocks16={k_blocks16}); "
-                    "expected tile_k*elem_bytes to be a positive multiple of 16 with (tile_k*elem_bytes/16) a power of two."
+                    f"Unsupported tile_k for LDS swizzle: tile_k={tile_k}, elem_bytes={elem_bytes} "
+                    f"(k_blocks16={k_blocks16}); expected tile_k*elem_bytes to be a positive multiple "
+                    "of 16 with (tile_k*elem_bytes/16) a power of two."
                 )
             swz_bits = k_blocks16.bit_length() - 1  # log2
-            swz = fx.SwizzleType.get(swz_bits, 4, swz_bits)
+            # base = log2(elements per 16B): 4 for 8-bit, 3 for f16/bf16
+            swz_base = (16 // elem_bytes).bit_length() - 1
+            swz = fx.SwizzleType.get(swz_bits, swz_base, swz_bits)
         else:
             swz = fx.SwizzleType.get(3, 3, 3)
 
@@ -325,7 +334,16 @@ def compile_preshuffle_gemm(
             # Bound to the real M extent (like the sync gA) so ragged-M blocks DMA-read
             # OOB rows as 0 instead of faulting past the allocation.
             gA_flat = fx.rocdl.make_buffer_tensor(
-                fx.Tensor(fx.make_view(fx.get_iter(arg_a), fx.make_layout(65536 * K, 1))),
+                # Byte-typed on both sides: the DMA is a raw 128b byte move and the
+                # index math below is already expressed in bytes. With an element-typed
+                # global view the copy only legalizes -- and only indexes correctly --
+                # when elem_bytes == 1, which is what restricted this path to 8-bit.
+                fx.Tensor(
+                    fx.make_view(
+                        fx.recast_iter(Int8, fx.get_iter(arg_a)),
+                        fx.make_layout(65536 * K * elem_bytes, 1),
+                    )
+                ),
                 max_size=False,
                 num_records_bytes=fx.Int64(i32_m) * fx.Int64(K) * fx.Int64(elem_bytes),
             )

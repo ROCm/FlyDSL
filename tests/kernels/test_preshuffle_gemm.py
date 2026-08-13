@@ -159,8 +159,6 @@ def test_mfma_a8_flyc_preshuffle(
         # operator's operand!"), while CDNA4 (gfx950) handles it. Restrict async
         # copy to gfx950 until the gfx942 codegen path is supported.
         pytest.skip(f"async copy (buffer_load_lds) is only supported on gfx950, not {get_rocm_arch()}")
-    if use_async_copy and in_dtype not in ("fp8", "int8"):
-        pytest.skip("async copy (buffer_load_lds) only supports 8-bit inputs (fp8/int8)")
     print("=" * 80)
     print(f"[flyc] MFMA {in_dtype.upper()} GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k})")
     print("=" * 80)
@@ -1003,3 +1001,28 @@ def test_preshuffle_accepts_whole_a_tile(tile_m):
     if get_rocm_arch() not in ("gfx942", "gfx950"):
         pytest.skip(f"v2 preshuffle GEMM requires gfx942/gfx950, got {get_rocm_arch()}")
     compile_preshuffle_gemm(N=1024, K=2048, tile_m=tile_m, tile_n=256, tile_k=64, in_dtype="bf16", out_dtype="bf16")
+
+
+@pytest.mark.parametrize("in_dtype", ["fp16", "bf16"])
+@pytest.mark.parametrize("tile_k", [64, 128])
+def test_preshuffle_async_copy_2byte_dtypes(in_dtype, tile_k):
+    """The gmem->LDS DMA must match the sync path for 2-byte input dtypes.
+
+    tile_k is parametrized because the DMA's LDS swizzle width derives from
+    ``tile_k * elem_bytes``, so tile_k=128 exercises a different swizzle than the
+    tile_k=64 case that the fixed Swizzle<3,3,3> happened to match.
+    """
+    if get_rocm_arch() != "gfx950":
+        pytest.skip(f"async copy (buffer_load_lds) requires gfx950, got {get_rocm_arch()}")
+    test_mfma_a8_flyc_preshuffle(
+        in_dtype,
+        M=512,
+        N=1024,
+        K=2048,
+        tile_m=128,
+        tile_n=256,
+        tile_k=tile_k,
+        use_async_copy=True,
+        test_graph=False,
+        run_aiter_bench=False,
+    )
