@@ -7,6 +7,7 @@
 
 import os
 import sys
+import time
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if _REPO_ROOT not in sys.path:
@@ -479,8 +480,8 @@ def test_256x256_back_to_back_determinism(mode, K):
     assert torch.equal(c_gpu, golden), "back-to-back launches drifted from the synchronized result"
 
 
-def _bench_us(launch, output: torch.Tensor, *, warmup: int = 10, iters: int = 100) -> float:
-    """Median per-launch latency (us), timed over direct launches."""
+def _bench_us(launch, output: torch.Tensor, *, warmup: int = 10, iters: int = 100, gap_us: float = 100.0) -> float:
+    """Median per-launch latency (us), each launch timed in isolation."""
     for _ in range(warmup):
         launch()
     torch.cuda.synchronize()
@@ -491,9 +492,12 @@ def _bench_us(launch, output: torch.Tensor, *, warmup: int = 10, iters: int = 10
     if output.abs().max().item() == 0:
         raise RuntimeError("the launch produced an all-zero output; it is not running")
 
-    batch = max(1, iters // 10)
+    saturated = gap_us <= 0
+    # saturated mode: one event pair around a batch of back-to-back launches
+    rounds, batch = (10, max(1, iters // 10)) if saturated else (iters, 1)
+
     samples = []
-    for _ in range(10):
+    for _ in range(rounds):
         start, end = (torch.cuda.Event(enable_timing=True) for _ in range(2))
         start.record()
         for _ in range(batch):
@@ -501,6 +505,8 @@ def _bench_us(launch, output: torch.Tensor, *, warmup: int = 10, iters: int = 10
         end.record()
         torch.cuda.synchronize()
         samples.append(start.elapsed_time(end) * 1e3 / batch)
+        if not saturated:
+            time.sleep(gap_us * 1e-6)
     return sorted(samples)[len(samples) // 2]
 
 
@@ -526,6 +532,12 @@ def _main():
     parser.add_argument("-out-dtype", default="bf16", choices=sorted(_DT))
     parser.add_argument("-bench", action="store_true", help="also measure perf")
     parser.add_argument("-const", type=float, default=None, help="fill A/B with a representable constant")
+    parser.add_argument(
+        "-bench-gap-us",
+        type=float,
+        default=100.0,
+        help="host idle after each timed launch; 0 measures saturated back-to-back throughput",
+    )
     args = parser.parse_args()
 
     M, N, K = args.mnk
@@ -538,7 +550,7 @@ def _main():
     print(f"PASSED correctness: mode={args.mode} M={M} N={N} K={K}")
 
     if args.bench:
-        us = _bench_us(lambda: compiled(*make_args(torch.cuda.current_stream())), c_gpu)
+        us = _bench_us(lambda: compiled(*make_args(torch.cuda.current_stream())), c_gpu, gap_us=args.bench_gap_us)
         print(
             f"perf: mode={args.mode} M={M} N={N} K={K} {us:.3f}us ({2.0 * M * N * K / (us * 1e-6) / 1e12:.2f} TFLOPS)"
         )

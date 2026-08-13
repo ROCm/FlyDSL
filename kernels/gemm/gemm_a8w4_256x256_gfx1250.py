@@ -76,6 +76,7 @@ def launch_gemm_a8w4_256x256(
     block = num_waves * WAVE
     # Each of the num_buffers slots holds KPAIR K-tiles side by side in every LDS row
     KPAIR = 2
+    A_SEED_ORDER = (0, 2, 1, 3)
     UNROLL = KPAIR * num_buffers
     SUPER_K = tile_k * KPAIR
     LDS_PAD_A = 16
@@ -386,10 +387,10 @@ def launch_gemm_a8w4_256x256(
             b_right = [b_right_0, b_right_1, b_right_2, b_right_3]
             sb_k = sb_left + sb_right
 
-            rocdl.sched_mfma(1)
+            rocdl.sched_mfma(3)
             rocdl.sched_dsrd(2)
             for _ in range_constexpr(2):
-                rocdl.sched_mfma(1)
+                rocdl.sched_mfma(3)
                 rocdl.sched_dsrd(4)
             rocdl.sched_barrier(0)
             _mma_block_range(0, 0, a_top, b_left, sa_top, sb_left, 3, 5)
@@ -415,10 +416,10 @@ def launch_gemm_a8w4_256x256(
             a_bottom = [a_bottom_0, a_bottom_1, a_bottom_2, a_bottom_3]
             sa_k = sa_top + sa_bottom
 
-            rocdl.sched_mfma(1)
+            rocdl.sched_mfma(3)
             rocdl.sched_dsrd(2)
             for _ in range_constexpr(4):
-                rocdl.sched_mfma(1)
+                rocdl.sched_mfma(3)
                 rocdl.sched_dsrd(4)
             rocdl.sched_barrier(0)
             _mma_block_range(0, half_n, a_top, b_right, sa_k, sb_k, 5, 3)
@@ -443,11 +444,11 @@ def launch_gemm_a8w4_256x256(
             _load_seed_a_scales(next_stage, next_bank)
             for pos in range_constexpr(1, 3):
                 _mma_block_range(half_m, 0, a_bottom, b_left, sa_k, sb_left, pos, 1)
-                _load_seed_a_fragment(next_stage, next_bank, pos - 1)
-            rocdl.sched_mfma(1)
+                _load_seed_a_fragment(next_stage, next_bank, A_SEED_ORDER[pos - 1])
+            rocdl.sched_mfma(3)
             rocdl.sched_dsrd(2)
             for _ in range_constexpr(2):
-                rocdl.sched_mfma(1)
+                rocdl.sched_mfma(3)
                 rocdl.sched_dsrd(4)
             rocdl.sched_barrier(0)
             if const_expr(boundary):
@@ -455,9 +456,9 @@ def launch_gemm_a8w4_256x256(
             rocdl.sched_barrier(0)
             for pos in range_constexpr(3, 5):
                 _mma_block_range(half_m, 0, a_bottom, b_left, sa_k, sb_left, pos, 1)
-                _load_seed_a_fragment(next_stage, next_bank, pos - 1)
+                _load_seed_a_fragment(next_stage, next_bank, A_SEED_ORDER[pos - 1])
             for _ in range_constexpr(2):
-                rocdl.sched_mfma(1)
+                rocdl.sched_mfma(3)
                 rocdl.sched_dsrd(4)
             rocdl.sched_barrier(0)
             _mma_block_range(half_m, 0, a_bottom, b_left, sa_k, sb_left, 5, 11)
@@ -499,10 +500,10 @@ def launch_gemm_a8w4_256x256(
             )
             _load_seed_b_fragment(next_stage, next_bank, 2)
             _load_seed_b_fragment(next_stage, next_bank, 3)
-            rocdl.sched_mfma(1)
+            rocdl.sched_mfma(3)
             rocdl.sched_dsrd(2)
             for _ in range_constexpr(2):
-                rocdl.sched_mfma(1)
+                rocdl.sched_mfma(3)
                 rocdl.sched_dsrd(4)
             rocdl.sched_barrier(0)
             _mma_block_range(
@@ -552,10 +553,10 @@ def launch_gemm_a8w4_256x256(
                 a_bottom_3 = _rmem(16, _stage_load_a(stage, half_m + 3))
                 a_bottom = [a_bottom_0, a_bottom_1, a_bottom_2, a_bottom_3]
 
-                rocdl.sched_mfma(1)
+                rocdl.sched_mfma(3)
                 rocdl.sched_dsrd(2)
                 for _ in range_constexpr(4):
-                    rocdl.sched_mfma(1)
+                    rocdl.sched_mfma(3)
                     rocdl.sched_dsrd(4)
                 rocdl.sched_barrier(0)
                 _mma_block_range(0, 0, a_top, b_left, sa_top, sb_left, 5, 3, True)
@@ -589,10 +590,10 @@ def launch_gemm_a8w4_256x256(
                 b_right = [b_right_0, b_right_1, b_right_2, b_right_3]
                 sb_k = sb_left + sb_right
 
-                rocdl.sched_mfma(1)
+                rocdl.sched_mfma(3)
                 rocdl.sched_dsrd(2)
                 for _ in range_constexpr(2):
-                    rocdl.sched_mfma(1)
+                    rocdl.sched_mfma(3)
                     rocdl.sched_dsrd(4)
                 rocdl.sched_barrier(0)
                 _mma_block_range(half_m, 0, a_bottom, b_left, sa_k, sb_k, 3, 5, True)
@@ -624,10 +625,10 @@ def launch_gemm_a8w4_256x256(
                 _load_seed_b_fragment(next_stage, next_bank, 2)
                 _load_seed_b_fragment(next_stage, next_bank, 3)
                 _mma_block_range(0, half_n, a_top, b_right, sa_k, sb_k, 3, 2, True)
-                rocdl.sched_mfma(1)
+                rocdl.sched_mfma(3)
                 rocdl.sched_dsrd(2)
                 for _ in range_constexpr(2):
-                    rocdl.sched_mfma(1)
+                    rocdl.sched_mfma(3)
                     rocdl.sched_dsrd(4)
                 rocdl.sched_mfma(2)
                 rocdl.sched_barrier(0)
@@ -661,11 +662,11 @@ def launch_gemm_a8w4_256x256(
                         1,
                         True,
                     )
-                    _load_seed_a_fragment(next_stage, next_bank, pos - 1)
-                rocdl.sched_mfma(1)
+                    _load_seed_a_fragment(next_stage, next_bank, A_SEED_ORDER[pos - 1])
+                rocdl.sched_mfma(3)
                 rocdl.sched_dsrd(1)
                 for _ in range_constexpr(4):
-                    rocdl.sched_mfma(1)
+                    rocdl.sched_mfma(3)
                     rocdl.sched_dsrd(4)
                 rocdl.sched_barrier(0)
                 _mma_block_range(
