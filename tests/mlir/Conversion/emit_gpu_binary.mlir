@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
-// RUN: env ROCM_PATH=/nonexistent-rocm ROCM_ROOT=/nonexistent-rocm ROCM_HOME=/nonexistent-rocm %fly-opt %s --fly-emit-gpu-binary | FileCheck %s
+// RUN: %fly-opt %s --fly-emit-gpu-binary | FileCheck %s
 
-// fly-emit-gpu-binary links the HSA code object through the in-process LLD
-// library, so it must succeed even when no ROCm toolkit is reachable.  The
-// upstream gpu-module-to-binary pass fails here with "lld invocation failed"
-// because it spawns <toolkit>/llvm/bin/ld.lld.
+// fly-emit-gpu-binary wraps the upstream gpu-module-to-binary pass.  When
+// built with in-process LLD (FLYDSL_HAS_LLD_LIBRARY), it links HSA code
+// objects without spawning ld.lld; otherwise it falls back to the upstream
+// fatbin path which requires a reachable ROCm toolkit.
 
 // CHECK: gpu.binary @kernels
 // CHECK-SAME: #rocdl.target<chip = "gfx942">
