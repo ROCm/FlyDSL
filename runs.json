@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-13T08:25:13Z",
+ "updated": "2026-08-13T09:03:10Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31683858468,
+   "pr": 971,
+   "commit": "ac84c9e3d04524d4f556109378a4339a86fef938",
+   "branch": "gfx1250/gemm-opt-0805",
+   "event": "pull_request",
+   "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31683858468",
+   "created_at": "2026-08-13T08:50:28Z",
+   "updated_at": "2026-08-13T08:52:44Z",
+   "actor": "aoli26",
+   "jobs": []
+  },
   {
    "run_id": 31681364265,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "Fix GitHub Pages docs deployment (#1006)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31681364265",
    "created_at": "2026-08-13T08:16:53Z",
-   "updated_at": "2026-08-13T08:18:12Z",
+   "updated_at": "2026-08-13T08:27:49Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -29,9 +44,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31681184248",
    "created_at": "2026-08-13T08:14:22Z",
-   "updated_at": "2026-08-13T08:15:48Z",
+   "updated_at": "2026-08-13T08:54:36Z",
    "actor": "gyohuangxin",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-13T08:54:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31681184248/job/94396244480"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-13T08:54:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31681184248/job/94396244571"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-13T08:54:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31681184248/job/94396244575"
+    }
+   ]
   },
   {
    "run_id": 31676223615,
@@ -39,14 +82,42 @@
    "commit": "6a5783c293d14715bff96fd415dbe0a7d242eb27",
    "branch": "feature/typed-arithmetic-modernization",
    "event": "pull_request",
-   "title": "[Feat] Add type-aware extrema and integer ceiling division",
+   "title": "[Expr] Add type-aware extrema and integer ceiling division",
    "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31676223615",
    "created_at": "2026-08-13T07:03:38Z",
-   "updated_at": "2026-08-13T08:11:52Z",
+   "updated_at": "2026-08-13T08:56:24Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T08:51:35Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31676223615/job/94395353289"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T08:51:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31676223615/job/94395353321"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T08:56:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31676223615/job/94395353411"
+    }
+   ]
   },
   {
    "run_id": 31674712052,
@@ -55,20 +126,20 @@
    "branch": "dsl-ify-arith",
    "event": "pull_request",
    "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31674712052",
    "created_at": "2026-08-13T06:40:23Z",
-   "updated_at": "2026-08-13T08:10:46Z",
+   "updated_at": "2026-08-13T08:51:53Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-13T08:11:10Z",
-     "completed_at": null,
+     "completed_at": "2026-08-13T08:29:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31674712052/job/94385924471"
     },
     {
@@ -83,9 +154,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-13T08:10:46Z",
+     "started_at": "2026-08-13T08:51:52Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31674712052/job/94385924557"
     }
@@ -123,10 +194,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-13T07:03:31Z",
-     "completed_at": null,
+     "completed_at": "2026-08-13T09:01:20Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31673258278/job/94370887936"
     },
     {
@@ -156,29 +227,29 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31671988869",
    "created_at": "2026-08-13T05:55:30Z",
-   "updated_at": "2026-08-13T06:38:47Z",
+   "updated_at": "2026-08-13T09:01:40Z",
    "actor": "Boss2002n",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-13T06:38:46Z",
-     "completed_at": null,
+     "completed_at": "2026-08-13T09:01:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31671988869/job/94366030203"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-13T06:38:07Z",
-     "completed_at": null,
+     "completed_at": "2026-08-13T08:25:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31671988869/job/94366030233"
     },
     {
@@ -458,7 +529,7 @@
    "commit": "9ab8a9d7eae99bad632aaef31b4e3392d06e4efd",
    "branch": "feature/typed-arithmetic-modernization",
    "event": "pull_request",
-   "title": "[Feat] Add type-aware extrema and integer ceiling division",
+   "title": "[Expr] Add type-aware extrema and integer ceiling division",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655638442",
@@ -955,16 +1026,16 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582596158",
    "created_at": "2026-08-12T09:22:22Z",
-   "updated_at": "2026-08-13T07:10:45Z",
+   "updated_at": "2026-08-13T08:48:11Z",
    "actor": "Yaowu-Xiong",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-13T07:10:45Z",
-     "completed_at": null,
+     "completed_at": "2026-08-13T08:31:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582596158/job/94372393733"
     },
     {
@@ -984,6 +1055,24 @@
      "started_at": "2026-08-12T13:02:29Z",
      "completed_at": "2026-08-12T13:21:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582596158/job/94372394500"
+    },
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-13T08:48:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582596158/job/94390753113"
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-13T08:32:31Z",
+     "completed_at": "2026-08-13T08:41:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582596158/job/94390753142"
     }
    ]
   },
@@ -1053,7 +1142,7 @@
    "commit": "75d29e01ce503e00b361a47c2af02f77c5145532",
    "branch": "feature/typed-arithmetic-modernization",
    "event": "pull_request",
-   "title": "[Feat] Add type-aware extrema and integer ceiling division",
+   "title": "[Expr] Add type-aware extrema and integer ceiling division",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31578608800",
@@ -1378,7 +1467,7 @@
    "commit": "2741b7f8bac05b89d98ec0d296b5edb760b3f001",
    "branch": "feature/typed-arithmetic-modernization",
    "event": "pull_request",
-   "title": "[Feat] Add type-aware extrema and integer ceiling division",
+   "title": "[Expr] Add type-aware extrema and integer ceiling division",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31492623191",
@@ -1680,21 +1769,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31476253355/job/93778693462"
     }
    ]
-  },
-  {
-   "run_id": 31474702073,
-   "pr": null,
-   "commit": "76b2399f0f569cb2dcdf6b05d021a8d675ae03f6",
-   "branch": "feat/rdna3-gemm-tile-autotune",
-   "event": "pull_request",
-   "title": "[Perf] Choose the RDNA3 GEMM tile from the shape",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31474702073",
-   "created_at": "2026-08-11T08:46:30Z",
-   "updated_at": "2026-08-11T12:23:51Z",
-   "actor": "vlluvia",
-   "jobs": []
   }
  ]
 }
