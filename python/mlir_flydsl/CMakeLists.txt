@@ -271,6 +271,10 @@ add_custom_target(CopyFlyPythonSources ALL
     "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/dialects/_fly_enum_gen.py"
   ${_FLY_COPY_ROCDL_TABLEGEN}
   ${_FLY_COPY_DEVICE_BITCODE}
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+    "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/_rocm"
+  COMMAND ${CMAKE_COMMAND} -E $<IF:$<BOOL:${LLD_FOUND}>,touch,true>
+    "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/_rocm/.has_inprocess_lld"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "$<TARGET_FILE:mlir_c_runner_utils>"
     "${_MLIR_LIBS_DIR}/libmlir_c_runner_utils.so"
