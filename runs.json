@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-08-14T09:40:58Z",
+ "updated": "2026-08-14T10:27:18Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31790212900,
+   "pr": null,
+   "commit": "01d63f7d04d5040e3d9df77feb6d083936b9d86a",
+   "branch": "main",
+   "event": "push",
+   "title": "[compiler] isolate mutable state across dynamic if branches (#1003)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31790212900",
+   "created_at": "2026-08-14T09:57:03Z",
+   "updated_at": "2026-08-14T10:23:32Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-14T10:23:21Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31790212900/job/94740624546"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-14T10:23:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31790212900/job/94740624556"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-14T10:23:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31790212900/job/94740624645"
+    }
+   ]
+  },
   {
    "run_id": 31785133670,
    "pr": 1009,
@@ -59,11 +102,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-14T09:34:25Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31783384884/job/94730181980"
+     "completed_at": "2026-08-14T09:59:45Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31783384884/job/94730181980",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -83,11 +127,11 @@
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
    "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31782417882",
    "created_at": "2026-08-14T08:04:27Z",
-   "updated_at": "2026-08-14T08:33:22Z",
+   "updated_at": "2026-08-14T10:24:48Z",
    "actor": "jli-melchior",
    "jobs": [
     {
@@ -103,20 +147,21 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-14T08:33:12Z",
-     "completed_at": null,
+     "completed_at": "2026-08-14T10:03:48Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31782417882/job/94716609304"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-14T08:33:22Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31782417882/job/94716609313"
+     "completed_at": "2026-08-14T10:24:47Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31782417882/job/94716609313",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -523,11 +568,11 @@
    "branch": "mega_moe_a4w4",
    "event": "pull_request",
    "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31687955945",
    "created_at": "2026-08-13T09:44:25Z",
-   "updated_at": "2026-08-14T08:33:31Z",
+   "updated_at": "2026-08-14T10:17:00Z",
    "actor": "Yaowu-Xiong",
    "jobs": [
     {
@@ -562,19 +607,19 @@
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-14T08:33:31Z",
+     "started_at": "2026-08-14T10:16:59Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31687955945/job/94716944509"
     },
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-14T08:58:29Z",
-     "completed_at": null,
+     "completed_at": "2026-08-14T09:40:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31687955945/job/94716944692"
     }
    ]
@@ -1967,21 +2012,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 31566303938,
-   "pr": null,
-   "commit": "434bcd6563e6893c583e6ad2f868b172e46fb703",
-   "branch": "xyt/citest",
-   "event": "pull_request",
-   "title": "Use stable torch reference API for a16w16 GFX950 GEMM testing",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31566303938",
-   "created_at": "2026-08-12T05:22:05Z",
-   "updated_at": "2026-08-12T05:24:26Z",
-   "actor": "xytpai",
-   "jobs": []
   }
  ]
 }
