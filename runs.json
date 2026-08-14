@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-08-14T10:38:19Z",
+ "updated": "2026-08-14T10:53:19Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31793679094,
+   "pr": 1011,
+   "commit": "c378af834e06a55c3a70e3701e8af66352e01227",
+   "branch": "main",
+   "event": "pull_request",
+   "title": "test_pr",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31793679094",
+   "created_at": "2026-08-14T10:48:26Z",
+   "updated_at": "2026-08-14T10:50:25Z",
+   "actor": "james-huang09",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-14T10:50:20Z",
+     "completed_at": "2026-08-14T10:50:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31793679094/job/94746259181",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-14T10:50:20Z",
+     "completed_at": "2026-08-14T10:50:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31793679094/job/94746259191",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-14T10:50:20Z",
+     "completed_at": "2026-08-14T10:50:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31793679094/job/94746259217",
+     "log_fetch_failed": true
+    }
+   ]
+  },
   {
    "run_id": 31790212900,
    "pr": null,
@@ -29,11 +75,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-14T10:23:04Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31790212900/job/94740624556"
+     "completed_at": "2026-08-14T10:44:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31790212900/job/94740624556",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -1964,52 +2011,6 @@
      "started_at": "2026-08-12T12:36:31Z",
      "completed_at": "2026-08-12T13:01:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31566833673/job/94115567423"
-    }
-   ]
-  },
-  {
-   "run_id": 31566447072,
-   "pr": null,
-   "commit": "2a47ff8b8408103a8d4afea60e0c4276c6e64bc4",
-   "branch": "xyt/citest",
-   "event": "pull_request",
-   "title": "Use stable torch reference API for a16w16 GFX950 GEMM testing",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31566447072",
-   "created_at": "2026-08-12T05:24:44Z",
-   "updated_at": "2026-08-12T05:27:58Z",
-   "actor": "xytpai",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-12T05:27:47Z",
-     "completed_at": "2026-08-12T05:27:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31566447072/job/94019524354",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-12T05:27:47Z",
-     "completed_at": "2026-08-12T05:27:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31566447072/job/94019524499",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-12T05:27:54Z",
-     "completed_at": "2026-08-12T05:27:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31566447072/job/94019524517",
-     "log_fetch_failed": true
     }
    ]
   }
