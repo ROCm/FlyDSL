@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-14T06:50:22Z",
+ "updated": "2026-08-14T07:13:28Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31778926349,
+   "pr": 1010,
+   "commit": "ac1af8cb4fad1715e053f122322eb1bf666d8e46",
+   "branch": "feat/rdna3-gemm-wide-tiles-followup",
+   "event": "pull_request",
+   "title": "[Perf] Add wide RDNA3 GEMM tiles",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31778926349",
+   "created_at": "2026-08-14T07:10:34Z",
+   "updated_at": "2026-08-14T07:12:08Z",
+   "actor": "vlluvia",
+   "jobs": []
+  },
   {
    "run_id": 31774856574,
    "pr": 1009,
@@ -38,11 +53,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-14T06:32:22Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31774856574/job/94692798754"
+     "completed_at": "2026-08-14T07:02:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31774856574/job/94692798754",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1952,21 +1968,6 @@
    "created_at": "2026-08-12T01:37:40Z",
    "updated_at": "2026-08-12T04:11:27Z",
    "actor": "jli-melchior",
-   "jobs": []
-  },
-  {
-   "run_id": 31506045411,
-   "pr": null,
-   "commit": "fe6db3fc2d643ef8956295b29d7fcd2bf7709219",
-   "branch": "new_bias_alibi_sink_attention",
-   "event": "pull_request",
-   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31506045411",
-   "created_at": "2026-08-11T15:15:35Z",
-   "updated_at": "2026-08-11T17:54:32Z",
-   "actor": "amd-nprotaso",
    "jobs": []
   }
  ]
