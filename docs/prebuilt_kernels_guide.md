@@ -16,7 +16,7 @@ All kernels use the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `f
 
 ---
 
-## 1. Normalization kernels
+## 1. Normalization kernels test
 
 ### 1.1 LayerNorm (`kernels/norm/layernorm_kernel.py`)
 
