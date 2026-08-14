@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-14T08:21:05Z",
+ "updated": "2026-08-14T08:46:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31785133670,
+   "pr": 1009,
+   "commit": "db4143c45195b8f989e74650c8db07b1a993152d",
+   "branch": "john/bf16-attn-xcd-swizzle",
+   "event": "pull_request",
+   "title": "[Perf] Enable the XCD swizzle for bf16 dense attention on gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31785133670",
+   "created_at": "2026-08-14T08:44:12Z",
+   "updated_at": "2026-08-14T08:44:51Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
+  {
+   "run_id": 31784525574,
+   "pr": 1009,
+   "commit": "616227145644a2d0513f328be5be58b8aad779df",
+   "branch": "john/bf16-attn-xcd-swizzle",
+   "event": "pull_request",
+   "title": "[Perf] Enable the XCD swizzle for bf16 dense attention on gfx950",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31784525574",
+   "created_at": "2026-08-14T08:35:28Z",
+   "updated_at": "2026-08-14T08:44:19Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 31783384884,
    "pr": 971,
@@ -14,7 +44,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31783384884",
    "created_at": "2026-08-14T08:18:38Z",
-   "updated_at": "2026-08-14T08:18:43Z",
+   "updated_at": "2026-08-14T08:21:07Z",
    "actor": "aoli26",
    "jobs": []
   },
@@ -29,9 +59,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31782417882",
    "created_at": "2026-08-14T08:04:27Z",
-   "updated_at": "2026-08-14T08:06:31Z",
+   "updated_at": "2026-08-14T08:33:22Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-14T08:32:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31782417882/job/94716609238"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-14T08:33:12Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31782417882/job/94716609304"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-14T08:33:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31782417882/job/94716609313"
+    }
+   ]
   },
   {
    "run_id": 31778926349,
@@ -436,20 +494,20 @@
    "branch": "mega_moe_a4w4",
    "event": "pull_request",
    "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31687955945",
    "created_at": "2026-08-13T09:44:25Z",
-   "updated_at": "2026-08-14T07:34:06Z",
+   "updated_at": "2026-08-14T08:33:31Z",
    "actor": "Yaowu-Xiong",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-14T07:34:05Z",
-     "completed_at": null,
+     "completed_at": "2026-08-14T08:33:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31687955945/job/94704542925"
     },
     {
@@ -471,6 +529,24 @@
      "completed_at": "2026-08-13T11:33:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31687955945/job/94704544195",
      "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-14T08:33:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31687955945/job/94716944509"
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-14T08:33:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31687955945/job/94716944692"
     }
    ]
   },
@@ -1876,84 +1952,6 @@
    "created_at": "2026-08-12T05:22:05Z",
    "updated_at": "2026-08-12T05:24:26Z",
    "actor": "xytpai",
-   "jobs": []
-  },
-  {
-   "run_id": 31561190239,
-   "pr": 930,
-   "commit": "4eb60e178d6728298f0ba7d1c5a4c7a5e3ad20e8",
-   "branch": "dsl-ify-arith",
-   "event": "pull_request",
-   "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31561190239",
-   "created_at": "2026-08-12T03:47:50Z",
-   "updated_at": "2026-08-13T06:40:46Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T04:23:44Z",
-     "completed_at": "2026-08-13T04:45:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31561190239/job/94343238824",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T04:24:18Z",
-     "completed_at": "2026-08-13T05:35:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31561190239/job/94343238854",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-13T04:24:49Z",
-     "completed_at": "2026-08-13T05:32:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31561190239/job/94343238890"
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-13T06:17:16Z",
-     "completed_at": "2026-08-13T06:40:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31561190239/job/94354884609"
-    },
-    {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-13T05:45:58Z",
-     "completed_at": "2026-08-13T06:12:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31561190239/job/94354884654"
-    }
-   ]
-  },
-  {
-   "run_id": 31560514862,
-   "pr": null,
-   "commit": "c6d30130077368eed0fa93450a392843c03b4506",
-   "branch": "jiacao/conv3d-gemm-port",
-   "event": "pull_request",
-   "title": "[Kernel] fp8 conv3d: 8-wave GEMM pipeline + BIG_IN fix",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31560514862",
-   "created_at": "2026-08-12T03:34:49Z",
-   "updated_at": "2026-08-12T06:08:31Z",
-   "actor": "jiacao-amd",
    "jobs": []
   }
  ]
