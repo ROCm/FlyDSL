@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-14T11:11:01Z",
+ "updated": "2026-08-14T11:51:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -71,21 +71,22 @@
    "branch": "main",
    "event": "push",
    "title": "[compiler] isolate mutable state across dynamic if branches (#1003)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31790212900",
    "created_at": "2026-08-14T09:57:03Z",
-   "updated_at": "2026-08-14T10:23:32Z",
+   "updated_at": "2026-08-14T11:49:17Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-14T10:23:21Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31790212900/job/94740624546"
+     "completed_at": "2026-08-14T11:49:16Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31790212900/job/94740624546",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -100,11 +101,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-14T10:23:32Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31790212900/job/94740624645"
+     "completed_at": "2026-08-14T11:41:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31790212900/job/94740624645",
+     "log_fetch_failed": true
     }
    ]
   },
