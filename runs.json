@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-14T11:01:07Z",
+ "updated": "2026-08-14T11:11:01Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31794868681,
+   "pr": 1012,
+   "commit": "fc1da1423cf97debe3fb45ab9cdfba5676a6d77b",
+   "branch": "rchamber/add_16x16x16_MFMA_support",
+   "event": "pull_request",
+   "title": "[MFMA] Add 16x16x16 bf16/f16 support with fly-fix-bitcast-width pass",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31794868681",
+   "created_at": "2026-08-14T11:06:23Z",
+   "updated_at": "2026-08-14T11:08:12Z",
+   "actor": "RichardChamberlain1",
+   "jobs": []
+  },
   {
    "run_id": 31793679094,
    "pr": 1011,
@@ -1972,49 +1987,6 @@
    "updated_at": "2026-08-12T10:37:36Z",
    "actor": "amd-nprotaso",
    "jobs": []
-  },
-  {
-   "run_id": 31566833673,
-   "pr": null,
-   "commit": "882d198890dde700048c9d723903958fa53a7544",
-   "branch": "xyt/citest",
-   "event": "pull_request",
-   "title": "Use stable torch reference API for a16w16 GFX950 GEMM testing",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31566833673",
-   "created_at": "2026-08-12T05:31:42Z",
-   "updated_at": "2026-08-12T13:01:29Z",
-   "actor": "xytpai",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-12T12:36:34Z",
-     "completed_at": "2026-08-12T13:01:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31566833673/job/94115567294"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-12T12:35:59Z",
-     "completed_at": "2026-08-12T13:01:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31566833673/job/94115567379"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-12T12:36:31Z",
-     "completed_at": "2026-08-12T13:01:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31566833673/job/94115567423"
-    }
-   ]
   }
  ]
 }
