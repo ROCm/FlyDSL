@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-14T15:37:25Z",
+ "updated": "2026-08-14T15:48:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Docs] Elaboration for composite type and storage (#1004)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31807212850",
    "created_at": "2026-08-14T13:58:15Z",
-   "updated_at": "2026-08-14T14:22:21Z",
+   "updated_at": "2026-08-14T15:46:08Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -30,20 +30,22 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-14T14:22:21Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31807212850/job/94795086982"
+     "completed_at": "2026-08-14T15:39:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31807212850/job/94795086982",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-14T14:22:13Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31807212850/job/94795087019"
+     "completed_at": "2026-08-14T15:46:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31807212850/job/94795087019",
+     "log_fetch_failed": true
     }
    ]
   },
