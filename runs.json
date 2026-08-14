@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-14T12:34:26Z",
+ "updated": "2026-08-14T12:35:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31800890359,
+   "pr": 1013,
+   "commit": "313594fc71bf79e2688470997b10e7fe23800fc7",
+   "branch": "pr/enh-cdna5-tiled-tdm-atom",
+   "event": "pull_request",
+   "title": "[ROCDL] Add make_tiled_tdm_atom op and tdm_partition",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31800890359",
+   "created_at": "2026-08-14T12:34:10Z",
+   "updated_at": "2026-08-14T12:34:52Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 31798205814,
    "pr": 1013,
@@ -10,11 +25,11 @@
    "branch": "pr/enh-cdna5-tiled-tdm-atom",
    "event": "pull_request",
    "title": "[ROCDL] Add make_tiled_tdm_atom op and tdm_partition",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31798205814",
    "created_at": "2026-08-14T11:55:59Z",
-   "updated_at": "2026-08-14T11:58:34Z",
+   "updated_at": "2026-08-14T12:34:45Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -1944,51 +1959,6 @@
    "updated_at": "2026-08-12T08:39:09Z",
    "actor": "jli-melchior",
    "jobs": []
-  },
-  {
-   "run_id": 31578608800,
-   "pr": 995,
-   "commit": "75d29e01ce503e00b361a47c2af02f77c5145532",
-   "branch": "feature/typed-arithmetic-modernization",
-   "event": "pull_request",
-   "title": "[Expr] Add type-aware extrema and integer ceiling division",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31578608800",
-   "created_at": "2026-08-12T08:30:10Z",
-   "updated_at": "2026-08-13T00:43:18Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-12T23:37:18Z",
-     "completed_at": "2026-08-13T00:25:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31578608800/job/94296439728"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-12T23:36:34Z",
-     "completed_at": "2026-08-13T00:43:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31578608800/job/94296439809",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-12T23:36:30Z",
-     "completed_at": "2026-08-12T23:52:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31578608800/job/94296439830",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
