@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-14T21:30:59Z",
+ "updated": "2026-08-14T21:56:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,30 +10,32 @@
    "branch": "john/bf16-attn-xcd-swizzle",
    "event": "pull_request",
    "title": "[Perf] Enable the XCD swizzle and pin the softmax basis for gfx950 bf16 attention",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31835253178",
    "created_at": "2026-08-14T19:52:37Z",
-   "updated_at": "2026-08-14T20:28:29Z",
+   "updated_at": "2026-08-14T21:53:45Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-14T20:28:28Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31835253178/job/94888615194"
+     "completed_at": "2026-08-14T21:30:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31835253178/job/94888615194",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-14T20:28:27Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31835253178/job/94888615218"
+     "completed_at": "2026-08-14T21:53:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31835253178/job/94888615218",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
