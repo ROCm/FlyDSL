@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-14T14:00:06Z",
+ "updated": "2026-08-14T14:02:49Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31807212850,
+   "pr": null,
+   "commit": "47009a30e01a0aba0f04b892283d27f0c4660d29",
+   "branch": "main",
+   "event": "push",
+   "title": "[Docs] Elaboration for composite type and storage (#1004)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31807212850",
+   "created_at": "2026-08-14T13:58:15Z",
+   "updated_at": "2026-08-14T14:00:10Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 31807140665,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[fix] Resolve normalization-related CI regressions (#991)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31807140665",
    "created_at": "2026-08-14T13:57:21Z",
-   "updated_at": "2026-08-14T13:57:36Z",
+   "updated_at": "2026-08-14T13:58:31Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1645,7 +1660,7 @@
   },
   {
    "run_id": 31614890110,
-   "pr": 1004,
+   "pr": null,
    "commit": "50c2046bfc5f0f59996a6b507416d301ffca85ad",
    "branch": "pr/docs-composite-storage",
    "event": "pull_request",
@@ -1660,7 +1675,7 @@
   },
   {
    "run_id": 31614584861,
-   "pr": 1004,
+   "pr": null,
    "commit": "651506ecc26c02767944fb5f43e9af9120cd6140",
    "branch": "pr/docs-composite-storage",
    "event": "pull_request",
@@ -1675,7 +1690,7 @@
   },
   {
    "run_id": 31613381709,
-   "pr": 1004,
+   "pr": null,
    "commit": "358cc1903cdd60c96d7c0950126316a2f9c0d801",
    "branch": "pr/docs-composite-storage",
    "event": "pull_request",
@@ -1973,21 +1988,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582596158/job/94390753142"
     }
    ]
-  },
-  {
-   "run_id": 31582023351,
-   "pr": null,
-   "commit": "3c8ecc78d381d90a0c6c0a8810c77c83a1313b36",
-   "branch": "jli/gfx1250/fix-mma-atom",
-   "event": "pull_request",
-   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582023351",
-   "created_at": "2026-08-12T09:14:36Z",
-   "updated_at": "2026-08-12T09:23:27Z",
-   "actor": "jli-melchior",
-   "jobs": []
   }
  ]
 }
