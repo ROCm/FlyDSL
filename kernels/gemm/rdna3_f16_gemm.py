@@ -50,6 +50,48 @@ WAVE_SIZE = 32
 K_PAD = 8
 
 
+def _sched_plan(reg_m, reg_n, reg_k, g2s_chunks):
+    """The order the k-tile body is meant to issue in, as (group, count) pairs.
+
+    Left alone, LLVM hoists the whole ds_store block into the middle of the WMMA
+    stream, so each store's ``s_waitcnt vmcnt`` stalls the wave while the WMMAs
+    behind it wait. This spends the WMMA stream as cover instead: global loads
+    go out first, the next k-step's LDS reads hide under this k-step's math, and
+    the stores drain under the tail, which also leaves the ``lgkmcnt(0)`` in
+    front of the barrier with almost nothing left to wait for.
+
+    Built here, from Python ints, because the kernel body is traced and cannot
+    branch on values. The counts are hints: a group the dependences cannot
+    satisfy is dropped rather than honoured.
+    """
+    per_rk_wmma = reg_m * reg_n
+    per_rk_dsrd = 2 * (reg_m + reg_n)  # each v16 operand is two 128-bit reads
+    chunk = max(1, reg_n)
+
+    plan = [("vmem", g2s_chunks), ("dsrd", per_rk_dsrd)]
+    dsrd_left = per_rk_dsrd * (reg_k - 1)
+    dsrd_step = chunk
+    dswr_left = g2s_chunks
+    dswr_chunk = max(1, g2s_chunks // 2)
+    for _ in range(reg_k):
+        issued = 0
+        while issued < per_rk_wmma:
+            n = min(chunk, per_rk_wmma - issued)
+            plan.append(("mfma", n))
+            issued += n
+            if dsrd_left:
+                take = min(dsrd_step, dsrd_left)
+                plan.append(("dsrd", take))
+                dsrd_left -= take
+            elif dswr_left:
+                take = min(dswr_chunk, dswr_left)
+                plan.append(("dswr", take))
+                dswr_left -= take
+    if dswr_left:
+        plan.append(("dswr", dswr_left))
+    return tuple(plan)
+
+
 def _group_width(grid_m, group_m):
     """Largest grouping width <= group_m that divides grid_m.
 
@@ -95,6 +137,8 @@ def create_wmma_gemm_module(
     group_m=8,
     a_k_pad=K_PAD,
     b_k_pad=K_PAD,
+    lds_layout="pad",
+    sched_hint=False,
 ):
     gpu_arch = str(get_rocm_arch() or "")
     if not gpu_arch.startswith("gfx11"):
@@ -109,7 +153,10 @@ def create_wmma_gemm_module(
     NUM_WAVES = waves_m * waves_n  # 4
     THREADS_PER_BLOCK = NUM_WAVES * WAVE_SIZE  # 128
 
-    assert reg_k >= 2 and reg_k % 2 == 0
+    # One WMMA K-step is 16 elements and the v16 operand reads it as two 8-wide
+    # chunks, so BLOCK_K only has to be a multiple of 16. reg_k=1 (BLOCK_K=16) is
+    # what keeps the LDS tile small enough to fit more than one workgroup per CU.
+    assert reg_k >= 1
     assert rounding in ("rn", "rs"), f"rounding must be 'rn' or 'rs', got {rounding!r}"
     if rounding == "rs":
         assert out_dtype == "bf16", "stochastic rounding currently supports bf16 output only"
@@ -121,13 +168,37 @@ def create_wmma_gemm_module(
     # ``row = tid // THRS_K, col = (tid % THRS_K) * LOAD_VEC``.
     THRS_K = BLOCK_K // LOAD_VEC
     THRS_M = THREADS_PER_BLOCK // THRS_K
+    # 128-bit chunks of A and B one thread moves per k-tile; equals both the
+    # global-load and the ds_store count in the loop body.
+    G2S_CHUNKS = (BLOCK_M + BLOCK_N) * BLOCK_K // THREADS_PER_BLOCK // LOAD_VEC
+    SCHED_PLAN = _sched_plan(reg_m, reg_n, reg_k, G2S_CHUNKS) if sched_hint else ()
     assert THRS_K * THRS_M == THREADS_PER_BLOCK
     assert BLOCK_M % THRS_M == 0 and BLOCK_N % THRS_M == 0
 
-    BLOCK_K_PAD_A = BLOCK_K + a_k_pad  # 40
-    BLOCK_K_PAD_B = BLOCK_K + b_k_pad  # 40
-    LDS_A_SIZE = BLOCK_M * BLOCK_K_PAD_A
-    LDS_B_SIZE = BLOCK_N * BLOCK_K_PAD_B
+    # Two ways to lay a tile out in LDS, and the choice is what decides which
+    # macro tiles are reachable at all:
+    #
+    #   "pad"    row-major, BLOCK_K + 8 elements per row. The pad is what keeps
+    #            the 128-bit reads off each other's banks, and it is the only
+    #            pad that does: the row start has to stay 16-byte aligned, which
+    #            leaves 0, 8, 16 and 24, and of those only 8 and 24 spread the
+    #            16 rows a read touches over all 32 banks.
+    #
+    #   "kblock" k-major in groups of 8, so element (row, k) sits at
+    #            ((k // 8) * rows + row) * 8 + k % 8. Consecutive rows are then
+    #            16 bytes apart, so the 8 lanes the LDS services per cycle cover
+    #            128 contiguous bytes -- every bank, once -- with no pad at all.
+    #
+    # Dropping the pad is worth 20% of the LDS budget, which is what brings a
+    # 256x256x32 tile inside the 64 KB a workgroup may allocate.
+    assert lds_layout in ("pad", "kblock")
+    if lds_layout == "kblock":
+        assert BLOCK_K % LOAD_VEC == 0
+        a_k_pad = b_k_pad = 0
+    ROW_STRIDE_A = BLOCK_K + a_k_pad
+    ROW_STRIDE_B = BLOCK_K + b_k_pad
+    LDS_A_SIZE = BLOCK_M * ROW_STRIDE_A
+    LDS_B_SIZE = BLOCK_N * ROW_STRIDE_B
     LDS_ONE_BUF = LDS_A_SIZE + LDS_B_SIZE
     LDS_TOTAL = 2 * LDS_ONE_BUF
 
@@ -248,14 +319,30 @@ def create_wmma_gemm_module(
         # allocation instead, which is what the flat _v8_store did by hand.
         def _lds_dst(buf_offset, base, rows, row_stride):
             ptr = fx.add_offset(lds_ptr, fx.make_int_tuple(buf_offset + base))
-            view = fx.make_view(fx.recast_iter(elem_dtype, ptr), fx.make_layout((rows, BLOCK_K), (row_stride, 1)))
+            if const_expr(lds_layout == "kblock"):
+                # (row, k) with k split as (k % 8, k // 8): the low part is
+                # contiguous so the 128-bit copy atom still sees eight adjacent
+                # elements, the high part strides a whole plane of rows.
+                layout = fx.make_layout(
+                    (rows, (LOAD_VEC, BLOCK_K // LOAD_VEC)),
+                    (LOAD_VEC, (1, rows * LOAD_VEC)),
+                )
+            else:
+                layout = fx.make_layout((rows, BLOCK_K), (row_stride, 1))
+            view = fx.make_view(fx.recast_iter(elem_dtype, ptr), layout)
             return thr_g2s.partition_D(view)[None, None, None]
 
         def _pA_s(buf_offset):
-            return _lds_dst(buf_offset, 0, BLOCK_M, BLOCK_K_PAD_A)
+            return _lds_dst(buf_offset, 0, BLOCK_M, ROW_STRIDE_A)
 
         def _pB_s(buf_offset):
-            return _lds_dst(buf_offset, LDS_A_SIZE, BLOCK_N, BLOCK_K_PAD_B)
+            return _lds_dst(buf_offset, LDS_A_SIZE, BLOCK_N, ROW_STRIDE_B)
+
+        def _lds_elem(rows, row_stride, row, col):
+            """Element index of (row, col) inside one A- or B-tile of the buffer."""
+            if const_expr(lds_layout == "kblock"):
+                return (col // LOAD_VEC * rows + row) * LOAD_VEC + col % LOAD_VEC
+            return row * row_stride + col
 
         frag_copy_A = fx.make_fragment_like(_pA_s(0))
         frag_copy_B = fx.make_fragment_like(_pB_s(0))
@@ -283,8 +370,8 @@ def create_wmma_gemm_module(
             col_hi = 16 * rk + 8
             for rn in range_constexpr(reg_n):
                 row = wave_n * (reg_n * WMMA_N) + 16 * rn + lane16
-                lds_idx_lo = buf_offset + LDS_A_SIZE + row * BLOCK_K_PAD_B + col_lo
-                lds_idx_hi = buf_offset + LDS_A_SIZE + row * BLOCK_K_PAD_B + col_hi
+                lds_idx_lo = buf_offset + LDS_A_SIZE + _lds_elem(BLOCK_N, ROW_STRIDE_B, row, col_lo)
+                lds_idx_hi = buf_offset + LDS_A_SIZE + _lds_elem(BLOCK_N, ROW_STRIDE_B, row, col_hi)
                 v_lo = _v8_load(lds_idx_lo // 8)
                 v_hi = _v8_load(lds_idx_hi // 8)
                 vecs.append(v_lo.shuffle(v_hi, _concat16_mask))
@@ -294,8 +381,8 @@ def create_wmma_gemm_module(
             col_lo = 16 * rk
             col_hi = 16 * rk + 8
             row = wave_m * (reg_m * WMMA_M) + 16 * rm_val + lane16
-            lds_idx_lo = buf_offset + row * BLOCK_K_PAD_A + col_lo
-            lds_idx_hi = buf_offset + row * BLOCK_K_PAD_A + col_hi
+            lds_idx_lo = buf_offset + _lds_elem(BLOCK_M, ROW_STRIDE_A, row, col_lo)
+            lds_idx_hi = buf_offset + _lds_elem(BLOCK_M, ROW_STRIDE_A, row, col_hi)
             v_lo = _v8_load(lds_idx_lo // 8)
             v_hi = _v8_load(lds_idx_hi // 8)
             return v_lo.shuffle(v_hi, _concat16_mask)
@@ -310,11 +397,30 @@ def create_wmma_gemm_module(
                 has_side_effects=True,
             )
 
-        def _do_compute_rk(accs_in, rk, buf_offset):
+        def _do_compute_rk(accs_in, rk, buf_offset, b_vecs):
             new_accs = list(accs_in)
-            b_vecs = _load_b_from_lds(rk, buf_offset)
+            # Each A fragment feeds reg_n back-to-back WMMAs. Emitting its read
+            # immediately before its first consumer lets the register allocator
+            # give every rm the same quad, and then the read for rm+1 cannot
+            # issue until the WMMAs on rm have retired -- the body ends up with
+            # a full ``lgkmcnt(0)`` drain in front of each group of reg_n WMMAs
+            # instead of a partial wait. Issuing one fragment ahead is what
+            # breaks that: the read in flight and the one being consumed need
+            # different registers, so the wait has something to overlap.
+            #
+            # Only survives together with sched_hint. On its own the machine
+            # scheduler sinks the read back down onto its consumer and the ISA
+            # comes out unchanged at any prefetch depth; the group barriers are
+            # what hold the reads up front for the allocator to see. Measured as
+            # a pair at 256x256x32, worth 5% (109.1 -> 103.9 ms at 16384 cubed)
+            # and 9 lgkmcnt(0) drains per k-tile down to 4. Neither shows up in
+            # an instruction histogram -- the counts and the register total are
+            # the same, only the order changes.
+            a_next = _load_a_single_from_lds(rk, 0, buf_offset)
             for rm in range_constexpr(reg_m):
-                a_vec = _load_a_single_from_lds(rk, rm, buf_offset)
+                a_vec = a_next
+                if const_expr(rm + 1 < reg_m):
+                    a_next = _load_a_single_from_lds(rk, rm + 1, buf_offset)
                 for rn in range_constexpr(reg_n):
                     idx = rm * reg_n + rn
                     new_accs[idx] = _wmma_op(
@@ -323,6 +429,29 @@ def create_wmma_gemm_module(
                         new_accs[idx],
                     )
             return new_accs
+
+        def _compute_k_tile(accs_in, buf_offset):
+            """All reg_k WMMA steps over one LDS buffer.
+
+            Step rk reads B into the registers step rk-1 is still using, so its
+            reads cannot issue until that step's WMMAs retire, and the wait in
+            front of them is a full lgkmcnt(0) drain rather than a partial one.
+            Reading every step's B up front instead does remove that dependence,
+            and it loses: 2*reg_n*(reg_k-1) more live registers pushes the
+            allocator into recycling the A fragments harder, and the drains go
+            from 4 per k-tile to 8. Measured at 256x256x32, 104.0 -> 118.3 ms.
+            """
+            new_accs = list(accs_in)
+            for rk in range_constexpr(reg_k):
+                new_accs = _do_compute_rk(new_accs, rk, buf_offset,
+                                          _load_b_from_lds(rk, buf_offset))
+            return new_accs
+
+        def _sched_k_tile():
+            emit = {"vmem": rocdl.sched_vmem, "mfma": rocdl.sched_mfma,
+                    "dsrd": rocdl.sched_dsrd, "dswr": rocdl.sched_dswr}
+            for group, count in SCHED_PLAN:
+                emit[group](count)
 
         zero_acc = fx.full(8, 0.0, fx.Float32)
         accs = [zero_acc for _ in range_constexpr(reg_m * reg_n)]
@@ -337,27 +466,33 @@ def create_wmma_gemm_module(
         n_acc = reg_m * reg_n
         init_state = list(accs)
 
+        def _one_k_tile(s_accs, read_off, write_off, load_tile):
+            """Prefetch the next k-tile, consume this one, hand over, barrier."""
+            _gmem_load(load_tile)
+            s_accs = _compute_k_tile(s_accs, read_off)
+            _lds_store(write_off)
+            if const_expr(sched_hint):
+                _sched_k_tile()
+            _barrier()
+            return s_accs
+
+        # The read buffer alternates with the trip counter, so both offsets are
+        # values derived from ``iv`` and the body spends ~10 VALU and SALU ops
+        # per trip on them. Stepping the loop by two fixes each half's parity at
+        # trace time and folds the arithmetic into ds_load immediates: overhead
+        # instructions drop from 0.93 to 0.31 per WMMA and VGPRs from 212 to
+        # 204. It is 1.7% slower (104.0 -> 105.8 ms at 16384 cubed). The loop is
+        # not issue-bound, so paying more instructions is not what it costs.
         for iv, state in range(0, num_k_tiles - 1, 1, init=init_state):
             s_accs = list(state[:n_acc])
-
-            read_off = iv % 2 * c_lds_buf_stride
-            write_off = (1 - iv % 2) * c_lds_buf_stride
-
-            _gmem_load(iv + 1)
-
-            for rk in range_constexpr(reg_k):
-                s_accs = _do_compute_rk(s_accs, rk, read_off)
-
-            _lds_store(write_off)
-            _barrier()
-
+            s_accs = _one_k_tile(s_accs, iv % 2 * c_lds_buf_stride,
+                                 (1 - iv % 2) * c_lds_buf_stride, iv + 1)
             results = yield list(s_accs)
 
         accs = list(results[:n_acc])
 
         last_read_off = ((num_k_tiles - 1) % 2) * c_lds_buf_stride
-        for rk in range_constexpr(reg_k):
-            accs = _do_compute_rk(accs, rk, last_read_off)
+        accs = _compute_k_tile(accs, last_read_off)
 
         # ============================================================
         # Store results to GMEM through the tiled copy
