@@ -535,8 +535,8 @@ def _main():
     parser.add_argument(
         "-bench-gap-us",
         type=float,
-        default=100.0,
-        help="host idle after each timed launch; 0 measures saturated back-to-back throughput",
+        default=0.0,
+        help="host idle after each isolated timed launch; default 0 measures saturated back-to-back throughput",
     )
     args = parser.parse_args()
 

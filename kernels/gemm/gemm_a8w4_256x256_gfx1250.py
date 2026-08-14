@@ -365,6 +365,7 @@ def launch_gemm_a8w4_256x256(
             future_kt,
             fence_outstanding,
             boundary,
+            phase,
         ):
             """Even-wave stage ordered to align sibling READY arrival."""
             a_top = pipe_a[bank]
@@ -387,10 +388,10 @@ def launch_gemm_a8w4_256x256(
             b_right = [b_right_0, b_right_1, b_right_2, b_right_3]
             sb_k = sb_left + sb_right
 
-            rocdl.sched_mfma(3)
+            rocdl.sched_mfma(3 - phase)
             rocdl.sched_dsrd(2)
             for _ in range_constexpr(2):
-                rocdl.sched_mfma(3)
+                rocdl.sched_mfma(3 - phase)
                 rocdl.sched_dsrd(4)
             rocdl.sched_barrier(0)
             _mma_block_range(0, 0, a_top, b_left, sa_top, sb_left, 3, 5)
@@ -416,10 +417,10 @@ def launch_gemm_a8w4_256x256(
             a_bottom = [a_bottom_0, a_bottom_1, a_bottom_2, a_bottom_3]
             sa_k = sa_top + sa_bottom
 
-            rocdl.sched_mfma(3)
+            rocdl.sched_mfma(3 - phase)
             rocdl.sched_dsrd(2)
             for _ in range_constexpr(4):
-                rocdl.sched_mfma(3)
+                rocdl.sched_mfma(3 - phase)
                 rocdl.sched_dsrd(4)
             rocdl.sched_barrier(0)
             _mma_block_range(0, half_n, a_top, b_right, sa_k, sb_k, 5, 3)
@@ -427,6 +428,7 @@ def launch_gemm_a8w4_256x256(
             rocdl.s_wait_dscnt(17)
             rocdl.sched_barrier(0)
             if const_expr(boundary):
+                rocdl.s_wait_dscnt(0)
                 pipeline_fence_signal(outstanding=fence_outstanding, use_cluster=False)
             rocdl.sched_barrier(0)
             _mma_block_range(0, half_n, a_top, b_right, sa_k, sb_k, 8, 8)
@@ -434,31 +436,32 @@ def launch_gemm_a8w4_256x256(
             if const_expr(boundary):
                 pipeline_fence_wait(use_cluster=False)
                 rocdl.sched_barrier(0)
-                rocdl.s_wait_dscnt(0)
             rocdl.sched_barrier(0)
 
-            # q10: produce next A and issue TDM at W3.
             if const_expr(boundary):
                 prepared_refill_desc = _prepare_tdm(future_slot, future_kt)
+                if const_expr(phase == 0):
+                    tdm_ops.tensor_load_2d(prepared_refill_desc)
             _mma_block_range(half_m, 0, a_bottom, b_left, sa_k, sb_left, 0, 1)
             _load_seed_a_scales(next_stage, next_bank)
             for pos in range_constexpr(1, 3):
                 _mma_block_range(half_m, 0, a_bottom, b_left, sa_k, sb_left, pos, 1)
                 _load_seed_a_fragment(next_stage, next_bank, A_SEED_ORDER[pos - 1])
-            rocdl.sched_mfma(3)
+            rocdl.sched_mfma(3 - phase)
             rocdl.sched_dsrd(2)
             for _ in range_constexpr(2):
-                rocdl.sched_mfma(3)
+                rocdl.sched_mfma(3 - phase)
                 rocdl.sched_dsrd(4)
             rocdl.sched_barrier(0)
             if const_expr(boundary):
-                tdm_ops.tensor_load_2d(prepared_refill_desc)
+                if const_expr(phase != 0):
+                    tdm_ops.tensor_load_2d(prepared_refill_desc)
             rocdl.sched_barrier(0)
             for pos in range_constexpr(3, 5):
                 _mma_block_range(half_m, 0, a_bottom, b_left, sa_k, sb_left, pos, 1)
                 _load_seed_a_fragment(next_stage, next_bank, A_SEED_ORDER[pos - 1])
             for _ in range_constexpr(2):
-                rocdl.sched_mfma(3)
+                rocdl.sched_mfma(3 - phase)
                 rocdl.sched_dsrd(4)
             rocdl.sched_barrier(0)
             _mma_block_range(half_m, 0, a_bottom, b_left, sa_k, sb_left, 5, 11)
@@ -500,10 +503,10 @@ def launch_gemm_a8w4_256x256(
             )
             _load_seed_b_fragment(next_stage, next_bank, 2)
             _load_seed_b_fragment(next_stage, next_bank, 3)
-            rocdl.sched_mfma(3)
+            rocdl.sched_mfma(3 - phase)
             rocdl.sched_dsrd(2)
             for _ in range_constexpr(2):
-                rocdl.sched_mfma(3)
+                rocdl.sched_mfma(3 - phase)
                 rocdl.sched_dsrd(4)
             rocdl.sched_barrier(0)
             _mma_block_range(
@@ -603,17 +606,18 @@ def launch_gemm_a8w4_256x256(
                 # Signal READY early: the window between signal and wait is what absorbs a
                 # late sibling, and the TDM it waits on has far more slack than the barrier.
                 if const_expr(boundary):
+                    rocdl.s_wait_dscnt(0)
                     pipeline_fence_signal(outstanding=fence_outstanding, use_cluster=False)
                 rocdl.sched_barrier(0)
                 _mma_block_range(half_m, 0, a_bottom, b_left, sa_k, sb_k, 8, 8, True)
                 rocdl.sched_barrier(0)
                 if const_expr(boundary):
                     pipeline_fence_wait(use_cluster=False)
-                    rocdl.s_wait_dscnt(0)
                 rocdl.sched_barrier(0)
                 rocdl.sched_barrier(0)
 
-                # q01: produce next B and issue TDM after five WMMAs.
+                # q01: produce next B, then let two more useful WMMAs run
+                # before wave1/wave3 submit their B/SB refills.
                 if const_expr(boundary):
                     prepared_refill_desc = _prepare_tdm(future_slot, future_kt)
                 _mma_block_range(0, half_n, a_top, b_right, sa_k, sb_k, 0, 1, True)
@@ -632,9 +636,10 @@ def launch_gemm_a8w4_256x256(
                     rocdl.sched_dsrd(4)
                 rocdl.sched_mfma(2)
                 rocdl.sched_barrier(0)
-                if const_expr(boundary):
-                    tdm_ops.tensor_load_2d(prepared_refill_desc)
                 _mma_block_range(0, half_n, a_top, b_right, sa_k, sb_k, 5, 2, True)
+                if const_expr(boundary):
+                    rocdl.sched_barrier(0)
+                    tdm_ops.tensor_load_2d(prepared_refill_desc)
                 _mma_block_range(0, half_n, a_top, b_right, sa_k, sb_k, 7, 9, True)
 
                 # q11: leave the next A tail in flight.
@@ -686,12 +691,14 @@ def launch_gemm_a8w4_256x256(
                 rocdl.s_wait_dscnt(9)
                 _mma_block_range(half_m, 0, a_bottom, b_left, sa_k, sb_k, 0, 13)
                 if const_expr(boundary):
+                    rocdl.s_wait_dscnt(0)
                     pipeline_fence_signal(outstanding=fence_outstanding, use_cluster=False)
                 rocdl.sched_barrier(0)
                 _mma_block_range(half_m, 0, a_bottom, b_left, sa_k, sb_k, 13, 3)
                 if const_expr(boundary):
                     pipeline_fence_wait(use_cluster=False)
-                rocdl.s_wait_dscnt(0)
+                else:
+                    rocdl.s_wait_dscnt(0)
                 rocdl.sched_barrier(0)
                 _load_seed_a(next_stage, next_bank)
                 _load_seed_b(next_stage, next_bank)
@@ -711,9 +718,6 @@ def launch_gemm_a8w4_256x256(
             seed_delta = (seed_delta < last_delta).select(seed_delta, last_delta)
             tdm_ops.tensor_load_2d(_prepare_tdm(i, seed_delta))
         pipeline_fence(outstanding=num_buffers - 1, use_cluster=False)
-        _load_seed_a(0, 0)
-        _load_seed_b(0, 0)
-        rocdl.s_wait_dscnt(0)
 
         n_full = (SUPERS + num_buffers - 1) // num_buffers - 1
         drain_s = SUPERS - n_full * num_buffers  # 1..num_buffers
@@ -725,14 +729,17 @@ def launch_gemm_a8w4_256x256(
             delta = (delta < last_delta).select(delta, last_delta)
             return (g, (g + 1) % UNROLL, g % 2, (g + 1) % 2, slot, delta, fence_outstanding)
 
-        def _run_steady(owner_parity):
+        def _run_steady(owner_parity, phase):
+            _load_seed_a(0, 0)
+            _load_seed_b(0, 0)
+            rocdl.s_wait_dscnt(0)
             for rev in range(n_full):
                 rev_delta = (rev * num_buffers) * tdm_global_step
                 for g in range_constexpr(UNROLL):
                     args = _stage_args(g, rev_delta, num_buffers - 2)
                     boundary = g % KPAIR == KPAIR - 1
                     if const_expr(owner_parity == 0):
-                        _compute_even_stage(*args, boundary)
+                        _compute_even_stage(*args, boundary, phase)
                     else:
                         _compute_stage(*args, True, True, boundary)
                 if rev % cluster_sync_revs == cluster_sync_revs - 1:
@@ -748,9 +755,12 @@ def launch_gemm_a8w4_256x256(
             )
         )
         if wave_parity == 0:
-            _run_steady(0)
+            if wave < 2:
+                _run_steady(0, 0)
+            else:
+                _run_steady(0, 1)
         else:
-            _run_steady(1)
+            _run_steady(1, 0)
 
         # Retire the last steady producer before the shared drain.
         rocdl.s_wait_dscnt(0)
@@ -769,6 +779,7 @@ def launch_gemm_a8w4_256x256(
                     False,
                     g % KPAIR == KPAIR - 1,
                 )
+        rocdl.s_wait_dscnt(0)
         accs = [c_frags[idx].load() for idx in range_constexpr(n_acc)]
 
         pipeline_fence(outstanding=0, use_cluster=True)
