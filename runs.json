@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-08-14T12:35:51Z",
+ "updated": "2026-08-14T14:00:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31807140665,
+   "pr": null,
+   "commit": "f6d0a4106b065e37a01a120015dbd7707afd0c14",
+   "branch": "main",
+   "event": "push",
+   "title": "[fix] Resolve normalization-related CI regressions (#991)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31807140665",
+   "created_at": "2026-08-14T13:57:21Z",
+   "updated_at": "2026-08-14T13:57:36Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 31807089634,
+   "pr": null,
+   "commit": "daa056604b326fea9aebd62f08f4ba017dd934f6",
+   "branch": "main",
+   "event": "push",
+   "title": "[Feat] Add fx.num_warp_threads() as constant accessor (#996)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31807089634",
+   "created_at": "2026-08-14T13:56:42Z",
+   "updated_at": "2026-08-14T13:57:23Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 31807019369,
+   "pr": null,
+   "commit": "92ca7ece48f820aedb5ef0ae6375409e62a48883",
+   "branch": "main",
+   "event": "push",
+   "title": "[Expr] Add type-aware extrema and integer ceiling division (#995)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31807019369",
+   "created_at": "2026-08-14T13:55:50Z",
+   "updated_at": "2026-08-14T13:56:58Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 31800890359,
    "pr": 1013,
@@ -14,9 +59,38 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31800890359",
    "created_at": "2026-08-14T12:34:10Z",
-   "updated_at": "2026-08-14T12:34:52Z",
+   "updated_at": "2026-08-14T12:55:07Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-14T12:55:06Z",
+     "completed_at": "2026-08-14T13:33:54Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31800890359/job/94772960338"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-14T12:55:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31800890359/job/94772960413"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-14T12:54:56Z",
+     "completed_at": "2026-08-14T13:12:31Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31800890359/job/94772960438",
+     "log_fetch_failed": true
+    }
+   ]
   },
   {
    "run_id": 31798205814,
@@ -953,7 +1027,7 @@
   },
   {
    "run_id": 31674648878,
-   "pr": 996,
+   "pr": null,
    "commit": "8d7bce7702b8cf78c40d1b5b9cbc2d1123f2f6f6",
    "branch": "coop-library",
    "event": "pull_request",
@@ -1329,7 +1403,7 @@
   },
   {
    "run_id": 31655638442,
-   "pr": 995,
+   "pr": null,
    "commit": "9ab8a9d7eae99bad632aaef31b4e3392d06e4efd",
    "branch": "feature/typed-arithmetic-modernization",
    "event": "pull_request",
@@ -1912,51 +1986,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582023351",
    "created_at": "2026-08-12T09:14:36Z",
    "updated_at": "2026-08-12T09:23:27Z",
-   "actor": "jli-melchior",
-   "jobs": []
-  },
-  {
-   "run_id": 31581294710,
-   "pr": null,
-   "commit": "cb7b0fa44d6813a18f8c5bdd3b4b4db5fc475ce1",
-   "branch": "jli/gfx1250/fix-mma-atom",
-   "event": "pull_request",
-   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31581294710",
-   "created_at": "2026-08-12T09:05:03Z",
-   "updated_at": "2026-08-12T09:14:38Z",
-   "actor": "jli-melchior",
-   "jobs": []
-  },
-  {
-   "run_id": 31579694195,
-   "pr": null,
-   "commit": "85d6c212ea0b978555aa64a9ab53226399f49ca4",
-   "branch": "jli/gfx1250/fix-mma-atom",
-   "event": "pull_request",
-   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31579694195",
-   "created_at": "2026-08-12T08:44:19Z",
-   "updated_at": "2026-08-12T09:05:05Z",
-   "actor": "jli-melchior",
-   "jobs": []
-  },
-  {
-   "run_id": 31579198376,
-   "pr": null,
-   "commit": "eb8aa80997b631f21de327ecb9fcc5212910bb89",
-   "branch": "jli/gfx1250/fix-mma-atom",
-   "event": "pull_request",
-   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31579198376",
-   "created_at": "2026-08-12T08:37:50Z",
-   "updated_at": "2026-08-12T08:39:09Z",
    "actor": "jli-melchior",
    "jobs": []
   }
