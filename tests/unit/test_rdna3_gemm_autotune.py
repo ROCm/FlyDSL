@@ -39,6 +39,18 @@ SHAPES = [
     for K in (512, 1024, 2048, 4096)
 ]
 
+DEEPSEEK_V4_FLASH_DECODE_SHAPES = [
+    (M, N, K)
+    for M in (1, 5, 16)
+    for N, K in (
+        (4096, 1024),
+        (1024, 4096),
+        (4096, 512),
+        (4096, 2048),
+        (2048, 4096),
+    )
+]
+
 _shape_id = lambda shape: "x".join(map(str, shape))  # noqa: E731
 
 
@@ -87,3 +99,15 @@ def test_feasible_tiles_is_the_ladder_filtered_in_order(shape):
     assert [tile for tile, _ in reported] == [cfg for cfg in ladder if _tile_workgroups(*shape, cfg) is not None]
     for tile, workgroups in reported:
         assert workgroups == _tile_workgroups(*shape, tile)
+
+
+@pytest.mark.parametrize("shape", DEEPSEEK_V4_FLASH_DECODE_SHAPES, ids=_shape_id)
+def test_deepseek_v4_flash_decode_shapes_remain_out_of_scope(shape):
+    """Formal decode rows are small-M tail cases, not tune candidates yet.
+
+    This pins the current scope boundary: these inference shapes have no legal
+    tile in the existing ladder and would reject at the kernel's ``M % BLOCK_M``
+    assertion. Small-M/tail handling is a separate follow-on.
+    """
+    assert feasible_tiles(*shape) == []
+    assert all(_tile_workgroups(*shape, tile) is None for tile in _ladder_for(shape[2]))

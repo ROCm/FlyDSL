@@ -46,11 +46,37 @@ NUM_CU = 96
 LDS_BYTES = 64 * 1024
 
 # Named by the block tile they produce: (reg_m, reg_n, reg_k, waves_m, waves_n).
+TILE_256x256x32 = (4, 4, 2, 4, 4)
+TILE_128x256x32 = (4, 4, 2, 2, 4)
 TILE_128x128x32 = (4, 4, 2, 2, 2)
 TILE_128x64x32 = (4, 2, 2, 2, 2)
 TILE_64x64x64 = (2, 2, 4, 2, 2)
 TILE_32x64x64 = (2, 2, 4, 1, 2)
 TILE_32x32x64 = (2, 2, 4, 1, 1)
+
+# Options a tile needs beyond its shape. Kept next to the ladder rather than in
+# the ladder tuples so a Config stays the five tile fields the autotuner sweeps.
+#
+# 256x256x32 is only reachable unpadded: with K_PAD it wants 80 KB and the pad is
+# what the LDS budget cannot afford at that width. Unpadded it is exactly 64 KB.
+# The hints are not a tuning knob there but a requirement — without the immediate
+# offsets the pad used to give it, LLVM assigns every A fragment the same register
+# quad, so each ds_load waits on a full lgkmcnt(0) drain instead of overlapping
+# the WMMA stream. Measured at 128x256x32: 53 TFLOP/s without the hints, 84 with.
+#
+# group_m is the width of the L2 grouping. The wide tiles read a whole 256-row
+# band of A per workgroup, so the default 8 walks off the reuse the swizzle is
+# there to get; 16 was the best of 1/4/8/16/32 for both, worth 1-2%.
+_DEFAULT_OPTS = {"lds_layout": "pad", "sched_hint": False, "group_m": 8}
+_TILE_OPTS = {
+    TILE_256x256x32: {"lds_layout": "kblock", "sched_hint": True, "group_m": 16},
+    TILE_128x256x32: {"lds_layout": "pad", "sched_hint": False, "group_m": 16},
+}
+
+
+def tile_opts(tile):
+    return _TILE_OPTS.get(tuple(tile), _DEFAULT_OPTS)
+
 
 # Tile ladder, widest first.
 #
@@ -62,7 +88,8 @@ TILE_32x32x64 = (2, 2, 4, 1, 1)
 # The ladder is the feasibility-ordered search space; pick_tile does not walk it
 # in order. 32x64x64 is here only as a fallback for shapes the others cannot
 # divide -- it was not the fastest tile on any of the 27 shapes swept.
-_LADDER_LARGE_K = [TILE_128x128x32, TILE_64x64x64, TILE_32x64x64, TILE_32x32x64]
+_LADDER_LARGE_K = [TILE_256x256x32, TILE_128x256x32, TILE_128x128x32, TILE_64x64x64,
+                   TILE_32x64x64, TILE_32x32x64]
 _LADDER_SMALL_K = [TILE_128x128x32, TILE_128x64x32, TILE_64x64x64, TILE_32x64x64, TILE_32x32x64]
 
 
@@ -80,7 +107,8 @@ def _tile_workgroups(M, N, K, cfg):
     # Every thread must carry a whole 8-element vector of both tiles.
     if (block_m * block_k) % (threads * 8) or (block_n * block_k) % (threads * 8):
         return None
-    if 2 * (block_m + block_n) * (block_k + K_PAD) * 2 > LDS_BYTES:  # 2 buffers, 2 bytes/elem
+    pad = 0 if tile_opts(cfg)["lds_layout"] == "kblock" else K_PAD
+    if 2 * (block_m + block_n) * (block_k + pad) * 2 > LDS_BYTES:  # 2 buffers, 2 bytes/elem
         return None
     return (M // block_m) * (N // block_n)
 
@@ -108,8 +136,26 @@ def pick_tile(M, N, K):
     72 depending on how its much coarser grid happens to land. Taking the widest
     covering tile cost up to 37% (1664x1664x1024) and averaged 6.5%.
 
-    Three exceptions, in order:
+    Five exceptions, in order. The first two are the wide tiles, and both are
+    about operand traffic rather than about filling the machine: a tile reads
+    ``(BM + BN) / (BM * BN)`` of A and B per output, so 128x256 moves a quarter
+    less than 128x128 and 256x256 half as much again. Measured against rocBLAS TN
+    in one thermal window, as a fraction of its time:
 
+        square      4096   8192   12288  16384  20480
+        128x128x32  0.805  0.903  0.919  0.875  0.829
+        128x256x32  0.826  0.933  0.990  0.988  0.928
+        256x256x32  0.797  0.913  0.979  1.012  0.999
+
+    So the widest tile is not simply best: 256x256 needs roughly 32 workgroups per
+    CU before its traffic saving outweighs how coarsely its grid lands, and below
+    that 128x256 leads. Above it the order reverses and stays reversed, because
+    128x256 is the one that starts falling off as the footprint grows.
+
+      * 256x256x32 once the grid is worth ~32 workgroups per CU. Only reachable
+        unpadded; see _TILE_OPTS for why that drags the scheduling hints with it.
+      * 128x256x32 from ~4 workgroups per CU up. Never behind 128x128x32 anywhere
+        it applies, by 2-11%.
       * 128x128x32 once the grid is worth at least ~2.5 workgroups per CU. Its
         compute intensity wins outright there, by 5-11% over 64x64x64.
       * 128x64x32 (small-K ladder only) when it lands near one workgroup per CU.
@@ -124,6 +170,10 @@ def pick_tile(M, N, K):
     if not feasible:
         return _ladder_for(K)[0]
 
+    if feasible.get(TILE_256x256x32, 0) >= 32 * NUM_CU:
+        return TILE_256x256x32
+    if feasible.get(TILE_128x256x32, 0) >= 4 * NUM_CU:
+        return TILE_128x256x32
     if feasible.get(TILE_128x128x32, 0) >= 2.5 * NUM_CU:
         return TILE_128x128x32
     if NUM_CU <= feasible.get(TILE_128x64x32, 0) <= 1.5 * NUM_CU:
@@ -170,6 +220,7 @@ def _build(M, N, K, in_dtype, out_dtype, rounding, reg_m, reg_n, reg_k, waves_m,
         reg_k=reg_k,
         waves_m=waves_m,
         waves_n=waves_n,
+        **tile_opts((reg_m, reg_n, reg_k, waves_m, waves_n)),
     )
     return launch_fn
 
