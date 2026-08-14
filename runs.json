@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-14T11:51:34Z",
+ "updated": "2026-08-14T12:34:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31798205814,
+   "pr": 1013,
+   "commit": "49be829250a189bbdbb1a26ee61a4d9ac10977c9",
+   "branch": "pr/enh-cdna5-tiled-tdm-atom",
+   "event": "pull_request",
+   "title": "[ROCDL] Add make_tiled_tdm_atom op and tdm_partition",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31798205814",
+   "created_at": "2026-08-14T11:55:59Z",
+   "updated_at": "2026-08-14T11:58:34Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 31794868681,
    "pr": 1012,
@@ -1974,21 +1989,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 31576298595,
-   "pr": null,
-   "commit": "ebabfd0a78ea744ec8d6202caa692e759aa2f642",
-   "branch": "new_bias_alibi_sink_attention",
-   "event": "pull_request",
-   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31576298595",
-   "created_at": "2026-08-12T07:59:16Z",
-   "updated_at": "2026-08-12T10:37:36Z",
-   "actor": "amd-nprotaso",
-   "jobs": []
   }
  ]
 }
