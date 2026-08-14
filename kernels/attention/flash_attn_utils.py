@@ -32,6 +32,9 @@ _LOG2E = host_math.log2(host_math.e)
 # gfx950 (MI350/MI355X): 8 XCDs, each with a private ~4 MB L2.
 NUM_XCD_GFX950 = 8
 MIN_Q_BLOCKS_XCD_SWIZZLE = 64
+# The dual-wave 8-wave CTA fixes the q-block height; callers need it to count
+# q-blocks before any traits object exists.
+DUALWAVE_SWP_BLOCK_M = 256
 # s_waitcnt bitfield encoding
 _VMCNT_LO_MASK = 0xF
 _LGKMCNT_EXPCNT_BASE = 0x3F70
@@ -1607,7 +1610,7 @@ def _make_dualwave_swp_traits(
 ):
     """Build gfx950 DUALWAVE_SWP compile-time layout traits."""
     # Tile shape and wave geometry follow the gfx950 dual-wave 8-wave CTA.
-    block_m = 256
+    block_m = DUALWAVE_SWP_BLOCK_M
     block_n = 64
     block_n_out = 64
     k_sub_n = 32
