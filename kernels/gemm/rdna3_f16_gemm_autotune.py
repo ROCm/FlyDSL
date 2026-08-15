@@ -59,18 +59,31 @@ TILE_32x32x64 = (2, 2, 4, 1, 1)
 #
 # 256x256x32 is only reachable unpadded: with K_PAD it wants 80 KB and the pad is
 # what the LDS budget cannot afford at that width. Unpadded it is exactly 64 KB.
-# The hints are not a tuning knob there but a requirement — without the immediate
-# offsets the pad used to give it, LLVM assigns every A fragment the same register
-# quad, so each ds_load waits on a full lgkmcnt(0) drain instead of overlapping
-# the WMMA stream. Measured at 128x256x32: 53 TFLOP/s without the hints, 84 with.
 #
 # group_m is the width of the L2 grouping. The wide tiles read a whole 256-row
 # band of A per workgroup, so the default 8 walks off the reuse the swizzle is
 # there to get; 16 was the best of 1/4/8/16/32 for both, worth 1-2%.
-_DEFAULT_OPTS = {"lds_layout": "pad", "sched_hint": False, "group_m": 8}
+#
+# stagger is on everywhere. The kernel turns it into a no-op unless the k-tile
+# count is a power of two, which is exactly the case where the row stride is one
+# too and workgroups reading the same k-slice in lockstep pile onto the same
+# memory channels. Where it engages it is worth 2.5% (512x512x4096) to 12%
+# (2048x2048x1024) and it was not behind anywhere.
+#
+# sched_hint splits by tile, and the split moved. It was once required at the
+# wide tiles -- without the immediate offsets the pad used to give them, LLVM
+# assigned every A fragment the same register quad and each ds_load waited on a
+# full lgkmcnt(0) drain. Against flydsl 0.3.1 that is no longer true at
+# 256x256x32, where the hint now costs 6% at 8192, 12288 and 16384 square
+# (0.1-0.4% spread), and the narrower tiles are the ones that want it: 128x128x32
+# gains 2-3% alone and 9% together with stagger, 128x256x32 gains 5.6-8.5%.
+# 64x64x64 is left without it -- it gained 1.7% at 1024 square and lost 9.4% at
+# 512x512x4096.
+_DEFAULT_OPTS = {"lds_layout": "pad", "sched_hint": False, "group_m": 8, "stagger": 1}
 _TILE_OPTS = {
-    TILE_256x256x32: {"lds_layout": "kblock", "sched_hint": True, "group_m": 16},
-    TILE_128x256x32: {"lds_layout": "pad", "sched_hint": False, "group_m": 16},
+    TILE_256x256x32: {"lds_layout": "kblock", "sched_hint": False, "group_m": 16, "stagger": 1},
+    TILE_128x256x32: {"lds_layout": "pad", "sched_hint": True, "group_m": 16, "stagger": 1},
+    TILE_128x128x32: {"lds_layout": "pad", "sched_hint": True, "group_m": 8, "stagger": 1},
 }
 
 

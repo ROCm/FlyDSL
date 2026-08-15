@@ -139,6 +139,7 @@ def create_wmma_gemm_module(
     b_k_pad=K_PAD,
     lds_layout="pad",
     sched_hint=False,
+    stagger=0,
 ):
     gpu_arch = str(get_rocm_arch() or "")
     if not gpu_arch.startswith("gfx11"):
@@ -215,6 +216,26 @@ def create_wmma_gemm_module(
 
     group_width = _group_width(grid_m, group_m)
 
+    # Every workgroup walks the k-tiles in the same order, so at any instant the
+    # whole machine is reading the same k-slice of A and of B. When the row
+    # stride is a power of two those reads land on a narrow set of memory
+    # channels and queue behind each other. Measured at 2048 cubed with M and N
+    # pinned so the grid never changes: K=2048 (4096-byte rows) runs 67.4
+    # TFLOP/s while 1920, 1984, 2112, 2176 and 2304 all sit at 70.0-71.9. The
+    # dip is worth 6.5%.
+    #
+    # Starting each workgroup at a different k-tile and wrapping around
+    # decorrelates them. ``stagger`` is the step in k-tiles between the starts
+    # of consecutive workgroup ids; the swizzle hands consecutive ids adjacent
+    # row bands of A, which are exactly the ones worth separating. rocBLAS
+    # solves the same problem the same way and every solution it picks at this
+    # shape carries StaggerU=32.
+    #
+    # Only wired up when the k-tile count is a power of two, so the wraparound
+    # is a mask rather than a division on a runtime value.
+    assert stagger >= 0
+    stagger_step = int(stagger) if num_k_tiles & (num_k_tiles - 1) == 0 else 0
+
     is_bf16 = in_dtype == "bf16"
 
     def _wmma_op(a_vec, b_vec, acc):
@@ -270,6 +291,22 @@ def create_wmma_gemm_module(
         lane16 = lane % 16
 
         bid_m, bid_n = _swizzle_tile_id(pid, grid_n, group_width)
+
+        # Where this workgroup enters the k loop. Uniform across the block, so
+        # it lives in scalar registers and the wraparound below costs one SALU
+        # add and one SALU and per trip. Everything is forced to Int32 because
+        # the block id is index-typed while the loop counter reaching _gmem_load
+        # is not, and mixing the two fails the arith.addi verifier.
+        if const_expr(stagger_step):
+            k_first = fx.Int32(pid) * stagger_step % num_k_tiles
+        else:
+            k_first = 0
+
+        def _k_tile(step):
+            """Global k-tile index of the ``step``-th tile this workgroup visits."""
+            if const_expr(stagger_step):
+                return (k_first + fx.Int32(step)) % num_k_tiles
+            return step
 
         wave_m = wave_id // waves_n
         wave_n = wave_id % waves_n
@@ -459,7 +496,7 @@ def create_wmma_gemm_module(
         c_lds_buf_stride = LDS_ONE_BUF
 
         # --- PROLOGUE ---
-        _gmem_load(fx.Int32(0))
+        _gmem_load(_k_tile(fx.Int32(0)))
         _lds_store(0)
         _barrier()
 
@@ -486,7 +523,7 @@ def create_wmma_gemm_module(
         for iv, state in range(0, num_k_tiles - 1, 1, init=init_state):
             s_accs = list(state[:n_acc])
             s_accs = _one_k_tile(s_accs, iv % 2 * c_lds_buf_stride,
-                                 (1 - iv % 2) * c_lds_buf_stride, iv + 1)
+                                 (1 - iv % 2) * c_lds_buf_stride, _k_tile(iv + 1))
             results = yield list(s_accs)
 
         accs = list(results[:n_acc])
