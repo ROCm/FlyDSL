@@ -1004,6 +1004,9 @@ def _init_dualwave_thread_mapping(ctx):
     # so output is bit-identical; split-K's third grid axis would not survive it.
     # Non-causal only: under a causal mask q-block i does work proportional to i, so
     # making q_block the fast axis clusters unequal work and costs 7% (measured).
+    # Measured on causal paged prefill: opting causal into this remap costs 3-5% even
+    # when paired with CAUSAL_LPT below, which removes the load imbalance this comment
+    # blames. So the causal penalty is not only imbalance, and the non-causal gate stands.
     if const_expr(
         traits.XCD_SWIZZLE and not traits.SPLITK and not traits.CAUSAL and traits.NUM_HEADS_Q % NUM_XCD_GFX950 == 0
     ):
@@ -1043,6 +1046,27 @@ def _init_dualwave_thread_mapping(ctx):
     ctx.group_id = ctx.h_idx // traits.NUM_HEADS_KV
     ctx.q_head_idx = ctx.h_kv_idx * traits.GQA_GROUP_SIZE + ctx.group_id
     ctx.kv_head_idx = ctx.h_kv_idx
+
+
+def _init_causal_lpt_order(ctx):
+    """Issue causal q-blocks longest-first by reversing the q-block grid axis.
+
+    Causal work per q-block grows with the block index and workgroups dispatch in
+    flattened-id order, so the natural order issues the heaviest block last and the
+    makespan carries its tail. Must run after the thread mapping and before anything
+    that reads q_start (sequence lengths, tile bounds, q_row).
+
+    The reversal is taken over ``grid_dim.y``, the extent the launcher actually
+    dispatched, which makes it a bijection on the dispatched q-block indices by
+    construction. Deriving it from ``seq_len`` instead would only agree while
+    ``seq_len`` is the same max the grid was sized from -- and under varlen it is a
+    per-batch maximum, so a mismatch there would silently drop or double-compute
+    q-blocks rather than merely reorder them.
+
+    Shared by DualwaveKernelContext and DualwaveFp8KernelContext.
+    """
+    ctx.q_block_idx = fx.Index(gpu.grid_dim.y) - fx.Index(1) - ctx.q_block_idx
+    ctx.q_start = ctx.q_block_idx * ctx.traits.BLOCK_M
 
 
 def _init_dualwave_q_row(ctx):
@@ -1561,6 +1585,7 @@ class DualwaveSwpTraits:
     LGKMCNT_0_ONLY: int
     RETURN_LSE: bool = False
     XCD_SWIZZLE: bool = False
+    CAUSAL_LPT: bool = False
 
     @property
     def cache_tag(self):
@@ -1585,6 +1610,7 @@ class DualwaveSwpTraits:
             self.KV_VECTORIZED,
             self.RETURN_LSE,
             self.XCD_SWIZZLE,
+            self.CAUSAL_LPT,
         )
 
 
@@ -1608,6 +1634,7 @@ def _make_dualwave_swp_traits(
     kv_vectorized=None,
     return_lse=False,
     xcd_swizzle=False,
+    causal_lpt=True,
 ):
     """Build gfx950 DUALWAVE_SWP compile-time layout traits."""
     # Tile shape and wave geometry follow the gfx950 dual-wave 8-wave CTA.
@@ -1759,6 +1786,7 @@ def _make_dualwave_swp_traits(
         LGKMCNT_0_ONLY=0xC07F,
         RETURN_LSE=bool(return_lse),
         XCD_SWIZZLE=bool(xcd_swizzle),
+        CAUSAL_LPT=bool(causal_lpt) and bool(causal),
     )
 
 
@@ -3346,6 +3374,9 @@ class DualwaveKernelContext:
     def init_thread_mapping(self):
         _init_dualwave_thread_mapping(self)
 
+    def init_causal_lpt_order(self):
+        _init_causal_lpt_order(self)
+
     def init_sequence_lengths(self, CuSeqQ=None, CuSeqKv=None):
         if CuSeqQ is None:
             CuSeqQ = self.CuSeqQ
@@ -4413,17 +4444,7 @@ class DualwaveFp8KernelContext:
         self.stride_kv_n_v = fx.Index(self.stride_kv_n)
 
     def init_causal_lpt_order(self):
-        """Issue causal q-blocks longest-first by reversing the q-block grid axis.
-
-        Causal work per q-block grows with the block index and workgroups dispatch in
-        flattened-id order, so the natural order issues the heaviest block last and the
-        makespan carries its tail. Must run after init_thread_mapping and before
-        init_sequence_lengths / init_tile_bounds / init_q_row read q_start.
-        """
-        traits = self.traits
-        num_q_blocks = (self.seq_len_v + traits.BLOCK_M - 1) // traits.BLOCK_M
-        self.q_block_idx = num_q_blocks - fx.Index(1) - self.q_block_idx
-        self.q_start = self.q_block_idx * traits.BLOCK_M
+        _init_causal_lpt_order(self)
 
     def init_lds(self, shared_storage):
         lds = fx.SharedAllocator().allocate(shared_storage).peek()

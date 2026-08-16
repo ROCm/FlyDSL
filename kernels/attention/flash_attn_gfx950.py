@@ -81,6 +81,7 @@ def build_flash_attn_dualwave_swp_module(
     cross_seqlen=False,
     paged=False,
     kv_cache_layout="linear",
+    causal_lpt=True,
     return_lse=False,
     has_bias=False,
     has_alibi=False,
@@ -146,6 +147,7 @@ def build_flash_attn_dualwave_swp_module(
         paged=paged,
         kv_cache_layout=kv_cache_layout,
         kv_vectorized=KV_VECTORIZED,
+        causal_lpt=causal_lpt,
         return_lse=return_lse,
         xcd_swizzle=_xcd_swizzle,
     )
@@ -232,6 +234,8 @@ def build_flash_attn_dualwave_swp_module(
         ctx.init_runtime_indices()
         ctx.init_lds(SharedStorage)
         ctx.init_thread_mapping()
+        if const_expr(traits.CAUSAL_LPT):
+            ctx.init_causal_lpt_order()
         ctx.init_sequence_lengths()
         ctx.init_descriptors()
         ctx.init_workspace()
