@@ -149,6 +149,7 @@ def _build_dense_dualwave(
     setprio: bool,
     debug_lazy_counts: bool,
     enable_stagger: bool,
+    causal_lpt: bool = True,
     return_lse: bool = False,
     has_bias: bool = False,
     has_alibi: bool = False,
@@ -171,6 +172,7 @@ def _build_dense_dualwave(
         dualwave_swp_setprio=setprio,
         dualwave_swp_debug_lazy_counts=debug_lazy_counts,
         dualwave_swp_enable_stagger=enable_stagger,
+        causal_lpt=causal_lpt,
         return_lse=return_lse,
         has_bias=has_bias,
         has_alibi=has_alibi,
@@ -343,6 +345,7 @@ def _build_paged(
     num_kv_splits: int = 1,
     varlen: bool = False,
     kv_cache_layout: str = "linear",
+    causal_lpt: bool = True,
     return_lse: bool = False,
     has_bias: bool = False,
 ):
@@ -377,6 +380,7 @@ def _build_paged(
         dualwave_swp_lazy_rescale=lazy_rescale,
         dualwave_swp_setprio=setprio,
         dualwave_swp_enable_stagger=enable_stagger,
+        causal_lpt=causal_lpt,
         return_lse=return_lse,
         has_bias=has_bias,
     )
@@ -412,6 +416,7 @@ def _flydsl_flash_attn_paged(
     dualwave_swp_lazy_rescale: bool,
     dualwave_swp_setprio: bool,
     dualwave_swp_enable_stagger: bool,
+    causal_lpt: bool,
     stream,
 ) -> torch.Tensor:
     """Native paged-KV attention on the gfx950 dualwave kernel.
@@ -587,6 +592,7 @@ def _flydsl_flash_attn_paged(
                 varlen=varlen,
                 kv_cache_layout=kv_cache_layout,
                 has_bias=bias is not None,
+                causal_lpt=causal_lpt,
             )
         if out is None:
             out = torch.empty_like(q)
@@ -709,6 +715,10 @@ def flydsl_flash_attn_func(
     # stay on one XCD instead of every XCD re-streaming that head's K/V. None
     # auto-selects on the shapes it helps; True/False force it. Dense non-fp8 only.
     dualwave_swp_xcd_swizzle: Optional[bool] = None,
+    # Reverse the causal q-block grid axis so the heaviest blocks issue first,
+    # shortening the makespan tail. Bit-identical, being a permutation of
+    # workgroup -> q-block. See flash_attn_utils._init_causal_lpt_order.
+    causal_lpt: bool = True,
     # Debug: pass a pre-allocated float32[2] tensor to enable the lazy-rescale
     # branch counter (dualwave_swp_debug_lazy_counts=True). Only for dense mode.
     debug_counts: Optional[torch.Tensor] = None,
@@ -927,6 +937,7 @@ def flydsl_flash_attn_func(
             dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
             dualwave_swp_setprio=dualwave_swp_setprio,
             dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
+            causal_lpt=causal_lpt,
             stream=stream,
         )
 
@@ -1169,6 +1180,7 @@ def flydsl_flash_attn_func(
                         setprio=dualwave_swp_setprio,
                         debug_lazy_counts=debug_lazy,
                         enable_stagger=dualwave_swp_enable_stagger,
+                        causal_lpt=causal_lpt,
                         return_lse=return_lse,
                         has_bias=has_bias,
                         has_alibi=has_alibi,

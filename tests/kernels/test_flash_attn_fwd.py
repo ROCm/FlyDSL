@@ -4447,6 +4447,23 @@ def test_xcd_swizzle_is_bit_identical(H):
     def run(flag):
         return flydsl_flash_attn_func(q, k, v, causal=False, dualwave_swp_xcd_swizzle=flag).clone()
 
+
+@_requires_gfx950
+@pytest.mark.parametrize("H", [8, 16])
+def test_causal_lpt_is_bit_identical(H):
+    """LPT only reorders q-blocks, so the output must not move a bit.
+
+    This is also the guard against a reversal that drops or double-computes
+    q-blocks, which would otherwise read as a speedup.
+    """
+    B, S, D = 1, 8192, 128
+    torch.manual_seed(H)
+    q = _rand_lse(B, S, H, D, dtype=torch.bfloat16)
+    k, v = torch.randn_like(q), torch.randn_like(q)
+
+    def run(flag):
+        return flydsl_flash_attn_func(q, k, v, causal=True, causal_lpt=flag).clone()
+
     off, on = run(False), run(True)
     torch.cuda.synchronize()
     assert torch.equal(off, on)
@@ -4476,6 +4493,20 @@ def test_xcd_swizzle_heads_not_multiple_of_xcd(xcd_swizzle):
         q.transpose(1, 2).float(), k.transpose(1, 2).float(), v.transpose(1, 2).float()
     ).transpose(1, 2)
     torch.testing.assert_close(out.float(), ref, atol=_ATOL_BF16, rtol=0)
+
+
+@_requires_gfx950
+def test_causal_lpt_ignored_when_not_causal():
+    """Non-causal has no work gradient across q-blocks, so the flag is inert."""
+    B, S, H, D = 1, 4096, 8, 128
+    torch.manual_seed(3)
+    q = _rand_lse(B, S, H, D, dtype=torch.bfloat16)
+    k, v = torch.randn_like(q), torch.randn_like(q)
+
+    off = flydsl_flash_attn_func(q, k, v, causal=False, causal_lpt=False).clone()
+    on = flydsl_flash_attn_func(q, k, v, causal=False, causal_lpt=True).clone()
+    torch.cuda.synchronize()
+    assert torch.equal(off, on)
 
 
 if __name__ == "__main__":
