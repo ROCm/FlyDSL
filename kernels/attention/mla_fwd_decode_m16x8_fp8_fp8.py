@@ -19,8 +19,8 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
+from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
-from flydsl.expr import math as fmath
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
@@ -329,31 +329,9 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
     # ---- Types ----
     fm_fast = arith.FastMathFlags.fast
-    # fastmath without ninf: safe for operations that may encounter -inf
-    # (boundary masking sets OOB attention scores to -inf)
-    fm_no_inf = (
-        arith.FastMathFlags.nnan
-        | arith.FastMathFlags.nsz
-        | arith.FastMathFlags.arcp
-        | arith.FastMathFlags.contract
-        | arith.FastMathFlags.afn
-        | arith.FastMathFlags.reassoc
-    )
 
     def _mfma_fp8(result_type, operands, **kw):
         return rocdl.mfma_f32_16x16x32_fp8_fp8(result_type, operands, **kw)
-
-    def _fadd(a, b, fastmath=fm_no_inf):
-        return arith.addf(_raw(a), _raw(b), fastmath=fastmath)
-
-    def _fsub(a, b, fastmath=fm_no_inf):
-        return arith.subf(_raw(a), _raw(b), fastmath=fastmath)
-
-    def _fmul(a, b, fastmath=fm_no_inf):
-        return arith.mulf(_raw(a), _raw(b), fastmath=fastmath)
-
-    def _fmax(a, b, fastmath=fm_no_inf):
-        return arith.maximumf(_raw(a), _raw(b), fastmath=fastmath)
 
     # ---- LDS setup ----
     lds = fx.SharedAllocator().allocate(SharedStorage).peek()
@@ -757,7 +735,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         """Butterfly max reduce across MFMA column groups (strides 32, 16)."""
         w = _f32(val)
         for sh in [32, 16]:
-            w = _fmax(w, _shfl_xor_f32(w, sh), fm_no_inf)
+            w = fx.maxnumf(w, _shfl_xor_f32(w, sh))
         return w
 
     def _warp_reduce_add_16(val):
@@ -917,7 +895,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         # Local max
         local_max = scaled[0]
         for i in range_constexpr(1, P_VALS_PER_THR):
-            local_max = _fmax(local_max, scaled[i], fm_no_inf)
+            local_max = fx.maxnumf(local_max, scaled[i])
 
         # Warp reduce max (within 16-lane groups)
         local_max = _warp_reduce_max_16(local_max)
@@ -927,18 +905,18 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             new_row_max = local_max
             rescale = c_one_f32
         else:
-            new_row_max = _fmax(local_max, row_max_old, fm_no_inf)
+            new_row_max = fx.maxnumf(local_max, row_max_old)
             # rescale = exp2((old_max - new_max) * log2e)
-            diff = _fsub(row_max_old, new_row_max, fm_no_inf)
-            rescale = _fast_exp2(_fmul(diff, c_log2e, fm_no_inf))
+            diff = row_max_old - new_row_max
+            rescale = _fast_exp2(diff * c_log2e)
 
         # exp(p - max) for each value, and sum
         p_exp_vals = [None] * P_VALS_PER_THR
         local_sum = c_zero_f32
         for i in range_constexpr(P_VALS_PER_THR):
-            exp_arg = _fmul(_fsub(scaled[i], new_row_max, fm_no_inf), c_log2e, fm_no_inf)
+            exp_arg = (scaled[i] - new_row_max) * c_log2e
             p_exp_vals[i] = _fast_exp2(exp_arg)
-            local_sum = _fadd(local_sum, p_exp_vals[i], fm_no_inf)
+            local_sum = local_sum + p_exp_vals[i]
 
         # Warp reduce sum
         local_sum = _warp_reduce_add_16(local_sum)
@@ -947,7 +925,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         if const_expr(is_first_iter):
             row_sum_e_new = local_sum
         else:
-            row_sum_e_new = _fadd(_f32(rescale) * row_sum_e_old, local_sum, fm_no_inf)
+            row_sum_e_new = _f32(rescale) * row_sum_e_old + local_sum
 
         return p_exp_vals, new_row_max, row_sum_e_new, rescale
 
@@ -1824,8 +1802,8 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         def _write_lse(pqo_loc_i32, rm, rse):
             """Write LSE for split output (first 16 lanes per warp)."""
             if ArithValue(lane_idx) < 16:
-                log2_sum = fmath.log2(rse, fastmath=fm_fast)
-                lse = fmath.fma(log2_sum, c_inv_log2e, rm, fastmath=fm_fast)
+                log2_sum = fx.log2(rse, fastmath=fm_fast)
+                lse = fx.fma(log2_sum, c_inv_log2e, rm, fastmath=fm_fast)
                 row_idx = _raw(ArithValue(lane_idx) + warp_idx * 16 + _idx(pqo_loc_i32) * NUM_QO_HEADS)
                 buffer_ops.buffer_store(lse, split_lse_rsrc, row_idx)
 
@@ -2078,19 +2056,22 @@ def launch_mla_fwd_decode_m16x8_fp8_fp8(
 ):
     """JIT host function: configures grid/block and launches the kernel."""
     assert TOTAL_LDS_BYTES <= lds_size, f"Kernel requires {TOTAL_LDS_BYTES} bytes LDS but CU budget is {lds_size}"
-    kn_mla_fwd_decode_m16x8_fp8_fp8(
-        query,
-        kv_buffer,
-        kv_page_indices,
-        work_indptr,
-        work_info_set,
-        final_output,
-        split_output,
-        split_lse,
-        softmax_scale,
-    ).launch(
-        grid=(num_cus, 1, 1),
-        block=(NUM_THREADS, 1, 1),
-        smem=0,
-        stream=stream,
-    )
+    # DSL arithmetic (+ - * .maximumf) picks up fastmath from the ambient hint;
+    # enable it for the whole traced body so ops emit fastmath<fast>.
+    with CompilationContext.compile_hints({"fast_fp_math": True}):
+        kn_mla_fwd_decode_m16x8_fp8_fp8(
+            query,
+            kv_buffer,
+            kv_page_indices,
+            work_indptr,
+            work_info_set,
+            final_output,
+            split_output,
+            split_lse,
+            softmax_scale,
+        ).launch(
+            grid=(num_cus, 1, 1),
+            block=(NUM_THREADS, 1, 1),
+            smem=0,
+            stream=stream,
+        )
