@@ -19,8 +19,6 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
@@ -226,10 +224,11 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
             in_base = nb * c * s
             out_base = nb * s * c
 
+        _lds_st_ptr_ty = fx.PointerType.get(elem_ty.ir_type, fx.AddressSpace.Shared, TR_VEC * BF16_BYTES)
+
         def lds_store_vec8(elem_offset, value):
             base = fx.Int64(fx.ptrtoint(lds.ptr)) + fx.Int64(elem_offset * 2)
-            ptr = buffer_ops.create_llvm_ptr(base, address_space=3)
-            llvm.StoreOp(value, ptr, alignment=16)
+            fx.ptr_store(value, fx.inttoptr(_lds_st_ptr_ty, base))
 
         def lds_load_scalar(elem_offset):
             u8 = fx.recast_iter(fx.Uint8, lds.ptr)
@@ -409,7 +408,7 @@ def compile_conv3d_implicit(
     # BIG_IN_N1 rebases the buffer to the block's first input row, and a reflected tap can
     # resolve below that base; _conv3d_impl keeps non-zero modes off the BIG_IN path.
     assert pad_mode == "zeros" or not BIG_IN, "non-zero pad_mode requires the non-BIG_IN address path"
-    X_SAMPLE_BYTES = c * d * h * w * BF16_BYTES
+    X_SAMPLE_ELEMS = c * d * h * w
 
     # A tile must never straddle a group boundary -- every column in it shares one A tile in
     # LDS, and different groups need different input channels. So the N grid is
@@ -472,9 +471,25 @@ def compile_conv3d_implicit(
 
     @flyc.kernel(known_block_size=[BLOCK_THREADS, 1, 1])
     def conv3d_implicit_kernel(y: fx.Tensor, x: fx.Tensor, weight: fx.Tensor, bias: fx.Tensor):
-        w_rsrc = buffer_ops.create_buffer_resource(weight, num_records_bytes=W_BYTES)
+        # The im2col gather addresses its source by a flat element index, so the DMA source
+        # is a 1-D view over the buffer rather than the tensor's own n-D layout: dividing
+        # that by a 1-element tile makes slice(src, (None, off)) exactly element `off`,
+        # with no coordinate decomposition. `elems` only shapes the view -- the sentinel
+        # offset that masks a tap deliberately points past it, and num_records (not the
+        # layout) is what turns that into a zero-fill.
+        def _dma_src(ptr, elems, num_records_bytes):
+            buf = fx.rocdl.make_buffer_ptr(ptr, num_records_bytes=num_records_bytes)
+            return fx.logical_divide(fx.make_view(buf, fx.make_layout(elems, 1)), fx.make_layout(1, 1))
+
+        def _x_rebased(off_elems):
+            # BIG_IN moves the descriptor base to the block's own origin so a 32-bit
+            # voffset still reaches the tile; num_records bounds it at 2 GB from there.
+            ptr = fx.add_offset(fx.get_iter(x), fx.make_int_tuple(off_elems))
+            return _dma_src(ptr, BIG_IN_NR // BF16_BYTES, BIG_IN_NR)
+
+        w_src = _dma_src(fx.get_iter(weight), W_BYTES // BF16_BYTES, W_BYTES)
         if const_expr(not BIG_IN):
-            x_rsrc = buffer_ops.create_buffer_resource(x, num_records_bytes=X_BYTES)
+            x_src = _dma_src(fx.get_iter(x), X_BYTES // BF16_BYTES, X_BYTES)
         y_rsrc = buffer_ops.create_buffer_resource(y)
         if const_expr(has_bias):
             bias_rsrc = buffer_ops.create_buffer_resource(bias)
@@ -539,10 +554,7 @@ def compile_conv3d_implicit(
             else:
                 base_h = fx.Index(0)
             x_base_elem = ((nbase * fx.Index(d) + base_t) * fx.Index(h) + base_h) * fx.Index(w) * fx.Index(c)
-            x_addr = fx.Int64(buffer_ops.extract_base_index(x)) + fx.Int64(x_base_elem) * fx.Int64(2)
-            x_rsrc = buffer_ops.create_buffer_resource_from_addr(x_addr, num_records_bytes=BIG_IN_NR)
-        if const_expr(BIG_IN_NM):
-            x_base_addr = fx.Int64(buffer_ops.extract_base_index(x))
+            x_src = _x_rebased(fx.Int64(x_base_elem))
 
         wid = tid // WARP_SIZE
         lane = tid % WARP_SIZE
@@ -733,24 +745,24 @@ def compile_conv3d_implicit(
         DMA_BYTES = LDG_VEC * BF16_BYTES  # 16
         OOB_ELEM = fx.Int32(OOB_SENTINEL_ELEM)
 
+        _lds_dma_ptr_ty = fx.PointerType.get(elem_ty.ir_type, fx.AddressSpace.Shared, DMA_BYTES)
+
+        def sgpr(x):
+            # Hoist a wave-uniform value into an SGPR (readfirstlane).
+            return fx.Int64(rocdl.readfirstlane(T.i64, fx.Int64(x)))
+
+        _dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), DMA_BYTES * 8)
+
         def _lds_dma_ptr(lds_array, stage_tile, i):
+            # buffer_load_lds takes one wave-uniform LDS base and fans the wave's lanes
+            # out from it, so the lane-0 address is the base the whole wave writes from.
             off_elems = fx.Index(stage_tile) + (fx.Index(tid) + fx.Index(i * BLOCK_THREADS)) * fx.Index(LDG_VEC)
             base_bytes = off_elems * fx.Index(BF16_BYTES)
             addr = fx.Int64(fx.ptrtoint(lds_array.ptr)) + fx.Int64(base_bytes)
-            addr = rocdl.readfirstlane(T.i64, arith.index_cast(T.i64, addr.ir_value()))
-            return llvm.inttoptr(ir.Type.parse("!llvm.ptr<3>"), addr)
+            return fx.make_view(fx.inttoptr(_lds_dma_ptr_ty, sgpr(addr)), fx.make_layout(1, 1))
 
-        def _dma_to_lds(rsrc, lds_ptr, voff_elem):
-            voff_b = (voff_elem * fx.Int32(BF16_BYTES)).ir_value()
-            rocdl.raw_ptr_buffer_load_lds(
-                rsrc,
-                lds_ptr,
-                arith.constant(DMA_BYTES, type=T.i32),
-                voff_b,
-                arith.constant(0, type=T.i32),
-                arith.constant(0, type=T.i32),
-                arith.constant(0, type=T.i32),
-            )
+        def _dma_to_lds(src, dst, voff_elem):
+            fx.copy(_dma_atom, fx.slice(src, (None, voff_elem)), dst)
 
         def _load_a(stage, k_base):
             kbase_i = fx.Index(k_base)
@@ -767,14 +779,13 @@ def compile_conv3d_implicit(
                 if const_expr(BIG_IN_NM):
                     addr_ret = _a_addr(i, kbase_i, cc_base, ckk_base)
                     g_off_i, valid, n_idx_i = addr_ret
-                    sample_addr = x_base_addr + fx.Int64(n_idx_i) * fx.Int64(X_SAMPLE_BYTES)
-                    x_rsrc_i = buffer_ops.create_buffer_resource_from_addr(sample_addr, num_records_bytes=BIG_IN_NR)
+                    x_src_i = _x_rebased(fx.Int64(n_idx_i) * fx.Int64(X_SAMPLE_ELEMS))
                     voff = fx.Int32(arith.select(valid, g_off_i, OOB_ELEM))
-                    _dma_to_lds(x_rsrc_i, _lds_dma_ptr(a_lds, stage_tile, i), voff)
+                    _dma_to_lds(x_src_i, _lds_dma_ptr(a_lds, stage_tile, i), voff)
                 else:
                     g_off_i, valid = _a_addr(i, kbase_i, cc_base, ckk_base)
                     voff = fx.Int32(arith.select(valid, g_off_i, OOB_ELEM))
-                    _dma_to_lds(x_rsrc, _lds_dma_ptr(a_lds, stage_tile, i), voff)
+                    _dma_to_lds(x_src, _lds_dma_ptr(a_lds, stage_tile, i), voff)
 
         def _load_b(stage, k_base):
             stage_tile = fx.Index(stage) * TILE_N * TILE_K
@@ -784,7 +795,7 @@ def compile_conv3d_implicit(
                     voff = fx.Int32(arith.select(col_valid, g_off, OOB_ELEM))
                 else:
                     voff = g_off
-                _dma_to_lds(w_rsrc, _lds_dma_ptr(b_lds, stage_tile, i), voff)
+                _dma_to_lds(w_src, _lds_dma_ptr(b_lds, stage_tile, i), voff)
 
         # ---- single-vec ds_read (LDS -> register), indexed by per-wave MFMA row ----
         def read_a_vec(stage, mi):
@@ -857,10 +868,14 @@ def compile_conv3d_implicit(
         if const_expr(BIG_OUT):
             y_elem_base = fx.Int64(buffer_ops.extract_base_index(y))
 
+        # Past 2 GB the epilogue's 32-bit buffer voffset would wrap, so this row stores
+        # through a 64-bit address instead. off_nk_i64 is an arbitrary element index, so
+        # the address is only element-aligned -- which is all a scalar bf16 store needs.
+        _big_st_ptr_ty = fx.PointerType.get(elem_ty.ir_type, fx.AddressSpace.Global, BF16_BYTES)
+
         def _big_store(off_nk_i64, value):
             addr = y_elem_base + off_nk_i64 * fx.Int64(BF16_BYTES)
-            ptr = buffer_ops.create_llvm_ptr(addr, address_space=1)
-            llvm.StoreOp(value.ir_value() if hasattr(value, "ir_value") else value, ptr, alignment=2)
+            fx.ptr_store(value, fx.inttoptr(_big_st_ptr_ty, addr))
 
         # col_loc is the column within its group; the tail check is per group because the N
         # grid is over-provisioned. At groups == 1 it is the same value as col.
