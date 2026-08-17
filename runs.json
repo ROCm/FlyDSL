@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-17T04:56:25Z",
+ "updated": "2026-08-17T06:17:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32000872789,
+   "pr": null,
+   "commit": "96af91bcab7703df1b8d5536ffbb4ff72b6dfacd",
+   "branch": "main",
+   "event": "push",
+   "title": "[CI] Skip amdgpu repo during manylinux image dnf install (#1014)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32000872789",
+   "created_at": "2026-08-17T06:15:06Z",
+   "updated_at": "2026-08-17T06:15:44Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 31996059761,
    "pr": null,
@@ -10,13 +25,42 @@
    "branch": "main",
    "event": "push",
    "title": "[fp4_gemm_4wave] MXFP4 GEMM perf optimize (#990)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31996059761",
    "created_at": "2026-08-17T04:54:34Z",
-   "updated_at": "2026-08-17T04:55:21Z",
+   "updated_at": "2026-08-17T06:15:39Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-17T05:25:54Z",
+     "completed_at": "2026-08-17T06:06:19Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31996059761/job/95289871784"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-08-17T05:09:02Z",
+     "completed_at": "2026-08-17T06:15:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31996059761/job/95289871819"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-17T05:09:02Z",
+     "completed_at": "2026-08-17T05:54:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31996059761/job/95289871843",
+     "log_fetch_failed": true
+    }
+   ]
   },
   {
    "run_id": 31995425965,
@@ -25,13 +69,44 @@
    "branch": "fix/ci-manylinux-dnf-amdgpu-timeout",
    "event": "pull_request",
    "title": "[CI] Skip amdgpu repo during manylinux image dnf install",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31995425965",
    "created_at": "2026-08-17T04:42:57Z",
-   "updated_at": "2026-08-17T04:45:43Z",
+   "updated_at": "2026-08-17T06:15:11Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-17T05:04:52Z",
+     "completed_at": "2026-08-17T05:49:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31995425965/job/95289228942",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-17T05:04:43Z",
+     "completed_at": "2026-08-17T05:25:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31995425965/job/95289228982",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-17T05:04:52Z",
+     "completed_at": "2026-08-17T06:15:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31995425965/job/95289229017",
+     "log_fetch_failed": true
+    }
+   ]
   },
   {
    "run_id": 31992264183,
@@ -1959,51 +2034,6 @@
    "updated_at": "2026-08-13T04:02:48Z",
    "actor": "kefan203",
    "jobs": []
-  },
-  {
-   "run_id": 31603808114,
-   "pr": 848,
-   "commit": "2aefe4a0d1b5cd5d4d76d2edd47f185d79bf0b95",
-   "branch": "cjl/norm_perf",
-   "event": "pull_request",
-   "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31603808114",
-   "created_at": "2026-08-12T13:53:32Z",
-   "updated_at": "2026-08-12T16:28:18Z",
-   "actor": "cschenjunlin",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-12T15:05:13Z",
-     "completed_at": "2026-08-12T16:28:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31603808114/job/94159392192"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-12T15:05:04Z",
-     "completed_at": "2026-08-12T16:25:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31603808114/job/94159392204",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-12T15:06:21Z",
-     "completed_at": "2026-08-12T15:24:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31603808114/job/94159392343",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
