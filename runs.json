@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-17T10:06:57Z",
+ "updated": "2026-08-17T10:09:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32018459059,
+   "pr": 1015,
+   "commit": "220c6663f6f5145596f671792c19d0180b8a332f",
+   "branch": "phil/isa-resource-diff-arch-general",
+   "event": "pull_request",
+   "title": "[WIP] [Feature] Add architecture-general ISA resource diff tool",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32018459059",
+   "created_at": "2026-08-17T10:05:27Z",
+   "updated_at": "2026-08-17T10:07:01Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 32018377541,
    "pr": 1015,
@@ -10,11 +25,11 @@
    "branch": "phil/isa-resource-diff-arch-general",
    "event": "pull_request",
    "title": "[WIP] [Feature] Add architecture-general ISA resource diff tool",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32018377541",
    "created_at": "2026-08-17T10:04:31Z",
-   "updated_at": "2026-08-17T10:05:17Z",
+   "updated_at": "2026-08-17T10:05:44Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -44,9 +59,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32017096084",
    "created_at": "2026-08-17T09:48:47Z",
-   "updated_at": "2026-08-17T09:50:29Z",
+   "updated_at": "2026-08-17T10:07:02Z",
    "actor": "Boss2002n",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-17T10:06:55Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32017096084/job/95352988733"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-17T10:06:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32017096084/job/95352988741"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-17T10:07:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32017096084/job/95352988799"
+    }
+   ]
   },
   {
    "run_id": 32016008004,
@@ -2022,52 +2065,6 @@
    "updated_at": "2026-08-12T20:45:12Z",
    "actor": "amd-nprotaso",
    "jobs": []
-  },
-  {
-   "run_id": 31618801908,
-   "pr": 1005,
-   "commit": "9c134fc77ca888f365e10b618bd0e0b8b3971d7e",
-   "branch": "docs-fix",
-   "event": "pull_request",
-   "title": "docs: add rocm-docs-core package to requirements",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31618801908",
-   "created_at": "2026-08-12T16:40:57Z",
-   "updated_at": "2026-08-12T16:45:28Z",
-   "actor": "nhaehnle",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-12T16:44:15Z",
-     "completed_at": "2026-08-12T16:44:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31618801908/job/94189027130",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-12T16:44:14Z",
-     "completed_at": "2026-08-12T16:44:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31618801908/job/94189027156",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-12T16:45:24Z",
-     "completed_at": "2026-08-12T16:45:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31618801908/job/94189027165",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
