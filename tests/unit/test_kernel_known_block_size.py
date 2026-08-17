@@ -171,9 +171,9 @@ class TestKnownBlockSize:
     def test_compiled_ir_has_max_flat_workgroup_size(self):
         compiled_ir = _get_compiled_ir(_launch_bs128_4_2, self.x)
         # The compiled IR should report max_flat_workgroup_size >= total_threads
-        match = re.search(r"max_flat_workgroup_size\s*=\s*(\d+)", compiled_ir)
+        match = re.search(r"max_flat_workgroup_size\\CD\\([0-9A-Fa-f]{2})\\([0-9A-Fa-f]{2})", compiled_ir)
         assert match is not None, f"max_flat_workgroup_size not found in compiled IR:\n{compiled_ir}"
-        max_wg = int(match.group(1))
+        max_wg = int("".join(match.groups()), 16)
         assert max_wg >= 1024, f"max_flat_workgroup_size={max_wg} < total_threads=1024"
 
     def test_dynamic_block_size_omits_exact_attribute(self):

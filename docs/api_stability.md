@@ -1,7 +1,7 @@
 # API Stability
 
-This document defines which `flydsl` APIs may be relied on across releases and
-the compatibility commitments that apply when they are changed. Its scope is
+This document defines which `flydsl` APIs you can rely on across releases and
+the compatibility commitments that apply when they change. Its scope is
 limited to `python/flydsl/`. Below, `fx` refers to `flydsl.expr`.
 
 A release means a minor-version increment (for example, `0.3` → `0.4`). A
@@ -26,8 +26,8 @@ non-underscore members and Python special methods are stable when reached
 through that result. This rule applies recursively to objects returned by those
 members.
 
-The concrete implementation class, its constructor, and its import path are not
-promised by this rule. They may change if the replacement preserves the result
+This rule does not promise the concrete implementation class, its constructor,
+or its import path. They may change if the replacement preserves the result
 interface's public members, signatures, and semantics. For example,
 `flyc.from_torch_tensor(x).mark_shape_dynamic(0)` is stable, while
 `flyc.from_torch_tensor(x)._ensure_spec()` is unstable.
@@ -149,12 +149,12 @@ APIs remain compatible but are intentionally excluded from this catalog.
 
 The APIs in the table below satisfy the stable rules in §2 but are marked as
 deprecated. They remain stable during the §5 window; new code must not use
-them, and a replacement must be provided before removal.
+them, and you must provide a replacement before removal.
 
 For direct-child module exports under §2.1, the deprecated status in this table
 also applies to `fx.<name>`, `fx.<module>.<name>`, and direct-import forms.
-This table is maintained separately as the compatibility-debt list and is
-excluded from the catalog above.
+FlyDSL maintains this table separately as the compatibility-debt list and
+excludes it from the catalog above.
 
 | API | Replacement or required work before removal | Declared removal release |
 |---|---|---|
@@ -162,7 +162,7 @@ excluded from the catalog above.
 | `fx.index_cast` | `fx.Index(x)` | v0.4 |
 | `fx.constant_vector` | `Numeric` and `Vector` member functions | v0.4 |
 | `fx.tdm_ops` and content reached through this alias | `fx.rocdl.tdm_ops`; the latter is a target-specific unstable path | v0.4 |
-| `fx.Numeric.maximumf`, `fx.Numeric.minimumf` | `fx.arith.maximumf(x, y)`, `fx.arith.minimumf(x, y)` | v0.4 |
+| `fx.Numeric.maximumf`, `fx.Numeric.minimumf` | `fx.max(x, y)`, `fx.min(x, y)` | v0.4 |
 | `fx.Numeric.shrui`, `fx.Numeric.addf` | `fx.arith.shrui(x, amount)`, `x + y` with a `fastmath` context | v0.4 |
 | `fx.Numeric.exp2` | `fx.math.exp2(x)` | v0.4 |
 | `fx.Numeric.shuffle_xor` | `fx.gpu.shuffle_xor(x, offset, width)` | v0.4 |

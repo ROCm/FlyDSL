@@ -1,7 +1,7 @@
-# Arithmetic Types
+# Arithmetic types
 
-The arithmetic layer is the set of scalar (`Numeric`) and SIMD (`Vector`) values
-a kernel computes with: the types themselves, their public operations.
+The arithmetic layer defines the scalar (`Numeric`) and SIMD (`Vector`) types
+that a kernel computes with, along with their public operations.
 
 ## The type tower
 
@@ -24,7 +24,7 @@ casts to) a `Float32`.
 
 ### Public methods
 
-Common to `Numeric` and `Vector`, elementwise for `Vector`:
+The following methods apply to both `Numeric` and `Vector`, and are elementwise for `Vector`:
 
 | Method | Meaning | Example |
 |--------|---------|---------|
@@ -46,6 +46,33 @@ Common to `Numeric` and `Vector`, elementwise for `Vector`:
 | `Numeric.width` / `Numeric.log_width` | the type's bit width, and `ceil(log2(width))` | `Int32.width` → `32`; `Int32.log_width` → `5` |
 | `as_numeric` / `Numeric.from_python_value(value)` | build a `Numeric` from a Python value | `as_numeric(5)` → `Int32(5)` |
 | `Numeric.from_ir_type(ir_type)` | the `Numeric` type for an MLIR type | `Numeric.from_ir_type(T.f32())` → `Float32` |
+
+### Function-level typed arithmetic
+
+`fx.max`, `fx.min`, and `fx.ceildiv` normalize Python literals and DSL operands,
+resolve one common type, broadcast scalar operands to `Vector` shapes, and emit
+the dedicated MLIR operation for that type:
+
+| API | Float | Signed integer | Unsigned integer |
+|---|---|---|---|
+| `fx.max` | `arith.maximumf` | `arith.maxsi` | `arith.maxui` |
+| `fx.min` | `arith.minimumf` | `arith.minsi` | `arith.minui` |
+| `fx.ceildiv` | unsupported | `arith.ceildivsi` | `arith.ceildivui` |
+
+`fx.max` and `fx.min` are variadic and accept nested lists/tuples. Their float
+forms propagate NaN and order signed zero as `-0.0 < +0.0`. This is deliberately
+different from `fx.maxnumf`, which returns the non-NaN input when exactly one
+operand is NaN.
+
+`fx.ceildiv` rounds integer division toward positive infinity. It does not use
+`(a + b - 1) // b`, whose intermediate addition can overflow at run time, and
+it does not change the floor-division meaning of `//`. The similarly named
+`fx.ceil_div` remains the layout/int-tuple operation.
+
+Boolean inputs to `fx.max` / `fx.min` widen to `Int32`. Boolean, `Index`, float,
+and narrow storage-float inputs to `fx.ceildiv` are rejected. `Index` and narrow
+storage floats are also rejected by `fx.max` / `fx.min`; cast them to an
+explicit supported arithmetic type first.
 
 ### Vector
 
@@ -116,7 +143,7 @@ forced to a Python value.
 
 ## Type interoperability
 
-How a binary operation between two DSL numeric values determines the type its
+A binary operation between two DSL numeric values determines the type that its
 operands are converted to (the *common type*) and the type it produces (the
 *result type*). The rules are the same whether operands are scalar (`Numeric`),
 `Vector`, or a mix of the two; `Vector ⊗ Vector` additionally broadcasts shapes,
@@ -206,7 +233,7 @@ The keyword applies elementwise to a `Vector` as well.
 
 *Fast-math* flags relax IEEE-754 semantics so the compiler may reorder,
 contract, or approximate eligible operations. Consequently, they affect only
-runtime, a.k.a. MLIR, operations with floating-point semantics. An all
+runtime (that is, MLIR) operations with floating-point semantics. An all
 compile-time result is folded on the host and emits no op.
 
 ### Flags and their meanings

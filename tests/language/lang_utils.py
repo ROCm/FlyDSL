@@ -22,6 +22,15 @@ def source_ir(body, *args):
     return run(body, *args)._last_compiled[1].source_ir
 
 
+def launch_ir(kernel, *args):
+    """Trace ``kernel(*args)`` through a ``@flyc.jit`` launch wrapper; return the module MLIR text."""
+
+    def body():
+        kernel(*args).launch(grid=(1, 1, 1), block=(64, 1, 1))
+
+    return source_ir(body)
+
+
 def dtype_of(value):
     """Result dtype for a scalar ``Numeric`` or a ``Vector``."""
     return value.dtype if isinstance(value, fx.Vector) else type(value)

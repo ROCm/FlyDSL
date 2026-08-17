@@ -1,0 +1,3 @@
+rocm-docs-core[llms]==1.39.0
+sphinx-autodoc-typehints>=1.25
+
