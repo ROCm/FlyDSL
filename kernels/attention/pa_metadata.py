@@ -42,6 +42,7 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import vector
+from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, as_ir_value, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, T
 from flydsl.runtime.device import get_rocm_arch
@@ -332,14 +333,14 @@ def _finish_q_fragments(
 
     q_frags = []
     gpu.barrier()
-    query_scale_lane = fx.ptr_load(softmax_base + (lane16id), result_type=fx.Vector.make_type(1, fx.Float32))[
+    query_scale_lane = fx.ptr_load(softmax_base + lane16id, result_type=fx.Vector.make_type(1, fx.Float32))[
         0
     ].ir_value()
     for qkhe in range_constexpr(qkhe_loop):
         for qkr in range_constexpr(2):
             lds_rd = lane16id * fx.Int32(head_size // 8) + fx.Int32(qkhe * 8) + rowid * fx.Int32(2) + fx.Int32(qkr)
             q_v1 = fx.ptr_load(
-                fx.recast_iter(fx.Int64, logits_base) + (lds_rd), result_type=fx.Vector.make_type(1, fx.Int64)
+                fx.recast_iter(fx.Int64, logits_base) + lds_rd, result_type=fx.Vector.make_type(1, fx.Int64)
             )
             q_frags.append(q_v1[0])
     return q_frags, query_scale_lane
@@ -540,7 +541,7 @@ def _make_pa_phase_helpers(
                 for td in range_constexpr(TLOOP):
                     scale_row_base = kv_tok_thread_base + fx.Int32(td * MFMA_N)
                     k_scale_vecs.append(
-                        fx.ptr_load(scale_base + (scale_row_base), result_type=fx.Vector.make_type(4, fx.Float32))
+                        fx.ptr_load(scale_base + scale_row_base, result_type=fx.Vector.make_type(4, fx.Float32))
                     )
                     v_scale_vecs.append(
                         fx.ptr_load(
@@ -556,7 +557,7 @@ def _make_pa_phase_helpers(
         return kv_tok_thread_base + fx.Int32(td * MFMA_N)
 
     def _load_k_scale_vec(td: int):
-        return fx.ptr_load(scale_base + (_scale_row_base(td)), result_type=fx.Vector.make_type(4, fx.Float32))
+        return fx.ptr_load(scale_base + _scale_row_base(td), result_type=fx.Vector.make_type(4, fx.Float32))
 
     def _load_v_scale_vec(td: int):
         return fx.ptr_load(
@@ -668,7 +669,7 @@ def _make_pa_phase_helpers(
     def _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, outs, v_scale_vecs):
         partition_max = neg_inf
         partition_sum = zero_f
-        max_vec = fx.ptr_load(softmax_base + (sm_rd_max_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
+        max_vec = fx.ptr_load(softmax_base + sm_rd_max_offs[0], result_type=fx.Vector.make_type(4, fx.Float32))
         for w in range_constexpr(NUM_WARPS):
             partition_max = fx.maxnumf(partition_max, max_vec[w])
 
@@ -696,14 +697,12 @@ def _make_pa_phase_helpers(
             accum_scale = exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value())
 
         gpu.barrier()
-        sum_vec = fx.ptr_load(softmax_base + (sm_rd_sum_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
+        sum_vec = fx.ptr_load(softmax_base + sm_rd_sum_offs[0], result_type=fx.Vector.make_type(4, fx.Float32))
         for w in range_constexpr(NUM_WARPS):
-            partition_sum = arith.addf(
-                arith.unwrap(partition_sum), arith.unwrap(sum_vec[w]), fastmath=arith.FastMathFlags.contract
-            )
+            partition_sum = partition_sum + sum_vec[w]
 
-        accum_sum = arith.mulf(arith.unwrap(accum_scale), arith.unwrap(rsum), fastmath=arith.FastMathFlags.contract)
-        rsum = arith.addf(accum_sum, arith.unwrap(partition_sum), fastmath=arith.FastMathFlags.contract)
+        accum_sum = accum_scale * rsum
+        rsum = accum_sum + partition_sum
         rmax = new_rmax
         accum_scale_vec = vector.broadcast(T.f32x4, arith.unwrap(accum_scale))
         for vhe in range_constexpr(vhe_loop):
@@ -711,7 +710,7 @@ def _make_pa_phase_helpers(
 
         if const_expr(per_token_kv):
             v_max_global = zero_f
-            vmax_vec = fx.ptr_load(softmax_base + (sm_vmax_rd_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
+            vmax_vec = fx.ptr_load(softmax_base + sm_vmax_rd_offs[0], result_type=fx.Vector.make_type(4, fx.Float32))
             for w in range_constexpr(NUM_WARPS):
                 w_vmax = vmax_vec[w]
                 v_max_global = fx.maxnumf(v_max_global, w_vmax)
@@ -736,7 +735,6 @@ def _make_pa_phase_helpers(
 
     def _pv_mfma(v_ops, outs, v_correction):
         v_correction = fx.Float32(v_correction).ir_value()
-        fm_contract = arith.FastMathFlags.contract
         v_correction_vec = vector.broadcast(T.f32x4, v_correction)
 
         # ── Batch-load all P_i64 from LDS upfront ──
@@ -751,7 +749,7 @@ def _make_pa_phase_helpers(
                 p_i64_off = pv_prob_i64_elems[vt * 2 + j]
                 p_i64_all.append(
                     fx.ptr_load(
-                        fx.recast_iter(fx.Int64, logits_base) + (p_i64_off),
+                        fx.recast_iter(fx.Int64, logits_base) + p_i64_off,
                         result_type=fx.Vector.make_type(1, fx.Int64),
                     )[0]
                 )
@@ -772,11 +770,7 @@ def _make_pa_phase_helpers(
                             0,
                         ],
                     )
-            outs[vhe] = arith.addf(
-                arith.mulf(tmp_out, v_correction_vec, fastmath=fm_contract),
-                outs[vhe],
-                fastmath=fm_contract,
-            )
+            outs[vhe] = fx.Vector(tmp_out) * v_correction_vec + outs[vhe]
         return outs
 
     return (
@@ -1000,12 +994,12 @@ def compile_pa_metadata_v1(
         for sh in _shuffle_offsets:
             sum_blocks = sum_blocks + sum_blocks.shuffle_xor(arith.constant(sh, type=i32), c_ws.ir_value())
 
-        average = fx.Int32(arith.divui(sum_blocks.ir_value(), c_nspk.ir_value()))
-        reminder = fx.Int32(arith.remui(sum_blocks.ir_value(), c_nspk.ir_value()))
+        average = sum_blocks // c_nspk
+        reminder = sum_blocks % c_nspk
 
         def _remain_for_cid(cid_val):
             # remain = average + (1 if (cid % num_splits_per_khead) < reminder else 0)
-            mod = fx.Int32(arith.remui(cid_val.ir_value(), c_nspk.ir_value()))
+            mod = cid_val % c_nspk
             return average + _sel(mod < reminder, 1, 0)
 
         # ---- Phase 2: per khead, flattened CU x batch scheduler ----
@@ -1192,17 +1186,18 @@ def compile_pa_metadata_v1(
         num_batches: Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        pa_metadata_v1_kernel(
-            seqlens_qo_indptr,
-            pages_kv_indptr,
-            context_lens,
-            work_indptr,
-            work_info,
-            reduce_indptr,
-            reduce_final_map,
-            reduce_partial_map,
-            num_batches,
-        ).launch(grid=(1, 1, 1), block=(warp_size, 1, 1), stream=stream)
+        with CompilationContext.compile_hints({"fastmath": arith.FastMathFlags.contract}):
+            pa_metadata_v1_kernel(
+                seqlens_qo_indptr,
+                pages_kv_indptr,
+                context_lens,
+                work_indptr,
+                work_info,
+                reduce_indptr,
+                reduce_final_map,
+                reduce_partial_map,
+                num_batches,
+            ).launch(grid=(1, 1, 1), block=(warp_size, 1, 1), stream=stream)
 
     return {"kernel": pa_metadata_v1_kernel, "launch": launch_pa_metadata_v1}
 
@@ -1503,10 +1498,10 @@ def compile_pa_decode_metadata(
         # Outer work loop — each work item = one (batch, kv_head_range, kv_page_range)
         _work_start_idx = fx.Index(arith.unwrap(work_start))
         _work_end_idx = fx.Index(arith.unwrap(work_end))
-        _work_step = arith.index(1)
+        _work_step = fx.Index(1)
 
         for _wi in range(_work_start_idx, _work_end_idx, _work_step):
-            work_idx = arith.index_cast(T.i32, _wi)
+            work_idx = fx.Int32(_wi)
 
             # ── Load work_info[work_idx] — 8 × int32, as 2 × vec4 loads ──
             # info_base is a multiple of 8, so both dwordx4 loads are naturally
@@ -1627,9 +1622,9 @@ def compile_pa_decode_metadata(
             # (sink-prone partition 0 processed last for online-softmax stability).
             num_parts_in_work = kv_end - kv_start
             last_part_idx_val = num_parts_in_work - c_one
-            _loop_start_g = arith.index(0)
+            _loop_start_g = fx.Index(0)
             _loop_stop_g = fx.Index(arith.unwrap(num_parts_in_work))
-            _loop_step_g = arith.index(1)
+            _loop_step_g = fx.Index(1)
 
             _mtp_groups = math.ceil(query_length * query_group_size / 16)
 
@@ -1677,7 +1672,7 @@ def compile_pa_decode_metadata(
                     for vt in range_constexpr(VTLOOP):
                         bt_lds_off = arith.constant(vt * TLOOP, type=T.i32) + rowid
                         v_phys_blocks.append(
-                            fx.ptr_load(bt_base + (bt_lds_off), result_type=fx.Vector.make_type(1, fx.Int32))[0]
+                            fx.ptr_load(bt_base + bt_lds_off, result_type=fx.Vector.make_type(1, fx.Int32))[0]
                         )
                 return v_phys_blocks
 
@@ -1805,7 +1800,7 @@ def compile_pa_decode_metadata(
                 # Reverse iteration: scf.for walks ib forward (0..N-1); remap to
                 # the local partition index lp = N-1..0 so the sink-prone first
                 # partition is processed last.
-                rel_part = last_part_idx_val - arith.index_cast(T.i32, ib)
+                rel_part = last_part_idx_val - as_ir_value(fx.Int32(ib))
                 lp = local_part_start + rel_part
                 next_rel = rel_part - c_one
                 next_rel_clamped = arith.select(next_rel >= c_zero_i32, next_rel, c_zero_i32)
@@ -2144,7 +2139,7 @@ def compile_pa_metadata_reduce(
                 v = buffer_ops.buffer_load(
                     po_rsrc, prow * stride_po_row + qhead * c_head + tid, vec_width=1, dtype=T.f32
                 )
-                m_new = m.maximumf(lse)
+                m_new = fx.maxnumf(m, lse)
                 scale_old = exp2_f32_fast((m - m_new) * c_log2e)
                 w = exp2_f32_fast((lse - m_new) * c_log2e)
                 denom_new = denom * scale_old + w
@@ -2180,22 +2175,23 @@ def compile_pa_metadata_reduce(
         num_groups,
         stream: fx.Stream = fx.Stream(None),
     ):
-        pa_metadata_reduce_kernel(
-            final_output,
-            partial_output,
-            partial_lse,
-            reduce_indptr,
-            reduce_final_map,
-            reduce_partial_map,
-            stride_out_seq,
-            stride_out_head,
-            stride_po_row,
-            stride_pl_row,
-        ).launch(
-            grid=(num_groups, num_query_heads, query_length),
-            block=(block_threads, 1, 1),
-            stream=stream,
-        )
+        with CompilationContext.compile_hints({"fastmath": arith.FastMathFlags.contract}):
+            pa_metadata_reduce_kernel(
+                final_output,
+                partial_output,
+                partial_lse,
+                reduce_indptr,
+                reduce_final_map,
+                reduce_partial_map,
+                stride_out_seq,
+                stride_out_head,
+                stride_po_row,
+                stride_pl_row,
+            ).launch(
+                grid=(num_groups, num_query_heads, query_length),
+                block=(block_threads, 1, 1),
+                stream=stream,
+            )
 
     return {"launch": launch_pa_metadata_reduce, "kernel": pa_metadata_reduce_kernel}
 
