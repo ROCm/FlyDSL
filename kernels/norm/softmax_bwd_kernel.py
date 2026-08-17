@@ -45,23 +45,32 @@ WARP_SIZE = get_warp_size()
 #   bf16 N=16384 (64 elem/thread): 154 VGPR, 0 spill
 #   f32  N=16384 (64 elem/thread): 164 VGPR, 0 spill
 # Throughput either side of the cap, 3*M*N*elem_bytes traffic model:
-#   f32  N=16384 (64 elem/thread):  buffered 4.93 TB/s vs reload 3.92 TB/s
-#   bf16 N=32768 (128 elem/thread): buffered 1.78 TB/s vs reload 3.35 TB/s
+#   f32  N=16384 (64 elem/thread):  both buffered 4.93 TB/s vs neither 3.92 TB/s
+#   bf16 N=32768 (128 elem/thread): both buffered 1.78 TB/s vs neither 3.35 TB/s
+# The middle tier (Y only) is worth 1.36x at bf16 N=32768 and 1.40x at f32
+# N=32768; extending it to N=65536 spills and loses 29%, so it stops at 2x.
 MAX_RESIDENT_ELEMS_PER_THREAD = 64
 MAX_RESIDENT_COLS = BLOCK_THREADS * MAX_RESIDENT_ELEMS_PER_THREAD
 
 
-def softmax_bwd_uses_register_buffering(N: int, dtype_str: str) -> bool:
-    """Whether (N, dtype_str) takes the register-buffered second pass.
+def softmax_bwd_buffered_operands(N: int, dtype_str: str) -> int:
+    """How many of (DY, Y) stay register-resident across the block reduction.
 
-    Exposed so the dispatch threshold can be asserted without a GPU, mirroring
+    2 -> ideal 3-unit traffic; 1 -> DY re-read (4 units); 0 -> both re-read
+    (5 units), which is also what the generic scalar path does.
+
+    Exposed so the dispatch thresholds can be asserted without a GPU, mirroring
     ``is_rmsnorm_bwd_two_stage_vec_config`` in ``rmsnorm_bwd_kernel.py``.
     """
     vec_width = 128 // (32 if dtype_str == "f32" else 16)
     tile_cols = BLOCK_THREADS * vec_width
     if N < tile_cols or N % tile_cols != 0:
-        return False
-    return N <= MAX_RESIDENT_COLS
+        return 0
+    if N <= MAX_RESIDENT_COLS:
+        return 2
+    if N <= 2 * MAX_RESIDENT_COLS:
+        return 1
+    return 0
 
 
 def build_softmax_bwd_module(N: int, dtype_str: str = "f32"):
@@ -96,10 +105,11 @@ def build_softmax_bwd_module(N: int, dtype_str: str = "f32"):
         # ── wave / block reduction (sum only) ─────────────────────────────
         def wave_reduce_add(x):
             w = x
-            for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                off = WARP_SIZE // (2 << _sh_exp)
-                peer = w.shuffle_xor(off, WARP_SIZE)
-                w = w.addf(peer, fastmath=fm_fast)
+            with fx.fastmath(fm_fast):
+                for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
+                    off = WARP_SIZE // (2 << _sh_exp)
+                    peer = gpu.shuffle_xor(w, off, WARP_SIZE)
+                    w = w + peer
             return w
 
         def block_reduce_add(val):
@@ -141,7 +151,15 @@ def build_softmax_bwd_module(N: int, dtype_str: str = "f32"):
         # ==================================================================
         if const_expr(N >= tile_cols and N % tile_cols == 0):
             num_tiles = N // tile_cols
-            resident = N <= MAX_RESIDENT_COLS
+            # Three tiers by row width. Ideal traffic is 3 units (read Y, read
+            # DY, write DX); each operand dropped from registers adds one more.
+            #   both buffered  -> 3 units
+            #   Y only         -> 4 units (DY re-read)
+            #   neither        -> 5 units
+            # Y alone at twice the cap costs the same registers as both operands
+            # at the cap, so the middle tier is free in occupancy terms.
+            buffer_dy = N <= MAX_RESIDENT_COLS
+            buffer_y = N <= 2 * MAX_RESIDENT_COLS
 
             dy_div = fx.logical_divide(row_dy, fx.make_layout(vec_width, 1))
             y_div = fx.logical_divide(row_y, fx.make_layout(vec_width, 1))
@@ -169,8 +187,9 @@ def build_softmax_bwd_module(N: int, dtype_str: str = "f32"):
                 idx = tid + tile_i * BLOCK_THREADS
                 dy_vec = _load_vec(dy_div, idx)
                 y_vec = _load_vec(y_div, idx)
-                if const_expr(resident):
+                if const_expr(buffer_dy):
                     dy_buffer.append(dy_vec)
+                if const_expr(buffer_y):
                     y_buffer.append(y_vec)
                 prod = dy_vec.to(fx.Float32) * y_vec.to(fx.Float32)
                 thread_dot = thread_dot + prod.reduce(ReductionOp.ADD, fastmath=fm_fast)
@@ -180,11 +199,13 @@ def build_softmax_bwd_module(N: int, dtype_str: str = "f32"):
             # 2. Apply dx = y * (dy - dot)
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
-                if const_expr(resident):
+                if const_expr(buffer_dy):
                     dy_f = dy_buffer[tile_i].to(fx.Float32)
-                    y_f = y_buffer[tile_i].to(fx.Float32)
                 else:
                     dy_f = _load_vec(dy_div, idx).to(fx.Float32)
+                if const_expr(buffer_y):
+                    y_f = y_buffer[tile_i].to(fx.Float32)
+                else:
                     y_f = _load_vec(y_div, idx).to(fx.Float32)
 
                 dx_vec = y_f * (dy_f - dot)

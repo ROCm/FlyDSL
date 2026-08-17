@@ -6,8 +6,8 @@
 """Softmax backward correctness and performance tests.
 
 Covers dx = y * (dy - sum(dy * y)) across:
-  - the vectorized path (N % tile_cols == 0), both register-buffered and
-    reload variants either side of MAX_RESIDENT_TILES;
+  - the vectorized path (N % tile_cols == 0) at all three residency tiers
+    (both operands buffered, Y only, neither);
   - the generic masked scalar path (arbitrary N, including N < BLOCK_THREADS);
   - f32 / f16 / bf16.
 """
@@ -27,7 +27,7 @@ if torch is None or not torch.cuda.is_available():
 
 from kernels.norm.softmax_bwd_kernel import (  # noqa: E402
     build_softmax_bwd_module,
-    softmax_bwd_uses_register_buffering,
+    softmax_bwd_buffered_operands,
 )
 from tests.test_common import run_perftest  # noqa: E402
 
@@ -58,8 +58,9 @@ _BWD_CONFIGS = (
     (512, 8192, "f32"),  # vectorized buffered, num_tiles=8
     (256, 16384, "f32"),  # vectorized buffered, 16 tiles -- at the cap
     (512, 16384, "bf16"),  # vectorized buffered, 8 tiles -- at the cap
-    (128, 32768, "f32"),  # vectorized reload -- past the cap
-    (256, 32768, "bf16"),  # vectorized reload -- past the cap
+    (128, 32768, "f32"),  # vectorized, Y-only buffering -- middle tier
+    (256, 32768, "bf16"),  # vectorized, Y-only buffering -- middle tier
+    (64, 65536, "bf16"),  # vectorized, no buffering -- widest tier
 )
 
 
@@ -101,8 +102,8 @@ def _reference_softmax_bwd(y, dy):
 def run_bwd_test(M, N, dtype_str, verbose=True):
     """Build, launch and compare one config. Returns (ok, gpu_us)."""
     if verbose:
-        buffered = softmax_bwd_uses_register_buffering(N, dtype_str)
-        print(f"\nSoftmax bwd: M={M}, N={N}, dtype={dtype_str}, register_buffered={buffered}")
+        nbuf = softmax_bwd_buffered_operands(N, dtype_str)
+        print(f"\nSoftmax bwd: M={M}, N={N}, dtype={dtype_str}, buffered_operands={nbuf}")
 
     try:
         launch_fn = build_softmax_bwd_module(N, dtype_str)
@@ -229,20 +230,23 @@ def test_softmax_bwd_is_deterministic(M, N, dtype):
 
 
 def test_register_buffering_threshold():
-    """Pin the dispatch threshold so retuning MAX_RESIDENT_COLS is deliberate.
+    """Pin the dispatch tiers so retuning MAX_RESIDENT_COLS is deliberate.
 
-    The cap is on elements held per thread (N / BLOCK_THREADS), so it lands on
-    the same N for every dtype.
+    The cap is on elements held per thread (N / BLOCK_THREADS), so the tier
+    boundaries land on the same N for every dtype.
     """
-    assert softmax_bwd_uses_register_buffering(1024, "f32") is True
-    assert softmax_bwd_uses_register_buffering(8192, "f32") is True
-    assert softmax_bwd_uses_register_buffering(16384, "f32") is True  # at the cap
-    assert softmax_bwd_uses_register_buffering(32768, "f32") is False  # past it
-    assert softmax_bwd_uses_register_buffering(16384, "bf16") is True  # at the cap
-    assert softmax_bwd_uses_register_buffering(32768, "bf16") is False  # past it
+    # Both operands resident -- ideal 3-unit traffic.
+    assert softmax_bwd_buffered_operands(1024, "f32") == 2
+    assert softmax_bwd_buffered_operands(16384, "f32") == 2  # at the cap
+    assert softmax_bwd_buffered_operands(16384, "bf16") == 2  # at the cap
+    # Y only, DY re-read -- 4 units.
+    assert softmax_bwd_buffered_operands(32768, "f32") == 1
+    assert softmax_bwd_buffered_operands(32768, "bf16") == 1
+    # Neither -- 5 units.
+    assert softmax_bwd_buffered_operands(65536, "bf16") == 0
     # Not on the vectorized path at all.
-    assert softmax_bwd_uses_register_buffering(2000, "f32") is False  # not a multiple
-    assert softmax_bwd_uses_register_buffering(512, "bf16") is False  # below tile_cols
+    assert softmax_bwd_buffered_operands(2000, "f32") == 0  # not a multiple
+    assert softmax_bwd_buffered_operands(512, "bf16") == 0  # below tile_cols
 
 
 @pytest.mark.large_shape

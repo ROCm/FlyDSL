@@ -159,12 +159,18 @@ Inputs must be **contiguous 2-D** tensors — reshape a 4-D attention gradient t
 |---|---|
 | `N >= tile_cols and N % tile_cols == 0` | 128-bit vectorized load/store (`tile_cols` = 1024 for f32, 2048 for 16-bit) |
 | otherwise | masked scalar path for arbitrary `N` |
-| `N <= 16384` | both operands stay register-resident between the two passes |
-| `N > 16384` | second pass re-loads; ~1.67x the ideal traffic, largely absorbed by LLC |
+| `N <= 16384` | both operands register-resident across the reduction — ideal 3-unit traffic |
+| `16384 < N <= 32768` | `Y` resident, `DY` re-read — 4 units |
+| `N > 32768` | neither resident — 5 units |
 
-The residency cap is on elements held per thread (`N / BLOCK_THREADS`), so it
-falls at the same `N` for every dtype. Use
-`softmax_bwd_uses_register_buffering(N, dtype_str)` to query it.
+Ideal traffic is 3 units (read `Y`, read `DY`, write `DX`); each operand dropped
+from registers adds one more. The residency cap is on elements held per thread
+(`N / BLOCK_THREADS`), so the tier boundaries fall at the same `N` for every
+dtype. Use `softmax_bwd_buffered_operands(N, dtype_str)` to query the tier.
+
+Both bounds are measured, not assumed: on gfx950 pushing the middle tier out to
+`N = 65536` spills and costs 29% (338.6 µs vs 262.3 µs at 2048x65536 bf16), and
+dropping the middle tier entirely costs 36-40% on the shapes it covers.
 
 **Notes:**
 - One block per row. Small `M`/`N` are launch-bound rather than bandwidth-bound;
