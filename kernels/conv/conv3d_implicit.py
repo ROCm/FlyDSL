@@ -251,7 +251,8 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
             v = buffer_ops.buffer_load(in_rsrc, safe, vec_width=TR_VEC, dtype=elem_ty)
             lds_store_vec8(rc * _TR_LDS_S + sv, v)
 
-        llvm.InlineAsmOp(None, [], "s_waitcnt lgkmcnt(0)\n\ts_barrier", "", has_side_effects=True)
+        rocdl.s_waitcnt(lgkmcnt=0)
+        rocdl.s_barrier()
 
         for i in range_constexpr(_TR_ITERS):
             lin = tid + i * TR_THREADS
@@ -564,13 +565,9 @@ def compile_conv3d_implicit(
         acc = [acc0 for _ in range_constexpr(N_ACC)]
 
         def barrier(vmcnt=0, lgkmcnt=None):
-            waits = []
-            if vmcnt is not None:
-                waits.append(f"vmcnt({vmcnt})")
-            if lgkmcnt is not None:
-                waits.append(f"lgkmcnt({lgkmcnt})")
-            pre = ("s_waitcnt " + " ".join(waits) + "\n\t") if waits else ""
-            llvm.InlineAsmOp(None, [], f"{pre}s_barrier", "", has_side_effects=True)
+            # None means "do not wait on this counter" -- s_waitcnt encodes it as the max.
+            rocdl.s_waitcnt(vmcnt=vmcnt, lgkmcnt=lgkmcnt)
+            rocdl.s_barrier()
 
         def lds_load_vec8(lds_array, elem_offset):
             u8_ptr = fx.recast_iter(fx.Uint8, lds_array.ptr)
