@@ -3818,11 +3818,11 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         return v_o, m_new, l_row, v_p
 
     def fold_sink(self, v_o, m_row, l_row, sink_log2):
-        m_new = _fmax(m_row, sink_log2, self.fm_fast)
-        corr = rocdl.exp2(T.f32, as_mlir_value(_fsub(m_row, m_new, self.fm_fast)))
+        m_new = fx.maxnumf(m_row, sink_log2)
+        corr = rocdl.exp2(T.f32, as_mlir_value(m_row - m_new))
         self.scale_o(v_o, corr)
-        sink_w = rocdl.exp2(T.f32, as_mlir_value(_fsub(sink_log2, m_new, self.fm_fast)))
-        l_row = _fadd(_fmul(l_row, corr, self.fm_fast), sink_w, self.fm_fast)
+        sink_w = rocdl.exp2(T.f32, as_mlir_value(sink_log2 - m_new))
+        l_row = l_row * corr + sink_w
         return m_new, l_row
 
     def _lazy_rescale_o_rescale(self, _n, *_st, v_o, m_row, l_row, m_tile_max, v_p):
@@ -5478,13 +5478,13 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
             dtype=T.f32,
         )
 
-        sink_log2 = _fmul(sink_f32, fx.Float32(bias_log2e), self.fm_fast)
-        m_new = _fmax(m_max, sink_log2, self.fm_fast)
-        sink_w = rocdl.exp2(T.f32, as_mlir_value(_fsub(sink_log2, m_new, self.fm_fast)))
+        sink_log2 = sink_f32 * fx.Float32(bias_log2e)
+        m_new = fx.maxnumf(m_max, sink_log2)
+        sink_w = rocdl.exp2(T.f32, as_mlir_value(sink_log2 - m_new))
         return m_new, sink_w
 
     def add_sink_den(self, den, sink_w):
-        return _fadd(den, sink_w, self.fm_fast)
+        return den + sink_w
 
     def init_accumulators(self):
         return as_mlir_value(self.c_zero_v4f32), as_mlir_value(self.c_zero_f)
