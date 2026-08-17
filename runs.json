@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-17T21:42:24Z",
+ "updated": "2026-08-17T23:53:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32082186367,
+   "pr": 1019,
+   "commit": "5f8728766e3b1381ce6ec3c2fd458c9241cec0a1",
+   "branch": "jhinpan/softmax-bwd",
+   "event": "pull_request",
+   "title": "[Kernel] Add row-wise Softmax backward",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32082186367",
+   "created_at": "2026-08-17T23:51:24Z",
+   "updated_at": "2026-08-17T23:52:24Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 32081118423,
+   "pr": 1019,
+   "commit": "a0a6b08e973c57acb8519c295dfc5ce92a5e6ed7",
+   "branch": "jhinpan/softmax-bwd",
+   "event": "pull_request",
+   "title": "[Kernel] Add row-wise Softmax backward",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32081118423",
+   "created_at": "2026-08-17T23:36:05Z",
+   "updated_at": "2026-08-17T23:51:52Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 32060274392,
    "pr": 960,
@@ -1980,64 +2010,6 @@
    "updated_at": "2026-08-13T04:07:20Z",
    "actor": "jli-melchior",
    "jobs": []
-  },
-  {
-   "run_id": 31660168987,
-   "pr": null,
-   "commit": "27056e1fde21e66a931c386abe562d10c89868e0",
-   "branch": "jli/gfx1250/fix-mma-atom",
-   "event": "pull_request",
-   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31660168987",
-   "created_at": "2026-08-13T02:13:34Z",
-   "updated_at": "2026-08-13T02:14:37Z",
-   "actor": "jli-melchior",
-   "jobs": []
-  },
-  {
-   "run_id": 31658557819,
-   "pr": 987,
-   "commit": "7e80b071685686aa47021e1dae547dbbde2831af",
-   "branch": "jli/fix-lld-issue",
-   "event": "pull_request",
-   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31658557819",
-   "created_at": "2026-08-13T01:42:37Z",
-   "updated_at": "2026-08-13T04:27:35Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-13T02:29:36Z",
-     "completed_at": "2026-08-13T02:52:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31658557819/job/94323222204"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-13T02:15:39Z",
-     "completed_at": "2026-08-13T03:57:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31658557819/job/94323222206"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-13T02:15:50Z",
-     "completed_at": "2026-08-13T04:27:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31658557819/job/94323222224"
-    }
-   ]
   }
  ]
 }
