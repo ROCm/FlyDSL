@@ -39,16 +39,19 @@ WARP_SIZE = get_warp_size()
 # costs roughly half the achieved bandwidth. Beyond the cap the second pass
 # re-loads from memory instead, which the LLC largely absorbs.
 #
-# Measured on MI355X (gfx950). At 64 elements/thread both dtypes land at ~160
-# VGPRs with zero spill; 128 would need roughly twice that against a 256 limit.
+# Measured on an idle MI355X (gfx950); 3*M*N*elem_bytes traffic model. At 64
+# elements/thread both dtypes land at ~160 VGPRs with zero spill; 128 would need
+# roughly twice that against a 256 limit.
 #   bf16 N=8192  (32 elem/thread):  78 VGPR, 0 spill
 #   bf16 N=16384 (64 elem/thread): 154 VGPR, 0 spill
 #   f32  N=16384 (64 elem/thread): 164 VGPR, 0 spill
-# Throughput either side of the cap, 3*M*N*elem_bytes traffic model:
-#   f32  N=16384 (64 elem/thread):  both buffered 4.93 TB/s vs neither 3.92 TB/s
-#   bf16 N=32768 (128 elem/thread): both buffered 1.78 TB/s vs neither 3.35 TB/s
-# The middle tier (Y only) is worth 1.36x at bf16 N=32768 and 1.40x at f32
-# N=32768; extending it to N=65536 spills and loses 29%, so it stops at 2x.
+# Tier choice at each width, best option last:
+#   bf16 N=16384: Y only 5.20 TB/s  -> both     5.79 TB/s
+#   bf16 N=32768: both   2.79 TB/s  -> neither 3.65 -> Y only 4.76 TB/s
+#   f32  N=32768: both   4.19 TB/s  -> neither 3.41 -> Y only 4.72 TB/s
+#   bf16 N=65536: Y only 2.39 TB/s  -> neither 3.08 TB/s
+# So both-resident wins up to the cap, Y-only wins to twice the cap, and past
+# that the spill cost exceeds the extra read.
 MAX_RESIDENT_ELEMS_PER_THREAD = 64
 MAX_RESIDENT_COLS = BLOCK_THREADS * MAX_RESIDENT_ELEMS_PER_THREAD
 
