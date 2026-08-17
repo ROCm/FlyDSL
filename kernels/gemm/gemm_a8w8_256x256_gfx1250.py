@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""A8W8 (FP8 E4M3 activation x FP8 E4M3 weight) 256x256 MXscale GEMM for gfx1250."""
+"""A8W8 (FP8 E4M3 activation x FP8 E4M3 weight) 256x256 / 128x256 MXscale GEMM for gfx1250."""
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -51,25 +51,15 @@ def launch_gemm_a8w8_256x256(
 ):
     """N must divide 1024; M is unrestricted; K divides 128 and is at least 512."""
 
-    assert (tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, cluster_m, cluster_n) == (
-        256,
-        256,
-        128,
-        2,
-        2,
-        4,
-        4,
-        4,
-    ) or (tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, cluster_m, cluster_n) == (
-        256,
-        256,
-        128,
-        2,
-        2,
-        2,
-        4,
-        4,
-    ), "only the tuned 256x256x128 2x2-wave 4x4-cluster profile is supported: 4 buffers (any K/128) or 2 buffers (K/256)"
+    assert (tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers) in (
+        (256, 256, 128, 2, 2, 4),
+        (256, 256, 128, 2, 2, 2),
+        (128, 256, 128, 2, 2, 4),
+        (128, 256, 128, 2, 2, 3),
+    ), "only the tuned 2x2-wave profiles are supported: tile_m 256 or 128, 4 buffers (K/128) else K/256"
+    assert (
+        cluster_m >= 1 and cluster_n >= 1 and 1 < cluster_m * cluster_n <= 16
+    ), f"cluster_m*cluster_n must be 2..16, got {cluster_m}x{cluster_n}"
     cluster_sync_revs = 8
     m_run_max, m_run_min = 32, 8
     WMMA_M = WMMA_N = 16
@@ -91,7 +81,7 @@ def launch_gemm_a8w8_256x256(
     n_acc = wmma_m_rep * wmma_n_rep
     num_waves = m_warp * n_warp
     block = num_waves * WAVE
-    KPAIR = 2 if num_buffers == 2 else 1
+    KPAIR = 1 if num_buffers == 4 else 2
     UNROLL = KPAIR * num_buffers
     SUPER_K = tile_k * KPAIR
     LDS_PAD_A = 16
@@ -476,8 +466,8 @@ def launch_gemm_a8w8_256x256(
             nxt = {}
 
             def _mk(kind, half, key):
-                """One thunk per WMMA slot. block128 splits per ds_load rather than per
-                fragment."""
+                """One thunk per WMMA slot. Only the 256-row tile has enough slots for
+                block128 to split per ds_load rather than per fragment."""
                 n = half_m if kind == "a" else half_n
                 addr, row, span = _frag_geom(kind, stage)
                 nxt[key] = [None] * n
@@ -488,7 +478,7 @@ def launch_gemm_a8w8_256x256(
                     if const_expr(j == DS_PER_FRAG - 1):
                         nxt[key][i] = _rmem(16, _join(parts[i]))
 
-                per = const_expr(DS_PER_FRAG if mx32 else 1)
+                per = const_expr(DS_PER_FRAG if mx32 or tile_m != 256 else 1)
                 return [
                     (lambda i=i, base=base: [_load(i, base + k) for k in range_constexpr(per)])
                     for i in range_constexpr(n)
@@ -639,7 +629,9 @@ def launch_gemm_a8w8_256x256(
     # Split gx exactly, so no workgroup is left over to recompute a duplicate tile.
     pow2 = gx & -gx
     capped = (pow2 < m_run_max).select(pow2, fx.Int32(m_run_max))
-    m_run = ((gx > m_run_max) & (pow2 >= m_run_min)).select(capped, gx)
+    # A cluster spans consecutive bid_x, so the x extent must stay a whole number of cluster rows.
+    fits_cluster = (capped % fx.Int32(cluster_m)) == 0
+    m_run = ((gx > m_run_max) & (pow2 >= m_run_min) & fits_cluster).select(capped, gx)
     grid_arg = (m_run, gy, gx // m_run)
     # Runtime N/K shape checks belong to the caller.
     cluster_arg = (cluster_m, cluster_n, 1)

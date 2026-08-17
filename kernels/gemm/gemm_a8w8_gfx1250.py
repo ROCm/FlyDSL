@@ -372,6 +372,7 @@ def launch_gemm_a8w8(
             rocdl.sched_barrier(0)
 
         HALF_M, HALF_N = wmma_m_rep // 2, wmma_n_rep // 2
+        _NXT_DS = HALF_N * DS_B + (wmma_n_rep + wmma_m_rep if is_mxscale else 0)
 
         def _emit_block(wm0, wn0, a_frags, b_frags, sa_k, sb_k):
             for i in range_constexpr(len(a_frags)):
@@ -431,7 +432,7 @@ def launch_gemm_a8w8(
                     rocdl.s_wait_dscnt(DS_B * HALF_N if const_expr(nxt_ks is None) else _BS_DS)
                 _emit_block(0, HALF_N, a_top, b_right, sa_k, sb_k)
                 if const_expr(is_mxscale):
-                    rocdl.s_wait_dscnt(0)
+                    rocdl.s_wait_dscnt(0 if const_expr(nxt_ks is None) else _NXT_DS)
                 _emit_block(HALF_M, HALF_N, a_bot, b_right, sa_k, sb_k)
                 rocdl.sched_barrier(0)
                 if const_expr(nxt_ks is not None):
