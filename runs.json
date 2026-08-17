@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-08-17T06:33:16Z",
+ "updated": "2026-08-17T07:55:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32006057052,
+   "pr": 1001,
+   "commit": "8a481d2c8f1a0478b5ea120bf043f189e348e4de",
+   "branch": "jli/gfx1250/fix-mma-atom",
+   "event": "pull_request",
+   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32006057052",
+   "created_at": "2026-08-17T07:29:42Z",
+   "updated_at": "2026-08-17T07:44:15Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-17T07:44:14Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32006057052/job/95318741214"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-17T07:44:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32006057052/job/95318741254"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-17T07:44:13Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32006057052/job/95318741283"
+    }
+   ]
+  },
   {
    "run_id": 32000872789,
    "pr": null,
@@ -10,13 +53,44 @@
    "branch": "main",
    "event": "push",
    "title": "[CI] Skip amdgpu repo during manylinux image dnf install (#1014)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32000872789",
    "created_at": "2026-08-17T06:15:06Z",
-   "updated_at": "2026-08-17T06:17:35Z",
+   "updated_at": "2026-08-17T07:52:13Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-17T06:38:59Z",
+     "completed_at": "2026-08-17T07:37:37Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32000872789/job/95305333167",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-17T06:56:46Z",
+     "completed_at": "2026-08-17T07:11:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32000872789/job/95305333236",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-17T06:39:20Z",
+     "completed_at": "2026-08-17T07:52:12Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32000872789/job/95305333286",
+     "log_fetch_failed": true
+    }
+   ]
   },
   {
    "run_id": 31996059761,
@@ -155,7 +229,7 @@
   },
   {
    "run_id": 31985834529,
-   "pr": 1001,
+   "pr": null,
    "commit": "f3c3771481f8fe4d897c88d744eebd8069ce348f",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
@@ -2019,21 +2093,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 31604202127,
-   "pr": null,
-   "commit": "4612cf450a56ab0432b4b431c8322c41c35967ae",
-   "branch": "kefan.cao/list-branch-state",
-   "event": "pull_request",
-   "title": "[compiler] isolate mutable state across dynamic if branches",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31604202127",
-   "created_at": "2026-08-12T13:57:57Z",
-   "updated_at": "2026-08-13T04:02:48Z",
-   "actor": "kefan203",
-   "jobs": []
   }
  ]
 }
