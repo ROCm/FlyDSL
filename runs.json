@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-08-17T09:32:32Z",
+ "updated": "2026-08-17T09:51:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32017173048,
+   "pr": 1015,
+   "commit": "0c9c152742349e227da0198a9b5641384863018d",
+   "branch": "phil/isa-resource-diff-arch-general",
+   "event": "pull_request",
+   "title": "[WIP] [Feature] Add architecture-general ISA resource diff tool",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32017173048",
+   "created_at": "2026-08-17T09:49:46Z",
+   "updated_at": "2026-08-17T09:50:19Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 32017096084,
+   "pr": 987,
+   "commit": "4827dcb0fc54d1bb879d0800dfbb8ee9656d7037",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32017096084",
+   "created_at": "2026-08-17T09:48:47Z",
+   "updated_at": "2026-08-17T09:50:29Z",
+   "actor": "Boss2002n",
+   "jobs": []
+  },
+  {
+   "run_id": 32016008004,
+   "pr": 1015,
+   "commit": "5c4f252bc6ebf89432f343c8b7eb7b4aa819bab8",
+   "branch": "phil/isa-resource-diff-arch-general",
+   "event": "pull_request",
+   "title": "[WIP] [Feature] Add architecture-general ISA resource diff tool",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32016008004",
+   "created_at": "2026-08-17T09:35:30Z",
+   "updated_at": "2026-08-17T09:50:15Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 32009237842,
    "pr": 971,
@@ -2051,51 +2096,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 31614890110,
-   "pr": null,
-   "commit": "50c2046bfc5f0f59996a6b507416d301ffca85ad",
-   "branch": "pr/docs-composite-storage",
-   "event": "pull_request",
-   "title": "[Docs] Elaboration for composite type and storage",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31614890110",
-   "created_at": "2026-08-12T15:55:03Z",
-   "updated_at": "2026-08-12T18:28:30Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 31614584861,
-   "pr": null,
-   "commit": "651506ecc26c02767944fb5f43e9af9120cd6140",
-   "branch": "pr/docs-composite-storage",
-   "event": "pull_request",
-   "title": "[Docs] Elaboration for composite type and storage",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31614584861",
-   "created_at": "2026-08-12T15:51:38Z",
-   "updated_at": "2026-08-12T15:55:04Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 31613381709,
-   "pr": null,
-   "commit": "358cc1903cdd60c96d7c0950126316a2f9c0d801",
-   "branch": "pr/docs-composite-storage",
-   "event": "pull_request",
-   "title": "[Docs] Elaboration for composite type and storage",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31613381709",
-   "created_at": "2026-08-12T15:38:14Z",
-   "updated_at": "2026-08-12T15:52:12Z",
-   "actor": "sjfeng1999",
-   "jobs": []
   }
  ]
 }
