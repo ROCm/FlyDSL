@@ -395,6 +395,7 @@ bash scripts/dumpir.sh
 | `scripts/run_tests.sh` | Full test runner (pytest + examples + FileCheck) |
 | `scripts/run_benchmark.sh` | Benchmark harness with configurable shapes |
 | `scripts/dumpir.sh` | IR dump helper script |
+| `scripts/isa_resource_table.py` | Diff per-kernel ISA resource usage (compile-only) |
 | `tests/conftest.py` | Pytest fixtures (MLIR context, module, insert point) |
 | `tests/test_common.py` | `perftest()`, `checkAllclose()`, `verify_output()` |
 | `tests/utils.py` | `pertoken_quant()`, `shuffle_weight()` |

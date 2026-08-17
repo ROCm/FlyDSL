@@ -445,6 +445,28 @@ WHERE ks.KernelName LIKE '%target_kernel%' LIMIT 5;
 the binding limiter, so you know whether to cut VGPR, shrink LDS per block, or
 reduce SGPR pressure.
 
+For a lightweight before/after check without collecting a profiler trace, dump
+the final ISA of each build and diff the per-kernel **total VGPR (with its
+arch/accumulator split), SGPR, register spills, scratch bytes, and static LDS**
+with `scripts/isa_resource_table.py`. It is compile-only, so it needs no GPU:
+
+```bash
+FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=/tmp/isa-before FLYDSL_RUNTIME_ENABLE_CACHE=0 \
+    python3 -m pytest tests/kernels/test_softmax.py -q     # repeat for /tmp/isa-after
+python3 scripts/isa_resource_table.py diff /tmp/isa-before /tmp/isa-after
+```
+
+It exits `0` for no regression, `1` for one, and `2` when it cannot produce a
+trustworthy answer — a crash never reports as `1`. The table marks regression
+triggers with `*` and prints a legend above itself; `/isa-resource-diff` carries
+the full column reference. Set `FLYDSL_RUNTIME_ENABLE_CACHE=0` on both runs: a
+cache hit emits no dump at all, which would silently drop a kernel from one side.
+
+Because arch VGPRs and accumulator VGPRs share one register budget on CDNA, that
+tool treats the **total** as the regression signal and reports `arch_vgpr` and
+`agpr` alongside it for information only. Moving accumulators into AGPRs, as
+recommended below, therefore does **not** register as a resource regression.
+
 **Do not** use `maxnreg` to force `accum_vgpr=0` — it spills MFMA results through
 arch_vgpr via `v_accvgpr_read` (measured ~4.5× regression).
 
