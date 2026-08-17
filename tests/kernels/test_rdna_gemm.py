@@ -244,7 +244,8 @@ def test_f16_gemm_autotuned_matches_the_heuristic_path(M, N, K):
     B_T = torch.randn(N, K, dtype=torch.bfloat16, device="cuda") * 0.1
     C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
 
-    signature = (M, N, K, "bf16", "bf16", "rn")
+    strides = (A.stride(0), B_T.stride(0), C.stride(0))
+    signature = gemm_autotune._signature(M, N, K, "bf16", "bf16", "rn", *strides)
     gemm_autotune._resolved.pop(signature, None)
 
     gemm_autotune.rdna3_gemm_autotuned(C, A, B_T)
@@ -253,13 +254,43 @@ def test_f16_gemm_autotuned_matches_the_heuristic_path(M, N, K):
 
     resolved = gemm_autotune._resolved[signature]
     expected_tile = pick_tile(M, N, K)
-    assert resolved is gemm_autotune._build(M, N, K, "bf16", "bf16", "rn", *expected_tile)
+    assert resolved is gemm_autotune._build(M, N, K, "bf16", "bf16", "rn", *expected_tile, *strides)
 
     C.zero_()
     gemm_autotune.rdna3_gemm_autotuned(C, A, B_T)
     torch.cuda.synchronize()
     assert verify_output(C.float(), A.float() @ B_T.float().T, atol=0.05, rtol=0.05)
     assert gemm_autotune._resolved[signature] is resolved
+
+
+def test_f16_gemm_autotuned_keys_the_cache_on_the_row_strides():
+    """A padded and a tight operand of one shape must not share a built module.
+
+    The strides are compile-time arguments, so the module built for a padded slice
+    reads a tight one at the wrong pitch. Both orders are exercised because only
+    the second call of each pair can be served from the cache.
+    """
+    _requires_rdna3()
+    from kernels.gemm import rdna3_f16_gemm_autotune as gemm_autotune
+
+    M = N = K = 512
+    pad = 64
+    torch.manual_seed(42)
+    A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") * 0.1
+    B_T = torch.randn(N, K, dtype=torch.bfloat16, device="cuda") * 0.1
+    ref = A.float() @ B_T.float().T
+
+    A_pad = torch.zeros(M, K + pad, dtype=torch.bfloat16, device="cuda")[:, :K]
+    B_T_pad = torch.zeros(N, K + pad, dtype=torch.bfloat16, device="cuda")[:, :K]
+    A_pad.copy_(A)
+    B_T_pad.copy_(B_T)
+    assert (A_pad.stride(0), B_T_pad.stride(0)) == (K + pad, K + pad)
+
+    for a, b in ((A_pad, B_T_pad), (A, B_T), (A_pad, B_T_pad)):
+        C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
+        gemm_autotune.rdna3_gemm_autotuned(C, a, b)
+        torch.cuda.synchronize()
+        assert verify_output(C.float(), ref, atol=0.05, rtol=0.05)
 
 
 @pytest.mark.parametrize(
