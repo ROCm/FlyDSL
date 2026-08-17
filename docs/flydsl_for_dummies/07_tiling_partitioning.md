@@ -66,7 +66,9 @@ tiled_mma = fx.make_tiled_mma(mma_atom, fx.make_layout((2, 2, 1), (1, 2, 0)))
   cover `tile` elements.
 - `make_tiled_mma(atom, atom_layout[, perm])` — replicate an MMA atom. The
   `atom_layout` says how many atoms tile the M/N/K space (here a 2×2 grid of MFMA
-  atoms), which sets the warp-level tile size.
+  atoms). Because one MFMA occupies a whole wave, that is also a 2×2 grid of *waves*:
+  this TiledMma covers a 32×32 tile and requires a 256-thread block. Chapter 9 works
+  through how A, B and C are distributed across those waves.
 
 A crucial convenience for GEMM: you can derive matching copies *from* a TiledMma
 so the copied fragments land exactly where the MMA expects them:
