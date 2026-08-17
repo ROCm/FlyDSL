@@ -3,9 +3,12 @@
 
 """Double-buffered implicit-GEMM conv3d (BF16).
 
-x: (N, C, D, H, W) bf16 NCDHW, weight: (K, C/groups, T, R, S) bf16 KCTRS.
-Returns (N, K, Do, Ho, Wo) bf16. Supports stride, padding (int, per-axis tuple, or
-torch's "same" / "valid"), padding_mode, dilation, bias, groups, and split-K.
+x: (N, C, D, H, W) bf16 NCDHW by default, weight: (K, C/groups, T, R, S) bf16 KCTRS.
+Returns (N, K, Do, Ho, Wo) bf16 by default. ``input_layout`` / ``output_layout`` select
+NCDHW or NDHWC independently; the GEMM itself is channels-last, so NDHWC input skips the
+pre-transpose and NDHWC output is the raw row-major (npq, K) the epilogue produces.
+Supports stride, padding (int, per-axis tuple, or torch's "same" / "valid"),
+padding_mode, dilation, bias, groups, and split-K.
 """
 
 import functools
@@ -84,6 +87,47 @@ _WEIGHT_CACHE = {}
 
 def _pad_channels(c):
     return (c + LDG_VEC - 1) // LDG_VEC * LDG_VEC
+
+
+# Layout names accepted per spatial rank. The 1D/2D entries translate their own names to
+# the 3D pair before delegating, so only these two ever reach the builder.
+LAYOUTS = {
+    3: ("NCDHW", "NDHWC"),
+    2: ("NCHW", "NHWC"),
+    1: ("NCW", "NWC"),
+}
+
+
+def _check_layouts(rank, input_layout, output_layout):
+    names = LAYOUTS[rank]
+    for what, v in (("input_layout", input_layout), ("output_layout", output_layout)):
+        assert v in names, f"{what} must be one of {names}, got {v!r}"
+
+
+def _shape_ncdhw(x, ndhwc):
+    """Unpack a 5-D input in either layout to (n, c, d, h, w)."""
+    if ndhwc:
+        n, d, h, w, c = x.shape
+    else:
+        n, c, d, h, w = x.shape
+    return n, c, d, h, w
+
+
+def _pad_spatial(x, ndhwc, pads, mode="constant"):
+    """Pad (D, H, W) with torch's (w_lo, w_hi, h_lo, h_hi, d_lo, d_hi) ordering.
+
+    Returns the padded tensor and its layout flag. Constant padding is layout-agnostic --
+    the channel axis just picks up a (0, 0) pair when it is trailing. The other three modes
+    are implemented only for a channels-first 5-D input, so a channels-last one is relabeled
+    with a permute and comes back channels-first; the caller's later transpose to NDHWC then
+    does the copy that permute deferred. These are the paths that already materialize a
+    padded input, so the extra pass rides along with one torch has to make anyway.
+    """
+    if mode == "constant":
+        return torch.nn.functional.pad(x, ((0, 0) + pads) if ndhwc else pads), ndhwc
+    if ndhwc:
+        x = x.permute(0, 4, 1, 2, 3)
+    return torch.nn.functional.pad(x, pads, mode=mode), False
 
 
 def _big_in(n, c, groups, d, h, w, pt, ph, pw):
@@ -286,6 +330,7 @@ def compile_conv3d_implicit(
     tile=DEFAULT_TILE,
     wgm=1,
     groups=1,
+    out_ndhwc=False,
 ):
     TILE_M, TILE_N, WAVE_M, WAVE_N = tile
     BLOCK_THREADS = WAVE_M * WAVE_N * WARP_SIZE
@@ -807,7 +852,10 @@ def compile_conv3d_implicit(
         # evenly between them, so those blocks have to be masked out even at a tail-free npq.
         _row_chk = (npq % TILE_M != 0) or (grid_x * m_chunks > grid_m)
         _need_chk = _row_chk or n_tail
-        _vec_store = (n == 1) and (not use_splitk) and (dhw % MFMA_C_VALUES == 0) and (not BIG_OUT)
+        # The vectorized store walks four consecutive M rows, which are contiguous only in
+        # NCDHW. Under NDHWC those rows are K apart -- a lane holds one column of four rows,
+        # so there is nothing to widen without a cross-lane shuffle first.
+        _vec_store = (n == 1) and (not use_splitk) and (dhw % MFMA_C_VALUES == 0) and (not BIG_OUT) and (not out_ndhwc)
 
         if const_expr(BIG_OUT):
             y_elem_base = fx.Int64(buffer_ops.extract_base_index(y))
@@ -865,7 +913,12 @@ def compile_conv3d_implicit(
                         row = fx.Index(row_base + i)
                         off_sk = row * k + col
 
-                        if const_expr(n == 1):
+                        if const_expr(out_ndhwc):
+                            # (n, do, ho, wo, k) is row-major over exactly the GEMM's own
+                            # (npq, k) index space, so the scatter collapses to off_sk and
+                            # the row decomposition disappears.
+                            off_nk = off_sk
+                        elif const_expr(n == 1):
                             off_nk = col * dhw + row
                         else:
                             n_idx = row // dhw
@@ -1010,8 +1063,15 @@ def _conv3d_impl(
     stream=None,
     tile=None,
     autotune=None,
+    input_layout="NCDHW",
+    output_layout="NCDHW",
 ):
-    n, c, d, h, w = x.shape
+    _check_layouts(3, input_layout, output_layout)
+    # in_ndhwc is not constant: the padding fallbacks below can hand back a channels-first
+    # copy, after which the ordinary transpose path takes over again.
+    in_ndhwc = input_layout == "NDHWC"
+    out_ndhwc = output_layout == "NDHWC"
+    n, c, d, h, w = _shape_ncdhw(x, in_ndhwc)
     k, wc, kt, kh, kw = weight.shape
     # Device and dtype first: everything below this point either launches a kernel or
     # allocates on x.device, and a host tensor reaching that far faults the GPU instead
@@ -1063,11 +1123,11 @@ def _conv3d_impl(
     # chained pads do not compose (reflecting by 1 then by 2 is not reflecting by 3).
     if pad_lo != pad_hi:
         if padding_mode == "zeros":
-            x = torch.nn.functional.pad(x, (0, pad_hi[2] - pw, 0, pad_hi[1] - ph, 0, pad_hi[0] - pt))
+            x, in_ndhwc = _pad_spatial(x, in_ndhwc, (0, pad_hi[2] - pw, 0, pad_hi[1] - ph, 0, pad_hi[0] - pt))
         else:
-            x = torch.nn.functional.pad(x, (pw, pad_hi[2], ph, pad_hi[1], pt, pad_hi[0]), mode=padding_mode)
+            x, in_ndhwc = _pad_spatial(x, in_ndhwc, (pw, pad_hi[2], ph, pad_hi[1], pt, pad_hi[0]), mode=padding_mode)
             pt = ph = pw = 0
-        n, c, d, h, w = x.shape
+        n, c, d, h, w = _shape_ncdhw(x, in_ndhwc)
 
     # Non-zero modes are resolved inside the im2col gather, which remaps an out-of-range
     # tap onto a real input coordinate instead of masking it to zero. No border is
@@ -1078,8 +1138,8 @@ def _conv3d_impl(
     # inputs (> 2^31 elements) fall back to torch's pre-pad, which is always correct.
     inline_pad = padding_mode != "zeros" and bool(pt or ph or pw)
     if inline_pad and _big_in(n, c, groups, d, h, w, pt, ph, pw):
-        x = torch.nn.functional.pad(x, (pw, pw, ph, ph, pt, pt), mode=padding_mode)
-        n, c, d, h, w = x.shape
+        x, in_ndhwc = _pad_spatial(x, in_ndhwc, (pw, pw, ph, ph, pt, pt), mode=padding_mode)
+        n, c, d, h, w = _shape_ncdhw(x, in_ndhwc)
         pt = ph = pw = 0
         inline_pad = False
     pad_mode = padding_mode if inline_pad else "zeros"
@@ -1099,13 +1159,20 @@ def _conv3d_impl(
         and pw == 0
     ):
         wm = weight.reshape(k, c)
+        if in_ndhwc:
+            # Channels-last is already the GEMM's row-major (npq, C) operand, so this side
+            # runs x @ W^T and lands directly in NDHWC.
+            y = torch.matmul(x.reshape(n * d * h * w, c), wm.t()).reshape(n, d, h, w, k)
+            if bias is not None:
+                y = y + bias.to(y.dtype)
+            return y if out_ndhwc else y.permute(0, 4, 1, 2, 3).contiguous()
         if n == 1:
             y = torch.matmul(wm, x.reshape(c, d * h * w)).reshape(n, k, d, h, w)
         else:
             y = torch.matmul(wm, x.reshape(n, c, d * h * w)).reshape(n, k, d, h, w)
         if bias is not None:
             y = y + bias.to(y.dtype).view(1, k, 1, 1, 1)
-        return y
+        return y.permute(0, 2, 3, 4, 1).contiguous() if out_ndhwc else y
 
     do = (d + 2 * pt - (dt * (kt - 1) + 1)) // st + 1
     ho = (h + 2 * ph - (dh * (kh - 1) + 1)) // sh + 1
@@ -1117,7 +1184,8 @@ def _conv3d_impl(
     # both return hipErrorInvalidValue and leave the HIP context unusable. Return the empty
     # output torch produces instead, before any launch.
     if n == 0:
-        return torch.empty((0, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
+        empty = (0, do, ho, wo, k) if out_ndhwc else (0, k, do, ho, wo)
+        return torch.empty(empty, device=x.device, dtype=torch.bfloat16)
 
     # Zero-pad C to the gather's vector width; padded channels see zero weights. The pad is
     # PER GROUP, since the gather vectorizes along channels and must not cross into the next
@@ -1125,8 +1193,12 @@ def _conv3d_impl(
     cg = c // groups
     cgp = _pad_channels(cg)
     if cgp != cg:
-        x = torch.nn.functional.pad(x.reshape(n, groups, cg, d, h, w), (0, 0, 0, 0, 0, 0, 0, cgp - cg))
-        x = x.reshape(n, groups * cgp, d, h, w)
+        if in_ndhwc:
+            x = torch.nn.functional.pad(x.reshape(n, d, h, w, groups, cg), (0, cgp - cg))
+            x = x.reshape(n, d, h, w, groups * cgp)
+        else:
+            x = torch.nn.functional.pad(x.reshape(n, groups, cg, d, h, w), (0, 0, 0, 0, 0, 0, 0, cgp - cg))
+            x = x.reshape(n, groups * cgp, d, h, w)
     c = groups * cgp
     crs = cgp * kt * kh * kw
 
@@ -1134,17 +1206,20 @@ def _conv3d_impl(
     has_bias = bias is not None
     bias_arg = bias.to(torch.float32).contiguous() if has_bias else torch.empty(1, device=x.device, dtype=torch.float32)
 
-    x_ndhwc = _ncdhw_to_ndhwc(x, stream)
+    # The gather is channels-last, so an NDHWC input is already in the kernel's layout and
+    # only has to be made contiguous (a no-op for the ordinary case).
+    x_ndhwc = x.contiguous() if in_ndhwc else _ncdhw_to_ndhwc(x, stream)
     w_packed = _prep_weight(weight, k, kt, kh, kw, wc)
 
-    shape = (n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, dt, dh, dw, pad_mode, has_bias, groups)
+    shape = (n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, dt, dh, dw, pad_mode, has_bias, groups, out_ndhwc)
 
     def _run(the_tile, the_wgm=1):
         sk = _resolve_splitk(splitk, npq, crs, k, x.device, the_tile, groups)
         if sk > 1:
             y = torch.zeros((npq, k), device=x.device, dtype=torch.float32)
         else:
-            y = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
+            out_shape = (n, do, ho, wo, k) if out_ndhwc else (n, k, do, ho, wo)
+            y = torch.empty(out_shape, device=x.device, dtype=torch.bfloat16)
         exe = compile_conv3d_implicit(
             n,
             c,
@@ -1170,6 +1245,7 @@ def _conv3d_impl(
             the_tile,
             the_wgm,
             groups,
+            out_ndhwc,
         )
         _dispatch(exe, y, x_ndhwc, w_packed, bias_arg, stream=launch_stream)
         return y, sk
@@ -1193,19 +1269,24 @@ def _conv3d_impl(
     if sk > 1:
         if has_bias:
             y = y + bias_arg.view(1, k)
-        # The split-K accumulator is the raw GEMM shape, i.e. NDHWC, so the permute below is
-        # a metadata-only relabel and leaves the data channels-last. Materialize contiguous
-        # NCDHW so the memory format does not depend on whether split-K ran. copy_ folds the
-        # f32 -> bf16 cast into the transpose, keeping this to the single pass the cast cost
-        # anyway.
+        # The split-K accumulator is the raw GEMM shape, i.e. NDHWC, so the view below is a
+        # metadata-only relabel. Requesting NDHWC therefore leaves only the f32 -> bf16 cast.
+        if out_ndhwc:
+            return y.view(n, do, ho, wo, k).to(torch.bfloat16)
+        # Materialize contiguous NCDHW so the memory format does not depend on whether
+        # split-K ran. copy_ folds the cast into the transpose, keeping this to the single
+        # pass the cast cost anyway.
         out = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
         out.copy_(y.view(n, do, ho, wo, k).permute(0, 4, 1, 2, 3))
         return out
     return y
 
 
-def _conv2d_impl(x, weight, bias=None, stride=1, padding=0, dilation=1, **kwargs):
+def _conv2d_impl(
+    x, weight, bias=None, stride=1, padding=0, dilation=1, input_layout="NCHW", output_layout="NCHW", **kwargs
+):
     assert x.dim() == 4 and weight.dim() == 4, "conv2d expects (N,C,H,W) / (K,C,R,S)"
+    _check_layouts(2, input_layout, output_layout)
     sh, sw = _as_tuple(stride, 2, "stride")
     dh, dw = _as_tuple(dilation, 2, "dilation")
     # A padding string stays a string: the degenerate depth axis is a single 1-tap slice,
@@ -1215,27 +1296,66 @@ def _conv2d_impl(x, weight, bias=None, stride=1, padding=0, dilation=1, **kwargs
     else:
         ph, pw = _as_tuple(padding, 2, "padding")
         p3 = (0, ph, pw)
-    n, c, h, w = x.shape
     k, wc, r, s = weight.shape
-    x5 = x.reshape(n, c, 1, h, w)
+    # The degenerate depth axis goes in front of the spatial ones in either layout, so both
+    # reshapes stay views.
+    if input_layout == "NHWC":
+        n, h, w, c = x.shape
+        x5, in5 = x.reshape(n, 1, h, w, c), "NDHWC"
+    else:
+        n, c, h, w = x.shape
+        x5, in5 = x.reshape(n, c, 1, h, w), "NCDHW"
+    out5 = "NDHWC" if output_layout == "NHWC" else "NCDHW"
     w5 = weight.reshape(k, wc, 1, r, s)
-    y5 = _conv3d_impl(x5, w5, bias=bias, stride=(1, sh, sw), padding=p3, dilation=(1, dh, dw), **kwargs)
+    y5 = _conv3d_impl(
+        x5,
+        w5,
+        bias=bias,
+        stride=(1, sh, sw),
+        padding=p3,
+        dilation=(1, dh, dw),
+        input_layout=in5,
+        output_layout=out5,
+        **kwargs,
+    )
+    if output_layout == "NHWC":
+        return y5.reshape(y5.shape[0], y5.shape[2], y5.shape[3], y5.shape[4])
     return y5.reshape(y5.shape[0], y5.shape[1], y5.shape[3], y5.shape[4])
 
 
-def _conv1d_impl(x, weight, bias=None, stride=1, padding=0, dilation=1, **kwargs):
+def _conv1d_impl(
+    x, weight, bias=None, stride=1, padding=0, dilation=1, input_layout="NCW", output_layout="NCW", **kwargs
+):
     assert x.dim() == 3 and weight.dim() == 3, "conv1d expects (N,C,W) / (K,C,S)"
+    _check_layouts(1, input_layout, output_layout)
     (sw,) = _as_tuple(stride, 1, "stride")
     (dw,) = _as_tuple(dilation, 1, "dilation")
     if isinstance(padding, str):
         p3 = padding
     else:
         p3 = (0, 0, _as_tuple(padding, 1, "padding")[0])
-    n, c, w = x.shape
     k, wc, s = weight.shape
-    x5 = x.reshape(n, c, 1, 1, w)
+    if input_layout == "NWC":
+        n, w, c = x.shape
+        x5, in5 = x.reshape(n, 1, 1, w, c), "NDHWC"
+    else:
+        n, c, w = x.shape
+        x5, in5 = x.reshape(n, c, 1, 1, w), "NCDHW"
+    out5 = "NDHWC" if output_layout == "NWC" else "NCDHW"
     w5 = weight.reshape(k, wc, 1, 1, s)
-    y5 = _conv3d_impl(x5, w5, bias=bias, stride=(1, 1, sw), padding=p3, dilation=(1, 1, dw), **kwargs)
+    y5 = _conv3d_impl(
+        x5,
+        w5,
+        bias=bias,
+        stride=(1, 1, sw),
+        padding=p3,
+        dilation=(1, 1, dw),
+        input_layout=in5,
+        output_layout=out5,
+        **kwargs,
+    )
+    if output_layout == "NWC":
+        return y5.reshape(y5.shape[0], y5.shape[3], y5.shape[4])
     return y5.reshape(y5.shape[0], y5.shape[1], y5.shape[4])
 
 
@@ -1243,6 +1363,15 @@ def conv3d_implicit(x, weight, bias=None, stride=1, padding=0, dilation=1, **kwa
     """Main implicit-GEMM conv entry; dispatches 1D/2D/3D by filter rank.
 
     Rank is taken from the filter (weight.dim() - 2): 3 -> 3D (N,C,D,H,W)/(K,C,T,R,S).
+
+    ``input_layout`` and ``output_layout`` are independent and named per rank:
+    "NCDHW"/"NDHWC", "NCHW"/"NHWC", "NCW"/"NWC". The weight stays KC*, and the batch axis
+    leads in both, so an unbatched input works either way. Channels-last is the kernel's
+    own layout on both sides: an NDHWC input skips the pre-transpose, and an NDHWC output
+    is the (npq, K) index space the GEMM already writes, so it also skips the split-K
+    epilogue's transpose. Channels-last output does give up the vectorized store on the
+    ``n == 1`` fast path, since a lane's four accumulator values are four M rows and those
+    are K apart once channels are innermost.
 
     ``padding`` takes an int, a per-axis tuple, or one of torch's two strings. "valid" is
     no padding. "same" pads so the output keeps the input's spatial extent, which needs
