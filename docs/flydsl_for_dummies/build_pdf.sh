@@ -24,8 +24,9 @@ OUT="${1:-flydsl_for_dummies.pdf}"
 # (prefer xelatex if installed, else fall back to the self-contained typst).
 ENGINE="${PDF_ENGINE:-}"
 
-# Stamp the cover page with the build date (overrides `date:` in metadata.yaml).
-# Override with e.g. BUILD_DATE="2026" for a reproducible build.
+# Cover-page date: computed at build time (metadata.yaml intentionally has no
+# `date:`, so this is the single source). Override with e.g. BUILD_DATE="2026"
+# for a reproducible build.
 BUILD_DATE="${BUILD_DATE:-$(date +'%B %-d, %Y')}"
 
 # Chapters, in order. Keep this list in sync with new files.
@@ -35,16 +36,17 @@ CHAPTERS=(
   02_compilation_pipeline.md
   03_control_flow.md
   04_types_and_values.md
-  05_layout_algebra.md
-  06_tiling_partitioning.md
-  07_data_movement.md
-  08_mma.md
-  09_loads_stores_intrinsics.md
-  10_mfma_intrinsics.md
-  11_escape_hatches.md
-  12_worked_examples.md
-  13_debugging.md
-  14_reference.md
+  05_tensors.md
+  06_layout_algebra.md
+  07_tiling_partitioning.md
+  08_data_movement.md
+  09_mma.md
+  10_loads_stores_intrinsics.md
+  11_mfma_intrinsics.md
+  12_escape_hatches.md
+  13_worked_examples.md
+  14_debugging.md
+  15_reference.md
 )
 
 if [[ "${1:-}" == "--html" ]]; then

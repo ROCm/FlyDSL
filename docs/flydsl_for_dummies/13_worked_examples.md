@@ -2,7 +2,7 @@
 
 Three complete kernels from `examples/`, read line by line. They escalate from a
 target-neutral elementwise add, through a 2-D tiled copy, to a single-block MFMA
-GEMM — exercising every concept in Chapters 5–8. Run any of them directly:
+GEMM — exercising every concept in Chapters 7–9. Run any of them directly:
 
 ```bash
 python examples/01-vectorAdd.py     # prints PASS
@@ -34,7 +34,7 @@ def vector_add(A, B, C, stream=fx.Stream(None)):
         grid=(grid_m, grid_n, 1), block=(8 * 16, 1, 1), stream=stream)
 ```
 
-- `make_tiled_copy_tv(atom, thr_layout, val_layout)` builds a TiledCopy (§6.2)
+- `make_tiled_copy_tv(atom, thr_layout, val_layout)` builds a TiledCopy (§7.2)
   directly from a thread layout (128 threads arranged 8×16) and a value layout
   (each thread owns 1×4 = a `float4`). Because the value layout's fast axis is N
   and the width is 4×fp32 = 128 bits, each thread issues one coalesced float4 —
@@ -70,7 +70,7 @@ by comparing coordinates against `(M,N)`.
     cC = fx.flat_divide(idC, TileMN)[None, None, bid_x, bid_y]
 ```
 
-`flat_divide(A, TileMN)` tiles the whole tensor (§5.3); indexing
+`flat_divide(A, TileMN)` tiles the whole tensor (§6.3); indexing
 `[None, None, bid_x, bid_y]` keeps both intra-tile modes (`None`) and fixes the
 block coordinate — this block's tile, exactly like `zipped_divide`+`slice` but
 spelled with fancy indexing. `cC` is the same tiling applied to the coordinate
@@ -84,7 +84,7 @@ tensor, so `cC` holds the global `(m,n)` of every element in this block's tile.
     thr_cC = thr_copy.partition_S(cC)[(0, None), None, None]
 ```
 
-`partition_S/D` (§6.3) hand each thread its float4 of A, B, C, and its four
+`partition_S/D` (§7.3) hand each thread its float4 of A, B, C, and its four
 coordinates (`thr_cC`).
 
 ```python
@@ -97,7 +97,7 @@ coordinates (`thr_cC`).
         thr_pC[a] = fx.elem_less(thr_cC[a], (M, N))            # in-bounds mask
 ```
 
-`make_fragment_like` allocates registers shaped like a partition (§6.4). The
+`make_fragment_like` allocates registers shaped like a partition (§7.4). The
 unrolled `range_constexpr` loop (§1.3) fills a boolean predicate: value `a` is
 kept iff its coordinate is `< (M, N)`.
 
@@ -109,7 +109,7 @@ kept iff its coordinate is `< (M, N)`.
     fx.copy(copy_atom, thr_rC, thr_gC, pred=thr_pC)    # regs -> gmem, masked
 ```
 
-The three `fx.copy` calls (§7.3) are gated by `pred=thr_pC` (§7.4) so overhang
+The three `fx.copy` calls (§8.3) are gated by `pred=thr_pC` (§8.4) so overhang
 threads never touch OOB memory. The arithmetic is `.load()`/`.store()` on
 register fragments — `thr_rA.load()` yields a vector value, `+` emits
 `arith.addf`, `.store()` writes it back. **This is the entire "compute": load
@@ -119,7 +119,7 @@ regs, add, store regs.** Everything else is layout and safety.
 
 Copies an `M×N = 24×120` fp32 matrix tile-by-tile using the **buffer** copy path.
 It is the minimal `make_layout_tv` → `make_tiled_copy` → `partition` → `copy`
-skeleton (§7.5).
+skeleton (§8.5).
 
 ```python
 @flyc.kernel
@@ -128,14 +128,14 @@ def copy_kernel(A, B):
     bid = fx.block_idx.x
     block_m, block_n = 8, 24
 
-    A = fx.rocdl.make_buffer_tensor(A)          # buffer tensors (§7.2)
+    A = fx.rocdl.make_buffer_tensor(A)          # buffer tensors (§8.2)
     B = fx.rocdl.make_buffer_tensor(B)
 
     bA = fx.slice(fx.zipped_divide(A, (block_m, block_n)), (None, bid))
     bB = fx.slice(fx.zipped_divide(B, (block_m, block_n)), (None, bid))
 ```
 
-`zipped_divide` + `slice(_, (None, bid))` (§5.3.2) selects this block's 8×24 tile
+`zipped_divide` + `slice(_, (None, bid))` (§6.3.2) selects this block's 8×24 tile
 from A and B.
 
 ```python
@@ -158,7 +158,7 @@ from A and B.
 Note the launch is `block=(4,1,1)`, `grid=(15,1,1)` — 4 threads per block (the
 thread layout has 4 threads), 15 blocks tiling the 24×120 matrix into 8×24 tiles
 (3×5 = 15). The copy goes global→registers→global; add an LDS tier and a barrier
-and this becomes the staging half of a GEMM (§7.6). No predication is needed
+and this becomes the staging half of a GEMM (§8.6). No predication is needed
 because the shape divides evenly and the buffer atom would bounds-check anyway.
 
 ## Single-block MFMA GEMM (`03-tiledMma.py`)
@@ -192,7 +192,7 @@ as the B operand yields `A @ B.T` — the common weight-matrix convention.
     thr_mma   = tiled_mma.thr_slice(tid)
 ```
 
-One `16×16×4` MFMA atom (§8.1), tiled `2×2×1` (§8.2) → a 32×32 warp tile; with 256
+One `16×16×4` MFMA atom (§9.1), tiled `2×2×1` (§9.2) → a 32×32 warp tile; with 256
 threads (4 waves) this covers the 64×64 block. `thr_slice(tid)` narrows to this
 thread's MMA role.
 
@@ -200,7 +200,7 @@ thread's MMA role.
     copy_atom    = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
     tiled_copy_A = fx.make_tiled_copy_A(copy_atom, tiled_mma)   # derive copies
     tiled_copy_B = fx.make_tiled_copy_B(copy_atom, tiled_mma)   #   from the MMA
-    tiled_copy_C = fx.make_tiled_copy_C(copy_atom, tiled_mma)   #   (§6.2)
+    tiled_copy_C = fx.make_tiled_copy_C(copy_atom, tiled_mma)   #   (§7.2)
     thr_copy_A = tiled_copy_A.get_slice(tid)
     thr_copy_B = tiled_copy_B.get_slice(tid)
     thr_copy_C = tiled_copy_C.get_slice(tid)
@@ -215,7 +215,7 @@ consumes/produces — so loaded data lands in operand order without hand-tuning.
     copy_dst_C = thr_copy_C.partition_S(bC)
 
     frag_A = thr_mma.make_fragment_A(bA)         # operand/accumulator fragments
-    frag_B = thr_mma.make_fragment_B(bB)         #   (§6.4, §8.3)
+    frag_B = thr_mma.make_fragment_B(bB)         #   (§7.4, §9.3)
     frag_C = thr_mma.make_fragment_C(bC)
 
     copy_frag_A = thr_copy_A.retile(frag_A)      # reconcile copy <-> MFMA order
@@ -223,7 +223,7 @@ consumes/produces — so loaded data lands in operand order without hand-tuning.
     copy_frag_C = thr_copy_C.retile(frag_C)
 ```
 
-`retile` (§6.4) is the key correctness step: it maps the copy's TV layout onto the
+`retile` (§7.4) is the key correctness step: it maps the copy's TV layout onto the
 fragment's MFMA-operand TV layout so `buffer_load` writes each byte where the
 matrix core reads it.
 
@@ -236,12 +236,12 @@ matrix core reads it.
     fx.copy(copy_atom, copy_frag_C, copy_dst_C, pred=None)    # C frag -> gmem
 ```
 
-The compute is one `fx.gemm` (§8.3), lowering to `rocdl.mfma.*`. Because `K=8`
+The compute is one `fx.gemm` (§9.3), lowering to `rocdl.mfma.*`. Because `K=8`
 here fits in a single load, there is no K-loop — the GEMM puzzles add the
-accumulate-over-K loop (§8.4), LDS staging, double-buffering, and swizzle to turn
+accumulate-over-K loop (§9.4), LDS staging, double-buffering, and swizzle to turn
 this into an efficient kernel.
 
 Read these three side by side and the pattern is unmistakable: **describe layouts
 and distributions, then issue one copy/gemm per action.** With that internalized,
-Chapter 13 (debugging), Chapter 14's reference tables, and the puzzles are all you
+Chapter 14 (debugging), Chapter 15's reference tables, and the puzzles are all you
 need.

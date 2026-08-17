@@ -1,9 +1,9 @@
 # MFMA, Close to the Metal
 
-Chapter 8 issued `fx.gemm` over an MMA atom and told you it "lowers to
+Chapter 9 issued `fx.gemm` over an MMA atom and told you it "lowers to
 `rocdl.mfma.*`." This chapter opens the atom: the exact instruction each shape picks,
 how the operand and accumulator fragments map to lanes and VGPRs (the matrix-core
-ABI), and how to issue a single MFMA. It is the deep-dive companion to Chapter 8 — if
+ABI), and how to issue a single MFMA. It is the deep-dive companion to Chapter 9 — if
 you have ever called `__builtin_amdgcn_mfma_*` directly, this is the FlyDSL view of
 the same instruction.
 
@@ -54,7 +54,7 @@ VGPR counts for the common shapes:
 | `16x16x32 fp8` | `i64` (8 packed fp8) | 4 × f32 |
 | `32x32x8 f16` | `vector<4xf16>` | 16 × f32 |
 
-This is why `make_fragment_A/B/C` and `retile` (Chapter 8) are not bookkeeping: they
+This is why `make_fragment_A/B/C` and `retile` (Chapter 9) are not bookkeeping: they
 place bytes in precisely those slots. Load A/B with a copy whose TV layout does *not*
 match the atom's operand layout and the MFMA reads the wrong lanes — you get
 numerically plausible garbage, the classic MFMA bug. In FlyDSL both the fragment and
@@ -131,7 +131,7 @@ fx.copy(ccopy, tcC.retile(frag_C), tcC.partition_S(bC))   # store C
 ```
 
 Here **`bA`/`bB`/`bC`** are the block's 16×16 input/output tiles (from
-`zipped_divide` + `slice`, Chapter 6), and **`tcA`/`tcB`/`tcC`** are this thread's
+`zipped_divide` + `slice`, Chapter 7), and **`tcA`/`tcB`/`tcC`** are this thread's
 slices of the A/B/C tiled copies — built from the *same* `tiled_mma` via
 `make_tiled_copy_A/B/C` so the copy fills the fragments in the exact order the atom
 expects. You never name a lane or a register: `make_fragment_A/B/C` allocate the
@@ -207,7 +207,7 @@ This is the useful escape hatch: keep the high-level fragment/copy machinery for
 loading and storing (where the layout algebra earns its keep), and drop to the raw
 `rocdl.mfma_*` only for the instruction itself — for example to pass an `op_sel`
 modifier, pin the accumulator in an AGPR, or issue an instruction the atom does not
-yet cover (Chapter 11).
+yet cover (Chapter 12).
 
 > **HIP/CK-Tile → FlyDSL.** `frag.load()` / `frag.store()` around a raw
 > `rocdl.mfma_*` is the CK-Tile move of reading a `WarpGemm`'s register spans as a
@@ -230,7 +230,7 @@ for ki in range_constexpr(num_k):               # unroll the MFMA sequence
 
 `range_constexpr` unrolls the MFMA chain (the compiler schedules loads against MFMAs);
 when K is dynamic, `range(..., init=[frag_C.load()])` carries the accumulator as
-`scf.for` iter_args (§3.2, Chapter 8) so the accumulator registers stay a
+`scf.for` iter_args (§3.2, Chapter 9) so the accumulator registers stay a
 well-defined SSA value across iterations.
 
 ## MFMA-scale and other subtargets
@@ -257,6 +257,6 @@ fx.gemm(scale_atom, cf, av, bv, cf, scale_a=sa, scale_b=sb)   # -> rocdl.mfma.sc
 The atom is architecture-independent in your Python; only the chosen instruction and
 its fragment layout change per subtarget. This book targets CDNA MFMA.
 
-With the copy and MMA instructions both opened up, Chapter 11 turns to the cases where
+With the copy and MMA instructions both opened up, Chapter 12 turns to the cases where
 even this atom layer is not enough — small MFMAs outside a GEMM, cross-lane ops, and
-inline assembly. Chapter 12 then reads three complete kernels end to end.
+inline assembly. Chapter 13 then reads three complete kernels end to end.

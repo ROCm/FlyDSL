@@ -2,7 +2,8 @@
 title: "FlyDSL for Dummies"
 subtitle: "A hands-on guide for HIP C++ / CK-Tile developers"
 author: "FlyDSL Project"
-date: "August 13, 2026"
+# `date` is injected at build time by build_pdf.sh (-M date="$BUILD_DATE",
+# defaulting to today's date). Do not hardcode it here.
 lang: en-US
 documentclass: report
 geometry:

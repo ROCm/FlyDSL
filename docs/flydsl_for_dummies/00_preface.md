@@ -28,7 +28,7 @@ core, where a `Layout` is a `Shape:Stride` pair over hierarchical `IntTuple`s, a
 mapping tiles onto threads. **FlyDSL's layout algebra is that same algebra.** The
 names line up almost one to one — `make_layout`, `logical_divide`, `zipped_divide`,
 `composition`, `partition_S/D`, `make_fragment_like`, `make_tiled_copy`,
-`make_tiled_mma` — so if you know CuTe you already know most of Chapters 5–8, and
+`make_tiled_mma` — so if you know CuTe you already know most of Chapters 7–9, and
 the CuTe identities you rely on (divide/product duality, the TV-layout contract)
 hold here unchanged.
 
@@ -60,29 +60,32 @@ CK-Tile) equivalent, the `HIP/CK-Tile → FlyDSL` boxes call it out; the reposit
 3. **The language foundations** — how C++ control flow (`if`/`for`/`while`) maps to
    FlyDSL's trace-time vs. run-time regimes (Chapter 3), and the type system: how
    Python types become value types at each IR level (Chapter 4).
-4. **The Fly dialect, formally** — the layout algebra (Chapter 5), tiling and
-   partitioning (Chapter 6), data movement / copy atoms (Chapter 7), and MMA
-   atoms (Chapter 8), each with small worked examples and a mapping to the
+4. **Working with tensors** — how to access shape, stride, and individual elements of
+   an `fx.Tensor`; element indexing, `None`-slice selection, and `make_view` for
+   reinterpreting memory (Chapter 5).
+5. **The Fly dialect, formally** — the layout algebra (Chapter 6), tiling and
+   partitioning (Chapter 7), data movement / copy atoms (Chapter 8), and MMA
+   atoms (Chapter 9), each with small worked examples and a mapping to the
    CK-Tile / CuTe concept you already know.
 5. **Close to the metal** — the intrinsic level beneath the atoms: loads and stores
-   down to `buffer_load`/`ds_read` (Chapter 9), MFMA down to the `rocdl.mfma.*`
-   instruction and its operand/accumulator VGPRs (Chapter 10), and the escape
+   down to `buffer_load`/`ds_read` (Chapter 10), MFMA down to the `rocdl.mfma.*`
+   instruction and its operand/accumulator VGPRs (Chapter 11), and the escape
    hatches for when the high-level dialect is not enough — small MFMAs outside a
-   GEMM, cross-lane ops, inline asm (Chapter 11).
+   GEMM, cross-lane ops, inline asm (Chapter 12).
 6. **Worked examples** — three complete kernels annotated line by line
-   (Chapter 12).
+   (Chapter 13).
 7. **Debugging** — how (and how far) you can actually debug a FlyDSL kernel:
    the three layers of failure, the IR-dump and `printf` tools, a repeatable
-   isolation loop, and two real worked failures (Chapter 13).
+   isolation loop, and two real worked failures (Chapter 14).
 8. **A reference appendix** — environment variables, an API cheat-sheet, and a
-   HIP/CK-Tile ↔ FlyDSL glossary (Chapter 14).
+   HIP/CK-Tile ↔ FlyDSL glossary (Chapter 15).
 
 ## How to read it
 
-Read Chapters 1–4 first — they install the mental model, the control-flow rules,
-and the type system that make everything else make sense. Then either continue
-linearly, or jump to the algebra chapters (5–8) as a reference while you work the
-companion **[FlyDSL Puzzles](../../puzzles/)**.
+Read Chapters 1–5 first — they install the mental model, the control-flow rules,
+the type system, and the tensor access idioms that make everything else make sense.
+Then either continue linearly, or jump to the algebra chapters (6–9) as a reference
+while you work the companion **[FlyDSL Puzzles](../../puzzles/)**.
 The puzzles are where the learning actually sticks: each one references the section
 here that explains it.
 

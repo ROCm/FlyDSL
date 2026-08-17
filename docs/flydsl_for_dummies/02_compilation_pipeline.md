@@ -25,7 +25,7 @@ C++ to LLVM IR in a single large jump, discarding your tiling structure on the
 way, while MLIR keeps that structure as *real ops* through many verifiable steps.
 And because every dialect has a textual form that MLIR can print and re-parse,
 you can dump and read the IR after any stage (§2.8) — which is what makes the rest
-of this chapter, and the layout algebra in Chapters 5–8, inspectable rather than
+of this chapter, and the layout algebra in Chapters 7–9, inspectable rather than
 opaque.
 
 > **HIP/CK-Tile → FlyDSL.** Think of LLVM IR as a single language and MLIR as a
@@ -68,7 +68,7 @@ Compare with the two C++ worlds you know:
 The key structural difference: FlyDSL has a **first-class tiling/layout IR** (the
 Fly dialect). In HIP and CK-Tile, your tiling decisions live in C++ and are gone by
 the time LLVM sees the code. In FlyDSL they are explicit MLIR ops that dedicated
-passes optimize and lower. That is what makes the layout algebra in Chapters 5–8
+passes optimize and lower. That is what makes the layout algebra in Chapters 7–9
 *real objects* you can print and inspect, not just a coding convention.
 
 ## Stage 1 — AST rewriting (host, before tracing)
@@ -256,7 +256,7 @@ compiles to.
 Other useful switches: `FLYDSL_DEBUG_PRINT_AFTER_ALL` (print IR after every pass),
 `FLYDSL_DEBUG_AST_DIFF` (see the AST rewrite from §2.3), and
 `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1` (line info for the profiler; incompatible with
-`FLYDSL_RUNTIME_RUN_ONLY`). See Chapter 14 for the full table. Chapter 13 puts these
+`FLYDSL_RUNTIME_RUN_ONLY`). See Chapter 15 for the full table. Chapter 14 puts these
 switches to work on real failures.
 
 With the pipeline in hand, we can now look at the objects that flow through it: the

@@ -1,6 +1,6 @@
 # When the High-Level Dialect Isn't Enough
 
-The layout/atom API of Chapters 5–10 covers the two shapes that dominate GPU kernels:
+The layout/atom API of Chapters 7–11 covers the two shapes that dominate GPU kernels:
 tile-shaped copies and tiled GEMM. Real kernels routinely hit work that does not fit
 that mold — a single small MFMA feeding an online-softmax rescale, a cross-lane
 reduction, a hand-scheduled software pipeline. FlyDSL does not wall these off; it
@@ -162,6 +162,6 @@ is nothing at that level to attach a schedule to.
 Dropping lower is a *local* decision: it forfeits the portability and inspectability
 the atom layer gives you, so confine it to the few lines that need it and keep the
 surrounding kernel in the high-level dialect. When a lowered kernel misbehaves,
-Chapter 13 (debugging) shows how to dump and read the `rocdl.*`/`llvm.*` your escape
-hatch produced. Chapter 12 next reads three complete kernels that stay on the
+Chapter 14 (debugging) shows how to dump and read the `rocdl.*`/`llvm.*` your escape
+hatch produced. Chapter 13 next reads three complete kernels that stay on the
 high-level path from start to finish.

@@ -1,11 +1,11 @@
 # Loads & Stores, Close to the Metal
 
-Chapter 7 drove data movement with a copy atom over a TiledCopy and left the
+Chapter 8 drove data movement with a copy atom over a TiledCopy and left the
 instruction implicit — a copy "lowers to `rocdl.buffer_load`." This chapter opens
 the atom. It is the level you reach for when you read a dumped `rocdl.*` module, or
 when you write `buffer_load_dwordx4` / `ds_read_b128` by hand in HIP and want to
 know which FlyDSL construct produces each. Everything here is a deep-dive companion
-to Chapter 7; the layout algebra that *feeds* these instructions is unchanged.
+to Chapter 8; the layout algebra that *feeds* these instructions is unchanged.
 
 ## The copy-op zoo: what an atom actually names
 
@@ -68,7 +68,7 @@ Contrast the two global-memory handles:
 
 The legacy `buffer_ops.create_buffer_resource()` builds the same V# by hand and is
 discouraged for new kernels (`CLAUDE.md` → Kernel Authoring Conventions); prefer
-`make_buffer_tensor`, which keeps the layout attached so the Chapters 5–6 algebra
+`make_buffer_tensor`, which keeps the layout attached so the Chapters 7–7 algebra
 still applies.
 
 > **HIP/CK-Tile → FlyDSL.** `make_buffer_tensor(t)` is
@@ -259,7 +259,7 @@ one after lowering). What changed is where the addressing lives:
 
 The high-level version costs more lines here because the tile is trivial; the payoff
 grows with the kernel — the layout objects compose with tiling, MMA fragments
-(Chapter 10), and swizzle without touching the copy calls.
+(Chapter 11), and swizzle without touching the copy calls.
 
 > **HIP/CK-Tile → FlyDSL.** `fx.ptr_load(ptr)` / `fx.ptr_store(v, ptr)` is the typed
 > `*ptr` dereference — the plain load/store you write in HIP against a `__shared__`
@@ -270,23 +270,126 @@ grows with the kernel — the layout objects compose with tiling, MMA fragments
 
 ## Registers are memory, too
 
-The destination of a load is usually a **register-space tensor** — a fragment. FlyDSL
-models register files as memrefs in address space 5:
+The destination of a load — and the output of an MFMA — is a **register-space
+tensor**. FlyDSL models register files as memrefs in LLVM address space 5. There
+are two ways to allocate one; which you use depends on whether you have a tile
+layout to derive from.
 
-- `fx.make_rmem_tensor(shape_or_layout, dtype)` (`derived.py:89`) allocates a raw
-  register tensor.
-- `fx.make_fragment_like(t[, dtype])` (`primitive.py:536`) allocates one shaped like
-  an existing partition — the usual way to get an operand/accumulator fragment.
-- `.load()` / `.store(vec)` read and write the fragment as an SSA vector.
+### Declaring a register tensor for a single MFMA output
 
-These are not real stack allocations. The `fly-promote-regmem-to-vectorssa` pass
-(Chapter 2 pipeline) rewrites every register-space memref and its load/stores into
-pure `vector<N×T>` SSA values — i.e. VGPRs. After that pass there are no address-5
-allocas left.
+When you drive the MFMA yourself (as in the low-level example in Chapter 11), you
+need to declare the accumulator VGPR array directly. Use `make_rmem_tensor`:
 
-> **HIP/CK-Tile → FlyDSL.** `make_fragment_like` / `make_rmem_tensor` is declaring the
-> VGPR array (`float4 a_frag;`) that a `buffer_load` fills; `.load()`/`.store()` are
-> reads and writes of those registers.
+```python
+frag = fx.make_rmem_tensor(N_ELEMENTS, dtype)
+```
+
+`N_ELEMENTS` is the number of values **this lane** owns — set by the MFMA operand
+ABI. For the shapes this book uses on CDNA (wave64):
+
+| MFMA shape | Acc dtype | Acc elements per lane | Declare as |
+|---|---|---|---|
+| 16×16×\* | f32 | **4** | `make_rmem_tensor(4, fx.Float32)` |
+| 32×32×\* | f32 | **16** | `make_rmem_tensor(16, fx.Float32)` |
+| 16×16×\* | i32 | **4** | `make_rmem_tensor(4, fx.Int32)` |
+
+These numbers come from `getMfmaAccVecSize` in `CDNA3/MmaAtom.cpp`: a 16×16 MFMA
+has `GroupM = 64/16 = 4` lane-groups each covering 4 rows, so each lane owns
+`ValM0 = 4` accumulators; a 32×32 MFMA has `GroupM = 2` × `ValM1 = 4`, giving 16.
+
+Similarly for operands — for `MFMA(16, 16, 16, bf16)` each lane holds 4 bf16
+elements of one A or B row, stored as `i16` per the hardware ABI:
+
+```python
+# A/B operand fragment (4 bf16 elements per lane, passed as i16 to the intrinsic)
+a_frag = fx.make_rmem_tensor(4, fx.BFloat16)  # or Int16 if you bitcast immediately
+# Accumulator (4 f32 per lane)
+c_frag = fx.make_rmem_tensor(4, fx.Float32)
+```
+
+### The lifecycle: zero → gemm → load → use
+
+Allocating a register tensor gives you a name for the VGPR slots; you must fill
+them before reading:
+
+```python
+c_frag = fx.make_rmem_tensor(4, fx.Float32)
+c_frag.store(fx.Vector.filled(4, 0.0, fx.Float32))   # zero the accumulators
+
+# ... fill a_frag, b_frag by loading from global/LDS ...
+fx.gemm(mma_atom, c_frag, a_frag, b_frag, c_frag)    # result written back to c_frag
+
+result = c_frag.load()    # pull the vector<4xf32> out as an SSA value for use
+```
+
+`frag.store(vec)` / `frag.load()` are the register-level equivalents of writing to
+and reading from a named `float4` variable in HIP. After the
+`fly-promote-regmem-to-vectorssa` pass (Chapter 2 pipeline), every register-space
+memref is rewritten into a pure `vector<N×T>` SSA value — the allocas disappear and
+what remains is exactly the VGPR you would have declared by hand.
+
+### The high-level alternative: `make_fragment_C/A/B` and `make_fragment_like`
+
+When you use `fx.gemm` over a `TiledMma`, you do not need to know the accumulator
+size: `thr_mma.make_fragment_C(bC)` reads the size from the atom's thread-value
+layout and allocates the right register tensor automatically. This is what the
+high-level MFMA code does:
+
+```python
+frag_C = thr_mma.make_fragment_C(bC)   # size inferred from the atom (4 or 16 f32)
+frag_C.fill(0)                          # fills the underlying register tensor to 0
+fx.gemm(mma_atom, frag_C, frag_A, frag_B, frag_C)
+```
+
+`make_fragment_like(partition, dtype=None)` allocates a register tensor shaped like
+*an existing partition* — used when you have a copy partition and want a matching
+register staging buffer. `make_rmem_tensor` is the manual version: reach for it
+when you drive the MFMA yourself and need to name the accumulator explicitly.
+
+### N separate MFMA atoms → a list of N register tensors
+
+When you tile MFMA atoms in M and N (a `TiledMma` with atom-layout `(2, 2, 1)`
+covers a 32×32 output with four 16×16 atoms), each atom's accumulator is an
+*independent* set of 4 VGPRs. The pattern is a Python list of register tensors —
+one per atom — built at trace time:
+
+```python
+N_TILES_M, N_TILES_N = 2, 2      # 2x2 grid of 16x16 atoms
+N_ATOMS = N_TILES_M * N_TILES_N   # = 4
+
+# one accumulator tensor per atom, all zeroed
+c_frags = [fx.make_rmem_tensor(4, fx.Float32) for _ in fx.range_constexpr(N_ATOMS)]
+for frag in c_frags:
+    frag.store(fx.Vector.filled(4, 0.0, fx.Float32))
+
+# issue four MFMAs
+for i in fx.range_constexpr(N_TILES_M):
+    for j in fx.range_constexpr(N_TILES_N):
+        frag_idx = i * N_TILES_N + j
+        fx.gemm(mma_atom, c_frags[frag_idx],
+                a_frags[i], b_frags[j], c_frags[frag_idx])
+
+# extract all results
+results = [c_frags[k].load().ir_value() for k in fx.range_constexpr(N_ATOMS)]
+```
+
+This is the exact pattern used in `kernels/gemm/fp8_gemm_utils.py:211`
+(`Mfma16x16x128.call`), which manages `n_tiles_a × n_tiles_b` accumulators as a
+flat list. The loop body is unrolled at trace time by `range_constexpr`, so the
+compiler sees all four `fx.gemm` calls simultaneously and can schedule them with
+their loads freely.
+
+> **Gotcha — the accumulator count is lane-local.** You declare `4` (not `16×16`)
+> because each of the 64 lanes holds only 4 of the 256 output values. The full
+> output tile only exists once all 64 lanes' registers are combined — which is why
+> you never index into `c_frag` by row/col; you index the result tensor by matrix
+> coordinate *after* storing through the fragment and copying back to global memory.
+
+> **HIP/CK-Tile → FlyDSL.** `make_rmem_tensor(4, fx.Float32)` is `float4 c_frag = {0};`
+> — the per-lane accumulator array the ISA manual specifies. A list of N such
+> tensors is `float4 c_frag[N];`, and `frag.load()` is reading that array into an
+> SSA value the next operation (another MFMA, a store, an epilogue cast) can
+> consume.
 
 ## The three-tier flow, instruction by instruction
 
@@ -356,5 +459,5 @@ gives you the module right after `convert-fly-to-rocdl`, where these `rocdl.*` o
 are explicit. Diffing the pre/post-Stage-A modules is the fastest way to confirm your
 copy became the instruction and width you intended.
 
-The matrix multiply gets the same treatment next: Chapter 10 opens the MMA atom down
+The matrix multiply gets the same treatment next: Chapter 11 opens the MMA atom down
 to the `rocdl.mfma.*` instruction and the operand/accumulator VGPRs.

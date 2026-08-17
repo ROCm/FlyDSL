@@ -255,7 +255,7 @@ real kernels:
 - **Invalidate cached smem views after `scf.for`.** If you recreate shared-memory
   views inside a loop, clear `SmemPtr._view_cache = None` after the loop so a stale
   SSA value (defined inside the loop's region) is not reused outside it — otherwise
-  you hit an MLIR dominance error. See the data-movement chapter (Ch. 7) for the
+  you hit an MLIR dominance error. See the data-movement chapter (Ch. 8) for the
   LDS view pattern.
 - **Booleans on DSL values are ops.** `a < b`, `a & b`, `cond1 and cond2` on DSL
   values emit `arith` comparisons/`andi`/`ori`; they do not short-circuit like

@@ -4,7 +4,7 @@ Getting bytes from global memory, through LDS, into registers — and back — i
 half of a fast kernel. In HIP you write this as `buffer_load`/`ds_write`/
 `ds_read` intrinsics with careful address math; in CK-Tile it is `load_tile` /
 `store_tile` over tile windows. FlyDSL expresses it as a **copy atom** driving a
-**TiledCopy** (Chapter 6), and a single `fx.copy` / `fx.copy_atom_call` per
+**TiledCopy** (Chapter 7), and a single `fx.copy` / `fx.copy_atom_call` per
 transfer.
 
 ## What a copy atom is
@@ -39,21 +39,21 @@ alignment allows is the first, cheapest copy optimization.
 ## Buffer tensors: the modern global-memory handle
 
 New kernels do **not** compute byte offsets by hand. They wrap a raw pointer in a
-**buffer tensor**, which carries the shape/stride (a Layout, §5.2) *and* the
+**buffer tensor**, which carries the shape/stride (a Layout, §6.2) *and* the
 buffer descriptor needed for `BufferCopy`:
 
 ```python
 A = fx.rocdl.make_buffer_tensor(A_ptr)      # + shape/stride from the traced args
 ```
 
-From there you use the layout algebra of Chapters 5–6 (`zipped_divide`, `slice`,
+From there you use the layout algebra of Chapters 7–7 (`zipped_divide`, `slice`,
 `partition_S`) directly on `A`. Raw `buffer_ops.create_buffer_resource()` and
 manual offsets still exist for legacy kernels but are discouraged
 (`CLAUDE.md` → Kernel Authoring Conventions).
 
 ## Executing a copy
 
-Once a thread has a source partition and a destination partition (Chapter 6),
+Once a thread has a source partition and a destination partition (Chapter 7),
 one call moves the data:
 
 ```python
@@ -72,7 +72,7 @@ load/store the atom names.
 A tiled MMA kernel performs, per K-step, exactly three copy patterns:
 
 ```python
-# global -> registers (A and B operands), retiled to fragment order (§6.4)
+# global -> registers (A and B operands), retiled to fragment order (§7.4)
 fx.copy(copy_atom_a, thr_copy_a.partition_S(bA), thr_copy_a.retile(frag_A))
 fx.copy(copy_atom_b, thr_copy_b.partition_S(bB), thr_copy_b.retile(frag_B))
 # ... fx.gemm(...) ...
@@ -80,7 +80,7 @@ fx.copy(copy_atom_b, thr_copy_b.partition_S(bB), thr_copy_b.retile(frag_B))
 fx.copy(copy_atom_c, thr_copy_c.retile(frag_C), thr_copy_c.partition_D(bC))
 ```
 
-Add an LDS staging tier (§9.5 / Chapter 12 / GEMM puzzles) and it becomes
+Add an LDS staging tier (§10.5 / Chapter 13 / GEMM puzzles) and it becomes
 global→LDS then LDS→registers, but the call shape is identical.
 
 ## Predication: safe boundaries without branches
@@ -121,11 +121,11 @@ copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), dtype)
 src = fx.rocdl.make_buffer_tensor(src_ptr)
 dst = fx.rocdl.make_buffer_tensor(dst_ptr)
 
-# tile both by the block shape and slice this block (Ch. 5)
+# tile both by the block shape and slice this block (Ch. 6)
 bsrc = fx.slice(fx.zipped_divide(src, (BM, BN)), (None, bid))
 bdst = fx.slice(fx.zipped_divide(dst, (BM, BN)), (None, bid))
 
-# thread/value layout -> TiledCopy (Ch. 6)
+# thread/value layout -> TiledCopy (Ch. 7)
 tiler_mn, tv = fx.make_layout_tv(thr_layout, val_layout)
 tiled_copy = fx.make_tiled_copy(copy_atom, tv, tiler_mn)
 thr_copy = tiled_copy.get_slice(tid)
@@ -137,7 +137,7 @@ fx.copy(copy_atom, thr_copy.partition_S(bsrc), thr_copy.partition_D(bdst))
 Everything before the last line is *description* (layouts, distribution); the
 last line is the only *action*. That ratio — lots of layout algebra, one copy —
 is normal and is exactly what makes the data movement inspectable and
-optimizable. Chapter 8 does the same for the matrix multiply itself.
+optimizable. Chapter 9 does the same for the matrix multiply itself.
 
 ## LDS (shared memory) in one paragraph
 
@@ -153,7 +153,7 @@ fx.copy(copy_atom, smem_A_part, frag_A)
 ```
 
 Bank-conflict avoidance is a *layout* concern: you pick a swizzled LDS layout so
-lanes hit distinct banks (Chapter 12 and the GEMM puzzles). The copy calls do not
+lanes hit distinct banks (Chapter 13 and the GEMM puzzles). The copy calls do not
 change — only the LDS layout does. Full LDS mechanics, double-buffering, and
 swizzle live in `docs/kernel_tuning_guide.md`; the GEMM puzzles build them up
 step by step.

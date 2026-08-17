@@ -89,7 +89,7 @@ hand — the *divide* and *product* operators below build them for you.
 
 ## The two operators: divide (tiling) and product (replication)
 
-Everything in Chapters 6–8 is built from two families of operators.
+Everything in Chapters 8–9 is built from two families of operators.
 
 - **Divide** takes a big layout and a **tiler** and splits it into
   `(tile, rest)`: "carve this tensor into tiles of this shape." This is how you

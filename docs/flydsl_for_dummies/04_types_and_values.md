@@ -164,7 +164,7 @@ Scalars rarely travel alone on a GPU. FlyDSL has three aggregate forms:
   to / rebuild from a list of `ir.Value`s (so a whole struct can be a set of
   loop-carried values or function arguments), report its size/alignment, and
   peek/poke itself to a pointer. This is the abstraction behind shared-memory
-  storage layouts (Ch. 7).
+  storage layouts (Ch. 8).
 
 ```python
 @fx.struct
@@ -187,7 +187,7 @@ exactly like a template parameter on the struct.
 
 `fx.Tensor` is the principal type a kernel operates on. It is far more than a
 pointer: it bundles an **element type**, an **address space**, an **alignment**,
-and a **layout** (Ch. 5), lowering to `!fly.memref<elem, addrspace, layout, align>`.
+and a **layout** (Ch. 6), lowering to `!fly.memref<elem, addrspace, layout, align>`.
 Its address space is what distinguishes the memory tiers you already reason about:
 
 | CK-Tile object you know | FlyDSL tensor | Address space |
@@ -199,7 +199,7 @@ Its address space is what distinguishes the memory tiers you already reason abou
 
 The same `fx.Tensor` type spans all four tiers; only the address space (and layout)
 changes. `make_buffer_tensor` wraps a Global pointer into a CDNA hardware buffer
-descriptor so that copies get hardware bounds-checking (Ch. 7).
+descriptor so that copies get hardware bounds-checking (Ch. 8).
 
 > **HIP/CK-Tile → FlyDSL.** A `fx.Tensor` is a CK naive tensor descriptor plus its
 > address space rolled into one type: `Shape:Stride` is the `layout`, and Global /
@@ -247,6 +247,7 @@ a bound that is `Constexpr` can drive a `range_constexpr` unroll (§3.2), while 
 runtime bound forces an `scf.for`. Keeping "what type" and "known when" separate in
 your head prevents most FlyDSL surprises.
 
-With values and control flow in hand, we can turn to the objects that make FlyDSL
-distinctive: the layout algebra that describes *how those values are arranged in
-memory and across threads*, next.
+With values and control flow in hand, Chapter 5 shows how to work with an
+`fx.Tensor` directly — reading its shape, indexing individual elements, and
+selecting sub-tiles. Chapter 6 then covers the layout algebra that describes how
+those values are arranged in memory and across threads.
