@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-08-17T00:32:02Z",
+ "updated": "2026-08-17T03:37:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 31985834529,
+   "pr": 1001,
+   "commit": "f3c3771481f8fe4d897c88d744eebd8069ce348f",
+   "branch": "jli/gfx1250/fix-mma-atom",
+   "event": "pull_request",
+   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31985834529",
+   "created_at": "2026-08-17T01:44:10Z",
+   "updated_at": "2026-08-17T02:11:58Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-17T02:11:57Z",
+     "completed_at": "2026-08-17T03:16:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31985834529/job/95264186754",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-17T02:11:48Z",
+     "completed_at": "2026-08-17T02:34:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31985834529/job/95264186801",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-17T02:11:57Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31985834529/job/95264186936"
+    }
+   ]
+  },
   {
    "run_id": 31835253178,
    "pr": 1009,
@@ -384,7 +429,7 @@
   },
   {
    "run_id": 31782417882,
-   "pr": 1001,
+   "pr": null,
    "commit": "2b691b8e8e503340622e2d3e480a8af885fbfd04",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
@@ -1985,21 +2030,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31586091547",
    "created_at": "2026-08-12T10:08:30Z",
    "updated_at": "2026-08-12T10:26:34Z",
-   "actor": "jli-melchior",
-   "jobs": []
-  },
-  {
-   "run_id": 31582678294,
-   "pr": null,
-   "commit": "c70676b823a4216b7abcf6c4f96e7b1916aade10",
-   "branch": "jli/gfx1250/fix-mma-atom",
-   "event": "pull_request",
-   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31582678294",
-   "created_at": "2026-08-12T09:23:26Z",
-   "updated_at": "2026-08-12T10:08:32Z",
    "actor": "jli-melchior",
    "jobs": []
   }
