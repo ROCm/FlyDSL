@@ -103,6 +103,8 @@ class FlexAttnParam:
     n_kv_tiles: fx.Constexpr[int]  # seqlen_kv // block_n (KV loop is compile-time unrolled)
     pipe_depth: fx.Constexpr[int]  # 1 = monolithic, 2 = decomposed pipeline
     pipe_stages: fx.Constexpr[int]  # deprecated: stagger follows num_groups/pipe_depth/m_waves
+    # True = exact per-row softmax; False = approximate column softmax (mma_m=32 only)
+    accurate_softmax: fx.Constexpr[bool]
 
 
 def make_flex_attn_param(
@@ -122,6 +124,7 @@ def make_flex_attn_param(
     mma_k: int = 16,
     pipe_depth: int = 1,
     pipe_stages: int = 1,
+    accurate_softmax: bool = True,
 ) -> FlexAttnParam:
     if dtype_id not in (FLEX_DTYPE_BF16, FLEX_DTYPE_FP16):
         raise ValueError(f"unsupported dtype_id={dtype_id}")
@@ -139,6 +142,8 @@ def make_flex_attn_param(
         raise ValueError(f"block_n ({block_n}) must be divisible by n_waves*mma_n ({n_waves * mma_n})")
     if n_waves != 1:
         raise ValueError("n_waves must be 1 (softmax row reduction requires all N-lanes in one wave)")
+    if not accurate_softmax and mma_m != 32:
+        raise ValueError("accurate_softmax=False (approximate column softmax) requires mma_m=32")
     if num_groups < 1:
         raise ValueError("num_groups must be >= 1")
     if num_heads_q % num_heads_kv != 0:
@@ -192,6 +197,7 @@ def make_flex_attn_param(
         n_kv_tiles=seqlen_kv // block_n,
         pipe_depth=pipe_depth,
         pipe_stages=pipe_stages,
+        accurate_softmax=accurate_softmax,
     )
 
 
@@ -200,6 +206,7 @@ def make_flex_attn_kernel_name(param: FlexAttnParam) -> str:
     name = f"flex_attn_{dtype_str}_m{param.block_m}n{param.block_n}d{param.head_dim}"
     name += f"_w{param.m_waves}x{param.n_waves}g{param.num_groups}"
     name += "_causal" if param.causal else "_dense"
+    name += "_rsm" if param.accurate_softmax else "_csm"
     name += f"_pd{param.pipe_depth}"
     if pipeline_stagger_enabled(
         depth=int(param.pipe_depth),
@@ -348,6 +355,15 @@ def _permlane32_reduce(x, mode):
         return lhs.addf(rhs, fastmath=_FM)
 
 
+def _global_reduce(x, mode):
+    """Full-wave reduce: 5 shuffle_xor steps within each 32-lane half + permlane32_swap."""
+    w = x
+    for off in (16, 8, 4, 2, 1):
+        peer = w.shuffle_xor(off, GFX950_WAVE_SIZE)
+        w = w.maximumf(peer) if mode == "max" else w.addf(peer, fastmath=_FM)
+    return _permlane32_reduce(w, mode)
+
+
 def _mfma_acc(a, b, c, mma_atom):
     """Single MFMA call: C += A × B. Returns updated accumulator."""
     from flydsl._mlir.dialects import fly
@@ -485,17 +501,21 @@ def flex_attn_fwd_gfx950_kernel(
     sK_ptr = storage.k_lds.peek().ptr
     sV_ptr = storage.v_lds.peek().ptr
 
-    # K LDS: [block_n, head_dim] with XOR swizzle for bank-conflict-free reads.
+    # K LDS: [block_n, head_dim] row-major with Swizzle(3,3,3) for bank-conflict-free
+    # ds_read_b128. The DMA compensates by fetching from the swizzled global column.
     _k_swizzle = fx.static(fx.SwizzleType.get(3, 3, 3))
-    _k_base_layout = fx.make_layout((block_n, head_dim), (head_dim, 1))
-    _k_lds_layout = fx.make_composed_layout(_k_swizzle, _k_base_layout)
+    _k_base_layout = fx.make_composed_layout(
+        _k_swizzle, fx.make_layout((block_n, head_dim), (head_dim, 1))
+    )
     sK = [
-        fx.make_view(sK_ptr + i * kv_tile_elems, _k_lds_layout)
+        fx.make_view(sK_ptr + i * kv_tile_elems, _k_base_layout)
         for i in range_constexpr(_lds_ring_slots)
     ]
-    # V LDS: [head_dim, block_n] row-major — V is host-transposed.
-    # No swizzle: DMA writes use raw byte offsets that bypass the layout.
-    _v_base_layout = fx.make_layout((head_dim, block_n), (block_n, 1))
+    # V LDS: 4 compact sub-tiles [block_n, 32]:(32, 1) per D-chunk.
+    # V is NOT host-transposed; DMA writes [block_n, D] tiled into D-chunks.
+    # LDSReadTrans16_64b transposes each [block_n, 32] sub-tile for A[M=D, K=score].
+    _v_subtile_elems = block_n * 32
+    _v_base_layout = fx.make_layout((block_n * (head_dim // 32), 32), (32, 1))
     sV = [
         fx.make_view(sV_ptr + i * kv_tile_elems, _v_base_layout)
         for i in range_constexpr(_lds_ring_slots)
@@ -514,9 +534,9 @@ def flex_attn_fwd_gfx950_kernel(
     q_off = b_idx * seqlen_q * hq * head_dim + h_idx * head_dim + q_start * hq * head_dim
     o_off = q_off
     k_off = b_idx * seqlen_kv * hkv * head_dim + kv_head * head_dim
-    # Vt is [B, Hkv, D, Skv] (host-transposed per head): element (b,h,d,s) at
-    # b*Hkv*D*Skv + h*D*Skv + d*Skv + s.  This head's [D, Skv] slice:
-    v_off = b_idx * hkv * head_dim * seqlen_kv + kv_head * head_dim * seqlen_kv
+    # V is [B, Skv, Hkv, D] (un-transposed): element (b,s,h,d) at
+    # b*Skv*Hkv*D + s*Hkv*D + h*D + d.  This head's base:
+    v_off = b_idx * seqlen_kv * hkv * head_dim + kv_head * head_dim
 
     # Per-(batch,head) sub-views wrapped as BUFFER pointers so BufferCopy128b
     # legalizes (a plain make_view over a global ptr is not buffer-backed).
@@ -528,7 +548,7 @@ def flex_attn_fwd_gfx950_kernel(
     gQ = fx.make_view(q_it, fx.make_layout((block_m, head_dim), (hq * head_dim, 1)))
     gO = fx.make_view(o_it, fx.make_layout((block_m, head_dim), (hq * head_dim, 1)))
     gK = fx.make_view(k_it, fx.make_layout((seqlen_kv, head_dim), (hkv * head_dim, 1)))
-    gV = fx.make_view(vt_it, fx.make_layout((head_dim, seqlen_kv), (seqlen_kv, 1)))
+    gV = fx.make_view(vt_it, fx.make_layout((seqlen_kv, head_dim), (hkv * head_dim, 1)))
 
     # Each group runs the validated 128-thread MMA partition via local_tid.
     thr_qk = tiled_mma_qk.thr_slice(local_tid)
@@ -537,20 +557,24 @@ def flex_attn_fwd_gfx950_kernel(
     ca = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_dtype)
     uca = fx.make_copy_atom(fx.UniversalCopy128b(), elem_dtype)
 
-    # Q resident: load once into the GEMM1 A-fragment (reused every KV tile).
-    tcA = fx.make_tiled_copy_A(ca, tiled_mma_qk).get_slice(local_tid)
-    frag_Q = thr_qk.make_fragment_A(gQ)
-    fx.copy(ca, tcA.partition_S(gQ), tcA.retile(frag_Q))
+    # Q resident: load once into the GEMM1 B-fragment (reused every KV tile).
+    # QK uses K=A, Q=B so C's M-rows = score indices, allowing register C→B pack for PV.
+    tcB_q = fx.make_tiled_copy_B(ca, tiled_mma_qk).get_slice(local_tid)
+    frag_Q = thr_qk.make_fragment_B(gQ)
+    fx.copy(ca, tcB_q.partition_S(gQ), tcB_q.retile(frag_Q))
     _is_32x32 = int(param.mma_m) == 32
     if const_expr(_is_32x32):
-        print("Using 32x32 MMA", flush=True)
+        print("Using 32x32 MMA (K=A, Q=B)", flush=True)
         n_q = _size_scalar(frag_Q.shape)
         for qi in range_constexpr(n_q):
             frag_Q[qi] = _to_elem(_to_elem(frag_Q[qi], fx.Float32) * scale, elem_dtype)
 
-    # Persistent O accumulator [block_m, head_dim] in registers across the KV loop.
-    frag_O = thr_pv.make_fragment_C(gO)
-    frag_O.fill(0.0)
+    # Persistent O accumulator: 4 × v16f32 (one per D-chunk).
+    # With V=A, P=B PV GEMM: each v16f32 has 16 D-values at 1 query-row per lane.
+    Vec = fx.Vector
+    _n_d_chunks = head_dim // 32
+    o_accs_init = [Vec.filled(16, 0.0, fx.Float32).ir_value()
+                   for _ in range_constexpr(_n_d_chunks)]
 
     # Per-slot row map: thr_qk.partition_C partitions by THIS thread's wave, so
     # n_c is always this lane's slot count (not the full tile). For MFMA 16x16
@@ -560,9 +584,16 @@ def flex_attn_fwd_gfx950_kernel(
     # and i % npair maps each slot to its row. This holds for any m_waves because
     # thr_slice already selects the per-wave partition.
     n_c = _size_scalar(thr_qk.partition_C(sP).shape)
+    _accurate_softmax = int(param.accurate_softmax)
+    # After QK operand swap (K=A, Q=B), C's M-rows = score indices, N-cols = query.
+    # Each lane has 16 score values at 1 query column. npair=1: single max/sum per lane.
+    # This gives exact per-query-row softmax (permlane32 combines the two score halves).
+    # The "approx" softmax path (npair=1, vec reduce) is now exact after the swap.
+    _use_approx_softmax = _is_32x32  # Always use the npair=1 path for 32x32
+
     if const_expr(_is_32x32):
-        npair = n_c
-        _s_slot_to_row_idx = list(range(n_c))
+        npair = 1
+        _s_slot_to_row_idx = [0] * n_c
     else:
         npair = n_c // 2
         _s_slot_to_row_idx = [i % npair for i in range(n_c)]
@@ -571,9 +602,9 @@ def flex_attn_fwd_gfx950_kernel(
     m_i = [fx.Float32(_M_NEG_FLOOR) for _ in range_constexpr(npair)]
     l_i = [fx.Float32(0.0) for _ in range_constexpr(npair)]
 
-    n_o = _size_scalar(frag_O.shape)
+    n_o = _n_d_chunks * 16  # 4 D-chunks × 16 elements per chunk
     if const_expr(_is_32x32):
-        o_slot_row = [i % n_c for i in range(n_o)]
+        o_slot_row = [0] * n_o
     else:
         o_slot_row = [i % npair for i in range(n_o)]
 
@@ -589,11 +620,24 @@ def flex_attn_fwd_gfx950_kernel(
     # LDS views, DMA descriptors) so the pipeline module never needs them.
 
     # Copy builders and fragments for double-buffered K/V
-    tcA2 = fx.make_tiled_copy_A(uca, tiled_mma_pv).get_slice(local_tid)
-    tcB_lds = [fx.make_tiled_copy_B(uca, tiled_mma_qk).get_slice(local_tid) for _ in range_constexpr(_lds_ring_slots)]
-    tcB2_lds = [fx.make_tiled_copy_B(uca, tiled_mma_pv).get_slice(local_tid) for _ in range_constexpr(_lds_ring_slots)]
-    frag_K = [thr_qk.make_fragment_B(sK[i]) for i in range_constexpr(_lds_ring_slots)]
-    frag_V = [thr_pv.make_fragment_B(sV[i]) for i in range_constexpr(_lds_ring_slots)]
+    # K is now the A operand of QK GEMM (K=A, Q=B).
+    tcA_k_lds = [fx.make_tiled_copy_A(uca, tiled_mma_qk).get_slice(local_tid) for _ in range_constexpr(_lds_ring_slots)]
+    frag_K = [thr_qk.make_fragment_A(sK[i]) for i in range_constexpr(_lds_ring_slots)]
+
+    # V is loaded as A operand for PV GEMM (V=A, P=B).
+    # V LDS has 4 compact sub-tiles [block_n, 32]:(32, 1). LDSReadTrans16_64b
+    # transposes each [block_n, 32] → [32, block_n] = A[M=D_chunk, K=score].
+    _v_tr_atom = fx.make_copy_atom(rocdl.cdna4.LDSReadTrans16_64b(), elem_dtype)
+    # View sub-tiles as [M=32(D), K=block_n(score)]:(1, 32) — column-major.
+    # The transpose atom reads score-contiguous data from LDS and delivers A[M=D, K=score].
+    sV_chunk = [[fx.make_view(sV_ptr + slot * kv_tile_elems + dc * _v_subtile_elems,
+                               fx.make_layout((32, block_n), (1, 32)))
+                 for dc in range_constexpr(_n_d_chunks)]
+                for slot in range_constexpr(_lds_ring_slots)]
+    tcA_v = fx.make_tiled_copy_A(_v_tr_atom, tiled_mma_pv).get_slice(local_tid)
+    frag_V_a = [[thr_pv.make_fragment_A(sV_chunk[slot][dc])
+                 for dc in range_constexpr(_n_d_chunks)]
+                for slot in range_constexpr(_lds_ring_slots)]
 
     # DMA infrastructure
     block_threads = param.block_threads
@@ -603,8 +647,10 @@ def flex_attn_fwd_gfx950_kernel(
     dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
     _k_row_stride_bytes = hkv * head_dim * param.in_data_bytes
     _k_row_bytes = head_dim * param.in_data_bytes
-    _v_row_stride_bytes = seqlen_kv * fx.Int32(param.in_data_bytes)
-    _v_row_bytes = block_n * param.in_data_bytes
+    # V DMA: sub-tile rows are 32 bf16 = 64 bytes. Global stride between score rows
+    # is hkv * head_dim elements (V is [B, Skv, Hkv, D], D contiguous per score row).
+    _v_subtile_row_bytes = 32 * param.in_data_bytes  # 64 bytes per sub-tile row
+    _v_row_stride_bytes = hkv * head_dim * param.in_data_bytes
     gK_flat = fx.rocdl.make_buffer_tensor(
         fx.Tensor(fx.make_view(fx.recast_iter(fx.Int8, fx.get_iter(k)), fx.make_layout(0x7FFFFFFF, 1))),
         max_size=True,
@@ -630,6 +676,13 @@ def flex_attn_fwd_gfx950_kernel(
     print(summarize_flex_wg_thread_layout(param), flush=True)
 
     # ── Stage: DMA K+V global → LDS ─────────────────────────────────────
+    def _k_swizzled_col(tile_row, tile_col_elem):
+        """Apply K swizzle to get the global column index for a given LDS position."""
+        elem_off = fx.get_scalar(fx.crd2idx(
+            fx.make_int_tuple((tile_row, tile_col_elem)), _k_base_layout
+        ))
+        return elem_off % head_dim
+
     def _stage_kv_to_lds(kv_idx, buf):
         wave_off = rocdl.readfirstlane(fx.Int32.ir_type, fx.Int32(tid // GFX950_WAVE_SIZE * GFX950_WAVE_SIZE * _dma_bytes))
         k_global_base = k_off * param.in_data_bytes + kv_idx * block_n * _k_row_stride_bytes
@@ -639,19 +692,27 @@ def flex_attn_fwd_gfx950_kernel(
                 lds_k = fx.add_offset(lds_k, _step_bytes)
             flat_byte = i * block_threads * _dma_bytes + tid * _dma_bytes
             tile_row = flat_byte // _k_row_bytes
-            tile_col_byte = flat_byte % _k_row_bytes
-            gmem_byte = k_global_base + tile_row * _k_row_stride_bytes + tile_col_byte
+            tile_col_elem = (flat_byte % _k_row_bytes) // param.in_data_bytes
+            swiz_col = _k_swizzled_col(tile_row, tile_col_elem)
+            gmem_byte = k_global_base + tile_row * _k_row_stride_bytes + swiz_col * param.in_data_bytes
             fx.copy(dma_atom, fx.slice(k_div, (None, fx.Int32(gmem_byte))),
                     fx.make_view(lds_k, fx.make_layout(1, 1)))
-        v_global_base = v_off * param.in_data_bytes + kv_idx * block_n * param.in_data_bytes
+        # V DMA: tiled into compact [block_n, 32] sub-tiles per D-chunk.
+        # LDS sub-tile layout: dc → offset dc*block_n*32, each row = 32 bf16.
+        # Global V is [Skv, Hkv, D]: score_row stride = _v_row_stride_bytes.
+        v_global_base = v_off * param.in_data_bytes + kv_idx * fx.Int32(block_n * _v_row_stride_bytes)
         lds_v = fx.add_offset(sV_i8[buf], wave_off)
         for i in range_constexpr(_dma_ops_per_thread):
             if const_expr(i > 0):
                 lds_v = fx.add_offset(lds_v, _step_bytes)
             flat_byte = i * block_threads * _dma_bytes + tid * _dma_bytes
-            tile_row = flat_byte // _v_row_bytes
-            tile_col_byte = flat_byte % _v_row_bytes
-            gmem_byte = fx.Int32(v_global_base) + tile_row * _v_row_stride_bytes + fx.Int32(tile_col_byte)
+            # Decompose LDS linear position into (dc, score_row, d_in_chunk).
+            tile_row = flat_byte // _v_subtile_row_bytes  # 0..block_n*_n_d_chunks-1
+            tile_col_byte = flat_byte % _v_subtile_row_bytes
+            dc = tile_row // block_n
+            score_row = tile_row % block_n
+            d_global_byte = dc * 32 * param.in_data_bytes + tile_col_byte
+            gmem_byte = fx.Int32(v_global_base) + score_row * fx.Int32(_v_row_stride_bytes) + d_global_byte
             fx.copy(dma_atom, fx.slice(v_div, (None, fx.Int32(gmem_byte))),
                     fx.make_view(lds_v, fx.make_layout(1, 1)))
 
@@ -664,22 +725,26 @@ def flex_attn_fwd_gfx950_kernel(
                 lds_k = fx.add_offset(lds_k, _step_bytes)
             flat_byte = i * block_threads * _dma_bytes + tid * _dma_bytes
             tile_row = flat_byte // _k_row_bytes
-            tile_col_byte = flat_byte % _k_row_bytes
-            gmem_byte = k_global_base + tile_row * _k_row_stride_bytes + tile_col_byte
+            tile_col_elem = (flat_byte % _k_row_bytes) // param.in_data_bytes
+            swiz_col = _k_swizzled_col(tile_row, tile_col_elem)
+            gmem_byte = k_global_base + tile_row * _k_row_stride_bytes + swiz_col * param.in_data_bytes
             fx.copy(dma_atom, fx.slice(k_div, (None, fx.Int32(gmem_byte))),
                     fx.make_view(lds_k, fx.make_layout(1, 1)))
 
     def _stage_v_to_lds(kv_idx, buf):
         wave_off = rocdl.readfirstlane(fx.Int32.ir_type, fx.Int32(tid // GFX950_WAVE_SIZE * GFX950_WAVE_SIZE * _dma_bytes))
-        v_global_base = v_off * param.in_data_bytes + kv_idx * block_n * param.in_data_bytes
+        v_global_base = v_off * param.in_data_bytes + kv_idx * fx.Int32(block_n * _v_row_stride_bytes)
         lds_v = fx.add_offset(sV_i8[buf], wave_off)
         for i in range_constexpr(_dma_ops_per_thread):
             if const_expr(i > 0):
                 lds_v = fx.add_offset(lds_v, _step_bytes)
             flat_byte = i * block_threads * _dma_bytes + tid * _dma_bytes
-            tile_row = flat_byte // _v_row_bytes
-            tile_col_byte = flat_byte % _v_row_bytes
-            gmem_byte = fx.Int32(v_global_base) + tile_row * _v_row_stride_bytes + fx.Int32(tile_col_byte)
+            tile_row = flat_byte // _v_subtile_row_bytes
+            tile_col_byte = flat_byte % _v_subtile_row_bytes
+            dc = tile_row // block_n
+            score_row = tile_row % block_n
+            d_global_byte = dc * 32 * param.in_data_bytes + tile_col_byte
+            gmem_byte = fx.Int32(v_global_base) + score_row * fx.Int32(_v_row_stride_bytes) + d_global_byte
             fx.copy(dma_atom, fx.slice(v_div, (None, fx.Int32(gmem_byte))),
                     fx.make_view(lds_v, fx.make_layout(1, 1)))
 
@@ -741,84 +806,99 @@ def flex_attn_fwd_gfx950_kernel(
         return []
 
     def read_k(slot):
-        fx.copy(uca, tcB_lds[slot].partition_S(sK[slot]), tcB_lds[slot].retile(frag_K[slot]))
+        fx.copy(uca, tcA_k_lds[slot].partition_S(sK[slot]), tcA_k_lds[slot].retile(frag_K[slot]))
         return [frag_K[slot]]
 
-    def read_v(slot):
-        fx.copy(uca, tcB2_lds[slot].partition_S(sV[slot]), tcB2_lds[slot].retile(frag_V[slot]))
-        return [frag_V[slot]]
+    def read_v_as_a(slot):
+        for dc in range_constexpr(_n_d_chunks):
+            fx.copy(uca, tcA_v.partition_S(sV_chunk[slot][dc]),
+                    tcA_v.retile(frag_V_a[slot][dc]))
+        return []
 
     def read_kv(slot):
         read_k(slot)
-        read_v(slot)
-        return [frag_K[slot], frag_V[slot]]
+        read_v_as_a(slot)
+        return [frag_K[slot]]
+
+    # V transpose read using swa's copy-atom pattern on compact [32, 32] sub-tiles.
+    _v_tr_layout = fx.make_layout(4, 1)  # 4 bf16 per transpose read
+    _v_smem_layout = fx.make_layout((block_n, 32), (32, 1))  # sub-tile layout
+    # Lane address decomposition (same as swa for V sub-tiles):
+    _v_row_off = ((local_tid % 16) // 4) + ((local_tid // 32) * 4)
+    _v_col_off = ((local_tid % 4) * 4) + (16 * ((local_tid % 32) // 16))
+    _v_lane_elem = fx.Int32(fx.get_scalar(
+        fx.crd2idx(fx.make_int_tuple((fx.Int32(_v_row_off), fx.Int32(_v_col_off % 32))),
+                   _v_smem_layout)
+    ))
+
+    def _read_v_transpose(slot_elem_offset):
+        """Read V via ds_read_b64_tr_b16 on compact [32, 32] sub-tiles (swa pattern)."""
+        v_lo_out = [None] * _n_d_chunks
+        v_hi_out = [None] * _n_d_chunks
+        base_ptr = fx.add_offset(sV_ptr + slot_elem_offset, fx.make_int_tuple(_v_lane_elem))
+        for dc in range_constexpr(_n_d_chunks):
+            # 32×32 sub-tile = 4 groups of 8×32 (same structure as swa's 8×32 sub-tiles).
+            # k_sub=0..1 gives lo/hi K-tile halves; k_half=0..1 gives shuffle pairs.
+            halves = [None, None, None, None]
+            for k_sub in range_constexpr(4):
+                off = (dc * 4 + k_sub) * _v_subtile_elems // 4
+                src = fx.make_view(
+                    fx.add_offset(base_ptr, fx.make_int_tuple(off)),
+                    _v_tr_layout,
+                )
+                dst = fx.make_rmem_tensor(_v_tr_layout, elem_dtype)
+                fx.copy(_v_tr_atom, src, dst)
+                halves[k_sub] = Vec(dst.load())
+            v_lo_out[dc] = halves[0].shuffle(halves[1], list(range(8))).ir_value()
+            v_hi_out[dc] = halves[2].shuffle(halves[3], list(range(8))).ir_value()
+        return v_lo_out, v_hi_out
 
     def read_kv_work(slot):
-        # pd2 scf.for: dynamic ring slot, fixed register tiles (avoid fragment SSA merge).
-        fx.copy(uca, tcB_lds[slot].partition_S(sK[slot]), tcB_lds[slot].retile(frag_K[0]))
-        fx.copy(uca, tcB2_lds[slot].partition_S(sV[slot]), tcB2_lds[slot].retile(frag_V[0]))
+        fx.copy(uca, tcA_k_lds[slot].partition_S(sK[slot]), tcA_k_lds[slot].retile(frag_K[0]))
         return []
 
     def gemm1_qk(frag_Q_in, frag_K_in):
         frag_S_out = thr_qk.make_fragment_C(sP)
         frag_S_out.fill(0.0)
-        fx.gemm(tiled_mma_qk, frag_S_out, frag_Q_in, frag_K_in, frag_S_out)
+        fx.gemm(tiled_mma_qk, frag_S_out, frag_K_in, frag_Q_in, frag_S_out)
         return [frag_S_out]
 
-    def softmax_full(frag_S_in, m_i_in, l_i_in, frag_O_in):
+    # _n_d_chunks defined above as head_dim // 32 (= 4 for D=128).
+
+    def _scale_o_vec(o_accs_in, scale_scalar):
+        """Vectorized O rescale: broadcast scalar to vec16, multiply per D-chunk."""
+        scale_vec = Vec.from_elements([scale_scalar], fx.Float32).broadcast_to(16)
+        for dc in range_constexpr(_n_d_chunks):
+            o_vec = Vec(o_accs_in[dc])
+            o_accs_in[dc] = (o_vec * scale_vec).ir_value()
+
+    def softmax_full(frag_S_in, m_i_in, l_i_in, o_accs_in):
         if const_expr(_is_32x32):
-            # Column reduction: NO cross-lane ops. Each thread holds 1 score
-            # per M-row at ONE N-column. The per-thread max/sum IS the per-column
-            # contribution. PV GEMM will sum across lanes with inconsistent scaling,
-            # but O/l cancels. One corr scalar for all rows (uniform rescale).
-            global_max = frag_S_in[0]
+            # Max: sequential loop over 16 vals + permlane (flash-style).
+            tile_max = frag_S_in[0]
             for i in range_constexpr(1, n_c):
-                global_max = global_max.maximumf(frag_S_in[i])
-            # permlane32_swap: combine max across row-halves (lanes 0-31 ↔ 32-63)
-            # so both halves of the same column share the same max.
-            global_max = _permlane32_reduce(global_max, "max")
-            old_m = m_i_in[0]
-            for r in range_constexpr(1, npair):
-                old_m = old_m.maximumf(m_i_in[r])
-            m_new = old_m.maximumf(global_max)
-            corr_scalar = fmath.exp2((old_m - m_new) * scale_log2e, fastmath=_FM)
+                tile_max = tile_max.maximumf(frag_S_in[i])
+            tile_max = _permlane32_reduce(tile_max, "max")
+
+            m_new = m_i_in[0].maximumf(tile_max)
+            corr_scalar = fmath.exp2((m_i_in[0] - m_new) * scale_log2e, fastmath=_FM)
             for i in range_constexpr(n_c):
                 frag_S_in[i] = fmath.exp2(
                     (frag_S_in[i] - m_new) * scale_log2e, fastmath=_FM
                 )
-            local_sum = frag_S_in[0]
-            for i in range_constexpr(1, n_c):
-                local_sum = local_sum.addf(frag_S_in[i], fastmath=_FM)
-            # Single m/l per thread (all rows share same column max)
-            corr = [corr_scalar for _ in range_constexpr(npair)]
-            for r in range_constexpr(npair):
-                l_i_in[r] = l_i_in[r] * corr_scalar + local_sum
-                m_i_in[r] = m_new
-            for i in range_constexpr(n_o):
-                frag_O_in[i] = frag_O_in[i] * corr_scalar
-            return [frag_S_in, m_i_in, l_i_in, frag_O_in, corr]
-        corr = [fx.Float32(1.0) for _ in range_constexpr(npair)]
-        for r in range_constexpr(npair):
-            slots = _row_slots[r]
-            row_max = frag_S_in[slots[0]]
-            for si in range_constexpr(1, len(slots)):
-                row_max = row_max.maximumf(frag_S_in[slots[si]])
-            tile_m = _row_reduce(row_max, "max")
-            m_new = m_i_in[r].maximumf(tile_m)
-            corr[r] = fmath.exp2((m_i_in[r] - m_new) * scale_log2e, fastmath=_FM)
-            for si in range_constexpr(len(slots)):
-                frag_S_in[slots[si]] = fmath.exp2(
-                    (frag_S_in[slots[si]] - m_new) * scale_log2e, fastmath=_FM
-                )
-            row_sum = frag_S_in[slots[0]]
-            for si in range_constexpr(1, len(slots)):
-                row_sum = row_sum.addf(frag_S_in[slots[si]], fastmath=_FM)
-            tile_l = _row_reduce(row_sum, "sum")
-            l_i_in[r] = l_i_in[r] * corr[r] + tile_l
-            m_i_in[r] = m_new
-        for i in range_constexpr(n_o):
-            frag_O_in[i] = frag_O_in[i] * corr[o_slot_row[i]]
-        return [frag_S_in, m_i_in, l_i_in, frag_O_in, corr]
+            # Vector reduce for sum (flash-style): build vec16, reduce.
+            s_elems = [frag_S_in[i] for i in range_constexpr(n_c)]
+            s_vec = Vec.from_elements(s_elems, fx.Float32)
+            local_sum = s_vec.reduce("add", init_val=fx.Float32(0.0), fastmath=_FM)
+            local_sum = _permlane32_reduce(local_sum, "sum")
+            corr = [corr_scalar]
+            l_i_in[0] = l_i_in[0] * corr_scalar + local_sum
+            m_i_in[0] = m_new
+            # Vectorized O rescale
+            _scale_o_vec(o_accs_in, corr_scalar)
+            return [frag_S_in, m_i_in, l_i_in, o_accs_in, corr]
+        # Non-32x32 path (16x16 MMA): not yet updated for register PV bridge.
+        raise NotImplementedError("Register PV bridge only supports 32x32 MMA")
 
     def softmax_finish(v_p_partial_in, l_i_in):
         for r in range_constexpr(npair):
@@ -870,13 +950,6 @@ def flex_attn_fwd_gfx950_kernel(
         fx.copy(uca, tcA2.partition_S(sP), tcA2.retile(frag_P_a_out))
         return [frag_P_a_out]
 
-    def frag_p_to_pv_a(frag_P_in):
-        frag_P_a_out = thr_pv.make_fragment_A(sP)
-        n_pa = _size_scalar(frag_P_a_out.shape)
-        for i in range_constexpr(min(n_c, n_pa)):
-            frag_P_a_out[i] = _to_elem(frag_P_in[i], elem_dtype)
-        return [frag_P_a_out]
-
     def gemm2_write_p(v_p_for_gemm_in, softmax_corr_in):
         for i in range_constexpr(n_c):
             pi = _to_elem(v_p_for_gemm_in[i], fx.Float32) * softmax_corr_in[_s_slot_to_row_idx[i]]
@@ -893,6 +966,45 @@ def flex_attn_fwd_gfx950_kernel(
     def gemm2_pd1(frag_P_a_in, frag_Vt_next_in, frag_O_in):
         fx.gemm(tiled_mma_pv, frag_O_in, frag_P_a_in, frag_Vt_next_in, frag_O_in)
         return [frag_O_in]
+
+    # ── Register-only PV GEMM (V=A, P=B) ──────────────────────────────────
+    # After QK swap (K=A, Q=B), C's M-rows = score indices.
+    # C→B is register-local: pack 16 f32 → 2 × v8bf16.
+    # V is loaded as A from LDS per D-chunk.
+    _pv_mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype))
+
+    _is_bf16 = int(param.dtype_id) == FLEX_DTYPE_BF16
+
+    def _pack_8_f32_to_v8elem(vals_8):
+        """Pack 8 f32 values into v8 of elem_dtype (bf16 or f16)."""
+        if const_expr(_is_bf16):
+            pairs = []
+            for j in range_constexpr(4):
+                pairs.append(rocdl.cvt_pk_bf16_f32(vals_8[j * 2], vals_8[j * 2 + 1]))
+            return Vec.from_elements(pairs, fx.Int32).bitcast(elem_dtype).ir_value()
+        else:
+            elems = []
+            for j in range_constexpr(8):
+                elems.append(fx.Float32(vals_8[j]).to(elem_dtype))
+            return Vec.from_elements(elems, elem_dtype).ir_value()
+
+    def _pack_p_b(frag_P_in):
+        """Pack 16 C-fragment f32 values into 2 v8elem MFMA B packs."""
+        p_lo = _pack_8_f32_to_v8elem([frag_P_in[i] for i in range(8)])
+        p_hi = _pack_8_f32_to_v8elem([frag_P_in[8 + i] for i in range(8)])
+        return p_lo, p_hi
+
+
+    def pv_gemm_register(frag_P_in, v_lo_regs, v_hi_regs, o_accs):
+        """PV GEMM without LDS P bridge: P packed as B, V pre-read as A.
+
+        v_lo_regs/v_hi_regs: lists of v8elem per D-chunk, pre-read from LDS
+        in the non-contiguous C-score order by _read_v_scattered.
+        """
+        p_lo, p_hi = _pack_p_b(frag_P_in)
+        for dc in range_constexpr(_n_d_chunks):
+            o_accs[dc] = _mfma_acc(v_lo_regs[dc], p_lo, o_accs[dc], _pv_mma_atom)
+            o_accs[dc] = _mfma_acc(v_hi_regs[dc], p_hi, o_accs[dc], _pv_mma_atom)
 
     def dualwave_cluster_sync(cluster_index):
         if const_expr(cluster_index == 1 and _pd_for_sched >= 2):
@@ -1220,11 +1332,8 @@ def flex_attn_fwd_gfx950_kernel(
     frag_P_carry.fill(0.0)
     v_p_partial = frag_P_init
     frag_P = frag_P_carry
-    frag_Vt = thr_pv.make_fragment_B(sV[0])
     softmax_corr = [fx.Float32(1.0) for _ in range_constexpr(npair)]
-    frag_Vt_next = frag_V[0]
     frag_S = frag_P_init
-    frag_P_a = thr_pv.make_fragment_A(sP)
 
     infra = InfraContext()
     infra.head_dim = head_dim
@@ -1248,8 +1357,7 @@ def flex_attn_fwd_gfx950_kernel(
     _kv_vm_in_flight = _dma_ops_per_thread * 2
 
     if const_expr(param.pipe_depth == 1):
-        # Double-buffered: prefetch next tile's DMA while computing current tile.
-        # Prologue: start DMA for tile 0.
+        # Double-buffered KV loop via scf.for with loop-carried m/l/O state.
         load_kv(0, 0)
         rocdl.s_waitcnt(0)
         rocdl.s_barrier()
@@ -1257,10 +1365,12 @@ def flex_attn_fwd_gfx950_kernel(
         if const_expr(_enable_stagger):
             stagger_open(infra.stagger_i32)
 
+        # Loop-carried state: m_i (npair scalars) + l_i (npair scalars) + o_accs (D_CHUNKS v16f32)
+        o_accs = o_accs_init
         init_args = (
             [m_i[r] for r in range_constexpr(npair)]
             + [l_i[r] for r in range_constexpr(npair)]
-            + [frag_O]
+            + [o_accs[dc] for dc in range_constexpr(_n_d_chunks)]
         )
         _o = 2 * npair
         loop_results = init_args
@@ -1273,19 +1383,20 @@ def flex_attn_fwd_gfx950_kernel(
         ):
             m_i = [loop_args[r] for r in range_constexpr(npair)]
             l_i = [loop_args[npair + r] for r in range_constexpr(npair)]
-            frag_O = loop_args[_o]
+            o_accs = [loop_args[_o + dc] for dc in range_constexpr(_n_d_chunks)]
 
             kv_i32 = fx.Int32(arith.index_cast(T.i32, kv))
             _ring_slots = fx.Int32(_lds_ring_slots)
             ring0 = (kv_i32 % _ring_slots) == fx.Int32(0)
             has_next = (kv_i32 + fx.Int32(1)) < fx.Int32(n_kv_tiles)
 
-            # Cluster 0 (mem): read K/V from LDS + prefetch next tile.
+            # Cluster 0 (mem): read K and V from current LDS slot, prefetch next.
+            _v_slot_elem_offset = (kv_i32 % _ring_slots) * fx.Int32(kv_tile_elems)
             if ring0:
                 read_kv_work(0)
             else:
                 read_kv_work(1)
-            frag_Vt_next = frag_V[0]
+            v_lo_regs, v_hi_regs = _read_v_transpose(_v_slot_elem_offset)
             if has_next:
                 if ring0:
                     load_kv(kv_i32 + fx.Int32(1), 1)
@@ -1295,33 +1406,26 @@ def flex_attn_fwd_gfx950_kernel(
 
             dualwave_cluster_sync(0)
 
-            # Cluster 1 (comp): QK GEMM + softmax + PV GEMM.
+            # Cluster 1 (comp): QK GEMM + softmax + register PV GEMM.
             frag_S, = gemm1_qk(frag_Q, frag_K[0])
-            out_sm = softmax_full(frag_S, m_i, l_i, frag_O)
-            frag_P, m_i, l_i, frag_O, softmax_corr = (
+            out_sm = softmax_full(frag_S, m_i, l_i, o_accs)
+            frag_P, m_i, l_i, o_accs, softmax_corr = (
                 out_sm[0], out_sm[1], out_sm[2], out_sm[3], out_sm[4],
             )
-            if const_expr(_is_32x32):
-                frag_P_a, = frag_p_to_pv_a(frag_P)
-                frag_O, = gemm2_pd1(frag_P_a, frag_Vt_next, frag_O)
-            else:
-                bridge_p_write_from_frag_p(frag_P)
-                rocdl.s_waitcnt(0)
-                rocdl.s_barrier()
-                frag_P_a, = bridge_p_load()
-                frag_O, = gemm2_pd1(frag_P_a, frag_Vt_next, frag_O)
+            # Register-only PV: P packed as B, V pre-read as A.
+            pv_gemm_register(frag_P, v_lo_regs, v_hi_regs, o_accs)
 
             dualwave_cluster_sync(1)
 
             loop_results = yield (
                 [m_i[r] for r in range_constexpr(npair)]
                 + [l_i[r] for r in range_constexpr(npair)]
-                + [frag_O]
+                + [o_accs[dc] for dc in range_constexpr(_n_d_chunks)]
             )
 
         m_i = [loop_results[r] for r in range_constexpr(npair)]
         l_i = [loop_results[npair + r] for r in range_constexpr(npair)]
-        frag_O = loop_results[_o]
+        o_accs = [loop_results[_o + dc] for dc in range_constexpr(_n_d_chunks)]
 
         if const_expr(_enable_stagger):
             stagger_close(infra.stagger_i32)
@@ -1368,15 +1472,11 @@ def flex_attn_fwd_gfx950_kernel(
             frag_P, m_i, l_i, frag_O, softmax_corr = (
                 out_sm[0], out_sm[1], out_sm[2], out_sm[3], out_sm[4],
             )
-            if const_expr(_is_32x32):
-                frag_P_a, = frag_p_to_pv_a(frag_P)
-                frag_O, = gemm2_pd1(frag_P_a, frag_V[0], frag_O)
-            else:
-                bridge_p_write_from_frag_p(frag_P)
-                rocdl.s_waitcnt(0)
-                rocdl.s_barrier()
-                frag_P_a, = bridge_p_load()
-                frag_O, = gemm2_pd1(frag_P_a, frag_V[0], frag_O)
+            bridge_p_write_from_frag_p(frag_P)
+            rocdl.s_waitcnt(0)
+            rocdl.s_barrier()
+            frag_P_a, = bridge_p_load()
+            frag_O, = gemm2_pd1(frag_P_a, frag_V[0], frag_O)
             rocdl.s_waitcnt(0)
             rocdl.s_barrier()
             if has_next:
@@ -1439,25 +1539,32 @@ def flex_attn_fwd_gfx950_kernel(
 
     #pipeline._dump_config()
 
-    if const_expr(_is_32x32):
-        # Post-loop: reduce l_i across 32 lanes + permlane32_swap for half-wave.
-        # l_i has npair=16 entries but they all track the same column sum.
-        # Sum across lanes to get the true per-row denominator.
-        # With column reduction, all npair entries have the same value (single column).
-        # Just reduce l_i[0] across lanes, then broadcast.
-        w = l_i[0]
-        for off in (16, 8, 4, 2, 1):
-            peer = w.shuffle_xor(off, GFX950_WAVE_SIZE)
-            w = w.addf(peer, fastmath=_FM)
-        l_total = _permlane32_reduce(w, "sum")
-        for r in range_constexpr(npair):
-            l_i[r] = l_total
+    # After QK swap with npair=1: l_i[0] already has the correct per-query-row sum
+    # (permlane32 in softmax combines the two score halves). No shuffle_xor needed.
 
-    for i in range_constexpr(n_o):
-        frag_O[i] = frag_O[i] * (fx.Float32(1.0) / l_i[o_slot_row[i]])
-    thr_o = thr_pv.partition_C(gO)
-    for i in range_constexpr(n_o):
-        thr_o[i] = _to_elem(frag_O[i], elem_dtype)
+    # O normalization: divide each v16f32 by l_i[0].
+    inv_l = fx.Float32(1.0) / l_i[0]
+    inv_l_vec = Vec.from_elements([inv_l], fx.Float32).broadcast_to(16)
+    for dc in range_constexpr(_n_d_chunks):
+        o_accs[dc] = (Vec(o_accs[dc]) * inv_l_vec).ir_value()
+
+    # O store: each thread writes 16 D-values at 1 query-row per D-chunk.
+    # C fragment layout (M=D, N=query): lane L has query_row = L%32.
+    # Element e → D-in-chunk = 8*(e//4) + e%4 + 4*(L//32).
+    # Group 0 (L<32): D positions {0,1,2,3,8,9,10,11,16,17,18,19,24,25,26,27}
+    # Group 1 (L>=32): complement {4,5,6,7,12,13,14,15,20,21,22,23,28,29,30,31}
+    _qrow = fx.Int32(local_tid % 32)
+    _group_d_base = fx.Int32((local_tid // 32) * 4)
+    _o_row_stride = hq * head_dim  # stride between consecutive query rows in O
+
+    o_base = o_off + _qrow * _o_row_stride
+    o_elem_iter = fx.recast_iter(elem_dtype, fx.get_iter(o))
+    for dc in range_constexpr(_n_d_chunks):
+        o_vec = Vec(o_accs[dc])
+        for e in range_constexpr(16):
+            d_in_chunk = 8 * (e // 4) + (e % 4)
+            global_d = dc * 32 + d_in_chunk
+            o_elem_iter[fx.Int32(o_base + _group_d_base + fx.Int32(global_d))] = _to_elem(o_vec[e], elem_dtype)
 
 
 @flyc.jit
@@ -1538,6 +1645,7 @@ def flydsl_flex_attention_layout(
     num_groups: int = 2,
     pipe_depth: int = 1,
     pipe_stages: int = 1,
+    accurate_softmax: bool = True,
     stream: Optional[torch.cuda.Stream] = None,
 ) -> torch.Tensor:
     """Dense flash-attention forward on the layout API (gfx950). Phase 0: no mods.
@@ -1609,14 +1717,14 @@ def flydsl_flex_attention_layout(
         num_groups=num_groups,
         pipe_depth=pipe_depth,
         pipe_stages=pipe_stages,
+        accurate_softmax=accurate_softmax,
     )
     #if os.environ.get("FLEX_ATTN_PRINT_TRAITS"):
     #    print_flex_attn_launch_summary(param, seqlen_q=Sq, seqlen_kv=Skv)
-    # V is pre-transposed on the host to [B, Hkv, D, Skv] (contiguous) so GEMM2's
-    # B operand has block_n (K-dim) contiguous. In-kernel LDSReadTrans is a future opt.
-    vt = v.permute(0, 2, 3, 1).contiguous()
+    # V stays in BSHD layout [B, Skv, Hkv, D]; the kernel tiles V into compact
+    # [block_n, 32] D-chunk sub-tiles in LDS and uses LDSReadTrans16_64b to transpose.
     launch_flex_attn_gfx950(
-        out.contiguous(), q.contiguous(), k.contiguous(), vt,
+        out.contiguous(), q.contiguous(), k.contiguous(), v.contiguous(),
         fx.Float32(scale), param, stream,
     )
     return out
