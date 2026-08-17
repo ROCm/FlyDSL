@@ -738,9 +738,11 @@ class ReplaceIfWithDispatch(Transformer):
 
         def _emit_branch(fn, block, label):
             with ir.InsertionPoint(block):
-                branch_result = ReplaceIfWithDispatch._call_branch(fn, result_names, result_values)
+                branch_inputs = _pack_states(state_raw, exemplar)
+                branch_result = ReplaceIfWithDispatch._call_branch(fn, result_names, branch_inputs)
+                branch_map = dict(zip(result_names, branch_inputs))
                 branch_values = ReplaceIfWithDispatch._normalize_branch_result(
-                    branch_result, result_names, result_map, label
+                    branch_result, result_names, branch_map, label
                 )
                 scf.YieldOp(
                     _unpack_branch_outputs(result_names, branch_values, exemplar, label),
