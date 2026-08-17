@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-17T18:34:33Z",
+ "updated": "2026-08-17T18:58:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32057245438,
+   "pr": 960,
+   "commit": "2cc5acc49303b8d44a3fb73b3276a33aad1c861e",
+   "branch": "new_bias_alibi_sink_attention",
+   "event": "pull_request",
+   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32057245438",
+   "created_at": "2026-08-17T18:53:06Z",
+   "updated_at": "2026-08-17T18:55:29Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
   {
    "run_id": 32042918431,
    "pr": 971,
@@ -1158,7 +1173,7 @@
   },
   {
    "run_id": 31723810762,
-   "pr": 960,
+   "pr": null,
    "commit": "1a5d018b7062d71a5640d91cbe14e72f23b00a92",
    "branch": "new_bias_alibi_sink_attention",
    "event": "pull_request",
@@ -2020,52 +2035,6 @@
      "started_at": "2026-08-13T01:37:15Z",
      "completed_at": "2026-08-13T02:02:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655638442/job/94314405758",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 31655621039,
-   "pr": 860,
-   "commit": "f25e5a4c267b73bc93849c3f080a51e806da04c7",
-   "branch": "jiacao/conv3d-gemm-port",
-   "event": "pull_request",
-   "title": "[Kernel] fp8 conv3d: 8-wave GEMM pipeline + BIG_IN fix",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655621039",
-   "created_at": "2026-08-13T00:47:40Z",
-   "updated_at": "2026-08-13T03:07:21Z",
-   "actor": "jiacao-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T01:19:54Z",
-     "completed_at": "2026-08-13T02:39:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655621039/job/94314529164",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T01:19:56Z",
-     "completed_at": "2026-08-13T03:07:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655621039/job/94314529173",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T02:03:58Z",
-     "completed_at": "2026-08-13T02:29:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31655621039/job/94314529278",
      "log_fetch_failed": true
     }
    ]
