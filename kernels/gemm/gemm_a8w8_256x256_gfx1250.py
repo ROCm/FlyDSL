@@ -341,15 +341,19 @@ def launch_gemm_a8w8_256x256(
         lds_load_b32, _ = make_lds_copy_ops(32)
         lds_load_b128, _ = make_lds_copy_ops(128)
 
-        def _stage_load_a(stage, wm):
-            row_off = wm * 16 * A_LDS_ROW
-            v = [Vec(lds_load_b128(stage_a_addr[stage], row_off + 32 * j)) for j in range_constexpr(4)]
+        DS_PER_FRAG = 4  # ds_load_b128 per 16-dword fragment
+
+        def _frag_geom(kind, stage):
+            if const_expr(kind == "a"):
+                return stage_a_addr[stage], 16 * A_LDS_ROW, 32
+            return stage_b_addr[stage], B_LDS_ROW, 512
+
+        def _join(v):
             return v[0].shuffle(v[1], list(range(8))).shuffle(v[2].shuffle(v[3], list(range(8))), list(range(16)))
 
-        def _stage_load_b(stage, wn):
-            col_off = wn * B_LDS_ROW
-            v = [Vec(lds_load_b128(stage_b_addr[stage], col_off + 512 * j)) for j in range_constexpr(4)]
-            return v[0].shuffle(v[1], list(range(8))).shuffle(v[2].shuffle(v[3], list(range(8))), list(range(16)))
+        def _stage_load_frag(kind, stage, idx):
+            addr, row, span = _frag_geom(kind, stage)
+            return _join([Vec(lds_load_b128(addr, idx * row + span * j)) for j in range_constexpr(DS_PER_FRAG)])
 
         def _bcast_byte(word, sel):
             """E8M0 byte -> all four bytes of an i32, so the atom's scale opsel is a no-op.
@@ -378,7 +382,6 @@ def launch_gemm_a8w8_256x256(
         def _stage_load_sa(stage, sm):
             return _sa_of(_stage_load_sa_raw(stage, sm))
 
-        DS_PER_FRAG = 4  # ds_load_b128 per 16-dword fragment
         N_SA = half_m // 2 * 2 if const_expr(mx32) else wmma_m_rep
         N_SB = half_n // 2 * 2 if const_expr(mx32) else 1
         N_SA_LO = N_SA // 2 if const_expr(not mx32) else N_SA
@@ -407,13 +410,13 @@ def launch_gemm_a8w8_256x256(
             for wm in range_constexpr(half_m):
 
                 def _go_a(wm=wm):
-                    seed_a[wm].store(_stage_load_a(stage, wm))
+                    seed_a[wm].store(_stage_load_frag("a", stage, wm))
 
                 a_thunks.append(_go_a)
             for wn in range_constexpr(half_n):
 
                 def _go_b(wn=wn):
-                    seed_b[wn].store(_stage_load_b(stage, wn))
+                    seed_b[wn].store(_stage_load_frag("b", stage, wn))
 
                 b_thunks.append(_go_b)
             if const_expr(parity == 0):
@@ -473,19 +476,24 @@ def launch_gemm_a8w8_256x256(
             nxt = {}
 
             def _mk(kind, half, key):
-                """Per-fragment producer thunks, so a group spreads over four WMMA slots
-                instead of landing as one burst (the reference's fused_lds_load cadence)."""
+                """One thunk per WMMA slot. block128 splits per ds_load rather than per
+                fragment."""
                 n = half_m if kind == "a" else half_n
-                ld = _stage_load_a if kind == "a" else _stage_load_b
+                addr, row, span = _frag_geom(kind, stage)
                 nxt[key] = [None] * n
-                out = []
-                for i in range_constexpr(n):
+                parts = {}
 
-                    def _go(i=i):
-                        nxt[key][i] = _rmem(16, ld(stage, half * n + i))
+                def _load(i, j):
+                    parts.setdefault(i, []).append(Vec(lds_load_b128(addr, (half * n + i) * row + span * j)))
+                    if const_expr(j == DS_PER_FRAG - 1):
+                        nxt[key][i] = _rmem(16, _join(parts[i]))
 
-                    out.append(_go)
-                return out
+                per = const_expr(DS_PER_FRAG if mx32 else 1)
+                return [
+                    (lambda i=i, base=base: [_load(i, base + k) for k in range_constexpr(per)])
+                    for i in range_constexpr(n)
+                    for base in range_constexpr(0, DS_PER_FRAG, per)
+                ]
 
             def _drain_ds():
                 rocdl.sched_barrier(0)
@@ -517,20 +525,26 @@ def launch_gemm_a8w8_256x256(
             assert not (set(tail_at) & set(q3)), "tail seeds collide with the Q3 early seeds"
             q3.update(dict(zip(tail_at, tail)))
 
-            def _seq(thunks):
-                return {i: t for i, t in enumerate(thunks)}
+            def _seq(thunks, extra=()):
+                out = {i: t for i, t in enumerate(thunks)}
+                assert len(thunks) <= half_m * half_n, "producer thunks overflow the quadrant"
+                for k in range_constexpr(len(extra)):
+                    at = min(len(thunks) - 1, (len(thunks) // len(extra)) * (k + 1) - 1)
+                    out[at] = lambda p=out[at], q=extra[k]: (p(), q())
+                return out
 
             sched_fence = lambda: rocdl.sched_barrier(0)  # noqa: E731
+            q1_fast = const_expr(parity == 0 if mx32 else parity == 1)
             if const_expr(parity == 0):
                 # (A0,B0) -> (A0,B1) -> (A1,B1) -> (A1,B0); produce b1 then a1.
-                _quad(0, 0, a0, b0, _seq(_mk("b", 1, "b1") + _mk_sa_hi()), False)
-                _quad(0, half_n, a0, nxt["b1"], _seq(_mk("a", 1, "a1")), True, pre=sched_fence)
+                _quad(0, 0, a0, b0, _seq(_mk("b", 1, "b1"), _mk_sa_hi()), False)
+                _quad(0, half_n, a0, nxt["b1"], _seq(_mk("a", 1, "a1")), q1_fast, pre=sched_fence)
                 _quad(half_m, half_n, nxt["a1"], nxt["b1"], q2, True, pre=_sig)
                 _quad(half_m, 0, nxt["a1"], b0, q3, True, pre=sched_fence)
             else:
                 # (A0,B0) -> (A1,B0) -> (A1,B1) -> (A0,B1); produce a1 then b1.
-                _quad(0, 0, a0, b0, _seq(_mk("a", 1, "a1") + _mk_sa_hi()), True)
-                _quad(half_m, 0, nxt["a1"], b0, _seq(_mk("b", 1, "b1")), False, pre=sched_fence)
+                _quad(0, 0, a0, b0, _seq(_mk("a", 1, "a1"), _mk_sa_hi()), True)
+                _quad(half_m, 0, nxt["a1"], b0, _seq(_mk("b", 1, "b1")), q1_fast, pre=sched_fence)
                 _quad(half_m, half_n, nxt["a1"], nxt["b1"], q2, False, pre=_sig)
                 _quad(0, half_n, a0, nxt["b1"], q3, False, pre=sched_fence)
 
