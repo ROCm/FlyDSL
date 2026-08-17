@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-17T11:36:30Z",
+ "updated": "2026-08-17T11:50:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,11 +25,11 @@
    "branch": "phil/isa-resource-diff-arch-general",
    "event": "pull_request",
    "title": "[WIP] [Feature] Add architecture-general ISA resource diff tool",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32018459059",
    "created_at": "2026-08-17T10:05:27Z",
-   "updated_at": "2026-08-17T10:30:37Z",
+   "updated_at": "2026-08-17T11:47:17Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -55,11 +55,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-17T10:30:29Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32018459059/job/95358749515"
+     "completed_at": "2026-08-17T11:47:16Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32018459059/job/95358749515",
+     "log_fetch_failed": true
     }
    ]
   },
