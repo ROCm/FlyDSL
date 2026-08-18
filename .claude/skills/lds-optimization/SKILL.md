@@ -294,21 +294,24 @@ Same as swizzle — stride-aligned accesses cause bank conflicts. Padding adds e
 
 ### The Solution
 
-Add 1 element of padding per row to break the alignment:
+Add padding per row to break the alignment. The rule is about the **row stride
+in dwords**, not in elements: lane `t` reading row `t` lands on bank
+`(t * row_stride_bytes / 4) % NBANKS`, so the wavefront touches
+`NBANKS / gcd(row_stride_dwords, NBANKS)` distinct banks — and a *fractional*
+dword stride (an odd number of 2-byte elements) walks all of them.
 
-```python
-# gfx942 (32 banks):
-# Without padding: row stride = HEAD_SIZE (e.g., 128)
-# Bank stride = 128 * 2 / 4 = 64 -> 64 % 32 = 0 -> ALL rows hit same bank column
-# With padding: row stride = HEAD_SIZE + 1 (e.g., 129)
-# Bank stride = 129 * 2 / 4 = 64.5 -> fractional -> conflicts eliminated
-
-# gfx950 (64 banks):
-# Without padding: row stride = HEAD_SIZE (e.g., 128)
-# Bank stride = 128 * 2 / 4 = 64 -> 64 % 64 = 0 -> ALL rows hit same bank column (still conflicts!)
-# With padding: row stride = HEAD_SIZE + 1 (e.g., 129)
-# Bank stride = 129 * 2 / 4 = 64.5 -> fractional -> conflicts eliminated
+```text
+fp16, HEAD_SIZE = 128, gfx950 (64 banks):
+  pad 0  -> 128 elems -> 256 B -> 64.0 dw -> gcd(64,64)=64 ->  1 bank  -> 64-way
+  pad 1  -> 129 elems -> 258 B -> 64.5 dw -> fractional    -> 64 banks ->  1-way
+  pad 2  -> 130 elems -> 260 B -> 65.0 dw -> gcd(65,64)=1  -> 64 banks ->  1-way
+  pad 4  -> 132 elems -> 264 B -> 66.0 dw -> gcd(66,64)=2  -> 32 banks ->  2-way
+  pad 32 -> 160 elems -> 320 B -> 80.0 dw -> gcd(80,64)=16 ->  4 banks -> 16-way
 ```
+
+**More padding is not safer.** Only a fractional-dword stride, or one coprime
+with the bank count, is conflict-free; a large even padding can be nearly as bad
+as none.
 
 ### FlyDSL Padding Implementation
 
@@ -336,17 +339,29 @@ def my_kernel(...):
 
 ### Padding Amount
 
-The minimum padding to eliminate all bank conflicts:
+Pick the smallest padding whose row stride is fractional-dword or coprime with
+the bank count — for 2-byte elements that is **+1 or +2 elements**. Do **not**
+use `padding = bank_count / element_size_bytes`: for fp16 on gfx950 that gives
++32 elements, an 80-dword stride, and a 16-way conflict.
 
-```
-# gfx942 (32 banks):
-padding_elements = 32 / (element_size_bytes)  # worst case
+Measured on gfx950 (MI355X), one wavefront strided-column-reading a
+`[64][64+PAD]` fp16 tile, best of 9 x 50 launches, `hipcc -O3`:
 
-# gfx950 (64 banks):
-padding_elements = 64 / (element_size_bytes)  # worst case
-```
+| PAD | row stride | predicted | measured | vs best |
+|-----|-----------|-----------|----------|---------|
+| 0 | 128 B (32.0 dw) | 32-way | 7.11 ms | +59% |
+| 1 | 130 B (32.5 dw) | 1-way | 4.61 ms | +3% |
+| 2 | 132 B (33.0 dw) | 1-way | **4.48 ms** | best |
+| 4 | 136 B (34.0 dw) | 2-way | 4.62 ms | +3% |
+| 32 | 192 B (48.0 dw) | 16-way | 5.81 ms | +30% |
 
-But usually 1-4 elements suffice. The cost is extra LDS usage:
+Unpadded is clearly worst, and the `bank_count / element_size` formula is 26%
+slower than a single element of padding. (The microbenchmark is latency-bound on
+one wavefront, so absolute ratios are compressed relative to the conflict factor
+and it cannot separate 1-way from 2-way; use it for the ordering, not for an
+expected speedup.)
+
+The cost of padding is extra LDS usage:
 - 1 element padding per row: `KV_BLOCK_SIZE * element_size` extra bytes
 - Must ensure total LDS usage stays within **64 KB** per CU (gfx942) or **160 KB** per CU (gfx950)
 

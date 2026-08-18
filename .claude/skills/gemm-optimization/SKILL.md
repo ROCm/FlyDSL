@@ -231,8 +231,7 @@ uses swizzle but the other doesn't, data will be read from wrong positions.
 
 This section is the GEMM-specific pipeline. For the general transformation --
 prologue, `range(..., init=...)` loop-carried state, epilogue -- see the
-**prefetch-data-load** skill. (Note its register-budget model contradicts 10.2
-below; see the flag there.)
+**prefetch-data-load** skill, and 10.2 below for the register budget.
 
 ### 4.1 A Matrix: Global → LDS
 
@@ -581,26 +580,33 @@ Total:        ~148 arch_vgpr
 
 ### 10.2 Occupancy Impact
 
-On gfx942 (256 arch_vgpr + 256 accum_vgpr per SIMD):
+On gfx942 and gfx950, `arch_vgpr` and `accum_vgpr` are two physical files that
+share **one combined 512-entry occupancy budget per SIMD** — they *do* compete:
 
-| arch_vgpr | accum_vgpr | Waves/SIMD | Assessment |
-|-----------|-----------|------------|------------|
-| ≤ 128 | ≤ 128 | 2 | Good |
-| 129-256 | ≤ 256 | 1 | Acceptable for compute-bound |
-| > 256 | any | SPILL | Critical regression |
+| arch_vgpr + accum_vgpr | Waves/SIMD | Assessment |
+|------------------------|------------|------------|
+| <= 128 | 4 | High occupancy |
+| <= 170 | 3 | Good |
+| <= 256 | 2 | Moderate |
+| <= 512 | 1 | Minimum |
+| > 512 | SPILL | Critical regression |
 
-MFMA accumulators use **accum_vgpr**. Prefetch buffers, B tile, and A tile use
-**arch_vgpr**.
+Occupancy is `512 / alignTo(arch_vgpr + accum_vgpr, granule)`, capped at the
+per-SIMD wave maximum. MFMA accumulators live in `accum_vgpr` and prefetch
+buffers / A / B tiles in `arch_vgpr`, but growing either one costs occupancy.
 
-> **Unresolved — do not rely on this table without checking.** The
-> **prefetch-data-load** and **lds-optimization** skills state the opposite
-> model for the same chip: that `arch_vgpr` and `accum_vgpr` are two physical
-> files sharing **one combined 512-entry occupancy budget**, so they *do*
-> compete (<= 256 combined -> 2 waves, > 512 -> spill), and that the separate
-> 256/256 model applies only to gfx908/CDNA1. The table above and those skills
-> disagree on both the wave count and whether adding a prefetch buffer is safe.
-> This needs an owner with hardware access to settle; until then, measure
-> occupancy directly rather than trusting either table.
+The separate 256-per-file model (`max(arch, accum)`) applies only to
+gfx908/CDNA1. In LLVM this is `getTotalNumVGPRs(has90AInsts, NumAGPR, NumVGPR)`
+(`llvm/lib/Target/AMDGPU/Utils/AMDGPUBaseInfo.cpp`), which returns
+`alignTo(NumVGPR, 4) + NumAGPR` when the target has GFX90AInsts — gfx90a, gfx942
+and gfx950 all do — and `max(NumVGPR, NumAGPR)` otherwise.
+
+Measured on gfx950 (MI355X) with `hipcc -Rpass-analysis=kernel-resource-usage`:
+an MFMA kernel at arch=36/accum=32 reports 7 waves (combined model predicts 7;
+separate-file model predicts 6) and at arch=84/accum=80 reports 3 waves
+(combined predicts 3; separate predicts 2). Spilling first appears at
+arch=256/accum=256, i.e. when the combined 512 is exhausted, not when either
+file alone passes 256.
 
 ---
 
