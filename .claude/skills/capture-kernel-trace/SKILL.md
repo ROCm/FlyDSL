@@ -6,7 +6,7 @@ description: >
   kernel_include_regex, runs rocprofv3 -i input.yaml with FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1,
   and downloads the latest ui_output_agent_* directory for analysis.
   Usage: /capture-kernel-trace <test_script.py> [kernel_name_pattern]
-tools: Bash,Read,Write,Edit,Grep,Glob
+allowed-tools: Bash,Read,Write,Edit,Grep,Glob
 ---
 
 # Capture Kernel Trace

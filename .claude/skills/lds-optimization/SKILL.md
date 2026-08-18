@@ -9,7 +9,7 @@ description: >
   lgkmcnt or s_barrier). Use when trace analysis shows ds_read/ds_write/lgkmcnt
   as a bottleneck.
   Usage: /lds-optimization
-tools: Read,Edit,Bash,Grep,Glob,Agent
+allowed-tools: Read,Edit,Bash,Grep,Glob,Agent
 ---
 
 # LDS Optimization

@@ -7,14 +7,16 @@ description: >
   lines, and produce an actionable optimization plan.
   Usage: /kernel-trace-analysis <cmd>
   Can also analyze an existing dispatch dir directly: /kernel-trace-analysis --dir <path>
-tools: Read,Edit,Bash,Grep,Glob,Agent,Write
-note: All analysis is done programmatically via hotspot_analyzer.py + code.json. Do NOT use GUI tools.
+allowed-tools: Read,Edit,Bash,Grep,Glob,Agent,Write
 ---
 
 # Kernel Trace Analysis
 
 Profile and analyze GPU kernel ATT traces to identify stall hotspots and produce
 an optimization plan.
+
+All analysis is done programmatically via `hotspot_analyzer.py` + `code.json`.
+Do **not** use GUI tools.
 
 ## Arguments
 

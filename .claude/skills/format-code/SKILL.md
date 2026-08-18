@@ -7,6 +7,7 @@ description: >
   files. Use when the user says "format code", "clean up code", "lint", "format before commit",
   "/format-code", wants to reproduce the "Check Python Code Style" CI job locally, is fixing a
   CI style failure, is about to push Python changes, or mentions black, ruff, or clang-format.
+allowed-tools: Bash Read Edit Grep Glob
 ---
 
 # Format Code

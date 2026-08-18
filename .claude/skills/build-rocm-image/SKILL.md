@@ -1,6 +1,10 @@
 ---
 name: build-rocm-image
-description: Connect to a remote host via SSH and build a Docker image with rocprofv3, aiter, and FlyDSL. Use when user wants to build/rebuild the ROCm development image on a remote host. Usage: /build-rocm-image <hostname>
+description: >
+  Connect to a remote host via SSH and build a Docker image with rocprofv3, aiter,
+  and FlyDSL. Use when user wants to build/rebuild the ROCm development image on a
+  remote host.
+  Usage: /build-rocm-image <hostname>
 allowed-tools: Bash
 ---
 
