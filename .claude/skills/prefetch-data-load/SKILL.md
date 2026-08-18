@@ -16,6 +16,15 @@ allowed-tools: Read Edit Bash Grep Glob Agent
 Apply software prefetch (double-buffering) to overlap async data loads with
 compute in FlyDSL GPU kernel loops.
 
+**API note.** The worked examples below are transcribed from the PA decode
+kernel and spell loads as raw `buffer_ops.buffer_load` and MMA as raw
+`rocdl.mfma_*`. What they demonstrate is the *loop structure* — prologue,
+loop-carried state, epilogue — which is unchanged on the current surface. For
+new code prefer `fx.rocdl.make_buffer_tensor` + `fx.copy` for the loads and
+`fx.make_mma_atom` + `fx.gemm` for the MMA; the raw intrinsics now live in
+`kernels/common/buffer_ops.py` (moved out of `flydsl.expr` in #880). See the
+**kernel-code-cleanup** skill for the mapping.
+
 ## Core Principle
 
 GPU global memory loads (`buffer_ops.buffer_load`, `buffer_load_dwordx4`)
@@ -220,7 +229,8 @@ K loads needed).
    Use `fx.Int64(0)`, `fx.Int64(15)`, `fx.Int64(1)` instead.
 
 2. **Prefer internal types; unwrap only at hard boundaries.** Most loop-carried
-   values can remain `fx.Int32`, `fx.Float32`, `ArithValue`, or `Vector`. If a
+   values can remain `fx.Int32`, `fx.Float32`, or `fx.Vector` (not the deprecated
+   `ArithValue`). If a
    low-level helper explicitly expects raw `ir.Value`, unwrap at that boundary.
 
 3. **Clear `SmemPtr._view_cache` before epilogue.** `SmemPtr.get()` caches the
@@ -351,7 +361,9 @@ This works because:
 - **Use `range(..., init=...)`** to carry prefetched data across iterations (Python variable swap is invisible to MLIR)
 - **Minimize work between load and consume**: the more compute between prefetch issue and data use, the better the overlap
 - **Keep the swap simple**: just unpack from `state`, no computation
-- **Check VGPR budget**: calculate `current_arch_vgpr + prefetch_vgprs <= 256` to avoid spills
+- **Check VGPR budget**: spills start when `arch_vgpr + accum_vgpr` exceeds the
+  combined 512-entry budget; staying at or under 256 is what buys a 2nd wave/SIMD.
+  See "Register Budget" above for the full occupancy table.
 - **Hoist cross-phase loads into barrier regions**: if a kernel has barrier-heavy phases (reduce/sync), issue the next phase's loads before/during those barriers
 - **Unwrap all init values to raw ir.Value**: use `v.ir_value() if hasattr(v, 'ir_value') else v`
 

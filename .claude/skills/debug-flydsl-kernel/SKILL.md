@@ -186,7 +186,8 @@ Do not use `const_expr(lane == 0)`: even with `known_block_size`, `gpu.thread_id
 
 ### 6.3 Loop-carried state packing
 
-Prefer FlyDSL internal types (`fx.Int32`, `fx.Float32`, `Vector`, `ArithValue`) for loop-carried state. Unwrap only when a low-level helper explicitly requires raw `ir.Value`:
+Prefer FlyDSL internal types (`fx.Int32`, `fx.Float32`, `fx.Vector`) for loop-carried state.
+Do not reach for the deprecated `ArithValue` wrapper. Unwrap only when a low-level helper explicitly requires raw `ir.Value`:
 ```python
 def _unwrap(v):
     return v.ir_value() if hasattr(v, 'ir_value') else v
@@ -198,11 +199,20 @@ Supported state types: `f32` (scalar), vector values, `i32`, `i64`, `index`.
 
 ### 6.4 buffer_load type mismatch
 
-`buffer_ops.buffer_load(rsrc, offset, vec_width=4, dtype=T.i32)` — the offset is in units of `dtype`. For FP8 data addressed in bytes, divide by element size:
+Applies to kernels still on the raw buffer intrinsics, which live in
+`kernels/common/buffer_ops.py` (moved out of `flydsl.expr` in #880). The
+`offset` is in units of `dtype`, so FP8 data addressed in bytes must be divided
+by the element size:
 ```python
+from kernels.common import buffer_ops
+
 k_addr_bytes = ...  # address in FP8 elements (= bytes for FP8)
 k_4xi32 = buffer_ops.buffer_load(k_rsrc, k_addr_bytes // 4, vec_width=4, dtype=T.i32)
 ```
+
+This class of offset bug is the reason `fx.rocdl.make_buffer_tensor` + a layout
+view is preferred for new code — the descriptor and offsets are derived for you.
+See the **kernel-code-cleanup** skill to migrate.
 
 ### 6.5 Vector stores require vector values
 
@@ -232,10 +242,10 @@ print(f"loop: start={part_start}, stop={part_end}, step={cpb}")
 ### 7.3 Recovery from GPU hang
 
 ```bash
-# Check GPU state
-rocm-smi
-# If GPU shows 100% usage with no progress, reset:
-sudo amdgpu-reset  # or reboot
+# Check GPU state (amd-smi; rocm-smi is deprecated)
+amd-smi monitor
+# If a GPU shows full utilization with no progress, reset that device:
+sudo amd-smi reset -g <gpu_index>
 ```
 
 ## 8. Diagnostic Workflow

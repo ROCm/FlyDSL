@@ -54,10 +54,12 @@ Pipeline is built by `RocmBackend._pipeline_parts()` and split into three stages
 - `python/flydsl/expr/primitive.py` - All layout algebra functions
 - `python/flydsl/expr/derived.py` - CopyAtom, MmaAtom, TiledCopy, TiledMma wrappers
 - `python/flydsl/expr/gpu.py` - GPU operations (thread_idx, block_idx, barrier)
-- `python/flydsl/expr/buffer_ops.py` - AMD buffer load/store intrinsics
-- `python/flydsl/expr/rocdl/` - MFMA/WMMA and other ROCm intrinsics (package: cdna4, cluster, inline_asm, tdm_ops, universal)
+- `python/flydsl/expr/rocdl/` - MFMA/WMMA and other ROCm intrinsics
+  (package: cdna3, cdna4, cdna5, rdna3, rdna4, cluster, inline_asm, tdm_ops, universal)
 - `python/flydsl/expr/gpu.py` - `SharedAllocator` for LDS (shared memory), `thread_id`/`block_id`, `barrier`
 - `python/flydsl/utils/smem_allocator.py` - legacy `SmemAllocator` (un-migrated kernels only)
+- `kernels/common/buffer_ops.py` - legacy raw AMD buffer load/store intrinsics
+  (moved out of `flydsl.expr` in #880; prefer `fx.rocdl.make_buffer_tensor`)
 - `kernels/` - Pre-built kernels, organized into subpackages: `gemm/` (preshuffle_gemm.py, mxfp4_preshuffle.py, ...), `norm/` (layernorm/softmax/rmsnorm), `attention/`, `moe/`, `mma/`, `common/`, `comm/`, `conv/`
 
 ---
@@ -138,7 +140,7 @@ Products combine two layouts to create a larger layout:
 
 ```python
 fx.logical_product(layout, tiler)   # Basic mode-wise concatenation
-fx.raked_product(thr, val)          # Interleaved access pattern (common for TiledCopy)
+fx.raked_product(thr, val)          # Interleaved access pattern (see make_layout_tv for TV layouts)
 fx.blocked_product(layout, tiler)   # Blocked access pattern
 fx.zipped_product(layout, tiler)    # Zipped modes
 fx.tiled_product(layout, tiler)     # Hierarchical tiled structure
@@ -229,10 +231,10 @@ elem0 = v_i64[0]
 
 buf = fx.rocdl.make_buffer_tensor(tensor)          # preferred buffer-resource view
 tA  = fx.make_view(fx.get_iter(buf), fx.make_layout((M, N), (N, 1)))
-# load/store tA via copy atoms (fx.copy_atom_call); raw buffer_ops is legacy
+# load/store tA via copy atoms (fx.copy); the raw buffer intrinsics are legacy
 ```
 
-Older code may use `gpu.thread_idx.x`, `gpu.block_idx.x`, `arith.constant(...)`, `T.i32`, raw `vector.*` helpers, the `ArithValue` wrapper, and `buffer_ops`. Keep those when editing existing code that already uses them heavily, but prefer `gpu.thread_id/block_id`, `fx.Int64`/`fx.Int32`/`fx.Float32`, `fx.Vector`, and `fx.rocdl.make_buffer_tensor` for new code. `ArithValue`, `fx.Index`, and `buffer_ops` are deprecated/legacy — for migrating an existing kernel see the **flydsl-kernel-code-cleanup** skill.
+Older code may use `gpu.thread_idx.x`, `gpu.block_idx.x`, `arith.constant(...)`, `T.i32`, raw `vector.*` helpers, the `ArithValue` wrapper, and `buffer_ops`. Keep those when editing existing code that already uses them heavily, but prefer `gpu.thread_id/block_id`, `fx.Int64`/`fx.Int32`/`fx.Float32`, `fx.Vector`, and `fx.rocdl.make_buffer_tensor` for new code. `ArithValue`, `fx.Index`, and `buffer_ops` are deprecated/legacy — for migrating an existing kernel see the **kernel-code-cleanup** skill.
 
 ### Parameter Types
 | Type | Description | At host boundary |
@@ -531,9 +533,9 @@ def my_kernel(A: fx.Tensor, B: fx.Tensor, BLOCK_DIM: fx.Constexpr[int]):
     rA = fx.make_rmem_tensor(1, fx.Float32)
 
     # 5. Copy: global -> register -> compute -> global
-    fx.copy_atom_call(copyAtom, fx.slice(tA, (None, tid)), rA)
+    fx.copy(copyAtom, fx.slice(tA, (None, tid)), rA)
     # ... compute on register values ...
-    fx.copy_atom_call(copyAtom, rA, fx.slice(tB, (None, tid)))
+    fx.copy(copyAtom, rA, fx.slice(tB, (None, tid)))
 ```
 
 ### Vectorized Loads (Wide Copies)
@@ -546,7 +548,7 @@ rA = fx.make_rmem_tensor(VEC_WIDTH, fx.Float32)
 
 # Divide for VEC_WIDTH elements per thread
 tA = fx.logical_divide(tA, fx.make_layout(VEC_WIDTH, 1))
-fx.copy_atom_call(copyAtom, fx.slice(tA, (None, tid)), rA)
+fx.copy(copyAtom, fx.slice(tA, (None, tid)), rA)
 
 # Load/store as vectors
 vec = fx.memref_load_vec(rA)     # Load vector from register memref
@@ -562,10 +564,12 @@ val_layout = fx.make_layout((1, 8), (1, 1))    # 8 values per thread
 # Create copy atom
 copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
 
-# Build tiled copy with raked product layout
-layout_thr_val = fx.raked_product(thr_layout, val_layout)
-tile_mn = fx.make_tile(4, 8)
-tiled_copy = fx.make_tiled_copy(copy_atom, layout_thr_val, tile_mn)
+# Build tiled copy from the TV layout. Use make_layout_tv -- a bare
+# raked_product is NOT equivalent: make_layout_tv additionally derives the
+# TV mapping via composition(right_inverse(layout_mn), ...).
+tile_mn, tv_layout = fx.make_layout_tv(thr_layout, val_layout)
+tiled_copy = fx.make_tiled_copy(copy_atom, tv_layout, tile_mn)
+# fx.make_tiled_copy_tv(copy_atom, thr_layout, val_layout) is the one-call form.
 
 # Get this thread's slice and partition
 thr_copy = tiled_copy.get_slice(tid)
@@ -586,12 +590,13 @@ through copy atoms — the OOB-checked V# descriptor is built for you.
 buf = fx.rocdl.make_buffer_tensor(tensor)
 tA  = fx.make_view(fx.get_iter(buf), fx.make_layout((M, N), (N, 1)))
 copy = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
-fx.copy_atom_call(copy, fx.slice(tA, (None, tid)), rA)   # after partitioning tA
+fx.copy(copy, fx.slice(tA, (None, tid)), rA)   # after partitioning tA
 ```
 
-Legacy raw intrinsics (`buffer_ops.create_buffer_resource` / `buffer_load` /
-`buffer_store`, `offset` in **elements**) remain for un-migrated kernels; see the
-**flydsl-kernel-code-cleanup** skill to migrate them.
+Legacy raw intrinsics (`create_buffer_resource` / `buffer_load` / `buffer_store`,
+`offset` in **elements**) remain for un-migrated kernels. They now live in
+`kernels/common/buffer_ops.py` (moved out of `flydsl.expr` in #880); see the
+**kernel-code-cleanup** skill to migrate them.
 
 ### Copy Atom Types
 | Type | Bits | Usage |
@@ -759,12 +764,12 @@ def elementwise_kernel(In: fx.Tensor, Out: fx.Tensor, BLOCK: fx.Constexpr[int], 
     copy = fx.make_copy_atom(fx.UniversalCopy(VEC * 32), fx.Float32)
     rIn = fx.make_rmem_tensor(VEC, fx.Float32)
     rOut = fx.make_rmem_tensor(VEC, fx.Float32)
-    fx.copy_atom_call(copy, fx.slice(tIn, (None, tid)), rIn)
+    fx.copy(copy, fx.slice(tIn, (None, tid)), rIn)
     # Transform
-v = Vec(fx.memref_load_vec(rIn))
-v = v * v  # example: square
+    v = Vec(fx.memref_load_vec(rIn))
+    v = v * v  # example: square
     fx.memref_store_vec(v, rOut)
-    fx.copy_atom_call(copy, rOut, fx.slice(tOut, (None, tid)))
+    fx.copy(copy, rOut, fx.slice(tOut, (None, tid)))
 ```
 
 ### Element-wise Kernel Cookbook (GPU-Verified)
@@ -790,7 +795,7 @@ zero_vec = Vec.filled(vec_width, 0.0, fx.Float32)
 vC = fx.max(vA, zero_vec)
 
 # --- Abs: C = |A| (arith.absf does NOT exist) ---
-vA = fx.memref_load_vec(rA)
+vA = Vec(fx.memref_load_vec(rA))
 zero_vec = Vec.filled(vec_width, 0.0, fx.Float32)
 neg_vA = -vA
 is_neg = vA < zero_vec
@@ -922,7 +927,8 @@ Pass raw `torch.Tensor` objects instead.
 
 1. **Constants/casts**: Prefer `fx.Int32(...)`, `fx.Int64(...)`, and `fx.Float32(...)` (`fx.Index(...)` is being deprecated in favor of `fx.Int64(...)`). Use `arith.constant(...)` only at low-level boundaries.
 
-2. **`buffer_ops.buffer_load` offset**: The `offset` parameter is in ELEMENTS, not bytes.
+2. **Raw `buffer_load` offset**: the `offset` parameter is in ELEMENTS, not bytes.
+   The raw intrinsics live in `kernels/common/buffer_ops.py`, not `flydsl.expr`.
 
 3. **Cache stale after code changes**: The disk cache auto-invalidates on source/closure changes. Only set `FLYDSL_RUNTIME_ENABLE_CACHE=0` or clear `~/.flydsl/cache/` if you changed C++ passes or non-closure helpers.
 

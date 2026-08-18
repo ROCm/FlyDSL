@@ -405,8 +405,8 @@ lds_ptr.store(data, [offset])               # ds_write (async)
 
 # Do independent compute that doesn't need the LDS data
 next_offsets = compute_next_offsets()        # SALU/VALU work
-next_data = buffer_ops.buffer_load(rsrc, next_offsets, vec_width=4)  # global load (also async)
-scale_factor = buffer_ops.buffer_load(rsrc_scale, scale_off, vec_width=1)
+fx.copy(copy_atom, fx.slice(tNext, (None, tid)), rNext)   # global load (also async)
+fx.copy(scale_atom, fx.slice(tScale, (None, tid)), rScale)
 
 gpu.barrier()                                # by now, LDS write has completed
 result = lds_ptr.load([offset])             # ds_read (no stall)
@@ -416,7 +416,7 @@ result = lds_ptr.load([offset])             # ds_read (no stall)
 
 Prioritize by latency-hiding value:
 
-1. **Global loads for next phase** (`buffer_ops.buffer_load`) — these are also async, ~300+ cycle latency
+1. **Global loads for next phase** (`fx.copy` from a `make_buffer_tensor` view) — also async, ~300+ cycle latency
 2. **Address computation** (`compute_offsets`) — SALU/VALU, ~4-8 cycles each
 3. **Independent MFMA chains** — if available, ~64 cycles per MFMA
 4. **Scalar loads** (`s_load_dword*`) — kernel arguments, ~20 cycles

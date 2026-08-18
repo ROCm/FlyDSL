@@ -27,8 +27,8 @@ Ask the user what kind of kernel they need. Map to one of these patterns:
 
 | Pattern | Examples | Key Primitives |
 |---------|----------|---------------|
-| **Elementwise** | vecadd, scale, relu, abs | `logical_divide` + `copy_atom_call` |
-| **Reduction** | sum, max, softmax, layernorm | `buffer_load` + warp shuffle + LDS |
+| **Elementwise** | vecadd, scale, relu, abs | `logical_divide` + `fx.copy` |
+| **Reduction** | sum, max, softmax, layernorm | `make_buffer_tensor` + warp shuffle + LDS |
 | **Tiled Copy** | transpose, permute, gather | `zipped_divide` + `TiledCopy` |
 | **GEMM** | matmul, batched gemm | `TiledMma` + `TiledCopy` + LDS |
 | **Fused** | fused attention, GEMM+epilogue | Combine GEMM + elementwise |
@@ -105,7 +105,7 @@ def elementwise_kernel(
     rOut = fx.make_rmem_tensor(VEC_WIDTH, fx.Float32)
 
     # === Step 5: Load -> Compute -> Store ===
-    fx.copy_atom_call(copy_atom, fx.slice(tA, (None, tid)), rA)
+    fx.copy(copy_atom, fx.slice(tA, (None, tid)), rA)
 
     vA = Vec(fx.memref_load_vec(rA))
     # --- YOUR COMPUTE HERE ---
@@ -113,7 +113,7 @@ def elementwise_kernel(
     # --- END COMPUTE ---
     fx.memref_store_vec(vOut, rOut)
 
-    fx.copy_atom_call(copy_atom, rOut, fx.slice(tOut, (None, tid)))
+    fx.copy(copy_atom, rOut, fx.slice(tOut, (None, tid)))
 
 @flyc.jit
 def elementwise_launch(
@@ -167,11 +167,13 @@ def tiled_copy_kernel(A: fx.Tensor, B: fx.Tensor):
     thr_layout = fx.make_layout((4, 1), (1, 1))   # 4 threads along M
     val_layout = fx.make_layout((1, 8), (1, 1))    # each loads 8 along N
     copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
-    layout_tv = fx.raked_product(thr_layout, val_layout)
-    tile_mn = fx.make_tile(4, 8)
+    # Build the TV layout with make_layout_tv -- do NOT hand-build it from
+    # raked_product alone: make_layout_tv also derives the TV mapping via
+    # composition(right_inverse(layout_mn), ...). See examples/02-tiledCopy.py.
+    tile_mn, tv_layout = fx.make_layout_tv(thr_layout, val_layout)
 
     # Build tiled copy and get thread's partition
-    tiled_copy = fx.make_tiled_copy(copy_atom, layout_tv, tile_mn)
+    tiled_copy = fx.make_tiled_copy(copy_atom, tv_layout, tile_mn)
     thr_copy = tiled_copy.get_slice(tid)
     src = thr_copy.partition_S(bA)
     dst = thr_copy.partition_D(bB)
@@ -260,27 +262,36 @@ def gemm_kernel(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor):
     fx.copy(copy_atom, copy_frag_C, copy_dst_C, pred=None)
 ```
 
-### Pattern D: Buffer Load/Store (Low-level)
+### Pattern D: Buffer-Resource View (Preferred Low-level Path)
 
-Direct AMD buffer intrinsics for maximum control. Bypasses the layout algebra.
+For AMD buffer loads/stores, build a buffer-resource view with
+`make_buffer_tensor` and move data through copy atoms. The OOB-checked V#
+descriptor is built for you, and the offsets stay in layout coordinates instead
+of hand-computed element counts.
 
 ```python
-from flydsl.expr import buffer_ops
-
 @flyc.kernel
-def buffer_kernel(A: fx.Tensor, B: fx.Tensor, N: fx.Constexpr[int]):
+def buffer_kernel(A: fx.Tensor, B: fx.Tensor, M: fx.Constexpr[int], N: fx.Constexpr[int]):
     tid = fx.thread_idx.x
-    bid = fx.block_idx.x
-    gid = bid * 256 + tid
 
-    rsrc_a = buffer_ops.create_buffer_resource(A)
-    rsrc_b = buffer_ops.create_buffer_resource(B)
+    bufA = fx.rocdl.make_buffer_tensor(A)
+    bufB = fx.rocdl.make_buffer_tensor(B)
+    tA = fx.make_view(fx.get_iter(bufA), fx.make_layout((M, N), (N, 1)))
+    tB = fx.make_view(fx.get_iter(bufB), fx.make_layout((M, N), (N, 1)))
 
-    # offset is in ELEMENTS (not bytes!) -- buffer_load converts internally
-    data = buffer_ops.buffer_load(rsrc_a, gid * 4, vec_width=4, dtype=fx.T.f32())
-    # ... compute on data ...
-    buffer_ops.buffer_store(data, rsrc_b, gid * 4)
+    copy = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
+    rA = fx.make_rmem_tensor(4, fx.Float32)
+    fx.copy(copy, fx.slice(tA, (None, tid)), rA)   # after partitioning tA
+    # ... compute on rA ...
+    fx.copy(copy, rA, fx.slice(tB, (None, tid)))
 ```
+
+The raw intrinsics (`create_buffer_resource` / `buffer_load` / `buffer_store`)
+still exist for a scalar-base + per-thread-offset load that has no layout form,
+but they now live in `kernels/common/buffer_ops.py` (moved out of
+`flydsl.expr` in #880) and their `offset` is in **elements**, not bytes — a
+classic source of bugs. Prefer the view above; see the **kernel-code-cleanup**
+skill to migrate existing raw-intrinsic kernels.
 
 ---
 
@@ -359,10 +370,14 @@ if bid == 0:
 # Workgroup barrier (__syncthreads)
 fx.gpu.barrier()
 
-# Fine-grained waitcnt (CDNA3)
-fx.rocdl.s_waitcnt(0)
+# Fine-grained waitcnt (CDNA3 gfx942 / CDNA4 gfx950, and RDNA3/RDNA4).
+# Use the keyword form: it is arch-dispatched and packs the correct bitfield.
+# Unset counters default to "no wait", so name only the ones you need.
+fx.rocdl.s_waitcnt(lgkmcnt=0)              # LDS/SMEM only
+fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0)     # everything
 
-# Fine-grained waitcnt (CDNA4 / gfx950)
+# Split wait counters are gfx12+ only (gfx1250 / RDNA4) — NOT available on
+# gfx942 or gfx950. They are upstream ROCDL ops re-exported through fx.rocdl.
 fx.rocdl.s_wait_loadcnt(0)
 fx.rocdl.s_wait_storecnt(0)
 fx.rocdl.s_wait_dscnt(0)

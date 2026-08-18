@@ -195,6 +195,11 @@ Flatten recursively: `/FlyDSL/kernels/pa_decode_sw_fp8_ps.py` → `source_0_pa_d
 
 ### Common hotspot patterns
 
+The snippets below are schematic — they illustrate *instruction scheduling*, so
+loads are written in the abbreviated raw-intrinsic form. On the current surface
+these are `fx.copy` from a `make_buffer_tensor` view; the scheduling advice is
+unchanged either way.
+
 #### Pattern 1: V/K loads inside MFMA loop → very high stall rate (80–95%)
 
 ```python
