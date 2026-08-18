@@ -112,7 +112,19 @@ for f in $(find "${REPO_ROOT}/tests/mlir" -name "*.mlir" -type f 2>/dev/null | s
     mapfile -t run_lines < <(grep '^// RUN:' "$f" | sed 's|^// RUN: *||')
     [ ${#run_lines[@]} -eq 0 ] && continue
     for run_line in "${run_lines[@]}"; do
-        cmd=$(echo "$run_line" | sed "s|%fly-opt|${FLY_OPT}|g; s|%FileCheck|${FILECHECK}|g; s|%s|${f}|g; s|FileCheck|${FILECHECK}|g")
+        # Map every substitution to a placeholder first, then expand. Expanding
+        # in place would let a later rule rewrite text an earlier one inserted:
+        # with `%FileCheck`, the bare-FileCheck rule would match inside the path
+        # just substituted and yield `/usr/bin//usr/bin/FileCheck`. `%FileCheck`
+        # must also be consumed before the bare form, or it degrades to `%<path>`.
+        cmd=$(echo "$run_line" | sed \
+            -e "s|%fly-opt|@FLY_OPT@|g" \
+            -e "s|%FileCheck|@FILECHECK@|g" \
+            -e "s|FileCheck|@FILECHECK@|g" \
+            -e "s|%s|@SRC@|g" \
+            -e "s|@FLY_OPT@|${FLY_OPT}|g" \
+            -e "s|@FILECHECK@|${FILECHECK}|g" \
+            -e "s|@SRC@|${f}|g")
         if ! eval "$cmd" > /tmp/filecheck_out.log 2>&1; then
             echo "  FAIL  ${f#${REPO_ROOT}/tests/mlir/}"
             echo "        RUN: ${run_line}"
