@@ -19,9 +19,10 @@ Usage::
 from .._mlir import ir
 from .._mlir.dialects import gpu
 from .._mlir.dialects._fly_enum_gen import AddressSpace
+from ..compiler.backends import current_target
 from ..compiler.protocol import dsl_align_of, dsl_size_of
 from .math import dsl_math_wrap_result
-from .meta import dsl_loc_tracing
+from .meta import dsl_loc_tracing, tracing_option
 from .numeric import Int32, Numeric, Uint8
 from .primitive import get_dyn_shared, make_ptr
 from .struct import (
@@ -34,6 +35,21 @@ from .struct import (
     is_struct_type,
 )
 from .typing import Array, PointerType, Tuple3D, as_ir_value
+
+__all__ = [
+    "thread_idx",
+    "block_idx",
+    "block_dim",
+    "grid_dim",
+    "barrier",
+    "shuffle_xor",
+    "shuffle_up",
+    "shuffle_down",
+    "shuffle_idx",
+    "known_block_size",
+    "num_warp_threads",
+    "SharedAllocator",
+]
 
 
 @dsl_loc_tracing
@@ -88,6 +104,22 @@ def shuffle_down(value, offset, width):
 def shuffle_idx(value, lane, width):
     """``shuffle`` in ``"idx"`` mode: every lane reads lane ``lane``."""
     return shuffle(value, lane, width, mode="idx")
+
+
+def known_block_size():
+    """Return the compile-time block dimensions as ``(x, y, z)`` Python ints.
+
+    Raises ``RuntimeError`` when no block size is in scope.
+    """
+    size = tracing_option("known_block_size")
+    if size is None:
+        raise RuntimeError("no compile-time block size is in scope.")
+    return size
+
+
+def num_warp_threads():
+    """Lanes per warp on the target being compiled for, as a Python int."""
+    return current_target().warp_size
 
 
 thread_idx = Tuple3D(gpu.thread_id)
@@ -229,21 +261,3 @@ class SharedAllocator(Arena):
             }
         )
         return make_ptr(ptr_ty, [], dict_attrs=dict_attrs)
-
-
-__all__ = [
-    "thread_id",
-    "block_id",
-    "thread_idx",
-    "block_idx",
-    "block_dim",
-    "grid_dim",
-    "barrier",
-    "shuffle_xor",
-    "shuffle_up",
-    "shuffle_down",
-    "shuffle_idx",
-    "smem_space",
-    "lds_space",
-    "SharedAllocator",
-]

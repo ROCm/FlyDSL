@@ -55,7 +55,7 @@ def make_single_reduction_storage(red_slots: int):
 def load_scalar(copy_atom, elem_dtype, divided_tensor, index):
     view = fx.slice(divided_tensor, (None, index))
     r = fx.make_rmem_tensor(1, elem_dtype)
-    fx.copy_atom_call(copy_atom, view, r)
+    fx.copy(copy_atom, view, r)
     return fx.memref_load_vec(r)[0]
 
 
@@ -64,12 +64,12 @@ def store_scalar(copy_atom, elem_dtype, divided_tensor, index, val):
     ts = fx.Vector.filled(1, val, elem_dtype)
     fx.memref_store_vec(ts, r)
     view = fx.slice(divided_tensor, (None, index))
-    fx.copy_atom_call(copy_atom, r, view)
+    fx.copy(copy_atom, r, view)
 
 
 def load_vec(copy_atom, vec_width, elem_dtype, div_tensor, idx):
     r = fx.make_rmem_tensor(vec_width, elem_dtype)
-    fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
+    fx.copy(copy_atom, fx.slice(div_tensor, (None, idx)), r)
     return fx.memref_load_vec(r)
 
 
@@ -88,7 +88,7 @@ def load_weight_vec(copy_atom, weight_dtype_str, weight_elem_dtype, div_tensor, 
 def store_vec(copy_atom, vec_width, elem_dtype, val, div_tensor, idx):
     r = fx.make_rmem_tensor(vec_width, elem_dtype)
     fx.memref_store_vec(val, r)
-    fx.copy_atom_call(copy_atom, r, fx.slice(div_tensor, (None, idx)))
+    fx.copy(copy_atom, r, fx.slice(div_tensor, (None, idx)))
 
 
 def to_elem_scalar(dtype_str: str, elem_dtype, y):

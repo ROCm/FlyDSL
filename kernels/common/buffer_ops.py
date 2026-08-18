@@ -555,12 +555,10 @@ def buffer_load(
             if not isinstance(soffset.type, ir.IntegerType) or soffset.type.width != 32:
                 op = std_arith.IndexCastOp(T.i32(), soffset)
                 soffset = _unwrap_value(op.result)
-    aux_flags = _create_i32_constant(cache_modifier)
+    aux_attr = ir.IntegerAttr.get(ir.IntegerType.get_signless(32), cache_modifier) if cache_modifier else None
 
     # Emit buffer load
-    load_op = rocdl.RawPtrBufferLoadOp(
-        result_type, rsrc, offset, soffset, aux_flags  # soffset (scalar byte offset)  # aux (cache modifiers)
-    )
+    load_op = rocdl.RawPtrBufferLoadOp(result_type, rsrc, offset, soffset, aux=aux_attr)
 
     return load_op.result
 
@@ -642,9 +640,7 @@ def buffer_store(
             if not isinstance(soffset.type, ir.IntegerType) or soffset.type.width != 32:
                 op = std_arith.IndexCastOp(T.i32(), soffset)
                 soffset = _unwrap_value(op.result)
-    aux_flags = _create_i32_constant(cache_modifier)
+    aux_attr = ir.IntegerAttr.get(ir.IntegerType.get_signless(32), cache_modifier) if cache_modifier else None
 
     # Emit buffer store
-    rocdl.RawPtrBufferStoreOp(
-        data, rsrc, offset, soffset, aux_flags  # soffset (scalar byte offset)  # aux (cache modifiers)
-    )
+    rocdl.RawPtrBufferStoreOp(data, rsrc, offset, soffset, aux=aux_attr)

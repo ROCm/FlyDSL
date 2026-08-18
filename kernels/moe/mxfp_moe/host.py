@@ -41,6 +41,7 @@ _G2_SUPPORTED = {
     (64, True, "atomic"),
     (128, False, "nonatomic"),
     (128, False, "nonatomic_mxfp4"),
+    (128, False, "nonatomic_fp8"),
     (32, False, "nonatomic_cshuffle"),
     (64, False, "nonatomic_cshuffle"),
     (128, False, "nonatomic_cshuffle"),
@@ -198,9 +199,14 @@ def flydsl_mxfp4_gemm2(
         )
     if D_HIDDEN % BN != 0:
         raise NotImplementedError(f"mxfp_moe gemm2 requires D_HIDDEN (N_OUT=model_dim) % {BN} == 0, got H={D_HIDDEN}")
+    _cshuffle_default = epilog == "nonatomic" and BM == 128
     if (BM, use_nt, epilog) not in _G2_SUPPORTED:
         raise NotImplementedError(f"mxfp_moe gemm2 unsupported variant (BM={BM}, use_nt={use_nt}, epilog={epilog})")
 
+    if xcd_swizzle == 0 and epilog in ("nonatomic", "nonatomic_fp8"):
+        xcd_swizzle = 3
+    if _cshuffle_default:
+        epilog = "nonatomic_cshuffle"
     launch = _get_compiled_gemm2(BM, use_nt, NE, D_HIDDEN, epilog, D_INTER, D_INTER_REAL, BN, BK, xcd_swizzle)
     max_m_blocks = (max_sorted + BM - 1) // BM
     if flat_out_scale is None:

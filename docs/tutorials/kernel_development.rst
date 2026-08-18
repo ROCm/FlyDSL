@@ -1,11 +1,11 @@
-Kernel Development
+Kernel development
 ==================
 
 This tutorial covers advanced kernel development techniques in FlyDSL,
 including tiled data movement, MFMA instructions, shared memory, and
 performance optimization.
 
-Tiled Copies
+Tiled copies
 -------------
 
 FlyDSL uses a hierarchical tiling model to partition data across blocks,
@@ -24,7 +24,7 @@ warps, and threads:
        thr_layout = fx.make_layout((4, 1), (1, 1))
        val_layout = fx.make_layout((1, 8), (1, 1))
 
-       # Create a copy atom (e.g., 128-bit buffer copy)
+       # Create a copy atom (for example, 128-bit buffer copy)
        copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
 
        # Build the tiled copy descriptor via raked product
@@ -42,7 +42,7 @@ warps, and threads:
 
 See ``examples/02-tiledCopy.py`` for a complete working example.
 
-MFMA Instructions
+MFMA instructions
 -----------------
 
 For matrix operations, FlyDSL supports AMD's Matrix Fused Multiply-Add (MFMA)
@@ -74,19 +74,19 @@ See ``examples/03-tiledMma.py`` for a complete GEMM example and
 ``kernels/gemm/preshuffle_gemm.py`` for a production GEMM implementation with
 LDS pipeline.
 
-Shared Memory (LDS)
+Shared memory (LDS)
 --------------------
 
 FlyDSL provides explicit control over Local Data Share (LDS) allocation and
 data movement:
 
-1. Allocate LDS buffers with appropriate padding to avoid bank conflicts
-2. Use cooperative loads to fill LDS from global memory
-3. Synchronize with barriers before consuming LDS data
+1. Allocate LDS buffers with appropriate padding to avoid bank conflicts.
+2. Use cooperative loads to fill LDS from global memory.
+3. Synchronize with barriers before consuming LDS data.
 
 See ``kernels/gemm/preshuffle_gemm.py`` for LDS double-buffering patterns.
 
-Performance Optimization
+Performance optimization
 ------------------------
 
 Key optimization techniques demonstrated in the pre-built kernels:
@@ -96,7 +96,7 @@ Key optimization techniques demonstrated in the pre-built kernels:
 - **Software pipelining**: Hide memory latency with multi-stage pipelines
 - **Pre-shuffled weights**: Avoid runtime layout transformations for MFMA
 
-Reference Implementations
+Reference implementations
 -------------------------
 
 Study these kernels for real-world patterns:

@@ -26,6 +26,22 @@ class RocmBackend(BaseBackend):
         warp_size = 32 if is_rdna_arch(arch) else 64
         return GPUTarget(backend="rocm", arch=arch, warp_size=warp_size)
 
+    @classmethod
+    def llvm_address_space(cls, address_space) -> int:
+        """Map an address space to its AMDGPU LLVM representation."""
+        from ..._mlir.dialects.fly import AddressSpace
+
+        mapping = {
+            AddressSpace.Generic: 0,
+            AddressSpace.Global: 1,
+            AddressSpace.Shared: 3,
+            AddressSpace.Register: 5,
+        }
+        try:
+            return mapping[address_space]
+        except KeyError:
+            raise ValueError(f"ROCm address space {address_space} does not lower to a bare LLVM pointer") from None
+
     # -- compile pipeline ------------------------------------------------
 
     @staticmethod
@@ -113,12 +129,11 @@ class RocmBackend(BaseBackend):
             return
 
         with module.context:
+            from ..._mlir import ir as _ir
+
+            wpe_attr = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), waves_per_eu)
             for func_op in _iter_gpu_kernel_funcs(module):
-                # rocdl.waves_per_eu expresses a minimum. Replace it with the exact
-                # min/max LLVM passthrough for an explicit compile-hint override.
-                if "rocdl.waves_per_eu" in func_op.attributes:
-                    del func_op.attributes["rocdl.waves_per_eu"]
-                _set_passthrough(func_op, "amdgpu-waves-per-eu", f"{waves_per_eu},{waves_per_eu}")
+                func_op.attributes["rocdl.waves_per_eu"] = wpe_attr
 
     def gpu_module_targets(self) -> List[str]:
         chip = self.target.arch
@@ -148,7 +163,7 @@ def _iter_gpu_kernel_funcs(module):
         if top.operation.name != "gpu.module":
             continue
         for op in top.regions[0].blocks[0].operations:
-            if op.operation.name == "gpu.func" and "gpu.kernel" in op.attributes:
+            if op.operation.name == "gpu.func" and ("kernel" in op.attributes or "gpu.kernel" in op.attributes):
                 yield op
 
 
