@@ -624,6 +624,103 @@ def _load_k_pack_aligned(traits, lds_kv_base_ptr, elem_idx, buf_id, kv_mfma_pack
     ).result
 
 
+# ---------------- attention-bias LDS staging ----------------
+# The per-lane score layout wants 16 bias values from one q row, so a direct global
+# read makes every lane in a wave touch a different bias row (one cache line per
+# lane). Instead each wave DMAs its own [ROWS_PER_WAVE, BLOCK_N] tile with 8 lanes
+# per row -- fully coalesced -- and reads the per-lane pattern back out of LDS.
+# Column granules are XOR-swizzled by row so the read side spreads across banks;
+# without it all 32 lanes of a half-wave would hit one bank (row stride is 128B).
+
+
+def _bias_lanes_per_row(traits):
+    return traits.BLOCK_N * traits.BF16_BYTES // traits.DMA_BYTES
+
+
+def _bias_gran_elems(traits):
+    return traits.DMA_BYTES // traits.BF16_BYTES
+
+
+def _bias_wave_bytes(traits):
+    return traits.ROWS_PER_WAVE * traits.BLOCK_N * traits.BF16_BYTES
+
+
+def _bias_buf_bytes(traits):
+    return traits.NUM_WAVES * _bias_wave_bytes(traits)
+
+
+def _num_bias_dma(traits):
+    return _bias_wave_bytes(traits) // (traits.WARP_SIZE * traits.DMA_BYTES)
+
+
+def _bias_dma_m0_base(traits, buf, d, wave_id_uni, lds_bias_base_idx):
+    lds_addr = (
+        lds_bias_base_idx
+        + buf * _bias_buf_bytes(traits)
+        + wave_id_uni * _bias_wave_bytes(traits)
+        + d * (traits.WARP_SIZE * traits.DMA_BYTES)
+    )
+    return fx.Int32(lds_addr)
+
+
+def _bias_dma_src_elem(traits, row_base, tile_col_base, d, lane_in_warp, bias_stride0_v):
+    lanes_per_row = _bias_lanes_per_row(traits)
+    stride = fx.Int32(bias_stride0_v)
+    lane_i32 = fx.Int32(lane_in_warp)
+    row_in_group = lane_i32 // fx.Int32(lanes_per_row)
+    gran = (lane_i32 % fx.Int32(lanes_per_row)) ^ row_in_group
+    uni = (fx.Int32(row_base) + fx.Int32(d * (traits.WARP_SIZE // lanes_per_row))) * stride + fx.Int32(tile_col_base)
+    uni_s = rocdl.readfirstlane(T.i32, as_mlir_value(uni))
+    return fx.Int32(uni_s) + row_in_group * stride + gran * fx.Int32(_bias_gran_elems(traits))
+
+
+BIAS_MAX_OFFSET_ELEMS = 2**31 - 1
+BIAS_MAX_DESCRIPTOR_BYTES = 0xFFFFFFFF
+
+
+def bias_addressing_error(elems, elem_size):
+    """Reason an `elems`-element bias cannot be addressed, or None if it fits.
+
+    A bias past either limit wraps the i32 offset or overruns the descriptor, so
+    the kernel would silently read the wrong rows instead of failing. Callers
+    prefix their own entry-point name and the bias shape.
+    """
+    if elems > BIAS_MAX_OFFSET_ELEMS:
+        return (
+            f"has {elems} elements, exceeding the {BIAS_MAX_OFFSET_ELEMS} "
+            f"addressable by the kernel's i32 bias element offsets"
+        )
+    if elems * elem_size > BIAS_MAX_DESCRIPTOR_BYTES:
+        return (
+            f"occupies {elems * elem_size} bytes, exceeding the "
+            f"{BIAS_MAX_DESCRIPTOR_BYTES} byte range of the bias buffer descriptor"
+        )
+    return None
+
+
+def _bias_lds_lane_base(traits, buf, wave_id, lane_mod_32, lane_div_32, vec_elems):
+    return (
+        buf * _bias_buf_bytes(traits)
+        + wave_id * _bias_wave_bytes(traits)
+        + lane_mod_32 * (traits.BLOCK_N * traits.BF16_BYTES)
+        + lane_div_32 * (vec_elems * traits.BF16_BYTES)
+    )
+
+
+def _make_bias_lds_ptr(lds_bias_base_idx):
+    return buffer_ops.create_llvm_ptr(lds_bias_base_idx, address_space=3)
+
+
+def _load_bias_frag_lds(lds_bias_base_ptr, byte_offset, frag_type, align):
+    ptr = buffer_ops.get_element_ptr(lds_bias_base_ptr, byte_offset=byte_offset, elem_type=T.i8)
+    return llvm.LoadOp(
+        frag_type,
+        ptr,
+        alignment=align,
+        alias_scopes=_dualwave_lds_alias_scopes(_dualwave_lds_scope("bias", 0)),
+    ).result
+
+
 def _ws_store_f32(f32_val, local_elem_index, rsrc):
     """32-bit f32 store into a per-split-z workspace region via raw buffer descriptor."""
     f32_ir = as_mlir_value(fx.Float32(f32_val))
@@ -3720,6 +3817,14 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         l_row = l_row * corr
         return v_o, m_new, l_row, v_p
 
+    def fold_sink(self, v_o, m_row, l_row, sink_log2):
+        m_new = fx.maxnumf(m_row, sink_log2)
+        corr = rocdl.exp2(T.f32, as_mlir_value(m_row - m_new))
+        self.scale_o(v_o, corr)
+        sink_w = rocdl.exp2(T.f32, as_mlir_value(sink_log2 - m_new))
+        l_row = l_row * corr + sink_w
+        return m_new, l_row
+
     def _lazy_rescale_o_rescale(self, _n, *_st, v_o, m_row, l_row, m_tile_max, v_p):
         corr = rocdl.exp2(T.f32, as_mlir_value(m_row - m_tile_max))
         scaled_accs = list(v_o)
@@ -4119,7 +4224,7 @@ class DualwaveStoreHelper(DualwaveKernelContext):
             for g in range_constexpr(2):
                 self._store_splitk_partial_o_quad(v_o, dc, g, local_opart_row_base, opart_rsrc)
 
-    def zero_o_block_if_needed(self, causal_end_raw_i32=None):
+    def zero_o_block_if_needed(self, causal_end_raw_i32=None, sink_log2=None):
         if causal_end_raw_i32 is None:
             causal_end_raw_i32 = self.causal_end_raw_i32
         traits = self.traits
@@ -4127,6 +4232,9 @@ class DualwaveStoreHelper(DualwaveKernelContext):
         wave_q_offset = self.wave_q_offset
         lane_mod_32 = self.lane_mod_32
         seq_len_v = self.seq_len_v
+
+        lse_m_z = self.c_zero_f if sink_log2 is None else sink_log2
+        lse_l_z = self.c_zero_f if sink_log2 is None else fx.Float32(1.0)
 
         @flyc.jit
         def _zero_o_block_if_needed():
@@ -4145,6 +4253,8 @@ class DualwaveStoreHelper(DualwaveKernelContext):
                                 _store_atom_128=self.store_atom_128,
                                 o_div=self.o_div,
                             )
+                    if const_expr(traits.RETURN_LSE):
+                        self._store_lse_row(lse_m_z, lse_l_z, q_row_z)
 
         _zero_o_block_if_needed()
 
@@ -5239,6 +5349,7 @@ class DualwaveSplitKCombineContext:
         seq_len=None,
         stride_q_n=None,
         LSE=None,
+        Sink=None,
     ):
         if isinstance(traits_or_ctx, DualwaveSplitKCombineContext):
             self.__dict__.update(traits_or_ctx.__dict__)
@@ -5250,6 +5361,7 @@ class DualwaveSplitKCombineContext:
         self.O = O
         self.WS = WS
         self.LSE = LSE
+        self.Sink = Sink
         self.batch_size = batch_size
         self.seq_len = seq_len
         self.stride_q_n = stride_q_n
@@ -5353,6 +5465,26 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
         for i in range_constexpr(self.traits.NUM_KV_SPLITS - 1):
             m_max = fx.maxnumf(m_max, m_s[i + 1])
         return m_max
+
+    def fold_sink(self, m_max, bias_log2e):
+        sink_rsrc = buffer_ops.create_buffer_resource_from_addr(
+            as_mlir_value(fx.Int64(fx.ptrtoint(fx.get_iter(self.Sink)))),
+            num_records_bytes=as_mlir_value(fx.Int64(self.traits.NUM_HEADS_Q * 4)),
+        )
+        sink_f32 = buffer_ops.buffer_load(
+            sink_rsrc,
+            as_mlir_value(fx.Int32(self.q_head_idx)),
+            vec_width=1,
+            dtype=T.f32,
+        )
+
+        sink_log2 = sink_f32 * fx.Float32(bias_log2e)
+        m_new = fx.maxnumf(m_max, sink_log2)
+        sink_w = rocdl.exp2(T.f32, as_mlir_value(sink_log2 - m_new))
+        return m_new, sink_w
+
+    def add_sink_den(self, den, sink_w):
+        return den + sink_w
 
     def init_accumulators(self):
         return as_mlir_value(self.c_zero_v4f32), as_mlir_value(self.c_zero_f)

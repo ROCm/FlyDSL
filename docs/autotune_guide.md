@@ -67,12 +67,33 @@ chained, so a numerical rejection stays distinguishable from a compile failure.
 Use it wherever a candidate could launch successfully and still compute the wrong
 answer, and hold every candidate to the same tolerance as the default.
 
+## Device timing contract
+
+The shared `do_bench` timer queues a GPU-side backlog before batched event
+windows. This is required for sub-100 µs kernels: a fresh event pair on an empty
+stream can time the host enqueue gap instead of the kernel. Each window averages
+several launches, and the reported value is the median across windows. The
+callable must enqueue asynchronous work on the current stream and must not
+synchronize internally.
+
+For Softmax results within 2% of the measured minimum, selection prefers the
+compatibility default, then a config without an explicit occupancy override,
+then the candidate packing more rows per block. This prevents event granularity
+from turning equivalent 6--10 µs candidates into unstable deployment artifacts;
+an improvement outside the band still wins normally. Softmax uses 10 warmup and
+100 measured launches, split into five backlogged event windows; the larger
+sample stabilized bandwidth-scale rows that moved by more than the tie band with
+the generic 25-launch default.
+
 ## Adopters
 
 | Kernel | Module | `artifact_name` | Tuned axes |
 |---|---|---|---|
 | RMSNorm | `kernels/norm/rmsnorm_autotune.py` | `rmsnorm` | `BLOCK_THREADS`, `waves_per_eu` |
-| Softmax | `kernels/norm/softmax_autotune.py` | `softmax_fwd` | `BLOCK_THREADS`, `waves_per_eu` |
+| Softmax forward | `kernels/norm/softmax_autotune.py` | `softmax_fwd` | full-row threads, `waves_per_eu`, threads/rows per block for short rows |
+
+Softmax backward is not an adopter yet; its existing kernel and dispatch are
+unchanged by `softmax_fwd` artifacts.
 
 ## Failure behavior
 

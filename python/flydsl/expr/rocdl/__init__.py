@@ -35,6 +35,8 @@ __all__ = [
     "SyncScope",
     # Re-exported from .universal
     "s_waitcnt",
+    "asyncmark",
+    "wait_asyncmark",
     "BufferCopy",
     "BufferCopy8b",
     "BufferCopy16b",
@@ -43,7 +45,7 @@ __all__ = [
     "BufferCopy128b",
     "BufferCopyLDS",
     "BufferCopyLDS32b",
-    "BufferCopyLDS64b",
+    "BufferCopyLDS64b",  # Deprecated: no 8-byte LDS DMA exists; use 32b / 128b
     "BufferCopyLDS128b",
     "BufferAtomic",
     "BufferAtomicAdd",

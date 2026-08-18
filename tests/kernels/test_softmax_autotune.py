@@ -26,8 +26,10 @@ if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
 import flydsl.compiler as flyc  # noqa: E402
+import kernels.norm.softmax_autotune as softmax_autotune_module  # noqa: E402
 from kernels.norm.softmax_autotune import (  # noqa: E402
     _RTOL,
+    _softmax_hot_cache,
     _softmax_tuner,
     candidate_configs,
     softmax_autotuned,
@@ -37,8 +39,16 @@ from kernels.norm.softmax_kernel import TUNING_SCHEMA, softmax_direct  # noqa: E
 
 DTYPES = [(torch.float32, "f32"), (torch.float16, "f16"), (torch.bfloat16, "bf16")]
 
-# Small, medium, wide, aligned and arbitrary-tail rows.
-SHAPES = [(8, 128), (16, 2000), (32, 2048), (8, 4096), (8, 4097), (4, 8192)]
+# Small, medium, wide, aligned, arbitrary-column-tail and partial-row-block cases.
+SHAPES = [
+    (8, 128),
+    (17, 128),
+    (16, 2000),
+    (32, 2048),
+    (8, 4096),
+    (8, 4097),
+    (4, 8192),
+]
 
 
 @pytest.fixture(autouse=True)
@@ -47,12 +57,14 @@ def _isolated_tuner(tmp_path, monkeypatch):
     winner cache, artifact cache, disk cache and artifact directory isolated."""
     _softmax_tuner.cache.clear()
     _softmax_tuner._artifact_cache.clear()
+    _softmax_hot_cache.clear()
     monkeypatch.setattr(_softmax_tuner, "_cache_file", tmp_path / "softmax.json")
     monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(tmp_path / "artifacts"))
     monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
     yield
     _softmax_tuner.cache.clear()
     _softmax_tuner._artifact_cache.clear()
+    _softmax_hot_cache.clear()
 
 
 def _inputs(M, N, dtype, seed=0):
@@ -81,10 +93,21 @@ def test_workgroup_size_tracks_block_threads(block_threads):
     """A 512-thread candidate is only a real candidate if the workgroup limit follows it
     past the 256 default. The launcher passes a static block dim, so the compiler infers
     known_block_size and no explicit attribute is needed -- this pins that inference,
-    since a regression would silently shrink the search space to the sizes that fit 256."""
+    since a regression would silently shrink the search space to the sizes that fit 256.
+    """
     x, out = _inputs(4, 4096, torch.bfloat16)
     stream = torch.cuda.current_stream()
-    compiled = flyc.compile(softmax_direct, x, out, x.shape[0], 4096, "bf16", block_threads, TUNING_SCHEMA, stream)
+    compiled = flyc.compile(
+        softmax_direct,
+        x,
+        out,
+        x.shape[0],
+        4096,
+        "bf16",
+        block_threads,
+        TUNING_SCHEMA,
+        stream,
+    )
     stream.synchronize()
     artifact = compiled._keepalive
 
@@ -105,11 +128,24 @@ def test_every_legal_candidate_is_correct(dtype, dtype_str, M, N):
     stream = torch.cuda.current_stream()
 
     paths = set()
-    for config in candidate_configs():
+    for config in candidate_configs(m_in=M, N=N, dtype_str=dtype_str):
         block_threads = config.kwargs["BLOCK_THREADS"]
-        paths.add(uses_fast_path(N, dtype_str, block_threads))
+        threads_per_row = config.kwargs["THREADS_PER_ROW"]
+        paths.add(uses_fast_path(N, dtype_str, threads_per_row))
+        kernel_kwargs = dict(config.kwargs)
+        kernel_kwargs.pop("BLOCK_THREADS")
         out.zero_()
-        softmax_direct(x, out, M, N, dtype_str, block_threads, TUNING_SCHEMA, stream)
+        softmax_direct(
+            x,
+            out,
+            M,
+            N,
+            dtype_str,
+            block_threads,
+            TUNING_SCHEMA,
+            stream,
+            **kernel_kwargs,
+        )
         torch.cuda.synchronize()
         _assert_close(out, reference, dtype_str)
         row_sums = out.float().sum(dim=-1)
@@ -132,7 +168,16 @@ def test_wrapper_matches_the_torch_reference(dtype, dtype_str):
 def test_zero_rows_is_a_no_launch(monkeypatch):
     """M == 0 must return before reaching the tuner: a zero-sized grid is not a legal
     launch, and there is nothing to compute."""
-    monkeypatch.setattr(_softmax_tuner, "__call__", lambda *a, **k: pytest.fail("unexpected launch"))
+    monkeypatch.setattr(
+        _softmax_tuner,
+        "resolve_config",
+        lambda *a, **k: pytest.fail("unexpected resolution"),
+    )
+    monkeypatch.setattr(
+        softmax_autotune_module,
+        "_compile_resolved",
+        lambda *a, **k: pytest.fail("unexpected compilation"),
+    )
     x = torch.empty((0, 4096), device="cuda", dtype=torch.bfloat16)
     assert softmax_autotuned(x, torch.empty_like(x)) is None
 
@@ -188,13 +233,14 @@ def test_input_contract_failures_are_rejected(make_args, message):
 def test_default_serves_without_searching_on_the_current_stream(monkeypatch):
     monkeypatch.setattr(_softmax_tuner, "_bench_one", lambda *a, **k: pytest.fail("unexpected search"))
     observed = []
-    original_run = _softmax_tuner._run_config
+    original_resolve = _softmax_tuner.resolve_config
 
-    def record(config, args, kwargs):
+    def record(*args, **kwargs):
+        config = original_resolve(*args, **kwargs)
         observed.append((config.kwargs["BLOCK_THREADS"], kwargs["stream"].cuda_stream))
-        return original_run(config, args, kwargs)
+        return config
 
-    monkeypatch.setattr(_softmax_tuner, "_run_config", record)
+    monkeypatch.setattr(_softmax_tuner, "resolve_config", record)
 
     x, out = _inputs(64, 4096, torch.bfloat16)
     stream = torch.cuda.Stream()
@@ -204,6 +250,27 @@ def test_default_serves_without_searching_on_the_current_stream(monkeypatch):
 
     assert observed == [(256, stream.cuda_stream)]
     _assert_close(out, _reference(x), "bf16")
+
+
+def test_compiled_cache_hit_bypasses_resolution_and_accepts_new_buffers_and_stream(
+    monkeypatch,
+):
+    x1, out1 = _inputs(64, 4096, torch.bfloat16, seed=1)
+    softmax_autotuned(x1, out1)
+    torch.cuda.synchronize()
+    _assert_close(out1, _reference(x1), "bf16")
+
+    monkeypatch.setattr(
+        _softmax_tuner,
+        "resolve_config",
+        lambda *a, **k: pytest.fail("compiled cache hit resolved again"),
+    )
+    x2, out2 = _inputs(64, 4096, torch.bfloat16, seed=2)
+    stream = torch.cuda.Stream()
+    softmax_autotuned(x2, out2, stream=stream)
+    stream.synchronize()
+
+    _assert_close(out2, _reference(x2), "bf16")
 
 
 def test_forced_search_then_cache_hit_then_artifact_load(monkeypatch, tmp_path):
@@ -258,7 +325,12 @@ def test_forced_search_then_cache_hit_then_artifact_load(monkeypatch, tmp_path):
     # without evaluating the default or the search space.
     _softmax_tuner.cache.clear()
     _softmax_tuner._artifact_cache.clear()
-    monkeypatch.setattr(_softmax_tuner, "configs", lambda *a, **k: pytest.fail("artifact must skip the search"))
+    _softmax_hot_cache.clear()
+    monkeypatch.setattr(
+        _softmax_tuner,
+        "configs",
+        lambda *a, **k: pytest.fail("artifact must skip the search"),
+    )
     softmax_autotuned(x, out)
     torch.cuda.synchronize()
     assert completed == len(configs)
@@ -287,16 +359,16 @@ def test_invalid_artifact_falls_back_to_the_default(monkeypatch, damage):
     monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
     _softmax_tuner.cache.clear()
     _softmax_tuner._artifact_cache.clear()
+    _softmax_hot_cache.clear()
     served = []
-    original_run = _softmax_tuner._run_config
-    monkeypatch.setattr(
-        _softmax_tuner,
-        "_run_config",
-        lambda config, args, kwargs: (
-            served.append(config.kwargs["BLOCK_THREADS"]),
-            original_run(config, args, kwargs),
-        )[1],
-    )
+    original_resolve = _softmax_tuner.resolve_config
+
+    def record(*args, **kwargs):
+        config = original_resolve(*args, **kwargs)
+        served.append(config.kwargs["BLOCK_THREADS"])
+        return config
+
+    monkeypatch.setattr(_softmax_tuner, "resolve_config", record)
     softmax_autotuned(x, out)
     torch.cuda.synchronize()
 
