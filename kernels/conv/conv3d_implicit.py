@@ -807,12 +807,10 @@ def compile_conv3d_implicit(
             return lds_load_vec8(b_lds, b_lds_off(stage, fx.Index(b_row), fx.Index(lane_k_b)))
 
         def mfma_one(a_frag, b_frag, c_frag):
-            out = mfma_fn(
+            return mfma_fn(
                 T.vec(MFMA_C_VALUES, T.f32),
                 [a_frag, b_frag, c_frag, 0, 0, 0],
             )
-            rocdl.sched_mfma(1)
-            return out
 
         def read_a_frags(stage):
             frags = [read_a_vec(stage, mi) for mi in range_constexpr(MI_M)]
@@ -830,6 +828,9 @@ def compile_conv3d_implicit(
                 for ni in range_constexpr(MI_N):
                     idx = mi * MI_N + ni
                     acc_values[idx] = mfma_one(a_frag_values[mi], b_frag_values[ni], acc_values[idx])
+                # One scheduling group per MI_M row: the row's MFMAs stay contiguous, and
+                # the DMA/ds_read work only gets slotted in between rows.
+                rocdl.sched_mfma(MI_N)
             rocdl.s_setprio(0)
             return acc_values
 
