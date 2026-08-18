@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-18T10:19:53Z",
+ "updated": "2026-08-18T11:17:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32130866237,
+   "pr": 1025,
+   "commit": "8dc03fb203216e9e9fb7aea9a7948eb4a8de1be2",
+   "branch": "dsl-ify-scf-controlflow",
+   "event": "pull_request",
+   "title": "[Kernel] Replace raw scf ops with Python control flow in kernels",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32130866237",
+   "created_at": "2026-08-18T11:15:55Z",
+   "updated_at": "2026-08-18T11:16:57Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
+  {
+   "run_id": 32130468240,
+   "pr": 1025,
+   "commit": "c5ca77668e14c3fa607ecdc333a094b136af0083",
+   "branch": "dsl-ify-scf-controlflow",
+   "event": "pull_request",
+   "title": "[Kernel] Replace raw scf ops with Python control flow in kernels",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32130468240",
+   "created_at": "2026-08-18T11:11:07Z",
+   "updated_at": "2026-08-18T11:15:57Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 32125806929,
    "pr": 1024,
@@ -1747,66 +1777,6 @@
      "completed_at": "2026-08-13T12:50:21Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31683858468/job/94424158339",
      "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 31681364265,
-   "pr": null,
-   "commit": "ac227c35029d2008282cbf035caa5923b769d37e",
-   "branch": "main",
-   "event": "push",
-   "title": "Fix GitHub Pages docs deployment (#1006)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31681364265",
-   "created_at": "2026-08-13T08:16:53Z",
-   "updated_at": "2026-08-13T09:48:27Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 31681184248,
-   "pr": 1006,
-   "commit": "ba198a476cdcf302cff4908ba246f6d8570b5533",
-   "branch": "fix-docs-pages-deploy",
-   "event": "pull_request",
-   "title": "Fix GitHub Pages docs deployment",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31681184248",
-   "created_at": "2026-08-13T08:14:22Z",
-   "updated_at": "2026-08-13T11:25:41Z",
-   "actor": "gyohuangxin",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T09:02:56Z",
-     "completed_at": "2026-08-13T11:25:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31681184248/job/94396244480",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T09:19:00Z",
-     "completed_at": "2026-08-13T09:44:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31681184248/job/94396244571",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-13T09:49:16Z",
-     "completed_at": "2026-08-13T09:58:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31681184248/job/94396244575"
     }
    ]
   }
