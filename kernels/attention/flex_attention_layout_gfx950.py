@@ -306,7 +306,7 @@ def flex_attn_fwd_gfx950_kernel(
     n_kv_tiles = param.n_kv_tiles  # compile-time: seqlen_kv // block_n (validated on host)
 
     # ── LDS: K/V staging (shared across all groups) + per-group P bridge ──────
-    kv_tile_elems = block_n * head_dim  # elements in one K or V tile
+    kv_tile_elems = block_n * head_dim
     _lds_ring_slots = max(2, int(param.pipe_depth))
     _lds_kv_elems = _lds_ring_slots * kv_tile_elems
 
@@ -320,8 +320,7 @@ def flex_attn_fwd_gfx950_kernel(
     sK_ptr = storage.k_lds.peek().ptr
     sV_ptr = storage.v_lds.peek().ptr
 
-    # K LDS: [block_n, head_dim] row-major with Swizzle(3,3,3) for bank-conflict-free
-    # ds_read_b128. The DMA compensates by fetching from the swizzled global column.
+    # K LDS: [block_n, head_dim] row-major with Swizzle(3,3,3).
     _k_swizzle = fx.static(fx.SwizzleType.get(3, 3, 3))
     _k_base_layout = fx.make_composed_layout(
         _k_swizzle, fx.make_layout((block_n, head_dim), (head_dim, 1))
@@ -449,8 +448,6 @@ def flex_attn_fwd_gfx950_kernel(
              for i in range_constexpr(_lds_ring_slots)]
     sV_i8 = [fx.recast_iter(fx.Int8, sV_ptr) + i * fx.Int32(kv_tile_elems * param.in_data_bytes)
              for i in range_constexpr(_lds_ring_slots)]
-    _step_bytes = block_threads * _dma_bytes
-
     # ── Stage: DMA K+V global → LDS ─────────────────────────────────────
     def _k_swizzled_col(tile_row, tile_col_elem):
         """Apply K swizzle to get the global column index for a given LDS position."""
@@ -459,38 +456,37 @@ def flex_attn_fwd_gfx950_kernel(
         ))
         return elem_off % head_dim
 
-    def _stage_kv_to_lds(kv_idx, buf):
+    def _stage_kv_to_lds(kv_idx, buf, do_k, do_v):
         wave_off = rocdl.readfirstlane(fx.Int32.ir_type, fx.Int32(tid // GFX950_WAVE_SIZE * GFX950_WAVE_SIZE * _dma_bytes))
-        k_global_base = k_off * param.in_data_bytes + kv_idx * block_n * _k_row_stride_bytes
-        lds_k = fx.add_offset(sK_i8[buf], wave_off)
-        for i in range_constexpr(_dma_ops_per_thread):
-            if const_expr(i > 0):
-                lds_k = fx.add_offset(lds_k, _step_bytes)
-            flat_byte = i * block_threads * _dma_bytes + tid * _dma_bytes
-            tile_row = flat_byte // _k_row_bytes
-            tile_col_elem = (flat_byte % _k_row_bytes) // param.in_data_bytes
-            swiz_col = _k_swizzled_col(tile_row, tile_col_elem)
-            gmem_byte = k_global_base + tile_row * _k_row_stride_bytes + swiz_col * param.in_data_bytes
-            fx.copy(dma_atom, fx.slice(k_div, (None, fx.Int32(gmem_byte))),
-                    fx.make_view(lds_k, fx.make_layout(1, 1)))
-        # V DMA: tiled into compact [block_n, 32] sub-tiles per D-chunk.
-        # LDS sub-tile layout: dc → offset dc*block_n*32, each row = 32 bf16.
-        # Global V is [Skv, Hkv, D]: score_row stride = _v_row_stride_bytes.
-        v_global_base = v_off * param.in_data_bytes + kv_idx * fx.Int32(block_n * _v_row_stride_bytes)
-        lds_v = fx.add_offset(sV_i8[buf], wave_off)
-        for i in range_constexpr(_dma_ops_per_thread):
-            if const_expr(i > 0):
-                lds_v = fx.add_offset(lds_v, _step_bytes)
-            flat_byte = i * block_threads * _dma_bytes + tid * _dma_bytes
-            # Decompose LDS linear position into (dc, score_row, d_in_chunk).
-            tile_row = flat_byte // _v_subtile_row_bytes  # 0..block_n*_n_d_chunks-1
-            tile_col_byte = flat_byte % _v_subtile_row_bytes
-            dc = tile_row // block_n
-            score_row = tile_row % block_n
-            d_global_byte = dc * 32 * param.in_data_bytes + tile_col_byte
-            gmem_byte = fx.Int32(v_global_base) + score_row * fx.Int32(_v_row_stride_bytes) + d_global_byte
-            fx.copy(dma_atom, fx.slice(v_div, (None, fx.Int32(gmem_byte))),
-                    fx.make_view(lds_v, fx.make_layout(1, 1)))
+        _step_bytes = block_threads * _dma_bytes
+        if const_expr(do_k):
+            k_global_base = k_off * param.in_data_bytes + kv_idx * block_n * _k_row_stride_bytes
+            lds_k = fx.add_offset(sK_i8[buf], wave_off)
+            for i in range_constexpr(_dma_ops_per_thread):
+                if const_expr(i > 0):
+                    lds_k = fx.add_offset(lds_k, _step_bytes)
+                flat_byte = i * block_threads * _dma_bytes + tid * _dma_bytes
+                tile_row = flat_byte // _k_row_bytes
+                tile_col_elem = (flat_byte % _k_row_bytes) // param.in_data_bytes
+                swiz_col = _k_swizzled_col(tile_row, tile_col_elem)
+                gmem_byte = k_global_base + tile_row * _k_row_stride_bytes + swiz_col * param.in_data_bytes
+                fx.copy(dma_atom, fx.slice(k_div, (None, fx.Int32(gmem_byte))),
+                        fx.make_view(lds_k, fx.make_layout(1, 1)))
+        if const_expr(do_v):
+            v_global_base = v_off * param.in_data_bytes + kv_idx * fx.Int32(block_n * _v_row_stride_bytes)
+            lds_v = fx.add_offset(sV_i8[buf], wave_off)
+            for i in range_constexpr(_dma_ops_per_thread):
+                if const_expr(i > 0):
+                    lds_v = fx.add_offset(lds_v, _step_bytes)
+                flat_byte = i * block_threads * _dma_bytes + tid * _dma_bytes
+                tile_row = flat_byte // _v_subtile_row_bytes
+                tile_col_byte = flat_byte % _v_subtile_row_bytes
+                dc = tile_row // block_n
+                score_row = tile_row % block_n
+                d_global_byte = dc * 32 * param.in_data_bytes + tile_col_byte
+                gmem_byte = fx.Int32(v_global_base) + score_row * fx.Int32(_v_row_stride_bytes) + d_global_byte
+                fx.copy(dma_atom, fx.slice(v_div, (None, fx.Int32(gmem_byte))),
+                        fx.make_view(lds_v, fx.make_layout(1, 1)))
 
     from kernels.attention.pipeline import (
         InfraContext,
@@ -503,7 +499,15 @@ def flex_attn_fwd_gfx950_kernel(
         HEAD_DIM = int(param.head_dim)
 
     def load_kv(tile_idx, slot):
-        _stage_kv_to_lds(tile_idx, slot)
+        _stage_kv_to_lds(tile_idx, slot, True, True)
+        return []
+
+    def load_k(tile_idx, slot):
+        _stage_kv_to_lds(tile_idx, slot, True, False)
+        return []
+
+    def load_v(tile_idx, slot):
+        _stage_kv_to_lds(tile_idx, slot, False, True)
         return []
 
     # V transpose read using swa's copy-atom pattern on compact [32, 32] sub-tiles.
@@ -539,7 +543,7 @@ def flex_attn_fwd_gfx950_kernel(
             v_hi_out[dc] = halves[2].shuffle(halves[3], list(range(8))).ir_value()
         return v_lo_out, v_hi_out
 
-    def read_kv_work(slot):
+    def read_k_work(slot):
         fx.copy(uca, tcA_k_lds[slot].partition_S(sK[slot]), tcA_k_lds[slot].retile(frag_K[0]))
         return []
 
@@ -733,24 +737,24 @@ def flex_attn_fwd_gfx950_kernel(
             has_next = (kv_i32 + fx.Int32(1)) < fx.Int32(n_kv_tiles)
 
             # Cluster 0 (mem): read K and V from current LDS slot, prefetch next.
-            rocdl.s_setprio(0)
+            rocdl.s_setprio(1)
             _v_slot_elem_offset = (kv_i32 % _ring_slots) * fx.Int32(kv_tile_elems)
             if ring0:
-                read_kv_work(0)
+                read_k_work(0)
             else:
-                read_kv_work(1)
-            v_lo_regs, v_hi_regs = _read_v_transpose(_v_slot_elem_offset)
+                read_k_work(1)
             if has_next:
                 if ring0:
                     load_kv(kv_i32 + fx.Int32(1), 1)
                 else:
                     load_kv(kv_i32 + fx.Int32(1), 0)
+            v_lo_regs, v_hi_regs = _read_v_transpose(_v_slot_elem_offset)
             rocdl.s_waitcnt(0)
 
             dualwave_cluster_sync(0)
 
             # Cluster 1 (comp): QK GEMM + softmax + register PV GEMM.
-            rocdl.s_setprio(1)
+            rocdl.s_setprio(0)
             frag_S, = gemm1_qk(frag_Q, frag_K[0])
             out_sm = softmax_full(frag_S, m_i, l_i, o_accs)
             frag_P, m_i, l_i, o_accs, _ = (
