@@ -135,6 +135,6 @@ export FLYDSL_RUNTIME_ENABLE_CACHE=0
 
 ## Verified Environments
 
-| Container | Image | Host | Status |
-|-----------|-------|------|--------|
-| hungry_dijkstra | rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_release_2.8.0 | hjbog-srdc-39.amd.com | Verified 2026-03-10 |
+| Image | Status |
+|-------|--------|
+| rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_release_2.8.0 | Verified 2026-03-10 |
