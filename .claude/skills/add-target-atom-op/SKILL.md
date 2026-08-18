@@ -314,7 +314,8 @@ The `FlyROCDL_MmaOp` base auto-adds `DeclareTypeInterfaceMethods<Fly_MayStaticTy
 (`parseMNKDimensionList` / `printMNKDimensionList` in `lib/Dialect/Fly/IR/FlyDialect.cpp`) — reuse
 it.
 
-**Step 2 — Interface methods** in `lib/Dialect/FlyROCDL/CDNA5/MmaAtom.cpp`. Clone
+**Step 2 — Interface methods** in `lib/Dialect/FlyROCDL/CDNA5/MmaAtom.cpp` <!-- api-check: ignore -->
+(the hypothetical subtarget of this walkthrough; it does not exist yet). Clone
 `lib/Dialect/FlyROCDL/CDNA3/MmaAtom.cpp` as the template; the only non-boilerplate methods are:
 
 - `getThrLayout()` → `FxLayout(FxC(<wave-size>), FxC(1))`

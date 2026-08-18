@@ -28,7 +28,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install style tools
-        run: python3 -m pip install black ruff
+        run: python3 -m pip install black ruff pyyaml
 
       - name: Install reviewdog
         if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -51,6 +51,9 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
           HEAD_SHA: ${{ github.sha }}
+
+      - name: Check agent docs against the Python surface
+        run: python3 scripts/check_docs_api.py
 
   cpp-style:
     name: Check C++ Code Style
