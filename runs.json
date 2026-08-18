@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-08-18T00:32:37Z",
+ "updated": "2026-08-18T01:41:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32086458109,
+   "pr": 1020,
+   "commit": "0914e81c3cf31f73348d52c74c6fd4447611c5ce",
+   "branch": "fp8-softmax-normalisation",
+   "event": "pull_request",
+   "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32086458109",
+   "created_at": "2026-08-18T00:57:33Z",
+   "updated_at": "2026-08-18T01:17:03Z",
+   "actor": "JohnQinAMD",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-18T01:16:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32086458109/job/95563228381"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-18T01:17:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32086458109/job/95563228395"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-18T01:16:16Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32086458109/job/95563228443"
+    }
+   ]
+  },
   {
    "run_id": 32082765803,
    "pr": 1019,
@@ -10,39 +53,42 @@
    "branch": "jhinpan/softmax-bwd",
    "event": "pull_request",
    "title": "[Kernel] Add row-wise Softmax backward",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32082765803",
    "created_at": "2026-08-18T00:00:15Z",
-   "updated_at": "2026-08-18T00:22:16Z",
+   "updated_at": "2026-08-18T01:38:05Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-18T00:22:08Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32082765803/job/95553245796"
+     "completed_at": "2026-08-18T01:09:17Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32082765803/job/95553245796",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-18T00:21:57Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32082765803/job/95553245865"
+     "completed_at": "2026-08-18T00:34:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32082765803/job/95553245865",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-18T00:22:16Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32082765803/job/95553245936"
+     "completed_at": "2026-08-18T01:38:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32082765803/job/95553245936",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1989,52 +2035,6 @@
      "started_at": "2026-08-13T04:47:37Z",
      "completed_at": "2026-08-13T05:05:05Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31665169196/job/94361473580",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 31661995365,
-   "pr": null,
-   "commit": "2ee71068fd46c3387f109de8aed6bc862b01df29",
-   "branch": "main",
-   "event": "push",
-   "title": "docs: add rocm-docs-core package to requirements (#1005)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31661995365",
-   "created_at": "2026-08-13T02:49:27Z",
-   "updated_at": "2026-08-13T02:51:50Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T02:51:45Z",
-     "completed_at": "2026-08-13T02:51:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31661995365/job/94328822601",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T02:51:45Z",
-     "completed_at": "2026-08-13T02:51:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31661995365/job/94328822627",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T02:51:45Z",
-     "completed_at": "2026-08-13T02:51:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31661995365/job/94328822731",
      "log_fetch_failed": true
     }
    ]
