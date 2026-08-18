@@ -132,7 +132,10 @@ fx.copy(copy, fx.slice(tA, (None, tid)), rA)   # after partitioning tA (§7b: pr
 | `arith.index_cast(T.i32, v)` | `fx.Int32(v)` |
 | `arith.select(cond, t, f)` | `cond.select(t, f)` |
 | `arith.cmpi(slt, a, b)` | `a < b` |
-| `arith.maxnumf(a,b)` | `a.maximumf(b)` |
+| `arith.maximumf/minimumf(a,b)` | `fx.max(a, b)` / `fx.min(a, b)` |
+| `arith.maxsi/maxui/minsi/minui(a,b)` | `fx.max(a, b)` / `fx.min(a, b)` |
+| `arith.maxnumf(a,b)` | `fx.maxnumf(a, b)` — different NaN semantics from `fx.max` |
+| `arith.ceildivsi/ceildivui(a,b)` | `fx.ceildiv(a, b)` |
 
 Keep `arith.cmpf` / explicit `*FOp` only where no operator exists or fastmath is
 needed.
@@ -471,6 +474,7 @@ def _run_compiled(exe, *args):             # in-tree
 | `arith.unwrap(v)` / `_to_raw(v)` | `v.ir_value()` (boundary only) |
 | `fx.Index(n)` / `arith.index` / `arith.index_cast` | explicit `fx.Int64/Int32(...)` |
 | `arith.mulf/addf/trunc_f/select` | `*`, `+`, `.to(ty)`, `.select(...)` |
+| raw integer min/max or ceil-div | `fx.max` / `fx.min` / `fx.ceildiv` |
 | `vector.extract/bitcast/splat` | `fx.Vector(v)[i]` / `.bitcast(ty)` / `.filled(...)` |
 | `scf.ForOp` / `scf.IfOp` | `range_constexpr` / `range(..., init=)` / Python `if` / `const_expr` |
 | `buffer_ops.*` + offsets | `fx.rocdl.make_buffer_tensor` + layout + `fx.copy` |
