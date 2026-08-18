@@ -136,6 +136,8 @@ smem_2d[r, c] = val                               # write at logical (r, c)
 `make_view` is also how you attach a layout to an arbitrary pointer (e.g. one
 returned by `get_dyn_shared` or `get_iter`). The result is an `fx.Tensor` with that
 layout; all the indexing, slicing, and copy operations then work as usual.
+When the layout is a composed layout wrapping a swizzle, `make_view` is how you
+build a bank-conflict-free LDS tensor — Chapter 6 covers this in full.
 
 ## `get_iter` and `get_layout`: decomposing a Tensor
 

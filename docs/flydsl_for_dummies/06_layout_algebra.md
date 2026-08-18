@@ -204,6 +204,227 @@ Two helpers support it:
   *rest* part). You rarely call it directly, but seeing it in dumped IR is a sign
   a divide is being lowered.
 
+## Layout constructors: `make_ordered_layout` and `make_view`
+
+### `make_ordered_layout` — compact layout from shape and stride order
+
+`make_layout(shape, stride)` requires you to supply exact stride values.
+`make_ordered_layout(shape, order)` is a convenience that computes compact
+(densely packed, no gaps) strides automatically, given only the *order* in which
+the modes should iterate:
+
+```python
+fx.make_ordered_layout((M, N), (0, 1))   # column-major: M is fastest (stride 1)
+fx.make_ordered_layout((M, N), (1, 0))   # row-major:    N is fastest (stride 1)
+```
+
+`order[i]` is the *rank* of mode `i` among all modes, where 0 means "innermost /
+fastest / stride-1 candidate." The resulting strides are the sorted prefix
+products of the shape in that order:
+
+```
+make_ordered_layout((tile_m, tile_k), (1, 0))
+  order: tile_k is innermost (order 0), tile_m is outermost (order 1)
+  stride of tile_k = 1
+  stride of tile_m = tile_k
+  result: (tile_m, tile_k) : (tile_k, 1)   ← row-major
+```
+
+This is the standard way to describe an LDS buffer whose rows are contiguous —
+the pattern used by the preshuffle GEMM's LDS A tile:
+
+```python
+fx.make_ordered_layout((tile_m, tile_k), (1, 0))  # tile_k is contiguous in LDS
+```
+
+### `make_view` — reinterpret a pointer through any layout
+
+`fx.make_view(ptr, layout)` attaches a layout to a raw pointer and produces an
+`fx.Tensor`. No data is moved; it is purely a type-level reinterpretation.
+
+```python
+smem_ptr = fx.get_dyn_shared(fx.Float16)       # raw LDS pointer
+sA = fx.make_view(smem_ptr, fx.make_ordered_layout((tile_m, tile_k), (1, 0)))
+# sA is now a (tile_m × tile_k) f16 tensor living in shared memory
+```
+
+Typical uses:
+
+- Give structure to a flat LDS allocation (`get_dyn_shared` returns a 1-D
+  pointer; `make_view` imposes the 2-D tile shape).
+- Reinterpret typed LDS — e.g. after `recast_iter` to a narrower dtype, attach
+  the wider shape back.
+- Construct a tensor from an arbitrary `inttoptr`'d address for scale tensors or
+  opaque pointer arithmetic.
+
+The layout you pass becomes the tensor's `layout` property; all subsequent
+`zipped_divide`, `partition_S`, `retile`, etc. operate on it normally.
+
+> **HIP/CK-Tile → FlyDSL.** `make_view(ptr, layout)` ≡ constructing a CK-Tile
+> `tensor_view` or `naive_tensor_view` from a pointer + descriptor. It is also the
+> FlyDSL equivalent of `CuTe::make_tensor(ptr, layout)`.
+
+## Composed layouts and XOR swizzle
+
+A plain `Layout` maps a logical coordinate to a flat integer offset: it is a
+linear function. Bank-conflict elimination needs a *non-linear* rearrangement of
+that offset — the XOR swizzle. FlyDSL represents this as a **composed layout**:
+an outer layout followed by a non-linear inner transform.
+
+### `make_composed_layout` — stacking a transform on top of a layout
+
+```python
+fx.make_composed_layout(inner, outer)
+fx.make_composed_layout(inner, offset, outer)
+```
+
+`outer` is a plain `Layout`; `inner` is a `SwizzleType` (or another layout).
+Evaluation is right-to-left: a coordinate is first mapped by `outer`, then the
+resulting offset is transformed by `inner`. The optional `offset` constant is
+added between the two.
+
+```python
+swz = fx.static(fx.SwizzleType.get(3, 3, 3))
+layout = fx.make_ordered_layout((tile_m, tile_k), (1, 0))
+sA = fx.make_view(smem_ptr, fx.make_composed_layout(swz, layout))
+```
+
+Reading this: a logical `(m, k)` coordinate is first mapped to a flat LDS offset
+by `layout`, then that offset is XOR'd by `swz` to produce the swizzled address.
+The copy and partition machinery in `make_tiled_copy` sees the composed layout as
+opaque — it passes coordinates through both layers automatically.
+
+> **HIP/CK-Tile → FlyDSL.** A composed layout is CK-Tile's `ComposedTensorView`
+> or the `xor_swizzle` + `TensorView` idiom. In CUTLASS 3 it is CuTe's
+> `ComposedLayout(swizzle, offset, layout)`. The argument order in FlyDSL is
+> `(inner, [offset,] outer)` — `outer` is applied first.
+
+### `SwizzleType` — the XOR swizzle descriptor
+
+`fx.SwizzleType.get(mask, base, shift)` constructs a swizzle descriptor with
+three parameters, all in units of **bits**:
+
+| Parameter | Role |
+|-----------|------|
+| `mask`    | Number of address bits XOR'd. The mask covers bits `base+shift .. base+shift+mask-1`. |
+| `base`    | Lowest bit position of the source field (the bits that drive the XOR). |
+| `shift`   | How far to shift the source field before XOR-ing. |
+
+The formula applied to an offset `v` is (`IntUtils.cpp:237`):
+
+```
+bit_mask = ((1 << mask) - 1) << (base + shift)
+swizzled = v ^ ((v & bit_mask) >> shift)
+```
+
+In words: take `mask` bits of `v` starting at `base+shift`, shift them down by
+`shift`, and XOR that into `v`. Because the shifted value and the original field
+sit `shift` bits apart, the XOR affects the `base .. base+mask-1` bits of the
+output, making them depend on the `base+shift .. base+shift+mask-1` bits — which
+are row bits for a row-major LDS layout.
+
+The **period** of the swizzle (the tile size over which the XOR pattern repeats)
+is `2^(mask + base + shift)` elements (`FlyAttrDefs.td:146`).
+
+#### Choosing parameters for LDS bank-conflict elimination
+
+LDS on CDNA is 64 banks × 4 bytes, for a 256-byte bank period. Each contiguous
+16 bytes (128-bit) of an LDS line maps to one bank group. The goal of swizzling
+is to make threads that would collide in the same bank group address different
+banks instead, by XOR-ing the row index into the column address.
+
+For **f32 data, `tile_k` contiguous** (row-major LDS tile):
+
+```python
+swz = fx.SwizzleType.get(3, 3, 3)   # period = 2^(3+3+3) = 512 elements = 2048 B
+```
+
+This is the canonical f32/f16 GEMM swizzle in `preshuffle_gemm.py:274`. For
+**8-bit data** the tile is narrower, so the swizzle must be narrower too —
+`preshuffle_gemm.py:272` computes:
+
+```python
+k_blocks16 = (tile_k * elem_bytes) // 16   # number of 16-byte blocks per row
+swz_bits   = (k_blocks16).bit_length() - 1  # log2
+swz = fx.SwizzleType.get(swz_bits, 4, swz_bits)
+```
+
+#### What the swizzle does to addresses
+
+For `tile_k = 16` f32 elements (64 bytes per row), `SwizzleType.get(3, 3, 3)`:
+
+```
+Without swizzle — rows 0..7 of LDS (each column = 1 f32 = 4 bytes):
+
+  k:  0   1   2   3   4   5   6   7   8   9  10  11  12  13  14  15
+m=0 [ 0][ 1][ 2][ 3][ 4][ 5][ 6][ 7][ 8][ 9][10][11][12][13][14][15]
+m=1 [16][17][18][19][20][21][22][23][24][25][26][27][28][29][30][31]
+m=2 [32][33]...
+m=3 [48][49]...
+m=4 [64][65][66][67][68][69][70][71][72][73][74][75][76][77][78][79]
+m=5 [80][81]...
+
+  Every column k lands in bank k % 32 (4-byte granularity).
+  Lanes reading column 0 in rows 0 and 4 hit the same bank → conflict.
+
+With swizzle(3,3,3) — XOR shifts column by 8 starting at row 4:
+
+  k:  0   1   2   3   4   5   6   7   8   9  10  11  12  13  14  15
+m=0 [ 0][ 1][ 2][ 3][ 4][ 5][ 6][ 7][ 8][ 9][10][11][12][13][14][15]
+m=1 [16][17][18][19][20][21][22][23][24][25][26][27][28][29][30][31]
+m=2 [32][33]...
+m=3 [48][49]...
+m=4 [72][73][74][75][76][77][78][79][64][65][66][67][68][69][70][71]
+m=5 [88][89]...         ↑
+                row 4, col 0 now holds the element that was at offset 72
+                = bank 72%32 = bank 8   ← different from row 0's bank 0
+```
+
+The columns in row 4 are rotated by 8 positions. Threads accessing a full column
+of C (all 16 `tile_m` rows at the same `k`) now touch 16 distinct banks instead
+of colliding on 8.
+
+#### Putting it all together
+
+The complete LDS-A pattern from `preshuffle_gemm.py:277`:
+
+```python
+swz = fx.SwizzleType.get(3, 3, 3)
+
+sA = fx.make_view(
+    smem_ptr,
+    fx.make_composed_layout(
+        fx.static(swz),
+        fx.make_ordered_layout((tile_m, tile_k), (1, 0)),
+    ),
+)
+```
+
+Step by step:
+
+1. `make_ordered_layout((tile_m, tile_k), (1, 0))` builds a row-major layout
+   where `tile_k` is the contiguous (fastest) dimension with stride 1, and
+   `tile_m` has stride `tile_k`. This is the *nominal* memory layout.
+2. `fx.static(swz)` boxes the swizzle descriptor into a compile-time constant.
+3. `make_composed_layout(swz, layout)` stacks the XOR transform on top: a
+   logical `(m, k)` coordinate → flat offset `m*tile_k + k` → XOR'd address.
+4. `make_view(smem_ptr, ...)` attaches the composed layout to the LDS pointer,
+   producing an `fx.Tensor` with shape `(tile_m, tile_k)`.
+
+After this, `thr_g2s.partition_D(sA)` computes per-thread destination addresses
+using the composed layout, so every `ds_write` goes to a swizzled bank. The
+matching `thr_s2r.partition_S(sA)` uses the same layout for the `ds_read` side,
+so loads and stores stay coherent with no explicit address math.
+
+#### `CoordSwizzleType` — 2-D coordinate swizzle
+
+A second variant, `fx.CoordSwizzleType.get(mask, base_row, mode_row,
+base_col, mode_col)`, XORs bits of *one coordinate mode* into another mode
+rather than operating on a flat offset. It is used for situations where the
+layout has two independent address modes (row and column) and bank-conflict
+depends on their interaction. You will see it in LDS-read-transpose patterns
+(CDNA4 / gfx950); for plain GEMM `SwizzleType` is sufficient.
+
 ## A complete worked example
 
 Tile a `(64, 32)` row-major matrix into `(16, 16)` blocks and address block
