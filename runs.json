@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-18T23:32:37Z",
+ "updated": "2026-08-18T23:52:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32198160997,
+   "pr": 1022,
+   "commit": "62d3db68c55d47de01c8ea2f129307bc2e623e66",
+   "branch": "jhinpan/softmax-autotune",
+   "event": "pull_request",
+   "title": "[Kernel] Add opt-in autotuning for Softmax",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32198160997",
+   "created_at": "2026-08-18T23:40:31Z",
+   "updated_at": "2026-08-18T23:42:03Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 32195705113,
    "pr": 1027,
@@ -255,28 +270,28 @@
    "branch": "jhinpan/softmax-bwd-bench",
    "event": "pull_request",
    "title": "[CI] Track Softmax backward in the benchmark dashboard",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32178004828",
    "created_at": "2026-08-18T19:41:09Z",
-   "updated_at": "2026-08-18T22:25:20Z",
+   "updated_at": "2026-08-18T23:51:17Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-18T22:25:20Z",
+     "started_at": "2026-08-18T23:51:16Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32178004828/job/95890064362"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-18T22:25:20Z",
+     "started_at": "2026-08-18T23:32:10Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32178004828/job/95890064416"
     },
@@ -333,11 +348,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-18T23:26:53Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32144957080/job/95896843540"
+     "completed_at": "2026-08-18T23:41:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32144957080/job/95896843540",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -376,9 +392,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-18T22:22:48Z",
+     "started_at": "2026-08-18T23:50:20Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32144669431/job/95889439600"
     },
@@ -697,21 +713,22 @@
    "branch": "pr/enh-cdna4-async-lds-copy-atoms",
    "event": "pull_request",
    "title": "[ROCDL] Add Global/BufferLoadAsyncLDS atoms",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32120675626",
    "created_at": "2026-08-18T09:15:53Z",
-   "updated_at": "2026-08-18T22:26:25Z",
+   "updated_at": "2026-08-18T23:51:03Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-18T22:26:24Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32120675626/job/95872736942"
+     "completed_at": "2026-08-18T23:51:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32120675626/job/95872736942",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -846,10 +863,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-18T21:56:56Z",
-     "completed_at": null,
+     "completed_at": "2026-08-18T23:49:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32110444156/job/95872887657"
     }
    ]
@@ -1852,21 +1869,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31785133670",
    "created_at": "2026-08-14T08:44:12Z",
    "updated_at": "2026-08-14T08:46:03Z",
-   "actor": "JohnQinAMD",
-   "jobs": []
-  },
-  {
-   "run_id": 31784525574,
-   "pr": 1009,
-   "commit": "616227145644a2d0513f328be5be58b8aad779df",
-   "branch": "john/bf16-attn-xcd-swizzle",
-   "event": "pull_request",
-   "title": "[Perf] Enable the XCD swizzle and pin the softmax basis for gfx950 bf16 attention",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31784525574",
-   "created_at": "2026-08-14T08:35:28Z",
-   "updated_at": "2026-08-14T08:44:19Z",
    "actor": "JohnQinAMD",
    "jobs": []
   }
