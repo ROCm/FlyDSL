@@ -50,6 +50,19 @@ BF16_BYTES = 2
 
 DEFAULT_TILE = (128, 128, 2, 4)
 
+# Widest first. Every rung is legal for any problem: TILE_K is fixed at 32 and each rung's
+# TILE_M * TILE_K and TILE_N * TILE_K land on exactly one LDG_VEC vector per thread, so
+# _pick_tile never has to fall back on a builder assertion.
+TILE_LADDER = ((128, 128, 2, 4), (64, 64, 2, 2), (32, 32, 1, 2))
+
+# Waves the grid has to put on each CU before a wider tile is preferred. Halving a tile
+# halves TILE_M * TILE_N / (TILE_M + TILE_N), i.e. doubles global traffic per FLOP, so
+# narrowing only pays while the device is starved. Measured on gfx950 (256 CU) over 1D/2D/3D
+# shapes the crossover sits at ~6 waves/CU -- 1.5 per SIMD, enough to hide the k-loop's
+# vmcnt drains: below it the narrower rung wins by 1.1-2.0x, above it the wider one wins by
+# up to 1.2x (a 14x14x512->512 k3 conv2d is 1.6x *slower* on the narrowest rung).
+TILE_MIN_WAVES_PER_CU = 6
+
 # Same set torch's nn.ConvNd accepts. All four are resolved inside the im2col gather:
 # "zeros" masks an out-of-range tap, the rest remap it onto a real input coordinate.
 PADDING_MODES = ("zeros", "reflect", "replicate", "circular")
@@ -168,16 +181,24 @@ def _prep_weight(w, k, kt, kh, kw, c):
 
     Entries do not outlive their weight: the weakref carries a callback that removes
     its own key, so neither the dict nor the packed GPU tensors it pins accumulate.
+
+    What the weakref points at is the view's *base*, not the argument itself. The 1D and
+    2D entries reach this through a fresh ``weight.reshape(...)`` view built per call, and
+    that view dies as soon as the call returns -- the eviction callback then fired
+    immediately and the memo never hit once for conv1d or conv2d, repacking the weight on
+    every launch. A view shares both its storage and its version counter with its base, so
+    the base is both the right lifetime to hold and the same mutation signal.
     """
+    anchor = w._base if w._base is not None else w
     key = w.data_ptr()
     stamp = (w._version, tuple(w.shape), w.stride(), w.dtype)
     ent = _WEIGHT_CACHE.get(key)
-    if ent is not None and ent[0]() is w and ent[2] == stamp:
+    if ent is not None and ent[0]() is anchor and ent[2] == stamp:
         return ent[1]
     cp = _pad_channels(c)
     wsrc = torch.nn.functional.pad(w, (0, 0, 0, 0, 0, 0, 0, cp - c)) if cp != c else w
     wk = wsrc.permute(0, 2, 3, 4, 1).contiguous().reshape(k, kt * kh * kw * cp)
-    _WEIGHT_CACHE[key] = (weakref.ref(w, functools.partial(_evict_weight, key)), wk, stamp)
+    _WEIGHT_CACHE[key] = (weakref.ref(anchor, functools.partial(_evict_weight, key)), wk, stamp)
     return wk
 
 
@@ -429,6 +450,10 @@ def compile_conv3d_implicit(
     splitk = max(1, min(splitk, k_tiles))
     tiles_per_split = k_tiles // splitk
     use_splitk = splitk > 1
+    # Exact num_records on the output descriptor, so the epilogue can route a masked store
+    # past the end of the buffer and let the hardware drop it instead of branching around
+    # it -- see _route. BIG_OUT does not store through this descriptor at all.
+    Y_BYTES = npq * k * (4 if use_splitk else BF16_BYTES)
     # The bound _resolve_splitk applies, restated where the unsafe arithmetic actually
     # lives so a caller reaching this builder directly fails loudly instead of silently
     # wrapping the epilogue's 32-bit atomic offset.
@@ -509,7 +534,7 @@ def compile_conv3d_implicit(
         w_src = _dma_src(fx.get_iter(weight), W_BYTES // BF16_BYTES, W_BYTES)
         if const_expr(not BIG_IN):
             x_src = _dma_src(fx.get_iter(x), X_BYTES // BF16_BYTES, X_BYTES)
-        y_rsrc = buffer_ops.create_buffer_resource(y)
+        y_rsrc = buffer_ops.create_buffer_resource(y, num_records_bytes=Y_BYTES)
         if const_expr(has_bias):
             bias_rsrc = buffer_ops.create_buffer_resource(bias)
 
@@ -926,19 +951,51 @@ def compile_conv3d_implicit(
             v = col_loc < fx.Index(KG)
             return arith.andi(v, v)
 
+        # A masked store on the plain buffer path is routed past num_records and dropped by
+        # the hardware rather than branched around, which is what keeps the epilogue
+        # straight-line. The branchy form gave every store its own basic block, and the
+        # bias load's `s_waitcnt vmcnt(0)` was then duplicated into each of them; gfx9 keeps
+        # loads and stores on one in-order vmcnt, so each of those waits also drained every
+        # store already issued and the epilogue ran as one serialized round trip per value.
+        # The other two store paths cannot be routed: split-K's atomic takes a byte offset
+        # and BIG_OUT stores through a raw pointer, so both keep the branch.
+        _route_store = _need_chk and not use_splitk and not BIG_OUT
+
+        def _route(off, row, col_loc):
+            if const_expr(not _route_store):
+                return off
+            return fx.Int32(arith.select(_valid_raw(row, col_loc), fx.Int32(off), OOB_ELEM))
+
+        def _cols(ni):
+            """Global out-channel for MFMA column block ni, and its index within the group."""
+            col_off = fx.Index(wave_n * WARP_N + ni * MFMA_N + c_n)
+            col = n_offset + col_off
+            return col, ((n_local + col_off) if const_expr(groups > 1) else col)
+
         def store_acc():
+            # Bias depends only on the column, so MI_N loads cover the whole wave tile. They
+            # are issued together up front on purpose: a buffer_load sitting between two
+            # stores forces `s_waitcnt vmcnt(0)` before its use, which on gfx9's shared
+            # in-order vmcnt also waits for every store already issued. Interleaved, the
+            # MI_M * MI_N loads serialized the whole epilogue on store-ack latency.
+            if const_expr(has_bias and not use_splitk):
+                bias_vals = []
+                for ni in range_constexpr(MI_N):
+                    col, col_loc = _cols(ni)
+                    col_i = fx.Int32(col)  # bias is indexed by the global out-channel
+                    if const_expr(n_tail):
+                        col_i = arith.select(col_loc < fx.Index(KG), col_i, fx.Int32(0))
+                    bias_vals.append(
+                        fx.Float32(buffer_ops.buffer_load(bias_rsrc, col_i, vec_width=1, dtype=fx.Float32))
+                    )
+
             for mi in range_constexpr(MI_M):
                 row_base = m_offset + wave_m * WARP_M + mi * MFMA_M + c_m_vec
                 for ni in range_constexpr(MI_N):
-                    col_off = fx.Index(wave_n * WARP_N + ni * MFMA_N + c_n)
-                    col = n_offset + col_off
-                    col_loc = (n_local + col_off) if const_expr(groups > 1) else col
+                    col, col_loc = _cols(ni)
                     a = Vec(acc[mi * MI_N + ni])
                     if const_expr(has_bias and not use_splitk):
-                        col_i = fx.Int32(col)  # bias is indexed by the global out-channel
-                        if const_expr(n_tail):
-                            col_i = arith.select(col_loc < fx.Index(KG), col_i, fx.Int32(0))
-                        bias_val = fx.Float32(buffer_ops.buffer_load(bias_rsrc, col_i, vec_width=1, dtype=fx.Float32))
+                        bias_val = bias_vals[ni]
 
                     if const_expr(_vec_store):
                         row0 = fx.Index(row_base)
@@ -950,9 +1007,9 @@ def compile_conv3d_implicit(
                                 cval = (a[i] + bias_val) if const_expr(has_bias) else a[i]
                                 vals.append(cval.to(elem_ty))
                             v4 = fx.Vector.from_elements(vals, dtype=elem_ty)
-                            buffer_ops.buffer_store(v4, y_rsrc, off_nk0)
+                            buffer_ops.buffer_store(v4, y_rsrc, _route(off_nk0, row0, col_loc))
 
-                        if const_expr(_need_chk):
+                        if const_expr(_need_chk and not _route_store):
                             if _valid_raw(row0, col_loc):
                                 _emit_vec()
                         else:
@@ -985,9 +1042,9 @@ def compile_conv3d_implicit(
                                 if const_expr(BIG_OUT):
                                     _big_store(fx.Int64(off_nk), cval)
                                 else:
-                                    buffer_ops.buffer_store(cval, y_rsrc, off_nk)
+                                    buffer_ops.buffer_store(cval, y_rsrc, _route(off_nk, row, col_loc))
 
-                        if const_expr(_need_chk):
+                        if const_expr(_need_chk and not _route_store):
                             if _valid_raw(row, col_loc):
                                 _emit()
                         else:
@@ -1024,6 +1081,34 @@ def compile_conv3d_implicit(
 SPLITK_MAX_STAGING_BYTES = 0xFFFFFFFF
 
 
+def _num_cu(device):
+    try:
+        return torch.cuda.get_device_properties(device).multi_processor_count
+    except Exception:
+        return 256
+
+
+def _pick_tile(npq, k, groups, device):
+    """Widest ladder rung whose grid still covers the device.
+
+    DEFAULT_TILE alone leaves the grid far short of the CU count on anything but a large
+    2D conv -- the user-visible symptom is a staircase in SM occupancy, where the few
+    blocks that exist finish in waves instead of filling the machine. Walking the ladder
+    down until the grid reaches TILE_MIN_WAVES_PER_CU trades arithmetic intensity for
+    parallelism only as far as the problem actually needs.
+    """
+    kg = k // groups
+    # A tile never spans two groups, so an N tile wider than K/groups sits mostly masked;
+    # those rungs are dropped before the occupancy test rather than counted as useful work.
+    legal = [t for t in TILE_LADDER if t[1] <= kg] or [TILE_LADDER[-1]]
+    target = TILE_MIN_WAVES_PER_CU * _num_cu(device)
+    for tile_m, tile_n, wave_m, wave_n in legal:
+        blocks = ((npq + tile_m - 1) // tile_m) * groups * ((kg + tile_n - 1) // tile_n)
+        if blocks * wave_m * wave_n >= target:
+            return (tile_m, tile_n, wave_m, wave_n)
+    return legal[-1]
+
+
 def _resolve_splitk(splitk, npq, crs, k, device, tile=DEFAULT_TILE, groups=1):
     k_tiles = (crs + TILE_K - 1) // TILE_K
     # Correctness bound, so it has to gate an explicit splitk too -- the auto branch's own
@@ -1044,10 +1129,7 @@ def _resolve_splitk(splitk, npq, crs, k, device, tile=DEFAULT_TILE, groups=1):
         ):
             sk = 1
         else:
-            try:
-                num_cu = torch.cuda.get_device_properties(device).multi_processor_count
-            except Exception:
-                num_cu = 256
+            num_cu = _num_cu(device)
             if base >= (3 * num_cu) // 4:
                 sk = 1
             else:
@@ -1310,9 +1392,7 @@ def _conv3d_impl(
         best = autotune_conv3d("bf16", shape, "bf16", candidates, x.device, lambda tw: _run(tw[0], tw[1])[0])
         chosen_tile, chosen_wgm = best
     else:
-        # A tile never spans groups, so a 128-wide N tile sits mostly empty when K/groups is
-        # small; drop to the narrowest legal candidate. Autotune picks properly when enabled.
-        chosen_tile = (64, 64, 2, 2) if (groups > 1 and k // groups < DEFAULT_TILE[1]) else DEFAULT_TILE
+        chosen_tile = _pick_tile(npq, k, groups, x.device)
         chosen_wgm = 1
 
     y, sk = _run(chosen_tile, chosen_wgm)
