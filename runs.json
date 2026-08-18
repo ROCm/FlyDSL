@@ -1,15 +1,61 @@
 {
  "schema": 1,
- "updated": "2026-08-18T20:57:56Z",
+ "updated": "2026-08-18T21:01:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32185208973,
+   "pr": 1027,
+   "commit": "b5fdcda06137a66017bec5a074a865f79e701651",
+   "branch": "skills/dedrift-and-fix-frontmatter",
+   "event": "pull_request",
+   "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32185208973",
+   "created_at": "2026-08-18T20:58:14Z",
+   "updated_at": "2026-08-18T21:00:03Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-18T20:59:57Z",
+     "completed_at": "2026-08-18T21:00:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32185208973/job/95867603414",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-18T20:59:58Z",
+     "completed_at": "2026-08-18T21:00:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32185208973/job/95867603430",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-18T20:59:58Z",
+     "completed_at": "2026-08-18T21:00:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32185208973/job/95867603441",
+     "log_fetch_failed": true
+    }
+   ]
+  },
   {
    "run_id": 32184771964,
    "pr": 1027,
    "commit": "77a7dae5e153ae927e9ff0f9e197b6f2c7b4eb53",
    "branch": "skills/dedrift-and-fix-frontmatter",
    "event": "pull_request",
-   "title": "[Skills] Fix silently-ignored frontmatter and de-drift kernel skills",
+   "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32184771964",
@@ -55,7 +101,7 @@
    "commit": "e94dfad4cb84c57bad83d86d0f7356fb39897c4c",
    "branch": "skills/dedrift-and-fix-frontmatter",
    "event": "pull_request",
-   "title": "[Skills] Fix silently-ignored frontmatter and de-drift kernel skills",
+   "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32181490321",
@@ -1531,52 +1577,6 @@
    "updated_at": "2026-08-14T07:12:08Z",
    "actor": "vlluvia",
    "jobs": []
-  },
-  {
-   "run_id": 31774856574,
-   "pr": 1009,
-   "commit": "3d0e4b91f3c986f25c1541f9e32f93679e3ae999",
-   "branch": "john/bf16-attn-xcd-swizzle",
-   "event": "pull_request",
-   "title": "[Perf] Enable the XCD swizzle and pin the softmax basis for gfx950 bf16 attention",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31774856574",
-   "created_at": "2026-08-14T06:01:01Z",
-   "updated_at": "2026-08-14T08:18:25Z",
-   "actor": "JohnQinAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-14T06:30:31Z",
-     "completed_at": "2026-08-14T08:15:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31774856574/job/94692798640",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-14T06:30:37Z",
-     "completed_at": "2026-08-14T08:18:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31774856574/job/94692798734",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-14T06:32:22Z",
-     "completed_at": "2026-08-14T07:02:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31774856574/job/94692798754",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
