@@ -180,6 +180,11 @@ Limits: 64 KB on gfx942, 160 KB on gfx950.
 
 ## 3. LDS XOR Bank-Conflict Swizzle
 
+This section is the GEMM-specific implementation. For the general method --
+diagnosing bank conflicts from ATT trace data, choosing swizzle vs padding, and
+the gfx942 (32-bank) vs gfx950 (64-bank) differences -- see the
+**lds-optimization** skill.
+
 ### 3.1 The Problem
 
 A tile stored row-major in LDS with stride = tile_k creates bank conflicts when
@@ -223,6 +228,10 @@ uses swizzle but the other doesn't, data will be read from wrong positions.
 ---
 
 ## 4. Data Prefetch Pipeline
+
+This section is the GEMM-specific pipeline. For the general transformation --
+prologue, `range(..., init=...)` loop-carried state, epilogue, and the register
+-budget rules -- see the **prefetch-data-load** skill.
 
 ### 4.1 A Matrix: Global → LDS
 

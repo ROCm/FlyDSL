@@ -117,7 +117,10 @@ FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 rocprofv3 -i /tmp/trace_input.yaml -- <CMD> 2>&
 find . -type d -name "ui_output_agent_*" -newer /tmp/trace_ts 2>/dev/null
 ```
 
-If `rocprof-trace-decoder` library is missing:
+If the `rocprof-trace-decoder` library is missing, install the release matching
+the ROCm version in `/opt/rocm/.info/version` (the **build-rocm-image** skill
+does this selection automatically when building an image). Substitute that
+version for `0.1.6` below:
 ```bash
 wget -q https://github.com/ROCm/rocprof-trace-decoder/releases/download/0.1.6/rocprof-trace-decoder-manylinux-2.28-0.1.6-Linux.sh
 chmod +x rocprof-trace-decoder-manylinux-2.28-0.1.6-Linux.sh

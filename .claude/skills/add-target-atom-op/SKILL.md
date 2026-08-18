@@ -1,23 +1,15 @@
 ---
 name: add-target-atom-op
 description: >
-  Add a new target-specific Mma / Copy Op type to any FlyDSL backend
-  dialect (`lib/Dialect/Fly<TARGET>/<SUBTARGET>/` +
-  `include/flydsl/Dialect/Fly<TARGET>/IR/`). Explains the `MmaOp`-type /
-  `CopyOp`-type design (each type plugs into the generic
-  `!fly.mma_atom<...>` / `!fly.copy_atom<...>` wrapper through
-  `Fly_MmaOpTypeInterface` / `Fly_CopyOpTypeInterface`), the
-  stateful-vs-stateless variants (`Fly_StatefulOpTypeInterface`), and the
-  required `emitAtomCall` / `emitAtomCallSSA` lowering contract to the
-  backend dialect (LLVM/ROCDL/NVVM/SPIR-V/...). Use when adding a new
-  tensor-core / matrix instruction (MFMA, WMMA, HMMA, WGMMA, ...), a new
-  buffer / shared-memory / global copy atom, a new stateful copy (e.g.
-  per-atom offset or descriptor), or bringing up a new backend dialect
-  (`FlyPTX`, `FlyCPU`, etc.). The current reference implementation is
-  `FlyROCDL` with `CDNA3` MFMA, `CDNA3` BufferCopy, `CDNA4`
-  LDS-read-transpose, `GFX1250` WMMA / MX-scaled WMMA (stateful scale) /
-  N-D TDM copy (stateful descriptor); treat these as templates, not
-  prerequisites. Usage: /add-target-atom-op
+  Add a new target-specific Mma / Copy Op type to a FlyDSL backend dialect
+  (`lib/Dialect/Fly<TARGET>/<SUBTARGET>/` + `include/flydsl/Dialect/Fly<TARGET>/IR/`).
+  Covers the MmaOp/CopyOp type design, the stateful-vs-stateless variants, and the
+  `emitAtomCall` / `emitAtomCallSSA` lowering contract to the backend dialect
+  (LLVM/ROCDL/NVVM/SPIR-V/...). Use when adding a new tensor-core / matrix instruction
+  (MFMA, WMMA, HMMA, WGMMA, ...), a new buffer / shared-memory / global copy atom, a new
+  stateful copy (per-atom offset or descriptor), or bringing up a new backend dialect
+  (`FlyPTX`, `FlyCPU`, ...). Reference implementations live in `FlyROCDL`.
+  Usage: /add-target-atom-op
 allowed-tools: Read Edit Bash Grep Glob Agent
 ---
 

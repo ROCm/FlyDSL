@@ -5,8 +5,9 @@ description: >
   Formats Python with black + ruff and C/C++ with clang-format using the repository's
   .clang-format, and can also run check-only to reproduce the CI gate locally without editing
   files. Use when the user says "format code", "clean up code", "lint", "format before commit",
-  "/format-code", wants to reproduce the "Check Python Code Style" CI job locally, is fixing a
-  CI style failure, is about to push Python changes, or mentions black, ruff, or clang-format.
+  "/format-code", wants to reproduce the "Check Python Code Style" or "Check C++ Code Style" CI
+  jobs locally, is fixing a CI style failure, is about to push Python or C/C++ changes, or
+  mentions black, ruff, or clang-format.
 allowed-tools: Bash Read Edit Grep Glob
 ---
 
@@ -41,6 +42,22 @@ This wrapper runs `black -> ruff check --fix -> black` on the committed diff, ex
 CI. If it succeeds, inspect the resulting diff and skip the generic Python steps below unless
 additional non-Python formatting is still needed. If required tooling is missing, use the
 repo's install option, e.g. `bash scripts/check_python_style.sh --install`.
+
+### 1b. C/C++ has its own CI gate
+
+CI runs two style jobs from `.github/workflows/pre-checks.yaml`: `python-style`
+("Check Python Code Style") and `cpp-style` ("Check C++ Code Style"). The C++
+job runs `./.github/scripts/check_cpp_style.sh`, which clang-format-*checks*
+(does not rewrite) the C/C++ files in the diff. Reproduce it locally:
+
+```bash
+# Match what CI sees on a PR branch
+BASE_SHA=origin/main CLANG_FORMAT=clang-format-18 bash .github/scripts/check_cpp_style.sh
+```
+
+Without `BASE_SHA`, the script falls back to `HEAD^`, so it checks only the last
+commit rather than the whole branch. It reports offenders; use the in-place
+`clang-format-18 -i` steps below to fix them, and for files outside the diff range.
 
 ### 2. Ensure generic tools are installed
 
