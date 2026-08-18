@@ -230,8 +230,9 @@ uses swizzle but the other doesn't, data will be read from wrong positions.
 ## 4. Data Prefetch Pipeline
 
 This section is the GEMM-specific pipeline. For the general transformation --
-prologue, `range(..., init=...)` loop-carried state, epilogue, and the register
--budget rules -- see the **prefetch-data-load** skill.
+prologue, `range(..., init=...)` loop-carried state, epilogue -- see the
+**prefetch-data-load** skill. (Note its register-budget model contradicts 10.2
+below; see the flag there.)
 
 ### 4.1 A Matrix: Global → LDS
 
@@ -386,7 +387,7 @@ for ku in range_constexpr(k_unroll):           # K dimension (K64 steps)
 | Data Type | K per MFMA | Instruction | Accumulator |
 |-----------|-----------|-------------|-------------|
 | FP8 | K=32 | `mfma_f32_16x16x32_fp8_fp8` | f32×4 |
-| INT8 | K=32 | `mfma_i32_16x16x32i8` | i32×4 |
+| INT8 | K=32 | `mfma_i32_16x16x32_i8` | i32×4 |
 | BF16 | K=16 | `mfma_f32_16x16x16bf16_1k` | f32×4 |
 | FP16 | K=16 | `mfma_f32_16x16x16f16` | f32×4 |
 | FP4 (gfx950) | K=128 | `mfma_scale_f32_16x16x128_f8f6f4` | f32×4 |
@@ -588,8 +589,18 @@ On gfx942 (256 arch_vgpr + 256 accum_vgpr per SIMD):
 | 129-256 | ≤ 256 | 1 | Acceptable for compute-bound |
 | > 256 | any | SPILL | Critical regression |
 
-MFMA accumulators use **accum_vgpr** (separate file). Prefetch buffers, B tile,
-and A tile use **arch_vgpr**. These do not compete.
+MFMA accumulators use **accum_vgpr**. Prefetch buffers, B tile, and A tile use
+**arch_vgpr**.
+
+> **Unresolved — do not rely on this table without checking.** The
+> **prefetch-data-load** and **lds-optimization** skills state the opposite
+> model for the same chip: that `arch_vgpr` and `accum_vgpr` are two physical
+> files sharing **one combined 512-entry occupancy budget**, so they *do*
+> compete (<= 256 combined -> 2 waves, > 512 -> spill), and that the separate
+> 256/256 model applies only to gfx908/CDNA1. The table above and those skills
+> disagree on both the wave count and whether adding a prefetch buffer is safe.
+> This needs an owner with hardware access to settle; until then, measure
+> occupancy directly rather than trusting either table.
 
 ---
 

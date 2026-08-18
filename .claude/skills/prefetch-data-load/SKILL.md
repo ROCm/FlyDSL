@@ -17,13 +17,14 @@ Apply software prefetch (double-buffering) to overlap async data loads with
 compute in FlyDSL GPU kernel loops.
 
 **API note.** The worked examples below are transcribed from the PA decode
-kernel and spell loads as raw `buffer_ops.buffer_load` and MMA as raw
-`rocdl.mfma_*`. What they demonstrate is the *loop structure* — prologue,
-loop-carried state, epilogue — which is unchanged on the current surface. For
-new code prefer `fx.rocdl.make_buffer_tensor` + `fx.copy` for the loads and
-`fx.make_mma_atom` + `fx.gemm` for the MMA; the raw intrinsics now live in
-`kernels/common/buffer_ops.py` (moved out of `flydsl.expr` in #880). See the
-**kernel-code-cleanup** skill for the mapping.
+kernel and are *schematic*: they demonstrate the loop structure — prologue,
+loop-carried state, epilogue — not a copy-pasteable kernel. The loads are still
+spelled as raw `buffer_ops.buffer_load`, which now lives in
+`kernels/common/buffer_ops.py` (moved out of `flydsl.expr` in #880); for new
+code use `fx.rocdl.make_buffer_tensor` + `fx.copy` instead. The MMA is shown in
+the current atom form (`mma = fx.make_mma_atom(...)`, then `fx.gemm(mma, d, a,
+b, c)`); the raw `rocdl.mfma_*` intrinsics take `(result_type, operands)`, not
+`(a, b, acc)`. See the **kernel-code-cleanup** skill for the full mapping.
 
 ## Core Principle
 
@@ -97,7 +98,7 @@ for i in range(START, END):
     data_B = buffer_ops.buffer_load(rsrc_B, offsets, vec_width=4)
 
     # === COMPUTE PHASE ===
-    result = rocdl.mfma_f32_16x16x16_f16(transform(data_A), transform(data_B), acc)
+    fx.gemm(mma, acc, transform(data_A), transform(data_B), acc)   # d, a, b, c
 ```
 
 Apply the following transformation using `range(..., init=...)`:
@@ -131,7 +132,7 @@ for iv, state in range(_start, _stop, _step, init=init_state):
     next_data_B = buffer_ops.buffer_load(rsrc_B, offsets_next, vec_width=4)
 
     # Compute using current data (overlaps with next load)
-    acc = rocdl.mfma_f32_16x16x16_f16(transform(data_A), transform(data_B), acc)
+    fx.gemm(mma, acc, transform(data_A), transform(data_B), acc)
 
     results = yield [_unwrap(v) for v in [next_data_A, next_data_B, acc]]
 ```
@@ -142,7 +143,7 @@ for iv, state in range(_start, _stop, _step, init=init_state):
 data_A = results[0]
 data_B = results[1]
 acc = results[2]
-acc = rocdl.mfma_f32_16x16x16_f16(transform(data_A), transform(data_B), acc)
+fx.gemm(mma, acc, transform(data_A), transform(data_B), acc)
 ```
 
 ### Handling auxiliary data (block tables, scales)
@@ -166,9 +167,7 @@ for iv, state in range(_start, _stop, _step, init=init_state):
     next_scale = buffer_ops.buffer_load(rsrc_scale, next_block_id, vec_width=1)
 
     # Compute with current data
-    acc = rocdl.mfma_f32_16x16x16_f16(
-        transform(data_A) * scale, transform(data_B), acc
-    )
+    fx.gemm(mma, acc, transform(data_A) * scale, transform(data_B), acc)
 
     results = yield [_unwrap(v) for v in [
         next_data_A, next_data_B, next_block_id, next_scale, acc

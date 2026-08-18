@@ -14,7 +14,7 @@ allowed-tools: Read Edit Bash Grep Glob Agent
 
 FlyDSL is a Python DSL and MLIR-based compiler for writing high-performance GPU kernels on AMD GPUs (MI300X/MI350). It provides explicit layout algebra for controlling data movement, tiling, and memory access patterns. The layout system is the core abstraction that distinguishes FlyDSL from Triton/Gluon.
 
-**Repository**: `/FlyDSL/` (installed in editable mode)
+**Repository**: this checkout (examples below assume it is importable — see 12)
 **Target GPU**: gfx942 (MI300X, CDNA3), gfx950 (MI350, CDNA4)
 **Python**: 3.12, ROCm 7.2
 
@@ -55,7 +55,8 @@ Pipeline is built by `RocmBackend._pipeline_parts()` and split into three stages
 - `python/flydsl/expr/derived.py` - CopyAtom, MmaAtom, TiledCopy, TiledMma wrappers
 - `python/flydsl/expr/gpu.py` - GPU operations (thread_idx, block_idx, barrier)
 - `python/flydsl/expr/rocdl/` - MFMA/WMMA and other ROCm intrinsics
-  (package: cdna3, cdna4, cdna5, rdna3, rdna4, cluster, inline_asm, tdm_ops, universal)
+  (package: cdna3, cdna4, cdna5, rdna3, rdna4, cluster, inline_asm, tdm_ops, universal;
+  plus `utils.py` / `enum.py` helpers)
 - `python/flydsl/expr/gpu.py` - `SharedAllocator` for LDS (shared memory), `thread_id`/`block_id`, `barrier`
 - `python/flydsl/utils/smem_allocator.py` - legacy `SmemAllocator` (un-migrated kernels only)
 - `kernels/common/buffer_ops.py` - legacy raw AMD buffer load/store intrinsics
@@ -609,7 +610,7 @@ Legacy raw intrinsics (`create_buffer_resource` / `buffer_load` / `buffer_store`
 
 **gfx1250 TDM async copy** (`fx.rocdl.make_tdm_atom`): a whole-tile DMA whose
 descriptor (base pointer, per-dim extent for HW OOB handling, per-dim stride) is
-carried as **atom state**. The global operand of `copy_atom_call` is a
+carried as **atom state**. The global operand of the copy is a
 shape/direction token only — its layout gives the compile-time N-D tile shape and
 its address space picks load vs store; its *pointer is unused* (base comes from
 state). Needs a **raw VA** (not `make_buffer_tensor`).
@@ -619,9 +620,11 @@ lds = fx.SharedAllocator().allocate(fx.Array[fx.Float16, M * N]).peek()
 lds2d = fx.make_view(lds.ptr, fx.make_layout((M, N), (N, 1)))       # note: lds.ptr
 g2d = fx.make_view(fx.get_iter(A), fx.make_layout((M, N), (N, 1)))
 atom = fx.rocdl.make_tdm_atom(g2d, [M, N], num_warps=4)            # rank = len(extents), 1–5D
-fx.copy_atom_call(atom, g2d, lds2d)                               # Global → LDS
+fx.copy(atom, g2d, lds2d)                                        # Global → LDS
 fx.rocdl.tdm_ops.tensor_wait(0)                                  # await async DMA
-atom = fx.rocdl.advance_tdm_atom(atom, k_tile * k_stride_bytes)  # K-loop tile bump (imm_offset)
+fx.copy(atom, g2d, lds2d, imm_offset=k_tile * k_stride_bytes)    # K-loop tile bump
+# imm_offset is atom state, so it must go through fx.copy -- copy_atom_call
+# takes no **kwargs and cannot carry it.
 ```
 
 ---
@@ -671,17 +674,24 @@ prefer `SharedAllocator` for anything new.
 ## 6. MFMA Integration (Matrix Math)
 
 ### Available MFMA Instructions
+
+Prefer the atom form — it picks the intrinsic from shape + dtype, handles
+fragment packing, and is arch-dispatched (MFMA on CDNA3/4, WMMA on gfx11/gfx1250):
+
+```python
+mma = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.Float16))   # -> f32 acc
+fx.gemm(mma, frag_C, frag_A, frag_B, frag_C)                    # d, a, b, c
+```
+
+The raw intrinsics take `(result_type, operands)` — note the exact spellings,
+which are easy to get wrong:
+
 ```python
 from flydsl.expr import rocdl
 
-# FP16/BF16 MFMA
-result = rocdl.mfma_f32_16x16x16_f16(a, b, acc)
-
-# FP8 MFMA
-result = rocdl.mfma_f32_16x16x32_fp8(a, b, acc)
-
-# INT8 MFMA
-result = rocdl.mfma_i32_16x16x32i8(a, b, acc)
+acc = rocdl.mfma_f32_16x16x16f16(T.vec(4, T.f32), [a, b, acc, 0, 0, 0])    # f16
+acc = rocdl.mfma_f32_16x16x32_fp8_fp8(T.vec(4, T.f32), [a, b, acc, 0, 0, 0])  # fp8
+acc = rocdl.mfma_i32_16x16x32_i8(T.vec(4, T.i32), [a, b, acc, 0, 0, 0])    # i8
 ```
 
 ### gfx1250 WMMA (wave32)
@@ -794,12 +804,9 @@ vA = Vec(fx.memref_load_vec(rA))
 zero_vec = Vec.filled(vec_width, 0.0, fx.Float32)
 vC = fx.max(vA, zero_vec)
 
-# --- Abs: C = |A| (arith.absf does NOT exist) ---
-vA = Vec(fx.memref_load_vec(rA))
-zero_vec = Vec.filled(vec_width, 0.0, fx.Float32)
-neg_vA = -vA
-is_neg = vA < zero_vec
-vC = is_neg.select(neg_vA, vA)
+# --- Abs: C = |A| ---
+vC = abs(fx.memref_load_vec(rA))        # or fx.absf(...); memref_load_vec already
+                                        # returns a Vector, so no Vec() wrap needed
 ```
 
 ### Naive GEMM Template (for understanding, not performance)
@@ -884,7 +891,7 @@ without the DI scope pass.
 
 ### Autotune Module
 
-FlyDSL includes a Triton-style autotune module at `/FlyDSL/python/flydsl/autotune.py`:
+FlyDSL includes a Triton-style autotune module at `python/flydsl/autotune.py`:
 
 ```python
 from flydsl.autotune import autotune, Config, do_bench
@@ -946,7 +953,7 @@ Pass raw `torch.Tensor` objects instead.
 
 10. **INT4 (W4A8)**: A matrix is int8, B matrix is packed int4 (2 values/byte), unpacked to int8 in-kernel.
 
-11. **`arith.absf` does not exist**: Prefer `fx.Vector` / typed `fx` operators (not the deprecated `ArithValue`): `neg = -v`, `is_neg = v < zero`, `out = is_neg.select(neg, v)`.
+11. **Absolute value**: the *arith dialect* has no `absf`, but FlyDSL exports one — use `abs(v)` or `fx.absf(v)` rather than a negate/compare/select sequence.
 
 12. **Scalar broadcast to vector**: Use `Vec.filled(width, value, fx.Float32)` to create a splat constant vector. Do NOT use raw vector ops for ordinary arithmetic.
 
@@ -973,8 +980,14 @@ FlyDSL gives maximum control at the cost of verbosity. The layout algebra is the
 
 ### Locally
 
+With an editable install (`pip install -e .`) the repo root is enough. From a
+plain source checkout, put the built bindings on the path as well (CLAUDE.md):
+
 ```bash
-PYTHONPATH=./ python3 my_kernel.py
+export PYTHONPATH="${PWD}/build-fly/python_packages:${PWD}:${PYTHONPATH}"
+export LD_LIBRARY_PATH="${PWD}/build-fly/python_packages/flydsl/_mlir/_mlir_libs:${LD_LIBRARY_PATH}"
+
+python3 my_kernel.py
 python3 -m pytest tests/kernels/test_vec_add.py -v
 bash scripts/run_benchmark.sh
 ```

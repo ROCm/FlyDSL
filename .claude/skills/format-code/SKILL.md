@@ -136,8 +136,12 @@ pushing, or when that job has already failed -- run the wrapper without `--fix` 
 modified:
 
 ```bash
+# Python gate
 bash scripts/check_python_style.sh            # check committed Python diff vs origin/main (matches CI)
 bash scripts/check_python_style.sh --install  # install the black/ruff versions CI uses, if missing
+
+# C++ gate (see 1b -- committed revisions only, so commit before trusting a pass)
+BASE_SHA=origin/main CLANG_FORMAT=clang-format-18 bash .github/scripts/check_cpp_style.sh
 ```
 
 What it checks:

@@ -119,8 +119,9 @@ find . -type d -name "ui_output_agent_*" -newer /tmp/trace_ts 2>/dev/null
 
 If the `rocprof-trace-decoder` library is missing, install the release matching
 the ROCm version in `/opt/rocm/.info/version`. Set `RTD_VERSION` to that release
-before running the block below (**build-rocm-image** pins its own copy of this
-step and may lag; check both if the versions disagree):
+before running the block below. **build-rocm-image** hardcodes its own
+`RTD_VERSION` for the image it builds and does not derive it either; if the two
+disagree, the ROCm version on the machine you are profiling wins:
 ```bash
 RTD_VERSION=0.1.6   # <-- set to the release matching your ROCm version
 RTD_INSTALLER="rocprof-trace-decoder-manylinux-2.28-${RTD_VERSION}-Linux.sh"
@@ -146,7 +147,7 @@ ui_output_agent_<PID>_dispatch_<N>/
 
 ## Step 4: Run hotspot_analyzer.py
 
-Write the script (see above), then run:
+The analyzer ships with this skill — do not reimplement it. Run:
 
 ```bash
 # Full report
