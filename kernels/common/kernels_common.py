@@ -14,7 +14,8 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import builtin
 from flydsl._mlir.dialects import gpu as _gpu
 from flydsl._mlir.dialects import scf as _scf
-from flydsl.runtime.device import get_rocm_arch, get_warp_size
+from flydsl.runtime.device import get_rocm_arch
+from flydsl.runtime.device import get_warp_size as get_warp_size
 
 # Memory/atomic primitives now live in mem_ops; re-exported here for back-compat.
 from kernels.common.mem_ops import _create_llvm_ptr
