@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-18T13:52:19Z",
+ "updated": "2026-08-18T15:31:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32144957080,
+   "pr": 1007,
+   "commit": "d57c39991b472b0e538255205049aec732c412cd",
+   "branch": "fix/preshuffle-a-tile-bugs",
+   "event": "pull_request",
+   "title": "[Bugfix] Fix two A-tile loading bugs in the preshuffle GEMM",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32144957080",
+   "created_at": "2026-08-18T13:53:00Z",
+   "updated_at": "2026-08-18T13:54:51Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 32144669431,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Kernel] Add row-wise Softmax backward (#1019)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32144669431",
    "created_at": "2026-08-18T13:50:04Z",
-   "updated_at": "2026-08-18T13:50:17Z",
+   "updated_at": "2026-08-18T13:51:25Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1593,21 +1608,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 31750962203,
-   "pr": 1008,
-   "commit": "9ad598b9a0badf04a4eec81725174e4dfe785f2d",
-   "branch": "feat/preshuffle-async-copy-f16",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Enable the gmem->LDS async copy for f16/bf16 preshuffle GEMM",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31750962203",
-   "created_at": "2026-08-13T22:41:23Z",
-   "updated_at": "2026-08-13T22:49:15Z",
-   "actor": "JohnQinAMD",
-   "jobs": []
   }
  ]
 }
