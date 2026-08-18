@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-08-18T13:40:25Z",
+ "updated": "2026-08-18T13:52:19Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32144669431,
+   "pr": null,
+   "commit": "e338067610c0d420e63d4f36042987ad8c87841a",
+   "branch": "main",
+   "event": "push",
+   "title": "[Kernel] Add row-wise Softmax backward (#1019)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32144669431",
+   "created_at": "2026-08-18T13:50:04Z",
+   "updated_at": "2026-08-18T13:50:17Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 32143663070,
+   "pr": null,
+   "commit": "44130d43f372b6e76ba626209250443b408abee5",
+   "branch": "main",
+   "event": "push",
+   "title": "[Test] Run every RUN line in the MLIR FileCheck harness (#1021)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32143663070",
+   "created_at": "2026-08-18T13:39:45Z",
+   "updated_at": "2026-08-18T13:50:06Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 32143572153,
+   "pr": null,
+   "commit": "3d8fbf1d88680848ce850f6b1cc6225fa2ed843c",
+   "branch": "main",
+   "event": "push",
+   "title": "[ROCDL] Fix wave size for gfx1250 (wave32, not wave64) (#1024)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32143572153",
+   "created_at": "2026-08-18T13:38:49Z",
+   "updated_at": "2026-08-18T13:39:47Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 32143454942,
    "pr": null,
@@ -10,11 +55,11 @@
    "branch": "main",
    "event": "push",
    "title": "[ROCDL] Add Global/BufferLoadAsyncLDS atoms (#1023)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32143454942",
    "created_at": "2026-08-18T13:37:37Z",
-   "updated_at": "2026-08-18T13:38:23Z",
+   "updated_at": "2026-08-18T13:39:28Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -35,7 +80,7 @@
   },
   {
    "run_id": 32132113458,
-   "pr": 1024,
+   "pr": null,
    "commit": "3951a38826e86fc82e2acab7e2eb60dd22d7dcbd",
    "branch": "pr/fix-gfx1250-wave-size",
    "event": "pull_request",
@@ -50,7 +95,7 @@
   },
   {
    "run_id": 32131673954,
-   "pr": 1024,
+   "pr": null,
    "commit": "745b186224bc670d5a484a8944432a4a0516b708",
    "branch": "pr/fix-gfx1250-wave-size",
    "event": "pull_request",
@@ -65,7 +110,7 @@
   },
   {
    "run_id": 32131357298,
-   "pr": 1024,
+   "pr": null,
    "commit": "05614906b49a0b8ae58be0ce1fde3fe5cb365b99",
    "branch": "pr/fix-gfx1250-wave-size",
    "event": "pull_request",
@@ -110,7 +155,7 @@
   },
   {
    "run_id": 32125806929,
-   "pr": 1024,
+   "pr": null,
    "commit": "81462524428562bc202b176de69e98fcffbcdddb",
    "branch": "pr/fix-gfx1250-wave-size",
    "event": "pull_request",
@@ -185,7 +230,7 @@
   },
   {
    "run_id": 32115635980,
-   "pr": 1021,
+   "pr": null,
    "commit": "9197d4137835b41c4ba56578006730f8f5bceb02",
    "branch": "pr/fix-mlir-filecheck-all-run-lines",
    "event": "pull_request",
@@ -337,7 +382,7 @@
   },
   {
    "run_id": 32082186367,
-   "pr": 1019,
+   "pr": null,
    "commit": "5f8728766e3b1381ce6ec3c2fd458c9241cec0a1",
    "branch": "jhinpan/softmax-bwd",
    "event": "pull_request",
@@ -352,7 +397,7 @@
   },
   {
    "run_id": 32081118423,
-   "pr": 1019,
+   "pr": null,
    "commit": "a0a6b08e973c57acb8519c295dfc5ce92a5e6ed7",
    "branch": "jhinpan/softmax-bwd",
    "event": "pull_request",
@@ -1563,112 +1608,6 @@
    "updated_at": "2026-08-13T22:49:15Z",
    "actor": "JohnQinAMD",
    "jobs": []
-  },
-  {
-   "run_id": 31750920773,
-   "pr": 1007,
-   "commit": "e1f206173705a0b2917aa5c3d7271dac110c210b",
-   "branch": "fix/preshuffle-a-tile-bugs",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix two A-tile loading bugs in the preshuffle GEMM",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31750920773",
-   "created_at": "2026-08-13T22:40:46Z",
-   "updated_at": "2026-08-13T23:49:34Z",
-   "actor": "JohnQinAMD",
-   "jobs": []
-  },
-  {
-   "run_id": 31723810762,
-   "pr": null,
-   "commit": "1a5d018b7062d71a5640d91cbe14e72f23b00a92",
-   "branch": "new_bias_alibi_sink_attention",
-   "event": "pull_request",
-   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31723810762",
-   "created_at": "2026-08-13T17:03:41Z",
-   "updated_at": "2026-08-13T19:20:20Z",
-   "actor": "amd-nprotaso",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T17:31:47Z",
-     "completed_at": "2026-08-13T19:20:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31723810762/job/94534594754",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T17:31:29Z",
-     "completed_at": "2026-08-13T17:49:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31723810762/job/94534594797",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T17:32:01Z",
-     "completed_at": "2026-08-13T19:07:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31723810762/job/94534594869",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 31712148880,
-   "pr": null,
-   "commit": "44fc566667c3a07e4f55a7b06bcbe6fed7684fa8",
-   "branch": "new_bias_alibi_sink_attention",
-   "event": "pull_request",
-   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31712148880",
-   "created_at": "2026-08-13T14:50:19Z",
-   "updated_at": "2026-08-13T16:46:52Z",
-   "actor": "amd-nprotaso",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T15:20:58Z",
-     "completed_at": "2026-08-13T15:37:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31712148880/job/94496773292",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-13T15:21:23Z",
-     "completed_at": "2026-08-13T16:24:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31712148880/job/94496773320"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T15:21:10Z",
-     "completed_at": "2026-08-13T16:46:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31712148880/job/94496773322",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
