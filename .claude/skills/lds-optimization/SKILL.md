@@ -392,7 +392,11 @@ ds_read_b32 ...           ; data ready immediately
 
 ### FlyDSL-Level Implementation
 
-At the Python/FlyDSL level, you control write-read distance by reordering operations:
+At the Python/FlyDSL level, you control write-read distance by reordering operations.
+The snippet below is schematic — it illustrates *ordering*, and spells the global
+load in the raw-intrinsic form. On the current surface that load is `fx.copy` from
+a `make_buffer_tensor` view (see **kernel-code-cleanup**); the ordering argument is
+the same either way.
 
 ```python
 # BEFORE: write and read are close together
@@ -405,8 +409,8 @@ lds_ptr.store(data, [offset])               # ds_write (async)
 
 # Do independent compute that doesn't need the LDS data
 next_offsets = compute_next_offsets()        # SALU/VALU work
-fx.copy(copy_atom, fx.slice(tNext, (None, tid)), rNext)   # global load (also async)
-fx.copy(scale_atom, fx.slice(tScale, (None, tid)), rScale)
+next_data = buffer_ops.buffer_load(rsrc, next_offsets, vec_width=4)  # global load (also async)
+scale_factor = buffer_ops.buffer_load(rsrc_scale, scale_off, vec_width=1)
 
 gpu.barrier()                                # by now, LDS write has completed
 result = lds_ptr.load([offset])             # ds_read (no stall)
@@ -416,7 +420,7 @@ result = lds_ptr.load([offset])             # ds_read (no stall)
 
 Prioritize by latency-hiding value:
 
-1. **Global loads for next phase** (`fx.copy` from a `make_buffer_tensor` view) — also async, ~300+ cycle latency
+1. **Global loads for next phase** — also async, ~300+ cycle latency
 2. **Address computation** (`compute_offsets`) — SALU/VALU, ~4-8 cycles each
 3. **Independent MFMA chains** — if available, ~64 cycles per MFMA
 4. **Scalar loads** (`s_load_dword*`) — kernel arguments, ~20 cycles

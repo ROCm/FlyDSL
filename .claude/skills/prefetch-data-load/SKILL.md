@@ -229,8 +229,10 @@ K loads needed).
    Use `fx.Int64(0)`, `fx.Int64(15)`, `fx.Int64(1)` instead.
 
 2. **Prefer internal types; unwrap only at hard boundaries.** Most loop-carried
-   values can remain `fx.Int32`, `fx.Float32`, or `fx.Vector` (not the deprecated
-   `ArithValue`). If a
+   values can remain `fx.Int32`, `fx.Float32`, or `fx.Vector`. Prefer these
+   concrete types over wrapping a raw value in `ArithValue` directly -- note
+   `fx.Vector` subclasses `ArithValue`, so this is about which constructor you
+   reach for, not about avoiding the base class. If a
    low-level helper explicitly expects raw `ir.Value`, unwrap at that boundary.
 
 3. **Clear `SmemPtr._view_cache` before epilogue.** `SmemPtr.get()` caches the

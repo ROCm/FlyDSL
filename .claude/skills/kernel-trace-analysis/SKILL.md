@@ -30,10 +30,10 @@ Do **not** use GUI tools.
 
 ## Analyzer Scripts
 
-- `scripts/hotspot_analyzer.py` — reads a `ui_output_agent_*_dispatch_*` ATT
+- `${CLAUDE_SKILL_DIR}/scripts/hotspot_analyzer.py` — reads a `ui_output_agent_*_dispatch_*` ATT
   directory; reports top-K stall hotspots, stall-type breakdown, and occupancy
   (combined-VGPR-pool model, reads accum/LDS/SGPR from `out_kernel_trace.csv`).
-- `scripts/pmc_l2_analyzer.py` — reads rocprofv3 PMC counter CSV(s); reports
+- `${CLAUDE_SKILL_DIR}/scripts/pmc_l2_analyzer.py` — reads rocprofv3 PMC counter CSV(s); reports
   L2 hit rate, HBM 32B-partial fraction, and over-fetch ratio. Use when a
   kernel is memory-bound and you need to know *why* (ATT has no cache counters).
   See "L2 / HBM efficiency analysis" under Step 5.
@@ -47,12 +47,12 @@ Do **not** use GUI tools.
 If the user provides `--dir <path>` or already has a `ui_output_agent_*_dispatch_*` directory:
 
 ```bash
-# Write hotspot_analyzer.py (see above), then:
-python /tmp/hotspot_analyzer.py <dispatch_dir> --topk 15 --mode both
-python /tmp/hotspot_analyzer.py <dispatch_dir> --topk 5 --mode src --detail --context 4
+# Both analyzers ship with this skill -- do not reimplement them.
+python ${CLAUDE_SKILL_DIR}/scripts/hotspot_analyzer.py <dispatch_dir> --topk 15 --mode both
+python ${CLAUDE_SKILL_DIR}/scripts/hotspot_analyzer.py <dispatch_dir> --topk 5 --mode src --detail --context 4
 ```
 
-Skip to **Step 4: Interpret Results**.
+Skip to **Step 5: Interpret Results**.
 
 ---
 
@@ -118,13 +118,15 @@ find . -type d -name "ui_output_agent_*" -newer /tmp/trace_ts 2>/dev/null
 ```
 
 If the `rocprof-trace-decoder` library is missing, install the release matching
-the ROCm version in `/opt/rocm/.info/version` (the **build-rocm-image** skill
-does this selection automatically when building an image). Substitute that
-version for `0.1.6` below:
+the ROCm version in `/opt/rocm/.info/version`. Set `RTD_VERSION` to that release
+before running the block below (**build-rocm-image** pins its own copy of this
+step and may lag; check both if the versions disagree):
 ```bash
-wget -q https://github.com/ROCm/rocprof-trace-decoder/releases/download/0.1.6/rocprof-trace-decoder-manylinux-2.28-0.1.6-Linux.sh
-chmod +x rocprof-trace-decoder-manylinux-2.28-0.1.6-Linux.sh
-./rocprof-trace-decoder-manylinux-2.28-0.1.6-Linux.sh --skip-license --prefix=/tmp/rtd-install
+RTD_VERSION=0.1.6   # <-- set to the release matching your ROCm version
+RTD_INSTALLER="rocprof-trace-decoder-manylinux-2.28-${RTD_VERSION}-Linux.sh"
+wget -q "https://github.com/ROCm/rocprof-trace-decoder/releases/download/${RTD_VERSION}/${RTD_INSTALLER}"
+chmod +x "${RTD_INSTALLER}"
+"./${RTD_INSTALLER}" --skip-license --prefix=/tmp/rtd-install
 find /tmp/rtd-install -name '*.so*' -exec cp -a {} /opt/rocm/lib/ \;
 ldconfig
 ```
@@ -148,13 +150,13 @@ Write the script (see above), then run:
 
 ```bash
 # Full report
-python /tmp/hotspot_analyzer.py <dispatch_dir> --topk 15 --mode both
+python ${CLAUDE_SKILL_DIR}/scripts/hotspot_analyzer.py <dispatch_dir> --topk 15 --mode both
 
 # Source-level with code context (best for optimization)
-python /tmp/hotspot_analyzer.py <dispatch_dir> --topk 5 --mode src --detail --context 4
+python ${CLAUDE_SKILL_DIR}/scripts/hotspot_analyzer.py <dispatch_dir> --topk 5 --mode src --detail --context 4
 
 # ASM-only for instruction-level detail
-python /tmp/hotspot_analyzer.py <dispatch_dir> --mode asm --topk 20
+python ${CLAUDE_SKILL_DIR}/scripts/hotspot_analyzer.py <dispatch_dir> --mode asm --topk 20
 ```
 
 ---
@@ -334,10 +336,10 @@ When the ATT hotspots are dominated by `VMEM-load` at high stall rate (e.g.
 40-50% of stall, ~94% per-load), the kernel is memory-bound and the next
 question is **why** — and ATT cannot answer it (it has no cache counters).
 Capture PMC counters (see capture-kernel-trace "PMC Mode") and analyze with
-`scripts/pmc_l2_analyzer.py`:
+`${CLAUDE_SKILL_DIR}/scripts/pmc_l2_analyzer.py`:
 
 ```bash
-python scripts/pmc_l2_analyzer.py \
+python ${CLAUDE_SKILL_DIR}/scripts/pmc_l2_analyzer.py \
     /tmp/pmc_out/pass_1/pmc_l2_counter_collection.csv \
     /tmp/pmc_ea_out/pass_1/pmc_ea_counter_collection.csv \
     --kernel <kernel> --ideal-gb <bytes_per_dispatch_GB> --ea-channels 2

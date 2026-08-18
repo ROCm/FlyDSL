@@ -56,7 +56,10 @@ BASE_SHA=origin/main CLANG_FORMAT=clang-format-18 bash .github/scripts/check_cpp
 ```
 
 Without `BASE_SHA`, the script falls back to `HEAD^`, so it checks only the last
-commit rather than the whole branch. It reports offenders; use the in-place
+commit rather than the whole branch. It also diffs **committed** revisions only:
+with no C/C++ files in that range it prints "No changed C++ files to check" and
+exits 0, so uncommitted edits pass locally and then fail in CI. Commit (or stage
+and amend) before trusting a green result. It reports offenders; use the in-place
 `clang-format-18 -i` steps below to fix them, and for files outside the diff range.
 
 ### 2. Ensure generic tools are installed
@@ -127,7 +130,8 @@ If any files were staged before formatting, remind the user to re-stage them
 
 ## Check only (reproduce the CI gate without editing files)
 
-When the user wants to know whether the `Check Python Code Style` CI job will pass -- before
+When the user wants to know whether the `Check Python Code Style` or `Check C++ Code Style`
+CI job will pass -- before
 pushing, or when that job has already failed -- run the wrapper without `--fix` so nothing is
 modified:
 

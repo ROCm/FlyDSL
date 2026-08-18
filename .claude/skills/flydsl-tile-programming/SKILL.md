@@ -262,36 +262,35 @@ def gemm_kernel(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor):
     fx.copy(copy_atom, copy_frag_C, copy_dst_C, pred=None)
 ```
 
-### Pattern D: Buffer-Resource View (Preferred Low-level Path)
+### Pattern D: Raw Buffer Load/Store (Low-level Escape Hatch)
 
-For AMD buffer loads/stores, build a buffer-resource view with
-`make_buffer_tensor` and move data through copy atoms. The OOB-checked V#
-descriptor is built for you, and the offsets stay in layout coordinates instead
-of hand-computed element counts.
+Direct AMD buffer intrinsics, bypassing the layout algebra. Reach for this only
+when the access has no layout form — typically a scalar base with a per-thread
+element offset. For anything with a tile structure, use Pattern A/B/C, which go
+through `make_buffer_tensor` + copy atoms and get an OOB-checked V# descriptor
+built for you.
 
 ```python
+from kernels.common import buffer_ops   # moved out of flydsl.expr in #880
+
 @flyc.kernel
-def buffer_kernel(A: fx.Tensor, B: fx.Tensor, M: fx.Constexpr[int], N: fx.Constexpr[int]):
+def buffer_kernel(A: fx.Tensor, B: fx.Tensor, N: fx.Constexpr[int]):
     tid = fx.thread_idx.x
+    bid = fx.block_idx.x
+    gid = bid * 256 + tid
 
-    bufA = fx.rocdl.make_buffer_tensor(A)
-    bufB = fx.rocdl.make_buffer_tensor(B)
-    tA = fx.make_view(fx.get_iter(bufA), fx.make_layout((M, N), (N, 1)))
-    tB = fx.make_view(fx.get_iter(bufB), fx.make_layout((M, N), (N, 1)))
+    rsrc_a = buffer_ops.create_buffer_resource(A)
+    rsrc_b = buffer_ops.create_buffer_resource(B)
 
-    copy = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
-    rA = fx.make_rmem_tensor(4, fx.Float32)
-    fx.copy(copy, fx.slice(tA, (None, tid)), rA)   # after partitioning tA
-    # ... compute on rA ...
-    fx.copy(copy, rA, fx.slice(tB, (None, tid)))
+    # offset is in ELEMENTS (not bytes!) -- buffer_load converts internally
+    # fx.T.* are properties on Types -- reference them, do not call them
+    data = buffer_ops.buffer_load(rsrc_a, gid * 4, vec_width=4, dtype=fx.T.f32)
+    # ... compute on data ...
+    buffer_ops.buffer_store(data, rsrc_b, gid * 4)
 ```
 
-The raw intrinsics (`create_buffer_resource` / `buffer_load` / `buffer_store`)
-still exist for a scalar-base + per-thread-offset load that has no layout form,
-but they now live in `kernels/common/buffer_ops.py` (moved out of
-`flydsl.expr` in #880) and their `offset` is in **elements**, not bytes — a
-classic source of bugs. Prefer the view above; see the **kernel-code-cleanup**
-skill to migrate existing raw-intrinsic kernels.
+The element-vs-byte offset is a classic source of bugs; see the
+**kernel-code-cleanup** skill to migrate an existing kernel onto the layout API.
 
 ---
 
@@ -370,11 +369,16 @@ if bid == 0:
 # Workgroup barrier (__syncthreads)
 fx.gpu.barrier()
 
-# Fine-grained waitcnt (CDNA3 gfx942 / CDNA4 gfx950, and RDNA3/RDNA4).
-# Use the keyword form: it is arch-dispatched and packs the correct bitfield.
-# Unset counters default to "no wait", so name only the ones you need.
-fx.rocdl.s_waitcnt(lgkmcnt=0)              # LDS/SMEM only
-fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0)     # everything
+# Fine-grained waitcnt. The keyword form is arch-dispatched over gfx942,
+# gfx950, gfx11xx and gfx120x, and packs the correct bitfield per arch.
+# An unset counter encodes as "already satisfied", so name every counter you
+# actually need to wait on -- vmcnt+lgkmcnt does NOT cover expcnt.
+fx.rocdl.s_waitcnt(lgkmcnt=0)                        # LDS/SMEM only
+fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)     # all three counters
+
+# On an arch the keyword form does not dispatch (gfx1250 raises ValueError),
+# use the legacy positional bitfield; 0 waits on everything.
+fx.rocdl.s_waitcnt(0)
 
 # Split wait counters are gfx12+ only (gfx1250 / RDNA4) — NOT available on
 # gfx942 or gfx950. They are upstream ROCDL ops re-exported through fx.rocdl.

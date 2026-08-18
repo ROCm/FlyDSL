@@ -186,8 +186,10 @@ Do not use `const_expr(lane == 0)`: even with `known_block_size`, `gpu.thread_id
 
 ### 6.3 Loop-carried state packing
 
-Prefer FlyDSL internal types (`fx.Int32`, `fx.Float32`, `fx.Vector`) for loop-carried state.
-Do not reach for the deprecated `ArithValue` wrapper. Unwrap only when a low-level helper explicitly requires raw `ir.Value`:
+Prefer the concrete FlyDSL types (`fx.Int32`, `fx.Float32`, `fx.Vector`) for
+loop-carried state rather than wrapping raw values in `ArithValue` directly.
+(`fx.Vector` subclasses `ArithValue`; the guidance is about the constructor you
+reach for, not the base class.) Unwrap only when a low-level helper explicitly requires raw `ir.Value`:
 ```python
 def _unwrap(v):
     return v.ir_value() if hasattr(v, 'ir_value') else v
@@ -204,10 +206,11 @@ Applies to kernels still on the raw buffer intrinsics, which live in
 `offset` is in units of `dtype`, so FP8 data addressed in bytes must be divided
 by the element size:
 ```python
+import flydsl.expr as fx
 from kernels.common import buffer_ops
 
 k_addr_bytes = ...  # address in FP8 elements (= bytes for FP8)
-k_4xi32 = buffer_ops.buffer_load(k_rsrc, k_addr_bytes // 4, vec_width=4, dtype=T.i32)
+k_4xi32 = buffer_ops.buffer_load(k_rsrc, k_addr_bytes // 4, vec_width=4, dtype=fx.T.i32)
 ```
 
 This class of offset bug is the reason `fx.rocdl.make_buffer_tensor` + a layout
@@ -244,8 +247,9 @@ print(f"loop: start={part_start}, stop={part_end}, step={cpb}")
 ```bash
 # Check GPU state (amd-smi; rocm-smi is deprecated)
 amd-smi monitor
-# If a GPU shows full utilization with no progress, reset that device:
-sudo amd-smi reset -g <gpu_index>
+# If a GPU shows full utilization with no progress, reset that device.
+# -G is the reset action; -g only selects which device.
+sudo amd-smi reset -G -g <gpu_index>
 ```
 
 ## 8. Diagnostic Workflow
