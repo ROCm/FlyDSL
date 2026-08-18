@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-18T11:26:12Z",
+ "updated": "2026-08-18T11:28:58Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32131673954,
+   "pr": 1024,
+   "commit": "745b186224bc670d5a484a8944432a4a0516b708",
+   "branch": "pr/fix-gfx1250-wave-size",
+   "event": "pull_request",
+   "title": "[ROCDL] Fix wave size for gfx1250 (wave32, not wave64)",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32131673954",
+   "created_at": "2026-08-18T11:25:46Z",
+   "updated_at": "2026-08-18T11:27:05Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 32131357298,
    "pr": 1024,
@@ -1733,21 +1748,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31687955945/job/95165573929"
     }
    ]
-  },
-  {
-   "run_id": 31685532123,
-   "pr": 972,
-   "commit": "67cfcedba81c31d830fffbc2e275ed6c57f425f7",
-   "branch": "mega_moe_a4w4",
-   "event": "pull_request",
-   "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31685532123",
-   "created_at": "2026-08-13T09:12:28Z",
-   "updated_at": "2026-08-13T09:13:55Z",
-   "actor": "Yaowu-Xiong",
-   "jobs": []
   }
  ]
 }
