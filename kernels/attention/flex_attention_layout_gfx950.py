@@ -68,6 +68,14 @@ FLEX_DTYPE_FP16 = 3
 
 _LOG2E = 1.4426950408889634
 
+MASK_NONE = 0
+MASK_CAUSAL = 1
+MASK_SLIDING_WINDOW = 2
+
+SCORE_NONE = 0
+SCORE_ALIBI = 1
+
+
 
 @fx.struct
 class FlexAttnParam:
@@ -77,7 +85,6 @@ class FlexAttnParam:
     head_dim: fx.Constexpr[int]
     num_heads_q: fx.Constexpr[int]
     num_heads_kv: fx.Constexpr[int]
-    causal: fx.Constexpr[bool]
     # wave tiling
     m_waves: fx.Constexpr[int]
     n_waves: fx.Constexpr[int]
@@ -100,6 +107,11 @@ class FlexAttnParam:
     pipe_stages: fx.Constexpr[int]  # deprecated: stagger follows num_groups/pipe_depth/m_waves
     # True = exact per-row softmax; False = approximate column softmax (mma_m=32 only)
     accurate_softmax: fx.Constexpr[bool]
+    # flex mods: integer type IDs (MASK_NONE/CAUSAL/SLIDING_WINDOW, SCORE_NONE/ALIBI)
+    mask_type: fx.Constexpr[int]
+    score_type: fx.Constexpr[int]
+    mask_window: fx.Constexpr[int]  # sliding window size (only used when mask_type==MASK_SLIDING_WINDOW)
+    score_alibi_slope: fx.Constexpr[float]  # alibi slope (only used when score_type==SCORE_ALIBI)
 
 
 def make_flex_attn_param(
@@ -110,7 +122,6 @@ def make_flex_attn_param(
     head_dim: int = 128,
     num_heads_q: int = 8,
     num_heads_kv: int = 8,
-    causal: bool = False,
     m_waves: int = 1,
     n_waves: int = 1,
     num_groups: int = 1,
@@ -120,6 +131,10 @@ def make_flex_attn_param(
     pipe_depth: int = 1,
     pipe_stages: int = 1,
     accurate_softmax: bool = True,
+    mask_type: int = MASK_NONE,
+    score_type: int = SCORE_NONE,
+    mask_window: int = 0,
+    score_alibi_slope: float = 0.0,
 ) -> FlexAttnParam:
     if dtype_id not in (FLEX_DTYPE_BF16, FLEX_DTYPE_FP16):
         raise ValueError(f"unsupported dtype_id={dtype_id}")
@@ -170,6 +185,12 @@ def make_flex_attn_param(
     in_dbytes = 2  # bf16/f16
     group_threads = m_waves * n_waves * GFX950_WAVE_SIZE
     block_threads = num_groups * group_threads
+    _max_waves = 8
+    if block_threads > _max_waves * GFX950_WAVE_SIZE:
+        raise ValueError(
+            f"block_threads ({block_threads}) exceeds {_max_waves} SIMDs/CU limit "
+            f"({_max_waves * GFX950_WAVE_SIZE} threads); reduce num_groups or m_waves"
+        )
 
     return FlexAttnParam(
         dtype_id=dtype_id,
@@ -178,7 +199,6 @@ def make_flex_attn_param(
         head_dim=head_dim,
         num_heads_q=num_heads_q,
         num_heads_kv=num_heads_kv,
-        causal=causal,
         m_waves=m_waves,
         n_waves=n_waves,
         num_groups=num_groups,
@@ -193,6 +213,10 @@ def make_flex_attn_param(
         pipe_depth=pipe_depth,
         pipe_stages=pipe_stages,
         accurate_softmax=accurate_softmax,
+        mask_type=mask_type,
+        score_type=score_type,
+        mask_window=mask_window,
+        score_alibi_slope=score_alibi_slope,
     )
 
 
@@ -200,7 +224,7 @@ def make_flex_attn_kernel_name(param: FlexAttnParam) -> str:
     dtype_str = "fp16" if param.dtype_id == FLEX_DTYPE_FP16 else "bf16"
     name = f"flex_attn_{dtype_str}_m{param.block_m}n{param.block_n}d{param.head_dim}"
     name += f"_w{param.m_waves}x{param.n_waves}g{param.num_groups}"
-    name += "_causal" if param.causal else "_dense"
+    name += "_dense"
     name += "_rsm" if param.accurate_softmax else "_csm"
     name += f"_pd{param.pipe_depth}"
     if pipeline_stagger_enabled(
@@ -553,6 +577,51 @@ def flex_attn_fwd_gfx950_kernel(
         fx.gemm(tiled_mma_qk, frag_S_out, frag_K_in, frag_Q_in, frag_S_out)
         return [frag_S_out]
 
+    # ── Flex score/mask mod application ────────────────────────────────────
+    # MFMA 32x32x16 C fragment with K=A, Q=B swap:
+    #   q_idx = q_start + local_tid % 32 (same for all 16 elements)
+    #   kv_in_tile(e) = 8*(e//4) + e%4 + 4*(local_tid//32)
+    _mask_type = int(param.mask_type)
+    _score_type = int(param.score_type)
+    _has_mods = _mask_type != MASK_NONE or _score_type != SCORE_NONE
+    _b_i32 = fx.Int32(arith.index_cast(T.i32, b_idx))
+    _h_i32 = fx.Int32(arith.index_cast(T.i32, h_idx))
+    _q_idx = fx.Int32(arith.index_cast(T.i32, q_start)) + fx.Int32(local_tid % 32)
+    _lane_group_off = fx.Int32((local_tid // 32) * 4)
+    _kv_offsets = [8 * (e // 4) + (e % 4) for e in range(n_c)]
+
+    def apply_score_mod(frag_S_in, kv_tile_idx):
+        kv_base = kv_tile_idx * fx.Int32(block_n) + _lane_group_off
+        for e in range_constexpr(n_c):
+            kv_idx = kv_base + fx.Int32(_kv_offsets[e])
+            if const_expr(_score_type == SCORE_ALIBI):
+                bias = (kv_idx - _q_idx).to(fx.Float32) * fx.Float32(float(param.score_alibi_slope))
+                frag_S_in[e] = fx.Float32(frag_S_in[e]) + bias
+
+    def apply_mask_mod(frag_S_in, kv_tile_idx):
+        kv_base = kv_tile_idx * fx.Int32(block_n) + _lane_group_off
+        for e in range_constexpr(n_c):
+            kv_idx = kv_base + fx.Int32(_kv_offsets[e])
+            if const_expr(_mask_type == MASK_CAUSAL):
+                keep = kv_idx <= _q_idx
+                frag_S_in[e] = keep.select(frag_S_in[e], fx.Float32(-1e9))
+            elif const_expr(_mask_type == MASK_SLIDING_WINDOW):
+                causal = kv_idx <= _q_idx
+                in_window = (_q_idx - kv_idx) <= fx.Int32(int(param.mask_window))
+                keep = causal & in_window
+                frag_S_in[e] = keep.select(frag_S_in[e], fx.Float32(-1e9))
+
+    def tile_needs_mask(kv_tile_idx):
+        kv_tile_end = kv_tile_idx * fx.Int32(block_n) + fx.Int32(block_n - 1)
+        if const_expr(_mask_type == MASK_CAUSAL):
+            return kv_tile_end > _q_idx
+        elif const_expr(_mask_type == MASK_SLIDING_WINDOW):
+            kv_tile_start = kv_tile_idx * fx.Int32(block_n)
+            too_far = kv_tile_end > _q_idx
+            out_of_window = (_q_idx - kv_tile_start) > fx.Int32(int(param.mask_window))
+            return too_far | out_of_window
+        return fx.Int32(0) != fx.Int32(0)
+
     # _n_d_chunks defined above as head_dim // 32 (= 4 for D=128).
 
     def _scale_o_vec(o_accs_in, scale_scalar):
@@ -562,7 +631,7 @@ def flex_attn_fwd_gfx950_kernel(
             o_vec = Vec(o_accs_in[dc])
             o_accs_in[dc] = (o_vec * scale_vec).ir_value()
 
-    def softmax_full(frag_S_in, m_i_in, l_i_in, o_accs_in):
+    def softmax(frag_S_in, m_i_in, l_i_in, o_accs_in):
         if const_expr(_is_32x32):
             # Pre-scale S into log2 space once (1 vec mul for 16 elements),
             # so the exp2 loop is subtract + exp2 with no per-element multiply.
@@ -703,8 +772,24 @@ def flex_attn_fwd_gfx950_kernel(
 
     single_tile = True
     if const_expr(single_tile):
+        # KV tile range: clamp to the mask's valid range to skip fully-masked tiles.
+        _kv_lo = fx.Int32(0)
+        _kv_hi = fx.Int32(n_kv_tiles)
+        if const_expr(_mask_type == MASK_CAUSAL):
+            _q_max_wg = fx.Int32(arith.index_cast(T.i32, q_tile)) * fx.Int32(num_groups * block_m) + fx.Int32(num_groups * block_m - 1)
+            _raw_hi = ((_q_max_wg + fx.Int32(block_n)) // fx.Int32(block_n))
+            _kv_hi = fx.Int32(arith.minsi(_raw_hi.ir_value(), fx.Int32(n_kv_tiles).ir_value()))
+        elif const_expr(_mask_type == MASK_SLIDING_WINDOW):
+            _q_min_wg = fx.Int32(arith.index_cast(T.i32, q_tile)) * fx.Int32(num_groups * block_m)
+            _q_max_wg = _q_min_wg + fx.Int32(num_groups * block_m - 1)
+            _window = fx.Int32(int(param.mask_window))
+            _raw_hi = ((_q_max_wg + fx.Int32(block_n)) // fx.Int32(block_n))
+            _kv_hi = fx.Int32(arith.minsi(_raw_hi.ir_value(), fx.Int32(n_kv_tiles).ir_value()))
+            _raw_lo = ((_q_min_wg - _window) // fx.Int32(block_n))
+            _kv_lo = fx.Int32(arith.maxsi(_raw_lo.ir_value(), fx.Int32(0).ir_value()))
+
         # Double-buffered KV loop via scf.for with loop-carried m/l/O state.
-        load_kv(0, 0)
+        load_kv(_kv_lo, 0)
         rocdl.s_waitcnt(0)
         rocdl.s_barrier()
 
@@ -722,8 +807,8 @@ def flex_attn_fwd_gfx950_kernel(
         loop_results = init_args
 
         for kv, loop_args in range(
-            fx.Int32(0),
-            fx.Int32(n_kv_tiles),
+            fx.Int32(_kv_lo),
+            fx.Int32(_kv_hi),
             fx.Int32(1),
             init=init_args,
         ):
@@ -732,13 +817,14 @@ def flex_attn_fwd_gfx950_kernel(
             o_accs = [loop_args[_o + dc] for dc in range_constexpr(_n_d_chunks)]
 
             kv_i32 = fx.Int32(arith.index_cast(T.i32, kv))
+            _ring_iter = kv_i32 - _kv_lo  # iteration count from loop start
             _ring_slots = fx.Int32(_lds_ring_slots)
-            ring0 = (kv_i32 % _ring_slots) == fx.Int32(0)
-            has_next = (kv_i32 + fx.Int32(1)) < fx.Int32(n_kv_tiles)
+            ring0 = (_ring_iter % _ring_slots) == fx.Int32(0)
+            has_next = (kv_i32 + fx.Int32(1)) < _kv_hi
 
             # Cluster 0 (mem): read K and V from current LDS slot, prefetch next.
             rocdl.s_setprio(1)
-            _v_slot_elem_offset = (kv_i32 % _ring_slots) * fx.Int32(kv_tile_elems)
+            _v_slot_elem_offset = (_ring_iter % _ring_slots) * fx.Int32(kv_tile_elems)
             if ring0:
                 read_k_work(0)
             else:
@@ -753,14 +839,18 @@ def flex_attn_fwd_gfx950_kernel(
 
             dualwave_cluster_sync(0)
 
-            # Cluster 1 (comp): QK GEMM + softmax + register PV GEMM.
+            # Cluster 1 (comp): QK GEMM + mods + softmax + register PV GEMM.
             rocdl.s_setprio(0)
             frag_S, = gemm1_qk(frag_Q, frag_K[0])
-            out_sm = softmax_full(frag_S, m_i, l_i, o_accs)
+            if const_expr(_score_type != SCORE_NONE):
+                apply_score_mod(frag_S, kv_i32)
+            if const_expr(_mask_type != MASK_NONE):
+                if tile_needs_mask(kv_i32):
+                    apply_mask_mod(frag_S, kv_i32)
+            out_sm = softmax(frag_S, m_i, l_i, o_accs)
             frag_P, m_i, l_i, o_accs, _ = (
                 out_sm[0], out_sm[1], out_sm[2], out_sm[3], out_sm[4],
             )
-            # Register-only PV: P packed as B, V pre-read as A.
             pv_gemm_register(frag_P, v_lo_regs, v_hi_regs, o_accs)
 
             dualwave_cluster_sync(1)
@@ -784,7 +874,12 @@ def flex_attn_fwd_gfx950_kernel(
     # (permlane32 in softmax combines the two score halves). No shuffle_xor needed.
 
     # O normalization: divide each v16f32 by l_i[0].
-    inv_l = fx.Float32(1.0) / l_i[0]
+    # Guard against fully-masked rows (l_i == 0) producing NaN.
+    if const_expr(_mask_type != MASK_NONE):
+        _safe_l = l_i[0].maximumf(fx.Float32(1e-12))
+        inv_l = fx.Float32(1.0) / _safe_l
+    else:
+        inv_l = fx.Float32(1.0) / l_i[0]
     inv_l_vec = Vec.from_elements([inv_l], fx.Float32).broadcast_to(16)
     for dc in range_constexpr(_n_d_chunks):
         o_accs[dc] = (Vec(o_accs[dc]) * inv_l_vec).ir_value()
@@ -889,7 +984,6 @@ def flydsl_flex_attention_layout(
     k: torch.Tensor,
     v: torch.Tensor,
     *,
-    causal: bool = False,
     scale: Optional[float] = None,
     num_kv_heads: Optional[int] = None,
     out: Optional[torch.Tensor] = None,
@@ -899,9 +993,13 @@ def flydsl_flex_attention_layout(
     pipe_depth: int = 1,
     pipe_stages: int = 1,
     accurate_softmax: bool = True,
+    mask_type: int = MASK_NONE,
+    score_type: int = SCORE_NONE,
+    mask_window: int = 0,
+    score_alibi_slope: float = 0.0,
     stream: Optional[torch.cuda.Stream] = None,
 ) -> torch.Tensor:
-    """Dense flash-attention forward on the layout API (gfx950). Phase 0: no mods.
+    """Flash-attention forward on the layout API (gfx950) with flex score/mask mods.
 
     q/k/v: ``[B, S, H, D]`` (BSHD), bf16/f16. Returns ``[B, Sq, Hq, D]``.
 
@@ -966,11 +1064,14 @@ def flydsl_flex_attention_layout(
         head_dim=D,
         num_heads_q=Hq,
         num_heads_kv=Hkv,
-        causal=causal,
         num_groups=num_groups,
         pipe_depth=pipe_depth,
         pipe_stages=pipe_stages,
         accurate_softmax=accurate_softmax,
+        mask_type=mask_type,
+        score_type=score_type,
+        mask_window=mask_window,
+        score_alibi_slope=score_alibi_slope,
     )
     # V stays in BSHD layout [B, Skv, Hkv, D]; the kernel tiles V into compact
     # [block_n, 32] D-chunk sub-tiles in LDS and uses LDSReadTrans16_64b to transpose.
