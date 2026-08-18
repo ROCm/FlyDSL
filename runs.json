@@ -1,8 +1,98 @@
 {
  "schema": 1,
- "updated": "2026-08-18T06:33:00Z",
+ "updated": "2026-08-18T09:24:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32121325896,
+   "pr": 1021,
+   "commit": "2a0d88d100191a67991d5f9125601a055a1c4098",
+   "branch": "pr/fix-mlir-filecheck-all-run-lines",
+   "event": "pull_request",
+   "title": "[Test] Run every RUN line in the MLIR FileCheck harness",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32121325896",
+   "created_at": "2026-08-18T09:23:16Z",
+   "updated_at": "2026-08-18T09:23:48Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 32120675626,
+   "pr": 1023,
+   "commit": "8bc42830ba0e7e25648a42278e700cf5619f6b21",
+   "branch": "pr/enh-cdna4-async-lds-copy-atoms",
+   "event": "pull_request",
+   "title": "[ROCDL] Add Global/BufferLoadAsyncLDS atoms",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32120675626",
+   "created_at": "2026-08-18T09:15:53Z",
+   "updated_at": "2026-08-18T09:17:31Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 32115762986,
+   "pr": 1022,
+   "commit": "bcce9f4dcfaf4a55c061b6b20bb0b0295692ac0a",
+   "branch": "jhinpan/softmax-autotune",
+   "event": "pull_request",
+   "title": "[Kernel] Add opt-in autotuning for Softmax",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32115762986",
+   "created_at": "2026-08-18T08:19:08Z",
+   "updated_at": "2026-08-18T08:21:04Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 32115635980,
+   "pr": 1021,
+   "commit": "9197d4137835b41c4ba56578006730f8f5bceb02",
+   "branch": "pr/fix-mlir-filecheck-all-run-lines",
+   "event": "pull_request",
+   "title": "[Test] Run every RUN line in the MLIR FileCheck harness",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32115635980",
+   "created_at": "2026-08-18T08:17:37Z",
+   "updated_at": "2026-08-18T09:23:18Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 32110624444,
+   "pr": 971,
+   "commit": "8d85e2fcaa5b8332497ed64c5502402af6710e1d",
+   "branch": "gfx1250/gemm-opt-0805",
+   "event": "pull_request",
+   "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32110624444",
+   "created_at": "2026-08-18T07:16:08Z",
+   "updated_at": "2026-08-18T07:17:58Z",
+   "actor": "aoli26",
+   "jobs": []
+  },
+  {
+   "run_id": 32110444156,
+   "pr": 1013,
+   "commit": "f0906861544a3bf57b09c64bbfcfca3b8633acba",
+   "branch": "pr/enh-cdna5-tiled-tdm-atom",
+   "event": "pull_request",
+   "title": "[ROCDL] Add make_tiled_tdm_atom op and tdm_partition",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32110444156",
+   "created_at": "2026-08-18T07:13:48Z",
+   "updated_at": "2026-08-18T07:15:13Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 32092905226,
    "pr": null,
@@ -1797,217 +1887,6 @@
      "started_at": "2026-08-13T10:47:09Z",
      "completed_at": "2026-08-13T11:29:49Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31674712052/job/94422812665"
-    }
-   ]
-  },
-  {
-   "run_id": 31674648878,
-   "pr": null,
-   "commit": "8d7bce7702b8cf78c40d1b5b9cbc2d1123f2f6f6",
-   "branch": "coop-library",
-   "event": "pull_request",
-   "title": "[Feat] Add fx.num_warp_threads() as constant accessor",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31674648878",
-   "created_at": "2026-08-13T06:39:24Z",
-   "updated_at": "2026-08-13T07:57:30Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 31673258278,
-   "pr": 1004,
-   "commit": "5276d509632e44f3cdf1ec1ef4fb772fd045335b",
-   "branch": "pr/docs-composite-storage",
-   "event": "pull_request",
-   "title": "[Docs] Elaboration for composite type and storage",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31673258278",
-   "created_at": "2026-08-13T06:16:52Z",
-   "updated_at": "2026-08-13T09:47:42Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T07:03:31Z",
-     "completed_at": "2026-08-13T09:01:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31673258278/job/94370887936",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T07:59:14Z",
-     "completed_at": "2026-08-13T09:47:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31673258278/job/94370887954",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T07:02:46Z",
-     "completed_at": "2026-08-13T07:20:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31673258278/job/94370888096",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 31671988869,
-   "pr": 987,
-   "commit": "9292d821cf97efd84c31a4cf2e2813059128fc9b",
-   "branch": "jli/fix-lld-issue",
-   "event": "pull_request",
-   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31671988869",
-   "created_at": "2026-08-13T05:55:30Z",
-   "updated_at": "2026-08-13T09:01:40Z",
-   "actor": "Boss2002n",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T06:38:46Z",
-     "completed_at": "2026-08-13T09:01:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31671988869/job/94366030203",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T06:38:07Z",
-     "completed_at": "2026-08-13T08:25:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31671988869/job/94366030233",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T06:37:44Z",
-     "completed_at": "2026-08-13T07:00:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31671988869/job/94366030237",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 31669063948,
-   "pr": 987,
-   "commit": "514b933df4d794e61915ca5c6cc4c830b8482ebf",
-   "branch": "jli/fix-lld-issue",
-   "event": "pull_request",
-   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31669063948",
-   "created_at": "2026-08-13T05:04:28Z",
-   "updated_at": "2026-08-13T05:56:01Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-13T05:26:33Z",
-     "completed_at": "2026-08-13T05:46:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31669063948/job/94353398180"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-13T05:33:06Z",
-     "completed_at": "2026-08-13T05:56:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31669063948/job/94353398181"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-13T05:27:56Z",
-     "completed_at": "2026-08-13T05:55:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31669063948/job/94353398216"
-    }
-   ]
-  },
-  {
-   "run_id": 31669014962,
-   "pr": 987,
-   "commit": "f10b3051f0283ec88cc08b8d10e5b83a534653a7",
-   "branch": "jli/fix-lld-issue",
-   "event": "pull_request",
-   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31669014962",
-   "created_at": "2026-08-13T05:03:38Z",
-   "updated_at": "2026-08-13T05:04:45Z",
-   "actor": "Boss2002n",
-   "jobs": []
-  },
-  {
-   "run_id": 31666000306,
-   "pr": null,
-   "commit": "44bfe884307707b1cc74d7acac0910950da0c99c",
-   "branch": "jli/gfx1250/fix-mma-atom",
-   "event": "pull_request",
-   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31666000306",
-   "created_at": "2026-08-13T04:07:13Z",
-   "updated_at": "2026-08-13T06:01:56Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T05:05:30Z",
-     "completed_at": "2026-08-13T05:22:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31666000306/job/94345376674",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T04:38:20Z",
-     "completed_at": "2026-08-13T05:41:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31666000306/job/94345376694",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T04:38:20Z",
-     "completed_at": "2026-08-13T06:01:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31666000306/job/94345376715",
-     "log_fetch_failed": true
     }
    ]
   }
