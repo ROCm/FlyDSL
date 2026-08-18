@@ -27,8 +27,14 @@ KERNEL_NAME = "softmax_kernel"
 BLOCK_THREADS = 256
 WARP_SIZE = get_warp_size()
 
+# Bumped whenever a kernel or search-space change can change the tuned winner. The
+# scratch cache does not fingerprint kernel source, so this is what forces a retune.
+TUNING_SCHEMA = 1
 
-def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
+
+def build_softmax_module(M: int, N: int, dtype_str: str = "f32", BLOCK_THREADS: int = BLOCK_THREADS):
+    """Build a Softmax launcher. ``M`` is vestigial: the row count is a runtime grid
+    value, so it must not specialize the kernel."""
     elem_bits = 32 if dtype_str == "f32" else 16
     # BufferCopy128b moves one 128-bit transaction per lane, so the register
     # vector width must satisfy vec_width * elem_bits == 128 (8 for 16-bit, 4 for f32).
@@ -40,6 +46,9 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
     class SharedStorage:
         s_red: fx.Array[fx.Float32, RED_SLOTS, 16]
 
+    # No explicit known_block_size: launch_softmax passes a static block dim, so the
+    # compiler infers it and max_flat_workgroup_size tracks BLOCK_THREADS above 256.
+    # tests/kernels/test_softmax_autotune.py pins that.
     @flyc.kernel
     def softmax_kernel(
         A: fx.Tensor,
@@ -255,3 +264,23 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
         )
 
     return launch_softmax
+
+
+@flyc.jit
+def softmax_direct(
+    A: fx.Tensor,
+    C: fx.Tensor,
+    m_in: fx.Int32,
+    N: fx.Constexpr[int],
+    dtype_str: fx.Constexpr[str],
+    BLOCK_THREADS: fx.Constexpr[int],
+    tuning_schema: fx.Constexpr[int],
+    stream: fx.Stream = fx.Stream(None),
+):
+    """Specialize the existing Softmax factory through JIT Constexpr inputs.
+
+    ``tuning_schema`` is not read by the kernel. It is a declared autotune key axis, so
+    bumping it partitions the winner cache and forces a fresh search.
+    """
+    launch = build_softmax_module(0, N, dtype_str, BLOCK_THREADS=BLOCK_THREADS)
+    launch(A, C, m_in, stream)

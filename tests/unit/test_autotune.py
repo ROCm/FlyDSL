@@ -753,5 +753,105 @@ def test_call_returns_none_when_fn_returns_none(monkeypatch):
     assert args[1]._data[0] == 64.0
 
 
+# ── validate_hook (untimed candidate correctness gate) ───────────────────
+def test_validate_hook_runs_once_per_candidate_outside_the_timed_reps(monkeypatch):
+    """The gate must see every candidate's real output, but must not be timed --
+    otherwise the validation cost is folded into the ranking."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    runs = []
+
+    def fn(a, out, BLOCK):
+        runs.append(("run", BLOCK))
+
+    def validate(sig_args):
+        runs.append(("validate", sig_args["BLOCK"]))
+        # The hook sees positional args by name, which pre_hook/post_hook cannot.
+        assert sig_args["a"].shape == (8,)
+
+    def bench(call, warmup, rep):
+        runs.append(("bench", warmup, rep))
+        for _ in range(warmup + rep):
+            call()
+        return 1.0
+
+    tuner = _make_tuner(
+        fn=fn,
+        configs=[Config(BLOCK=64), Config(BLOCK=128)],
+        validate_hook=validate,
+        do_bench_fn=bench,
+        warmup=1,
+        rep=1,
+    )
+    tuner(FakeTensor((8,)), FakeTensor((8,)))
+
+    # Per candidate: one untimed run, then the validation, then the timed reps.
+    assert runs[:4] == [("run", 64), ("validate", 64), ("bench", 1, 1), ("run", 64)]
+    assert runs[5:9] == [("run", 128), ("validate", 128), ("bench", 1, 1), ("run", 128)]
+
+
+def test_validate_hook_rejection_drops_only_that_candidate(monkeypatch):
+    """A candidate that launches but computes the wrong answer must not win."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+
+    def validate(sig_args):
+        if sig_args["BLOCK"] == 64:
+            raise ValueError("wrong numerics")
+
+    seen = []
+
+    def fn(a, out, BLOCK):
+        seen.append(BLOCK)
+
+    # The rejected candidate is also the fastest, so it would win without the gate.
+    def bench(call, warmup, rep):
+        call()
+        return {64: 0.1, 128: 1.0}[seen[-1]]
+
+    tuner = _make_tuner(
+        fn=fn,
+        configs=[Config(BLOCK=64), Config(BLOCK=128)],
+        validate_hook=validate,
+        do_bench_fn=bench,
+    )
+    args = (FakeTensor((8,)), FakeTensor((8,)))
+    tuner(*args)
+    key = tuner._make_key(args, {})
+    assert tuner.cache[key].kwargs["BLOCK"] == 128
+
+
+def test_all_candidates_failing_chains_the_underlying_error(monkeypatch):
+    """Without the cause, a validation rejection is indistinguishable from a
+    compile failure once the loop has swallowed every exception."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+
+    def validate(sig_args):
+        raise ValueError(f"bad numerics for BLOCK={sig_args['BLOCK']}")
+
+    tuner = _make_tuner(
+        fn=lambda a, out, BLOCK: None,
+        configs=[Config(BLOCK=64), Config(BLOCK=128)],
+        validate_hook=validate,
+        do_bench_fn=lambda call, warmup, rep: 1.0,
+    )
+    with pytest.raises(RuntimeError, match="All autotune configs failed") as excinfo:
+        tuner(FakeTensor((8,)), FakeTensor((8,)))
+    assert isinstance(excinfo.value.__cause__, ValueError)
+    assert "BLOCK=128" in str(excinfo.value.__cause__)
+
+
+def test_no_validate_hook_leaves_the_timed_path_untouched(monkeypatch):
+    """Adopters that do not pass a gate must see exactly the previous behavior."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    runs = []
+
+    tuner = _make_tuner(
+        fn=lambda a, out, BLOCK: runs.append(BLOCK),
+        configs=[Config(BLOCK=64)],
+        do_bench_fn=lambda call, warmup, rep: (call(), 1.0)[1],
+    )
+    tuner(FakeTensor((8,)), FakeTensor((8,)))
+    assert runs == [64, 64]  # one bench call, one final _run_config
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

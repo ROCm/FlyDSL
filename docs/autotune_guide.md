@@ -46,6 +46,34 @@ Artifacts intentionally do not include a compiler or kernel-source fingerprint.
 Treat them as reviewed deployment inputs, and retune after a compiler, kernel,
 compile-hint, or search-space change that can affect the winner.
 
+The scratch winner cache has the same blind spot: it fingerprints the device,
+toolchain, environment and compile hints, but not the adopter's kernel source or
+search space. An adopter that needs stale scratch winners invalidated should
+declare an integer schema parameter on its entry point and list it in `key`, then
+bump it with any change that can move the winner. Softmax does this with
+`tuning_schema`.
+
+## Candidate correctness gate
+
+`validate_hook(sig_args)` runs once per candidate, outside the timed repetitions
+but under the same stream, compile hints, reset/restore policy and call arguments
+as the timing run. `sig_args` maps every kernel parameter name to its value, so
+positional tensor arguments are visible; `pre_hook` and `post_hook` see only the
+merged kwargs and both run inside the timed callable.
+
+Raising from the hook rejects that candidate. If every candidate is rejected the
+search raises `RuntimeError("All autotune configs failed")` with the last failure
+chained, so a numerical rejection stays distinguishable from a compile failure.
+Use it wherever a candidate could launch successfully and still compute the wrong
+answer, and hold every candidate to the same tolerance as the default.
+
+## Adopters
+
+| Kernel | Module | `artifact_name` | Tuned axes |
+|---|---|---|---|
+| RMSNorm | `kernels/norm/rmsnorm_autotune.py` | `rmsnorm` | `BLOCK_THREADS`, `waves_per_eu` |
+| Softmax | `kernels/norm/softmax_autotune.py` | `softmax_fwd` | `BLOCK_THREADS`, `waves_per_eu` |
+
 ## Failure behavior
 
 FlyDSL ignores missing, unreadable, mismatched, or structurally invalid

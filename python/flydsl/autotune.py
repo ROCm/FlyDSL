@@ -212,6 +212,7 @@ class Autotuner:
         do_bench_fn=None,
         default=None,
         artifact_name=None,
+        validate_hook=None,
     ):
         self.fn = fn  # JitFunction instance
         self.configs = configs
@@ -223,6 +224,7 @@ class Autotuner:
         self.restore_value = restore_value or []
         self.pre_hook = pre_hook
         self.post_hook = post_hook
+        self.validate_hook = validate_hook
         self._do_bench = do_bench_fn or do_bench
         self.cache: Dict[tuple, Config] = {}
         self.default = default
@@ -253,6 +255,12 @@ class Autotuner:
         self._cache_file = cache_dir / f"{fn_name}.json"
 
         self._load_disk_cache()
+
+    def _sig_args(self, args, kwargs):
+        """Call arguments as a {parameter name: value} mapping."""
+        sig_args = dict(zip(self.arg_names, args))
+        sig_args.update(kwargs)
+        return sig_args
 
     def _make_key(self, args, kwargs):
         """Cache key over shape/dtype/stride + arch + toolchain + env. A config
@@ -392,6 +400,13 @@ class Autotuner:
                     self.post_hook(merged_kwargs)
 
             try:
+                # Untimed preflight: one extra run under this config's stream, compile
+                # hints and reset/restore policy, validated outside the timed reps so a
+                # numerically wrong candidate cannot win by launching successfully. A
+                # raising hook propagates as an ordinary candidate failure.
+                if self.validate_hook is not None:
+                    kernel_call()
+                    self.validate_hook(self._sig_args(args, merged_kwargs))
                 return self._do_bench(kernel_call, warmup=self.warmup, rep=self.rep)
             finally:
                 # Leave the caller's tensors as a single clean run would.
@@ -582,16 +597,20 @@ class Autotuner:
         configs = self._prune(configs, args, kwargs)
         print(f"[autotune] tuning {len(configs)} configs...")
         results = []
+        last_error = None
         for i, config in enumerate(configs):
             try:
                 t = self._bench_one(config, args, kwargs)
                 results.append((config, t))
                 print(f"  [{i+1}/{len(configs)}] {config} -> {t:.3f} ms")
             except Exception as e:
+                # Keep the cause: without it a preflight rejection is indistinguishable
+                # from a compile failure once the loop ends.
+                last_error = e
                 print(f"  [{i+1}/{len(configs)}] {config} -> FAILED: {e}")
 
         if not results:
-            raise RuntimeError("All autotune configs failed")
+            raise RuntimeError("All autotune configs failed") from last_error
 
         best_config, best_time = min(results, key=lambda x: x[1])
         print(f"[autotune] best: {best_config} ({best_time:.3f} ms)")
@@ -635,6 +654,7 @@ def autotune(
     do_bench: Callable = None,
     default: Callable = None,
     artifact_name: str = None,
+    validate_hook: Callable = None,
 ):
     """Autotune decorator for @jit functions.
 
@@ -658,6 +678,13 @@ def autotune(
             tuning any in-place kernel (e.g. fused-add rmsnorm).
         reset_to_zero: tensor args to zero before each rep (accumulate-into-zero
             kernels).
+        validate_hook: optional ``validate_hook(sig_args)`` numerical check run once
+            per candidate, outside the timed repetitions but under the same stream,
+            compile hints and reset/restore policy. ``sig_args`` maps every kernel
+            parameter name to its value for this call, so positional tensor args are
+            visible (``pre_hook``/``post_hook`` see only the merged kwargs). Raising
+            rejects the candidate; if every candidate is rejected the search raises
+            with the last failure chained.
     """
 
     def decorator(fn):
@@ -675,6 +702,7 @@ def autotune(
             do_bench_fn=do_bench,
             default=default,
             artifact_name=artifact_name,
+            validate_hook=validate_hook,
         )
 
     return decorator
