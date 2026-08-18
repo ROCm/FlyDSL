@@ -94,14 +94,6 @@ def cvt_sr_f32_to_bf16(x, rand):
     return fx.Uint16(bits >> fx.Uint32(16)).bitcast(fx.BFloat16)
 
 
-def get_warp_size(arch=None):
-    """Return the wavefront/warp size for the given GPU architecture.
-
-    CDNA (gfx9xx) uses wave64, gfx10xx/gfx11xx/gfx12xx use wave32.
-    """
-    return get_warp_size(arch)
-
-
 def default_f8_type() -> ir.Type:
     """Select E4M3 f8 type compatible with the current GPU arch.
 
