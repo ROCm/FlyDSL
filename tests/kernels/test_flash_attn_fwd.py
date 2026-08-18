@@ -4301,6 +4301,56 @@ def test_lse_fully_masked_rows():
     _assert_lse_matches(lse, ref, _ATOL_BF16)
 
 
+@pytest.mark.parametrize("lazy_rescale, atol", [(True, 0.30), (False, 0.05)])
+@pytest.mark.parametrize("S", [1024, 12288])
+@pytest.mark.parametrize("k_scale", [1.0, 200.0])
+def test_fp8_softmax_normalises(S, k_scale, lazy_rescale, atol):
+    """With V all ones the output is exactly 1.0, because softmax normalises.
+
+    Nothing about V or the PV product can move it, and 1.0 is representable in
+    e4m3, so any deviation is the softmax's own normalisation. `k_scale` widens
+    the score range: the failure this guards against is invisible on
+    near-uniform attention and severe on peaked attention.
+
+    Both rescale paths are checked, with different bounds, because the headroom
+    for lifting P differs. The lazy path leaves ``exp2`` free to reach
+    ``2**RESCALE_THRESHOLD`` and can use only the remainder, so it improves
+    without becoming exact; the eager path rebases every tile and gets all of
+    it. Before the fix these reached 0.64 and 0.50 respectively.
+    """
+    if get_rocm_arch() != "gfx950":
+        pytest.skip("dense fp8 attention is gfx950-only")
+
+    B, H, D = 2, 8, 128
+    torch.manual_seed(0)
+    q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1
+    k = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1 * k_scale
+
+    fp8 = torch.float8_e4m3fn
+    fp8_max = torch.finfo(fp8).max
+    q_s = q.abs().amax().float() / fp8_max
+    k_s = k.abs().amax().float() / fp8_max
+    v_s = torch.tensor(1.0 / fp8_max, device="cuda")
+    v = (torch.ones(B, S, H, D, device="cuda", dtype=torch.bfloat16) / v_s).to(fp8)
+
+    out = flydsl_flash_attn_func(
+        (q / q_s).to(fp8),
+        (k / k_s).to(fp8),
+        v,
+        causal=False,
+        q_descale=q_s.reshape(1).contiguous(),
+        k_descale=k_s.reshape(1).contiguous(),
+        v_descale=v_s.reshape(1).contiguous(),
+        dualwave_swp_lazy_rescale=lazy_rescale,
+    )
+    if isinstance(out, (tuple, list)):
+        out = out[0]
+    out = out.float()
+
+    # e4m3 rounding of P leaves a per-row residue that the lift cannot remove.
+    torch.testing.assert_close(out, torch.ones_like(out), rtol=0, atol=atol)
+
+
 def test_return_lse_false_returns_only_out():
     """Backwards-compat: default return_lse=False returns a bare tensor."""
     dtype = torch.bfloat16
