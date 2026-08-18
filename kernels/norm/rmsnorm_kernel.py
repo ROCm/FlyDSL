@@ -6,8 +6,8 @@
 RMSNorm(x) = x / sqrt(mean(x^2) + eps) * gamma
 
 Two paths:
-  - Fast path (N % tile_cols == 0): 128-bit buffer copies.
-  - Generic path (arbitrary N): scalar guarded copies.
+  - Vector path (f16/bf16, N >= 8): 128-bit vec8 copies plus a scalar tail.
+  - Scalar path (f32 or N < 8): guarded elementwise copies.
 """
 
 import math
@@ -89,8 +89,10 @@ def build_rmsnorm_module(
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
     weight_elem_bits = 32 if weight_dtype_str == "f32" else 16
-    USE_VEC_N = elem_bits <= 16 and N % VEC_WIDTH == 0
+    USE_VEC_N = elem_bits <= 16 and N >= VEC_WIDTH
     VEC_TILES = N // VEC_WIDTH if USE_VEC_N else 0
+    VEC_ELEMS = VEC_TILES * VEC_WIDTH
+    TAIL_ELEMS = N - VEC_ELEMS
     NUM_VEC_ITERS = (VEC_TILES + BLOCK_THREADS - 1) // BLOCK_THREADS if USE_VEC_N else 0
     _kernel_kwargs = {} if BLOCK_THREADS <= 256 else {"known_block_size": [BLOCK_THREADS, 1, 1]}
 
@@ -151,7 +153,7 @@ def build_rmsnorm_module(
 
             return fx.memref_load(s_red, 0)
 
-        # Vector path for every complete f16/bf16 vec8 row.
+        # Vector path for the f16/bf16 vec8 prefix plus an optional scalar tail.
         if const_expr(USE_VEC_N):
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
@@ -166,6 +168,15 @@ def build_rmsnorm_module(
 
             copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
             gamma_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), weight_elem_bits)
+            if const_expr(TAIL_ELEMS > 0):
+                row_div_s = fx.logical_divide(row_in, fx.make_layout(1, 1))
+                gamma_div_s = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
+                out_div_s = fx.logical_divide(row_out, fx.make_layout(1, 1))
+                copy_atom_s = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), elem_bits)
+                gamma_copy_atom_s = fx.make_copy_atom(
+                    fx.rocdl.BufferCopy16b() if weight_elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
+                    weight_elem_bits,
+                )
 
             c_zero_f = fx.Float32(0.0)
             thread_sumsq = c_zero_f
@@ -183,6 +194,13 @@ def build_rmsnorm_module(
                 x2 = x * x
                 red2 = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
                 thread_sumsq = thread_sumsq + is_valid.select(red2, c_zero_f)
+
+            if const_expr(TAIL_ELEMS > 0):
+                if tid < TAIL_ELEMS:
+                    tail_idx = tid + VEC_ELEMS
+                    x_tail_e = _load_scalar(copy_atom_s, elem_dtype, row_div_s, tail_idx)
+                    x_tail = x_tail_e.to(fx.Float32)
+                    thread_sumsq = thread_sumsq + x_tail * x_tail
 
             sum_sq = block_reduce_add(thread_sumsq)
             mean_sq = sum_sq / n_float
@@ -203,6 +221,17 @@ def build_rmsnorm_module(
                     y = (x * rrms) * g
                     out_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
                     _store_vec(copy_atom, VEC_WIDTH, elem_dtype, out_e, out_div, idx)
+
+            if const_expr(TAIL_ELEMS > 0):
+                if tid < TAIL_ELEMS:
+                    tail_idx = tid + VEC_ELEMS
+                    x_tail_e = _load_scalar(copy_atom_s, elem_dtype, row_div_s, tail_idx)
+                    g_tail_e = _load_scalar(gamma_copy_atom_s, weight_elem_dtype, gamma_div_s, tail_idx)
+                    x_tail = x_tail_e.to(fx.Float32)
+                    g_tail = g_tail_e if weight_dtype_str == "f32" else g_tail_e.to(fx.Float32)
+                    y_tail = (x_tail * rrms) * g_tail
+                    y_tail_e = _to_elem_scalar(dtype_str, elem_dtype, y_tail)
+                    _store_scalar(copy_atom_s, elem_dtype, out_div_s, tail_idx, y_tail_e)
 
         else:
             # Scalar fallback for arbitrary N.

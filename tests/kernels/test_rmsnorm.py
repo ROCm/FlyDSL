@@ -151,7 +151,7 @@ def _get_rmsnorm_forward_configs():
         (1, 511, "bf16"),  # small M plus vec8 prefix/scalar tail
         (9, 2048, "f16"),  # small-N dispatch boundary
         (33, 3072, "bf16"),  # vec8 row not divisible by BLOCK_THREADS * VEC_WIDTH
-        (7, 3073, "f16"),  # large-N scalar fallback for an unaligned row
+        (7, 3073, "f16"),  # large-N vec8 prefix/scalar tail
     ]
 
 
@@ -181,7 +181,7 @@ def _quant_test_eps(N: int) -> float:
 def _assert_rmsnorm_forward_copy_width(compiled_fn, N: int, dtype: str):
     if dtype not in ("f16", "bf16"):
         return
-    expects_vec8 = N >= 8 and (N <= rmsnorm_kernel_impl.SMALL_N_THRESHOLD or N % 8 == 0)
+    expects_vec8 = N >= 8
     has_128b_io = "buffer_copy<128>, 16>" in compiled_fn._keepalive.source_ir
     assert has_128b_io == expects_vec8, f"unexpected RMSNorm copy width for N={N}, dtype={dtype}"
 
