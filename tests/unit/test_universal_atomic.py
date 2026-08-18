@@ -20,6 +20,21 @@ pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available", allow_module_level=True)
 
+# UniversalAtomic itself is target-neutral, but the Agent/Workgroup/Wavefront
+# sync scopes are AMD-specific and ``fx.rocdl`` only imports in a build that
+# includes the ROCDL backend. These feed ``parametrize``, which is evaluated at
+# collection time, so gate them here rather than skipping inside the test.
+try:
+    _ROCDL_SYNC_SCOPES = [
+        fx.rocdl.SyncScope.Agent,
+        fx.rocdl.SyncScope.Workgroup,
+        fx.rocdl.SyncScope.Wavefront,
+    ]
+except ImportError:
+    _ROCDL_SYNC_SCOPES = []
+
+SYNC_SCOPES = [fx.SyncScope.System, fx.SyncScope.SingleThread, *_ROCDL_SYNC_SCOPES]
+
 
 @flyc.kernel
 def reduce_add_kernel(
@@ -68,16 +83,7 @@ def reduce_add(
     )
 
 
-@pytest.mark.parametrize(
-    "syncscope",
-    [
-        fx.SyncScope.System,
-        fx.SyncScope.SingleThread,
-        fx.rocdl.SyncScope.Agent,
-        fx.rocdl.SyncScope.Workgroup,
-        fx.rocdl.SyncScope.Wavefront,
-    ],
-)
+@pytest.mark.parametrize("syncscope", SYNC_SCOPES)
 def test_reduce_add_atomic(syncscope):
     BLOCK_DIM = 64
     N = BLOCK_DIM * 4
@@ -157,13 +163,7 @@ def test_reduce_max_atomic():
 
 
 if __name__ == "__main__":
-    for _scope in [
-        fx.SyncScope.System,
-        fx.SyncScope.SingleThread,
-        fx.rocdl.SyncScope.Agent,
-        fx.rocdl.SyncScope.Workgroup,
-        fx.rocdl.SyncScope.Wavefront,
-    ]:
+    for _scope in SYNC_SCOPES:
         test_reduce_add_atomic(_scope)
     test_reduce_max_atomic()
     print("ALL PASSED")

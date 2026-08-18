@@ -18,8 +18,8 @@ def test_cmake_default_backend_stays_rocdl():
     text = (_REPO_ROOT / "cmake" / "FlyDSLBackends.cmake").read_text()
 
     assert 'set(FLYDSL_BACKENDS "rocdl"' in text
-    assert "set_property(CACHE FLYDSL_BACKENDS PROPERTY STRINGS rocdl)" in text
-    assert "set(_FLYDSL_BACKENDS_ALLOWED rocdl)" in text
+    assert "set_property(CACHE FLYDSL_BACKENDS PROPERTY STRINGS rocdl nvvm)" in text
+    assert "set(_FLYDSL_BACKENDS_ALLOWED rocdl nvvm)" in text
 
 
 def test_rocm_runtime_is_only_added_for_rocdl_backend():
@@ -50,12 +50,12 @@ def test_future_backend_descriptor_is_opt_in(tmp_path):
 
     text = (_REPO_ROOT / "cmake" / "FlyDSLBackends.cmake").read_text()
     text = text.replace(
-        "set_property(CACHE FLYDSL_BACKENDS PROPERTY STRINGS rocdl)",
-        "set_property(CACHE FLYDSL_BACKENDS PROPERTY STRINGS rocdl dummy)",
+        "set_property(CACHE FLYDSL_BACKENDS PROPERTY STRINGS rocdl nvvm)",
+        "set_property(CACHE FLYDSL_BACKENDS PROPERTY STRINGS rocdl nvvm dummy)",
     )
     text = text.replace(
-        "set(_FLYDSL_BACKENDS_ALLOWED rocdl)",
-        "set(_FLYDSL_BACKENDS_ALLOWED rocdl dummy)",
+        "set(_FLYDSL_BACKENDS_ALLOWED rocdl nvvm)",
+        "set(_FLYDSL_BACKENDS_ALLOWED rocdl nvvm dummy)",
     )
     (cmake_dir / "FlyDSLBackends.cmake").write_text(text)
 

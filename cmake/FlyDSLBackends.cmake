@@ -12,7 +12,7 @@
 
 set(FLYDSL_BACKENDS "rocdl"
     CACHE STRING "Enabled FlyDSL backend stacks (semicolon-separated)")
-set_property(CACHE FLYDSL_BACKENDS PROPERTY STRINGS rocdl)
+set_property(CACHE FLYDSL_BACKENDS PROPERTY STRINGS rocdl nvvm)
 
 # ---- Validate ----
 list(LENGTH FLYDSL_BACKENDS _n_backends)
@@ -23,7 +23,7 @@ if(_n_backends GREATER 5)
   message(FATAL_ERROR "FLYDSL_FOR_EACH_BACKEND supports at most 5 backends.")
 endif()
 
-set(_FLYDSL_BACKENDS_ALLOWED rocdl)
+set(_FLYDSL_BACKENDS_ALLOWED rocdl nvvm)
 foreach(_b ${FLYDSL_BACKENDS})
   if(NOT _b IN_LIST _FLYDSL_BACKENDS_ALLOWED)
     message(FATAL_ERROR
