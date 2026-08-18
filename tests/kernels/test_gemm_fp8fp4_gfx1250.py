@@ -220,6 +220,20 @@ for _tm, _nb in ((256, 4), (256, 2), (128, 4), (128, 3)):
         )
 
 
+def _bytes_moved(mode: str, M: int, N: int, K: int) -> int:
+    """Logical A/B/scales read plus C written by one GEMM launch."""
+    spec = _MODES[mode]
+    a_bytes = M * K // (2 if spec["fp4_act"] else 1)
+    b_bytes = N * K // (2 if spec["fp4_w"] else 1)
+    if spec["scale"] == "mx32":
+        scale_bytes = (M + N) * (K // SCALE_BLOCK_32)
+    elif spec["scale"] == "mx128":
+        scale_bytes = M * (K // SCALE_BLOCK_128) + (N // SCALE_BLOCK_128) * (K // SCALE_BLOCK_128)
+    else:
+        scale_bytes = (M + N) * 4
+    return a_bytes + b_bytes + scale_bytes + M * N * 2
+
+
 def _skip_reason(spec, N, K, tile_cfg, cluster):
     """None when the mode supports this shape/tile combination, else why it cannot."""
     tile_m, tile_n, tile_k, _m_warp, _n_warp, num_buffers = tile_cfg
@@ -586,9 +600,9 @@ def _main():
 
     if args.bench:
         us = _bench_us(lambda: compiled(*make_args(torch.cuda.current_stream())), c_gpu, gap_us=args.bench_gap_us)
-        print(
-            f"perf: mode={args.mode} M={M} N={N} K={K} {us:.3f}us ({2.0 * M * N * K / (us * 1e-6) / 1e12:.2f} TFLOPS)"
-        )
+        tflops = 2.0 * M * N * K / (us * 1e-6) / 1e12
+        tbps = _bytes_moved(args.mode, M, N, K) / (us * 1e-6) / 1e12
+        print(f"perf: mode={args.mode} M={M} N={N} K={K} {us:.3f}us " f"({tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s)")
 
 
 if __name__ == "__main__":

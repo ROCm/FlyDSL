@@ -55,9 +55,10 @@ def launch_gemm_a8w8_256x256(
     assert (tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers) in (
         (256, 256, 128, 2, 2, 4),
         (256, 256, 128, 2, 2, 2),
+        (128, 128, 128, 2, 2, 4),
         (128, 256, 128, 2, 2, 4),
         (128, 256, 128, 2, 2, 3),
-    ), "only the tuned 2x2-wave profiles are supported: tile_m 256 or 128, 4 buffers (K/128) else K/256"
+    ), "only the tuned 2x2-wave profiles are supported"
     assert (
         cluster_m >= 1 and cluster_n >= 1 and 1 < cluster_m * cluster_n <= 16
     ), f"cluster_m*cluster_n must be 2..16, got {cluster_m}x{cluster_n}"
@@ -82,7 +83,7 @@ def launch_gemm_a8w8_256x256(
     n_acc = wmma_m_rep * wmma_n_rep
     num_waves = m_warp * n_warp
     block = num_waves * WAVE
-    KPAIR = 1 if num_buffers == 4 else 2
+    KPAIR = 1 if num_buffers == 4 and tile_n == 256 else 2
     UNROLL = KPAIR * num_buffers
     SUPER_K = tile_k * KPAIR
     LDS_PAD_A = 16

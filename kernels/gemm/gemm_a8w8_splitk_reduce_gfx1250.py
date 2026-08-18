@@ -25,8 +25,8 @@ def compile_gemm_a8w8_splitk_reduce(
         raise ValueError(f"split_k must be greater than one, got {split_k}")
     if out_dtype_str not in ("bf16", "f16"):
         raise ValueError(f"unsupported output dtype {out_dtype_str!r}")
-    if block not in (64, 128, 256):
-        raise ValueError(f"block must be one of 64, 128, or 256, got {block}")
+    if block not in (64, 128, 256, 512):
+        raise ValueError(f"block must be one of 64, 128, 256, or 512, got {block}")
     unroll = unroll or 256 // block
     if unroll <= 0:
         raise ValueError(f"unroll must be positive, got {unroll}")
