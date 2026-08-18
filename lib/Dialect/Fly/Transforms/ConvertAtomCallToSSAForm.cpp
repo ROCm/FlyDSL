@@ -23,7 +23,12 @@ namespace fly {
 
 namespace {
 
-bool isEligibleToPromote(fly::MemRefType memRefTy) {
+// A copy operand may be a coordinate tensor rather than a memref (it names a
+// position, not storage), and such an operand is never register-promotable.
+bool isEligibleToPromote(Type ty) {
+  auto memRefTy = dyn_cast<fly::MemRefType>(ty);
+  if (!memRefTy)
+    return false;
   if (!isGenericAddressSpace<AddressSpace::Register>(memRefTy.getAddressSpace()))
     return false;
   auto layoutAttr = dyn_cast<LayoutAttr>(memRefTy.getLayout());
@@ -49,9 +54,7 @@ public:
     SmallVector<MmaAtomCall> mmaOpsToConvert;
 
     moduleOp->walk([&](CopyAtomCall op) {
-      auto srcTy = cast<fly::MemRefType>(op.getSrc().getType());
-      auto dstTy = cast<fly::MemRefType>(op.getDst().getType());
-      if (isEligibleToPromote(srcTy) || isEligibleToPromote(dstTy))
+      if (isEligibleToPromote(op.getSrc().getType()) || isEligibleToPromote(op.getDst().getType()))
         copyOpsToConvert.push_back(op);
     });
 
@@ -68,10 +71,10 @@ public:
     OpBuilder builder(moduleOp->getContext());
 
     for (CopyAtomCall copyOp : copyOpsToConvert) {
-      auto srcTy = cast<fly::MemRefType>(copyOp.getSrc().getType());
-      auto dstTy = cast<fly::MemRefType>(copyOp.getDst().getType());
-      bool srcEligible = isEligibleToPromote(srcTy);
-      bool dstEligible = isEligibleToPromote(dstTy);
+      auto srcTy = dyn_cast<fly::MemRefType>(copyOp.getSrc().getType());
+      auto dstTy = dyn_cast<fly::MemRefType>(copyOp.getDst().getType());
+      bool srcEligible = isEligibleToPromote(copyOp.getSrc().getType());
+      bool dstEligible = isEligibleToPromote(copyOp.getDst().getType());
 
       builder.setInsertionPoint(copyOp);
       Location loc = copyOp.getLoc();

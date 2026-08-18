@@ -26,7 +26,6 @@
 
 namespace mlir {
 #define GEN_PASS_DEF_FLYTOROCDLCONVERSIONPASS
-#define GEN_PASS_DEF_FLYROCDLCLUSTERATTRPASS
 #include "flydsl/Conversion/FlyToROCDL/Passes.h.inc"
 } // namespace mlir
 
@@ -359,16 +358,10 @@ public:
 
   LogicalResult matchAndRewrite(MakeViewOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    if (isa<fly::CoordTensorType>(op.getResult().getType())) {
-      if (!op.getResult().use_empty())
-        return rewriter.notifyMatchFailure(op, "coord_tensor result should have no uses");
-      rewriter.eraseOp(op);
-      return success();
-    } else {
-      Value base = adaptor.getIter();
-      rewriter.replaceOp(op, base);
-      return success();
-    }
+    // A view's runtime value is its iterator: a pointer for a memref, a coordinate
+    // for a coordinate tensor.
+    rewriter.replaceOp(op, adaptor.getIter());
+    return success();
   }
 };
 
@@ -478,8 +471,12 @@ public:
 
     auto statefulOp = dyn_cast<StatefulOpTypeInterface>(copyAtomTy.getCopyOp());
     if (statefulOp) {
-      Value state = statefulOp.getDefaultState(rewriter, op.getLoc());
+      Value state = statefulOp.getAtomState(rewriter, op.getLoc(), adaptor.getArgs());
+      if (!state)
+        return failure();
       rewriter.replaceOp(op, state);
+    } else if (!adaptor.getArgs().empty()) {
+      return rewriter.notifyMatchFailure(op, "stateless copy atom takes no construction arguments");
     } else {
       rewriter.replaceOpWithNewOp<LLVM::UndefOp>(op, convertedTy);
     }
@@ -500,6 +497,8 @@ public:
     auto statefulOp = dyn_cast<StatefulOpTypeInterface>(mmaAtomTy.getMmaOp());
     if (statefulOp) {
       Value state = statefulOp.getDefaultState(rewriter, op.getLoc());
+      if (!state)
+        return failure();
       rewriter.replaceOp(op, state);
     } else {
       rewriter.replaceOpWithNewOp<LLVM::UndefOp>(op, convertedTy);
@@ -580,12 +579,15 @@ public:
     Value dst = adaptor.getDst();
     Value pred = adaptor.getPred();
 
-    auto srcMemTy = dyn_cast<fly::MemRefType>(op.getSrc().getType());
-    auto dstMemTy = dyn_cast<fly::MemRefType>(op.getDst().getType());
-
-    if (!srcMemTy || !dstMemTy)
-      return rewriter.notifyMatchFailure(op, "expected MemRef types on original op");
-    if (srcMemTy.getElemTy() != dstMemTy.getElemTy())
+    Type srcTy = op.getSrc().getType();
+    Type dstTy = op.getDst().getType();
+    auto srcMemTy = dyn_cast<fly::MemRefType>(srcTy);
+    auto dstMemTy = dyn_cast<fly::MemRefType>(dstTy);
+    if (!srcMemTy && !isa<fly::CoordTensorType>(srcTy))
+      return rewriter.notifyMatchFailure(op, "src is neither a MemRef nor a coord tensor");
+    if (!dstMemTy && !isa<fly::CoordTensorType>(dstTy))
+      return rewriter.notifyMatchFailure(op, "dst is neither a MemRef nor a coord tensor");
+    if (srcMemTy && dstMemTy && srcMemTy.getElemTy() != dstMemTy.getElemTy())
       return rewriter.notifyMatchFailure(op, "src/dst element types mismatch");
 
     Location loc = op.getLoc();
@@ -598,12 +600,12 @@ public:
     }
 
     if (pred) {
-      if (failed(copyAtom.emitAtomCall(rewriter, loc, copyAtomType, srcMemTy, dstMemTy, predMemTy,
+      if (failed(copyAtom.emitAtomCall(rewriter, loc, copyAtomType, srcTy, dstTy, predMemTy,
                                        copyAtomVal, src, dst, pred)))
         return failure();
     } else {
-      if (failed(copyAtom.emitAtomCall(rewriter, loc, copyAtomType, srcMemTy, dstMemTy, copyAtomVal,
-                                       src, dst)))
+      if (failed(copyAtom.emitAtomCall(rewriter, loc, copyAtomType, srcTy, dstTy, copyAtomVal, src,
+                                       dst)))
         return failure();
     }
     rewriter.eraseOp(op);
@@ -793,6 +795,9 @@ public:
       unsigned as = mapAttrToLLVMAddressSpace(flyMemRefTy.getAddressSpace());
       return LLVM::LLVMPointerType::get(flyMemRefTy.getContext(), as);
     });
+    addConversion([&](fly::CoordTensorType coordTy) -> Type {
+      return fly::IntTupleType::get(coordTy.getBase());
+    });
     addConversion([&](fly::PointerType flyPtrTy) -> Type {
       if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace()))
         return BufferFatPtr::getType(flyPtrTy.getContext());
@@ -916,46 +921,6 @@ public:
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))
       signalPassFailure();
-  }
-};
-
-// ---------------------------------------------------------------------------
-// FlyROCDLClusterAttrPass — inject amdgpu-cluster-dims into llvm.func
-// passthrough.  Run inside gpu.module() AFTER convert-gpu-to-rocdl.
-//
-// The upstream ROCDL dialect does not translate `rocdl.cluster_dims` to the
-// LLVM IR function attribute `amdgpu-cluster-dims`.  This pass bridges the
-// gap by converting the discardable attribute that `GPUFuncOpLowering`
-// copied from gpu.func into an LLVM passthrough entry that the LLVM IR
-// emitter honours.
-// ---------------------------------------------------------------------------
-class FlyROCDLClusterAttrPass
-    : public mlir::impl::FlyROCDLClusterAttrPassBase<FlyROCDLClusterAttrPass> {
-public:
-  using mlir::impl::FlyROCDLClusterAttrPassBase<
-      FlyROCDLClusterAttrPass>::FlyROCDLClusterAttrPassBase;
-
-  void runOnOperation() override {
-    getOperation()->walk([&](LLVM::LLVMFuncOp func) {
-      auto clusterAttr = func->getAttrOfType<StringAttr>("rocdl.cluster_dims");
-      if (!clusterAttr)
-        return;
-
-      MLIRContext *ctx = func.getContext();
-
-      // Build the new passthrough entry: ["amdgpu-cluster-dims", "2,2,1"].
-      auto key = StringAttr::get(ctx, "amdgpu-cluster-dims");
-      auto entry = ArrayAttr::get(ctx, {key, clusterAttr});
-
-      // Append to existing passthrough list (if any).
-      SmallVector<Attribute, 4> passthroughAttrs;
-      if (auto existing = func.getPassthroughAttr())
-        passthroughAttrs.append(existing.begin(), existing.end());
-      passthroughAttrs.push_back(entry);
-
-      func.setPassthroughAttr(ArrayAttr::get(ctx, passthroughAttrs));
-      func->removeAttr("rocdl.cluster_dims");
-    });
   }
 };
 

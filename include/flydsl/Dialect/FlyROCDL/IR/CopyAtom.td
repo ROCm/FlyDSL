@@ -88,4 +88,58 @@ def FlyROCDL_CopyOpGFX1250TDM : FlyROCDL_StatefulCopyOp<"CopyOpGFX1250TDM", "gfx
   let genVerifyDecl = 1;
 }
 
+//===----------------------------------------------------------------------===//
+// CopyOp CDNA5 — N-D TDM (Tensor Data Mover) async Global <-> LDS copy (1-5D),
+// addressed by a tile coordinate.
+//===----------------------------------------------------------------------===//
+
+class FlyROCDL_CopyOpCDNA5TDM<string typeName, string typeMnemonic>
+    : FlyROCDL_StatefulCopyOp<typeName, typeMnemonic, [
+        DeclareTypeInterfaceMethods<Fly_StatefulOpTypeInterface, ["getAtomState"]>
+      ]> {
+  dag tdmParams = (ins
+    ArrayRefParameter<"int32_t">:$tileShape,
+    // The unit the *descriptor* counts. Only its width reaches the hardware (`data_size`).
+    "Type":$dataType,
+    // Where each mode of the *global* tensor sends its *tdm* basis axis, congruent
+    // with that tensor's shape.
+    //
+    // Being an attribute is a real restriction, not just an encoding choice: a leaf is
+    // `scale E axis`, so the scale is a compile-time integer. One axis per mode is exact
+    // while the map is 1:1, which it is up to five modes.
+    // TODO(rank>5, dynamic strides)
+    "::mlir::fly::IntTupleAttr":$tensor2tdm,
+    // Whether this atom arrives on the HW auto-barrier (descriptor config bit 18).
+    // Only the enable is a type property: *which* barrier is an LDS address, and that
+    // is atom state. With this off the atom has no `atomic_barrier_addr` field to set.
+    DefaultValuedParameter<"bool", "false">:$atomicBarrier,
+    DefaultValuedParameter<"int32_t", "0">:$cacheModifier,
+    DefaultValuedParameter<"int32_t", "1">:$iterCount
+  );
+  let genVerifyDecl = 1;
+}
+
+def FlyROCDL_CopyOpCDNA5TensorLoad : FlyROCDL_CopyOpCDNA5TDM<"CopyOpCDNA5TensorLoad", "cdna5.tensor_load"> {
+  let parameters = !con(tdmParams, (ins
+    DefaultValuedParameter<"int32_t", "0">:$padInterval,
+    DefaultValuedParameter<"int32_t", "0">:$padAmount
+  ));
+
+  let assemblyFormat = [{
+    `<` `shape` `=` `[` $tileShape `]` `,` `elem` `=` $dataType
+    `,` `tensor2tdm` `=` $tensor2tdm
+    (`,` struct($atomicBarrier, $cacheModifier, $iterCount, $padInterval, $padAmount)^)? `>`
+  }];
+}
+
+def FlyROCDL_CopyOpCDNA5TensorStore : FlyROCDL_CopyOpCDNA5TDM<"CopyOpCDNA5TensorStore", "cdna5.tensor_store"> {
+  let parameters = tdmParams;
+
+  let assemblyFormat = [{
+    `<` `shape` `=` `[` $tileShape `]` `,` `elem` `=` $dataType
+    `,` `tensor2tdm` `=` $tensor2tdm
+    (`,` struct($atomicBarrier, $cacheModifier, $iterCount)^)? `>`
+  }];
+}
+
 #endif // FLYROCDL_COPYATOM
