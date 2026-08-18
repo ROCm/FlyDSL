@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-17T23:53:32Z",
+ "updated": "2026-08-18T00:02:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32082765803,
+   "pr": 1019,
+   "commit": "a4ca4c0a6fd90461fd78dc81f9bfbcac4b0c3fd5",
+   "branch": "jhinpan/softmax-bwd",
+   "event": "pull_request",
+   "title": "[Kernel] Add row-wise Softmax backward",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32082765803",
+   "created_at": "2026-08-18T00:00:15Z",
+   "updated_at": "2026-08-18T00:01:00Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 32082186367,
    "pr": 1019,
@@ -10,11 +25,11 @@
    "branch": "jhinpan/softmax-bwd",
    "event": "pull_request",
    "title": "[Kernel] Add row-wise Softmax backward",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32082186367",
    "created_at": "2026-08-17T23:51:24Z",
-   "updated_at": "2026-08-17T23:52:24Z",
+   "updated_at": "2026-08-18T00:00:32Z",
    "actor": "jhinpan",
    "jobs": []
   },
@@ -1995,21 +2010,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 31660219863,
-   "pr": null,
-   "commit": "f4f8267a0a320244024a1a0011d935efd7324ae4",
-   "branch": "jli/gfx1250/fix-mma-atom",
-   "event": "pull_request",
-   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31660219863",
-   "created_at": "2026-08-13T02:14:35Z",
-   "updated_at": "2026-08-13T04:07:20Z",
-   "actor": "jli-melchior",
-   "jobs": []
   }
  ]
 }
