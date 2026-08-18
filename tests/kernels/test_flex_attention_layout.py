@@ -75,11 +75,15 @@ def _run(B, Sq, Skv, H, D, dtype_str, *, num_groups=2, accurate_softmax=True):
 
 
 _SHAPES = [
+    # (B, Sq, Skv, H, D)
     (1, 64, 64, 4, 128),
-    (1, 64, 128, 4, 128),
+    (1, 64, 128, 4, 128),     # Sq != Skv
     (2, 128, 128, 8, 128),
-    (1, 64, 64, 4, 64),
+    (1, 64, 64, 4, 64),       # D=64
     (1, 128, 128, 4, 128),
+    (1, 64, 32, 4, 128),      # single KV tile (Skv == block_n)
+    (1, 256, 512, 4, 128),    # larger sequences
+    (1, 64, 64, 8, 128),      # GQA: Hq=8, but uses default Hkv=Hq; see GQA test below
 ]
 
 
@@ -102,15 +106,21 @@ def test_flex_attention_layout_approx_softmax(B, Sq, Skv, H, D, dtype_str):
 
 
 _MOD_SHAPES = [
+    # (B, Sq, Skv, H, D)
     (1, 64, 64, 4, 128),
     (2, 128, 128, 8, 128),
+    (1, 64, 128, 4, 128),     # Sq < Skv (prefill with longer KV)
+    (1, 64, 32, 4, 128),      # single KV tile
+    (1, 64, 64, 4, 64),       # D=64
+    (1, 256, 256, 4, 128),    # larger sequence (tile-range clamping exercises more tiles)
 ]
 
 
 @_requires_gfx950
+@pytest.mark.parametrize("dtype_str", ["bf16", "f16"])
 @pytest.mark.parametrize("B,Sq,Skv,H,D", _MOD_SHAPES)
-def test_flex_attention_layout_causal(B, Sq, Skv, H, D):
-    dtype = torch.bfloat16
+def test_flex_attention_layout_causal(B, Sq, Skv, H, D, dtype_str):
+    dtype = _DTYPES[dtype_str]
     dev = "cuda"
     torch.manual_seed(0)
     q = torch.empty(B, Sq, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
@@ -125,14 +135,15 @@ def test_flex_attention_layout_causal(B, Sq, Skv, H, D):
     max_err = (out - ref).abs().max().item()
     cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
     assert max_err < 8e-2 and cos > 0.98, (
-        f"causal B{B} Sq{Sq} Skv{Skv} H{H} D{D}: max_err={max_err} cos={cos}"
+        f"causal B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
     )
 
 
 @_requires_gfx950
+@pytest.mark.parametrize("dtype_str", ["bf16", "f16"])
 @pytest.mark.parametrize("B,Sq,Skv,H,D", _MOD_SHAPES)
-def test_flex_attention_layout_alibi(B, Sq, Skv, H, D):
-    dtype = torch.bfloat16
+def test_flex_attention_layout_alibi(B, Sq, Skv, H, D, dtype_str):
+    dtype = _DTYPES[dtype_str]
     dev = "cuda"
     torch.manual_seed(0)
     q = torch.empty(B, Sq, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
@@ -152,14 +163,15 @@ def test_flex_attention_layout_alibi(B, Sq, Skv, H, D):
     max_err = (out - ref).abs().max().item()
     cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
     assert max_err < 8e-2 and cos > 0.98, (
-        f"alibi B{B} Sq{Sq} Skv{Skv} H{H} D{D}: max_err={max_err} cos={cos}"
+        f"alibi B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
     )
 
 
 @_requires_gfx950
+@pytest.mark.parametrize("dtype_str", ["bf16", "f16"])
 @pytest.mark.parametrize("B,Sq,Skv,H,D", _MOD_SHAPES)
-def test_flex_attention_layout_sliding_window(B, Sq, Skv, H, D):
-    dtype = torch.bfloat16
+def test_flex_attention_layout_sliding_window(B, Sq, Skv, H, D, dtype_str):
+    dtype = _DTYPES[dtype_str]
     dev = "cuda"
     torch.manual_seed(0)
     q = torch.empty(B, Sq, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
@@ -182,7 +194,133 @@ def test_flex_attention_layout_sliding_window(B, Sq, Skv, H, D):
     max_err = (out - ref).abs().max().item()
     cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
     assert max_err < 8e-2 and cos > 0.97, (
-        f"sw B{B} Sq{Sq} Skv{Skv} H{H} D{D}: max_err={max_err} cos={cos}"
+        f"sw B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
+    )
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("window", [33, 97])
+def test_flex_attention_layout_sliding_window_odd(window):
+    """Non-block-aligned windows that straddle tile boundaries."""
+    B, Sq, Skv, H, D = 2, 128, 128, 4, 128
+    dtype = torch.bfloat16
+    dev = "cuda"
+    torch.manual_seed(0)
+    q = torch.empty(B, Sq, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    k = torch.empty(B, Skv, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    v = torch.empty(B, Skv, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    scale = 1.0 / math.sqrt(D)
+
+    out = flydsl_flex_attention_layout(
+        q, k, v, scale=scale, mask_type=MASK_SLIDING_WINDOW, mask_window=window,
+    ).float()
+    qi = torch.arange(Sq, device=dev).unsqueeze(1)
+    ki = torch.arange(Skv, device=dev).unsqueeze(0)
+    causal = ki <= qi
+    in_window = (qi - ki) <= window
+    mask = (causal & in_window).float().unsqueeze(0).unsqueeze(0)
+    mask = mask.masked_fill(mask == 0, float("-inf")).masked_fill(mask == 1, 0.0)
+    ref = _sdpa_ref(q, k, v, scale, attn_mask=mask).float()
+    max_err = (out - ref).abs().max().item()
+    cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
+    assert max_err < 8e-2 and cos > 0.97, (
+        f"sw_odd w={window}: max_err={max_err} cos={cos}"
+    )
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("Hq,Hkv", [(8, 1), (8, 2), (32, 8)])
+def test_flex_attention_layout_gqa(Hq, Hkv):
+    B, Sq, Skv, D = 1, 64, 64, 128
+    dtype = torch.bfloat16
+    dev = "cuda"
+    torch.manual_seed(0)
+    q = torch.empty(B, Sq, Hq, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    k = torch.empty(B, Skv, Hkv, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    v = torch.empty(B, Skv, Hkv, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    scale = 1.0 / math.sqrt(D)
+
+    out = flydsl_flex_attention_layout(
+        q, k, v, scale=scale, num_kv_heads=Hkv,
+    ).float()
+    # SDPA reference needs [B,H,S,D] with K/V expanded for GQA
+    qh = q.permute(0, 2, 1, 3).float()
+    kh = k.permute(0, 2, 1, 3).float().repeat_interleave(Hq // Hkv, dim=1)
+    vh = v.permute(0, 2, 1, 3).float().repeat_interleave(Hq // Hkv, dim=1)
+    ref = F.scaled_dot_product_attention(qh, kh, vh, scale=scale).permute(0, 2, 1, 3).contiguous()
+    max_err = (out - ref).abs().max().item()
+    cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
+    assert max_err < 8e-2 and cos > 0.98, (
+        f"gqa Hq{Hq} Hkv{Hkv}: max_err={max_err} cos={cos}"
+    )
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("num_groups", [4, 8])
+def test_flex_attention_layout_multi_group(num_groups):
+    B, Sq, Skv, H, D = 1, num_groups * 32, 128, 4, 128
+    dtype = torch.bfloat16
+    dev = "cuda"
+    torch.manual_seed(0)
+    q = torch.empty(B, Sq, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    k = torch.empty(B, Skv, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    v = torch.empty(B, Skv, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    scale = 1.0 / math.sqrt(D)
+
+    out = flydsl_flex_attention_layout(
+        q, k, v, scale=scale, num_groups=num_groups,
+    ).float()
+    ref = _sdpa_ref(q, k, v, scale).float()
+    max_err = (out - ref).abs().max().item()
+    cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
+    assert max_err < 8e-2 and cos > 0.98, (
+        f"groups={num_groups}: max_err={max_err} cos={cos}"
+    )
+
+
+@_requires_gfx950
+def test_flex_attention_layout_sliding_window_full():
+    """Window >= Skv: everything visible, should match dense."""
+    B, Sq, Skv, H, D = 1, 64, 64, 4, 128
+    dtype = torch.bfloat16
+    dev = "cuda"
+    torch.manual_seed(0)
+    q = torch.empty(B, Sq, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    k = torch.empty(B, Skv, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    v = torch.empty(B, Skv, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    scale = 1.0 / math.sqrt(D)
+
+    out = flydsl_flex_attention_layout(
+        q, k, v, scale=scale, mask_type=MASK_SLIDING_WINDOW, mask_window=Skv,
+    ).float()
+    ref = _sdpa_ref(q, k, v, scale, is_causal=True).float()
+    max_err = (out - ref).abs().max().item()
+    cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
+    assert max_err < 8e-2 and cos > 0.98, (
+        f"sw_full: max_err={max_err} cos={cos}"
+    )
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("num_groups", [4, 8])
+def test_flex_attention_layout_causal_multi_group(num_groups):
+    B, Sq, Skv, H, D = 1, num_groups * 32, num_groups * 32, 4, 128
+    dtype = torch.bfloat16
+    dev = "cuda"
+    torch.manual_seed(0)
+    q = torch.empty(B, Sq, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    k = torch.empty(B, Skv, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    v = torch.empty(B, Skv, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    scale = 1.0 / math.sqrt(D)
+
+    out = flydsl_flex_attention_layout(
+        q, k, v, scale=scale, mask_type=MASK_CAUSAL, num_groups=num_groups,
+    ).float()
+    ref = _sdpa_ref(q, k, v, scale, is_causal=True).float()
+    max_err = (out - ref).abs().max().item()
+    cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
+    assert max_err < 8e-2 and cos > 0.98, (
+        f"causal groups={num_groups}: max_err={max_err} cos={cos}"
     )
 
 

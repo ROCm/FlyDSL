@@ -76,6 +76,114 @@ SCORE_NONE = 0
 SCORE_ALIBI = 1
 
 
+class FlexMod:
+    has_mask = False
+    has_score = False
+    needs_safe_norm = False
+
+    def kv_range(self, q_min_wg, q_max_wg, n_kv_tiles, block_n):
+        return fx.Int32(0), fx.Int32(n_kv_tiles)
+
+    def tile_needs_mask(self, kv_tile_idx, q_idx, block_n):
+        return fx.Int32(0) != fx.Int32(0)
+
+    def apply_mask(self, score, q_idx, kv_idx):
+        return score
+
+    def apply_score(self, score, b, h, q_idx, kv_idx):
+        return score
+
+
+class CausalMask(FlexMod):
+    has_mask = True
+    needs_safe_norm = True
+
+    def kv_range(self, q_min_wg, q_max_wg, n_kv_tiles, block_n):
+        raw_hi = (q_max_wg + fx.Int32(block_n)) // fx.Int32(block_n)
+        kv_hi = fx.Int32(arith.minsi(raw_hi.ir_value(), fx.Int32(n_kv_tiles).ir_value()))
+        return fx.Int32(0), kv_hi
+
+    def tile_needs_mask(self, kv_tile_idx, q_idx, block_n):
+        kv_tile_end = kv_tile_idx * fx.Int32(block_n) + fx.Int32(block_n - 1)
+        return kv_tile_end > q_idx
+
+    def apply_mask(self, score, q_idx, kv_idx):
+        return (kv_idx <= q_idx).select(score, fx.Float32(-1e9))
+
+
+class SlidingWindowMask(FlexMod):
+    has_mask = True
+    needs_safe_norm = True
+
+    def __init__(self, window):
+        self.window = window
+
+    def kv_range(self, q_min_wg, q_max_wg, n_kv_tiles, block_n):
+        raw_hi = (q_max_wg + fx.Int32(block_n)) // fx.Int32(block_n)
+        kv_hi = fx.Int32(arith.minsi(raw_hi.ir_value(), fx.Int32(n_kv_tiles).ir_value()))
+        raw_lo = (q_min_wg - fx.Int32(self.window)) // fx.Int32(block_n)
+        kv_lo = fx.Int32(arith.maxsi(raw_lo.ir_value(), fx.Int32(0).ir_value()))
+        return kv_lo, kv_hi
+
+    def tile_needs_mask(self, kv_tile_idx, q_idx, block_n):
+        kv_tile_end = kv_tile_idx * fx.Int32(block_n) + fx.Int32(block_n - 1)
+        kv_tile_start = kv_tile_idx * fx.Int32(block_n)
+        too_far = kv_tile_end > q_idx
+        out_of_window = (q_idx - kv_tile_start) > fx.Int32(self.window)
+        return too_far | out_of_window
+
+    def apply_mask(self, score, q_idx, kv_idx):
+        causal = kv_idx <= q_idx
+        in_window = (q_idx - kv_idx) <= fx.Int32(self.window)
+        return (causal & in_window).select(score, fx.Float32(-1e9))
+
+
+class AlibiScore(FlexMod):
+    has_score = True
+
+    def __init__(self, slope):
+        self.slope = slope
+
+    def apply_score(self, score, b, h, q_idx, kv_idx):
+        bias = (kv_idx - q_idx).to(fx.Float32) * fx.Float32(self.slope)
+        return fx.Float32(score) + bias
+
+
+class CompositeMod(FlexMod):
+    def __init__(self, score_mod, mask_mod):
+        self._score = score_mod
+        self._mask = mask_mod
+        self.has_score = score_mod.has_score
+        self.has_mask = mask_mod.has_mask
+        self.needs_safe_norm = mask_mod.needs_safe_norm
+
+    def kv_range(self, q_min_wg, q_max_wg, n_kv_tiles, block_n):
+        return self._mask.kv_range(q_min_wg, q_max_wg, n_kv_tiles, block_n)
+
+    def tile_needs_mask(self, kv_tile_idx, q_idx, block_n):
+        return self._mask.tile_needs_mask(kv_tile_idx, q_idx, block_n)
+
+    def apply_mask(self, score, q_idx, kv_idx):
+        return self._mask.apply_mask(score, q_idx, kv_idx)
+
+    def apply_score(self, score, b, h, q_idx, kv_idx):
+        return self._score.apply_score(score, b, h, q_idx, kv_idx)
+
+
+def _build_mod(mask_type, score_type, mask_window=0, score_alibi_slope=0.0):
+    _mask = {
+        MASK_NONE: FlexMod(),
+        MASK_CAUSAL: CausalMask(),
+        MASK_SLIDING_WINDOW: SlidingWindowMask(mask_window),
+    }[mask_type]
+    _score = {
+        SCORE_NONE: FlexMod(),
+        SCORE_ALIBI: AlibiScore(score_alibi_slope),
+    }[score_type]
+    if _mask.has_mask or _score.has_score:
+        return CompositeMod(_score, _mask)
+    return FlexMod()
+
 
 @fx.struct
 class FlexAttnParam:
@@ -581,46 +689,30 @@ def flex_attn_fwd_gfx950_kernel(
     # MFMA 32x32x16 C fragment with K=A, Q=B swap:
     #   q_idx = q_start + local_tid % 32 (same for all 16 elements)
     #   kv_in_tile(e) = 8*(e//4) + e%4 + 4*(local_tid//32)
-    _mask_type = int(param.mask_type)
-    _score_type = int(param.score_type)
-    _has_mods = _mask_type != MASK_NONE or _score_type != SCORE_NONE
-    _b_i32 = fx.Int32(arith.index_cast(T.i32, b_idx))
-    _h_i32 = fx.Int32(arith.index_cast(T.i32, h_idx))
-    _q_idx = fx.Int32(arith.index_cast(T.i32, q_start)) + fx.Int32(local_tid % 32)
-    _lane_group_off = fx.Int32((local_tid // 32) * 4)
-    _kv_offsets = [8 * (e // 4) + (e % 4) for e in range(n_c)]
+    flex_mod = _build_mod(int(param.mask_type), int(param.score_type),
+                          int(param.mask_window), float(param.score_alibi_slope))
+    mod_has_score = flex_mod.has_score
+    mod_has_mask = flex_mod.has_mask
+    _mod_apply_score = flex_mod.apply_score
+    _mod_apply_mask = flex_mod.apply_mask
+    _mod_tile_needs_mask = flex_mod.tile_needs_mask
+    b_i32 = fx.Int32(arith.index_cast(T.i32, b_idx))
+    h_i32 = fx.Int32(arith.index_cast(T.i32, h_idx))
+    q_idx_mod = fx.Int32(arith.index_cast(T.i32, q_start)) + fx.Int32(local_tid % 32)
+    lane_group_off = fx.Int32((local_tid // 32) * 4)
+    kv_offsets = [8 * (e // 4) + (e % 4) for e in range(n_c)]
 
-    def apply_score_mod(frag_S_in, kv_tile_idx):
-        kv_base = kv_tile_idx * fx.Int32(block_n) + _lane_group_off
-        for e in range_constexpr(n_c):
-            kv_idx = kv_base + fx.Int32(_kv_offsets[e])
-            if const_expr(_score_type == SCORE_ALIBI):
-                bias = (kv_idx - _q_idx).to(fx.Float32) * fx.Float32(float(param.score_alibi_slope))
-                frag_S_in[e] = fx.Float32(frag_S_in[e]) + bias
-
-    def apply_mask_mod(frag_S_in, kv_tile_idx):
-        kv_base = kv_tile_idx * fx.Int32(block_n) + _lane_group_off
-        for e in range_constexpr(n_c):
-            kv_idx = kv_base + fx.Int32(_kv_offsets[e])
-            if const_expr(_mask_type == MASK_CAUSAL):
-                keep = kv_idx <= _q_idx
-                frag_S_in[e] = keep.select(frag_S_in[e], fx.Float32(-1e9))
-            elif const_expr(_mask_type == MASK_SLIDING_WINDOW):
-                causal = kv_idx <= _q_idx
-                in_window = (_q_idx - kv_idx) <= fx.Int32(int(param.mask_window))
-                keep = causal & in_window
-                frag_S_in[e] = keep.select(frag_S_in[e], fx.Float32(-1e9))
-
-    def tile_needs_mask(kv_tile_idx):
-        kv_tile_end = kv_tile_idx * fx.Int32(block_n) + fx.Int32(block_n - 1)
-        if const_expr(_mask_type == MASK_CAUSAL):
-            return kv_tile_end > _q_idx
-        elif const_expr(_mask_type == MASK_SLIDING_WINDOW):
-            kv_tile_start = kv_tile_idx * fx.Int32(block_n)
-            too_far = kv_tile_end > _q_idx
-            out_of_window = (_q_idx - kv_tile_start) > fx.Int32(int(param.mask_window))
-            return too_far | out_of_window
-        return fx.Int32(0) != fx.Int32(0)
+    def apply_mods(frag_S_in, kv_tile_idx):
+        kv_base = kv_tile_idx * fx.Int32(block_n) + lane_group_off
+        if const_expr(mod_has_score):
+            for e in range_constexpr(n_c):
+                kv_idx = kv_base + fx.Int32(kv_offsets[e])
+                frag_S_in[e] = _mod_apply_score(frag_S_in[e], b_i32, h_i32, q_idx_mod, kv_idx)
+        if const_expr(mod_has_mask):
+            if _mod_tile_needs_mask(kv_tile_idx, q_idx_mod, block_n):
+                for e in range_constexpr(n_c):
+                    kv_idx = kv_base + fx.Int32(kv_offsets[e])
+                    frag_S_in[e] = _mod_apply_mask(frag_S_in[e], q_idx_mod, kv_idx)
 
     # _n_d_chunks defined above as head_dim // 32 (= 4 for D=128).
 
@@ -773,20 +865,9 @@ def flex_attn_fwd_gfx950_kernel(
     single_tile = True
     if const_expr(single_tile):
         # KV tile range: clamp to the mask's valid range to skip fully-masked tiles.
-        _kv_lo = fx.Int32(0)
-        _kv_hi = fx.Int32(n_kv_tiles)
-        if const_expr(_mask_type == MASK_CAUSAL):
-            _q_max_wg = fx.Int32(arith.index_cast(T.i32, q_tile)) * fx.Int32(num_groups * block_m) + fx.Int32(num_groups * block_m - 1)
-            _raw_hi = ((_q_max_wg + fx.Int32(block_n)) // fx.Int32(block_n))
-            _kv_hi = fx.Int32(arith.minsi(_raw_hi.ir_value(), fx.Int32(n_kv_tiles).ir_value()))
-        elif const_expr(_mask_type == MASK_SLIDING_WINDOW):
-            _q_min_wg = fx.Int32(arith.index_cast(T.i32, q_tile)) * fx.Int32(num_groups * block_m)
-            _q_max_wg = _q_min_wg + fx.Int32(num_groups * block_m - 1)
-            _window = fx.Int32(int(param.mask_window))
-            _raw_hi = ((_q_max_wg + fx.Int32(block_n)) // fx.Int32(block_n))
-            _kv_hi = fx.Int32(arith.minsi(_raw_hi.ir_value(), fx.Int32(n_kv_tiles).ir_value()))
-            _raw_lo = ((_q_min_wg - _window) // fx.Int32(block_n))
-            _kv_lo = fx.Int32(arith.maxsi(_raw_lo.ir_value(), fx.Int32(0).ir_value()))
+        _q_min_wg = fx.Int32(arith.index_cast(T.i32, q_tile)) * fx.Int32(num_groups * block_m)
+        _q_max_wg = _q_min_wg + fx.Int32(num_groups * block_m - 1)
+        _kv_lo, _kv_hi = flex_mod.kv_range(_q_min_wg, _q_max_wg, n_kv_tiles, block_n)
 
         # Double-buffered KV loop via scf.for with loop-carried m/l/O state.
         load_kv(_kv_lo, 0)
@@ -842,11 +923,8 @@ def flex_attn_fwd_gfx950_kernel(
             # Cluster 1 (comp): QK GEMM + mods + softmax + register PV GEMM.
             rocdl.s_setprio(0)
             frag_S, = gemm1_qk(frag_Q, frag_K[0])
-            if const_expr(_score_type != SCORE_NONE):
-                apply_score_mod(frag_S, kv_i32)
-            if const_expr(_mask_type != MASK_NONE):
-                if tile_needs_mask(kv_i32):
-                    apply_mask_mod(frag_S, kv_i32)
+            if const_expr(mod_has_score or mod_has_mask):
+                apply_mods(frag_S, kv_i32)
             out_sm = softmax(frag_S, m_i, l_i, o_accs)
             frag_P, m_i, l_i, o_accs, _ = (
                 out_sm[0], out_sm[1], out_sm[2], out_sm[3], out_sm[4],
@@ -875,7 +953,7 @@ def flex_attn_fwd_gfx950_kernel(
 
     # O normalization: divide each v16f32 by l_i[0].
     # Guard against fully-masked rows (l_i == 0) producing NaN.
-    if const_expr(_mask_type != MASK_NONE):
+    if const_expr(flex_mod.needs_safe_norm):
         _safe_l = l_i[0].maximumf(fx.Float32(1e-12))
         inv_l = fx.Float32(1.0) / _safe_l
     else:
