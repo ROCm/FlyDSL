@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-18T10:02:12Z",
+ "updated": "2026-08-18T10:19:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32125806929,
+   "pr": 1024,
+   "commit": "81462524428562bc202b176de69e98fcffbcdddb",
+   "branch": "pr/fix-gfx1250-wave-size",
+   "event": "pull_request",
+   "title": "[ROCDL] Fix wave size for gfx1250 (wave32, not wave64)",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32125806929",
+   "created_at": "2026-08-18T10:14:58Z",
+   "updated_at": "2026-08-18T10:16:53Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 32124542325,
    "pr": 971,
@@ -10,11 +25,11 @@
    "branch": "gfx1250/gemm-opt-0805",
    "event": "pull_request",
    "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32124542325",
    "created_at": "2026-08-18T10:00:21Z",
-   "updated_at": "2026-08-18T10:00:51Z",
+   "updated_at": "2026-08-18T10:01:58Z",
    "actor": "aoli26",
    "jobs": []
   },
@@ -1792,52 +1807,6 @@
      "started_at": "2026-08-13T09:49:16Z",
      "completed_at": "2026-08-13T09:58:15Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31681184248/job/94396244575"
-    }
-   ]
-  },
-  {
-   "run_id": 31676223615,
-   "pr": 995,
-   "commit": "6a5783c293d14715bff96fd415dbe0a7d242eb27",
-   "branch": "feature/typed-arithmetic-modernization",
-   "event": "pull_request",
-   "title": "[Expr] Add type-aware extrema and integer ceiling division",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31676223615",
-   "created_at": "2026-08-13T07:03:38Z",
-   "updated_at": "2026-08-13T11:17:52Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T08:51:35Z",
-     "completed_at": "2026-08-13T09:18:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31676223615/job/94395353289",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T08:51:52Z",
-     "completed_at": "2026-08-13T10:59:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31676223615/job/94395353321",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T08:56:24Z",
-     "completed_at": "2026-08-13T11:17:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31676223615/job/94395353411",
-     "log_fetch_failed": true
     }
    ]
   }
