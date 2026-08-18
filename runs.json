@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-18T21:01:11Z",
+ "updated": "2026-08-18T21:30:01Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32187853635,
+   "pr": 1027,
+   "commit": "6bff1e67bc8289531ce3738959680eb9e8a22639",
+   "branch": "skills/dedrift-and-fix-frontmatter",
+   "event": "pull_request",
+   "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32187853635",
+   "created_at": "2026-08-18T21:27:58Z",
+   "updated_at": "2026-08-18T21:28:11Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 32185208973,
    "pr": 1027,
@@ -253,11 +268,11 @@
    "branch": "pr/fix-gfx1250-wave-size",
    "event": "pull_request",
    "title": "[ROCDL] Fix wave size for gfx1250 (wave32, not wave64)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32132126110",
    "created_at": "2026-08-18T11:31:12Z",
-   "updated_at": "2026-08-18T11:32:28Z",
+   "updated_at": "2026-08-18T21:18:11Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -313,11 +328,11 @@
    "branch": "dsl-ify-scf-controlflow",
    "event": "pull_request",
    "title": "[Kernel] Replace raw scf ops with Python control flow in kernels",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32130866237",
    "created_at": "2026-08-18T11:15:55Z",
-   "updated_at": "2026-08-18T11:18:04Z",
+   "updated_at": "2026-08-18T21:19:08Z",
    "actor": "xudoyuan",
    "jobs": []
   },
@@ -388,13 +403,41 @@
    "branch": "pr/enh-cdna4-async-lds-copy-atoms",
    "event": "pull_request",
    "title": "[ROCDL] Add Global/BufferLoadAsyncLDS atoms",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32120675626",
    "created_at": "2026-08-18T09:15:53Z",
-   "updated_at": "2026-08-18T20:50:00Z",
+   "updated_at": "2026-08-18T21:17:51Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-18T21:17:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32120675626/job/95872736942"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-18T21:21:44Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32120675626/job/95872737057"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-18T21:18:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32120675626/job/95872737066"
+    }
+   ]
   },
   {
    "run_id": 32115762986,
@@ -448,13 +491,41 @@
    "branch": "pr/enh-cdna5-tiled-tdm-atom",
    "event": "pull_request",
    "title": "[ROCDL] Add make_tiled_tdm_atom op and tdm_partition",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32110444156",
    "created_at": "2026-08-18T07:13:48Z",
-   "updated_at": "2026-08-18T20:49:38Z",
+   "updated_at": "2026-08-18T21:18:24Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-18T21:18:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32110444156/job/95872887538"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-18T21:18:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32110444156/job/95872887578"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-18T21:18:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32110444156/job/95872887657"
+    }
+   ]
   },
   {
    "run_id": 32092905226,
@@ -1562,21 +1633,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 31778926349,
-   "pr": 1010,
-   "commit": "ac1af8cb4fad1715e053f122322eb1bf666d8e46",
-   "branch": "feat/rdna3-gemm-wide-tiles-followup",
-   "event": "pull_request",
-   "title": "[Perf] Add wide RDNA3 GEMM tiles",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31778926349",
-   "created_at": "2026-08-14T07:10:34Z",
-   "updated_at": "2026-08-14T07:12:08Z",
-   "actor": "vlluvia",
-   "jobs": []
   }
  ]
 }
