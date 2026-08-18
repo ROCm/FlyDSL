@@ -33,6 +33,7 @@ if not torch.cuda.is_available():
 import pytest  # noqa: E402
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
+from kernels.attention import flash_attn_interface  # noqa: E402
 from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module  # noqa: E402
 from kernels.attention.flash_attn_interface import flydsl_flash_attn_func  # noqa: E402
 from kernels.attention.flash_attn_utils import (  # noqa: E402
@@ -4349,6 +4350,51 @@ def test_fp8_softmax_normalises(S, k_scale, lazy_rescale, atol):
 
     # e4m3 rounding of P leaves a per-row residue that the lift cannot remove.
     torch.testing.assert_close(out, torch.ones_like(out), rtol=0, atol=atol)
+
+
+@pytest.mark.parametrize("split", [False, True])
+def test_fp8_out_tensor_is_filled_and_returned(monkeypatch, split):
+    """A caller-supplied ``out`` must come back filled, and be the same tensor.
+
+    ``split=True`` lowers the overflow bound so the batch-splitting path runs on
+    a small tensor: reaching it for real needs 2**31 elements, i.e. ~10 GB of
+    q/k/v/out, which is why it must be reachable another way to be covered at
+    all. Each launch writes into its own ``out[i:i+1]`` view, so returning a
+    concatenation would both copy several GB at the sizes that reach it and hand
+    back a different tensor than the caller passed. Splitting must also leave
+    the result unchanged, which is what comparing against the unsplit reference
+    checks.
+    """
+    if get_rocm_arch() != "gfx950":
+        pytest.skip("dense fp8 attention is gfx950-only")
+
+    B, S, H, D = 2, 1024, 8, 128
+    torch.manual_seed(0)
+    fp8 = torch.float8_e4m3fn
+    fp8_max = torch.finfo(fp8).max
+    q, k, v = (torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1 for _ in range(3))
+    scales = [t.abs().amax().float() / fp8_max for t in (q, k, v)]
+    qq, kq, vq = ((t / s).to(fp8) for t, s in zip((q, k, v), scales))
+    descales = [s.reshape(1).contiguous() for s in scales]
+
+    ref = flydsl_flash_attn_func(
+        qq, kq, vq, causal=False, q_descale=descales[0], k_descale=descales[1], v_descale=descales[2]
+    )
+    if isinstance(ref, (tuple, list)):
+        ref = ref[0]
+
+    if split:
+        monkeypatch.setattr(flash_attn_interface, "_FP8_MAX_FLAT_ELEMS", qq.numel())
+
+    out = torch.empty(B, S, H, D, device="cuda", dtype=torch.bfloat16)
+    got = flydsl_flash_attn_func(
+        qq, kq, vq, causal=False, q_descale=descales[0], k_descale=descales[1], v_descale=descales[2], out=out
+    )
+    if isinstance(got, (tuple, list)):
+        got = got[0]
+
+    assert got.data_ptr() == out.data_ptr(), "out was not returned to the caller"
+    torch.testing.assert_close(out, ref, rtol=0, atol=0)
 
 
 def test_return_lse_false_returns_only_out():

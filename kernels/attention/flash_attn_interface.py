@@ -43,6 +43,8 @@ _DTYPE_MAP = {torch.bfloat16: "bf16", torch.float16: "f16", torch.float8_e4m3fn:
 
 # Short varlen/paged cases use the lightweight generic path.
 _VARLEN_LIGHT_MAX_SEQ = 256
+# Largest flat element count the fp8 C-ABI can address; see the split below.
+_FP8_MAX_FLAT_ELEMS = 2**31
 _DENSE_LIGHT_CU_FALLBACK = 256
 _DENSE_DUALWAVE_MIN_SEQ = 256
 _DENSE_DUALWAVE_LARGE_BATCH = 8
@@ -807,6 +809,50 @@ def flydsl_flash_attn_func(
     paged_kv = any(x is not None for x in (block_table, seqlen_k))
     if dtype_str == "fp8" and paged_kv:
         raise NotImplementedError("flydsl_flash_attn_func: fp8 flash_attn does not support paged KV")
+
+    # The fp8 path flattens Q/K/V/O to 1-D and the C-ABI packs a dynamic dim as
+    # int32, so a launch aborts once B*S*H*D reaches 2**31 (S >= 131072 at
+    # D=128, H=64). Batch entries are independent and a leading slice of a
+    # contiguous tensor is still contiguous, so one launch per entry divides the
+    # flat dim by B at no copy. bf16 passes the natural 4-D shape and is exempt.
+    if (
+        dtype_str == "fp8"
+        and not paged_kv
+        and cu_seqlens_q is None
+        and cu_seqlens_kv is None
+        and q.dim() == 4
+        and q.shape[0] > 1
+        and q.numel() >= _FP8_MAX_FLAT_ELEMS
+    ):
+        kw = dict(
+            causal=causal,
+            num_kv_heads=num_kv_heads,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+            cross_seqlen=cross_seqlen,
+            kv_cache_layout=kv_cache_layout,
+            num_kv_splits=num_kv_splits,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            waves_per_eu=waves_per_eu,
+            daz=daz,
+            dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
+            dualwave_swp_setprio=dualwave_swp_setprio,
+            dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
+            debug_counts=debug_counts,
+            stream=stream,
+        )
+        parts = []
+        for i in range(q.shape[0]):
+            sl = slice(i, i + 1)
+            o = flydsl_flash_attn_func(
+                q[sl].contiguous(), k[sl].contiguous(), v[sl].contiguous(), out=None if out is None else out[sl], **kw
+            )
+            parts.append(o[0] if isinstance(o, (tuple, list)) else o)
+        # Each call already wrote into its own out[sl] view; concatenating would
+        # copy several GB again and return a different tensor than was passed.
+        return out if out is not None else torch.cat(parts, dim=0)
     if return_lse and paged_kv:
         raise NotImplementedError("flydsl_flash_attn_func: return_lse is not supported for paged KV")
     has_bias = bias is not None
