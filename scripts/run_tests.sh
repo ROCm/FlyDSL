@@ -107,16 +107,20 @@ if [ -z "${FILECHECK}" ] || [ ! -x "${FILECHECK}" ]; then
 else
 
 for f in $(find "${REPO_ROOT}/tests/mlir" -name "*.mlir" -type f 2>/dev/null | sort); do
-    run_line=$(grep '^// RUN:' "$f" | head -1 | sed 's|^// RUN: *||')
-    [ -z "$run_line" ] && continue
-    cmd=$(echo "$run_line" | sed "s|%fly-opt|${FLY_OPT}|g; s|%FileCheck|${FILECHECK}|g; s|%s|${f}|g; s|FileCheck|${FILECHECK}|g")
-    if eval "$cmd" > /tmp/filecheck_out.log 2>&1; then
-        echo "  PASS  ${f#${REPO_ROOT}/tests/mlir/}"
-    else
-        echo "  FAIL  ${f#${REPO_ROOT}/tests/mlir/}"
-        tail -5 /tmp/filecheck_out.log | sed 's/^/        /'
-        exit 1
-    fi
+    # A file may carry several RUN lines, typically one per --check-prefix. Run
+    # every one of them: only checking the first silently skips the rest.
+    mapfile -t run_lines < <(grep '^// RUN:' "$f" | sed 's|^// RUN: *||')
+    [ ${#run_lines[@]} -eq 0 ] && continue
+    for run_line in "${run_lines[@]}"; do
+        cmd=$(echo "$run_line" | sed "s|%fly-opt|${FLY_OPT}|g; s|%FileCheck|${FILECHECK}|g; s|%s|${f}|g; s|FileCheck|${FILECHECK}|g")
+        if ! eval "$cmd" > /tmp/filecheck_out.log 2>&1; then
+            echo "  FAIL  ${f#${REPO_ROOT}/tests/mlir/}"
+            echo "        RUN: ${run_line}"
+            tail -5 /tmp/filecheck_out.log | sed 's/^/        /'
+            exit 1
+        fi
+    done
+    echo "  PASS  ${f#${REPO_ROOT}/tests/mlir/}"
 done
 
 fi
