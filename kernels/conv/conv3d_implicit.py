@@ -29,6 +29,15 @@ TILE_K = 32
 STAGES = 2
 WARP_SIZE = 64
 
+# K tiles consumed between two barriers. Each one is MI_M * MI_N MFMAs, and that product
+# is the only thing that hides global latency here -- see the PIPE_STAGES comment for why
+# the pipeline depth cannot. Costs no LDS (the tiles are stages that already exist) and no
+# extra ds_read/DMA traffic; it just halves the number of barriers. Worth +8..16% on the
+# 3x3 conv2d/conv3d shapes at 2. Reaching the same ratio through TILE_K = 64 instead is a
+# trap: it makes the LDS row stride 128B, exactly one bank rotation, and the resulting
+# ds_read_b128 conflicts cost more than the batching wins (measured ~15% slower).
+TILES_PER_BARRIER = 2
+
 MFMA_M = 16
 MFMA_N = 16
 MFMA_A_VALUES = 8
@@ -427,10 +436,20 @@ def compile_conv3d_implicit(
         not use_splitk or npq * k * 4 <= SPLITK_MAX_STAGING_BYTES
     ), f"split-K staging {npq * k * 4}B exceeds the {SPLITK_MAX_STAGING_BYTES}B buffer window"
 
-    # Software-pipeline depth. 4 stages is optimal across all shapes on gfx950 --
-    # even short-K, memory-bound 3x1x1 depends more (not less) on deep prefetch to
-    # hide DMA latency; a shallower pipeline measured slower (2/3/4-stage A/B).
-    PIPE_STAGES = 4
+    # Software-pipeline depth. Depth buys almost nothing here: 2/3/4/5 stages landed
+    # within +-3% of each other on gfx950 (the 3x3 conv2d/conv3d shapes and the short-K
+    # 1D one alike), because the DMA prefetch does not survive codegen. buffer_load_lds
+    # carries no alias-scope info, so SIInsertWaitcnts cannot tell one LDS stage from
+    # another and drops an `s_waitcnt vmcnt(0)` in front of the first ds_read after the
+    # barrier -- every tile therefore drains *all* in-flight DMAs, including the ones
+    # aimed at stages two and three ahead, and the reachable overlap collapses to the one
+    # tile of MFMAs between a DMA issue and the next barrier no matter what this is set
+    # to. Making the depth real needs alias scopes on the LDS DMA at the lowering level,
+    # not a change here. What the stages are used for instead is width: the main loop
+    # consumes TILES_PER_BARRIER of them per barrier, so the reachable window holds that
+    # many tiles of MFMAs. Hence 2 * TILES_PER_BARRIER -- half the stages are being read,
+    # half are being written by the DMAs that the next barrier waits on.
+    PIPE_STAGES = 2 * TILES_PER_BARRIER
 
     LDS_A_SIZE = PIPE_STAGES * TILE_M * TILE_K
     LDS_B_SIZE = PIPE_STAGES * TILE_N * TILE_K
@@ -836,26 +855,44 @@ def compile_conv3d_implicit(
 
         # global->LDS software pipeline
         # ---- prologue: fill the pipeline with the first PREFETCH tiles' DMAs ----
-        PREFETCH = PIPE_STAGES - 1
+        PREFETCH = TILES_PER_BARRIER
         for s in range_constexpr(PREFETCH):
             if const_expr(s < tiles_per_split):
                 _load_a(s, k_off + s * TILE_K)
                 _load_b(s, k_off + s * TILE_K)
-        LDG_PER_TILE = LDG_A_COUNT + LDG_B_COUNT
 
-        # ---- main loop: wait oldest tile, read frags, launch tile PREFETCH ahead, compute ----
-        for kt_idx in range_constexpr(tiles_per_split):
-            cur = kt_idx % PIPE_STAGES
-            inflight_tiles = min(PREFETCH - 1, tiles_per_split - 1 - kt_idx)
-            barrier(vmcnt=inflight_tiles * LDG_PER_TILE, lgkmcnt=0)
-            a_frags = read_a_frags(cur)
-            b_frags = read_b_frags(cur)
-            nxt = kt_idx + PREFETCH
-            if const_expr(nxt < tiles_per_split):
-                _load_a(nxt % PIPE_STAGES, k_off + nxt * TILE_K)
-                _load_b(nxt % PIPE_STAGES, k_off + nxt * TILE_K)
-                rocdl.sched_vmem(LDG_A_COUNT + LDG_B_COUNT)
-            acc = do_compute(acc, a_frags, b_frags)
+        # ---- main loop: wait for a batch of tiles, read their frags, launch the next
+        # batch's DMAs, compute the whole batch ----
+        # A batch is TILES_PER_BARRIER tiles, so one barrier covers that many times
+        # MI_M * MI_N MFMAs. That ratio is the only thing that hides global latency here:
+        # the compiler puts an `s_waitcnt vmcnt(0)` in front of the first ds_read after
+        # every barrier (see PIPE_STAGES), so the DMAs issued in one iteration get exactly
+        # that iteration's MFMAs to hide behind and nothing more. Batching widens the
+        # window without touching the LDS layout or the traffic.
+        #
+        # Every tile's fragments are read up front, before any MFMA. The later tiles'
+        # ds_reads then retire under the earlier tiles' MFMAs instead of stalling in front
+        # of them: lgkmcnt is in-order for pure LDS traffic, so tile 0 of a batch can start
+        # computing with tile 1's reads still outstanding.
+        for kt_idx in range_constexpr(0, tiles_per_split, TILES_PER_BARRIER):
+            batch = range_constexpr(kt_idx, min(kt_idx + TILES_PER_BARRIER, tiles_per_split))
+            # Nothing is left in flight: the previous iteration issued exactly this
+            # batch's DMAs. lgkmcnt=0 retires the previous batch's ds_reads, which is what
+            # lets those DMAs overwrite the stages they came from.
+            barrier(vmcnt=0, lgkmcnt=0)
+            a_frags = [read_a_frags(kt % PIPE_STAGES) for kt in batch]
+            b_frags = [read_b_frags(kt % PIPE_STAGES) for kt in batch]
+            issued = 0
+            for kt in batch:
+                nxt = kt + PREFETCH
+                if const_expr(nxt < tiles_per_split):
+                    _load_a(nxt % PIPE_STAGES, k_off + nxt * TILE_K)
+                    _load_b(nxt % PIPE_STAGES, k_off + nxt * TILE_K)
+                    issued += LDG_A_COUNT + LDG_B_COUNT
+            if const_expr(issued):
+                rocdl.sched_vmem(issued)
+            for j in range_constexpr(len(batch)):
+                acc = do_compute(acc, a_frags[j], b_frags[j])
 
         # grid.x x grid.z over-provisions the M axis whenever the tiles do not divide
         # evenly between them, so those blocks have to be masked out even at a tail-free npq.
