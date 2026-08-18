@@ -971,14 +971,23 @@ FlyDSL gives maximum control at the cost of verbosity. The layout algebra is the
 
 ## 12. Running Kernels
 
-### SSH to Remote Host
+### Locally
+
 ```bash
-# Run a kernel
-ssh -o LogLevel=ERROR hjbog-srdc-39.amd.com 'docker exec hungry_dijkstra bash -c "cd /FlyDSL && python3 my_kernel.py"'
-
-# Run existing tests
-ssh -o LogLevel=ERROR hjbog-srdc-39.amd.com 'docker exec hungry_dijkstra bash -c "cd /FlyDSL && python3 tests/kernels/test_vec_add.py"'
-
-# Run benchmarks
-ssh -o LogLevel=ERROR hjbog-srdc-39.amd.com 'docker exec hungry_dijkstra bash -c "cd /FlyDSL && bash scripts/run_benchmark.sh"'
+PYTHONPATH=./ python3 my_kernel.py
+python3 -m pytest tests/kernels/test_vec_add.py -v
+bash scripts/run_benchmark.sh
 ```
+
+### On a remote host or container
+
+Ask the user for the host, container, and checkout path; do not assume one.
+With `$HOST`, `$CONTAINER`, and `$FLYDSL_ROOT` set:
+
+```bash
+ssh -o LogLevel=ERROR "$HOST" \
+  "docker exec $CONTAINER bash -c 'cd $FLYDSL_ROOT && python3 my_kernel.py'"
+```
+
+Drop the `docker exec` wrapper when the checkout is on the host itself.
+To build FlyDSL on such a host first, use the **build-flydsl** skill.

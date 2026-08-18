@@ -18,7 +18,7 @@ LLVM/MLIR build with Python bindings, followed by the FlyDSL C++ dialect and Pyt
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `[container@host]` | No | Target in format `container@hostname`. If omitted, build locally. Example: `hungry_dijkstra@hjbog-srdc-39.amd.com` |
+| `[container@host]` | No | Target in format `container@hostname`. If omitted, build locally. Example: `my-container@gpu-host.example.com` |
 
 ## Prerequisites
 

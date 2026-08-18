@@ -85,11 +85,8 @@ GROUP BY ks.KernelName ORDER BY avg_us DESC LIMIT 20;"
 
 #### Step 2: Configure input.yaml
 
-```bash
-cp ~/Documents/input.yaml /tmp/trace_input.yaml
-```
-
-Edit `/tmp/trace_input.yaml`:
+Write `/tmp/trace_input.yaml` with the job below, setting
+`kernel_include_regex` to the kernel found in Step 1:
 
 ```yaml
 jobs:
