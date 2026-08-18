@@ -171,17 +171,7 @@ helper code that is not part of the traced closure.
 | `gfx950` / `gfx95*` | MI350 / MI355X | 64 | MFMA | CDNA4 path; FP4, MFMA scale, wider LDS copy paths, 160KB LDS |
 | `gfx11*` | RDNA3 / RDNA3.5 (Strix Halo, e.g. gfx1151) | 32 | WMMA | No MFMA; f16/bf16 (and i8/i4) WMMA GEMM; legacy v16-operand WMMA ABI; **no native FP8** (kernels fail-fast); `kernels/rdna3_f16_gemm.py`. `is_rdna_arch()` returns True. |
 | `gfx120*` | RDNA4 (gfx1201 = Radeon AI PRO R9700) | 32 | WMMA | RDNA path, wave32; new v8-operand WMMA ABI with the gfx11 16x16x16 shapes (`gfx120x.wmma` atom, `lib/Dialect/FlyROCDL/GFX120X/`); native FP8. `is_rdna_arch()` returns True. |
-| `gfx1250` | — | 32 | WMMA / TDM | FP8/FP4 GEMM, MoE, async/TDM copy helpers, 320KB LDS. NOTE: `is_rdna_arch('gfx1250')` returns **False** and `get_warp_size` returns 64 — the gfx1250 kernels hardcode `WAVE_SIZE = 32` themselves. |
-
-Use `from flydsl.runtime.device import get_rocm_arch, is_rdna_arch` rather than
-hard-coding behavior when possible. `is_rdna_arch()`
-(`python/flydsl/runtime/device.py`) is the single source of truth for CDNA vs
-RDNA and is wave32-true only for `gfx10*`/`gfx11*`/`gfx120*` prefixes; it does
-**not** match `gfx1250`. Shared wave-size logic is `get_warp_size(arch)` in
-`kernels/kernels_common.py` (`32 if is_rdna_arch(arch) else 64`), so it returns
-64 for gfx1250 — gfx1250 kernels set wave32 explicitly.
-`tests/kernels/test_rdna_gemm.py` shows the gfx11* (v16 ABI) vs gfx120* (v8 ABI)
-kernel-selection pattern.
+| `gfx1250` | — | 32 | WMMA / TDM | FP8/FP4 GEMM, MoE, async/TDM copy helpers, 320KB LDS. |
 
 ## Kernel Entry Points
 

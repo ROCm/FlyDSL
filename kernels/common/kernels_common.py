@@ -14,7 +14,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import builtin
 from flydsl._mlir.dialects import gpu as _gpu
 from flydsl._mlir.dialects import scf as _scf
-from flydsl.runtime.device import get_rocm_arch, is_rdna_arch
+from flydsl.runtime.device import get_rocm_arch, get_warp_size
 
 # Memory/atomic primitives now live in mem_ops; re-exported here for back-compat.
 from kernels.common.mem_ops import _create_llvm_ptr
@@ -97,11 +97,9 @@ def cvt_sr_f32_to_bf16(x, rand):
 def get_warp_size(arch=None):
     """Return the wavefront/warp size for the given GPU architecture.
 
-    CDNA (gfx9xx) uses wave64, RDNA (gfx10xx/gfx11xx/gfx12xx) uses wave32.
+    CDNA (gfx9xx) uses wave64, gfx10xx/gfx11xx/gfx12xx use wave32.
     """
-    if arch is None:
-        arch = get_rocm_arch()
-    return 32 if is_rdna_arch(arch) else 64
+    return get_warp_size(arch)
 
 
 def default_f8_type() -> ir.Type:

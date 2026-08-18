@@ -258,7 +258,7 @@ Shared kernel utilities used across GEMM/MoE/norm kernels.
 
 | Function | Description |
 |---|---|
-| `get_warp_size(arch=None)` | Wave size for the arch: `32` on RDNA, else `64` |
+| `get_warp_size(arch=None)` | Wave size for the arch: `32` on gfx10/11/12, else `64` |
 | `dtype_to_elem_type(dtype_str)` | Map a dtype string to the Fly element type |
 | `validate_moe_dtypes(a_dtype, b_dtype)` | Validate an allowed MoE A/B dtype pairing |
 | `get_llvm_ptr(ptr, offset, dtype_bytes, ...)` | Compute a byte-offset LLVM pointer |
