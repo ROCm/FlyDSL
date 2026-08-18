@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-18T01:41:17Z",
+ "updated": "2026-08-18T03:13:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32092905226,
+   "pr": null,
+   "commit": "4521c8cb5855aa902f3e99a50ca481c8ce64d61b",
+   "branch": "main",
+   "event": "push",
+   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention (#960)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32092905226",
+   "created_at": "2026-08-18T02:44:03Z",
+   "updated_at": "2026-08-18T02:45:45Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 32086458109,
    "pr": 1020,
@@ -10,39 +25,42 @@
    "branch": "fp8-softmax-normalisation",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32086458109",
    "created_at": "2026-08-18T00:57:33Z",
-   "updated_at": "2026-08-18T01:17:03Z",
+   "updated_at": "2026-08-18T03:10:58Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-18T01:16:07Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32086458109/job/95563228381"
+     "completed_at": "2026-08-18T01:40:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32086458109/job/95563228381",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-18T01:17:03Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32086458109/job/95563228395"
+     "completed_at": "2026-08-18T03:07:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32086458109/job/95563228395",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-18T01:16:16Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32086458109/job/95563228443"
+     "completed_at": "2026-08-18T03:10:57Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32086458109/job/95563228443",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1989,52 +2007,6 @@
      "started_at": "2026-08-13T04:38:20Z",
      "completed_at": "2026-08-13T06:01:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31666000306/job/94345376715",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 31665169196,
-   "pr": null,
-   "commit": "6c8e7c31e9701f86fc767e86a1c2d2c00feb3cfc",
-   "branch": "feat/rdna3-gemm-tile-autotune",
-   "event": "pull_request",
-   "title": "[Perf] Choose the RDNA3 GEMM tile from the shape",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31665169196",
-   "created_at": "2026-08-13T03:51:15Z",
-   "updated_at": "2026-08-13T08:23:38Z",
-   "actor": "vlluvia",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T06:27:49Z",
-     "completed_at": "2026-08-13T08:23:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31665169196/job/94361473079",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T04:36:49Z",
-     "completed_at": "2026-08-13T05:59:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31665169196/job/94361473523",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-13T04:47:37Z",
-     "completed_at": "2026-08-13T05:05:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31665169196/job/94361473580",
      "log_fetch_failed": true
     }
    ]
