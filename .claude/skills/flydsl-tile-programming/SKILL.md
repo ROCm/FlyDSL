@@ -148,10 +148,11 @@ def tiled_copy_kernel(A: fx.Tensor, B: fx.Tensor):
     bid = fx.block_idx.x
 
     block_m, block_n = 8, 24
-    tile = fx.make_tile([
+    # make_tile is varargs -- passing a list raises ValueError
+    tile = fx.make_tile(
         fx.make_layout(block_m, 1),
-        fx.make_layout(block_n, 1)
-    ])
+        fx.make_layout(block_n, 1),
+    )
 
     # Wrap as buffer tensors (AMD buffer descriptors)
     A = fx.rocdl.make_buffer_tensor(A)

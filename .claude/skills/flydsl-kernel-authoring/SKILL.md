@@ -492,7 +492,7 @@ Use `Vec.filled(...)` for splats and `Vec.from_elements(...)` for vectors from s
 | Negate | `-a` | Yes | |
 | Max / Min | `fx.max(a, b)` / `fx.min(a, b)` | Yes | Float forms propagate NaN; `fx.maxnumf` does not |
 | Integer ceil-div | `fx.ceildiv(a, b)` | Yes | Direct signed/unsigned op; distinct from layout `fx.ceil_div` |
-| Compare | `arith.cmpf(a, b, pred)` | Yes | Returns i1/vec<i1> |
+| Compare | `arith.cmpf(pred, a, b)` | Yes | predicate FIRST; returns i1/vec<i1> |
 | Select | `cond.select(t, f)` | Yes | |
 | Abs | no direct helper | Use `-v`, comparison, and `cond.select(...)` |
 | FMA | `a * b + c` | Yes | Use direct FOp only when explicit fastmath is needed |
@@ -676,7 +676,9 @@ prefer `SharedAllocator` for anything new.
 ### Available MFMA Instructions
 
 Prefer the atom form — it picks the intrinsic from shape + dtype, handles
-fragment packing, and is arch-dispatched (MFMA on CDNA3/4, WMMA on gfx11/gfx1250):
+fragment packing. Pick the atom family by target yourself -- `fx.rocdl.MFMA` for
+CDNA3/CDNA4 (it always builds the CDNA3 MFMA type, which covers both), 
+`fx.rocdl.cdna4.MFMA_Scale` for CDNA4 scaled, `fx.rocdl.WMMA` for gfx11/gfx1250:
 
 ```python
 mma = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.Float16))   # -> f32 acc
@@ -710,7 +712,7 @@ dispatched: gfx11 v16 ABI, gfx12 / gfx1250 v8 ABI) and issue it via
 
 ```python
 mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 128, fx.Float8E4M3FN))       # fp8 → f32
-mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 32, T.i4, T.i32, sign_a=True, sign_b=True, clamp=True))
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 32, fx.Int4, fx.Int32, sign_a=True, sign_b=True, clamp=True))
 ```
 
 **MX-scaled WMMA** — `rocdl.WMMAScale(m, n, k, elem_ty_a, ..., block_size=32)` for
@@ -742,7 +744,7 @@ XOR-shuffle-based intra-wave reduction:
 width_i32 = fx.Int32(64)
 val = fx.Float32(val)                                        # typed once, not per-iter
 for sh in [32, 16, 8, 4, 2, 1]:
-    peer = gpu.ShuffleOp(val.ir_value(), fx.Int32(sh), width_i32, mode="xor").shuffleResult
+    peer = gpu.shuffle_xor(val, sh, width_i32)   # or gpu.shuffle(val, sh, w, mode="xor")
     val = val + fx.Float32(peer)  # typed add; explicit FOp only for fastmath flags
 ```
 
