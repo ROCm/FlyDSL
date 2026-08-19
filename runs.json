@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-19T01:51:19Z",
+ "updated": "2026-08-19T02:14:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -29,11 +29,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T01:38:17Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32201700343/job/95928181410"
+     "completed_at": "2026-08-19T01:52:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32201700343/job/95928181410",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -72,9 +73,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32198160997",
    "created_at": "2026-08-18T23:40:31Z",
-   "updated_at": "2026-08-19T01:18:41Z",
+   "updated_at": "2026-08-19T02:07:41Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T02:07:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32198160997/job/95933105835"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T02:07:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32198160997/job/95933105850"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T02:07:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32198160997/job/95933105886"
+    }
+   ]
   },
   {
    "run_id": 32195705113,
@@ -389,21 +418,22 @@
    "branch": "fix/preshuffle-a-tile-bugs",
    "event": "pull_request",
    "title": "[Bugfix] Fix two A-tile loading bugs in the preshuffle GEMM",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32144957080",
    "created_at": "2026-08-18T13:53:00Z",
-   "updated_at": "2026-08-19T00:54:16Z",
+   "updated_at": "2026-08-19T02:11:30Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T00:49:36Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32144957080/job/95896843525"
+     "completed_at": "2026-08-19T01:57:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32144957080/job/95896843525",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -418,11 +448,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T00:54:16Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32144957080/job/95896843552"
+     "completed_at": "2026-08-19T02:11:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32144957080/job/95896843552",
+     "log_fetch_failed": true
     }
    ]
   },
