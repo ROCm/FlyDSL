@@ -13,6 +13,7 @@ add_mlir_conversion_library(MLIRFlyToROCDL
   MLIRArithDialect
   MLIRIR
   MLIRLLVMDialect
+  MLIRMathDialect
   MLIRPass
   MLIRSCFDialect
   MLIRTransforms
