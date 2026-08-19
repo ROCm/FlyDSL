@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-19T06:32:33Z",
+ "updated": "2026-08-19T07:02:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32225508976,
+   "pr": null,
+   "commit": "27dccebdefb8a54a8573b1c38eeb32a9e384e4eb",
+   "branch": "main",
+   "event": "push",
+   "title": "[Kernel] fp8 conv3d: 8-wave GEMM pipeline + BIG_IN fix (#860)",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32225508976",
+   "created_at": "2026-08-19T06:55:56Z",
+   "updated_at": "2026-08-19T06:59:17Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 32224951300,
+   "pr": 1009,
+   "commit": "43081ba31287abee78a00aa40750e410d68e687c",
+   "branch": "john/bf16-attn-xcd-swizzle",
+   "event": "pull_request",
+   "title": "[Fix] Restore the gfx950 XCD mapping for bf16 dense attention",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32224951300",
+   "created_at": "2026-08-19T06:48:04Z",
+   "updated_at": "2026-08-19T06:50:29Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 32223299596,
    "pr": 1029,
@@ -35,11 +65,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T06:20:32Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32220754968/job/95975660853"
+     "completed_at": "2026-08-19T06:39:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32220754968/job/95975660853",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -78,11 +109,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T05:54:44Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32219870712/job/95971846054"
+     "completed_at": "2026-08-19T06:53:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32219870712/job/95971846054",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -1796,7 +1828,7 @@
    "commit": "9967addd8a7f291f1e11c089b6252907fd6ad144",
    "branch": "john/bf16-attn-xcd-swizzle",
    "event": "pull_request",
-   "title": "[Perf] Enable the XCD swizzle and pin the softmax basis for gfx950 bf16 attention",
+   "title": "[Fix] Restore the gfx950 XCD mapping for bf16 dense attention",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/31835253178",
@@ -1881,36 +1913,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 31807140665,
-   "pr": null,
-   "commit": "f6d0a4106b065e37a01a120015dbd7707afd0c14",
-   "branch": "main",
-   "event": "push",
-   "title": "[fix] Resolve normalization-related CI regressions (#991)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31807140665",
-   "created_at": "2026-08-14T13:57:21Z",
-   "updated_at": "2026-08-14T13:58:31Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 31807089634,
-   "pr": null,
-   "commit": "daa056604b326fea9aebd62f08f4ba017dd934f6",
-   "branch": "main",
-   "event": "push",
-   "title": "[Feat] Add fx.num_warp_threads() as constant accessor (#996)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31807089634",
-   "created_at": "2026-08-14T13:56:42Z",
-   "updated_at": "2026-08-14T13:57:23Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
