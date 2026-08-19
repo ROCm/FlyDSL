@@ -890,7 +890,7 @@ public:
     ConversionTarget target(getContext());
 
     target.addLegalDialect<arith::ArithDialect, scf::SCFDialect, vector::VectorDialect,
-                           gpu::GPUDialect, func::FuncDialect, math::MathDialect, LLVM::LLVMDialect,
+                           gpu::GPUDialect, func::FuncDialect, LLVM::LLVMDialect,
                            ROCDL::ROCDLDialect>();
     target.addIllegalDialect<fly::FlyDialect, fly_rocdl::FlyROCDLDialect>();
     target.addDynamicallyLegalOp<math::Exp2Op>(
