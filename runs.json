@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-19T18:42:47Z",
+ "updated": "2026-08-19T19:11:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32291286328,
+   "pr": 1027,
+   "commit": "73baab6a597dcc3fe77bbd708323bc7a0254457d",
+   "branch": "skills/dedrift-and-fix-frontmatter",
+   "event": "pull_request",
+   "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32291286328",
+   "created_at": "2026-08-19T19:07:44Z",
+   "updated_at": "2026-08-19T19:10:06Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 32291086909,
+   "pr": 1022,
+   "commit": "0a5015acac4fa8c7094ea4ee7ad1779638f2f3f3",
+   "branch": "jhinpan/softmax-autotune",
+   "event": "pull_request",
+   "title": "[Kernel] Add opt-in autotuning for Softmax",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32291086909",
+   "created_at": "2026-08-19T19:05:37Z",
+   "updated_at": "2026-08-19T19:09:17Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 32288703611,
    "pr": 1034,
@@ -10,11 +40,11 @@
    "branch": "john/maxnumf-fastmath",
    "event": "pull_request",
    "title": "[Fix] Restore the fastmath flag on flash-attention maxnumf",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32288703611",
    "created_at": "2026-08-19T18:40:53Z",
-   "updated_at": "2026-08-19T18:40:53Z",
+   "updated_at": "2026-08-19T18:43:40Z",
    "actor": "JohnQinAMD",
    "jobs": []
   },
@@ -1846,36 +1876,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 32082186367,
-   "pr": null,
-   "commit": "5f8728766e3b1381ce6ec3c2fd458c9241cec0a1",
-   "branch": "jhinpan/softmax-bwd",
-   "event": "pull_request",
-   "title": "[Kernel] Add row-wise Softmax backward",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32082186367",
-   "created_at": "2026-08-17T23:51:24Z",
-   "updated_at": "2026-08-18T00:00:32Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 32081118423,
-   "pr": null,
-   "commit": "a0a6b08e973c57acb8519c295dfc5ce92a5e6ed7",
-   "branch": "jhinpan/softmax-bwd",
-   "event": "pull_request",
-   "title": "[Kernel] Add row-wise Softmax backward",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32081118423",
-   "created_at": "2026-08-17T23:36:05Z",
-   "updated_at": "2026-08-17T23:51:52Z",
-   "actor": "jhinpan",
-   "jobs": []
   }
  ]
 }
