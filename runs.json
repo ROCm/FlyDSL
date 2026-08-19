@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-19T03:00:28Z",
+ "updated": "2026-08-19T03:28:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -71,11 +71,11 @@
    "branch": "jhinpan/softmax-autotune",
    "event": "pull_request",
    "title": "[Kernel] Add opt-in autotuning for Softmax",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32198160997",
    "created_at": "2026-08-18T23:40:31Z",
-   "updated_at": "2026-08-19T02:07:41Z",
+   "updated_at": "2026-08-19T03:26:04Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -90,20 +90,22 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T02:07:36Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32198160997/job/95933105850"
+     "completed_at": "2026-08-19T03:00:54Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32198160997/job/95933105850",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T02:07:40Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32198160997/job/95933105886"
+     "completed_at": "2026-08-19T03:26:03Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32198160997/job/95933105886",
+     "log_fetch_failed": true
     }
    ]
   },
