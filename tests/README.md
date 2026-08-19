@@ -52,6 +52,14 @@ Use the same names as [`python/flydsl/utils/env.py`](../python/flydsl/utils/env.
 | IR dump | `FLYDSL_DUMP_IR`, `FLYDSL_DUMP_DIR` |
 | Device runtime kind | `FLYDSL_RUNTIME_KIND` |
 | ROCm arch hints (detection helpers) | `FLYDSL_GPU_ARCH`, `HSA_OVERRIDE_GFX_VERSION` |
+| AOT worker-process limit | `FLYDSL_AOT_WORKERS` (unset: automatic CPU/memory limit) |
+| AOT automatic memory cap | `FLYDSL_AOT_MEM_PER_WORKER_GB` (default `2.0`; non-positive disables) |
+| AOT per-job timeout | `FLYDSL_AOT_TIMEOUT` (default `1200` seconds; non-positive disables) |
+| AOT abnormal-exit retries | `FLYDSL_AOT_MAX_RETRIES` (default `2`) |
+
+`flydsl.utils.parallel.run_jobs_parallel` uses the Linux `fork` multiprocessing
+context and is intended for compile-only AOT jobs. It is not a device-runtime
+executor.
 
 Session-level pytest options are supported in `tests/conftest.py`:
 

@@ -106,6 +106,35 @@ class OptInt(EnvOption[int]):
         return int(raw)
 
 
+class OptFloat(EnvOption[float]):
+    """Floating-point environment option with optional min/max validation."""
+
+    def __init__(
+        self,
+        default: float = 0.0,
+        env_var: Optional[str] = None,
+        description: str = "",
+        min_value: Optional[float] = None,
+        max_value: Optional[float] = None,
+    ):
+        validator = None
+        if min_value is not None or max_value is not None:
+
+            def validator(v: float) -> bool:
+                if min_value is not None and v < min_value:
+                    return False
+                if max_value is not None and v > max_value:
+                    return False
+                return True
+
+        super().__init__(default, env_var, description, validator)
+        self.min_value = min_value
+        self.max_value = max_value
+
+    def parse_value(self, raw: str) -> float:
+        return float(raw)
+
+
 class OptStr(EnvOption[str]):
     """String environment option with optional ``choices`` validation."""
 
@@ -224,6 +253,31 @@ class AutotuneEnvManager(EnvManager):
     config_dir = OptStr("", description="Directory for offline config artifacts; empty disables artifacts")
 
 
+class AotEnvManager(EnvManager):
+    """AOT job options (``FLYDSL_AOT_*`` environment variables)."""
+
+    env_prefix = "AOT"
+
+    workers = OptInt(
+        0,
+        description=(
+            "Maximum concurrent worker processes; when unset, use the CPU and available-memory based automatic limit"
+        ),
+    )
+    mem_per_worker_gb = OptFloat(
+        2.0,
+        description="Assumed GiB per worker for the automatic memory cap; non-positive disables the cap",
+    )
+    timeout = OptFloat(
+        1200.0,
+        description="Per-job wall-clock timeout in seconds; non-positive disables the timeout",
+    )
+    max_retries = OptInt(
+        2,
+        description="Retries after an abnormal worker exit or timeout; negative values clamp to zero",
+    )
+
+
 class CompileEnvManager(EnvManager):
     """Compile-time options (``FLYDSL_COMPILE_*`` environment variables)."""
 
@@ -296,16 +350,18 @@ class RuntimeEnvManager(EnvManager):
     enable_cache = OptBool(True, description="Enable kernel caching")
     run_only = OptBool(
         False,
-        description=("Skip JIT compilation; only load AOT cache. " "Raise RuntimeError on cache miss."),
+        description=("Skip JIT compilation; only load AOT cache. Raise RuntimeError on cache miss."),
     )
 
 
+aot = AotEnvManager()
 autotune = AutotuneEnvManager()
 compile = CompileEnvManager()
 debug = DebugEnvManager()
 runtime = RuntimeEnvManager()
 
 __all__ = [
+    "aot",
     "autotune",
     "compile",
     "debug",
