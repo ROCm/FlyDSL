@@ -49,6 +49,7 @@ FlyDSL/
 │   ├── flydsl/                    # Python DSL core
 │   │   ├── expr/                  # DSL expression API; direct children are TARGET-NEUTRAL (typing, primitive, gpu, derived, struct, numeric, math, vector, arith, meta, extern; + utils/)
 │   │   │   └── rocdl/             # Target-specific ROCDL package (cdna4, cdna5, cluster, inline_asm, tdm_ops, universal); lazy-loaded via __init__'s _BACKEND_MODULES
+│   │   ├── extension/             # Extension libraries on top of expr; lazy-loaded via expr/__init__'s _LIBRARY_MODULES
 │   │   ├── compiler/              # @flyc.kernel / @flyc.jit, AST rewriting, JIT cache, backends
 │   │   ├── runtime/               # Device runtime and GPU arch detection
 │   │   ├── utils/                 # EnvManager, SmemAllocator (legacy), logger
@@ -170,17 +171,7 @@ helper code that is not part of the traced closure.
 | `gfx950` / `gfx95*` | MI350 / MI355X | 64 | MFMA | CDNA4 path; FP4, MFMA scale, wider LDS copy paths, 160KB LDS |
 | `gfx11*` | RDNA3 / RDNA3.5 (Strix Halo, e.g. gfx1151) | 32 | WMMA | No MFMA; f16/bf16 (and i8/i4) WMMA GEMM; legacy v16-operand WMMA ABI; **no native FP8** (kernels fail-fast); `kernels/rdna3_f16_gemm.py`. `is_rdna_arch()` returns True. |
 | `gfx120*` | RDNA4 (gfx1201 = Radeon AI PRO R9700) | 32 | WMMA | RDNA path, wave32; new v8-operand WMMA ABI with the gfx11 16x16x16 shapes (`gfx120x.wmma` atom, `lib/Dialect/FlyROCDL/GFX120X/`); native FP8. `is_rdna_arch()` returns True. |
-| `gfx1250` | — | 32 | WMMA / TDM | FP8/FP4 GEMM, MoE, async/TDM copy helpers, 320KB LDS. NOTE: `is_rdna_arch('gfx1250')` returns **False** and `get_warp_size` returns 64 — the gfx1250 kernels hardcode `WAVE_SIZE = 32` themselves. |
-
-Use `from flydsl.runtime.device import get_rocm_arch, is_rdna_arch` rather than
-hard-coding behavior when possible. `is_rdna_arch()`
-(`python/flydsl/runtime/device.py`) is the single source of truth for CDNA vs
-RDNA and is wave32-true only for `gfx10*`/`gfx11*`/`gfx120*` prefixes; it does
-**not** match `gfx1250`. Shared wave-size logic is `get_warp_size(arch)` in
-`kernels/kernels_common.py` (`32 if is_rdna_arch(arch) else 64`), so it returns
-64 for gfx1250 — gfx1250 kernels set wave32 explicitly.
-`tests/kernels/test_rdna_gemm.py` shows the gfx11* (v16 ABI) vs gfx120* (v8 ABI)
-kernel-selection pattern.
+| `gfx1250` | — | 32 | WMMA / TDM | FP8/FP4 GEMM, MoE, async/TDM copy helpers, 320KB LDS. |
 
 ## Kernel Entry Points
 
@@ -205,6 +196,7 @@ This is routing guidance, not a complete kernel inventory. Search the current `k
 - **Helper placement.** Do not scatter small helpers across unrelated modules and do not duplicate an existing one; search for and reuse an existing helper first. Shared kernel helpers belong in `kernels/kernels_common.py` (wave size via `get_warp_size`, `dtype_to_elem_type`, `validate_moe_dtypes`, the `_if_then` SCF context manager, LLVM-ptr/stream helpers); domain-specific shared helpers go in the existing topical modules (`kernels/moe_common.py`, `layout_utils.py`, `pipeline_utils.py`, `fp8_gemm_utils.py`, `dpp_utils.py`, `mfma_epilogues.py`, `mfma_preshuffle_pipeline.py`). DSL-level numeric/arith and type helpers belong in `python/flydsl/expr/utils/arith.py` / `python/flydsl/expr/numeric.py`; compiler/runtime-wide utilities (env, logger, smem allocator) in `python/flydsl/utils/`. (PR #388 extracted shared `_if_then`/`validate_moe_dtypes` into `kernels_common.py`; PR #448 removed redundant numeric wrappers in favor of existing `fx.*` type methods.)
 - **`expr/` is target-neutral.** The direct child modules of `python/flydsl/expr/` (`typing`, `primitive`, `gpu`, `derived`, `struct`, `arith`, `math`, `vector`, `numeric`, `meta`, `extern`, `utils/`) must stay backend-agnostic: they may not import ROCDL/HIP bindings (`flydsl._mlir.dialects.rocdl`, `_mlirDialectsFlyROCDL`, `fly_rocdl`). `import flydsl.expr` must succeed without the FlyROCDL bindings; `tests/unit/test_expr_optional_rocdl.py` enforces this in CI. New target-specific (ROCDL/HIP, MFMA/WMMA, buffer/TDM/cluster) expr code goes in the `expr/rocdl/` package (`cdna4`, `cdna5`, `cluster`, `inline_asm`, `tdm_ops`, `universal`), never in a new top-level `expr/*.py`. The target-specific modules `buffer_ops`, `rocdl`, and `tdm_ops` are lazy-loaded from `expr/__init__.py` via `__getattr__` (`_BACKEND_MODULES`); add new backend modules to that lazy map rather than eager-importing them (PR #521).
 - **`expr/rocdl` is a package.** `expr/rocdl/` (`__init__.py` + `cluster.py`, `tdm_ops.py`, `cdna4.py`, `cdna5.py`, `universal.py`, `inline_asm.py`) holds all target-specific ROCDL/MFMA/WMMA/buffer/TDM/cluster code (`cdna5.py` holds the gfx1250 TDM copy atom, re-exported top-level like `universal`). `from flydsl.expr import rocdl` and `flydsl.expr.rocdl` bind to `expr/rocdl/__init__.py`. Import submodules explicitly, e.g. `from flydsl.expr.rocdl import cluster`; `flydsl.expr.tdm_ops` is a lazy alias for `flydsl.expr.rocdl.tdm_ops` (see `expr/__init__.py` `_BACKEND_MODULES`).
+- **`extension/` holds the libraries.** `python/flydsl/extension/` is for libraries built on top of the expr primitives.
 
 ## Testing Notes
 

@@ -14,7 +14,8 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import builtin
 from flydsl._mlir.dialects import gpu as _gpu
 from flydsl._mlir.dialects import scf as _scf
-from flydsl.runtime.device import get_rocm_arch, is_rdna_arch
+from flydsl.runtime.device import get_rocm_arch
+from flydsl.runtime.device import get_warp_size as get_warp_size
 
 # Memory/atomic primitives now live in mem_ops; re-exported here for back-compat.
 from kernels.common.mem_ops import _create_llvm_ptr
@@ -85,14 +86,13 @@ def dtype_to_elem_type(dtype_str: str):
     raise ValueError(f"unsupported dtype: {dtype_str!r} (expected 'f32', 'f16', 'bf16', or 'fp8')")
 
 
-def get_warp_size(arch=None):
-    """Return the wavefront/warp size for the given GPU architecture.
+def cvt_sr_f32_to_bf16(x, rand):
+    """Stochastically convert f32 to bf16 using raw random bits.
 
-    CDNA (gfx9xx) uses wave64, RDNA (gfx10xx/gfx11xx/gfx12xx) uses wave32.
+    The add-then-truncate conversion matches AMD's non-saturating behavior.
     """
-    if arch is None:
-        arch = get_rocm_arch()
-    return 32 if is_rdna_arch(arch) else 64
+    bits = fx.Float32(x).bitcast(fx.Uint32) + (fx.Uint32(rand) & fx.Uint32(0xFFFF))
+    return fx.Uint16(bits >> fx.Uint32(16)).bitcast(fx.BFloat16)
 
 
 def default_f8_type() -> ir.Type:

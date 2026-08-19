@@ -11,7 +11,6 @@ from flydsl.expr.typing import T
 from . import dpp_utils
 from .mxfp4_gemm_common import (
     _e8m0_from_amax,
-    _fabs_f32,
     _global_i32_at,
     _global_i32_buffer_tiles,
     _global_i32_buffer_view,
@@ -246,7 +245,7 @@ def _gemm1_body(
         # ds_read_b128 straight into an i32[4] register fragment (kept as a tensor
         # so it can feed fx.gemm directly).
         r = fx.make_rmem_tensor(i32x4_reg_lay, fx.Int32)
-        fx.copy_atom_call(i32x4_copy_atom, fx.slice(s_aq_i32x4_tiles, (None, tile_idx)), r)
+        fx.copy(i32x4_copy_atom, fx.slice(s_aq_i32x4_tiles, (None, tile_idx)), r)
         return r
 
     def issue_a_ds_read(slot):
@@ -559,11 +558,11 @@ def _gemm1_body(
     def acc_store(idx, value):
         r = fx.make_rmem_tensor(acc_reg_lay, fx.Float32)
         r.store(fx.Vector.from_elements([fx.Float32(value)], fx.Float32))
-        fx.copy_atom_call(acc_copy_atom, r, fx.slice(acc_flat_tiles, (None, idx)))
+        fx.copy(acc_copy_atom, r, fx.slice(acc_flat_tiles, (None, idx)))
 
     def acc_load(idx):
         r = fx.make_rmem_tensor(acc_reg_lay, fx.Float32)
-        fx.copy_atom_call(acc_copy_atom, fx.slice(acc_flat_tiles, (None, idx)), r)
+        fx.copy(acc_copy_atom, fx.slice(acc_flat_tiles, (None, idx)), r)
         return r.load()[0]
 
     for i in range_constexpr(kMChunks):
@@ -604,9 +603,9 @@ def _gemm1_body(
             up_vs[ee] = acc_load(acc_idx(row_local, up_col))
         result = _silu_mul_batch(gate_vs, up_vs)
 
-        local_max = _fabs_f32(result[0])
+        local_max = fx.absf(result[0])
         for ee in range_constexpr(1, 8):
-            local_max = local_max.maximumf(_fabs_f32(result[ee]))
+            local_max = fx.maxnumf(local_max, fx.absf(result[ee]))
         lm_i = _inline_dpp_quad_amax(fx.Int32(_raw(local_max).bitcast(T.i32)))
         local_max = fx.Float32(_raw(lm_i).bitcast(T.f32))
 

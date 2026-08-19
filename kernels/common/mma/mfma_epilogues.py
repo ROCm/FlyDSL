@@ -37,7 +37,6 @@ from typing import Callable
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects.arith import CmpIPredicate
 from flydsl.expr.typing import T
 from kernels.common.kernels_common import _if_then
 
@@ -69,7 +68,7 @@ def default_epilog(
     ii_idx_list = [fx.Index(ii) for ii in range(4)]
 
     for mi in range_constexpr(m_repeat):
-        mi_base = arith.constant(mi * 16, index=True)
+        mi_base = fx.Index(mi * 16)
         for ii in range_constexpr(4):
             row_off = lane_div_16_mul4 + ii_idx_list[ii]
             row_in_tile = mi_base + row_off
@@ -157,11 +156,11 @@ def c_shuffle_epilog(
         m_reps_s = int(tile_m) // CShuffleMLane_s
         n_reps_s = _half_n // (CShuffleNLane_s * EVec)
 
-        _half_n_idx = arith.constant(_half_n, index=True)
-        _half_thr_idx = arith.constant(_half_threads, index=True)
-        _zero_idx = arith.constant(0, index=True)
+        _half_n_idx = fx.Index(_half_n)
+        _half_thr_idx = fx.Index(_half_threads)
+        _zero_idx = fx.Index(0)
 
-        _is_group_b = arith.cmpi(CmpIPredicate.uge, tx, _half_thr_idx)
+        _is_group_b = fx.as_ir_value((tx) >= (_half_thr_idx))
 
         # -- write phase (all waves, each to its group's LDS buffer) --
         n_tile_base_v = n_tile_base
@@ -209,10 +208,10 @@ def c_shuffle_epilog(
 
         # -- read phase (each group reads from its own LDS buffer) --
         tx_local = tx - arith.select(_is_group_b, _half_thr_idx, _zero_idx)
-        c_nlane_s = arith.constant(CShuffleNLane_s, index=True)
+        c_nlane_s = fx.Index(CShuffleNLane_s)
         m_lane_s = tx_local / c_nlane_s
         n_lane_s = tx_local % c_nlane_s
-        c_evec = arith.constant(EVec, index=True)
+        c_evec = fx.Index(EVec)
 
         if frag_elem_type is None:
             frag_elem_type = T.f16
@@ -222,7 +221,7 @@ def c_shuffle_epilog(
 
         _precomputed_rows_s = []
         for mr in range_constexpr(m_reps_s):
-            row_base_m = arith.constant(mr * CShuffleMLane_s, index=True)
+            row_base_m = fx.Index(mr * CShuffleMLane_s)
             row_local = row_base_m + m_lane_s
             row = bx_m_v + row_local
             row_ctx_raw = precompute_row(row_local=row_local, row=row) if precompute_row is not None else None
@@ -238,7 +237,7 @@ def c_shuffle_epilog(
             def _do_store_row_split():
                 row_base_lds = row_local * _half_n_idx
                 for nr in range_constexpr(n_reps_s):
-                    col_base_nr = arith.constant(nr * (CShuffleNLane_s * EVec), index=True)
+                    col_base_nr = fx.Index(nr * (CShuffleNLane_s * EVec))
                     col_pair0_local = col_base_nr + (n_lane_s * c_evec)
                     lds_idx = row_base_lds + col_pair0_local
 
@@ -273,7 +272,7 @@ def c_shuffle_epilog(
     # ===================== Standard (non-split) path below =====================
 
     # ---------------- Step 1: write C tile to LDS (row-major, fp16) ----------------
-    tile_n_idx = arith.constant(int(tile_n), index=True)
+    tile_n_idx = fx.Index(int(tile_n))
     n_tile_base_v = n_tile_base
     col_base_local = n_tile_base_v + lane_mod_16  # index within [0,tile_n)
 
@@ -332,7 +331,7 @@ def c_shuffle_epilog(
     # them instead of serializing each load with s_waitcnt vmcnt(0).
     _precomputed_rows = []
     for mr in range_constexpr(m_reps_shuffle):
-        row_base_m = arith.constant(mr * CShuffleMLane, index=True)
+        row_base_m = fx.Index(mr * CShuffleMLane)
         row_local = row_base_m + m_lane
         row = bx_m_v + row_local
 
@@ -356,7 +355,7 @@ def c_shuffle_epilog(
             if _lds_row_base_offset is not None:
                 row_base_lds = row_base_lds + _lds_row_base_offset
             for nr in range_constexpr(n_reps_shuffle):
-                col_base_nr = arith.constant(nr * (CShuffleNLane * EVec), index=True)
+                col_base_nr = fx.Index(nr * (CShuffleNLane * EVec))
                 col_pair0 = col_base_nr + (n_lane * c_evec)  # even col within tile
 
                 lds_idx_pair = row_base_lds + col_pair0

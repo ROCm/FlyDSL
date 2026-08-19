@@ -22,6 +22,7 @@ __all__ = [
     "dsl_loc_tracing",
     "dsl_wrap_result",
     "tracing_context",
+    "tracing_option",
 ]
 
 # Package root for the ``flydsl`` Python package: ``.../python/flydsl``.
@@ -54,14 +55,36 @@ def _stack():
 
 
 @contextlib.contextmanager
-def tracing_context(func):
-    _stack().append(getattr(func, "__code__", None))
+def tracing_context(func=None, **options):
+    """Push a tracing frame for the duration of the ``with`` block.
+
+    *func*, when given, marks the call-site boundary used by
+    ``capture_user_location``; a frame entered without one inherits the
+    enclosing boundary.  Keyword *options* become ambient settings readable
+    with ``tracing_option(key)``.  Every key passed is set, ``None`` included
+    -- an explicit ``None`` shadows an enclosing setting.
+    """
+    stack = _stack()
+    boundary = getattr(func, "__code__", None)
+    if boundary is None and stack:
+        boundary = stack[-1][0]
+    stack.append((boundary, options))
     try:
         yield
     finally:
         stack = _stack()
         if stack:
             stack.pop()
+
+
+def tracing_option(key, default=None):
+    """Return the ambient value of *key*, innermost tracing frame first."""
+    stack = getattr(_tls, "stack", None)
+    if stack:
+        for _, options in reversed(stack):
+            if key in options:
+                return options[key]
+    return default
 
 
 def file_location(filename: str, line: int, col: int = 0, context=None) -> ir.Location:
@@ -79,7 +102,7 @@ def capture_user_location() -> ir.Location:
     tracing boundary.
     """
     stack = getattr(_tls, "stack", None)
-    boundary = stack[-1] if stack else None
+    boundary = stack[-1][0] if stack else None
     max_depth = env.debug.max_loc_depth
     ctx = ir.Context.current
     locs = []

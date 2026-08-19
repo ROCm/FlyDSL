@@ -101,6 +101,11 @@ def get_backend(name: Optional[str] = None, *, arch: str = "") -> BaseBackend:
     return _make_backend(name, arch)
 
 
+def current_target() -> GPUTarget:
+    """The :class:`GPUTarget` being compiled for right now."""
+    return get_backend().target
+
+
 # -- auto-discover built-in backends (Triton-style directory scan) --------
 _import_errors: Dict[str, Exception] = {}
 
@@ -174,6 +179,7 @@ __all__ = [
     "BaseBackend",
     "GPUTarget",
     "compile_backend_name",
+    "current_target",
     "get_backend",
     "register_backend",
     "resolve_llvm_address_space",

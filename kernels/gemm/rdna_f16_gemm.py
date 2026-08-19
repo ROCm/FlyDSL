@@ -30,6 +30,7 @@ from flydsl._mlir.dialects import vector
 from flydsl.expr import as_ir_value, const_expr, gpu, range_constexpr
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
+from kernels.common.kernels_common import cvt_sr_f32_to_bf16
 
 WMMA_M = 16
 WMMA_N = 16
@@ -47,6 +48,7 @@ def create_wmma_gemm_module(
     in_dtype="bf16",
     out_dtype="bf16",
     *,
+    rounding="rn",  # "rn" (round to nearest) or "rs" (stochastic rounding)
     reg_m=4,  # M-repeats per wave
     reg_n=4,  # N-repeats per wave
     reg_k=2,  # K-steps per tile (32/16=2)
@@ -63,6 +65,9 @@ def create_wmma_gemm_module(
     THREADS_PER_BLOCK = NUM_WAVES * WAVE_SIZE  # 128
 
     assert reg_k >= 2 and reg_k % 2 == 0
+    assert rounding in ("rn", "rs"), f"rounding must be 'rn' or 'rs', got {rounding!r}"
+    if rounding == "rs":
+        assert out_dtype == "bf16", "stochastic rounding currently supports bf16 output only"
 
     elem_cls = fx.BFloat16 if in_dtype == "bf16" else fx.Float16
     out_elem_cls = {"bf16": fx.BFloat16, "f16": fx.Float16, "f32": fx.Float32}[out_dtype]
@@ -116,9 +121,10 @@ def create_wmma_gemm_module(
         arg_bt: fx.Tensor,
         tiled_mma: fx.TiledMma,
         tiled_copy_g2s: fx.TiledCopy,
+        sr_seed: fx.Int32,  # runtime seed; only read on the stochastic-rounding path
     ):
         tid = fx.thread_idx.x
-        pid = gpu.block_id("x")
+        pid = fx.block_idx.x
 
         # Swizzle workgroup mapping for L2 locality
         effective_group_m = min(group_m, grid_m)
@@ -235,7 +241,17 @@ def create_wmma_gemm_module(
         # ── Epilogue ──────────────────────────────────────────────────
         if const_expr(out_elem_cls is not fx.Float32):
             acc_vec = Vec(frag_C.load())
-            out_elems = [acc_vec[p].to(out_elem_cls) for p in range_constexpr(acc_size)]
+            if const_expr(rounding == "rs"):
+                base_off = (pid * THREADS_PER_BLOCK + tid) * acc_size
+                out_elems = []
+                for p_base in range_constexpr(0, acc_size, 8):
+                    rand_words = fx.random.randint4x(fx.Uint32(sr_seed), fx.Uint32(base_off + p_base))
+                    for p_rel in range_constexpr(8):
+                        word = rand_words[p_rel // 2]
+                        rbits = word if p_rel % 2 == 0 else (word >> fx.Uint32(16))
+                        out_elems.append(cvt_sr_f32_to_bf16(acc_vec[p_base + p_rel], rbits))
+            else:
+                out_elems = [acc_vec[p].to(out_elem_cls) for p in range_constexpr(acc_size)]
             out_vec = vector.from_elements(T.vec(acc_size, out_elem_cls.ir_type), [as_ir_value(e) for e in out_elems])
             frag_C_out.store(out_vec)
         fx.copy(copy_out, frag_C_retile, pC_g)
@@ -247,6 +263,7 @@ def create_wmma_gemm_module(
         arg_a: fx.Tensor,
         arg_bt: fx.Tensor,
         stream: fx.Stream,
+        sr_seed: fx.Int32 = 0,
     ):
         # 16x16x16 v8 WMMA atom (gfx120x.wmma), tiled over a waves_m x waves_n
         # wave grid. A 128x128 block tile then decomposes into reg_m x reg_n
@@ -272,7 +289,7 @@ def create_wmma_gemm_module(
         c1 = 1
         total_blocks = grid_m * grid_n
 
-        wmma_gemm_kernel(arg_c_2d, arg_a_2d, arg_bt_2d, tiled_mma, tiled_copy_g2s).launch(
+        wmma_gemm_kernel(arg_c_2d, arg_a_2d, arg_bt_2d, tiled_mma, tiled_copy_g2s, sr_seed).launch(
             grid=(total_blocks, c1, c1),
             block=(THREADS_PER_BLOCK, c1, c1),
             stream=stream,

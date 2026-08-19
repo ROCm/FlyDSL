@@ -201,11 +201,13 @@ def as_ir_value(value, *, keep_static=False):
       - ``None``                                    -> ``None``
       - ``ir.Value``                                -> returned unchanged
       - ``Numeric`` holding a Python literal, when
+        ``keep_static=True``                        -> its Python payload
+        ``keep_static=False``                       -> promoted via ``as_numeric(value).ir_value()``
+      - ``bool`` / ``int`` / ``float``, when
         ``keep_static=True``                        -> returned unchanged
         ``keep_static=False``                       -> promoted via ``as_numeric(value).ir_value()``
       - ``tuple`` / ``list``                        -> recursed, shape preserved
       - object with ``__extract_to_ir_values__``    -> single value extracted; multi-value returns a list
-      - ``bool`` / ``int`` / ``float``              -> promoted via ``as_numeric(value).ir_value()``
       - object with ``ir_value()``                  -> called as a fallback
       - anything else                               -> returned unchanged
     """
@@ -213,8 +215,10 @@ def as_ir_value(value, *, keep_static=False):
         return None
     if isinstance(value, ir.Value):
         return value
-    if keep_static and isinstance(value, Numeric) and not isinstance(value.value, ir.Value):
+    if keep_static and isinstance(value, (bool, int, float)):
         return value
+    if keep_static and isinstance(value, Numeric) and value.is_static():
+        return value.value
     if isinstance(value, tuple):
         return tuple(as_ir_value(v, keep_static=keep_static) for v in value)
     if isinstance(value, list):
@@ -594,7 +598,7 @@ class Constexpr:
         if not cls.is_specialized:
             raise TypeError(
                 f"{cls.__name__} must be value-specialized (e.g. Constexpr[42]) "
-                f"before reconstruction; the surrounding schema did not bind a value."
+                f"before reconstruction; the surrounding type did not bind a value."
             )
         return cls.value
 
@@ -1461,6 +1465,15 @@ class Vector(ArithValue):
         super().__init__(value, signed)
         self._shape = shape
         self._dtype = dtype
+
+    @classmethod
+    def __coerce__(cls, value):
+        if isinstance(value, cls):
+            return value
+        try:
+            return cls(value)
+        except Exception as exc:
+            raise TypeError(f"expects {cls.__name__}, got {type(value).__name__} ({exc})") from exc
 
     @property
     def dtype(self) -> Type[Numeric]:

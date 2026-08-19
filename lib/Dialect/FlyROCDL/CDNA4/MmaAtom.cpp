@@ -256,21 +256,19 @@ FailureOr<Value> MmaOpCDNA4_MFMAScaleType::emitAtomCallSSA(OpBuilder &builder, L
   Value scaleB = LLVM::ExtractValueOp::create(
       builder, loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleB)});
 
-  auto cbszAttr = builder.getI32IntegerAttr(*aTypeCode);
-  auto blgpAttr = builder.getI32IntegerAttr(*bTypeCode);
-  auto opselAAttr = builder.getI32IntegerAttr(getOpselA());
-  auto opselBAttr = builder.getI32IntegerAttr(getOpselB());
+  auto cbsz = static_cast<ROCDL::MatrixFormat>(*aTypeCode);
+  auto blgp = static_cast<ROCDL::MatrixFormat>(*bTypeCode);
+  uint32_t opselA = getOpselA();
+  uint32_t opselB = getOpselB();
 
   if (m == 16 && n == 16 && k == 128) {
-    return ROCDL::mfma_scale_f32_16x16x128_f8f6f4::create(builder, loc, accTy, a, b, c, cbszAttr,
-                                                          blgpAttr, opselAAttr, scaleA, opselBAttr,
-                                                          scaleB)
+    return ROCDL::mfma_scale_f32_16x16x128_f8f6f4::create(builder, loc, accTy, a, b, c, cbsz, blgp,
+                                                          opselA, scaleA, opselB, scaleB)
         .getResult();
   }
   if (m == 32 && n == 32 && k == 64) {
-    return ROCDL::mfma_scale_f32_32x32x64_f8f6f4::create(builder, loc, accTy, a, b, c, cbszAttr,
-                                                         blgpAttr, opselAAttr, scaleA, opselBAttr,
-                                                         scaleB)
+    return ROCDL::mfma_scale_f32_32x32x64_f8f6f4::create(builder, loc, accTy, a, b, c, cbsz, blgp,
+                                                         opselA, scaleA, opselB, scaleB)
         .getResult();
   }
 

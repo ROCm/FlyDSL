@@ -1,10 +1,12 @@
-# Layout Algebra Guide
+# Layout algebra guide
 
-> Core types, construction, coordinate mapping, algebra operations, and layout utilities in FlyDSL.
+This guide covers the core layout types, construction, coordinate mapping, algebra operations, and layout utilities in FlyDSL.
 
-> **Important:** All `fx.*` layout operations generate MLIR IR and **must** be called inside a `@flyc.kernel` or `@flyc.jit` function body. Code snippets below show API usage patterns within that context, not standalone scripts.
+:::{important}
+All `fx.*` layout operations generate MLIR IR and must be called inside a `@flyc.kernel` or `@flyc.jit` function body. The code snippets below show API usage patterns within that context, not standalone scripts.
+:::
 
-## Quick Reference
+## Quick reference
 
 | Operation | Python API | Fly Dialect Op | Description |
 |---|---|---|---|
@@ -43,7 +45,7 @@
 
 ---
 
-## 1. Core Types
+## 1. Core types
 
 The Fly dialect defines several custom MLIR types for layout algebra:
 
@@ -57,7 +59,7 @@ The Fly dialect defines several custom MLIR types for layout algebra:
 | `!fly.copy_atom` | `!fly.copy_atom_universal_copy<...>` | Copy atom type |
 | `!fly.mma_atom` | `!fly.mma_atom_universal_fma<...>` | MMA atom type |
 
-### IntTuple Patterns
+### IntTuple patterns
 
 IntTuples encode structure at the type level:
 
@@ -104,19 +106,19 @@ identity = fx.make_identity_layout((M, N))
 
 ---
 
-## 3. Coordinate Mapping
+## 3. Coordinate mapping
 
-The fundamental operation: mapping between logical coordinates and physical memory indices.
+The fundamental operation maps between logical coordinates and physical memory indices.
 
 **Formula**: `Index = sum(coord_i * stride_i)`
 
-### `crd2idx` — Coordinate to Index
+### `crd2idx` — Coordinate to index
 
 ```python
 idx = fx.crd2idx(coord, layout)
 ```
 
-### `idx2crd` — Index to Coordinate (inverse)
+### `idx2crd` — Index to coordinate (inverse)
 
 ```python
 coord = fx.idx2crd(idx, layout)
@@ -130,7 +132,7 @@ For layout `((8, 16), (1, 8))` (8x16, column-major):
 
 ---
 
-## 4. Query Operations
+## 4. Query operations
 
 | Operation | Description | Example |
 |---|---|---|
@@ -154,11 +156,11 @@ r = fx.rank(shape)            # number of modes
 
 ---
 
-## 5. Layout Algebra
+## 5. Layout algebra
 
 ### 5.1 Composition: `composition(A, B)`
 
-Composes two layouts: result maps through B first, then A.
+Composes two layouts: the result maps through B first, then A.
 
 **Semantics**: `result(x) = A(B(x))`
 
@@ -190,7 +192,7 @@ Simplifies a layout by flattening nested modes and combining adjacent modes when
 simplified = fx.coalesce(layout)
 ```
 
-### 5.4 Right Inverse: `right_inverse(layout)`
+### 5.4 Right inverse: `right_inverse(layout)`
 
 Computes the right inverse of a layout mapping.
 
@@ -198,9 +200,9 @@ Computes the right inverse of a layout mapping.
 inv = fx.right_inverse(layout)
 ```
 
-### 5.5 Recast Layout: `recast_layout(layout, old_bits, new_bits)`
+### 5.5 Recast layout: `recast_layout(layout, old_bits, new_bits)`
 
-Adjusts a layout for a type width change (e.g., FP16 → FP8):
+Adjusts a layout for a type width change (for example, FP16 → FP8):
 
 ```python
 # Convert layout from 16-bit to 8-bit elements
@@ -209,7 +211,7 @@ recasted = fx.recast_layout(layout, old_type_bits=16, new_type_bits=8)
 
 ---
 
-## 6. Product Operations
+## 6. Product operations
 
 Products combine two layouts to create a larger layout. All products take `(layout, tiler)`.
 
@@ -230,7 +232,7 @@ result = fx.raked_product(layout, tiler)
 
 ---
 
-## 7. Divide Operations
+## 7. Divide operations
 
 Divides partition a layout by a divisor, creating a view that separates "tile" and "rest" dimensions.
 
@@ -248,7 +250,7 @@ result = fx.zipped_divide(layout, divisor)
 
 ---
 
-## 8. Structural Operations
+## 8. Structural operations
 
 ### `select(int_tuple, indices)`
 
@@ -285,9 +287,9 @@ sliced = fx.slice(layout, coord)
 
 ---
 
-## 9. MemRef / View / Copy Operations
+## 9. MemRef / view / copy operations
 
-### MemRef Operations
+### MemRef operations
 
 ```python
 # Allocate on-chip memory with layout
@@ -308,7 +310,7 @@ ly = fx.get_layout(memref)
 it = fx.get_iter(memref)
 ```
 
-### View and Offset
+### View and offset
 
 ```python
 # Create a view from iterator + layout
@@ -318,9 +320,9 @@ view = fx.make_view(iterator, layout)
 ptr = fx.add_offset(ptr, offset)
 ```
 
-### Copy Atoms and Tiled Copies
+### Copy atoms and tiled copies
 
-#### Copy Atom Types
+#### Copy atom types
 
 | Type Factory | Description |
 |---|---|
@@ -362,7 +364,7 @@ tiled_mma = fx.make_tiled_mma(mma_atom, atom_layout)
 tiled_mma = fx.make_tiled_mma(mma_atom, atom_layout, permutation)
 ```
 
-#### Thread Slicing and Partitioning
+#### Thread slicing and partitioning
 
 ```python
 # Get a per-thread view of a tiled copy
@@ -414,7 +416,7 @@ fx.gemm(mma_atom, d, a, b, c)
 
 ---
 
-## 10. Nested / Hierarchical Layouts
+## 10. Nested / hierarchical layouts
 
 The Fly dialect supports nested layouts for representing multi-level tiling hierarchies:
 
@@ -427,7 +429,7 @@ Nested layouts are used in GEMM kernels for multi-level tiling (block → warp �
 
 ---
 
-## 11. IntTuple Arithmetic
+## 11. IntTuple arithmetic
 
 ```python
 # Element-wise operations on IntTuples
@@ -445,7 +447,7 @@ products = fx.int_tuple_product_each(int_tuple)
 
 ---
 
-## 12. Printf Debugging
+## 12. Printf debugging
 
 The Fly dialect provides a `printf` op for kernel debugging:
 
@@ -461,7 +463,7 @@ Supports:
 
 ---
 
-## 13. Decision Tree
+## 13. Decision tree
 
 ```
 Which layout operation do I need?
@@ -502,7 +504,7 @@ Which layout operation do I need?
 
 ---
 
-## 14. Source Files
+## 14. Source files
 
 | File | Description |
 |---|---|
