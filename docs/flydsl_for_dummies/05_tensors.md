@@ -16,7 +16,8 @@ MLIR type:
 - **Element type** — the `Numeric` dtype (`fx.Float32`, `fx.BFloat16`, …)
 - **Layout** — a `(shape, stride)` pair describing how multi-dimensional coordinates
   map to linear memory
-- **Address space** — Global (HBM), Shared (LDS), or Register (VGPRs)
+- **Address space** — Global (HBM), Shared (LDS), Register (VGPRs), or BufferDesc
+  (a CDNA buffer resource; see `make_buffer_tensor` below)
 
 All three are available at trace time as Python-level properties:
 
@@ -139,6 +140,51 @@ layout; all the indexing, slicing, and copy operations then work as usual.
 When the layout is a composed layout wrapping a swizzle, `make_view` is how you
 build a bank-conflict-free LDS tensor — Chapter 6 covers this in full.
 
+## `make_buffer_tensor`: the CDNA buffer-resource handle
+
+The kernel argument you receive is a plain global pointer (address space 1). On
+CDNA there is a second, faster way to address global memory: through a **buffer
+resource descriptor** (the "V#"), which gives loads and stores *free hardware
+out-of-bounds handling*. `fx.rocdl.make_buffer_tensor(t)` wraps an existing global
+tensor in that descriptor, returning a new `Tensor` with the **same layout** but a
+`BufferDesc` address space:
+
+```python
+@flyc.kernel
+def gemm(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor):
+    A = fx.rocdl.make_buffer_tensor(A)   # (M, N) layout preserved; now a buffer tensor
+    ...
+```
+
+It takes the whole tensor (not a raw pointer) and keeps the shape/stride attached,
+so every operation from this chapter and the layout algebra of Chapters 6–7 —
+`A[r, c]`, `A[None, bid]`, `zipped_divide`, `partition_S` — works unchanged. The
+difference is only *how the address is realized*:
+
+- A **plain global tensor** loads via `global_load`; an out-of-bounds coordinate is
+  undefined behavior, so you must guard the last tile with a predicate.
+- A **buffer tensor** loads via `buffer_load`; reads past the end return 0 and
+  stores past the end are dropped, in hardware, at no VGPR cost. This is why almost
+  every CDNA kernel wraps its global arguments in `make_buffer_tensor` as the first
+  line, and why the `BufferCopy*` copy atoms (Chapter 8) require one.
+
+```python
+x = A[r, c]          # buffer tensor -> buffer_load, hardware-bounds-checked
+```
+
+By default the descriptor is sized to cover all of memory (`max_size=True`); pass
+`max_size=False` (or an explicit `num_records_bytes=`) to derive the exact record
+count from the layout so the hardware bounds check matches the real extent.
+
+This chapter only introduces the handle; the descriptor internals (the V# fields,
+the `rocdl.make.buffer.rsrc` lowering, and when to prefer buffer vs. universal
+loads) are in Chapter 10, and the copy atoms that consume it are in Chapter 8.
+
+> **HIP/CK-Tile → FlyDSL.** `make_buffer_tensor(t)` is
+> `__builtin_amdgcn_make_buffer_rsrc` / CK-Tile's `make_buffer_view` — assembling
+> the `s[0:3]` buffer descriptor you would otherwise fill in field by field, but
+> with the tensor's layout carried along so you never touch raw byte offsets.
+
 ## `get_iter` and `get_layout`: decomposing a Tensor
 
 `fx.get_iter(T)` strips the layout and returns a raw typed `Pointer` to the first
@@ -172,6 +218,7 @@ manual indexing) but want to keep the layout separate for size computations.
 | `fx.get_iter(A)` | `Pointer` | raw pointer; use with `ptr_load`/`ptr_store` |
 | `fx.get_layout(A)` | `Layout` | standalone layout object |
 | `fx.make_view(ptr, layout)` | `Tensor` | attach a layout to a pointer |
+| `fx.rocdl.make_buffer_tensor(A)` | `Tensor` | wrap a global tensor in a CDNA buffer descriptor (OOB-checked) |
 | `fx.get_scalar(A.shape[i])` | scalar | unwrap a static single-element dim |
 
 ## Converting a tensor to a Vector

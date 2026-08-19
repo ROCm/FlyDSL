@@ -501,6 +501,158 @@ The contract that makes this correct:
 > ISA-mandated element order. `frag_C.fill(0)` ≡ zeroing the accumulator before
 > the K-loop.
 
+## Transposed operand loads
+
+The fragment contract above assumes the A operand arrives **M-major** (one
+`vector` of K-contiguous elements per lane, §11). But operands often live in
+memory the other way around — `A` stored as `(K, M)` (the "transposed" or `T`
+layout), or `B` that must be read column-wise. You cannot feed that to the matrix
+core directly; the bytes have to be reoriented into MFMA-operand order first.
+
+The reorientation is **not** a data shuffle — it is a *layout*. A `Layout` maps a
+coordinate to an offset (§6.2), so a transpose is the same LDS bytes read through
+a view whose row and column strides are swapped. You stage the operand into LDS in
+its natural order, then read it back through a transposed view straight into the
+A-fragment. Because the copy tiling is *derived from the same TiledMma*, the
+transposed read still lands in MFMA order — `retile` reconciles the two.
+
+```python
+# A is stored transposed in gmem as (K, M). Present it to the core as M-major.
+sA_w = lds.a.view(fx.make_layout((K, M), (M, 1)))   # write (k,m) -> k*M + m
+sA_r = lds.a.view(fx.make_layout((M, K), (1, M)))   # read  (m,k) -> k*M + m  (same bytes)
+
+tcA = fx.make_tiled_copy_A(uni_copy, tiled_mma).get_slice(tid)   # A-operand tiling
+frag_A = thr_mma.make_fragment_A(sA_r)              # fragment shaped from the transposed view
+
+# ... stage gmem(K,M) -> sA_w, then barrier ...
+fx.copy(uni_copy, tcA.partition_S(sA_r), tcA.retile(frag_A))     # transposed LDS read
+```
+
+`sA_w` and `sA_r` alias one allocation; `sA_r[m, k]` and `sA_w[k, m]` are the same
+word. The transpose lives entirely in the swapped strides — it runs on **every**
+architecture (this example is verified on gfx942).
+
+Here is the complete single-tile GEMM with a transposed A operand,
+`C = A · Bᵀ` where `A` is stored as `Aᵀ` `(K, M)`:
+
+```python
+import torch
+import flydsl.compiler as flyc
+import flydsl.expr as fx
+
+M, N, K = 32, 32, 8            # one 2x2 wave-grid tile of 16x16x4 atoms
+
+@fx.struct
+class SharedStorage:
+    a: fx.Array[fx.Float32, M * K]
+
+@flyc.kernel
+def gemm_tr_kernel(At: fx.Tensor, B: fx.Tensor, C: fx.Tensor):
+    tid = fx.thread_idx.x
+
+    At = fx.rocdl.make_buffer_tensor(At)                    # (K, M): A stored transposed
+    B  = fx.rocdl.make_buffer_tensor(B)                     # (N, K): N-first, MFMA sees Bᵀ
+    C  = fx.rocdl.make_buffer_tensor(C)                     # (M, N)
+    bB  = fx.slice(fx.zipped_divide(B, (N, K)), (None, 0))  # (N, K) tile
+    bC  = fx.slice(fx.zipped_divide(C, (M, N)), (None, 0))  # (M, N) tile
+
+    lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+    sA_w = lds.a.view(fx.make_layout((K, M), (M, 1)))       # write (k,m) -> k*M + m
+    sA_r = lds.a.view(fx.make_layout((M, K), (1, M)))       # read  (m,k) -> same bytes
+
+    mma_atom  = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 4, fx.Float32))
+    tiled_mma = fx.make_tiled_mma(mma_atom, fx.make_layout((2, 2, 1), (1, 2, 0)))
+    thr_mma   = tiled_mma.thr_slice(tid)
+
+    buf = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+    uni = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
+    tcA = fx.make_tiled_copy_A(uni, tiled_mma).get_slice(tid)   # A tiling over (M,K)
+    tcB = fx.make_tiled_copy_B(buf, tiled_mma).get_slice(tid)
+    tcC = fx.make_tiled_copy_C(buf, tiled_mma).get_slice(tid)
+
+    frag_A = thr_mma.make_fragment_A(sA_r)                  # A fragment in MFMA order
+    frag_B = thr_mma.make_fragment_B(bB)
+    frag_C = thr_mma.make_fragment_C(bC)
+    frag_C.fill(0)
+
+    # gmem At(K,M) -> LDS in natural (K,M) order (K*M = 256 = one element/thread).
+    sA_w[tid // M, tid % M] = At[tid // M, tid % M]
+    fx.gpu.barrier()
+
+    # transposed LDS read -> A fragment; buffer-load B; MFMA; store C.
+    fx.copy(uni, tcA.partition_S(sA_r), tcA.retile(frag_A))
+    fx.copy(buf, tcB.partition_S(bB), tcB.retile(frag_B))
+    fx.gemm(mma_atom, frag_C, frag_A, frag_B, frag_C)
+    fx.copy(buf, tcC.retile(frag_C), tcC.partition_S(bC))
+
+@flyc.jit
+def gemm_tr(At, B, C, stream: fx.Stream = fx.Stream(None)):
+    gemm_tr_kernel(At, B, C).launch(grid=(1, 1, 1), block=(256, 1, 1), stream=stream)
+
+A  = torch.randn(M, K, dtype=torch.float32).cuda()
+At = A.T.contiguous()                          # stored transposed (K, M)
+B  = torch.randn(N, K, dtype=torch.float32).cuda()
+C  = torch.zeros(M, N, dtype=torch.float32).cuda()
+gemm_tr(At, B, C, stream=torch.cuda.Stream())
+torch.cuda.synchronize()
+assert torch.allclose(C, A @ B.T, atol=1e-4, rtol=1e-4)   # passes
+```
+
+The single load `sA_w[tid // M, tid % M] = At[...]` stages the tile; the
+`fx.copy(uni, tcA.partition_S(sA_r), tcA.retile(frag_A))` is the transposed read
+that delivers A in MFMA order. Everything downstream is the ordinary fragment
+contract.
+
+> **The catch: bank conflicts.** Reading a column of a row-major LDS tile makes
+> every lane hit the same bank. Production kernels pair the transposed view with
+> an XOR `SwizzleType` on the LDS layout so columns scatter across banks — see
+> `make_transposed_lds_layout` in `kernels/gemm/gemm_a16w16_gfx950_utils.py` and
+> Chapter 6's swizzle section. The copy calls above do not change; only the LDS
+> layout gains a composed swizzle.
+
+### The hardware fast path: `ds_read_tr` (CDNA4 / gfx950)
+
+CDNA4 (gfx950) and gfx1250 have dedicated **transpose-during-read** LDS
+instructions that perform the row/column swap *in the load unit* — no swizzle
+gymnastics, and each lane receives its transposed fragment directly. FlyDSL
+exposes them as ordinary copy atoms, so only the atom in the line above changes:
+
+```python
+# gfx950 only: 16-element transpose granularity, 64-bit access
+tr_atom = fx.make_copy_atom(fx.rocdl.cdna4.LDSReadTrans16_64b(), fx.BFloat16)
+fx.copy(tr_atom, tcA.partition_S(sA), tcA.retile(frag_A))     # HW transpose
+```
+
+The factory is `fx.rocdl.cdna4.LDSReadTrans(trans_granularity, bit_size)`, with
+four validated shapes (`lib/Dialect/FlyROCDL/CDNA4/CopyAtom.cpp`):
+
+| Factory | Lowers to | Per-lane result |
+|---------|-----------|-----------------|
+| `LDSReadTrans4_64b()`  | `rocdl.ds_read_tr4_b64`  | `vector<2xi32>` |
+| `LDSReadTrans8_64b()`  | `rocdl.ds_read_tr8_b64`  | `vector<2xi32>` (fp8) |
+| `LDSReadTrans6_96b()`  | `rocdl.ds_read_tr6_b96`  | `vector<3xi32>` |
+| `LDSReadTrans16_64b()` | `rocdl.ds_read_tr16_b64` | `vector<4xi16>` (bf16/f16) |
+
+Real users: `kernels/gemm/gemm_a16w16_gfx950.py` (transposed GEMM operand) and
+`kernels/attention/swa_gfx950.py` (V transpose). On gfx1250 the analogue is
+`fx.rocdl.lds_transpose_load(...)` (`ds_load_tr16_b128`), used as a raw op.
+
+Selection is the author's, at trace time — no automatic dispatch. The idiom is a
+`const_expr` arch guard swapping just the atom; the swapped-stride view and the
+`retile` stay identical:
+
+```python
+if const_expr(arch.startswith("gfx950")):
+    a_s2r = fx.make_copy_atom(fx.rocdl.cdna4.LDSReadTrans16_64b(), dtype)  # HW transpose
+else:
+    a_s2r = fx.make_copy_atom(fx.UniversalCopy32b(), dtype)               # layout transpose
+```
+
+> **HIP/CK-Tile → FlyDSL.** `LDSReadTrans16_64b` ≡ emitting
+> `__builtin_amdgcn_ds_read_tr16_b64` (a.k.a. `ds_read_b64_tr_b16`) and arranging
+> the LDS layout so the transpose lands in MFMA operand order — the `transpose_read`
+> path inside a CK-Tile warp-tile. Here it is one copy atom.
+
 ## Accumulating over K
 
 A real GEMM sums many K-tiles into one accumulator. The accumulator fragment is

@@ -157,3 +157,7 @@ lanes hit distinct banks (Chapter 13 and the GEMM puzzles). The copy calls do no
 change — only the LDS layout does. Full LDS mechanics, double-buffering, and
 swizzle live in `docs/kernel_tuning_guide.md`; the GEMM puzzles build them up
 step by step.
+
+A special case — reading a tile **transposed** out of LDS so it lands in
+matrix-core operand order — is covered in Chapter 9 (§"Transposed operand
+loads"), since it only makes sense in the context of feeding an MFMA.
