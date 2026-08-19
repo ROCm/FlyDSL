@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-18T23:52:47Z",
+ "updated": "2026-08-19T00:15:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32200398231,
+   "pr": 1027,
+   "commit": "33fdb0343dacc68614a645b9192ddd1474de4567",
+   "branch": "skills/dedrift-and-fix-frontmatter",
+   "event": "pull_request",
+   "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32200398231",
+   "created_at": "2026-08-19T00:13:25Z",
+   "updated_at": "2026-08-19T00:14:13Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 32198160997,
    "pr": 1022,
@@ -25,11 +40,11 @@
    "branch": "skills/dedrift-and-fix-frontmatter",
    "event": "pull_request",
    "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32195705113",
    "created_at": "2026-08-18T23:05:59Z",
-   "updated_at": "2026-08-18T23:07:09Z",
+   "updated_at": "2026-08-19T00:13:27Z",
    "actor": "jhinpan",
    "jobs": []
   },
@@ -373,19 +388,19 @@
    "branch": "main",
    "event": "push",
    "title": "[Kernel] Add row-wise Softmax backward (#1019)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32144669431",
    "created_at": "2026-08-18T13:50:04Z",
-   "updated_at": "2026-08-18T22:22:48Z",
+   "updated_at": "2026-08-18T23:55:54Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-18T22:22:48Z",
+     "started_at": "2026-08-18T23:55:54Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32144669431/job/95889439471"
     },
@@ -472,11 +487,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-18T22:55:46Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32132126110/job/95890547726"
+     "completed_at": "2026-08-19T00:10:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32132126110/job/95890547726",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -551,11 +567,11 @@
    "branch": "dsl-ify-scf-controlflow",
    "event": "pull_request",
    "title": "[Kernel] Replace raw scf ops with Python control flow in kernels",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32130866237",
    "created_at": "2026-08-18T11:15:55Z",
-   "updated_at": "2026-08-18T21:39:17Z",
+   "updated_at": "2026-08-19T00:11:25Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -580,9 +596,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-18T21:39:17Z",
+     "started_at": "2026-08-19T00:11:24Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32130866237/job/95878533031"
     }
@@ -698,11 +714,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-18T22:46:01Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32121325896/job/95882864764"
+     "completed_at": "2026-08-18T23:55:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32121325896/job/95882864764",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1856,21 +1873,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 31785133670,
-   "pr": 1009,
-   "commit": "db4143c45195b8f989e74650c8db07b1a993152d",
-   "branch": "john/bf16-attn-xcd-swizzle",
-   "event": "pull_request",
-   "title": "[Perf] Enable the XCD swizzle and pin the softmax basis for gfx950 bf16 attention",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31785133670",
-   "created_at": "2026-08-14T08:44:12Z",
-   "updated_at": "2026-08-14T08:46:03Z",
-   "actor": "JohnQinAMD",
-   "jobs": []
   }
  ]
 }
