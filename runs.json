@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-19T00:15:44Z",
+ "updated": "2026-08-19T00:33:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "skills/dedrift-and-fix-frontmatter",
    "event": "pull_request",
    "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32200398231",
    "created_at": "2026-08-19T00:13:25Z",
-   "updated_at": "2026-08-19T00:14:13Z",
+   "updated_at": "2026-08-19T00:15:22Z",
    "actor": "jhinpan",
    "jobs": []
   },
