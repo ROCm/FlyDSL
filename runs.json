@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-19T15:32:08Z",
+ "updated": "2026-08-19T16:30:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,31 +25,21 @@
    "branch": "fix/fly-ptr-honor-alignment",
    "event": "pull_request",
    "title": "[FlyToROCDL] Honor fly pointer alignment in ptr.load/ptr.store lowering",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256430019",
    "created_at": "2026-08-19T13:08:35Z",
-   "updated_at": "2026-08-19T15:29:15Z",
+   "updated_at": "2026-08-19T16:20:59Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-19T14:31:59Z",
-     "completed_at": "2026-08-19T14:52:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256430019/job/96105460886"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-19T14:46:50Z",
-     "completed_at": "2026-08-19T15:02:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256430019/job/96105460932",
-     "log_fetch_failed": true
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T16:20:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256430019/job/96141395366"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -58,7 +48,17 @@
      "conclusion": "success",
      "started_at": "2026-08-19T14:32:06Z",
      "completed_at": "2026-08-19T15:29:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256430019/job/96105460941",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256430019/job/96141396419",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-19T14:46:50Z",
+     "completed_at": "2026-08-19T15:02:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256430019/job/96141396815",
      "log_fetch_failed": true
     }
    ]
@@ -70,20 +70,20 @@
    "branch": "rchamber/add_16x16x16_MFMA_support",
    "event": "pull_request",
    "title": "[MFMA] Add 16x16x16 bf16/f16 support with fly-fix-bitcast-width pass",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123",
    "created_at": "2026-08-19T13:07:55Z",
-   "updated_at": "2026-08-19T14:29:02Z",
+   "updated_at": "2026-08-19T16:27:59Z",
    "actor": "RichardChamberlain1",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-19T14:29:02Z",
-     "completed_at": null,
+     "completed_at": "2026-08-19T16:27:59Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123/job/96104551353"
     },
     {
@@ -99,11 +99,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T14:29:01Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123/job/96104551553"
+     "completed_at": "2026-08-19T16:20:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123/job/96104551553",
+     "log_fetch_failed": true
     }
    ]
   },
