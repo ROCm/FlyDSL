@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-19T05:34:29Z",
+ "updated": "2026-08-19T05:37:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32219870712,
+   "pr": 1015,
+   "commit": "81873df9821fbc2f2648e59c6e4b9e37dc799726",
+   "branch": "phil/isa-resource-diff-arch-general",
+   "event": "pull_request",
+   "title": "[WIP] [Feature] Add architecture-general ISA resource diff tool",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32219870712",
+   "created_at": "2026-08-19T05:33:32Z",
+   "updated_at": "2026-08-19T05:34:35Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 32219722336,
    "pr": 1015,
@@ -10,11 +25,11 @@
    "branch": "phil/isa-resource-diff-arch-general",
    "event": "pull_request",
    "title": "[WIP] [Feature] Add architecture-general ISA resource diff tool",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32219722336",
    "created_at": "2026-08-19T05:31:12Z",
-   "updated_at": "2026-08-19T05:31:36Z",
+   "updated_at": "2026-08-19T05:33:34Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -1868,21 +1883,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 31798205814,
-   "pr": 1013,
-   "commit": "49be829250a189bbdbb1a26ee61a4d9ac10977c9",
-   "branch": "pr/enh-cdna5-tiled-tdm-atom",
-   "event": "pull_request",
-   "title": "[ROCDL] Add make_tiled_tdm_atom op and tdm_partition",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31798205814",
-   "created_at": "2026-08-14T11:55:59Z",
-   "updated_at": "2026-08-14T12:34:45Z",
-   "actor": "sjfeng1999",
-   "jobs": []
   }
  ]
 }
