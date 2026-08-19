@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-19T22:00:35Z",
+ "updated": "2026-08-19T22:01:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32306637551,
+   "pr": 1036,
+   "commit": "2fa92c42793da1fc30d9b20ace259ac41b23f936",
+   "branch": "john/loud-aiter-skip",
+   "event": "pull_request",
+   "title": "[Test] Print when aiter is missing instead of collecting nothing",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306637551",
+   "created_at": "2026-08-19T21:59:25Z",
+   "updated_at": "2026-08-19T22:00:50Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 32306567897,
    "pr": 1037,
@@ -10,11 +25,11 @@
    "branch": "jhinpan/fix-exp2-fastmath",
    "event": "pull_request",
    "title": "[ROCDL] Lower approximate exp2 to native intrinsic",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306567897",
    "created_at": "2026-08-19T21:58:33Z",
-   "updated_at": "2026-08-19T21:59:20Z",
+   "updated_at": "2026-08-19T22:00:20Z",
    "actor": "jhinpan",
    "jobs": []
   },
@@ -40,11 +55,11 @@
    "branch": "john/loud-aiter-skip",
    "event": "pull_request",
    "title": "[Test] Print when aiter is missing instead of collecting nothing",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32305613373",
    "created_at": "2026-08-19T21:46:50Z",
-   "updated_at": "2026-08-19T21:49:04Z",
+   "updated_at": "2026-08-19T22:00:23Z",
    "actor": "JohnQinAMD",
    "jobs": []
   },
@@ -1733,51 +1748,6 @@
    "updated_at": "2026-08-18T11:23:18Z",
    "actor": "sjfeng1999",
    "jobs": []
-  },
-  {
-   "run_id": 32130866237,
-   "pr": 1025,
-   "commit": "8dc03fb203216e9e9fb7aea9a7948eb4a8de1be2",
-   "branch": "dsl-ify-scf-controlflow",
-   "event": "pull_request",
-   "title": "[Kernel] Replace raw scf ops with Python control flow in kernels",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32130866237",
-   "created_at": "2026-08-18T11:15:55Z",
-   "updated_at": "2026-08-19T01:17:40Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-18T21:49:54Z",
-     "completed_at": "2026-08-18T22:03:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32130866237/job/95878532899",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-18T21:56:56Z",
-     "completed_at": "2026-08-18T23:01:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32130866237/job/95878532956"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-19T00:11:24Z",
-     "completed_at": "2026-08-19T01:17:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32130866237/job/95878533031",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
