@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-19T12:32:03Z",
+ "updated": "2026-08-19T12:35:22Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -171,21 +171,22 @@
    "branch": "refactor/pa-metadata-tile-programming",
    "event": "pull_request",
    "title": "[Kernel][Perf] Optimize paged-attention metadata decode",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32238194867",
    "created_at": "2026-08-19T09:33:16Z",
-   "updated_at": "2026-08-19T10:54:39Z",
+   "updated_at": "2026-08-19T12:31:51Z",
    "actor": "fsx950223",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T10:41:50Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32238194867/job/96040106810"
+     "completed_at": "2026-08-19T12:31:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32238194867/job/96040106810",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -246,11 +247,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T10:35:21Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32236366945/job/96038571500"
+     "completed_at": "2026-08-19T12:33:15Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32236366945/job/96038571500",
+     "log_fetch_failed": true
     }
    ]
   },
