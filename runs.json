@@ -1,11 +1,26 @@
 {
  "schema": 1,
- "updated": "2026-08-19T16:30:04Z",
+ "updated": "2026-08-19T17:09:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 32269752515,
+   "run_id": 32279429189,
    "pr": 1032,
+   "commit": "7be935fb0a89156c321e944859151d2bbf1f68db",
+   "branch": "convolution",
+   "event": "pull_request",
+   "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32279429189",
+   "created_at": "2026-08-19T17:03:26Z",
+   "updated_at": "2026-08-19T17:07:05Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
+  {
+   "run_id": 32269752515,
+   "pr": null,
    "commit": "3c3c14309e4428bf92060962ddec838d559c6041",
    "branch": "convolution",
    "event": "pull_request",
@@ -70,21 +85,21 @@
    "branch": "rchamber/add_16x16x16_MFMA_support",
    "event": "pull_request",
    "title": "[MFMA] Add 16x16x16 bf16/f16 support with fly-fix-bitcast-width pass",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123",
    "created_at": "2026-08-19T13:07:55Z",
-   "updated_at": "2026-08-19T16:27:59Z",
+   "updated_at": "2026-08-19T16:49:40Z",
    "actor": "RichardChamberlain1",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-19T14:29:02Z",
-     "completed_at": "2026-08-19T16:27:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123/job/96104551353"
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T16:49:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123/job/96149871926"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -93,7 +108,7 @@
      "conclusion": "success",
      "started_at": "2026-08-19T14:28:49Z",
      "completed_at": "2026-08-19T14:46:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123/job/96104551374",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123/job/96149873209",
      "log_fetch_failed": true
     },
     {
@@ -103,7 +118,7 @@
      "conclusion": "success",
      "started_at": "2026-08-19T14:29:01Z",
      "completed_at": "2026-08-19T16:20:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123/job/96104551553",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123/job/96149873542",
      "log_fetch_failed": true
     }
    ]
@@ -1891,21 +1906,6 @@
    "created_at": "2026-08-17T18:53:06Z",
    "updated_at": "2026-08-17T18:55:29Z",
    "actor": "amd-nprotaso",
-   "jobs": []
-  },
-  {
-   "run_id": 32042918431,
-   "pr": 971,
-   "commit": "a73252757fbd571f7f02c245ab19beb1ffd31580",
-   "branch": "gfx1250/gemm-opt-0805",
-   "event": "pull_request",
-   "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32042918431",
-   "created_at": "2026-08-17T15:38:11Z",
-   "updated_at": "2026-08-17T15:42:37Z",
-   "actor": "aoli26",
    "jobs": []
   }
  ]
