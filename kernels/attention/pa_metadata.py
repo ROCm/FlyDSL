@@ -19,7 +19,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, as_ir_value, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import as_ir_value, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from kernels.attention.pa_common import _compute_block_base_dw_i64, _prefetch_q_chunks_tile
@@ -509,9 +509,7 @@ def _make_pa_phase_helpers(
         gpu.barrier()
         sum_vec = fx.ptr_load(softmax_base + (sm_rd_sum_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
         for w in range_constexpr(NUM_WARPS):
-            partition_sum = arith.addf(
-                arith.unwrap(partition_sum), arith.unwrap(sum_vec[w]), fastmath=arith.FastMathFlags.contract
-            )
+            partition_sum = partition_sum + sum_vec[w]
 
         if const_expr(per_token_kv):
             if const_expr(v_normalization is None):
@@ -543,15 +541,13 @@ def _make_pa_phase_helpers(
             pk_vec = fx.Vector.from_elements([pk], dtype=fx.Int32)
             fx.ptr_store(pk_vec, logits_base + elem_base)
 
-        accum_sum = arith.mulf(arith.unwrap(accum_scale), arith.unwrap(rsum), fastmath=arith.FastMathFlags.contract)
-        rsum = arith.addf(accum_sum, arith.unwrap(partition_sum), fastmath=arith.FastMathFlags.contract)
+        rsum = accum_scale * rsum + partition_sum
         rmax = new_rmax
         for vhe in range_constexpr(vhe_loop):
             outs[vhe] = outs[vhe] * fx.Float32(accum_scale)
         return rmax, rsum, outs, v_correction, normalized_v_scales
 
     def _pv_mfma(v_ops, outs, v_correction):
-        fm_contract = arith.FastMathFlags.contract
         v_correction_vec = fx.Vector.filled(4, fx.Float32(v_correction), fx.Float32)
 
         # P depends only on (vt, j); load it once before every VHE MFMA chain.
@@ -582,11 +578,7 @@ def _make_pa_phase_helpers(
                             0,
                         ],
                     )
-            outs[vhe] = arith.addf(
-                arith.mulf(tmp_out, v_correction_vec, fastmath=fm_contract),
-                outs[vhe],
-                fastmath=fm_contract,
-            )
+            outs[vhe] = tmp_out * v_correction_vec + outs[vhe]
         return outs
 
     return (
@@ -1331,7 +1323,7 @@ def compile_pa_decode_metadata(
                         )
 
                     safe_sum_lse = (running_sum > 0.0).select(running_sum, 1.0)
-                    log_sum = fmath.log(safe_sum_lse, fastmath=arith.FastMathFlags.fast)
+                    log_sum = fmath.log(safe_sum_lse, fastmath="fast")
                     lse_val = running_max + log_sum
                     pl_off = _po_row * stride_pl_ql + qhead
                     fx.memref_store_vec(fx.Vector.from_elements([lse_val], dtype=fx.Float32), partial_lse_reg)
@@ -1400,6 +1392,10 @@ def compile_pa_decode_metadata(
             s_po_ql,
             s_pl_ql,
         ).launch(grid=(num_sm, 1, 1), block=(BLOCK_THREADS, 1, 1), stream=stream)
+
+    # Ask the compiler for mul+add -> FMA contraction across the whole kernel
+    # instead of tagging individual online-softmax / PV-accumulate ops.
+    launch_pa_decode_metadata.compile_hints = {"fastmath": "contract"}
 
     return {
         "launch": launch_pa_decode_metadata,
