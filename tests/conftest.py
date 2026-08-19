@@ -110,6 +110,26 @@ def pytest_addoption(parser):
     )
 
 
+_AITER_ERROR = None
+try:
+    import aiter as _aiter
+except Exception as _exc:  # a version-mismatched aiter raises ImportError from inside itself
+    _aiter = None
+    _AITER_ERROR = _exc
+
+
+def pytest_report_header(config):
+    """Say whether aiter imported.
+
+    Nineteen suites skip themselves at module level when it does not, and
+    pytest_sessionfinish below rewrites the resulting exit code 5 to 0, so a run
+    that collected nothing is indistinguishable from a run that passed.
+    """
+    if _aiter is not None:
+        return f"aiter: {getattr(_aiter, '__version__', 'unknown version')}"
+    return f"aiter: NOT IMPORTABLE ({_AITER_ERROR}) -- the suites that need it will collect nothing"
+
+
 def pytest_configure(config):
     """Apply FlyDSL env overrides from CLI options.
 
@@ -123,6 +143,10 @@ def pytest_configure(config):
         os.environ["FLYDSL_COMPILE_BACKEND"] = backend
     if arch:
         os.environ["ARCH"] = arch
+
+    # Opt-in for CI, where a silently empty run is worse than a red one.
+    if _aiter is None and os.environ.get("FLYDSL_REQUIRE_AITER", "") not in ("", "0", "false", "False"):
+        pytest.exit(f"FLYDSL_REQUIRE_AITER is set but aiter is not importable: {_AITER_ERROR}", returncode=1)
 
 
 def pytest_sessionfinish(session, exitstatus):

@@ -20,7 +20,7 @@ try:
     import aiter
     from aiter import dtypes, per_tensor_quant, pertoken_quant
     from aiter.ops.triton.gluon.pa_decode_gluon import get_recommended_splits
-except Exception as exc:
+except ImportError as exc:
     pytest.skip(f"aiter is not available: {exc}", allow_module_level=True)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
