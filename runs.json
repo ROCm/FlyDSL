@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-19T12:35:22Z",
+ "updated": "2026-08-19T12:38:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -217,11 +217,11 @@
    "branch": "phil/isa-resource-diff-arch-general",
    "event": "pull_request",
    "title": "[Tools] Add architecture-general ISA resource diff tool",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32236366945",
    "created_at": "2026-08-19T09:11:51Z",
-   "updated_at": "2026-08-19T10:36:32Z",
+   "updated_at": "2026-08-19T12:33:16Z",
    "actor": "Phil-amd",
    "jobs": [
     {
