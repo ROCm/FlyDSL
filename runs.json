@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-19T00:35:22Z",
+ "updated": "2026-08-19T00:37:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "skills/dedrift-and-fix-frontmatter",
    "event": "pull_request",
    "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32201700343",
    "created_at": "2026-08-19T00:33:32Z",
-   "updated_at": "2026-08-19T00:34:24Z",
+   "updated_at": "2026-08-19T00:35:32Z",
    "actor": "jhinpan",
    "jobs": []
   },
@@ -866,20 +866,20 @@
    "branch": "pr/enh-cdna5-tiled-tdm-atom",
    "event": "pull_request",
    "title": "[ROCDL] Add make_tiled_tdm_atom op and tdm_partition",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32110444156",
    "created_at": "2026-08-18T07:13:48Z",
-   "updated_at": "2026-08-18T23:19:12Z",
+   "updated_at": "2026-08-19T00:36:09Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-18T23:19:12Z",
-     "completed_at": null,
+     "completed_at": "2026-08-19T00:36:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32110444156/job/95872887538"
     },
     {
