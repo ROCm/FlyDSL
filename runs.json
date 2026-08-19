@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-19T22:01:46Z",
+ "updated": "2026-08-19T23:21:01Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306637551",
    "created_at": "2026-08-19T21:59:25Z",
-   "updated_at": "2026-08-19T22:00:50Z",
+   "updated_at": "2026-08-19T22:27:49Z",
    "actor": "JohnQinAMD",
    "jobs": []
   },
@@ -25,13 +25,42 @@
    "branch": "jhinpan/fix-exp2-fastmath",
    "event": "pull_request",
    "title": "[ROCDL] Lower approximate exp2 to native intrinsic",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306567897",
    "created_at": "2026-08-19T21:58:33Z",
-   "updated_at": "2026-08-19T22:00:20Z",
+   "updated_at": "2026-08-19T22:45:43Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-19T22:27:50Z",
+     "completed_at": "2026-08-19T22:43:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306567897/job/96247395203",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T22:27:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306567897/job/96247395232"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T22:45:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306567897/job/96247395259"
+    }
+   ]
   },
   {
    "run_id": 32306348107,
@@ -50,7 +79,7 @@
   },
   {
    "run_id": 32305613373,
-   "pr": 1036,
+   "pr": null,
    "commit": "1e6e45a1beade48086f36d7459d801d323cd1da2",
    "branch": "john/loud-aiter-skip",
    "event": "pull_request",
@@ -74,9 +103,38 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298273166",
    "created_at": "2026-08-19T20:23:36Z",
-   "updated_at": "2026-08-19T20:47:50Z",
+   "updated_at": "2026-08-19T23:19:23Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T23:19:23Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298273166/job/96247704710"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T22:29:18Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298273166/job/96247704739"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-19T22:44:19Z",
+     "completed_at": "2026-08-19T22:59:22Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298273166/job/96247704780",
+     "log_fetch_failed": true
+    }
+   ]
   },
   {
    "run_id": 32298048348,
@@ -114,10 +172,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-19T21:16:33Z",
-     "completed_at": null,
+     "completed_at": "2026-08-19T22:21:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298048348/job/96228993313"
     }
    ]
@@ -159,11 +217,11 @@
    "branch": "john/maxnumf-fastmath",
    "event": "pull_request",
    "title": "[Fix] Restore the fastmath flag on flash-attention maxnumf",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32297665721",
    "created_at": "2026-08-19T20:16:48Z",
-   "updated_at": "2026-08-19T20:57:19Z",
+   "updated_at": "2026-08-19T23:19:09Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
@@ -179,19 +237,20 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T20:57:07Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32297665721/job/96223987140"
+     "completed_at": "2026-08-19T23:19:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32297665721/job/96223987140",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-19T20:57:19Z",
-     "completed_at": null,
+     "completed_at": "2026-08-19T23:17:24Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32297665721/job/96223987212"
     }
    ]
