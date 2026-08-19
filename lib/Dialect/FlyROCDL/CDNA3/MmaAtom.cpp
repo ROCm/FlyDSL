@@ -174,7 +174,8 @@ FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Locati
       if (srcBits > dstBits && srcBits % dstBits == 0) {
         int64_t fullCount = srcBits / dstVecTy.getElementType().getIntOrFloatBitWidth();
         auto wideTy = VectorType::get({fullCount}, dstVecTy.getElementType());
-        val = LLVM::BitcastOp::create(builder, loc, wideTy, val);
+        if (wideTy != srcVecTy)
+          val = LLVM::BitcastOp::create(builder, loc, wideTy, val);
         val = vector::ExtractStridedSliceOp::create(builder, loc, val, /*offsets=*/{0},
                                                     /*sizes=*/{dstVecTy.getNumElements()},
                                                     /*strides=*/{1});
