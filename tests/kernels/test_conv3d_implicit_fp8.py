@@ -5,9 +5,10 @@
 
 """Correctness test for the FP8 (E4M3FN) 8-wave implicit-GEMM conv3d kernel.
 
-The kernel quantizes the bf16 inputs to FP8, so it is checked against an
-FP8-cast reference (``x.to(float8_e4m3fn)`` / weight likewise) rather than the
-full-precision bf16 conv. Requires the CDNA4 (gfx95x) 16x16x128 FP8 MFMA. Only
+The kernel takes FP8 E4M3FN inputs, so it is checked against an FP8-cast
+reference (the same ``x.to(float8_e4m3fn)`` / weight tensors upcast back to
+bf16) rather than the full-precision bf16 conv. Requires the CDNA4 (gfx95x)
+16x16x128 FP8 MFMA. Only
 ``c % 16 == 0`` is required; partial M/N/K tiles (NPQ, K, CRS not multiples of
 128) are masked, so misaligned channel counts and frame counts are covered too.
 """
@@ -48,10 +49,13 @@ def test_conv3d_fp8_vs_fp8cast_reference(n, c, t, h, w, k, stride, padding):
     x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16)
     weight = torch.randn((k, c, 3, 3, 3), device="cuda", dtype=torch.bfloat16)
 
-    y = conv3d_implicit_fp8(x, weight, stride=stride, padding=padding)
+    x_fp8 = x.to(torch.float8_e4m3fn)
+    w_fp8 = weight.to(torch.float8_e4m3fn)
+
+    y = conv3d_implicit_fp8(x_fp8, w_fp8, stride=stride, padding=padding)
     ref = F.conv3d(
-        x.to(torch.float8_e4m3fn).to(torch.bfloat16),
-        weight.to(torch.float8_e4m3fn).to(torch.bfloat16),
+        x_fp8.to(torch.bfloat16),
+        w_fp8.to(torch.bfloat16),
         stride=stride,
         padding=padding,
     )

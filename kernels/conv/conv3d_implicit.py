@@ -1210,12 +1210,11 @@ def _conv3d_impl(
     # of raising.
     for name, t in (("x", x), ("weight", weight), ("bias", bias)):
         assert t is None or t.is_cuda, f"conv3d_implicit needs GPU tensors; {name} is on {t.device}"
-    assert x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16, (
-        f"conv3d_implicit is a bf16-only kernel; got x={x.dtype}, weight={weight.dtype}"
-    )
+    assert (
+        x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16
+    ), f"conv3d_implicit is a bf16-only kernel; got x={x.dtype}, weight={weight.dtype}"
     assert bias is None or (bias.dim() == 1 and bias.numel() == k), (
-        f"bias must be a 1-D tensor of {k} elements, one per output channel; "
-        f"got shape {tuple(bias.shape)}"
+        f"bias must be a 1-D tensor of {k} elements, one per output channel; " f"got shape {tuple(bias.shape)}"
     )
     groups = int(groups)
     assert groups >= 1, f"groups must be >= 1, got {groups}"
