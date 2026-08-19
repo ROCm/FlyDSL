@@ -4,14 +4,16 @@
 import fcntl
 import json
 import os
+import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import flydsl.utils.parallel as parallel
 from flydsl.utils.env import aot
-from flydsl.utils.parallel import run_jobs_parallel
+from flydsl.utils.parallel import run_parallel_jobs
 
 pytestmark = [pytest.mark.l0_backend_agnostic]
 
@@ -72,6 +74,15 @@ def _sleep_worker(kernel_name, delay):
     return {"kernel_name": kernel_name, "compile_time": 0.01}
 
 
+def _mixed_outcome_worker(kernel_name, outcome):
+    if outcome == "crash":
+        os._exit(17)
+    return {
+        "kernel_name": kernel_name,
+        "compile_time": None if outcome == "compile-error" else 0.01,
+    }
+
+
 @pytest.fixture(autouse=True)
 def _parallel_env(monkeypatch):
     monkeypatch.setenv("FLYDSL_AOT_WORKERS", "2")
@@ -82,7 +93,7 @@ def _parallel_env(monkeypatch):
 
 def test_empty_jobs_do_not_invoke_worker(monkeypatch):
     monkeypatch.setenv("FLYDSL_AOT_WORKERS", "invalid")
-    assert run_jobs_parallel(_success_worker, []) == []
+    assert run_parallel_jobs(_success_worker, []) == []
 
 
 def test_results_follow_input_order():
@@ -92,7 +103,7 @@ def test_results_follow_input_order():
         {"kernel_name": "last", "index": 2, "delay": 0.01},
     ]
 
-    results = run_jobs_parallel(_success_worker, jobs)
+    results = run_parallel_jobs(_success_worker, jobs)
 
     assert [result["index"] for result in results] == [0, 1, 2]
 
@@ -113,7 +124,7 @@ def test_worker_count_is_bounded(monkeypatch, tmp_path):
         for index in range(6)
     ]
 
-    results = run_jobs_parallel(_tracked_worker, jobs)
+    results = run_parallel_jobs(_tracked_worker, jobs)
 
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state == {"active": 0, "peak": 2}
@@ -126,7 +137,7 @@ def test_crashed_worker_is_retried(monkeypatch, tmp_path):
     attempt_path = tmp_path / "attempt.txt"
     attempt_path.write_text("0", encoding="utf-8")
 
-    results = run_jobs_parallel(
+    results = run_parallel_jobs(
         _crash_then_succeed,
         [
             {
@@ -147,7 +158,7 @@ def test_retry_exhaustion_returns_failure(monkeypatch, tmp_path):
     attempt_path = tmp_path / "attempt.txt"
     attempt_path.write_text("0", encoding="utf-8")
 
-    results = run_jobs_parallel(
+    results = run_parallel_jobs(
         _crash_then_succeed,
         [
             {
@@ -162,12 +173,36 @@ def test_retry_exhaustion_returns_failure(monkeypatch, tmp_path):
     assert results == [{"kernel_name": "dead-job", "compile_time": None}]
 
 
+def test_failed_jobs_do_not_stop_remaining_jobs():
+    jobs = [
+        {"kernel_name": "first", "outcome": "success"},
+        {"kernel_name": "crashed", "outcome": "crash"},
+        {"kernel_name": "compile-error", "outcome": "compile-error"},
+        {"kernel_name": "last", "outcome": "success"},
+    ]
+
+    results = run_parallel_jobs(_mixed_outcome_worker, jobs)
+
+    assert [result["kernel_name"] for result in results] == [
+        "first",
+        "crashed",
+        "compile-error",
+        "last",
+    ]
+    assert [result["compile_time"] for result in results] == [
+        0.01,
+        None,
+        None,
+        0.01,
+    ]
+
+
 def test_deterministic_failure_is_not_retried(monkeypatch, tmp_path):
     monkeypatch.setenv("FLYDSL_AOT_MAX_RETRIES", "3")
     attempt_path = tmp_path / "attempt.txt"
     attempt_path.write_text("0", encoding="utf-8")
 
-    results = run_jobs_parallel(
+    results = run_parallel_jobs(
         _deterministic_failure,
         [
             {
@@ -186,7 +221,7 @@ def test_timed_out_worker_is_killed(monkeypatch):
     monkeypatch.setenv("FLYDSL_AOT_TIMEOUT", "0.05")
 
     started = time.monotonic()
-    results = run_jobs_parallel(
+    results = run_parallel_jobs(
         _sleep_worker,
         [{"kernel_name": "hung-job", "delay": 60}],
     )
@@ -205,12 +240,23 @@ def test_temporary_result_directory_is_removed(monkeypatch, tmp_path):
 
     monkeypatch.setattr(parallel.tempfile, "mkdtemp", make_result_dir)
 
-    run_jobs_parallel(
+    run_parallel_jobs(
         _success_worker,
         [{"kernel_name": "one", "index": 0}],
     )
 
     assert not result_dir.exists()
+
+
+def test_mem_per_worker_env_caps_automatic_workers(monkeypatch):
+    gib = 1024**3
+    fake_psutil = SimpleNamespace(virtual_memory=lambda: SimpleNamespace(available=8 * gib))
+    monkeypatch.delenv("FLYDSL_AOT_WORKERS")
+    monkeypatch.setenv("FLYDSL_AOT_MEM_PER_WORKER_GB", "2")
+    monkeypatch.setattr(parallel, "_affinity_aware_cpu_count", lambda: 16)
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    assert parallel._get_max_workers(num_jobs=100) == 4
 
 
 @pytest.mark.parametrize(

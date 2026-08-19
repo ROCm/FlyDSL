@@ -57,7 +57,7 @@ Use the same names as [`python/flydsl/utils/env.py`](../python/flydsl/utils/env.
 | AOT per-job timeout | `FLYDSL_AOT_TIMEOUT` (default `1200` seconds; non-positive disables) |
 | AOT abnormal-exit retries | `FLYDSL_AOT_MAX_RETRIES` (default `2`) |
 
-`flydsl.utils.parallel.run_jobs_parallel` uses the Linux `fork` multiprocessing
+`flydsl.utils.parallel.run_parallel_jobs` uses the Linux `fork` multiprocessing
 context and is intended for compile-only AOT jobs. It is not a device-runtime
 executor.
 

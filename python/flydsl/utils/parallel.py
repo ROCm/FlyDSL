@@ -220,7 +220,7 @@ def _run_file_pool(
     return results
 
 
-def run_jobs_parallel(
+def run_parallel_jobs(
     worker: Callable[..., dict[str, Any]],
     jobs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -271,4 +271,4 @@ def run_jobs_parallel(
     return results
 
 
-__all__ = ["run_jobs_parallel"]
+__all__ = ["run_parallel_jobs"]
