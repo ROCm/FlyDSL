@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-19T10:15:33Z",
+ "updated": "2026-08-19T10:18:54Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32241703763,
+   "pr": 1012,
+   "commit": "2755a9ec682d34c63de1f9c0be1b5a7ef3617468",
+   "branch": "rchamber/add_16x16x16_MFMA_support",
+   "event": "pull_request",
+   "title": "[MFMA] Add 16x16x16 bf16/f16 support with fly-fix-bitcast-width pass",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32241703763",
+   "created_at": "2026-08-19T10:14:28Z",
+   "updated_at": "2026-08-19T10:16:36Z",
+   "actor": "RichardChamberlain1",
+   "jobs": []
+  },
   {
    "run_id": 32241088864,
    "pr": 1012,
@@ -10,11 +25,11 @@
    "branch": "rchamber/add_16x16x16_MFMA_support",
    "event": "pull_request",
    "title": "[MFMA] Add 16x16x16 bf16/f16 support with fly-fix-bitcast-width pass",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32241088864",
    "created_at": "2026-08-19T10:07:06Z",
-   "updated_at": "2026-08-19T10:09:37Z",
+   "updated_at": "2026-08-19T10:14:57Z",
    "actor": "RichardChamberlain1",
    "jobs": []
   },
@@ -1804,52 +1819,6 @@
      "started_at": "2026-08-17T07:44:13Z",
      "completed_at": "2026-08-17T08:31:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32006057052/job/95318741283",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32000872789,
-   "pr": null,
-   "commit": "96af91bcab7703df1b8d5536ffbb4ff72b6dfacd",
-   "branch": "main",
-   "event": "push",
-   "title": "[CI] Skip amdgpu repo during manylinux image dnf install (#1014)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32000872789",
-   "created_at": "2026-08-17T06:15:06Z",
-   "updated_at": "2026-08-17T07:52:13Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-17T06:38:59Z",
-     "completed_at": "2026-08-17T07:37:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32000872789/job/95305333167",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-17T06:56:46Z",
-     "completed_at": "2026-08-17T07:11:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32000872789/job/95305333236",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-17T06:39:20Z",
-     "completed_at": "2026-08-17T07:52:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32000872789/job/95305333286",
      "log_fetch_failed": true
     }
    ]
