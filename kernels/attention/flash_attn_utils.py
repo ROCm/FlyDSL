@@ -386,7 +386,7 @@ def _lane_pair_reduce(v, reducer, fm_fast):
 
 
 def _score_pair_max(v_s, neg_inf, fm_fast):
-    reducer = lambda a, b, _fm: fx.maxnumf(a, b, fastmath=_fm)  # noqa: E731
+    reducer = lambda a, b, fm: fx.maxnumf(a, b, fastmath=fm)  # noqa: E731
     return _lane_pair_reduce(_reduce_score_pair(v_s, neg_inf, reducer, fm_fast), reducer, fm_fast)
 
 
