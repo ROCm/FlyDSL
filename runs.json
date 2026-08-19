@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-19T00:33:31Z",
+ "updated": "2026-08-19T00:35:22Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32201700343,
+   "pr": 1027,
+   "commit": "67a75305b4aa9d2b6a5db443c520f4e82f4bb2f1",
+   "branch": "skills/dedrift-and-fix-frontmatter",
+   "event": "pull_request",
+   "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32201700343",
+   "created_at": "2026-08-19T00:33:32Z",
+   "updated_at": "2026-08-19T00:34:24Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 32200398231,
    "pr": 1027,
@@ -10,11 +25,11 @@
    "branch": "skills/dedrift-and-fix-frontmatter",
    "event": "pull_request",
    "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32200398231",
    "created_at": "2026-08-19T00:13:25Z",
-   "updated_at": "2026-08-19T00:15:22Z",
+   "updated_at": "2026-08-19T00:33:34Z",
    "actor": "jhinpan",
    "jobs": []
   },
@@ -1824,52 +1839,6 @@
      "started_at": "2026-08-14T10:50:20Z",
      "completed_at": "2026-08-14T10:50:23Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31793679094/job/94746259217",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 31790212900,
-   "pr": null,
-   "commit": "01d63f7d04d5040e3d9df77feb6d083936b9d86a",
-   "branch": "main",
-   "event": "push",
-   "title": "[compiler] isolate mutable state across dynamic if branches (#1003)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31790212900",
-   "created_at": "2026-08-14T09:57:03Z",
-   "updated_at": "2026-08-14T11:49:17Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-14T10:23:21Z",
-     "completed_at": "2026-08-14T11:49:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31790212900/job/94740624546",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-14T10:23:04Z",
-     "completed_at": "2026-08-14T10:44:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31790212900/job/94740624556",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-14T10:23:32Z",
-     "completed_at": "2026-08-14T11:41:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31790212900/job/94740624645",
      "log_fetch_failed": true
     }
    ]
