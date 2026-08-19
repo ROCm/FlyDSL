@@ -54,8 +54,8 @@ public:
         src = bc.getArg();
       // Only protect if the ultimate source is a wider integer type.
       if (auto srcIntTy = dyn_cast<IntegerType>(src.getType())) {
-        int64_t dstBits = dstVecTy.getNumElements() *
-                          dstVecTy.getElementType().getIntOrFloatBitWidth();
+        int64_t dstBits =
+            dstVecTy.getNumElements() * dstVecTy.getElementType().getIntOrFloatBitWidth();
         if (srcIntTy.getWidth() > dstBits)
           extractsToProtect.push_back(op);
       }
@@ -93,8 +93,7 @@ public:
     for (auto extractOp : extractsToProtect) {
       builder.setInsertionPointAfter(extractOp);
       Value result = extractOp.getResult();
-      Value frozen = LLVM::FreezeOp::create(builder, extractOp.getLoc(),
-                                             result.getType(), result);
+      Value frozen = LLVM::FreezeOp::create(builder, extractOp.getLoc(), result.getType(), result);
       result.replaceAllUsesExcept(frozen, frozen.getDefiningOp());
     }
 

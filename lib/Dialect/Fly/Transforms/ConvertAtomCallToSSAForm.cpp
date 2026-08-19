@@ -132,9 +132,8 @@ public:
         LayoutBuilder<LayoutAttr> lb(builder.getContext());
         int32_t mmaCosize = layoutCosize(lb, mmaLayout).getLeafAsInt().getValue();
         if (regVecTy.getNumElements() > mmaCosize) {
-          val = vector::ExtractStridedSliceOp::create(
-              builder, loc, val, /*offsets=*/{0},
-              /*sizes=*/{mmaCosize}, /*strides=*/{1});
+          val = vector::ExtractStridedSliceOp::create(builder, loc, val, /*offsets=*/{0},
+                                                      /*sizes=*/{mmaCosize}, /*strides=*/{1});
         }
       };
 
