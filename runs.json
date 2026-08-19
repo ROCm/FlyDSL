@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-19T19:29:14Z",
+ "updated": "2026-08-19T19:44:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32294101577,
+   "pr": 1035,
+   "commit": "190712f843fac03b9762e1cfc9c74f0d80716c28",
+   "branch": "john/maxnumf-ambient-fastmath",
+   "event": "pull_request",
+   "title": "[Fix] Let fx.maxnumf inherit the ambient fastmath",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32294101577",
+   "created_at": "2026-08-19T19:38:03Z",
+   "updated_at": "2026-08-19T19:41:27Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 32293043249,
    "pr": 1027,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32293043249",
    "created_at": "2026-08-19T19:26:34Z",
-   "updated_at": "2026-08-19T19:27:06Z",
+   "updated_at": "2026-08-19T19:29:48Z",
    "actor": "jhinpan",
    "jobs": []
   },
@@ -89,11 +104,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T19:24:25Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32288703611/job/96197153650"
+     "completed_at": "2026-08-19T19:38:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32288703611/job/96197153650",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -1827,21 +1843,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32110444156/job/95872887657"
     }
    ]
-  },
-  {
-   "run_id": 32092905226,
-   "pr": null,
-   "commit": "4521c8cb5855aa902f3e99a50ca481c8ce64d61b",
-   "branch": "main",
-   "event": "push",
-   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention (#960)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32092905226",
-   "created_at": "2026-08-18T02:44:03Z",
-   "updated_at": "2026-08-18T13:37:39Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
