@@ -258,9 +258,9 @@ def _skip_reason(spec, N, K, tile_cfg, cluster):
     if spec["scale"] == "mx32":
         if K % SCALE_BLOCK_128 or tile_n % SCALE_BLOCK_32:
             return f"mx32 needs K={K} divisible by 128 and tile_n={tile_n} by {SCALE_BLOCK_32}"
-        # The 32x4 shuffle needs whole 32-row supers; only a8w8 handles a 16-row tile.
-        if tile_m % SCALE_BLOCK_32 and (spec["fp4_w"] or tile_m != 16):
-            return f"mx32 needs tile_m={tile_m} divisible by {SCALE_BLOCK_32}" + ("" if spec["fp4_w"] else " or == 16")
+        # The 32x4 shuffle is super-row granular; a 16-row tile reads its half of the containing super.
+        if tile_m % SCALE_BLOCK_32 and tile_m != 16:
+            return f"mx32 needs tile_m={tile_m} divisible by {SCALE_BLOCK_32} or == 16"
     return None
 
 
