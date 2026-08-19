@@ -60,7 +60,15 @@ def _swizzle_broadcast(width):
 
 
 def _dpp(value, ctrl, row_mask, old):
-    """One DPP move of *value*, with *old* wherever the move reaches nothing."""
+    """One DPP move of *value*, with *old* wherever the move reaches nothing.
+
+    ``bound_ctrl`` is off, which is what puts *old* there: the hardware's own
+    out-of-range fill writes zero, and zero is the identity of ``ADD`` alone.
+    Every caller passes the identity of the *op* it is folding with, so the
+    lanes a move does not reach drop out of that fold whatever the op is. Turning
+    ``bound_ctrl`` on to save the operand would silently break ``MUL``, ``MAX``
+    and ``MIN``.
+    """
     dtype = value.dtype
     moved = update_dpp(
         dtype.ir_type,
@@ -82,7 +90,7 @@ def _swizzle(value, offset):
     return moved if dtype is Int32 else moved.bitcast(dtype)
 
 
-def _dpp_applies(value, width):
+def _dpp_applies(value):
     """Whether the sequences below cover this call, or the portable ones have to.
 
     - **gfx9.** Every control used here -- ``row_bcast``, ``wave_shr``,
@@ -90,10 +98,8 @@ def _dpp_applies(value, width):
     - **A 32-bit scalar.** ``update_dpp`` and ``ds_swizzle`` both move one
       32-bit lane value; a narrower type would have to be packed and a wider
       one split.
-    - **A group no wider than the wave.** gfx9 is wave64 throughout, so this
-      only rejects a caller that asked for something meaningless.
     """
-    if width > 64 or not current_target().arch.startswith("gfx9"):
+    if not current_target().arch.startswith("gfx9"):
         return False
     return isinstance(value, Numeric) and value.dtype.width == 32
 
@@ -171,7 +177,7 @@ def warp_reduce(value, op, *, width=None):
     :func:`~flydsl.extension.coop.warp.reduce.warp_reduce`.
     """
     width = resolve_warp_width(width, "warp_reduce width")
-    if not _dpp_applies(value, width):
+    if not _dpp_applies(value):
         return _portable_warp_reduce(value, op, width=width)
     if width == 64:
         return _wave64_reduce(value, op)
@@ -184,10 +190,11 @@ def warp_reduce(value, op, *, width=None):
 def _inclusive_scan(value, op, width):
     """The raw inclusive scan: ``log2(width)`` rounds, all of them DPP moves."""
     neutral = identity(op, value.dtype)
-    # Within a 16-lane row ``row_shr:k`` is exactly the round's shift, and
-    # ``bound_ctrl`` supplies identity at the row's start for free. A group
-    # narrower than a row shares that row with its neighbours, so it is the one
-    # case that has to mask the reads crossing into them itself.
+    # Within a 16-lane row ``row_shr:k`` is exactly the round's shift, and the
+    # lanes at the row's start read nothing, so ``_dpp`` hands them the identity
+    # and they fold away for free. A group narrower than a row shares that row
+    # with its neighbours, so it is the one case that has to mask the reads
+    # crossing into them itself.
     in_group = lane_id() % width if width < 16 else None
 
     acc = value
@@ -214,10 +221,10 @@ def _shift_up(inclusive, op, width):
     """Turn an inclusive scan into the exclusive one by moving it up a lane.
 
     ``row_shr:1`` covers a group inside a row and ``wave_shr:1`` one spanning
-    rows; either way ``bound_ctrl`` puts identity in front of the lane it
-    shifted in from nowhere. That lane is the group's first only when the group
-    starts where the row (or the wave) does, so the two widths that sit inside
-    a larger unit -- under 16 lanes, or 32 -- name their own first lane.
+    rows; either way the lane that shifted in from nowhere reads nothing, so
+    ``_dpp`` gives it the identity. That lane is the group's first only when the
+    group starts where the row (or the wave) does, so the two widths that sit
+    inside a larger unit -- under 16 lanes, or 32 -- name their own first lane.
     """
     neutral = identity(op, inclusive.dtype)
     ctrl = _ROW_SHR[1] if width <= 16 else _WAVE_SHR1
@@ -247,7 +254,7 @@ def warp_inclusive_scan(value, op, *, width=None, init=None):
     :func:`~flydsl.extension.coop.warp.scan.warp_inclusive_scan`.
     """
     width = resolve_warp_width(width, "warp_inclusive_scan width")
-    if not _dpp_applies(value, width):
+    if not _dpp_applies(value):
         return _universal_scan.warp_inclusive_scan(value, op, width=width, init=init)
     return seed(_inclusive_scan(value, op, width), op, init)
 
@@ -259,7 +266,7 @@ def warp_exclusive_scan(value, op, *, width=None, init=None):
     :func:`~flydsl.extension.coop.warp.scan.warp_exclusive_scan`.
     """
     width = resolve_warp_width(width, "warp_exclusive_scan width")
-    if not _dpp_applies(value, width):
+    if not _dpp_applies(value):
         return _universal_scan.warp_exclusive_scan(value, op, width=width, init=init)
     return seed(_shift_up(_inclusive_scan(value, op, width), op, width), op, init)
 
@@ -271,7 +278,7 @@ def warp_scan(value, op, *, width=None, init=None):
     :func:`~flydsl.extension.coop.warp.scan.warp_scan`.
     """
     width = resolve_warp_width(width, "warp_scan width")
-    if not _dpp_applies(value, width):
+    if not _dpp_applies(value):
         return _universal_scan.warp_scan(value, op, width=width, init=init)
     raw = _inclusive_scan(value, op, width)
     return seed(raw, op, init), seed(_shift_up(raw, op, width), op, init)
@@ -284,7 +291,7 @@ def warp_scan_with_aggregate(value, op, *, width=None, init=None):
     :func:`~flydsl.extension.coop.warp.scan.warp_scan_with_aggregate`.
     """
     width = resolve_warp_width(width, "warp_scan_with_aggregate width")
-    if not _dpp_applies(value, width):
+    if not _dpp_applies(value):
         return _universal_scan.warp_scan_with_aggregate(value, op, width=width, init=init)
     raw = _inclusive_scan(value, op, width)
     inclusive = seed(raw, op, init)

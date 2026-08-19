@@ -63,8 +63,8 @@ class BlockAlgorithmMeta(type):
             raise TypeError(f"expected a {cls._algorithms.__name__}, got {algorithm!r}")
         block_size = _block_shape(block_size)
         block_threads = block_size[0] * block_size[1] * block_size[2]
-        # A power-of-two product forces every dimension to be one too, so the
-        # dimensions need no separate check.
+        # A power-of-two product forces every dimension to be a power of two
+        # too, so the dimensions need no separate check.
         require_power_of_two(block_threads, "block_dim_x * block_dim_y * block_dim_z")
         # A block narrower than the wave leaves the wave's remaining lanes
         # unlaunched, and a cross-lane read of one of those is undefined — so

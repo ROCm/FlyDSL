@@ -67,6 +67,12 @@ def _prefix_warp_scans(partial, tid, slots, op, warp_scan_with_aggregate, warp_t
         barrier()
         # Highest warp first, so the operands stay in block order: a thread in
         # warp w ends up with slots[0] ⊕ ... ⊕ slots[w-1] ⊕ its own warp prefix.
+
+        # TODO: this and the aggregate below are linear in num_warps, and every
+        # thread walks both — 2 * (num_warps - 1) folds each, so 30 at a
+        # 1024-thread wave64 block. Scanning *slots* in one warp instead would
+        # make it logarithmic: warp 0 scans the num_warps totals, and each
+        # thread then reads the single entry in front of its own warp.
         for i in range_constexpr(num_warps - 2, -1, -1):
             prefix = (warp_id > i).select(combine(op, slots[i], prefix), prefix)
         # Same slots, folded unconditionally: that is the whole block.
@@ -111,9 +117,9 @@ class BlockScan(metaclass=_BlockScanMeta):
 
     Specialize it, allocate its shared storage, then ask for the form you want::
 
-        block_scan = fx.coop.BlockScan[fx.Float32, 256] storage =
-        fx.SharedAllocator().allocate(block_scan.SharedStorage).peek() running =
-        block_scan.inclusive(value, fx.ReductionOp.ADD, storage=storage)
+        block_scan = fx.coop.BlockScan[fx.Float32, 256]
+        storage = fx.SharedAllocator().allocate(block_scan.SharedStorage).peek()
+        running = block_scan.inclusive(value, fx.ReductionOp.ADD, storage=storage)
 
     The parameters are ``[dtype, block_size, algorithm]``, exactly as for
     :class:`~flydsl.extension.coop.BlockReduce` — *block_size* is either the x extent or the full
@@ -130,11 +136,11 @@ class BlockScan(metaclass=_BlockScanMeta):
     block_aggregate)`` instead. The aggregate is the fold of every thread's input, valid in all of
     them. It reuses what the scan already staged in shared memory, so it adds ``num_warps - 1``
     folds and no traffic at all — and nothing whatsoever when a caller ignores it. It is what lets a
-    kernel carry a running total across tiles::
+    kernel carry a running total across tiles.
 
-        for tile, (running,) in range(0, n_tiles, init=[fx.Float32(0)]):
-            out, total = block_scan.exclusive_with_aggregate(x, op, storage=s, init=running) yield
-            [running + total]
+    Every thread of the block has to reach the call, and reach it together, exactly as for
+    :class:`~flydsl.extension.coop.BlockReduce`: it synchronizes the block and reads across lanes,
+    and the specialization's *block_size* has to be the size the kernel is actually launched with.
 
     Threads are ordered by their linear id, and *op* has to be associative but not commutative:
     every fold on the way, the warp-scope scan included, keeps its operands in that order. That is

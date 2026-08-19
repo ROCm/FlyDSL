@@ -64,7 +64,8 @@ def width_id(width):
 requires_dpp = pytest.mark.skipif(not _is_gfx9(), reason="the DPP sequence is gfx9-only")
 
 
-@pytest.mark.l1a_compile_no_target_dialect
+@pytest.mark.l1b_target_dialect
+@pytest.mark.rocm_lower
 def test_rocm_resolves_every_warp_collective_to_the_override():
     """On the ROCm backend the public names are the target's, not the portable ones."""
     from flydsl.extension.coop import warp

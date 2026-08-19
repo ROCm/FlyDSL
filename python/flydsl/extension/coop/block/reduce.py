@@ -75,6 +75,11 @@ def _reduce_warp_reductions(partial, tid, slots, op, warp_reduce, warp_threads, 
         barrier()
         # Every thread folds the same num_warps values, so the result is valid
         # block-wide and no second barrier is needed to broadcast it.
+
+        # TODO: that fold is linear in num_warps and every thread walks it —
+        # num_warps - 1 combines each, so 15 at a 1024-thread wave64 block.
+        # Reducing *slots* in one warp instead would make it logarithmic, at the
+        # cost of the second barrier this shape is currently free of.
         total = slots[0]
         for i in range_constexpr(1, num_warps):
             total = combine(op, total, slots[i])
@@ -189,6 +194,10 @@ class BlockReduce(metaclass=_BlockReduceMeta):
 
     ``value`` is either one scalar per thread or a ``Vector`` of several per-thread items. The
     result is valid in every thread of the block, not only in one of them.
+
+    Every thread of the block has to reach this call, and reach it together. It synchronizes the
+    block and reads across lanes, so a call made under a condition that is not uniform block-wide
+    hangs on the barrier or folds in lanes with no defined value.
 
     *op* must be commutative under every algorithm implemented so far, and associative under all of
     them; :class:`BlockReduceAlgorithm` says where that comes from and why no policy is currently

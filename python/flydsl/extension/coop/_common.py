@@ -23,9 +23,12 @@ def require_power_of_two(value, what):
 
 
 def resolve_warp_width(width, what):
+    warp_threads = num_warp_threads()
     if width is None:
-        width = num_warp_threads()
+        return warp_threads
     require_power_of_two(width, what)
+    if width > warp_threads:
+        raise ValueError(f"{what} must not exceed the target's {warp_threads}-lane warp, got {width}")
     return width
 
 
