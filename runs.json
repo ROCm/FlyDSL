@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-19T02:33:17Z",
+ "updated": "2026-08-19T03:00:28Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,21 +10,22 @@
    "branch": "skills/dedrift-and-fix-frontmatter",
    "event": "pull_request",
    "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32201700343",
    "created_at": "2026-08-19T00:33:32Z",
-   "updated_at": "2026-08-19T01:38:27Z",
+   "updated_at": "2026-08-19T02:58:03Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T01:38:25Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32201700343/job/95928181402"
+     "completed_at": "2026-08-19T02:58:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32201700343/job/95928181402",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -39,11 +40,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T01:38:26Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32201700343/job/95928181429"
+     "completed_at": "2026-08-19T02:52:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32201700343/job/95928181429",
+     "log_fetch_failed": true
     }
    ]
   },
