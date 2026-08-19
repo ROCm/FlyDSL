@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-08-19T21:29:43Z",
+ "updated": "2026-08-19T22:00:35Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32306567897,
+   "pr": 1037,
+   "commit": "0f98781edc7697097be16c48d5cfa39f118891c1",
+   "branch": "jhinpan/fix-exp2-fastmath",
+   "event": "pull_request",
+   "title": "[ROCDL] Lower approximate exp2 to native intrinsic",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306567897",
+   "created_at": "2026-08-19T21:58:33Z",
+   "updated_at": "2026-08-19T21:59:20Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 32306348107,
+   "pr": 1037,
+   "commit": "a5bca1f80ea662a816272333b82eeadce82fdc54",
+   "branch": "jhinpan/fix-exp2-fastmath",
+   "event": "pull_request",
+   "title": "[ROCDL] Lower approximate exp2 to native intrinsic",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306348107",
+   "created_at": "2026-08-19T21:55:50Z",
+   "updated_at": "2026-08-19T21:58:35Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 32305613373,
+   "pr": 1036,
+   "commit": "1e6e45a1beade48086f36d7459d801d323cd1da2",
+   "branch": "john/loud-aiter-skip",
+   "event": "pull_request",
+   "title": "[Test] Print when aiter is missing instead of collecting nothing",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32305613373",
+   "created_at": "2026-08-19T21:46:50Z",
+   "updated_at": "2026-08-19T21:49:04Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 32298273166,
    "pr": 1027,
@@ -188,29 +233,30 @@
    "branch": "jhinpan/softmax-autotune",
    "event": "pull_request",
    "title": "[Kernel] Add opt-in autotuning for Softmax",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32291906140",
    "created_at": "2026-08-19T19:14:16Z",
-   "updated_at": "2026-08-19T19:57:37Z",
+   "updated_at": "2026-08-19T21:58:52Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T19:57:37Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32291906140/job/96206506109"
+     "completed_at": "2026-08-19T21:31:06Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32291906140/job/96206506109",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-19T19:57:35Z",
-     "completed_at": null,
+     "completed_at": "2026-08-19T21:58:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32291906140/job/96206506113"
     },
     {
@@ -256,7 +302,7 @@
   },
   {
    "run_id": 32288703611,
-   "pr": 1034,
+   "pr": null,
    "commit": "9d4a021566c34aa30083ce4496d89a0f2cab1e11",
    "branch": "john/maxnumf-fastmath",
    "event": "pull_request",
@@ -395,31 +441,21 @@
    "branch": "rchamber/add_16x16x16_MFMA_support",
    "event": "pull_request",
    "title": "[MFMA] Add 16x16x16 bf16/f16 support with fly-fix-bitcast-width pass",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123",
    "created_at": "2026-08-19T13:07:55Z",
-   "updated_at": "2026-08-19T17:52:03Z",
+   "updated_at": "2026-08-19T21:47:37Z",
    "actor": "RichardChamberlain1",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-19T16:49:39Z",
-     "completed_at": "2026-08-19T17:52:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123/job/96149871926"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-19T14:28:49Z",
-     "completed_at": "2026-08-19T14:46:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123/job/96149873209",
-     "log_fetch_failed": true
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T21:47:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123/job/96237356191"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -428,7 +464,17 @@
      "conclusion": "success",
      "started_at": "2026-08-19T14:29:01Z",
      "completed_at": "2026-08-19T16:20:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123/job/96149873542",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123/job/96237357405",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-19T14:28:49Z",
+     "completed_at": "2026-08-19T14:46:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123/job/96237385272",
      "log_fetch_failed": true
     }
    ]
@@ -1729,82 +1775,6 @@
      "started_at": "2026-08-19T00:11:24Z",
      "completed_at": "2026-08-19T01:17:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32130866237/job/95878533031",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32130468240,
-   "pr": 1025,
-   "commit": "c5ca77668e14c3fa607ecdc333a094b136af0083",
-   "branch": "dsl-ify-scf-controlflow",
-   "event": "pull_request",
-   "title": "[Kernel] Replace raw scf ops with Python control flow in kernels",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32130468240",
-   "created_at": "2026-08-18T11:11:07Z",
-   "updated_at": "2026-08-18T11:15:57Z",
-   "actor": "xudoyuan",
-   "jobs": []
-  },
-  {
-   "run_id": 32125806929,
-   "pr": null,
-   "commit": "81462524428562bc202b176de69e98fcffbcdddb",
-   "branch": "pr/fix-gfx1250-wave-size",
-   "event": "pull_request",
-   "title": "[ROCDL] Fix wave size for gfx1250 (wave32, not wave64)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32125806929",
-   "created_at": "2026-08-18T10:14:58Z",
-   "updated_at": "2026-08-18T10:16:53Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 32124542325,
-   "pr": 971,
-   "commit": "a74da809399730403ed8ef21dbf5ac3a27e07a2a",
-   "branch": "gfx1250/gemm-opt-0805",
-   "event": "pull_request",
-   "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32124542325",
-   "created_at": "2026-08-18T10:00:21Z",
-   "updated_at": "2026-08-19T01:46:12Z",
-   "actor": "aoli26",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-18T22:17:15Z",
-     "completed_at": "2026-08-18T22:30:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32124542325/job/95883687834",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-19T00:36:59Z",
-     "completed_at": "2026-08-19T01:46:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32124542325/job/95883687895",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-18T23:02:29Z",
-     "completed_at": "2026-08-19T01:11:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32124542325/job/95883687906",
      "log_fetch_failed": true
     }
    ]
