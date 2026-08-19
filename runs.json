@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-19T08:42:24Z",
+ "updated": "2026-08-19T08:47:10Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "john/bf16-attn-xcd-swizzle",
    "event": "pull_request",
    "title": "[Fix] Restore the gfx950 XCD mapping for bf16 dense attention",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32233695138",
    "created_at": "2026-08-19T08:39:43Z",
-   "updated_at": "2026-08-19T08:41:20Z",
+   "updated_at": "2026-08-19T08:44:00Z",
    "actor": "JohnQinAMD",
    "jobs": []
   },
