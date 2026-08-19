@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-19T01:23:24Z",
+ "updated": "2026-08-19T01:38:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -705,21 +705,22 @@
    "branch": "pr/fix-mlir-filecheck-all-run-lines",
    "event": "pull_request",
    "title": "[Test] Run every RUN line in the MLIR FileCheck harness",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32121325896",
    "created_at": "2026-08-18T09:23:16Z",
-   "updated_at": "2026-08-18T23:31:18Z",
+   "updated_at": "2026-08-19T01:37:12Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-18T23:31:17Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32121325896/job/95882864593"
+     "completed_at": "2026-08-19T01:37:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32121325896/job/95882864593",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
