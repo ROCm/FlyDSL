@@ -51,9 +51,26 @@ class FakeTensor:
 
 @pytest.fixture(autouse=True)
 def _isolate_env(tmp_path, monkeypatch):
+    """Isolate the module-level tuner's in-memory and on-disk state."""
+    _softmax_tuner.cache.clear()
+    _softmax_tuner._artifact_cache.clear()
     monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(
+        _softmax_tuner,
+        "_cache_file",
+        tmp_path / "cache" / _softmax_tuner._cache_file.name,
+    )
     monkeypatch.delenv("FLYDSL_AUTOTUNE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    yield
+    _softmax_tuner.cache.clear()
+    _softmax_tuner._artifact_cache.clear()
+
+
+def test_tuner_state_uses_the_per_test_cache(tmp_path):
+    assert _softmax_tuner.cache == {}
+    assert _softmax_tuner._artifact_cache == {}
+    assert _softmax_tuner._cache_file.parent == tmp_path / "cache"
 
 
 def _identities(configs):
