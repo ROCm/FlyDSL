@@ -59,7 +59,20 @@ Use the same names as [`python/flydsl/utils/env.py`](../python/flydsl/utils/env.
 
 `flydsl.utils.parallel.run_parallel_jobs` uses the Linux `fork` multiprocessing
 context and is intended for compile-only AOT jobs. It is not a device-runtime
-executor.
+executor. Its automatic memory cap requires the runtime `psutil` dependency and
+fails with an actionable error instead of silently disabling the cap when
+memory cannot be queried. A worker killed by `SIGKILL` (`exitcode=-9`, or shell
+form `137`; possible OOM) halves the worker limit before retrying and is not
+retried once the limit reaches one.
+Progress and final summary lines report terminal failure counts separately from
+the number of jobs that have finished.
+
+Failed results retain `compile_time=None` and include a machine-readable
+`failure` mapping. Its `kind` distinguishes `compile_error`,
+`worker_exception`, `worker_crash`, `possible_oom`, `timeout`,
+`invalid_result`, and `scheduler_error`; `reason` and `attempts` are always
+included when known, while process failures also carry `exitcode` and uncaught
+Python exceptions carry `traceback`.
 
 Session-level pytest options are supported in `tests/conftest.py`:
 

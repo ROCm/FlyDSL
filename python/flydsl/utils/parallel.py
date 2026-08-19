@@ -8,8 +8,10 @@ import json
 import multiprocessing
 import os
 import shutil
+import signal
 import tempfile
 import time
+import traceback
 from collections.abc import Callable
 from multiprocessing.connection import wait as wait_for_sentinels
 from pathlib import Path
@@ -19,6 +21,13 @@ from .env import aot
 from .file import atomic_write
 
 _DEFAULT_MAX_WORKERS = 64
+_POSSIBLE_OOM_EXITCODES = {-signal.SIGKILL, 128 + signal.SIGKILL}
+_WORKER_EXCEPTION_KEY = "__flydsl_worker_exception__"
+
+
+def _write_json_file(out_path: str, payload: Any) -> None:
+    with atomic_write(Path(out_path), mode="w", encoding="utf-8") as output:
+        json.dump(payload, output)
 
 
 def _run_one_to_file(
@@ -26,9 +35,21 @@ def _run_one_to_file(
     kwargs: dict[str, Any],
     out_path: str,
 ) -> None:
-    result = worker(**kwargs)
-    with atomic_write(Path(out_path), mode="w", encoding="utf-8") as output:
-        json.dump(result, output)
+    try:
+        result = worker(**kwargs)
+        _write_json_file(out_path, result)
+    except Exception as error:
+        _write_json_file(
+            out_path,
+            {
+                _WORKER_EXCEPTION_KEY: {
+                    "kind": "worker_exception",
+                    "reason": f"{type(error).__name__}: {error}",
+                    "traceback": traceback.format_exc(),
+                }
+            },
+        )
+        raise
 
 
 def _affinity_aware_cpu_count() -> int:
@@ -55,10 +76,19 @@ def _memory_worker_cap(default_workers: int) -> int:
 
     try:
         import psutil
+    except ImportError as error:
+        raise RuntimeError(
+            "psutil is required for automatic AOT worker memory limiting; "
+            "install FlyDSL runtime dependencies or set FLYDSL_AOT_WORKERS explicitly"
+        ) from error
 
+    try:
         available_gb = psutil.virtual_memory().available / (1024**3)
-    except Exception:  # noqa: BLE001
-        return default_workers
+    except Exception as error:
+        raise RuntimeError(
+            "failed to query available memory for the AOT worker limit; "
+            "set FLYDSL_AOT_WORKERS explicitly to bypass automatic detection"
+        ) from error
     return min(default_workers, max(1, int(available_gb / per_worker_gb)))
 
 
@@ -73,6 +103,32 @@ def _get_max_workers(num_jobs: int) -> int:
 
 def _job_label(job: dict[str, Any]) -> str:
     return str(job.get("kernel_name", "?"))
+
+
+def _failure_result(
+    job: dict[str, Any],
+    *,
+    kind: str,
+    reason: str,
+    attempts: int | None = None,
+    exitcode: int | None = None,
+    traceback_text: str | None = None,
+) -> dict[str, Any]:
+    failure: dict[str, Any] = {
+        "kind": kind,
+        "reason": reason,
+    }
+    if attempts is not None:
+        failure["attempts"] = attempts
+    if exitcode is not None:
+        failure["exitcode"] = exitcode
+    if traceback_text is not None:
+        failure["traceback"] = traceback_text
+    return {
+        "kernel_name": _job_label(job),
+        "compile_time": None,
+        "failure": failure,
+    }
 
 
 def _run_file_pool(
@@ -91,6 +147,7 @@ def _run_file_pool(
     attempts = [0] * num_jobs
     retries_used = 0
     completed = 0
+    failed_jobs = 0
     progress_stride = max(1, num_jobs // 20)
 
     queue = list(range(num_jobs))
@@ -114,13 +171,46 @@ def _run_file_pool(
             deadline = time.monotonic() + kernel_timeout if kernel_timeout > 0 else None
             running[process] = (index, deadline)
 
-    def note_done() -> None:
-        nonlocal completed
+    def note_done(*, is_failure: bool = False) -> None:
+        nonlocal completed, failed_jobs
         completed += 1
+        failed_jobs += int(is_failure)
         if completed % progress_stride == 0 or completed == num_jobs:
-            print(f"  ... {completed}/{num_jobs} jobs done", flush=True)
+            print(
+                f"  ... {completed}/{num_jobs} jobs finished ({failed_jobs} failed)",
+                flush=True,
+            )
 
-    def retry_or_drop(index: int, reason: str) -> None:
+    def finish_failure(
+        index: int,
+        *,
+        kind: str,
+        reason: str,
+        exitcode: int | None = None,
+        traceback_text: str | None = None,
+    ) -> None:
+        results[index] = _failure_result(
+            jobs[index],
+            kind=kind,
+            reason=reason,
+            attempts=attempts[index] + 1,
+            exitcode=exitcode,
+            traceback_text=traceback_text,
+        )
+        print(
+            f"[flydsl] AOT job {_job_label(jobs[index])} {reason}; not retrying",
+            flush=True,
+        )
+        note_done(is_failure=True)
+
+    def retry_or_drop(
+        index: int,
+        *,
+        kind: str,
+        reason: str,
+        exitcode: int | None = None,
+        traceback_text: str | None = None,
+    ) -> None:
         nonlocal retries_used
         if attempts[index] < max_retries:
             attempts[index] += 1
@@ -131,35 +221,108 @@ def _run_file_pool(
                 flush=True,
             )
         else:
-            note_done()
+            finish_failure(
+                index,
+                kind=kind,
+                reason=reason,
+                exitcode=exitcode,
+                traceback_text=traceback_text,
+            )
 
     def reap(process: Any) -> None:
+        nonlocal max_workers
         index, _ = running.pop(process)
         out_path = os.path.join(result_dir, f"k{index}.json")
         try:
-            if process.exitcode != 0:
-                retry_or_drop(
-                    index,
-                    f"worker crashed (exitcode={process.exitcode})",
-                )
-                return
-
-            result: dict[str, Any] | None = None
+            loaded: Any = None
+            load_error: str | None = None
             if os.path.isfile(out_path):
                 try:
                     with open(out_path, encoding="utf-8") as result_file:
                         loaded = json.load(result_file)
-                    if isinstance(loaded, dict):
-                        result = loaded
-                except Exception:  # noqa: BLE001
-                    result = None
-            if result is None:
-                result = {
-                    "kernel_name": _job_label(jobs[index]),
-                    "compile_time": None,
-                }
+                except Exception as error:  # noqa: BLE001
+                    load_error = f"failed to read worker result: {type(error).__name__}: {error}"
+            else:
+                load_error = "worker produced no result file"
+
+            if process.exitcode in _POSSIBLE_OOM_EXITCODES:
+                previous_max_workers = max_workers
+                max_workers = max(1, max_workers // 2)
+                reason = (
+                    "worker killed by SIGKILL (possible OOM)"
+                    if process.exitcode == -signal.SIGKILL
+                    else f"worker exited with code {process.exitcode} (possible OOM)"
+                )
+                if max_workers == previous_max_workers:
+                    finish_failure(
+                        index,
+                        kind="possible_oom",
+                        reason=f"{reason} at the minimum worker limit",
+                        exitcode=process.exitcode,
+                    )
+                else:
+                    retry_or_drop(
+                        index,
+                        kind="possible_oom",
+                        reason=(f"{reason}; reduced worker limit {previous_max_workers}->{max_workers}"),
+                        exitcode=process.exitcode,
+                    )
+                return
+
+            if process.exitcode != 0:
+                worker_exception = loaded.get(_WORKER_EXCEPTION_KEY) if isinstance(loaded, dict) else None
+                if isinstance(worker_exception, dict):
+                    reason = str(
+                        worker_exception.get(
+                            "reason",
+                            f"worker raised an exception (exitcode={process.exitcode})",
+                        )
+                    )
+                    traceback_text = worker_exception.get("traceback")
+                    if not isinstance(traceback_text, str):
+                        traceback_text = None
+                    kind = "worker_exception"
+                else:
+                    reason = f"worker crashed (exitcode={process.exitcode})"
+                    traceback_text = None
+                    kind = "worker_crash"
+                retry_or_drop(
+                    index,
+                    kind=kind,
+                    reason=reason,
+                    exitcode=process.exitcode,
+                    traceback_text=traceback_text,
+                )
+                return
+
+            if load_error is not None:
+                finish_failure(
+                    index,
+                    kind="invalid_result",
+                    reason=load_error,
+                    exitcode=process.exitcode,
+                )
+                return
+            if not isinstance(loaded, dict) or _WORKER_EXCEPTION_KEY in loaded:
+                finish_failure(
+                    index,
+                    kind="invalid_result",
+                    reason=(f"worker returned {type(loaded).__name__}, expected a dictionary"),
+                    exitcode=process.exitcode,
+                )
+                return
+
+            result = loaded
+            if result.get("compile_time") is None:
+                failure = result.get("failure")
+                if not isinstance(failure, dict):
+                    failure = {}
+                    result["failure"] = failure
+                failure.setdefault("kind", "compile_error")
+                failure.setdefault("reason", "worker returned compile_time=None")
+                failure.setdefault("attempts", attempts[index] + 1)
             results[index] = result
-            note_done()
+            note_done(is_failure=result.get("compile_time") is None)
         finally:
             process.close()
 
@@ -190,10 +353,13 @@ def _run_file_pool(
                         process.kill()
                         process.join()
                         running.pop(process)
+                        exitcode = process.exitcode
                         process.close()
                         retry_or_drop(
                             index,
-                            f"exceeded per-job timeout ({kernel_timeout:.0f}s); killed",
+                            kind="timeout",
+                            reason=(f"exceeded per-job timeout ({kernel_timeout:.0f}s); killed"),
+                            exitcode=exitcode,
                         )
 
             launch()
@@ -212,11 +378,13 @@ def _run_file_pool(
                     pass
         running.clear()
 
-    if retries_used:
-        print(
-            f"[flydsl] AOT: {retries_used} retr{'y' if retries_used == 1 else 'ies'} after abnormal worker exits",
-            flush=True,
-        )
+    retry_label = "retry" if retries_used == 1 else "retries"
+    print(
+        f"[flydsl] AOT: {num_jobs - failed_jobs} succeeded, "
+        f"{failed_jobs} failed; {retries_used} {retry_label} "
+        "after abnormal worker exits",
+        flush=True,
+    )
     return results
 
 
@@ -229,11 +397,16 @@ def run_parallel_jobs(
     Each job is expanded into ``worker(**job)``. Workers must return a
     JSON-serializable dictionary containing ``compile_time``; deterministic
     compile errors should be represented by ``compile_time=None`` rather than
-    escaping as an exception. Abnormal exits and timeouts are retried before
-    being normalized to the same failure shape.
+    escaping as an exception. Every failed result keeps ``compile_time=None``
+    for compatibility and adds a ``failure`` dictionary with machine-readable
+    ``kind``, ``reason``, and ``attempts`` fields. Process failures also include
+    ``exitcode``; uncaught Python exceptions include ``traceback``.
 
     This executor uses the Linux ``fork`` multiprocessing context because it is
     intended for compile-only workers that inherit the initialized compiler.
+    A possible OOM exit (``-SIGKILL`` or shell-style ``137``) halves the
+    concurrency limit before retrying and is not retried once that limit
+    reaches one.
     """
     if not jobs:
         return []
@@ -261,10 +434,11 @@ def run_parallel_jobs(
     for job, result in zip(jobs, raw_results):
         if result is None:
             results.append(
-                {
-                    "kernel_name": _job_label(job),
-                    "compile_time": None,
-                }
+                _failure_result(
+                    job,
+                    kind="scheduler_error",
+                    reason="scheduler returned no result for the job",
+                )
             )
         else:
             results.append(result)
