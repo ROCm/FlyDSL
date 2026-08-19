@@ -16,9 +16,53 @@ This module provides access to ROCm-specific GPU operations including:
 
 from ..._mlir.dialects.rocdl import *  # noqa: F401,F403
 from ..meta import dsl_loc_tracing
+from . import cdna3 as cdna3
 from . import cdna4 as cdna4
 from . import cdna5 as cdna5
+from . import rdna3 as rdna3
+from . import rdna4 as rdna4
 from .enum import SyncScope as SyncScope
+from .universal import *
+
+__all__ = [
+    # Targets
+    "cdna3",
+    "cdna4",
+    # "cdna5", unstable for now
+    "rdna3",
+    "rdna4",
+    # Enums
+    "SyncScope",
+    # Re-exported from .universal
+    "s_waitcnt",
+    "asyncmark",
+    "wait_asyncmark",
+    "BufferCopy",
+    "BufferCopy8b",
+    "BufferCopy16b",
+    "BufferCopy32b",
+    "BufferCopy64b",
+    "BufferCopy128b",
+    "BufferCopyLDS",
+    "BufferCopyLDS32b",
+    "BufferCopyLDS64b",  # Deprecated: no 8-byte LDS DMA exists; use 32b / 128b
+    "BufferCopyLDS128b",
+    "BufferAtomic",
+    "BufferAtomicAdd",
+    "BufferAtomicMax",
+    "BufferAtomicMin",
+    "BufferAtomicPkAdd",
+    "MFMA",
+    "WMMA",
+    "make_buffer_ptr",
+    "make_buffer_tensor",
+    "get_buffer_rsrc",
+    # Operations
+    "sched_mfma",
+    "sched_vmem",
+    "sched_dsrd",
+    "sched_dswr",
+]
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
 _ods_wmma_scale_f32_16x16x128_f8f6f4 = globals().get("wmma_scale_f32_16x16x128_f8f6f4", None)
@@ -49,10 +93,59 @@ _ods_mfma_f32_16x16x32_bf16 = globals().get("mfma_f32_16x16x32_bf16", None)
 _ods_mfma_scale_f32_16x16x128_f8f6f4 = globals().get("mfma_scale_f32_16x16x128_f8f6f4", None) or globals().get(
     "mfma_scale_f32_16x16x128_f8f6f4_", None
 )
+_ods_mfma_scale_f32_32x32x64_f8f6f4 = globals().get("mfma_scale_f32_32x32x64_f8f6f4", None) or globals().get(
+    "mfma_scale_f32_32x32x64_f8f6f4_", None
+)
 mask_mfma = 0x008
 mask_vmem_rd = 0x020
 mask_dsrd = 0x100
 mask_dswr = 0x200
+
+_ods_sched_barrier = globals().get("sched_barrier")
+_ods_sched_group_barrier = globals().get("sched_group_barrier")
+
+_SCHED_MASK_INT_TO_KW = {
+    0x000: "none",
+    0x001: "non_mem_non_sideeffect",
+    0x002: "valu",
+    0x004: "salu",
+    0x008: "mfma_wmma",
+    0x010: "all_vmem",
+    0x020: "vmem_read",
+    0x040: "vmem_write",
+    0x080: "all_ds",
+    0x100: "ds_read",
+    0x200: "ds_write",
+    0x400: "transcendental",
+    0x800: "ldsdma",
+}
+
+
+def _mask_to_attr(mask):
+    """Convert an int or keyword mask to a SchedGroupMask attribute."""
+    from ..._mlir import ir as _ir
+
+    if isinstance(mask, _ir.Attribute):
+        return mask
+    if isinstance(mask, str):
+        return _ir.Attribute.parse(f"#rocdl<sched_group_mask {mask}>")
+    val = int(mask)
+    if val == 0:
+        return _ir.Attribute.parse("#rocdl<sched_group_mask none>")
+    parts = [kw for bit, kw in _SCHED_MASK_INT_TO_KW.items() if bit and val & bit]
+    if not parts:
+        return _ir.Attribute.parse("#rocdl<sched_group_mask none>")
+    return _ir.Attribute.parse(f"#rocdl<sched_group_mask {'|'.join(parts)}>")
+
+
+@dsl_loc_tracing
+def sched_barrier(mask, **kw):
+    return _ods_sched_barrier(_mask_to_attr(mask), **kw)
+
+
+@dsl_loc_tracing
+def sched_group_barrier(mask, size, group_id, **kw):
+    return _ods_sched_group_barrier(_mask_to_attr(mask), size, group_id, **kw)
 
 
 @dsl_loc_tracing
@@ -89,14 +182,33 @@ def _unwrap_mfma_operand(v):
     return _arith_ext.unwrap(v)
 
 
+_BLGP_INT_TO_KW = {
+    0: "none",
+    1: "bcast_first_32",
+    2: "bcast_second_32",
+    4: "bcast_first_16",
+    5: "bcast_second_16",
+}
+
+
+def _blgp_attr(val):
+    """Convert an int blgp value to a ROCDL MFMAPermB attribute."""
+    from ..._mlir import ir as _ir
+
+    if isinstance(val, _ir.Attribute):
+        return val
+    kw = _BLGP_INT_TO_KW.get(int(val), "none")
+    return _ir.Attribute.parse(f"#rocdl<mfma_perm_b {kw}>")
+
+
 def _split_mfma_operands(operands):
-    """Split [a, b, c, cbsz, abid, blgp] into (a, b, c) Values + (cbsz, abid, blgp) ints."""
+    """Split [a, b, c, cbsz, abid, blgp] into (a, b, c) Values + (cbsz, abid, blgp) attrs."""
     a = _unwrap_mfma_operand(operands[0])
     b = _unwrap_mfma_operand(operands[1])
     c = _unwrap_mfma_operand(operands[2])
     cbsz = int(operands[3]) if len(operands) > 3 else 0
     abid = int(operands[4]) if len(operands) > 4 else 0
-    blgp = int(operands[5]) if len(operands) > 5 else 0
+    blgp = _blgp_attr(operands[5]) if len(operands) > 5 else _blgp_attr(0)
     return a, b, c, cbsz, abid, blgp
 
 
@@ -174,31 +286,97 @@ def mfma_f32_16x16x32_bf16(result_type, operands):
     return _ods_mfma_f32_16x16x32_bf16(result_type, a, b, c, cbsz, abid, blgp).result
 
 
-@dsl_loc_tracing
-def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands):
-    if _ods_mfma_scale_f32_16x16x128_f8f6f4 is None:
-        raise AttributeError("ROCDL op not found: mfma_scale_f32_16x16x128_f8f6f4(_)")
+def _mfma_scale_call(ods_op, name, result_type, operands):
+    """Shared body for the scaled-MFMA wrappers.
+
+    ``cbsz``/``blgp`` are ROCDL MatrixFormat enum attributes, so every
+    scale variant must route them through ``_wmma_fmt``.
+    """
+    if ods_op is None:
+        raise AttributeError(f"ROCDL op not found: {name}(_)")
     a = _unwrap_mfma_operand(operands[0])
     b = _unwrap_mfma_operand(operands[1])
     c = _unwrap_mfma_operand(operands[2])
-    cbsz = int(operands[3]) if len(operands) > 3 else 0
-    blgp = int(operands[4]) if len(operands) > 4 else 0
+    cbsz = operands[3] if len(operands) > 3 else 0
+    blgp = operands[4] if len(operands) > 4 else 0
     opselA = int(operands[5]) if len(operands) > 5 else 0
     scaleA = _unwrap_mfma_operand(operands[6]) if len(operands) > 6 else a
     opselB = int(operands[7]) if len(operands) > 7 else 0
     scaleB = _unwrap_mfma_operand(operands[8]) if len(operands) > 8 else b
-    return _ods_mfma_scale_f32_16x16x128_f8f6f4(
+    return ods_op(
         result_type,
         a,
         b,
         c,
-        cbsz,
-        blgp,
+        _wmma_fmt(cbsz),
+        _wmma_fmt(blgp),
         opselA,
         scaleA,
         opselB,
         scaleB,
     ).result
+
+
+@dsl_loc_tracing
+def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands):
+    return _mfma_scale_call(
+        _ods_mfma_scale_f32_16x16x128_f8f6f4,
+        "mfma_scale_f32_16x16x128_f8f6f4",
+        result_type,
+        operands,
+    )
+
+
+@dsl_loc_tracing
+def mfma_scale_f32_32x32x64_f8f6f4(result_type, operands):
+    return _mfma_scale_call(
+        _ods_mfma_scale_f32_32x32x64_f8f6f4,
+        "mfma_scale_f32_32x32x64_f8f6f4",
+        result_type,
+        operands,
+    )
+
+
+_WMMA_FMT_INT_TO_KW = {
+    0: "fp8_e4m3",
+    1: "fp8_e5m2",
+    2: "fp6_e2m3",
+    3: "fp6_e3m2",
+    4: "fp4_e2m1",
+}
+_WMMA_MODC_INT_TO_KW = {0: "none", 1: "neg", 2: "abs", 3: "neg_abs"}
+_WMMA_SCALE_TYPE_INT_TO_KW = {0: "row0", 1: "row1"}
+_WMMA_SCALE_FMT_INT_TO_KW = {0: "e8", 1: "e5m3", 2: "e4m3"}
+
+
+def _wmma_attr(val, mapping, attr_name):
+    """Convert an int to a parsed ROCDL enum attribute for WMMA ops."""
+    from ..._mlir import ir as _ir
+
+    if val is None or isinstance(val, _ir.Attribute):
+        return val
+    if isinstance(val, bool):
+        return val
+    kw = mapping.get(int(val))
+    if kw is None:
+        return val
+    return _ir.Attribute.parse(f"#rocdl<{attr_name} {kw}>")
+
+
+def _wmma_fmt(val):
+    return _wmma_attr(val, _WMMA_FMT_INT_TO_KW, "matrix_format")
+
+
+def _wmma_modc(val):
+    return _wmma_attr(val, _WMMA_MODC_INT_TO_KW, "wmma_c_modifier")
+
+
+def _wmma_scale_type(val):
+    return _wmma_attr(val, _WMMA_SCALE_TYPE_INT_TO_KW, "wmma_matrix_scale")
+
+
+def _wmma_scale_fmt(val):
+    return _wmma_attr(val, _WMMA_SCALE_FMT_INT_TO_KW, "wmma_matrix_scale_format")
 
 
 @dsl_loc_tracing
@@ -247,13 +425,13 @@ def wmma_scale_f32_16x16x128_f8f6f4(
         c_v,
         sA,
         sB,
-        fmtA=fmtA,
-        fmtB=fmtB,
-        modC=modC,
-        scaleAType=scaleAType,
-        fmtScaleA=fmtScaleA,
-        scaleBType=scaleBType,
-        fmtScaleB=fmtScaleB,
+        fmtA=_wmma_fmt(fmtA),
+        fmtB=_wmma_fmt(fmtB),
+        modC=_wmma_modc(modC),
+        scaleAType=_wmma_scale_type(scaleAType),
+        fmtScaleA=_wmma_scale_fmt(fmtScaleA),
+        scaleBType=_wmma_scale_type(scaleBType),
+        fmtScaleB=_wmma_scale_fmt(fmtScaleB),
         reuseA=reuseA,
         reuseB=reuseB,
     ).result
@@ -299,11 +477,11 @@ def wmma_scale_f32_32x16x128_f4(
         c_v,
         sA,
         sB,
-        modC=modC,
-        scaleAType=scaleAType,
-        fmtScaleA=fmtScaleA,
-        scaleBType=scaleBType,
-        fmtScaleB=fmtScaleB,
+        modC=_wmma_modc(modC),
+        scaleAType=_wmma_scale_type(scaleAType),
+        fmtScaleA=_wmma_scale_fmt(fmtScaleA),
+        scaleBType=_wmma_scale_type(scaleBType),
+        fmtScaleB=_wmma_scale_fmt(fmtScaleB),
         reuseA=reuseA,
         reuseB=reuseB,
     ).result
@@ -323,7 +501,9 @@ def wmma_f32_16x16x128_fp8_fp8(result_type, a, b, c, *, modC=0, reuseA=False, re
     a_v = _unwrap_mfma_operand(a)
     b_v = _unwrap_mfma_operand(b)
     c_v = _unwrap_mfma_operand(c)
-    return _ods_wmma_f32_16x16x128_fp8_fp8(result_type, a_v, b_v, c_v, modC=modC, reuseA=reuseA, reuseB=reuseB).result
+    return _ods_wmma_f32_16x16x128_fp8_fp8(
+        result_type, a_v, b_v, c_v, modC=_wmma_modc(modC), reuseA=reuseA, reuseB=reuseB
+    ).result
 
 
 @dsl_loc_tracing
@@ -458,7 +638,6 @@ def lds_transpose_load(result_type, lds_memref, elem_offset, elem_bytes):
 
 
 # ── New high-level helpers from universal.py ──────────────────────────
-from .universal import *  # noqa: E402,F401,F403,I001
 from .cdna5 import *  # noqa: E402,F401,F403,I001
 from .inline_asm import *  # noqa: E402,F401,F403,I001
 
@@ -481,24 +660,45 @@ def _to_ir(v):
 
 
 @dsl_loc_tracing
-def raw_ptr_buffer_atomic_fadd(vdata, rsrc, offset, soffset, aux, **kw):
+def raw_ptr_buffer_atomic_fadd(vdata, rsrc, offset, soffset, aux=None, **kw):
+    from ..._mlir import ir as _ir
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_atomic_fadd as _op
 
-    return _op(_to_ir(vdata), _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), _to_ir(aux), **kw)
+    vdata_ir = _to_ir(vdata)
+    if aux is not None and not isinstance(aux, _ir.Attribute):
+        if isinstance(aux, int):
+            aux = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), aux)
+        else:
+            aux = None
+    return _op(vdata_ir.type, vdata_ir, _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), aux=aux, **kw)
 
 
 @dsl_loc_tracing
-def raw_ptr_buffer_atomic_fmax(vdata, rsrc, offset, soffset, aux, **kw):
+def raw_ptr_buffer_atomic_fmax(vdata, rsrc, offset, soffset, aux=None, **kw):
+    from ..._mlir import ir as _ir
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_atomic_fmax as _op
 
-    return _op(_to_ir(vdata), _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), _to_ir(aux), **kw)
+    vdata_ir = _to_ir(vdata)
+    if aux is not None and not isinstance(aux, _ir.Attribute):
+        if isinstance(aux, int):
+            aux = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), aux)
+        else:
+            aux = None
+    return _op(vdata_ir.type, vdata_ir, _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), aux=aux, **kw)
 
 
 @dsl_loc_tracing
 def cvt_pk_fp8_f32(res, src_a, src_b, old, word_sel, **kw):
     from ..._mlir.dialects.rocdl import cvt_pk_fp8_f32 as _op
 
-    return _op(res=res, src_a=_to_ir(src_a), src_b=_to_ir(src_b), old=_to_ir(old), word_sel=word_sel, **kw)
+    return _op(
+        res=res,
+        src_a=_to_ir(src_a),
+        src_b=_to_ir(src_b),
+        old=_to_ir(old),
+        word_sel=word_sel,
+        **kw,
+    )
 
 
 @dsl_loc_tracing
@@ -524,6 +724,21 @@ def cvt_scalef32_pk_f32_fp4(res, src, scale, src_sel_index, **kw):
     two-stage shuffle to stitch.
     """
     from ..._mlir.dialects.rocdl import cvt_scalef32_pk_f32_fp4 as _op
+
+    return _op(res=res, src=_to_ir(src), scale=_to_ir(scale), src_sel_index=src_sel_index, **kw)
+
+
+@dsl_loc_tracing
+def cvt_scalef32_pk_bf16_fp4(res, src, scale, src_sel_index, **kw):
+    """ROCDL ``cvt_scalef32_pk_bf16_fp4``: unpack 2 fp4 (from one i32 holding 8 packed
+    fp4 elems) into ``vector<2xbf16>``, multiplied by ``scale``.
+
+    Same operand shape as :func:`cvt_scalef32_pk_f32_fp4` but the destination is bf16
+    (the mxfp4->bf16 upconvert used by the a16w4 MoE path). ``src_sel_index`` (Python
+    int in ``[0,3]``) selects which fp4 pair within the i32 lane is decoded; a full
+    v8bf16 unpack requires 4 calls (sel=0..3).
+    """
+    from ..._mlir.dialects.rocdl import cvt_scalef32_pk_bf16_fp4 as _op
 
     return _op(res=res, src=_to_ir(src), scale=_to_ir(scale), src_sel_index=src_sel_index, **kw)
 
@@ -573,11 +788,44 @@ def perm_b32(src_hi, src_lo, sel, **kw):
 
 
 @dsl_loc_tracing
-def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, **kw):
+def raw_ptr_buffer_load(res, rsrc, offset, soffset, aux=None, **kw):
+    from ..._mlir import ir as _ir
+    from ..._mlir.dialects.rocdl import raw_ptr_buffer_load as _op
+
+    if aux is not None and not isinstance(aux, _ir.Attribute):
+        if isinstance(aux, int):
+            aux = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), aux)
+        else:
+            aux = None
+    return _op(
+        res=res,
+        rsrc=_to_ir(rsrc),
+        offset=_to_ir(offset),
+        soffset=_to_ir(soffset),
+        aux=aux,
+        **kw,
+    )
+
+
+@dsl_loc_tracing
+def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux=None, **kw):
+    from ..._mlir import ir as _ir
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_load_lds as _op
 
+    if aux is not None and not isinstance(aux, _ir.Attribute):
+        if isinstance(aux, int):
+            aux = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), aux)
+        else:
+            aux = None
     return _op(
-        _to_ir(rsrc), _to_ir(lds_ptr), _to_ir(size), _to_ir(voffset), _to_ir(soffset), _to_ir(offset), _to_ir(aux), **kw
+        _to_ir(rsrc),
+        _to_ir(lds_ptr),
+        _to_ir(size),
+        _to_ir(voffset),
+        _to_ir(soffset),
+        _to_ir(offset),
+        aux=aux,
+        **kw,
     )
 
 
@@ -590,6 +838,32 @@ def buffer_load_to_lds(rsrc, lds_ptr, voffset, size_bytes=4, soffset=0, offset=0
     Python int arguments are auto-materialised as i32 constants.
     """
     return raw_ptr_buffer_load_lds(rsrc, lds_ptr, size_bytes, voffset, soffset, offset, 0, **kw)
+
+
+@dsl_loc_tracing
+def tensor_load_to_lds(dgroup0, dgroup1, dgroup2, dgroup3, dgroup4, cache_policy=None, **kw):
+    from ..._mlir import ir as _ir
+    from ..._mlir.dialects.rocdl import tensor_load_to_lds as _op
+
+    if cache_policy is not None and not isinstance(cache_policy, _ir.Attribute):
+        if isinstance(cache_policy, int):
+            cache_policy = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), cache_policy)
+        else:
+            cache_policy = None
+    return _op(dgroup0, dgroup1, dgroup2, dgroup3, dgroup4, cache_policy=cache_policy, **kw)
+
+
+@dsl_loc_tracing
+def tensor_store_from_lds(dgroup0, dgroup1, dgroup2, dgroup3, dgroup4, cache_policy=None, **kw):
+    from ..._mlir import ir as _ir
+    from ..._mlir.dialects.rocdl import tensor_store_from_lds as _op
+
+    if cache_policy is not None and not isinstance(cache_policy, _ir.Attribute):
+        if isinstance(cache_policy, int):
+            cache_policy = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), cache_policy)
+        else:
+            cache_policy = None
+    return _op(dgroup0, dgroup1, dgroup2, dgroup3, dgroup4, cache_policy=cache_policy, **kw)
 
 
 @dsl_loc_tracing

@@ -46,9 +46,6 @@ from .enum import SyncScope
 from .meta import dsl_loc_tracing, dsl_wrap_result
 
 __all__ = [
-    # Maybe remove it in the future
-    "T",
-    # "arith",
     # Enum Attributes
     "AtomicOp",
     "AddressSpace",
@@ -183,6 +180,7 @@ __all__ = [
     "get_dyn_shared",
     "inttoptr",
     "ptrtoint",
+    "to_llvm_ptr",
     "add_offset",
     "apply_swizzle",
     "ptr_load",
@@ -1182,6 +1180,19 @@ def ptrtoint(ptr):
     if is_generic_address_space(ptr.address_space, AddressSpace.Register):
         raise ValueError("ptrtoint is not supported for register address space")
     return fly.ptrtoint(ptr)
+
+
+@dsl_loc_tracing
+def to_llvm_ptr(ptr):
+    """Expose a ``fly.ptr`` as an ``!llvm.ptr``.
+
+    The active compile backend maps the pointer's semantic address space to the
+    explicit LLVM address-space number.
+    """
+    from ..compiler.backends import resolve_llvm_address_space
+
+    llvm_address_space = resolve_llvm_address_space(ptr.address_space)
+    return fly.to_llvm_ptr(ptr, llvm_address_space)
 
 
 @dsl_loc_tracing

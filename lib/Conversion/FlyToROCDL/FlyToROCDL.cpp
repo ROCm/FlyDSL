@@ -41,11 +41,11 @@ unsigned mapToLLVMAddressSpace(AddressSpace addrSpace) {
   case AddressSpace::Generic:
     return 0;
   case AddressSpace::Global:
-    return 1;
+    return ROCDL::ROCDLDialect::kGlobalMemoryAddressSpace;
   case AddressSpace::Shared:
-    return 3;
+    return ROCDL::ROCDLDialect::kSharedMemoryAddressSpace;
   case AddressSpace::Register:
-    return 5;
+    return ROCDL::ROCDLDialect::kPrivateMemoryAddressSpace;
   }
   llvm_unreachable("unsupported address space");
 }
@@ -242,6 +242,30 @@ public:
   }
 };
 
+class ToLLVMPtrOpLowering : public OpConversionPattern<ToLLVMPtrOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ToLLVMPtrOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto convertedPtrTy = dyn_cast<LLVM::LLVMPointerType>(adaptor.getPtr().getType());
+    if (!convertedPtrTy)
+      return op.emitError("pointer address space does not lower to a bare ROCDL LLVM pointer: ")
+             << cast<fly::PointerType>(op.getPtr().getType()).getAddressSpace();
+
+    auto requestedPtrTy = dyn_cast<LLVM::LLVMPointerType>(op.getResult().getType());
+    if (!requestedPtrTy)
+      return op.emitError("expected an LLVM pointer result, got ") << op.getResult().getType();
+    if (requestedPtrTy.getAddressSpace() != convertedPtrTy.getAddressSpace())
+      return op.emitError("requested LLVM address space ")
+             << requestedPtrTy.getAddressSpace() << " but ROCDL conversion requires "
+             << convertedPtrTy.getAddressSpace();
+
+    rewriter.replaceOp(op, adaptor.getPtr());
+    return success();
+  }
+};
+
 class ApplySwizzleOpLowering : public OpConversionPattern<ApplySwizzleOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -378,10 +402,11 @@ public:
     if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace())) {
       BufferFatPtr bp(flyPtrTy, ptr);
       Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
+      auto auxAttr = rewriter.getI32IntegerAttr(0);
       ArrayAttr noAttrs;
       Value loaded = ROCDL::RawPtrBufferLoadOp::create(
           rewriter, loc, loadTy, bp.bufferRsrc(rewriter, loc), bp.swizzleByteOffset(rewriter, loc),
-          zero, zero, noAttrs, noAttrs, noAttrs);
+          zero, auxAttr, noAttrs, noAttrs, noAttrs);
       rewriter.replaceOp(op, loaded);
       return success();
     } else {
@@ -423,10 +448,11 @@ public:
     if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace())) {
       BufferFatPtr bp(flyPtrTy, ptr);
       Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
+      auto auxAttr = rewriter.getI32IntegerAttr(0);
       ArrayAttr noAttrs;
       ROCDL::RawPtrBufferStoreOp::create(rewriter, loc, value, bp.bufferRsrc(rewriter, loc),
-                                         bp.swizzleByteOffset(rewriter, loc), zero, zero, noAttrs,
-                                         noAttrs, noAttrs);
+                                         bp.swizzleByteOffset(rewriter, loc), zero, auxAttr,
+                                         noAttrs, noAttrs, noAttrs);
       rewriter.eraseOp(op);
       return success();
     } else {
@@ -869,6 +895,7 @@ public:
 
     patterns.add<MakePtrOpLowering, GetDynSharedOpLowering>(typeConverter, context);
     patterns.add<IntToPtrOpLowering, PtrToIntOpLowering>(typeConverter, context);
+    patterns.add<ToLLVMPtrOpLowering>(typeConverter, context);
     patterns.add<ApplySwizzleOpLowering, RecastIterOpLowering>(typeConverter, context);
     patterns.add<GetBufferRsrcOpLowering>(typeConverter, context);
     patterns.add<AddOffsetOpLowering>(typeConverter, context);

@@ -67,7 +67,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 off = WARP_SIZE // (2 << _sh_exp)
                 peer = w.shuffle_xor(off, WARP_SIZE)
                 if const_expr(mode == "max"):
-                    w = w.maximumf(peer)
+                    w = fx.max(w, peer)
                 else:
                     w = w.addf(peer, fastmath=fm_fast)
             return w
@@ -119,13 +119,13 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
 
             def _load_vec(div_tensor, idx):
                 r = fx.make_rmem_tensor(vec_width, elem_dtype)
-                fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
+                fx.copy(copy_atom, fx.slice(div_tensor, (None, idx)), r)
                 return fx.memref_load_vec(r)
 
             def _store_vec(val, div_tensor, idx):
                 r = fx.make_rmem_tensor(vec_width, elem_dtype)
                 fx.memref_store_vec(val, r)
-                fx.copy_atom_call(copy_atom, r, fx.slice(div_tensor, (None, idx)))
+                fx.copy(copy_atom, r, fx.slice(div_tensor, (None, idx)))
 
             # 1. Load + compute local max
             row_buffer = []
@@ -137,7 +137,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 x = vec.to(fx.Float32)
                 row_buffer.append(x)
                 red_max = x.reduce(ReductionOp.MAX)
-                thread_max = thread_max.maximumf(red_max)
+                thread_max = fx.max(thread_max, red_max)
 
             global_max = block_reduce(thread_max, "max", s_red)
 
@@ -185,7 +185,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             def _load_scalar(divided, index):
                 view = fx.slice(divided, (None, index))
                 r = fx.make_rmem_tensor(1, elem_dtype)
-                fx.copy_atom_call(copy_atom_s, view, r)
+                fx.copy(copy_atom_s, view, r)
                 return fx.memref_load_vec(r)[0]
 
             def _store_scalar(divided, index, val):
@@ -193,7 +193,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 ts = full(1, elem_dtype(val), elem_dtype)
                 fx.memref_store_vec(ts, r)
                 view = fx.slice(divided, (None, index))
-                fx.copy_atom_call(copy_atom_s, r, view)
+                fx.copy(copy_atom_s, r, view)
 
             # 1. Load + max
             row_buffer = []
@@ -207,7 +207,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 val = val_e if dtype_str == "f32" else val_e.to(fx.Float32)
                 safe_val = is_valid.select(val, c_neg_inf)
                 row_buffer.append((safe_val, is_valid))
-                thread_max = thread_max.maximumf(safe_val)
+                thread_max = fx.max(thread_max, safe_val)
 
             global_max = block_reduce(thread_max, "max", s_red)
 

@@ -321,37 +321,27 @@ def pa_decode_ps_launch(
 
     query_length = query.shape[0] // context_lengths.shape[0]
     query_group_size = num_query_heads // num_kv_heads
+    batch_size = context_lengths.shape[0]
+    head_size = query.shape[-1]
 
     # Strides for key_scale/value_scale
-    if per_token_kv:
-        stride_ks_block = key_scale.stride(0)
-        stride_ks_head = key_scale.stride(1)
-    else:
-        stride_ks_block = 0
-        stride_ks_head = 0
+    stride_ks_block = key_scale.stride(0) if per_token_kv else 0
+    stride_ks_head = key_scale.stride(1) if per_token_kv else 0
 
     s = stream or torch.cuda.current_stream()
 
-    if sliding_window > 0:
-        # Launch one CTA per 256-token context partition in the sliding window:
-        # grid = (batch, kv_heads, max_context_partition_num).
-        batch_size = context_lengths.shape[0]
-        head_size = query.shape[-1]
+    if max_context_partition_num <= 0:
+        raise ValueError("max_context_partition_num must be positive for sliding-window decode.")
+    if is_graph_capturing and (exp_sums is None or max_logits is None or temporary_output is None):
+        raise ValueError(
+            "CUDA graph capture requires preallocated `exp_sums`, `max_logits`, "
+            "and `temporary_output` for the sliding-window path."
+        )
+    # ── small-block (block_size 16/64) → tile kernel ──
+    # Key cache shape is [num_blocks, num_kv_heads, head_size // 16, block_size, 16].
+    block_size = key_cache.shape[-2]
+    if block_size in _PA_DECODE_PS_SMALL_BLOCK_SIZES or sliding_window > 0:
         eqgs = query_length * query_group_size
-        context_partition_size = KV_COMPUTE_BLOCK
-        if max_context_partition_num == 0:
-            max_context_partition_num = get_recommended_splits(
-                batch_size,
-                num_kv_heads,
-                sliding_window=sliding_window,
-                context_partition_size=context_partition_size,
-                query_length=query_length,
-            )
-        if is_graph_capturing and (exp_sums is None or max_logits is None or temporary_output is None):
-            raise ValueError(
-                "CUDA graph capture requires preallocated `exp_sums`, `max_logits`, "
-                "and `temporary_output` for the sliding-window path."
-            )
         if exp_sums is None:
             exp_sums = torch.zeros(
                 batch_size, num_kv_heads, max_context_partition_num, eqgs, device=dev, dtype=torch.float32
@@ -368,6 +358,9 @@ def pa_decode_ps_launch(
                 batch_size, num_kv_heads, max_context_partition_num, eqgs, head_size, device=dev, dtype=torch.bfloat16
             )
 
+    if sliding_window > 0:
+        # Launch one CTA per 256-token context partition in the sliding window:
+        # grid = (batch, kv_heads, max_context_partition_num).
         # The fused SW kernel is useful only when there is no real cross-partition
         # parallelism to exploit.  For the 1023-token window case, one CTA would
         # serialize six 256-token partitions and regress badly versus the
@@ -379,13 +372,13 @@ def pa_decode_ps_launch(
 
         compiled_sw = compile_pa_decode_sw(
             sliding_window=sliding_window,
+            max_context_partition_num=max_context_partition_num,
             softmax_scale=softmax_scale,
             trans_v=trans_v,
             query_group_size=query_group_size,
             per_token_kv=per_token_kv,
             query_length=query_length,
             query_input_dtype=query_input_dtype,
-            fuse_partitions=fuse_sw_partitions,
             head_dim=int(head_size),
         )
 
@@ -461,16 +454,12 @@ def pa_decode_ps_launch(
         )
         return "ps_sw_partitioned"
 
-    # ── small-block (block_size 16/64) → tile kernel ──
-    # Key cache shape is [num_blocks, num_kv_heads, head_size // 16, block_size, 16].
-    block_size = key_cache.shape[-2]
     if block_size in _PA_DECODE_PS_SMALL_BLOCK_SIZES:
         if block_tables is None:
             raise ValueError(
                 f"pa_decode_ps_launch: block_size={block_size} requires `block_tables` "
                 "(per-sequence physical block index table)."
             )
-        batch_size = context_lengths.shape[0]
         if is_graph_capturing:
             # Buffer sizes must be fixed ahead of capture and stay identical
             # across every replay, so require the caller to have preallocated

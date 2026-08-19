@@ -27,14 +27,12 @@ using namespace mlir::fly;
 
 namespace llvm {
 
-template <> struct DenseMapInfo<mlir::fly::MakePtrOp> : DenseMapInfo<mlir::Operation *> {
-  using Base = DenseMapInfo<mlir::Operation *>;
-
-  static mlir::fly::MakePtrOp getEmptyKey() { return mlir::fly::MakePtrOp(Base::getEmptyKey()); }
-
-  static mlir::fly::MakePtrOp getTombstoneKey() {
-    return mlir::fly::MakePtrOp(Base::getTombstoneKey());
+template <> struct DenseMapInfo<mlir::fly::MakePtrOp> {
+  static unsigned getHashValue(mlir::fly::MakePtrOp op) {
+    return DenseMapInfo<void *>::getHashValue(op.getAsOpaquePointer());
   }
+
+  static bool isEqual(mlir::fly::MakePtrOp lhs, mlir::fly::MakePtrOp rhs) { return lhs == rhs; }
 };
 
 } // namespace llvm
@@ -86,17 +84,27 @@ bool isRegOperandOrResult(Operation *op) {
   return false;
 }
 
-std::optional<std::pair<MakePtrOp, int32_t>> resolveRegOffset(Value ptr) {
+/// Resolves the root alloca of an add_offset chain and its accumulated offset.
+///
+/// Nullopt result: the chain does not bottom out in a MakePtrOp.
+/// Nullopt `second`: the root is known but some link carries a dynamic offset,
+/// so there is no concrete displacement.  The root is still reported, so
+/// callers that only need its identity stay conservative; callers that need the
+/// displacement must bail.
+std::optional<std::pair<MakePtrOp, std::optional<int32_t>>> resolveRegOffset(Value ptr) {
   assert(isa<RegPtrValue>(ptr) && "expected register pointer");
 
   if (auto makePtrOp = ptr.getDefiningOp<MakePtrOp>()) {
-    return std::pair<MakePtrOp, int32_t>{makePtrOp, 0};
+    return std::pair<MakePtrOp, std::optional<int32_t>>{makePtrOp, 0};
   } else if (auto addOffsetOp = ptr.getDefiningOp<AddOffsetOp>()) {
     auto base = resolveRegOffset(addOffsetOp.getPtr());
     if (!base)
       return std::nullopt;
     IntAttr intAttr = addOffsetOp.getOffset().getType().getAttr().getLeafAsInt();
-    return std::pair<MakePtrOp, int32_t>{base->first, base->second + intAttr.getValue()};
+    if (!base->second || !intAttr.isStatic())
+      return std::pair<MakePtrOp, std::optional<int32_t>>{base->first, std::nullopt};
+    return std::pair<MakePtrOp, std::optional<int32_t>>{base->first,
+                                                        *base->second + intAttr.getValue()};
   } else {
     return std::nullopt;
   }
@@ -154,11 +162,25 @@ private:
       for (Value v : {recastOp.getSrc(), recastOp.getResult()}) {
         if (!isRegValue(v))
           continue;
+        // Only the root identity matters here: a dynamic offset must not stop
+        // the recast-reachable alloca from being excluded.
         auto root = resolveRegOffset(v);
         if (root)
           regAllocaInfos.erase(root->first);
       }
     });
+
+    // A dynamic link in the add_offset chain gives no concrete slot index, so
+    // the alloca it reaches cannot be promoted to a vector SSA value.
+    funcOp.walk([&](AddOffsetOp addOffsetOp) {
+      Value result = addOffsetOp.getResult();
+      if (!isRegValue(result))
+        return;
+      auto root = resolveRegOffset(result);
+      if (root && !root->second)
+        regAllocaInfos.erase(root->first);
+    });
+
     bool hasExcludedRoots = allocaOrder.size() != regAllocaInfos.size();
     llvm::erase_if(allocaOrder, [&](MakePtrOp r) { return !regAllocaInfos.count(r); });
 
@@ -220,7 +242,8 @@ private:
 
   std::optional<RegAccessInfo> getRegAccessInfo(Value ptr, Type valueType) {
     auto rootAndOffset = resolveRegOffset(ptr);
-    if (!rootAndOffset)
+    // A concrete displacement is required to index the vector SSA value.
+    if (!rootAndOffset || !rootAndOffset->second)
       return std::nullopt;
 
     int32_t width = 0;
@@ -235,7 +258,7 @@ private:
     if (!info)
       return std::nullopt;
 
-    return RegAccessInfo{rootAndOffset->first, rootAndOffset->second, width, info->elemTy};
+    return RegAccessInfo{rootAndOffset->first, *rootAndOffset->second, width, info->elemTy};
   }
 
   LogicalResult collectTouchedRegAllocaInRegion(Region &region, Operation *boundaryOp,
@@ -243,6 +266,8 @@ private:
     auto tryRecord = [&](Value ptr) {
       if (!isa<RegPtrValue>(ptr))
         return;
+      // Only the root identity matters here: a dynamic offset must not stop the
+      // alloca from being recorded as touched.
       auto root = resolveRegOffset(ptr);
       if (root && getAllocaInfo(root->first) && !boundaryOp->isProperAncestor(root->first))
         touchedRoots.insert(root->first);

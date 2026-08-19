@@ -48,7 +48,7 @@ def _make_reduction_storage(red_slots: int):
 def _load_scalar(copy_atom, elem_dtype, divided_tensor, index):
     view = fx.slice(divided_tensor, (None, index))
     r = fx.make_rmem_tensor(1, elem_dtype)
-    fx.copy_atom_call(copy_atom, view, r)
+    fx.copy(copy_atom, view, r)
     return fx.memref_load_vec(r)[0]
 
 
@@ -57,19 +57,19 @@ def _store_scalar(copy_atom, elem_dtype, store_dtype, divided_tensor, index, val
     ts = full(1, store_dtype(val), store_dtype)
     fx.memref_store_vec(ts, r)
     view = fx.slice(divided_tensor, (None, index))
-    fx.copy_atom_call(copy_atom, r, view)
+    fx.copy(copy_atom, r, view)
 
 
 def _load_vec(copy_atom, vec_width, elem_dtype, div_tensor, idx):
     r = fx.make_rmem_tensor(vec_width, elem_dtype)
-    fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
+    fx.copy(copy_atom, fx.slice(div_tensor, (None, idx)), r)
     return fx.memref_load_vec(r)
 
 
 def _store_vec(copy_atom, vec_width, elem_dtype, val, div_tensor, idx):
     r = fx.make_rmem_tensor(vec_width, elem_dtype)
     fx.memref_store_vec(val, r)
-    fx.copy_atom_call(copy_atom, r, fx.slice(div_tensor, (None, idx)))
+    fx.copy(copy_atom, r, fx.slice(div_tensor, (None, idx)))
 
 
 def _to_elem_scalar(dtype_str: str, elem_dtype, y):
@@ -102,7 +102,7 @@ def _store_yscale(scale_copy_atom, yscale_div, index, val):
     r = fx.make_rmem_tensor(1, fx.Float32)
     ts = full(1, fx.Float32(val), fx.Float32)
     fx.memref_store_vec(ts, r)
-    fx.copy_atom_call(scale_copy_atom, r, fx.slice(yscale_div, (None, index)))
+    fx.copy(scale_copy_atom, r, fx.slice(yscale_div, (None, index)))
 
 
 def _quant_dtype_to_elem_type(dtype_str: str):
@@ -837,7 +837,7 @@ def _build_layernorm_quant_module(
             for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
                 off = WARP_SIZE // (2 << _sh_exp)
                 peer = w.shuffle_xor(off, WARP_SIZE)
-                w = w.maximumf(peer)
+                w = fx.max(w, peer)
             return w
 
         def block_reduce_add2(val0, val1):
@@ -960,7 +960,7 @@ def _build_layernorm_quant_module(
                 y_local.append(y)
                 y_abs = (y.bitcast(fx.Uint32) & abs_mask).bitcast(fx.Float32)
                 tile_max = y_abs.reduce(ReductionOp.MAX)
-                thread_row_max = thread_row_max.maximumf(tile_max)
+                thread_row_max = fx.max(thread_row_max, tile_max)
 
             row_max = block_reduce_max(thread_row_max)
             scale = row_max / c_dtype_max
@@ -1050,7 +1050,7 @@ def _build_layernorm_quant_module(
                     s = s_e if dtype_str == "f32" else s_e.to(fx.Float32)
                     y = y * s
                 y_abs = _abs_scalar(y)
-                thread_row_max = thread_row_max.maximumf(is_valid.select(y_abs, c_zero_f))
+                thread_row_max = fx.max(thread_row_max, is_valid.select(y_abs, c_zero_f))
 
             row_max = block_reduce_max(thread_row_max)
             scale = row_max / c_dtype_max
@@ -1186,7 +1186,7 @@ def _build_fused_add_layernorm_quant_module(
             for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
                 off = WARP_SIZE // (2 << _sh_exp)
                 peer = w.shuffle_xor(off, WARP_SIZE)
-                w = w.maximumf(peer)
+                w = fx.max(w, peer)
             return w
 
         def block_reduce_add2(val0, val1):
@@ -1318,7 +1318,7 @@ def _build_fused_add_layernorm_quant_module(
                 y_local.append(y)
                 y_abs = (y.bitcast(fx.Uint32) & abs_mask).bitcast(fx.Float32)
                 tile_max = y_abs.reduce(ReductionOp.MAX)
-                thread_row_max = thread_row_max.maximumf(tile_max)
+                thread_row_max = fx.max(thread_row_max, tile_max)
 
             row_max = block_reduce_max(thread_row_max)
             scale = row_max / c_dtype_max
@@ -1420,7 +1420,7 @@ def _build_fused_add_layernorm_quant_module(
                     s = s_e if dtype_str == "f32" else s_e.to(fx.Float32)
                     y = y * s
                 y_abs = _abs_scalar(y)
-                thread_row_max = thread_row_max.maximumf(is_valid.select(y_abs, c_zero_f))
+                thread_row_max = fx.max(thread_row_max, is_valid.select(y_abs, c_zero_f))
 
             row_max = block_reduce_max(thread_row_max)
             scale = row_max / c_dtype_max

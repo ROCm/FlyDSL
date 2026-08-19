@@ -19,6 +19,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import as_ir_value, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
@@ -865,16 +866,17 @@ def compile_pa_metadata_v1(
         num_batches: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        pa_metadata_v1_kernel(
-            seqlens_qo_indptr,
-            context_lens,
-            work_indptr,
-            work_info,
-            reduce_indptr,
-            reduce_final_map,
-            reduce_partial_map,
-            num_batches,
-        ).launch(grid=(1, 1, 1), block=(WARP_SIZE, 1, 1), stream=stream)
+        with CompilationContext.compile_hints({"fastmath": "contract"}):
+            pa_metadata_v1_kernel(
+                seqlens_qo_indptr,
+                context_lens,
+                work_indptr,
+                work_info,
+                reduce_indptr,
+                reduce_final_map,
+                reduce_partial_map,
+                num_batches,
+            ).launch(grid=(1, 1, 1), block=(WARP_SIZE, 1, 1), stream=stream)
 
     return {"kernel": pa_metadata_v1_kernel, "launch": launch_pa_metadata_v1}
 
@@ -1362,40 +1364,37 @@ def compile_pa_decode_metadata(
         num_sm,
         stream: fx.Stream = fx.Stream(None),
     ):
-        pa_decode_metadata_kernel(
-            out,
-            po,
-            pl,
-            q,
-            kc,
-            vc,
-            cl,
-            ks,
-            vs,
-            work_indptr,
-            work_info,
-            kv_page_indices,
-            kv_indptr,
-            partition_indptr,
-            s_q_seq,
-            s_q_head,
-            s_k_block,
-            s_k_head,
-            s_v_block,
-            s_v_head,
-            s_out_seq,
-            s_out_head,
-            s_po_partial,
-            s_pl_partial,
-            s_ks_block,
-            s_ks_head,
-            s_po_ql,
-            s_pl_ql,
-        ).launch(grid=(num_sm, 1, 1), block=(BLOCK_THREADS, 1, 1), stream=stream)
-
-    # Ask the compiler for mul+add -> FMA contraction across the whole kernel
-    # instead of tagging individual online-softmax / PV-accumulate ops.
-    launch_pa_decode_metadata.compile_hints = {"fastmath": "contract"}
+        with CompilationContext.compile_hints({"fastmath": "contract"}):
+            pa_decode_metadata_kernel(
+                out,
+                po,
+                pl,
+                q,
+                kc,
+                vc,
+                cl,
+                ks,
+                vs,
+                work_indptr,
+                work_info,
+                kv_page_indices,
+                kv_indptr,
+                partition_indptr,
+                s_q_seq,
+                s_q_head,
+                s_k_block,
+                s_k_head,
+                s_v_block,
+                s_v_head,
+                s_out_seq,
+                s_out_head,
+                s_po_partial,
+                s_pl_partial,
+                s_ks_block,
+                s_ks_head,
+                s_po_ql,
+                s_pl_ql,
+            ).launch(grid=(num_sm, 1, 1), block=(BLOCK_THREADS, 1, 1), stream=stream)
 
     return {
         "launch": launch_pa_decode_metadata,
@@ -1497,7 +1496,7 @@ def compile_pa_metadata_reduce(
                     copy_f32_vec,
                     reg_f32_vec,
                 )
-                m_new = m.maximumf(lse)
+                m_new = fx.maxnumf(m, lse)
                 scale_old = exp2_f32_fast((m - m_new) * LOG2E)
                 w = exp2_f32_fast((lse - m_new) * LOG2E)
                 denom_new = denom * scale_old + w
@@ -1529,22 +1528,23 @@ def compile_pa_metadata_reduce(
         num_groups,
         stream: fx.Stream = fx.Stream(None),
     ):
-        pa_metadata_reduce_kernel(
-            final_output,
-            partial_output,
-            partial_lse,
-            reduce_indptr,
-            reduce_final_map,
-            reduce_partial_map,
-            stride_out_seq,
-            stride_out_head,
-            stride_po_row,
-            stride_pl_row,
-        ).launch(
-            grid=(num_groups, num_query_heads, query_length),
-            block=(block_threads, 1, 1),
-            stream=stream,
-        )
+        with CompilationContext.compile_hints({"fastmath": "contract"}):
+            pa_metadata_reduce_kernel(
+                final_output,
+                partial_output,
+                partial_lse,
+                reduce_indptr,
+                reduce_final_map,
+                reduce_partial_map,
+                stride_out_seq,
+                stride_out_head,
+                stride_po_row,
+                stride_pl_row,
+            ).launch(
+                grid=(num_groups, num_query_heads, query_length),
+                block=(block_threads, 1, 1),
+                stream=stream,
+            )
 
     return {"launch": launch_pa_metadata_reduce, "kernel": pa_metadata_reduce_kernel}
 

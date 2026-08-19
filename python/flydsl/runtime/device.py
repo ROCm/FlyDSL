@@ -37,16 +37,22 @@ def _arch_from_hardware() -> str:
 
 
 def get_rocm_arch() -> str:
-    """Best-effort ROCm GPU arch string (e.g. 'gfx942')."""
+    """Best-effort ROCm GPU arch string, always lower-cased (e.g. 'gfx942').
+
+    Lower-casing happens here so every caller can compare against lower-case
+    literals without normalising first; ROCm itself only ever emits lower-case
+    names, so this only affects hand-set environment overrides.
+    """
     env = os.environ.get("FLYDSL_GPU_ARCH") or os.environ.get("HSA_OVERRIDE_GFX_VERSION")
     if env:
+        env = env.lower()
         if env.startswith("gfx"):
             return env
         if env.count(".") == 2:
             parts = env.split(".")
             return f"gfx{parts[0]}{parts[1]}{parts[2]}"
 
-    return _arch_from_hardware()
+    return _arch_from_hardware().lower()
 
 
 @functools.lru_cache(maxsize=None)
@@ -91,3 +97,18 @@ def is_rdna_arch(arch: Optional[str] = None) -> bool:
     if arch.startswith("gfx120"):
         return True
     return False
+
+
+def get_warp_size(arch: Optional[str] = None) -> int:
+    """Lanes per warp for an architecture.
+
+    If arch is None, the current GPU arch is auto-detected.
+    """
+    if arch is None:
+        arch = get_rocm_arch()
+    if not arch:
+        return 64
+    arch = arch.lower()
+    if arch.startswith("gfx10") or arch.startswith("gfx11") or arch.startswith("gfx12"):
+        return 32
+    return 64

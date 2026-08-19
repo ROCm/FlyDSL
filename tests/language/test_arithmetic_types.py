@@ -726,6 +726,20 @@ class TestToConversion:
 
         assert "arith.extsi" in source_ir(body)
 
+    def test_same_width_float_to_float_goes_through_f32(self):
+        """``arith`` has no op for a same-width float cast: ``truncf`` needs a
+        strictly narrower and ``extf`` a strictly wider result type. f32 holds
+        every sub-32-bit float value exactly, so the detour rounds once."""
+
+        def body():
+            result = vec(Float16).to(BFloat16)
+            assert result.dtype is BFloat16
+            assert result.shape == (8,)
+
+        ir_text = source_ir(body)
+        assert "arith.extf" in ir_text and "vector<8xf32>" in ir_text
+        assert "arith.truncf" in ir_text
+
     def test_to_ir_value_returns_self(self):
         """to(ir.Value) should return self unchanged."""
 
@@ -740,6 +754,76 @@ class TestToConversion:
             result = vec(Float32).to(BFloat16)
             assert result.shape == (8,)
             assert result.dtype is BFloat16
+
+        run(body)
+
+
+class TestRoundingMode:
+    """``x.to(dtype, rounding_mode=...)`` — narrowing float-to-float casts only
+    (spec: ## Rounding-mode control)."""
+
+    def test_scalar_narrowing_carries_the_attribute(self):
+        def body(a: Float32):
+            _ = a.to(Float16, rounding_mode=fx.RoundingMode.upward)
+
+        assert "arith.truncf %arg0 upward : f32 to f16" in source_ir(body, 1.0)
+
+    def test_vector_narrowing_carries_the_attribute(self):
+        def body():
+            _ = vec(Float32).to(Float16, rounding_mode=fx.RoundingMode.to_nearest_away)
+
+        assert "to_nearest_away : vector<8xf32> to vector<8xf16>" in source_ir(body)
+
+    def test_omitted_mode_emits_no_attribute(self):
+        def body(a: Float32):
+            _ = a.to(Float16)
+
+        assert "arith.truncf %arg0 : f32 to f16" in source_ir(body, 1.0)
+
+    def test_same_type_is_a_noop(self):
+        def body(a: Float32):
+            assert a.to(Float32, rounding_mode=fx.RoundingMode.downward) is a
+
+        run(body, 1.0)
+
+    def test_widening_is_exact_so_the_mode_is_dropped(self):
+        def body(a: Float32):
+            _ = Float16(a).to(Float32, rounding_mode=fx.RoundingMode.downward)
+
+        ir_text = source_ir(body, 1.0)
+        assert "arith.extf" in ir_text
+        assert "downward" not in ir_text
+
+    def test_same_width_cast_rounds_on_the_truncf_step(self):
+        """The f32 detour is exact, so the mode belongs to the second step."""
+
+        def body(a: Float32):
+            _ = Float16(a).to(BFloat16, rounding_mode=fx.RoundingMode.upward)
+
+        ir_text = source_ir(body, 1.0)
+        assert "arith.extf" in ir_text and ": f16 to f32" in ir_text
+        assert "arith.truncf" in ir_text and "upward : f32 to bf16" in ir_text
+
+    @pytest.mark.parametrize(
+        "cast",
+        [
+            lambda a: a.to(Int32, rounding_mode=fx.RoundingMode.upward),
+            lambda a: Int32(a).to(Float32, rounding_mode=fx.RoundingMode.upward),
+            lambda a: vec(Float32).to(Int32, rounding_mode=fx.RoundingMode.upward),
+        ],
+        ids=["float_to_int", "int_to_float", "vector_float_to_int"],
+    )
+    def test_non_float_cast_is_rejected(self, cast):
+        def body(a: Float32):
+            with pytest.raises(TypeError, match="float-to-float"):
+                cast(a)
+
+        run(body, 1.0)
+
+    def test_compile_time_value_is_rejected(self):
+        def body():
+            with pytest.raises(ValueError, match="run-time value"):
+                _ = Float32(1.5).to(Float16, rounding_mode=fx.RoundingMode.upward)
 
         run(body)
 
@@ -822,6 +906,7 @@ class TestNumericIntrospection:
 
             assert Numeric.from_ir_type(T.f32()) is Float32
             assert Numeric.from_ir_type(T.i32()) is Int32
+            assert Numeric.from_ir_type(T.i(4)) is fx.Int4
 
         run(body)
 
@@ -1566,6 +1651,132 @@ class TestCompileTimeVsRuntime:
             assert not (a + b).is_static()
 
         run(body, 3, 4)
+
+
+class TestIntegerWrapAround:
+    """Constructing or folding an integer reduces it mod 2**width (spec:
+    "Compile-time and run-time values" → integer wrap-around), so the folded
+    result matches what the equivalent run-time op would compute."""
+
+    @pytest.mark.parametrize(
+        "dtype, value, expected",
+        [
+            (fx.Uint32, 2**32 + 5, 5),
+            (fx.Uint32, -1, 0xFFFFFFFF),
+            (fx.Int32, 2**31, -(2**31)),
+            (fx.Uint64, 2**64 + 5, 5),  # above every machine integer
+            (fx.Uint64, -1, 0xFFFFFFFFFFFFFFFF),
+            (fx.Int64, 2**63, -(2**63)),
+            (fx.Int8, 200, -56),
+            (fx.Int4, 20, 4),  # no numpy dtype
+            (fx.Uint128, 2**128 + 9, 9),  # no numpy dtype
+        ],
+    )
+    def test_python_int_wraps_to_width(self, dtype, value, expected):
+        def body():
+            r = dtype(value)
+            assert r.is_static()
+            assert int(r) == expected
+
+        run(body)
+
+    @pytest.mark.parametrize(
+        "op, rhs, expected",
+        [
+            (operator.add, 2, 1),
+            (operator.sub, -2, 1),
+            (operator.mul, 3, 0xFFFFFFFFFFFFFFFD),
+        ],
+    )
+    def test_uint64_fold_wraps_like_uint32(self, op, rhs, expected):
+        """The 64-bit static fold must not overflow where the 32-bit one wraps."""
+
+        def body():
+            lhs = fx.Uint64(0xFFFFFFFFFFFFFFFF)
+            assert int(op(fx.Uint32(0xFFFFFFFF), fx.Uint32(rhs))) == expected & 0xFFFFFFFF
+            r = op(lhs, fx.Uint64(rhs))
+            assert r.is_static()
+            assert int(r) == expected
+
+        run(body)
+
+    @pytest.mark.parametrize(
+        "src, dst, value, expected",
+        [
+            (fx.Uint32, fx.Uint64, 7, 7),
+            (fx.Int32, fx.Uint8, -1, 255),  # sign-extend, then truncate
+            (fx.Int8, fx.Uint32, -1, 0xFFFFFFFF),
+            (fx.Uint64, fx.Uint32, 2**40 + 3, 3),
+            (fx.Uint128, fx.Uint64, 2**100 + 7, 7),  # source has no numpy dtype
+            (fx.Uint64, fx.Int4, 20, 4),  # destination has no numpy dtype
+        ],
+    )
+    def test_static_narrowing_truncates(self, src, dst, value, expected):
+        def body():
+            r = dst(src(value))
+            assert r.is_static()
+            assert int(r) == expected
+
+        run(body)
+
+    def test_boolean_is_not_reduced_to_minus_one(self):
+        """``Boolean`` is width 1 and signed; reducing it would map True to -1."""
+
+        def body():
+            assert int(fx.Boolean(True)) == 1
+            assert int(fx.Boolean(5)) == 1
+            assert int(fx.Boolean(False)) == 0
+
+        run(body)
+
+
+class TestWideIntegerConstants:
+    """An unsigned constant at or above ``2**63`` must reach the IR with its
+    bits intact — ``ir.IntegerAttr`` takes a signed C integer for widths up to
+    64, so it has to be reinterpreted host-side first."""
+
+    KEY = 0x9E3779B97F4A7C15
+    KEY_AS_SIGNED = KEY - (1 << 64)
+
+    def test_uint64_constant_materializes(self):
+        def body():
+            fx.Uint64(self.KEY).ir_value()
+
+        assert f"arith.constant {self.KEY_AS_SIGNED} : i64" in source_ir(body)
+
+    def test_all_ones_uint64_constant_materializes(self):
+        def body():
+            fx.Uint64(0xFFFFFFFFFFFFFFFF).ir_value()
+
+        assert "arith.constant -1 : i64" in source_ir(body)
+
+    def test_arith_const_helpers_accept_wide_unsigned(self):
+        from flydsl.expr.utils.arith import arith_const, constant, constant_vector
+
+        def body():
+            arith_const(self.KEY, ir.IntegerType.get_signless(64))
+            constant(self.KEY, type=ir.IntegerType.get_signless(64))
+            constant_vector(self.KEY, ir.VectorType.get([2], ir.IntegerType.get_signless(64)))
+
+        text = source_ir(body)
+        assert f"arith.constant {self.KEY_AS_SIGNED} : i64" in text
+        assert f"dense<{self.KEY_AS_SIGNED}> : vector<2xi64>" in text
+
+    def test_narrower_and_wider_constants_are_unchanged(self):
+        """Regression guard: only the i64 path needed reinterpretation."""
+        from flydsl.expr.utils.arith import arith_const
+
+        def body():
+            arith_const(0xFFFFFFFF, ir.IntegerType.get_signless(32))
+            arith_const(-1, ir.IntegerType.get_signless(64))
+            arith_const(0xD2E7470EE14C6C93, ir.IntegerType.get_signless(128))
+            arith_const(5, ir.IndexType.get())
+
+        text = source_ir(body)
+        assert "arith.constant -1 : i32" in text
+        assert "arith.constant -1 : i64" in text
+        assert "arith.constant 15197193596820024467 : i128" in text
+        assert "arith.constant 5 : index" in text
 
 
 class TestCompileTimeAsPython:

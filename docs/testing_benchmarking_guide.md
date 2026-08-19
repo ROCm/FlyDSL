@@ -1,8 +1,8 @@
-# Testing & Benchmarking Guide
+# Testing & benchmarking guide
 
-> Test infrastructure, running tests, benchmark harness, writing new tests, and performance measurement.
+This guide covers the FlyDSL test infrastructure, how to run tests and benchmarks, how to write new tests, and how to measure and compare performance.
 
-## Quick Reference
+## Quick reference
 
 | Category | Location | Requires GPU | Description |
 |---|---|---|---|
@@ -23,11 +23,11 @@ bash scripts/run_benchmark.sh
 
 ---
 
-## 1. Test Categories
+## 1. Test categories
 
-### 1.1 MLIR Lit Tests (`tests/mlir/`)
+### 1.1 MLIR lit tests (`tests/mlir/`)
 
-MLIR-based tests organized by category, verified using the `fly-opt` tool. Validates that Fly dialect operations lower correctly to standard MLIR dialects without needing a GPU.
+MLIR-based tests organized by category, verified using the `fly-opt` tool. These tests confirm that Fly dialect operations lower correctly to standard MLIR dialects without requiring a GPU.
 
 **Directories:**
 
@@ -46,7 +46,17 @@ cmake --build build-fly --target fly-opt -j$(nproc)
 build-fly/bin/fly-opt --fly-canonicalize tests/mlir/LayoutAlgebra/construction.mlir
 ```
 
-### 1.2 Python Tests (`tests/python/`)
+**Editor support (MLIR LSP):** `build-fly/bin/flydsl-lsp-server` is a thin
+`MlirLspServerMain` wrapper with Fly (+ backend) dialects registered. Point the
+editor's MLIR LSP client / `mlir-lsp-server` path at that binary for `.mlir`
+diagnostics, hover, go-to-definition, and completion. It is not a Python DSL /
+kernel language server.
+
+```bash
+cmake --build build-fly --target flydsl-lsp-server -j$(nproc)
+```
+
+### 1.2 Python tests (`tests/python/`)
 
 Python-based tests including AOT pre-compilation examples.
 
@@ -55,19 +65,18 @@ Python-based tests including AOT pre-compilation examples.
 python tests/python/examples/aot_example.py
 ```
 
-### 1.3 GPU Kernel Tests (`tests/kernels/`)
+### 1.3 GPU kernel tests (`tests/kernels/`)
 
-Full end-to-end tests: compile FlyDSL kernels, execute on GPU, validate against PyTorch reference.
+Full end-to-end tests that compile FlyDSL kernels, execute them on the GPU, and validate results against a PyTorch reference.
 
 **Files:**
-| Test File | Kernel | Description |
+| Test file | Kernel | Description |
 |---|---|---|
 | `test_vec_add.py` | VecAdd | Vector addition (C = A + B) |
 | `test_softmax.py` | Softmax | Row-wise softmax |
 | `test_layernorm.py` | LayerNorm | Layer normalization |
 | `test_rmsnorm.py` | RMSNorm | RMS normalization |
 | `test_preshuffle_gemm.py` | GEMM | Preshuffle MFMA GEMM (fp8/int8/fp16/bf16) |
-| `test_blockscale_preshuffle_gemm.py` | GEMM | Block-scale (MXFP4) preshuffle GEMM |
 | `test_moe_gemm.py` | MoE GEMM | Mixture-of-Experts GEMM |
 | `test_moe_reduce.py` | MoE Reduce | MoE reduction kernel |
 | `test_pa.py` | Paged Attn | Paged attention decode |
@@ -80,7 +89,7 @@ python tests/kernels/test_softmax.py
 python tests/kernels/test_preshuffle_gemm.py --in_dtype fp8 -M 16 -N 5120 -K 8192
 ```
 
-### 1.4 AOT Examples (`tests/python/examples/`)
+### 1.4 AOT examples (`tests/python/examples/`)
 
 AOT pre-compilation examples:
 
@@ -91,7 +100,7 @@ tests/python/examples/
 
 ---
 
-## 2. Test Runner Scripts
+## 2. Test runner scripts
 
 ### 2.1 `scripts/run_tests.sh`
 
@@ -160,7 +169,7 @@ gemm           16x40960x5120                      fp8         1.234     56.789
 
 ---
 
-## 3. Pytest Configuration
+## 3. Pytest configuration
 
 ### 3.1 `tests/conftest.py`
 
@@ -183,7 +192,7 @@ def insert_point(ctx):
     """Sets insertion point to module body."""
 ```
 
-**Build discovery:** Supports multiple build layouts:
+**Build discovery:** The configuration supports multiple build layouts:
 - `build-fly/python_packages` (preferred)
 - `build/python_packages/flydsl` (fallback)
 
@@ -191,7 +200,7 @@ def insert_point(ctx):
 
 ---
 
-## 4. Performance Measurement
+## 4. Performance measurement
 
 ### 4.1 `tests/test_common.py`
 
@@ -235,9 +244,9 @@ gpu_us = bench_gpu_us_torch(fn, warmup=20, iters=200)
 
 ---
 
-## 5. Test Utilities (`tests/utils.py`)
+## 5. Test utilities (`tests/utils.py`)
 
-### Weight Utilities
+### Weight utilities
 
 ```python
 from tests.utils import pertoken_quant, shuffle_weight
@@ -251,9 +260,9 @@ shuffled = shuffle_weight(weight, layout=(16, 16))
 
 ---
 
-## 6. Writing New Tests
+## 6. Writing new tests
 
-### 6.1 PyIR Test Pattern (No GPU)
+### 6.1 PyIR test pattern (no GPU)
 
 ```python
 # tests/python/test_my_feature.py
@@ -269,7 +278,7 @@ def test_my_layout_op(ctx, insert_point):
     assert "fly.make_layout" in ir_str
 ```
 
-### 6.2 GPU Kernel Test Pattern (New API)
+### 6.2 GPU kernel test pattern (new API)
 
 ```python
 # tests/kernels/test_my_kernel.py
@@ -305,7 +314,7 @@ def test_my_kernel():
     assert err == 0, f"Mismatch: {err * 100:.2f}%"
 ```
 
-### 6.3 Benchmark Test Pattern
+### 6.3 Benchmark test pattern
 
 ```python
 from tests.kernels.benchmark_common import bench_gpu_us_torch
@@ -328,7 +337,7 @@ def benchmark_my_kernel():
 
 ---
 
-## 7. GEMM Test CLI Arguments
+## 7. GEMM test CLI arguments
 
 The `test_preshuffle_gemm.py` test supports extensive CLI configuration:
 
@@ -347,9 +356,9 @@ python tests/kernels/test_preshuffle_gemm.py \
 
 ---
 
-## 8. Test Configuration via Environment Variables
+## 8. Test configuration via environment variables
 
-| Variable | Used By | Description |
+| Variable | Used by | Description |
 |---|---|---|
 | `ROCDSL_SOFTMAX_SHAPES` | `test_softmax.py` | Override softmax test shapes (`"M,N,dtype;..."`) |
 | `ROCDSL_LAYERNORM_SHAPES` | `test_layernorm.py` | Override layernorm test shapes |
@@ -361,7 +370,7 @@ python tests/kernels/test_preshuffle_gemm.py \
 
 ---
 
-## 9. IR Dump Workflow
+## 9. IR dump workflow
 
 ### Via `MlirCompiler`
 
@@ -371,7 +380,7 @@ FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=./dumps python my_test.py
 
 Produces numbered `.mlir` files per pipeline stage plus `final_isa.s`.
 
-### Dedicated IR Dump Script
+### Dedicated IR dump script
 
 ```bash
 bash scripts/dumpir.sh
@@ -379,7 +388,7 @@ bash scripts/dumpir.sh
 
 ---
 
-## 10. Source Files
+## 10. Source files
 
 | File | Description |
 |---|---|
