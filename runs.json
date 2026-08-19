@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-19T01:48:54Z",
+ "updated": "2026-08-19T01:51:19Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -433,11 +433,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Kernel] Add row-wise Softmax backward (#1019)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32144669431",
    "created_at": "2026-08-18T13:50:04Z",
-   "updated_at": "2026-08-18T23:55:54Z",
+   "updated_at": "2026-08-19T01:48:53Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -453,11 +453,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-18T23:50:20Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32144669431/job/95889439600"
+     "completed_at": "2026-08-19T01:48:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32144669431/job/95889439600",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
