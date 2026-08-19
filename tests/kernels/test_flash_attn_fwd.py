@@ -4559,8 +4559,11 @@ def test_lazy_rescale_survives_a_wide_score_range(k_scale):
     eager = flydsl_flash_attn_func(q, k, v, causal=False, dualwave_swp_lazy_rescale=False)
     torch.cuda.synchronize()
 
+    assert torch.isfinite(eager).all(), f"the eager baseline is not finite at k_scale={k_scale}"
+    n_nan = int(torch.isnan(lazy).sum())
+    n_inf = int(torch.isinf(lazy).sum())
     assert torch.isfinite(lazy).all(), (
-        f"lazy rescale produced {int(torch.isnan(lazy).sum())} NaN of {lazy.numel()} at k_scale={k_scale}"
+        f"lazy rescale produced {n_nan} NaN and {n_inf} inf of {lazy.numel()} at k_scale={k_scale}"
     )
     ref = torch.nn.functional.scaled_dot_product_attention(
         q.transpose(1, 2).float(), k.transpose(1, 2).float(), v.transpose(1, 2).float()
