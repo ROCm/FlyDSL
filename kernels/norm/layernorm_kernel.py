@@ -876,6 +876,10 @@ def _build_layernorm_quant_module(
 
             lane = tid % WARP_SIZE
             wave = tid // WARP_SIZE
+            # s_sum still holds the sum reduction's result, which every wave
+            # broadcast-reads on exit. Only this barrier orders that read
+            # against the store below; without it a late wave reads this max.
+            gpu.barrier()
             w = wave_reduce_max(val)
             if lane == 0:
                 fx.memref_store(w, s_sum, wave)
@@ -1236,6 +1240,10 @@ def _build_fused_add_layernorm_quant_module(
 
             lane = tid % WARP_SIZE
             wave = tid // WARP_SIZE
+            # s_sum still holds the sum reduction's result, which every wave
+            # broadcast-reads on exit. Only this barrier orders that read
+            # against the store below; without it a late wave reads this max.
+            gpu.barrier()
             w = wave_reduce_max(val)
             if lane == 0:
                 fx.memref_store(w, s_sum, wave)

@@ -935,6 +935,10 @@ def _build_rmsnorm_quant_module(
             lane = tid % WARP_SIZE
             wave = tid // WARP_SIZE
 
+            # s_red still holds the sum reduction's result, which every wave
+            # broadcast-reads on exit. Only this barrier orders that read
+            # against the store below; without it a late wave reads this max.
+            gpu.barrier()
             w = wave_reduce_max(val)
             if lane == 0:
                 fx.memref_store(w, s_red, wave)
@@ -1309,6 +1313,10 @@ def _build_fused_add_rmsnorm_quant_module(
             lane = tid % WARP_SIZE
             wave = tid // WARP_SIZE
 
+            # s_red still holds the sum reduction's result, which every wave
+            # broadcast-reads on exit. Only this barrier orders that read
+            # against the store below; without it a late wave reads this max.
+            gpu.barrier()
             w = wave_reduce_max(val)
             if lane == 0:
                 fx.memref_store(w, s_red, wave)
