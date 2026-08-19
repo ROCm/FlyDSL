@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-19T02:14:20Z",
+ "updated": "2026-08-19T02:33:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -79,10 +79,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-19T02:07:28Z",
-     "completed_at": null,
+     "completed_at": "2026-08-19T02:21:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32198160997/job/95933105835"
     },
     {
@@ -555,11 +555,11 @@
    "branch": "pr/fix-gfx1250-wave-size",
    "event": "pull_request",
    "title": "[ROCDL] Fix wave size for gfx1250 (wave32, not wave64)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32132126110",
    "created_at": "2026-08-18T11:31:12Z",
-   "updated_at": "2026-08-19T01:12:52Z",
+   "updated_at": "2026-08-19T02:30:46Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -585,11 +585,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T01:12:51Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32132126110/job/95890547874"
+     "completed_at": "2026-08-19T02:30:45Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32132126110/job/95890547874",
+     "log_fetch_failed": true
     }
    ]
   },
