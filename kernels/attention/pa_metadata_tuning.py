@@ -76,6 +76,21 @@ def make_pa_metadata_grid_autotuner(
 _RUNTIME_TUNER = make_pa_metadata_grid_autotuner(warmup=0, rep=1)
 
 
+def get_cached_config(tuner: Autotuner, *args, **kwargs):
+    """Return an in-memory, scratch, or offline config without running it."""
+    config = tuner.cache.get(tuner._make_key(args, kwargs))
+    if config is not None:
+        return config
+    artifact = tuner._artifact_ref(args, kwargs, required=False)
+    return tuner._load_artifact(artifact, args, kwargs)
+
+
+def persistent_config_path(tuner: Autotuner, *args, **kwargs):
+    """Return the offline artifact path, or the scratch cache path."""
+    artifact = tuner._artifact_ref(args, kwargs, required=False)
+    return artifact[0] if artifact is not None else tuner._cache_file
+
+
 def lookup_pa_metadata_grid_multiplier(
     *,
     num_cu: int,
@@ -102,11 +117,7 @@ def lookup_pa_metadata_grid_multiplier(
         device_tensor,
         None,
     )
-    get_cached_config = getattr(_RUNTIME_TUNER, "get_cached_config", None)
-    if get_cached_config is not None:
-        config = get_cached_config(*args)
-    else:
-        config = _RUNTIME_TUNER.cache.get(_RUNTIME_TUNER._make_key(args, {}))
+    config = get_cached_config(_RUNTIME_TUNER, *args)
     if config is None:
         return None
     return int(config.kwargs["grid_multiplier"])
@@ -264,11 +275,7 @@ def _tune_shape(
         replay_grid,
     )
     tuner(*tuner_args)
-    get_cached_config = getattr(tuner, "get_cached_config", None)
-    if get_cached_config is not None:
-        best_config = get_cached_config(*tuner_args)
-    else:
-        best_config = tuner.cache.get(tuner._make_key(tuner_args, {}))
+    best_config = get_cached_config(tuner, *tuner_args)
     best_grid = int(best_config.kwargs["grid_multiplier"])
     torch.cuda.synchronize(device)
 
@@ -279,8 +286,7 @@ def _tune_shape(
         rtol=2e-2,
     ):
         raise RuntimeError(f"grid_multiplier={best_grid} failed correctness")
-    persistent_config_path = getattr(tuner, "persistent_config_path", None)
-    config_path = persistent_config_path(*tuner_args) if persistent_config_path is not None else tuner._cache_file
+    config_path = persistent_config_path(tuner, *tuner_args)
     return best_grid, timings_us.get(best_grid), config_path
 
 

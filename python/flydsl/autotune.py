@@ -562,19 +562,6 @@ class Autotuner:
         self._artifact_cache[str(path)] = body
         log().info(f"Wrote offline config {path}")
 
-    def get_cached_config(self, *args, **kwargs):
-        """Return an in-memory, scratch, or offline config without running it."""
-        config = self.cache.get(self._make_key(args, kwargs))
-        if config is not None:
-            return config
-        artifact = self._artifact_ref(args, kwargs, required=False)
-        return self._load_artifact(artifact, args, kwargs)
-
-    def persistent_config_path(self, *args, **kwargs):
-        """Return the offline artifact path, or the scratch cache path."""
-        artifact = self._artifact_ref(args, kwargs, required=False)
-        return artifact[0] if artifact is not None else self._cache_file
-
     def __call__(self, *args, **kwargs):
         key = self._make_key(args, kwargs)
         force = _tuning_enabled()

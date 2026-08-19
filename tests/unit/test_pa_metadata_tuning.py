@@ -45,8 +45,8 @@ def test_pa_metadata_tuner_persists_and_runtime_reads(tmp_path, monkeypatch):
     tuner_args = (81, 648, 4, True, 80, 16, 1, 128, 1024, None, runner)
     tuner(*tuner_args)
 
-    assert tuner.get_cached_config(*tuner_args).kwargs["grid_multiplier"] == 2
-    config_path = tuner.persistent_config_path(*tuner_args)
+    assert tuning.get_cached_config(tuner, *tuner_args).kwargs["grid_multiplier"] == 2
+    config_path = tuning.persistent_config_path(tuner, *tuner_args)
     assert config_path == tmp_path / "run_pa_metadata_grid_config.json"
     assert config_path.is_file()
 
