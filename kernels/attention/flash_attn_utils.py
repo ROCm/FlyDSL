@@ -386,7 +386,7 @@ def _lane_pair_reduce(v, reducer, fm_fast):
 
 
 def _score_pair_max(v_s, neg_inf, fm_fast):
-    reducer = lambda a, b, _fm: fx.maxnumf(a, b)  # noqa: E731
+    reducer = lambda a, b, _fm: fx.maxnumf(a, b, fastmath=_fm)  # noqa: E731
     return _lane_pair_reduce(_reduce_score_pair(v_s, neg_inf, reducer, fm_fast), reducer, fm_fast)
 
 
@@ -460,7 +460,7 @@ def _safe_l_inv(l_row, zero_f):
 
 
 def _rescale_from_tile_max(m_row, m_tile_max, fm_fast):
-    row_max = fx.maxnumf(m_row, m_tile_max)
+    row_max = fx.maxnumf(m_row, m_tile_max, fastmath=fm_fast)
     rescale = rocdl.exp2(T.f32, as_mlir_value(m_row - row_max))
     return row_max, rescale
 
@@ -2980,19 +2980,19 @@ class GenericSoftmaxHelper:
         if const_expr(os.getenv("FLYDSL_FLASH_ATTN_FUNC_TREE_REDUCE", "0") == "1"):
 
             def _max_pair(a, b):
-                return fx.maxnumf(a, b)
+                return fx.maxnumf(a, b, fastmath=ctx.fm_fast)
 
             local_max = _tree_reduce(list(s_raw_lo) + list(s_raw_hi), _max_pair)
         else:
             local_max = s_raw_lo[0]
             for r in range_constexpr(15):
-                local_max = fx.maxnumf(local_max, s_raw_lo[r + 1])
+                local_max = fx.maxnumf(local_max, s_raw_lo[r + 1], fastmath=ctx.fm_fast)
             for r in range_constexpr(16):
-                local_max = fx.maxnumf(local_max, s_raw_hi[r])
-        row_max = fx.maxnumf(local_max, self.reduction_peer(local_max))
-        m_new_raw = fx.maxnumf(m_running, row_max)
+                local_max = fx.maxnumf(local_max, s_raw_hi[r], fastmath=ctx.fm_fast)
+        row_max = fx.maxnumf(local_max, self.reduction_peer(local_max), fastmath=ctx.fm_fast)
+        m_new_raw = fx.maxnumf(m_running, row_max, fastmath=ctx.fm_fast)
         if const_expr(traits.CAUSAL):
-            m_new_raw = fx.maxnumf(m_new_raw, ctx.c_neg_floor)
+            m_new_raw = fx.maxnumf(m_new_raw, ctx.c_neg_floor, fastmath=ctx.fm_fast)
 
         diff_m_scaled = (m_running - m_new_raw) * ctx.c_sm_scale_log2e
         corr = self._exp2(diff_m_scaled)
@@ -3772,7 +3772,7 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         return _score_pair_max(v_s, self.c_neg_inf, self.fm_fast)
 
     def floor_masked_max(self, row_max):
-        return fx.maxnumf(row_max, self.c_neg_floor)
+        return fx.maxnumf(row_max, self.c_neg_floor, fastmath=self.fm_fast)
 
     def rescale_from_tile_max(self, m_row, m_tile_max):
         return _rescale_from_tile_max(m_row, m_tile_max, self.fm_fast)
@@ -3803,7 +3803,7 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         _scale_o_accs(v_o, scale_scalar, self.traits, self.fm_fast)
 
     def rescale_o(self, v_o, m_row, l_row, m_tile_max, v_p):
-        m_new = fx.maxnumf(m_row, m_tile_max)
+        m_new = fx.maxnumf(m_row, m_tile_max, fastmath=self.fm_fast)
         corr = rocdl.exp2(T.f32, as_mlir_value(m_row - m_new))
         self.scale_o(v_o, corr)
         v_o = _anchor_v_o(self.traits, v_o)
@@ -3818,7 +3818,7 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         return v_o, m_new, l_row, v_p
 
     def fold_sink(self, v_o, m_row, l_row, sink_log2):
-        m_new = fx.maxnumf(m_row, sink_log2)
+        m_new = fx.maxnumf(m_row, sink_log2, fastmath=self.fm_fast)
         corr = rocdl.exp2(T.f32, as_mlir_value(m_row - m_new))
         self.scale_o(v_o, corr)
         sink_w = rocdl.exp2(T.f32, as_mlir_value(sink_log2 - m_new))
@@ -5101,10 +5101,10 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         return _score_pair_max(v_s, self.c_neg_inf, self.fm_fast)
 
     def max2(self, a, b):
-        return fx.maxnumf(a, b)
+        return fx.maxnumf(a, b, fastmath=self.fm_fast)
 
     def floor_masked_max(self, row_max):
-        return fx.maxnumf(row_max, self.c_neg_floor)
+        return fx.maxnumf(row_max, self.c_neg_floor, fastmath=self.fm_fast)
 
     def sub_m(self, v_s, row_max):
         return _scale_sub_score_pair(v_s, row_max, self.c_logit_scale, self.c_zero_f, self.fm_fast)
@@ -5149,7 +5149,7 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         return _safe_l_inv(l_row, self.c_zero_f)
 
     def rescale_from_tile_max(self, m_row, m_tile_max):
-        row_max = fx.maxnumf(m_row, m_tile_max)
+        row_max = fx.maxnumf(m_row, m_tile_max, fastmath=self.fm_fast)
         diff_scaled = (m_row - row_max) * self.c_logit_scale
         rescale = rocdl.exp2(T.f32, as_mlir_value(diff_scaled))
         return row_max, rescale
