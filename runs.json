@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-19T09:06:02Z",
+ "updated": "2026-08-19T09:32:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32236366945,
+   "pr": 1015,
+   "commit": "3b3e9e8b34d89d4431207830a3ddcf2c8e548fa6",
+   "branch": "phil/isa-resource-diff-arch-general",
+   "event": "pull_request",
+   "title": "[Tools] Add architecture-general ISA resource diff tool",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32236366945",
+   "created_at": "2026-08-19T09:11:51Z",
+   "updated_at": "2026-08-19T09:14:34Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 32233695138,
    "pr": 1009,
@@ -29,9 +44,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32231429789",
    "created_at": "2026-08-19T08:11:57Z",
-   "updated_at": "2026-08-19T08:14:37Z",
+   "updated_at": "2026-08-19T09:23:47Z",
    "actor": "aoli26",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T09:23:14Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32231429789/job/96019952145"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T09:23:47Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32231429789/job/96019952174"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T09:23:13Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32231429789/job/96019952176"
+    }
+   ]
   },
   {
    "run_id": 32228197237,
@@ -50,11 +93,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T08:03:40Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32228197237/job/95999557480"
+     "completed_at": "2026-08-19T09:05:15Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32228197237/job/95999557480",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -234,7 +278,7 @@
    "commit": "81873df9821fbc2f2648e59c6e4b9e37dc799726",
    "branch": "phil/isa-resource-diff-arch-general",
    "event": "pull_request",
-   "title": "[WIP] [Feature] Add architecture-general ISA resource diff tool",
+   "title": "[Tools] Add architecture-general ISA resource diff tool",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32219870712",
@@ -280,7 +324,7 @@
    "commit": "8be519e925742386771bda69b7a9f777a73e0804",
    "branch": "phil/isa-resource-diff-arch-general",
    "event": "pull_request",
-   "title": "[WIP] [Feature] Add architecture-general ISA resource diff tool",
+   "title": "[Tools] Add architecture-general ISA resource diff tool",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32219722336",
@@ -295,7 +339,7 @@
    "commit": "61dd482a00749ec8a7bc0acfde39ed62b86826e9",
    "branch": "phil/isa-resource-diff-arch-general",
    "event": "pull_request",
-   "title": "[WIP] [Feature] Add architecture-general ISA resource diff tool",
+   "title": "[Tools] Add architecture-general ISA resource diff tool",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32219046776",
@@ -1510,7 +1554,7 @@
    "commit": "220c6663f6f5145596f671792c19d0180b8a332f",
    "branch": "phil/isa-resource-diff-arch-general",
    "event": "pull_request",
-   "title": "[WIP] [Feature] Add architecture-general ISA resource diff tool",
+   "title": "[Tools] Add architecture-general ISA resource diff tool",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32018459059",
@@ -1556,7 +1600,7 @@
    "commit": "4627f89b43c8176a27eb11cf85fbba4d92d4d8d1",
    "branch": "phil/isa-resource-diff-arch-general",
    "event": "pull_request",
-   "title": "[WIP] [Feature] Add architecture-general ISA resource diff tool",
+   "title": "[Tools] Add architecture-general ISA resource diff tool",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32018377541",
@@ -1571,7 +1615,7 @@
    "commit": "0c9c152742349e227da0198a9b5641384863018d",
    "branch": "phil/isa-resource-diff-arch-general",
    "event": "pull_request",
-   "title": "[WIP] [Feature] Add architecture-general ISA resource diff tool",
+   "title": "[Tools] Add architecture-general ISA resource diff tool",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32017173048",
@@ -1632,7 +1676,7 @@
    "commit": "5c4f252bc6ebf89432f343c8b7eb7b4aa819bab8",
    "branch": "phil/isa-resource-diff-arch-general",
    "event": "pull_request",
-   "title": "[WIP] [Feature] Add architecture-general ISA resource diff tool",
+   "title": "[Tools] Add architecture-general ISA resource diff tool",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32016008004",
@@ -1864,51 +1908,6 @@
      "started_at": "2026-08-17T05:04:52Z",
      "completed_at": "2026-08-17T06:15:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/31995425965/job/95289229017",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 31992264183,
-   "pr": null,
-   "commit": "daee90e485e7e872c54a2ebd147228219f0b367e",
-   "branch": "main",
-   "event": "push",
-   "title": "DSL-ify raw arith float ops in kernels (flash/mla/pa/moe), fastmath v\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31992264183",
-   "created_at": "2026-08-17T03:47:06Z",
-   "updated_at": "2026-08-17T04:55:03Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-17T04:01:44Z",
-     "completed_at": "2026-08-17T04:55:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31992264183/job/95279739312"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-17T04:01:31Z",
-     "completed_at": "2026-08-17T04:18:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31992264183/job/95279739361",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-17T04:01:43Z",
-     "completed_at": "2026-08-17T04:47:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31992264183/job/95279739373",
      "log_fetch_failed": true
     }
    ]
