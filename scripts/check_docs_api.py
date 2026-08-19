@@ -36,7 +36,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -262,9 +264,65 @@ def _check_skill_refs(path: Path, text: str, skills: set[str]) -> list[str]:
     return bad
 
 
+def _changed_files(base: str, head: str) -> list[str] | None:
+    """Repo-relative paths changed between *base* and *head*, or None if git fails."""
+    try:
+        out = subprocess.run(
+            ["git", "diff", "--name-only", "--diff-filter=ACMR", base, head],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    return [line for line in out.stdout.splitlines() if line]
+
+
+def _default_base(head: str) -> str:
+    env = os.environ.get("BASE_SHA", "").strip()
+    if env:
+        return env
+    try:
+        out = subprocess.run(
+            ["git", "merge-base", head, "origin/main"],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return out.stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ""
+
+
+def _scope_targets(patterns: list[str], base: str, head: str) -> tuple[list[Path], str]:
+    """Narrow the scan to what this change can have invalidated.
+
+    Diff-scoping a *cross-reference* check needs care: renaming a symbol under
+    ``python/flydsl/`` can invalidate any document, not just the ones the commit
+    touched. So a source change widens the scan back to everything, and only a
+    docs-only change narrows it.
+    """
+    everything = _iter_targets(patterns)
+    if not base:
+        return everything, "whole tree (no base revision)"
+    changed = _changed_files(base, head)
+    if changed is None:
+        return everything, "whole tree (git unavailable)"
+    if any(c.startswith("python/flydsl/") for c in changed):
+        return everything, "whole tree (python/flydsl changed)"
+    changed_abs = {(REPO / c).resolve() for c in changed}
+    scoped = [p for p in everything if p.resolve() in changed_abs]
+    return scoped, f"{len(scoped)} changed file(s) vs {base[:12]}"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--include-docs", action="store_true", help="also scan docs/ (not yet clean; see PR #1027)")
+    ap.add_argument("--base", help="base commit; defaults to BASE_SHA or merge-base with origin/main")
+    ap.add_argument("--head", default=os.environ.get("HEAD_SHA", "HEAD"), help="head commit")
+    ap.add_argument("--all", action="store_true", help="scan every target regardless of the diff")
     args = ap.parse_args()
 
     known = _defined_symbols() | _used_symbols()
@@ -275,8 +333,12 @@ def main() -> int:
     )
 
     patterns = list(DEFAULT_TARGETS) + (DOCS_TARGETS if args.include_docs else [])
+    if args.all:
+        targets, scope = _iter_targets(patterns), "whole tree (--all)"
+    else:
+        base = args.base if args.base is not None else _default_base(args.head)
+        targets, scope = _scope_targets(patterns, base, args.head)
     problems: list[str] = []
-    targets = _iter_targets(patterns)
     for path in targets:
         text = path.read_text(encoding="utf-8")
         problems += _check_symbols(path, text, known)
@@ -285,7 +347,9 @@ def main() -> int:
         if path.name == "SKILL.md":
             problems += _check_frontmatter(path)
 
-    print(f"check_docs_api: scanned {len(targets)} file(s), " f"{len(known)} known symbols, {len(skills)} skills")
+    print(
+        f"check_docs_api: {scope}; scanned {len(targets)} file(s), " f"{len(known)} known symbols, {len(skills)} skills"
+    )
     if problems:
         print(f"\n{len(problems)} problem(s):\n", file=sys.stderr)
         for p in problems:

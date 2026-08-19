@@ -160,7 +160,7 @@ helper code that is not part of the traced closure.
 - **Imports**: isort treats `flydsl` as first-party.
 - **C++**: LLVM style, `ColumnLimit: 100` in `.clang-format`; C++17 via top-level `CMakeLists.txt`.
 - **CI style gate**: `.github/workflows/pre-checks.yaml` runs a Python check (black + ruff, `.github/scripts/check_python_style.sh`) and a C++ check (`clang-format-18`, `.github/scripts/check_cpp_style.sh`) on every PR. Reproduce the Python gate locally with `scripts/check_python_style.sh`.
-- **Agent-docs gate**: the same workflow runs `scripts/check_docs_api.py`, which checks that `fx.*` / `rocdl.*` symbols, repo paths, skill frontmatter, and skill cross-references in `CLAUDE.md` and `.claude/skills/` still resolve against the source. Run it locally after editing either. Annotate a genuine placeholder with a trailing `<!-- api-check: ignore -->`.
+- **Repository pre-checks**: the same workflow runs `scripts/check_repo.py`, one entry point for the non-style checks (currently the legacy-arithmetic guard and `check_docs_api.py`, which verifies that `fx.*` / `rocdl.*` symbols, repo paths, skill frontmatter, and skill cross-references in `CLAUDE.md` and `.claude/skills/` still resolve against the source). Reproduce all of them with `python3 scripts/check_repo.py`; `--list` shows them and `--only <name>` runs one. Register a new check there rather than adding a workflow step. Annotate a genuine documentation placeholder with a trailing `<!-- api-check: ignore -->`.
 - **Generated output**: never edit `build-fly/python_packages/`, generated `_mlir` bindings, or other build outputs directly.
 - **Third-party code**: avoid touching `thirdparty/` unless the task explicitly requires it.
 
