@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-19T23:25:17Z",
+ "updated": "2026-08-19T23:49:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,9 +14,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306637551",
    "created_at": "2026-08-19T21:59:25Z",
-   "updated_at": "2026-08-19T22:27:49Z",
+   "updated_at": "2026-08-19T23:38:59Z",
    "actor": "JohnQinAMD",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T23:38:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306637551/job/96262735080"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T23:38:49Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306637551/job/96262735084"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T23:38:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306637551/job/96262735216"
+    }
+   ]
   },
   {
    "run_id": 32306567897,
@@ -143,21 +171,22 @@
    "branch": "john/maxnumf-ambient-fastmath",
    "event": "pull_request",
    "title": "[Fix] Let fx.maxnumf inherit the ambient fastmath",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298048348",
    "created_at": "2026-08-19T20:21:05Z",
-   "updated_at": "2026-08-19T21:16:49Z",
+   "updated_at": "2026-08-19T23:46:07Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T21:16:49Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298048348/job/96228993219"
+     "completed_at": "2026-08-19T23:46:06Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298048348/job/96228993219",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
