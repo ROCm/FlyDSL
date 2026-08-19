@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-19T18:30:41Z",
+ "updated": "2026-08-19T18:42:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32288703611,
+   "pr": 1034,
+   "commit": "9d4a021566c34aa30083ce4496d89a0f2cab1e11",
+   "branch": "john/maxnumf-fastmath",
+   "event": "pull_request",
+   "title": "[Fix] Restore the fastmath flag on flash-attention maxnumf",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32288703611",
+   "created_at": "2026-08-19T18:40:53Z",
+   "updated_at": "2026-08-19T18:40:53Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
+  {
+   "run_id": 32288313164,
+   "pr": 1033,
+   "commit": "5e0456e6ffb6cf6ddbb227538fd0aab85888ec13",
+   "branch": "john/lazy-rescale-nan",
+   "event": "pull_request",
+   "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32288313164",
+   "created_at": "2026-08-19T18:36:44Z",
+   "updated_at": "2026-08-19T18:40:16Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 32279429189,
    "pr": 1032,
@@ -1845,67 +1875,6 @@
    "created_at": "2026-08-17T23:36:05Z",
    "updated_at": "2026-08-17T23:51:52Z",
    "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 32060274392,
-   "pr": 960,
-   "commit": "1761c57b77fe97eee444f05a004450e34f749003",
-   "branch": "new_bias_alibi_sink_attention",
-   "event": "pull_request",
-   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32060274392",
-   "created_at": "2026-08-17T19:25:38Z",
-   "updated_at": "2026-08-17T21:39:42Z",
-   "actor": "amd-nprotaso",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-17T20:03:26Z",
-     "completed_at": "2026-08-17T21:39:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32060274392/job/95490322217",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-17T20:02:47Z",
-     "completed_at": "2026-08-17T20:15:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32060274392/job/95490322265",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-17T20:04:03Z",
-     "completed_at": "2026-08-17T21:05:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32060274392/job/95490322457",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32057245438,
-   "pr": null,
-   "commit": "2cc5acc49303b8d44a3fb73b3276a33aad1c861e",
-   "branch": "new_bias_alibi_sink_attention",
-   "event": "pull_request",
-   "title": "[Kernel][MI350] Add bias, alibi bias and sink to flash attention",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32057245438",
-   "created_at": "2026-08-17T18:53:06Z",
-   "updated_at": "2026-08-17T18:55:29Z",
-   "actor": "amd-nprotaso",
    "jobs": []
   }
  ]
