@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-08-19T05:37:08Z",
+ "updated": "2026-08-19T06:32:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32223299596,
+   "pr": 1029,
+   "commit": "f330650664903194635b7a4ae617347c00910fdd",
+   "branch": "pr/fix-waitcnt-attr-compat",
+   "event": "pull_request",
+   "title": "[ROCDL] Accept IntegerAttr in the wait-counter for backward compatibility",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32223299596",
+   "created_at": "2026-08-19T06:24:45Z",
+   "updated_at": "2026-08-19T06:27:16Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 32220754968,
+   "pr": 1028,
+   "commit": "1f811d456cc26a3fbd0e67a68a14fa9a332a4556",
+   "branch": "feat/rdna3-gemm-tile-selection",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Speed up the RDNA3 GEMM up to 1.85x by choosing the tile from the shape",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32220754968",
+   "created_at": "2026-08-19T05:47:28Z",
+   "updated_at": "2026-08-19T06:20:32Z",
+   "actor": "vlluvia",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T06:20:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32220754968/job/95975660853"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T06:15:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32220754968/job/95975660890"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T06:15:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32220754968/job/95975660933"
+    }
+   ]
+  },
   {
    "run_id": 32219870712,
    "pr": 1015,
@@ -14,9 +72,38 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32219870712",
    "created_at": "2026-08-19T05:33:32Z",
-   "updated_at": "2026-08-19T05:34:35Z",
+   "updated_at": "2026-08-19T05:55:02Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T05:54:44Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32219870712/job/95971846054"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T05:55:01Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32219870712/job/95971846101"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-19T05:54:30Z",
+     "completed_at": "2026-08-19T06:20:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32219870712/job/95971846117",
+     "log_fetch_failed": true
+    }
+   ]
   },
   {
    "run_id": 32219722336,
@@ -1824,65 +1911,6 @@
    "updated_at": "2026-08-14T13:57:23Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 31807019369,
-   "pr": null,
-   "commit": "92ca7ece48f820aedb5ef0ae6375409e62a48883",
-   "branch": "main",
-   "event": "push",
-   "title": "[Expr] Add type-aware extrema and integer ceiling division (#995)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31807019369",
-   "created_at": "2026-08-14T13:55:50Z",
-   "updated_at": "2026-08-14T13:56:58Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 31800890359,
-   "pr": 1013,
-   "commit": "313594fc71bf79e2688470997b10e7fe23800fc7",
-   "branch": "pr/enh-cdna5-tiled-tdm-atom",
-   "event": "pull_request",
-   "title": "[ROCDL] Add make_tiled_tdm_atom op and tdm_partition",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31800890359",
-   "created_at": "2026-08-14T12:34:10Z",
-   "updated_at": "2026-08-14T14:08:29Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-14T12:55:06Z",
-     "completed_at": "2026-08-14T13:33:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31800890359/job/94772960338"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-14T12:55:06Z",
-     "completed_at": "2026-08-14T14:08:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31800890359/job/94772960413"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-14T12:54:56Z",
-     "completed_at": "2026-08-14T13:12:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31800890359/job/94772960438",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
