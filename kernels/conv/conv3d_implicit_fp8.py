@@ -20,13 +20,8 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir as _ir
-from flydsl._mlir.dialects import llvm
-from flydsl._mlir.dialects import llvm as _llvm
-from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TAS
 from flydsl.expr import arith, const_expr, range_constexpr
 from flydsl.expr.typing import Vector as Vec
-from flydsl.expr.utils.arith import ArithValue as _ArithValue
 from kernels.common import buffer_ops
 from kernels.gemm.fp8_gemm_utils import (
     G2SLoader,
@@ -51,27 +46,15 @@ def _make_fp8_buffer_tensor_from_addr(addr_i64, fp8_ir_t, ref_buf_tensor):
 
     The 2 GB num_records bound ensures OOB-routed padding taps read zero.
     """
-    from flydsl.expr.rocdl.universal import make_ptr
-
     BIG_ASYNC_NR = 0x80000000  # 2 GB
     alignment = fx.PointerType(fx.get_iter(ref_buf_tensor).type).alignment
     f8_ptr_ty = fx.PointerType.get(
         elem_ty=fp8_ir_t,
-        address_space=_TAS.BufferDesc,
+        address_space=fx.AddressSpace.Global,
         alignment=alignment,
     )
-    llvm_ptr_ty = _ir.Type.parse("!llvm.ptr")
-    addr_val = addr_i64.ir_value() if hasattr(addr_i64, "ir_value") else addr_i64
-    base_ptr = _llvm.IntToPtrOp(llvm_ptr_ty, addr_val).result
-    buf_ptr = make_ptr(
-        f8_ptr_ty,
-        [
-            _ArithValue(base_ptr),
-            fx.Int16(0).ir_value(),
-            fx.Int64(BIG_ASYNC_NR).ir_value(),
-            fx.Int32(buffer_ops._get_buffer_flags()).ir_value(),
-        ],
-    )
+    base_ptr = fx.inttoptr(f8_ptr_ty, addr_i64)
+    buf_ptr = fx.rocdl.make_buffer_ptr(base_ptr, num_records_bytes=BIG_ASYNC_NR)
     return fx.Tensor(fx.make_view(buf_ptr, fx.get_layout(ref_buf_tensor)))
 
 
@@ -158,11 +141,14 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
         in_base = nb * c * s
         out_base = nb * s * c
 
+        _lds_st_ptr_ty = fx.PointerType.get(fx.Int32.ir_type, fx.AddressSpace.Shared, 16)
+        _gl_ptr_ty = fx.PointerType.get(fx.Int32.ir_type, fx.AddressSpace.Global, 16)
+        _i32x4_ty = fx.Vector.make_type(4, fx.Int32)
+
         # v16i8 is not a legal backend vector width, so move 16B chunks as dwordx4.
         def lds_store_i32x4(elem_offset, value_i32x4):
             base = fx.Int64(fx.ptrtoint(lds.ptr)) + fx.Int64(elem_offset)
-            ptr = buffer_ops.create_llvm_ptr(base, address_space=3)
-            llvm.StoreOp(value_i32x4, ptr, alignment=16)
+            fx.ptr_store(value_i32x4, fx.inttoptr(_lds_st_ptr_ty, base))
 
         def lds_load_scalar(elem_offset):
             u8p = fx.recast_iter(u8, lds.ptr)
@@ -181,16 +167,16 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
                 cc_s = fx.Index(arith.select(valid, fx.Int64(cc), fx.Int64(0)))
                 ss_s = fx.Index(arith.select(valid, fx.Int64(ss), fx.Int64(0)))
                 addr = in_base_addr + (fx.Int64(nb) * fx.Int64(c) + fx.Int64(cc_s)) * fx.Int64(s) + fx.Int64(ss_s)
-                ptr = buffer_ops.create_llvm_ptr(addr, address_space=1)
-                v = llvm.LoadOp(fx.Vector.make_type(4, fx.Int32), ptr, alignment=16).result
+                v = fx.ptr_load(fx.inttoptr(_gl_ptr_ty, addr), result_type=_i32x4_ty)
             else:
                 # buffer_load offset is in i32 elements; the byte offset is 16B-aligned.
                 g = fx.Int32((in_base + cc * s + ss) // 4)
                 safe = arith.select(valid, g, fx.Int32(0))
                 v = buffer_ops.buffer_load(in_rsrc, safe, vec_width=4, dtype=fx.Int32)  # dwordx4 = 16B
-            lds_store_i32x4(rc * TR_LDS_S + sv, v.ir_value() if hasattr(v, "ir_value") else v)
+            lds_store_i32x4(rc * TR_LDS_S + sv, v)
 
-        llvm.InlineAsmOp(None, [], "s_waitcnt lgkmcnt(0)\n\ts_barrier", "", has_side_effects=True)
+        fx.rocdl.s_waitcnt(lgkmcnt=0)
+        fx.rocdl.s_barrier()
 
         # Read LDS transposed, store 16 contiguous channels per S along C as dwordx4.
         for i in range_constexpr(TR_ITERS):
@@ -206,8 +192,7 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
                 packed = packed_u8.bitcast(fx.Int32)  # v16u8 -> v4i32
                 if const_expr(TR_BIG):
                     addr = out_base_addr + (fx.Int64(nb) * fx.Int64(s) + fx.Int64(ss)) * fx.Int64(c) + fx.Int64(cc)
-                    ptr = buffer_ops.create_llvm_ptr(addr, address_space=1)
-                    llvm.StoreOp(packed.ir_value() if hasattr(packed, "ir_value") else packed, ptr, alignment=16)
+                    fx.ptr_store(packed, fx.inttoptr(_gl_ptr_ty, addr))
                 else:
                     byte_off = out_base + ss * c + cc
                     buffer_ops.buffer_store(packed, out_rsrc, byte_off, offset_is_bytes=True)
@@ -592,11 +577,11 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
         if const_expr(BIG_OUT):
             y_elem_base = fx.Int64(buffer_ops.extract_base_index(y))
 
+        _big_st_ptr_ty = fx.PointerType.get(fx.BFloat16.ir_type, fx.AddressSpace.Global, 2)
+
         def _big_store(off_elem, value):
             addr = y_elem_base + fx.Int64(off_elem) * fx.Int64(2)
-            ptr = buffer_ops.create_llvm_ptr(addr, address_space=1)
-            v = value.ir_value() if hasattr(value, "ir_value") else value
-            llvm.StoreOp(v, ptr, alignment=2)
+            fx.ptr_store(value, fx.inttoptr(_big_st_ptr_ty, addr))
 
         # When n == 1 the 4 accumulator rows a lane owns are contiguous in the output,
         # so one 4xbf16 store replaces four buffer_store_short. dhw % 4 == 0 keeps the

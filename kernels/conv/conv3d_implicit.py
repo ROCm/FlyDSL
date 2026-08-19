@@ -50,32 +50,12 @@ BF16_BYTES = 2
 
 DEFAULT_TILE = (128, 128, 2, 4)
 
-# Widest first. Every rung is legal for any problem: TILE_K is fixed at 32 and each rung's
-# TILE_M * TILE_K and TILE_N * TILE_K land on exactly one LDG_VEC vector per thread, so
-# _pick_tile never has to fall back on a builder assertion.
 TILE_LADDER = ((128, 128, 2, 4), (64, 64, 2, 2), (32, 32, 1, 2))
 
-# Waves the grid has to put on each CU before a wider tile is preferred. Halving a tile
-# halves TILE_M * TILE_N / (TILE_M + TILE_N), i.e. doubles global traffic per FLOP, so
-# narrowing only pays while the device is starved. Measured on gfx950 (256 CU) over 1D/2D/3D
-# shapes the crossover sits at ~6 waves/CU -- 1.5 per SIMD, enough to hide the k-loop's
-# vmcnt drains: below it the narrower rung wins by 1.1-2.0x, above it the wider one wins by
-# up to 1.2x (a 14x14x512->512 k3 conv2d is 1.6x *slower* on the narrowest rung).
 TILE_MIN_WAVES_PER_CU = 6
 
-# Same set torch's nn.ConvNd accepts. All four are resolved inside the im2col gather:
-# "zeros" masks an out-of-range tap, the rest remap it onto a real input coordinate.
 PADDING_MODES = ("zeros", "reflect", "replicate", "circular")
 
-# Applied around both tracing and flyc.compile so the hinted and the fast-dispatch
-# paths lower identically. Keys are the ones rocm.py reads: waves_per_eu, maxnreg,
-# fast_fp_math, unsafe_fp_math, llvm_options.
-#
-# Deliberately empty. Swept on gfx950 over five shapes (g in {1,2,4,8}, small and
-# large): fast_fp_math is a wash -- MFMA does the arithmetic and the epilogue is a
-# single f32->bf16 convert, so there is nothing to reassociate -- and waves_per_eu
-# of 1/2 measured 3%/11% slower, 4 within noise. Left as the hook the launchers
-# already thread through, not as a tuning knob that currently pays.
 CONV_COMPILE_HINTS = {}
 
 
@@ -84,13 +64,7 @@ def _as_stream(stream):
 
 
 def _dispatch(exe, *args, stream=None):
-    """Run a builder's launcher, pre-compiling on first use.
-
-    ``exe.compile(...)`` both compiles and executes, and hands back a
-    ``CompiledFunction`` whose call path skips signature binding and cache lookup
-    (~5 us vs ~35 us for the @flyc.jit wrapper). Cached on the launcher, which is
-    itself memoized per problem shape by the builder's lru_cache.
-    """
+    """Run a builder's launcher, pre-compiling on first use."""
     cf = getattr(exe, "_cf", None)
     if cf is None:
         exe._cf = exe.compile(*args, stream=stream)
@@ -109,8 +83,7 @@ def _pad_channels(c):
     return (c + LDG_VEC - 1) // LDG_VEC * LDG_VEC
 
 
-# Layout names accepted per spatial rank. The 1D/2D entries translate their own names to
-# the 3D pair before delegating, so only these two ever reach the builder.
+# Layout names accepted per spatial rank.
 LAYOUTS = {
     3: ("NCDHW", "NDHWC"),
     2: ("NCHW", "NHWC"),
@@ -134,15 +107,7 @@ def _shape_ncdhw(x, ndhwc):
 
 
 def _pad_spatial(x, ndhwc, pads, mode="constant"):
-    """Pad (D, H, W) with torch's (w_lo, w_hi, h_lo, h_hi, d_lo, d_hi) ordering.
-
-    Returns the padded tensor and its layout flag. Constant padding is layout-agnostic --
-    the channel axis just picks up a (0, 0) pair when it is trailing. The other three modes
-    are implemented only for a channels-first 5-D input, so a channels-last one is relabeled
-    with a permute and comes back channels-first; the caller's later transpose to NDHWC then
-    does the copy that permute deferred. These are the paths that already materialize a
-    padded input, so the extra pass rides along with one torch has to make anyway.
-    """
+    """Pad (D, H, W) with torch's (w_lo, w_hi, h_lo, h_hi, d_lo, d_hi) ordering."""
     if mode == "constant":
         return torch.nn.functional.pad(x, ((0, 0) + pads) if ndhwc else pads), ndhwc
     if ndhwc:
@@ -151,11 +116,7 @@ def _pad_spatial(x, ndhwc, pads, mode="constant"):
 
 
 def _big_in(n, c, groups, d, h, w, pt, ph, pw):
-    """Whether the kernel's 64-bit BIG_IN address path would engage for this input.
-
-    Mirrors the kernel's own test, but on the padded channel count and the worst-case
-    (pre-padded) spatial extents, so a "no" here holds for either lowering.
-    """
+    """Whether the kernel's 64-bit BIG_IN address path would engage for this input."""
     cp = _pad_channels(c // groups) * groups
     return n * cp * (d + 2 * pt) * (h + 2 * ph) * (w + 2 * pw) > 0x7FFFFFFF
 
@@ -168,27 +129,7 @@ def _evict_weight(key, _ref):
 
 
 def _prep_weight(w, k, kt, kh, kw, c):
-    """Pack (K, C, T, R, S) -> (K, T*R*S*Cpad), memoized on the source weight.
-
-    The memo has to notice an in-place update: an optimizer step or a load_state_dict
-    into existing storage leaves both ``id(w)`` and ``data_ptr()`` unchanged, so a key
-    built from either alone would keep returning the previous step's packed weights.
-    The stamp therefore carries torch's version counter, which is the same signal
-    autograd uses to detect mutation -- this is exactly as sensitive as PyTorch's own
-    checks, no more and no less. (Mutation through ``w.data`` escapes the version
-    counter by design, which is why torch documents it as unsafe; it is invisible here
-    for the same reason it is invisible to autograd.)
-
-    Entries do not outlive their weight: the weakref carries a callback that removes
-    its own key, so neither the dict nor the packed GPU tensors it pins accumulate.
-
-    What the weakref points at is the view's *base*, not the argument itself. The 1D and
-    2D entries reach this through a fresh ``weight.reshape(...)`` view built per call, and
-    that view dies as soon as the call returns -- the eviction callback then fired
-    immediately and the memo never hit once for conv1d or conv2d, repacking the weight on
-    every launch. A view shares both its storage and its version counter with its base, so
-    the base is both the right lifetime to hold and the same mutation signal.
-    """
+    """Pack (K, C, T, R, S) -> (K, T*R*S*Cpad), memoized on the source weight."""
     anchor = w._base if w._base is not None else w
     key = w.data_ptr()
     stamp = (w._version, tuple(w.shape), w.stride(), w.dtype)
@@ -210,13 +151,6 @@ _TR_ITERS = (TR_TILE * TR_TILE) // (TR_VEC * TR_THREADS)
 _TR_PAD = 8
 _TR_LDS_S = TR_TILE + _TR_PAD
 
-# Largest S = D*H*W the transpose kernel can address on its 64-bit (BIG) path. That path
-# rebases the descriptor per (channel, spatial) tile, but the per-thread read offset
-# `rc * s + sv` still carries the full row stride in 32 bits, with rc up to TR_TILE-1 and
-# sv up to TR_TILE-TR_VEC. Beyond this the product wraps and the gather silently reads
-# the wrong rows, so _ncdhw_to_ndhwc hands those copies to torch instead. Folding the row
-# term into the 64-bit base is not possible here: rc varies per lane and a buffer
-# descriptor has to be wave-uniform.
 TR_MAX_BIG_S = (0x7FFFFFFF - (TR_TILE - TR_VEC)) // (TR_TILE - 1)
 
 
@@ -414,14 +348,6 @@ def compile_conv3d_implicit(
     BIG_IN_N1 = BIG_IN and n == 1
     BIG_IN_NM = BIG_IN and n > 1
 
-    # BIG_IN_N1 rebases the descriptor to the block's own origin and addresses everything
-    # from there in 32 bits, so the block's reachable footprint has to fit the window.
-    # Rebasing on D alone leaves a whole H*W*C slice in the offset, which is itself past
-    # 2 GiB on a large 2D input, so the origin drops to H as well. Rows run
-    # (n, ot, oh, ow), so oh is monotone within a block and only restarts when the block
-    # crosses an ot boundary -- which cannot happen when the ot windows are a whole number
-    # of tiles. The two bounds below are the worst case over every block: sound in both
-    # cases, and tight in the aligned one.
     _t_aligned = BIG_IN_N1 and hw_o % TILE_M == 0
     if BIG_IN_N1:
         _ot_span = (TILE_M - 1) // hw_o + (1 if _t_aligned else 2)
@@ -434,15 +360,11 @@ def compile_conv3d_implicit(
             f"{BIG_IN_NR / 2**30:.0f} GiB the buffer descriptor addresses. Split the batch "
             f"over N, or pass a narrower tile=(TILE_M, ...)."
         )
+
     assert pad_mode in PADDING_MODES, f"pad_mode must be one of {PADDING_MODES}, got {pad_mode!r}"
-    # BIG_IN_N1 rebases the buffer to the block's first input row, and a reflected tap can
-    # resolve below that base; _conv3d_impl keeps non-zero modes off the BIG_IN path.
     assert pad_mode == "zeros" or not BIG_IN, "non-zero pad_mode requires the non-BIG_IN address path"
     X_SAMPLE_ELEMS = c * d * h * w
 
-    # A tile must never straddle a group boundary -- every column in it shares one A tile in
-    # LDS, and different groups need different input channels. So the N grid is
-    # over-provisioned per group and the per-group tail is masked.
     tiles_per_group = (KG + TILE_N - 1) // TILE_N
     n_tail = KG % TILE_N != 0
     grid_n = groups * tiles_per_group
@@ -450,30 +372,13 @@ def compile_conv3d_implicit(
     splitk = max(1, min(splitk, k_tiles))
     tiles_per_split = k_tiles // splitk
     use_splitk = splitk > 1
-    # Exact num_records on the output descriptor, so the epilogue can route a masked store
-    # past the end of the buffer and let the hardware drop it instead of branching around
-    # it -- see _route. BIG_OUT does not store through this descriptor at all.
+
     Y_BYTES = npq * k * (4 if use_splitk else BF16_BYTES)
-    # The bound _resolve_splitk applies, restated where the unsafe arithmetic actually
-    # lives so a caller reaching this builder directly fails loudly instead of silently
-    # wrapping the epilogue's 32-bit atomic offset.
+
     assert (
         not use_splitk or npq * k * 4 <= SPLITK_MAX_STAGING_BYTES
     ), f"split-K staging {npq * k * 4}B exceeds the {SPLITK_MAX_STAGING_BYTES}B buffer window"
 
-    # Software-pipeline depth. Depth buys almost nothing here: 2/3/4/5 stages landed
-    # within +-3% of each other on gfx950 (the 3x3 conv2d/conv3d shapes and the short-K
-    # 1D one alike), because the DMA prefetch does not survive codegen. buffer_load_lds
-    # carries no alias-scope info, so SIInsertWaitcnts cannot tell one LDS stage from
-    # another and drops an `s_waitcnt vmcnt(0)` in front of the first ds_read after the
-    # barrier -- every tile therefore drains *all* in-flight DMAs, including the ones
-    # aimed at stages two and three ahead, and the reachable overlap collapses to the one
-    # tile of MFMAs between a DMA issue and the next barrier no matter what this is set
-    # to. Making the depth real needs alias scopes on the LDS DMA at the lowering level,
-    # not a change here. What the stages are used for instead is width: the main loop
-    # consumes TILES_PER_BARRIER of them per barrier, so the reachable window holds that
-    # many tiles of MFMAs. Hence 2 * TILES_PER_BARRIER -- half the stages are being read,
-    # half are being written by the DMAs that the next barrier waits on.
     PIPE_STAGES = 2 * TILES_PER_BARRIER
 
     LDS_A_SIZE = PIPE_STAGES * TILE_M * TILE_K
@@ -481,22 +386,16 @@ def compile_conv3d_implicit(
 
     grid_m = (npq + TILE_M - 1) // TILE_M
 
-    # HSA's dispatch packet carries grid_size_x as a uint32 *work-item* count, not a block
-    # count, so grid.x * block.x has to stay under 2^32 -- about 2^30 output rows at any
-    # tile size. Past that hipModuleLaunchKernel rejects the launch, and FlyDSL's wrapper
-    # only prints that to stderr, so the kernel would hand back its uninitialised output
-    # as if it had run. The surplus M tiles therefore spill onto grid.z, which is a plain
-    # block count; grid.z already carries split-K, so the two are packed into it together.
     MAX_GRID_X = 0xFFFFFFFF // BLOCK_THREADS
     MAX_GRID_YZ = 65535
     grid_x = min(grid_m, MAX_GRID_X)
     m_chunks = (grid_m + grid_x - 1) // grid_x
+
     assert grid_n <= MAX_GRID_YZ, f"grid.y = {grid_n} exceeds the {MAX_GRID_YZ}-block limit"
     assert (
         m_chunks * splitk <= MAX_GRID_YZ
     ), f"grid.z = {m_chunks} M-chunks x {splitk} splits exceeds the {MAX_GRID_YZ}-block limit"
-    # The block swizzle mixes grid.x and grid.y and has no meaning once M is split across
-    # two axes; it is a locality tweak, so drop it rather than complicate the mapping.
+
     WGM = 1 if m_chunks > 1 else max(1, int(wgm))
     elem_ty = fx.BFloat16
     mfma_fn = rocdl.mfma_f32_16x16x32_bf16
@@ -544,7 +443,6 @@ def compile_conv3d_implicit(
 
         tid = fx.thread_idx.x
         if const_expr(m_chunks > 1):
-            # grid.z packs (split, m_chunk); the M tiles that did not fit grid.x live here.
             m_chunk = fx.Index(fx.block_idx.z) % fx.Index(m_chunks)
             m_offset = (fx.Index(fx.block_idx.x) + m_chunk * fx.Index(grid_x)) * TILE_M
             n_tile = fx.block_idx.y
@@ -561,9 +459,7 @@ def compile_conv3d_implicit(
         else:
             m_offset = fx.block_idx.x * TILE_M
             n_tile = fx.block_idx.y
-        # n_offset is the GLOBAL output-channel base (drives the B row and the store),
-        # n_local is the base within this group (drives every tail check), and ch_base is
-        # this group's first input channel. All three are block-uniform.
+
         if const_expr(groups > 1):
             gi = n_tile // tiles_per_group
             n_local = (n_tile % tiles_per_group) * TILE_N
@@ -585,13 +481,10 @@ def compile_conv3d_implicit(
             nbase = m_offset // dhw
             rem0 = m_offset % dhw
             ot_base0 = rem0 // hw_o
-            # ot*st - pt is the first input row this ot can read; every later row in the
-            # block has ot >= ot_base0, so this is a lower bound for the whole block.
+
             base_t = ot_base0 * fx.Index(st) - fx.Index(pt)
             base_t = arith.select(base_t < fx.Index(0), fx.Index(0), base_t)
             if const_expr(_t_aligned):
-                # An ot window is a whole number of tiles, so oh cannot restart mid-block
-                # and the same argument carries to H.
                 oh_base0 = (rem0 % hw_o) // wo
                 base_h = oh_base0 * fx.Index(sh) - fx.Index(ph)
                 base_h = arith.select(base_h < fx.Index(0), fx.Index(0), base_h)
@@ -621,7 +514,6 @@ def compile_conv3d_implicit(
         acc = [acc0 for _ in range_constexpr(N_ACC)]
 
         def barrier(vmcnt=0, lgkmcnt=None):
-            # None means "do not wait on this counter" -- s_waitcnt encodes it as the max.
             rocdl.s_waitcnt(vmcnt=vmcnt, lgkmcnt=lgkmcnt)
             rocdl.s_barrier()
 
@@ -639,7 +531,6 @@ def compile_conv3d_implicit(
             return (v >= 0) & (v < fx.Index(hi))
 
         def dil(tap, factor):
-            # Filter tap -> input offset. Kept off the multiply when undilated.
             scaled = tap * factor if const_expr(factor != 1) else tap
             return scaled
 
@@ -649,18 +540,6 @@ def compile_conv3d_implicit(
             "zeros" leaves the coordinate alone and returns a range mask, which the
             caller folds into the OOB-sentinel routing so the load reads as zero. Every
             other mode resolves the coordinate into [0, ext) instead and returns no mask
-            -- the three range checks the zeros path needs disappear, which offsets most
-            of what the remap costs. One step is enough because torch caps reflect at
-            pad < ext and circular at pad <= ext (both asserted host-side), so a
-            coordinate can never wrap past the far edge.
-
-            Index compares here lower to UNSIGNED predicates, so a negative coordinate
-            reads as a huge value and `v < 0` would fold to false. Everything below is
-            therefore expressed on u = v + pad, which is >= 0 by construction (v is
-            ot*stride - pad + tap, so u is ot*stride + tap). Both the tests and every
-            branch value stay non-negative, which makes the unsigned semantics correct
-            rather than merely lucky. The +pad cancels against the -pad already inside
-            v, so it costs nothing once folded.
             """
             if const_expr(pad_mode == "zeros"):
                 return v, in_range(v, ext)
@@ -738,8 +617,7 @@ def compile_conv3d_implicit(
                 temporal_delta = dil(kt_i, dt) - pt
                 in_t, m_t = pad_coord(out_t + temporal_delta, d, pt)
                 valid = gather_valid(row_valid & k_valid, m_t)
-                # `row` already encodes out_t, so the gather shifts it by the resolved
-                # delta; under a remap that is no longer the raw tap offset.
+
                 delta = temporal_delta if const_expr(pad_mode == "zeros") else (in_t - out_t)
                 if const_expr(BIG_IN_N1):
                     g_off = ((row + delta * hw_o) - (fx.Index(nbase) * dhw + base_t * hw_o)) * c + cc
@@ -812,8 +690,6 @@ def compile_conv3d_implicit(
             kbase_i = fx.Index(k_base)
             cc_base = ckk_base = None
             if const_expr(SCALAR_K):
-                # Loop-invariant and block-uniform, so folding ch_base in here costs no
-                # per-load instructions on the SCALAR_K path.
                 cc_base = kbase_i % CGP
                 if const_expr(groups > 1):
                     cc_base = ch_base + cc_base
@@ -872,8 +748,6 @@ def compile_conv3d_implicit(
                 for ni in range_constexpr(MI_N):
                     idx = mi * MI_N + ni
                     acc_values[idx] = mfma_one(a_frag_values[mi], b_frag_values[ni], acc_values[idx])
-                # One scheduling group per MI_M row: the row's MFMAs stay contiguous, and
-                # the DMA/ds_read work only gets slotted in between rows.
                 rocdl.sched_mfma(MI_N)
             rocdl.s_setprio(0)
             return acc_values
@@ -886,24 +760,10 @@ def compile_conv3d_implicit(
                 _load_a(s, k_off + s * TILE_K)
                 _load_b(s, k_off + s * TILE_K)
 
-        # ---- main loop: wait for a batch of tiles, read their frags, launch the next
-        # batch's DMAs, compute the whole batch ----
-        # A batch is TILES_PER_BARRIER tiles, so one barrier covers that many times
-        # MI_M * MI_N MFMAs. That ratio is the only thing that hides global latency here:
-        # the compiler puts an `s_waitcnt vmcnt(0)` in front of the first ds_read after
-        # every barrier (see PIPE_STAGES), so the DMAs issued in one iteration get exactly
-        # that iteration's MFMAs to hide behind and nothing more. Batching widens the
-        # window without touching the LDS layout or the traffic.
-        #
-        # Every tile's fragments are read up front, before any MFMA. The later tiles'
-        # ds_reads then retire under the earlier tiles' MFMAs instead of stalling in front
-        # of them: lgkmcnt is in-order for pure LDS traffic, so tile 0 of a batch can start
-        # computing with tile 1's reads still outstanding.
+        # ---- main loop
         for kt_idx in range_constexpr(0, tiles_per_split, TILES_PER_BARRIER):
             batch = range_constexpr(kt_idx, min(kt_idx + TILES_PER_BARRIER, tiles_per_split))
-            # Nothing is left in flight: the previous iteration issued exactly this
-            # batch's DMAs. lgkmcnt=0 retires the previous batch's ds_reads, which is what
-            # lets those DMAs overwrite the stages they came from.
+
             barrier(vmcnt=0, lgkmcnt=0)
             a_frags = [read_a_frags(kt % PIPE_STAGES) for kt in batch]
             b_frags = [read_b_frags(kt % PIPE_STAGES) for kt in batch]
@@ -919,29 +779,20 @@ def compile_conv3d_implicit(
             for j in range_constexpr(len(batch)):
                 acc = do_compute(acc, a_frags[j], b_frags[j])
 
-        # grid.x x grid.z over-provisions the M axis whenever the tiles do not divide
-        # evenly between them, so those blocks have to be masked out even at a tail-free npq.
         _row_chk = (npq % TILE_M != 0) or (grid_x * m_chunks > grid_m)
         _need_chk = _row_chk or n_tail
-        # The vectorized store walks four consecutive M rows, which are contiguous only in
-        # NCDHW. Under NDHWC those rows are K apart -- a lane holds one column of four rows,
-        # so there is nothing to widen without a cross-lane shuffle first.
+
         _vec_store = (n == 1) and (not use_splitk) and (dhw % MFMA_C_VALUES == 0) and (not BIG_OUT) and (not out_ndhwc)
 
         if const_expr(BIG_OUT):
             y_elem_base = fx.Int64(buffer_ops.extract_base_index(y))
 
-        # Past 2 GB the epilogue's 32-bit buffer voffset would wrap, so this row stores
-        # through a 64-bit address instead. off_nk_i64 is an arbitrary element index, so
-        # the address is only element-aligned -- which is all a scalar bf16 store needs.
         _big_st_ptr_ty = fx.PointerType.get(elem_ty.ir_type, fx.AddressSpace.Global, BF16_BYTES)
 
         def _big_store(off_nk_i64, value):
             addr = y_elem_base + off_nk_i64 * fx.Int64(BF16_BYTES)
             fx.ptr_store(value, fx.inttoptr(_big_st_ptr_ty, addr))
 
-        # col_loc is the column within its group; the tail check is per group because the N
-        # grid is over-provisioned. At groups == 1 it is the same value as col.
         def _valid_raw(row, col_loc):
             if const_expr(_row_chk and n_tail):
                 return arith.andi(row < fx.Index(npq), col_loc < fx.Index(KG))
@@ -951,14 +802,6 @@ def compile_conv3d_implicit(
             v = col_loc < fx.Index(KG)
             return arith.andi(v, v)
 
-        # A masked store on the plain buffer path is routed past num_records and dropped by
-        # the hardware rather than branched around, which is what keeps the epilogue
-        # straight-line. The branchy form gave every store its own basic block, and the
-        # bias load's `s_waitcnt vmcnt(0)` was then duplicated into each of them; gfx9 keeps
-        # loads and stores on one in-order vmcnt, so each of those waits also drained every
-        # store already issued and the epilogue ran as one serialized round trip per value.
-        # The other two store paths cannot be routed: split-K's atomic takes a byte offset
-        # and BIG_OUT stores through a raw pointer, so both keep the branch.
         _route_store = _need_chk and not use_splitk and not BIG_OUT
 
         def _route(off, row, col_loc):
@@ -973,11 +816,6 @@ def compile_conv3d_implicit(
             return col, ((n_local + col_off) if const_expr(groups > 1) else col)
 
         def store_acc():
-            # Bias depends only on the column, so MI_N loads cover the whole wave tile. They
-            # are issued together up front on purpose: a buffer_load sitting between two
-            # stores forces `s_waitcnt vmcnt(0)` before its use, which on gfx9's shared
-            # in-order vmcnt also waits for every store already issued. Interleaved, the
-            # MI_M * MI_N loads serialized the whole epilogue on store-ack latency.
             if const_expr(has_bias and not use_splitk):
                 bias_vals = []
                 for ni in range_constexpr(MI_N):
@@ -1070,14 +908,6 @@ def compile_conv3d_implicit(
     return _launch
 
 
-# Split-K accumulates into an (npq, k) f32 staging buffer through a buffer atomic, and
-# that atomic's voffset is an unsigned 32-bit BYTE offset while the descriptor's
-# num_records caps the window at 0xFFFFFFFF. Past 4 GB of staging `off_sk * 4` truncates
-# and the high rows wrap onto the start of the buffer, accumulating into unrelated
-# outputs; exactly at 4 GB the last element instead lands outside num_records and its
-# atomic is dropped. Both are silent, so refuse split-K rather than teach the epilogue
-# 64-bit addressing: split-K only pays when the tile grid is too small to fill the device,
-# and an npq*k this large is already tens of thousands of tiles.
 SPLITK_MAX_STAGING_BYTES = 0xFFFFFFFF
 
 
@@ -1089,17 +919,7 @@ def _num_cu(device):
 
 
 def _pick_tile(npq, k, groups, device):
-    """Widest ladder rung whose grid still covers the device.
-
-    DEFAULT_TILE alone leaves the grid far short of the CU count on anything but a large
-    2D conv -- the user-visible symptom is a staircase in SM occupancy, where the few
-    blocks that exist finish in waves instead of filling the machine. Walking the ladder
-    down until the grid reaches TILE_MIN_WAVES_PER_CU trades arithmetic intensity for
-    parallelism only as far as the problem actually needs.
-    """
     kg = k // groups
-    # A tile never spans two groups, so an N tile wider than K/groups sits mostly masked;
-    # those rungs are dropped before the occupancy test rather than counted as useful work.
     legal = [t for t in TILE_LADDER if t[1] <= kg] or [TILE_LADDER[-1]]
     target = TILE_MIN_WAVES_PER_CU * _num_cu(device)
     for tile_m, tile_n, wave_m, wave_n in legal:
@@ -1111,8 +931,6 @@ def _pick_tile(npq, k, groups, device):
 
 def _resolve_splitk(splitk, npq, crs, k, device, tile=DEFAULT_TILE, groups=1):
     k_tiles = (crs + TILE_K - 1) // TILE_K
-    # Correctness bound, so it has to gate an explicit splitk too -- the auto branch's own
-    # staging term below is a stricter memory-traffic heuristic, not this limit.
     if npq * k * 4 > SPLITK_MAX_STAGING_BYTES:
         return 1
     if splitk is None:
@@ -1142,12 +960,6 @@ def _resolve_splitk(splitk, npq, crs, k, device, tile=DEFAULT_TILE, groups=1):
 
 
 def _as_tuple(v, rank, name):
-    """Normalize torch's int / length-1 / length-``rank`` sequence forms to a tuple.
-
-    torch broadcasts a length-1 sequence across every spatial axis, so ``stride=(2,)``
-    on a 3D conv means ``(2, 2, 2)``. Unpacking the sequence directly instead would
-    raise ValueError on that form.
-    """
     if isinstance(v, int):
         return (v,) * rank
     t = tuple(v)
@@ -1158,15 +970,7 @@ def _as_tuple(v, rank, name):
 
 
 def _resolve_padding(padding, kernel, stride, dilation):
-    """Normalize torch's ``padding`` argument to a (low, high) pair of per-axis triples.
-
-    An int or a triple is symmetric, so both sides come back the same. The two strings
-    torch accepts are resolved here instead: "valid" is no padding, and "same" holds the
-    output extent equal to the input's, which takes ``dilation * (kernel - 1)`` elements
-    per axis. When that total is odd it cannot be split evenly and torch puts the extra
-    element on the high side, so the two returned triples differ -- see ``_conv3d_impl``
-    for how that case is lowered. "same" is only defined at stride 1, matching torch.
-    """
+    """Normalize torch's ``padding`` argument to a (low, high) pair of per-axis triples."""
     if not isinstance(padding, str):
         p = _as_tuple(padding, 3, "padding")
         assert min(p) >= 0, f"negative padding is not supported, got (pt, ph, pw) = {p}"
@@ -1199,15 +1003,12 @@ def _conv3d_impl(
     output_layout="NCDHW",
 ):
     _check_layouts(3, input_layout, output_layout)
-    # in_ndhwc is not constant: the padding fallbacks below can hand back a channels-first
-    # copy, after which the ordinary transpose path takes over again.
+
     in_ndhwc = input_layout == "NDHWC"
     out_ndhwc = output_layout == "NDHWC"
     n, c, d, h, w = _shape_ncdhw(x, in_ndhwc)
     k, wc, kt, kh, kw = weight.shape
-    # Device and dtype first: everything below this point either launches a kernel or
-    # allocates on x.device, and a host tensor reaching that far faults the GPU instead
-    # of raising.
+
     for name, t in (("x", x), ("weight", weight), ("bias", bias)):
         assert t is None or t.is_cuda, f"conv3d_implicit needs GPU tensors; {name} is on {t.device}"
     assert (
@@ -1222,12 +1023,7 @@ def _conv3d_impl(
     assert k % groups == 0, f"out-channels {k} not divisible by groups {groups}"
     assert wc == c // groups, f"weight in-channels {wc} != C/groups = {c // groups}"
     st, sh, sw = _as_tuple(stride, 3, "stride")
-    # Both of these are torch errors, and validating them here is what makes them say so:
-    # stride 0 would otherwise divide by zero computing the output extent below, and a
-    # negative stride or padding would collapse that extent and trip the unrelated
-    # "dilated filter is larger than the padded input" assertion. The 1D/2D entries widen
-    # their argument to three axes with 1s, so the triple reported here can be longer than
-    # the one that was passed in.
+
     assert min(st, sh, sw) >= 1, f"non-positive stride is not supported, got (st, sh, sw) = {(st, sh, sw)}"
     dt, dh, dw = _as_tuple(dilation, 3, "dilation")
     assert min(dt, dh, dw) >= 1, f"dilation must be >= 1, got {(dt, dh, dw)}"
@@ -1235,9 +1031,6 @@ def _conv3d_impl(
     pt, ph, pw = pad_lo
     assert padding_mode in PADDING_MODES, f"padding_mode must be one of {PADDING_MODES}, got {padding_mode!r}"
 
-    # The bounds torch enforces inside its own pad. They also make the kernel's remap a
-    # single step, so check them up front on both paths for one consistent message. An
-    # uneven "same" pad is checked on its wider side, which is the one that can overrun.
     if padding_mode in ("reflect", "circular"):
         for ax, (p, ext) in enumerate(zip(map(max, pad_lo, pad_hi), (d, h, w))):
             if padding_mode == "reflect":
@@ -1245,13 +1038,6 @@ def _conv3d_impl(
             else:
                 assert p <= ext, f"circular padding {p} must be <= input extent {ext} on spatial axis {ax}"
 
-    # An odd "same" total splits unevenly, and the kernel carries one pad per axis. Torch
-    # has the same limitation and resolves it the same way -- by materializing a padded
-    # copy of the input, which it warns about. Under "zeros" only the surplus on the high
-    # side has to exist, because a zero tap past the high edge is already what the
-    # gather's range mask produces; pad that side alone and keep convolving with pad_lo.
-    # The other modes fill the whole border in one call, matching nn.ConvNd, because two
-    # chained pads do not compose (reflecting by 1 then by 2 is not reflecting by 3).
     if pad_lo != pad_hi:
         if padding_mode == "zeros":
             x, in_ndhwc = _pad_spatial(x, in_ndhwc, (0, pad_hi[2] - pw, 0, pad_hi[1] - ph, 0, pad_hi[0] - pt))
@@ -1260,13 +1046,6 @@ def _conv3d_impl(
             pt = ph = pw = 0
         n, c, d, h, w = _shape_ncdhw(x, in_ndhwc)
 
-    # Non-zero modes are resolved inside the im2col gather, which remaps an out-of-range
-    # tap onto a real input coordinate instead of masking it to zero. No border is
-    # materialized, so this costs no extra memory traffic.
-    #
-    # BIG_IN is the exception: that path rebases the input buffer per block to keep
-    # offsets in 32 bits, and a reflected tap can resolve below the block's base. Those
-    # inputs (> 2^31 elements) fall back to torch's pre-pad, which is always correct.
     inline_pad = padding_mode != "zeros" and bool(pt or ph or pw)
     if inline_pad and _big_in(n, c, groups, d, h, w, pt, ph, pw):
         x, in_ndhwc = _pad_spatial(x, in_ndhwc, (pw, pw, ph, ph, pt, pt), mode=padding_mode)
@@ -1275,8 +1054,6 @@ def _conv3d_impl(
         inline_pad = False
     pad_mode = padding_mode if inline_pad else "zeros"
 
-    # 1x1x1 fast path: y[n,k,dhw] = sum_c weight[k,c] * x[n,c,dhw] — pure channel GEMM.
-    # Grouped 1x1x1 is block-diagonal, so it goes through the kernel instead.
     if (
         groups == 1
         and kt == 1
@@ -1291,8 +1068,6 @@ def _conv3d_impl(
     ):
         wm = weight.reshape(k, c)
         if in_ndhwc:
-            # Channels-last is already the GEMM's row-major (npq, C) operand, so this side
-            # runs x @ W^T and lands directly in NDHWC.
             y = torch.matmul(x.reshape(n * d * h * w, c), wm.t()).reshape(n, d, h, w, k)
             if bias is not None:
                 y = y + bias.to(y.dtype)
@@ -1311,16 +1086,10 @@ def _conv3d_impl(
     assert min(do, ho, wo) >= 1, f"dilated filter is larger than the padded input: output ({do}, {ho}, {wo})"
     npq = n * do * ho * wo
 
-    # An empty batch would launch the transpose with grid.z == 0 and the conv with grid.x == 0;
-    # both return hipErrorInvalidValue and leave the HIP context unusable. Return the empty
-    # output torch produces instead, before any launch.
     if n == 0:
         empty = (0, do, ho, wo, k) if out_ndhwc else (0, k, do, ho, wo)
         return torch.empty(empty, device=x.device, dtype=torch.bfloat16)
 
-    # Zero-pad C to the gather's vector width; padded channels see zero weights. The pad is
-    # PER GROUP, since the gather vectorizes along channels and must not cross into the next
-    # group. _prep_weight pads the weight's own C the same way, so the two stay aligned.
     cg = c // groups
     cgp = _pad_channels(cg)
     if cgp != cg:
@@ -1337,8 +1106,6 @@ def _conv3d_impl(
     has_bias = bias is not None
     bias_arg = bias.to(torch.float32).contiguous() if has_bias else torch.empty(1, device=x.device, dtype=torch.float32)
 
-    # The gather is channels-last, so an NDHWC input is already in the kernel's layout and
-    # only has to be made contiguous (a no-op for the ordinary case).
     x_ndhwc = x.contiguous() if in_ndhwc else _ncdhw_to_ndhwc(x, stream)
     w_packed = _prep_weight(weight, k, kt, kh, kw, wc)
 
@@ -1398,13 +1165,8 @@ def _conv3d_impl(
     if sk > 1:
         if has_bias:
             y = y + bias_arg.view(1, k)
-        # The split-K accumulator is the raw GEMM shape, i.e. NDHWC, so the view below is a
-        # metadata-only relabel. Requesting NDHWC therefore leaves only the f32 -> bf16 cast.
         if out_ndhwc:
             return y.view(n, do, ho, wo, k).to(torch.bfloat16)
-        # Materialize contiguous NCDHW so the memory format does not depend on whether
-        # split-K ran. copy_ folds the cast into the transpose, keeping this to the single
-        # pass the cast cost anyway.
         out = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
         out.copy_(y.view(n, do, ho, wo, k).permute(0, 4, 1, 2, 3))
         return out
@@ -1418,16 +1180,14 @@ def _conv2d_impl(
     _check_layouts(2, input_layout, output_layout)
     sh, sw = _as_tuple(stride, 2, "stride")
     dh, dw = _as_tuple(dilation, 2, "dilation")
-    # A padding string stays a string: the degenerate depth axis is a single 1-tap slice,
-    # so "same" resolves to no padding on it anyway.
+
     if isinstance(padding, str):
         p3 = padding
     else:
         ph, pw = _as_tuple(padding, 2, "padding")
         p3 = (0, ph, pw)
     k, wc, r, s = weight.shape
-    # The degenerate depth axis goes in front of the spatial ones in either layout, so both
-    # reshapes stay views.
+
     if input_layout == "NHWC":
         n, h, w, c = x.shape
         x5, in5 = x.reshape(n, 1, h, w, c), "NDHWC"
@@ -1531,8 +1291,6 @@ def conv3d_implicit(x, weight, bias=None, stride=1, padding=0, dilation=1, **kwa
     spatial_rank = weight.dim() - 2
     if spatial_rank not in (1, 2, 3):
         raise ValueError(f"conv3d_implicit supports 1D/2D/3D; got filter rank {weight.dim()}")
-    # An unbatched (C, *spatial) input runs as a batch of one and loses the dim again on
-    # the way out, matching torch.
     unbatched = x.dim() == weight.dim() - 1
     if unbatched:
         x = x.unsqueeze(0)
