@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-08-19T19:44:31Z",
+ "updated": "2026-08-19T20:20:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32297710010,
+   "pr": 1033,
+   "commit": "0e4bdebba357f0e27cf0618691d3f7b77e1792eb",
+   "branch": "john/lazy-rescale-nan",
+   "event": "pull_request",
+   "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32297710010",
+   "created_at": "2026-08-19T20:17:18Z",
+   "updated_at": "2026-08-19T20:18:31Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
+  {
+   "run_id": 32297665721,
+   "pr": 1034,
+   "commit": "8a9eb36d1fc1f44fe906b48c13e5e403a0d6384e",
+   "branch": "john/maxnumf-fastmath",
+   "event": "pull_request",
+   "title": "[Fix] Restore the fastmath flag on flash-attention maxnumf",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32297665721",
+   "created_at": "2026-08-19T20:16:48Z",
+   "updated_at": "2026-08-19T20:18:37Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
+  {
+   "run_id": 32297631800,
+   "pr": 1035,
+   "commit": "f3dbf085fae5922e6502c8e6616bc76ae48ed53d",
+   "branch": "john/maxnumf-ambient-fastmath",
+   "event": "pull_request",
+   "title": "[Fix] Let fx.maxnumf inherit the ambient fastmath",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32297631800",
+   "created_at": "2026-08-19T20:16:25Z",
+   "updated_at": "2026-08-19T20:18:16Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 32294101577,
    "pr": 1035,
@@ -44,9 +89,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32291906140",
    "created_at": "2026-08-19T19:14:16Z",
-   "updated_at": "2026-08-19T19:18:12Z",
+   "updated_at": "2026-08-19T19:57:37Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T19:57:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32291906140/job/96206506109"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-19T19:57:35Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32291906140/job/96206506113"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-19T19:57:22Z",
+     "completed_at": "2026-08-19T20:09:18Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32291906140/job/96206506237"
+    }
+   ]
   },
   {
    "run_id": 32291286328,
@@ -85,20 +158,20 @@
    "branch": "john/maxnumf-fastmath",
    "event": "pull_request",
    "title": "[Fix] Restore the fastmath flag on flash-attention maxnumf",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32288703611",
    "created_at": "2026-08-19T18:40:53Z",
-   "updated_at": "2026-08-19T19:25:18Z",
+   "updated_at": "2026-08-19T20:17:33Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-19T19:25:04Z",
-     "completed_at": null,
+     "completed_at": "2026-08-19T20:17:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32288703611/job/96197153562"
     },
     {
@@ -114,10 +187,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-19T19:25:18Z",
-     "completed_at": null,
+     "completed_at": "2026-08-19T20:17:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32288703611/job/96197153746"
     }
    ]
@@ -1767,80 +1840,6 @@
      "completed_at": "2026-08-18T23:30:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32115762986/job/95882608792",
      "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32115635980,
-   "pr": null,
-   "commit": "9197d4137835b41c4ba56578006730f8f5bceb02",
-   "branch": "pr/fix-mlir-filecheck-all-run-lines",
-   "event": "pull_request",
-   "title": "[Test] Run every RUN line in the MLIR FileCheck harness",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32115635980",
-   "created_at": "2026-08-18T08:17:37Z",
-   "updated_at": "2026-08-18T09:23:18Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 32110624444,
-   "pr": 971,
-   "commit": "8d85e2fcaa5b8332497ed64c5502402af6710e1d",
-   "branch": "gfx1250/gemm-opt-0805",
-   "event": "pull_request",
-   "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32110624444",
-   "created_at": "2026-08-18T07:16:08Z",
-   "updated_at": "2026-08-18T10:00:24Z",
-   "actor": "aoli26",
-   "jobs": []
-  },
-  {
-   "run_id": 32110444156,
-   "pr": 1013,
-   "commit": "f0906861544a3bf57b09c64bbfcfca3b8633acba",
-   "branch": "pr/enh-cdna5-tiled-tdm-atom",
-   "event": "pull_request",
-   "title": "[ROCDL] Add make_tiled_tdm_atom op and tdm_partition",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32110444156",
-   "created_at": "2026-08-18T07:13:48Z",
-   "updated_at": "2026-08-19T00:36:09Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-18T23:19:12Z",
-     "completed_at": "2026-08-19T00:36:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32110444156/job/95872887538"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-18T21:34:39Z",
-     "completed_at": "2026-08-18T21:49:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32110444156/job/95872887578",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-18T21:56:56Z",
-     "completed_at": "2026-08-18T23:49:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32110444156/job/95872887657"
     }
    ]
   }
