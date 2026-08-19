@@ -201,6 +201,9 @@ result = a + b
 result = a * 2
 result = a // 4
 result = a % 16
+largest = fx.max(a, b)
+smallest = fx.min(a, b)
+tiles = fx.ceildiv(count, tile_size)
 
 # Cast (prefer DSL numeric constructors)
 i64_val = fx.Int64(int_val) # cast to 64-bit integer (fx.Index is deprecated)
@@ -216,6 +219,9 @@ result = a << 4
 ```
 
 Use direct `arith.*FOp(..., fastmath=...)` only where explicit fastmath flags are performance-critical.
+Use `fx.max` / `fx.min` for type-dispatched extrema and `fx.ceildiv` for
+overflow-safe integer ceil division. `fx.maxnumf` intentionally retains
+non-NaN-wins semantics, and `fx.ceil_div` remains the layout/int-tuple API.
 
 ### 4.2 Vector values (`Vector`)
 

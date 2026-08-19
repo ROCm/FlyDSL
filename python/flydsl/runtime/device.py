@@ -97,3 +97,18 @@ def is_rdna_arch(arch: Optional[str] = None) -> bool:
     if arch.startswith("gfx120"):
         return True
     return False
+
+
+def get_warp_size(arch: Optional[str] = None) -> int:
+    """Lanes per warp for an architecture.
+
+    If arch is None, the current GPU arch is auto-detected.
+    """
+    if arch is None:
+        arch = get_rocm_arch()
+    if not arch:
+        return 64
+    arch = arch.lower()
+    if arch.startswith("gfx10") or arch.startswith("gfx11") or arch.startswith("gfx12"):
+        return 32
+    return 64

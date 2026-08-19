@@ -7,8 +7,7 @@
 
 Compares ``conv3d_implicit`` against ``torch.nn.functional.conv3d`` on
 NCDHW/OIDHW bf16 inputs across stride/padding and M%TILE_M / K%TILE_N tail paths.
-Channels must satisfy the kernel's ``c % 8 == 0`` and ``crs = c*kt*kh*kw`` a
-multiple of TILE_K (32) constraints.
+Any channel count and spatial extent is supported.
 """
 
 import pytest
@@ -40,6 +39,10 @@ _skip_non_cdna4 = pytest.mark.skipif(
         # Partial K-tile: C=16 -> CRS=432, 432 % TILE_K(32) = 16 (masked).
         (1, 16, 6, 16, 20, 16, 1, 1),
         (1, 16, 4, 12, 16, 384, 1, 1),
+        (1, 3, 4, 12, 12, 32, 1, 1),
+        (1, 12, 4, 12, 12, 32, 1, 1),
+        (2, 5, 4, 10, 14, 48, 1, 1),
+        (1, 6, 3, 11, 11, 32, 1, 1),
     ],
 )
 def test_conv3d_vs_torch(n, c, t, h, w, k, stride, padding):
@@ -183,6 +186,49 @@ def test_conv2d_vs_torch(kernel_shape, stride, padding):
 
     assert y.shape == y_ref.shape
     assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
+
+
+# Unaligned channel counts and spatial extents.
+@_skip_non_cdna4
+@pytest.mark.parametrize(
+    "c,h,w,k,kernel_shape,stride,padding",
+    [
+        (3, 32, 32, 64, (3, 3), 1, 1),
+        (3, 24, 28, 32, (7, 7), 2, 3),
+        (1, 24, 24, 32, (3, 3), 1, 1),
+        (12, 16, 16, 32, (3, 3), 1, 1),
+        (64, 33, 33, 64, (3, 3), 2, 0),
+        (128, 17, 17, 64, (3, 3), 2, 0),
+        (6, 21, 21, 32, (3, 3), 1, 1),
+    ],
+)
+def test_conv2d_unaligned_channels_and_spatial(c, h, w, k, kernel_shape, stride, padding):
+    torch.manual_seed(7000 + c + h + k)
+    x = torch.randn((1, c, h, w), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn((k, c, *kernel_shape), device="cuda", dtype=torch.bfloat16)
+
+    y = conv3d_implicit(x, weight, stride=stride, padding=padding)
+    y_ref = F.conv2d(x, weight, stride=stride, padding=padding)
+    torch.cuda.synchronize()
+
+    assert y.shape == y_ref.shape
+    assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
+
+
+# The transpose needs C aligned to the vector width; S may be anything.
+@_skip_non_cdna4
+@pytest.mark.parametrize("c", [8, 16, 64, 512])
+@pytest.mark.parametrize("h,w", [(3, 3), (5, 5), (17, 15), (33, 33), (8, 8)])
+def test_transpose_unaligned_spatial(c, h, w):
+    from kernels.conv.conv3d_implicit import _ncdhw_to_ndhwc
+
+    torch.manual_seed(8000 + c + h * w)
+    x = torch.randn((1, c, 1, h, w), device="cuda", dtype=torch.bfloat16)
+
+    got = _ncdhw_to_ndhwc(x, torch.cuda.current_stream())
+    torch.cuda.synchronize()
+
+    assert torch.equal(got, x.permute(0, 2, 3, 4, 1).contiguous())
 
 
 # 1D conv via the depth/height-1 degenerate path through the 3D kernel.

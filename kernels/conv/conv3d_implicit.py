@@ -22,7 +22,6 @@ import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
-from kernels.common import buffer_ops
 from kernels.common.mem_ops import buffer_atomic_add
 
 TILE_K = 32
@@ -162,11 +161,20 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
     elem_ty = fx.BFloat16
     BIG = (n * c * s) > 0x7FFFFFFF
 
+    # 1-D element view so the flat gather/scatter offsets index elements. Both
+    # descriptors stay max_size: an exact num_records would zero the whole
+    # straddling tail read.
+    _TR_FLAT = n * c * s
+    _TR_REBASED_FLAT = 0xFFFFFFFF // BF16_BYTES
+
+    def _flat_div(buf_ptr, elems):
+        return fx.logical_divide(
+            fx.Tensor(fx.make_view(buf_ptr, fx.make_layout(elems, 1))),
+            fx.make_layout(1, 1),
+        )
+
     @flyc.kernel(known_block_size=[TR_THREADS, 1, 1])
     def transpose_kernel(out: fx.Tensor, inp: fx.Tensor):
-        # max_size: an exact num_records would zero the whole straddling tail read.
-        in_rsrc = buffer_ops.create_buffer_resource(inp)
-        out_rsrc = buffer_ops.create_buffer_resource(out)
         lds_alloc = fx.SharedAllocator(static=False)
         lds = lds_alloc.allocate(fx.Array[elem_ty, TR_TILE * _TR_LDS_S, 16]).peek()
 
@@ -178,15 +186,24 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
         c0 = fx.block_idx.y * TR_TILE
         nb = fx.block_idx.z
         if const_expr(BIG):
+            # Rebase onto this block's tile origin so the per-tile offsets stay in i32.
+            GPtrTy = fx.PointerType.get(elem_ty.ir_type, fx.AddressSpace.Global, BF16_BYTES)
+
+            def _rebased(tensor, base_elem):
+                addr = fx.Int64(fx.ptrtoint(fx.get_iter(tensor))) + fx.Int64(base_elem) * fx.Int64(BF16_BYTES)
+                return _flat_div(fx.rocdl.make_buffer_ptr(fx.inttoptr(GPtrTy, addr)), _TR_REBASED_FLAT)
+
             in_base_elem = fx.Index(nb) * fx.Index(c) * fx.Index(s) + fx.Index(c0) * fx.Index(s) + fx.Index(s0)
-            in_addr = fx.Int64(buffer_ops.extract_base_index(inp)) + fx.Int64(in_base_elem) * fx.Int64(2)
-            in_rsrc = buffer_ops.create_buffer_resource_from_addr(in_addr)
+            in_div = _rebased(inp, in_base_elem)
             out_base_elem = fx.Index(nb) * fx.Index(s) * fx.Index(c) + fx.Index(s0) * fx.Index(c) + fx.Index(c0)
-            out_addr = fx.Int64(buffer_ops.extract_base_index(out)) + fx.Int64(out_base_elem) * fx.Int64(2)
-            out_rsrc = buffer_ops.create_buffer_resource_from_addr(out_addr)
+            out_div = _rebased(out, out_base_elem)
         else:
             in_base = nb * c * s
             out_base = nb * s * c
+            in_div = _flat_div(fx.get_iter(fx.rocdl.make_buffer_tensor(inp)), _TR_FLAT)
+            out_div = _flat_div(fx.get_iter(fx.rocdl.make_buffer_tensor(out)), _TR_FLAT)
+        tr_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_ty)
+        tr_reg = fx.make_rmem_tensor(TR_VEC, elem_ty)
 
         _lds_st_ptr_ty = fx.PointerType.get(elem_ty.ir_type, fx.AddressSpace.Shared, TR_VEC * BF16_BYTES)
 
@@ -211,7 +228,8 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
             else:
                 g = fx.Int32(in_base + cc * s + ss)
             safe = arith.select(valid, g, fx.Int32(0))
-            v = buffer_ops.buffer_load(in_rsrc, safe, vec_width=TR_VEC, dtype=elem_ty)
+            fx.copy(tr_atom, fx.slice(in_div, (None, safe)), tr_reg)
+            v = fx.memref_load_vec(tr_reg)
             lds_store_vec8(rc * _TR_LDS_S + sv, v)
 
         rocdl.s_waitcnt(lgkmcnt=0)
@@ -231,7 +249,8 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
                     go = fx.Int32(rs * c + cv)
                 else:
                     go = fx.Int32(out_base + ss * c + cc)
-                buffer_ops.buffer_store(vv, out_rsrc, go)
+                fx.memref_store_vec(vv, tr_reg)
+                fx.copy(tr_atom, tr_reg, fx.slice(out_div, (None, go)))
 
     @flyc.jit
     def launch_transpose(out: fx.Tensor, inp: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
@@ -391,6 +410,10 @@ def compile_conv3d_implicit(
     grid_x = min(grid_m, MAX_GRID_X)
     m_chunks = (grid_m + grid_x - 1) // grid_x
 
+    _row_chk = (npq % TILE_M != 0) or (grid_x * m_chunks > grid_m)
+    _need_chk = _row_chk or n_tail
+    _vec_store = (n == 1) and (not use_splitk) and (dhw % MFMA_C_VALUES == 0) and (not BIG_OUT) and (not out_ndhwc)
+
     assert grid_n <= MAX_GRID_YZ, f"grid.y = {grid_n} exceeds the {MAX_GRID_YZ}-block limit"
     assert (
         m_chunks * splitk <= MAX_GRID_YZ
@@ -433,9 +456,24 @@ def compile_conv3d_implicit(
         w_src = _dma_src(fx.get_iter(weight), W_BYTES // BF16_BYTES, W_BYTES)
         if const_expr(not BIG_IN):
             x_src = _dma_src(fx.get_iter(x), X_BYTES // BF16_BYTES, X_BYTES)
-        y_rsrc = buffer_ops.create_buffer_resource(y, num_records_bytes=Y_BYTES)
+        y_buf = fx.rocdl.make_buffer_tensor(y, num_records_bytes=Y_BYTES)
+        if const_expr(use_splitk):
+            # buffer_atomic_add needs the raw !llvm.ptr<8> descriptor, not a tensor.
+            y_rsrc = fx.rocdl.get_buffer_rsrc(fx.get_iter(y_buf))
+        else:
+            y_div = fx.logical_divide(
+                fx.Tensor(fx.make_view(fx.get_iter(y_buf), fx.make_layout(npq * k, 1))),
+                fx.make_layout(1, 1),
+            )
+            y_atom_1 = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), elem_ty)
+            y_reg_1 = fx.make_rmem_tensor(1, elem_ty)
+            if const_expr(_vec_store):
+                y_atom_4 = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), elem_ty)
+                y_reg_4 = fx.make_rmem_tensor(MFMA_C_VALUES, elem_ty)
         if const_expr(has_bias):
-            bias_rsrc = buffer_ops.create_buffer_resource(bias)
+            bias_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(bias), fx.make_layout(1, 1))
+            bias_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+            bias_reg = fx.make_rmem_tensor(1, fx.Float32)
 
         lds_alloc = fx.SharedAllocator(static=False)
         a_lds = lds_alloc.allocate(fx.Array[elem_ty, LDS_A_SIZE, 16]).peek()
@@ -779,13 +817,8 @@ def compile_conv3d_implicit(
             for j in range_constexpr(len(batch)):
                 acc = do_compute(acc, a_frags[j], b_frags[j])
 
-        _row_chk = (npq % TILE_M != 0) or (grid_x * m_chunks > grid_m)
-        _need_chk = _row_chk or n_tail
-
-        _vec_store = (n == 1) and (not use_splitk) and (dhw % MFMA_C_VALUES == 0) and (not BIG_OUT) and (not out_ndhwc)
-
         if const_expr(BIG_OUT):
-            y_elem_base = fx.Int64(buffer_ops.extract_base_index(y))
+            y_elem_base = fx.Int64(fx.ptrtoint(fx.get_iter(y)))
 
         _big_st_ptr_ty = fx.PointerType.get(elem_ty.ir_type, fx.AddressSpace.Global, BF16_BYTES)
 
@@ -806,7 +839,7 @@ def compile_conv3d_implicit(
 
         def _route(off, row, col_loc):
             if const_expr(not _route_store):
-                return off
+                return fx.Int32(off)
             return fx.Int32(arith.select(_valid_raw(row, col_loc), fx.Int32(off), OOB_ELEM))
 
         def _cols(ni):
@@ -823,9 +856,8 @@ def compile_conv3d_implicit(
                     col_i = fx.Int32(col)  # bias is indexed by the global out-channel
                     if const_expr(n_tail):
                         col_i = arith.select(col_loc < fx.Index(KG), col_i, fx.Int32(0))
-                    bias_vals.append(
-                        fx.Float32(buffer_ops.buffer_load(bias_rsrc, col_i, vec_width=1, dtype=fx.Float32))
-                    )
+                    fx.copy(bias_atom, fx.slice(bias_div, (None, col_i)), bias_reg)
+                    bias_vals.append(fx.Float32(fx.memref_load_vec(bias_reg)[0]))
 
             for mi in range_constexpr(MI_M):
                 row_base = m_offset + wave_m * WARP_M + mi * MFMA_M + c_m_vec
@@ -845,7 +877,8 @@ def compile_conv3d_implicit(
                                 cval = (a[i] + bias_val) if const_expr(has_bias) else a[i]
                                 vals.append(cval.to(elem_ty))
                             v4 = fx.Vector.from_elements(vals, dtype=elem_ty)
-                            buffer_ops.buffer_store(v4, y_rsrc, _route(off_nk0, row0, col_loc))
+                            fx.memref_store_vec(v4, y_reg_4)
+                            fx.copy(y_atom_4, y_reg_4, fx.slice(y_div, (None, _route(off_nk0, row0, col_loc))))
 
                         if const_expr(_need_chk and not _route_store):
                             if _valid_raw(row0, col_loc):
@@ -880,7 +913,8 @@ def compile_conv3d_implicit(
                                 if const_expr(BIG_OUT):
                                     _big_store(fx.Int64(off_nk), cval)
                                 else:
-                                    buffer_ops.buffer_store(cval, y_rsrc, _route(off_nk, row, col_loc))
+                                    fx.memref_store_vec(fx.Vector.filled(1, cval, elem_ty), y_reg_1)
+                                    fx.copy(y_atom_1, y_reg_1, fx.slice(y_div, (None, _route(off_nk, row, col_loc))))
 
                         if const_expr(_need_chk and not _route_store):
                             if _valid_raw(row, col_loc):
