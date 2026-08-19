@@ -36,15 +36,18 @@ try:
     from aiter.ops.attention import (  # noqa: E402  # pyright: ignore[reportMissingImports]
         get_mla_metadata_info_v1,
         get_mla_metadata_v1,
-        hk_mla_decode_fwd,
         mla_decode_stage1_asm_fwd,
         mla_reduce_v1,
     )
 except ImportError as _e:
-    # aiter is installed but its attention API drifted (e.g. hk_mla_decode_fwd
-    # was renamed). Skip this module cleanly instead of aborting collection for
-    # the whole suite.
     pytest.skip(f"aiter.ops.attention API mismatch ({_e})", allow_module_level=True)
+
+# Benchmark-only, and gone from aiter since mid-2026. Missing it must not take
+# the correctness tests down with it.
+try:
+    from aiter.ops.attention import hk_mla_decode_fwd  # pyright: ignore[reportMissingImports]
+except ImportError:
+    hk_mla_decode_fwd = None
 
 from kernels.attention.mla_fwd_decode import flydsl_mla_fwd_decode  # noqa: E402
 from tests.test_common import checkAllclose, run_perftest  # noqa: E402
@@ -413,7 +416,7 @@ def run_single(
     )
     assert cos_diff < 3e-2, f"cos_diff={cos_diff} exceeds threshold"
 
-    if bench_aiter:
+    if bench_aiter and hk_mla_decode_fwd is not None:
         aiter_hk_out = torch.empty_like(out_asm).fill_(-1)
         aiter_hk_logits = torch.empty_like(logits)
         aiter_hk_lse = torch.empty_like(attn_lse)
