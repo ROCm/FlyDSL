@@ -4539,15 +4539,9 @@ def test_sink_lse_cross_attn_skipped_blocks(Sq, Skv):
 def test_lazy_rescale_survives_a_wide_score_range(k_scale):
     """A widened logit spread must not break the lazy online rescale.
 
-    The rescale branch is wave-uniform: one lane past DUALWAVE_SWP_RESCALE_THRESHOLD
-    sends every lane down it, including lanes whose tile max is below their running
-    max. Those lanes must be left alone; taking the tile max unconditionally scales
-    their accumulators by exp2(m_row - m_tile_max) > 1, which overflows and lands as
-    NaN in the output. Scaling K widens the spread without changing anything else,
-    and near-uniform attention -- what every other test here uses -- never reaches it.
-
-    The eager path is the reference: the two are mathematically the same, so they
-    must agree, and neither may produce NaN.
+    Scaling K widens the spread; near-uniform attention, which every other test
+    here uses, never reaches the branch. The eager path is the reference -- the
+    two are mathematically the same.
     """
     B, S, H, D = 1, 4096, 8, 128
     torch.manual_seed(0)

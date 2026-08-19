@@ -3822,12 +3822,8 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         return m_new, l_row
 
     def _lazy_rescale_o_rescale(self, _n, *_st, v_o, m_row, l_row, m_tile_max, v_p):
-        # The branch is wave-uniform: one lane over the threshold sends every
-        # lane down this path, including lanes whose tile max sits below their
-        # running max. Taking m_tile_max unconditionally would give those lanes
-        # exp2(m_row - m_tile_max) > 1 and overflow the accumulators, so pick the
-        # max, exactly as the eager rescale_o does. For a lane that did trigger
-        # the branch this is m_tile_max and nothing changes.
+        # Wave-uniform branch: lanes whose tile max is below their running max get
+        # dragged in too, and m_tile_max alone would scale them up into overflow.
         m_new = fx.maxnumf(m_row, m_tile_max, fastmath=self.fm_fast)
         corr = rocdl.exp2(T.f32, as_mlir_value(m_row - m_new))
         scaled_accs = list(v_o)
