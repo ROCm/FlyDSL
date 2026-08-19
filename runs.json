@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-19T11:05:39Z",
+ "updated": "2026-08-19T12:06:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32250433584,
+   "pr": 1031,
+   "commit": "33c405aed0c64c851d2217fcb51b604f0d8b9e60",
+   "branch": "coop-library",
+   "event": "pull_request",
+   "title": "[Ext][Coop] Add cooperative warp- and block-scope collectives",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32250433584",
+   "created_at": "2026-08-19T12:00:37Z",
+   "updated_at": "2026-08-19T12:00:38Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 32248171263,
+   "pr": 1031,
+   "commit": "a9c8001e648031641de5cf40afbef6d2449298e9",
+   "branch": "coop-library",
+   "event": "pull_request",
+   "title": "[Ext][Coop] Add cooperative warp- and block-scope collectives",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32248171263",
+   "created_at": "2026-08-19T11:33:35Z",
+   "updated_at": "2026-08-19T11:50:49Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 32242923439,
    "pr": 1030,
@@ -10,13 +40,41 @@
    "branch": "fix/fly-ptr-honor-alignment",
    "event": "pull_request",
    "title": "[FlyToROCDL] Honor fly pointer alignment in ptr.load/ptr.store lowering",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32242923439",
    "created_at": "2026-08-19T10:29:25Z",
-   "updated_at": "2026-08-19T10:35:15Z",
+   "updated_at": "2026-08-19T12:02:58Z",
    "actor": "xudoyuan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-19T11:06:34Z",
+     "completed_at": "2026-08-19T12:02:57Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32242923439/job/96046243986"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-19T11:27:37Z",
+     "completed_at": "2026-08-19T11:42:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32242923439/job/96046244038"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-19T11:06:40Z",
+     "completed_at": "2026-08-19T11:42:47Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32242923439/job/96046244085"
+    }
+   ]
   },
   {
    "run_id": 32242664701,
@@ -55,20 +113,20 @@
    "branch": "rchamber/add_16x16x16_MFMA_support",
    "event": "pull_request",
    "title": "[MFMA] Add 16x16x16 bf16/f16 support with fly-fix-bitcast-width pass",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32241703763",
    "created_at": "2026-08-19T10:14:28Z",
-   "updated_at": "2026-08-19T10:53:40Z",
+   "updated_at": "2026-08-19T11:12:31Z",
    "actor": "RichardChamberlain1",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-19T10:54:52Z",
-     "completed_at": null,
+     "completed_at": "2026-08-19T11:52:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32241703763/job/96043179312"
     },
     {
@@ -83,10 +141,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-19T10:53:40Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-19T11:12:30Z",
+     "completed_at": "2026-08-19T11:27:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32241703763/job/96043179353"
     }
    ]
@@ -132,11 +190,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T10:54:38Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32238194867/job/96040106818"
+     "completed_at": "2026-08-19T11:12:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32238194867/job/96040106818",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -176,11 +235,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T10:36:31Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32236366945/job/96038571437"
+     "completed_at": "2026-08-19T11:50:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32236366945/job/96038571437",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -1787,67 +1847,6 @@
    "updated_at": "2026-08-17T10:05:44Z",
    "actor": "Phil-amd",
    "jobs": []
-  },
-  {
-   "run_id": 32017173048,
-   "pr": 1015,
-   "commit": "0c9c152742349e227da0198a9b5641384863018d",
-   "branch": "phil/isa-resource-diff-arch-general",
-   "event": "pull_request",
-   "title": "[Tools] Add architecture-general ISA resource diff tool",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32017173048",
-   "created_at": "2026-08-17T09:49:46Z",
-   "updated_at": "2026-08-17T10:05:00Z",
-   "actor": "Phil-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 32017096084,
-   "pr": 987,
-   "commit": "4827dcb0fc54d1bb879d0800dfbb8ee9656d7037",
-   "branch": "jli/fix-lld-issue",
-   "event": "pull_request",
-   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32017096084",
-   "created_at": "2026-08-17T09:48:47Z",
-   "updated_at": "2026-08-17T11:33:35Z",
-   "actor": "Boss2002n",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-17T10:06:55Z",
-     "completed_at": "2026-08-17T11:03:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32017096084/job/95352988733",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-17T10:06:30Z",
-     "completed_at": "2026-08-17T10:24:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32017096084/job/95352988741",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-17T10:07:02Z",
-     "completed_at": "2026-08-17T11:33:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32017096084/job/95352988799",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
