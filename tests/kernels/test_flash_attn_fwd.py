@@ -4532,3 +4532,40 @@ def test_sink_lse_cross_attn_skipped_blocks(Sq, Skv):
     masked_lse = lse[:, :, :n_masked].float()
     assert (masked_lse - sink.view(1, H, 1)).abs().max().item() <= 1e-4, "all-masked rows must carry the sink LSE"
     assert out[:, :n_masked].abs().max().item() == 0.0, "all-masked rows must have zero output"
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("k_scale", [8.0, 32.0, 64.0])
+def test_lazy_rescale_survives_a_wide_score_range(k_scale):
+    """A widened logit spread must not break the lazy online rescale.
+
+    The rescale branch is wave-uniform: one lane past DUALWAVE_SWP_RESCALE_THRESHOLD
+    sends every lane down it, including lanes whose tile max is below their running
+    max. Those lanes must be left alone; taking the tile max unconditionally scales
+    their accumulators by exp2(m_row - m_tile_max) > 1, which overflows and lands as
+    NaN in the output. Scaling K widens the spread without changing anything else,
+    and near-uniform attention -- what every other test here uses -- never reaches it.
+
+    The eager path is the reference: the two are mathematically the same, so they
+    must agree, and neither may produce NaN.
+    """
+    B, S, H, D = 1, 4096, 8, 128
+    torch.manual_seed(0)
+    q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16)
+    k = (torch.randn_like(q).float() * k_scale).to(torch.bfloat16)
+    v = torch.randn_like(q)
+
+    lazy = flydsl_flash_attn_func(q, k, v, causal=False)
+    eager = flydsl_flash_attn_func(q, k, v, causal=False, dualwave_swp_lazy_rescale=False)
+    torch.cuda.synchronize()
+
+    assert torch.isfinite(lazy).all(), (
+        f"lazy rescale produced {int(torch.isnan(lazy).sum())} NaN of {lazy.numel()} at k_scale={k_scale}"
+    )
+    ref = torch.nn.functional.scaled_dot_product_attention(
+        q.transpose(1, 2).float(), k.transpose(1, 2).float(), v.transpose(1, 2).float()
+    ).transpose(1, 2)
+    rel = lambda o: ((o.float() - ref).norm() / ref.norm()).item()  # noqa: E731
+    assert rel(lazy) <= rel(eager) * 1.05 + 1e-4, (
+        f"lazy rel L2 {rel(lazy):.3e} is worse than eager {rel(eager):.3e} at k_scale={k_scale}"
+    )
