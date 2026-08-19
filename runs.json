@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-19T09:32:08Z",
+ "updated": "2026-08-19T10:15:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32241088864,
+   "pr": 1012,
+   "commit": "b731514a5448576dbf75bc9b825796bcf76e1e61",
+   "branch": "rchamber/add_16x16x16_MFMA_support",
+   "event": "pull_request",
+   "title": "[MFMA] Add 16x16x16 bf16/f16 support with fly-fix-bitcast-width pass",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32241088864",
+   "created_at": "2026-08-19T10:07:06Z",
+   "updated_at": "2026-08-19T10:09:37Z",
+   "actor": "RichardChamberlain1",
+   "jobs": []
+  },
+  {
+   "run_id": 32238194867,
+   "pr": 910,
+   "commit": "08fe1219e41163b16d6c72d6acce43d3226b6964",
+   "branch": "refactor/pa-metadata-tile-programming",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Optimize paged-attention metadata decode",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32238194867",
+   "created_at": "2026-08-19T09:33:16Z",
+   "updated_at": "2026-08-19T09:37:31Z",
+   "actor": "fsx950223",
+   "jobs": []
+  },
   {
    "run_id": 32236366945,
    "pr": 1015,
@@ -59,11 +89,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T09:23:47Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32231429789/job/96019952174"
+     "completed_at": "2026-08-19T09:44:18Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32231429789/job/96019952174",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -83,11 +114,11 @@
    "branch": "fp8-softmax-normalisation",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32228197237",
    "created_at": "2026-08-19T07:31:04Z",
-   "updated_at": "2026-08-19T08:06:34Z",
+   "updated_at": "2026-08-19T10:13:07Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
@@ -103,11 +134,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T08:03:40Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32228197237/job/95999557489"
+     "completed_at": "2026-08-19T10:13:06Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32228197237/job/95999557489",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -1818,96 +1850,6 @@
      "started_at": "2026-08-17T06:39:20Z",
      "completed_at": "2026-08-17T07:52:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32000872789/job/95305333286",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 31996059761,
-   "pr": null,
-   "commit": "741f3d6d322182b451f7b48600385ec9a5415794",
-   "branch": "main",
-   "event": "push",
-   "title": "[fp4_gemm_4wave] MXFP4 GEMM perf optimize (#990)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31996059761",
-   "created_at": "2026-08-17T04:54:34Z",
-   "updated_at": "2026-08-17T06:15:39Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-17T05:25:54Z",
-     "completed_at": "2026-08-17T06:06:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31996059761/job/95289871784"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-17T05:09:02Z",
-     "completed_at": "2026-08-17T06:15:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31996059761/job/95289871819"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-17T05:09:02Z",
-     "completed_at": "2026-08-17T05:54:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31996059761/job/95289871843",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 31995425965,
-   "pr": 1014,
-   "commit": "3d45655e9998a9ba9c43826b3f1a9c0bef19a7a1",
-   "branch": "fix/ci-manylinux-dnf-amdgpu-timeout",
-   "event": "pull_request",
-   "title": "[CI] Skip amdgpu repo during manylinux image dnf install",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/31995425965",
-   "created_at": "2026-08-17T04:42:57Z",
-   "updated_at": "2026-08-17T06:15:11Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-17T05:04:52Z",
-     "completed_at": "2026-08-17T05:49:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31995425965/job/95289228942",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-17T05:04:43Z",
-     "completed_at": "2026-08-17T05:25:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31995425965/job/95289228982",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-17T05:04:52Z",
-     "completed_at": "2026-08-17T06:15:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/31995425965/job/95289229017",
      "log_fetch_failed": true
     }
    ]
