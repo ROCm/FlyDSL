@@ -46,12 +46,14 @@ Run `/kernel-trace-analysis` first. Apply this skill when the trace shows:
 ### Hardware Facts
 
 - LDS size: **160 KB per CU** (2.5x larger than gfx942's 64 KB)
-- LDS is organized into **64 banks**, each **4 bytes wide** (640 DWords per bank)
-- Bank index = `(byte_address / 4) % 64`
+- LDS is organized into **32 banks**, each **4 bytes wide** — same bank count as
+  gfx942. (LLVM: `FeatureISAVersion9_4_Common` carries `FeatureLDSBankCount32` and
+  gfx950 inherits it; `llvm/lib/Target/AMDGPU/AMDGPU.td`. Only 16 and 32 are defined.)
+- Bank index = `(byte_address / 4) % 32`
 - **Bank conflict**: same rule as gfx942 — when 2+ threads in the same wavefront access **different addresses** in the **same bank** in the same cycle, accesses are serialized
 - **Broadcast**: same as gfx942 — when 2+ threads access the **same address** in the same bank, hardware broadcasts (no conflict)
-- LDS throughput: **256 bytes/cycle** (peak, no conflicts; 2x gfx942 due to 64 banks)
-- LDS latency: **~2-64 cycles** per operation depending on bank conflicts (2 cycles best case, 64 cycles worst case with all threads conflicting on one bank)
+- LDS throughput: **128 bytes/cycle** (peak, no conflicts) — 32 banks x 4 B
+- LDS latency: **~2-32 cycles** per operation depending on bank conflicts (best case no conflict; worst case all lanes serialized onto one bank)
 - LDS allocation granularity: **1280 bytes** on **1280-byte alignment**; LDS allocations do not wrap around the LDS storage
 - **Wavefront dispatch**: reads across a 64-thread wavefront are dispatched over **4 cycles** in waterfall fashion
 - **32 concurrent LDS operations**: hardware can concurrently execute 32 read or write instructions (each 32-bit); extended instructions (read2/write2) can be 64-bit each
@@ -63,21 +65,29 @@ Run `/kernel-trace-analysis` first. Apply this skill when the trace shows:
 | Aspect | gfx942 (CDNA3) | gfx950 (CDNA4) |
 |--------|----------------|-----------------|
 | LDS size per CU | 64 KB | 160 KB |
-| Number of banks | 32 | 64 |
-| Bank index formula | `(addr/4) % 32` | `(addr/4) % 64` |
-| Peak throughput | 128 bytes/cycle | 256 bytes/cycle |
+| Number of banks | 32 | 32 (unchanged) |
+| Bank index formula | `(addr/4) % 32` | `(addr/4) % 32` |
+| Peak throughput | 128 bytes/cycle | 128 bytes/cycle |
 | LDS allocation granularity | 256 bytes | 1280 bytes |
 | Max LDS per workgroup | 64 KB | 160 KB |
 | MFMA Transpose Load | Not available | `DS_READ_B64_TR_B16/B8/B4`, `DS_READ_B96_TR_B6` |
 
 ### Impact on Bank Conflict Analysis
 
-Because gfx950 has **64 banks** instead of 32, the bank conflict patterns change:
+The bank count is the **same** on gfx942 and gfx950, so conflict analysis and any
+XOR swizzle mask carries over unchanged between the two. What differs is capacity
+(64 KB vs 160 KB), allocation granularity, and the CDNA4 transpose loads below.
 
-- **Stride that causes conflicts**: multiples of 64 banks (256 bytes) instead of 32 banks (128 bytes)
-- A stride of 128 bytes that caused **full conflict on gfx942** (all threads hit same bank) will only cause **partial conflict on gfx950** (threads alternate between 2 banks)
-- To cause full 64-way conflict on gfx950, the stride must be a multiple of `64 * 4 = 256` bytes
-- **XOR swizzle masks may need adjustment** — masks designed for 32-bank gfx942 may be suboptimal on 64-bank gfx950
+- **Stride that causes conflicts**: a row stride that is a multiple of
+  `32 * 4 = 128 bytes` collapses the wavefront onto one bank on both targets.
+- Distinct banks touched by lane-per-row access =
+  `32 / gcd(row_stride_dwords, 32)`; a *fractional*-dword stride walks all 32.
+
+Verified on gfx950 (MI355X): a 64-thread wavefront reading one dword per lane at a
+32-dword row stride takes 12.70 ms and at a 64-dword stride 12.75 ms — within 0.4%
+of each other, and both ~1.7x a conflict-free stride-1 baseline (7.41 ms). A
+64-bank part would have made the 64-dword stride roughly twice as slow as the
+32-dword one; it does not.
 
 ### MFMA Transpose Load from LDS (gfx950 only)
 
@@ -186,24 +196,20 @@ Signs:
 
 When multiple threads access LDS with a stride that is a multiple of the bank count, every access hits the same bank:
 
-- **gfx942 (32 banks)**: stride multiple of 128 bytes causes full conflict
-- **gfx950 (64 banks)**: stride multiple of 256 bytes causes full conflict; stride of 128 bytes causes 2-way conflict (threads alternate between 2 banks)
+Both gfx942 and gfx950 have **32 banks**, so the same strides conflict on both:
+a row stride that is a multiple of `32 * 4 = 128 bytes` collapses the wavefront
+onto one bank.
 
 ```
-# gfx942 (32 banks): stride=128 -> full conflict
+# gfx942 and gfx950 (32 banks): stride=128 B -> full conflict
 Thread 0: addr = base + 0*128  -> bank (0*128/4)%32 = 0
 Thread 1: addr = base + 1*128  -> bank (1*128/4)%32 = 0  <- CONFLICT
 Thread 2: addr = base + 2*128  -> bank (2*128/4)%32 = 0  <- CONFLICT
 
-# gfx950 (64 banks): stride=128 -> only 2-way conflict (NOT full conflict)
-Thread 0: addr = base + 0*128  -> bank (0*128/4)%64 = 0
-Thread 1: addr = base + 1*128  -> bank (1*128/4)%64 = 32  <- different bank!
-Thread 2: addr = base + 2*128  -> bank (2*128/4)%64 = 0   <- conflict with thread 0
-
-# gfx950 (64 banks): stride=256 -> full conflict
-Thread 0: addr = base + 0*256  -> bank (0*256/4)%64 = 0
-Thread 1: addr = base + 1*256  -> bank (1*256/4)%64 = 0  <- CONFLICT
-...
+# stride=132 B (128 + one dword) -> conflict-free
+Thread 0: addr = base + 0*132  -> bank (0*132/4)%32 = 0
+Thread 1: addr = base + 1*132  -> bank (1*132/4)%32 = 1  <- different bank
+Thread 2: addr = base + 2*132  -> bank (2*132/4)%32 = 2  <- different bank
 ```
 
 ### The Solution: XOR-Based Swizzle
@@ -256,8 +262,8 @@ The goal is to make vectorized access span enough banks:
 | fp8       | 1 byte      | 16                   | 4 banks (16 bytes)   |
 
 For XOR mask:
-- **gfx942 (32 banks)**: use `32 / (vec * element_size / 4) - 1` to ensure full bank coverage
-- **gfx950 (64 banks)**: use `64 / (vec * element_size / 4) - 1` — the doubled bank count means wider XOR masks may be needed to fully distribute accesses
+- **gfx942 and gfx950 (both 32 banks)**: use `32 / (vec * element_size / 4) - 1`
+  to cover the bank range. A mask tuned on one of the two carries over unchanged.
 
 ### Example: Fix Bank Conflicts in KV Cache Load to LDS
 
@@ -301,12 +307,12 @@ in dwords**, not in elements: lane `t` reading row `t` lands on bank
 dword stride (an odd number of 2-byte elements) walks all of them.
 
 ```text
-fp16, HEAD_SIZE = 128, gfx950 (64 banks):
-  pad 0  -> 128 elems -> 256 B -> 64.0 dw -> gcd(64,64)=64 ->  1 bank  -> 64-way
-  pad 1  -> 129 elems -> 258 B -> 64.5 dw -> fractional    -> 64 banks ->  1-way
-  pad 2  -> 130 elems -> 260 B -> 65.0 dw -> gcd(65,64)=1  -> 64 banks ->  1-way
-  pad 4  -> 132 elems -> 264 B -> 66.0 dw -> gcd(66,64)=2  -> 32 banks ->  2-way
-  pad 32 -> 160 elems -> 320 B -> 80.0 dw -> gcd(80,64)=16 ->  4 banks -> 16-way
+fp16, HEAD_SIZE = 128, gfx942 / gfx950 (both 32 banks):
+  pad 0  -> 128 elems -> 256 B ->  64.0 dw -> gcd(64,32)=32 ->  1 bank(s) -> 32-way
+  pad 1  -> 129 elems -> 258 B ->  64.5 dw -> fractional     -> 32 banks ->  1-way
+  pad 2  -> 130 elems -> 260 B ->  65.0 dw -> gcd(65,32)=1  -> 32 bank(s) ->  1-way
+  pad 4  -> 132 elems -> 264 B ->  66.0 dw -> gcd(66,32)=2  -> 16 bank(s) ->  2-way
+  pad 32 -> 160 elems -> 320 B ->  80.0 dw -> gcd(80,32)=16 ->  2 bank(s) -> 16-way
 ```
 
 **More padding is not safer.** Only a fractional-dword stride, or one coprime
@@ -345,7 +351,9 @@ use `padding = bank_count / element_size_bytes`: for fp16 on gfx950 that gives
 +32 elements, an 80-dword stride, and a 16-way conflict.
 
 Measured on gfx950 (MI355X), one wavefront strided-column-reading a
-`[64][64+PAD]` fp16 tile, best of 9 x 50 launches, `hipcc -O3`:
+`[64][64+PAD]` fp16 tile, best of 9 x 50 launches, `hipcc -O3`. Note this is a
+64-element row (128 B unpadded), so the strides differ from the 128-element
+worked example above; the predicted column is `gcd(row_stride_dwords, 32)`:
 
 | PAD | row stride | predicted | measured | vs best |
 |-----|-----------|-----------|----------|---------|

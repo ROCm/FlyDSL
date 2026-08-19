@@ -20,6 +20,16 @@ LLVM/MLIR build with Python bindings, followed by the FlyDSL C++ dialect and Pyt
 |----------|----------|-------------|
 | `[container@host]` | No | Target in format `container@hostname`. If omitted, build locally. Example: `my-container@gpu-host.example.com` |
 
+## Checkout path
+
+The steps below use `$FLYDSL_ROOT` for the checkout. Set it before starting; the
+container images this skill targets conventionally clone to `/FlyDSL`, but a
+developer checkout is wherever it was cloned:
+
+```bash
+export FLYDSL_ROOT="${FLYDSL_ROOT:-$PWD}"   # or /FlyDSL inside the prebuilt image
+```
+
 ## Prerequisites
 
 - **ROCm 6.x or 7.x** (for GPU execution)
@@ -37,7 +47,7 @@ This clones ROCm/llvm-project, checks out the commit specified in `thirdparty/ll
 and builds MLIR with Python bindings.
 
 ```bash
-cd /FlyDSL
+cd "$FLYDSL_ROOT"
 bash scripts/build_llvm.sh -j128
 ```
 
@@ -55,7 +65,7 @@ export MLIR_PATH=/path/to/llvm-project/mlir_install
 ### Step 2: Build FlyDSL (~5 min)
 
 ```bash
-cd /FlyDSL
+cd "$FLYDSL_ROOT"
 bash scripts/build.sh -j128
 ```
 
@@ -67,14 +77,14 @@ bash scripts/build.sh -j128
 ### Step 3: Install (editable mode)
 
 ```bash
-cd /FlyDSL
+cd "$FLYDSL_ROOT"
 pip install -e .
 ```
 
 **Or without installing** (just set paths):
 ```bash
-export PYTHONPATH=/FlyDSL/build-fly/python_packages:$(pwd):$PYTHONPATH
-export LD_LIBRARY_PATH=/FlyDSL/build-fly/python_packages/flydsl/_mlir/_mlir_libs:$LD_LIBRARY_PATH
+export PYTHONPATH="$FLYDSL_ROOT/build-fly/python_packages:$FLYDSL_ROOT:$PYTHONPATH"
+export LD_LIBRARY_PATH="$FLYDSL_ROOT/build-fly/python_packages/flydsl/_mlir/_mlir_libs:$LD_LIBRARY_PATH"
 ```
 
 ### Step 4: Verify
@@ -90,15 +100,15 @@ For building inside a Docker container on a remote host:
 
 ```bash
 # SSH command pattern
-ssh -o LogLevel=ERROR <HOST> 'docker exec <CONTAINER> bash -c "cd /FlyDSL && CMD"'
+ssh -o LogLevel=ERROR <HOST> 'docker exec <CONTAINER> bash -c "cd "$FLYDSL_ROOT" && CMD"'
 
 # Full build sequence (run each step, wait for completion)
-ssh ... 'docker exec -d <CONTAINER> bash -c "cd /FlyDSL && bash scripts/build_llvm.sh -j128 > /tmp/build_llvm.log 2>&1"'
+ssh ... 'docker exec -d <CONTAINER> bash -c "cd "$FLYDSL_ROOT" && bash scripts/build_llvm.sh -j128 > /tmp/build_llvm.log 2>&1"'
 # Monitor: ssh ... 'docker exec <CONTAINER> tail -5 /tmp/build_llvm.log'
 # Wait for "LLVM_BUILD_DONE" or "Creating tarball..." followed by completion
 
-ssh ... 'docker exec <CONTAINER> bash -c "cd /FlyDSL && bash scripts/build.sh -j128"'
-ssh ... 'docker exec <CONTAINER> bash -c "cd /FlyDSL && pip install -e ."'
+ssh ... 'docker exec <CONTAINER> bash -c "cd "$FLYDSL_ROOT" && bash scripts/build.sh -j128"'
+ssh ... 'docker exec <CONTAINER> bash -c "cd "$FLYDSL_ROOT" && pip install -e ."'
 ssh ... 'docker exec <CONTAINER> bash -c "python3 -c \"import flydsl; print(\\\"FlyDSL OK\\\")\""'
 ```
 

@@ -362,9 +362,11 @@ This works because:
 - **Use `range(..., init=...)`** to carry prefetched data across iterations (Python variable swap is invisible to MLIR)
 - **Minimize work between load and consume**: the more compute between prefetch issue and data use, the better the overlap
 - **Keep the swap simple**: just unpack from `state`, no computation
-- **Check VGPR budget**: spills start when `arch_vgpr + accum_vgpr` exceeds the
-  combined 512-entry budget; staying at or under 256 is what buys a 2nd wave/SIMD.
-  See "Register Budget" above for the full occupancy table.
+- **Check VGPR budget**: the two files share one 512-entry budget and each
+  saturates at 256, so a report never shows a combined figure above 512 --
+  demand beyond it appears as `arch=256, accum=256` plus a non-zero spill count.
+  Treat any spill as the regression; staying at or under 256 combined is what
+  buys a 2nd wave/SIMD. See "Register Budget" above.
 - **Hoist cross-phase loads into barrier regions**: if a kernel has barrier-heavy phases (reduce/sync), issue the next phase's loads before/during those barriers
 - **Unwrap all init values to raw ir.Value**: use `v.ir_value() if hasattr(v, 'ir_value') else v`
 

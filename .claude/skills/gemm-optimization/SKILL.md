@@ -585,14 +585,19 @@ share **one combined 512-entry occupancy budget per SIMD** — they *do* compete
 
 | arch_vgpr + accum_vgpr | Waves/SIMD | Assessment |
 |------------------------|------------|------------|
+| <= 64 | 8 | Maximum (the per-SIMD cap) |
+| <= 72 | 7 | |
+| <= 96 | 5 | |
 | <= 128 | 4 | High occupancy |
-| <= 170 | 3 | Good |
+| <= 168 | 3 | Good |
 | <= 256 | 2 | Moderate |
 | <= 512 | 1 | Minimum |
-| > 512 | SPILL | Critical regression |
 
-Occupancy is `512 / alignTo(arch_vgpr + accum_vgpr, granule)`, capped at the
-per-SIMD wave maximum. MFMA accumulators live in `accum_vgpr` and prefetch
+Occupancy is `min(8, 512 / alignTo(arch_vgpr + accum_vgpr, 8))`. Both constants
+come from LLVM for GFX90AInsts targets: `getMaxWavesPerEU` returns 8 and
+`getVGPRAllocGranule` returns 8 (`Utils/AMDGPUBaseInfo.cpp`). The granule matters
+at the boundaries -- a combined 170 rounds up to 176 and yields **2** waves, not
+the 3 that `512/170` alone suggests. MFMA accumulators live in `accum_vgpr` and prefetch
 buffers / A / B tiles in `arch_vgpr`, but growing either one costs occupancy.
 
 The separate 256-per-file model (`max(arch, accum)`) applies only to

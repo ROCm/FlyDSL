@@ -44,7 +44,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 # Files whose prose is executed by an agent rather than read by a human.
 DEFAULT_TARGETS = ["CLAUDE.md", ".claude/skills/*/SKILL.md"]
-DOCS_TARGETS = ["docs/*.md", "docs/*.rst"]
+DOCS_TARGETS = ["docs/**/*.md", "docs/**/*.rst"]
 
 # Trees whose call sites vouch for a symbol that has no in-tree definition
 # (upstream MLIR dialect re-exports, generated ODS builders).
@@ -101,7 +101,8 @@ _PATH_PREFIXES = (
     ".claude/",
 )
 
-_SYM = re.compile(r"\b(?:fx\.rocdl|fx|rocdl)\.([A-Za-z_][A-Za-z0-9_]*)")
+# The lookbehind keeps fx./rocdl. from matching inside a URL, path or filename.
+_SYM = re.compile(r"(?<![\w./-])(?:fx\.rocdl|fx|rocdl)\.([A-Za-z_][A-Za-z0-9_]*)")
 _BACKTICKED = re.compile(r"`([^`\n]+)`")
 _SKILL_REF = re.compile(r"\*\*([a-z][a-z0-9-]+)\*\* skill")
 _IGNORE = "<!-- api-check: ignore -->"
@@ -168,8 +169,11 @@ def _check_symbols(path: Path, text: str, known: set[str]) -> list[str]:
     fence: str | None = None
     for lineno, line in enumerate(text.splitlines(), 1):
         stripped = line.lstrip()
-        if stripped.startswith("```"):
-            lang = stripped[3:].strip().lower()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            # Only the first word of the info string is the language; the rest
+            # can be attributes. "python3" counts as Python too.
+            info = stripped[3:].strip().lower().split()
+            lang = info[0].rstrip("3") if info else ""
             fence = None if fence is not None else lang
             continue
         if fence is not None and fence not in _PY_FENCES:
@@ -179,7 +183,7 @@ def _check_symbols(path: Path, text: str, known: set[str]) -> list[str]:
         for name in _SYM.findall(line):
             if name in known or name in _PLACEHOLDERS or name in _UPSTREAM_ROCDL:
                 continue
-            if name.endswith("_") or "*" in name:  # rocdl.mfma_* style wildcards
+            if name.endswith("_"):  # trailing half of a rocdl.mfma_* wildcard
                 continue
             bad.append(f"{path.relative_to(REPO)}:{lineno}: unknown symbol `{name}`")
     return bad
@@ -192,7 +196,11 @@ def _check_paths(path: Path, text: str) -> list[str]:
             continue
         for tok in _BACKTICKED.findall(line):
             tok = tok.strip()
+            if tok.startswith("./"):
+                tok = tok[2:]
             if not tok.startswith(_PATH_PREFIXES):
+                continue
+            if ":" in tok:  # a file:line citation, not a path
                 continue
             if any(c in tok for c in "<>*$ "):  # templates and shell fragments
                 continue
@@ -202,10 +210,19 @@ def _check_paths(path: Path, text: str) -> list[str]:
 
 
 def _split_frontmatter(text: str) -> str | None:
-    if not text.startswith("---"):
+    """Return the frontmatter block, delimited by ``---`` on its own LINE.
+
+    A substring split would cut at the first ``---`` anywhere, so a value like
+    ``description: pass --- to separate args`` truncates the block and makes a
+    valid file look like invalid YAML.
+    """
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
         return None
-    parts = text.split("---", 2)
-    return parts[1] if len(parts) >= 3 else None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            return "\n".join(lines[1:i])
+    return None
 
 
 def _check_frontmatter(path: Path) -> list[str]:
