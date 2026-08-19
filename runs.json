@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-19T12:09:28Z",
+ "updated": "2026-08-19T12:13:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "coop-library",
    "event": "pull_request",
    "title": "[Ext][Coop] Add cooperative warp- and block-scope collectives",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32250433584",
    "created_at": "2026-08-19T12:00:37Z",
-   "updated_at": "2026-08-19T12:06:06Z",
+   "updated_at": "2026-08-19T12:07:31Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -113,11 +113,11 @@
    "branch": "rchamber/add_16x16x16_MFMA_support",
    "event": "pull_request",
    "title": "[MFMA] Add 16x16x16 bf16/f16 support with fly-fix-bitcast-width pass",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32241703763",
    "created_at": "2026-08-19T10:14:28Z",
-   "updated_at": "2026-08-19T11:12:31Z",
+   "updated_at": "2026-08-19T12:11:50Z",
    "actor": "RichardChamberlain1",
    "jobs": [
     {
@@ -132,10 +132,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-19T10:54:56Z",
-     "completed_at": null,
+     "completed_at": "2026-08-19T12:11:49Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32241703763/job/96043179338"
     },
     {
@@ -200,11 +200,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-19T10:41:48Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32238194867/job/96040106895"
+     "completed_at": "2026-08-19T12:09:06Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32238194867/job/96040106895",
+     "log_fetch_failed": true
     }
    ]
   },
