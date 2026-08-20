@@ -81,7 +81,7 @@ def _memory_worker_cap(default_workers: int) -> int:
     except ImportError as error:
         raise RuntimeError(
             "psutil is required for automatic AOT worker memory limiting; "
-            "install FlyDSL runtime dependencies or set FLYDSL_AOT_WORKERS explicitly"
+            "install psutil or set FLYDSL_AOT_WORKERS explicitly"
         ) from error
 
     try:
