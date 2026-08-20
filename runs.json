@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-20T07:28:47Z",
+ "updated": "2026-08-20T07:34:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32344192036,
+   "pr": 1001,
+   "commit": "a3e67752d9acce2f571c28adb10aff9e7496a23e",
+   "branch": "jli/gfx1250/fix-mma-atom",
+   "event": "pull_request",
+   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32344192036",
+   "created_at": "2026-08-20T07:28:43Z",
+   "updated_at": "2026-08-20T07:30:09Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 32344076593,
    "pr": 1009,
@@ -10,11 +25,11 @@
    "branch": "john/bf16-attn-xcd-swizzle",
    "event": "pull_request",
    "title": "[Fix] Restore the gfx950 XCD mapping for bf16 dense attention",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32344076593",
    "created_at": "2026-08-20T07:27:13Z",
-   "updated_at": "2026-08-20T07:27:51Z",
+   "updated_at": "2026-08-20T07:29:03Z",
    "actor": "JohnQinAMD",
    "jobs": []
   },
@@ -130,11 +145,11 @@
    "branch": "main",
    "event": "push",
    "title": "[CI] Track Softmax backward in the benchmark dashboard (#1026)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32335449457",
    "created_at": "2026-08-20T05:24:02Z",
-   "updated_at": "2026-08-20T06:03:40Z",
+   "updated_at": "2026-08-20T07:33:19Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -150,11 +165,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T06:03:32Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32335449457/job/96330968385"
+     "completed_at": "2026-08-20T07:33:18Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32335449457/job/96330968385",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -1666,21 +1682,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 32195705113,
-   "pr": 1027,
-   "commit": "9137f26c8f0b741245525966f005255f5249536b",
-   "branch": "skills/dedrift-and-fix-frontmatter",
-   "event": "pull_request",
-   "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32195705113",
-   "created_at": "2026-08-18T23:05:59Z",
-   "updated_at": "2026-08-19T00:13:27Z",
-   "actor": "jhinpan",
-   "jobs": []
   }
  ]
 }
