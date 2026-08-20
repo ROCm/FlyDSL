@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-20T16:45:14Z",
+ "updated": "2026-08-20T16:47:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32393726420,
+   "pr": 1045,
+   "commit": "89214edd9bf57687c2385e37c3055f34b4510788",
+   "branch": "john/attn-4gib-guard",
+   "event": "pull_request",
+   "title": "[Bugfix] Refuse a batch entry the buffer descriptor cannot address",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32393726420",
+   "created_at": "2026-08-20T16:44:49Z",
+   "updated_at": "2026-08-20T16:45:36Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 32393379405,
    "pr": 1032,
@@ -10,11 +25,11 @@
    "branch": "convolution",
    "event": "pull_request",
    "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32393379405",
    "created_at": "2026-08-20T16:41:10Z",
-   "updated_at": "2026-08-20T16:41:19Z",
+   "updated_at": "2026-08-20T16:44:01Z",
    "actor": "amd-nprotaso",
    "jobs": []
   },
@@ -1779,51 +1794,6 @@
      "completed_at": "2026-08-19T22:59:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298273166/job/96247704780",
      "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32298048348,
-   "pr": null,
-   "commit": "9ccb52f799e9066ce274bbe3218ac14997be2d45",
-   "branch": "john/maxnumf-ambient-fastmath",
-   "event": "pull_request",
-   "title": "[Fix] Let fx.maxnumf inherit the ambient fastmath",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298048348",
-   "created_at": "2026-08-19T20:21:05Z",
-   "updated_at": "2026-08-19T23:46:07Z",
-   "actor": "JohnQinAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-19T21:16:49Z",
-     "completed_at": "2026-08-19T23:46:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298048348/job/96228993219",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-19T21:15:19Z",
-     "completed_at": "2026-08-19T21:27:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298048348/job/96228993230",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-19T21:16:33Z",
-     "completed_at": "2026-08-19T22:21:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298048348/job/96228993313"
     }
    ]
   }
