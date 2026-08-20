@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-20T08:33:16Z",
+ "updated": "2026-08-20T08:34:49Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "dsl-ify-scf-controlflow",
    "event": "pull_request",
    "title": "[Kernel] Replace raw scf ops with Python control flow in kernels",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32349275165",
    "created_at": "2026-08-20T08:31:53Z",
-   "updated_at": "2026-08-20T08:31:55Z",
+   "updated_at": "2026-08-20T08:33:36Z",
    "actor": "xudoyuan",
    "jobs": []
   },
@@ -25,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[CI] Bypass runner git-cache in promote checkout (#1040)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32349247910",
    "created_at": "2026-08-20T08:31:34Z",
-   "updated_at": "2026-08-20T08:32:17Z",
+   "updated_at": "2026-08-20T08:33:24Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -220,11 +220,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T08:18:09Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32344076593/job/96359203270"
+     "completed_at": "2026-08-20T08:33:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32344076593/job/96359203270",
+     "log_fetch_failed": true
     }
    ]
   },
