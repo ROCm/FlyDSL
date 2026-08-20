@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-20T12:30:02Z",
+ "updated": "2026-08-20T12:31:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -115,11 +115,11 @@
    "branch": "pr/fix-ptr-alignment-lowering",
    "event": "pull_request",
    "title": "[Fix] Fix alignment reported by ptr.load/ptr.store lowering",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32364415618",
    "created_at": "2026-08-20T11:33:57Z",
-   "updated_at": "2026-08-20T11:35:57Z",
+   "updated_at": "2026-08-20T12:28:31Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
