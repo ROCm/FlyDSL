@@ -19,7 +19,6 @@ import pytest
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.runtime.device import get_rocm_arch
 from kernels.norm.layernorm_kernel import (
     build_fused_add_layernorm_dynamicquant_module,
     build_fused_add_layernorm_module,
@@ -51,8 +50,6 @@ DTYPE_FP32 = torch.float32
 DTYPE_FP16 = torch.float16
 DTYPE_BF16 = torch.bfloat16
 DTYPE_INT8 = torch.int8
-
-GPU_ARCH = str(get_rocm_arch())
 
 EPS: float = 1e-5
 
@@ -906,10 +903,6 @@ def test_layernorm_dynamicquant():
         raise SystemExit(1)
 
 
-@pytest.mark.skipif(
-    GPU_ARCH == "gfx1201",
-    reason="LayerNorm SmoothQuant is temporarily quarantined on gfx1201 pending correctness investigation",
-)
 def test_layernorm_smoothquant():
     print("=" * 80)
     print("Running LayerNorm SmoothQuant Tests")
@@ -1002,10 +995,6 @@ def test_fused_add_layernorm_dynamicquant():
         raise SystemExit(1)
 
 
-@pytest.mark.skipif(
-    GPU_ARCH == "gfx1201",
-    reason="LayerNorm SmoothQuant is temporarily quarantined on gfx1201 pending correctness investigation",
-)
 def test_fused_add_layernorm_smoothquant():
     print("=" * 80)
     print("Running FusedAdd LayerNorm SmoothQuant Tests")

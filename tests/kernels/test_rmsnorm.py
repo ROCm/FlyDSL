@@ -1924,10 +1924,6 @@ def test_rmsnorm_large_shape():
         assert ok
 
 
-@pytest.mark.skipif(
-    GPU_ARCH == "gfx1201",
-    reason="RMSNorm DynamicQuant is temporarily quarantined on gfx1201 pending correctness investigation",
-)
 def test_rmsnorm_dynamicquant():
     print("=" * 80)
     print("Running RMSNorm DynamicQuant Tests")
