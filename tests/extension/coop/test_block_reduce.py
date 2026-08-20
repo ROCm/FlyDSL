@@ -56,18 +56,16 @@ ALGORITHMS = (
 BLOCK_SHAPES = ((64, 1, 1), (128, 1, 1), (256, 1, 1), (64, 2, 2), (128, 2, 2))
 
 
-def run_block_reduce(values, name, dtype, *, block_size, algorithm, items_per_thread=1, op=None, namespace=None):
+def run_block_reduce(values, name, dtype, *, block_size, algorithm, items_per_thread=1, op=None, universal=False):
     """Reduce *values* with one ``BlockReduce`` call per thread.
 
     Returns the per-thread results on the host: the reduction is valid
     block-wide, so every entry should hold the same total.
 
-    *namespace* is which ``BlockReduce`` to reach for — the dispatched one by
-    default, or ``fx.coop.universal`` for the form that folds through the
-    portable warp reduction.
+    *universal* picks ``fx.coop.universal.BlockReduce``, the form that folds
+    through the portable warp reduction, over the dispatched one.
     """
     op = op if op is not None else fx.ReductionOp.ADD
-    namespace = namespace if namespace is not None else fx.coop
     block_threads = block_size[0] * block_size[1] * block_size[2]
 
     # Decide the per-thread read before tracing: one scalar, or a Vector of
@@ -84,6 +82,7 @@ def run_block_reduce(values, name, dtype, *, block_size, algorithm, items_per_th
 
     @flyc.kernel(known_block_size=list(block_size))
     def kernel(A: fx.Tensor, Out: fx.Tensor):
+        namespace = fx.coop.universal if universal else fx.coop
         block_reduce = namespace.BlockReduce[dtype, block_size, algorithm]
         storage = fx.SharedAllocator().allocate(block_reduce.SharedStorage).peek()
         tid = linear_tid(block_size)
@@ -262,7 +261,7 @@ def test_universal_agrees_with_the_dispatched_reduction(algorithm):
     shared = dict(block_size=(256, 1, 1), algorithm=algorithm)
 
     dispatched = run_block_reduce(values, name, dtype, **shared)
-    universal = run_block_reduce(values, name, dtype, namespace=fx.coop.universal, **shared)
+    universal = run_block_reduce(values, name, dtype, universal=True, **shared)
 
     assert torch.equal(universal, dispatched)
     check_sum(values, universal, name)

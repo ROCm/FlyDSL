@@ -60,16 +60,14 @@ BLOCK_SHAPES = ((64, 1, 1), (128, 1, 1), (256, 1, 1), (64, 2, 2))
 
 
 def run_block_scan(
-    values, name, dtype, *, block_size, inclusive, items_per_thread=1, op=None, init=None, namespace=None
+    values, name, dtype, *, block_size, inclusive, items_per_thread=1, op=None, init=None, universal=False
 ):
     """Scan *values* with one ``BlockScan`` call per thread; return the host result.
 
-    *namespace* is which ``BlockScan`` to reach for — the dispatched one by
-    default, or ``fx.coop.universal`` for the form that folds through the
-    portable warp scan.
+    *universal* picks ``fx.coop.universal.BlockScan``, the form that folds
+    through the portable warp scan, over the dispatched one.
     """
     op = op if op is not None else fx.ReductionOp.ADD
-    namespace = namespace if namespace is not None else fx.coop
 
     # Decide the per-thread read and write before tracing: one scalar, or a
     # Vector of several per-thread items.
@@ -91,6 +89,7 @@ def run_block_scan(
 
     @flyc.kernel(known_block_size=list(block_size))
     def kernel(A: fx.Tensor, Out: fx.Tensor):
+        namespace = fx.coop.universal if universal else fx.coop
         block_scan = namespace.BlockScan[dtype, block_size, namespace.BlockScanAlgorithm.WARP_SCANS]
         storage = fx.SharedAllocator().allocate(block_scan.SharedStorage).peek()
         scan(block_scan, A, Out, linear_tid(block_size), storage)
@@ -313,7 +312,7 @@ def test_universal_agrees_with_the_dispatched_scan(inclusive):
     shared = dict(block_size=(256, 1, 1), inclusive=inclusive)
 
     dispatched = run_block_scan(values, name, dtype, **shared)
-    universal = run_block_scan(values, name, dtype, namespace=fx.coop.universal, **shared)
+    universal = run_block_scan(values, name, dtype, universal=True, **shared)
 
     assert torch.equal(universal, dispatched)
     check_scan(values, universal, name, inclusive=inclusive)
