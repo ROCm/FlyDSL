@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-20T19:19:23Z",
+ "updated": "2026-08-20T19:22:35Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -158,11 +158,11 @@
    "branch": "fp8-softmax-normalisation",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386189717",
    "created_at": "2026-08-20T15:26:57Z",
-   "updated_at": "2026-08-20T17:07:57Z",
+   "updated_at": "2026-08-20T19:19:50Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
@@ -178,11 +178,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T17:07:46Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386189717/job/96512398349"
+     "completed_at": "2026-08-20T19:19:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386189717/job/96512398349",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
