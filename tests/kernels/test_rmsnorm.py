@@ -127,29 +127,36 @@ def _get_rmsnorm_shape_override(env_name="ROCDSL_RMSNORM_SHAPES"):
     return configs
 
 
+_RMSNORM_CONFIGS = (
+    (64, 256, "f32"),  # small-N scalar path
+    (32, 128, "f16"),  # small-N aligned vec8 path
+    (64, 2001, "f32"),  # small-N scalar path with an unaligned tail
+    (16, 512, "bf16"),  # small-N multi-row vec8 path
+    (64, 8192, "bf16"),  # large-N aligned vec8 path
+)
+
+_RMSNORM_FORWARD_EXTRA_CONFIGS = (
+    (1, 511, "bf16"),  # small M plus vec8 prefix/scalar tail
+    (9, 2048, "f16"),  # small-N dispatch boundary
+    (33, 3072, "bf16"),  # vec8 row not divisible by BLOCK_THREADS * VEC_WIDTH
+    (7, 3073, "f16"),  # large-N vec8 prefix/scalar tail
+)
+
+
+def get_default_rmsnorm_forward_configs():
+    return list(_RMSNORM_CONFIGS + _RMSNORM_FORWARD_EXTRA_CONFIGS)
+
+
 def _get_rmsnorm_configs():
     override = _get_rmsnorm_shape_override()
-    if override is not None:
-        return override
-    return [
-        (64, 256, "f32"),  # small-N scalar path
-        (32, 128, "f16"),  # small-N aligned vec8 path
-        (64, 2001, "f32"),  # small-N scalar path with an unaligned tail
-        (16, 512, "bf16"),  # small-N multi-row vec8 path
-        (64, 8192, "bf16"),  # large-N aligned vec8 path
-    ]
+    return override if override is not None else list(_RMSNORM_CONFIGS)
 
 
 def _get_rmsnorm_forward_configs():
     override = _get_rmsnorm_shape_override()
     if override is not None:
         return override
-    return _get_rmsnorm_configs() + [
-        (1, 511, "bf16"),  # small M plus vec8 prefix/scalar tail
-        (9, 2048, "f16"),  # small-N dispatch boundary
-        (33, 3072, "bf16"),  # vec8 row not divisible by BLOCK_THREADS * VEC_WIDTH
-        (7, 3073, "f16"),  # large-N vec8 prefix/scalar tail
-    ]
+    return get_default_rmsnorm_forward_configs()
 
 
 def _get_rmsnorm_backward_configs():
