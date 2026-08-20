@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-20T01:05:47Z",
+ "updated": "2026-08-20T01:18:52Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32320357427,
+   "pr": 1038,
+   "commit": "91e311d324ed78f9ec7e9b9877729d4137196994",
+   "branch": "zhimding/jobs_parallel_0819",
+   "event": "pull_request",
+   "title": "[AOT] Add resilient parallel job scheduler",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32320357427",
+   "created_at": "2026-08-20T01:15:30Z",
+   "updated_at": "2026-08-20T01:16:48Z",
+   "actor": "zhiding512",
+   "jobs": []
+  },
   {
    "run_id": 32319484816,
    "pr": 1033,
@@ -40,11 +55,11 @@
    "branch": "john/loud-aiter-skip",
    "event": "pull_request",
    "title": "[Test] Print when aiter is missing instead of collecting nothing",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306637551",
    "created_at": "2026-08-19T21:59:25Z",
-   "updated_at": "2026-08-19T23:38:59Z",
+   "updated_at": "2026-08-20T01:16:28Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
@@ -69,10 +84,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-19T23:38:58Z",
-     "completed_at": null,
+     "completed_at": "2026-08-20T01:16:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306637551/job/96262735216"
     }
    ]
@@ -1825,21 +1840,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 32132113458,
-   "pr": null,
-   "commit": "3951a38826e86fc82e2acab7e2eb60dd22d7dcbd",
-   "branch": "pr/fix-gfx1250-wave-size",
-   "event": "pull_request",
-   "title": "[ROCDL] Fix wave size for gfx1250 (wave32, not wave64)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32132113458",
-   "created_at": "2026-08-18T11:31:02Z",
-   "updated_at": "2026-08-18T11:31:14Z",
-   "actor": "sjfeng1999",
-   "jobs": []
   }
  ]
 }
