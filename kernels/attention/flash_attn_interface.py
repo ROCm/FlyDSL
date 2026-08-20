@@ -819,8 +819,9 @@ def flydsl_flash_attn_func(
             if _entry_bytes >= _MAX_DESCRIPTOR_BYTES:
                 raise NotImplementedError(
                     f"flydsl_flash_attn_func: one batch entry of {_name} is {_entry_bytes} bytes, at or over the "
-                    f"{_MAX_DESCRIPTOR_BYTES} a buffer descriptor can address. Launching would silently write only "
-                    f"{_entry_bytes % _MAX_DESCRIPTOR_BYTES} bytes of the output. Shorten the sequence or use fewer heads."
+                    f"{_MAX_DESCRIPTOR_BYTES} bytes a buffer descriptor can address. Its byte count and its offset "
+                    "are both 32-bit, so the span wraps and the kernel returns a wrong result without reporting "
+                    "anything. Shorten the sequence or use fewer heads."
                 )
     if return_lse and dtype_str == "fp8":
         raise NotImplementedError("flydsl_flash_attn_func: return_lse is not supported for fp8")
