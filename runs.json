@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-20T11:26:23Z",
+ "updated": "2026-08-20T11:36:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32364415618,
+   "pr": 1043,
+   "commit": "29bb7a9fc62ee9f233393bdf008e2f97c80c8a04",
+   "branch": "pr/fix-ptr-alignment-lowering",
+   "event": "pull_request",
+   "title": "[Fix] Fix alignment reported by ptr.load/ptr.store lowering",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32364415618",
+   "created_at": "2026-08-20T11:33:57Z",
+   "updated_at": "2026-08-20T11:33:58Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 32363611981,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Ext][Coop] Add cooperative warp- and block-scope collectives (#1031)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32363611981",
    "created_at": "2026-08-20T11:24:00Z",
-   "updated_at": "2026-08-20T11:24:37Z",
+   "updated_at": "2026-08-20T11:25:44Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -25,11 +40,11 @@
    "branch": "pr/fix-ptr-alignment-lowering",
    "event": "pull_request",
    "title": "[Fix] Fix alignment reported by ptr.load/ptr.store lowering",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32362524805",
    "created_at": "2026-08-20T11:10:36Z",
-   "updated_at": "2026-08-20T11:12:07Z",
+   "updated_at": "2026-08-20T11:33:58Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -183,9 +198,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-20T10:43:40Z",
+     "started_at": "2026-08-20T11:30:57Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32353132079/job/96398342490"
     },
@@ -452,11 +467,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T10:07:36Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32348910285/job/96389133543"
+     "completed_at": "2026-08-20T11:33:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32348910285/job/96389133543",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1659,52 +1675,6 @@
      "started_at": "2026-08-19T14:32:06Z",
      "completed_at": "2026-08-19T15:29:14Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256430019/job/96296482400",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32256370123,
-   "pr": 1012,
-   "commit": "24d92158b3bc76be52cbea35ea014b6ef3da39e8",
-   "branch": "rchamber/add_16x16x16_MFMA_support",
-   "event": "pull_request",
-   "title": "[MFMA] Add 16x16x16 bf16/f16 support with fly-fix-bitcast-width pass",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123",
-   "created_at": "2026-08-19T13:07:55Z",
-   "updated_at": "2026-08-19T23:23:12Z",
-   "actor": "RichardChamberlain1",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-19T21:47:36Z",
-     "completed_at": "2026-08-19T23:23:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123/job/96237356191",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-19T14:29:01Z",
-     "completed_at": "2026-08-19T16:20:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123/job/96237357405",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-19T14:28:49Z",
-     "completed_at": "2026-08-19T14:46:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32256370123/job/96237385272",
      "log_fetch_failed": true
     }
    ]
