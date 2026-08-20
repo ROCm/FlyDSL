@@ -35,6 +35,28 @@ jobs:
         with:
           ref: ${{ (github.event_name == 'push' && github.ref_name == 'ci_dashboard') && 'main' || '' }}
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+          cache-dependency-path: docs/requirements.txt
+
+      - name: Install documentation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r docs/requirements.txt
+
+      - name: Build Sphinx documentation
+        run: |
+          cd docs
+          make clean html
+
+      - name: Verify documentation root
+        run: |
+          test -f docs/_build/html/index.html \
+            || { echo "::error::docs build did not produce index.html — refusing to deploy a broken site"; exit 1; }
+
       # The static dashboard (html/js/css/vendor/png) is kept OFF main to keep
       # the repo lean; it lives on the ci_dashboard branch. Fetch it into the
       # /ci-dashboard subdir of the built site.

@@ -67,7 +67,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 off = WARP_SIZE // (2 << _sh_exp)
                 peer = w.shuffle_xor(off, WARP_SIZE)
                 if const_expr(mode == "max"):
-                    w = w.maximumf(peer)
+                    w = fx.max(w, peer)
                 else:
                     w = w.addf(peer, fastmath=fm_fast)
             return w
@@ -141,7 +141,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 x = vec.to(fx.Float32)
                 row_buffer.append(x)
                 red_max = x.reduce(ReductionOp.MAX)
-                thread_max = thread_max.maximumf(red_max)
+                thread_max = fx.max(thread_max, red_max)
 
             global_max = block_reduce(thread_max, "max", s_red)
 
@@ -211,7 +211,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 val = val_e if dtype_str == "f32" else val_e.to(fx.Float32)
                 safe_val = is_valid.select(val, c_neg_inf)
                 row_buffer.append((safe_val, is_valid))
-                thread_max = thread_max.maximumf(safe_val)
+                thread_max = fx.max(thread_max, safe_val)
 
             global_max = block_reduce(thread_max, "max", s_red)
 

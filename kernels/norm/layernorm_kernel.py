@@ -837,7 +837,7 @@ def _build_layernorm_quant_module(
             for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
                 off = WARP_SIZE // (2 << _sh_exp)
                 peer = w.shuffle_xor(off, WARP_SIZE)
-                w = w.maximumf(peer)
+                w = fx.max(w, peer)
             return w
 
         def block_reduce_add2(val0, val1):
@@ -969,7 +969,7 @@ def _build_layernorm_quant_module(
                 y_local.append(y)
                 y_abs = (y.bitcast(fx.Uint32) & abs_mask).bitcast(fx.Float32)
                 tile_max = y_abs.reduce(ReductionOp.MAX)
-                thread_row_max = thread_row_max.maximumf(is_valid.select(tile_max, c_zero_f))
+                thread_row_max = fx.max(thread_row_max, is_valid.select(tile_max, c_zero_f))
 
             row_max = block_reduce_max(thread_row_max)
             scale = row_max / c_dtype_max
@@ -1061,7 +1061,7 @@ def _build_layernorm_quant_module(
                     s = s_e if dtype_str == "f32" else s_e.to(fx.Float32)
                     y = y * s
                 y_abs = _abs_scalar(y)
-                thread_row_max = thread_row_max.maximumf(is_valid.select(y_abs, c_zero_f))
+                thread_row_max = fx.max(thread_row_max, is_valid.select(y_abs, c_zero_f))
 
             row_max = block_reduce_max(thread_row_max)
             scale = row_max / c_dtype_max
@@ -1201,7 +1201,7 @@ def _build_fused_add_layernorm_quant_module(
             for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
                 off = WARP_SIZE // (2 << _sh_exp)
                 peer = w.shuffle_xor(off, WARP_SIZE)
-                w = w.maximumf(peer)
+                w = fx.max(w, peer)
             return w
 
         def block_reduce_add2(val0, val1):
@@ -1343,7 +1343,7 @@ def _build_fused_add_layernorm_quant_module(
                 y_local.append(y)
                 y_abs = (y.bitcast(fx.Uint32) & abs_mask).bitcast(fx.Float32)
                 tile_max = y_abs.reduce(ReductionOp.MAX)
-                thread_row_max = thread_row_max.maximumf(is_valid.select(tile_max, c_zero_f))
+                thread_row_max = fx.max(thread_row_max, is_valid.select(tile_max, c_zero_f))
 
             row_max = block_reduce_max(thread_row_max)
             scale = row_max / c_dtype_max
@@ -1447,7 +1447,7 @@ def _build_fused_add_layernorm_quant_module(
                     s = s_e if dtype_str == "f32" else s_e.to(fx.Float32)
                     y = y * s
                 y_abs = _abs_scalar(y)
-                thread_row_max = thread_row_max.maximumf(is_valid.select(y_abs, c_zero_f))
+                thread_row_max = fx.max(thread_row_max, is_valid.select(y_abs, c_zero_f))
 
             row_max = block_reduce_max(thread_row_max)
             scale = row_max / c_dtype_max

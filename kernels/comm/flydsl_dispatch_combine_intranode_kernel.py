@@ -309,10 +309,12 @@ def make_dispatch_kernel(
 
                 expert_id = buffer_load(_r_out_idx_local, smoe_idx, vec_width=1, dtype=T.i32())
                 local_expert_id = expert_id - rank * experts_per_rank
-                # MUST be unsigned ``ult``: signed ``slt`` would mis-classify
-                # negative ``local_expert_id`` (non-local experts) as local
-                # and trigger illegal global access in WarpCopy below.
-                is_local = arith.cmpi(arith.CmpIPredicate.ult, local_expert_id, fx.Int32(experts_per_rank))
+                # MUST stay unsigned (``ult``): a signed compare would
+                # mis-classify negative ``local_expert_id`` (non-local experts)
+                # as local and trigger illegal global access in WarpCopy below.
+                # fx.Uint32 reinterprets the same bits as unsigned, so ``<``
+                # emits ``ult``.
+                is_local = fx.Uint32(local_expert_id) < fx.Uint32(experts_per_rank)
 
                 packed_slot_lane0 = fx.Int32(0)
                 if lane == 0:

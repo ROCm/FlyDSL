@@ -257,7 +257,7 @@ def _silu_mul_batch(gs, us):
 
 
 def _umax_i32(a, b):
-    is_gt = arith.cmpi(arith.CmpIPredicate.ugt, _raw(a), _raw(b))
+    is_gt = fx.as_ir_value((a) > (b))
     return fx.Int32(arith.select(is_gt, _raw(a), _raw(b)))
 
 
