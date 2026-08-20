@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-20T11:59:17Z",
+ "updated": "2026-08-20T12:03:35Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32366718417,
+   "pr": null,
+   "commit": "9d7accfcbe4e04e69b2e5f9a0b03e6c56def0fe5",
+   "branch": "main",
+   "event": "push",
+   "title": "[Fix] Restore the gfx950 XCD mapping for bf16 dense attention (#1009)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366718417",
+   "created_at": "2026-08-20T12:01:39Z",
+   "updated_at": "2026-08-20T12:01:59Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 32366353447,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "Release: bump version to 0.3.2 (#1044)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366353447",
    "created_at": "2026-08-20T11:57:25Z",
-   "updated_at": "2026-08-20T11:57:44Z",
+   "updated_at": "2026-08-20T12:01:41Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1632,21 +1647,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32291906140/job/96206506237"
     }
    ]
-  },
-  {
-   "run_id": 32291286328,
-   "pr": 1027,
-   "commit": "73baab6a597dcc3fe77bbd708323bc7a0254457d",
-   "branch": "skills/dedrift-and-fix-frontmatter",
-   "event": "pull_request",
-   "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32291286328",
-   "created_at": "2026-08-19T19:07:44Z",
-   "updated_at": "2026-08-19T19:27:00Z",
-   "actor": "jhinpan",
-   "jobs": []
   }
  ]
 }
