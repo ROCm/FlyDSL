@@ -23,14 +23,12 @@ using namespace mlir;
 
 namespace {
 
-template <typename NeutralOp, typename ROCDLOp>
-struct FastMathOpMapping {
+template <typename NeutralOp, typename ROCDLOp> struct FastMathOpMapping {
   using NeutralOpType = NeutralOp;
   using ROCDLOpType = ROCDLOp;
 };
 
-template <typename... Mappings>
-struct FastMathOpMappingTable {};
+template <typename... Mappings> struct FastMathOpMappingTable {};
 
 // Keep target selection separate from the lowering mechanics so follow-up
 // neutral math ops can be added by extending this table.
@@ -77,16 +75,16 @@ public:
 template <typename... Mappings>
 void populateFastMathOpPatterns(MLIRContext *context, RewritePatternSet &patterns,
                                 FastMathOpMappingTable<Mappings...>) {
-  (patterns.add<FastMathOpLowering<typename Mappings::NeutralOpType,
-                                   typename Mappings::ROCDLOpType>>(context),
+  (patterns
+       .add<FastMathOpLowering<typename Mappings::NeutralOpType, typename Mappings::ROCDLOpType>>(
+           context),
    ...);
 }
 
 class ConvertFastMathOpsPass
     : public mlir::impl::ConvertFastMathOpsPassBase<ConvertFastMathOpsPass> {
 public:
-  using mlir::impl::ConvertFastMathOpsPassBase<
-      ConvertFastMathOpsPass>::ConvertFastMathOpsPassBase;
+  using mlir::impl::ConvertFastMathOpsPassBase<ConvertFastMathOpsPass>::ConvertFastMathOpsPassBase;
 
   void runOnOperation() override {
     MLIRContext *context = &getContext();
