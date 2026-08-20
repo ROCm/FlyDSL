@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-20T08:37:05Z",
+ "updated": "2026-08-20T08:49:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32350489784,
+   "pr": 972,
+   "commit": "c2e54d679fc678c70f3de8e44c884f6dc1d128ec",
+   "branch": "mega_moe_a4w4",
+   "event": "pull_request",
+   "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32350489784",
+   "created_at": "2026-08-20T08:46:42Z",
+   "updated_at": "2026-08-20T08:48:57Z",
+   "actor": "Yaowu-Xiong",
+   "jobs": []
+  },
   {
    "run_id": 32349519074,
    "pr": 972,
@@ -1688,21 +1703,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 32225508976,
-   "pr": null,
-   "commit": "27dccebdefb8a54a8573b1c38eeb32a9e384e4eb",
-   "branch": "main",
-   "event": "push",
-   "title": "[Kernel] fp8 conv3d: 8-wave GEMM pipeline + BIG_IN fix (#860)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32225508976",
-   "created_at": "2026-08-19T06:55:56Z",
-   "updated_at": "2026-08-19T06:59:17Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
