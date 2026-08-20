@@ -5203,9 +5203,7 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
                 # and overflows once the score range is wide. Rebase only while the
                 # growth stays inside the threshold; past it, leave the lane alone.
                 safe = fx.Float32(m_diff_scaled) >= fx.Float32(-FP8_REBASE_DOWN_LIMIT_LOG2)
-                d_used = arith.select(
-                    as_mlir_value(safe), as_mlir_value(m_diff_scaled), as_mlir_value(self.c_zero_f)
-                )
+                d_used = arith.select(as_mlir_value(safe), as_mlir_value(m_diff_scaled), as_mlir_value(self.c_zero_f))
                 corr = rocdl.exp2(T.f32, as_mlir_value(self.c_zero_f - fx.Float32(d_used)))
                 scaled_accs = list(v_o)
                 self.scale_o(scaled_accs, corr)
@@ -5247,9 +5245,7 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
             else:
                 # Same bound as lazy_rescale_o above.
                 safe = fx.Float32(m_diff_scaled) >= fx.Float32(-FP8_REBASE_DOWN_LIMIT_LOG2)
-                d_used = arith.select(
-                    as_mlir_value(safe), as_mlir_value(m_diff_scaled), as_mlir_value(self.c_zero_f)
-                )
+                d_used = arith.select(as_mlir_value(safe), as_mlir_value(m_diff_scaled), as_mlir_value(self.c_zero_f))
                 corr = rocdl.exp2(T.f32, as_mlir_value(self.c_zero_f - fx.Float32(d_used)))
                 scaled_accs = list(v_o)
                 self.scale_o(scaled_accs, corr)

@@ -4556,13 +4556,13 @@ def test_lazy_rescale_survives_a_wide_score_range(k_scale):
     assert torch.isfinite(eager).all(), f"the eager baseline is not finite at k_scale={k_scale}"
     n_nan = int(torch.isnan(lazy).sum())
     n_inf = int(torch.isinf(lazy).sum())
-    assert torch.isfinite(lazy).all(), (
-        f"lazy rescale produced {n_nan} NaN and {n_inf} inf of {lazy.numel()} at k_scale={k_scale}"
-    )
+    assert torch.isfinite(
+        lazy
+    ).all(), f"lazy rescale produced {n_nan} NaN and {n_inf} inf of {lazy.numel()} at k_scale={k_scale}"
     ref = torch.nn.functional.scaled_dot_product_attention(
         q.transpose(1, 2).float(), k.transpose(1, 2).float(), v.transpose(1, 2).float()
     ).transpose(1, 2)
     rel = lambda o: ((o.float() - ref).norm() / ref.norm()).item()  # noqa: E731
-    assert rel(lazy) <= rel(eager) * 1.05 + 1e-4, (
-        f"lazy rel L2 {rel(lazy):.3e} is worse than eager {rel(eager):.3e} at k_scale={k_scale}"
-    )
+    assert (
+        rel(lazy) <= rel(eager) * 1.05 + 1e-4
+    ), f"lazy rel L2 {rel(lazy):.3e} is worse than eager {rel(eager):.3e} at k_scale={k_scale}"
