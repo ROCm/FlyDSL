@@ -691,7 +691,7 @@ def flydsl_flash_attn_func(
     # Kernel build options.
     waves_per_eu: int = 2,
     daz: bool = True,
-    dualwave_swp_lazy_rescale: bool = True,
+    dualwave_swp_lazy_rescale: Optional[bool] = None,
     dualwave_swp_setprio: bool = True,
     dualwave_swp_enable_stagger: bool = True,
     # Re-derive (head, q_block) with head as the slow axis so one head's q-blocks
@@ -781,7 +781,9 @@ def flydsl_flash_attn_func(
             otherwise it has the same dtype as q.
         waves_per_eu: Kernel occupancy hint.
         daz: Enable denormals-are-zero.
-        dualwave_swp_lazy_rescale: Enable lazy online softmax rescale.
+        dualwave_swp_lazy_rescale: Enable lazy online softmax rescale. Defaults to
+            True for bf16/fp16 and False for fp8, where the lazy path costs
+            accuracy; pass explicitly to override.
         dualwave_swp_setprio: Enable s_setprio scheduling hints.
         dualwave_swp_enable_stagger: Enable wave-group phase stagger.
         debug_counts: Float32[2] tensor; when given, counts lazy-rescale branches
@@ -804,6 +806,10 @@ def flydsl_flash_attn_func(
         raise ValueError(f"flydsl_flash_attn_func: q/k/v must share dtype; got {q.dtype}/{k.dtype}/{v.dtype}")
 
     dtype_str = _dtype_str(q)
+    if dualwave_swp_lazy_rescale is None:
+        # fp8 defaults to the eager rescale: the lazy path cannot lift P far
+        # enough to keep the softmax tail out of e4m3's flush-to-zero range.
+        dualwave_swp_lazy_rescale = dtype_str != "fp8"
     if return_lse and dtype_str == "fp8":
         raise NotImplementedError("flydsl_flash_attn_func: return_lse is not supported for fp8")
     paged_kv = any(x is not None for x in (block_table, seqlen_k))
