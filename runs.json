@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-20T10:46:14Z",
+ "updated": "2026-08-20T11:26:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32363611981,
+   "pr": null,
+   "commit": "c3bd00455f711bd4f8d521951e0f5d9162437d8d",
+   "branch": "main",
+   "event": "push",
+   "title": "[Ext][Coop] Add cooperative warp- and block-scope collectives (#1031)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32363611981",
+   "created_at": "2026-08-20T11:24:00Z",
+   "updated_at": "2026-08-20T11:24:37Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 32362524805,
+   "pr": 1043,
+   "commit": "cd6a73fe0bdf576f4b8aa797bc047fa7b4cfe2a7",
+   "branch": "pr/fix-ptr-alignment-lowering",
+   "event": "pull_request",
+   "title": "[Fix] Fix alignment reported by ptr.load/ptr.store lowering",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32362524805",
+   "created_at": "2026-08-20T11:10:36Z",
+   "updated_at": "2026-08-20T11:12:07Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 32357738168,
    "pr": 1020,
@@ -10,11 +40,11 @@
    "branch": "fp8-softmax-normalisation",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357738168",
    "created_at": "2026-08-20T10:11:56Z",
-   "updated_at": "2026-08-20T10:13:17Z",
+   "updated_at": "2026-08-20T10:52:01Z",
    "actor": "JohnQinAMD",
    "jobs": []
   },
@@ -25,13 +55,41 @@
    "branch": "cjl/norm_perf",
    "event": "pull_request",
    "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357145018",
    "created_at": "2026-08-20T10:04:59Z",
-   "updated_at": "2026-08-20T10:44:36Z",
+   "updated_at": "2026-08-20T11:11:00Z",
    "actor": "cschenjunlin",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-20T11:20:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357145018/job/96405070804"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-20T11:11:00Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357145018/job/96405070828"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-20T11:11:00Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357145018/job/96405070901"
+    }
+   ]
   },
   {
    "run_id": 32356653860,
@@ -40,11 +98,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Fix] Let fx.maxnumf inherit the ambient fastmath (#1035)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32356653860",
    "created_at": "2026-08-20T09:59:12Z",
-   "updated_at": "2026-08-20T10:28:31Z",
+   "updated_at": "2026-08-20T11:24:24Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -143,11 +201,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-20T10:43:40Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32353132079/job/96398342575"
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-20T11:03:27Z",
+     "completed_at": "2026-08-20T11:20:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32353132079/job/96398342575",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -158,21 +217,22 @@
    "branch": "xyt/rf_hgemm950",
    "event": "pull_request",
    "title": "[GEMM] Refine GFX950 A16W16 async load scheduling",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32352384346",
    "created_at": "2026-08-20T09:08:53Z",
-   "updated_at": "2026-08-20T10:27:46Z",
+   "updated_at": "2026-08-20T11:24:38Z",
    "actor": "xytpai",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T10:43:35Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32352384346/job/96394471075"
+     "completed_at": "2026-08-20T11:03:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32352384346/job/96394471075",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -186,9 +246,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-20T10:27:46Z",
+     "started_at": "2026-08-20T11:24:38Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32352384346/job/96394471184"
     }
@@ -201,11 +261,11 @@
    "branch": "dsl-ify-scf-controlflow",
    "event": "pull_request",
    "title": "[Kernel] Replace raw scf ops with Python control flow in kernels",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32351009384",
    "created_at": "2026-08-20T08:52:51Z",
-   "updated_at": "2026-08-20T10:20:37Z",
+   "updated_at": "2026-08-20T11:11:56Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -230,9 +290,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-20T10:20:36Z",
+     "started_at": "2026-08-20T11:11:56Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32351009384/job/96392702517"
     }
@@ -1648,64 +1708,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 32250433584,
-   "pr": 1031,
-   "commit": "33c405aed0c64c851d2217fcb51b604f0d8b9e60",
-   "branch": "coop-library",
-   "event": "pull_request",
-   "title": "[Ext][Coop] Add cooperative warp- and block-scope collectives",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32250433584",
-   "created_at": "2026-08-19T12:00:37Z",
-   "updated_at": "2026-08-19T14:52:52Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-19T13:22:07Z",
-     "completed_at": "2026-08-19T13:37:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32250433584/job/96082820139"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-19T13:22:15Z",
-     "completed_at": "2026-08-19T14:47:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32250433584/job/96082820294"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-19T13:22:15Z",
-     "completed_at": "2026-08-19T14:52:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32250433584/job/96082820359"
-    }
-   ]
-  },
-  {
-   "run_id": 32248171263,
-   "pr": 1031,
-   "commit": "a9c8001e648031641de5cf40afbef6d2449298e9",
-   "branch": "coop-library",
-   "event": "pull_request",
-   "title": "[Ext][Coop] Add cooperative warp- and block-scope collectives",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32248171263",
-   "created_at": "2026-08-19T11:33:35Z",
-   "updated_at": "2026-08-19T12:05:39Z",
-   "actor": "sjfeng1999",
-   "jobs": []
   }
  ]
 }
