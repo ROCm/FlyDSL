@@ -141,8 +141,7 @@ def _ptr8_to_v4i32(ptr8_val) -> ir.Value:
 
 
 def _as_num_records(num_records_bytes) -> Optional[fx.Int64]:
-    """Normalize a descriptor byte count to ``fx.Int64`` for ``make_buffer_ptr``.
-    """
+    """Normalize a descriptor byte count to ``fx.Int64`` for ``make_buffer_ptr``."""
     if num_records_bytes is None:
         return None
     if isinstance(num_records_bytes, int):
@@ -157,8 +156,7 @@ def _as_num_records(num_records_bytes) -> Optional[fx.Int64]:
 
 @dsl_loc_tracing
 def _byte_buffer_ptr(global_ptr, num_records_bytes, base_byte_offset=None):
-    """Wrap a global pointer in a byte-addressed buffer-resource pointer.
-    """
+    """Wrap a global pointer in a byte-addressed buffer-resource pointer."""
     ptr = fx.recast_iter(fx.Int8, global_ptr)
     if base_byte_offset is not None:
         if isinstance(base_byte_offset, ir.Value) and not isinstance(base_byte_offset.type, ir.IndexType):
@@ -169,8 +167,7 @@ def _byte_buffer_ptr(global_ptr, num_records_bytes, base_byte_offset=None):
 
 @dsl_loc_tracing
 def _add_soffset_bytes(byte_offset: ir.Value, soffset_bytes) -> ir.Value:
-    """Fold ``soffset_bytes`` into the byte offset.
-    """
+    """Fold ``soffset_bytes`` into the byte offset."""
     if soffset_bytes is None:
         return byte_offset
     if isinstance(soffset_bytes, int):
