@@ -1,11 +1,26 @@
 {
  "schema": 1,
- "updated": "2026-08-20T16:42:31Z",
+ "updated": "2026-08-20T16:45:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 32392582484,
+   "run_id": 32393379405,
    "pr": 1032,
+   "commit": "2f14c0b26e35097886da014db223d5b28b0314c3",
+   "branch": "convolution",
+   "event": "pull_request",
+   "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32393379405",
+   "created_at": "2026-08-20T16:41:10Z",
+   "updated_at": "2026-08-20T16:41:19Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
+  {
+   "run_id": 32392582484,
+   "pr": null,
    "commit": "93e060bf0e715b9b399d1df8b5ff19073a2c4582",
    "branch": "convolution",
    "event": "pull_request",
@@ -216,21 +231,22 @@
    "branch": "bump-version-0.3.2",
    "event": "pull_request",
    "title": "Release: bump version to 0.3.2",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366233237",
    "created_at": "2026-08-20T11:55:57Z",
-   "updated_at": "2026-08-20T15:28:35Z",
+   "updated_at": "2026-08-20T16:40:57Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T14:40:48Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366233237/job/96465411931"
+     "completed_at": "2026-08-20T16:40:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366233237/job/96465411931",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -1810,21 +1826,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298048348/job/96228993313"
     }
    ]
-  },
-  {
-   "run_id": 32298025749,
-   "pr": 1033,
-   "commit": "0609030ab20be134501eef9612ead6eaaef432bc",
-   "branch": "john/lazy-rescale-nan",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298025749",
-   "created_at": "2026-08-19T20:20:49Z",
-   "updated_at": "2026-08-19T20:23:34Z",
-   "actor": "JohnQinAMD",
-   "jobs": []
   }
  ]
 }
