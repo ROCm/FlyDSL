@@ -817,8 +817,9 @@ def flydsl_flash_attn_func(
         raise NotImplementedError("flydsl_flash_attn_func: fp8 flash_attn does not support paged KV")
 
     # The fp8 path flattens Q/K/V/O to 1-D and the C-ABI packs a dynamic dim as
-    # int32, so a launch aborts once B*S*H*D reaches 2**31 (S >= 131072 at
-    # D=128, H=64). Batch entries are independent and a leading slice of a
+    # int32, so a launch aborts once any of them reaches 2**31 (S >= 131072 at
+    # D=128, H=64). K/V are checked too: cross-attention can hold a short Q and
+    # an over-long KV. Batch entries are independent and a leading slice of a
     # contiguous tensor is still contiguous, so one launch per entry divides the
     # flat dim by B at no copy. bf16 passes the natural 4-D shape and is exempt.
     if (
@@ -827,9 +828,16 @@ def flydsl_flash_attn_func(
         and cu_seqlens_q is None
         and cu_seqlens_kv is None
         and q.dim() == 4
-        and q.shape[0] > 1
-        and q.numel() >= _FP8_MAX_FLAT_ELEMS
+        and max(q.numel(), k.numel(), v.numel()) >= _FP8_MAX_FLAT_ELEMS
     ):
+        if q.shape[0] == 1:
+            # Out of batch to divide by. Launching would abort inside the C ABI
+            # with a struct.error naming neither the tensor nor the limit.
+            raise NotImplementedError(
+                "flydsl_flash_attn_func: fp8 flattens Q/K/V/O and packs the dynamic dim as int32, so a "
+                f"single batch entry cannot exceed {_FP8_MAX_FLAT_ELEMS} elements; got q={q.numel()}, "
+                f"k={k.numel()}, v={v.numel()}. Shorten the sequence or use bf16."
+            )
         kw = dict(
             causal=causal,
             num_kv_heads=num_kv_heads,

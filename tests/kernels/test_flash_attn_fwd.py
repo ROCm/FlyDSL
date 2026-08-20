@@ -4628,3 +4628,51 @@ def test_sink_lse_cross_attn_skipped_blocks(Sq, Skv):
     masked_lse = lse[:, :, :n_masked].float()
     assert (masked_lse - sink.view(1, H, 1)).abs().max().item() <= 1e-4, "all-masked rows must carry the sink LSE"
     assert out[:, :n_masked].abs().max().item() == 0.0, "all-masked rows must have zero output"
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("case", ["b1_too_large", "per_slice_still_too_large", "kv_only_over_limit"])
+def test_fp8_flat_overflow_guard_covers_every_tensor(monkeypatch, case):
+    """The int32 flat-dim guard has to see K and V, and to give up loudly.
+
+    Splitting divides the flat dim by B, so it only helps while B > 1 and while
+    one entry fits. Cross-attention can also put the excess in K/V rather than
+    Q. Each case lowers the bound rather than allocating 2**31 elements.
+    """
+    torch.manual_seed(0)
+    fp8 = torch.float8_e4m3fn
+    fp8_max = torch.finfo(fp8).max
+    H, D = 8, 128
+
+    def quant(t):
+        s = t.abs().amax().float() / fp8_max
+        return (t / s).to(fp8), s.reshape(1).contiguous()
+
+    B, Sq, Skv = (1, 1024, 1024) if case == "b1_too_large" else (2, 1024, 1024)
+    if case == "kv_only_over_limit":
+        Sq = 256
+    q = torch.randn(B, Sq, H, D, device="cuda", dtype=torch.bfloat16) * 0.1
+    k = torch.randn(B, Skv, H, D, device="cuda", dtype=torch.bfloat16) * 0.1
+    v = torch.randn_like(k)
+    qq, qs = quant(q)
+    kq, ks = quant(k)
+    vq, vs = quant(v)
+    kw = dict(causal=False, q_descale=qs, k_descale=ks, v_descale=vs)
+
+    if case == "kv_only_over_limit":
+        # Between q's count and k's, so only the K/V check can fire. B=2 splits.
+        ref = flydsl_flash_attn_func(qq, kq, vq, **kw)
+        ref = ref[0] if isinstance(ref, (tuple, list)) else ref
+        monkeypatch.setattr(flash_attn_interface, "_FP8_MAX_FLAT_ELEMS", kq.numel())
+        got = flydsl_flash_attn_func(qq, kq, vq, **kw)
+        got = got[0] if isinstance(got, (tuple, list)) else got
+        torch.testing.assert_close(got.float(), ref.float(), rtol=0, atol=0)
+        return
+
+    # b1_too_large has no batch to divide; per_slice_still_too_large has B=2 but
+    # a bound low enough that one entry is still over, so the recursion hits the
+    # same wall. Both must raise rather than launch.
+    bound = qq.numel() if case == "b1_too_large" else qq.numel() // 2
+    monkeypatch.setattr(flash_attn_interface, "_FP8_MAX_FLAT_ELEMS", bound)
+    with pytest.raises(NotImplementedError, match="int32"):
+        flydsl_flash_attn_func(qq, kq, vq, **kw)
