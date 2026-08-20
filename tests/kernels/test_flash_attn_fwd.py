@@ -34,6 +34,7 @@ import pytest  # noqa: E402
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module  # noqa: E402
+from kernels.attention import flash_attn_interface  # noqa: E402
 from kernels.attention.flash_attn_interface import flydsl_flash_attn_func  # noqa: E402
 from kernels.attention.flash_attn_utils import (  # noqa: E402
     BIAS_MAX_DESCRIPTOR_BYTES,
@@ -4634,3 +4635,26 @@ def test_fp8_lazy_paths_do_not_roll_their_own_correction():
         assert "exp2" not in chunk, f"{name} computes its own correction instead of taking the monotonic one"
         assert "_lazy_correction" in chunk or "rescale_from_tile_max" in chunk, f"{name} has no correction source"
     assert "rescale_from_tile_max" in method("_lazy_correction"), "the shared correction is not the monotonic one"
+
+
+@pytest.mark.parametrize("over", [True, False])
+def test_descriptor_span_guard(monkeypatch, over):
+    """A batch entry the buffer descriptor cannot address must raise, not truncate.
+
+    The descriptor carries a 32-bit byte count and is addressed by a 32-bit
+    voffset, so one entry at or over 2**32 bytes writes only (bytes mod 2**32)
+    and reports nothing -- measured at 0 of 2**31 elements exactly on the bound,
+    and 1/3 of them at 1.5x. Reaching that for real needs 4 GiB of q, so the
+    bound is lowered here the way the fp8 flat-dim tests lower theirs.
+    """
+    B, S, H, D = 1, 256, 8, 128
+    entry_bytes = S * H * D * 2
+    monkeypatch.setattr(flash_attn_interface, "_MAX_DESCRIPTOR_BYTES", entry_bytes if over else entry_bytes * 2)
+    q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16)
+    k, v = torch.randn_like(q), torch.randn_like(q)
+    if over:
+        with pytest.raises(NotImplementedError, match="buffer descriptor can address"):
+            flydsl_flash_attn_func(q, k, v, causal=False)
+    else:
+        out = flydsl_flash_attn_func(q, k, v, causal=False)
+        assert torch.isfinite(out).all()
