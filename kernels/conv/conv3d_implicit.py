@@ -193,9 +193,9 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
                 addr = fx.Int64(fx.ptrtoint(fx.get_iter(tensor))) + fx.Int64(base_elem) * fx.Int64(BF16_BYTES)
                 return _flat_div(fx.rocdl.make_buffer_ptr(fx.inttoptr(GPtrTy, addr)), _TR_REBASED_FLAT)
 
-            in_base_elem = fx.Index(nb) * fx.Index(c) * fx.Index(s) + fx.Index(c0) * fx.Index(s) + fx.Index(s0)
+            in_base_elem = fx.Int64(nb) * fx.Int64(c) * fx.Int64(s) + fx.Int64(c0) * fx.Int64(s) + fx.Int64(s0)
             in_div = _rebased(inp, in_base_elem)
-            out_base_elem = fx.Index(nb) * fx.Index(s) * fx.Index(c) + fx.Index(s0) * fx.Index(c) + fx.Index(c0)
+            out_base_elem = fx.Int64(nb) * fx.Int64(s) * fx.Int64(c) + fx.Int64(s0) * fx.Int64(c) + fx.Int64(c0)
             out_div = _rebased(out, out_base_elem)
         else:
             in_base = nb * c * s
@@ -481,19 +481,19 @@ def compile_conv3d_implicit(
 
         tid = fx.thread_idx.x
         if const_expr(m_chunks > 1):
-            m_chunk = fx.Index(fx.block_idx.z) % fx.Index(m_chunks)
-            m_offset = (fx.Index(fx.block_idx.x) + m_chunk * fx.Index(grid_x)) * TILE_M
+            m_chunk = fx.Int64(fx.block_idx.z) % fx.Int64(m_chunks)
+            m_offset = (fx.Int64(fx.block_idx.x) + m_chunk * fx.Int64(grid_x)) * TILE_M
             n_tile = fx.block_idx.y
         elif const_expr(WGM > 1):
-            pid = fx.Index(fx.block_idx.x) + fx.Index(fx.block_idx.y) * fx.Index(grid_m)
-            blocks_per_swizzle = fx.Index(WGM * grid_n)
+            pid = fx.Int64(fx.block_idx.x) + fx.Int64(fx.block_idx.y) * fx.Int64(grid_m)
+            blocks_per_swizzle = fx.Int64(WGM * grid_n)
             swizzle_id = pid // blocks_per_swizzle
-            first_m = swizzle_id * fx.Index(WGM)
-            swizzle_rows = fx.Index(grid_m) - first_m
-            swizzle_rows = fx.Index(arith.select(swizzle_rows < fx.Index(WGM), swizzle_rows, fx.Index(WGM)))
+            first_m = swizzle_id * fx.Int64(WGM)
+            swizzle_rows = fx.Int64(grid_m) - first_m
+            swizzle_rows = fx.Int64(arith.select(swizzle_rows < fx.Int64(WGM), swizzle_rows, fx.Int64(WGM)))
             local = pid % blocks_per_swizzle
-            m_offset = fx.Index(first_m + (local % swizzle_rows)) * TILE_M
-            n_tile = fx.Index(local // swizzle_rows)
+            m_offset = fx.Int64(first_m + (local % swizzle_rows)) * TILE_M
+            n_tile = fx.Int64(local // swizzle_rows)
         else:
             m_offset = fx.block_idx.x * TILE_M
             n_tile = fx.block_idx.y
@@ -508,9 +508,9 @@ def compile_conv3d_implicit(
             n_local = n_offset
         if const_expr(use_splitk):
             if const_expr(m_chunks > 1):
-                split_idx = fx.Index(fx.block_idx.z) // fx.Index(m_chunks)
+                split_idx = fx.Int64(fx.block_idx.z) // fx.Int64(m_chunks)
             else:
-                split_idx = fx.Index(fx.block_idx.z)
+                split_idx = fx.Int64(fx.block_idx.z)
             k_off = split_idx * (tiles_per_split * TILE_K)
         else:
             k_off = 0
@@ -520,15 +520,15 @@ def compile_conv3d_implicit(
             rem0 = m_offset % dhw
             ot_base0 = rem0 // hw_o
 
-            base_t = ot_base0 * fx.Index(st) - fx.Index(pt)
-            base_t = arith.select(base_t < fx.Index(0), fx.Index(0), base_t)
+            base_t = ot_base0 * fx.Int64(st) - fx.Int64(pt)
+            base_t = arith.select(base_t < fx.Int64(0), fx.Int64(0), base_t)
             if const_expr(_t_aligned):
                 oh_base0 = (rem0 % hw_o) // wo
-                base_h = oh_base0 * fx.Index(sh) - fx.Index(ph)
-                base_h = arith.select(base_h < fx.Index(0), fx.Index(0), base_h)
+                base_h = oh_base0 * fx.Int64(sh) - fx.Int64(ph)
+                base_h = arith.select(base_h < fx.Int64(0), fx.Int64(0), base_h)
             else:
-                base_h = fx.Index(0)
-            x_base_elem = ((nbase * fx.Index(d) + base_t) * fx.Index(h) + base_h) * fx.Index(w) * fx.Index(c)
+                base_h = fx.Int64(0)
+            x_base_elem = ((nbase * fx.Int64(d) + base_t) * fx.Int64(h) + base_h) * fx.Int64(w) * fx.Int64(c)
             x_src = _x_rebased(fx.Int64(x_base_elem))
 
         wid = tid // WARP_SIZE
@@ -560,13 +560,13 @@ def compile_conv3d_implicit(
             return fx.ptr_load(u8_ptr + fx.Int32(elem_offset * 2), result_type=Vec8Ty)
 
         def a_lds_off(stage, row, col):
-            return (fx.Index(stage) * TILE_M + row) * TILE_K + col
+            return (fx.Int64(stage) * TILE_M + row) * TILE_K + col
 
         def b_lds_off(stage, row, col):
-            return (fx.Index(stage) * TILE_N + row) * TILE_K + col
+            return (fx.Int64(stage) * TILE_N + row) * TILE_K + col
 
         def in_range(v, hi):
-            return (v >= 0) & (v < fx.Index(hi))
+            return (v >= 0) & (v < fx.Int64(hi))
 
         def dil(tap, factor):
             scaled = tap * factor if const_expr(factor != 1) else tap
@@ -581,21 +581,21 @@ def compile_conv3d_implicit(
             """
             if const_expr(pad_mode == "zeros"):
                 return v, in_range(v, ext)
-            u = v + fx.Index(pad)
-            low = u < fx.Index(pad)  # v < 0
-            high = u >= fx.Index(pad + ext)  # v >= ext
-            mid = u - fx.Index(pad)  # v, where in range
+            u = v + fx.Int64(pad)
+            low = u < fx.Int64(pad)  # v < 0
+            high = u >= fx.Int64(pad + ext)  # v >= ext
+            mid = u - fx.Int64(pad)  # v, where in range
             if const_expr(pad_mode == "replicate"):
-                r = arith.select(high, fx.Index(ext - 1), mid)
-                r = arith.select(low, fx.Index(0), r)
+                r = arith.select(high, fx.Int64(ext - 1), mid)
+                r = arith.select(low, fx.Int64(0), r)
             elif const_expr(pad_mode == "reflect"):
                 # [a b c d e] pad 2 -> [c b a b c d e d c]: -v near, 2*(ext-1) - v far.
-                r = arith.select(high, fx.Index(2 * (ext - 1) + pad) - u, mid)
-                r = arith.select(low, fx.Index(pad) - u, r)
+                r = arith.select(high, fx.Int64(2 * (ext - 1) + pad) - u, mid)
+                r = arith.select(low, fx.Int64(pad) - u, r)
             else:  # circular: v + ext near, v - ext far
-                r = arith.select(high, u - fx.Index(pad + ext), mid)
-                r = arith.select(low, u + fx.Index(ext - pad), r)
-            return fx.Index(r), None
+                r = arith.select(high, u - fx.Int64(pad + ext), mid)
+                r = arith.select(low, u + fx.Int64(ext - pad), r)
+            return fx.Int64(r), None
 
         def gather_valid(base, *masks):
             for m in masks:
@@ -610,7 +610,7 @@ def compile_conv3d_implicit(
             local_m = linear // TILE_K
             local_k = linear % TILE_K
             row = m_offset + local_m
-            row_valid = row < fx.Index(npq)
+            row_valid = row < fx.Int64(npq)
             if const_expr(temporal_only_fast):
                 out_t = (row // hw_o) % d
                 _row_dec.append((local_k, row, row_valid, out_t))
@@ -641,14 +641,14 @@ def compile_conv3d_implicit(
         def _a_addr(i, kbase_i, cc_base, ckk_base):
             dec = _row_dec[i]
             local_k = dec[0]
-            k_abs = kbase_i + fx.Index(local_k)
+            k_abs = kbase_i + fx.Int64(local_k)
             if const_expr(SCALAR_K):
-                cc = cc_base + fx.Index(local_k)  # cc_base already carries ch_base
+                cc = cc_base + fx.Int64(local_k)  # cc_base already carries ch_base
             else:
                 cc = k_abs % CGP
                 if const_expr(groups > 1):
                     cc = ch_base + cc
-            k_valid = k_abs < fx.Index(crs)
+            k_valid = k_abs < fx.Int64(crs)
             if const_expr(temporal_only_fast):
                 _, row, row_valid, out_t = dec
                 kt_i = ckk_base if const_expr(SCALAR_K) else k_abs // CGP
@@ -658,7 +658,7 @@ def compile_conv3d_implicit(
 
                 delta = temporal_delta if const_expr(pad_mode == "zeros") else (in_t - out_t)
                 if const_expr(BIG_IN_N1):
-                    g_off = ((row + delta * hw_o) - (fx.Index(nbase) * dhw + base_t * hw_o)) * c + cc
+                    g_off = ((row + delta * hw_o) - (fx.Int64(nbase) * dhw + base_t * hw_o)) * c + cc
                 else:
                     g_off = (row + delta * hw_o) * c + cc
             else:
@@ -695,10 +695,10 @@ def compile_conv3d_implicit(
             linear = (tid + i * BLOCK_THREADS) * LDG_VEC
             local_n = linear // TILE_K
             local_k = linear % TILE_K
-            col = n_offset + fx.Index(local_n)
-            g_off = fx.Int32(col * crs + (fx.Index(k_base) + fx.Index(local_k)))
+            col = n_offset + fx.Int64(local_n)
+            g_off = fx.Int32(col * crs + (fx.Int64(k_base) + fx.Int64(local_k)))
             # Tail is per group: the N grid is over-provisioned to groups*tiles_per_group.
-            col_valid = ((n_local + fx.Index(local_n)) < fx.Index(KG)) if const_expr(n_tail) else None
+            col_valid = ((n_local + fx.Int64(local_n)) < fx.Int64(KG)) if const_expr(n_tail) else None
             return g_off, col_valid
 
         # ---- global -> LDS DMA copy, masking via OOB routing ----
@@ -716,8 +716,8 @@ def compile_conv3d_implicit(
         def _lds_dma_ptr(lds_array, stage_tile, i):
             # buffer_load_lds takes one wave-uniform LDS base and fans the wave's lanes
             # out from it, so the lane-0 address is the base the whole wave writes from.
-            off_elems = fx.Index(stage_tile) + (fx.Index(tid) + fx.Index(i * BLOCK_THREADS)) * fx.Index(LDG_VEC)
-            base_bytes = off_elems * fx.Index(BF16_BYTES)
+            off_elems = fx.Int64(stage_tile) + (fx.Int64(tid) + fx.Int64(i * BLOCK_THREADS)) * fx.Int64(LDG_VEC)
+            base_bytes = off_elems * fx.Int64(BF16_BYTES)
             addr = fx.Int64(fx.ptrtoint(lds_array.ptr)) + fx.Int64(base_bytes)
             return fx.make_view(fx.inttoptr(_lds_dma_ptr_ty, sgpr(addr)), fx.make_layout(1, 1))
 
@@ -725,14 +725,14 @@ def compile_conv3d_implicit(
             fx.copy(_dma_atom, fx.slice(src, (None, voff_elem)), dst)
 
         def _load_a(stage, k_base):
-            kbase_i = fx.Index(k_base)
+            kbase_i = fx.Int64(k_base)
             cc_base = ckk_base = None
             if const_expr(SCALAR_K):
                 cc_base = kbase_i % CGP
                 if const_expr(groups > 1):
                     cc_base = ch_base + cc_base
                 ckk_base = kbase_i // CGP
-            stage_tile = fx.Index(stage) * TILE_M * TILE_K
+            stage_tile = fx.Int64(stage) * TILE_M * TILE_K
             for i in range_constexpr(LDG_A_COUNT):
                 if const_expr(BIG_IN_NM):
                     addr_ret = _a_addr(i, kbase_i, cc_base, ckk_base)
@@ -746,7 +746,7 @@ def compile_conv3d_implicit(
                     _dma_to_lds(x_src, _lds_dma_ptr(a_lds, stage_tile, i), voff)
 
         def _load_b(stage, k_base):
-            stage_tile = fx.Index(stage) * TILE_N * TILE_K
+            stage_tile = fx.Int64(stage) * TILE_N * TILE_K
             for i in range_constexpr(LDG_B_COUNT):
                 g_off, col_valid = _b_addr(i, k_base)
                 if const_expr(n_tail):
@@ -758,11 +758,11 @@ def compile_conv3d_implicit(
         # ---- single-vec ds_read (LDS -> register), indexed by per-wave MFMA row ----
         def read_a_vec(stage, mi):
             a_row = wave_m * WARP_M + mi * MFMA_M + lane_m
-            return lds_load_vec8(a_lds, a_lds_off(stage, fx.Index(a_row), fx.Index(lane_k_a)))
+            return lds_load_vec8(a_lds, a_lds_off(stage, fx.Int64(a_row), fx.Int64(lane_k_a)))
 
         def read_b_vec(stage, ni):
             b_row = wave_n * WARP_N + ni * MFMA_N + lane_n
-            return lds_load_vec8(b_lds, b_lds_off(stage, fx.Index(b_row), fx.Index(lane_k_b)))
+            return lds_load_vec8(b_lds, b_lds_off(stage, fx.Int64(b_row), fx.Int64(lane_k_b)))
 
         def mfma_one(a_frag, b_frag, c_frag):
             return mfma_fn(
@@ -828,11 +828,11 @@ def compile_conv3d_implicit(
 
         def _valid_raw(row, col_loc):
             if const_expr(_row_chk and n_tail):
-                return arith.andi(row < fx.Index(npq), col_loc < fx.Index(KG))
+                return arith.andi(row < fx.Int64(npq), col_loc < fx.Int64(KG))
             if const_expr(_row_chk):
-                v = row < fx.Index(npq)
+                v = row < fx.Int64(npq)
                 return arith.andi(v, v)
-            v = col_loc < fx.Index(KG)
+            v = col_loc < fx.Int64(KG)
             return arith.andi(v, v)
 
         _route_store = _need_chk and not use_splitk and not BIG_OUT
@@ -844,7 +844,7 @@ def compile_conv3d_implicit(
 
         def _cols(ni):
             """Global out-channel for MFMA column block ni, and its index within the group."""
-            col_off = fx.Index(wave_n * WARP_N + ni * MFMA_N + c_n)
+            col_off = fx.Int64(wave_n * WARP_N + ni * MFMA_N + c_n)
             col = n_offset + col_off
             return col, ((n_local + col_off) if const_expr(groups > 1) else col)
 
@@ -855,7 +855,7 @@ def compile_conv3d_implicit(
                     col, col_loc = _cols(ni)
                     col_i = fx.Int32(col)  # bias is indexed by the global out-channel
                     if const_expr(n_tail):
-                        col_i = arith.select(col_loc < fx.Index(KG), col_i, fx.Int32(0))
+                        col_i = arith.select(col_loc < fx.Int64(KG), col_i, fx.Int32(0))
                     fx.copy(bias_atom, fx.slice(bias_div, (None, col_i)), bias_reg)
                     bias_vals.append(fx.Float32(fx.memref_load_vec(bias_reg)[0]))
 
@@ -868,7 +868,7 @@ def compile_conv3d_implicit(
                         bias_val = bias_vals[ni]
 
                     if const_expr(_vec_store):
-                        row0 = fx.Index(row_base)
+                        row0 = fx.Int64(row_base)
                         off_nk0 = col * dhw + row0
 
                         def _emit_vec():
@@ -888,7 +888,7 @@ def compile_conv3d_implicit(
                         continue
 
                     for i in range_constexpr(MFMA_C_VALUES):
-                        row = fx.Index(row_base + i)
+                        row = fx.Int64(row_base + i)
                         off_sk = row * k + col
 
                         if const_expr(out_ndhwc):
