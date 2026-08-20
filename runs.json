@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-08-20T17:47:31Z",
+ "updated": "2026-08-20T18:32:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32400500706,
+   "pr": 1037,
+   "commit": "2b4dbf6b6448417827d1e74824653f141b62ac80",
+   "branch": "jhinpan/fix-exp2-fastmath",
+   "event": "pull_request",
+   "title": "[ROCDL] Lower approximate exp2 to native intrinsic",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32400500706",
+   "created_at": "2026-08-20T17:57:31Z",
+   "updated_at": "2026-08-20T18:25:39Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-20T18:25:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32400500706/job/96535789860"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-20T18:26:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32400500706/job/96535789901"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-20T18:26:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32400500706/job/96535789915"
+    }
+   ]
+  },
   {
    "run_id": 32393726420,
    "pr": 1045,
@@ -123,11 +166,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T17:07:56Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386189717/job/96512398310"
+     "completed_at": "2026-08-20T17:55:57Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386189717/job/96512398310",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -1809,51 +1853,6 @@
    "updated_at": "2026-08-19T22:00:23Z",
    "actor": "JohnQinAMD",
    "jobs": []
-  },
-  {
-   "run_id": 32298273166,
-   "pr": 1027,
-   "commit": "13e9ab9a726343bb16234845890d517c3dd8b209",
-   "branch": "skills/dedrift-and-fix-frontmatter",
-   "event": "pull_request",
-   "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
-   "status": "queued",
-   "conclusion": null,
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298273166",
-   "created_at": "2026-08-19T20:23:36Z",
-   "updated_at": "2026-08-20T17:45:56Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
-     "started_at": "2026-08-20T17:47:00Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298273166/job/96523781813"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-19T23:19:23Z",
-     "completed_at": "2026-08-20T00:09:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298273166/job/96523783292",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-19T22:44:19Z",
-     "completed_at": "2026-08-19T22:59:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298273166/job/96523783666",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
