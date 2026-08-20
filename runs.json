@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-20T12:37:06Z",
+ "updated": "2026-08-20T13:58:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Fix] Restore the gfx950 XCD mapping for bf16 dense attention (#1009)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366718417",
    "created_at": "2026-08-20T12:01:39Z",
-   "updated_at": "2026-08-20T12:03:09Z",
+   "updated_at": "2026-08-20T13:38:58Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -40,11 +40,11 @@
    "branch": "bump-version-0.3.2",
    "event": "pull_request",
    "title": "Release: bump version to 0.3.2",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366233237",
    "created_at": "2026-08-20T11:55:57Z",
-   "updated_at": "2026-08-20T11:57:29Z",
+   "updated_at": "2026-08-20T13:29:19Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -70,11 +70,11 @@
    "branch": "feat/preshuffle-async-copy-f16",
    "event": "pull_request",
    "title": "[Kernel][Perf] Enable the gmem->LDS async copy for f16/bf16 preshuffle GEMM",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32365669387",
    "created_at": "2026-08-20T11:49:09Z",
-   "updated_at": "2026-08-20T11:50:48Z",
+   "updated_at": "2026-08-20T13:30:21Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -104,9 +104,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32364889999",
    "created_at": "2026-08-20T11:39:41Z",
-   "updated_at": "2026-08-20T11:41:29Z",
+   "updated_at": "2026-08-20T13:36:19Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-20T13:36:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32364889999/job/96444854259"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-20T13:36:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32364889999/job/96444854393"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-20T13:45:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32364889999/job/96444854451"
+    }
+   ]
   },
   {
    "run_id": 32364415618,
@@ -115,13 +143,42 @@
    "branch": "pr/fix-ptr-alignment-lowering",
    "event": "pull_request",
    "title": "[Fix] Fix alignment reported by ptr.load/ptr.store lowering",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32364415618",
    "created_at": "2026-08-20T11:33:57Z",
-   "updated_at": "2026-08-20T12:28:31Z",
+   "updated_at": "2026-08-20T13:29:30Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-20T13:29:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32364415618/job/96442723909"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-20T13:30:29Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32364415618/job/96442723977"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-20T13:30:02Z",
+     "completed_at": "2026-08-20T13:45:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32364415618/job/96442724054",
+     "log_fetch_failed": true
+    }
+   ]
   },
   {
    "run_id": 32363611981,
@@ -160,11 +217,11 @@
    "branch": "fp8-softmax-normalisation",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357738168",
    "created_at": "2026-08-20T10:11:56Z",
-   "updated_at": "2026-08-20T11:48:26Z",
+   "updated_at": "2026-08-20T13:53:27Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
@@ -179,9 +236,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-20T11:48:26Z",
+     "started_at": "2026-08-20T13:53:26Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357738168/job/96414342742"
     },
@@ -204,11 +261,11 @@
    "branch": "cjl/norm_perf",
    "event": "pull_request",
    "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357145018",
    "created_at": "2026-08-20T10:04:59Z",
-   "updated_at": "2026-08-20T12:10:54Z",
+   "updated_at": "2026-08-20T13:52:50Z",
    "actor": "cschenjunlin",
    "jobs": [
     {
@@ -224,20 +281,22 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T12:10:53Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357145018/job/96405070828"
+     "completed_at": "2026-08-20T13:52:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357145018/job/96405070828",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T11:35:43Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357145018/job/96405070901"
+     "completed_at": "2026-08-20T12:54:34Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357145018/job/96405070901",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -327,26 +386,28 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32353132079",
    "created_at": "2026-08-20T09:17:33Z",
-   "updated_at": "2026-08-20T11:51:01Z",
+   "updated_at": "2026-08-20T13:30:06Z",
    "actor": "Yaowu-Xiong",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T11:30:57Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32353132079/job/96398342490"
+     "completed_at": "2026-08-20T12:52:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32353132079/job/96398342490",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T11:51:01Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32353132079/job/96398342520"
+     "completed_at": "2026-08-20T13:27:21Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32353132079/job/96398342520",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -357,6 +418,24 @@
      "completed_at": "2026-08-20T11:20:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32353132079/job/96398342575",
      "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-20T13:30:05Z",
+     "completed_at": "2026-08-20T13:56:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32353132079/job/96442060268"
+    },
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-20T13:29:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32353132079/job/96442060386"
     }
    ]
   },
