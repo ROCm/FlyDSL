@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-08-20T14:45:08Z",
+ "updated": "2026-08-20T15:29:48Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32386189717,
+   "pr": 1020,
+   "commit": "e2313b6d87b72a551505ad54de38d950f24eb47d",
+   "branch": "fp8-softmax-normalisation",
+   "event": "pull_request",
+   "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386189717",
+   "created_at": "2026-08-20T15:26:57Z",
+   "updated_at": "2026-08-20T15:27:38Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
+  {
+   "run_id": 32386186330,
+   "pr": 1033,
+   "commit": "465226df40d8c1861da46c895b41bbb017b61e26",
+   "branch": "john/lazy-rescale-nan",
+   "event": "pull_request",
+   "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386186330",
+   "created_at": "2026-08-20T15:26:55Z",
+   "updated_at": "2026-08-20T15:28:38Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
+  {
+   "run_id": 32382498774,
+   "pr": 1032,
+   "commit": "3b0a47edf061492c5d90339f1085c7d9db75593d",
+   "branch": "convolution",
+   "event": "pull_request",
+   "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32382498774",
+   "created_at": "2026-08-20T14:50:00Z",
+   "updated_at": "2026-08-20T14:51:38Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
   {
    "run_id": 32366718417,
    "pr": null,
@@ -10,38 +55,38 @@
    "branch": "main",
    "event": "push",
    "title": "[Fix] Restore the gfx950 XCD mapping for bf16 dense attention (#1009)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366718417",
    "created_at": "2026-08-20T12:01:39Z",
-   "updated_at": "2026-08-20T14:41:41Z",
+   "updated_at": "2026-08-20T15:12:44Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-20T14:41:41Z",
+     "started_at": "2026-08-20T15:12:43Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366718417/job/96466110697"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-20T14:41:41Z",
+     "started_at": "2026-08-20T14:57:07Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366718417/job/96466110703"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-20T14:41:41Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-20T14:54:25Z",
+     "completed_at": "2026-08-20T15:07:15Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366718417/job/96466110762"
     }
    ]
@@ -68,11 +113,11 @@
    "branch": "bump-version-0.3.2",
    "event": "pull_request",
    "title": "Release: bump version to 0.3.2",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366233237",
    "created_at": "2026-08-20T11:55:57Z",
-   "updated_at": "2026-08-20T14:39:35Z",
+   "updated_at": "2026-08-20T15:28:35Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -87,19 +132,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-20T14:39:35Z",
+     "started_at": "2026-08-20T15:28:34Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366233237/job/96465412026"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-20T14:39:35Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-20T15:07:49Z",
+     "completed_at": "2026-08-20T15:19:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366233237/job/96465412058"
     }
    ]
@@ -136,11 +181,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T14:36:49Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32365669387/job/96464332873"
+     "completed_at": "2026-08-20T14:53:41Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32365669387/job/96464332873",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -184,30 +230,31 @@
    "branch": "john/lazy-rescale-nan",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32364889999",
    "created_at": "2026-08-20T11:39:41Z",
-   "updated_at": "2026-08-20T14:42:24Z",
+   "updated_at": "2026-08-20T15:28:01Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-20T14:42:23Z",
-     "completed_at": null,
+     "completed_at": "2026-08-20T15:28:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32364889999/job/96444854259"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T13:36:45Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32364889999/job/96444854393"
+     "completed_at": "2026-08-20T14:56:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32364889999/job/96444854393",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -297,7 +344,7 @@
   },
   {
    "run_id": 32357738168,
-   "pr": 1020,
+   "pr": null,
    "commit": "c299d53d2ad942cf45d069ba5c449496a2461d0f",
    "branch": "fp8-softmax-normalisation",
    "event": "pull_request",
@@ -1026,7 +1073,7 @@
   },
   {
    "run_id": 32342971326,
-   "pr": 1028,
+   "pr": null,
    "commit": "8e7918dca707ff6966dc7bde8d0c514b7f452846",
    "branch": "feat/rdna3-gemm-tile-selection",
    "event": "pull_request",
@@ -1745,80 +1792,6 @@
    "updated_at": "2026-08-19T20:21:36Z",
    "actor": "JohnQinAMD",
    "jobs": []
-  },
-  {
-   "run_id": 32294101577,
-   "pr": null,
-   "commit": "190712f843fac03b9762e1cfc9c74f0d80716c28",
-   "branch": "john/maxnumf-ambient-fastmath",
-   "event": "pull_request",
-   "title": "[Fix] Let fx.maxnumf inherit the ambient fastmath",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32294101577",
-   "created_at": "2026-08-19T19:38:03Z",
-   "updated_at": "2026-08-19T19:41:27Z",
-   "actor": "JohnQinAMD",
-   "jobs": []
-  },
-  {
-   "run_id": 32293043249,
-   "pr": 1027,
-   "commit": "5a3f58eaae1182b5aec8c74d9d2ae6fdb084a0b9",
-   "branch": "skills/dedrift-and-fix-frontmatter",
-   "event": "pull_request",
-   "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32293043249",
-   "created_at": "2026-08-19T19:26:34Z",
-   "updated_at": "2026-08-19T20:24:28Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 32291906140,
-   "pr": 1022,
-   "commit": "2fdd780f5c87826955621dc16cbd124e93d00f6e",
-   "branch": "jhinpan/softmax-autotune",
-   "event": "pull_request",
-   "title": "[Kernel] Add opt-in autotuning for Softmax",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32291906140",
-   "created_at": "2026-08-19T19:14:16Z",
-   "updated_at": "2026-08-19T21:58:52Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-19T19:57:37Z",
-     "completed_at": "2026-08-19T21:31:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32291906140/job/96206506109",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-19T19:57:35Z",
-     "completed_at": "2026-08-19T21:58:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32291906140/job/96206506113"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-19T19:57:22Z",
-     "completed_at": "2026-08-19T20:09:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32291906140/job/96206506237"
-    }
-   ]
   }
  ]
 }
