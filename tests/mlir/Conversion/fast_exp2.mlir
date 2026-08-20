@@ -1,12 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
-// RUN: %fly-opt %s --convert-fly-to-rocdl | FileCheck %s
+// RUN: %fly-opt %s --pass-pipeline="builtin.module(gpu.module(convert-fastmath-ops))" | FileCheck %s
+// RUN: %fly-opt %s --pass-pipeline="builtin.module(gpu.module(convert-fastmath-ops))" | FileCheck %s --check-prefix=VECTOR
+// RUN: %fly-opt %s --convert-fly-to-rocdl | FileCheck %s --check-prefix=FLY
 
 module {
   gpu.module @kernels {
     // CHECK-LABEL: gpu.func @fast_scalar
     // CHECK: rocdl.exp2
     // CHECK-NOT: math.exp2
+    // FLY-LABEL: gpu.func @fast_scalar
+    // FLY: math.exp2 %arg0 fastmath<fast> : f32
+    // FLY-NOT: rocdl.exp2
+    // FLY: gpu.return
     gpu.func @fast_scalar(%arg0: f32) -> f32 {
       %0 = math.exp2 %arg0 fastmath<fast> : f32
       gpu.return %0 : f32
@@ -21,18 +27,19 @@ module {
     }
 
     // CHECK-LABEL: gpu.func @fast_vector
+    // VECTOR-LABEL: gpu.func @fast_vector
+    // VECTOR-NOT: vector.insert
+    // VECTOR-NOT: arith.constant
+    // VECTOR: gpu.return
     // CHECK: %[[E0:.*]] = vector.extract %arg0[0]
     // CHECK: %[[X0:.*]] = rocdl.exp2 %[[E0]]
-    // CHECK: %[[I0:.*]] = vector.insert %[[X0]], %{{.*}} [0]
     // CHECK: %[[E1:.*]] = vector.extract %arg0[1]
     // CHECK: %[[X1:.*]] = rocdl.exp2 %[[E1]]
-    // CHECK: %[[I1:.*]] = vector.insert %[[X1]], %[[I0]] [1]
     // CHECK: %[[E2:.*]] = vector.extract %arg0[2]
     // CHECK: %[[X2:.*]] = rocdl.exp2 %[[E2]]
-    // CHECK: %[[I2:.*]] = vector.insert %[[X2]], %[[I1]] [2]
     // CHECK: %[[E3:.*]] = vector.extract %arg0[3]
     // CHECK: %[[X3:.*]] = rocdl.exp2 %[[E3]]
-    // CHECK: vector.insert %[[X3]], %[[I2]] [3]
+    // CHECK: vector.from_elements %[[X0]], %[[X1]], %[[X2]], %[[X3]] : vector<4xf32>
     // CHECK-NOT: math.exp2
     gpu.func @fast_vector(%arg0: vector<4xf32>) -> vector<4xf32> {
       %0 = math.exp2 %arg0 fastmath<fast> : vector<4xf32>

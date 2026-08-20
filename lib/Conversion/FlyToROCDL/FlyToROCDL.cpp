@@ -7,7 +7,6 @@
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
-#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -36,47 +35,6 @@ using namespace mlir::fly;
 using namespace mlir::fly_rocdl;
 
 namespace {
-
-// GPUToROCDL otherwise drops `afn` and routes math.exp2 through OCML.
-static bool canLowerFastExp2(math::Exp2Op op) {
-  if (!op->getParentOfType<gpu::GPUModuleOp>())
-    return false;
-  if (!arith::bitEnumContainsAny(op.getFastmath(), arith::FastMathFlags::afn))
-    return false;
-
-  Type resultTy = op.getType();
-  if (resultTy.isF32())
-    return true;
-  auto vecTy = dyn_cast<VectorType>(resultTy);
-  return vecTy && !vecTy.isScalable() && vecTy.getRank() == 1 && vecTy.getElementType().isF32();
-}
-
-class FastExp2OpLowering : public OpRewritePattern<math::Exp2Op> {
-public:
-  using OpRewritePattern::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(math::Exp2Op op, PatternRewriter &rewriter) const override {
-    if (!canLowerFastExp2(op))
-      return failure();
-
-    Location loc = op.getLoc();
-    Type resultTy = op.getType();
-    if (resultTy.isF32()) {
-      rewriter.replaceOpWithNewOp<ROCDL::ROCDLExp2>(op, resultTy, op.getOperand());
-      return success();
-    }
-
-    auto vecTy = cast<VectorType>(resultTy);
-    Value result = arith::ConstantOp::create(rewriter, loc, rewriter.getZeroAttr(vecTy));
-    for (int64_t i = 0; i < vecTy.getNumElements(); ++i) {
-      Value scalar = vector::ExtractOp::create(rewriter, loc, op.getOperand(), i);
-      Value exp2 = ROCDL::ROCDLExp2::create(rewriter, loc, scalar.getType(), scalar);
-      result = vector::InsertOp::create(rewriter, loc, exp2, result, i);
-    }
-    rewriter.replaceOp(op, result);
-    return success();
-  }
-};
 
 unsigned mapToLLVMAddressSpace(AddressSpace addrSpace) {
   switch (addrSpace) {
@@ -893,8 +851,6 @@ public:
                            gpu::GPUDialect, func::FuncDialect, LLVM::LLVMDialect,
                            ROCDL::ROCDLDialect>();
     target.addIllegalDialect<fly::FlyDialect, fly_rocdl::FlyROCDLDialect>();
-    target.addDynamicallyLegalOp<math::Exp2Op>(
-        [](math::Exp2Op op) { return !canLowerFastExp2(op); });
 
     // Constructors
     target.addLegalOp<StaticOp, MakeIntTupleOp, MakeLayoutOp, MakeComposedLayoutOp>();
@@ -951,7 +907,6 @@ public:
     patterns.add<CopyAtomCallLowering, MmaAtomCallLowering>(typeConverter, context);
     patterns.add<CopyAtomCallSSALowering, MmaAtomCallSSALowering>(typeConverter, context);
     patterns.add<GpuLaunchFuncOpLowering>(typeConverter, context);
-    patterns.add<FastExp2OpLowering>(context);
 
     // TODO: deprecated in the future
     patterns.add<ExtractAlignedPointerAsIndexLowering>(typeConverter, context);
