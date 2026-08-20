@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-20T00:36:21Z",
+ "updated": "2026-08-20T00:56:35Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32318912777,
+   "pr": 1038,
+   "commit": "66e1468a592f49bd54e8a95e0c1140a89d5f2780",
+   "branch": "zhimding/jobs_parallel_0819",
+   "event": "pull_request",
+   "title": "[AOT] Add resilient parallel job scheduler",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32318912777",
+   "created_at": "2026-08-20T00:51:58Z",
+   "updated_at": "2026-08-20T00:55:28Z",
+   "actor": "zhiding512",
+   "jobs": []
+  },
   {
    "run_id": 32306637551,
    "pr": 1036,
@@ -20,10 +35,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-19T23:38:58Z",
-     "completed_at": null,
+     "completed_at": "2026-08-20T00:46:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306637551/job/96262735080"
     },
     {
@@ -1823,21 +1838,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32131673954",
    "created_at": "2026-08-18T11:25:46Z",
    "updated_at": "2026-08-18T11:27:05Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 32131357298,
-   "pr": null,
-   "commit": "05614906b49a0b8ae58be0ce1fde3fe5cb365b99",
-   "branch": "pr/fix-gfx1250-wave-size",
-   "event": "pull_request",
-   "title": "[ROCDL] Fix wave size for gfx1250 (wave32, not wave64)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32131357298",
-   "created_at": "2026-08-18T11:21:58Z",
-   "updated_at": "2026-08-18T11:23:18Z",
    "actor": "sjfeng1999",
    "jobs": []
   }
