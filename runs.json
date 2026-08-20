@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-20T18:32:43Z",
+ "updated": "2026-08-20T19:11:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -38,10 +38,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-20T18:26:28Z",
-     "completed_at": null,
+     "completed_at": "2026-08-20T18:37:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32400500706/job/96535789915"
     }
    ]
@@ -113,11 +113,11 @@
    "branch": "feat/rdna3-gemm-tile-selection",
    "event": "pull_request",
    "title": "[Kernel][Perf] Speed up the RDNA3 GEMM up to 1.85x by choosing the tile from the shape",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386362772",
    "created_at": "2026-08-20T15:28:42Z",
-   "updated_at": "2026-08-20T17:32:19Z",
+   "updated_at": "2026-08-20T19:09:44Z",
    "actor": "vivienfanghuagood",
    "jobs": [
     {
@@ -132,20 +132,22 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T17:08:58Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386362772/job/96512455658"
+     "completed_at": "2026-08-20T19:09:43Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386362772/job/96512455658",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T17:32:19Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386362772/job/96512455744"
+     "completed_at": "2026-08-20T18:50:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386362772/job/96512455744",
+     "log_fetch_failed": true
     }
    ]
   },
