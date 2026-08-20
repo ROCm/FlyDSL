@@ -310,11 +310,7 @@ _A4_FIXED8192_TUNED_BUCKETS = frozenset(
 
 def _a4_fixed8192_estimated_hot_rows(bucket: int) -> int:
     """Estimate rows owned by the hottest expert for V4-Pro-like routing."""
-    numerator = (
-        int(bucket)
-        * A4_HOT_ROUTING_TOPK
-        * A4_HOT_ROUTING_SKEW_FACTOR
-    )
+    numerator = int(bucket) * A4_HOT_ROUTING_TOPK * A4_HOT_ROUTING_SKEW_FACTOR
     return (numerator + A4_HOT_ROUTING_TOTAL_EXPERTS - 1) // A4_HOT_ROUTING_TOTAL_EXPERTS
 
 
@@ -338,9 +334,7 @@ def _a4_fixed8192_tuned_patch(bucket: int) -> ConfigPatch | None:
         return None
     dispatch_cu = _a4_fixed8192_dispatch_cu(bucket)
     assert dispatch_cu is not None
-    use_chunk_pipeline = (
-        _a4_fixed8192_estimated_hot_rows(bucket) >= A4_HOT_PAYLOAD_CHUNK_ROWS
-    )
+    use_chunk_pipeline = _a4_fixed8192_estimated_hot_rows(bucket) >= A4_HOT_PAYLOAD_CHUNK_ROWS
     stage1 = {
         "num_dispatch_cu": dispatch_cu,
         "payload_chunk_rows": A4_HOT_PAYLOAD_CHUNK_ROWS if use_chunk_pipeline else 0,
