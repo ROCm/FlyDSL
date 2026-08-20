@@ -25,6 +25,10 @@ to GPU/ROCDL.
 
       * :doc:`Arithmetic types <language/arithmetic_types>`
 
+      * :doc:`Composite types <language/composite_types>`
+
+      * :doc:`Storage and allocator <language/storage_and_allocator>`
+
       * :doc:`Architecture and compilation pipeline <architecture_guide>`
 
       * :doc:`Layout algebra <layout_system_guide>`

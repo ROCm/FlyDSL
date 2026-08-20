@@ -2,12 +2,25 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 from ..._mlir.dialects import llvm
-from ..._mlir.dialects.fly_rocdl import CopyOpCDNA4LdsReadTransposeType, MmaOpCDNA4_MFMAScaleType
+from ..._mlir.dialects.fly_rocdl import (
+    CopyOpCDNA4BufferLoadAsyncLDSType,
+    CopyOpCDNA4GlobalLoadAsyncLDSType,
+    CopyOpCDNA4LdsReadTransposeType,
+    MmaOpCDNA4_MFMAScaleType,
+)
 from ..._mlir.extras import types as T
 from ..numeric import Boolean, Float32, Uint32
 from ..typing import BFloat16x2
 
 __all__ = [
+    "BufferLoadAsyncLDS",
+    "BufferLoadAsyncLDS32b",
+    "BufferLoadAsyncLDS96b",
+    "BufferLoadAsyncLDS128b",
+    "GlobalLoadAsyncLDS",
+    "GlobalLoadAsyncLDS32b",
+    "GlobalLoadAsyncLDS96b",
+    "GlobalLoadAsyncLDS128b",
     "LDSReadTrans",
     "MFMAScale",
     "MFMA_Scale",
@@ -24,6 +37,44 @@ LDSReadTrans4_64b = lambda: CopyOpCDNA4LdsReadTransposeType.get(4, 64)
 LDSReadTrans8_64b = lambda: CopyOpCDNA4LdsReadTransposeType.get(8, 64)
 LDSReadTrans6_96b = lambda: CopyOpCDNA4LdsReadTransposeType.get(6, 96)
 LDSReadTrans16_64b = lambda: CopyOpCDNA4LdsReadTransposeType.get(16, 64)
+
+
+def BufferLoadAsyncLDS(bit_size):
+    """Create a CDNA4 async buffer-to-LDS copy atom.
+
+    Same BufferDesc -> Shared direction and state as the synchronous
+    :func:`flydsl.expr.rocdl.BufferCopyLDS`, but emits the async LDS DMA: the
+    backend does not insert the ``vmcnt`` wait before the staged LDS data is
+    read. Bracket the copies with ``fx.rocdl.asyncmark()`` and wait with
+    ``fx.rocdl.wait_asyncmark(n)``.
+
+    ``bit_size`` must be 32, 96 or 128.
+
+    Current atom state:
+    - `soffset` (`i32`), default zero
+    - `imm_offset` (const `i32`), default zero
+    """
+    return CopyOpCDNA4BufferLoadAsyncLDSType.get(bit_size)
+
+
+BufferLoadAsyncLDS32b = lambda: CopyOpCDNA4BufferLoadAsyncLDSType.get(32)
+BufferLoadAsyncLDS96b = lambda: CopyOpCDNA4BufferLoadAsyncLDSType.get(96)
+BufferLoadAsyncLDS128b = lambda: CopyOpCDNA4BufferLoadAsyncLDSType.get(128)
+
+
+def GlobalLoadAsyncLDS(bit_size):
+    """Create a CDNA4 async global-to-LDS copy atom.
+
+    Completion tracking is the same: ``fx.rocdl.asyncmark()`` / ``fx.rocdl.wait_asyncmark(n)``.
+
+    ``bit_size`` must be 32, 96 or 128, same as :func:`BufferLoadAsyncLDS`.
+    """
+    return CopyOpCDNA4GlobalLoadAsyncLDSType.get(bit_size)
+
+
+GlobalLoadAsyncLDS32b = lambda: CopyOpCDNA4GlobalLoadAsyncLDSType.get(32)
+GlobalLoadAsyncLDS96b = lambda: CopyOpCDNA4GlobalLoadAsyncLDSType.get(96)
+GlobalLoadAsyncLDS128b = lambda: CopyOpCDNA4GlobalLoadAsyncLDSType.get(128)
 
 
 def MFMA_Scale(m, n, k, elem_ty_a, elem_ty_b=None, elem_ty_acc=None, *, opsel_a=0, opsel_b=0):

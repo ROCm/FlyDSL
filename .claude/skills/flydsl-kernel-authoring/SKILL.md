@@ -433,6 +433,9 @@ mask = fx.Int32(0xFF)                            # i32 constant (preferred)
 result = a + b
 result = a * scale
 result = cond.select(true_val, false_val)
+largest = fx.max(a, b)
+smallest = fx.min(a, b)
+tiles = fx.ceildiv(count, tile_size)  # signed/unsigned dispatch from typed operands
 
 # Keep direct arith.*FOp only when explicit fastmath flags are required.
 ```
@@ -484,7 +487,8 @@ Use `Vec.filled(...)` for splats and `Vec.from_elements(...)` for vectors from s
 | Add | `a + b` | Yes | Use direct FOp only for explicit fastmath |
 | Multiply | `a * b` | Yes | Use direct FOp only for explicit fastmath |
 | Negate | `-a` | Yes | |
-| Max | `a.maximumf(b)` | Yes | Good for ReLU |
+| Max / Min | `fx.max(a, b)` / `fx.min(a, b)` | Yes | Float forms propagate NaN; `fx.maxnumf` does not |
+| Integer ceil-div | `fx.ceildiv(a, b)` | Yes | Direct signed/unsigned op; distinct from layout `fx.ceil_div` |
 | Compare | `arith.cmpf(a, b, pred)` | Yes | Returns i1/vec<i1> |
 | Select | `cond.select(t, f)` | Yes | |
 | Abs | no direct helper | Use `-v`, comparison, and `cond.select(...)` |
@@ -783,7 +787,7 @@ vD = vAB + Vec(fx.memref_load_vec(rC))
 # --- ReLU: C = max(A, 0) ---
 vA = Vec(fx.memref_load_vec(rA))
 zero_vec = Vec.filled(vec_width, 0.0, fx.Float32)
-vC = vA.maximumf(zero_vec)
+vC = fx.max(vA, zero_vec)
 
 # --- Abs: C = |A| (arith.absf does NOT exist) ---
 vA = fx.memref_load_vec(rA)

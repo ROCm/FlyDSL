@@ -162,10 +162,11 @@ excludes it from the catalog above.
 | `fx.index_cast` | `fx.Index(x)` | v0.4 |
 | `fx.constant_vector` | `Numeric` and `Vector` member functions | v0.4 |
 | `fx.tdm_ops` and content reached through this alias | `fx.rocdl.tdm_ops`; the latter is a target-specific unstable path | v0.4 |
-| `fx.Numeric.maximumf`, `fx.Numeric.minimumf` | `fx.arith.maximumf(x, y)`, `fx.arith.minimumf(x, y)` | v0.4 |
+| `fx.Numeric.maximumf`, `fx.Numeric.minimumf` | `fx.max(x, y)`, `fx.min(x, y)` | v0.4 |
 | `fx.Numeric.shrui`, `fx.Numeric.addf` | `fx.arith.shrui(x, amount)`, `x + y` with a `fastmath` context | v0.4 |
 | `fx.Numeric.exp2` | `fx.math.exp2(x)` | v0.4 |
 | `fx.Numeric.shuffle_xor` | `fx.gpu.shuffle_xor(x, offset, width)` | v0.4 |
+| `fx.rocdl.BufferCopyLDS64b` | `fx.rocdl.BufferCopyLDS32b`, or `fx.rocdl.BufferCopyLDS128b` on gfx950. No AMD target has an 8-byte LDS DMA instruction, so this entry point could never emit a working copy; it now raises instead of silently failing instruction selection. | v0.4 |
 
 ## 4. What counts as a breaking change
 
