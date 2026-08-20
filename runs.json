@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-20T16:47:41Z",
+ "updated": "2026-08-20T16:49:35Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "john/attn-4gib-guard",
    "event": "pull_request",
    "title": "[Bugfix] Refuse a batch entry the buffer descriptor cannot address",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32393726420",
    "created_at": "2026-08-20T16:44:49Z",
-   "updated_at": "2026-08-20T16:45:36Z",
+   "updated_at": "2026-08-20T16:46:45Z",
    "actor": "JohnQinAMD",
    "jobs": []
   },
