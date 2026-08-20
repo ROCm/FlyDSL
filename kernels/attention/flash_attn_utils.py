@@ -3827,7 +3827,7 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
     def _lazy_rescale_o_rescale(self, _n, *_st, v_o, m_row, l_row, m_tile_max, v_p):
         # Wave-uniform branch: lanes whose tile max is below their running max get
         # dragged in too, and m_tile_max alone would scale them up into overflow.
-        m_new = fx.maxnumf(m_row, m_tile_max, fastmath=self.fm_fast)
+        m_new = fx.maxnumf(m_row, m_tile_max)
         corr = rocdl.exp2(T.f32, as_mlir_value(m_row - m_new))
         scaled_accs = list(v_o)
         self.scale_o(scaled_accs, corr)
