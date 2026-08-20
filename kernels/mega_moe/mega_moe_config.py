@@ -279,8 +279,84 @@ _A4_FP8_P2P_BUCKET_PATCHES = {
 }
 
 _A4_FIXED8192_SINGLE_TOKEN_PATCH = _patch(stage1={"num_dispatch_cu": 160})
+_A4_FIXED8192_TWO_TOKEN_PATCH = _patch(
+    stage1={
+        "num_dispatch_cu": 128,
+        "payload_chunk_rows": 0,
+        "payload_tile_ready": False,
+    }
+)
 _A4_FIXED8192_COMPACT_DISPATCH_PATCH = _patch(stage1={"num_dispatch_cu": 32})
 _A4_FIXED8192_BS8_STAGE2_PATCH = _patch(stage2={"block_m": BLOCK_M_MEDIUM})
+A4_HOT_ROUTING_TOPK = 6
+A4_HOT_ROUTING_TOTAL_EXPERTS = 384
+A4_HOT_ROUTING_SKEW_FACTOR = 54
+A4_HOT_PAYLOAD_CHUNK_ROWS = 384
+_A4_FIXED8192_TUNED_BUCKETS = frozenset(
+    (
+        TokenBucket.BS4,
+        TokenBucket.BS8,
+        TokenBucket.BS16,
+        TokenBucket.BS32,
+        TokenBucket.BS64,
+        TokenBucket.BS128,
+        TokenBucket.BS256,
+        TokenBucket.BS512,
+        TokenBucket.BS4096,
+        TokenBucket.BS8192,
+    )
+)
+
+
+def _a4_fixed8192_estimated_hot_rows(bucket: int) -> int:
+    """Estimate rows owned by the hottest expert for V4-Pro-like routing."""
+    numerator = (
+        int(bucket)
+        * A4_HOT_ROUTING_TOPK
+        * A4_HOT_ROUTING_SKEW_FACTOR
+    )
+    return (numerator + A4_HOT_ROUTING_TOTAL_EXPERTS - 1) // A4_HOT_ROUTING_TOTAL_EXPERTS
+
+
+def _a4_fixed8192_dispatch_cu(bucket: int) -> int | None:
+    """Return measured MI355X DCU optima without extrapolating to untested buckets."""
+    if bucket == TokenBucket.BS8:
+        return 32
+    if bucket <= TokenBucket.BS256:
+        return 160 - max(32, int(bucket) // 4)
+    if bucket == TokenBucket.BS512:
+        return 160
+    if bucket == TokenBucket.BS4096:
+        return 72
+    if bucket == TokenBucket.BS8192:
+        return 96
+    return None
+
+
+def _a4_fixed8192_tuned_patch(bucket: int) -> ConfigPatch | None:
+    if bucket not in _A4_FIXED8192_TUNED_BUCKETS:
+        return None
+    dispatch_cu = _a4_fixed8192_dispatch_cu(bucket)
+    assert dispatch_cu is not None
+    use_chunk_pipeline = (
+        _a4_fixed8192_estimated_hot_rows(bucket) >= A4_HOT_PAYLOAD_CHUNK_ROWS
+    )
+    stage1 = {
+        "num_dispatch_cu": dispatch_cu,
+        "payload_chunk_rows": A4_HOT_PAYLOAD_CHUNK_ROWS if use_chunk_pipeline else 0,
+        "payload_tile_ready": use_chunk_pipeline,
+    }
+    if bucket == TokenBucket.BS256:
+        stage1["tile_n"] = TILE_N_BASE
+    elif bucket == TokenBucket.BS8192:
+        stage1.update(
+            grid_mult=GRID_MULT_SINGLE_EPOCH,
+            swizzle_a=True,
+            waves_per_eu_hint=WAVES_PER_EU_DEFAULT,
+            external_grouping=False,
+            external_counting=False,
+        )
+    return _patch(stage1=stage1)
 
 
 def _a4_fixed8192_sync_patch(bucket: int, grid_mult: int) -> ConfigPatch:
@@ -733,6 +809,13 @@ def _select_tuning_patches(
         elif context.bucket in _A4_FIXED8192_SYNC_BUCKETS:
             grid_mult = 2 if context.bucket == TokenBucket.BS16 else GRID_MULT_SINGLE_EPOCH
             patches.append(_a4_fixed8192_sync_patch(context.bucket, grid_mult))
+
+        if patch := _a4_fixed8192_tuned_patch(context.bucket):
+            patches.append(patch)
+        if context.tokens == 2:
+            # BS2 resolves to the BS1 bucket, but its measured optimum differs
+            # from the latency-sensitive single-token path.
+            patches.append(_A4_FIXED8192_TWO_TOKEN_PATCH)
 
     return tuple(patches)
 
