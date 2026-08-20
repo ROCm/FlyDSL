@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-20T15:32:12Z",
+ "updated": "2026-08-20T15:36:42Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "feat/rdna3-gemm-tile-selection",
    "event": "pull_request",
    "title": "[Kernel][Perf] Speed up the RDNA3 GEMM up to 1.85x by choosing the tile from the shape",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386362772",
    "created_at": "2026-08-20T15:28:42Z",
-   "updated_at": "2026-08-20T15:29:30Z",
+   "updated_at": "2026-08-20T15:30:37Z",
    "actor": "vivienfanghuagood",
    "jobs": []
   },
@@ -40,11 +40,11 @@
    "branch": "john/lazy-rescale-nan",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386186330",
    "created_at": "2026-08-20T15:26:55Z",
-   "updated_at": "2026-08-20T15:28:38Z",
+   "updated_at": "2026-08-20T15:30:49Z",
    "actor": "JohnQinAMD",
    "jobs": []
   },
@@ -290,21 +290,22 @@
    "branch": "pr/fix-ptr-alignment-lowering",
    "event": "pull_request",
    "title": "[Fix] Fix alignment reported by ptr.load/ptr.store lowering",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32364415618",
    "created_at": "2026-08-20T11:33:57Z",
-   "updated_at": "2026-08-20T14:40:37Z",
+   "updated_at": "2026-08-20T15:34:39Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T14:40:36Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32364415618/job/96442723909"
+     "completed_at": "2026-08-20T15:34:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32364415618/job/96442723909",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
