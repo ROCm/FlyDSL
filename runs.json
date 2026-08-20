@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-20T16:49:35Z",
+ "updated": "2026-08-20T17:47:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -74,9 +74,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386362772",
    "created_at": "2026-08-20T15:28:42Z",
-   "updated_at": "2026-08-20T15:54:15Z",
+   "updated_at": "2026-08-20T17:32:19Z",
    "actor": "vivienfanghuagood",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-20T17:17:24Z",
+     "completed_at": "2026-08-20T17:26:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386362772/job/96512455609"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-20T17:08:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386362772/job/96512455658"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-20T17:32:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386362772/job/96512455744"
+    }
+   ]
   },
   {
    "run_id": 32386189717,
@@ -89,9 +117,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386189717",
    "created_at": "2026-08-20T15:26:57Z",
-   "updated_at": "2026-08-20T15:58:28Z",
+   "updated_at": "2026-08-20T17:07:57Z",
    "actor": "JohnQinAMD",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-20T17:07:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386189717/job/96512398310"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-20T17:07:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386189717/job/96512398349"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-20T17:07:48Z",
+     "completed_at": "2026-08-20T17:17:17Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386189717/job/96512398412"
+    }
+   ]
   },
   {
    "run_id": 32386186330,
@@ -100,30 +156,32 @@
    "branch": "john/lazy-rescale-nan",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386186330",
    "created_at": "2026-08-20T15:26:55Z",
-   "updated_at": "2026-08-20T16:22:19Z",
+   "updated_at": "2026-08-20T17:44:49Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T16:22:18Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386186330/job/96497381029"
+     "completed_at": "2026-08-20T17:34:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386186330/job/96497381029",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T16:18:41Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386186330/job/96497381042"
+     "completed_at": "2026-08-20T17:44:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386186330/job/96497381042",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -1759,13 +1817,22 @@
    "branch": "skills/dedrift-and-fix-frontmatter",
    "event": "pull_request",
    "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298273166",
    "created_at": "2026-08-19T20:23:36Z",
-   "updated_at": "2026-08-20T00:18:43Z",
+   "updated_at": "2026-08-20T17:45:56Z",
    "actor": "jhinpan",
    "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-20T17:47:00Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298273166/job/96523781813"
+    },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
@@ -1773,17 +1840,8 @@
      "conclusion": "success",
      "started_at": "2026-08-19T23:19:23Z",
      "completed_at": "2026-08-20T00:09:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298273166/job/96247704710",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298273166/job/96523783292",
      "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-19T22:29:18Z",
-     "completed_at": "2026-08-20T00:18:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298273166/job/96247704739"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -1792,7 +1850,7 @@
      "conclusion": "success",
      "started_at": "2026-08-19T22:44:19Z",
      "completed_at": "2026-08-19T22:59:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298273166/job/96247704780",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32298273166/job/96523783666",
      "log_fetch_failed": true
     }
    ]
