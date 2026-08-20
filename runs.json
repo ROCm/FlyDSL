@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-20T11:52:11Z",
+ "updated": "2026-08-20T11:59:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32366353447,
+   "pr": null,
+   "commit": "f1f3af4ec0b900cdd24d85f73c0468afc5342460",
+   "branch": "main",
+   "event": "push",
+   "title": "Release: bump version to 0.3.2 (#1044)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366353447",
+   "created_at": "2026-08-20T11:57:25Z",
+   "updated_at": "2026-08-20T11:57:44Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 32366233237,
+   "pr": 1044,
+   "commit": "df24b7416805e99587692c1ce89005ceb15011ff",
+   "branch": "bump-version-0.3.2",
+   "event": "pull_request",
+   "title": "Release: bump version to 0.3.2",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366233237",
+   "created_at": "2026-08-20T11:55:57Z",
+   "updated_at": "2026-08-20T11:57:29Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 32365748589,
    "pr": null,
@@ -10,11 +40,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Kernel][Perf] Enable the gmem->LDS async copy for f16/bf16 preshuffl\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32365748589",
    "created_at": "2026-08-20T11:50:07Z",
-   "updated_at": "2026-08-20T11:50:27Z",
+   "updated_at": "2026-08-20T11:57:27Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -25,11 +55,11 @@
    "branch": "feat/preshuffle-async-copy-f16",
    "event": "pull_request",
    "title": "[Kernel][Perf] Enable the gmem->LDS async copy for f16/bf16 preshuffle GEMM",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32365669387",
    "created_at": "2026-08-20T11:49:09Z",
-   "updated_at": "2026-08-20T11:49:43Z",
+   "updated_at": "2026-08-20T11:50:48Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -277,11 +307,11 @@
    "branch": "mega_moe_a4w4",
    "event": "pull_request",
    "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32353132079",
    "created_at": "2026-08-20T09:17:33Z",
-   "updated_at": "2026-08-20T10:43:40Z",
+   "updated_at": "2026-08-20T11:51:01Z",
    "actor": "Yaowu-Xiong",
    "jobs": [
     {
@@ -296,9 +326,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-20T10:43:40Z",
+     "started_at": "2026-08-20T11:51:01Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32353132079/job/96398342520"
     },
@@ -1617,65 +1647,6 @@
    "updated_at": "2026-08-19T19:27:00Z",
    "actor": "jhinpan",
    "jobs": []
-  },
-  {
-   "run_id": 32291086909,
-   "pr": 1022,
-   "commit": "0a5015acac4fa8c7094ea4ee7ad1779638f2f3f3",
-   "branch": "jhinpan/softmax-autotune",
-   "event": "pull_request",
-   "title": "[Kernel] Add opt-in autotuning for Softmax",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32291086909",
-   "created_at": "2026-08-19T19:05:37Z",
-   "updated_at": "2026-08-19T19:09:17Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 32288703611,
-   "pr": null,
-   "commit": "9d4a021566c34aa30083ce4496d89a0f2cab1e11",
-   "branch": "john/maxnumf-fastmath",
-   "event": "pull_request",
-   "title": "[Fix] Restore the fastmath flag on flash-attention maxnumf",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32288703611",
-   "created_at": "2026-08-19T18:40:53Z",
-   "updated_at": "2026-08-19T20:17:33Z",
-   "actor": "JohnQinAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-19T19:25:04Z",
-     "completed_at": "2026-08-19T20:17:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32288703611/job/96197153562"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-19T19:24:25Z",
-     "completed_at": "2026-08-19T19:38:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32288703611/job/96197153650",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-19T19:25:18Z",
-     "completed_at": "2026-08-19T20:17:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32288703611/job/96197153746"
-    }
-   ]
   }
  ]
 }
