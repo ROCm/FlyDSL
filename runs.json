@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-20T00:56:35Z",
+ "updated": "2026-08-20T01:05:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32319484816,
+   "pr": 1033,
+   "commit": "6b6b45c6bdfad1c1717efb4363ac96a67e7a873f",
+   "branch": "john/lazy-rescale-nan",
+   "event": "pull_request",
+   "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32319484816",
+   "created_at": "2026-08-20T01:01:17Z",
+   "updated_at": "2026-08-20T01:03:41Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 32318912777,
    "pr": 1038,
@@ -1823,21 +1838,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32132113458",
    "created_at": "2026-08-18T11:31:02Z",
    "updated_at": "2026-08-18T11:31:14Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 32131673954,
-   "pr": null,
-   "commit": "745b186224bc670d5a484a8944432a4a0516b708",
-   "branch": "pr/fix-gfx1250-wave-size",
-   "event": "pull_request",
-   "title": "[ROCDL] Fix wave size for gfx1250 (wave32, not wave64)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32131673954",
-   "created_at": "2026-08-18T11:25:46Z",
-   "updated_at": "2026-08-18T11:27:05Z",
    "actor": "sjfeng1999",
    "jobs": []
   }
