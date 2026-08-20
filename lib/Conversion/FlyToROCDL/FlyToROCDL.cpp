@@ -412,7 +412,8 @@ public:
     } else {
       ptr = applySwizzleOnPtr(rewriter, loc, cast<TypedValue<LLVM::LLVMPointerType>>(ptr),
                               flyPtrTy.getSwizzle());
-      Value loaded = LLVM::LoadOp::create(rewriter, loc, loadTy, ptr);
+      unsigned align = flyPtrTy.getAlignment().getAlignment();
+      Value loaded = LLVM::LoadOp::create(rewriter, loc, loadTy, ptr, align);
       rewriter.replaceOp(op, loaded);
       return success();
     }
@@ -458,7 +459,8 @@ public:
     } else {
       ptr = applySwizzleOnPtr(rewriter, loc, cast<TypedValue<LLVM::LLVMPointerType>>(ptr),
                               flyPtrTy.getSwizzle());
-      LLVM::StoreOp::create(rewriter, loc, value, ptr);
+      unsigned align = flyPtrTy.getAlignment().getAlignment();
+      LLVM::StoreOp::create(rewriter, loc, value, ptr, align);
       rewriter.eraseOp(op);
       return success();
     }
