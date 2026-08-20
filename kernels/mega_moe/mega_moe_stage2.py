@@ -41,7 +41,7 @@ def _quantize_fp8_payload(v8, weight):
     vals = [weighted_v8[i] for i in range_constexpr(8)]
     local_max = fabs_f32(vals[0])
     for q in range_constexpr(1, 8):
-        local_max = local_max.maximumf(fabs_f32(vals[q]))
+        local_max = fx.max(local_max, fabs_f32(vals[q]))
     max_bits = local_max.bitcast(fx.Int32)
     for dpp_ctrl in (0xB1, 0x4E):
         remote_bits = rocdl.update_dpp(
@@ -54,7 +54,7 @@ def _quantize_fp8_payload(v8, weight):
             True,
         )
         remote_max = fx.Int32(remote_bits).bitcast(fx.Float32)
-        local_max = local_max.maximumf(remote_max)
+        local_max = fx.max(local_max, remote_max)
         max_bits = local_max.bitcast(fx.Int32)
     e8m0 = _fp8_scale(local_max)
     block_scale = (e8m0 << fx.Int32(23)).bitcast(fx.Float32)
@@ -550,9 +550,9 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
             )
             n_iters = skewed.select(strided_iters, contiguous_iters)
             active = m_slot < active_cu
-            for _it in range(fx.Int32(0), n_iters, fx.Int32(1)):
-                strided_m = m_slot + fx.Int32(_it) * active_cu
-                contiguous_m = m_tile0 + fx.Int32(_it)
+            for _it in range(n_iters):
+                strided_m = m_slot + _it * active_cu
+                contiguous_m = m_tile0 + _it
                 m_block = skewed.select(strided_m, contiguous_m)
                 if active:
                     unit_bx = m_block * fx.Int32(num_n_blocks) + n_block
@@ -576,11 +576,11 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
                 diff = total_m_blocks - m_tile0
                 rem = (diff > fx.Int32(0)).select(diff, fx.Int32(0))
                 n_iters = (rem < tiles_per_slot).select(rem, tiles_per_slot)
-            for _it in range(fx.Int32(0), n_iters, fx.Int32(1)):
+            for _it in range(n_iters):
                 if const_expr(persist_strided):
-                    m_block = m_slot + fx.Int32(_it) * fx.Int32(cu_num)
+                    m_block = m_slot + _it * fx.Int32(cu_num)
                 else:
-                    m_block = m_tile0 + fx.Int32(_it)
+                    m_block = m_tile0 + _it
                 unit_bx = m_block * fx.Int32(num_n_blocks) + n_block
                 fx.barrier()  # separate prev-iter epilog LDS reads from this iter's A-load into the LDS union
                 issue_all_a_loads(m_block * fx.Int32(BM))

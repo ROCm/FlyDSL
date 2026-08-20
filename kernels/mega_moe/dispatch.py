@@ -139,12 +139,12 @@ def _store_expert_metadata(
     tile_row_base = crfa(addr_tile_row_base)
     srcmap = crfa(addr_srcmap)
     base_tile = local_row_base // fx.Int32(fz_tile_m)
-    for tile in range(fx.Int32(0), num_tiles, 1):
+    for tile in range(num_tiles):
         metadata_index = base_tile + tile
         buffer_ops.buffer_store(ge, sorted_expert, metadata_index)
         buffer_ops.buffer_store(local_row_base + tile * fx.Int32(fz_tile_m), tile_row_base, metadata_index)
     padding = padded_rows - total_count
-    for pad in range(fx.Int32(0), padding, 1):
+    for pad in range(padding):
         buffer_ops.buffer_store(fx.Int32(invalid_source), srcmap, local_row_base + total_count + pad)
 
 
@@ -521,7 +521,7 @@ def emit_dispatch_plan(
             if valid_expert:
                 if const_expr(payload_tile_ready):
                     base_tile = local_row_base // fx.Int32(fz_tile_m)
-                    for tile in range(fx.Int32(0), num_tiles, 1):
+                    for tile in range(num_tiles):
                         tile_index = base_tile + tile
                         buffer_ops.buffer_store(fx.Int32(0), crfa(a_tile_ready), tile_index)
                         buffer_ops.buffer_store(fx.Int32(1), crfa(a_tile_expected), tile_index)

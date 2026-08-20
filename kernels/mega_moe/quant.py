@@ -47,7 +47,7 @@ def build_per_1x32_mx_quant_module(n: int, quant_mode: str):
             for chunk in range_constexpr(GROUP // 8):
                 raw = buffer_ops.buffer_load(in_rsrc, in_dw + fx.Int32(chunk * 4), vec_width=4, dtype=T.i32)
                 values = fx.Vector(raw).bitcast(fx.BFloat16).to(fx.Float32)
-                local_max = local_max.maximumf(fmath.absf(values).reduce(ReductionOp.MAX))
+                local_max = fx.max(local_max, fmath.absf(values).reduce(ReductionOp.MAX))
                 for elem in range_constexpr(8):
                     act.append(values[elem])
 
