@@ -23,14 +23,9 @@ GFX950_WAVE_SIZE = 64
 SPLIT_K_SEMAPHORE_MAX_LEN = 256
 
 
-def __barrier(vmcnt=0):
-    llvm.InlineAsmOp(
-        None,
-        [],
-        f"s_waitcnt vmcnt({vmcnt})\n\ts_barrier",
-        "",
-        has_side_effects=True,
-    )
+def wait_vmcnt_and_barrier(vmcnt=0):
+    rocdl.s_waitcnt(vmcnt=vmcnt)
+    rocdl.s_barrier()
 
 
 _compiled_cache_lock = Lock()
@@ -232,7 +227,7 @@ class SplitKProtocol:
                             "v,v",
                             has_side_effects=True,
                         )
-            __barrier(0)
+            wait_vmcnt_and_barrier(0)
             if self.tid == 0:
                 signal_ptr = get_llvm_ptr(
                     self.signal_ptr,
@@ -365,10 +360,6 @@ def get_wave_lds_offset(tid, async_load_bytes):
     )
 
 
-def make_wave_lds_ptr(ptr, wave_offset):
-    return fx.recast_iter(fx.Int8, ptr) + fx.Int32(wave_offset)
-
-
 def swizzled_col_idx(row, col, layout, block_k):
     elem_offset = fx.get_scalar(fx.crd2idx((row, col), layout))
     return elem_offset % block_k
@@ -380,25 +371,3 @@ def transposed_contiguous_idx(idx, k_idx, layout, rows):
     # vector that belongs at that position.
     elem_offset = fx.get_scalar(fx.crd2idx((idx, k_idx), layout))
     return elem_offset % rows
-
-
-def buffer_load_lds_inline(rsrc, lds_ptr, global_offset, DMA_BYTES):
-    buffer_load_asm_dict = {
-        16: "buffer_load_dwordx4",
-        8: "buffer_load_dwordx2",
-        4: "buffer_load_dword",
-    }
-    llvm.InlineAsmOp(
-        None,
-        [
-            llvm.IntToPtrOp(
-                ir.Type.parse("!llvm.ptr<3>"),
-                fx.as_ir_value(fx.ptrtoint(lds_ptr)),
-            ).result,
-            fx.as_ir_value(global_offset),
-            fx.as_ir_value(rsrc),
-        ],
-        f"s_mov_b32 m0, $0\n\t{buffer_load_asm_dict[DMA_BYTES]} $1, $2, 0 offen sc0 lds",
-        "s,v,s",
-        has_side_effects=True,
-    )

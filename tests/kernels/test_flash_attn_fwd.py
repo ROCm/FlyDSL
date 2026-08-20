@@ -4329,6 +4329,57 @@ def test_return_lse_rejects_fp8():
         )
 
 
+@_requires_gfx950
+@pytest.mark.parametrize("H", [8, 16, 32, 64])
+def test_xcd_swizzle_is_bit_identical(H):
+    """The head-slow remap must not change a single bit of the output.
+
+    It only re-derives (head, q_block) from the same linear workgroup id, so it
+    is bijective by construction -- but a mistake in the derivation would show
+    up as a permuted or partially-recomputed output rather than as an error, so
+    this pins it. S clears the auto-dispatch threshold (num_q_blocks >= 64 at
+    BLOCK_M=256) so both settings run on the shapes the remap targets.
+    """
+    S = 64 * 256
+    dtype = torch.bfloat16
+    torch.manual_seed(H)
+    q = _rand_lse(1, S, H, 128, dtype=dtype)
+    k, v = torch.randn_like(q), torch.randn_like(q)
+
+    def run(flag):
+        return flydsl_flash_attn_func(q, k, v, causal=False, dualwave_swp_xcd_swizzle=flag).clone()
+
+    off, on = run(False), run(True)
+    torch.cuda.synchronize()
+    assert torch.equal(off, on)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("xcd_swizzle", [None, True])
+def test_xcd_swizzle_heads_not_multiple_of_xcd(xcd_swizzle):
+    """H % 8 != 0 must fall back rather than mis-map, however the flag is set.
+
+    The remap divides the linear workgroup id by the q-block count to recover
+    the head, which only lands each head on one XCD when the head count divides
+    evenly into the 8 XCDs. Two guards enforce that: the dispatch condition
+    below auto-selects against it, and _init_dualwave_thread_mapping re-checks
+    NUM_HEADS_Q % NUM_XCD_GFX950 independently -- so forcing the flag on is safe
+    and simply does not engage the remap. Both paths are checked here.
+    """
+    S, H = 64 * 256, 12
+    dtype = torch.bfloat16
+    torch.manual_seed(H)
+    q = _rand_lse(1, S, H, 128, dtype=dtype)
+    k, v = torch.randn_like(q), torch.randn_like(q)
+
+    out = flydsl_flash_attn_func(q, k, v, causal=False, dualwave_swp_xcd_swizzle=xcd_swizzle)
+    torch.cuda.synchronize()
+    ref = F.scaled_dot_product_attention(
+        q.transpose(1, 2).float(), k.transpose(1, 2).float(), v.transpose(1, 2).float()
+    ).transpose(1, 2)
+    torch.testing.assert_close(out.float(), ref, atol=_ATOL_BF16, rtol=0)
+
+
 if __name__ == "__main__":
     main()
 
