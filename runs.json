@@ -1,8 +1,81 @@
 {
  "schema": 1,
- "updated": "2026-08-20T04:16:28Z",
+ "updated": "2026-08-20T04:45:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32332843149,
+   "pr": null,
+   "commit": "d2530b30ed85f199723b0d147ffa06377da6c3d2",
+   "branch": "main",
+   "event": "push",
+   "title": "[ROCDL] Accept IntegerAttr in the wait-counter wrappers (#1029)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32332843149",
+   "created_at": "2026-08-20T04:42:15Z",
+   "updated_at": "2026-08-20T04:43:31Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 32332800713,
+   "pr": null,
+   "commit": "1b51c136c9ccb6ece324569c80b5275d29156b3d",
+   "branch": "main",
+   "event": "push",
+   "title": "[FlyToROCDL] Honor fly pointer alignment in ptr.load/ptr.store loweri\u2026",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32332800713",
+   "created_at": "2026-08-20T04:41:33Z",
+   "updated_at": "2026-08-20T04:42:30Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 32331703456,
+   "pr": 1031,
+   "commit": "2f36fb3ffea89cf660fb5619b3b6e67059efdd33",
+   "branch": "coop-library",
+   "event": "pull_request",
+   "title": "[Ext][Coop] Add cooperative warp- and block-scope collectives",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32331703456",
+   "created_at": "2026-08-20T04:23:16Z",
+   "updated_at": "2026-08-20T04:42:24Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-20T04:43:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32331703456/job/96316671818"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-20T04:43:29Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32331703456/job/96316671823"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-20T04:42:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32331703456/job/96316671843"
+    }
+   ]
+  },
   {
    "run_id": 32324922381,
    "pr": 1020,
@@ -736,7 +809,7 @@
   },
   {
    "run_id": 32242923439,
-   "pr": 1030,
+   "pr": null,
    "commit": "4a1795f1582b004f2ff98432a43b6f66330e1078",
    "branch": "fix/fly-ptr-honor-alignment",
    "event": "pull_request",
@@ -779,7 +852,7 @@
   },
   {
    "run_id": 32242664701,
-   "pr": 1030,
+   "pr": null,
    "commit": "53ac9bfc2afa515ee218cc1d831e9f61a0a808db",
    "branch": "fix/fly-ptr-honor-alignment",
    "event": "pull_request",
@@ -794,7 +867,7 @@
   },
   {
    "run_id": 32242374335,
-   "pr": 1030,
+   "pr": null,
    "commit": "6a792e8b06ba1e74f3435cac205a68070bd98cac",
    "branch": "fix/fly-ptr-honor-alignment",
    "event": "pull_request",
@@ -1794,51 +1867,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 32143663070,
-   "pr": null,
-   "commit": "44130d43f372b6e76ba626209250443b408abee5",
-   "branch": "main",
-   "event": "push",
-   "title": "[Test] Run every RUN line in the MLIR FileCheck harness (#1021)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32143663070",
-   "created_at": "2026-08-18T13:39:45Z",
-   "updated_at": "2026-08-18T13:50:06Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 32143572153,
-   "pr": null,
-   "commit": "3d8fbf1d88680848ce850f6b1cc6225fa2ed843c",
-   "branch": "main",
-   "event": "push",
-   "title": "[ROCDL] Fix wave size for gfx1250 (wave32, not wave64) (#1024)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32143572153",
-   "created_at": "2026-08-18T13:38:49Z",
-   "updated_at": "2026-08-18T13:39:47Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 32143454942,
-   "pr": null,
-   "commit": "fb0fd9654be184e4853a273dc2a3f80f1c8470b1",
-   "branch": "main",
-   "event": "push",
-   "title": "[ROCDL] Add Global/BufferLoadAsyncLDS atoms (#1023)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32143454942",
-   "created_at": "2026-08-18T13:37:37Z",
-   "updated_at": "2026-08-18T13:39:28Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
