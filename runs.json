@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-20T11:47:24Z",
+ "updated": "2026-08-20T11:52:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32365748589,
+   "pr": null,
+   "commit": "3a02102e8dfe65d4d941d32165fb0ec45ae845aa",
+   "branch": "main",
+   "event": "push",
+   "title": "[Kernel][Perf] Enable the gmem->LDS async copy for f16/bf16 preshuffl\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32365748589",
+   "created_at": "2026-08-20T11:50:07Z",
+   "updated_at": "2026-08-20T11:50:27Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 32365669387,
+   "pr": 1008,
+   "commit": "6e333c81199709d25d6f45b7f51e042a7b405942",
+   "branch": "feat/preshuffle-async-copy-f16",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Enable the gmem->LDS async copy for f16/bf16 preshuffle GEMM",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32365669387",
+   "created_at": "2026-08-20T11:49:09Z",
+   "updated_at": "2026-08-20T11:49:43Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 32365353655,
    "pr": null,
@@ -10,11 +40,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix] Fix two A-tile loading bugs in the preshuffle GEMM (#1007)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32365353655",
    "created_at": "2026-08-20T11:45:17Z",
-   "updated_at": "2026-08-20T11:45:44Z",
+   "updated_at": "2026-08-20T11:50:08Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -85,13 +115,41 @@
    "branch": "fp8-softmax-normalisation",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357738168",
    "created_at": "2026-08-20T10:11:56Z",
-   "updated_at": "2026-08-20T10:52:01Z",
+   "updated_at": "2026-08-20T11:48:26Z",
    "actor": "JohnQinAMD",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-20T11:48:26Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357738168/job/96414342652"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-20T11:48:26Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357738168/job/96414342742"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-20T11:48:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357738168/job/96414342753"
+    }
+   ]
   },
   {
    "run_id": 32357145018,
@@ -1618,36 +1676,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32288703611/job/96197153746"
     }
    ]
-  },
-  {
-   "run_id": 32288313164,
-   "pr": 1033,
-   "commit": "5e0456e6ffb6cf6ddbb227538fd0aab85888ec13",
-   "branch": "john/lazy-rescale-nan",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32288313164",
-   "created_at": "2026-08-19T18:36:44Z",
-   "updated_at": "2026-08-19T18:40:16Z",
-   "actor": "JohnQinAMD",
-   "jobs": []
-  },
-  {
-   "run_id": 32279429189,
-   "pr": 1032,
-   "commit": "7be935fb0a89156c321e944859151d2bbf1f68db",
-   "branch": "convolution",
-   "event": "pull_request",
-   "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32279429189",
-   "created_at": "2026-08-19T17:03:26Z",
-   "updated_at": "2026-08-19T17:07:05Z",
-   "actor": "amd-nprotaso",
-   "jobs": []
   }
  ]
 }
