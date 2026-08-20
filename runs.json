@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-20T07:17:01Z",
+ "updated": "2026-08-20T07:28:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32344076593,
+   "pr": 1009,
+   "commit": "0e41bfb367a16662e190952cec0985068f1032a1",
+   "branch": "john/bf16-attn-xcd-swizzle",
+   "event": "pull_request",
+   "title": "[Fix] Restore the gfx950 XCD mapping for bf16 dense attention",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32344076593",
+   "created_at": "2026-08-20T07:27:13Z",
+   "updated_at": "2026-08-20T07:27:51Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 32342975516,
    "pr": 1020,
@@ -10,11 +25,11 @@
    "branch": "fp8-softmax-normalisation",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32342975516",
    "created_at": "2026-08-20T07:12:59Z",
-   "updated_at": "2026-08-20T07:15:12Z",
+   "updated_at": "2026-08-20T07:18:55Z",
    "actor": "JohnQinAMD",
    "jobs": []
   },
@@ -25,11 +40,11 @@
    "branch": "feat/rdna3-gemm-tile-selection",
    "event": "pull_request",
    "title": "[Kernel][Perf] Speed up the RDNA3 GEMM up to 1.85x by choosing the tile from the shape",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32342971326",
    "created_at": "2026-08-20T07:12:56Z",
-   "updated_at": "2026-08-20T07:15:09Z",
+   "updated_at": "2026-08-20T07:18:39Z",
    "actor": "vlluvia",
    "jobs": []
   },
@@ -1220,10 +1235,10 @@
    "event": "pull_request",
    "title": "[Fix] Restore the gfx950 XCD mapping for bf16 dense attention",
    "status": "completed",
-   "conclusion": "failure",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32233695138",
    "created_at": "2026-08-19T08:39:43Z",
-   "updated_at": "2026-08-20T07:11:56Z",
+   "updated_at": "2026-08-20T07:27:15Z",
    "actor": "JohnQinAMD",
    "jobs": []
   },
@@ -1666,52 +1681,6 @@
    "updated_at": "2026-08-19T00:13:27Z",
    "actor": "jhinpan",
    "jobs": []
-  },
-  {
-   "run_id": 32194740490,
-   "pr": 1027,
-   "commit": "865fcd1fd68195991f9faa640f6009afd4b2b002",
-   "branch": "skills/dedrift-and-fix-frontmatter",
-   "event": "pull_request",
-   "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32194740490",
-   "created_at": "2026-08-18T22:53:05Z",
-   "updated_at": "2026-08-18T22:54:57Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-18T22:54:52Z",
-     "completed_at": "2026-08-18T22:54:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32194740490/job/95896599895",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-18T22:54:53Z",
-     "completed_at": "2026-08-18T22:54:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32194740490/job/95896599900",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-18T22:54:52Z",
-     "completed_at": "2026-08-18T22:54:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32194740490/job/95896599979",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
