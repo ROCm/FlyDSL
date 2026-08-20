@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Generic, Optional, TypeVar
 
 T = TypeVar("T")
+NumberT = TypeVar("NumberT", int, float)
 
 
 class EnvOption(Generic[T]):
@@ -77,7 +78,38 @@ class OptBool(EnvOption[bool]):
         return raw.lower() in ("1", "true", "yes", "on")
 
 
-class OptInt(EnvOption[int]):
+class _OptNumber(EnvOption[NumberT]):
+    """Numeric environment option with optional min/max validation."""
+
+    def __init__(
+        self,
+        default: NumberT,
+        parser: Callable[[str], NumberT],
+        env_var: Optional[str] = None,
+        description: str = "",
+        min_value: Optional[NumberT] = None,
+        max_value: Optional[NumberT] = None,
+    ):
+        validator = None
+        if min_value is not None or max_value is not None:
+
+            def validator(v: NumberT) -> bool:
+                if min_value is not None and v < min_value:
+                    return False
+                if max_value is not None and v > max_value:
+                    return False
+                return True
+
+        super().__init__(default, env_var, description, validator)
+        self.parser = parser
+        self.min_value = min_value
+        self.max_value = max_value
+
+    def parse_value(self, raw: str) -> NumberT:
+        return self.parser(raw)
+
+
+class OptInt(_OptNumber[int]):
     """Integer environment option with optional min/max validation."""
 
     def __init__(
@@ -88,25 +120,17 @@ class OptInt(EnvOption[int]):
         min_value: Optional[int] = None,
         max_value: Optional[int] = None,
     ):
-        validator = None
-        if min_value is not None or max_value is not None:
-
-            def validator(v: int) -> bool:
-                if min_value is not None and v < min_value:
-                    return False
-                if max_value is not None and v > max_value:
-                    return False
-                return True
-
-        super().__init__(default, env_var, description, validator)
-        self.min_value = min_value
-        self.max_value = max_value
-
-    def parse_value(self, raw: str) -> int:
-        return int(raw)
+        super().__init__(
+            default,
+            int,
+            env_var,
+            description,
+            min_value,
+            max_value,
+        )
 
 
-class OptFloat(EnvOption[float]):
+class OptFloat(_OptNumber[float]):
     """Floating-point environment option with optional min/max validation."""
 
     def __init__(
@@ -117,22 +141,14 @@ class OptFloat(EnvOption[float]):
         min_value: Optional[float] = None,
         max_value: Optional[float] = None,
     ):
-        validator = None
-        if min_value is not None or max_value is not None:
-
-            def validator(v: float) -> bool:
-                if min_value is not None and v < min_value:
-                    return False
-                if max_value is not None and v > max_value:
-                    return False
-                return True
-
-        super().__init__(default, env_var, description, validator)
-        self.min_value = min_value
-        self.max_value = max_value
-
-    def parse_value(self, raw: str) -> float:
-        return float(raw)
+        super().__init__(
+            default,
+            float,
+            env_var,
+            description,
+            min_value,
+            max_value,
+        )
 
 
 class OptStr(EnvOption[str]):
@@ -261,7 +277,8 @@ class AotEnvManager(EnvManager):
     workers = OptInt(
         0,
         description=(
-            "Maximum concurrent worker processes; when unset, use the CPU and available-memory based automatic limit"
+            "Maximum concurrent worker processes; unset, empty, or non-positive values use the CPU and "
+            "available-memory based automatic limit"
         ),
     )
     mem_per_worker_gb = OptFloat(

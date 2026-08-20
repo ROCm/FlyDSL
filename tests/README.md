@@ -52,7 +52,7 @@ Use the same names as [`python/flydsl/utils/env.py`](../python/flydsl/utils/env.
 | IR dump | `FLYDSL_DUMP_IR`, `FLYDSL_DUMP_DIR` |
 | Device runtime kind | `FLYDSL_RUNTIME_KIND` |
 | ROCm arch hints (detection helpers) | `FLYDSL_GPU_ARCH`, `HSA_OVERRIDE_GFX_VERSION` |
-| AOT worker-process limit | `FLYDSL_AOT_WORKERS` (unset: automatic CPU/memory limit) |
+| AOT worker-process limit | `FLYDSL_AOT_WORKERS` (positive: explicit limit; unset, empty, zero, or negative: automatic CPU/memory limit) |
 | AOT automatic memory cap | `FLYDSL_AOT_MEM_PER_WORKER_GB` (default `2.0`; non-positive disables) |
 | AOT per-job timeout | `FLYDSL_AOT_TIMEOUT` (default `1200` seconds; non-positive disables) |
 | AOT abnormal-exit retries | `FLYDSL_AOT_MAX_RETRIES` (default `2`) |
@@ -63,9 +63,12 @@ executor. Its automatic memory cap requires the runtime `psutil` dependency and
 fails with an actionable error instead of silently disabling the cap when
 memory cannot be queried. A worker killed by `SIGKILL` (`exitcode=-9`, or shell
 form `137`; possible OOM) halves the worker limit before retrying and is not
-retried once the limit reaches one.
+retried once the limit reaches one. Retries are appended behind jobs that have
+not started yet instead of jumping to the front of the queue.
 Progress and final summary lines report terminal failure counts separately from
-the number of jobs that have finished.
+the number of jobs that have finished. Scheduler messages use the FlyDSL logger;
+set `FLYDSL_DEBUG_LOG_TO_CONSOLE=1` and `FLYDSL_DEBUG_LOG_LEVEL=INFO` to emit
+progress and summaries to the console.
 
 Failed results retain `compile_time=None` and include a machine-readable
 `failure` mapping. Its `kind` distinguishes `compile_error`,

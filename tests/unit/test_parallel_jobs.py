@@ -54,7 +54,10 @@ def _tracked_worker(kernel_name, index, state_path, lock_path, delay):
             fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
-def _crash_then_succeed(kernel_name, attempt_path, crashes):
+def _crash_then_succeed(kernel_name, attempt_path, crashes, order_path=None):
+    if order_path is not None:
+        with open(order_path, "a", encoding="utf-8") as order_file:
+            order_file.write(f"{kernel_name}\n")
     path = Path(attempt_path)
     attempt = int(path.read_text(encoding="utf-8")) + 1
     path.write_text(str(attempt), encoding="utf-8")
@@ -115,9 +118,33 @@ def _parallel_env(monkeypatch):
     monkeypatch.setenv("FLYDSL_AOT_MAX_RETRIES", "0")
 
 
+@pytest.fixture
+def log_messages(monkeypatch):
+    messages = []
+
+    def record(message, *args):
+        messages.append(message % args if args else message)
+
+    logger = SimpleNamespace(info=record, warning=record)
+    monkeypatch.setattr(parallel, "log", lambda: logger)
+    return messages
+
+
 def test_empty_jobs_do_not_invoke_worker(monkeypatch):
     monkeypatch.setenv("FLYDSL_AOT_WORKERS", "invalid")
     assert run_parallel_jobs(_success_worker, []) == []
+
+
+@pytest.mark.parametrize("workers", [None, "", "0", "-2"])
+def test_non_positive_or_empty_workers_use_automatic_limit(monkeypatch, workers):
+    if workers is None:
+        monkeypatch.delenv("FLYDSL_AOT_WORKERS", raising=False)
+    else:
+        monkeypatch.setenv("FLYDSL_AOT_WORKERS", workers)
+    monkeypatch.setattr(parallel, "_affinity_aware_cpu_count", lambda: 8)
+    monkeypatch.setattr(parallel, "_memory_worker_cap", lambda workers: workers)
+
+    assert parallel._get_max_workers(num_jobs=100) == 8
 
 
 def test_results_follow_input_order():
@@ -176,7 +203,47 @@ def test_crashed_worker_is_retried(monkeypatch, tmp_path):
     assert results[0]["compile_time"] is not None
 
 
-def test_sigkill_reduces_worker_limit_before_retry(monkeypatch, tmp_path, capsys):
+def test_retries_wait_behind_pending_jobs(monkeypatch, tmp_path):
+    monkeypatch.setenv("FLYDSL_AOT_WORKERS", "1")
+    monkeypatch.setenv("FLYDSL_AOT_MAX_RETRIES", "1")
+    order_path = tmp_path / "order.txt"
+    order_path.write_text("", encoding="utf-8")
+    attempt_paths = [tmp_path / f"attempt-{index}.txt" for index in range(3)]
+    for attempt_path in attempt_paths:
+        attempt_path.write_text("0", encoding="utf-8")
+    jobs = [
+        {
+            "kernel_name": "retry",
+            "attempt_path": str(attempt_paths[0]),
+            "crashes": 1,
+            "order_path": str(order_path),
+        },
+        {
+            "kernel_name": "pending-0",
+            "attempt_path": str(attempt_paths[1]),
+            "crashes": 0,
+            "order_path": str(order_path),
+        },
+        {
+            "kernel_name": "pending-1",
+            "attempt_path": str(attempt_paths[2]),
+            "crashes": 0,
+            "order_path": str(order_path),
+        },
+    ]
+
+    results = run_parallel_jobs(_crash_then_succeed, jobs)
+
+    assert all(result["compile_time"] is not None for result in results)
+    assert order_path.read_text(encoding="utf-8").splitlines() == [
+        "retry",
+        "pending-0",
+        "pending-1",
+        "retry",
+    ]
+
+
+def test_sigkill_reduces_worker_limit_before_retry(monkeypatch, tmp_path, log_messages):
     monkeypatch.setenv("FLYDSL_AOT_WORKERS", "2")
     monkeypatch.setenv("FLYDSL_AOT_MAX_RETRIES", "1")
     attempt_path = tmp_path / "attempt.txt"
@@ -198,10 +265,10 @@ def test_sigkill_reduces_worker_limit_before_retry(monkeypatch, tmp_path, capsys
 
     assert attempt_path.read_text(encoding="utf-8") == "2"
     assert all(result["compile_time"] is not None for result in results)
-    assert "possible OOM); reduced worker limit 2->1; retry 1/1" in capsys.readouterr().out
+    assert "possible OOM); reduced worker limit 2->1; retry 1/1" in "\n".join(log_messages)
 
 
-def test_sigkill_at_minimum_worker_limit_is_not_retried(monkeypatch, tmp_path, capsys):
+def test_sigkill_at_minimum_worker_limit_is_not_retried(monkeypatch, tmp_path, log_messages):
     monkeypatch.setenv("FLYDSL_AOT_WORKERS", "1")
     monkeypatch.setenv("FLYDSL_AOT_MAX_RETRIES", "2")
     attempt_path = tmp_path / "attempt.txt"
@@ -222,7 +289,7 @@ def test_sigkill_at_minimum_worker_limit_is_not_retried(monkeypatch, tmp_path, c
     assert results[0]["failure"]["kind"] == "possible_oom"
     assert results[0]["failure"]["exitcode"] == -signal.SIGKILL
     assert results[0]["failure"]["attempts"] == 1
-    assert "at the minimum worker limit; not retrying" in capsys.readouterr().out
+    assert "at the minimum worker limit; not retrying" in "\n".join(log_messages)
 
 
 def test_retry_exhaustion_returns_failure(monkeypatch, tmp_path):
@@ -252,7 +319,7 @@ def test_retry_exhaustion_returns_failure(monkeypatch, tmp_path):
     }
 
 
-def test_final_logs_report_permanent_failures(monkeypatch, capsys):
+def test_final_logs_report_permanent_failures(monkeypatch, log_messages):
     monkeypatch.setenv("FLYDSL_AOT_MAX_RETRIES", "2")
     jobs = [
         {"kernel_name": "success-0", "outcome": "success"},
@@ -263,7 +330,7 @@ def test_final_logs_report_permanent_failures(monkeypatch, capsys):
     ]
 
     results = run_parallel_jobs(_mixed_outcome_worker, jobs)
-    output = capsys.readouterr().out
+    output = "\n".join(log_messages)
 
     assert [result["compile_time"] for result in results] == [
         0.01,
@@ -275,7 +342,7 @@ def test_final_logs_report_permanent_failures(monkeypatch, capsys):
     for kernel_name in ("failed-0", "failed-1", "failed-2"):
         assert f"AOT job {kernel_name} worker crashed (exitcode=17); not retrying" in output
     assert "... 5/5 jobs finished (3 failed)" in output
-    assert ("[flydsl] AOT: 2 succeeded, 3 failed; 6 retries after abnormal worker exits") in output
+    assert "AOT: 2 succeeded, 3 failed; 6 retries after abnormal worker exits" in output
 
 
 def test_failure_results_preserve_distinct_causes():
@@ -375,6 +442,7 @@ def test_timed_out_worker_is_killed(monkeypatch):
     assert results[0]["failure"]["kind"] == "timeout"
     assert results[0]["failure"]["exitcode"] == -signal.SIGKILL
     assert results[0]["failure"]["attempts"] == 1
+    assert results[0]["failure"]["reason"] == "exceeded per-job timeout (0.05s); killed"
 
 
 def test_temporary_result_directory_is_removed(monkeypatch, tmp_path):

@@ -12,6 +12,7 @@ import signal
 import tempfile
 import time
 import traceback
+from collections import deque
 from collections.abc import Callable
 from multiprocessing.connection import wait as wait_for_sentinels
 from pathlib import Path
@@ -19,6 +20,7 @@ from typing import Any
 
 from .env import aot
 from .file import atomic_write
+from .logger import log
 
 _DEFAULT_MAX_WORKERS = 64
 _POSSIBLE_OOM_EXITCODES = {-signal.SIGKILL, 128 + signal.SIGKILL}
@@ -93,8 +95,10 @@ def _memory_worker_cap(default_workers: int) -> int:
 
 
 def _get_max_workers(num_jobs: int) -> int:
-    if "FLYDSL_AOT_WORKERS" in os.environ:
-        max_workers = max(aot.workers, 1)
+    workers_raw = os.environ.get("FLYDSL_AOT_WORKERS", "").strip()
+    configured_workers = aot.workers if workers_raw else 0
+    if configured_workers > 0:
+        max_workers = configured_workers
     else:
         max_workers = min(_affinity_aware_cpu_count(), _DEFAULT_MAX_WORKERS)
         max_workers = _memory_worker_cap(max_workers)
@@ -150,13 +154,12 @@ def _run_file_pool(
     failed_jobs = 0
     progress_stride = max(1, num_jobs // 20)
 
-    queue = list(range(num_jobs))
-    queue.reverse()
+    queue = deque(range(num_jobs))
     running: dict[Any, tuple[int, float | None]] = {}
 
     def launch() -> None:
         while queue and len(running) < max_workers:
-            index = queue.pop()
+            index = queue.popleft()
             out_path = os.path.join(result_dir, f"k{index}.json")
             try:
                 os.remove(out_path)
@@ -176,9 +179,11 @@ def _run_file_pool(
         completed += 1
         failed_jobs += int(is_failure)
         if completed % progress_stride == 0 or completed == num_jobs:
-            print(
-                f"  ... {completed}/{num_jobs} jobs finished ({failed_jobs} failed)",
-                flush=True,
+            log().info(
+                "... %d/%d jobs finished (%d failed)",
+                completed,
+                num_jobs,
+                failed_jobs,
             )
 
     def finish_failure(
@@ -197,9 +202,10 @@ def _run_file_pool(
             exitcode=exitcode,
             traceback_text=traceback_text,
         )
-        print(
-            f"[flydsl] AOT job {_job_label(jobs[index])} {reason}; not retrying",
-            flush=True,
+        log().warning(
+            "AOT job %s %s; not retrying",
+            _job_label(jobs[index]),
+            reason,
         )
         note_done(is_failure=True)
 
@@ -216,9 +222,12 @@ def _run_file_pool(
             attempts[index] += 1
             retries_used += 1
             queue.append(index)
-            print(
-                f"[flydsl] AOT job {_job_label(jobs[index])} {reason}; retry {attempts[index]}/{max_retries}",
-                flush=True,
+            log().warning(
+                "AOT job %s %s; retry %d/%d",
+                _job_label(jobs[index]),
+                reason,
+                attempts[index],
+                max_retries,
             )
         else:
             finish_failure(
@@ -358,7 +367,7 @@ def _run_file_pool(
                         retry_or_drop(
                             index,
                             kind="timeout",
-                            reason=(f"exceeded per-job timeout ({kernel_timeout:.0f}s); killed"),
+                            reason=f"exceeded per-job timeout ({kernel_timeout:g}s); killed",
                             exitcode=exitcode,
                         )
 
@@ -379,11 +388,12 @@ def _run_file_pool(
         running.clear()
 
     retry_label = "retry" if retries_used == 1 else "retries"
-    print(
-        f"[flydsl] AOT: {num_jobs - failed_jobs} succeeded, "
-        f"{failed_jobs} failed; {retries_used} {retry_label} "
-        "after abnormal worker exits",
-        flush=True,
+    log().info(
+        "AOT: %d succeeded, %d failed; %d %s after abnormal worker exits",
+        num_jobs - failed_jobs,
+        failed_jobs,
+        retries_used,
+        retry_label,
     )
     return results
 
@@ -412,9 +422,10 @@ def run_parallel_jobs(
         return []
 
     max_workers = _get_max_workers(len(jobs))
-    print(
-        f"[flydsl] AOT: {len(jobs)} jobs, {max_workers} worker processes",
-        flush=True,
+    log().info(
+        "AOT: %d jobs, %d worker processes",
+        len(jobs),
+        max_workers,
     )
 
     result_dir = tempfile.mkdtemp(prefix="flydsl_aot_results_")
