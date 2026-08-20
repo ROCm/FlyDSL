@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-20T05:27:14Z",
+ "updated": "2026-08-20T06:10:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,9 +14,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32335449457",
    "created_at": "2026-08-20T05:24:02Z",
-   "updated_at": "2026-08-20T05:25:21Z",
+   "updated_at": "2026-08-20T06:03:40Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-20T06:02:49Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32335449457/job/96330968360"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-20T06:03:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32335449457/job/96330968385"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-20T06:03:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32335449457/job/96330968461"
+    }
+   ]
   },
   {
    "run_id": 32332843149,
@@ -84,21 +112,22 @@
    "branch": "coop-library",
    "event": "pull_request",
    "title": "[Ext][Coop] Add cooperative warp- and block-scope collectives",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32331703456",
    "created_at": "2026-08-20T04:23:16Z",
-   "updated_at": "2026-08-20T04:43:55Z",
+   "updated_at": "2026-08-20T06:07:44Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T04:43:39Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32331703456/job/96316671818"
+     "completed_at": "2026-08-20T06:07:43Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32331703456/job/96316671818",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -113,11 +142,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T04:43:54Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32331703456/job/96316671843"
+     "completed_at": "2026-08-20T06:03:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32331703456/job/96316671843",
+     "log_fetch_failed": true
     }
    ]
   },
