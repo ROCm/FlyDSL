@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-20T16:24:21Z",
+ "updated": "2026-08-20T16:27:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32391751847,
+   "pr": 1045,
+   "commit": "0904606b807e804f3e62dae8e33e10460ca34337",
+   "branch": "john/attn-4gib-guard",
+   "event": "pull_request",
+   "title": "[Bugfix] Refuse a batch entry the buffer descriptor cannot address",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32391751847",
+   "created_at": "2026-08-20T16:23:51Z",
+   "updated_at": "2026-08-20T16:25:19Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 32386362772,
    "pr": 1028,
@@ -1809,51 +1824,6 @@
    "updated_at": "2026-08-19T20:20:41Z",
    "actor": "JohnQinAMD",
    "jobs": []
-  },
-  {
-   "run_id": 32297665721,
-   "pr": 1034,
-   "commit": "8a9eb36d1fc1f44fe906b48c13e5e403a0d6384e",
-   "branch": "john/maxnumf-fastmath",
-   "event": "pull_request",
-   "title": "[Fix] Restore the fastmath flag on flash-attention maxnumf",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32297665721",
-   "created_at": "2026-08-19T20:16:48Z",
-   "updated_at": "2026-08-19T23:19:09Z",
-   "actor": "JohnQinAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-19T20:56:56Z",
-     "completed_at": "2026-08-19T21:10:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32297665721/job/96223987125",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-19T20:57:07Z",
-     "completed_at": "2026-08-19T23:19:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32297665721/job/96223987140",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-19T20:57:19Z",
-     "completed_at": "2026-08-19T23:17:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32297665721/job/96223987212"
-    }
-   ]
   }
  ]
 }
