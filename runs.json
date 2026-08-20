@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-20T10:44:26Z",
+ "updated": "2026-08-20T10:46:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,11 +25,11 @@
    "branch": "cjl/norm_perf",
    "event": "pull_request",
    "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357145018",
    "created_at": "2026-08-20T10:04:59Z",
-   "updated_at": "2026-08-20T10:06:10Z",
+   "updated_at": "2026-08-20T10:44:36Z",
    "actor": "cschenjunlin",
    "jobs": []
   },
@@ -115,13 +115,41 @@
    "branch": "mega_moe_a4w4",
    "event": "pull_request",
    "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32353132079",
    "created_at": "2026-08-20T09:17:33Z",
-   "updated_at": "2026-08-20T10:21:04Z",
+   "updated_at": "2026-08-20T10:43:40Z",
    "actor": "Yaowu-Xiong",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-20T10:43:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32353132079/job/96398342490"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-20T10:43:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32353132079/job/96398342520"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-20T10:43:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32353132079/job/96398342575"
+    }
+   ]
   },
   {
    "run_id": 32352384346,
@@ -140,18 +168,18 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-20T10:27:46Z",
+     "started_at": "2026-08-20T10:43:35Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32352384346/job/96394471075"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-20T10:27:46Z",
+     "started_at": "2026-08-20T10:43:49Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32352384346/job/96394471079"
     },
@@ -183,11 +211,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T10:25:45Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32351009384/job/96392702377"
+     "completed_at": "2026-08-20T10:43:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32351009384/job/96392702377",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -334,11 +363,11 @@
    "branch": "ci/promote-bypass-git-cache",
    "event": "pull_request",
    "title": "[CI] Bypass runner git-cache in promote checkout",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32348910285",
    "created_at": "2026-08-20T08:27:37Z",
-   "updated_at": "2026-08-20T10:06:47Z",
+   "updated_at": "2026-08-20T10:42:51Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -681,11 +710,11 @@
    "branch": "john/lazy-rescale-nan",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32342714471",
    "created_at": "2026-08-20T07:09:31Z",
-   "updated_at": "2026-08-20T09:26:17Z",
+   "updated_at": "2026-08-20T10:43:03Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
