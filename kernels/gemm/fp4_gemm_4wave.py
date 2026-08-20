@@ -495,10 +495,14 @@ class ScaleGatherLDS:
         # elements, i.e. K//32 bytes per row.
         row_bytes = K // 32
         self.a_rsrc = fx.as_ir_value(
-            _buffer_ops.create_buffer_resource(a_scale, max_size=False, num_records_bytes=a_rows * row_bytes)
+            fx.rocdl.get_buffer_rsrc(
+                _buffer_ops.create_buffer_resource(a_scale, max_size=False, num_records_bytes=a_rows * row_bytes)
+            )
         )
         self.b_rsrc = fx.as_ir_value(
-            _buffer_ops.create_buffer_resource(b_scale, max_size=False, num_records_bytes=b_rows * row_bytes)
+            fx.rocdl.get_buffer_rsrc(
+                _buffer_ops.create_buffer_resource(b_scale, max_size=False, num_records_bytes=b_rows * row_bytes)
+            )
         )
         # Per-lane block / within-block index (loop-invariant).
         self._blk = lane_id // 16  # 0..3 -> which of the 4 blocks
@@ -751,8 +755,12 @@ def compile_fp4_gemm_4w(
         gl_off_a = _global_swizzle(lane_id, wave_id, K_BYTES, N_LDS_ROUNDS, False)
         gl_off_b = _global_swizzle(lane_id, wave_id, K_BYTES, N_LDS_ROUNDS, True)
 
-        a_rsrc = _buffer_ops.create_buffer_resource(A, max_size=False, num_records_bytes=c_m * K_BYTES)
-        b_rsrc = _buffer_ops.create_buffer_resource(B_T, max_size=False, num_records_bytes=c_n * K_BYTES)
+        a_rsrc = fx.rocdl.get_buffer_rsrc(
+            _buffer_ops.create_buffer_resource(A, max_size=False, num_records_bytes=c_m * K_BYTES)
+        )
+        b_rsrc = fx.rocdl.get_buffer_rsrc(
+            _buffer_ops.create_buffer_resource(B_T, max_size=False, num_records_bytes=c_n * K_BYTES)
+        )
         a_g2s = G2SLoaderAsm(a_rsrc, gl_off_a, N_TILES_A, wave_id, scopes=_sc, base_ptr=_base_ptr)
         b_g2s = G2SLoaderAsm(b_rsrc, gl_off_b, N_TILES_B, wave_id, scopes=_sc, base_ptr=_base_ptr)
         # Precompute the g2s wave-uniform LDS base into SGPR once (all 8 buffers share
