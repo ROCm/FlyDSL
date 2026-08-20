@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-20T21:33:18Z",
+ "updated": "2026-08-20T22:17:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "jhinpan/ci-isolate-run-artifacts",
    "event": "pull_request",
    "title": "fix(ci): isolate self-hosted runner artifacts",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32411734537",
    "created_at": "2026-08-20T20:00:24Z",
-   "updated_at": "2026-08-20T20:54:15Z",
+   "updated_at": "2026-08-20T22:13:44Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -30,20 +30,22 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T20:54:10Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32411734537/job/96578820213"
+     "completed_at": "2026-08-20T21:45:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32411734537/job/96578820213",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T20:54:14Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32411734537/job/96578820290"
+     "completed_at": "2026-08-20T22:13:43Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32411734537/job/96578820290",
+     "log_fetch_failed": true
     }
    ]
   },
