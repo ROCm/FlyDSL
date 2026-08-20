@@ -166,6 +166,7 @@ excludes it from the catalog above.
 | `fx.Numeric.shrui`, `fx.Numeric.addf` | `fx.arith.shrui(x, amount)`, `x + y` with a `fastmath` context | v0.4 |
 | `fx.Numeric.exp2` | `fx.math.exp2(x)` | v0.4 |
 | `fx.Numeric.shuffle_xor` | `fx.gpu.shuffle_xor(x, offset, width)` | v0.4 |
+| `fx.rocdl.BufferCopyLDS64b` | `fx.rocdl.BufferCopyLDS32b`, or `fx.rocdl.BufferCopyLDS128b` on gfx950. No AMD target has an 8-byte LDS DMA instruction, so this entry point could never emit a working copy; it now raises instead of silently failing instruction selection. | v0.4 |
 
 ## 4. What counts as a breaking change
 
