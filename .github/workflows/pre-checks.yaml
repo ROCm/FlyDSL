@@ -46,6 +46,12 @@ jobs:
           REVIEWDOG_REPORTER: ${{ github.event_name == 'pull_request' && 'github-pr-review' || 'github-check' }}
           REVIEWDOG_FILTER_MODE: ${{ github.event_name == 'pull_request' && 'diff_context' || 'nofilter' }}
 
+      - name: Reject new legacy typed arithmetic
+        run: python3 scripts/check_typed_arithmetic_usage.py
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+          HEAD_SHA: ${{ github.sha }}
+
   cpp-style:
     name: Check C++ Code Style
     runs-on: ubuntu-24.04

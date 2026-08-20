@@ -19,6 +19,7 @@ Usage::
 from .._mlir import ir
 from .._mlir.dialects import gpu
 from .._mlir.dialects._fly_enum_gen import AddressSpace
+from ..compiler.backends import current_target
 from ..compiler.protocol import dsl_align_of, dsl_size_of
 from .math import dsl_math_wrap_result
 from .meta import dsl_loc_tracing, tracing_option
@@ -46,6 +47,7 @@ __all__ = [
     "shuffle_down",
     "shuffle_idx",
     "known_block_size",
+    "num_warp_threads",
     "SharedAllocator",
 ]
 
@@ -113,6 +115,11 @@ def known_block_size():
     if size is None:
         raise RuntimeError("no compile-time block size is in scope.")
     return size
+
+
+def num_warp_threads():
+    """Lanes per warp on the target being compiled for, as a Python int."""
+    return current_target().warp_size
 
 
 thread_idx = Tuple3D(gpu.thread_id)

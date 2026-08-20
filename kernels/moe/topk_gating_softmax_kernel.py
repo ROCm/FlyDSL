@@ -205,7 +205,7 @@ def _emit_topk_gating_softmax_body(
             off = fx.Int32(THREADS_PER_TOKEN // (2 << _sh))
             peer = w.shuffle_xor(off, width_i32)
             if mode == "max":
-                w = w.maximumf(peer)
+                w = fx.max(w, peer)
             else:
                 w = w.addf(peer, fastmath=fm_fast)
         return w
@@ -314,7 +314,7 @@ def _emit_topk_gating_softmax_body(
             val_e = vector.extract(as_ir_value(atom_vec), dynamic_position=[], static_position=[v])
             xv = val_e if dtype_str == "f32" else val_e.extf(compute_type)
             x_list.append(xv)
-            thread_max = thread_max.maximumf(xv)
+            thread_max = fx.max(thread_max, xv)
 
     group_max = group_reduce(thread_max, "max")
 
@@ -364,7 +364,7 @@ def _emit_topk_gating_softmax_body(
 
     # Pass 5: leader writes weights/indices/tei (with optional renorm).
     c_eps = fx.Float32(1e-20)
-    denom = selected_sum.maximumf(c_eps)
+    denom = fx.max(selected_sum, c_eps)
     inv_denom = c_one_f / denom
 
     if (expert_lane == fx.Int32(0)) & (global_token < i32_num_tokens):
@@ -467,7 +467,7 @@ def build_topk_gating_softmax_module(
                 off = fx.Int32(THREADS_PER_TOKEN // (2 << _sh))
                 peer = w.shuffle_xor(off, width_i32)
                 if mode == "max":
-                    w = w.maximumf(peer)
+                    w = fx.max(w, peer)
                 else:
                     w = w.addf(peer, fastmath=fm_fast)
             return w
@@ -568,7 +568,7 @@ def build_topk_gating_softmax_module(
                 val_e = vector.extract(as_ir_value(atom_vec), dynamic_position=[], static_position=[v])
                 xv = val_e if dtype_str == "f32" else val_e.extf(compute_type)
                 x_list.append(xv)
-                thread_max = thread_max.maximumf(xv)
+                thread_max = fx.max(thread_max, xv)
 
         group_max = group_reduce(thread_max, "max")
 
@@ -632,7 +632,7 @@ def build_topk_gating_softmax_module(
         # Pass 5: Leader writes weights/indices/tei (with optional renorm)
         # ==================================================================
         c_eps = fx.Float32(1e-20)
-        denom = selected_sum.maximumf(c_eps)
+        denom = fx.max(selected_sum, c_eps)
         inv_denom = c_one_f / denom
 
         # Inline the leader-active predicate so the AST rewriter recognises it
