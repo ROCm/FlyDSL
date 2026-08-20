@@ -44,25 +44,12 @@ WMMA_N = 16
 WMMA_K = 16
 WAVE_SIZE = 32
 
-# K-padding for the "pad" LDS layout (bank conflict avoidance). The "kblock"
-# layout needs no pad; see lds_layout below.
+# K-padding for the "pad" LDS layout; "kblock" needs none.
 K_PAD = 8
 
 
 def _sched_plan(reg_m, reg_n, reg_k, g2s_chunks):
-    """The order the k-tile body is meant to issue in, as (group, count) pairs.
-
-    Left alone, LLVM hoists the whole ds_store block into the middle of the WMMA
-    stream, so each store's ``s_waitcnt vmcnt`` stalls the wave while the WMMAs
-    behind it wait. This spends the WMMA stream as cover instead: global loads
-    go out first, the next k-step's LDS reads hide under this k-step's math, and
-    the stores drain under the tail, which also leaves the ``lgkmcnt(0)`` in
-    front of the barrier with almost nothing left to wait for.
-
-    Built here, from Python ints, because the kernel body is traced and cannot
-    branch on values. The counts are hints: a group the dependences cannot
-    satisfy is dropped rather than honoured.
-    """
+    """Issue-order hints for the k-tile body as (group, count) pairs."""
     per_rk_wmma = reg_m * reg_n
     per_rk_dsrd = 2 * (reg_m + reg_n)  # each v16 operand is two 128-bit reads
     chunk = max(1, reg_n)
@@ -120,7 +107,6 @@ def create_wmma_gemm_module(
     out_dtype="bf16",
     *,
     rounding="rn",  # "rn" (round to nearest) or "rs" (stochastic rounding)
-    # Default 128x128x32 tile. Shape-based selection lives in rdna3_f16_gemm_autotune.
     reg_m=4,
     reg_n=4,
     reg_k=2,
@@ -131,7 +117,6 @@ def create_wmma_gemm_module(
     sched_hint=False,
     stagger=0,
     persistent_wgs=0,
-    # Row strides when operands are not tight. Padded strides break L2 set camping.
     lda=None,
     ldb=None,
     ldc=None,
@@ -143,9 +128,6 @@ def create_wmma_gemm_module(
         raise ValueError(
             f"leading dimensions must cover the operands: lda={ld_a}, ldb={ld_b} " f"need K={K}, ldc={ld_c} needs N={N}"
         )
-    # The G2S copy moves 128 bits per thread, so a row has to start 16-byte
-    # aligned or the vectorized load reads across the boundary. Silently
-    # producing NaN is the failure mode, so it is refused instead.
     vec_elems = 16 // (2 if in_dtype in ("bf16", "f16") else 4)
     if ld_a % vec_elems or ld_b % vec_elems:
         raise ValueError(
@@ -166,9 +148,6 @@ def create_wmma_gemm_module(
     NUM_WAVES = waves_m * waves_n  # 4
     THREADS_PER_BLOCK = NUM_WAVES * WAVE_SIZE  # 128
 
-    # One WMMA K-step is 16 elements and the v16 operand reads it as two 8-wide
-    # chunks, so BLOCK_K only has to be a multiple of 16. reg_k=1 (BLOCK_K=16) is
-    # what keeps the LDS tile small enough to fit more than one workgroup per CU.
     assert reg_k >= 1
     assert rounding in ("rn", "rs"), f"rounding must be 'rn' or 'rs', got {rounding!r}"
     if rounding == "rs":
@@ -181,29 +160,12 @@ def create_wmma_gemm_module(
     # ``row = tid // THRS_K, col = (tid % THRS_K) * LOAD_VEC``.
     THRS_K = BLOCK_K // LOAD_VEC
     THRS_M = THREADS_PER_BLOCK // THRS_K
-    # 128-bit chunks of A and B one thread moves per k-tile; equals both the
-    # global-load and the ds_store count in the loop body.
     G2S_CHUNKS = (BLOCK_M + BLOCK_N) * BLOCK_K // THREADS_PER_BLOCK // LOAD_VEC
     SCHED_PLAN = _sched_plan(reg_m, reg_n, reg_k, G2S_CHUNKS) if sched_hint else ()
     assert THRS_K * THRS_M == THREADS_PER_BLOCK
     assert BLOCK_M % THRS_M == 0 and BLOCK_N % THRS_M == 0
 
-    # Two ways to lay a tile out in LDS, and the choice is what decides which
-    # macro tiles are reachable at all:
-    #
-    #   "pad"    row-major, BLOCK_K + 8 elements per row. The pad is what keeps
-    #            the 128-bit reads off each other's banks, and it is the only
-    #            pad that does: the row start has to stay 16-byte aligned, which
-    #            leaves 0, 8, 16 and 24, and of those only 8 and 24 spread the
-    #            16 rows a read touches over all 32 banks.
-    #
-    #   "kblock" k-major in groups of 8, so element (row, k) sits at
-    #            ((k // 8) * rows + row) * 8 + k % 8. Consecutive rows are then
-    #            16 bytes apart, so the 8 lanes the LDS services per cycle cover
-    #            128 contiguous bytes -- every bank, once -- with no pad at all.
-    #
-    # Dropping the pad is worth 20% of the LDS budget, which is what brings a
-    # 256x256x32 tile inside the 64 KB a workgroup may allocate.
+    # "pad": row-major with K_PAD; "kblock": k-major, no pad (fits 256x256x32 in 64 KB).
     assert lds_layout in ("pad", "kblock")
     if lds_layout == "kblock":
         assert BLOCK_K % LOAD_VEC == 0
@@ -219,9 +181,6 @@ def create_wmma_gemm_module(
     assert N % BLOCK_N == 0
     assert K % BLOCK_K == 0
 
-    # The LDS row is written 128 bits at a time, so a pad that leaves the row
-    # length off a vector boundary tears every write. The kernel still runs and
-    # quietly returns NaN, which is a bad way to find out.
     if lds_layout == "pad" and (BLOCK_K + k_pad) % LOAD_VEC:
         raise ValueError(
             f"K_PAD={k_pad} leaves an LDS row of {BLOCK_K + k_pad} elements, "
@@ -237,16 +196,9 @@ def create_wmma_gemm_module(
 
     group_width = _group_width(grid_m, group_m)
 
-    # Decorrelate k-tile order across workgroups when the k-tile count is a power
-    # of two (wraparound is then a mask). Disabled on the persistent path.
     assert stagger >= 0
     stagger_step = int(stagger) if num_k_tiles & (num_k_tiles - 1) == 0 else 0
 
-    # ── Persistent whole-tile grid ──────────────────────────────────────
-    # One workgroup per output tile leaves the machine ragged whenever the tile
-    # count is not a multiple of the slot count. ``persistent_wgs=num_tiles``
-    # launches that many persistent workgroups; each owns a contiguous band of
-    # whole output tiles and runs them serially.
     num_tiles = grid_m * grid_n
     persist_wgs = int(persistent_wgs)
     if persist_wgs not in (0, num_tiles):
@@ -254,8 +206,6 @@ def create_wmma_gemm_module(
             f"persistent_wgs must be 0 (plain grid) or num_tiles={num_tiles} "
             f"(whole-tile persistent), got {persist_wgs}"
         )
-    # On the persistent path stagger rotates inside each tile's k walk instead
-    # of offsetting workgroups across the whole k dimension.
     persist_rot_step = int(stagger) if persist_wgs else 0
     if persist_wgs:
         stagger_step = 0
@@ -314,11 +264,6 @@ def create_wmma_gemm_module(
         # in the K dimension — each lane carries all 16 K-elements.
         lane16 = lane % 16
 
-        # Where this workgroup enters the k loop. Uniform across the block, so
-        # it lives in scalar registers and the wraparound below costs one SALU
-        # add and one SALU and per trip. Everything is forced to Int32 because
-        # the block id is index-typed while the loop counter reaching _gmem_load
-        # is not, and mixing the two fails the arith.addi verifier.
         if const_expr(stagger_step):
             k_first = fx.Int32(pid) * stagger_step % num_k_tiles
         else:
@@ -335,9 +280,6 @@ def create_wmma_gemm_module(
 
         wave_m = wave_id // waves_n
         wave_n = wave_id % waves_n
-
-        # Wave wm owns rows [wm*reg_m*16, +reg_m*16). The tiled_mma permutation
-        # below preserves this banding instead of interleaving repeats.
 
         # ============================================================
         # GMEM -> registers -> LDS, through the tiled copy
@@ -367,9 +309,6 @@ def create_wmma_gemm_module(
         def _lds_dst(buf_offset, base, rows, row_stride):
             ptr = fx.add_offset(lds_ptr, fx.make_int_tuple(buf_offset + base))
             if const_expr(lds_layout == "kblock"):
-                # (row, k) with k split as (k % 8, k // 8): the low part is
-                # contiguous so the 128-bit copy atom still sees eight adjacent
-                # elements, the high part strides a whole plane of rows.
                 layout = fx.make_layout(
                     (rows, (LOAD_VEC, BLOCK_K // LOAD_VEC)),
                     (LOAD_VEC, (1, rows * LOAD_VEC)),
@@ -446,8 +385,6 @@ def create_wmma_gemm_module(
 
         def _do_compute_rk(accs_in, rk, buf_offset, b_vecs):
             new_accs = list(accs_in)
-            # Prefetch the next A fragment one step ahead to overlap ds_load waits.
-            # Only effective together with sched_hint.
             a_next = _load_a_single_from_lds(rk, 0, buf_offset)
             for rm in range_constexpr(reg_m):
                 a_vec = a_next
@@ -496,10 +433,7 @@ def create_wmma_gemm_module(
         def _accumulate(pA_g, pB_g, rot=None):
             """Run the double-buffered pipeline over all k-tiles of one output tile."""
             if const_expr(persist_wgs):
-                # A previous visit's closing _compute_k_tile may still be
-                # reading the buffer this prologue is about to overwrite.
                 _barrier()
-            # --- PROLOGUE ---
             _gmem_load(pA_g, pB_g, _k_tile(fx.Int32(0), rot, num_k_tiles))
             _lds_store(0)
             _barrier()
@@ -574,7 +508,6 @@ def create_wmma_gemm_module(
             accs = _accumulate(pA_g, pB_g)
             _store_C(accs, bid_m, bid_n, pid)
         else:
-            # ── Persistent whole-tile grid ──────────────────────────
             pid32 = fx.Int32(pid)
             t_first = pid32 * num_tiles // persist_wgs
             t_last = (pid32 + 1) * num_tiles // persist_wgs - 1
@@ -599,8 +532,6 @@ def create_wmma_gemm_module(
         stream: fx.Stream,
         sr_seed: fx.Int32 = 0,
     ):
-        # 16x16x16 v16 WMMA atom over a waves_m x waves_n wave grid.
-        # Permutation keeps each wave on a contiguous row band.
         mma_atom = fx.make_mma_atom(fx.rocdl.WMMA(WMMA_M, WMMA_N, WMMA_K, elem_dtype, fx.Float32))
         tiled_mma = fx.make_tiled_mma(
             mma_atom,
