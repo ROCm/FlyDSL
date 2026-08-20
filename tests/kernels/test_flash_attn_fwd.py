@@ -4542,8 +4542,8 @@ def test_descriptor_span_guard(monkeypatch, over):
     The descriptor carries a 32-bit byte count and is addressed by a 32-bit
     voffset, so one entry at or over 2**32 bytes writes only (bytes mod 2**32)
     and reports nothing -- measured at 0 of 2**31 elements exactly on the bound,
-    and 1/3 of them at 1.5x. Reaching that for real needs 4 GiB of q, so the
-    bound is lowered here the way the fp8 flat-dim tests lower theirs.
+    and 1/3 of them at 1.5x, all of them wrong. Reaching the real bound needs a
+    4 GiB q, so the bound is lowered instead of the tensor being grown.
     """
     B, S, H, D = 1, 256, 8, 128
     entry_bytes = S * H * D * 2
