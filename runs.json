@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-20T06:32:25Z",
+ "updated": "2026-08-20T06:49:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32340953095,
+   "pr": 1037,
+   "commit": "11bea4528bb7f757b5269c132eef4d95fa405ea0",
+   "branch": "jhinpan/fix-exp2-fastmath",
+   "event": "pull_request",
+   "title": "[ROCDL] Lower approximate exp2 to native intrinsic",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32340953095",
+   "created_at": "2026-08-20T06:45:45Z",
+   "updated_at": "2026-08-20T06:47:35Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 32340410707,
+   "pr": 1035,
+   "commit": "ae902c06529a43e42d6e4814b04dd806d882c4b2",
+   "branch": "john/maxnumf-ambient-fastmath",
+   "event": "pull_request",
+   "title": "[Fix] Let fx.maxnumf inherit the ambient fastmath",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32340410707",
+   "created_at": "2026-08-20T06:38:03Z",
+   "updated_at": "2026-08-20T06:39:35Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 32335449457,
    "pr": null,
@@ -1833,67 +1863,6 @@
      "started_at": "2026-08-18T22:58:10Z",
      "completed_at": "2026-08-18T23:13:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32178004828/job/95890064541",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32176682172,
-   "pr": 1026,
-   "commit": "c67a304163e452cd9c9afa744be6314a47d62b74",
-   "branch": "jhinpan/softmax-bwd-bench",
-   "event": "pull_request",
-   "title": "[CI] Track Softmax backward in the benchmark dashboard",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32176682172",
-   "created_at": "2026-08-18T19:27:18Z",
-   "updated_at": "2026-08-18T19:41:11Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 32144957080,
-   "pr": 1007,
-   "commit": "d57c39991b472b0e538255205049aec732c412cd",
-   "branch": "fix/preshuffle-a-tile-bugs",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix two A-tile loading bugs in the preshuffle GEMM",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32144957080",
-   "created_at": "2026-08-18T13:53:00Z",
-   "updated_at": "2026-08-19T02:11:30Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-19T00:49:36Z",
-     "completed_at": "2026-08-19T01:57:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32144957080/job/95896843525",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-18T23:26:53Z",
-     "completed_at": "2026-08-18T23:41:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32144957080/job/95896843540",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-19T00:54:16Z",
-     "completed_at": "2026-08-19T02:11:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32144957080/job/95896843552",
      "log_fetch_failed": true
     }
    ]
