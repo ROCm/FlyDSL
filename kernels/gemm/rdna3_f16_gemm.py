@@ -94,11 +94,7 @@ def _sched_plan(reg_m, reg_n, reg_k, g2s_chunks):
 def _group_width(grid_m, group_m):
     """Largest grouping width <= group_m that divides grid_m.
 
-    ``_swizzle_tile_id`` derives bid_m from a fixed group width, so a grid_m that
-    is not a multiple of it makes the final group address tiles past the end of
-    the grid. That is reachable at the default 128x128 tile: on gfx1100 it writes
-    a wrong C at M of 1152, 1280 and 1664, and faults outright at 1536 and 2560,
-    depending on whether the address past the grid happens to be mapped.
+    ``_swizzle_tile_id`` requires a group width that divides grid_m.
     """
     return max(d for d in range(1, min(group_m, grid_m) + 1) if grid_m % d == 0)
 
@@ -124,10 +120,7 @@ def create_wmma_gemm_module(
     out_dtype="bf16",
     *,
     rounding="rn",  # "rn" (round to nearest) or "rs" (stochastic rounding)
-    # 128x128x32. That tile is right once the problem is large enough to fill the
-    # grid, but it cuts only 4 workgroups at 256x256 on a 96-CU part, so most CUs
-    # idle. Choosing a tile from the shape is worth up to 3.0x there and lives in
-    # rdna3_f16_gemm_autotune, which drives these arguments.
+    # Default 128x128x32 tile. Shape-based selection lives in rdna3_f16_gemm_autotune.
     reg_m=4,
     reg_n=4,
     reg_k=2,
@@ -138,12 +131,7 @@ def create_wmma_gemm_module(
     sched_hint=False,
     stagger=0,
     persistent_wgs=0,
-    # Row strides of the operands, when the caller has room to make them
-    # something other than tight. A tile reads BLOCK_K of a row at a time, which
-    # at K=2048 in bf16 is a 64-byte run every 4096 bytes, and 4096 is exactly
-    # the spacing that camps on one set of L2. rocBLAS gains 1.20x on this shape
-    # from ld+32 alone (255.71 -> 212.86 us), so it is worth offering even though
-    # stagger already covers part of the same ground.
+    # Row strides when operands are not tight. Padded strides break L2 set camping.
     lda=None,
     ldb=None,
     ldc=None,
@@ -249,23 +237,8 @@ def create_wmma_gemm_module(
 
     group_width = _group_width(grid_m, group_m)
 
-    # Every workgroup walks the k-tiles in the same order, so at any instant the
-    # whole machine is reading the same k-slice of A and of B. When the row
-    # stride is a power of two those reads land on a narrow set of memory
-    # channels and queue behind each other. Measured at 2048 cubed with M and N
-    # pinned so the grid never changes: K=2048 (4096-byte rows) runs 67.4
-    # TFLOP/s while 1920, 1984, 2112, 2176 and 2304 all sit at 70.0-71.9. The
-    # dip is worth 6.5%.
-    #
-    # Starting each workgroup at a different k-tile and wrapping around
-    # decorrelates them. ``stagger`` is the step in k-tiles between the starts
-    # of consecutive workgroup ids; the swizzle hands consecutive ids adjacent
-    # row bands of A, which are exactly the ones worth separating. rocBLAS
-    # solves the same problem the same way and every solution it picks at this
-    # shape carries StaggerU=32.
-    #
-    # Only wired up when the k-tile count is a power of two, so the wraparound
-    # is a mask rather than a division on a runtime value.
+    # Decorrelate k-tile order across workgroups when the k-tile count is a power
+    # of two (wraparound is then a mask). Disabled on the persistent path.
     assert stagger >= 0
     stagger_step = int(stagger) if num_k_tiles & (num_k_tiles - 1) == 0 else 0
 
@@ -363,12 +336,8 @@ def create_wmma_gemm_module(
         wave_m = wave_id // waves_n
         wave_n = wave_id % waves_n
 
-        # Wave wm owns the contiguous row band [wm*reg_m*16, +reg_m*16). A
-        # tiled_mma stamps its wave grid across the tile instead, putting repeat
-        # rm at row (rm*waves_m + wm)*16; measured on gfx1100 that interleaving
-        # costs 62% at 3072x3072x1024 (269 -> 436 us) while gaining 3-8% on the
-        # medium shapes, so a tiled_mma standing in for this loop has to carry a
-        # permutation that restores the banding rather than adopt the default.
+        # Wave wm owns rows [wm*reg_m*16, +reg_m*16). The tiled_mma permutation
+        # below preserves this banding instead of interleaving repeats.
 
         # ============================================================
         # GMEM -> registers -> LDS, through the tiled copy
@@ -477,23 +446,8 @@ def create_wmma_gemm_module(
 
         def _do_compute_rk(accs_in, rk, buf_offset, b_vecs):
             new_accs = list(accs_in)
-            # Each A fragment feeds reg_n back-to-back WMMAs. Emitting its read
-            # immediately before its first consumer lets the register allocator
-            # give every rm the same quad, and then the read for rm+1 cannot
-            # issue until the WMMAs on rm have retired -- the body ends up with
-            # a full ``lgkmcnt(0)`` drain in front of each group of reg_n WMMAs
-            # instead of a partial wait. Issuing one fragment ahead is what
-            # breaks that: the read in flight and the one being consumed need
-            # different registers, so the wait has something to overlap.
-            #
-            # Only survives together with sched_hint. On its own the machine
-            # scheduler sinks the read back down onto its consumer and the ISA
-            # comes out unchanged at any prefetch depth; the group barriers are
-            # what hold the reads up front for the allocator to see. Measured as
-            # a pair at 256x256x32, worth 5% (109.1 -> 103.9 ms at 16384 cubed)
-            # and 9 lgkmcnt(0) drains per k-tile down to 4. Neither shows up in
-            # an instruction histogram -- the counts and the register total are
-            # the same, only the order changes.
+            # Prefetch the next A fragment one step ahead to overlap ds_load waits.
+            # Only effective together with sched_hint.
             a_next = _load_a_single_from_lds(rk, 0, buf_offset)
             for rm in range_constexpr(reg_m):
                 a_vec = a_next
@@ -509,16 +463,7 @@ def create_wmma_gemm_module(
             return new_accs
 
         def _compute_k_tile(accs_in, buf_offset):
-            """All reg_k WMMA steps over one LDS buffer.
-
-            Step rk reads B into the registers step rk-1 is still using, so its
-            reads cannot issue until that step's WMMAs retire, and the wait in
-            front of them is a full lgkmcnt(0) drain rather than a partial one.
-            Reading every step's B up front instead does remove that dependence,
-            and it loses: 2*reg_n*(reg_k-1) more live registers pushes the
-            allocator into recycling the A fragments harder, and the drains go
-            from 4 per k-tile to 8. Measured at 256x256x32, 104.0 -> 118.3 ms.
-            """
+            """All reg_k WMMA steps over one LDS buffer."""
             new_accs = list(accs_in)
             for rk in range_constexpr(reg_k):
                 new_accs = _do_compute_rk(new_accs, rk, buf_offset, _load_b_from_lds(rk, buf_offset))
@@ -654,11 +599,8 @@ def create_wmma_gemm_module(
         stream: fx.Stream,
         sr_seed: fx.Int32 = 0,
     ):
-        # 16x16x16 v16 WMMA atom (gfx11.wmma) over a waves_m x waves_n wave grid.
-        # The permutation spans the whole block tile and remaps the natural
-        # (atom, wave, repeat) coordinate so wave wm keeps the contiguous band
-        # [wm*reg_m*16, +reg_m*16); the default stamping interleaves the repeats
-        # instead, which measured 62% slower at 3072x3072x1024.
+        # 16x16x16 v16 WMMA atom over a waves_m x waves_n wave grid.
+        # Permutation keeps each wave on a contiguous row band.
         mma_atom = fx.make_mma_atom(fx.rocdl.WMMA(WMMA_M, WMMA_N, WMMA_K, elem_dtype, fx.Float32))
         tiled_mma = fx.make_tiled_mma(
             mma_atom,
