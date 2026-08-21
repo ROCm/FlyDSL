@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-21T19:14:13Z",
+ "updated": "2026-08-21T19:44:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -70,21 +70,22 @@
    "branch": "jhinpan/fix-exp2-fastmath",
    "event": "pull_request",
    "title": "[ROCDL] Lower approximate exp2 to native intrinsic",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32503825131",
    "created_at": "2026-08-21T16:36:52Z",
-   "updated_at": "2026-08-21T17:31:59Z",
+   "updated_at": "2026-08-21T19:41:12Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-21T17:17:36Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32503825131/job/96850235134"
+     "completed_at": "2026-08-21T19:41:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32503825131/job/96850235134",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
