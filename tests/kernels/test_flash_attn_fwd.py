@@ -2689,6 +2689,12 @@ def main():
         dest="dualwave_swp_lazy_rescale",
         help="Disable the DUALWAVE_SWP lazy online-softmax rescale (default: on for bf16, off for fp8)",
     )
+    parser.add_argument(
+        "--lazy-rescale",
+        action="store_true",
+        dest="dualwave_swp_lazy_rescale",
+        help="Force the lazy rescale on, including for fp8 where it is off by default",
+    )
     parser.set_defaults(dualwave_swp_lazy_rescale=None)
     parser.add_argument(
         "--no-setprio",
