@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
-// RUN: %fly-opt %s --pass-pipeline="builtin.module(gpu.module(convert-fastmath-ops))" | FileCheck %s
-// RUN: %fly-opt %s --pass-pipeline="builtin.module(gpu.module(convert-fastmath-ops))" | FileCheck %s --check-prefix=VECTOR
+// RUN: %fly-opt %s --pass-pipeline="builtin.module(gpu.module(convert-rocdl-fastmath-ops))" | FileCheck %s
+// RUN: %fly-opt %s --pass-pipeline="builtin.module(gpu.module(convert-rocdl-fastmath-ops))" | FileCheck %s --check-prefix=VECTOR
 // RUN: %fly-opt %s --convert-fly-to-rocdl | FileCheck %s --check-prefix=FLY
 
 module {

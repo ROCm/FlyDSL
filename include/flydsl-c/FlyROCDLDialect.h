@@ -13,7 +13,7 @@ extern "C" {
 
 MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(FlyROCDL, fly_rocdl);
 
-MLIR_CAPI_EXPORTED void mlirRegisterConvertFastMathOpsPass(void);
+MLIR_CAPI_EXPORTED void mlirRegisterConvertROCDLFastMathOpsPass(void);
 MLIR_CAPI_EXPORTED void mlirRegisterFlyToROCDLConversionPass(void);
 MLIR_CAPI_EXPORTED void mlirRegisterFlyROCDLClusterAttrPass(void);
 

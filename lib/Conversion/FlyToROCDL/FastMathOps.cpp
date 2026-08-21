@@ -15,7 +15,7 @@
 #include <utility>
 
 namespace mlir {
-#define GEN_PASS_DEF_CONVERTFASTMATHOPSPASS
+#define GEN_PASS_DEF_CONVERTROCDLFASTMATHOPSPASS
 #include "flydsl/Conversion/FlyToROCDL/Passes.h.inc"
 } // namespace mlir
 
@@ -81,10 +81,11 @@ void populateFastMathOpPatterns(MLIRContext *context, RewritePatternSet &pattern
    ...);
 }
 
-class ConvertFastMathOpsPass
-    : public mlir::impl::ConvertFastMathOpsPassBase<ConvertFastMathOpsPass> {
+class ConvertROCDLFastMathOpsPass
+    : public mlir::impl::ConvertROCDLFastMathOpsPassBase<ConvertROCDLFastMathOpsPass> {
 public:
-  using mlir::impl::ConvertFastMathOpsPassBase<ConvertFastMathOpsPass>::ConvertFastMathOpsPassBase;
+  using mlir::impl::ConvertROCDLFastMathOpsPassBase<
+      ConvertROCDLFastMathOpsPass>::ConvertROCDLFastMathOpsPassBase;
 
   void runOnOperation() override {
     MLIRContext *context = &getContext();

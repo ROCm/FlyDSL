@@ -3,7 +3,7 @@
 
 include "mlir/Pass/PassBase.td"
 
-def ConvertFastMathOpsPass : Pass<"convert-fastmath-ops", "gpu::GPUModuleOp"> {
+def ConvertROCDLFastMathOpsPass : Pass<"convert-rocdl-fastmath-ops", "gpu::GPUModuleOp"> {
   let summary = "Lower approximate math operations to native ROCDL operations";
   let description = [{
     Rewrites supported neutral math operations carrying the `afn` fast-math
