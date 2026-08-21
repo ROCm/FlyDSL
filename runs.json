@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-21T08:10:50Z",
+ "updated": "2026-08-21T08:17:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -55,11 +55,11 @@
    "branch": "zhimding/jobs_parallel_0819",
    "event": "pull_request",
    "title": "[AOT] Add resilient parallel job scheduler",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457110814",
    "created_at": "2026-08-21T07:05:26Z",
-   "updated_at": "2026-08-21T07:06:56Z",
+   "updated_at": "2026-08-21T08:15:56Z",
    "actor": "zhiding512",
    "jobs": []
   },
@@ -164,11 +164,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-21T08:00:06Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453264432/job/96700926244"
+     "completed_at": "2026-08-21T08:12:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453264432/job/96700926244",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -216,9 +217,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-21T07:29:40Z",
+     "started_at": "2026-08-21T08:13:23Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453263514/job/96701546459"
     }
@@ -305,11 +306,11 @@
    "branch": "feat/rdna3-gemm-tile-selection",
    "event": "pull_request",
    "title": "[Kernel][Perf] Speed up the RDNA3 GEMM up to 1.85x by choosing the tile from the shape",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32451534261",
    "created_at": "2026-08-21T05:42:25Z",
-   "updated_at": "2026-08-21T07:27:55Z",
+   "updated_at": "2026-08-21T08:15:32Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -335,11 +336,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-21T07:27:54Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32451534261/job/96687716602"
+     "completed_at": "2026-08-21T08:15:31Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32451534261/job/96687716602",
+     "log_fetch_failed": true
     }
    ]
   },
