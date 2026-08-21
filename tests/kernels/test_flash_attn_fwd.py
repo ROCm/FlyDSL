@@ -4676,3 +4676,60 @@ def test_fp8_flat_overflow_guard_covers_every_tensor(monkeypatch, case):
     monkeypatch.setattr(flash_attn_interface, "_FP8_MAX_FLAT_ELEMS", bound)
     with pytest.raises(NotImplementedError, match="int32"):
         flydsl_flash_attn_func(qq, kq, vq, **kw)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("modifier", ["bias", "alibi_slopes", "sink"])
+def test_fp8_split_still_rejects_modifiers(monkeypatch, modifier):
+    """The flat-dim split must not swallow an unsupported modifier.
+
+    It runs before the fp8 modifier check and does not forward bias, alibi or
+    sink, so a call large enough to split used to return plain attention while
+    the same call one element smaller raised.
+    """
+    B, S, H, D = 2, 256, 8, 128
+    monkeypatch.setattr(flash_attn_interface, "_FP8_MAX_FLAT_ELEMS", B * S * H * D // 2)
+    fp8 = torch.float8_e4m3fn
+    q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16).to(fp8)
+    k, v = q.clone(), q.clone()
+    scale = torch.ones(1, device="cuda")
+    kw = dict(causal=False, q_descale=scale, k_descale=scale, v_descale=scale)
+    arg = {
+        "bias": torch.zeros(S, S, device="cuda", dtype=torch.bfloat16),
+        "alibi_slopes": torch.zeros(H, device="cuda", dtype=torch.float32),
+        "sink": torch.zeros(H, device="cuda", dtype=torch.float32),
+    }[modifier]
+    with pytest.raises(NotImplementedError, match=f"{modifier} is not supported for fp8"):
+        flydsl_flash_attn_func(q, k, v, **{modifier: arg}, **kw)
+
+
+@_requires_gfx950
+def test_fp8_split_result_survives_a_non_current_stream(monkeypatch):
+    """The split must not be consumed on a stream that is not the one it ran on.
+
+    Every launch goes to ``stream``; building the result on the ambient stream
+    reads it while those kernels are still queued, and the damage survives a
+    later synchronize because the copy already happened.
+    """
+    B, S, H, D = 2, 512, 8, 128
+    fp8 = torch.float8_e4m3fn
+    torch.manual_seed(0)
+    q = (torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1).to(fp8)
+    k, v = q.clone(), q.clone()
+    scale = torch.ones(1, device="cuda")
+    kw = dict(causal=False, q_descale=scale, k_descale=scale, v_descale=scale)
+
+    ref = flydsl_flash_attn_func(q, k, v, **kw)
+    torch.cuda.synchronize()
+
+    # over the whole tensor, under one batch entry, so it splits and each launch fits
+    monkeypatch.setattr(flash_attn_interface, "_FP8_MAX_FLAT_ELEMS", B * S * H * D * 3 // 4)
+    side = torch.cuda.Stream()
+    filler = torch.randn(4096, 4096, device="cuda")
+    with torch.cuda.stream(side):
+        for _ in range(20):  # keep the stream busy so the attention starts late
+            filler = filler @ filler.T
+    got = flydsl_flash_attn_func(q, k, v, stream=side, **kw)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(got.float(), ref.float(), rtol=0, atol=0)

@@ -816,6 +816,19 @@ def flydsl_flash_attn_func(
     if dtype_str == "fp8" and paged_kv:
         raise NotImplementedError("flydsl_flash_attn_func: fp8 flash_attn does not support paged KV")
 
+    has_bias = bias is not None
+    has_alibi = alibi_slopes is not None
+    has_sink = sink is not None
+    for _name, _t in (("bias", bias), ("alibi_slopes", alibi_slopes), ("sink", sink)):
+        if _t is None:
+            continue
+        if paged_kv and _name != "bias":
+            raise NotImplementedError(f"flydsl_flash_attn_func: {_name} is not supported for paged KV")
+        if dtype_str == "fp8":
+            raise NotImplementedError(f"flydsl_flash_attn_func: {_name} is not supported for fp8")
+        if not _t.is_cuda or _t.device != q.device:
+            raise ValueError(f"flydsl_flash_attn_func: {_name} must be a CUDA tensor on {q.device}, got {_t.device}")
+
     # The fp8 path flattens Q/K/V/O to 1-D and the C-ABI packs a dynamic dim as
     # int32, so a launch aborts once any of them reaches 2**31 (S >= 131072 at
     # D=128, H=64). K/V are checked too: cross-attention can hold a short Q and
@@ -857,30 +870,22 @@ def flydsl_flash_attn_func(
             debug_counts=debug_counts,
             stream=stream,
         )
-        parts = []
+        if out is None:
+            # Allocate once and hand each launch its own slice. Concatenating
+            # afterwards would consume the parts on the ambient stream while the
+            # kernels are still running on `stream`, and would hold two full
+            # outputs at a size where one is already several GB.
+            out = torch.empty(
+                q.shape, dtype=torch.bfloat16 if dtype_str == "fp8" else q.dtype, device=q.device
+            )
         for i in range(q.shape[0]):
             sl = slice(i, i + 1)
-            o = flydsl_flash_attn_func(
-                q[sl].contiguous(), k[sl].contiguous(), v[sl].contiguous(), out=None if out is None else out[sl], **kw
+            flydsl_flash_attn_func(
+                q[sl].contiguous(), k[sl].contiguous(), v[sl].contiguous(), out=out[sl], **kw
             )
-            parts.append(o[0] if isinstance(o, (tuple, list)) else o)
-        # Each call already wrote into its own out[sl] view; concatenating would
-        # copy several GB again and return a different tensor than was passed.
-        return out if out is not None else torch.cat(parts, dim=0)
+        return out
     if return_lse and paged_kv:
         raise NotImplementedError("flydsl_flash_attn_func: return_lse is not supported for paged KV")
-    has_bias = bias is not None
-    has_alibi = alibi_slopes is not None
-    has_sink = sink is not None
-    for _name, _t in (("bias", bias), ("alibi_slopes", alibi_slopes), ("sink", sink)):
-        if _t is None:
-            continue
-        if paged_kv and _name != "bias":
-            raise NotImplementedError(f"flydsl_flash_attn_func: {_name} is not supported for paged KV")
-        if dtype_str == "fp8":
-            raise NotImplementedError(f"flydsl_flash_attn_func: {_name} is not supported for fp8")
-        if not _t.is_cuda or _t.device != q.device:
-            raise ValueError(f"flydsl_flash_attn_func: {_name} must be a CUDA tensor on {q.device}, got {_t.device}")
     if has_bias:
         if bias.dtype != q.dtype:
             raise ValueError(f"flydsl_flash_attn_func: bias dtype must match q dtype {q.dtype}, got {bias.dtype}")
