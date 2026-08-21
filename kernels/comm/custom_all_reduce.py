@@ -7,9 +7,8 @@ Provides FlyDSL-generated allreduce kernels with cross-GPU signal
 protocol for multi-GPU communication on ROCm.
 """
 
-from contextlib import contextmanager
-
 import os
+from contextlib import contextmanager
 
 import torch
 
@@ -161,9 +160,7 @@ class FlyDSLAllreduce:
         rocm_path = os.environ.get("ROCM_PATH")
         if rocm_path:
             candidates.extend(
-                os.path.join(rocm_path, lib_dir, name)
-                for lib_dir in ("lib", "lib64")
-                for name in sonames
+                os.path.join(rocm_path, lib_dir, name) for lib_dir in ("lib", "lib64") for name in sonames
             )
         candidates.extend(sonames)
 
