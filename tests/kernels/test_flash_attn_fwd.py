@@ -4537,11 +4537,10 @@ def test_sink_lse_cross_attn_skipped_blocks(Sq, Skv):
 @_requires_gfx950
 @pytest.mark.parametrize("k_scale", [8.0, 32.0, 64.0])
 def test_lazy_rescale_survives_a_wide_score_range(k_scale):
-    """A widened logit spread must not break the lazy online rescale.
+    """A widened logit spread must not break the lazy rescale.
 
-    Scaling K widens the spread; near-uniform attention, which every other test
-    here uses, never reaches the branch. The eager path is the reference -- the
-    two are mathematically the same.
+    Every other test here uses near-uniform attention, which never reaches the
+    branch. The eager path is the reference; the two are mathematically the same.
     """
     B, S, H, D = 1, 4096, 8, 128
     torch.manual_seed(0)
@@ -4569,22 +4568,28 @@ def test_lazy_rescale_survives_a_wide_score_range(k_scale):
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("k_scale", [200.0, 5000.0])
-def test_fp8_lazy_rescale_keeps_the_running_max_monotonic(k_scale):
-    """The fp8 lazy path must not rebase its running max downwards.
+def test_fp8_lazy_rescale_keeps_the_running_max_monotonic():
+    """Successive downward rebases must not multiply into an overflow.
 
-    The branch is wave-uniform, so lanes below their running max are dragged
-    into it. Rebasing them to the tile max gives corr > 1, and repeated ones
-    multiply until v_o and l_row overflow -- no per-step cap bounds a product
-    over arbitrarily many tiles. V is all ones, so the exact output is 1.0.
+    One row class reads a coordinate whose tile maxima descend, the other one that
+    ascends and so fires the wave-uniform branch every tile. V is all ones, so the
+    exact output is 1.0; the unfixed kernel returns 1,048,576 of 2,097,152 as NaN.
     """
-    B, S, H, D = 1, 4096, 8, 128
+    B, S, H, D = 1, 2048, 8, 128
+    BLOCK_N, STEP = 64, 32.0
     fp8 = torch.float8_e4m3fn
     fp8_max = torch.finfo(fp8).max
-    torch.manual_seed(0)
-    q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1
-    k = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1 * k_scale
-    q_s = q.abs().amax().float() / fp8_max
+
+    q = torch.zeros(B, S, H, D, device="cuda", dtype=torch.bfloat16)
+    q[:, 0::2, :, 0] = 1.0
+    q[:, 1::2, :, 1] = 1.0
+    tile = torch.arange(S, device="cuda") // BLOCK_N
+    k = torch.zeros(B, S, H, D, device="cuda", dtype=torch.float32)
+    k[:, :, :, 0] = (-STEP * tile).view(1, S, 1)
+    k[:, :, :, 1] = (STEP * tile).view(1, S, 1)
+    k = k.to(torch.bfloat16)
+
+    q_s = torch.tensor(1.0 / fp8_max, device="cuda")
     k_s = k.abs().amax().float() / fp8_max
     v_s = torch.tensor(1.0 / fp8_max, device="cuda")
     v = (torch.ones(B, S, H, D, device="cuda", dtype=torch.bfloat16) / v_s).to(fp8)
@@ -4601,5 +4606,31 @@ def test_fp8_lazy_rescale_keeps_the_running_max_monotonic(k_scale):
     )
     out = (out[0] if isinstance(out, (tuple, list)) else out).float()
     torch.cuda.synchronize()
-    assert torch.isfinite(out).all(), f"{int(torch.isnan(out).sum())} NaN of {out.numel()} at k_scale={k_scale}"
-    assert (out - 1).abs().mean().item() < 0.05, f"mean |o-1| = {(out - 1).abs().mean().item():.4f}"
+    assert torch.isfinite(out).all(), f"{int(torch.isnan(out).sum())} NaN of {out.numel()}"
+    assert (out - 1).abs().max().item() < 0.01, f"max |o-1| = {(out - 1).abs().max().item():.4f}"
+
+
+@pytest.mark.l0_backend_agnostic
+def test_fp8_lazy_paths_do_not_roll_their_own_correction():
+    """The fp8 lazy rescales must not compute their own correction factor.
+
+    A per-step cap does not bound the product over many tiles, so the invariant is
+    structural: the correction comes from ``rescale_from_tile_max``.
+    """
+    from kernels.attention import flash_attn_utils as _fau
+
+    src = Path(_fau.__file__).read_text().splitlines()
+    start = next(i for i, ln in enumerate(src) if "class DualwaveFp8SoftmaxHelper" in ln)
+    end = next((i for i, ln in enumerate(src[start + 1 :], start + 1) if ln.startswith("class ")), len(src))
+    body = src[start:end]
+
+    def method(name):
+        i = next(k for k, ln in enumerate(body) if f"def {name}(" in ln)
+        stop = next((k for k in range(i + 1, len(body)) if body[k].startswith("    def ")), len(body))
+        return "\n".join(body[i:stop])
+
+    for name in ("lazy_rescale_o", "lazy_correct_o"):
+        chunk = method(name)
+        assert "exp2" not in chunk, f"{name} computes its own correction instead of taking the monotonic one"
+        assert "_lazy_correction" in chunk or "rescale_from_tile_max" in chunk, f"{name} has no correction source"
+    assert "rescale_from_tile_max" in method("_lazy_correction"), "the shared correction is not the monotonic one"

@@ -3822,10 +3822,8 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         return m_new, l_row
 
     def _lazy_rescale_o_rescale(self, _n, *_st, v_o, m_row, l_row, m_tile_max, v_p):
-        # Wave-uniform branch: lanes whose tile max is below their running max get
-        # dragged in too, and m_tile_max alone would scale them up into overflow.
-        # nnan rather than the ambient flags: a fully masked row carries -inf here,
-        # and ninf would make that operand poison.
+        # Lanes below their running max are dragged into this wave-uniform branch and
+        # m_tile_max alone would overflow them. nnan, not the ambient: -inf is live here.
         m_new = fx.maxnumf(m_row, m_tile_max, fastmath=arith.FastMathFlags.nnan)
         corr = rocdl.exp2(T.f32, as_mlir_value(m_row - m_new))
         scaled_accs = list(v_o)
@@ -5174,6 +5172,13 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
     def v_vec32_to_p(self, v_p_all):
         return _v_vec32_to_p(self.traits, v_p_all, elem_dtype=self.p_elem)
 
+    def _lazy_correction(self, v_o, m_row, m_tile_max):
+        """Monotonic: a downward rebase gives corr > 1 and repeated ones overflow."""
+        m_new, corr = self.rescale_from_tile_max(m_row, m_tile_max)
+        scaled_accs = list(v_o)
+        self.scale_o(scaled_accs, corr)
+        return m_new, corr, [as_mlir_value(scaled_accs[i]) for i in range(self.traits.D_CHUNKS)]
+
     def lazy_rescale_o(self, v_o, m_row, l_row, m_tile_max, v_p):
         @flyc.jit
         def _run(v_o, m_row, l_row, m_tile_max, v_p):
@@ -5196,19 +5201,7 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
             if fx.Boolean(all_below):
                 pass
             else:
-                # The branch is wave-uniform, so lanes whose tile max sits below their
-                # running max come along. Keep the running max monotonic: a downward
-                # rebase gives corr > 1, and repeated ones multiply until v_o and
-                # l_row overflow.
-                m_new, corr = self.rescale_from_tile_max(m_row, m_tile_max)
-                scaled_accs = list(v_o)
-                self.scale_o(scaled_accs, corr)
-                o0, o1, o2, o3 = (
-                    as_mlir_value(scaled_accs[0]),
-                    as_mlir_value(scaled_accs[1]),
-                    as_mlir_value(scaled_accs[2]),
-                    as_mlir_value(scaled_accs[3]),
-                )
+                m_new, corr, (o0, o1, o2, o3) = self._lazy_correction(v_o, m_row, m_tile_max)
                 vp_out = self.v_p_to_vec32(self.scale_v_p(v_p, corr))
                 l_out = as_mlir_value(l_row * corr)
                 m_out = self.anchor_scalar_f32(m_new)
@@ -5237,19 +5230,7 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
             if fx.Boolean(all_below):
                 pass
             else:
-                # The branch is wave-uniform, so lanes whose tile max sits below their
-                # running max come along. Keep the running max monotonic: a downward
-                # rebase gives corr > 1, and repeated ones multiply until v_o and
-                # l_row overflow.
-                m_new, corr = self.rescale_from_tile_max(m_row, m_tile_max)
-                scaled_accs = list(v_o)
-                self.scale_o(scaled_accs, corr)
-                o0, o1, o2, o3 = (
-                    as_mlir_value(scaled_accs[0]),
-                    as_mlir_value(scaled_accs[1]),
-                    as_mlir_value(scaled_accs[2]),
-                    as_mlir_value(scaled_accs[3]),
-                )
+                m_new, corr, (o0, o1, o2, o3) = self._lazy_correction(v_o, m_row, m_tile_max)
                 l_out = as_mlir_value(l_row * corr)
                 m_out = self.anchor_scalar_f32(m_new)
             return ([o0, o1, o2, o3], m_out, l_out)
