@@ -12,6 +12,7 @@ import signal
 import tempfile
 import time
 import traceback
+import warnings
 from collections import deque
 from collections.abc import Callable
 from multiprocessing.connection import wait as wait_for_sentinels
@@ -23,6 +24,7 @@ from .file import atomic_write
 from .logger import log
 
 _DEFAULT_MAX_WORKERS = 64
+_FALLBACK_MAX_WORKERS_WITHOUT_MEMORY_INFO = 4
 _MAX_FAILURE_REASON_CHARS = 2 * 1024
 _MAX_TRACEBACK_CHARS = 16 * 1024
 _OOM_EXITCODE = -signal.SIGKILL
@@ -109,6 +111,17 @@ def _get_max_retries() -> int:
     return max(aot.max_retries, 0)
 
 
+def _memory_worker_fallback(default_workers: int, reason: str) -> int:
+    fallback_workers = min(
+        default_workers,
+        _FALLBACK_MAX_WORKERS_WITHOUT_MEMORY_INFO,
+    )
+    message = f"{reason}; limiting AOT concurrency to {fallback_workers} worker{'s' if fallback_workers != 1 else ''}"
+    log().warning(message)
+    warnings.warn(message, RuntimeWarning, stacklevel=2)
+    return fallback_workers
+
+
 def _memory_worker_cap(default_workers: int) -> int:
     per_worker_gb = aot.mem_per_worker_gb
     if per_worker_gb <= 0:
@@ -117,19 +130,18 @@ def _memory_worker_cap(default_workers: int) -> int:
     try:
         import psutil
     except ImportError:
-        log().warning(
-            "psutil is not installed; AOT memory limiting is disabled and the CPU-based worker limit will be used"
+        return _memory_worker_fallback(
+            default_workers,
+            "psutil is not installed; automatic AOT memory limiting is unavailable",
         )
-        return default_workers
 
     try:
         available_gb = psutil.virtual_memory().available / (1024**3)
     except Exception as error:
-        log().warning(
-            "failed to query available memory for AOT worker limiting (%s); the CPU-based worker limit will be used",
-            error,
+        return _memory_worker_fallback(
+            default_workers,
+            f"failed to query available memory for AOT worker limiting ({error})",
         )
-        return default_workers
     return min(default_workers, max(1, int(available_gb / per_worker_gb)))
 
 
@@ -190,14 +202,12 @@ def _run_file_pool(
     attempts = [0] * num_jobs
     retries_used = 0
     completed = 0
+    succeeded_jobs = 0
     failed_jobs = 0
     progress_stride = max(1, num_jobs // 20)
-    initial_max_workers = max_workers
-    launch_epoch = 0
-    successful_since_backoff = 0
 
     queue = deque(range(num_jobs))
-    running: dict[Any, tuple[int, float | None, int]] = {}
+    running: dict[Any, tuple[int, float | None]] = {}
 
     def launch() -> None:
         while queue and len(running) < max_workers:
@@ -214,12 +224,15 @@ def _run_file_pool(
             )
             process.start()
             deadline = time.monotonic() + kernel_timeout if kernel_timeout > 0 else None
-            running[process] = (index, deadline, launch_epoch)
+            running[process] = (index, deadline)
 
     def note_done(*, is_failure: bool = False) -> None:
-        nonlocal completed, failed_jobs
+        nonlocal completed, failed_jobs, succeeded_jobs
         completed += 1
-        failed_jobs += int(is_failure)
+        if is_failure:
+            failed_jobs += 1
+        else:
+            succeeded_jobs += 1
         if completed % progress_stride == 0 or completed == num_jobs:
             log().info(
                 "... %d/%d jobs finished (%d failed)",
@@ -227,32 +240,6 @@ def _run_file_pool(
                 num_jobs,
                 failed_jobs,
             )
-
-    def note_success() -> None:
-        nonlocal max_workers, successful_since_backoff
-        if max_workers >= initial_max_workers:
-            return
-        successful_since_backoff += 1
-        if successful_since_backoff < max_workers:
-            return
-        previous_max_workers = max_workers
-        max_workers += 1
-        successful_since_backoff = 0
-        log().info(
-            "AOT worker limit recovered %d->%d after healthy completions",
-            previous_max_workers,
-            max_workers,
-        )
-
-    def backoff_worker_limit(worker_epoch: int, reason: str) -> str:
-        nonlocal launch_epoch, max_workers, successful_since_backoff
-        if worker_epoch != launch_epoch:
-            return f"{reason}; worker limit already reduced to {max_workers} for this failure wave"
-        previous_max_workers = max_workers
-        max_workers = max(1, max_workers // 2)
-        launch_epoch += 1
-        successful_since_backoff = 0
-        return f"{reason}; reduced worker limit {previous_max_workers}->{max_workers}"
 
     def finish_failure(
         index: int,
@@ -307,8 +294,7 @@ def _run_file_pool(
             )
 
     def reap(process: Any, *, timeout_reason: str | None = None) -> None:
-        nonlocal launch_epoch, max_workers, successful_since_backoff
-        index, _, worker_epoch = running.pop(process)
+        index, _ = running.pop(process)
         out_path = os.path.join(result_dir, f"k{index}.json")
         try:
             loaded: Any = None
@@ -339,8 +325,6 @@ def _run_file_pool(
                 results[index] = result
                 is_failure = result.get("compile_time") is None
                 note_done(is_failure=is_failure)
-                if not is_failure:
-                    note_success()
                 return
 
             # A structured Python exception is deterministic for the same job.
@@ -374,37 +358,12 @@ def _run_file_pool(
                 return
 
             if process.exitcode == _OOM_EXITCODE:
-                reason = "worker killed by SIGKILL (possible OOM)"
-                can_retry = attempts[index] < max_retries
-                if not can_retry:
-                    finish_failure(
-                        index,
-                        kind="possible_oom",
-                        reason=reason,
-                        exitcode=process.exitcode,
-                    )
-                elif worker_epoch != launch_epoch:
-                    retry_or_drop(
-                        index,
-                        kind="possible_oom",
-                        reason=(f"{reason}; worker limit already reduced to {max_workers} for this failure wave"),
-                        exitcode=process.exitcode,
-                    )
-                elif max_workers <= 1:
-                    finish_failure(
-                        index,
-                        kind="possible_oom",
-                        reason=f"{reason} at the minimum worker limit",
-                        exitcode=process.exitcode,
-                    )
-                else:
-                    reason = backoff_worker_limit(worker_epoch, reason)
-                    retry_or_drop(
-                        index,
-                        kind="possible_oom",
-                        reason=reason,
-                        exitcode=process.exitcode,
-                    )
+                retry_or_drop(
+                    index,
+                    kind="possible_oom",
+                    reason="worker killed by SIGKILL (possible OOM)",
+                    exitcode=process.exitcode,
+                )
                 return
 
             if process.exitcode != 0:
@@ -439,7 +398,7 @@ def _run_file_pool(
         launch()
         while running:
             if kernel_timeout > 0:
-                nearest_deadline = min(deadline for _, deadline, _ in running.values() if deadline is not None)
+                nearest_deadline = min(deadline for _, deadline in running.values() if deadline is not None)
                 wait_timeout: float | None = max(0.0, nearest_deadline - time.monotonic())
             else:
                 wait_timeout = None
@@ -457,7 +416,7 @@ def _run_file_pool(
             if kernel_timeout > 0:
                 now = time.monotonic()
                 for process in list(running):
-                    _, deadline, _ = running[process]
+                    _, deadline = running[process]
                     if deadline is not None and now > deadline and process.is_alive():
                         timeout_reason = f"exceeded per-job timeout ({kernel_timeout:g}s); killed"
                         process.kill()
@@ -480,16 +439,21 @@ def _run_file_pool(
                     pass
         running.clear()
 
+    if completed != num_jobs or succeeded_jobs + failed_jobs != completed or any(result is None for result in results):
+        raise RuntimeError(
+            "internal AOT scheduler error: "
+            f"{completed}/{num_jobs} jobs completed, "
+            f"{succeeded_jobs} succeeded, {failed_jobs} failed"
+        )
+
     retry_label = "retry" if retries_used == 1 else "retries"
     log().info(
         "AOT: %d succeeded, %d failed; %d %s after abnormal worker exits",
-        num_jobs - failed_jobs,
+        succeeded_jobs,
         failed_jobs,
         retries_used,
         retry_label,
     )
-    if any(result is None for result in results):
-        raise RuntimeError("internal AOT scheduler error: unfinished jobs remain")
     return cast(list[dict[str, Any]], results)
 
 
@@ -510,9 +474,8 @@ def run_parallel_jobs(
 
     This executor uses the Linux ``fork`` multiprocessing context because it is
     intended for compile-only workers that inherit the initialized compiler.
-    An OOM-like ``-SIGKILL`` halves the concurrency limit once per launch wave;
-    healthy completions then restore it additively. OOM exits are not retried
-    once the limit reaches one.
+    An OOM-like ``-SIGKILL`` is reported as ``possible_oom`` and retried according
+    to ``FLYDSL_AOT_MAX_RETRIES`` without changing global concurrency.
     """
     if not jobs:
         return []
