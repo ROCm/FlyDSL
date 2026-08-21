@@ -4640,7 +4640,6 @@ def test_fp8_lazy_paths_do_not_roll_their_own_correction():
 def test_score_max_flag_excludes_ninf():
     """-inf is load-bearing in the score reductions; ninf would make it poison."""
     from flydsl.expr import arith as _arith
-
     from kernels.attention import flash_attn_utils as _fau
 
     flag = _fau._MAX_FASTMATH
