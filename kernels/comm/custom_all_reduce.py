@@ -9,6 +9,8 @@ protocol for multi-GPU communication on ROCm.
 
 from contextlib import contextmanager
 
+import os
+
 import torch
 
 _KMAXBLOCKS = 80
@@ -154,7 +156,18 @@ class FlyDSLAllreduce:
             return cls._hip
         import ctypes
 
-        for name in ("libamdhip64.so", "libamdhip64.so.6", "libamdhip64.so.5"):
+        sonames = ("libamdhip64.so", "libamdhip64.so.7", "libamdhip64.so.6", "libamdhip64.so.5")
+        candidates = []
+        rocm_path = os.environ.get("ROCM_PATH")
+        if rocm_path:
+            candidates.extend(
+                os.path.join(rocm_path, lib_dir, name)
+                for lib_dir in ("lib", "lib64")
+                for name in sonames
+            )
+        candidates.extend(sonames)
+
+        for name in candidates:
             try:
                 cls._hip = ctypes.CDLL(name)
                 break
