@@ -13,6 +13,7 @@ from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import check_smem_capacity
 from kernels.common.gfx1250_cluster import compute_mcast_masks
+from kernels.common.kernels_common import format_kernel_name
 
 from .gemm_common_gfx1250 import (
     make_lds_copy_ops,
@@ -50,7 +51,8 @@ def launch_gemm_a8w8_256x256(
     block_size: Constexpr[int],
     split_k: Constexpr[int] = 1,
 ):
-    """N must divide 1024; M is unrestricted; K divides 128 and is at least 512."""
+    """N must be a multiple of ``tile_n * cluster_n``; M is unrestricted;
+    K must be divisible by 128 and at least 512 per split."""
 
     assert (tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers) in (
         (256, 256, 128, 2, 2, 4),
@@ -105,8 +107,13 @@ def launch_gemm_a8w8_256x256(
 
     ARENA_B = max(PLANAR_END, tile_m * C_LDS_ROW * 2)
     check_smem_capacity(ARENA_B, str(get_hip_arch()))
+    kernel_name = format_kernel_name(
+        f"gemm_a8w8_mx{block_size}_compute_t{tile_m}x{tile_n}x{tile_k}"
+        f"_mw{m_warp}_nw{n_warp}_nb{num_buffers}_sk{split_k}"
+        f"_cm{cluster_m}_cn{cluster_n}"
+    )
 
-    @flyc.kernel(known_block_size=[block, 1, 1])
+    @flyc.kernel(name=kernel_name, known_block_size=[block, 1, 1])
     def kernel_gemm_a8w8_256x256(
         arg_c: fx.Pointer,
         arg_a: fx.Pointer,

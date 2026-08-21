@@ -14,6 +14,7 @@ from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import check_smem_capacity
 from kernels.common.gfx1250_cluster import compute_mcast_masks
+from kernels.common.kernels_common import format_kernel_name
 
 from .gemm_common_gfx1250 import (
     make_lds_copy_ops,
@@ -93,8 +94,14 @@ def launch_gemm_a8w8(
     ARENA_B = max(num_buffers * PITCH, C_STORE_B)
     check_smem_capacity(ARENA_B, str(get_hip_arch()))
     use_quadrant = (wmma_m_rep % 2 == 0) and (wmma_n_rep % 2 == 0) and (n_acc >= 8)
+    scale_tag = "mx32" if mx32 else ("mx128" if mx128 else "ptpc")
+    kernel_name = format_kernel_name(
+        f"gemm_a8w8_{scale_tag}_t{tile_m}x{tile_n}x{tile_k}"
+        f"_mw{m_warp}_nw{n_warp}_nb{num_buffers}_sk{split_k}"
+        f"_cm{cluster_m}_cn{cluster_n}"
+    )
 
-    @flyc.kernel(known_block_size=[block, 1, 1])
+    @flyc.kernel(name=kernel_name, known_block_size=[block, 1, 1])
     def kernel_gemm_a8w8(
         arg_c: fx.Pointer,
         arg_a: fx.Pointer,

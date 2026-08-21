@@ -57,6 +57,17 @@ def _if_else(if_op, scf=None):
                 _scf.YieldOp([])
 
 
+def format_kernel_name(name: str) -> str:
+    """Sanitize a kernel symbol name for the amdhsa assembler.
+
+    Config values interpolated into a kernel name may be negative (e.g. the
+    grouped-contiguous sentinel ``topk=-1`` renders as ``tk-1``). A hyphen is
+    not a legal symbol character, so the assembler misparses the
+    ``.amdhsa_kernel`` directive and the whole module fails to link.
+    """
+    return name.replace("-", "_")
+
+
 _VALID_A_DTYPES = frozenset(("fp8", "fp16", "int8", "fp4"))
 _VALID_B_DTYPES = frozenset(("fp8", "fp16", "int8", "int4", "fp4"))
 

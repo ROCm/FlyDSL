@@ -45,8 +45,9 @@ def launch_gemm_a8w4_256x256(
     num_buffers: Constexpr[int],
     cluster_m: Constexpr[int],
     cluster_n: Constexpr[int],
+    split_k: Constexpr[int] = 1,
 ):
-    """N must divide 1024; M is unrestricted; K divides 256 and is at least 512."""
+    """N must divide 1024; M is unrestricted; K divides 256 and is at least 512 per split."""
 
     assert (tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, cluster_m, cluster_n) == (
         256,
@@ -111,7 +112,7 @@ def launch_gemm_a8w4_256x256(
         i32_ldc: fx.Int32,
     ):
 
-        K_TILES = i32_k // tile_k
+        K_TILES = i32_k // (tile_k * split_k)
         k64 = fx.Int64(i32_k)
         lda64 = fx.Int64(i32_lda)
         ldc64 = fx.Int64(i32_ldc)
@@ -119,6 +120,15 @@ def launch_gemm_a8w4_256x256(
 
         tid = fx.Int32(fx.thread_idx.x)
         bid_x, bid_y, bid_z = fx.block_idx
+        if const_expr(split_k > 1):
+            m_chunks = fx.Int32(fx.grid_dim.z) // split_k
+            split_idx = bid_z // m_chunks
+            m_chunk = bid_z - split_idx * m_chunks
+            kt_base = fx.Int64(split_idx) * fx.Int64(K_TILES)
+        else:
+            split_idx = fx.Int32(0)
+            m_chunk = bid_z
+            kt_base = fx.Int64(0)
         wave = rocdl.readfirstlane(T.i32, tid // WAVE)
         lane = tid % WAVE
         lane16 = lane % 16
@@ -127,7 +137,7 @@ def launch_gemm_a8w4_256x256(
         wave_n = wave % n_warp
         local_x, local_y = cluster.compute_cluster_position()
         a_mask, b_mask = compute_mcast_masks(local_x, local_y, cluster_m, cluster_n)
-        blk_m = (bid_z * fx.Int32(fx.grid_dim.x) + bid_x) * tile_m
+        blk_m = (m_chunk * fx.Int32(fx.grid_dim.x) + bid_x) * tile_m
         blk_n = bid_y * tile_n
         blk_m64 = fx.Int64(blk_m)
         blk_n64 = fx.Int64(blk_n)
@@ -152,10 +162,11 @@ def launch_gemm_a8w4_256x256(
         gA_base = fx.recast_iter(fx.Int8, arg_a)
         gB_base = fx.recast_iter(fx.Int8, arg_b)
 
-        a_off0 = blk_m64 * lda64
-        b_off0 = (blk_n64 // 16) * Kp16
-        sa_off0 = (blk_m64 // 32) * k64
-        sb_off0 = (blk_n64 // 32) * k64
+        k_elem0 = kt_base * tile_k
+        a_off0 = blk_m64 * lda64 + k_elem0
+        b_off0 = (blk_n64 // 16) * Kp16 + k_elem0 * 8
+        sa_off0 = (blk_m64 // 32) * k64 + k_elem0
+        sb_off0 = (blk_n64 // 32) * k64 + k_elem0
 
         gA = _gv(gA_base, a_off0, (tile_m, tile_k), (tile_k, 1))
         gB = _gv(gB_base, b_off0, (tile_n // 16, PACK_TK * 16), (PACK_TK * 16, 1))
@@ -791,6 +802,8 @@ def launch_gemm_a8w4_256x256(
                 fx.ptr_store(h.bitcast(fx.Int8), base_ptr + (row_rel * C_LDS_ROW + col_rel) * 2)
         workgroup_barrier(use_cluster=False)
         c_off_rt = blk_m64 * ldc64 + blk_n64
+        if const_expr(split_k > 1):
+            c_off_rt = c_off_rt + fx.Int64(split_idx) * fx.Int64(i32_m) * ldc64
         gC_base = fx.recast_iter(fx.PointerType.get(oc.ir_type, arg_c.address_space), arg_c)
         gtC = _gv(gC_base, c_off_rt, (tile_m, C_LDS_ROW), (C_LDS_ROW, 1))
         atomC = fx.rocdl.make_tdm_atom(
@@ -809,7 +822,8 @@ def launch_gemm_a8w4_256x256(
     pow2 = gx & -gx
     capped = (pow2 < m_run_max).select(pow2, fx.Int32(m_run_max))
     m_run = ((gx > m_run_max) & (pow2 >= m_run_min)).select(capped, gx)
-    grid_arg = (m_run, gy, gx // m_run)
+    m_chunks = gx // m_run
+    grid_arg = (m_run, gy, m_chunks * split_k)
     # Runtime N/K shape checks belong to the caller.
     cluster_arg = (cluster_m, cluster_n, 1)
     kernel_gemm_a8w4_256x256(

@@ -42,6 +42,7 @@ def launch_gemm_a8w4_mxscale(
     num_buffers: Constexpr[int],
     cluster_m: Constexpr[int],
     cluster_n: Constexpr[int],
+    split_k: Constexpr[int] = 1,
 ):
     """A: [M, K] uint8 (FP8 E4M3). B: [N, K//2] uint8, 16x16-preshuffled FP4 (E2M1)."""
 
@@ -90,14 +91,15 @@ def launch_gemm_a8w4_mxscale(
         i32_lda: fx.Int32,
         i32_ldc: fx.Int32,
     ):
-        K_TILES = i32_k // tile_k
+        K_TILES = i32_k // (tile_k * split_k)
         k64 = fx.Int64(i32_k)
         lda64 = fx.Int64(i32_lda)
         ldc64 = fx.Int64(i32_ldc)
         Kp16 = (k64 // 2) * 16
 
         tid = fx.Int32(fx.thread_idx.x)
-        bid_x, bid_y, _ = fx.block_idx
+        bid_x, bid_y, bid_z = fx.block_idx
+        kt_base = fx.Int64(bid_z) * fx.Int64(K_TILES) if split_k > 1 else None
         wave = rocdl.readfirstlane(T.i32, tid // WAVE)
         lane = tid % WAVE
         lane16 = lane % 16
@@ -183,28 +185,28 @@ def launch_gemm_a8w4_mxscale(
 
         def issue(s, kt):
             pa = _buf_ptr(s)
-            kt64 = fx.Int64(kt)
-            _wcopy(W_A, atomA, gA, _lv(pa, (tile_m, tile_k), (A_LDS_ROW, 1)), kt64 * fx.Int64(tile_k))
+            ktg = fx.Int64(kt) if kt_base is None else fx.Int64(kt) + kt_base
+            _wcopy(W_A, atomA, gA, _lv(pa, (tile_m, tile_k), (A_LDS_ROW, 1)), ktg * fx.Int64(tile_k))
             _wcopy(
                 W_B,
                 atomB,
                 gB,
                 _lv(fx.add_offset(pa, STAGE_A), (tile_n // 16, PACK_TK * 16), (B_LDS_ROW, 1)),
-                kt64 * fx.Int64(PACK_TK * 16),
+                ktg * fx.Int64(PACK_TK * 16),
             )
             _wcopy(
                 W_SA,
                 atomSA,
                 gSA,
                 _lv(fx.add_offset(pa, SA_OFF), (SA_SUPERS, tile_k), (tile_k, 1)),
-                kt64 * fx.Int64(tile_k),
+                ktg * fx.Int64(tile_k),
             )
             _wcopy(
                 W_SB,
                 atomSB,
                 gSB,
                 _lv(fx.add_offset(pa, SB_OFF), (SB_SUPERS, tile_k), (tile_k, 1)),
-                kt64 * fx.Int64(tile_k),
+                ktg * fx.Int64(tile_k),
             )
 
         wmb = wave_m * warp_tile_m
@@ -337,6 +339,8 @@ def launch_gemm_a8w4_mxscale(
                 fx.ptr_store(h.bitcast(fx.Int8), base_ptr + (row_rel * tile_n + col_rel) * 2)
         workgroup_barrier(use_cluster=False)
         c_off_rt = blk_m64 * ldc64 + blk_n64
+        if const_expr(split_k > 1):
+            c_off_rt = c_off_rt + fx.Int64(bid_z) * fx.Int64(i32_m) * ldc64
         gtC = _gv(fx.get_iter(arg_c), c_off_rt, (tile_m, tile_n), (tile_n, 1))
         atomC = fx.rocdl.make_tdm_atom(
             gtC,
@@ -365,7 +369,7 @@ def launch_gemm_a8w4_mxscale(
         i32_lda,
         i32_ldc,
         value_attrs={"rocdl.cluster_dims": f"{cluster_m},{cluster_n},1" if use_cluster else None},
-    ).launch(grid=(gx, gy, 1), block=(block, 1, 1), stream=stream, cluster=cluster_arg)
+    ).launch(grid=(gx, gy, split_k), block=(block, 1, 1), stream=stream, cluster=cluster_arg)
 
 
 launch_gemm_a8w4_mxscale.compile_hints["llvm_options"] = {
