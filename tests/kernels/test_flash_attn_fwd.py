@@ -4547,9 +4547,7 @@ def test_descriptor_span_guard(monkeypatch, over):
     """
     B, S, H, D = 1, 256, 8, 128
     entry_bytes = S * H * D * 2
-    monkeypatch.setattr(
-        flash_attn_interface, "_MAX_DESCRIPTOR_BYTES", entry_bytes if over else entry_bytes * 2
-    )
+    monkeypatch.setattr(flash_attn_interface, "_MAX_DESCRIPTOR_BYTES", entry_bytes if over else entry_bytes * 2)
     q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16)
     k, v = torch.randn_like(q), torch.randn_like(q)
     if over:
