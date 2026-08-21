@@ -382,6 +382,41 @@ def _build_paged(
     )
 
 
+@functools.lru_cache(maxsize=64)
+def _build_paged_fp8(
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    value_head_dim: int,
+    waves_per_eu: int,
+    daz: bool,
+    lazy_rescale: bool,
+    setprio: bool,
+    enable_stagger: bool,
+):
+    """Build the gfx950 packed-varlen, vectorized page-64 FP8 launcher."""
+    from kernels.attention.flash_attn_fp8_paged_gfx950 import build_flash_attn_paged_fp8_module
+
+    return build_flash_attn_paged_fp8_module(
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        value_head_dim=value_head_dim,
+        causal=True,
+        dtype_str="fp8",
+        waves_per_eu=waves_per_eu,
+        daz=daz,
+        dualwave_swp_lazy_rescale=lazy_rescale,
+        dualwave_swp_setprio=setprio,
+        dualwave_swp_enable_stagger=enable_stagger,
+        num_kv_splits=1,
+        varlen=True,
+        cross_seqlen=True,
+        paged=True,
+        kv_cache_layout="vectorized",
+    )
+
+
 # ── paged-KV native path ────────────────────────────────────────────────────
 
 # gfx950 dualwave paged-KV currently supports exactly one configuration.
@@ -406,6 +441,9 @@ def _flydsl_flash_attn_paged(
     max_seqlen_q: Optional[int],
     cross_seqlen: Optional[bool],
     num_kv_splits: int,
+    q_descale: Optional[torch.Tensor],
+    k_descale: Optional[torch.Tensor],
+    v_descale: Optional[torch.Tensor],
     out: Optional[torch.Tensor],
     waves_per_eu: int,
     daz: bool,
@@ -417,8 +455,9 @@ def _flydsl_flash_attn_paged(
     """Native paged-KV attention on the gfx950 dualwave kernel.
 
     Supported config ONLY (anything else raises): linear/vectorized cache layout
-    [NumBlocks, PageSize=64, NumKVHeads, HeadDim], vLLM lookup (block_table +
-    seqlen_k), causal, D=64/128, dtype bf16/f16.
+    with page size 64 and vLLM ``block_table`` / ``seqlen_k`` metadata. BF16/F16
+    support D64/D128. gfx950 FP8 additionally supports packed-varlen causal
+    Q/K D192 with vectorized V/output D128 or D192.
     - Dense 4D Q ``[B, Sq, H, D]``: split-K (num_kv_splits>1) supported (seq_len>=384).
     - Varlen packed Q ``[total_q, H, D]`` (cu_seqlens_q given): paged K/V looked up
       per kv-tile via block_table; split-K not supported (matches dense varlen).
@@ -440,8 +479,9 @@ def _flydsl_flash_attn_paged(
             f"flydsl_flash_attn_func: linear paged K/V must be 4D [NumBlocks,PageSize,Hkv,D], got {k.dim()}D"
         )
 
-    varlen = cu_seqlens_q is not None
     dtype_str = _dtype_str(q)
+    paged_fp8 = dtype_str == "fp8"
+    varlen = cu_seqlens_q is not None
     if varlen:
         # Packed varlen Q: [total_q, H, D]. Per-batch ranges come from cu_seqlens
         # inside the kernel; grid_y is sized by max_seqlen_q.
@@ -461,24 +501,62 @@ def _flydsl_flash_attn_paged(
             raise ValueError(f"flydsl_flash_attn_func: paged dense q must be 4D [B,Sq,H,D], got {q.dim()}D")
         B, Sq, H, D = q.shape
     if vectorized:
-        kvs = 16 // q.element_size()
+        kvs = 16 // k.element_size()
         Hkv = int(k.shape[1])
         page_size = int(k.shape[3])
         k_head_dim = int(k.shape[2]) * int(k.shape[4])  # (D/kVS) * kVS
         if int(k.shape[4]) != kvs:
             raise ValueError(f"flydsl_flash_attn_func: vectorized K last dim ({k.shape[4]}) must equal kVS={kvs}")
+        value_head_dim = int(v.shape[3])
+        expected_v_tail = (Hkv, page_size // kvs, value_head_dim, kvs)
+        if tuple(v.shape[1:]) != expected_v_tail:
+            raise ValueError(
+                f"flydsl_flash_attn_func: vectorized V tail must be {expected_v_tail}, got {tuple(v.shape[1:])}"
+            )
     else:
         page_size = int(k.shape[1])
         Hkv = int(k.shape[2])
         k_head_dim = int(k.shape[3])
+        value_head_dim = int(v.shape[3])
+        if tuple(v.shape[1:3]) != (page_size, Hkv):
+            raise ValueError(
+                f"flydsl_flash_attn_func: linear V must match K page/head axes, got K{tuple(k.shape)} V{tuple(v.shape)}"
+            )
     if page_size != _PAGED_PAGE_SIZE:
         raise NotImplementedError(
             f"flydsl_flash_attn_func: native paged KV supports page_size={_PAGED_PAGE_SIZE} only, got {page_size}"
         )
-    if D not in (64, 128):
-        raise NotImplementedError(f"flydsl_flash_attn_func: native paged KV supports head_dim=64 or 128, got {D}")
     if k_head_dim != D:
         raise ValueError(f"flydsl_flash_attn_func: paged K head_dim ({k_head_dim}) must match q head_dim ({D})")
+    if paged_fp8:
+        _arch = _gpu_arch(q.device)
+        if not _arch.startswith("gfx950"):
+            raise ValueError(f"flydsl_flash_attn_func: paged FP8 requires gfx950, got '{_arch or 'unknown'}'")
+        if not (
+            causal and varlen and cross_seqlen is not False and vectorized and D == 192 and value_head_dim in (128, 192)
+        ):
+            raise NotImplementedError(
+                "flydsl_flash_attn_func: paged FP8 requires causal packed-varlen vectorized KV, "
+                f"Q/K D192, and V D128/D192; got causal={causal}, varlen={varlen}, "
+                f"layout={kv_cache_layout!r}, Q/K D{D}, V D{value_head_dim}"
+            )
+        if num_kv_splits != 1:
+            raise NotImplementedError("flydsl_flash_attn_func: paged FP8 does not support split-K")
+        if bias is not None:
+            raise NotImplementedError("flydsl_flash_attn_func: paged FP8 does not support bias")
+        if any(x is None for x in (q_descale, k_descale, v_descale)):
+            raise ValueError("flydsl_flash_attn_func: paged FP8 requires q_descale, k_descale, and v_descale")
+        for name, scale in (("q_descale", q_descale), ("k_descale", k_descale), ("v_descale", v_descale)):
+            if scale.device != q.device or scale.dtype != torch.float32 or scale.numel() != 1:
+                raise ValueError(
+                    f"flydsl_flash_attn_func: {name} must be one float32 value on {q.device}, "
+                    f"got shape={tuple(scale.shape)} dtype={scale.dtype} device={scale.device}"
+                )
+    elif D not in (64, 128) or value_head_dim != D:
+        raise NotImplementedError(
+            "flydsl_flash_attn_func: BF16/F16 paged KV requires matching K/V head_dim 64 or 128, "
+            f"got Q/K D{D}, V D{value_head_dim}"
+        )
 
     if num_kv_heads is None:
         num_kv_heads = Hkv
@@ -501,7 +579,7 @@ def _flydsl_flash_attn_paged(
     skv = int(max_seqlen_kv) if max_seqlen_kv is not None else int(max(_kv_lens))
     max_kv_pages = (skv + page_size - 1) // page_size
     max_pages_per_split = (max_kv_pages + int(num_kv_splits) - 1) // int(num_kv_splits)
-    if max_pages_per_split > _PAGED_BT_LDS_SIZE:
+    if not paged_fp8 and max_pages_per_split > _PAGED_BT_LDS_SIZE:
         max_supported_kv = _PAGED_BT_LDS_SIZE * int(num_kv_splits) * page_size
         raise NotImplementedError(
             f"flydsl_flash_attn_func: paged KV length {skv} exceeds block-table LDS window "
@@ -536,6 +614,16 @@ def _flydsl_flash_attn_paged(
                 f"flydsl_flash_attn_func: paged bias needs >= max_seqlen_kv={skv} columns, got {bias.shape[1]}"
             )
 
+    if block_table.dim() != 2 or block_table.device != q.device:
+        raise ValueError(
+            f"flydsl_flash_attn_func: block_table must be 2D on {q.device}, "
+            f"got shape={tuple(block_table.shape)} device={block_table.device}"
+        )
+    if seqlen_k.dtype != torch.int32 or seqlen_k.device != q.device or seqlen_k.numel() != B:
+        raise ValueError(
+            f"flydsl_flash_attn_func: seqlen_k must be int32 [{B}] on {q.device}, "
+            f"got shape={tuple(seqlen_k.shape)} dtype={seqlen_k.dtype} device={seqlen_k.device}"
+        )
     block_table_stride = int(block_table.shape[1])
     # Flatten so the kernel's flat row-major index addresses block_table correctly.
     block_table_i32 = (
@@ -553,7 +641,19 @@ def _flydsl_flash_attn_paged(
             and dtype_str in ("bf16", "f16")
             and (not _arch.startswith("gfx950") or Sq <= _VARLEN_LIGHT_MAX_SEQ)
         )
-        if _paged_light_ok:
+        if paged_fp8:
+            exe = _build_paged_fp8(
+                num_heads=H,
+                num_kv_heads=num_kv_heads,
+                head_dim=D,
+                value_head_dim=value_head_dim,
+                waves_per_eu=waves_per_eu,
+                daz=daz,
+                lazy_rescale=dualwave_swp_lazy_rescale,
+                setprio=dualwave_swp_setprio,
+                enable_stagger=dualwave_swp_enable_stagger,
+            )
+        elif _paged_light_ok:
             exe = _build_paged_light(
                 num_heads=H,
                 num_kv_heads=num_kv_heads,
@@ -588,15 +688,31 @@ def _flydsl_flash_attn_paged(
                 kv_cache_layout=kv_cache_layout,
                 has_bias=bias is not None,
             )
+        expected_out_shape = (*q.shape[:-1], value_head_dim)
         if out is None:
-            out = torch.empty_like(q)
-        # Keep tensors in natural shape; flattening can overflow int32 C-ABI dims.
-        # The paged kernel rebuilds per-batch/page descriptors from base pointers.
-        q_flat = q.contiguous()
+            out_dtype = torch.bfloat16 if paged_fp8 else q.dtype
+            out = torch.empty(expected_out_shape, dtype=out_dtype, device=q.device)
+        elif out.shape != expected_out_shape or not out.is_contiguous():
+            raise ValueError(
+                f"flydsl_flash_attn_func: paged output must be contiguous with shape {expected_out_shape}, "
+                f"got shape={tuple(out.shape)} strides={out.stride()}"
+            )
+        elif paged_fp8 and out.dtype != torch.bfloat16:
+            raise ValueError(f"flydsl_flash_attn_func: paged FP8 output must be bf16, got {out.dtype}")
+        elif not paged_fp8 and out.dtype != q.dtype:
+            raise ValueError(
+                f"flydsl_flash_attn_func: paged output dtype must match q dtype {q.dtype}, got {out.dtype}"
+            )
+        # Keep serving-sized physical K/V caches rank-5 because flattening their
+        # dynamic memref shape can exceed signed int32. The FP8 schedule consumes
+        # Q/O as flat token-major buffers, matching its explicit runtime strides.
+        q_flat = q.contiguous().view(-1) if paged_fp8 else q.contiguous()
         k_flat = k.contiguous()
         v_flat = v.contiguous()
-        o_flat = out.contiguous()
+        o_flat = out.contiguous().view(-1) if paged_fp8 else out.contiguous()
         kwargs = dict(block_table=block_table_i32, block_table_stride=block_table_stride, stream=launch_stream)
+        if paged_fp8:
+            kwargs.update(q_descale=q_descale, k_descale=k_descale, v_descale=v_descale)
         if bias is not None:
             kwargs["bias"] = bias
         if varlen:
@@ -690,7 +806,7 @@ def flydsl_flash_attn_func(
     # Per-head attention-sink logit: one extra softmax denominator term with no
     # matching V row. Same path and restrictions as `alibi_slopes`; combinable.
     sink: Optional[torch.Tensor] = None,
-    # fp8 dense ABI: per-tensor descales for pre-quantized e4m3fn Q/K/V.
+    # fp8 ABI: per-tensor descales for pre-quantized e4m3fn Q/K/V.
     q_descale: Optional[torch.Tensor] = None,
     k_descale: Optional[torch.Tensor] = None,
     v_descale: Optional[torch.Tensor] = None,
@@ -723,7 +839,7 @@ def flydsl_flash_attn_func(
         k: Key tensor. Dense: ``[B, Skv, Hkv, D]``.
            Varlen: ``[total_kv, Hkv, D]``.
         v: Value tensor, same shape as k.
-           Paged KV cache (future ABI): physical K/V cache tensors. Supported
+           Paged KV cache: physical K/V cache tensors. Supported
            ``kv_cache_layout`` values:
            - ``linear``: 4D paged K/V, ``[NumBlocks, PageSize, NumKVHeads, HeadDim]``.
            - ``linear3d``: page_size=1 special case,
@@ -745,7 +861,8 @@ def flydsl_flash_attn_func(
             dense mode infers it from ``q.shape[1] != k.shape[1]``.
         block_table / seqlen_k: vLLM-style 2D block table metadata. Enables the
             native paged-KV path, which supports ``bias`` but not
-            ``alibi_slopes``, ``sink``, ``return_lse``, or fp8.
+            ``alibi_slopes``, ``sink``, or ``return_lse``. gfx950 FP8 supports
+            the causal packed-varlen vectorized page-64 D192 path with V D128/D192.
         num_kv_splits: Split-K factor (>1: gfx950 only, D=64/128, bf16/f16, seq>=384).
         bias: Additive attention bias with the same dtype as q, folded in as
             ``softmax(q @ k^T * sm_scale + bias)`` -- after the scale, before the
@@ -787,7 +904,7 @@ def flydsl_flash_attn_func(
             with paged KV or fp8 -- but freely combinable with ``bias`` and
             ``alibi_slopes``.
         q_descale / k_descale / v_descale: fp32 shape-[1] descales required
-            for dense fp8 e4m3fn inputs.
+            for dense or paged fp8 e4m3fn inputs.
         out: Optional pre-allocated output tensor. For fp8, output is bf16;
             otherwise it has the same dtype as q.
         waves_per_eu: Kernel occupancy hint.
@@ -800,8 +917,9 @@ def flydsl_flash_attn_func(
         stream: CUDA/HIP stream to launch on.
 
     Returns:
-        Output tensor with the same shape as q. The dtype is bf16 for fp8
-        inputs, otherwise the same dtype as q. When ``return_lse=True`` returns
+        Output tensor with the same shape as q except that paged asymmetric-V
+        attention uses V's final dimension. The dtype is bf16 for fp8 inputs,
+        otherwise the same dtype as q. When ``return_lse=True`` returns
         ``(out, lse)`` where ``lse`` is fp32 ``[B, num_heads, Sq]`` (varlen:
         ``[B, num_heads, max_seqlen_q]``, padded) holding the per-row
         natural-log, scale-folded log-sum-exp.
@@ -818,8 +936,6 @@ def flydsl_flash_attn_func(
     if return_lse and dtype_str == "fp8":
         raise NotImplementedError("flydsl_flash_attn_func: return_lse is not supported for fp8")
     paged_kv = any(x is not None for x in (block_table, seqlen_k))
-    if dtype_str == "fp8" and paged_kv:
-        raise NotImplementedError("flydsl_flash_attn_func: fp8 flash_attn does not support paged KV")
     if return_lse and paged_kv:
         raise NotImplementedError("flydsl_flash_attn_func: return_lse is not supported for paged KV")
     has_bias = bias is not None
@@ -921,6 +1037,9 @@ def flydsl_flash_attn_func(
             max_seqlen_q=max_seqlen_q,
             cross_seqlen=cross_seqlen,
             num_kv_splits=num_kv_splits,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
             out=out,
             waves_per_eu=waves_per_eu,
             daz=daz,

@@ -4428,6 +4428,135 @@ def test_return_lse_rejects_fp8():
 
 
 @_requires_gfx950
+@pytest.mark.parametrize("value_head_dim", [128, 192])
+@pytest.mark.parametrize("use_non_default_stream", [False, True])
+def test_paged_fp8_d192_asymmetric_value_matches_torch(value_head_dim, use_non_default_stream):
+    """Packed causal FP8 page-64 attention supports native V/output width."""
+    torch.manual_seed(17)
+    query_lengths = [64, 32]
+    kv_lengths = [128, 96]
+    q_indptr = torch.tensor([0, 64, 96], device="cuda", dtype=torch.int32)
+    kv_indptr = torch.tensor([0, 128, 224], device="cuda", dtype=torch.int32)
+    block_table = torch.tensor([[2, 0], [3, 1]], device="cuda", dtype=torch.int32)
+    seqlen_k = torch.tensor(kv_lengths, device="cuda", dtype=torch.int32)
+    num_pages = 4
+
+    query, query_descale = quantize_per_tensor_fp8(torch.randn(sum(query_lengths), 16, 192, device="cuda") * 0.2)
+    key, key_descale = quantize_per_tensor_fp8(torch.randn(num_pages, 1, 12, 64, 16, device="cuda") * 0.2)
+    value, value_descale = quantize_per_tensor_fp8(
+        torch.randn(num_pages, 1, 4, value_head_dim, 16, device="cuda") * 0.2
+    )
+
+    stream = torch.cuda.Stream() if use_non_default_stream else None
+    if stream is not None:
+        torch.cuda.synchronize()
+    actual = flydsl_flash_attn_func(
+        query,
+        key,
+        value,
+        causal=True,
+        num_kv_heads=1,
+        cu_seqlens_q=q_indptr,
+        cu_seqlens_kv=kv_indptr,
+        max_seqlen_q=max(query_lengths),
+        max_seqlen_kv=max(kv_lengths),
+        cross_seqlen=True,
+        block_table=block_table,
+        seqlen_k=seqlen_k,
+        kv_cache_layout="vectorized",
+        q_descale=query_descale,
+        k_descale=key_descale,
+        v_descale=value_descale,
+        stream=stream,
+    )
+    if stream is not None:
+        stream.synchronize()
+    else:
+        torch.cuda.synchronize()
+
+    expected = []
+    for batch_idx, (query_length, kv_length) in enumerate(zip(query_lengths, kv_lengths)):
+        query_batch = query[q_indptr[batch_idx] : q_indptr[batch_idx + 1]].float() * query_descale
+        physical_pages = block_table[batch_idx].long()
+        key_batch = (
+            key[physical_pages].permute(0, 3, 1, 2, 4).reshape(-1, 1, 192)[:kv_length].float() * key_descale
+        ).expand(-1, 16, -1)
+        value_batch = (
+            value[physical_pages].permute(0, 2, 4, 1, 3).reshape(-1, 1, value_head_dim)[:kv_length].float()
+            * value_descale
+        ).expand(-1, 16, -1)
+        logits = torch.einsum("qhd,khd->hqk", query_batch, key_batch) / math.sqrt(192)
+        query_positions = torch.arange(query_length, device="cuda")
+        key_positions = torch.arange(kv_length, device="cuda")
+        causal_mask = key_positions[None, :] <= (kv_length - query_length + query_positions)[:, None]
+        logits.masked_fill_(~causal_mask[None, :, :], float("-inf"))
+        expected.append(torch.einsum("hqk,khd->qhd", torch.softmax(logits, dim=-1), value_batch).to(torch.bfloat16))
+
+    expected = torch.cat(expected)
+    assert actual.shape == (sum(query_lengths), 16, value_head_dim)
+    assert bool(torch.isfinite(actual).all().item())
+    torch.testing.assert_close(actual, expected, rtol=2.0e-2, atol=2.0e-2)
+
+
+@_requires_gfx950
+@pytest.mark.large_shape
+def test_paged_fp8_d192_cache_offsets_above_4gib():
+    """Physical K and V page rebasing remains 64-bit beyond 4 GiB."""
+    head_dim = 192
+    value_head_dim = 128
+    page_size = 64
+    key_page_bytes = page_size * head_dim
+    value_page_bytes = page_size * value_head_dim
+    high_page = math.ceil(2**32 / min(key_page_bytes, value_page_bytes))
+    num_pages = high_page + 1
+
+    query, query_descale = quantize_per_tensor_fp8(torch.randn(1, 16, head_dim, device="cuda") * 0.2)
+    key = torch.empty(num_pages, 1, head_dim // 16, page_size, 16, dtype=FP8_DTYPE, device="cuda")
+    value = torch.empty(
+        num_pages,
+        1,
+        page_size // 16,
+        value_head_dim,
+        16,
+        dtype=FP8_DTYPE,
+        device="cuda",
+    )
+    key_page, key_descale = quantize_per_tensor_fp8(torch.randn_like(key[high_page], dtype=torch.float32) * 0.2)
+    value_page, value_descale = quantize_per_tensor_fp8(torch.randn_like(value[high_page], dtype=torch.float32) * 0.2)
+    key[high_page].copy_(key_page)
+    value[high_page].copy_(value_page)
+
+    indptr = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
+    block_table = torch.tensor([[high_page]], device="cuda", dtype=torch.int32)
+    seqlen_k = torch.ones(1, device="cuda", dtype=torch.int32)
+    actual = flydsl_flash_attn_func(
+        query,
+        key,
+        value,
+        causal=True,
+        num_kv_heads=1,
+        cu_seqlens_q=indptr,
+        cu_seqlens_kv=indptr,
+        max_seqlen_q=1,
+        max_seqlen_kv=1,
+        cross_seqlen=True,
+        block_table=block_table,
+        seqlen_k=seqlen_k,
+        kv_cache_layout="vectorized",
+        q_descale=query_descale,
+        k_descale=key_descale,
+        v_descale=value_descale,
+    )
+    torch.cuda.synchronize()
+
+    expected = (value_page[0, 0, :, 0].float() * value_descale).expand(16, -1).unsqueeze(0).to(torch.bfloat16)
+    assert high_page * key_page_bytes >= 2**32
+    assert high_page * value_page_bytes >= 2**32
+    assert bool(torch.isfinite(actual).all().item())
+    torch.testing.assert_close(actual, expected, rtol=2.0e-2, atol=2.0e-2)
+
+
+@_requires_gfx950
 @pytest.mark.parametrize("H", [8, 16, 32, 64])
 def test_xcd_swizzle_is_bit_identical(H):
     """The head-slow remap must not change a single bit of the output.
