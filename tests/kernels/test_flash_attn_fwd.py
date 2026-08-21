@@ -4566,3 +4566,42 @@ def test_lazy_rescale_survives_a_wide_score_range(k_scale):
     assert (
         rel(lazy) <= rel(eager) * 1.05 + 1e-4
     ), f"lazy rel L2 {rel(lazy):.3e} is worse than eager {rel(eager):.3e} at k_scale={k_scale}"
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("k_scale", [200.0, 5000.0])
+def test_fp8_lazy_rescale_keeps_the_running_max_monotonic(k_scale):
+    """The fp8 lazy path must not rebase its running max downwards.
+
+    The branch is wave-uniform, so lanes below their running max are dragged
+    into it. Rebasing them to the tile max gives corr > 1, and repeated ones
+    multiply until v_o and l_row overflow -- no per-step cap bounds a product
+    over arbitrarily many tiles. V is all ones, so the exact output is 1.0.
+    """
+    B, S, H, D = 1, 4096, 8, 128
+    fp8 = torch.float8_e4m3fn
+    fp8_max = torch.finfo(fp8).max
+    torch.manual_seed(0)
+    q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1
+    k = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1 * k_scale
+    q_s = q.abs().amax().float() / fp8_max
+    k_s = k.abs().amax().float() / fp8_max
+    v_s = torch.tensor(1.0 / fp8_max, device="cuda")
+    v = (torch.ones(B, S, H, D, device="cuda", dtype=torch.bfloat16) / v_s).to(fp8)
+
+    out = flydsl_flash_attn_func(
+        (q / q_s).to(fp8),
+        (k / k_s).to(fp8),
+        v,
+        causal=False,
+        q_descale=q_s.reshape(1).contiguous(),
+        k_descale=k_s.reshape(1).contiguous(),
+        v_descale=v_s.reshape(1).contiguous(),
+        dualwave_swp_lazy_rescale=True,
+    )
+    out = (out[0] if isinstance(out, (tuple, list)) else out).float()
+    torch.cuda.synchronize()
+    assert torch.isfinite(out).all(), (
+        f"{int(torch.isnan(out).sum())} NaN of {out.numel()} at k_scale={k_scale}"
+    )
+    assert (out - 1).abs().mean().item() < 0.05, f"mean |o-1| = {(out - 1).abs().mean().item():.4f}"
