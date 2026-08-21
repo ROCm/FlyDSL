@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-21T04:28:15Z",
+ "updated": "2026-08-21T05:15:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32448587699,
+   "pr": 1047,
+   "commit": "9357d4f5bb2a7fb9290c9e1ebb6283c270712c0f",
+   "branch": "skill/review-flydsl-kernel",
+   "event": "pull_request",
+   "title": "Add review-flydsl-kernel: legacy-spelling scanner distilled from 479 maintainer comments",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32448587699",
+   "created_at": "2026-08-21T04:54:18Z",
+   "updated_at": "2026-08-21T04:57:24Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 32446827284,
    "pr": 1020,
@@ -55,11 +70,11 @@
    "branch": "zhimding/jobs_parallel_0819",
    "event": "pull_request",
    "title": "[AOT] Add resilient parallel job scheduler",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32443595655",
    "created_at": "2026-08-21T03:30:03Z",
-   "updated_at": "2026-08-21T03:57:23Z",
+   "updated_at": "2026-08-21T05:12:39Z",
    "actor": "zhiding512",
    "jobs": [
     {
@@ -74,10 +89,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-21T03:46:36Z",
-     "completed_at": null,
+     "completed_at": "2026-08-21T05:12:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32443595655/job/96661452880"
     },
     {
@@ -98,30 +113,32 @@
    "branch": "dsl-ify-scf-controlflow",
    "event": "pull_request",
    "title": "[Kernel] Replace raw scf ops with Python control flow in kernels",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772",
    "created_at": "2026-08-21T03:16:53Z",
-   "updated_at": "2026-08-21T03:36:48Z",
+   "updated_at": "2026-08-21T05:11:27Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-21T03:36:47Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772/job/96659945199"
+     "completed_at": "2026-08-21T04:46:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772/job/96659945199",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-21T03:36:47Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772/job/96659945201"
+     "completed_at": "2026-08-21T05:11:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772/job/96659945201",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -132,6 +149,24 @@
      "completed_at": "2026-08-21T03:56:15Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772/job/96659945202",
      "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-21T05:11:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772/job/96675522323"
+    },
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-21T05:11:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772/job/96675522325"
     }
    ]
   },
@@ -217,7 +252,7 @@
    "commit": "02a973783d070c2de77e0619d6f06e55099a447d",
    "branch": "skill/review-flydsl-kernel",
    "event": "pull_request",
-   "title": "Add review-flydsl-kernel skill distilled from this repo's review history",
+   "title": "Add review-flydsl-kernel: legacy-spelling scanner distilled from 479 maintainer comments",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32429571951",
@@ -1843,50 +1878,6 @@
      "completed_at": "2026-08-20T07:07:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32335449457/job/96330968461",
      "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32332843149,
-   "pr": null,
-   "commit": "d2530b30ed85f199723b0d147ffa06377da6c3d2",
-   "branch": "main",
-   "event": "push",
-   "title": "[ROCDL] Accept IntegerAttr in the wait-counter wrappers (#1029)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32332843149",
-   "created_at": "2026-08-20T04:42:15Z",
-   "updated_at": "2026-08-20T05:24:31Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T05:07:20Z",
-     "completed_at": "2026-08-20T05:23:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32332843149/job/96320742236",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-20T05:07:32Z",
-     "completed_at": "2026-08-20T05:24:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32332843149/job/96320742328"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-20T05:07:29Z",
-     "completed_at": "2026-08-20T05:24:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32332843149/job/96320742355"
     }
    ]
   }
