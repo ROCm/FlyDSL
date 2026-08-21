@@ -5,6 +5,9 @@ include setup.py
 recursive-include scripts *.sh
 
 recursive-include python/flydsl *.py
+include kernels/__init__.py
+recursive-include kernels/attention *.py
+recursive-include kernels/common *.py
 recursive-include python requirements.txt
 recursive-include examples *.py
 recursive-include tests *

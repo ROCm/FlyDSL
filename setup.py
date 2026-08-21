@@ -398,6 +398,13 @@ else:
         "flydsl._mlir": str(EMBEDDED__MLIR_REL),
     }
 
+prebuilt_kernel_packages = find_packages(
+    where=str(REPO_ROOT),
+    include=["kernels", "kernels.attention", "kernels.common", "kernels.common.*"],
+)
+all_packages = sorted(set(all_packages + prebuilt_kernel_packages))
+package_dir.update({package: package.replace(".", "/") for package in prebuilt_kernel_packages})
+
 _version = _read_version()
 
 setup(

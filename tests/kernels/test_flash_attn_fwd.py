@@ -356,8 +356,11 @@ def _build_paged_kv_for_test(
 
     kv_lens_cpu = torch.tensor(kv_lens, dtype=torch.int32, device="cpu")
     kv_num_used_pages = torch.div(kv_lens_cpu + page_size - 1, page_size, rounding_mode="floor").int()
-    kv_indptr_cpu = torch.cumsum(torch.cat((torch.tensor([0], dtype=torch.int32), kv_num_used_pages)), dim=0).int()
-    kv_indices_cpu = torch.nn.functional.pad(torch.randperm(total_num_pages).int(), (0, 128), value=0)
+    kv_indptr_cpu = torch.cumsum(
+        torch.cat((torch.zeros(1, dtype=torch.int32, device="cpu"), kv_num_used_pages)),
+        dim=0,
+    ).int()
+    kv_indices_cpu = torch.nn.functional.pad(torch.randperm(total_num_pages, device="cpu").int(), (0, 128), value=0)
     kv_last_page_len_cpu = ((kv_lens_cpu - 1) % page_size + 1).int()
     block_table_cpu = _block_table_from_indices(
         kv_indptr_cpu,
@@ -800,6 +803,61 @@ def compare_arrays(
     print(f"    >={thresholds[-1]:.0e}       : {count:>8d} ({pct:6.2f}%)")
 
     return result
+
+
+@pytest.mark.parametrize("query_length", range(1, 17))
+@pytest.mark.parametrize("sliding_window", [0, 128])
+def test_vectorized_paged_page16_short_query(query_length, sliding_window):
+    batch_size = 2
+    kv_length = 257
+    num_heads = 8
+    num_kv_heads = 1
+    head_dim = 128
+    inputs, _, skip = _precompute_paged_kv_inputs_and_ref(
+        batch=batch_size,
+        seqlen_q=query_length,
+        seqlen_kv=kv_length,
+        varlen_seqlens_q=None,
+        varlen_seqlens_kv=None,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        num_kv_heads=num_kv_heads,
+        dtype=torch.bfloat16,
+        causal=True,
+        seed=DEFAULT_SEED,
+        page_size=16,
+        kv_cache_layout="vectorized",
+    )
+    assert skip is None
+
+    q = inputs["q_t"]
+    k = inputs["k_t"].expand(-1, -1, num_heads, -1)
+    v = inputs["v_t"].expand(-1, -1, num_heads, -1)
+    scores = torch.einsum("bqhd,bkhd->bhqk", q.float(), k.float()) / math.sqrt(head_dim)
+    query_positions = torch.arange(query_length, device=q.device) + kv_length - query_length
+    key_positions = torch.arange(kv_length, device=q.device)
+    mask = key_positions[None, :] <= query_positions[:, None]
+    if sliding_window:
+        mask &= key_positions[None, :] >= query_positions[:, None] - sliding_window + 1
+    scores.masked_fill_(~mask[None, None, :, :], float("-inf"))
+    expected = torch.einsum("bhqk,bkhd->bqhd", torch.softmax(scores, dim=-1), v.float()).to(q.dtype)
+
+    kv_cache = inputs["kv_cache"]
+    output = torch.empty_like(q)
+    flydsl_flash_attn_func(
+        q,
+        kv_cache["k_cache"],
+        kv_cache["v_cache"],
+        causal=True,
+        num_kv_heads=num_kv_heads,
+        block_table=kv_cache["block_table"],
+        seqlen_k=kv_cache["seqlen_k"],
+        max_seqlen_kv=kv_length,
+        kv_cache_layout="vectorized",
+        sliding_window=sliding_window,
+        out=output,
+    )
+    torch.testing.assert_close(output, expected, atol=1e-2, rtol=1e-2)
 
 
 def _cfg_kw():

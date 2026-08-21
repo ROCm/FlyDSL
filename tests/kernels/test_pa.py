@@ -566,6 +566,7 @@ def run_pa_decode_ps_test(
     trans_v: bool,
     kv_varlen: bool,
     sliding_window: int,
+    compare_gluon: bool = True,
 ) -> Dict[str, Union[float, int, str, bool, Tuple[int, int]]]:
     if not HAS_FLYDSL_PS:
         raise RuntimeError("FlyDSL `pa_decode_ps_launch` is not available.")
@@ -681,7 +682,7 @@ def run_pa_decode_ps_test(
         sliding_window=sliding_window,
     ).to(data_type)
     quantized_values = shuffle_value_cache_layout(quantized_values) if trans_v else quantized_values
-    if HAS_GLUON:
+    if HAS_GLUON and compare_gluon:
         max_context_partition_num = get_gluon_partition_count(
             batch_size,
             num_kv_heads,
@@ -813,7 +814,7 @@ def run_pa_decode_ps_test(
     torch.testing.assert_close(flydsl_ps_output, reference_output, atol=ps_tol, rtol=ps_tol)
     print("FlyDSL PS vs Torch PASSED")
 
-    if HAS_GLUON:
+    if HAS_GLUON and compare_gluon:
         results["us_gluon"] = gluon_time
 
     results["us_flydsl_ps"] = flydsl_ps_time
@@ -1155,6 +1156,26 @@ def test_sliding_window_accuracy(
         trans_v=trans_v,
         kv_varlen=kv_varlen,
         sliding_window=sliding_window,
+    )
+
+
+@pytest.mark.parametrize("query_length", [1, 15, 16])
+@pytest.mark.parametrize("sliding_window", [0, 2047])
+def test_small_block_accuracy(query_length: int, sliding_window: int) -> None:
+    run_pa_decode_ps_test(
+        context_length=2048,
+        batch_size=2,
+        num_heads=(32, 4),
+        head_size=64,
+        block_size=16,
+        compute_type=aiter.dtypes.fp8,
+        query_length=query_length,
+        quant_mode="per_tensor",
+        context_partition_size=256,
+        trans_v=True,
+        kv_varlen=True,
+        sliding_window=sliding_window,
+        compare_gluon=False,
     )
 
 

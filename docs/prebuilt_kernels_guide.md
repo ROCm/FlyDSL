@@ -217,6 +217,11 @@ gfx950 + `head_dim == 128` it routes to the dual-wave software-pipelined fast pa
 Supports MHA and GQA/MQA (`num_kv_heads <= num_heads`), causal and non-causal,
 arbitrary sequence length, and (bf16/f16) packed varlen + split-K.
 
+The paged BF16/F16 interface accepts linear or AITER-style vectorized-5D KV
+caches. Short-query attention supports physical page sizes 16 and 64, including
+causal sliding windows through `sliding_window`; the dual-wave long-query path
+remains page-size 64 only.
+
 ### fp8 (e4m3fn) forward
 
 | Property | Value |

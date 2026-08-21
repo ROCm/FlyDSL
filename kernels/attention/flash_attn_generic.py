@@ -61,6 +61,8 @@ def build_flash_attn_func_module_primary(
     varlen=False,
     paged=False,
     kv_cache_layout="linear",
+    page_size=None,
+    sliding_window=0,
     skip_kv_pad_mask=None,
     return_lse=False,
 ):
@@ -100,6 +102,8 @@ def build_flash_attn_func_module_primary(
             varlen=varlen,
             paged=paged,
             kv_cache_layout=kv_cache_layout,
+            page_size=page_size,
+            sliding_window=sliding_window,
             skip_kv_pad_mask=skip_kv_pad_mask,
             return_lse=return_lse,
         )
@@ -123,6 +127,8 @@ def build_flash_attn_func_module_primary(
             varlen=varlen,
             paged=paged,
             kv_cache_layout=kv_cache_layout,
+            page_size=page_size,
+            sliding_window=sliding_window,
             skip_kv_pad_mask=skip_kv_pad_mask,
             return_lse=return_lse,
         )
@@ -186,6 +192,8 @@ def build_flash_attn_func_module_primary(
         )
     if paged and _validate_enable_dma:
         raise NotImplementedError("generic paged kernel requires the non-DMA path (build with path_tag='N32')")
+    if sliding_window and (not paged or not causal):
+        raise NotImplementedError("sliding_window is supported only for causal paged attention")
 
     traits = _make_flash_attn_generic_traits(
         num_heads,
@@ -201,6 +209,8 @@ def build_flash_attn_func_module_primary(
         cross_seqlen=cross_seqlen,
         paged=paged,
         kv_cache_layout=kv_cache_layout,
+        page_size=page_size,
+        sliding_window=sliding_window,
         waves_per_eu=waves_per_eu,
         daz=daz,
         fast_fp_math=fast_fp_math,
@@ -318,7 +328,7 @@ def build_flash_attn_func_module_primary(
                 init_args.append(_k0_vecs[_kb])
 
         loop_results = init_args
-        for kv_block_start, inner_iter_args in range(0, kv_upper, traits.BLOCK_N_OUT, init=init_args):
+        for kv_block_start, inner_iter_args in range(ctx.kv_lower, kv_upper, traits.BLOCK_N_OUT, init=init_args):
             m_running = inner_iter_args[0]
             l_running = inner_iter_args[1]
             o_accs = [inner_iter_args[2 + i] for i in range_constexpr(traits.D_CHUNKS)]
@@ -674,6 +684,8 @@ def build_flash_attn_func_module_primary(
             varlen=varlen,
             paged=paged,
             kv_cache_layout=kv_cache_layout,
+            page_size=page_size,
+            sliding_window=sliding_window,
             skip_kv_pad_mask=True,
             return_lse=return_lse,
         )
@@ -697,6 +709,8 @@ def build_flash_attn_func_module_primary(
             varlen=varlen,
             paged=paged,
             kv_cache_layout=kv_cache_layout,
+            page_size=page_size,
+            sliding_window=sliding_window,
             skip_kv_pad_mask=False,
             return_lse=return_lse,
         )

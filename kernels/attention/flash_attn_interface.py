@@ -343,8 +343,10 @@ def _build_paged(
 
 # ── paged-KV native path ────────────────────────────────────────────────────
 
-# gfx950 dualwave paged-KV currently supports exactly one configuration.
-_PAGED_PAGE_SIZE = 64
+# The lightweight paged kernel supports page sizes 16 and 64. The dual-wave
+# path remains page-size 64 only.
+_PAGED_PAGE_SIZES = (16, 64)
+_DUALWAVE_PAGED_PAGE_SIZE = 64
 _PAGED_BT_LDS_SIZE = 2048
 
 
@@ -363,6 +365,7 @@ def _flydsl_flash_attn_paged(
     cu_seqlens_kv: Optional[torch.Tensor],
     max_seqlen_q: Optional[int],
     cross_seqlen: Optional[bool],
+    sliding_window: int,
     num_kv_splits: int,
     out: Optional[torch.Tensor],
     waves_per_eu: int,
@@ -375,7 +378,7 @@ def _flydsl_flash_attn_paged(
     """Native paged-KV attention on the gfx950 dualwave kernel.
 
     Supported config ONLY (anything else raises): linear/vectorized cache layout
-    [NumBlocks, PageSize=64, NumKVHeads, HeadDim], vLLM lookup (block_table +
+    [NumBlocks, PageSize, NumKVHeads, HeadDim], vLLM lookup (block_table +
     seqlen_k), causal, D=64/128, dtype bf16/f16.
     - Dense 4D Q ``[B, Sq, H, D]``: split-K (num_kv_splits>1) supported (seq_len>=384).
     - Varlen packed Q ``[total_q, H, D]`` (cu_seqlens_q given): paged K/V looked up
@@ -429,10 +432,14 @@ def _flydsl_flash_attn_paged(
         page_size = int(k.shape[1])
         Hkv = int(k.shape[2])
         k_head_dim = int(k.shape[3])
-    if page_size != _PAGED_PAGE_SIZE:
+    if page_size not in _PAGED_PAGE_SIZES:
         raise NotImplementedError(
-            f"flydsl_flash_attn_func: native paged KV supports page_size={_PAGED_PAGE_SIZE} only, got {page_size}"
+            f"flydsl_flash_attn_func: native paged KV supports page_size in {_PAGED_PAGE_SIZES}, got {page_size}"
         )
+    if sliding_window < 0:
+        raise ValueError(f"flydsl_flash_attn_func: sliding_window must be non-negative, got {sliding_window}")
+    if sliding_window and not causal:
+        raise NotImplementedError("flydsl_flash_attn_func: sliding-window paged KV requires causal=True")
     if D not in (64, 128):
         raise NotImplementedError(f"flydsl_flash_attn_func: native paged KV supports head_dim=64 or 128, got {D}")
     if k_head_dim != D:
@@ -456,15 +463,6 @@ def _flydsl_flash_attn_paged(
     # Per-batch KV lengths differ in general → bottom-right cross-length masking. Varlen
     # paged always uses cross masking (per-batch seqlen_q/seqlen_kv come from cu_seqlens).
     skv = int(max_seqlen_kv) if max_seqlen_kv is not None else int(seqlen_k.max().item())
-    max_kv_pages = (skv + page_size - 1) // page_size
-    max_pages_per_split = (max_kv_pages + int(num_kv_splits) - 1) // int(num_kv_splits)
-    if max_pages_per_split > _PAGED_BT_LDS_SIZE:
-        max_supported_kv = _PAGED_BT_LDS_SIZE * int(num_kv_splits) * page_size
-        raise NotImplementedError(
-            f"flydsl_flash_attn_func: paged KV length {skv} exceeds block-table LDS window "
-            f"({_PAGED_BT_LDS_SIZE} pages/split, max_kv_len={max_supported_kv} for "
-            f"num_kv_splits={num_kv_splits}, page_size={page_size})"
-        )
     if varlen:
         cross = bool(cross_seqlen) if cross_seqlen is not None else True
     else:
@@ -495,6 +493,8 @@ def _flydsl_flash_attn_paged(
                 cross_seqlen=cross,
                 varlen=varlen,
                 kv_cache_layout=kv_cache_layout,
+                page_size=page_size,
+                sliding_window=sliding_window,
                 waves_per_eu=waves_per_eu,
                 daz=daz,
                 lazy_rescale=dualwave_swp_lazy_rescale,
@@ -503,6 +503,23 @@ def _flydsl_flash_attn_paged(
                 enable_stagger=dualwave_swp_enable_stagger,
             )
         else:
+            if page_size != _DUALWAVE_PAGED_PAGE_SIZE:
+                raise NotImplementedError(
+                    "flydsl_flash_attn_func: page_size=16 is supported only by the short-query paged path"
+                )
+            if sliding_window:
+                raise NotImplementedError(
+                    "flydsl_flash_attn_func: sliding-window paged KV is supported only by the short-query paged path"
+                )
+            max_kv_pages = (skv + page_size - 1) // page_size
+            max_pages_per_split = (max_kv_pages + int(num_kv_splits) - 1) // int(num_kv_splits)
+            if max_pages_per_split > _PAGED_BT_LDS_SIZE:
+                max_supported_kv = _PAGED_BT_LDS_SIZE * int(num_kv_splits) * page_size
+                raise NotImplementedError(
+                    f"flydsl_flash_attn_func: paged KV length {skv} exceeds block-table LDS window "
+                    f"({_PAGED_BT_LDS_SIZE} pages/split, max_kv_len={max_supported_kv} for "
+                    f"num_kv_splits={num_kv_splits}, page_size={page_size})"
+                )
             exe = _build_paged(
                 num_heads=H,
                 num_kv_heads=num_kv_heads,
@@ -552,6 +569,8 @@ def _build_paged_light(
     cross_seqlen: bool,
     varlen: bool,
     kv_cache_layout: str,
+    page_size: int,
+    sliding_window: int,
     waves_per_eu: int,
     daz: bool,
     lazy_rescale: bool,
@@ -573,6 +592,8 @@ def _build_paged_light(
         varlen=varlen,
         paged=True,
         kv_cache_layout=kv_cache_layout,
+        page_size=page_size,
+        sliding_window=sliding_window,
         block_m=64,
         flat_work_group_size=128,
         path_tag="N32",
@@ -610,6 +631,7 @@ def flydsl_flash_attn_func(
     kv_cache_layout: str = "linear",
     # Split-K (gfx950 only, seq_len >= 384, D=64/128, bf16/f16).
     num_kv_splits: int = 1,
+    sliding_window: int = 0,
     # fp8 dense ABI: per-tensor descales for pre-quantized e4m3fn Q/K/V.
     q_descale: Optional[torch.Tensor] = None,
     k_descale: Optional[torch.Tensor] = None,
@@ -661,6 +683,8 @@ def flydsl_flash_attn_func(
             dense mode infers it from ``q.shape[1] != k.shape[1]``.
         block_table / seqlen_k: vLLM-style 2D block table metadata.
         num_kv_splits: Split-K factor (>1: gfx950 only, D=64/128, bf16/f16, seq>=384).
+        sliding_window: Causal window width for short-query paged attention. Page-size-16
+            vectorized KV and sliding-window mode use the lightweight generic kernel.
         q_descale / k_descale / v_descale: fp32 shape-[1] descales required
             for dense fp8 e4m3fn inputs.
         out: Optional pre-allocated output tensor. For fp8, output is bf16;
@@ -712,6 +736,7 @@ def flydsl_flash_attn_func(
             cu_seqlens_kv=cu_seqlens_kv,
             max_seqlen_q=max_seqlen_q,
             cross_seqlen=cross_seqlen,
+            sliding_window=sliding_window,
             num_kv_splits=num_kv_splits,
             out=out,
             waves_per_eu=waves_per_eu,
