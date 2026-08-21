@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-21T08:17:14Z",
+ "updated": "2026-08-21T08:33:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32462982482,
+   "pr": null,
+   "commit": "6d5b0021ddbc87a897c0ab011eca82746899a706",
+   "branch": "main",
+   "event": "push",
+   "title": "[Kernel][Perf] Speed up the RDNA3 GEMM up to 1.85x by choosing the ti\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32462982482",
+   "created_at": "2026-08-21T08:23:47Z",
+   "updated_at": "2026-08-21T08:25:03Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 32458891715,
    "pr": 1037,
@@ -40,11 +55,11 @@
    "branch": "worktree-fix-basis2tuple",
    "event": "pull_request",
    "title": "[Fix] crd2idx uses wrong dynamic basis leaf",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457463858",
    "created_at": "2026-08-21T07:10:20Z",
-   "updated_at": "2026-08-21T07:12:24Z",
+   "updated_at": "2026-08-21T08:18:23Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -85,13 +100,41 @@
    "branch": "phil/bump-llvm-941a04e6",
    "event": "pull_request",
    "title": "[Misc][FlyToROCDL] Bump LLVM to 941a04e6 and adapt gpu.launch_func lowering",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32454436875",
    "created_at": "2026-08-21T06:27:05Z",
-   "updated_at": "2026-08-21T07:05:54Z",
+   "updated_at": "2026-08-21T08:16:48Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-21T08:16:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32454436875/job/96711958507"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-21T08:16:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32454436875/job/96711958508"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-21T08:17:18Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32454436875/job/96711958643"
+    }
+   ]
   },
   {
    "run_id": 32454155238,
@@ -665,20 +708,20 @@
    "branch": "dsl-ify-scf-controlflow",
    "event": "pull_request",
    "title": "[Kernel] Replace raw scf ops with Python control flow in kernels",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772",
    "created_at": "2026-08-21T03:16:53Z",
-   "updated_at": "2026-08-21T08:01:54Z",
+   "updated_at": "2026-08-21T08:31:12Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-21T08:01:54Z",
-     "completed_at": null,
+     "completed_at": "2026-08-21T08:31:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772/job/96695224350"
     },
     {
@@ -1703,52 +1746,6 @@
      "started_at": "2026-08-20T13:29:52Z",
      "completed_at": "2026-08-20T14:31:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32353132079/job/96442060386"
-    }
-   ]
-  },
-  {
-   "run_id": 32352384346,
-   "pr": 1041,
-   "commit": "4ed06127fb2f3f2d5722d95e120752948f7982df",
-   "branch": "xyt/rf_hgemm950",
-   "event": "pull_request",
-   "title": "[GEMM] Refine GFX950 A16W16 async load scheduling",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32352384346",
-   "created_at": "2026-08-20T09:08:53Z",
-   "updated_at": "2026-08-20T12:34:40Z",
-   "actor": "xytpai",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T10:43:35Z",
-     "completed_at": "2026-08-20T11:03:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32352384346/job/96394471075",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T10:43:49Z",
-     "completed_at": "2026-08-20T12:08:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32352384346/job/96394471079",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T11:24:38Z",
-     "completed_at": "2026-08-20T12:34:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32352384346/job/96394471184",
-     "log_fetch_failed": true
     }
    ]
   }
