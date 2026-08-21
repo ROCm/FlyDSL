@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-21T04:25:36Z",
+ "updated": "2026-08-21T04:28:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32446827284,
+   "pr": 1020,
+   "commit": "fc155670ee194ae1d7bf6d815b02fd82beba2084",
+   "branch": "fp8-softmax-normalisation",
+   "event": "pull_request",
+   "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32446827284",
+   "created_at": "2026-08-21T04:24:20Z",
+   "updated_at": "2026-08-21T04:26:06Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 32443647802,
    "pr": 1048,
@@ -440,7 +455,7 @@
   },
   {
    "run_id": 32386189717,
-   "pr": 1020,
+   "pr": null,
    "commit": "e2313b6d87b72a551505ad54de38d950f24eb47d",
    "branch": "fp8-softmax-normalisation",
    "event": "pull_request",
@@ -1874,21 +1889,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32332843149/job/96320742355"
     }
    ]
-  },
-  {
-   "run_id": 32332800713,
-   "pr": null,
-   "commit": "1b51c136c9ccb6ece324569c80b5275d29156b3d",
-   "branch": "main",
-   "event": "push",
-   "title": "[FlyToROCDL] Honor fly pointer alignment in ptr.load/ptr.store loweri\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32332800713",
-   "created_at": "2026-08-20T04:41:33Z",
-   "updated_at": "2026-08-20T04:42:30Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
