@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-21T06:32:35Z",
+ "updated": "2026-08-21T06:51:24Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32455927554,
+   "pr": 1038,
+   "commit": "de01efb4d0af6c77f80b9cd0d844b71902bc3cb3",
+   "branch": "zhimding/jobs_parallel_0819",
+   "event": "pull_request",
+   "title": "[AOT] Add resilient parallel job scheduler",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32455927554",
+   "created_at": "2026-08-21T06:48:54Z",
+   "updated_at": "2026-08-21T06:48:56Z",
+   "actor": "zhiding512",
+   "jobs": []
+  },
   {
    "run_id": 32454436875,
    "pr": 1051,
@@ -25,11 +40,11 @@
    "branch": "zhimding/jobs_parallel_0819",
    "event": "pull_request",
    "title": "[AOT] Add resilient parallel job scheduler",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32454155238",
    "created_at": "2026-08-21T06:22:45Z",
-   "updated_at": "2026-08-21T06:24:54Z",
+   "updated_at": "2026-08-21T06:48:56Z",
    "actor": "zhiding512",
    "jobs": []
   },
@@ -100,11 +115,11 @@
    "branch": "john/lazy-rescale-nan",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453263454",
    "created_at": "2026-08-21T06:09:26Z",
-   "updated_at": "2026-08-21T06:10:39Z",
+   "updated_at": "2026-08-21T06:36:44Z",
    "actor": "JohnQinAMD",
    "jobs": []
   },
@@ -155,9 +170,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-21T06:20:40Z",
+     "started_at": "2026-08-21T06:34:31Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32451534261/job/96687716531"
     },
@@ -216,11 +231,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-21T06:17:11Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32451114906/job/96684298216"
+     "completed_at": "2026-08-21T06:33:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32451114906/job/96684298216",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -231,13 +247,41 @@
    "branch": "jhinpan/fix-exp2-fastmath",
    "event": "pull_request",
    "title": "[ROCDL] Lower approximate exp2 to native intrinsic",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450902421",
    "created_at": "2026-08-21T05:32:08Z",
-   "updated_at": "2026-08-21T05:35:14Z",
+   "updated_at": "2026-08-21T06:36:13Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-21T06:36:13Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450902421/job/96690654773"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-21T06:36:13Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450902421/job/96690654778"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-21T06:36:13Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450902421/job/96690654850"
+    }
+   ]
   },
   {
    "run_id": 32450764384,
@@ -1671,21 +1715,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32349478770/job/96384294305"
     }
    ]
-  },
-  {
-   "run_id": 32349275165,
-   "pr": 1025,
-   "commit": "183b15fbe396685e3d10fbd10ec1d1a3a22f5b11",
-   "branch": "dsl-ify-scf-controlflow",
-   "event": "pull_request",
-   "title": "[Kernel] Replace raw scf ops with Python control flow in kernels",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32349275165",
-   "created_at": "2026-08-20T08:31:53Z",
-   "updated_at": "2026-08-20T08:33:36Z",
-   "actor": "xudoyuan",
-   "jobs": []
   }
  ]
 }
