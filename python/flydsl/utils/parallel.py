@@ -116,19 +116,20 @@ def _memory_worker_cap(default_workers: int) -> int:
 
     try:
         import psutil
-    except ImportError as error:
-        raise RuntimeError(
-            "psutil is required for automatic AOT worker memory limiting; "
-            "install psutil or set FLYDSL_AOT_WORKERS explicitly"
-        ) from error
+    except ImportError:
+        log().warning(
+            "psutil is not installed; AOT memory limiting is disabled and the CPU-based worker limit will be used"
+        )
+        return default_workers
 
     try:
         available_gb = psutil.virtual_memory().available / (1024**3)
     except Exception as error:
-        raise RuntimeError(
-            "failed to query available memory for the AOT worker limit; "
-            "set FLYDSL_AOT_WORKERS explicitly to bypass automatic detection"
-        ) from error
+        log().warning(
+            "failed to query available memory for AOT worker limiting (%s); the CPU-based worker limit will be used",
+            error,
+        )
+        return default_workers
     return min(default_workers, max(1, int(available_gb / per_worker_gb)))
 
 
@@ -227,9 +228,9 @@ def _run_file_pool(
                 failed_jobs,
             )
 
-    def note_success(worker_epoch: int) -> None:
+    def note_success() -> None:
         nonlocal max_workers, successful_since_backoff
-        if max_workers >= initial_max_workers or worker_epoch != launch_epoch:
+        if max_workers >= initial_max_workers:
             return
         successful_since_backoff += 1
         if successful_since_backoff < max_workers:
@@ -339,7 +340,7 @@ def _run_file_pool(
                 is_failure = result.get("compile_time") is None
                 note_done(is_failure=is_failure)
                 if not is_failure:
-                    note_success(worker_epoch)
+                    note_success()
                 return
 
             # A structured Python exception is deterministic for the same job.
@@ -364,11 +365,6 @@ def _run_file_pool(
                 return
 
             if timeout_reason is not None:
-                if attempts[index] < max_retries and max_workers > 1:
-                    timeout_reason = backoff_worker_limit(
-                        worker_epoch,
-                        timeout_reason,
-                    )
                 retry_or_drop(
                     index,
                     kind="timeout",
@@ -385,6 +381,13 @@ def _run_file_pool(
                         index,
                         kind="possible_oom",
                         reason=reason,
+                        exitcode=process.exitcode,
+                    )
+                elif worker_epoch != launch_epoch:
+                    retry_or_drop(
+                        index,
+                        kind="possible_oom",
+                        reason=(f"{reason}; worker limit already reduced to {max_workers} for this failure wave"),
                         exitcode=process.exitcode,
                     )
                 elif max_workers <= 1:

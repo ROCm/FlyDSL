@@ -60,12 +60,14 @@ Use the same names as [`python/flydsl/utils/env.py`](../python/flydsl/utils/env.
 `flydsl.utils.parallel.run_parallel_jobs` uses the Linux `fork` multiprocessing
 context and is intended for compile-only AOT jobs. It is not a device-runtime
 executor. Its automatic memory cap requires the optional `psutil` package and
-fails with an actionable error instead of silently disabling the cap when the
-optional package is not installed or memory cannot be queried. A worker killed
-by `SIGKILL` (`exitcode=-9`; possible OOM) halves the worker limit at most once
-per launch wave before retrying; timeout retries use the same backoff. Healthy
-completions restore the limit additively. No backoff is applied when retries are
-disabled, and retries are appended behind jobs that have not started yet.
+logs a warning before falling back to the CPU-based worker limit when the
+optional package is unavailable or memory cannot be queried. A worker killed by
+`SIGKILL` (`exitcode=-9`; possible OOM) halves the worker limit at most once per
+launch wave before retrying. Every healthy completion after a backoff helps
+restore the limit additively, including work launched before that backoff.
+Timeouts do not change the global worker limit. No backoff is applied when
+retries are disabled, and retries are appended behind jobs that have not
+started yet.
 Progress and final summary lines report terminal failure counts separately from
 the number of jobs that have finished. Scheduler messages use the FlyDSL logger;
 set `FLYDSL_DEBUG_LOG_TO_CONSOLE=1` and `FLYDSL_DEBUG_LOG_LEVEL=INFO` to emit
