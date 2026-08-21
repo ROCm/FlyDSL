@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-21T09:19:19Z",
+ "updated": "2026-08-21T09:25:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32467635411,
+   "pr": 1053,
+   "commit": "06ac7988679a9edf5c470aa487cf3410db92ee0e",
+   "branch": "upstream/pa-64bit-cache-offsets",
+   "event": "pull_request",
+   "title": "[Bugfix][PA] Fix D192 query staging and 64-bit cache offsets",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467635411",
+   "created_at": "2026-08-21T09:23:12Z",
+   "updated_at": "2026-08-21T09:24:03Z",
+   "actor": "sammysun0711",
+   "jobs": []
+  },
+  {
+   "run_id": 32467612345,
+   "pr": null,
+   "commit": "ff196ddfd5bba243166140a6752d5df3a9af296c",
+   "branch": "main",
+   "event": "push",
+   "title": "[Kernel] Replace raw scf ops with Python control flow in kernels (#1025)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467612345",
+   "created_at": "2026-08-21T09:22:56Z",
+   "updated_at": "2026-08-21T09:24:02Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 32467139450,
    "pr": 1025,
@@ -10,11 +40,11 @@
    "branch": "dsl-ify-scf-controlflow",
    "event": "pull_request",
    "title": "[Kernel] Replace raw scf ops with Python control flow in kernels",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467139450",
    "created_at": "2026-08-21T09:17:01Z",
-   "updated_at": "2026-08-21T09:17:14Z",
+   "updated_at": "2026-08-21T09:18:21Z",
    "actor": "xudoyuan",
    "jobs": []
   },
@@ -25,11 +55,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Kernel][Perf] Speed up the RDNA3 GEMM up to 1.85x by choosing the ti\u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32462982482",
    "created_at": "2026-08-21T08:23:47Z",
-   "updated_at": "2026-08-21T08:25:03Z",
+   "updated_at": "2026-08-21T09:22:58Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -40,11 +70,11 @@
    "branch": "jhinpan/fix-exp2-fastmath",
    "event": "pull_request",
    "title": "[ROCDL] Lower approximate exp2 to native intrinsic",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458891715",
    "created_at": "2026-08-21T07:30:00Z",
-   "updated_at": "2026-08-21T07:31:22Z",
+   "updated_at": "2026-08-21T09:24:03Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -55,11 +85,11 @@
    "branch": "yanbo/fix_multigpu_ci",
    "event": "pull_request",
    "title": "[CI] fix allreduce ci",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458362585",
    "created_at": "2026-08-21T07:22:45Z",
-   "updated_at": "2026-08-21T07:24:29Z",
+   "updated_at": "2026-08-21T09:18:21Z",
    "actor": "yanboshao",
    "jobs": []
   },
@@ -70,13 +100,41 @@
    "branch": "worktree-fix-basis2tuple",
    "event": "pull_request",
    "title": "[Fix] crd2idx uses wrong dynamic basis leaf",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457463858",
    "created_at": "2026-08-21T07:10:20Z",
-   "updated_at": "2026-08-21T08:18:23Z",
+   "updated_at": "2026-08-21T09:23:25Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-21T09:23:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457463858/job/96727584730"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-21T09:23:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457463858/job/96727584753"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-21T09:24:05Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457463858/job/96727584767"
+    }
+   ]
   },
   {
    "run_id": 32457110814,
@@ -753,7 +811,7 @@
   },
   {
    "run_id": 32442823772,
-   "pr": 1025,
+   "pr": null,
    "commit": "da37a45baf9f97e3aaa7aebd6fa2f9bf8c3ef88e",
    "branch": "dsl-ify-scf-controlflow",
    "event": "pull_request",
@@ -1703,36 +1761,6 @@
    "created_at": "2026-08-20T09:28:26Z",
    "updated_at": "2026-08-20T09:29:58Z",
    "actor": "yanboshao",
-   "jobs": []
-  },
-  {
-   "run_id": 32354052653,
-   "pr": 1048,
-   "commit": "588eb56253391be61110bf4067ce42e8aa5a838c",
-   "branch": "yanbo/fix_multigpu_ci",
-   "event": "pull_request",
-   "title": "[CI] fix multigpu ci",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32354052653",
-   "created_at": "2026-08-20T09:28:26Z",
-   "updated_at": "2026-08-20T09:28:29Z",
-   "actor": "yanboshao",
-   "jobs": []
-  },
-  {
-   "run_id": 32353761203,
-   "pr": null,
-   "commit": "fd380dd698d4df891ce0a610f92ed264e950819b",
-   "branch": "main",
-   "event": "push",
-   "title": "refine g2s load (#1041)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32353761203",
-   "created_at": "2026-08-20T09:24:59Z",
-   "updated_at": "2026-08-20T09:59:13Z",
-   "actor": "coderfeli",
    "jobs": []
   }
  ]
