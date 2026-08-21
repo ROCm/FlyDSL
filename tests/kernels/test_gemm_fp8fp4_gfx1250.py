@@ -3,10 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""GEMM kernel tests: A8W4 mxscale, A8W8 ptpc, A8W8 blockscale for gfx1250."""
+"""gfx1250 preshuffled-B GEMM tests."""
 
 import os
+import random
 import sys
+from typing import NamedTuple
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if _REPO_ROOT not in sys.path:
@@ -21,14 +23,19 @@ import flydsl.compiler as flyc  # noqa: E402,I001
 import flydsl.expr as fx  # noqa: E402
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
+from kernels.gemm.gemm_a4w4_256x256_gfx1250 import launch_gemm_a4w4_256x256  # noqa: E402
+from kernels.gemm.gemm_a8w4_256x256_gfx1250 import launch_gemm_a8w4_256x256  # noqa: E402
 from kernels.gemm.gemm_a8w4_mxscale_gfx1250 import launch_gemm_a8w4_mxscale  # noqa: E402
+from kernels.gemm.gemm_a8w8_256x256_gfx1250 import launch_gemm_a8w8_256x256  # noqa: E402
 from kernels.gemm.gemm_a8w8_gfx1250 import launch_gemm_a8w8  # noqa: E402
+from kernels.gemm.gemm_a8w8_splitk_reduce_gfx1250 import compile_gemm_a8w8_splitk_reduce  # noqa: E402
 from tests.kernels.utils import gemm_common_utils  # noqa: E402
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
 _DT = {"bf16": torch.bfloat16, "f16": torch.float16}
+_DT_NAME = {v: k for k, v in _DT.items()}
 SCALE_BLOCK_32 = 32
 SCALE_BLOCK_128 = 128
 
@@ -39,70 +46,54 @@ def _require_gpu():
         pytest.skip(f"requires gfx1250, got {arch}")
 
 
+def _u8(t):
+    return flyc.from_c_void_p(fx.Uint8, t.data_ptr())
+
+
+def _i8(t):
+    return flyc.from_c_void_p(fx.Int8, t.data_ptr(), assumed_align=16)
+
+
+def _new_seed():
+    seed = int(os.environ["FLYDSL_TEST_SEED"]) if os.environ.get("FLYDSL_TEST_SEED") else random.randrange(1 << 31)
+    torch.manual_seed(seed)
+    return seed
+
+
 def _random_fp8_bytes(rows: int, cols: int) -> torch.Tensor:
     """Finite FP8 E4M3 bytes (avoids the 0x7F/0xFF NaN encodings)."""
     return torch.randint(0, 126, (rows, cols), dtype=torch.uint8)
+
+
+def _make_quant_input(rows: int, K: int, fp4: bool, const_val: float | None):
+    if const_val is None:
+        q = gemm_common_utils.random_fp4_packed(rows, K) if fp4 else _random_fp8_bytes(rows, K)
+    else:
+        codes = torch.arange(16 if fp4 else 126, dtype=torch.uint8).view(1, -1)
+        vals = gemm_common_utils.mxfp4_to_f32(codes)[0, ::2] if fp4 else gemm_common_utils.fp8_e4m3_to_f32(codes)[0]
+        match = (vals == const_val).nonzero()
+        if not len(match):
+            raise ValueError(f"{const_val} is not exactly representable")
+        code = int(match[0, 0])
+        q = (
+            torch.full((rows, K // 2), code | (code << 4), dtype=torch.uint8)
+            if fp4
+            else torch.full((rows, K), code, dtype=torch.uint8)
+        )
+    return (q, gemm_common_utils.mxfp4_to_f32(q), K // 2) if fp4 else (q, gemm_common_utils.fp8_e4m3_to_f32(q), K)
 
 
 def _with_strided_a(a: torch.Tensor, K: int, lda: int) -> torch.Tensor:
     """Return A backed by runtime lda when lda exceeds logical K."""
     if lda == K:
         return a
-    M = a.shape[0]
-    out = torch.zeros(M, lda, dtype=a.dtype, device=a.device)
+    out = torch.zeros(a.shape[0], lda, dtype=a.dtype, device=a.device)
     out[:, :K] = a
     return out
 
 
-def _bench_us(launch, output: torch.Tensor, *, warmup: int = 5, iters: int = 20) -> float:
-    """Median per-launch latency (us) via hipGraph capture/replay."""
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
-        for _ in range(warmup):
-            launch()
-    torch.cuda.current_stream().wait_stream(stream)
-    torch.cuda.synchronize()
-
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.stream(stream), torch.cuda.graph(graph, stream=stream):
-        launch()
-    torch.cuda.synchronize()
-    if output.abs().max().item() == 0:
-        raise RuntimeError("hipGraph replay produced an all-zero output")
-
-    starts = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-    ends = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-    with torch.cuda.stream(stream):
-        for start, end in zip(starts, ends):
-            start.record()
-            graph.replay()
-            end.record()
-    torch.cuda.synchronize()
-    samples = sorted(start.elapsed_time(end) * 1e3 for start, end in zip(starts, ends))
-    return samples[len(samples) // 2]
-
-
-def _tflops(M: int, N: int, K: int, us: float) -> float:
-    return 2.0 * M * N * K / (us * 1e-6) / 1e12
-
-
-def _assert_case(build_fn, launch_fn, M, N, K, *rest, **kwargs):
-    """Build inputs, compile+run once, and assert against the reference.
-
-    Returns (c_gpu, make_args, compiled) so callers (e.g. the perf CLI) can
-    replay the same compiled kernel without rebuilding it.
-    """
-    c_gpu, make_args, ref, (rtol, atol) = build_fn(M, N, K, *rest, **kwargs)
-    compiled = flyc.compile(launch_fn, *make_args(torch.cuda.current_stream()))
-    torch.cuda.synchronize()
-    c_out = c_gpu[:M, :N].float().cpu()
-    torch.testing.assert_close(c_out, ref.float(), rtol=rtol, atol=atol)
-    return c_gpu, make_args, compiled
-
-
 def _preshuffle_scale_32x4(scale: torch.Tensor) -> torch.Tensor:
-    """[R, K] uint8 E8M0 -> [ceil(R/32), K] 32-row x 4-K-group preshuffled layout."""
+    """[R, K/32] uint8 E8M0 -> [ceil(R/32), K] 32-row x 4-K-group preshuffled layout."""
     rows, k_scale = scale.shape
     row_blocks = (rows + 31) // 32
     if row_blocks * 32 != rows:
@@ -113,445 +104,540 @@ def _preshuffle_scale_32x4(scale: torch.Tensor) -> torch.Tensor:
     return x.reshape(row_blocks, -1)
 
 
-def _e8m0_exp_range(scale: torch.Tensor) -> tuple[int, int]:
-    s = scale.view(torch.uint8).to(torch.int16)
-    return int(s.min().item()) - 127, int(s.max().item()) - 127
+def _fp4_tolerances(a_scale: torch.Tensor, b_scale: torch.Tensor, K: int) -> tuple[float, float]:
+    """Scale-range-aware tolerance for FP4 weights, whose quantization error needs an
+    absolute floor that a purely relative tolerance would not give."""
+    exps = [int(s.view(torch.uint8).max().item()) - 127 for s in (a_scale, b_scale)]
+    peak_prod_exp = sum(max(0, e) for e in exps)
+    return min(5e-2, 1e-2 + 3e-3 * peak_prod_exp), max(5e-2, K * (0.6 + 1.5 * peak_prod_exp))
 
 
-def _a8w4_tolerances(a_scale: torch.Tensor, b_scale: torch.Tensor, K: int) -> tuple[float, float]:
-    """Scale-range-aware tolerance for mixed FP8xFP4 WMMA-scale GEMM (bf16/f16 output)."""
-    _, a_max_exp = _e8m0_exp_range(a_scale)
-    _, b_max_exp = _e8m0_exp_range(b_scale)
-    peak_prod_exp = max(0, a_max_exp) + max(0, b_max_exp)
-    rtol = min(5e-2, 1e-2 + 3e-3 * peak_prod_exp)
-    atol = max(5e-2, K * (0.6 + 1.5 * peak_prod_exp))
-    return rtol, atol
+def _scales_mx32(a_f32, b_f32, M, N, K, fp4_w, scale_exp, _scale_scale):
+    a_s = gemm_common_utils.random_e8m0(M, K // SCALE_BLOCK_32, low_exp=scale_exp[0], high_exp=scale_exp[1])
+    b_s = gemm_common_utils.random_e8m0(N, K // SCALE_BLOCK_32, low_exp=scale_exp[0], high_exp=scale_exp[1])
+    a_sc = gemm_common_utils.e8m0_to_f32(a_s).repeat_interleave(SCALE_BLOCK_32, dim=-1)[:M, :K]
+    b_sc = gemm_common_utils.e8m0_to_f32(b_s).repeat_interleave(SCALE_BLOCK_32, dim=-1)[:N, :K]
+    ref = torch.matmul(a_f32[:M, :K] * a_sc, (b_f32[:N, :K] * b_sc).T)
+    tol = _fp4_tolerances(a_s, b_s, K) if fp4_w else (1e-2, 5e-2)
+    return _preshuffle_scale_32x4(a_s), _preshuffle_scale_32x4(b_s), 0, ref, tol
 
 
-def _reference_a8w4(a, b, a_scale, b_scale, M, N, K):
-    a_f32 = gemm_common_utils.fp8_e4m3_to_f32(a.view(torch.uint8))[:M, :K]
-    b_f32 = gemm_common_utils.mxfp4_to_f32(b.view(torch.uint8))[:N, :K]
-    a_sc = gemm_common_utils.e8m0_to_f32(a_scale.view(torch.uint8)).repeat_interleave(SCALE_BLOCK_32, dim=-1)[:M, :K]
-    b_sc = gemm_common_utils.e8m0_to_f32(b_scale.view(torch.uint8)).repeat_interleave(SCALE_BLOCK_32, dim=-1)[:N, :K]
-    return torch.matmul(a_f32 * a_sc, (b_f32 * b_sc).T)
+def _scales_mx128(a_f32, b_f32, M, N, K, _fp4_w, scale_exp, _scale_scale):
+    sk = K // SCALE_BLOCK_128
+    a_s = gemm_common_utils.random_e8m0(M, sk, low_exp=scale_exp[0], high_exp=scale_exp[1])
+    b_s = gemm_common_utils.random_e8m0(N // SCALE_BLOCK_128, sk, low_exp=scale_exp[0], high_exp=scale_exp[1])
+    a = a_f32[:M, :K].clone().view(M, sk, SCALE_BLOCK_128) * gemm_common_utils.e8m0_to_f32(a_s).unsqueeze(-1)
+    b_sc = gemm_common_utils.e8m0_to_f32(b_s).repeat_interleave(SCALE_BLOCK_128, dim=0)[:N]
+    b = b_f32[:N, :K].clone().view(N, sk, SCALE_BLOCK_128) * b_sc.unsqueeze(-1)
+    ref = torch.matmul(a.view(M, K), b.view(N, K).T)
+    return a_s.T.contiguous(), b_s, M, ref, (1e-2, 5e-2)  # A-scale is [K/128, M], row stride M
 
 
-def _build_a8w4_case(
-    M,
-    N,
-    K,
-    tile_m,
-    tile_n,
-    tile_k,
-    m_warp,
-    n_warp,
-    num_buffers,
-    out_dtype="bf16",
+def _scales_ptpc(a_f32, b_f32, M, N, K, _fp4_w, _scale_exp, scale_scale):
+    a_s = (scale_scale * (0.5 + torch.rand(M, dtype=torch.float32))).contiguous()
+    b_s = (scale_scale * (0.5 + torch.rand(N, dtype=torch.float32))).contiguous()
+    ref = torch.matmul(a_f32[:M, :K], b_f32[:N, :K].T) * a_s.view(M, 1) * b_s.view(1, N)
+    return a_s, b_s, 0, ref, (2e-2, max(5e-2, 2e-2 * float(ref.abs().max())))
+
+
+_SCALES = {"mx32": _scales_mx32, "mx128": _scales_mx128, "ptpc": _scales_ptpc}
+
+_SMOKE_TILE = (128, 256, 128, 2, 2)  # tile_m, tile_n, tile_k, m_warp, n_warp for the flexible kernels
+
+
+def _spec(
+    launch,
     *,
-    lda_extra=0,
-    ldc_extra=0,
-    cluster_m=1,
-    cluster_n=1,
+    fp4_w=False,
+    fp4_act=False,
+    scale="mx32",
+    profile=None,
+    cluster=(1, 1),
+    smoke=(512, 512),
+    k_pair=1,
+    k_whole_rev=False,
+    f16=True,
+    tensor_args=False,
 ):
-    torch.manual_seed(0)
-    a = _random_fp8_bytes(M, K)
-    b = gemm_common_utils.random_fp4_packed(N, K)
-    # f16 output overflows (~65504 max) with the default E8M0 exponent range at this K;
-    # pin scales to 1.0 so f16 accumulation stays in range like the other dtypes.
-    scale_exp = {"low_exp": 127, "high_exp": 127} if out_dtype == "f16" else {}
-    a_scale = gemm_common_utils.random_e8m0(M, K // SCALE_BLOCK_32, **scale_exp)
-    b_scale = gemm_common_utils.random_e8m0(N, K // SCALE_BLOCK_32, **scale_exp)
-    ref = _reference_a8w4(a, b, a_scale, b_scale, M, N, K)
-
-    lda, ldc = K + lda_extra, N + ldc_extra
-    a_gpu = _with_strided_a(a, K, lda).cuda()
-    b_gpu = gemm_common_utils.preshuffle_b_16x16(b, N, K // 2).cuda()
-    as_gpu = _preshuffle_scale_32x4(a_scale).cuda()
-    bs_gpu = _preshuffle_scale_32x4(b_scale).cuda()
-    c_gpu = torch.zeros(M, ldc, dtype=_DT[out_dtype], device="cuda")
-    out_is_f16 = 0 if out_dtype == "bf16" else 1
-
-    def make_args(stream):
-        return (
-            c_gpu,
-            flyc.from_c_void_p(fx.Int8, a_gpu.data_ptr(), assumed_align=16),
-            flyc.from_c_void_p(fx.Int8, b_gpu.data_ptr(), assumed_align=16),
-            as_gpu,
-            bs_gpu,
-            M,
-            stream,
-            N,
-            K,
-            lda,
-            ldc,
-            tile_m,
-            tile_n,
-            tile_k,
-            m_warp,
-            n_warp,
-            out_is_f16,
-            num_buffers,
-            cluster_m,
-            cluster_n,
-        )
-
-    return c_gpu, make_args, ref, _a8w4_tolerances(a_scale, b_scale, K)
-
-
-# (M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, out_dtype, lda_extra, ldc_extra)
-_A8W4_CASES = [
-    (128, 256, 512, 128, 256, 128, 2, 2, 2, "bf16", 0, 0),
-    (128, 512, 1024, 128, 256, 256, 2, 2, 2, "bf16", 0, 0),
-    (256, 256, 512, 256, 256, 256, 2, 2, 2, "bf16", 0, 0),
-    (1024, 1024, 1024, 128, 256, 128, 2, 2, 3, "bf16", 0, 0),
-    (128, 256, 512, 128, 256, 128, 2, 2, 2, "f16", 0, 0),
-    (128, 256, 512, 128, 256, 128, 2, 2, 2, "bf16", 64, 96),
-]
-
-
-@pytest.mark.parametrize(
-    "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, out_dtype, lda_extra, ldc_extra", _A8W4_CASES
-)
-def test_a8w4_mxscale_gemm(
-    M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, out_dtype, lda_extra, ldc_extra
-):
-    _run_case(
-        "mxscale_a8w4",
-        M,
-        N,
-        K,
-        tile_m,
-        tile_n,
-        tile_k,
-        m_warp,
-        n_warp,
-        num_buffers,
-        out_dtype=out_dtype,
-        lda_extra=lda_extra,
-        ldc_extra=ldc_extra,
-    )
-
-
-def _reference_ptpc(a, b, sa, sb, M, N, K):
-    a_f32 = gemm_common_utils.fp8_e4m3_to_f32(a.view(torch.uint8))[:M, :K]
-    b_f32 = gemm_common_utils.fp8_e4m3_to_f32(b.view(torch.uint8))[:N, :K]
-    raw = torch.matmul(a_f32, b_f32.T)
-    return raw * sa[:M].view(M, 1) * sb[:N].view(1, N)
-
-
-def _build_a8w8_ptpc_case(
-    M,
-    N,
-    K,
-    tile_m,
-    tile_n,
-    tile_k,
-    m_warp,
-    n_warp,
-    num_buffers,
-    out_dtype="bf16",
-    *,
-    cluster_m=1,
-    cluster_n=1,
-    lda_extra=0,
-    ldc_extra=0,
-    scale_scale=1.0,
-):
-    torch.manual_seed(0)
-    a = _random_fp8_bytes(M, K)
-    b = _random_fp8_bytes(N, K)
-    sa = (scale_scale * (0.5 + torch.rand(M, dtype=torch.float32))).contiguous()
-    sb = (scale_scale * (0.5 + torch.rand(N, dtype=torch.float32))).contiguous()
-    ref = _reference_ptpc(a, b, sa, sb, M, N, K)
-
-    lda, ldc = K + lda_extra, N + ldc_extra
-    a_gpu = _with_strided_a(a, K, lda).cuda().contiguous()
-    b_gpu = gemm_common_utils.preshuffle_b_16x16(b, N, K).cuda().contiguous()
-    sa_gpu, sb_gpu = sa.cuda().contiguous(), sb.cuda().contiguous()
-    c_gpu = torch.zeros(M, ldc, dtype=_DT[out_dtype], device="cuda")
-    out_is_f16 = 1 if out_dtype == "f16" else 0
-    peak = float(ref.float().abs().max())
-
-    def make_args(stream):
-        return (
-            flyc.from_c_void_p(fx.Uint8, c_gpu.data_ptr()),
-            flyc.from_c_void_p(fx.Uint8, a_gpu.data_ptr()),
-            flyc.from_c_void_p(fx.Uint8, b_gpu.data_ptr()),
-            flyc.from_c_void_p(fx.Uint8, sa_gpu.data_ptr()),
-            flyc.from_c_void_p(fx.Uint8, sb_gpu.data_ptr()),
-            M,
-            stream,
-            N,
-            K,
-            0,
-            lda,
-            ldc,
-            tile_m,
-            tile_n,
-            tile_k,
-            m_warp,
-            n_warp,
-            out_is_f16,
-            num_buffers,
-            cluster_m,
-            cluster_n,
-            False,
-        )
-
-    return c_gpu, make_args, ref, (2e-2, max(5e-2, 2e-2 * peak))
-
-
-# (M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, out_dtype, scale_scale, lda_extra, ldc_extra)
-_PTPC_CASES = [
-    (256, 256, 512, 256, 256, 128, 2, 2, 4, "bf16", 1.0, 0, 0),
-    (128, 256, 512, 128, 256, 128, 2, 2, 4, "bf16", 1.0, 0, 0),
-    (128, 128, 1024, 128, 128, 256, 2, 2, 3, "bf16", 1.0, 0, 0),
-    (64, 64, 512, 64, 64, 128, 2, 2, 2, "bf16", 1.0, 0, 0),
-    (128, 96, 512, 128, 96, 128, 2, 2, 2, "bf16", 1.0, 0, 0),
-    (128, 128, 512, 128, 128, 128, 1, 2, 2, "bf16", 1.0, 0, 0),
-    (256, 256, 512, 256, 256, 128, 2, 2, 4, "f16", 0.02, 0, 0),
-    (128, 256, 512, 128, 256, 128, 2, 2, 4, "bf16", 1.0, 128, 256),
-]
-
-
-@pytest.mark.parametrize(
-    "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, out_dtype, scale_scale, lda_extra, ldc_extra",
-    _PTPC_CASES,
-)
-def test_a8w8_ptpc_gemm(
-    M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, out_dtype, scale_scale, lda_extra, ldc_extra
-):
-    _run_case(
-        "ptpc_a8w8",
-        M,
-        N,
-        K,
-        tile_m,
-        tile_n,
-        tile_k,
-        m_warp,
-        n_warp,
-        num_buffers,
-        out_dtype=out_dtype,
-        scale_scale=scale_scale,
-        lda_extra=lda_extra,
-        ldc_extra=ldc_extra,
-    )
-
-
-def _reference_blockscale(a, b, a_scale, b_scale, M, N, K):
-    scale_k = K // SCALE_BLOCK_128
-    a_f32 = gemm_common_utils.fp8_e4m3_to_f32(a.view(torch.uint8))[:M, :K].clone()
-    b_f32 = gemm_common_utils.fp8_e4m3_to_f32(b.view(torch.uint8))[:N, :K].clone()
-    a_sc = gemm_common_utils.e8m0_to_f32(a_scale.view(torch.uint8))[:M, :scale_k]
-    b_sc = gemm_common_utils.e8m0_to_f32(b_scale.view(torch.uint8))[: N // SCALE_BLOCK_128, :scale_k]
-    a_f32.view(M, scale_k, SCALE_BLOCK_128).mul_(a_sc.unsqueeze(-1))
-    b_sc_rows = b_sc.repeat_interleave(SCALE_BLOCK_128, dim=0)[:N]
-    b_f32.view(N, scale_k, SCALE_BLOCK_128).mul_(b_sc_rows.unsqueeze(-1))
-    return torch.matmul(a_f32, b_f32.T)
-
-
-def _build_a8w8_blockscale_case(
-    M,
-    N,
-    K,
-    tile_m,
-    tile_n,
-    tile_k,
-    m_warp,
-    n_warp,
-    num_buffers,
-    *,
-    lda_extra=0,
-    ldc_extra=0,
-    cluster_m=1,
-    cluster_n=1,
-):
-    torch.manual_seed(0)
-    a = _random_fp8_bytes(M, K)
-    b = _random_fp8_bytes(N, K)
-    scale_k = K // SCALE_BLOCK_128
-    a_scale = gemm_common_utils.random_e8m0(M, scale_k, low_exp=126, high_exp=129)
-    b_scale = gemm_common_utils.random_e8m0(N // SCALE_BLOCK_128, scale_k, low_exp=126, high_exp=129)
-    ref = _reference_blockscale(a, b, a_scale, b_scale, M, N, K)
-
-    lda, ldc = K + lda_extra, N + ldc_extra
-    a_gpu = _with_strided_a(a, K, lda).cuda()
-    b_gpu = gemm_common_utils.preshuffle_b_16x16(b, N, K).cuda()
-    as_gpu = a_scale.T.contiguous().cuda()  # [scale_k, M], row stride == M
-    bs_gpu = b_scale.cuda()
-    c_gpu = torch.zeros(M, ldc, dtype=torch.bfloat16, device="cuda")
-
-    def make_args(stream):
-        return (
-            flyc.from_c_void_p(fx.Int8, c_gpu.data_ptr(), assumed_align=16),
-            flyc.from_c_void_p(fx.Int8, a_gpu.data_ptr(), assumed_align=16),
-            flyc.from_c_void_p(fx.Int8, b_gpu.data_ptr(), assumed_align=16),
-            flyc.from_c_void_p(fx.Int8, as_gpu.data_ptr(), assumed_align=16),
-            flyc.from_c_void_p(fx.Int8, bs_gpu.data_ptr(), assumed_align=16),
-            M,
-            stream,
-            N,
-            K,
-            M,  # stride_ascale_k
-            lda,
-            ldc,
-            tile_m,
-            tile_n,
-            tile_k,
-            m_warp,
-            n_warp,
-            0,  # bf16 output
-            num_buffers,
-            cluster_m,
-            cluster_n,
-            True,
-        )
-
-    return c_gpu, make_args, ref, (1e-2, 5e-2)
-
-
-# (M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, lda_extra, ldc_extra)
-_BLOCKSCALE_CASES = [
-    (128, 256, 512, 128, 256, 128, 2, 2, 2, 0, 0),
-    (256, 256, 512, 256, 256, 128, 2, 2, 4, 0, 0),
-    (1024, 1024, 1024, 128, 256, 128, 2, 2, 3, 0, 0),
-    (128, 256, 512, 128, 256, 128, 2, 2, 2, 128, 192),
-]
-
-
-@pytest.mark.parametrize(
-    "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, lda_extra, ldc_extra", _BLOCKSCALE_CASES
-)
-def test_a8w8_blockscale_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, lda_extra, ldc_extra):
-    _run_case(
-        "blockscale_a8w8",
-        M,
-        N,
-        K,
-        tile_m,
-        tile_n,
-        tile_k,
-        m_warp,
-        n_warp,
-        num_buffers,
-        lda_extra=lda_extra,
-        ldc_extra=ldc_extra,
+    if f16 is True:
+        f16 = dict(scale_scale=0.02) if scale == "ptpc" else dict(scale_exp=(127, 127)) if fp4_w else None
+    return dict(
+        launch=launch,
+        fp4_w=fp4_w,
+        fp4_act=fp4_act,
+        scale=scale,
+        profile=profile,
+        cluster=cluster,
+        smoke=smoke,
+        k_pair=k_pair,
+        k_whole_rev=k_whole_rev,
+        tensor_args=tensor_args,
+        f16_kw=f16 or None,
+        a8w8=not fp4_w,  # only the a8w8 launchers take stride_ascale_k
+        tail=() if fp4_w else (scale != "ptpc", 32 if scale == "mx32" else 128),  # is_mxscale, block_size
+        wrap=_u8 if scale == "ptpc" else _i8,
+        scale_exp=(127, 132) if fp4_w else (126, 129),
+        tiles=profile[:5] if profile else _SMOKE_TILE,
+        num_buffers=profile[5] if profile else 2,
     )
 
 
 _MODES = {
-    "mxscale_a8w4": dict(
-        build=_build_a8w4_case,
-        launch=launch_gemm_a8w4_mxscale,
-        supports_out_dtype=True,
-        checks=lambda N, K, tile_n, tile_k, num_buffers: [
-            (K % SCALE_BLOCK_32 != 0, f"K={K} must be divisible by {SCALE_BLOCK_32}"),
-            (N % tile_n != 0, f"N={N} must be divisible by tile_n={tile_n}"),
-            (K % tile_k != 0 or (K // tile_k) < num_buffers, f"K={K} incompatible with tile_k={tile_k}"),
-        ],
-        # N gives 2 tile_n-wide blocks so cluster_n=2 has a real 2nd block to span.
-        smoke=dict(N=512, K=512, tile=(128, 256, 128), warps=(2, 2), num_buffers=2),
+    "a8w4_mx32": _spec(launch_gemm_a8w4_mxscale, fp4_w=True, tensor_args=True),
+    "a8w4_256x256": _spec(
+        launch_gemm_a8w4_256x256,
+        fp4_w=True,
+        cluster=(4, 4),
+        k_pair=2,
+        profile=(256, 256, 128, 2, 2, 3),
+        smoke=(1024, 512),
     ),
-    "ptpc_a8w8": dict(
-        build=_build_a8w8_ptpc_case,
-        launch=launch_gemm_a8w8,
-        supports_out_dtype=True,
-        checks=lambda N, K, tile_n, tile_k, num_buffers: [
-            (N % tile_n != 0, f"N={N} must be divisible by tile_n={tile_n} (no silent pad)"),
-            (K % tile_k != 0, f"K={K} must be divisible by tile_k={tile_k} (no silent pad)"),
-            (num_buffers > 1 and (K // tile_k) < num_buffers, f"{num_buffers}-buf requires more K-tiles"),
-        ],
-        smoke=dict(N=256, K=512, tile=(128, 128, 128), warps=(2, 2), num_buffers=4),
+    "a4w4_256x256": _spec(
+        launch_gemm_a4w4_256x256,
+        fp4_w=True,
+        fp4_act=True,
+        cluster=(4, 4),
+        k_whole_rev=True,
+        profile=(256, 256, 256, 2, 2, 4),
+        smoke=(1024, 1024),
     ),
-    "blockscale_a8w8": dict(
-        build=_build_a8w8_blockscale_case,
-        launch=launch_gemm_a8w8,
-        supports_out_dtype=False,
-        checks=lambda N, K, tile_n, tile_k, num_buffers: [
-            (K % SCALE_BLOCK_128 != 0 or N % SCALE_BLOCK_128 != 0, f"N={N}, K={K} must both be divisible by 128"),
-            (N % tile_n != 0, f"N={N} must be divisible by tile_n={tile_n}"),
-            (K % tile_k != 0 or (K // tile_k) < num_buffers, f"K={K} incompatible with tile_k={tile_k}"),
-        ],
-        # N gives 2 tile_n-wide blocks so cluster_n=2 has a real 2nd block to span.
-        smoke=dict(N=512, K=512, tile=(128, 256, 128), warps=(2, 2), num_buffers=2),
-    ),
+    "a8w8_mx32": _spec(launch_gemm_a8w8, f16=False),
+    "a8w8_mx128": _spec(launch_gemm_a8w8, scale="mx128", f16=False),
+    "a8w8_ptpc": _spec(launch_gemm_a8w8, scale="ptpc"),
 }
+for _tm, _nb in ((256, 4), (256, 2), (128, 4), (128, 3)):
+    for _sc in ("mx32", "mx128"):
+        _MODES[f"a8w8_{_tm}x256" + ("" if _nb == 4 else f"_nb{_nb}") + ("" if _sc == "mx32" else "_mx128")] = _spec(
+            launch_gemm_a8w8_256x256,
+            scale=_sc,
+            cluster=(4, 4),
+            profile=(_tm, 256, 128, 2, 2, _nb),
+            smoke=(1024, 1024),
+            k_pair=1 if _nb == 4 else 2,
+            f16=dict(const_val=0.25),
+        )
 
 
-def _run_case(mode, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, **kwargs):
+def _bytes_moved(mode: str, M: int, N: int, K: int) -> int:
+    """Logical A/B/scales read plus C written by one GEMM launch."""
+    spec = _MODES[mode]
+    a_bytes = M * K // (2 if spec["fp4_act"] else 1)
+    b_bytes = N * K // (2 if spec["fp4_w"] else 1)
+    if spec["scale"] == "mx32":
+        scale_bytes = (M + N) * (K // SCALE_BLOCK_32)
+    elif spec["scale"] == "mx128":
+        scale_bytes = M * (K // SCALE_BLOCK_128) + (N // SCALE_BLOCK_128) * (K // SCALE_BLOCK_128)
+    else:
+        scale_bytes = (M + N) * 4
+    return a_bytes + b_bytes + scale_bytes + M * N * 2
+
+
+def _skip_reason(spec, N, K, tile_cfg, cluster, split_k):
+    """None when the mode supports this shape/tile combination, else why it cannot."""
+    tile_m, tile_n, tile_k, _m_warp, _n_warp, num_buffers = tile_cfg
+    profile = spec["profile"]
+    if split_k > 1:
+        k_step = tile_k * spec["k_pair"] * split_k
+        if K % k_step:
+            return f"K={K} must divide {k_step} so every one of the {split_k} splits gets whole K-tiles"
+        if K // split_k < num_buffers * tile_k:
+            return f"K={K} split {split_k} ways leaves fewer than {num_buffers} K-tiles per split"
+    if profile is not None:
+        if tile_cfg != profile:
+            return f"this kernel hand-schedules one profile, {profile}"
+        if cluster != spec["cluster"]:
+            return f"this kernel is tuned for a {spec['cluster']} cluster"
+        if N % (tile_n * cluster[1]):
+            return f"the {cluster[0]}x{cluster[1]} cluster needs N whole clusters of {tile_n}-wide tiles"
+        if spec["k_pair"] > 1 and K % (tile_k * spec["k_pair"] * split_k):
+            return f"K={K} must divide {tile_k * spec['k_pair']}: one TDM covers {spec['k_pair']} K-tiles"
+        if spec["k_whole_rev"] and (K // (tile_k * split_k)) % num_buffers:
+            return f"K={K} must cover whole {num_buffers}-K-tile revolutions"
+    if N % tile_n or K % tile_k:
+        return f"N={N} / K={K} must divide tile_n={tile_n} / tile_k={tile_k} (the kernel does not pad)"
+    if K // tile_k < num_buffers:
+        return f"K={K} yields fewer than {num_buffers} K-tiles at tile_k={tile_k}"
+    if spec["scale"] == "mx128" and (N % SCALE_BLOCK_128 or K % SCALE_BLOCK_128):
+        return f"mx128 needs N={N} and K={K} divisible by {SCALE_BLOCK_128}"
+    if spec["scale"] == "mx32":
+        if K % SCALE_BLOCK_128 or tile_n % SCALE_BLOCK_32:
+            return f"mx32 needs K={K} divisible by 128 and tile_n={tile_n} by {SCALE_BLOCK_32}"
+        # The 32x4 shuffle is super-row granular; a 16-row tile reads its half of the containing super.
+        if tile_m % SCALE_BLOCK_32 and tile_m != 16:
+            return f"mx32 needs tile_m={tile_m} divisible by {SCALE_BLOCK_32} or == 16"
+    return None
+
+
+def _splitk_reduce(partials, out, N, split_k):
+    """Fold the GEMM's split-K partials into *out* with the production reduce epilogue."""
+    rows, ldc = out.shape
+    dense = ldc == N  # a contiguous C is one long run; a padded one is one run per row
+    flyc.compile(  # compiles and runs
+        compile_gemm_a8w8_splitk_reduce(split_k=split_k, out_dtype_str=_DT_NAME[out.dtype]),
+        _u8(partials),
+        _u8(out),
+        rows * ldc if dense else N,
+        1 if dense else rows,
+        ldc,
+        rows * ldc * out.element_size(),
+        torch.cuda.current_stream(),
+    )
+
+
+class _Case(NamedTuple):
+    """One built GEMM input set, ready to launch and check."""
+
+    out: torch.Tensor  # C, what the reference is compared against
+    make_args: object  # stream -> launch argument tuple
+    ref: torch.Tensor
+    tol: tuple
+    seed: int
+    reduce: object  # split-K epilogue, None unless split_k > 1
+
+
+def _build_case(
+    mode,
+    M,
+    N,
+    K,
+    tile_m,
+    tile_n,
+    tile_k,
+    m_warp,
+    n_warp,
+    num_buffers,
+    *,
+    out_dtype="bf16",
+    lda_extra=0,
+    ldc_extra=0,
+    cluster=(1, 1),
+    scale_exp=None,
+    scale_scale=1.0,
+    c_guard_rows=0,
+    const_val=None,
+    split_k=1,
+):
+    spec = _MODES[mode]
+    seed = _new_seed()
+    a, a_f32, a_cols = _make_quant_input(M, K, spec["fp4_act"], const_val)
+    b, b_f32, b_cols = _make_quant_input(N, K, spec["fp4_w"], const_val)
+    a_s, b_s, ask, ref, tol = _SCALES[spec["scale"]](
+        a_f32, b_f32, M, N, K, spec["fp4_w"], scale_exp or spec["scale_exp"], scale_scale
+    )
+    if split_k > 1:
+        tol = (tol[0], tol[1] + split_k * float(ref.abs().max()) * 2**-8)
+
+    lda, ldc = K + lda_extra, N + ldc_extra
+    fill = float("nan") if c_guard_rows else 0.0
+    c_gpu = torch.full((M + c_guard_rows, ldc), fill, dtype=_DT[out_dtype], device="cuda")
+    # Split-K sends the GEMM to one C-sized partial per split; the same fill keeps the guard rows meaningful.
+    partials = torch.full((split_k, *c_gpu.shape), fill, dtype=c_gpu.dtype, device="cuda") if split_k > 1 else None
+    dev = [
+        c_gpu if partials is None else partials,
+        _with_strided_a(a, a_cols, lda if a_cols == K else lda // 2).cuda(),
+        gemm_common_utils.preshuffle_b_16x16(b, N, b_cols).cuda(),
+        a_s.cuda(),
+        b_s.cuda(),
+    ]
+
+    def make_args(stream):
+        w = spec["wrap"]
+        ptrs = [dev[0], w(dev[1]), w(dev[2]), dev[3], dev[4]] if spec["tensor_args"] else [w(t) for t in dev]
+        return (
+            *ptrs,
+            M,
+            stream,
+            N,
+            K,
+            *((ask,) if spec["a8w8"] else ()),
+            lda,
+            ldc,
+            tile_m,
+            tile_n,
+            tile_k,
+            m_warp,
+            n_warp,
+            int(out_dtype == "f16"),
+            num_buffers,
+            *cluster,
+            *spec["tail"],
+            split_k,
+        )
+
+    reduce = None if partials is None else lambda: _splitk_reduce(partials, c_gpu, N, split_k)
+    return _Case(c_gpu, make_args, ref, tol, seed, reduce)
+
+
+def _assert_case(mode, M, N, K, *tile_cfg, **kwargs):
+    """Compile+run once and return replay handles."""
+    guard_rows = kwargs.get("c_guard_rows", 0)
+    case = _build_case(mode, M, N, K, *tile_cfg, **kwargs)
+    compiled = flyc.compile(_MODES[mode]["launch"], *case.make_args(torch.cuda.current_stream()))
+    if case.reduce:
+        case.reduce()
+    torch.cuda.synchronize()
+    rtol, atol = case.tol
+    replay = f"FLYDSL_TEST_SEED={case.seed} reproduces this input"
+    out = case.out[:M, :N].float()
+    if guard_rows:
+        assert not torch.isnan(out).any(), f"OOB load reached the accumulator (NaN in the real output); {replay}"
+    torch.testing.assert_close(out.cpu(), case.ref.float(), rtol=rtol, atol=atol, msg=lambda m: f"{m}\n{replay}")
+    if guard_rows:
+        clobbered = int((~torch.isnan(case.out[M:].float())).sum())
+        assert (
+            clobbered == 0
+        ), f"M={M}: {clobbered} elements written at/after row {M} (store OOB clamp failed); {replay}"
+    return case.out, case.make_args, compiled
+
+
+def _run_case(mode, M, N, K, *tile_cfg, **kwargs):
     _require_gpu()
-    cfg = _MODES[mode]
-    for bad, msg in cfg["checks"](N, K, tile_n, tile_k, num_buffers):
-        if bad:
-            pytest.skip(msg)
-    _assert_case(cfg["build"], cfg["launch"], M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, **kwargs)
+    spec = _MODES[mode]
+    if spec["profile"] is not None:  # sweeps that do not parametrize buffers/cluster get the tuned ones
+        kwargs.setdefault("cluster", spec["cluster"])
+        tile_cfg = (*tile_cfg[:5], spec["num_buffers"])
+    reason = _skip_reason(spec, N, K, tile_cfg, kwargs.get("cluster", (1, 1)), kwargs.get("split_k", 1))
+    if reason:
+        pytest.skip(reason)
+    _assert_case(mode, M, N, K, *tile_cfg, **kwargs)
 
 
-def _run_smoke(mode, M, **kwargs):
-    """Run `mode`'s fixed small tile/warp/buffer config at a given M (ragged-M / cluster sweeps)."""
-    smoke = _MODES[mode]["smoke"]
-    _run_case(mode, M, smoke["N"], smoke["K"], *smoke["tile"], *smoke["warps"], smoke["num_buffers"], **kwargs)
+def _run_smoke(mode, M, num_buffers=None, **kwargs):
+    """Run the mode's own (N, K) smoke shape at the mode's own tiling."""
+    spec = _MODES[mode]
+    N, K = spec["smoke"]
+    K *= kwargs.get("split_k", 1)
+    _run_case(mode, M, N, K, *spec["tiles"], num_buffers or spec["num_buffers"], **kwargs)
 
 
+_MODE_IDS = sorted(_MODES)
+_PROFILE_MODES = [m for m in _MODE_IDS if _MODES[m]["profile"]]
+
+# (M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers)
+_CASES = [
+    (128, 256, 512, 128, 256, 128, 2, 2, 2),
+    (128, 512, 1024, 128, 256, 256, 2, 2, 2),
+    (256, 256, 512, 256, 256, 256, 2, 2, 2),
+    (256, 256, 512, 256, 256, 128, 2, 2, 4),
+    (1024, 1024, 1024, 128, 256, 128, 2, 2, 3),
+    (128, 128, 1024, 128, 128, 256, 2, 2, 3),
+    (64, 64, 512, 64, 64, 128, 2, 2, 2),
+    (128, 96, 512, 128, 96, 128, 2, 2, 2),  # tile_n not a multiple of 128
+    (128, 128, 512, 128, 128, 128, 1, 2, 2),  # 2-wave workgroup
+    (64, 64, 1024, 16, 32, 512, 1, 2, 2),  # tile_m below one 32-row scale super
+    (128, 128, 1024, 32, 32, 512, 2, 2, 2),
+    (256, 512, 512, 256, 256, 128, 2, 2, 4),
+    (257, 512, 4608, 256, 256, 128, 2, 2, 4),
+    (256, 512, 640, 256, 256, 128, 2, 2, 4),  # 5 K-tiles -> 1 active stage in rev 1
+    (256, 512, 768, 256, 256, 128, 2, 2, 4),  # 6 K-tiles -> 2 active stages
+    (257, 512, 896, 256, 256, 128, 2, 2, 4),  # 7 K-tiles -> 3 active, ragged M
+    (256, 512, 4736, 256, 256, 128, 2, 2, 4),  # 37 K-tiles, long run
+    (12288, 512, 512, 256, 256, 128, 2, 2, 4),  # 48 M-tiles -> grid split 16 x 3
+    (16384, 512, 512, 256, 256, 128, 2, 2, 4),  # 64 M-tiles -> grid split 32 x 2
+    (8448, 512, 512, 256, 256, 128, 2, 2, 4),  # 33 M-tiles -> no exact split, flat grid
+]
+_SMOKE_BUFFERS = [2, 4]
 _RAGGED_M_VALUES = [1, 2, 5, 15, 16, 17, 33, 63, 65, 100, 127, 128, 129, 191, 200, 255, 256, 257, 384, 500, 1000, 2048]
 
 
+@pytest.mark.parametrize("M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers", _CASES)
+@pytest.mark.parametrize("mode", _MODE_IDS)
+def test_gemm_shapes(mode, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers):
+    _run_case(mode, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers)
+
+
+def _whole_clusters_m(mode, M):
+    """Round M up so it fills whole clusters; for tests where the exact M is incidental."""
+    spec = _MODES[mode]
+    if spec["profile"] is None:
+        return M
+    tile_m, cluster_m = spec["profile"][0], spec["cluster"][0]
+    gx = -(-M // tile_m)
+    return tile_m * (gx + (-gx % cluster_m))
+
+
+# The split-K rows also cover the reduce epilogue's padded-C path: ldc > N makes it one run per row.
+@pytest.mark.parametrize(
+    "lda_extra, ldc_extra, split_k",
+    [(128, 192, 1), (128, 256, 1), (64, 96, 1), (128, 192, 2), (128, 192, 4)],
+)
+@pytest.mark.parametrize("mode", _MODE_IDS)
+def test_gemm_strided_lda_ldc(mode, lda_extra, ldc_extra, split_k):
+    _run_smoke(mode, _whole_clusters_m(mode, 128), lda_extra=lda_extra, ldc_extra=ldc_extra, split_k=split_k)
+
+
+@pytest.mark.parametrize("mode", [m for m in _MODE_IDS if _MODES[m]["f16_kw"]])
+def test_gemm_f16_out(mode):
+    _run_smoke(mode, _whole_clusters_m(mode, 128), out_dtype="f16", **_MODES[mode]["f16_kw"])
+
+
+@pytest.mark.parametrize("num_buffers", _SMOKE_BUFFERS)
 @pytest.mark.parametrize("M", _RAGGED_M_VALUES)
-@pytest.mark.parametrize("mode", sorted(_MODES))
-def test_gemm_ragged_m(mode, M):
-    _run_smoke(mode, M)
+@pytest.mark.parametrize("mode", _MODE_IDS)
+def test_gemm_ragged_m(mode, M, num_buffers):
+    _run_smoke(mode, M, num_buffers=num_buffers)
 
 
-@pytest.mark.parametrize("cluster_m, cluster_n", [(2, 1), (1, 2), (2, 2)])
+@pytest.mark.parametrize("num_buffers", _SMOKE_BUFFERS)
+@pytest.mark.parametrize("cluster", [(2, 1), (1, 2), (2, 2)], ids=["2x1", "1x2", "2x2"])
 @pytest.mark.parametrize("M", [1, 65, 129, 384])
-@pytest.mark.parametrize("mode", sorted(_MODES))
-def test_gemm_cluster(mode, M, cluster_m, cluster_n):
-    _run_smoke(mode, M, cluster_m=cluster_m, cluster_n=cluster_n)
+@pytest.mark.parametrize("mode", _MODE_IDS)
+def test_gemm_cluster(mode, M, cluster, num_buffers):
+    _run_smoke(mode, M, num_buffers=num_buffers, cluster=cluster)
 
 
-def _parse_csv_ints(value: str, n: int, name: str) -> list[int]:
-    parts = [int(x) for x in value.split(",")]
-    if len(parts) != n:
-        raise SystemExit(f"-{name} needs {n} comma-separated ints, got {value!r}")
-    return parts
+@pytest.mark.parametrize("knob", [*range(6), "cluster"])
+@pytest.mark.parametrize("mode", _PROFILE_MODES)
+def test_profile_rejects_untuned_config(mode, knob):
+    """A hand-scheduled kernel must reject any tiling/cluster it was not scheduled for."""
+    _require_gpu()
+    spec = _MODES[mode]
+    cfg, cluster = list(spec["profile"]), spec["cluster"]
+    if knob == "cluster":
+        cluster = (5, 5)
+    else:
+        cfg[knob] = cfg[knob] * 2 + 1  # do not land on another valid profile of the same kernel
+    make_args = _build_case(mode, 256, 512, 512, *cfg, cluster=cluster).make_args
+    with pytest.raises(AssertionError, match="only the tuned|cluster"):
+        flyc.compile(spec["launch"], *make_args(torch.cuda.current_stream()))
+
+
+_CLUSTER4X4_SHAPES = {  # (M, N, K) per hand-scheduled kernel; K picked to hit each K-tile remainder
+    "a8w8_256x256": [(1024, 1024, 1024), (2048, 1024, 1152), (1024, 2048, 1280), (1000, 1024, 1408)],
+    "a8w8_256x256_kpair": [(1024, 1024, 1024), (2048, 1024, 1280), (1024, 2048, 1536), (1000, 1024, 1792)],
+    # The 128-row tile leans on small M, where a 256-row tile pads whole cluster rows away.
+    "a8w8_128x256": [(128, 1024, 1024), (192, 1024, 1024), (384, 1024, 1024), (1024, 2048, 1280), (1000, 1024, 1792)],
+    "a8w4_256x256": [(1024, 1024, 1024), (2048, 1024, 1280), (1024, 2048, 1536)],
+    "a4w4_256x256": [(1024, 1024, 1024), (2048, 1024, 3072), (1000, 2048, 4096)],
+}
+
+
+def _cluster4x4_shapes(mode):
+    if mode.startswith("a8w8_128x256"):
+        return _CLUSTER4X4_SHAPES["a8w8_128x256"]
+    if mode.startswith("a8w8_256x256"):
+        return _CLUSTER4X4_SHAPES["a8w8_256x256" + ("_kpair" if _MODES[mode]["k_pair"] > 1 else "")]
+    return _CLUSTER4X4_SHAPES[mode]
+
+
+@pytest.mark.parametrize("split_k", [1, 2, 4])
+@pytest.mark.parametrize("mode, M, N, K", [(m, *mnk) for m in _PROFILE_MODES for mnk in _cluster4x4_shapes(m)])
+def test_256x256_cluster4x4(mode, M, N, K, split_k):
+    _run_case(mode, M, N, K, *_MODES[mode]["profile"], split_k=split_k)
+
+
+_RAGGED_M_GUARD_ROWS = 5 * 256  # > worst case (gx padded up 3 tiles), for any M
+_M_GUARD_SWEEP = (255, 512, 513, 769, 1025, 12289)
+_GUARD_CASES = [(m, *_MODES[m]["smoke"], _MODES[m]["profile"], _MODES[m]["cluster"]) for m in _PROFILE_MODES] + [
+    ("a8w8_mx128", 1536, 1024, tile, (1, 1))
+    for tile in [
+        (256, 256, 128, 2, 2, 4),
+        (128, 192, 128, 2, 2, 2),
+        (128, 128, 256, 2, 2, 2),
+        (64, 64, 128, 2, 2, 2),
+        (32, 32, 512, 2, 2, 2),
+    ]
+]
+
+
+@pytest.mark.parametrize("M", _M_GUARD_SWEEP)
+@pytest.mark.parametrize(
+    "mode, N, K, cfg, cluster", _GUARD_CASES, ids=[f"{m}-t{c[0]}x{c[1]}x{c[2]}" for m, _, _, c, _ in _GUARD_CASES]
+)
+def test_ragged_m_no_oob_store(mode, N, K, cfg, cluster, M):
+    _run_case(mode, M, N, K, *cfg, cluster=cluster, c_guard_rows=_RAGGED_M_GUARD_ROWS)
+
+
+def _determinism_k(mode):
+    if _MODES[mode]["k_whole_rev"]:
+        return 4096
+    return 4608 if _MODES[mode]["k_pair"] > 1 else 4736
+
+
+@pytest.mark.parametrize("mode, K", [(m, _determinism_k(m)) for m in _PROFILE_MODES])
+def test_256x256_back_to_back_determinism(mode, K):
+    _require_gpu()
+    spec = _MODES[mode]
+    c_gpu, make_args, compiled = _assert_case(
+        mode, 1024, 256 * spec["cluster"][1], K, *spec["profile"], cluster=spec["cluster"]
+    )
+    golden = c_gpu.clone()
+    stream = torch.cuda.current_stream()
+    for _ in range(32):
+        compiled(*make_args(stream))
+    torch.cuda.synchronize()
+    assert torch.equal(c_gpu, golden), "back-to-back launches drifted from the synchronized result"
+
+
+def _bench_us(launch, output: torch.Tensor, *, warmup: int = 10, iters: int = 100) -> float:
+    """Median per-launch latency (us) from saturated back-to-back throughput."""
+    for _ in range(warmup):
+        launch()
+    torch.cuda.synchronize()
+
+    output.zero_()
+    launch()
+    torch.cuda.synchronize()
+    if output.abs().max().item() == 0:
+        raise RuntimeError("the launch produced an all-zero output; it is not running")
+
+    rounds, batch = 10, max(1, iters // 10)
+    samples = []
+    for _ in range(rounds):
+        start, end = (torch.cuda.Event(enable_timing=True) for _ in range(2))
+        start.record()
+        for _ in range(batch):
+            launch()
+        end.record()
+        torch.cuda.synchronize()
+        samples.append(start.elapsed_time(end) * 1e3 / batch)
+    return sorted(samples)[len(samples) // 2]
 
 
 def _main():
     import argparse
 
+    def ints(n, name):
+        def parse(value):
+            parts = [int(x) for x in value.split(",")]
+            if len(parts) != n:
+                raise argparse.ArgumentTypeError(f"{name} needs {n} comma-separated ints, got {value!r}")
+            return parts
+
+        return parse
+
     parser = argparse.ArgumentParser(description="Manual correctness/perf run for the gfx1250 GEMM kernels")
-    parser.add_argument("-mode", choices=sorted(_MODES), required=True)
-    parser.add_argument("-mnk", required=True, help="M,N,K")
-    parser.add_argument("-tiles", required=True, help="tile_m,tile_n,tile_k")
-    parser.add_argument("-warps", required=True, help="m_warp,n_warp")
-    parser.add_argument("-nb", type=int, required=True, help="num_buffers")
-    parser.add_argument("-cluster", default="1,1", help="cluster_m,cluster_n")
-    parser.add_argument("-out-dtype", default="bf16", choices=["bf16", "f16"])
-    parser.add_argument("-bench", action="store_true", help="also measure perf (warmup=10, iters=100)")
+    parser.add_argument("-mode", choices=_MODE_IDS, required=True)
+    parser.add_argument("-mnk", type=ints(3, "-mnk"), required=True, help="M,N,K")
+    parser.add_argument("-tiles", type=ints(3, "-tiles"), help="tile_m,tile_n,tile_k; default: the mode's own")
+    parser.add_argument("-warps", type=ints(2, "-warps"), help="m_warp,n_warp; default: the mode's own")
+    parser.add_argument("-nb", type=int, help="num_buffers; default: the mode's own")
+    parser.add_argument("-cluster", type=ints(2, "-cluster"), help="cluster_m,cluster_n; default: the mode's own")
+    parser.add_argument("-out-dtype", default="bf16", choices=sorted(_DT))
+    parser.add_argument("-bench", action="store_true", help="also measure perf")
+    parser.add_argument("-const", type=float, default=None, help="fill A/B with a representable constant")
     args = parser.parse_args()
 
-    M, N, K = _parse_csv_ints(args.mnk, 3, "mnk")
-    tile_m, tile_n, tile_k = _parse_csv_ints(args.tiles, 3, "tiles")
-    m_warp, n_warp = _parse_csv_ints(args.warps, 2, "warps")
-    cluster_m, cluster_n = _parse_csv_ints(args.cluster, 2, "cluster")
-
-    cfg = _MODES[args.mode]
-    kwargs = {"cluster_m": cluster_m, "cluster_n": cluster_n}
-    if cfg["supports_out_dtype"]:
-        kwargs["out_dtype"] = args.out_dtype
-    c_gpu, make_args, compiled = _assert_case(
-        cfg["build"], cfg["launch"], M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, args.nb, **kwargs
+    M, N, K = args.mnk
+    spec = _MODES[args.mode]
+    tile_cfg = (
+        *(args.tiles or spec["tiles"][:3]),
+        *(args.warps or spec["tiles"][3:]),
+        args.nb or spec["num_buffers"],
     )
-    print(f"PASSED correctness: mode={args.mode} M={M} N={N} K={K}")
+    kwargs = dict(cluster=tuple(args.cluster or spec["cluster"]))
+    if args.const is not None:
+        kwargs["const_val"] = args.const
+    if args.out_dtype == "f16":
+        kwargs.update(out_dtype="f16", **(spec["f16_kw"] or {}))
+    c_gpu, make_args, compiled = _assert_case(args.mode, M, N, K, *tile_cfg, **kwargs)
+    print(f"PASSED correctness: mode={args.mode} M={M} N={N} K={K} tiles={tile_cfg} cluster={kwargs['cluster']}")
 
     if args.bench:
-
-        def launch():
-            compiled(*make_args(torch.cuda.current_stream()))
-
-        us = _bench_us(launch, c_gpu, warmup=10, iters=100)
-        print(f"perf: mode={args.mode} M={M} N={N} K={K} {us:.3f}us ({_tflops(M, N, K, us):.2f} TFLOPS)")
+        us = _bench_us(lambda: compiled(*make_args(torch.cuda.current_stream())), c_gpu)
+        tflops = 2.0 * M * N * K / (us * 1e-6) / 1e12
+        tbps = _bytes_moved(args.mode, M, N, K) / (us * 1e-6) / 1e12
+        print(f"perf: mode={args.mode} M={M} N={N} K={K} {us:.3f}us " f"({tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s)")
 
 
 if __name__ == "__main__":
