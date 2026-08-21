@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-21T12:34:52Z",
+ "updated": "2026-08-21T12:38:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -40,19 +40,19 @@
    "branch": "main",
    "event": "push",
    "title": "[Kernel][Perf] Optimize paged-attention metadata decode (#910)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467943760",
    "created_at": "2026-08-21T09:27:02Z",
-   "updated_at": "2026-08-21T11:18:09Z",
+   "updated_at": "2026-08-21T12:33:53Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-21T11:18:09Z",
+     "started_at": "2026-08-21T12:33:52Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467943760/job/96754075090"
     },
@@ -84,11 +84,11 @@
    "branch": "upstream/pa-64bit-cache-offsets",
    "event": "pull_request",
    "title": "[Bugfix][PA] Fix D192 query staging and 64-bit cache offsets",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467635411",
    "created_at": "2026-08-21T09:23:12Z",
-   "updated_at": "2026-08-21T11:33:31Z",
+   "updated_at": "2026-08-21T12:33:54Z",
    "actor": "sammysun0711",
    "jobs": [
     {
@@ -113,9 +113,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-21T11:33:31Z",
+     "started_at": "2026-08-21T12:33:54Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467635411/job/96757504917"
     }
@@ -252,7 +252,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458362585",
    "created_at": "2026-08-21T07:22:45Z",
-   "updated_at": "2026-08-21T11:19:11Z",
+   "updated_at": "2026-08-21T12:34:06Z",
    "actor": "yanboshao",
    "jobs": [
     {
@@ -278,11 +278,30 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-21T11:19:10Z",
+     "completed_at": "2026-08-21T12:33:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458362585/job/96733161722",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
      "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-21T11:19:10Z",
+     "started_at": "2026-08-21T12:34:02Z",
      "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458362585/job/96733161722"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458362585/job/96771571862"
+    },
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-21T12:34:05Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458362585/job/96771571977"
     }
    ]
   },
@@ -293,21 +312,22 @@
    "branch": "worktree-fix-basis2tuple",
    "event": "pull_request",
    "title": "[Fix] crd2idx uses wrong dynamic basis leaf",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457463858",
    "created_at": "2026-08-21T07:10:20Z",
-   "updated_at": "2026-08-21T10:51:03Z",
+   "updated_at": "2026-08-21T12:33:30Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-21T10:51:02Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457463858/job/96727584730"
+     "completed_at": "2026-08-21T12:33:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457463858/job/96727584730",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
