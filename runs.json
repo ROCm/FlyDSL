@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-21T07:58:59Z",
+ "updated": "2026-08-21T08:10:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -164,9 +164,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-21T07:26:44Z",
+     "started_at": "2026-08-21T08:00:06Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453264432/job/96700926244"
     },
@@ -231,11 +231,11 @@
    "branch": "john/lazy-rescale-nan",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453263454",
    "created_at": "2026-08-21T06:09:26Z",
-   "updated_at": "2026-08-21T06:50:51Z",
+   "updated_at": "2026-08-21T07:59:05Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
@@ -250,20 +250,21 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-21T06:50:51Z",
+     "started_at": "2026-08-21T07:59:04Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453263454/job/96693468626"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-21T07:31:06Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453263454/job/96693468655"
+     "completed_at": "2026-08-21T07:59:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453263454/job/96693468655",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -453,11 +454,11 @@
    "branch": "main",
    "event": "push",
    "title": "[FlyToROCDL] Fix alignment reported by ptr.load/ptr.store lowering (#\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450753464",
    "created_at": "2026-08-21T05:29:49Z",
-   "updated_at": "2026-08-21T06:03:35Z",
+   "updated_at": "2026-08-21T08:08:19Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -473,11 +474,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-21T05:58:50Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450753464/job/96683226573"
+     "completed_at": "2026-08-21T08:08:19Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450753464/job/96683226573",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -661,19 +663,19 @@
    "branch": "dsl-ify-scf-controlflow",
    "event": "pull_request",
    "title": "[Kernel] Replace raw scf ops with Python control flow in kernels",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772",
    "created_at": "2026-08-21T03:16:53Z",
-   "updated_at": "2026-08-21T06:59:42Z",
+   "updated_at": "2026-08-21T08:01:54Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-21T06:59:42Z",
+     "started_at": "2026-08-21T08:01:54Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772/job/96695224350"
     },
