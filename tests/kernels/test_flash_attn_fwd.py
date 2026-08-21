@@ -4411,6 +4411,139 @@ def test_causal_lpt_ignored_when_not_causal():
     assert torch.equal(off, on)
 
 
+def _paged_cache_from_dense(k, v, page_size, packed=False):
+    """Scatter dense [B, S, Hkv, D] K/V into a shuffled page cache.
+
+    ``packed=True`` mimics the vLLM cache, where K and V are views into one page
+    entry and a KV row is therefore ``2 * Hkv * D`` elements wide.
+    """
+    B, S, Hkv, D = k.shape
+    assert S % page_size == 0
+    num_pages = B * (S // page_size)
+    block_table = torch.randperm(num_pages, device=k.device).view(B, -1).to(torch.int32)
+    if packed:
+        cache = torch.empty(num_pages, page_size, 2, Hkv, D, dtype=k.dtype, device=k.device)
+        k_cache, v_cache = cache[:, :, 0], cache[:, :, 1]
+    else:
+        k_cache = torch.empty(num_pages, page_size, Hkv, D, dtype=k.dtype, device=k.device)
+        v_cache = torch.empty_like(k_cache)
+    pages = block_table.reshape(-1).long()
+    k_cache[pages] = k.reshape(num_pages, page_size, Hkv, D)
+    v_cache[pages] = v.reshape(num_pages, page_size, Hkv, D)
+    return k_cache, v_cache, block_table
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("page_size", [64, 128])
+def test_paged_page_size_matches_dense(page_size):
+    """A page wider than the 64-token KV tile is walked tile by tile."""
+    B, S, H, Hkv, D = 2, 1024, 8, 2, 128
+    torch.manual_seed(page_size)
+    q = _rand_lse(B, S, H, D, dtype=torch.bfloat16)
+    k = _rand_lse(B, S, Hkv, D, dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+    k_cache, v_cache, block_table = _paged_cache_from_dense(k, v, page_size)
+    seqlen_k = torch.full((B,), S, dtype=torch.int32, device=q.device)
+
+    ref = flydsl_flash_attn_func(q, k, v, causal=True)
+    out = flydsl_flash_attn_func(
+        q,
+        k_cache,
+        v_cache,
+        causal=True,
+        block_table=block_table,
+        seqlen_k=seqlen_k,
+        max_seqlen_kv=S,
+    )
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, ref, atol=2e-2, rtol=1e-2)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("page_size", [64, 128])
+def test_paged_strided_kv_matches_contiguous(page_size):
+    """K/V views into a packed cache only change addressing, never the values read."""
+    B, S, H, Hkv, D = 2, 1024, 8, 2, 128
+    torch.manual_seed(page_size)
+    q = _rand_lse(B, S, H, D, dtype=torch.bfloat16)
+    k = _rand_lse(B, S, Hkv, D, dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+    seqlen_k = torch.full((B,), S, dtype=torch.int32, device=q.device)
+
+    def run(packed):
+        torch.manual_seed(0)  # same block table for both layouts
+        k_cache, v_cache, block_table = _paged_cache_from_dense(k, v, page_size, packed=packed)
+        assert k_cache.is_contiguous() == (not packed)
+        return flydsl_flash_attn_func(
+            q,
+            k_cache,
+            v_cache,
+            causal=True,
+            block_table=block_table,
+            seqlen_k=seqlen_k,
+            max_seqlen_kv=S,
+        ).clone()
+
+    dense, packed = run(False), run(True)
+    torch.cuda.synchronize()
+    assert torch.equal(dense, packed)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("page_size", [64, 128])
+def test_paged_vllm_cache_view(page_size):
+    """vLLM's cache is [NumBlocks, Hkv, PageSize, 2*D] split into two K/V views.
+
+    Its head stride is PageSize*2*D rather than D, which the kernel only reads
+    with more than one KV head, so the single-head case must run in place.
+    """
+    B, S, H, D = 2, 1024, 8, 128
+    torch.manual_seed(page_size)
+    q = _rand_lse(B, S, H, D, dtype=torch.bfloat16)
+    k = _rand_lse(B, S, 1, D, dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+
+    num_pages = B * (S // page_size)
+    cache = torch.empty(num_pages, 1, page_size, 2 * D, dtype=k.dtype, device=k.device)
+    k_cache, v_cache = cache.transpose(1, 2).split(D, dim=-1)
+    block_table = torch.randperm(num_pages, device=k.device).view(B, -1).to(torch.int32)
+    pages = block_table.reshape(-1).long()
+    k_cache[pages] = k.reshape(num_pages, page_size, 1, D)
+    v_cache[pages] = v.reshape(num_pages, page_size, 1, D)
+
+    ref = flydsl_flash_attn_func(q, k, v, causal=True)
+    out = flydsl_flash_attn_func(
+        q,
+        k_cache,
+        v_cache,
+        causal=True,
+        block_table=block_table,
+        seqlen_k=torch.full((B,), S, dtype=torch.int32, device=q.device),
+        max_seqlen_kv=S,
+    )
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, ref, atol=2e-2, rtol=1e-2)
+
+
+@_requires_gfx950
+def test_paged_rejects_unsupported_page_size():
+    B, S, H, Hkv, D = 1, 512, 8, 2, 128
+    q = _rand_lse(B, S, H, D, dtype=torch.bfloat16)
+    k = _rand_lse(B, S, Hkv, D, dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+    k_cache, v_cache, block_table = _paged_cache_from_dense(k, v, 32)
+    with pytest.raises(NotImplementedError):
+        flydsl_flash_attn_func(
+            q,
+            k_cache,
+            v_cache,
+            causal=True,
+            block_table=block_table,
+            seqlen_k=torch.full((B,), S, dtype=torch.int32, device=q.device),
+            max_seqlen_kv=S,
+        )
+
+
 if __name__ == "__main__":
     main()
 
