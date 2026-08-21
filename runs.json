@@ -1,8 +1,82 @@
 {
  "schema": 1,
- "updated": "2026-08-21T01:15:11Z",
+ "updated": "2026-08-21T03:08:58Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32442154191,
+   "pr": 1038,
+   "commit": "85865086fd0493063206107f2e83029ae4ce39b2",
+   "branch": "zhimding/jobs_parallel_0819",
+   "event": "pull_request",
+   "title": "[AOT] Add resilient parallel job scheduler",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442154191",
+   "created_at": "2026-08-21T03:05:47Z",
+   "updated_at": "2026-08-21T03:06:59Z",
+   "actor": "zhiding512",
+   "jobs": []
+  },
+  {
+   "run_id": 32440546858,
+   "pr": 1038,
+   "commit": "156d394d123f21a153d8699f951b2f25f7885925",
+   "branch": "zhimding/jobs_parallel_0819",
+   "event": "pull_request",
+   "title": "[AOT] Add resilient parallel job scheduler",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32440546858",
+   "created_at": "2026-08-21T02:38:19Z",
+   "updated_at": "2026-08-21T03:06:04Z",
+   "actor": "zhiding512",
+   "jobs": []
+  },
+  {
+   "run_id": 32438575276,
+   "pr": null,
+   "commit": "065280213fb28f1b574b08333a1a05c05df2a195",
+   "branch": "main",
+   "event": "push",
+   "title": "fix(ci): isolate self-hosted runner artifacts (#1046)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32438575276",
+   "created_at": "2026-08-21T02:04:51Z",
+   "updated_at": "2026-08-21T02:28:07Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-21T02:27:54Z",
+     "completed_at": "2026-08-21T02:45:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32438575276/job/96648396034",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-21T02:28:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32438575276/job/96648396078"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-21T02:28:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32438575276/job/96648396079"
+    }
+   ]
+  },
   {
    "run_id": 32429571951,
    "pr": 1047,
@@ -1816,110 +1890,6 @@
    "updated_at": "2026-08-20T01:03:41Z",
    "actor": "JohnQinAMD",
    "jobs": []
-  },
-  {
-   "run_id": 32318912777,
-   "pr": 1038,
-   "commit": "66e1468a592f49bd54e8a95e0c1140a89d5f2780",
-   "branch": "zhimding/jobs_parallel_0819",
-   "event": "pull_request",
-   "title": "[AOT] Add resilient parallel job scheduler",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32318912777",
-   "created_at": "2026-08-20T00:51:58Z",
-   "updated_at": "2026-08-20T00:55:28Z",
-   "actor": "zhiding512",
-   "jobs": []
-  },
-  {
-   "run_id": 32306637551,
-   "pr": 1036,
-   "commit": "2fa92c42793da1fc30d9b20ace259ac41b23f936",
-   "branch": "john/loud-aiter-skip",
-   "event": "pull_request",
-   "title": "[Test] Print when aiter is missing instead of collecting nothing",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306637551",
-   "created_at": "2026-08-19T21:59:25Z",
-   "updated_at": "2026-08-20T01:16:28Z",
-   "actor": "JohnQinAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-19T23:38:58Z",
-     "completed_at": "2026-08-20T00:46:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306637551/job/96262735080"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-19T23:38:49Z",
-     "completed_at": "2026-08-19T23:55:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306637551/job/96262735084",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-19T23:38:58Z",
-     "completed_at": "2026-08-20T01:16:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306637551/job/96262735216"
-    }
-   ]
-  },
-  {
-   "run_id": 32306567897,
-   "pr": 1037,
-   "commit": "0f98781edc7697097be16c48d5cfa39f118891c1",
-   "branch": "jhinpan/fix-exp2-fastmath",
-   "event": "pull_request",
-   "title": "[ROCDL] Lower approximate exp2 to native intrinsic",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306567897",
-   "created_at": "2026-08-19T21:58:33Z",
-   "updated_at": "2026-08-20T00:15:44Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-19T22:27:50Z",
-     "completed_at": "2026-08-19T22:43:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306567897/job/96247395203",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-19T22:27:58Z",
-     "completed_at": "2026-08-20T00:15:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306567897/job/96247395232"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-19T22:45:42Z",
-     "completed_at": "2026-08-19T23:57:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32306567897/job/96247395259",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
