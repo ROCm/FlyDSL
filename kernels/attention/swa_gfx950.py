@@ -12,8 +12,7 @@ from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as _raw
-from flydsl.expr.utils.arith import current_fastmath
-from kernels.attention.flash_attn_utils import _reduction_pair
+from kernels.attention.flash_attn_utils import _MAX_FASTMATH, _reduction_pair
 
 MFMA_MASK = 0x08
 VALU_MASK = 0x02
@@ -105,8 +104,9 @@ def build_gqa_attn(
             return i32(rocdl.readfirstlane(T.i32, _raw(i32(x))))
 
         def fmax(a, b):
-            # fx.maxnumf takes fastmath explicitly instead of reading the ambient
-            return fx.maxnumf(a, b, fastmath=current_fastmath())
+            # nnan, not the ambient flags: this masks with -inf, which ninf would
+            # turn into poison. Same invariant as the dense score reductions.
+            return fx.maxnumf(a, b, fastmath=_MAX_FASTMATH)
 
         def bcast16(scalar):
             return Vec.from_elements([f32(scalar)], f32).broadcast_to(16)

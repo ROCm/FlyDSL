@@ -28,6 +28,11 @@ from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 from kernels.common import buffer_ops
 from kernels.common.kernels_common import dtype_to_elem_type
 
+# Softmax scores are finite or the -inf mask sentinel, never NaN, so nnan lets
+# maxnum lower to a bare v_max and fuse to v_max3. ninf must NOT be set here:
+# -inf is load-bearing, and an infinite operand under ninf is poison.
+_MAX_FASTMATH = arith.FastMathFlags.nnan
+
 _LOG2E = host_math.log2(host_math.e)
 # gfx950 (MI350/MI355X): 8 XCDs, each with a private ~4 MB L2.
 NUM_XCD_GFX950 = 8
@@ -388,7 +393,7 @@ def _lane_pair_reduce(v, reducer, fm_fast):
 
 
 def _score_pair_max(v_s, neg_inf, fm_fast):
-    reducer = lambda a, b, _fm: fx.maxnumf(a, b)  # noqa: E731
+    reducer = lambda a, b, _fm: fx.maxnumf(a, b, fastmath=_MAX_FASTMATH)  # noqa: E731
     return _lane_pair_reduce(_reduce_score_pair(v_s, neg_inf, reducer, fm_fast), reducer, fm_fast)
 
 
@@ -462,7 +467,7 @@ def _safe_l_inv(l_row, zero_f):
 
 
 def _rescale_from_tile_max(m_row, m_tile_max, fm_fast):
-    row_max = fx.maxnumf(m_row, m_tile_max)
+    row_max = fx.maxnumf(m_row, m_tile_max, fastmath=_MAX_FASTMATH)
     rescale = rocdl.exp2(T.f32, as_mlir_value(m_row - row_max))
     return row_max, rescale
 
@@ -2976,19 +2981,19 @@ class GenericSoftmaxHelper:
         if const_expr(os.getenv("FLYDSL_FLASH_ATTN_FUNC_TREE_REDUCE", "0") == "1"):
 
             def _max_pair(a, b):
-                return fx.maxnumf(a, b)
+                return fx.maxnumf(a, b, fastmath=_MAX_FASTMATH)
 
             local_max = _tree_reduce(list(s_raw_lo) + list(s_raw_hi), _max_pair)
         else:
             local_max = s_raw_lo[0]
             for r in range_constexpr(15):
-                local_max = fx.maxnumf(local_max, s_raw_lo[r + 1])
+                local_max = fx.maxnumf(local_max, s_raw_lo[r + 1], fastmath=_MAX_FASTMATH)
             for r in range_constexpr(16):
-                local_max = fx.maxnumf(local_max, s_raw_hi[r])
-        row_max = fx.maxnumf(local_max, self.reduction_peer(local_max))
-        m_new_raw = fx.maxnumf(m_running, row_max)
+                local_max = fx.maxnumf(local_max, s_raw_hi[r], fastmath=_MAX_FASTMATH)
+        row_max = fx.maxnumf(local_max, self.reduction_peer(local_max), fastmath=_MAX_FASTMATH)
+        m_new_raw = fx.maxnumf(m_running, row_max, fastmath=_MAX_FASTMATH)
         if const_expr(traits.CAUSAL):
-            m_new_raw = fx.maxnumf(m_new_raw, ctx.c_neg_floor)
+            m_new_raw = fx.maxnumf(m_new_raw, ctx.c_neg_floor, fastmath=_MAX_FASTMATH)
 
         diff_m_scaled = (m_running - m_new_raw) * ctx.c_sm_scale_log2e
         corr = self._exp2(diff_m_scaled)
@@ -3768,7 +3773,7 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         return _score_pair_max(v_s, self.c_neg_inf, self.fm_fast)
 
     def floor_masked_max(self, row_max):
-        return fx.maxnumf(row_max, self.c_neg_floor)
+        return fx.maxnumf(row_max, self.c_neg_floor, fastmath=_MAX_FASTMATH)
 
     def rescale_from_tile_max(self, m_row, m_tile_max):
         return _rescale_from_tile_max(m_row, m_tile_max, self.fm_fast)
@@ -3799,7 +3804,7 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         _scale_o_accs(v_o, scale_scalar, self.traits, self.fm_fast)
 
     def rescale_o(self, v_o, m_row, l_row, m_tile_max, v_p):
-        m_new = fx.maxnumf(m_row, m_tile_max)
+        m_new = fx.maxnumf(m_row, m_tile_max, fastmath=_MAX_FASTMATH)
         corr = rocdl.exp2(T.f32, as_mlir_value(m_row - m_new))
         self.scale_o(v_o, corr)
         v_o = _anchor_v_o(self.traits, v_o)
@@ -3814,7 +3819,7 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         return v_o, m_new, l_row, v_p
 
     def fold_sink(self, v_o, m_row, l_row, sink_log2):
-        m_new = fx.maxnumf(m_row, sink_log2)
+        m_new = fx.maxnumf(m_row, sink_log2, fastmath=_MAX_FASTMATH)
         corr = rocdl.exp2(T.f32, as_mlir_value(m_row - m_new))
         self.scale_o(v_o, corr)
         sink_w = rocdl.exp2(T.f32, as_mlir_value(sink_log2 - m_new))
@@ -5097,10 +5102,10 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         return _score_pair_max(v_s, self.c_neg_inf, self.fm_fast)
 
     def max2(self, a, b):
-        return fx.maxnumf(a, b)
+        return fx.maxnumf(a, b, fastmath=_MAX_FASTMATH)
 
     def floor_masked_max(self, row_max):
-        return fx.maxnumf(row_max, self.c_neg_floor)
+        return fx.maxnumf(row_max, self.c_neg_floor, fastmath=_MAX_FASTMATH)
 
     def sub_m(self, v_s, row_max):
         return _scale_sub_score_pair(v_s, row_max, self.c_logit_scale, self.c_zero_f, self.fm_fast)
@@ -5145,7 +5150,7 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         return _safe_l_inv(l_row, self.c_zero_f)
 
     def rescale_from_tile_max(self, m_row, m_tile_max):
-        row_max = fx.maxnumf(m_row, m_tile_max)
+        row_max = fx.maxnumf(m_row, m_tile_max, fastmath=_MAX_FASTMATH)
         diff_scaled = (m_row - row_max) * self.c_logit_scale
         rescale = rocdl.exp2(T.f32, as_mlir_value(diff_scaled))
         return row_max, rescale
@@ -5459,7 +5464,7 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
     def reduce_m_max(self, m_s):
         m_max = m_s[0]
         for i in range_constexpr(self.traits.NUM_KV_SPLITS - 1):
-            m_max = fx.maxnumf(m_max, m_s[i + 1])
+            m_max = fx.maxnumf(m_max, m_s[i + 1], fastmath=_MAX_FASTMATH)
         return m_max
 
     def fold_sink(self, m_max, bias_log2e):
@@ -5475,7 +5480,7 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
         )
 
         sink_log2 = sink_f32 * fx.Float32(bias_log2e)
-        m_new = fx.maxnumf(m_max, sink_log2)
+        m_new = fx.maxnumf(m_max, sink_log2, fastmath=_MAX_FASTMATH)
         sink_w = rocdl.exp2(T.f32, as_mlir_value(sink_log2 - m_new))
         return m_new, sink_w
 
