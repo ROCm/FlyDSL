@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-21T09:57:04Z",
+ "updated": "2026-08-21T10:34:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -55,11 +55,11 @@
    "branch": "dsl-ify-scf-controlflow",
    "event": "pull_request",
    "title": "[Kernel] Replace raw scf ops with Python control flow in kernels",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467139450",
    "created_at": "2026-08-21T09:17:01Z",
-   "updated_at": "2026-08-21T09:18:21Z",
+   "updated_at": "2026-08-21T10:33:37Z",
    "actor": "xudoyuan",
    "jobs": []
   },
@@ -95,9 +95,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-21T09:50:52Z",
+     "started_at": "2026-08-21T09:56:19Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458891715/job/96734106092"
     },
@@ -113,11 +113,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-21T09:50:52Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458891715/job/96734106175"
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-21T10:05:36Z",
+     "completed_at": "2026-08-21T10:23:17Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458891715/job/96734106175",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -147,11 +148,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-21T09:47:37Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458362585/job/96733161672"
+     "completed_at": "2026-08-21T10:05:12Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458362585/job/96733161672",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -364,11 +366,11 @@
    "branch": "fp8-softmax-normalisation",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453264432",
    "created_at": "2026-08-21T06:09:27Z",
-   "updated_at": "2026-08-21T08:53:41Z",
+   "updated_at": "2026-08-21T10:32:39Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
@@ -394,10 +396,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-21T08:53:41Z",
-     "completed_at": null,
+     "completed_at": "2026-08-21T10:32:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453264432/job/96700926255"
     }
    ]
