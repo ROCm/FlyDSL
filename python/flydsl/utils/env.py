@@ -89,6 +89,7 @@ class _OptNumber(EnvOption[NumberT]):
         description: str = "",
         min_value: Optional[NumberT] = None,
         max_value: Optional[NumberT] = None,
+        empty_is_default: bool = False,
     ):
         validator = None
         if min_value is not None or max_value is not None:
@@ -104,8 +105,11 @@ class _OptNumber(EnvOption[NumberT]):
         self.parser = parser
         self.min_value = min_value
         self.max_value = max_value
+        self.empty_is_default = empty_is_default
 
     def parse_value(self, raw: str) -> NumberT:
+        if self.empty_is_default and not raw.strip():
+            return self.default
         return self.parser(raw)
 
 
@@ -119,6 +123,7 @@ class OptInt(_OptNumber[int]):
         description: str = "",
         min_value: Optional[int] = None,
         max_value: Optional[int] = None,
+        empty_is_default: bool = False,
     ):
         super().__init__(
             default,
@@ -127,6 +132,7 @@ class OptInt(_OptNumber[int]):
             description,
             min_value,
             max_value,
+            empty_is_default,
         )
 
 
@@ -140,6 +146,7 @@ class OptFloat(_OptNumber[float]):
         description: str = "",
         min_value: Optional[float] = None,
         max_value: Optional[float] = None,
+        empty_is_default: bool = False,
     ):
         super().__init__(
             default,
@@ -148,6 +155,7 @@ class OptFloat(_OptNumber[float]):
             description,
             min_value,
             max_value,
+            empty_is_default,
         )
 
 
@@ -280,6 +288,7 @@ class AotEnvManager(EnvManager):
             "Maximum concurrent worker processes; unset, empty, or non-positive values use the CPU and "
             "available-memory based automatic limit"
         ),
+        empty_is_default=True,
     )
     mem_per_worker_gb = OptFloat(
         2.0,

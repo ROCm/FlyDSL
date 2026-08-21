@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 import flydsl.utils.parallel as parallel
+from flydsl.utils.env import aot
 from flydsl.utils.parallel import run_parallel_jobs
 
 pytestmark = [pytest.mark.l0_backend_agnostic]
@@ -151,6 +152,15 @@ def log_messages(monkeypatch):
     logger = SimpleNamespace(info=record, warning=record)
     monkeypatch.setattr(parallel, "log", lambda: logger)
     return messages
+
+
+def test_workers_option_whitespace_uses_automatic_default(monkeypatch):
+    monkeypatch.setenv("FLYDSL_AOT_WORKERS", "   ")
+    monkeypatch.setattr(parallel, "_affinity_aware_cpu_count", lambda: 8)
+    monkeypatch.setattr(parallel, "_memory_worker_cap", lambda workers: workers)
+
+    assert aot.workers == 0
+    assert parallel._get_max_workers(num_jobs=100) == 8
 
 
 def test_results_follow_input_order():

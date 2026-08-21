@@ -148,8 +148,7 @@ def _memory_worker_cap(default_workers: int) -> int:
 
 
 def _get_max_workers(num_jobs: int) -> int:
-    workers_raw = os.environ.get("FLYDSL_AOT_WORKERS", "").strip()
-    configured_workers = aot.workers if workers_raw else 0
+    configured_workers = aot.workers
     if configured_workers > 0:
         max_workers = configured_workers
     else:
