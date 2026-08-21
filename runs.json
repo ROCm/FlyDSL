@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-21T13:32:22Z",
+ "updated": "2026-08-21T13:49:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "convolution",
    "event": "pull_request",
    "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32482231072",
    "created_at": "2026-08-21T12:30:44Z",
-   "updated_at": "2026-08-21T12:32:03Z",
+   "updated_at": "2026-08-21T13:29:47Z",
    "actor": "amd-nprotaso",
    "jobs": []
   },
@@ -86,21 +86,22 @@
    "branch": "upstream/pa-64bit-cache-offsets",
    "event": "pull_request",
    "title": "[Bugfix][PA] Fix D192 query staging and 64-bit cache offsets",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467635411",
    "created_at": "2026-08-21T09:23:12Z",
-   "updated_at": "2026-08-21T12:33:54Z",
+   "updated_at": "2026-08-21T13:43:49Z",
    "actor": "sammysun0711",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-21T11:56:55Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467635411/job/96757504835"
+     "completed_at": "2026-08-21T13:43:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467635411/job/96757504835",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -146,11 +147,11 @@
    "branch": "dsl-ify-scf-controlflow",
    "event": "pull_request",
    "title": "[Kernel] Replace raw scf ops with Python control flow in kernels",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467139450",
    "created_at": "2026-08-21T09:17:01Z",
-   "updated_at": "2026-08-21T13:29:06Z",
+   "updated_at": "2026-08-21T13:29:55Z",
    "actor": "xudoyuan",
    "jobs": [
     {
