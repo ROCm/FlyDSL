@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-21T15:32:49Z",
+ "updated": "2026-08-21T16:01:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32500445773,
+   "pr": 1020,
+   "commit": "2f23ade79f655b9dc98222b2d832ddd68747b7a0",
+   "branch": "fp8-softmax-normalisation",
+   "event": "pull_request",
+   "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32500445773",
+   "created_at": "2026-08-21T15:58:04Z",
+   "updated_at": "2026-08-21T15:59:28Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
+  {
+   "run_id": 32500430459,
+   "pr": 1033,
+   "commit": "e58637f4fd34b4d4448e421270cd8dde1b9601ca",
+   "branch": "john/lazy-rescale-nan",
+   "event": "pull_request",
+   "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32500430459",
+   "created_at": "2026-08-21T15:57:53Z",
+   "updated_at": "2026-08-21T15:58:23Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 32488856219,
    "pr": null,
@@ -73,11 +103,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-21T13:55:08Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32482231072/job/96793007350"
+     "completed_at": "2026-08-21T15:40:17Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32482231072/job/96793007350",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -601,25 +632,25 @@
   },
   {
    "run_id": 32453264432,
-   "pr": 1020,
+   "pr": null,
    "commit": "f98e337094be347085a004aae7a5001b53575772",
    "branch": "fp8-softmax-normalisation",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453264432",
    "created_at": "2026-08-21T06:09:27Z",
-   "updated_at": "2026-08-21T14:51:27Z",
+   "updated_at": "2026-08-21T15:58:33Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-21T14:51:26Z",
-     "completed_at": null,
+     "completed_at": "2026-08-21T15:58:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453264432/job/96809166364"
     },
     {
@@ -1926,67 +1957,6 @@
    "updated_at": "2026-08-20T11:45:19Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 32362524805,
-   "pr": null,
-   "commit": "cd6a73fe0bdf576f4b8aa797bc047fa7b4cfe2a7",
-   "branch": "pr/fix-ptr-alignment-lowering",
-   "event": "pull_request",
-   "title": "[Fix] Fix alignment reported by ptr.load/ptr.store lowering",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32362524805",
-   "created_at": "2026-08-20T11:10:36Z",
-   "updated_at": "2026-08-20T11:33:58Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 32357738168,
-   "pr": null,
-   "commit": "c299d53d2ad942cf45d069ba5c449496a2461d0f",
-   "branch": "fp8-softmax-normalisation",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357738168",
-   "created_at": "2026-08-20T10:11:56Z",
-   "updated_at": "2026-08-20T14:42:24Z",
-   "actor": "JohnQinAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T12:09:29Z",
-     "completed_at": "2026-08-20T13:57:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357738168/job/96414342652",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T13:53:26Z",
-     "completed_at": "2026-08-20T14:42:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357738168/job/96414342742",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T11:48:56Z",
-     "completed_at": "2026-08-20T12:03:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32357738168/job/96414342753",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
