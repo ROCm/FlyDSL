@@ -1,8 +1,68 @@
 {
  "schema": 1,
- "updated": "2026-08-21T03:08:58Z",
+ "updated": "2026-08-21T03:32:35Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32443647802,
+   "pr": 1048,
+   "commit": "f0f67736686d3f5659510fe8fc6ab0eecb0a90f8",
+   "branch": "yanbo/fix_multigpu_ci",
+   "event": "pull_request",
+   "title": "[CI] fix allreduce ci",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32443647802",
+   "created_at": "2026-08-21T03:30:52Z",
+   "updated_at": "2026-08-21T03:31:37Z",
+   "actor": "yanboshao",
+   "jobs": []
+  },
+  {
+   "run_id": 32443640648,
+   "pr": 1048,
+   "commit": "f0f67736686d3f5659510fe8fc6ab0eecb0a90f8",
+   "branch": "yanbo/fix_multigpu_ci",
+   "event": "pull_request",
+   "title": "[CI] fix allreduce ci",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32443640648",
+   "created_at": "2026-08-21T03:30:44Z",
+   "updated_at": "2026-08-21T03:30:53Z",
+   "actor": "yanboshao",
+   "jobs": []
+  },
+  {
+   "run_id": 32443595655,
+   "pr": 1038,
+   "commit": "e9e0ca054660a73c5364f461d821c1ff7a46e2cc",
+   "branch": "zhimding/jobs_parallel_0819",
+   "event": "pull_request",
+   "title": "[AOT] Add resilient parallel job scheduler",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32443595655",
+   "created_at": "2026-08-21T03:30:03Z",
+   "updated_at": "2026-08-21T03:31:34Z",
+   "actor": "zhiding512",
+   "jobs": []
+  },
+  {
+   "run_id": 32442823772,
+   "pr": 1025,
+   "commit": "da37a45baf9f97e3aaa7aebd6fa2f9bf8c3ef88e",
+   "branch": "dsl-ify-scf-controlflow",
+   "event": "pull_request",
+   "title": "[Kernel] Replace raw scf ops with Python control flow in kernels",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772",
+   "created_at": "2026-08-21T03:16:53Z",
+   "updated_at": "2026-08-21T03:18:44Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 32442154191,
    "pr": 1038,
@@ -10,11 +70,11 @@
    "branch": "zhimding/jobs_parallel_0819",
    "event": "pull_request",
    "title": "[AOT] Add resilient parallel job scheduler",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442154191",
    "created_at": "2026-08-21T03:05:47Z",
-   "updated_at": "2026-08-21T03:06:59Z",
+   "updated_at": "2026-08-21T03:30:21Z",
    "actor": "zhiding512",
    "jobs": []
   },
@@ -878,7 +938,7 @@
   },
   {
    "run_id": 32354052771,
-   "pr": 1042,
+   "pr": 1048,
    "commit": "588eb56253391be61110bf4067ce42e8aa5a838c",
    "branch": "yanbo/fix_multigpu_ci",
    "event": "pull_request",
@@ -893,7 +953,7 @@
   },
   {
    "run_id": 32354052653,
-   "pr": 1042,
+   "pr": 1048,
    "commit": "588eb56253391be61110bf4067ce42e8aa5a838c",
    "branch": "yanbo/fix_multigpu_ci",
    "event": "pull_request",
@@ -1769,126 +1829,6 @@
    "created_at": "2026-08-20T04:41:33Z",
    "updated_at": "2026-08-20T04:42:30Z",
    "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 32331703456,
-   "pr": 1031,
-   "commit": "2f36fb3ffea89cf660fb5619b3b6e67059efdd33",
-   "branch": "coop-library",
-   "event": "pull_request",
-   "title": "[Ext][Coop] Add cooperative warp- and block-scope collectives",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32331703456",
-   "created_at": "2026-08-20T04:23:16Z",
-   "updated_at": "2026-08-20T06:07:44Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T04:43:39Z",
-     "completed_at": "2026-08-20T06:07:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32331703456/job/96316671818",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T04:43:29Z",
-     "completed_at": "2026-08-20T05:02:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32331703456/job/96316671823",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T04:43:54Z",
-     "completed_at": "2026-08-20T06:03:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32331703456/job/96316671843",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32324922381,
-   "pr": null,
-   "commit": "1e434c6d8f0745b28d69d4866885d24a32078484",
-   "branch": "fp8-softmax-normalisation",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32324922381",
-   "created_at": "2026-08-20T02:31:09Z",
-   "updated_at": "2026-08-20T02:32:48Z",
-   "actor": "JohnQinAMD",
-   "jobs": []
-  },
-  {
-   "run_id": 32320357427,
-   "pr": 1038,
-   "commit": "91e311d324ed78f9ec7e9b9877729d4137196994",
-   "branch": "zhimding/jobs_parallel_0819",
-   "event": "pull_request",
-   "title": "[AOT] Add resilient parallel job scheduler",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32320357427",
-   "created_at": "2026-08-20T01:15:30Z",
-   "updated_at": "2026-08-20T03:04:19Z",
-   "actor": "zhiding512",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-20T02:10:17Z",
-     "completed_at": "2026-08-20T03:04:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32320357427/job/96290373091"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T02:10:06Z",
-     "completed_at": "2026-08-20T02:36:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32320357427/job/96290373107",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-20T02:10:17Z",
-     "completed_at": "2026-08-20T02:37:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32320357427/job/96290373157"
-    }
-   ]
-  },
-  {
-   "run_id": 32319484816,
-   "pr": 1033,
-   "commit": "6b6b45c6bdfad1c1717efb4363ac96a67e7a873f",
-   "branch": "john/lazy-rescale-nan",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32319484816",
-   "created_at": "2026-08-20T01:01:17Z",
-   "updated_at": "2026-08-20T01:03:41Z",
-   "actor": "JohnQinAMD",
    "jobs": []
   }
  ]
