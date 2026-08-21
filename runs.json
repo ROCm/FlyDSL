@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-21T09:31:45Z",
+ "updated": "2026-08-21T09:57:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -85,13 +85,41 @@
    "branch": "jhinpan/fix-exp2-fastmath",
    "event": "pull_request",
    "title": "[ROCDL] Lower approximate exp2 to native intrinsic",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458891715",
    "created_at": "2026-08-21T07:30:00Z",
-   "updated_at": "2026-08-21T09:24:03Z",
+   "updated_at": "2026-08-21T09:50:52Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-21T09:50:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458891715/job/96734106092"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-21T09:50:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458891715/job/96734106143"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-21T09:50:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458891715/job/96734106175"
+    }
+   ]
   },
   {
    "run_id": 32458362585,
@@ -100,13 +128,41 @@
    "branch": "yanbo/fix_multigpu_ci",
    "event": "pull_request",
    "title": "[CI] fix allreduce ci",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458362585",
    "created_at": "2026-08-21T07:22:45Z",
-   "updated_at": "2026-08-21T09:18:21Z",
+   "updated_at": "2026-08-21T09:46:49Z",
    "actor": "yanboshao",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-21T09:47:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458362585/job/96733161656"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-21T09:47:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458362585/job/96733161672"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-21T09:46:49Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458362585/job/96733161722"
+    }
+   ]
   },
   {
    "run_id": 32457463858,
@@ -143,11 +199,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-21T09:24:05Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457463858/job/96727584767"
+     "completed_at": "2026-08-21T09:44:32Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457463858/job/96727584767",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -158,11 +215,11 @@
    "branch": "zhimding/jobs_parallel_0819",
    "event": "pull_request",
    "title": "[AOT] Add resilient parallel job scheduler",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457110814",
    "created_at": "2026-08-21T07:05:26Z",
-   "updated_at": "2026-08-21T08:45:40Z",
+   "updated_at": "2026-08-21T09:51:56Z",
    "actor": "zhiding512",
    "jobs": [
     {
@@ -187,9 +244,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-21T08:45:40Z",
+     "started_at": "2026-08-21T09:51:56Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457110814/job/96718613687"
     }
@@ -217,11 +274,11 @@
    "branch": "phil/bump-llvm-941a04e6",
    "event": "pull_request",
    "title": "[Misc][FlyToROCDL] Bump LLVM to 941a04e6 and adapt gpu.launch_func lowering",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32454436875",
    "created_at": "2026-08-21T06:27:05Z",
-   "updated_at": "2026-08-21T08:16:48Z",
+   "updated_at": "2026-08-21T09:47:39Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -237,20 +294,21 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-21T08:16:48Z",
+     "started_at": "2026-08-21T09:47:38Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32454436875/job/96711958508"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-21T08:17:18Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32454436875/job/96711958643"
+     "completed_at": "2026-08-21T09:42:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32454436875/job/96711958643",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -396,21 +454,22 @@
    "branch": "john/lazy-rescale-nan",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453263454",
    "created_at": "2026-08-21T06:09:26Z",
-   "updated_at": "2026-08-21T07:59:05Z",
+   "updated_at": "2026-08-21T09:55:53Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-21T07:42:17Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453263454/job/96693468590"
+     "completed_at": "2026-08-21T09:55:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453263454/job/96693468590",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -753,7 +812,7 @@
   },
   {
    "run_id": 32443647802,
-   "pr": 1048,
+   "pr": null,
    "commit": "f0f67736686d3f5659510fe8fc6ab0eecb0a90f8",
    "branch": "yanbo/fix_multigpu_ci",
    "event": "pull_request",
@@ -768,7 +827,7 @@
   },
   {
    "run_id": 32443640648,
-   "pr": 1048,
+   "pr": null,
    "commit": "f0f67736686d3f5659510fe8fc6ab0eecb0a90f8",
    "branch": "yanbo/fix_multigpu_ci",
    "event": "pull_request",
