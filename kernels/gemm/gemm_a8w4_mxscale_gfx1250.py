@@ -49,7 +49,7 @@ def launch_gemm_a8w4_mxscale(
     use_cluster = cluster_m > 1 or cluster_n > 1
     WMMA_M = WMMA_N = 16
     WMMA_K = 128
-    WAVE = 32
+    WAVE = fx.num_warp_threads()
     K_WS = tile_k // WMMA_K
     PACK_TK = tile_k // 2  # B row bytes per K-tile (FP4 packed 2/byte)
     SC_WORDS = tile_k // 4  # scale i32 words per super-row per K-tile
@@ -97,10 +97,10 @@ def launch_gemm_a8w4_mxscale(
         ldc64 = fx.Int64(i32_ldc)
         Kp16 = (k64 // 2) * 16
 
-        tid = fx.Int32(fx.thread_idx.x)
+        tid = fx.thread_idx.x
         bid_x, bid_y, bid_z = fx.block_idx
         kt_base = fx.Int64(bid_z) * fx.Int64(K_TILES) if split_k > 1 else None
-        wave = rocdl.readfirstlane(T.i32, tid // WAVE)
+        wave = fx.Int32(rocdl.readfirstlane(T.i32, tid // WAVE))
         lane = tid % WAVE
         lane16 = lane % 16
         kgrp = lane // 16
@@ -218,7 +218,7 @@ def launch_gemm_a8w4_mxscale(
         def load_a(buf, wm, ks):
             row = wmb + wm * 16 + lane16
             b0 = fx.Int64(row * A_LDS_ROW + ks * WMMA_K + kgrp * 16)
-            v = [Vec(lds_load_b128(buf, b0 + 32 * j)) for j in range_constexpr(4)]
+            v = [lds_load_b128(buf, b0 + 32 * j) for j in range_constexpr(4)]
             v01 = v[0].shuffle(v[1], list(range(8)))
             v23 = v[2].shuffle(v[3], list(range(8)))
             return v01.shuffle(v23, list(range(16)))
@@ -226,8 +226,8 @@ def launch_gemm_a8w4_mxscale(
         def load_b(buf, wn, ks):
             nbl = wnb // 16 + wn
             b0 = fx.Int64(STAGE_A + nbl * B_LDS_ROW + ks * 1024 + kgrp * 256 + lane16 * 16)
-            v0 = Vec(lds_load_b128(buf, b0))
-            v1 = Vec(lds_load_b128(buf, b0 + 512))
+            v0 = lds_load_b128(buf, b0)
+            v1 = lds_load_b128(buf, b0 + 512)
             return v0.shuffle(v1, list(range(8)))
 
         def load_sa(buf, wm, ks):

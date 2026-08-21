@@ -67,7 +67,7 @@ def launch_gemm_a4w4_256x256(
     WMMA_M = 32
     WMMA_N = 16
     WMMA_K = 128
-    WAVE = 32
+    WAVE = fx.num_warp_threads()
     PACK_TK = tile_k // 2  # A/B row bytes per K-tile (FP4 packed 2/byte)
     K_STEPS = tile_k // WMMA_K
     SC_WORDS = tile_k // 4  # scale i32 words per super-row per K-tile
@@ -121,10 +121,10 @@ def launch_gemm_a4w4_256x256(
         ldc64 = fx.Int64(i32_ldc)
         Kp16 = (k64 // 2) * 16
 
-        tid = fx.Int32(fx.thread_idx.x)
+        tid = fx.thread_idx.x
         bid_x, bid_y, bid_z = fx.block_idx
         if const_expr(split_k > 1):
-            m_chunks = fx.Int32(fx.grid_dim.z) // split_k
+            m_chunks = fx.grid_dim.z // split_k
             split_idx = bid_z // m_chunks
             m_chunk = bid_z - split_idx * m_chunks
             kt_base = fx.Int64(split_idx) * fx.Int64(K_TILES)
@@ -132,7 +132,7 @@ def launch_gemm_a4w4_256x256(
             split_idx = fx.Int32(0)
             m_chunk = bid_z
             kt_base = fx.Int64(0)
-        wave = rocdl.readfirstlane(T.i32, tid // WAVE)
+        wave = fx.Int32(rocdl.readfirstlane(T.i32, tid // WAVE))
         lane = tid % WAVE
         lane16 = lane % 16
         kgrp = lane // 16
@@ -140,7 +140,7 @@ def launch_gemm_a4w4_256x256(
         wave_n = wave % n_warp
         local_x, local_y = cluster.compute_cluster_position()
         a_mask, b_mask = compute_mcast_masks(local_x, local_y, cluster_m, cluster_n)
-        blk_m = (m_chunk * fx.Int32(fx.grid_dim.x) + bid_x) * tile_m
+        blk_m = (m_chunk * fx.grid_dim.x + bid_x) * tile_m
         blk_n = bid_y * tile_n
         blk_m64 = fx.Int64(blk_m)
         blk_n64 = fx.Int64(blk_n)
@@ -153,7 +153,7 @@ def launch_gemm_a4w4_256x256(
 
         def _planar_base(offset, stride, stage):
             ptr = fx.add_offset(base_ptr, offset + stage * stride)
-            return fx.index_cast(T.index, fx.ptrtoint(ptr))
+            return fx.Index(fx.ptrtoint(ptr))
 
         def _view(ptr, shape, stride):
             return fx.Tensor(fx.make_view(ptr, fx.make_layout(shape, stride)))
@@ -210,8 +210,8 @@ def launch_gemm_a4w4_256x256(
             desc, lds_step, global_step = _build_tdm_desc(owner)
             return Vec(desc.dgroup0), Vec(desc.dgroup1), fx.Int32(lds_step), fx.Int32(global_step)
 
-        dgroup0 = Vec.from_elements([as_ir_value(fx.Int32(0))] * 4, fx.Int32)
-        dgroup1 = Vec.from_elements([as_ir_value(fx.Int32(0))] * 8, fx.Int32)
+        dgroup0 = Vec.from_elements([fx.Int32(0)] * 4, fx.Int32)
+        dgroup1 = Vec.from_elements([fx.Int32(0)] * 8, fx.Int32)
         tdm_lds_step, tdm_global_step = fx.Int32(0), fx.Int32(0)
         if wave == 0:
             dgroup0, dgroup1, tdm_lds_step, tdm_global_step = _owned_tdm_desc(0)
@@ -223,11 +223,7 @@ def launch_gemm_a4w4_256x256(
             dgroup0, dgroup1, tdm_lds_step, tdm_global_step = _owned_tdm_desc(3)
 
         tdm_desc = tdm_ops.TDMDescriptor2D(as_ir_value(dgroup0), as_ir_value(dgroup1))
-        tdm_base_lds, tdm_base_lo, tdm_base_hi = (
-            fx.Int32(dgroup0[1]),
-            fx.Int32(dgroup0[2]),
-            fx.Int32(dgroup0[3]),
-        )
+        tdm_base_lds, tdm_base_lo, tdm_base_hi = dgroup0[1], dgroup0[2], dgroup0[3]
 
         def _prepare_tdm(slot, tile):
             desc = tdm_ops.update_tensor_descriptor_2d_lds_addr(tdm_desc, tdm_base_lds + tdm_lds_step * fx.Int32(slot))
@@ -258,7 +254,7 @@ def launch_gemm_a4w4_256x256(
         ]
         c_frags = [fx.make_rmem_tensor(16, fx.Float32) for _ in range_constexpr(n_acc)]
         for cf in c_frags:
-            cf.store(fx.constant_vector(0.0, T.vec(16, T.f32)))
+            cf.store(Vec.filled(16, 0.0, fx.Float32))
 
         def _rmem(n, v):
             t = fx.make_rmem_tensor(n, fx.Int32)
@@ -293,10 +289,10 @@ def launch_gemm_a4w4_256x256(
         # Keep fragment displacements as DS immediates inside the K loop.
         stage_a_addr, stage_b_addr, stage_sa_addr, stage_sb_addr = [], [], [], []
         sa_row, sb_col = wmb + lane, wnb + lane
-        a_byte = fx.index_cast(T.index, (wmb + lane16) * A_LDS_ROW + kgrp * 16)
-        b_byte = fx.index_cast(T.index, (wnb // 16) * B_LDS_ROW + kgrp * 256 + lane16 * 16)
-        sa_byte = fx.index_cast(T.index, ((sa_row // 32) * SC_WORDS + sa_row % 32) * 4)
-        sb_byte = fx.index_cast(T.index, ((sb_col // 32) * SC_WORDS + sb_col % 32) * 4)
+        a_byte = fx.Index((wmb + lane16) * A_LDS_ROW + kgrp * 16)
+        b_byte = fx.Index((wnb // 16) * B_LDS_ROW + kgrp * 256 + lane16 * 16)
+        sa_byte = fx.Index(((sa_row // 32) * SC_WORDS + sa_row % 32) * 4)
+        sb_byte = fx.Index(((sb_col // 32) * SC_WORDS + sb_col % 32) * 4)
         for addr_stage in range_constexpr(num_buffers):
             stage_a_addr.append(_planar_base(PLANAR_A_BASE, STAGE_A, addr_stage) + a_byte)
             stage_b_addr.append(_planar_base(PLANAR_B_BASE, STAGE_B, addr_stage) + b_byte)
@@ -327,15 +323,15 @@ def launch_gemm_a4w4_256x256(
         def _stage_load_a(stage, wm, k):
             """16 rows x 128 FP4: lane holds row wm*16+lane16, K-bytes kgrp*16 + 32*j."""
             row_off = wm * 16 * A_LDS_ROW + k * (WMMA_K // 2)
-            v0 = Vec(lds_load_b128(stage_a_addr[stage], row_off))
-            v1 = Vec(lds_load_b128(stage_a_addr[stage], row_off + 32))
+            v0 = lds_load_b128(stage_a_addr[stage], row_off)
+            v1 = lds_load_b128(stage_a_addr[stage], row_off + 32)
             return v0.shuffle(v1, list(range(8))), ds.mark(DS_A_OPS)
 
         def _stage_load_b(stage, wn, k):
             """32 rows x 128 FP4: two stacked 16-row blocks, low 8 words then high 8."""
             col_off = wn * 2 * B_LDS_ROW + k * (WMMA_K // 2) * 16
             v = [
-                Vec(lds_load_b128(stage_b_addr[stage], col_off + blk * B_LDS_ROW + half))
+                lds_load_b128(stage_b_addr[stage], col_off + blk * B_LDS_ROW + half)
                 for blk in range_constexpr(2)
                 for half in (0, 512)
             ]
@@ -594,7 +590,7 @@ def launch_gemm_a4w4_256x256(
                     parity,
                 )
 
-        wave_parity = rocdl.readfirstlane(T.i32, wave % 2)
+        wave_parity = fx.Int32(rocdl.readfirstlane(T.i32, wave % 2))
         if wave_parity == 0:
             _run_all(0)
         else:

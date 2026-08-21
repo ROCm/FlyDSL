@@ -55,7 +55,7 @@ def launch_gemm_a8w8(
     use_cluster = cluster_m > 1 or cluster_n > 1
     WMMA_M = WMMA_N = 16
     WMMA_K = 128
-    WAVE = 32
+    WAVE = fx.num_warp_threads()
     K_WS = tile_k // WMMA_K
     warp_tile_m = tile_m // m_warp
     warp_tile_n = tile_n // n_warp
@@ -120,10 +120,10 @@ def launch_gemm_a8w8(
         lda64 = fx.Int64(i32_lda)
         ldc64 = fx.Int64(i32_ldc)
 
-        tid = fx.Int32(fx.thread_idx.x)
+        tid = fx.thread_idx.x
         bid_x, bid_y, bid_z = fx.block_idx
         kt_base = fx.Int64(bid_z) * fx.Int64(K_TILES) if split_k > 1 else None
-        wave = rocdl.readfirstlane(T.i32, tid // WAVE)
+        wave = fx.Int32(rocdl.readfirstlane(T.i32, tid // WAVE))
         lane = tid % WAVE
         lane16 = lane % 16
         kgrp = lane // 16
@@ -269,7 +269,7 @@ def launch_gemm_a8w8(
         def load_a(buf, wm, ks):
             row = wmb + wm * 16 + lane16
             b0 = fx.Int64(row * A_LDS_ROW + ks * WMMA_K + kgrp * 16)
-            v = [Vec(lds_load_b128(buf, b0 + 32 * j)) for j in range_constexpr(4)]
+            v = [lds_load_b128(buf, b0 + 32 * j) for j in range_constexpr(4)]
             v01 = v[0].shuffle(v[1], list(range(8)))
             v23 = v[2].shuffle(v[3], list(range(8)))
             return v01.shuffle(v23, list(range(16)))
@@ -277,7 +277,7 @@ def launch_gemm_a8w8(
         def load_b(buf, wn, ks):
             nbl = wnb // 16 + wn
             b0 = fx.Int64(STAGE_A + nbl * B_LDS_ROW + ks * 2048 + kgrp * 256 + lane16 * 16)
-            v = [Vec(lds_load_b128(buf, b0 + 512 * j)) for j in range_constexpr(4)]
+            v = [lds_load_b128(buf, b0 + 512 * j) for j in range_constexpr(4)]
             v01 = v[0].shuffle(v[1], list(range(8)))
             v23 = v[2].shuffle(v[3], list(range(8)))
             return v01.shuffle(v23, list(range(16)))
@@ -487,7 +487,7 @@ def launch_gemm_a8w8(
 
             def _issue(atom, tiles, lay, tile_idx):
                 r = fx.make_rmem_tensor(lay, fx.Float32)
-                fx.copy_atom_call(atom, fx.slice(tiles, (None, tile_idx)), r)
+                fx.copy(atom, fx.slice(tiles, (None, tile_idx)), r)
                 return r
 
             sa_r = [

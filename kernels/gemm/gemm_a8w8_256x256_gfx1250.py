@@ -5,7 +5,6 @@
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import llvm as llvm_dialect
 from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.rocdl import cluster, tdm_ops
 from flydsl.expr.typing import Constexpr, T, as_ir_value
@@ -68,7 +67,7 @@ def launch_gemm_a8w8_256x256(
     m_run_max, m_run_min = 32, 8
     WMMA_M = WMMA_N = 16
     WMMA_K = 128
-    WAVE = 32
+    WAVE = fx.num_warp_threads()
     PACK_TK = tile_k  # B row bytes per K-tile (FP8, one byte per element)
     assert is_mxscale, "only the MX-scaled profiles are supported"
     mx32 = block_size == 32
@@ -134,10 +133,10 @@ def launch_gemm_a8w8_256x256(
         ldc64 = fx.Int64(i32_ldc)
         Kp16 = k64 * 16
 
-        tid = fx.Int32(fx.thread_idx.x)
+        tid = fx.thread_idx.x
         bid_x, bid_y, bid_z = fx.block_idx
         if const_expr(split_k > 1):
-            m_chunks = fx.Int32(fx.grid_dim.z) // split_k
+            m_chunks = fx.grid_dim.z // split_k
             split_idx = bid_z // m_chunks
             m_chunk = bid_z - split_idx * m_chunks
             kt_base = fx.Int64(split_idx) * fx.Int64(K_TILES)
@@ -145,7 +144,7 @@ def launch_gemm_a8w8_256x256(
             split_idx = fx.Int32(0)
             m_chunk = bid_z
             kt_base = fx.Int64(0)
-        wave = rocdl.readfirstlane(T.i32, tid // WAVE)
+        wave = fx.Int32(rocdl.readfirstlane(T.i32, tid // WAVE))
         lane = tid % WAVE
         lane16 = lane % 16
         kgrp = lane // 16
@@ -153,7 +152,7 @@ def launch_gemm_a8w8_256x256(
         wave_n = wave % n_warp
         local_x, local_y = cluster.compute_cluster_position()
         a_mask, b_mask = compute_mcast_masks(local_x, local_y, cluster_m, cluster_n)
-        blk_m = (m_chunk * fx.Int32(fx.grid_dim.x) + bid_x) * tile_m
+        blk_m = (m_chunk * fx.grid_dim.x + bid_x) * tile_m
         blk_n = bid_y * tile_n
         blk_m64 = fx.Int64(blk_m)
         blk_n64 = fx.Int64(blk_n)
@@ -166,7 +165,7 @@ def launch_gemm_a8w8_256x256(
 
         def _planar_base(offset, stride, stage):
             ptr = fx.add_offset(base_ptr, offset + stage * stride)
-            return fx.index_cast(T.index, fx.ptrtoint(ptr))
+            return fx.Index(fx.ptrtoint(ptr))
 
         def _view(ptr, shape, stride):
             return fx.Tensor(fx.make_view(ptr, fx.make_layout(shape, stride)))
@@ -243,8 +242,8 @@ def launch_gemm_a8w8_256x256(
             desc, lds_step, global_step = _build_tdm_desc(owner)
             return Vec(desc.dgroup0), Vec(desc.dgroup1), fx.Int32(lds_step), fx.Int32(global_step)
 
-        dgroup0 = Vec.from_elements([as_ir_value(fx.Int32(0))] * 4, fx.Int32)
-        dgroup1 = Vec.from_elements([as_ir_value(fx.Int32(0))] * 8, fx.Int32)
+        dgroup0 = Vec.from_elements([fx.Int32(0)] * 4, fx.Int32)
+        dgroup1 = Vec.from_elements([fx.Int32(0)] * 8, fx.Int32)
         tdm_lds_step, tdm_global_step = fx.Int32(0), fx.Int32(0)
         if wave == 0:
             dgroup0, dgroup1, tdm_lds_step, tdm_global_step = _owned_tdm_desc(0)
@@ -256,11 +255,7 @@ def launch_gemm_a8w8_256x256(
             dgroup0, dgroup1, tdm_lds_step, tdm_global_step = _owned_tdm_desc(3)
 
         tdm_desc = tdm_ops.TDMDescriptor2D(as_ir_value(dgroup0), as_ir_value(dgroup1))
-        tdm_base_lds, tdm_base_lo, tdm_base_hi = (
-            fx.Int32(dgroup0[1]),
-            fx.Int32(dgroup0[2]),
-            fx.Int32(dgroup0[3]),
-        )
+        tdm_base_lds, tdm_base_lo, tdm_base_hi = dgroup0[1], dgroup0[2], dgroup0[3]
 
         def _prepare_tdm(slot, tile_delta):
             desc = tdm_ops.update_tensor_descriptor_2d_lds_addr(tdm_desc, tdm_base_lds + tdm_lds_step * fx.Int32(slot))
@@ -299,7 +294,7 @@ def launch_gemm_a8w8_256x256(
                     for jn in range_constexpr(half_n):
                         c_frags[(qm * half_m + im) * wmma_n_rep + qn * half_n + jn] = fx.make_rmem_tensor(8, fx.Float32)
         for cf in c_frags:
-            cf.store(fx.constant_vector(0.0, T.vec(8, T.f32)))
+            cf.store(Vec.filled(8, 0.0, fx.Float32))
 
         def _rmem(n, v):
             t = fx.make_rmem_tensor(n, fx.Int32)
@@ -328,16 +323,16 @@ def launch_gemm_a8w8_256x256(
         # Keep fragment displacements as DS immediates inside the K loop.
         stage_a_addr, stage_b_addr, stage_sa_addr, stage_sb_addr = [], [], [], []
         sa_row, sb_col = wmb + lane, wnb + lane
-        a_byte = fx.index_cast(T.index, (wmb + lane16) * A_LDS_ROW + kgrp * 16)
-        b_byte = fx.index_cast(T.index, (wnb // 16) * B_LDS_ROW + kgrp * 256 + lane16 * 16)
+        a_byte = fx.Index((wmb + lane16) * A_LDS_ROW + kgrp * 16)
+        b_byte = fx.Index((wnb // 16) * B_LDS_ROW + kgrp * 256 + lane16 * 16)
         if const_expr(mx32):
-            sa_byte = fx.index_cast(T.index, (sa_row // 32) * SUPER_K + (sa_row % 32) * 4)
-            sb_byte = fx.index_cast(T.index, (sb_col // 32) * SUPER_K + (sb_col % 32) * 4)
+            sa_byte = fx.Index((sa_row // 32) * SUPER_K + (sa_row % 32) * 4)
+            sb_byte = fx.Index((sb_col // 32) * SUPER_K + (sb_col % 32) * 4)
         else:
             sa_sel = ((wmb + lane16) % 4) * 0x01010101
             sb_sel = fx.Int32(0)
-            sa_byte = fx.index_cast(T.index, ((wmb + lane16) // 4) * 4)
-            sb_byte = fx.index_cast(T.index, (wnb // 128) * SC_K)  # contiguous, see above
+            sa_byte = fx.Index(((wmb + lane16) // 4) * 4)
+            sb_byte = fx.Index((wnb // 128) * SC_K)  # contiguous, see above
         for addr_stage in range_constexpr(UNROLL):
             slot, par = addr_stage // KPAIR, addr_stage % KPAIR
             stage_a_addr.append(_planar_base(PLANAR_A_BASE, STAGE_A, slot) + a_byte + par * tile_k)
@@ -363,7 +358,7 @@ def launch_gemm_a8w8_256x256(
 
         def _stage_load_frag(kind, stage, idx):
             addr, row, span = _frag_geom(kind, stage)
-            return _join([Vec(lds_load_b128(addr, idx * row + span * j)) for j in range_constexpr(DS_PER_FRAG)])
+            return _join([lds_load_b128(addr, idx * row + span * j) for j in range_constexpr(DS_PER_FRAG)])
 
         def _bcast_byte(word, sel):
             """E8M0 byte -> all four bytes of an i32, so the atom's scale opsel is a no-op.
@@ -494,7 +489,7 @@ def launch_gemm_a8w8_256x256(
                 parts = {}
 
                 def _load(i, j):
-                    parts.setdefault(i, []).append(Vec(lds_load_b128(addr, (half * n + i) * row + span * j)))
+                    parts.setdefault(i, []).append(lds_load_b128(addr, (half * n + i) * row + span * j))
                     if const_expr(j == DS_PER_FRAG - 1):
                         nxt[key][i] = _rmem(16, _join(parts[i]))
 
@@ -590,15 +585,7 @@ def launch_gemm_a8w8_256x256(
                 if do_sync:
                     cluster.cluster_barrier()
 
-        wave_parity = fx.Int32(
-            llvm_dialect.inline_asm(
-                T.i32,
-                [as_ir_value(rocdl.wave_id())],
-                "s_and_b32 $0, $1, 1",
-                "=s,s,~{scc}",
-                has_side_effects=True,
-            )
-        )
+        wave_parity = fx.Int32(rocdl.readfirstlane(T.i32, wave % 2))
         if wave_parity == 0:
             _run_steady(0)
         else:

@@ -7,7 +7,7 @@ import functools
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import gpu, ptrtoint, range_constexpr
+from flydsl.expr import range_constexpr
 from flydsl.expr.typing import T
 from kernels.common.kernels_common import format_kernel_name
 
@@ -36,8 +36,8 @@ def compile_gemm_a8w8_splitk_reduce(*, split_k: int, out_dtype_str: str = "bf16"
     ):
         elem = fx.Float16 if is_f16 else fx.BFloat16
         vec_f32, vec_out = T.vec(VEC, T.f32), T.vec(VEC, elem.ir_type)
-        tid = gpu.thread_id("x")
-        tile, run = gpu.block_id("x"), gpu.block_id("y")
+        tid = fx.thread_idx.x
+        tile, run = fx.block_idx.x, fx.block_idx.y
         atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem)
 
         off = fx.Int64(tile) * fx.Int64(span)
@@ -54,11 +54,14 @@ def compile_gemm_a8w8_splitk_reduce(*, split_k: int, out_dtype_str: str = "bf16"
             )
             return fx.rocdl.make_buffer_tensor(view, num_records_bytes=nbytes)
 
-        pbase = fx.Int64(ptrtoint(partials)) + row * fx.Int64(ELEM_BYTES)
+        pbase = fx.Int64(fx.ptrtoint(partials)) + row * fx.Int64(ELEM_BYTES)
         pbufs = [_view(pbase + fx.Int64(s) * i64_slice_bytes) for s in range_constexpr(split_k)]
-        obuf = _view(fx.Int64(ptrtoint(out)) + row * fx.Int64(ELEM_BYTES))
+        obuf = _view(fx.Int64(fx.ptrtoint(out)) + row * fx.Int64(ELEM_BYTES))
 
-        tile_mn, tv_layout = fx.make_layout_tv(fx.make_layout((1, BLOCK), (1, 1)), fx.make_layout((1, VEC), (1, 1)))
+        tile_mn, tv_layout = fx.make_layout_tv(
+            fx.make_layout((1, BLOCK), (1, 1)),
+            fx.make_layout((1, VEC), (1, 1)),
+        )
         thr = fx.make_tiled_copy(atom, tv_layout, tile_mn).get_slice(tid)
 
         def _part(buf, u):
@@ -71,12 +74,12 @@ def compile_gemm_a8w8_splitk_reduce(*, split_k: int, out_dtype_str: str = "bf16"
             for s in range_constexpr(split_k):
                 fx.copy(atom, srcs[u][s], frags[u][s])
         for u in range_constexpr(unroll):
-            acc = fx.Vector(fx.memref_load_vec(frags[u][0])).extf(vec_f32)
+            acc = frags[u][0].load().extf(vec_f32)
             for s in range_constexpr(1, split_k):
-                acc = acc + fx.Vector(fx.memref_load_vec(frags[u][s])).extf(vec_f32)
+                acc = acc + frags[u][s].load().extf(vec_f32)
             dst = thr.partition_D(_part(obuf, u))
             ofrag = fx.make_fragment_like(dst)
-            fx.memref_store_vec(acc.truncf(vec_out), ofrag)
+            ofrag.store(acc.truncf(vec_out))
             fx.copy(atom, ofrag, dst)
 
     @flyc.jit

@@ -57,7 +57,6 @@ __all__ = [
     "tensor_store_gather",
     "tensor_store_2d",
     "tensor_wait",
-    "update_tensor_descriptor_2d_lds_addr",
     "update_tensor_descriptor_2d_addr_lo",
     "update_tensor_gather_descriptor_addr_lo",
     "update_tensor_descriptor_2d_addr_lo_hi",
