@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-21T21:31:13Z",
+ "updated": "2026-08-21T23:52:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32538119032,
+   "pr": 1056,
+   "commit": "635108b1e8e283d9591d6f575843142fc46723d2",
+   "branch": "feat/gfx950-paged-attention-vllm-kv-layouts",
+   "event": "pull_request",
+   "title": "Support vLLM paged KV cache layouts on the gfx950 attention kernel",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32538119032",
+   "created_at": "2026-08-21T23:47:15Z",
+   "updated_at": "2026-08-21T23:49:03Z",
+   "actor": "akii96",
+   "jobs": []
+  },
   {
    "run_id": 32505023342,
    "pr": 1033,
@@ -1948,21 +1963,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366718417/job/96466110762"
     }
    ]
-  },
-  {
-   "run_id": 32366353447,
-   "pr": null,
-   "commit": "f1f3af4ec0b900cdd24d85f73c0468afc5342460",
-   "branch": "main",
-   "event": "push",
-   "title": "Release: bump version to 0.3.2 (#1044)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366353447",
-   "created_at": "2026-08-20T11:57:25Z",
-   "updated_at": "2026-08-20T12:01:41Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
