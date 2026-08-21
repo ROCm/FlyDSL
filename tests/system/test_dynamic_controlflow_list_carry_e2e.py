@@ -49,6 +49,20 @@ def _run_if_list(Out: fx.Tensor, flag: fx.Int32, stream: fx.Stream = fx.Stream(N
     _kernel_if_list(Out, flag).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
 
 
+@flyc.kernel
+def _kernel_if_inplace_list(Out: fx.Tensor, flag: fx.Int32):
+    lst = [fx.Int32(1), fx.Int32(2)]
+    if flag > fx.Int32(0):
+        lst[0] = fx.Int32(10)
+    Out[0] = lst[0]
+    Out[1] = lst[1]
+
+
+@flyc.jit
+def _run_if_inplace_list(Out: fx.Tensor, flag: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+    _kernel_if_inplace_list(Out, flag).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
+
+
 # ── dynamic for carrying a list ─────────────────────────────────────────────
 
 
@@ -285,6 +299,18 @@ class TestDynamicControlFlowListCarryE2E:
         _run_if_list(t_out, fx.Int32(0))  # flag==0 -> else keeps original list
         torch.cuda.synchronize()
         assert out[0].item() == 1 and out[1].item() == 2, out.tolist()
+
+    def test_if_inplace_list_taken(self):
+        out, t_out = _out(2)
+        _run_if_inplace_list(t_out, fx.Int32(1))
+        torch.cuda.synchronize()
+        assert out.tolist() == [10, 2], out.tolist()
+
+    def test_if_inplace_list_not_taken(self):
+        out, t_out = _out(2)
+        _run_if_inplace_list(t_out, fx.Int32(0))
+        torch.cuda.synchronize()
+        assert out.tolist() == [1, 2], out.tolist()
 
     def test_for_list(self):
         out, t_out = _out(2)

@@ -35,10 +35,8 @@ def swizzle_xor16(row, col, k_blocks16):
     k_blocks16 is always a power of 2 (tile_k_bytes / 16), so use
     bitwise AND instead of remui to save ~10 VALU cycles on CDNA.
     """
-    from flydsl.expr import arith as _swz_arith
-
-    mask = k_blocks16 - _swz_arith.index(1)
-    rem = _swz_arith.andi(row, mask)
+    mask = k_blocks16 - fx.Index(1)
+    rem = (row) & (mask)
     return col ^ (rem * 16)
 
 
@@ -137,11 +135,11 @@ def make_preshuffle_scale_layout(
     stride_k0 = c4 * stride_klane
     stride_n0 = c_k1 * stride_k0
 
-    c_mn1_i32 = arith.index_cast(T.i32, c_mn1)
-    c_k1_i32 = arith.index_cast(T.i32, c_k1)
-    stride_n0_i32 = arith.index_cast(T.i32, stride_n0)
-    stride_k0_i32 = arith.index_cast(T.i32, stride_k0)
-    stride_klane_i32 = arith.index_cast(T.i32, stride_klane)
+    c_mn1_i32 = fx.Int32(c_mn1)
+    c_k1_i32 = fx.Int32(c_k1)
+    stride_n0_i32 = fx.Int32(stride_n0)
+    stride_k0_i32 = fx.Int32(stride_k0)
+    stride_klane_i32 = fx.Int32(stride_klane)
 
     layout_scale = fx.make_layout(
         (c_mn1_i32, c_k1_i32, 4, 16),
@@ -187,10 +185,10 @@ def make_preshuffle_b_layout(
 
     if elem_bytes not in (1, 2):
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
-    c_k_bytes = c_k * arith.constant(int(elem_bytes), index=True)
+    c_k_bytes = c_k * fx.Index(int(elem_bytes))
     n0 = c_n // c16
 
-    c_kpack_elems = c_kpack if elem_bytes == 1 else (c_kpack // arith.constant(int(elem_bytes), index=True))
+    c_kpack_elems = c_kpack if elem_bytes == 1 else (c_kpack // fx.Index(int(elem_bytes)))
 
     stride_nlane = c_kpack_elems
 
@@ -212,12 +210,12 @@ def make_preshuffle_b_layout(
         stride_n0 = c_k0 * stride_k0
 
     kpack_elems_static = kpack_bytes if elem_bytes == 1 else kpack_bytes // elem_bytes
-    n0_i32 = arith.index_cast(T.i32, n0)
-    c_k0_i32 = arith.index_cast(T.i32, c_k0)
-    stride_n0_i32 = arith.index_cast(T.i32, stride_n0)
-    stride_k0_i32 = arith.index_cast(T.i32, stride_k0)
-    stride_klane_i32 = arith.index_cast(T.i32, stride_klane)
-    stride_nlane_i32 = arith.index_cast(T.i32, stride_nlane)
+    n0_i32 = fx.Int32(n0)
+    c_k0_i32 = fx.Int32(c_k0)
+    stride_n0_i32 = fx.Int32(stride_n0)
+    stride_k0_i32 = fx.Int32(stride_k0)
+    stride_klane_i32 = fx.Int32(stride_klane)
+    stride_nlane_i32 = fx.Int32(stride_nlane)
 
     stride_b = (stride_n0_i32, stride_k0_i32, stride_klane_i32, stride_nlane_i32, 1)
     layout_b = fx.make_layout((n0_i32, c_k0_i32, klane_dim, 16, kpack_elems_static), stride_b)
@@ -439,12 +437,12 @@ def load_b_pack_k32(
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
 
     c64 = fx.Index(64)
-    base_k_bytes = base_k * arith.constant(int(elem_bytes), index=True)
+    base_k_bytes = base_k * fx.Index(int(elem_bytes))
     k0_base = base_k_bytes // c64
-    k0 = k0_base + arith.constant(ki_step // 2, index=True)
+    k0 = k0_base + fx.Index(ki_step // 2)
     k1 = lane_div_16
     half_bytes = kpack_bytes // 2
-    k2_base = arith.constant((ki_step % 2) * half_bytes, index=True)
+    k2_base = fx.Index((ki_step % 2) * half_bytes)
 
     coord_pack = (n_blk, k0, k1, n_intra, fx.Index(0))
     idx_pack = preshuffle_crd2idx(tuple(fx.Int32(c) for c in coord_pack), layout_b)
@@ -501,7 +499,7 @@ def tile_chunk_coord_i32(
     """Map (thread, chunk_id) -> (row_local, col_local_i32) for X/A loads."""
     if chunk_i32 not in (1, 2, 4):
         raise ValueError(f"chunk_i32 must be one of (1,2,4), got {chunk_i32!r}")
-    chunk_off_i32 = arith.constant(i * total_threads * chunk_i32, index=True)
+    chunk_off_i32 = fx.Index(i * total_threads * chunk_i32)
     tile_idx_i32 = tx_i32_base + chunk_off_i32
     coord_local = fx.idx2crd(fx.Int32(tile_idx_i32), layout_tile_div4)
     row_local = fx.get(coord_local, 0)
@@ -796,30 +794,31 @@ def _load_groupwise_scale(
         c_npm1 = fx.Index(num_pairs - 1)
         dword_base = expert_offset * c_npm1 + n_global
         dword_elem = dword_base + pair_idx * c_npe
-        dword_idx = arith.index_cast(T.i32, dword_elem)
+        dword_idx = fx.Int32(dword_elem)
         scale_val = buffer_ops.buffer_load(scale_rsrc, dword_idx, vec_width=1, dtype=T.i32)
     else:
         # (E, G, N) layout with f32 dtype
         c_gm1 = fx.Index(num_groups - 1)
         base_scale = expert_offset * c_gm1 + n_global
         elem_idx = base_scale + group_idx * c_npe
-        scale_idx_i32 = arith.index_cast(T.i32, elem_idx)
+        scale_idx_i32 = fx.Int32(elem_idx)
         scale_val = buffer_ops.buffer_load(scale_rsrc, scale_idx_i32, vec_width=1, dtype=T.f32)
     return scale_val
 
 
-def extract_bf16_scale(arith, scale_raw_i32, ku: int):
+def extract_bf16_scale(scale_raw_i32, ku: int):
     """Extract f32 scale from raw i32 dword loaded by bf16 groupwise path.
 
     In the ``(E, G//2, N, 2)`` layout two adjacent groups share one dword.
     ``ku`` determines which half: even ku → low bf16, odd ku → high bf16.
     """
+    v = fx.Uint32(scale_raw_i32)
     if ku % 2 == 0:
         # Low bf16: shift left by 16 to place in upper 16 bits → f32
-        return arith.bitcast(T.f32, scale_raw_i32 << fx.Int32(16))
+        return (v << fx.Int32(16)).bitcast(fx.Float32)
     else:
         # High bf16: mask upper 16 bits → f32
-        return arith.bitcast(T.f32, scale_raw_i32 & fx.Int32(0xFFFF0000))
+        return (v & fx.Int32(0xFFFF0000)).bitcast(fx.Float32)
 
 
 # ---------------------------------------------------------------------------
