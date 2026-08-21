@@ -1,0 +1,927 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="./" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>API Stability &#8212; FlyDSL 0.3.2</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+
+  
+  <link href="_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-regular-400.woff2" />
+
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=8f2a1f02" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/sphinx-book-theme.css?v=eba8b062" />
+    <link rel="stylesheet" type="text/css" href="_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="_static/custom.css?v=22b90084" />
+    <link rel="stylesheet" type="text/css" href="_static/rocm_header.css?v=037afccf" />
+    <link rel="stylesheet" type="text/css" href="_static/rocm_footer.css?v=7095035a" />
+    <link rel="stylesheet" type="text/css" href="_static/fonts.css?v=fcff5274" />
+    <link rel="stylesheet" type="text/css" href="_static/sphinx-design.min.css?v=95c83b7e" />
+    <link rel="stylesheet" type="text/css" href="_static/ai_ecosystem.css" />
+  
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
+<link rel="preload" as="script" href="_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
+  <script src="_static/vendor/fontawesome/6.5.2/js/all.min.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    <script src="_static/documentation_options.js?v=2f2e10e9"></script>
+    <script src="_static/doctools.js?v=9bcbadda"></script>
+    <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="_static/copybutton.js?v=91c4cb68"></script>
+    <script async="async" src="_static/code_word_breaks.js?v=327952c4"></script>
+    <script async="async" src="_static/renameVersionLinks.js?v=929fe5e4"></script>
+    <script async="async" src="_static/rdcMisc.js?v=01f88d96"></script>
+    <script async="async" src="_static/theme_mode_captions.js?v=15f4ec5d"></script>
+    <script defer="defer" src="_static/search.js?v=90a4452c"></script>
+    <script src="_static/scripts/sphinx-book-theme.js?v=887ef09a"></script>
+    <script src="_static/design-tabs.js?v=f930bc37"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'api_stability';</script>
+    <script async="async" src="https://download.amd.com/js/analytics/analyticsinit.js"></script>
+    <link rel="icon" href="https://www.amd.com/content/dam/code/images/favicon/favicon.ico"/>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Arithmetic types" href="language/arithmetic_types.html" />
+    <link rel="prev" title="Quick start" href="quickstart.html" />
+    <meta name="google-site-verification" content="vo35SZt_GASsTHAEmdww7AYKPCvZyzLvOXBl8guBME4" />
+
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-primary-sidebar-checkbox"/>
+  <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-secondary-sidebar-checkbox"/>
+  <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
+  
+  <div class="search-button__wrapper">
+    <div class="search-button__overlay"></div>
+    <div class="search-button__search-container">
+<form class="bd-search d-flex align-items-center"
+      action="search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         id="search-input"
+         placeholder="Search..."
+         aria-label="Search..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form></div>
+  </div>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="common-header" >
+        <nav class="navbar navbar-expand-xl">
+            <div class="container-fluid main-nav rocm-header">
+                <div class="header-logo">
+                    <div class="header-logo-title">
+                        
+                            <button class="navbar-toggler collapsed" id="nav-icon" data-tracking-information="mainMenuToggle" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
+                                <span></span>
+                                <span></span>
+                                <span></span>
+                            </button>
+                        
+                        <a class="navbar-brand" href="https://www.amd.com/">
+                            <img src="_static/images/amd-header-logo.svg" alt="AMD Logo" title="AMD Logo" width="90" class="d-inline-block align-text-top hover-opacity"/>
+                        </a>
+                        <div class="vr mx-40 my-25"></div>
+                        <a class="klavika-font hover-opacity" href="https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest">ROCm&#8482; AI Ecosystem</a>
+                    </div>
+                    
+                </div>
+                <div class="icon-nav text-center d-flex ms-auto"></div>
+            </div>
+        </nav>
+        
+        <nav class="navbar navbar-expand-xl second-level-nav">
+            <div class="container-fluid main-nav">
+                <div class="navbar-nav-container collapse navbar-collapse" id="navbarSupportedContent">
+                    
+                    <div class="d-flex w-100 align-items-stretch">
+                        <ul class="navbar-nav nav-mega mb-2 mb-lg-0">
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://rocm.docs.amd.com" id="navcore-sdk" role="button" aria-expanded="false" target="_blank">Core SDK</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links fw-bold" href="https://rocm.docs.amd.com/projects/ai-ecosystem" id="navai-ecosystem" role="button" aria-expanded="false" target="_blank">AI Ecosystem</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://instinct.docs.amd.com" id="navgpu-systems-and-infrastructure" role="button" aria-expanded="false" target="_blank">GPU Systems and Infrastructure</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item dropdown">
+                                
+                                    <a class="nav-link top-level header-menu-links dropdown-toggle header-nav-dropdown-toggle" href="#" id="navtoolkits" role="button" data-bs-toggle="dropdown" aria-expanded="false">Toolkits</a>
+                                    <ul class="dropdown-menu header-nav-dropdown-menu" aria-labelledby="navtoolkits">
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-ds/en/latest/index.html" target="_blank">AMD Data Science</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-finance/en/latest/index.html" target="_blank">AMD Finance</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-ls/en/latest/index.html" target="_blank">AMD Life Science</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-llmext/en/latest/index.html" target="_blank">AMD LLM Extension</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-simulation/en/latest/index.html" target="_blank">AMD Simulation</a></li>
+                                        
+                                    </ul>
+                                
+                            </li>
+                            
+                        </ul>
+                        <div class="nav-group-separator"></div>
+                        <ul class="navbar-nav nav-mega mb-2 mb-lg-0">
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://rocm.blogs.amd.com/" id="navblogs" role="button" aria-expanded="false" target="_blank">Blogs</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://www.amd.com/en/developer/resources/rocm-hub.html" id="navdeveloper-hub" role="button" aria-expanded="false" target="_blank">Developer Hub</a>
+                                
+                            </li>
+                            
+                        </ul>
+                    </div>
+                    
+                </div>
+            </div>
+        </nav>
+        
+    </header>
+    
+
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <div class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+
+<a class="navbar-brand logo" href="https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest">
+    <p>ROCm AI Ecosystem</p>
+</a></div>
+          
+        
+      </div>
+    
+    
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="index.html">
+  
+  
+  
+  
+  
+  
+    <p class="title logo__title">FlyDSL 0.3.2</p>
+  
+</a></div>
+        <div class="sidebar-primary-item">
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">Search</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script></div>
+        <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
+    <div class="bd-toc-item navbar-nav active">
+        <ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Install FlyDSL</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick start</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">API stability</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Language</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="language/arithmetic_types.html">Arithmetic types</a></li>
+<li class="toctree-l1"><a class="reference internal" href="language/composite_types.html">Composite types</a></li>
+<li class="toctree-l1"><a class="reference internal" href="language/storage_and_allocator.html">Storage and allocator</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="architecture_guide.html">Architecture and compilation pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="layout_system_guide.html">Layout algebra</a></li>
+<li class="toctree-l1"><a class="reference internal" href="kernel_authoring_guide.html">Kernel authoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="kernel_tuning_guide.html">Kernel tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="autotune_guide.html">Offline autotune configs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="prebuilt_kernels_guide.html">Prebuilt kernel library</a></li>
+<li class="toctree-l1"><a class="reference internal" href="testing_benchmarking_guide.html">Testing and benchmarking</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cute_layout_algebra_guide.html">CuTe layout algebra</a></li>
+<li class="toctree-l1"><a class="reference internal" href="extern_integration_guide.html">External bitcode integration</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">API reference</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="api/dsl.html">FlyDSL Python DSL</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/compiler.html">Compiler and pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/kernels.html">Prebuilt kernels</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Tutorials</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="tutorials/basic_usage.html">Basic usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="tutorials/kernel_development.html">Kernel development techniques</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">About</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="about/license.html">License</a></li>
+</ul>
+
+    </div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+  
+  <div id="rtd-footer-container"></div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+
+<div class="sbt-scroll-pixel-helper"></div>
+
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item"><label class="sidebar-toggle primary-toggle btn btn-sm" for="__primary" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-angle-right"></span>
+  </label></div>
+      
+        <div class="header-article-item">
+
+
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    <li class="breadcrumb-item active" aria-current="page">API Stability</li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+    <div class="header-article-items__end">
+      
+        <div class="header-article-item">
+
+<div class="article-header-buttons">
+
+
+
+
+
+<div class="dropdown dropdown-source-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Source repositories">
+    <i class="fab fa-github"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL" target="_blank"
+   class="btn btn-sm btn-source-repository-button dropdown-item"
+   title="Source repository"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fab fa-github"></i>
+  </span>
+<span class="btn__text-container">Repository</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL/blob/main/docs/api_stability.md?plain=1" target="_blank"
+   class="btn btn-sm btn-source-file-button dropdown-item"
+   title="Show source"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-code"></i>
+  </span>
+<span class="btn__text-container">Show source</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL/issues/new?title=Issue%20on%20page%20%2Fapi_stability.html&body=Your%20issue%20content%20here." target="_blank"
+   class="btn btn-sm btn-source-issues-button dropdown-item"
+   title="Open an issue"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-lightbulb"></i>
+  </span>
+<span class="btn__text-container">Open issue</span>
+</a>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+
+
+<div class="dropdown dropdown-download-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Download this page">
+    <i class="fas fa-download"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="_sources/api_stability.md" target="_blank"
+   class="btn btn-sm btn-download-source-button dropdown-item"
+   title="Download source file"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file"></i>
+  </span>
+<span class="btn__text-container">.md</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li>
+<button onclick="window.print()"
+  class="btn btn-sm btn-download-pdf-button dropdown-item"
+  title="Print to PDF"
+  data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file-pdf"></i>
+  </span>
+<span class="btn__text-container">.pdf</span>
+</button>
+</li>
+      
+  </ul>
+</div>
+
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script>
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm pst-navbar-icon search-button search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass fa-lg"></i>
+  </button>
+`);
+</script>
+<button class="sidebar-toggle secondary-toggle btn btn-sm" title="Toggle secondary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-list"></span>
+</button>
+</div></div>
+      
+    </div>
+  
+</div>
+</div>
+              
+              
+
+<div id="jb-print-docs-body" class="onlyprint">
+    <h1>API Stability</h1>
+    <!-- Table of contents -->
+    <div id="print-main-content">
+        <div id="jb-print-toc">
+            
+            <div>
+                <h2> Contents </h2>
+            </div>
+            <nav aria-label="Page">
+                <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#summary-and-general-rules">1. Summary and general rules</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#returned-object-rule">Returned-object rule</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#determining-stability">2. Determining stability</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flydsl-expr">2.1 <code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code></a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#symbols-exported-from-direct-child-modules">Symbols exported from direct-child modules</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#backend-entry-points-and-recursive-child-namespaces">Backend entry points and recursive child namespaces</a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flydsl-compiler">2.2 <code class="docutils literal notranslate"><span class="pre">flydsl.compiler</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#other-explicitly-stable-apis">2.3 Other explicitly stable APIs</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#all-other-apis">2.4 All other APIs</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#stable-api-catalog">Stable API catalog</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#stable-but-deprecated">3. Stable but deprecated</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#what-counts-as-a-breaking-change">4. What counts as a breaking change</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#changing-or-retiring-a-stable-api">5. Changing or retiring a stable API</a></li>
+</ul>
+            </nav>
+        </div>
+    </div>
+</div>
+
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section class="tex2jax_ignore mathjax_ignore" id="api-stability">
+<h1>API Stability<a class="headerlink" href="#api-stability" title="Link to this heading">#</a></h1>
+<p>This document defines which <code class="docutils literal notranslate"><span class="pre">flydsl</span></code> APIs you can rely on across releases and
+the compatibility commitments that apply when they change. Its scope is
+limited to <code class="docutils literal notranslate"><span class="pre">python/flydsl/</span></code>. Below, <code class="docutils literal notranslate"><span class="pre">fx</span></code> refers to <code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code>.</p>
+<p>A release means a minor-version increment (for example, <code class="docutils literal notranslate"><span class="pre">0.3</span></code> → <code class="docutils literal notranslate"><span class="pre">0.4</span></code>). A
+patch release must not break a stable API.</p>
+<section id="summary-and-general-rules">
+<h2>1. Summary and general rules<a class="headerlink" href="#summary-and-general-rules" title="Link to this heading">#</a></h2>
+<ul class="simple">
+<li><p><strong>stable</strong>: backward compatible across minor releases. Previously valid call
+paths, signatures, and semantics must continue to work.</p></li>
+<li><p><strong>unstable</strong>: everything else. These APIs may change or be removed in any
+minor release without notice.</p></li>
+</ul>
+<p><code class="docutils literal notranslate"><span class="pre">deprecated</span></code> is not a third stability level. It is a lifecycle marker for a
+stable API: during its deprecation window, it remains stable and protected by
+this document’s compatibility rules; it may be removed only after that window
+ends.</p>
+<section id="returned-object-rule">
+<h3>Returned-object rule<a class="headerlink" href="#returned-object-rule" title="Link to this heading">#</a></h3>
+<p>An object returned by a stable API has a stable public result interface: its
+non-underscore members and Python special methods are stable when reached
+through that result. This rule applies recursively to objects returned by those
+members.</p>
+<p>This rule does not promise the concrete implementation class, its constructor,
+or its import path. They may change if the replacement preserves the result
+interface’s public members, signatures, and semantics. For example,
+<code class="docutils literal notranslate"><span class="pre">flyc.from_torch_tensor(x).mark_shape_dynamic(0)</span></code> is stable, while
+<code class="docutils literal notranslate"><span class="pre">flyc.from_torch_tensor(x)._ensure_spec()</span></code> is unstable.</p>
+<p>Determine stability by the mechanical process below. A public export from an
+<code class="docutils literal notranslate"><span class="pre">expr</span></code> direct-child module has several equivalent access forms:
+<code class="docutils literal notranslate"><span class="pre">fx.&lt;name&gt;</span></code>, <code class="docutils literal notranslate"><span class="pre">fx.&lt;module&gt;.&lt;name&gt;</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">from</span> <span class="pre">flydsl.expr.&lt;module&gt;</span> <span class="pre">import</span> <span class="pre">&lt;name&gt;</span></code> have the same stability. Otherwise,
+classify the path that a caller actually uses, not the object’s identity.</p>
+</section>
+</section>
+<section id="determining-stability">
+<h2>2. Determining stability<a class="headerlink" href="#determining-stability" title="Link to this heading">#</a></h2>
+<p>Apply the following branches by path prefix:</p>
+<ol class="arabic simple">
+<li><p>A module-global name or namespace segment beginning with <code class="docutils literal notranslate"><span class="pre">_</span></code> is unstable.
+On stable types and returned objects, only <code class="docutils literal notranslate"><span class="pre">__...__</span></code> Python special methods
+may begin with <code class="docutils literal notranslate"><span class="pre">_</span></code>; all other underscore-prefixed members are unstable.</p></li>
+<li><p>A path under <code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code>: classify it only under §2.1; it is unstable if it
+does not qualify.</p></li>
+<li><p>A path under <code class="docutils literal notranslate"><span class="pre">flydsl.compiler</span></code>: direct members in <code class="docutils literal notranslate"><span class="pre">compiler.__all__</span></code>, and
+members in <code class="docutils literal notranslate"><span class="pre">compiler.protocol.__all__</span></code>, are stable. Other deep paths are
+stable only when listed exactly in §2.3.</p></li>
+<li><p>Every other path is stable only when listed exactly in §2.3.</p></li>
+</ol>
+<p>For a member reached through a returned object, first classify its producing API
+under these branches, then apply the returned-object rule in §1.</p>
+<section id="flydsl-expr">
+<h3>2.1 <code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code><a class="headerlink" href="#flydsl-expr" title="Link to this heading">#</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">expr/__init__.py</span></code> is the sole top-level aggregation manifest. It has no
+<code class="docutils literal notranslate"><span class="pre">__all__</span></code> of its own; stability is determined exclusively by the following two
+export chains.</p>
+<section id="symbols-exported-from-direct-child-modules">
+<h4>Symbols exported from direct-child modules<a class="headerlink" href="#symbols-exported-from-direct-child-modules" title="Link to this heading">#</a></h4>
+<p>Subject to the first branch above, <code class="docutils literal notranslate"><span class="pre">&lt;name&gt;</span></code> in a direct-child module <code class="docutils literal notranslate"><span class="pre">&lt;module&gt;</span></code>
+is stable if and only if:</p>
+<ol class="arabic simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">expr/__init__.py</span></code> aggregates that direct-child module through
+<code class="docutils literal notranslate"><span class="pre">from</span> <span class="pre">.&lt;module&gt;</span> <span class="pre">import</span> <span class="pre">*</span></code>;</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">&lt;name&gt;</span></code> is in that child module’s <code class="docutils literal notranslate"><span class="pre">__all__</span></code>.</p></li>
+</ol>
+<p>Names satisfying these conditions have identical stability when accessed via
+<code class="docutils literal notranslate"><span class="pre">fx.&lt;name&gt;</span></code>, <code class="docutils literal notranslate"><span class="pre">fx.&lt;module&gt;.&lt;name&gt;</span></code>, or a direct import. Those direct-child
+modules and their public export paths are part of the compatibility commitment.
+Therefore, both <code class="docutils literal notranslate"><span class="pre">fx.Int32</span></code> and <code class="docutils literal notranslate"><span class="pre">fx.numeric.Int32</span></code> are stable. Members omitted
+from <code class="docutils literal notranslate"><span class="pre">__all__</span></code> remain unstable; <code class="docutils literal notranslate"><span class="pre">fx.arith._to_raw</span></code> is unstable under the first
+branch even if it was listed in a historical <code class="docutils literal notranslate"><span class="pre">__all__</span></code>.</p>
+</section>
+<section id="backend-entry-points-and-recursive-child-namespaces">
+<h4>Backend entry points and recursive child namespaces<a class="headerlink" href="#backend-entry-points-and-recursive-child-namespaces" title="Link to this heading">#</a></h4>
+<p><code class="docutils literal notranslate"><span class="pre">fx.&lt;backend&gt;...&lt;name&gt;</span></code> is stable if and only if:</p>
+<ol class="arabic simple">
+<li><p>the first-level <code class="docutils literal notranslate"><span class="pre">&lt;backend&gt;</span></code> appears in <code class="docutils literal notranslate"><span class="pre">_BACKEND_MODULES</span></code> in <code class="docutils literal notranslate"><span class="pre">expr/__init__.py</span></code>;</p></li>
+<li><p>every following child namespace appears in the <code class="docutils literal notranslate"><span class="pre">__all__</span></code> of its direct parent
+package; and</p></li>
+<li><p>the final <code class="docutils literal notranslate"><span class="pre">&lt;name&gt;</span></code> appears in the <code class="docutils literal notranslate"><span class="pre">__all__</span></code> of its owning module or package.</p></li>
+</ol>
+<p>The first-level backend entry point, and intermediate child namespaces that
+satisfy condition 2, are stable namespaces as well. This rule applies
+recursively and has no path-depth limit.</p>
+<p>For example, <code class="docutils literal notranslate"><span class="pre">fx.rocdl.cdna3.s_waitcnt</span></code> satisfies the complete export chain and
+is stable, while <code class="docutils literal notranslate"><span class="pre">fx.rocdl.cluster.*</span></code> is unstable when <code class="docutils literal notranslate"><span class="pre">cluster</span></code> is not listed
+in <code class="docutils literal notranslate"><span class="pre">rocdl.__all__</span></code>. An upstream-MLIR ODS builder that is re-exported but omitted
+from the final <code class="docutils literal notranslate"><span class="pre">__all__</span></code> is unstable as well.</p>
+<p><code class="docutils literal notranslate"><span class="pre">__all__</span></code> is not access control: an attribute may exist and be callable while
+still failing the stability test above.</p>
+</section>
+</section>
+<section id="flydsl-compiler">
+<h3>2.2 <code class="docutils literal notranslate"><span class="pre">flydsl.compiler</span></code><a class="headerlink" href="#flydsl-compiler" title="Link to this heading">#</a></h3>
+<p>Only direct members of <code class="docutils literal notranslate"><span class="pre">flydsl.compiler.__all__</span></code> are stable. For example, if
+<code class="docutils literal notranslate"><span class="pre">jit</span></code> is in that manifest, <code class="docutils literal notranslate"><span class="pre">flydsl.compiler.jit</span></code> is stable.</p>
+<p><code class="docutils literal notranslate"><span class="pre">flydsl.compiler.protocol</span></code> is an exception: every non-underscore
+<code class="docutils literal notranslate"><span class="pre">flydsl.compiler.protocol.&lt;name&gt;</span></code> in its <code class="docutils literal notranslate"><span class="pre">__all__</span></code> is stable. It is the public
+extension namespace for user implementations of JIT / DSL-value protocols.</p>
+<p>This rule is otherwise not recursive:
+<code class="docutils literal notranslate"><span class="pre">flydsl.compiler.&lt;submodule&gt;.&lt;name&gt;</span></code> does not become stable merely because
+<code class="docutils literal notranslate"><span class="pre">&lt;submodule&gt;</span></code> is importable; it must be listed explicitly in §2.3.</p>
+</section>
+<section id="other-explicitly-stable-apis">
+<h3>2.3 Other explicitly stable APIs<a class="headerlink" href="#other-explicitly-stable-apis" title="Link to this heading">#</a></h3>
+<p>The following full paths are stable. This table is the only exception list; a
+new commitment must add an explicit row.</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>API</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">flydsl.runtime.device.get_rocm_arch</span></code></p></td>
+<td><p>Query the target ROCm architecture</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">flydsl.runtime.device.is_rdna_arch</span></code></p></td>
+<td><p>Choose between CDNA and RDNA paths</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="all-other-apis">
+<h3>2.4 All other APIs<a class="headerlink" href="#all-other-apis" title="Link to this heading">#</a></h3>
+<p>Every API that does not satisfy §2.1 or §2.2, and is not listed exactly in
+§2.3, is unstable. This includes undeclared <code class="docutils literal notranslate"><span class="pre">flydsl.*</span></code> submodules,
+<code class="docutils literal notranslate"><span class="pre">flydsl._mlir.*</span></code>, and every underscore-prefixed name.</p>
+<p>Direct invocation of an upstream MLIR dialect op is allowed but unstable: its
+name, arguments, and semantics are controlled by upstream MLIR, and FlyDSL
+provides no compatibility commitment for it.</p>
+</section>
+<section id="stable-api-catalog">
+<h3>Stable API catalog<a class="headerlink" href="#stable-api-catalog" title="Link to this heading">#</a></h3>
+<p>Generate the complete non-deprecated stable API catalog from the checked-out
+source:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python3<span class="w"> </span>scripts/list_stable_apis.py
+python3<span class="w"> </span>scripts/list_stable_apis.py<span class="w"> </span>--format<span class="w"> </span>json
+</pre></div>
+</div>
+<p>The script reads export manifests without importing FlyDSL. It lists canonical
+module paths, omitting equivalent top-level <code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code> aliases. Deprecated
+APIs remain compatible but are intentionally excluded from this catalog.</p>
+</section>
+</section>
+<section id="stable-but-deprecated">
+<h2>3. Stable but deprecated<a class="headerlink" href="#stable-but-deprecated" title="Link to this heading">#</a></h2>
+<p>The APIs in the table below satisfy the stable rules in §2 but are marked as
+deprecated. They remain stable during the §5 window; new code must not use
+them, and you must provide a replacement before removal.</p>
+<p>For direct-child module exports under §2.1, the deprecated status in this table
+also applies to <code class="docutils literal notranslate"><span class="pre">fx.&lt;name&gt;</span></code>, <code class="docutils literal notranslate"><span class="pre">fx.&lt;module&gt;.&lt;name&gt;</span></code>, and direct-import forms.
+FlyDSL maintains this table separately as the compatibility-debt list and
+excludes it from the catalog above.</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>API</p></th>
+<th class="head"><p>Replacement or required work before removal</p></th>
+<th class="head"><p>Declared removal release</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">fx.get</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.get_().unpack()</span></code> or <code class="docutils literal notranslate"><span class="pre">IntTuple[].unpack()</span></code></p></td>
+<td><p>v0.4</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">fx.index_cast</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.Index(x)</span></code></p></td>
+<td><p>v0.4</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">fx.constant_vector</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Numeric</span></code> and <code class="docutils literal notranslate"><span class="pre">Vector</span></code> member functions</p></td>
+<td><p>v0.4</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">fx.tdm_ops</span></code> and content reached through this alias</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.rocdl.tdm_ops</span></code>; the latter is a target-specific unstable path</p></td>
+<td><p>v0.4</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">fx.Numeric.maximumf</span></code>, <code class="docutils literal notranslate"><span class="pre">fx.Numeric.minimumf</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.max(x,</span> <span class="pre">y)</span></code>, <code class="docutils literal notranslate"><span class="pre">fx.min(x,</span> <span class="pre">y)</span></code></p></td>
+<td><p>v0.4</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">fx.Numeric.shrui</span></code>, <code class="docutils literal notranslate"><span class="pre">fx.Numeric.addf</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.arith.shrui(x,</span> <span class="pre">amount)</span></code>, <code class="docutils literal notranslate"><span class="pre">x</span> <span class="pre">+</span> <span class="pre">y</span></code> with a <code class="docutils literal notranslate"><span class="pre">fastmath</span></code> context</p></td>
+<td><p>v0.4</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">fx.Numeric.exp2</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.math.exp2(x)</span></code></p></td>
+<td><p>v0.4</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">fx.Numeric.shuffle_xor</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.gpu.shuffle_xor(x,</span> <span class="pre">offset,</span> <span class="pre">width)</span></code></p></td>
+<td><p>v0.4</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">fx.rocdl.BufferCopyLDS64b</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.rocdl.BufferCopyLDS32b</span></code>, or <code class="docutils literal notranslate"><span class="pre">fx.rocdl.BufferCopyLDS128b</span></code> on gfx950. No AMD target has an 8-byte LDS DMA instruction, so this entry point could never emit a working copy; it now raises instead of silently failing instruction selection.</p></td>
+<td><p>v0.4</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="what-counts-as-a-breaking-change">
+<h2>4. What counts as a breaking change<a class="headerlink" href="#what-counts-as-a-breaking-change" title="Link to this heading">#</a></h2>
+<p>For a stable API, each of the following is a breaking change:</p>
+<ul class="simple">
+<li><p>removing a stable API or breaking its export chain: removing an entry from a
+direct-child module’s <code class="docutils literal notranslate"><span class="pre">__all__</span></code>, <code class="docutils literal notranslate"><span class="pre">flydsl.compiler.__all__</span></code>, or
+<code class="docutils literal notranslate"><span class="pre">flydsl.compiler.protocol.__all__</span></code>; or removing a §2.3 entry without a new
+rule that covers it;</p></li>
+<li><p>removing an argument, renaming an argument that may be passed by keyword,
+reordering positional arguments, removing a default, or changing a default;</p></li>
+<li><p>narrowing accepted types, architectures, or value ranges;</p></li>
+<li><p>changing a returned scalar or value type, tuple arity, or a returned object’s
+stable public result interface (including non-private members and <code class="docutils literal notranslate"><span class="pre">__...__</span></code>
+Python special methods), or the numerical, layout, or emitted-op semantics
+for previously valid input.</p></li>
+</ul>
+<p>The following are not breaking changes:</p>
+<ul class="simple">
+<li><p>adding an API, or adding an optional keyword argument whose default preserves
+existing behavior;</p></li>
+<li><p>widening accepted input;</p></li>
+<li><p>improving an error message, converting undefined behavior into a clear error,
+or changing the exception type on failure;</p></li>
+<li><p>replacing a returned object’s concrete implementation class while preserving
+its stable public result interface;</p></li>
+<li><p>changing only unstable APIs.</p></li>
+</ul>
+</section>
+<section id="changing-or-retiring-a-stable-api">
+<h2>5. Changing or retiring a stable API<a class="headerlink" href="#changing-or-retiring-a-stable-api" title="Link to this heading">#</a></h2>
+<ol class="arabic simple">
+<li><p>Provide a replacement first, normally exposing it from an appropriate stable
+path.</p></li>
+<li><p>Mark the original API as deprecated at its definition or export declaration,
+and add the API and replacement to §3.</p></li>
+<li><p>Retain the old API in the release where it is marked, <code class="docutils literal notranslate"><span class="pre">N</span></code>, and in the next
+minor release, <code class="docutils literal notranslate"><span class="pre">N+1</span></code>.</p></li>
+<li><p>Remove the old API no earlier than <code class="docutils literal notranslate"><span class="pre">N+2</span></code>, and remove its corresponding §3
+entry at the same time.</p></li>
+</ol>
+</section>
+</section>
+
+
+                </article>
+              
+
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="quickstart.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">Quick start</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="language/arithmetic_types.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">Arithmetic types</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+    
+        
+              
+                <div class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+  <div class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> Contents
+  </div>
+  <nav class="bd-toc-nav page-toc">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#summary-and-general-rules">1. Summary and general rules</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#returned-object-rule">Returned-object rule</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#determining-stability">2. Determining stability</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flydsl-expr">2.1 <code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code></a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#symbols-exported-from-direct-child-modules">Symbols exported from direct-child modules</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#backend-entry-points-and-recursive-child-namespaces">Backend entry points and recursive child namespaces</a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flydsl-compiler">2.2 <code class="docutils literal notranslate"><span class="pre">flydsl.compiler</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#other-explicitly-stable-apis">2.3 Other explicitly stable APIs</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#all-other-apis">2.4 All other APIs</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#stable-api-catalog">Stable API catalog</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#stable-but-deprecated">3. Stable but deprecated</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#what-counts-as-a-breaking-change">4. What counts as a breaking change</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#changing-or-retiring-a-stable-api">5. Changing or retiring a stable API</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+    
+
+          </div>
+          <footer class="bd-footer-content">
+            <p>
+  </p>
+          </footer>
+        
+
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script src="_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
+<script src="_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    
+<footer class="rocm-footer">
+    <div class="container-lg">
+        <section class="bottom-menu menu py-45">
+            <div class="row d-flex align-items-center">
+                <div class="col-12 text-center">
+                    <ul>
+                        <li><a href="https://www.amd.com/en/corporate/copyright" target="_blank">Terms and Conditions</a></li>
+                        <li><a href="https://rocm.docs.amd.com/en/latest/about/license.html">ROCm Licenses and Disclaimers</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/privacy" target="_blank">Privacy</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/trademarks" target="_blank">Trademarks</a></li>
+                        <li><a href="https://www.amd.com/content/dam/amd/en/documents/corporate/cr/supply-chain-transparency.pdf" target="_blank">Supply Chain Transparency</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/competition" target="_blank">Fair and Open Competition</a></li>
+                        <li><a href="https://www.amd.com/system/files/documents/amd-uk-tax-strategy.pdf" target="_blank">UK Tax Strategy</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/cookies" target="_blank">Cookie Policy</a></li>
+                        <!-- OneTrust Cookies Settings button start -->
+                        <li><a href="#cookie-settings" id="ot-sdk-btn" class="ot-sdk-show-settings">Cookie Settings</a></li>
+                        <!-- OneTrust Cookies Settings button end -->
+                    </ul>
+                </div>
+            </div>
+            <div class="row d-flex align-items-center">
+                <div class="col-12 text-center">
+                    <div>
+                        <span class="copyright">© 2026 Advanced Micro Devices, Inc</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+</footer>
+
+<!-- <div id="rdc-watermark-container">
+    <img id="rdc-watermark" src="_static/images/alpha-watermark.svg" alt="DRAFT watermark"/>
+</div> -->
+    
+  </body>
+</html>

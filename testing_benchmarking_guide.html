@@ -1,0 +1,1245 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="./" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Testing &amp; benchmarking guide &#8212; FlyDSL 0.3.2</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+
+  
+  <link href="_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-regular-400.woff2" />
+
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=8f2a1f02" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/sphinx-book-theme.css?v=eba8b062" />
+    <link rel="stylesheet" type="text/css" href="_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="_static/custom.css?v=22b90084" />
+    <link rel="stylesheet" type="text/css" href="_static/rocm_header.css?v=037afccf" />
+    <link rel="stylesheet" type="text/css" href="_static/rocm_footer.css?v=7095035a" />
+    <link rel="stylesheet" type="text/css" href="_static/fonts.css?v=fcff5274" />
+    <link rel="stylesheet" type="text/css" href="_static/sphinx-design.min.css?v=95c83b7e" />
+    <link rel="stylesheet" type="text/css" href="_static/ai_ecosystem.css" />
+  
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
+<link rel="preload" as="script" href="_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
+  <script src="_static/vendor/fontawesome/6.5.2/js/all.min.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    <script src="_static/documentation_options.js?v=2f2e10e9"></script>
+    <script src="_static/doctools.js?v=9bcbadda"></script>
+    <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="_static/copybutton.js?v=91c4cb68"></script>
+    <script async="async" src="_static/code_word_breaks.js?v=327952c4"></script>
+    <script async="async" src="_static/renameVersionLinks.js?v=929fe5e4"></script>
+    <script async="async" src="_static/rdcMisc.js?v=01f88d96"></script>
+    <script async="async" src="_static/theme_mode_captions.js?v=15f4ec5d"></script>
+    <script defer="defer" src="_static/search.js?v=90a4452c"></script>
+    <script src="_static/scripts/sphinx-book-theme.js?v=887ef09a"></script>
+    <script src="_static/design-tabs.js?v=f930bc37"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'testing_benchmarking_guide';</script>
+    <script async="async" src="https://download.amd.com/js/analytics/analyticsinit.js"></script>
+    <link rel="icon" href="https://www.amd.com/content/dam/code/images/favicon/favicon.ico"/>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="CuTe layout algebra reference for FlyDSL" href="cute_layout_algebra_guide.html" />
+    <link rel="prev" title="Pre-built kernel library guide" href="prebuilt_kernels_guide.html" />
+    <meta name="google-site-verification" content="vo35SZt_GASsTHAEmdww7AYKPCvZyzLvOXBl8guBME4" />
+
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-primary-sidebar-checkbox"/>
+  <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-secondary-sidebar-checkbox"/>
+  <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
+  
+  <div class="search-button__wrapper">
+    <div class="search-button__overlay"></div>
+    <div class="search-button__search-container">
+<form class="bd-search d-flex align-items-center"
+      action="search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         id="search-input"
+         placeholder="Search..."
+         aria-label="Search..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form></div>
+  </div>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="common-header" >
+        <nav class="navbar navbar-expand-xl">
+            <div class="container-fluid main-nav rocm-header">
+                <div class="header-logo">
+                    <div class="header-logo-title">
+                        
+                            <button class="navbar-toggler collapsed" id="nav-icon" data-tracking-information="mainMenuToggle" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
+                                <span></span>
+                                <span></span>
+                                <span></span>
+                            </button>
+                        
+                        <a class="navbar-brand" href="https://www.amd.com/">
+                            <img src="_static/images/amd-header-logo.svg" alt="AMD Logo" title="AMD Logo" width="90" class="d-inline-block align-text-top hover-opacity"/>
+                        </a>
+                        <div class="vr mx-40 my-25"></div>
+                        <a class="klavika-font hover-opacity" href="https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest">ROCm&#8482; AI Ecosystem</a>
+                    </div>
+                    
+                </div>
+                <div class="icon-nav text-center d-flex ms-auto"></div>
+            </div>
+        </nav>
+        
+        <nav class="navbar navbar-expand-xl second-level-nav">
+            <div class="container-fluid main-nav">
+                <div class="navbar-nav-container collapse navbar-collapse" id="navbarSupportedContent">
+                    
+                    <div class="d-flex w-100 align-items-stretch">
+                        <ul class="navbar-nav nav-mega mb-2 mb-lg-0">
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://rocm.docs.amd.com" id="navcore-sdk" role="button" aria-expanded="false" target="_blank">Core SDK</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links fw-bold" href="https://rocm.docs.amd.com/projects/ai-ecosystem" id="navai-ecosystem" role="button" aria-expanded="false" target="_blank">AI Ecosystem</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://instinct.docs.amd.com" id="navgpu-systems-and-infrastructure" role="button" aria-expanded="false" target="_blank">GPU Systems and Infrastructure</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item dropdown">
+                                
+                                    <a class="nav-link top-level header-menu-links dropdown-toggle header-nav-dropdown-toggle" href="#" id="navtoolkits" role="button" data-bs-toggle="dropdown" aria-expanded="false">Toolkits</a>
+                                    <ul class="dropdown-menu header-nav-dropdown-menu" aria-labelledby="navtoolkits">
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-ds/en/latest/index.html" target="_blank">AMD Data Science</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-finance/en/latest/index.html" target="_blank">AMD Finance</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-ls/en/latest/index.html" target="_blank">AMD Life Science</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-llmext/en/latest/index.html" target="_blank">AMD LLM Extension</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-simulation/en/latest/index.html" target="_blank">AMD Simulation</a></li>
+                                        
+                                    </ul>
+                                
+                            </li>
+                            
+                        </ul>
+                        <div class="nav-group-separator"></div>
+                        <ul class="navbar-nav nav-mega mb-2 mb-lg-0">
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://rocm.blogs.amd.com/" id="navblogs" role="button" aria-expanded="false" target="_blank">Blogs</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://www.amd.com/en/developer/resources/rocm-hub.html" id="navdeveloper-hub" role="button" aria-expanded="false" target="_blank">Developer Hub</a>
+                                
+                            </li>
+                            
+                        </ul>
+                    </div>
+                    
+                </div>
+            </div>
+        </nav>
+        
+    </header>
+    
+
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <div class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+
+<a class="navbar-brand logo" href="https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest">
+    <p>ROCm AI Ecosystem</p>
+</a></div>
+          
+        
+      </div>
+    
+    
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="index.html">
+  
+  
+  
+  
+  
+  
+    <p class="title logo__title">FlyDSL 0.3.2</p>
+  
+</a></div>
+        <div class="sidebar-primary-item">
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">Search</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script></div>
+        <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
+    <div class="bd-toc-item navbar-nav active">
+        <ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Install FlyDSL</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api_stability.html">API stability</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Language</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="language/arithmetic_types.html">Arithmetic types</a></li>
+<li class="toctree-l1"><a class="reference internal" href="language/composite_types.html">Composite types</a></li>
+<li class="toctree-l1"><a class="reference internal" href="language/storage_and_allocator.html">Storage and allocator</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="architecture_guide.html">Architecture and compilation pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="layout_system_guide.html">Layout algebra</a></li>
+<li class="toctree-l1"><a class="reference internal" href="kernel_authoring_guide.html">Kernel authoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="kernel_tuning_guide.html">Kernel tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="autotune_guide.html">Offline autotune configs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="prebuilt_kernels_guide.html">Prebuilt kernel library</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">Testing and benchmarking</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cute_layout_algebra_guide.html">CuTe layout algebra</a></li>
+<li class="toctree-l1"><a class="reference internal" href="extern_integration_guide.html">External bitcode integration</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">API reference</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="api/dsl.html">FlyDSL Python DSL</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/compiler.html">Compiler and pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/kernels.html">Prebuilt kernels</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Tutorials</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="tutorials/basic_usage.html">Basic usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="tutorials/kernel_development.html">Kernel development techniques</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">About</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="about/license.html">License</a></li>
+</ul>
+
+    </div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+  
+  <div id="rtd-footer-container"></div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+
+<div class="sbt-scroll-pixel-helper"></div>
+
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item"><label class="sidebar-toggle primary-toggle btn btn-sm" for="__primary" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-angle-right"></span>
+  </label></div>
+      
+        <div class="header-article-item">
+
+
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    <li class="breadcrumb-item active" aria-current="page">Testing...</li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+    <div class="header-article-items__end">
+      
+        <div class="header-article-item">
+
+<div class="article-header-buttons">
+
+
+
+
+
+<div class="dropdown dropdown-source-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Source repositories">
+    <i class="fab fa-github"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL" target="_blank"
+   class="btn btn-sm btn-source-repository-button dropdown-item"
+   title="Source repository"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fab fa-github"></i>
+  </span>
+<span class="btn__text-container">Repository</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL/blob/main/docs/testing_benchmarking_guide.md?plain=1" target="_blank"
+   class="btn btn-sm btn-source-file-button dropdown-item"
+   title="Show source"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-code"></i>
+  </span>
+<span class="btn__text-container">Show source</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL/issues/new?title=Issue%20on%20page%20%2Ftesting_benchmarking_guide.html&body=Your%20issue%20content%20here." target="_blank"
+   class="btn btn-sm btn-source-issues-button dropdown-item"
+   title="Open an issue"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-lightbulb"></i>
+  </span>
+<span class="btn__text-container">Open issue</span>
+</a>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+
+
+<div class="dropdown dropdown-download-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Download this page">
+    <i class="fas fa-download"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="_sources/testing_benchmarking_guide.md" target="_blank"
+   class="btn btn-sm btn-download-source-button dropdown-item"
+   title="Download source file"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file"></i>
+  </span>
+<span class="btn__text-container">.md</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li>
+<button onclick="window.print()"
+  class="btn btn-sm btn-download-pdf-button dropdown-item"
+  title="Print to PDF"
+  data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file-pdf"></i>
+  </span>
+<span class="btn__text-container">.pdf</span>
+</button>
+</li>
+      
+  </ul>
+</div>
+
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script>
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm pst-navbar-icon search-button search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass fa-lg"></i>
+  </button>
+`);
+</script>
+<button class="sidebar-toggle secondary-toggle btn btn-sm" title="Toggle secondary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-list"></span>
+</button>
+</div></div>
+      
+    </div>
+  
+</div>
+</div>
+              
+              
+
+<div id="jb-print-docs-body" class="onlyprint">
+    <h1>Testing & benchmarking guide</h1>
+    <!-- Table of contents -->
+    <div id="print-main-content">
+        <div id="jb-print-toc">
+            
+            <div>
+                <h2> Contents </h2>
+            </div>
+            <nav aria-label="Page">
+                <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#quick-reference">Quick reference</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#test-categories">1. Test categories</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#mlir-lit-tests-tests-mlir">1.1 MLIR lit tests (<code class="docutils literal notranslate"><span class="pre">tests/mlir/</span></code>)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#python-tests-tests-python">1.2 Python tests (<code class="docutils literal notranslate"><span class="pre">tests/python/</span></code>)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#gpu-kernel-tests-tests-kernels">1.3 GPU kernel tests (<code class="docutils literal notranslate"><span class="pre">tests/kernels/</span></code>)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#aot-examples-tests-python-examples">1.4 AOT examples (<code class="docutils literal notranslate"><span class="pre">tests/python/examples/</span></code>)</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#test-runner-scripts">2. Test runner scripts</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#scripts-run-tests-sh">2.1 <code class="docutils literal notranslate"><span class="pre">scripts/run_tests.sh</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#scripts-run-benchmark-sh">2.2 <code class="docutils literal notranslate"><span class="pre">scripts/run_benchmark.sh</span></code></a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pytest-configuration">3. Pytest configuration</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#tests-conftest-py">3.1 <code class="docutils literal notranslate"><span class="pre">tests/conftest.py</span></code></a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#performance-measurement">4. Performance measurement</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#tests-test-common-py">4.1 <code class="docutils literal notranslate"><span class="pre">tests/test_common.py</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#tests-kernels-benchmark-common-py">4.2 <code class="docutils literal notranslate"><span class="pre">tests/kernels/benchmark_common.py</span></code></a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#test-utilities-tests-utils-py">5. Test utilities (<code class="docutils literal notranslate"><span class="pre">tests/utils.py</span></code>)</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#weight-utilities">Weight utilities</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#writing-new-tests">6. Writing new tests</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#pyir-test-pattern-no-gpu">6.1 PyIR test pattern (no GPU)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#gpu-kernel-test-pattern-new-api">6.2 GPU kernel test pattern (new API)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#benchmark-test-pattern">6.3 Benchmark test pattern</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#gemm-test-cli-arguments">7. GEMM test CLI arguments</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#test-configuration-via-environment-variables">8. Test configuration via environment variables</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#ir-dump-workflow">9. IR dump workflow</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#via-mlircompiler">Via <code class="docutils literal notranslate"><span class="pre">MlirCompiler</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#dedicated-ir-dump-script">Dedicated IR dump script</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#source-files">10. Source files</a></li>
+</ul>
+            </nav>
+        </div>
+    </div>
+</div>
+
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section class="tex2jax_ignore mathjax_ignore" id="testing-benchmarking-guide">
+<h1>Testing &amp; benchmarking guide<a class="headerlink" href="#testing-benchmarking-guide" title="Link to this heading">#</a></h1>
+<p>This guide covers the FlyDSL test infrastructure, how to run tests and benchmarks, how to write new tests, and how to measure and compare performance.</p>
+<section id="quick-reference">
+<h2>Quick reference<a class="headerlink" href="#quick-reference" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Category</p></th>
+<th class="head"><p>Location</p></th>
+<th class="head"><p>Requires GPU</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>MLIR lit tests</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">tests/mlir/{LayoutAlgebra,Conversion,Transforms}/</span></code></p></td>
+<td><p>No</p></td>
+<td><p>Verify Fly dialect lowering</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Python tests</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">tests/python/examples/</span></code></p></td>
+<td><p>Varies</p></td>
+<td><p>Python-based MLIR generation + AOT examples</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>GPU kernel tests</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">tests/kernels/test_*.py</span></code></p></td>
+<td><p>Yes</p></td>
+<td><p>Full compilation → GPU execution</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>AOT examples</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">tests/python/examples/</span></code></p></td>
+<td><p>Varies</p></td>
+<td><p>AOT pre-compilation examples</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><strong>Run GEMM tests:</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>bash<span class="w"> </span>scripts/run_tests.sh
+</pre></div>
+</div>
+<p><strong>Run benchmarks:</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>bash<span class="w"> </span>scripts/run_benchmark.sh
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="test-categories">
+<h2>1. Test categories<a class="headerlink" href="#test-categories" title="Link to this heading">#</a></h2>
+<section id="mlir-lit-tests-tests-mlir">
+<h3>1.1 MLIR lit tests (<code class="docutils literal notranslate"><span class="pre">tests/mlir/</span></code>)<a class="headerlink" href="#mlir-lit-tests-tests-mlir" title="Link to this heading">#</a></h3>
+<p>MLIR-based tests organized by category, verified using the <code class="docutils literal notranslate"><span class="pre">fly-opt</span></code> tool. These tests confirm that Fly dialect operations lower correctly to standard MLIR dialects without requiring a GPU.</p>
+<p><strong>Directories:</strong></p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Directory</p></th>
+<th class="head"><p>Tests</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">LayoutAlgebra/</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">coalesce.mlir</span></code>, <code class="docutils literal notranslate"><span class="pre">composition.mlir</span></code>, <code class="docutils literal notranslate"><span class="pre">construction.mlir</span></code>, <code class="docutils literal notranslate"><span class="pre">coordinate.mlir</span></code>, <code class="docutils literal notranslate"><span class="pre">divide.mlir</span></code>, <code class="docutils literal notranslate"><span class="pre">int_tuple.mlir</span></code>, <code class="docutils literal notranslate"><span class="pre">product.mlir</span></code>, <code class="docutils literal notranslate"><span class="pre">size_cosize.mlir</span></code></p></td>
+<td><p>Layout algebra operations</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">Conversion/</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">gpu_ops.mlir</span></code>, <code class="docutils literal notranslate"><span class="pre">memref_alloca.mlir</span></code>, <code class="docutils literal notranslate"><span class="pre">memref_ops.mlir</span></code>, <code class="docutils literal notranslate"><span class="pre">mma_atom.mlir</span></code>, <code class="docutils literal notranslate"><span class="pre">pointer_ops.mlir</span></code>, <code class="docutils literal notranslate"><span class="pre">type_conversion.mlir</span></code></p></td>
+<td><p>Dialect conversion passes</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">Transforms/</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">canonicalize.mlir</span></code>, <code class="docutils literal notranslate"><span class="pre">layout_lowering.mlir</span></code></p></td>
+<td><p>Transformation passes</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><strong>Running individually:</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Build fly-opt first if needed</span>
+cmake<span class="w"> </span>--build<span class="w"> </span>build-fly<span class="w"> </span>--target<span class="w"> </span>fly-opt<span class="w"> </span>-j<span class="k">$(</span>nproc<span class="k">)</span>
+
+<span class="c1"># Run a single test</span>
+build-fly/bin/fly-opt<span class="w"> </span>--fly-canonicalize<span class="w"> </span>tests/mlir/LayoutAlgebra/construction.mlir
+</pre></div>
+</div>
+<p><strong>Editor support (MLIR LSP):</strong> <code class="docutils literal notranslate"><span class="pre">build-fly/bin/flydsl-lsp-server</span></code> is a thin
+<code class="docutils literal notranslate"><span class="pre">MlirLspServerMain</span></code> wrapper with Fly (+ backend) dialects registered. Point the
+editor’s MLIR LSP client / <code class="docutils literal notranslate"><span class="pre">mlir-lsp-server</span></code> path at that binary for <code class="docutils literal notranslate"><span class="pre">.mlir</span></code>
+diagnostics, hover, go-to-definition, and completion. It is not a Python DSL /
+kernel language server.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cmake<span class="w"> </span>--build<span class="w"> </span>build-fly<span class="w"> </span>--target<span class="w"> </span>flydsl-lsp-server<span class="w"> </span>-j<span class="k">$(</span>nproc<span class="k">)</span>
+</pre></div>
+</div>
+</section>
+<section id="python-tests-tests-python">
+<h3>1.2 Python tests (<code class="docutils literal notranslate"><span class="pre">tests/python/</span></code>)<a class="headerlink" href="#python-tests-tests-python" title="Link to this heading">#</a></h3>
+<p>Python-based tests including AOT pre-compilation examples.</p>
+<p><strong>Running:</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>tests/python/examples/aot_example.py
+</pre></div>
+</div>
+</section>
+<section id="gpu-kernel-tests-tests-kernels">
+<h3>1.3 GPU kernel tests (<code class="docutils literal notranslate"><span class="pre">tests/kernels/</span></code>)<a class="headerlink" href="#gpu-kernel-tests-tests-kernels" title="Link to this heading">#</a></h3>
+<p>Full end-to-end tests that compile FlyDSL kernels, execute them on the GPU, and validate results against a PyTorch reference.</p>
+<p><strong>Files:</strong></p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Test file</p></th>
+<th class="head"><p>Kernel</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">test_vec_add.py</span></code></p></td>
+<td><p>VecAdd</p></td>
+<td><p>Vector addition (C = A + B)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">test_softmax.py</span></code></p></td>
+<td><p>Softmax</p></td>
+<td><p>Row-wise softmax</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">test_layernorm.py</span></code></p></td>
+<td><p>LayerNorm</p></td>
+<td><p>Layer normalization</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">test_rmsnorm.py</span></code></p></td>
+<td><p>RMSNorm</p></td>
+<td><p>RMS normalization</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">test_preshuffle_gemm.py</span></code></p></td>
+<td><p>GEMM</p></td>
+<td><p>Preshuffle MFMA GEMM (fp8/int8/fp16/bf16)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">test_moe_gemm.py</span></code></p></td>
+<td><p>MoE GEMM</p></td>
+<td><p>Mixture-of-Experts GEMM</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">test_moe_reduce.py</span></code></p></td>
+<td><p>MoE Reduce</p></td>
+<td><p>MoE reduction kernel</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">test_pa.py</span></code></p></td>
+<td><p>Paged Attn</p></td>
+<td><p>Paged attention decode</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">test_quant.py</span></code></p></td>
+<td><p>Quantization</p></td>
+<td><p>Quantization ops</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">test_ref.py</span></code></p></td>
+<td><p>Reference</p></td>
+<td><p>Reference implementations</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><strong>Running individually:</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>tests/kernels/test_softmax.py
+python<span class="w"> </span>tests/kernels/test_preshuffle_gemm.py<span class="w"> </span>--in_dtype<span class="w"> </span>fp8<span class="w"> </span>-M<span class="w"> </span><span class="m">16</span><span class="w"> </span>-N<span class="w"> </span><span class="m">5120</span><span class="w"> </span>-K<span class="w"> </span><span class="m">8192</span>
+</pre></div>
+</div>
+</section>
+<section id="aot-examples-tests-python-examples">
+<h3>1.4 AOT examples (<code class="docutils literal notranslate"><span class="pre">tests/python/examples/</span></code>)<a class="headerlink" href="#aot-examples-tests-python-examples" title="Link to this heading">#</a></h3>
+<p>AOT pre-compilation examples:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>tests/python/examples/
+└── aot_example.py      # AOT pre-compilation for preshuffle GEMM
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="test-runner-scripts">
+<h2>2. Test runner scripts<a class="headerlink" href="#test-runner-scripts" title="Link to this heading">#</a></h2>
+<section id="scripts-run-tests-sh">
+<h3>2.1 <code class="docutils literal notranslate"><span class="pre">scripts/run_tests.sh</span></code><a class="headerlink" href="#scripts-run-tests-sh" title="Link to this heading">#</a></h3>
+<p>Runs the full FlyDSL test suite:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>bash<span class="w"> </span>scripts/run_tests.sh
+</pre></div>
+</div>
+<p><strong>Features:</strong></p>
+<ul class="simple">
+<li><p>Auto-discovers build directory (<code class="docutils literal notranslate"><span class="pre">build-fly/</span></code>)</p></li>
+<li><p>Auto-selects the GPU with the most free VRAM when <code class="docutils literal notranslate"><span class="pre">HIP_VISIBLE_DEVICES</span></code> is unset</p></li>
+<li><p>Sets up <code class="docutils literal notranslate"><span class="pre">PYTHONPATH</span></code> and <code class="docutils literal notranslate"><span class="pre">LD_LIBRARY_PATH</span></code>, and exports <code class="docutils literal notranslate"><span class="pre">FLYDSL_RUN_QUANT=1</span></code></p></li>
+<li><p>Runs <code class="docutils literal notranslate"><span class="pre">pytest</span></code> over <code class="docutils literal notranslate"><span class="pre">tests/kernels/</span></code>, <code class="docutils literal notranslate"><span class="pre">tests/unit/</span></code>, <code class="docutils literal notranslate"><span class="pre">tests/system/</span></code>, and <code class="docutils literal notranslate"><span class="pre">tests/python/examples/</span></code></p></li>
+<li><p>Runs the standalone <code class="docutils literal notranslate"><span class="pre">examples/</span></code> scripts and the MLIR FileCheck tests (<code class="docutils literal notranslate"><span class="pre">tests/mlir/</span></code>)</p></li>
+<li><p>By default skips <code class="docutils literal notranslate"><span class="pre">large_shape</span></code>-marked tests (set <code class="docutils literal notranslate"><span class="pre">RUN_TESTS_FULL=1</span></code> for all)</p></li>
+<li><p>Fail-fast: exits on the first failure</p></li>
+</ul>
+<p><strong>Environment setup:</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">PYTHONPATH</span><span class="o">=</span><span class="s2">"</span><span class="si">${</span><span class="nv">BUILD_DIR</span><span class="si">}</span><span class="s2">/python_packages:</span><span class="si">${</span><span class="nv">REPO_ROOT</span><span class="si">}</span><span class="s2">:</span><span class="si">${</span><span class="nv">PYTHONPATH</span><span class="si">}</span><span class="s2">"</span>
+<span class="nv">LD_LIBRARY_PATH</span><span class="o">=</span><span class="s2">"</span><span class="si">${</span><span class="nv">MLIR_LIBS_DIR</span><span class="si">}</span><span class="s2">:</span><span class="si">${</span><span class="nv">LD_LIBRARY_PATH</span><span class="si">}</span><span class="s2">"</span>
+</pre></div>
+</div>
+</section>
+<section id="scripts-run-benchmark-sh">
+<h3>2.2 <code class="docutils literal notranslate"><span class="pre">scripts/run_benchmark.sh</span></code><a class="headerlink" href="#scripts-run-benchmark-sh" title="Link to this heading">#</a></h3>
+<p>Specialized benchmarking harness for performance characterization.</p>
+<p><strong>Default configurations:</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Softmax/LayerNorm: "M,N,dtype"</span>
+<span class="nv">SOFTMAX_SHAPES</span><span class="o">=</span><span class="s1">'32768,8192,bf16'</span>
+<span class="nv">LAYERNORM_SHAPES</span><span class="o">=</span><span class="s1">'32768,8192,bf16'</span>
+
+<span class="c1"># Preshuffle GEMM: "dtype,M,N,K,tile_m,tile_n,tile_k"</span>
+<span class="nv">GEMM_SHAPES</span><span class="o">=</span><span class="s1">'</span>
+<span class="s1">fp8,16,40960,5120,16,128,256</span>
+<span class="s1">fp8,16,77824,5120,16,128,256</span>
+<span class="s1">fp8,5120,5120,8320,64,256,128</span>
+<span class="s1">fp8,9728,8192,8320,64,256,128</span>
+<span class="s1">int8,9728,8192,8320,64,256,128</span>
+<span class="s1">bf16,5120,5120,8320,64,256,128</span>
+<span class="s1">'</span>
+
+<span class="c1"># FP4 GEMM (gfx950 only): "M,N,K,tile_m,tile_n,tile_k"</span>
+<span class="nv">GEMM_FP4_SHAPES</span><span class="o">=</span><span class="s1">'8192,8192,8192,64,128,256'</span>
+</pre></div>
+</div>
+<p><strong>Selective execution:</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>bash<span class="w"> </span>scripts/run_benchmark.sh<span class="w">                    </span><span class="c1"># default: GEMM only</span>
+bash<span class="w"> </span>scripts/run_benchmark.sh<span class="w"> </span>softmax<span class="w">             </span><span class="c1"># only softmax</span>
+bash<span class="w"> </span>scripts/run_benchmark.sh<span class="w"> </span>gemm<span class="w"> </span>moe<span class="w">            </span><span class="c1"># GEMM and MoE</span>
+bash<span class="w"> </span>scripts/run_benchmark.sh<span class="w"> </span>--only<span class="w"> </span>softmax,layernorm
+bash<span class="w"> </span>scripts/run_benchmark.sh<span class="w"> </span>--list<span class="w">              </span><span class="c1"># list available ops</span>
+</pre></div>
+</div>
+<p><strong>Output format:</strong> Tabular with TB/s and TFLOPS columns:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">op</span>             <span class="n">shape</span>                              <span class="n">dtype</span>       <span class="n">TB</span><span class="o">/</span><span class="n">s</span>    <span class="n">TFLOPS</span>
+<span class="o">--------------</span> <span class="o">----------------------------------</span> <span class="o">----------</span> <span class="o">----------</span> <span class="o">----------</span>
+<span class="n">gemm</span>           <span class="mi">16</span><span class="n">x40960x5120</span>                      <span class="n">fp8</span>         <span class="mf">1.234</span>     <span class="mf">56.789</span>
+</pre></div>
+</div>
+<p><strong>Logs:</strong> Written to <code class="docutils literal notranslate"><span class="pre">${BENCH_LOG_DIR:-/tmp/flydsl_bench}/</span></code></p>
+</section>
+</section>
+<hr class="docutils" />
+<section id="pytest-configuration">
+<h2>3. Pytest configuration<a class="headerlink" href="#pytest-configuration" title="Link to this heading">#</a></h2>
+<section id="tests-conftest-py">
+<h3>3.1 <code class="docutils literal notranslate"><span class="pre">tests/conftest.py</span></code><a class="headerlink" href="#tests-conftest-py" title="Link to this heading">#</a></h3>
+<p>Pytest configuration with MLIR context fixtures for the Fly dialect.</p>
+<p><strong>Fixtures:</strong></p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="nd">@pytest</span><span class="o">.</span><span class="n">fixture</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">ctx</span><span class="p">():</span>
+<span class="w">    </span><span class="sd">"""Fresh MLIR context per test with dialects registered."""</span>
+    <span class="c1"># Creates Context, yields object with: ctx.context, ctx.module, ctx.location</span>
+
+<span class="nd">@pytest</span><span class="o">.</span><span class="n">fixture</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">module</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Provides ctx.module."""</span>
+
+<span class="nd">@pytest</span><span class="o">.</span><span class="n">fixture</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">insert_point</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Sets insertion point to module body."""</span>
+</pre></div>
+</div>
+<p><strong>Build discovery:</strong> The configuration supports multiple build layouts:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">build-fly/python_packages</span></code> (preferred)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">build/python_packages/flydsl</span></code> (fallback)</p></li>
+</ul>
+<p><strong>Session hook:</strong> Prevents pytest exit code 5 (no tests collected) from being treated as failure.</p>
+</section>
+</section>
+<hr class="docutils" />
+<section id="performance-measurement">
+<h2>4. Performance measurement<a class="headerlink" href="#performance-measurement" title="Link to this heading">#</a></h2>
+<section id="tests-test-common-py">
+<h3>4.1 <code class="docutils literal notranslate"><span class="pre">tests/test_common.py</span></code><a class="headerlink" href="#tests-test-common-py" title="Link to this heading">#</a></h3>
+<p>Core performance testing utilities (adapted from AIter).</p>
+<p><strong><code class="docutils literal notranslate"><span class="pre">perftest()</span></code> decorator:</strong></p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="nd">@perftest</span><span class="p">(</span><span class="n">num_iters</span><span class="o">=</span><span class="mi">20</span><span class="p">,</span> <span class="n">num_warmup</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">testGraph</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">num_rotate_args</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">my_kernel_test</span><span class="p">(</span><span class="n">Input</span><span class="p">,</span> <span class="n">Output</span><span class="p">):</span>
+    <span class="c1"># Kernel invocation</span>
+    <span class="o">...</span>
+</pre></div>
+</div>
+<p>Features:</p>
+<ul class="simple">
+<li><p>Device memory profiling to determine rotation count</p></li>
+<li><p>Torch CUDA event timing</p></li>
+<li><p>HIPGraph capture mode (<code class="docutils literal notranslate"><span class="pre">testGraph=True</span></code>)</p></li>
+<li><p>Cache-aware iteration calculation</p></li>
+</ul>
+<p><strong><code class="docutils literal notranslate"><span class="pre">checkAllclose()</span></code> function:</strong></p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">checkAllclose</span><span class="p">(</span><span class="n">output</span><span class="p">,</span> <span class="n">reference</span><span class="p">,</span> <span class="n">rtol</span><span class="o">=</span><span class="mf">1e-2</span><span class="p">,</span> <span class="n">atol</span><span class="o">=</span><span class="mf">1e-2</span><span class="p">,</span> <span class="n">tol_err_ratio</span><span class="o">=</span><span class="mf">0.05</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Returns a mismatch ratio in [0, 1] (0 = pass).</p>
+<p><strong><code class="docutils literal notranslate"><span class="pre">verify_output()</span></code> function:</strong></p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">verify_output</span><span class="p">(</span><span class="n">c_out</span><span class="p">,</span> <span class="n">c_ref</span><span class="p">,</span> <span class="n">atol</span><span class="o">=</span><span class="mf">1e-2</span><span class="p">,</span> <span class="n">rtol</span><span class="o">=</span><span class="mf">1e-2</span><span class="p">,</span> <span class="n">msg</span><span class="o">=</span><span class="s1">''</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>High-level validation wrapper around <code class="docutils literal notranslate"><span class="pre">checkAllclose</span></code>.</p>
+</section>
+<section id="tests-kernels-benchmark-common-py">
+<h3>4.2 <code class="docutils literal notranslate"><span class="pre">tests/kernels/benchmark_common.py</span></code><a class="headerlink" href="#tests-kernels-benchmark-common-py" title="Link to this heading">#</a></h3>
+<p>Shared benchmark harness for performance comparison.</p>
+<p><strong>Key functions:</strong></p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Measure device time (torch CUDA events)</span>
+<span class="n">gpu_us</span> <span class="o">=</span> <span class="n">bench_gpu_us_torch</span><span class="p">(</span><span class="n">fn</span><span class="p">,</span> <span class="n">warmup</span><span class="o">=</span><span class="mi">20</span><span class="p">,</span> <span class="n">iters</span><span class="o">=</span><span class="mi">200</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="test-utilities-tests-utils-py">
+<h2>5. Test utilities (<code class="docutils literal notranslate"><span class="pre">tests/utils.py</span></code>)<a class="headerlink" href="#test-utilities-tests-utils-py" title="Link to this heading">#</a></h2>
+<section id="weight-utilities">
+<h3>Weight utilities<a class="headerlink" href="#weight-utilities" title="Link to this heading">#</a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">tests.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">pertoken_quant</span><span class="p">,</span> <span class="n">shuffle_weight</span>
+
+<span class="c1"># Per-token quantization (handles NaN/Inf)</span>
+<span class="n">quantized</span><span class="p">,</span> <span class="n">scales</span> <span class="o">=</span> <span class="n">pertoken_quant</span><span class="p">(</span><span class="n">tensor</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float8_e4m3fnuz</span><span class="p">)</span>
+
+<span class="c1"># Weight preshuffle for MFMA (layout 16x16)</span>
+<span class="n">shuffled</span> <span class="o">=</span> <span class="n">shuffle_weight</span><span class="p">(</span><span class="n">weight</span><span class="p">,</span> <span class="n">layout</span><span class="o">=</span><span class="p">(</span><span class="mi">16</span><span class="p">,</span> <span class="mi">16</span><span class="p">))</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="writing-new-tests">
+<h2>6. Writing new tests<a class="headerlink" href="#writing-new-tests" title="Link to this heading">#</a></h2>
+<section id="pyir-test-pattern-no-gpu">
+<h3>6.1 PyIR test pattern (no GPU)<a class="headerlink" href="#pyir-test-pattern-no-gpu" title="Link to this heading">#</a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># tests/python/test_my_feature.py</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.expr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">fx</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">flydsl.expr.typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">T</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">test_my_layout_op</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span> <span class="n">insert_point</span><span class="p">):</span>
+    <span class="n">shape</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_shape</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="mi">8</span><span class="p">)</span>
+    <span class="n">stride</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_stride</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="n">layout</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_layout</span><span class="p">(</span><span class="n">shape</span><span class="p">,</span> <span class="n">stride</span><span class="p">)</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">size</span><span class="p">(</span><span class="n">layout</span><span class="p">)</span>
+    <span class="n">ir_str</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">ctx</span><span class="o">.</span><span class="n">module</span><span class="p">)</span>
+    <span class="k">assert</span> <span class="s2">"fly.make_layout"</span> <span class="ow">in</span> <span class="n">ir_str</span>
+</pre></div>
+</div>
+</section>
+<section id="gpu-kernel-test-pattern-new-api">
+<h3>6.2 GPU kernel test pattern (new API)<a class="headerlink" href="#gpu-kernel-test-pattern-new-api" title="Link to this heading">#</a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># tests/kernels/test_my_kernel.py</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.compiler</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">flyc</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.expr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">fx</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">flydsl.expr</span><span class="w"> </span><span class="kn">import</span> <span class="n">gpu</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">tests.test_common</span><span class="w"> </span><span class="kn">import</span> <span class="n">checkAllclose</span>
+
+<span class="nd">@flyc</span><span class="o">.</span><span class="n">kernel</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">my_kernel</span><span class="p">(</span><span class="n">A</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">B</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">N</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Constexpr</span><span class="p">[</span><span class="nb">int</span><span class="p">]):</span>
+    <span class="n">tid</span> <span class="o">=</span> <span class="n">gpu</span><span class="o">.</span><span class="n">thread_idx</span><span class="o">.</span><span class="n">x</span>
+    <span class="n">bid</span> <span class="o">=</span> <span class="n">gpu</span><span class="o">.</span><span class="n">block_idx</span><span class="o">.</span><span class="n">x</span>
+    <span class="c1"># ... kernel body ...</span>
+
+<span class="nd">@flyc</span><span class="o">.</span><span class="n">jit</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">launch</span><span class="p">(</span><span class="n">A</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">B</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">N</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Constexpr</span><span class="p">[</span><span class="nb">int</span><span class="p">],</span>
+           <span class="n">stream</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Stream</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">Stream</span><span class="p">(</span><span class="kc">None</span><span class="p">)):</span>
+    <span class="n">my_kernel</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">B</span><span class="p">,</span> <span class="n">N</span><span class="p">)</span><span class="o">.</span><span class="n">launch</span><span class="p">(</span><span class="n">grid</span><span class="o">=</span><span class="p">(</span><span class="n">N</span> <span class="o">//</span> <span class="mi">256</span><span class="p">,),</span> <span class="n">block</span><span class="o">=</span><span class="p">(</span><span class="mi">256</span><span class="p">,),</span> <span class="n">stream</span><span class="o">=</span><span class="n">stream</span><span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">test_my_kernel</span><span class="p">():</span>
+    <span class="n">N</span> <span class="o">=</span> <span class="mi">1024</span>
+    <span class="n">A</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">N</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s2">"cuda"</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+    <span class="n">B</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">empty</span><span class="p">(</span><span class="n">N</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s2">"cuda"</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+
+    <span class="n">launch</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">B</span><span class="p">,</span> <span class="n">N</span><span class="p">)</span>
+
+    <span class="c1"># Reference</span>
+    <span class="n">ref</span> <span class="o">=</span> <span class="n">A</span>  <span class="c1"># or some computation</span>
+
+    <span class="c1"># Validate</span>
+    <span class="n">err</span> <span class="o">=</span> <span class="n">checkAllclose</span><span class="p">(</span><span class="n">B</span><span class="p">,</span> <span class="n">ref</span><span class="p">,</span> <span class="n">rtol</span><span class="o">=</span><span class="mf">1e-2</span><span class="p">,</span> <span class="n">atol</span><span class="o">=</span><span class="mf">1e-2</span><span class="p">)</span>
+    <span class="k">assert</span> <span class="n">err</span> <span class="o">==</span> <span class="mi">0</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"Mismatch: </span><span class="si">{</span><span class="n">err</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">100</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2">%"</span>
+</pre></div>
+</div>
+</section>
+<section id="benchmark-test-pattern">
+<h3>6.3 Benchmark test pattern<a class="headerlink" href="#benchmark-test-pattern" title="Link to this heading">#</a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">tests.kernels.benchmark_common</span><span class="w"> </span><span class="kn">import</span> <span class="n">bench_gpu_us_torch</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">benchmark_my_kernel</span><span class="p">():</span>
+    <span class="c1"># Setup</span>
+    <span class="n">launch_fn</span> <span class="o">=</span> <span class="n">compile_my_kernel</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">run</span><span class="p">():</span>
+        <span class="n">launch_fn</span><span class="p">(</span><span class="n">input_tensor</span><span class="p">,</span> <span class="n">output_tensor</span><span class="p">)</span>
+
+    <span class="c1"># Measure</span>
+    <span class="n">gpu_us</span> <span class="o">=</span> <span class="n">bench_gpu_us_torch</span><span class="p">(</span><span class="n">run</span><span class="p">,</span> <span class="n">warmup</span><span class="o">=</span><span class="mi">20</span><span class="p">,</span> <span class="n">iters</span><span class="o">=</span><span class="mi">200</span><span class="p">)</span>
+
+    <span class="c1"># Compute metrics</span>
+    <span class="n">total_bytes</span> <span class="o">=</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">M</span> <span class="o">*</span> <span class="n">N</span> <span class="o">*</span> <span class="n">elem_size</span>
+    <span class="n">bandwidth_tbs</span> <span class="o">=</span> <span class="n">total_bytes</span> <span class="o">/</span> <span class="p">(</span><span class="n">gpu_us</span> <span class="o">*</span> <span class="mf">1e-6</span><span class="p">)</span> <span class="o">/</span> <span class="mf">1e12</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Time: </span><span class="si">{</span><span class="n">gpu_us</span><span class="si">:</span><span class="s2">.1f</span><span class="si">}</span><span class="s2"> us, Bandwidth: </span><span class="si">{</span><span class="n">bandwidth_tbs</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2"> TB/s"</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="gemm-test-cli-arguments">
+<h2>7. GEMM test CLI arguments<a class="headerlink" href="#gemm-test-cli-arguments" title="Link to this heading">#</a></h2>
+<p>The <code class="docutils literal notranslate"><span class="pre">test_preshuffle_gemm.py</span></code> test supports extensive CLI configuration:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>tests/kernels/test_preshuffle_gemm.py<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--in_dtype<span class="w"> </span>fp8<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-M<span class="w"> </span><span class="m">16</span><span class="w"> </span>-N<span class="w"> </span><span class="m">5120</span><span class="w"> </span>-K<span class="w"> </span><span class="m">8192</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--tile_m<span class="w"> </span><span class="m">16</span><span class="w"> </span>--tile_n<span class="w"> </span><span class="m">128</span><span class="w"> </span>--tile_k<span class="w"> </span><span class="m">256</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--lds_stage<span class="w"> </span><span class="m">2</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--num_iters<span class="w"> </span><span class="m">20</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--num_warmup<span class="w"> </span><span class="m">3</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--no_aiter_bench<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--test_graph<span class="w">        </span><span class="c1"># or -tg for HIPGraph mode</span>
+<span class="w">    </span>--wfp4<span class="w">              </span><span class="c1"># FP4 weight path (gfx950 only)</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="test-configuration-via-environment-variables">
+<h2>8. Test configuration via environment variables<a class="headerlink" href="#test-configuration-via-environment-variables" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Variable</p></th>
+<th class="head"><p>Used by</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">ROCDSL_SOFTMAX_SHAPES</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">test_softmax.py</span></code></p></td>
+<td><p>Override softmax test shapes (<code class="docutils literal notranslate"><span class="pre">&quot;M,N,dtype;...&quot;</span></code>)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">ROCDSL_LAYERNORM_SHAPES</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">test_layernorm.py</span></code></p></td>
+<td><p>Override layernorm test shapes</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DUMP_IR</span></code></p></td>
+<td><p>Compiler</p></td>
+<td><p>Dump intermediate IR at each pipeline stage</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DUMP_DIR</span></code></p></td>
+<td><p>Compiler</p></td>
+<td><p>IR dump directory (default: <code class="docutils literal notranslate"><span class="pre">~/.flydsl/debug</span></code>)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_RUNTIME_CACHE_DIR</span></code></p></td>
+<td><p>Compiler</p></td>
+<td><p>Cache directory (default: <code class="docutils literal notranslate"><span class="pre">~/.flydsl/cache</span></code>)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">RUN_TESTS_FULL</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">run_tests.sh</span></code></p></td>
+<td><p>Set to <code class="docutils literal notranslate"><span class="pre">1</span></code> to run all parametrized cases</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">BENCH_LOG_DIR</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">run_benchmark.sh</span></code></p></td>
+<td><p>Benchmark log directory (default: <code class="docutils literal notranslate"><span class="pre">/tmp/flydsl_bench</span></code>)</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<hr class="docutils" />
+<section id="ir-dump-workflow">
+<h2>9. IR dump workflow<a class="headerlink" href="#ir-dump-workflow" title="Link to this heading">#</a></h2>
+<section id="via-mlircompiler">
+<h3>Via <code class="docutils literal notranslate"><span class="pre">MlirCompiler</span></code><a class="headerlink" href="#via-mlircompiler" title="Link to this heading">#</a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">FLYDSL_DUMP_IR</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="nv">FLYDSL_DUMP_DIR</span><span class="o">=</span>./dumps<span class="w"> </span>python<span class="w"> </span>my_test.py
+</pre></div>
+</div>
+<p>Produces numbered <code class="docutils literal notranslate"><span class="pre">.mlir</span></code> files per pipeline stage plus <code class="docutils literal notranslate"><span class="pre">final_isa.s</span></code>.</p>
+</section>
+<section id="dedicated-ir-dump-script">
+<h3>Dedicated IR dump script<a class="headerlink" href="#dedicated-ir-dump-script" title="Link to this heading">#</a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>bash<span class="w"> </span>scripts/dumpir.sh
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="source-files">
+<h2>10. Source files<a class="headerlink" href="#source-files" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>File</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">scripts/run_tests.sh</span></code></p></td>
+<td><p>Full test runner (pytest + examples + FileCheck)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">scripts/run_benchmark.sh</span></code></p></td>
+<td><p>Benchmark harness with configurable shapes</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">scripts/dumpir.sh</span></code></p></td>
+<td><p>IR dump helper script</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">tests/conftest.py</span></code></p></td>
+<td><p>Pytest fixtures (MLIR context, module, insert point)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">tests/test_common.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">perftest()</span></code>, <code class="docutils literal notranslate"><span class="pre">checkAllclose()</span></code>, <code class="docutils literal notranslate"><span class="pre">verify_output()</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">tests/utils.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">pertoken_quant()</span></code>, <code class="docutils literal notranslate"><span class="pre">shuffle_weight()</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">tests/kernels/benchmark_common.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">bench_gpu_us_torch()</span></code>, benchmark harness</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">tests/mlir/{LayoutAlgebra,Conversion,Transforms}/</span></code></p></td>
+<td><p>MLIR lit tests (18 files)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">tests/python/examples/</span></code></p></td>
+<td><p>Python AOT examples</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">tests/kernels/test_*.py</span></code></p></td>
+<td><p>GPU kernel tests (12 files)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">tests/python/examples/</span></code></p></td>
+<td><p>AOT pre-compilation examples</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+</section>
+
+
+                </article>
+              
+
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="prebuilt_kernels_guide.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">Pre-built kernel library guide</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="cute_layout_algebra_guide.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">CuTe layout algebra reference for FlyDSL</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+    
+        
+              
+                <div class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+  <div class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> Contents
+  </div>
+  <nav class="bd-toc-nav page-toc">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#quick-reference">Quick reference</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#test-categories">1. Test categories</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#mlir-lit-tests-tests-mlir">1.1 MLIR lit tests (<code class="docutils literal notranslate"><span class="pre">tests/mlir/</span></code>)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#python-tests-tests-python">1.2 Python tests (<code class="docutils literal notranslate"><span class="pre">tests/python/</span></code>)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#gpu-kernel-tests-tests-kernels">1.3 GPU kernel tests (<code class="docutils literal notranslate"><span class="pre">tests/kernels/</span></code>)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#aot-examples-tests-python-examples">1.4 AOT examples (<code class="docutils literal notranslate"><span class="pre">tests/python/examples/</span></code>)</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#test-runner-scripts">2. Test runner scripts</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#scripts-run-tests-sh">2.1 <code class="docutils literal notranslate"><span class="pre">scripts/run_tests.sh</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#scripts-run-benchmark-sh">2.2 <code class="docutils literal notranslate"><span class="pre">scripts/run_benchmark.sh</span></code></a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pytest-configuration">3. Pytest configuration</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#tests-conftest-py">3.1 <code class="docutils literal notranslate"><span class="pre">tests/conftest.py</span></code></a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#performance-measurement">4. Performance measurement</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#tests-test-common-py">4.1 <code class="docutils literal notranslate"><span class="pre">tests/test_common.py</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#tests-kernels-benchmark-common-py">4.2 <code class="docutils literal notranslate"><span class="pre">tests/kernels/benchmark_common.py</span></code></a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#test-utilities-tests-utils-py">5. Test utilities (<code class="docutils literal notranslate"><span class="pre">tests/utils.py</span></code>)</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#weight-utilities">Weight utilities</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#writing-new-tests">6. Writing new tests</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#pyir-test-pattern-no-gpu">6.1 PyIR test pattern (no GPU)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#gpu-kernel-test-pattern-new-api">6.2 GPU kernel test pattern (new API)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#benchmark-test-pattern">6.3 Benchmark test pattern</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#gemm-test-cli-arguments">7. GEMM test CLI arguments</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#test-configuration-via-environment-variables">8. Test configuration via environment variables</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#ir-dump-workflow">9. IR dump workflow</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#via-mlircompiler">Via <code class="docutils literal notranslate"><span class="pre">MlirCompiler</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#dedicated-ir-dump-script">Dedicated IR dump script</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#source-files">10. Source files</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+    
+
+          </div>
+          <footer class="bd-footer-content">
+            <p>
+  </p>
+          </footer>
+        
+
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script src="_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
+<script src="_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    
+<footer class="rocm-footer">
+    <div class="container-lg">
+        <section class="bottom-menu menu py-45">
+            <div class="row d-flex align-items-center">
+                <div class="col-12 text-center">
+                    <ul>
+                        <li><a href="https://www.amd.com/en/corporate/copyright" target="_blank">Terms and Conditions</a></li>
+                        <li><a href="https://rocm.docs.amd.com/en/latest/about/license.html">ROCm Licenses and Disclaimers</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/privacy" target="_blank">Privacy</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/trademarks" target="_blank">Trademarks</a></li>
+                        <li><a href="https://www.amd.com/content/dam/amd/en/documents/corporate/cr/supply-chain-transparency.pdf" target="_blank">Supply Chain Transparency</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/competition" target="_blank">Fair and Open Competition</a></li>
+                        <li><a href="https://www.amd.com/system/files/documents/amd-uk-tax-strategy.pdf" target="_blank">UK Tax Strategy</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/cookies" target="_blank">Cookie Policy</a></li>
+                        <!-- OneTrust Cookies Settings button start -->
+                        <li><a href="#cookie-settings" id="ot-sdk-btn" class="ot-sdk-show-settings">Cookie Settings</a></li>
+                        <!-- OneTrust Cookies Settings button end -->
+                    </ul>
+                </div>
+            </div>
+            <div class="row d-flex align-items-center">
+                <div class="col-12 text-center">
+                    <div>
+                        <span class="copyright">© 2026 Advanced Micro Devices, Inc</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+</footer>
+
+<!-- <div id="rdc-watermark-container">
+    <img id="rdc-watermark" src="_static/images/alpha-watermark.svg" alt="DRAFT watermark"/>
+</div> -->
+    
+  </body>
+</html>

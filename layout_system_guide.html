@@ -1,0 +1,1577 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="./" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Layout algebra guide &#8212; FlyDSL 0.3.2</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+
+  
+  <link href="_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-regular-400.woff2" />
+
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=8f2a1f02" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/sphinx-book-theme.css?v=eba8b062" />
+    <link rel="stylesheet" type="text/css" href="_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="_static/custom.css?v=22b90084" />
+    <link rel="stylesheet" type="text/css" href="_static/rocm_header.css?v=037afccf" />
+    <link rel="stylesheet" type="text/css" href="_static/rocm_footer.css?v=7095035a" />
+    <link rel="stylesheet" type="text/css" href="_static/fonts.css?v=fcff5274" />
+    <link rel="stylesheet" type="text/css" href="_static/sphinx-design.min.css?v=95c83b7e" />
+    <link rel="stylesheet" type="text/css" href="_static/ai_ecosystem.css" />
+  
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
+<link rel="preload" as="script" href="_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
+  <script src="_static/vendor/fontawesome/6.5.2/js/all.min.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    <script src="_static/documentation_options.js?v=2f2e10e9"></script>
+    <script src="_static/doctools.js?v=9bcbadda"></script>
+    <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="_static/copybutton.js?v=91c4cb68"></script>
+    <script async="async" src="_static/code_word_breaks.js?v=327952c4"></script>
+    <script async="async" src="_static/renameVersionLinks.js?v=929fe5e4"></script>
+    <script async="async" src="_static/rdcMisc.js?v=01f88d96"></script>
+    <script async="async" src="_static/theme_mode_captions.js?v=15f4ec5d"></script>
+    <script defer="defer" src="_static/search.js?v=90a4452c"></script>
+    <script src="_static/scripts/sphinx-book-theme.js?v=887ef09a"></script>
+    <script src="_static/design-tabs.js?v=f930bc37"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'layout_system_guide';</script>
+    <script async="async" src="https://download.amd.com/js/analytics/analyticsinit.js"></script>
+    <link rel="icon" href="https://www.amd.com/content/dam/code/images/favicon/favicon.ico"/>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Kernel authoring guide" href="kernel_authoring_guide.html" />
+    <link rel="prev" title="Architecture &amp; compilation pipeline guide" href="architecture_guide.html" />
+    <meta name="google-site-verification" content="vo35SZt_GASsTHAEmdww7AYKPCvZyzLvOXBl8guBME4" />
+
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-primary-sidebar-checkbox"/>
+  <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-secondary-sidebar-checkbox"/>
+  <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
+  
+  <div class="search-button__wrapper">
+    <div class="search-button__overlay"></div>
+    <div class="search-button__search-container">
+<form class="bd-search d-flex align-items-center"
+      action="search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         id="search-input"
+         placeholder="Search..."
+         aria-label="Search..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form></div>
+  </div>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="common-header" >
+        <nav class="navbar navbar-expand-xl">
+            <div class="container-fluid main-nav rocm-header">
+                <div class="header-logo">
+                    <div class="header-logo-title">
+                        
+                            <button class="navbar-toggler collapsed" id="nav-icon" data-tracking-information="mainMenuToggle" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
+                                <span></span>
+                                <span></span>
+                                <span></span>
+                            </button>
+                        
+                        <a class="navbar-brand" href="https://www.amd.com/">
+                            <img src="_static/images/amd-header-logo.svg" alt="AMD Logo" title="AMD Logo" width="90" class="d-inline-block align-text-top hover-opacity"/>
+                        </a>
+                        <div class="vr mx-40 my-25"></div>
+                        <a class="klavika-font hover-opacity" href="https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest">ROCm&#8482; AI Ecosystem</a>
+                    </div>
+                    
+                </div>
+                <div class="icon-nav text-center d-flex ms-auto"></div>
+            </div>
+        </nav>
+        
+        <nav class="navbar navbar-expand-xl second-level-nav">
+            <div class="container-fluid main-nav">
+                <div class="navbar-nav-container collapse navbar-collapse" id="navbarSupportedContent">
+                    
+                    <div class="d-flex w-100 align-items-stretch">
+                        <ul class="navbar-nav nav-mega mb-2 mb-lg-0">
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://rocm.docs.amd.com" id="navcore-sdk" role="button" aria-expanded="false" target="_blank">Core SDK</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links fw-bold" href="https://rocm.docs.amd.com/projects/ai-ecosystem" id="navai-ecosystem" role="button" aria-expanded="false" target="_blank">AI Ecosystem</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://instinct.docs.amd.com" id="navgpu-systems-and-infrastructure" role="button" aria-expanded="false" target="_blank">GPU Systems and Infrastructure</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item dropdown">
+                                
+                                    <a class="nav-link top-level header-menu-links dropdown-toggle header-nav-dropdown-toggle" href="#" id="navtoolkits" role="button" data-bs-toggle="dropdown" aria-expanded="false">Toolkits</a>
+                                    <ul class="dropdown-menu header-nav-dropdown-menu" aria-labelledby="navtoolkits">
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-ds/en/latest/index.html" target="_blank">AMD Data Science</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-finance/en/latest/index.html" target="_blank">AMD Finance</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-ls/en/latest/index.html" target="_blank">AMD Life Science</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-llmext/en/latest/index.html" target="_blank">AMD LLM Extension</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-simulation/en/latest/index.html" target="_blank">AMD Simulation</a></li>
+                                        
+                                    </ul>
+                                
+                            </li>
+                            
+                        </ul>
+                        <div class="nav-group-separator"></div>
+                        <ul class="navbar-nav nav-mega mb-2 mb-lg-0">
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://rocm.blogs.amd.com/" id="navblogs" role="button" aria-expanded="false" target="_blank">Blogs</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://www.amd.com/en/developer/resources/rocm-hub.html" id="navdeveloper-hub" role="button" aria-expanded="false" target="_blank">Developer Hub</a>
+                                
+                            </li>
+                            
+                        </ul>
+                    </div>
+                    
+                </div>
+            </div>
+        </nav>
+        
+    </header>
+    
+
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <div class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+
+<a class="navbar-brand logo" href="https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest">
+    <p>ROCm AI Ecosystem</p>
+</a></div>
+          
+        
+      </div>
+    
+    
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="index.html">
+  
+  
+  
+  
+  
+  
+    <p class="title logo__title">FlyDSL 0.3.2</p>
+  
+</a></div>
+        <div class="sidebar-primary-item">
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">Search</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script></div>
+        <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
+    <div class="bd-toc-item navbar-nav active">
+        <ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Install FlyDSL</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api_stability.html">API stability</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Language</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="language/arithmetic_types.html">Arithmetic types</a></li>
+<li class="toctree-l1"><a class="reference internal" href="language/composite_types.html">Composite types</a></li>
+<li class="toctree-l1"><a class="reference internal" href="language/storage_and_allocator.html">Storage and allocator</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="architecture_guide.html">Architecture and compilation pipeline</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">Layout algebra</a></li>
+<li class="toctree-l1"><a class="reference internal" href="kernel_authoring_guide.html">Kernel authoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="kernel_tuning_guide.html">Kernel tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="autotune_guide.html">Offline autotune configs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="prebuilt_kernels_guide.html">Prebuilt kernel library</a></li>
+<li class="toctree-l1"><a class="reference internal" href="testing_benchmarking_guide.html">Testing and benchmarking</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cute_layout_algebra_guide.html">CuTe layout algebra</a></li>
+<li class="toctree-l1"><a class="reference internal" href="extern_integration_guide.html">External bitcode integration</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">API reference</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="api/dsl.html">FlyDSL Python DSL</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/compiler.html">Compiler and pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/kernels.html">Prebuilt kernels</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Tutorials</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="tutorials/basic_usage.html">Basic usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="tutorials/kernel_development.html">Kernel development techniques</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">About</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="about/license.html">License</a></li>
+</ul>
+
+    </div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+  
+  <div id="rtd-footer-container"></div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+
+<div class="sbt-scroll-pixel-helper"></div>
+
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item"><label class="sidebar-toggle primary-toggle btn btn-sm" for="__primary" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-angle-right"></span>
+  </label></div>
+      
+        <div class="header-article-item">
+
+
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    <li class="breadcrumb-item active" aria-current="page">Layout algebra guide</li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+    <div class="header-article-items__end">
+      
+        <div class="header-article-item">
+
+<div class="article-header-buttons">
+
+
+
+
+
+<div class="dropdown dropdown-source-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Source repositories">
+    <i class="fab fa-github"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL" target="_blank"
+   class="btn btn-sm btn-source-repository-button dropdown-item"
+   title="Source repository"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fab fa-github"></i>
+  </span>
+<span class="btn__text-container">Repository</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL/blob/main/docs/layout_system_guide.md?plain=1" target="_blank"
+   class="btn btn-sm btn-source-file-button dropdown-item"
+   title="Show source"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-code"></i>
+  </span>
+<span class="btn__text-container">Show source</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL/issues/new?title=Issue%20on%20page%20%2Flayout_system_guide.html&body=Your%20issue%20content%20here." target="_blank"
+   class="btn btn-sm btn-source-issues-button dropdown-item"
+   title="Open an issue"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-lightbulb"></i>
+  </span>
+<span class="btn__text-container">Open issue</span>
+</a>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+
+
+<div class="dropdown dropdown-download-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Download this page">
+    <i class="fas fa-download"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="_sources/layout_system_guide.md" target="_blank"
+   class="btn btn-sm btn-download-source-button dropdown-item"
+   title="Download source file"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file"></i>
+  </span>
+<span class="btn__text-container">.md</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li>
+<button onclick="window.print()"
+  class="btn btn-sm btn-download-pdf-button dropdown-item"
+  title="Print to PDF"
+  data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file-pdf"></i>
+  </span>
+<span class="btn__text-container">.pdf</span>
+</button>
+</li>
+      
+  </ul>
+</div>
+
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script>
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm pst-navbar-icon search-button search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass fa-lg"></i>
+  </button>
+`);
+</script>
+<button class="sidebar-toggle secondary-toggle btn btn-sm" title="Toggle secondary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-list"></span>
+</button>
+</div></div>
+      
+    </div>
+  
+</div>
+</div>
+              
+              
+
+<div id="jb-print-docs-body" class="onlyprint">
+    <h1>Layout algebra guide</h1>
+    <!-- Table of contents -->
+    <div id="print-main-content">
+        <div id="jb-print-toc">
+            
+            <div>
+                <h2> Contents </h2>
+            </div>
+            <nav aria-label="Page">
+                <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#quick-reference">Quick reference</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#core-types">1. Core types</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#inttuple-patterns">IntTuple patterns</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#construction">2. Construction</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#python-api-via-flydsl-expr">Python API (via <code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code>)</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#coordinate-mapping">3. Coordinate mapping</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#crd2idx-coordinate-to-index"><code class="docutils literal notranslate"><span class="pre">crd2idx</span></code> — Coordinate to index</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#idx2crd-index-to-coordinate-inverse"><code class="docutils literal notranslate"><span class="pre">idx2crd</span></code> — Index to coordinate (inverse)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#example">Example</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#query-operations">4. Query operations</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#layout-algebra">5. Layout algebra</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#composition-composition-a-b">5.1 Composition: <code class="docutils literal notranslate"><span class="pre">composition(A,</span> <span class="pre">B)</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#complement-complement-tiler-target-size">5.2 Complement: <code class="docutils literal notranslate"><span class="pre">complement(tiler,</span> <span class="pre">target_size)</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#coalesce-coalesce-layout">5.3 Coalesce: <code class="docutils literal notranslate"><span class="pre">coalesce(layout)</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#right-inverse-right-inverse-layout">5.4 Right inverse: <code class="docutils literal notranslate"><span class="pre">right_inverse(layout)</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#recast-layout-recast-layout-layout-old-bits-new-bits">5.5 Recast layout: <code class="docutils literal notranslate"><span class="pre">recast_layout(layout,</span> <span class="pre">old_bits,</span> <span class="pre">new_bits)</span></code></a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#product-operations">6. Product operations</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#divide-operations">7. Divide operations</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#structural-operations">8. Structural operations</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#select-int-tuple-indices"><code class="docutils literal notranslate"><span class="pre">select(int_tuple,</span> <span class="pre">indices)</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#group-int-tuple-begin-end"><code class="docutils literal notranslate"><span class="pre">group(int_tuple,</span> <span class="pre">begin,</span> <span class="pre">end)</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#append-base-elem-prepend-base-elem"><code class="docutils literal notranslate"><span class="pre">append(base,</span> <span class="pre">elem)</span></code> / <code class="docutils literal notranslate"><span class="pre">prepend(base,</span> <span class="pre">elem)</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#slice-src-coord"><code class="docutils literal notranslate"><span class="pre">slice(src,</span> <span class="pre">coord)</span></code></a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#memref-view-copy-operations">9. MemRef / view / copy operations</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#memref-operations">MemRef operations</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#view-and-offset">View and offset</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#copy-atoms-and-tiled-copies">Copy atoms and tiled copies</a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#copy-atom-types">Copy atom types</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">Construction</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#thread-slicing-and-partitioning">Thread slicing and partitioning</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#execution">Execution</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#introspection">Introspection</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#nested-hierarchical-layouts">10. Nested / hierarchical layouts</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#inttuple-arithmetic">11. IntTuple arithmetic</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#printf-debugging">12. Printf debugging</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#decision-tree">13. Decision tree</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#source-files">14. Source files</a></li>
+</ul>
+            </nav>
+        </div>
+    </div>
+</div>
+
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section class="tex2jax_ignore mathjax_ignore" id="layout-algebra-guide">
+<h1>Layout algebra guide<a class="headerlink" href="#layout-algebra-guide" title="Link to this heading">#</a></h1>
+<p>This guide covers the core layout types, construction, coordinate mapping, algebra operations, and layout utilities in FlyDSL.</p>
+<div class="admonition important">
+<p class="admonition-title">Important</p>
+<p>All <code class="docutils literal notranslate"><span class="pre">fx.*</span></code> layout operations generate MLIR IR and must be called inside a <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> or <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code> function body. The code snippets below show API usage patterns within that context, not standalone scripts.</p>
+</div>
+<section id="quick-reference">
+<h2>Quick reference<a class="headerlink" href="#quick-reference" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Operation</p></th>
+<th class="head"><p>Python API</p></th>
+<th class="head"><p>Fly Dialect Op</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>Construction</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.make_shape(8,</span> <span class="pre">16)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.make_shape</span></code></p></td>
+<td><p>Create shape (IntTuple)</p></td>
+</tr>
+<tr class="row-odd"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.make_stride(1,</span> <span class="pre">8)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.make_stride</span></code></p></td>
+<td><p>Create stride (IntTuple)</p></td>
+</tr>
+<tr class="row-even"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.make_layout(shape,</span> <span class="pre">stride)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.make_layout</span></code></p></td>
+<td><p>Create layout from (shape, stride)</p></td>
+</tr>
+<tr class="row-odd"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.make_coord(i,</span> <span class="pre">j)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.make_coord</span></code></p></td>
+<td><p>Create coordinate</p></td>
+</tr>
+<tr class="row-even"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.make_int_tuple(elems)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.make_int_tuple</span></code></p></td>
+<td><p>Create generic IntTuple</p></td>
+</tr>
+<tr class="row-odd"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.make_ordered_layout(shape,</span> <span class="pre">order)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.make_ordered_layout</span></code></p></td>
+<td><p>Create layout with mode ordering</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Mapping</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.crd2idx(coord,</span> <span class="pre">layout)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.crd2idx</span></code></p></td>
+<td><p>Coordinate → linear index</p></td>
+</tr>
+<tr class="row-odd"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.idx2crd(idx,</span> <span class="pre">layout)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.idx2crd</span></code></p></td>
+<td><p>Linear index → coordinate</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Query</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.size(layout)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.size</span></code></p></td>
+<td><p>Total element count</p></td>
+</tr>
+<tr class="row-odd"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.cosize(layout)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.cosize</span></code></p></td>
+<td><p>Codomain size (max index + 1)</p></td>
+</tr>
+<tr class="row-even"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.get_shape(layout)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.get_shape</span></code></p></td>
+<td><p>Extract shape from layout</p></td>
+</tr>
+<tr class="row-odd"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.get_stride(layout)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.get_stride</span></code></p></td>
+<td><p>Extract stride from layout</p></td>
+</tr>
+<tr class="row-even"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.get(int_tuple,</span> <span class="pre">idx)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.select</span></code> + <code class="docutils literal notranslate"><span class="pre">fly.get_scalar</span></code></p></td>
+<td><p>Extract element at index</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Algebra</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.composition(A,</span> <span class="pre">B)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.composition</span></code></p></td>
+<td><p>Compose: A ∘ B</p></td>
+</tr>
+<tr class="row-even"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.complement(tiler,</span> <span class="pre">size)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.complement</span></code></p></td>
+<td><p>Complement of tiler</p></td>
+</tr>
+<tr class="row-odd"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.coalesce(layout)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.coalesce</span></code></p></td>
+<td><p>Simplify layout</p></td>
+</tr>
+<tr class="row-even"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.right_inverse(layout)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.right_inverse</span></code></p></td>
+<td><p>Right inverse of layout</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Products</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.logical_product(A,</span> <span class="pre">B)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.logical_product</span></code></p></td>
+<td><p>Basic product</p></td>
+</tr>
+<tr class="row-even"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.zipped_product(A,</span> <span class="pre">B)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.zipped_product</span></code></p></td>
+<td><p>Zipped product</p></td>
+</tr>
+<tr class="row-odd"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.tiled_product(A,</span> <span class="pre">B)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.tiled_product</span></code></p></td>
+<td><p>Tiled product</p></td>
+</tr>
+<tr class="row-even"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.flat_product(A,</span> <span class="pre">B)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.flat_product</span></code></p></td>
+<td><p>Flat product</p></td>
+</tr>
+<tr class="row-odd"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.raked_product(A,</span> <span class="pre">B)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.raked_product</span></code></p></td>
+<td><p>Raked product</p></td>
+</tr>
+<tr class="row-even"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.blocked_product(A,</span> <span class="pre">B)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.blocked_product</span></code></p></td>
+<td><p>Blocked product</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Divides</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.logical_divide(A,</span> <span class="pre">B)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.logical_divide</span></code></p></td>
+<td><p>Basic divide</p></td>
+</tr>
+<tr class="row-even"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.zipped_divide(A,</span> <span class="pre">B)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.zipped_divide</span></code></p></td>
+<td><p>Zipped divide</p></td>
+</tr>
+<tr class="row-odd"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.tiled_divide(A,</span> <span class="pre">B)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.tiled_divide</span></code></p></td>
+<td><p>Tiled divide</p></td>
+</tr>
+<tr class="row-even"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.flat_divide(A,</span> <span class="pre">B)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.flat_divide</span></code></p></td>
+<td><p>Flat divide</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Structural</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.select(it,</span> <span class="pre">indices)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.select</span></code></p></td>
+<td><p>Select modes by index</p></td>
+</tr>
+<tr class="row-even"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.group(it,</span> <span class="pre">begin,</span> <span class="pre">end)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.group</span></code></p></td>
+<td><p>Group modes into nested tuple</p></td>
+</tr>
+<tr class="row-odd"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.append(base,</span> <span class="pre">elem)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.append</span></code></p></td>
+<td><p>Append mode to IntTuple</p></td>
+</tr>
+<tr class="row-even"><td><p></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.prepend(base,</span> <span class="pre">elem)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.prepend</span></code></p></td>
+<td><p>Prepend mode to IntTuple</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Recast</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.recast_layout(ly,</span> <span class="pre">old,</span> <span class="pre">new)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly.recast_layout</span></code></p></td>
+<td><p>Recast layout for type width change</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<hr class="docutils" />
+<section id="core-types">
+<h2>1. Core types<a class="headerlink" href="#core-types" title="Link to this heading">#</a></h2>
+<p>The Fly dialect defines several custom MLIR types for layout algebra:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Type</p></th>
+<th class="head"><p>MLIR Syntax</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">!fly.int_tuple</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">!fly.int_tuple&lt;(8,</span> <span class="pre">16)&gt;</span></code></p></td>
+<td><p>Integer tuple — can be nested</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">!fly.layout</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">!fly.layout&lt;(8,</span> <span class="pre">16):(1,</span> <span class="pre">8)&gt;</span></code></p></td>
+<td><p>Layout = (Shape, Stride) pair</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">!fly.pointer</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">!fly.pointer&lt;f16&gt;</span></code></p></td>
+<td><p>Typed pointer</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">!fly.memref</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">!fly.memref&lt;...&gt;</span></code></p></td>
+<td><p>Memory reference with layout</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">!fly.swizzle</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">!fly.swizzle&lt;...&gt;</span></code></p></td>
+<td><p>Swizzle descriptor</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">!fly.copy_atom</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">!fly.copy_atom_universal_copy&lt;...&gt;</span></code></p></td>
+<td><p>Copy atom type</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">!fly.mma_atom</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">!fly.mma_atom_universal_fma&lt;...&gt;</span></code></p></td>
+<td><p>MMA atom type</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<section id="inttuple-patterns">
+<h3>IntTuple patterns<a class="headerlink" href="#inttuple-patterns" title="Link to this heading">#</a></h3>
+<p>IntTuples encode structure at the type level:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Pattern</p></th>
+<th class="head"><p>Meaning</p></th>
+<th class="head"><p>Example</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Integer literal</p></td>
+<td><p>Static constant</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">8</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>Dynamic value</p></td>
+<td><p>Runtime SSA value</p></td>
+<td><p>Provided as operand</p></td>
+</tr>
+<tr class="row-even"><td><p>Nested tuple</p></td>
+<td><p>Hierarchical mode</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">(8,</span> <span class="pre">(4,</span> <span class="pre">2))</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="construction">
+<h2>2. Construction<a class="headerlink" href="#construction" title="Link to this heading">#</a></h2>
+<section id="python-api-via-flydsl-expr">
+<h3>Python API (via <code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code>)<a class="headerlink" href="#python-api-via-flydsl-expr" title="Link to this heading">#</a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.expr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">fx</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">flydsl.expr.typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">T</span>
+
+<span class="c1"># Shapes and strides (static constants auto-materialized)</span>
+<span class="n">shape</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_shape</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span> <span class="mi">16</span><span class="p">)</span>              <span class="c1"># !fly.int_tuple&lt;(8, 16)&gt;</span>
+<span class="n">stride</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_stride</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">8</span><span class="p">)</span>             <span class="c1"># !fly.int_tuple&lt;(1, 8)&gt;</span>
+<span class="n">layout</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_layout</span><span class="p">(</span><span class="n">shape</span><span class="p">,</span> <span class="n">stride</span><span class="p">)</span>    <span class="c1"># !fly.layout&lt;(8, 16):(1, 8)&gt;</span>
+
+<span class="c1"># Shorthand — pass Python tuples directly</span>
+<span class="n">layout</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_layout</span><span class="p">((</span><span class="mi">8</span><span class="p">,</span> <span class="mi">16</span><span class="p">),</span> <span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">8</span><span class="p">))</span>
+
+<span class="c1"># Coordinates</span>
+<span class="n">coord</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_coord</span><span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="n">j</span><span class="p">)</span>
+
+<span class="c1"># Generic integer tuple</span>
+<span class="n">it</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_int_tuple</span><span class="p">((</span><span class="mi">4</span><span class="p">,</span> <span class="mi">8</span><span class="p">,</span> <span class="mi">2</span><span class="p">))</span>
+
+<span class="c1"># Nested shapes</span>
+<span class="n">shape_nested</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_shape</span><span class="p">(</span><span class="mi">9</span><span class="p">,</span> <span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="mi">8</span><span class="p">))</span>   <span class="c1"># (9, (4, 8))</span>
+
+<span class="c1"># Ordered layout — specify stride order (e.g., column-major vs row-major)</span>
+<span class="n">col_major</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_ordered_layout</span><span class="p">((</span><span class="n">M</span><span class="p">,</span> <span class="n">N</span><span class="p">),</span> <span class="n">order</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>  <span class="c1"># stride order: M-first</span>
+<span class="n">row_major</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_ordered_layout</span><span class="p">((</span><span class="n">M</span><span class="p">,</span> <span class="n">N</span><span class="p">),</span> <span class="n">order</span><span class="o">=</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">))</span>  <span class="c1"># stride order: N-first</span>
+
+<span class="c1"># Identity layout</span>
+<span class="n">identity</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_identity_layout</span><span class="p">((</span><span class="n">M</span><span class="p">,</span> <span class="n">N</span><span class="p">))</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="coordinate-mapping">
+<h2>3. Coordinate mapping<a class="headerlink" href="#coordinate-mapping" title="Link to this heading">#</a></h2>
+<p>The fundamental operation maps between logical coordinates and physical memory indices.</p>
+<p><strong>Formula</strong>: <code class="docutils literal notranslate"><span class="pre">Index</span> <span class="pre">=</span> <span class="pre">sum(coord_i</span> <span class="pre">*</span> <span class="pre">stride_i)</span></code></p>
+<section id="crd2idx-coordinate-to-index">
+<h3><code class="docutils literal notranslate"><span class="pre">crd2idx</span></code> — Coordinate to index<a class="headerlink" href="#crd2idx-coordinate-to-index" title="Link to this heading">#</a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">idx</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">crd2idx</span><span class="p">(</span><span class="n">coord</span><span class="p">,</span> <span class="n">layout</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="idx2crd-index-to-coordinate-inverse">
+<h3><code class="docutils literal notranslate"><span class="pre">idx2crd</span></code> — Index to coordinate (inverse)<a class="headerlink" href="#idx2crd-index-to-coordinate-inverse" title="Link to this heading">#</a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">coord</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">idx2crd</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span> <span class="n">layout</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="example">
+<h3>Example<a class="headerlink" href="#example" title="Link to this heading">#</a></h3>
+<p>For layout <code class="docutils literal notranslate"><span class="pre">((8,</span> <span class="pre">16),</span> <span class="pre">(1,</span> <span class="pre">8))</span></code> (8x16, column-major):</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">crd2idx((3,</span> <span class="pre">5),</span> <span class="pre">layout)</span></code> = <code class="docutils literal notranslate"><span class="pre">3*1</span> <span class="pre">+</span> <span class="pre">5*8</span></code> = <code class="docutils literal notranslate"><span class="pre">43</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">idx2crd(43,</span> <span class="pre">layout)</span></code> = <code class="docutils literal notranslate"><span class="pre">(43</span> <span class="pre">%</span> <span class="pre">8,</span> <span class="pre">43</span> <span class="pre">/</span> <span class="pre">8)</span></code> = <code class="docutils literal notranslate"><span class="pre">(3,</span> <span class="pre">5)</span></code></p></li>
+</ul>
+</section>
+</section>
+<hr class="docutils" />
+<section id="query-operations">
+<h2>4. Query operations<a class="headerlink" href="#query-operations" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Operation</p></th>
+<th class="head"><p>Description</p></th>
+<th class="head"><p>Example</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">size(x)</span></code></p></td>
+<td><p>Product of all dimensions</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">size((8,</span> <span class="pre">16))</span> <span class="pre">=</span> <span class="pre">128</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">cosize(layout)</span></code></p></td>
+<td><p>Max index + 1 (codomain size)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">cosize(((8,16),(1,8)))</span> <span class="pre">=</span> <span class="pre">128</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">get_shape(layout)</span></code></p></td>
+<td><p>Extract shape from layout</p></td>
+<td><p>Returns <code class="docutils literal notranslate"><span class="pre">!fly.int_tuple</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">get_stride(layout)</span></code></p></td>
+<td><p>Extract stride from layout</p></td>
+<td><p>Returns <code class="docutils literal notranslate"><span class="pre">!fly.int_tuple</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">get(x,</span> <span class="pre">i)</span></code></p></td>
+<td><p>Extract i-th element</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">get((8,</span> <span class="pre">16),</span> <span class="pre">0)</span> <span class="pre">=</span> <span class="pre">8</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">get_scalar(x)</span></code></p></td>
+<td><p>Extract scalar from leaf IntTuple</p></td>
+<td><p>Returns index value</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">rank(x)</span></code></p></td>
+<td><p>Number of top-level modes</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">rank((8,</span> <span class="pre">16))</span> <span class="pre">=</span> <span class="pre">2</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">depth(x)</span></code></p></td>
+<td><p>Nesting depth</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">depth((8,</span> <span class="pre">(4,</span> <span class="pre">2)))</span> <span class="pre">=</span> <span class="pre">2</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">s</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">size</span><span class="p">(</span><span class="n">layout</span><span class="p">)</span>           <span class="c1"># total elements (returns Int32 for static)</span>
+<span class="n">cs</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">cosize</span><span class="p">(</span><span class="n">layout</span><span class="p">)</span>        <span class="c1"># codomain size (max index + 1)</span>
+<span class="n">shape</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">get_shape</span><span class="p">(</span><span class="n">layout</span><span class="p">)</span>
+<span class="n">stride</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">get_stride</span><span class="p">(</span><span class="n">layout</span><span class="p">)</span>
+<span class="n">v</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">shape</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>          <span class="c1"># first dimension</span>
+<span class="n">r</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">rank</span><span class="p">(</span><span class="n">shape</span><span class="p">)</span>            <span class="c1"># number of modes</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="layout-algebra">
+<h2>5. Layout algebra<a class="headerlink" href="#layout-algebra" title="Link to this heading">#</a></h2>
+<section id="composition-composition-a-b">
+<h3>5.1 Composition: <code class="docutils literal notranslate"><span class="pre">composition(A,</span> <span class="pre">B)</span></code><a class="headerlink" href="#composition-composition-a-b" title="Link to this heading">#</a></h3>
+<p>Composes two layouts: the result maps through B first, then A.</p>
+<p><strong>Semantics</strong>: <code class="docutils literal notranslate"><span class="pre">result(x)</span> <span class="pre">=</span> <span class="pre">A(B(x))</span></code></p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">composed</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">composition</span><span class="p">(</span><span class="n">layout_a</span><span class="p">,</span> <span class="n">layout_b</span><span class="p">)</span>
+</pre></div>
+</div>
+<p><strong>Use case</strong>: Applying a permutation or tile coordinate mapping to a memory layout.</p>
+</section>
+<section id="complement-complement-tiler-target-size">
+<h3>5.2 Complement: <code class="docutils literal notranslate"><span class="pre">complement(tiler,</span> <span class="pre">target_size)</span></code><a class="headerlink" href="#complement-complement-tiler-target-size" title="Link to this heading">#</a></h3>
+<p>Computes the “remaining” modes not covered by the tiler, up to <code class="docutils literal notranslate"><span class="pre">target_size</span></code> elements.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">rest</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">complement</span><span class="p">(</span><span class="n">tiler</span><span class="p">,</span> <span class="n">target_size</span><span class="p">)</span>
+</pre></div>
+</div>
+<p><strong>Use case</strong>: Internal building block for <code class="docutils literal notranslate"><span class="pre">logical_divide</span></code>. Computing complementary iteration space when tiling.</p>
+</section>
+<section id="coalesce-coalesce-layout">
+<h3>5.3 Coalesce: <code class="docutils literal notranslate"><span class="pre">coalesce(layout)</span></code><a class="headerlink" href="#coalesce-coalesce-layout" title="Link to this heading">#</a></h3>
+<p>Simplifies a layout by flattening nested modes and combining adjacent modes when possible.</p>
+<p><strong>Post-conditions</strong>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">size(result)</span> <span class="pre">==</span> <span class="pre">size(layout)</span></code> (preserves total size)</p></li>
+<li><p>For all valid indices: <code class="docutils literal notranslate"><span class="pre">layout(i)</span> <span class="pre">==</span> <span class="pre">result(i)</span></code> (preserves mapping)</p></li>
+</ul>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">simplified</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">coalesce</span><span class="p">(</span><span class="n">layout</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="right-inverse-right-inverse-layout">
+<h3>5.4 Right inverse: <code class="docutils literal notranslate"><span class="pre">right_inverse(layout)</span></code><a class="headerlink" href="#right-inverse-right-inverse-layout" title="Link to this heading">#</a></h3>
+<p>Computes the right inverse of a layout mapping.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">inv</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">right_inverse</span><span class="p">(</span><span class="n">layout</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="recast-layout-recast-layout-layout-old-bits-new-bits">
+<h3>5.5 Recast layout: <code class="docutils literal notranslate"><span class="pre">recast_layout(layout,</span> <span class="pre">old_bits,</span> <span class="pre">new_bits)</span></code><a class="headerlink" href="#recast-layout-recast-layout-layout-old-bits-new-bits" title="Link to this heading">#</a></h3>
+<p>Adjusts a layout for a type width change (for example, FP16 → FP8):</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Convert layout from 16-bit to 8-bit elements</span>
+<span class="n">recasted</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">recast_layout</span><span class="p">(</span><span class="n">layout</span><span class="p">,</span> <span class="n">old_type_bits</span><span class="o">=</span><span class="mi">16</span><span class="p">,</span> <span class="n">new_type_bits</span><span class="o">=</span><span class="mi">8</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="product-operations">
+<h2>6. Product operations<a class="headerlink" href="#product-operations" title="Link to this heading">#</a></h2>
+<p>Products combine two layouts to create a larger layout. All products take <code class="docutils literal notranslate"><span class="pre">(layout,</span> <span class="pre">tiler)</span></code>.</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Variant</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">logical_product</span></code></p></td>
+<td><p>Mode-wise concatenation (most basic). Scales tiler strides by layout size.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">zipped_product</span></code></p></td>
+<td><p>Interleaves modes from layout and tiler.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">tiled_product</span></code></p></td>
+<td><p>Creates hierarchical tiled structure.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">flat_product</span></code></p></td>
+<td><p>Produces a flattened result.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">raked_product</span></code></p></td>
+<td><p>Creates a raked (interleaved) access pattern.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">blocked_product</span></code></p></td>
+<td><p>Creates a blocked access pattern.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">result</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">logical_product</span><span class="p">(</span><span class="n">layout</span><span class="p">,</span> <span class="n">tiler</span><span class="p">)</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">zipped_product</span><span class="p">(</span><span class="n">layout</span><span class="p">,</span> <span class="n">tiler</span><span class="p">)</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">raked_product</span><span class="p">(</span><span class="n">layout</span><span class="p">,</span> <span class="n">tiler</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="divide-operations">
+<h2>7. Divide operations<a class="headerlink" href="#divide-operations" title="Link to this heading">#</a></h2>
+<p>Divides partition a layout by a divisor, creating a view that separates “tile” and “rest” dimensions.</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Variant</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">logical_divide</span></code></p></td>
+<td><p>Basic partitioning. Internally uses <code class="docutils literal notranslate"><span class="pre">complement</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">zipped_divide</span></code></p></td>
+<td><p>Zipped division semantics.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">tiled_divide</span></code></p></td>
+<td><p>Hierarchical tiled division.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">flat_divide</span></code></p></td>
+<td><p>Flattened division.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">result</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">logical_divide</span><span class="p">(</span><span class="n">layout</span><span class="p">,</span> <span class="n">divisor</span><span class="p">)</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">zipped_divide</span><span class="p">(</span><span class="n">layout</span><span class="p">,</span> <span class="n">divisor</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="structural-operations">
+<h2>8. Structural operations<a class="headerlink" href="#structural-operations" title="Link to this heading">#</a></h2>
+<section id="select-int-tuple-indices">
+<h3><code class="docutils literal notranslate"><span class="pre">select(int_tuple,</span> <span class="pre">indices)</span></code><a class="headerlink" href="#select-int-tuple-indices" title="Link to this heading">#</a></h3>
+<p>Select modes by index:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">selected</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">int_tuple</span><span class="p">,</span> <span class="n">indices</span><span class="o">=</span><span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2</span><span class="p">])</span>  <span class="c1"># pick modes 0 and 2</span>
+</pre></div>
+</div>
+</section>
+<section id="group-int-tuple-begin-end">
+<h3><code class="docutils literal notranslate"><span class="pre">group(int_tuple,</span> <span class="pre">begin,</span> <span class="pre">end)</span></code><a class="headerlink" href="#group-int-tuple-begin-end" title="Link to this heading">#</a></h3>
+<p>Group a range of modes into a nested tuple:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">grouped</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">group</span><span class="p">(</span><span class="n">int_tuple</span><span class="p">,</span> <span class="n">begin</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">end</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="append-base-elem-prepend-base-elem">
+<h3><code class="docutils literal notranslate"><span class="pre">append(base,</span> <span class="pre">elem)</span></code> / <code class="docutils literal notranslate"><span class="pre">prepend(base,</span> <span class="pre">elem)</span></code><a class="headerlink" href="#append-base-elem-prepend-base-elem" title="Link to this heading">#</a></h3>
+<p>Add a mode to the end/beginning:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">extended</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">base_tuple</span><span class="p">,</span> <span class="n">new_elem</span><span class="p">)</span>
+<span class="n">extended</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">prepend</span><span class="p">(</span><span class="n">base_tuple</span><span class="p">,</span> <span class="n">new_elem</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="slice-src-coord">
+<h3><code class="docutils literal notranslate"><span class="pre">slice(src,</span> <span class="pre">coord)</span></code><a class="headerlink" href="#slice-src-coord" title="Link to this heading">#</a></h3>
+<p>Slice an IntTuple/layout at a coordinate:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">sliced</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">slice</span><span class="p">(</span><span class="n">layout</span><span class="p">,</span> <span class="n">coord</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="memref-view-copy-operations">
+<h2>9. MemRef / view / copy operations<a class="headerlink" href="#memref-view-copy-operations" title="Link to this heading">#</a></h2>
+<section id="memref-operations">
+<h3>MemRef operations<a class="headerlink" href="#memref-operations" title="Link to this heading">#</a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Allocate on-chip memory with layout</span>
+<span class="n">alloca</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_rmem_tensor</span><span class="p">(</span><span class="n">layout</span><span class="p">,</span> <span class="n">fx</span><span class="o">.</span><span class="n">Float32</span><span class="p">)</span>
+
+<span class="c1"># Load / store through layout</span>
+<span class="n">val</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">memref_load</span><span class="p">(</span><span class="n">memref</span><span class="p">,</span> <span class="n">indices</span><span class="p">)</span>
+<span class="n">fx</span><span class="o">.</span><span class="n">memref_store</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">memref</span><span class="p">,</span> <span class="n">indices</span><span class="p">)</span>
+
+<span class="c1"># Vector load / store</span>
+<span class="n">vec</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">memref_load_vec</span><span class="p">(</span><span class="n">memref</span><span class="p">)</span>
+<span class="n">fx</span><span class="o">.</span><span class="n">memref_store_vec</span><span class="p">(</span><span class="n">vector</span><span class="p">,</span> <span class="n">memref</span><span class="p">)</span>
+
+<span class="c1"># Get layout from memref</span>
+<span class="n">ly</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">get_layout</span><span class="p">(</span><span class="n">memref</span><span class="p">)</span>
+
+<span class="c1"># Get iterator from memref</span>
+<span class="n">it</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">get_iter</span><span class="p">(</span><span class="n">memref</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="view-and-offset">
+<h3>View and offset<a class="headerlink" href="#view-and-offset" title="Link to this heading">#</a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Create a view from iterator + layout</span>
+<span class="n">view</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_view</span><span class="p">(</span><span class="n">iterator</span><span class="p">,</span> <span class="n">layout</span><span class="p">)</span>
+
+<span class="c1"># Add offset to a pointer</span>
+<span class="n">ptr</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">add_offset</span><span class="p">(</span><span class="n">ptr</span><span class="p">,</span> <span class="n">offset</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="copy-atoms-and-tiled-copies">
+<h3>Copy atoms and tiled copies<a class="headerlink" href="#copy-atoms-and-tiled-copies" title="Link to this heading">#</a></h3>
+<section id="copy-atom-types">
+<h4>Copy atom types<a class="headerlink" href="#copy-atom-types" title="Link to this heading">#</a></h4>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Type Factory</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">fx.UniversalCopy128b()</span></code></p></td>
+<td><p>Generic 128-bit copy</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">fx.UniversalCopy64b()</span></code></p></td>
+<td><p>Generic 64-bit copy</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">fx.UniversalCopy32b()</span></code></p></td>
+<td><p>Generic 32-bit copy</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">fx.UniversalCopy(bits)</span></code></p></td>
+<td><p>Generic copy with custom bit width</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">fx.rocdl.BufferCopy128b()</span></code></p></td>
+<td><p>AMD buffer-descriptor 128-bit copy</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">fx.rocdl.BufferCopy64b()</span></code></p></td>
+<td><p>AMD buffer-descriptor 64-bit copy</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">fx.rocdl.BufferCopy32b()</span></code></p></td>
+<td><p>AMD buffer-descriptor 32-bit copy</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">fx.rocdl.make_tdm_atom(tensor,</span> <span class="pre">extents,</span> <span class="pre">...)</span></code></p></td>
+<td><p>gfx1250 TDM async Global↔LDS whole-tile copy (1–5D); descriptor carried as atom state</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="id1">
+<h4>Construction<a class="headerlink" href="#id1" title="Link to this heading">#</a></h4>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Create copy atom (copy_op_type, elem_type)</span>
+<span class="n">copy_atom</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_copy_atom</span><span class="p">(</span><span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">BufferCopy128b</span><span class="p">(),</span> <span class="n">fx</span><span class="o">.</span><span class="n">Float32</span><span class="p">)</span>
+
+<span class="c1"># Create MMA atom (CDNA MFMA)</span>
+<span class="n">mma_atom</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_mma_atom</span><span class="p">(</span><span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">MFMA</span><span class="p">(</span><span class="mi">16</span><span class="p">,</span> <span class="mi">16</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="n">fx</span><span class="o">.</span><span class="n">Float32</span><span class="p">))</span>
+
+<span class="c1"># gfx1250 (wave32): WMMA and MX-scaled WMMA MMA atoms</span>
+<span class="n">mma_atom</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_mma_atom</span><span class="p">(</span><span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">WMMA</span><span class="p">(</span><span class="mi">16</span><span class="p">,</span> <span class="mi">16</span><span class="p">,</span> <span class="mi">128</span><span class="p">,</span> <span class="n">fx</span><span class="o">.</span><span class="n">Float8E4M3FN</span><span class="p">))</span>
+<span class="n">mma_atom</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_mma_atom</span><span class="p">(</span><span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">WMMAScale</span><span class="p">(</span><span class="mi">16</span><span class="p">,</span> <span class="mi">16</span><span class="p">,</span> <span class="mi">128</span><span class="p">,</span> <span class="n">fx</span><span class="o">.</span><span class="n">Float8E4M3FN</span><span class="p">))</span>  <span class="c1"># E8M0 block scale</span>
+
+<span class="c1"># Build thread-value layout from thread and value layouts</span>
+<span class="n">tiler_mn</span><span class="p">,</span> <span class="n">layout_tv</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_layout_tv</span><span class="p">(</span><span class="n">thr_layout</span><span class="p">,</span> <span class="n">val_layout</span><span class="p">)</span>
+
+<span class="c1"># Make tiled copy from copy atom + layout + tile</span>
+<span class="n">tiled_copy</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tiled_copy</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">layout_tv</span><span class="p">,</span> <span class="n">tile_mn</span><span class="p">)</span>
+
+<span class="c1"># Make tiled copy matched to a TiledMma's A/B/C partitioning</span>
+<span class="n">tiled_copy_a</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tiled_copy_A</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">tiled_mma</span><span class="p">)</span>
+<span class="n">tiled_copy_b</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tiled_copy_B</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">tiled_mma</span><span class="p">)</span>
+<span class="n">tiled_copy_c</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tiled_copy_C</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">tiled_mma</span><span class="p">)</span>
+
+<span class="c1"># Make tiled MMA from MMA atom + atom layout + optional permutation</span>
+<span class="n">tiled_mma</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tiled_mma</span><span class="p">(</span><span class="n">mma_atom</span><span class="p">,</span> <span class="n">atom_layout</span><span class="p">)</span>
+<span class="n">tiled_mma</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tiled_mma</span><span class="p">(</span><span class="n">mma_atom</span><span class="p">,</span> <span class="n">atom_layout</span><span class="p">,</span> <span class="n">permutation</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="thread-slicing-and-partitioning">
+<h4>Thread slicing and partitioning<a class="headerlink" href="#thread-slicing-and-partitioning" title="Link to this heading">#</a></h4>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Get a per-thread view of a tiled copy</span>
+<span class="n">thr_copy</span> <span class="o">=</span> <span class="n">tiled_copy</span><span class="o">.</span><span class="n">get_slice</span><span class="p">(</span><span class="n">tid</span><span class="p">)</span>   <span class="c1"># returns ThrCopy</span>
+<span class="n">src_part</span> <span class="o">=</span> <span class="n">thr_copy</span><span class="o">.</span><span class="n">partition_S</span><span class="p">(</span><span class="n">src</span><span class="p">)</span>   <span class="c1"># partition source tensor</span>
+<span class="n">dst_part</span> <span class="o">=</span> <span class="n">thr_copy</span><span class="o">.</span><span class="n">partition_D</span><span class="p">(</span><span class="n">dst</span><span class="p">)</span>   <span class="c1"># partition destination tensor</span>
+<span class="n">retiled</span>  <span class="o">=</span> <span class="n">thr_copy</span><span class="o">.</span><span class="n">retile</span><span class="p">(</span><span class="n">tensor</span><span class="p">)</span>     <span class="c1"># retile tensor to match copy atom</span>
+
+<span class="c1"># Get a per-thread view of a tiled MMA</span>
+<span class="n">thr_mma</span> <span class="o">=</span> <span class="n">tiled_mma</span><span class="o">.</span><span class="n">thr_slice</span><span class="p">(</span><span class="n">tid</span><span class="p">)</span>     <span class="c1"># returns ThrMma (alias: get_slice)</span>
+
+<span class="c1"># Register fragments: pass the block-level tensor views (see examples/03-tiledMma.py).</span>
+<span class="n">frag_a</span> <span class="o">=</span> <span class="n">thr_mma</span><span class="o">.</span><span class="n">make_fragment_A</span><span class="p">(</span><span class="n">tensor_a</span><span class="p">)</span>
+<span class="n">frag_b</span> <span class="o">=</span> <span class="n">thr_mma</span><span class="o">.</span><span class="n">make_fragment_B</span><span class="p">(</span><span class="n">tensor_b</span><span class="p">)</span>
+<span class="n">frag_c</span> <span class="o">=</span> <span class="n">thr_mma</span><span class="o">.</span><span class="n">make_fragment_C</span><span class="p">(</span><span class="n">tensor_c</span><span class="p">)</span>
+
+<span class="c1"># Optional spatial partition of a tensor for this thread (different use case)</span>
+<span class="n">part_a</span> <span class="o">=</span> <span class="n">thr_mma</span><span class="o">.</span><span class="n">partition_A</span><span class="p">(</span><span class="n">tensor_a</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="execution">
+<h4>Execution<a class="headerlink" href="#execution" title="Link to this heading">#</a></h4>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Execute tiled copy</span>
+<span class="n">fx</span><span class="o">.</span><span class="n">copy</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">src_part</span><span class="p">,</span> <span class="n">dst_part</span><span class="p">)</span>
+
+<span class="c1"># Execute tiled copy with predicate mask (for boundary handling)</span>
+<span class="n">fx</span><span class="o">.</span><span class="n">copy</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">src_part</span><span class="p">,</span> <span class="n">dst_part</span><span class="p">,</span> <span class="n">pred</span><span class="o">=</span><span class="n">pred_tensor</span><span class="p">)</span>
+
+<span class="c1"># Execute GEMM: D = A * B + C</span>
+<span class="n">fx</span><span class="o">.</span><span class="n">gemm</span><span class="p">(</span><span class="n">mma_atom</span><span class="p">,</span> <span class="n">d</span><span class="p">,</span> <span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">,</span> <span class="n">c</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="introspection">
+<h4>Introspection<a class="headerlink" href="#introspection" title="Link to this heading">#</a></h4>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Property</p></th>
+<th class="head"><p>Class</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">copy_atom.thr_layout</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">CopyAtom</span></code></p></td>
+<td><p>Thread layout of copy atom</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">copy_atom.layout_src_tv</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">CopyAtom</span></code></p></td>
+<td><p>Thread-value layout for source</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">copy_atom.layout_dst_tv</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">CopyAtom</span></code></p></td>
+<td><p>Thread-value layout for destination</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">mma_atom.thr_layout</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">MmaAtom</span></code></p></td>
+<td><p>Thread layout</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">mma_atom.shape_mnk</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">MmaAtom</span></code></p></td>
+<td><p>M×N×K tile dimensions</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">mma_atom.layout_A_tv/layout_B_tv/layout_C_tv</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">MmaAtom</span></code></p></td>
+<td><p>Thread-value layouts per operand</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">tiled_copy.layout_src_tv_tiled</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">TiledCopy</span></code></p></td>
+<td><p>Full tiled source layout</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">tiled_copy.layout_dst_tv_tiled</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">TiledCopy</span></code></p></td>
+<td><p>Full tiled destination layout</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">tiled_mma.tile_size_mnk</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">TiledMma</span></code></p></td>
+<td><p>Tiled MMA dimensions</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">tiled_mma.thr_layout_vmnk</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">TiledMma</span></code></p></td>
+<td><p>Thread layout across V,M,N,K</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">tiled_mma.tv_layout_A_tiled/tv_layout_B_tiled/tv_layout_C_tiled</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">TiledMma</span></code></p></td>
+<td><p>Full tiled layouts per operand</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+</section>
+</section>
+<hr class="docutils" />
+<section id="nested-hierarchical-layouts">
+<h2>10. Nested / hierarchical layouts<a class="headerlink" href="#nested-hierarchical-layouts" title="Link to this heading">#</a></h2>
+<p>The Fly dialect supports nested layouts for representing multi-level tiling hierarchies:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Nested shape: 9 elements in first mode, (4, 8) = 32 elements in second</span>
+<span class="n">shape</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_shape</span><span class="p">(</span><span class="mi">9</span><span class="p">,</span> <span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="mi">8</span><span class="p">))</span>
+</pre></div>
+</div>
+<p>Nested layouts are used in GEMM kernels for multi-level tiling (block → warp → thread → instruction).</p>
+</section>
+<hr class="docutils" />
+<section id="inttuple-arithmetic">
+<h2>11. IntTuple arithmetic<a class="headerlink" href="#inttuple-arithmetic" title="Link to this heading">#</a></h2>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Element-wise operations on IntTuples</span>
+<span class="n">sum_it</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">int_tuple_add</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">)</span>
+<span class="n">diff_it</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">int_tuple_sub</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">)</span>
+<span class="n">prod_it</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">int_tuple_mul</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">)</span>
+<span class="n">quot_it</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">int_tuple_div</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">)</span>
+
+<span class="c1"># Reduce to product</span>
+<span class="n">total</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">int_tuple_product</span><span class="p">(</span><span class="n">int_tuple</span><span class="p">)</span>
+
+<span class="c1"># Per-mode product (for nested tuples)</span>
+<span class="n">products</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">int_tuple_product_each</span><span class="p">(</span><span class="n">int_tuple</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="printf-debugging">
+<h2>12. Printf debugging<a class="headerlink" href="#printf-debugging" title="Link to this heading">#</a></h2>
+<p>The Fly dialect provides a <code class="docutils literal notranslate"><span class="pre">printf</span></code> op for kernel debugging:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">fx</span><span class="o">.</span><span class="n">printf</span><span class="p">(</span><span class="s2">"tid=</span><span class="si">{}</span><span class="s2"> bid=</span><span class="si">{}</span><span class="s2"> val=</span><span class="si">{}</span><span class="s2">"</span><span class="p">,</span> <span class="n">tid</span><span class="p">,</span> <span class="n">bid</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Supports:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">ir.Value</span></code> — dynamic values</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">int</span></code>, <code class="docutils literal notranslate"><span class="pre">float</span></code>, <code class="docutils literal notranslate"><span class="pre">bool</span></code> — auto-converted to constants</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">str</span></code>, <code class="docutils literal notranslate"><span class="pre">type</span></code> — embedded as static text</p></li>
+<li><p>DSL types with <code class="docutils literal notranslate"><span class="pre">__extract_to_ir_values__</span></code> — auto-unwrapped</p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="decision-tree">
+<h2>13. Decision tree<a class="headerlink" href="#decision-tree" title="Link to this heading">#</a></h2>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>Which layout operation do I need?
+
+├── Creating a layout?
+│   ├── From explicit shape + stride → make_layout(shape, stride)
+│   ├── Identity layout → make_identity_layout(shape)
+│   └── From existing components → make_layout(get_shape(l), new_stride)
+│
+├── Querying a layout?
+│   ├── Total elements → size(layout)
+│   ├── Extract component → get_shape(layout), get_stride(layout)
+│   ├── Single mode → get(shape, i)
+│   └── Number of modes → rank(layout)
+│
+├── Coordinate mapping?
+│   ├── Coord → memory index → crd2idx(coord, layout)
+│   ├── Memory index → coord → idx2crd(idx, layout)
+│   └── Tuple shortcut → fx.crd2idx([c0, c1], layout)
+│
+├── Combining layouts?
+│   ├── Sequential mapping → composition(A, B)
+│   ├── Extending threads → logical_product / raked_product / blocked_product
+│   └── Simplifying → coalesce(layout)
+│
+├── Partitioning / tiling?
+│   ├── Split layout → logical_divide / zipped_divide
+│   └── Hierarchical tile → tiled_divide
+│
+├── Type width change?
+│   └── recast_layout(layout, old_bits, new_bits)
+│
+└── Structural manipulation?
+    ├── Select modes → select(it, indices)
+    ├── Group modes → group(it, begin, end)
+    └── Extend → append(it, elem) / prepend(it, elem)
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="source-files">
+<h2>14. Source files<a class="headerlink" href="#source-files" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>File</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/expr/primitive.py</span></code></p></td>
+<td><p>All layout functions: construction, query, algebra, divide, product, copy, gemm</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/expr/derived.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">CopyAtom</span></code>, <code class="docutils literal notranslate"><span class="pre">MmaAtom</span></code>, <code class="docutils literal notranslate"><span class="pre">TiledCopy</span></code> wrapper classes</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/expr/typing.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">IntTupleType</span></code>, <code class="docutils literal notranslate"><span class="pre">LayoutType</span></code>, type definitions</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">include/flydsl/Dialect/Fly/IR/FlyOps.td</span></code></p></td>
+<td><p>Fly dialect op definitions</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">lib/Dialect/Fly/IR/FlyOps.cpp</span></code></p></td>
+<td><p>Type inference for composition, product, divide (Fly)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">include/flydsl/Dialect/Fly/Utils/LayoutUtils.h</span></code></p></td>
+<td><p>Layout algebra algorithms (composition, product, divide)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">tests/mlir/LayoutAlgebra/*.mlir</span></code></p></td>
+<td><p>Layout algebra MLIR lit tests</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+</section>
+
+
+                </article>
+              
+
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="architecture_guide.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">Architecture &amp; compilation pipeline guide</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="kernel_authoring_guide.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">Kernel authoring guide</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+    
+        
+              
+                <div class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+  <div class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> Contents
+  </div>
+  <nav class="bd-toc-nav page-toc">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#quick-reference">Quick reference</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#core-types">1. Core types</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#inttuple-patterns">IntTuple patterns</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#construction">2. Construction</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#python-api-via-flydsl-expr">Python API (via <code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code>)</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#coordinate-mapping">3. Coordinate mapping</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#crd2idx-coordinate-to-index"><code class="docutils literal notranslate"><span class="pre">crd2idx</span></code> — Coordinate to index</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#idx2crd-index-to-coordinate-inverse"><code class="docutils literal notranslate"><span class="pre">idx2crd</span></code> — Index to coordinate (inverse)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#example">Example</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#query-operations">4. Query operations</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#layout-algebra">5. Layout algebra</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#composition-composition-a-b">5.1 Composition: <code class="docutils literal notranslate"><span class="pre">composition(A,</span> <span class="pre">B)</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#complement-complement-tiler-target-size">5.2 Complement: <code class="docutils literal notranslate"><span class="pre">complement(tiler,</span> <span class="pre">target_size)</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#coalesce-coalesce-layout">5.3 Coalesce: <code class="docutils literal notranslate"><span class="pre">coalesce(layout)</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#right-inverse-right-inverse-layout">5.4 Right inverse: <code class="docutils literal notranslate"><span class="pre">right_inverse(layout)</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#recast-layout-recast-layout-layout-old-bits-new-bits">5.5 Recast layout: <code class="docutils literal notranslate"><span class="pre">recast_layout(layout,</span> <span class="pre">old_bits,</span> <span class="pre">new_bits)</span></code></a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#product-operations">6. Product operations</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#divide-operations">7. Divide operations</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#structural-operations">8. Structural operations</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#select-int-tuple-indices"><code class="docutils literal notranslate"><span class="pre">select(int_tuple,</span> <span class="pre">indices)</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#group-int-tuple-begin-end"><code class="docutils literal notranslate"><span class="pre">group(int_tuple,</span> <span class="pre">begin,</span> <span class="pre">end)</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#append-base-elem-prepend-base-elem"><code class="docutils literal notranslate"><span class="pre">append(base,</span> <span class="pre">elem)</span></code> / <code class="docutils literal notranslate"><span class="pre">prepend(base,</span> <span class="pre">elem)</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#slice-src-coord"><code class="docutils literal notranslate"><span class="pre">slice(src,</span> <span class="pre">coord)</span></code></a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#memref-view-copy-operations">9. MemRef / view / copy operations</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#memref-operations">MemRef operations</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#view-and-offset">View and offset</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#copy-atoms-and-tiled-copies">Copy atoms and tiled copies</a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#copy-atom-types">Copy atom types</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">Construction</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#thread-slicing-and-partitioning">Thread slicing and partitioning</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#execution">Execution</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#introspection">Introspection</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#nested-hierarchical-layouts">10. Nested / hierarchical layouts</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#inttuple-arithmetic">11. IntTuple arithmetic</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#printf-debugging">12. Printf debugging</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#decision-tree">13. Decision tree</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#source-files">14. Source files</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+    
+
+          </div>
+          <footer class="bd-footer-content">
+            <p>
+  </p>
+          </footer>
+        
+
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script src="_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
+<script src="_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    
+<footer class="rocm-footer">
+    <div class="container-lg">
+        <section class="bottom-menu menu py-45">
+            <div class="row d-flex align-items-center">
+                <div class="col-12 text-center">
+                    <ul>
+                        <li><a href="https://www.amd.com/en/corporate/copyright" target="_blank">Terms and Conditions</a></li>
+                        <li><a href="https://rocm.docs.amd.com/en/latest/about/license.html">ROCm Licenses and Disclaimers</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/privacy" target="_blank">Privacy</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/trademarks" target="_blank">Trademarks</a></li>
+                        <li><a href="https://www.amd.com/content/dam/amd/en/documents/corporate/cr/supply-chain-transparency.pdf" target="_blank">Supply Chain Transparency</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/competition" target="_blank">Fair and Open Competition</a></li>
+                        <li><a href="https://www.amd.com/system/files/documents/amd-uk-tax-strategy.pdf" target="_blank">UK Tax Strategy</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/cookies" target="_blank">Cookie Policy</a></li>
+                        <!-- OneTrust Cookies Settings button start -->
+                        <li><a href="#cookie-settings" id="ot-sdk-btn" class="ot-sdk-show-settings">Cookie Settings</a></li>
+                        <!-- OneTrust Cookies Settings button end -->
+                    </ul>
+                </div>
+            </div>
+            <div class="row d-flex align-items-center">
+                <div class="col-12 text-center">
+                    <div>
+                        <span class="copyright">© 2026 Advanced Micro Devices, Inc</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+</footer>
+
+<!-- <div id="rdc-watermark-container">
+    <img id="rdc-watermark" src="_static/images/alpha-watermark.svg" alt="DRAFT watermark"/>
+</div> -->
+    
+  </body>
+</html>

@@ -1,0 +1,905 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Composite Types &#8212; FlyDSL 0.3.2</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+
+  
+  <link href="../_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-regular-400.woff2" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=8f2a1f02" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/sphinx-book-theme.css?v=eba8b062" />
+    <link rel="stylesheet" type="text/css" href="../_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=22b90084" />
+    <link rel="stylesheet" type="text/css" href="../_static/rocm_header.css?v=037afccf" />
+    <link rel="stylesheet" type="text/css" href="../_static/rocm_footer.css?v=7095035a" />
+    <link rel="stylesheet" type="text/css" href="../_static/fonts.css?v=fcff5274" />
+    <link rel="stylesheet" type="text/css" href="../_static/sphinx-design.min.css?v=95c83b7e" />
+    <link rel="stylesheet" type="text/css" href="../_static/ai_ecosystem.css" />
+  
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
+  <script src="../_static/vendor/fontawesome/6.5.2/js/all.min.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    <script src="../_static/documentation_options.js?v=2f2e10e9"></script>
+    <script src="../_static/doctools.js?v=9bcbadda"></script>
+    <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=91c4cb68"></script>
+    <script async="async" src="../_static/code_word_breaks.js?v=327952c4"></script>
+    <script async="async" src="../_static/renameVersionLinks.js?v=929fe5e4"></script>
+    <script async="async" src="../_static/rdcMisc.js?v=01f88d96"></script>
+    <script async="async" src="../_static/theme_mode_captions.js?v=15f4ec5d"></script>
+    <script defer="defer" src="../_static/search.js?v=90a4452c"></script>
+    <script src="../_static/scripts/sphinx-book-theme.js?v=887ef09a"></script>
+    <script src="../_static/design-tabs.js?v=f930bc37"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'language/composite_types';</script>
+    <script async="async" src="https://download.amd.com/js/analytics/analyticsinit.js"></script>
+    <link rel="icon" href="https://www.amd.com/content/dam/code/images/favicon/favicon.ico"/>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Storage and Allocator" href="storage_and_allocator.html" />
+    <link rel="prev" title="Arithmetic types" href="arithmetic_types.html" />
+    <meta name="google-site-verification" content="vo35SZt_GASsTHAEmdww7AYKPCvZyzLvOXBl8guBME4" />
+
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-primary-sidebar-checkbox"/>
+  <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-secondary-sidebar-checkbox"/>
+  <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
+  
+  <div class="search-button__wrapper">
+    <div class="search-button__overlay"></div>
+    <div class="search-button__search-container">
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         id="search-input"
+         placeholder="Search..."
+         aria-label="Search..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form></div>
+  </div>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="common-header" >
+        <nav class="navbar navbar-expand-xl">
+            <div class="container-fluid main-nav rocm-header">
+                <div class="header-logo">
+                    <div class="header-logo-title">
+                        
+                            <button class="navbar-toggler collapsed" id="nav-icon" data-tracking-information="mainMenuToggle" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
+                                <span></span>
+                                <span></span>
+                                <span></span>
+                            </button>
+                        
+                        <a class="navbar-brand" href="https://www.amd.com/">
+                            <img src="../_static/images/amd-header-logo.svg" alt="AMD Logo" title="AMD Logo" width="90" class="d-inline-block align-text-top hover-opacity"/>
+                        </a>
+                        <div class="vr mx-40 my-25"></div>
+                        <a class="klavika-font hover-opacity" href="https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest">ROCm&#8482; AI Ecosystem</a>
+                    </div>
+                    
+                </div>
+                <div class="icon-nav text-center d-flex ms-auto"></div>
+            </div>
+        </nav>
+        
+        <nav class="navbar navbar-expand-xl second-level-nav">
+            <div class="container-fluid main-nav">
+                <div class="navbar-nav-container collapse navbar-collapse" id="navbarSupportedContent">
+                    
+                    <div class="d-flex w-100 align-items-stretch">
+                        <ul class="navbar-nav nav-mega mb-2 mb-lg-0">
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://rocm.docs.amd.com" id="navcore-sdk" role="button" aria-expanded="false" target="_blank">Core SDK</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links fw-bold" href="https://rocm.docs.amd.com/projects/ai-ecosystem" id="navai-ecosystem" role="button" aria-expanded="false" target="_blank">AI Ecosystem</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://instinct.docs.amd.com" id="navgpu-systems-and-infrastructure" role="button" aria-expanded="false" target="_blank">GPU Systems and Infrastructure</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item dropdown">
+                                
+                                    <a class="nav-link top-level header-menu-links dropdown-toggle header-nav-dropdown-toggle" href="#" id="navtoolkits" role="button" data-bs-toggle="dropdown" aria-expanded="false">Toolkits</a>
+                                    <ul class="dropdown-menu header-nav-dropdown-menu" aria-labelledby="navtoolkits">
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-ds/en/latest/index.html" target="_blank">AMD Data Science</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-finance/en/latest/index.html" target="_blank">AMD Finance</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-ls/en/latest/index.html" target="_blank">AMD Life Science</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-llmext/en/latest/index.html" target="_blank">AMD LLM Extension</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-simulation/en/latest/index.html" target="_blank">AMD Simulation</a></li>
+                                        
+                                    </ul>
+                                
+                            </li>
+                            
+                        </ul>
+                        <div class="nav-group-separator"></div>
+                        <ul class="navbar-nav nav-mega mb-2 mb-lg-0">
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://rocm.blogs.amd.com/" id="navblogs" role="button" aria-expanded="false" target="_blank">Blogs</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://www.amd.com/en/developer/resources/rocm-hub.html" id="navdeveloper-hub" role="button" aria-expanded="false" target="_blank">Developer Hub</a>
+                                
+                            </li>
+                            
+                        </ul>
+                    </div>
+                    
+                </div>
+            </div>
+        </nav>
+        
+    </header>
+    
+
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <div class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+
+<a class="navbar-brand logo" href="https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest">
+    <p>ROCm AI Ecosystem</p>
+</a></div>
+          
+        
+      </div>
+    
+    
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+  
+    <p class="title logo__title">FlyDSL 0.3.2</p>
+  
+</a></div>
+        <div class="sidebar-primary-item">
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">Search</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script></div>
+        <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
+    <div class="bd-toc-item navbar-nav active">
+        <ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../installation.html">Install FlyDSL</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart.html">Quick start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api_stability.html">API stability</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Language</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="arithmetic_types.html">Arithmetic types</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">Composite types</a></li>
+<li class="toctree-l1"><a class="reference internal" href="storage_and_allocator.html">Storage and allocator</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../architecture_guide.html">Architecture and compilation pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../layout_system_guide.html">Layout algebra</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../kernel_authoring_guide.html">Kernel authoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../kernel_tuning_guide.html">Kernel tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../autotune_guide.html">Offline autotune configs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../prebuilt_kernels_guide.html">Prebuilt kernel library</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../testing_benchmarking_guide.html">Testing and benchmarking</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cute_layout_algebra_guide.html">CuTe layout algebra</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../extern_integration_guide.html">External bitcode integration</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">API reference</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../api/dsl.html">FlyDSL Python DSL</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/compiler.html">Compiler and pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/kernels.html">Prebuilt kernels</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Tutorials</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../tutorials/basic_usage.html">Basic usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../tutorials/kernel_development.html">Kernel development techniques</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">About</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../about/license.html">License</a></li>
+</ul>
+
+    </div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+  
+  <div id="rtd-footer-container"></div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+
+<div class="sbt-scroll-pixel-helper"></div>
+
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item"><label class="sidebar-toggle primary-toggle btn btn-sm" for="__primary" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-angle-right"></span>
+  </label></div>
+      
+        <div class="header-article-item">
+
+
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    <li class="breadcrumb-item active" aria-current="page">Composite Types</li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+    <div class="header-article-items__end">
+      
+        <div class="header-article-item">
+
+<div class="article-header-buttons">
+
+
+
+
+
+<div class="dropdown dropdown-source-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Source repositories">
+    <i class="fab fa-github"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL" target="_blank"
+   class="btn btn-sm btn-source-repository-button dropdown-item"
+   title="Source repository"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fab fa-github"></i>
+  </span>
+<span class="btn__text-container">Repository</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL/blob/main/docs/language/composite_types.md?plain=1" target="_blank"
+   class="btn btn-sm btn-source-file-button dropdown-item"
+   title="Show source"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-code"></i>
+  </span>
+<span class="btn__text-container">Show source</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL/issues/new?title=Issue%20on%20page%20%2Flanguage/composite_types.html&body=Your%20issue%20content%20here." target="_blank"
+   class="btn btn-sm btn-source-issues-button dropdown-item"
+   title="Open an issue"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-lightbulb"></i>
+  </span>
+<span class="btn__text-container">Open issue</span>
+</a>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+
+
+<div class="dropdown dropdown-download-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Download this page">
+    <i class="fas fa-download"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="../_sources/language/composite_types.md" target="_blank"
+   class="btn btn-sm btn-download-source-button dropdown-item"
+   title="Download source file"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file"></i>
+  </span>
+<span class="btn__text-container">.md</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li>
+<button onclick="window.print()"
+  class="btn btn-sm btn-download-pdf-button dropdown-item"
+  title="Print to PDF"
+  data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file-pdf"></i>
+  </span>
+<span class="btn__text-container">.pdf</span>
+</button>
+</li>
+      
+  </ul>
+</div>
+
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script>
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm pst-navbar-icon search-button search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass fa-lg"></i>
+  </button>
+`);
+</script>
+<button class="sidebar-toggle secondary-toggle btn btn-sm" title="Toggle secondary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-list"></span>
+</button>
+</div></div>
+      
+    </div>
+  
+</div>
+</div>
+              
+              
+
+<div id="jb-print-docs-body" class="onlyprint">
+    <h1>Composite Types</h1>
+    <!-- Table of contents -->
+    <div id="print-main-content">
+        <div id="jb-print-toc">
+            
+            <div>
+                <h2> Contents </h2>
+            </div>
+            <nav aria-label="Page">
+                <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#declaring-a-composite">Declaring a composite</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#reserved-field-names">Reserved field names</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#what-can-be-a-field">What can be a field</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#nesting">Nesting</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#closure-over-the-protocols">Closure over the protocols</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#compile-time-fields">Compile-time fields</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#jit-and-kernel-boundaries">JIT and kernel boundaries</a></li>
+</ul>
+            </nav>
+        </div>
+    </div>
+</div>
+
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section class="tex2jax_ignore mathjax_ignore" id="composite-types">
+<h1>Composite Types<a class="headerlink" href="#composite-types" title="Link to this heading">#</a></h1>
+<p>A composite gives one name to several DSL values. There are exactly two forms — <code class="docutils literal notranslate"><span class="pre">&#64;fx.struct</span></code>, a
+<strong>product</strong> in which every declared field is present, and <code class="docutils literal notranslate"><span class="pre">&#64;fx.union</span></code>, a <strong>storage overlay</strong> in
+which every field starts at byte offset zero.</p>
+<p>A composite adds no capability of its own. Its whole semantics is <em>inheritance by field</em>: a
+composite supports exactly the protocols all of its fields support, recursively. Everything below is
+a consequence of that one rule.</p>
+<p>A composite is also a trace-time Python type, not a value in the generated MLIR program: grouping
+fields emits no aggregate operation.</p>
+<section id="declaring-a-composite">
+<h2>Declaring a composite<a class="headerlink" href="#declaring-a-composite" title="Link to this heading">#</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">&#64;fx.struct</span></code> declares an ordered product; the field annotations <em>are</em> the type, and class-level
+defaults do not create optional constructor arguments. Construction takes exactly one value per
+field, positionally or by name, and the result is frozen.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="nd">@fx</span><span class="o">.</span><span class="n">struct</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">Pair</span><span class="p">:</span>
+    <span class="n">left</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Int32</span>
+    <span class="n">right</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Float32</span>
+
+<span class="n">pair</span> <span class="o">=</span> <span class="n">Pair</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mf">2.0</span><span class="p">)</span>             <span class="c1"># ⇒ Pair(left=Int32(1), right=Float32(2.0))</span>
+<span class="n">pair</span><span class="o">.</span><span class="n">left</span>                       <span class="c1"># ⇒ Int32(1)</span>
+<span class="n">pair</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="n">left</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span><span class="o">.</span><span class="n">left</span>       <span class="c1"># ⇒ Int32(3); `pair` is unchanged</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">&#64;fx.union</span></code> declares alternative views of the same bytes. It is for scratch memory whose
+interpretation changes across phases, not for a tagged sum type: it carries no discriminant, tracks
+no active variant, and has <strong>no value form</strong> at all — a union is only ever reached through <a class="reference internal" href="storage_and_allocator.html"><span class="std std-doc">Storable
+and Allocator</span></a>.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="nd">@fx</span><span class="o">.</span><span class="n">union</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">Scratch</span><span class="p">:</span>
+    <span class="n">fp16</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Array</span><span class="p">[</span><span class="n">fx</span><span class="o">.</span><span class="n">Float16</span><span class="p">,</span> <span class="mi">128</span><span class="p">]</span>
+    <span class="n">fp32</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Array</span><span class="p">[</span><span class="n">fx</span><span class="o">.</span><span class="n">Float32</span><span class="p">,</span> <span class="mi">64</span><span class="p">]</span>
+
+<span class="n">Scratch</span><span class="p">(</span><span class="n">fp16</span><span class="o">=...</span><span class="p">)</span>               <span class="c1"># ⇒ TypeError: no value form</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">fx.Struct[...]</span></code> and <code class="docutils literal notranslate"><span class="pre">fx.Union[...]</span></code> are the inline forms of the same two declarations:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">Pair</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">Struct</span><span class="p">[</span><span class="s2">"left"</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Int32</span><span class="p">,</span> <span class="s2">"right"</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Float32</span><span class="p">]</span>
+<span class="n">fx</span><span class="o">.</span><span class="n">Struct</span><span class="p">[</span><span class="n">fx</span><span class="o">.</span><span class="n">Int32</span><span class="p">,</span> <span class="n">fx</span><span class="o">.</span><span class="n">Float32</span><span class="p">]</span> <span class="c1"># ⇒ generated field names `_0`, `_1`</span>
+</pre></div>
+</div>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Form</p></th>
+<th class="head"><p>Kind</p></th>
+<th class="head"><p>Meaning</p></th>
+<th class="head"><p>Example</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">⟨Type⟩(...)</span></code></p></td>
+<td><p>constructor</p></td>
+<td><p>one value per field, positional or by name; a field type may coerce its value</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Pair(1,</span> <span class="pre">2.0)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">value.⟨field⟩</span></code></p></td>
+<td><p>attribute access</p></td>
+<td><p>read that field</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">pair.left</span></code> ⇒ <code class="docutils literal notranslate"><span class="pre">Int32(1)</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">value.replace(⟨field⟩=new)</span></code></p></td>
+<td><p>method</p></td>
+<td><p>a new value with that field replaced</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">pair.replace(left=3)</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<section id="reserved-field-names">
+<h3>Reserved field names<a class="headerlink" href="#reserved-field-names" title="Link to this heading">#</a></h3>
+<p>A field is read as an ordinary attribute, and Python resolves a real class member before it ever
+reaches the field lookup. A field named after an existing member would therefore be permanently
+shadowed by it, so those names are rejected at declaration instead of failing mysteriously at use:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Reserved</p></th>
+<th class="head"><p>Why the name is taken</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">replace</span></code></p></td>
+<td><p>the only public member of a <code class="docutils literal notranslate"><span class="pre">&#64;fx.struct</span></code> value</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">peek</span></code>, <code class="docutils literal notranslate"><span class="pre">poke</span></code></p></td>
+<td><p>the public members of the <code class="docutils literal notranslate"><span class="pre">Storage[T]</span></code> view a composite type is reached through (see <a class="reference internal" href="storage_and_allocator.html#fx-storage-t-a-typed-address"><span class="std std-ref">Storage and Allocator</span></a>)</p></td>
+</tr>
+<tr class="row-even"><td><p>any name starting with <code class="docutils literal notranslate"><span class="pre">_</span></code></p></td>
+<td><p>the implementation’s own namespace</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The rule covers <code class="docutils literal notranslate"><span class="pre">&#64;fx.union</span></code> and the inline <code class="docutils literal notranslate"><span class="pre">fx.Struct[...]</span></code> / <code class="docutils literal notranslate"><span class="pre">fx.Union[...]</span></code> forms equally — a
+union is reached through the same <code class="docutils literal notranslate"><span class="pre">Storage</span></code> view. Only the names generated for anonymous inline
+fields (<code class="docutils literal notranslate"><span class="pre">_0</span></code>, <code class="docutils literal notranslate"><span class="pre">_1</span></code>, …) are exempt from the underscore rule; it applies to every name you write.</p>
+</section>
+</section>
+<section id="what-can-be-a-field">
+<h2>What can be a field<a class="headerlink" href="#what-can-be-a-field" title="Link to this heading">#</a></h2>
+<p><strong>Any type that is a <code class="docutils literal notranslate"><span class="pre">DslType</span></code> can be a field</strong> — that is the only requirement the composite itself
+imposes. <code class="docutils literal notranslate"><span class="pre">fx.Constexpr[T]</span></code> is the one addition: it is not a run-time value at all, but is admitted
+as trace-time configuration.</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Field type</p></th>
+<th class="head"><p>As a value field</p></th>
+<th class="head"><p>Contributes</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">Numeric</span></code> (<code class="docutils literal notranslate"><span class="pre">fx.Int32</span></code>, <code class="docutils literal notranslate"><span class="pre">fx.Float32</span></code>, …)</p></td>
+<td><p>yes</p></td>
+<td><p>one SSA value; also a host argument and a storage leaf</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">fx.Vector</span></code></p></td>
+<td><p>yes</p></td>
+<td><p>one SSA value; neither a host argument nor a storage leaf</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">fx.Pointer</span></code></p></td>
+<td><p>yes</p></td>
+<td><p>one SSA value</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">fx.Tensor</span></code></p></td>
+<td><p>yes, when built from a traced tensor</p></td>
+<td><p>one SSA value</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">fx.Array[E,</span> <span class="pre">N]</span></code></p></td>
+<td><p>yes</p></td>
+<td><p>one SSA value</p></td>
+</tr>
+<tr class="row-odd"><td><p>another <code class="docutils literal notranslate"><span class="pre">&#64;fx.struct</span></code></p></td>
+<td><p>yes</p></td>
+<td><p>its own fields, recursively</p></td>
+</tr>
+<tr class="row-even"><td><p>a <code class="docutils literal notranslate"><span class="pre">&#64;fx.union</span></code> type</p></td>
+<td><p><strong>no</strong> — it has no value form</p></td>
+<td><p>storage only</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">fx.Constexpr[T]</span></code></p></td>
+<td><p>yes, as a Python value</p></td>
+<td><p>nothing at run time</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>One point is worth stating outright:</p>
+<ul class="simple">
+<li><p>a union-typed field gives a struct a byte layout but not a value form: such a struct can be
+allocated and viewed, never constructed.</p></li>
+</ul>
+</section>
+<section id="nesting">
+<h2>Nesting<a class="headerlink" href="#nesting" title="Link to this heading">#</a></h2>
+<p>A field whose type is itself a composite nests structurally, to any depth, in both directions: a
+struct may hold structs and unions, and a union may hold structs. Nesting is not a special case —
+the nested type is just a field whose capabilities are the ones inherited by the rule above.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="nd">@fx</span><span class="o">.</span><span class="n">struct</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">Inner</span><span class="p">:</span>
+    <span class="n">x</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Int32</span>
+    <span class="n">y</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Int32</span>
+
+<span class="nd">@fx</span><span class="o">.</span><span class="n">struct</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">Outer</span><span class="p">:</span>
+    <span class="n">head</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Int32</span>
+    <span class="n">inner</span><span class="p">:</span> <span class="n">Inner</span>
+    <span class="n">tail</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Float32</span>
+
+
+<span class="n">Outer</span><span class="p">(</span><span class="n">head</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">inner</span><span class="o">=</span><span class="n">Inner</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">),</span> <span class="n">tail</span><span class="o">=</span><span class="mf">4.0</span><span class="p">)</span><span class="o">.</span><span class="n">inner</span><span class="o">.</span><span class="n">y</span>   <span class="c1"># ⇒ Int32(3)</span>
+</pre></div>
+</div>
+<p>Everything a composite does to its fields, it does recursively: flattening, reconstruction, cache
+signatures, ABI slots, byte offsets. A nested value is flattened only when a consumer needs its
+underlying IR values or storage.</p>
+</section>
+<section id="closure-over-the-protocols">
+<h2>Closure over the protocols<a class="headerlink" href="#closure-over-the-protocols" title="Link to this heading">#</a></h2>
+<p>FlyDSL’s three protocols — <code class="docutils literal notranslate"><span class="pre">DslType</span></code>, <code class="docutils literal notranslate"><span class="pre">JitArgument</span></code>, <code class="docutils literal notranslate"><span class="pre">Storable</span></code> describe what a value can do at a
+boundary. Composites are <strong>closed under each of them, independently</strong>:</p>
+<blockquote>
+<div><p>a composite satisfies protocol <code class="docutils literal notranslate"><span class="pre">P</span></code> if and only if every non-<code class="docutils literal notranslate"><span class="pre">Constexpr</span></code> field satisfies <code class="docutils literal notranslate"><span class="pre">P</span></code>; its
+implementation of <code class="docutils literal notranslate"><span class="pre">P</span></code> is the concatenation of the fields’ implementations, in declaration order.</p>
+</div></blockquote>
+<p>Closure is per protocol, so a type can satisfy one and not another. A struct of <code class="docutils literal notranslate"><span class="pre">fx.Int32</span></code> and
+<code class="docutils literal notranslate"><span class="pre">fx.Vector</span></code> is a perfectly good <code class="docutils literal notranslate"><span class="pre">DslType</span></code> — it flattens to two SSA values and rebuilds with the
+vector’s shape and dtype intact — but <code class="docutils literal notranslate"><span class="pre">fx.Vector</span></code> is neither a <code class="docutils literal notranslate"><span class="pre">JitArgument</span></code> nor <code class="docutils literal notranslate"><span class="pre">Storable</span></code>, so that
+struct is neither a host launch argument nor a storable type:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>struct { scalar: Int32, vector: Vector }
+  DslType      ⇒ [i32, vector&lt;4xf32&gt;]            # both fields qualify
+  JitArgument  ⇒ TypeError (Vector)              # one field disqualifies it
+  Storable     ⇒ TypeError (Vector)              # likewise
+</pre></div>
+</div>
+</section>
+<section id="compile-time-fields">
+<h2>Compile-time fields<a class="headerlink" href="#compile-time-fields" title="Link to this heading">#</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">fx.Constexpr[T]</span></code> marks a field as part of the type’s logical configuration rather than its
+representation. Constructing the struct specializes the <em>type</em> to that value, so the value travels
+in the type and is dropped from every protocol’s per-field composition.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="nd">@fx</span><span class="o">.</span><span class="n">struct</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">Params</span><span class="p">:</span>
+    <span class="n">tile</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Constexpr</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span>
+    <span class="n">scale</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Float32</span>
+
+<span class="n">params</span> <span class="o">=</span> <span class="n">Params</span><span class="p">(</span><span class="n">tile</span><span class="o">=</span><span class="mi">32</span><span class="p">,</span> <span class="n">scale</span><span class="o">=</span><span class="mf">1.0</span><span class="p">)</span>
+<span class="n">params</span><span class="o">.</span><span class="n">tile</span>                     <span class="c1"># ⇒ 32 (a Python int, usable in range_constexpr)</span>
+<span class="n">params</span><span class="o">.</span><span class="n">tile</span> <span class="o">=</span> <span class="mi">64</span>                <span class="c1"># ⇒ FrozenInstanceError, as for any field</span>
+<span class="nb">type</span><span class="p">(</span><span class="n">params</span><span class="p">)</span><span class="o">.</span><span class="vm">__name__</span>           <span class="c1"># ⇒ 'Params[tile=32]'</span>
+<span class="n">dsl_size_of</span><span class="p">(</span><span class="n">Params</span><span class="p">)</span>             <span class="c1"># ⇒ 4 — only `scale` has bytes</span>
+
+<span class="c1"># Changing it is a change of *type*, and the type is the JIT cache key:</span>
+<span class="nb">type</span><span class="p">(</span><span class="n">params</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="n">tile</span><span class="o">=</span><span class="mi">64</span><span class="p">))</span><span class="o">.</span><span class="vm">__name__</span>      <span class="c1"># ⇒ 'Params[tile=64]' — a new specialization</span>
+<span class="nb">type</span><span class="p">(</span><span class="n">params</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="n">scale</span><span class="o">=</span><span class="mf">2.0</span><span class="p">))</span><span class="o">.</span><span class="vm">__name__</span>    <span class="c1"># ⇒ 'Params[tile=32]' — reuses the artifact</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">T</span></code> may be <code class="docutils literal notranslate"><span class="pre">int</span></code>, <code class="docutils literal notranslate"><span class="pre">bool</span></code>, <code class="docutils literal notranslate"><span class="pre">float</span></code>, <code class="docutils literal notranslate"><span class="pre">str</span></code>, <code class="docutils literal notranslate"><span class="pre">tuple</span></code>, or <code class="docutils literal notranslate"><span class="pre">Callable</span></code> — the value must match it, and a
+capture-free lambda is the only accepted callable; a value of the wrong type is a <strong>must-signal</strong>
+<code class="docutils literal notranslate"><span class="pre">TypeError</span></code> at construction. A run-time value is therefore never a <code class="docutils literal notranslate"><span class="pre">Constexpr</span></code> value:
+<code class="docutils literal notranslate"><span class="pre">Params(tile=fx.Int32(4),</span> <span class="pre">…)</span></code> is that same <code class="docutils literal notranslate"><span class="pre">TypeError</span></code>. The same rules hold for a <code class="docutils literal notranslate"><span class="pre">Constexpr</span></code> field
+nested inside another struct.</p>
+</section>
+<section id="jit-and-kernel-boundaries">
+<h2>JIT and kernel boundaries<a class="headerlink" href="#jit-and-kernel-boundaries" title="Link to this heading">#</a></h2>
+<p>Where a struct may be built decides what its fields may be:</p>
+<ul class="simple">
+<li><p><strong>inside <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code>, passed to <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code></strong> — a struct built from traced DSL values crosses
+as one source-level kernel argument and arrives as the flattened field list. This is the way to
+group tensors: build <code class="docutils literal notranslate"><span class="pre">IOPair(a,</span> <span class="pre">b)</span></code> from the JIT function’s own <code class="docutils literal notranslate"><span class="pre">fx.Tensor</span></code> parameters.</p></li>
+<li><p><strong>inside a kernel</strong> — <code class="docutils literal notranslate"><span class="pre">value.field</span></code> is ordinary attribute access; the fields are reconstructed
+from the flattened argument list.</p></li>
+<li><p><strong>host → <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code></strong> — every non-<code class="docutils literal notranslate"><span class="pre">Constexpr</span></code> field must already be a JIT-compatible leaf, which
+by the closure rule means every field must be a <code class="docutils literal notranslate"><span class="pre">JitArgument</span></code>. Scalar fields work directly,
+including from Python literals (<code class="docutils literal notranslate"><span class="pre">Pair(3,</span> <span class="pre">4.0)</span></code>).</p></li>
+</ul>
+<p><strong>Implementation restriction</strong> — a raw framework tensor is not accepted as an <code class="docutils literal notranslate"><span class="pre">fx.Tensor</span></code> field:
+<code class="docutils literal notranslate"><span class="pre">IOPair(torch_a,</span> <span class="pre">torch_b)</span></code> is a <code class="docutils literal notranslate"><span class="pre">TypeError</span></code> at construction, and wrapping the leaves with
+<code class="docutils literal notranslate"><span class="pre">flyc.from_torch_tensor(...)</span></code> / <code class="docutils literal notranslate"><span class="pre">flyc.from_dlpack(...)</span></code> does not help either, because the resulting
+host adapter is not an <code class="docutils literal notranslate"><span class="pre">fx.Tensor</span></code> value. Pass those tensors as top-level JIT arguments and build
+the struct inside the JIT body.</p>
+<p>A struct is still not a device aggregate ABI object: the non-<code class="docutils literal notranslate"><span class="pre">Constexpr</span></code> fields <em>are</em> the ABI slots,
+in declaration order. Use a <code class="docutils literal notranslate"><span class="pre">Tensor</span></code>-field struct when the goal is to name and transport related
+kernel arguments, and a storable struct when the goal is memory placement.</p>
+</section>
+</section>
+
+
+                </article>
+              
+
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="arithmetic_types.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">Arithmetic types</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="storage_and_allocator.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">Storage and Allocator</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+    
+        
+              
+                <div class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+  <div class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> Contents
+  </div>
+  <nav class="bd-toc-nav page-toc">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#declaring-a-composite">Declaring a composite</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#reserved-field-names">Reserved field names</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#what-can-be-a-field">What can be a field</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#nesting">Nesting</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#closure-over-the-protocols">Closure over the protocols</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#compile-time-fields">Compile-time fields</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#jit-and-kernel-boundaries">JIT and kernel boundaries</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+    
+
+          </div>
+          <footer class="bd-footer-content">
+            <p>
+  </p>
+          </footer>
+        
+
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script src="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
+<script src="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    
+<footer class="rocm-footer">
+    <div class="container-lg">
+        <section class="bottom-menu menu py-45">
+            <div class="row d-flex align-items-center">
+                <div class="col-12 text-center">
+                    <ul>
+                        <li><a href="https://www.amd.com/en/corporate/copyright" target="_blank">Terms and Conditions</a></li>
+                        <li><a href="https://rocm.docs.amd.com/en/latest/about/license.html">ROCm Licenses and Disclaimers</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/privacy" target="_blank">Privacy</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/trademarks" target="_blank">Trademarks</a></li>
+                        <li><a href="https://www.amd.com/content/dam/amd/en/documents/corporate/cr/supply-chain-transparency.pdf" target="_blank">Supply Chain Transparency</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/competition" target="_blank">Fair and Open Competition</a></li>
+                        <li><a href="https://www.amd.com/system/files/documents/amd-uk-tax-strategy.pdf" target="_blank">UK Tax Strategy</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/cookies" target="_blank">Cookie Policy</a></li>
+                        <!-- OneTrust Cookies Settings button start -->
+                        <li><a href="#cookie-settings" id="ot-sdk-btn" class="ot-sdk-show-settings">Cookie Settings</a></li>
+                        <!-- OneTrust Cookies Settings button end -->
+                    </ul>
+                </div>
+            </div>
+            <div class="row d-flex align-items-center">
+                <div class="col-12 text-center">
+                    <div>
+                        <span class="copyright">© 2026 Advanced Micro Devices, Inc</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+</footer>
+
+<!-- <div id="rdc-watermark-container">
+    <img id="rdc-watermark" src="../_static/images/alpha-watermark.svg" alt="DRAFT watermark"/>
+</div> -->
+    
+  </body>
+</html>

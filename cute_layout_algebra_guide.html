@@ -1,0 +1,1524 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="./" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>CuTe layout algebra reference for FlyDSL &#8212; FlyDSL 0.3.2</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+
+  
+  <link href="_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-regular-400.woff2" />
+
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=8f2a1f02" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/sphinx-book-theme.css?v=eba8b062" />
+    <link rel="stylesheet" type="text/css" href="_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="_static/custom.css?v=22b90084" />
+    <link rel="stylesheet" type="text/css" href="_static/rocm_header.css?v=037afccf" />
+    <link rel="stylesheet" type="text/css" href="_static/rocm_footer.css?v=7095035a" />
+    <link rel="stylesheet" type="text/css" href="_static/fonts.css?v=fcff5274" />
+    <link rel="stylesheet" type="text/css" href="_static/sphinx-design.min.css?v=95c83b7e" />
+    <link rel="stylesheet" type="text/css" href="_static/ai_ecosystem.css" />
+  
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
+<link rel="preload" as="script" href="_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
+  <script src="_static/vendor/fontawesome/6.5.2/js/all.min.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    <script src="_static/documentation_options.js?v=2f2e10e9"></script>
+    <script src="_static/doctools.js?v=9bcbadda"></script>
+    <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="_static/copybutton.js?v=91c4cb68"></script>
+    <script async="async" src="_static/code_word_breaks.js?v=327952c4"></script>
+    <script async="async" src="_static/renameVersionLinks.js?v=929fe5e4"></script>
+    <script async="async" src="_static/rdcMisc.js?v=01f88d96"></script>
+    <script async="async" src="_static/theme_mode_captions.js?v=15f4ec5d"></script>
+    <script defer="defer" src="_static/search.js?v=90a4452c"></script>
+    <script src="_static/scripts/sphinx-book-theme.js?v=887ef09a"></script>
+    <script src="_static/design-tabs.js?v=f930bc37"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'cute_layout_algebra_guide';</script>
+    <script async="async" src="https://download.amd.com/js/analytics/analyticsinit.js"></script>
+    <link rel="icon" href="https://www.amd.com/content/dam/code/images/favicon/favicon.ico"/>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="External bitcode integration (ffi + link_extern)" href="extern_integration_guide.html" />
+    <link rel="prev" title="Testing &amp; benchmarking guide" href="testing_benchmarking_guide.html" />
+    <meta name="google-site-verification" content="vo35SZt_GASsTHAEmdww7AYKPCvZyzLvOXBl8guBME4" />
+
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-primary-sidebar-checkbox"/>
+  <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-secondary-sidebar-checkbox"/>
+  <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
+  
+  <div class="search-button__wrapper">
+    <div class="search-button__overlay"></div>
+    <div class="search-button__search-container">
+<form class="bd-search d-flex align-items-center"
+      action="search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         id="search-input"
+         placeholder="Search..."
+         aria-label="Search..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form></div>
+  </div>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="common-header" >
+        <nav class="navbar navbar-expand-xl">
+            <div class="container-fluid main-nav rocm-header">
+                <div class="header-logo">
+                    <div class="header-logo-title">
+                        
+                            <button class="navbar-toggler collapsed" id="nav-icon" data-tracking-information="mainMenuToggle" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
+                                <span></span>
+                                <span></span>
+                                <span></span>
+                            </button>
+                        
+                        <a class="navbar-brand" href="https://www.amd.com/">
+                            <img src="_static/images/amd-header-logo.svg" alt="AMD Logo" title="AMD Logo" width="90" class="d-inline-block align-text-top hover-opacity"/>
+                        </a>
+                        <div class="vr mx-40 my-25"></div>
+                        <a class="klavika-font hover-opacity" href="https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest">ROCm&#8482; AI Ecosystem</a>
+                    </div>
+                    
+                </div>
+                <div class="icon-nav text-center d-flex ms-auto"></div>
+            </div>
+        </nav>
+        
+        <nav class="navbar navbar-expand-xl second-level-nav">
+            <div class="container-fluid main-nav">
+                <div class="navbar-nav-container collapse navbar-collapse" id="navbarSupportedContent">
+                    
+                    <div class="d-flex w-100 align-items-stretch">
+                        <ul class="navbar-nav nav-mega mb-2 mb-lg-0">
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://rocm.docs.amd.com" id="navcore-sdk" role="button" aria-expanded="false" target="_blank">Core SDK</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links fw-bold" href="https://rocm.docs.amd.com/projects/ai-ecosystem" id="navai-ecosystem" role="button" aria-expanded="false" target="_blank">AI Ecosystem</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://instinct.docs.amd.com" id="navgpu-systems-and-infrastructure" role="button" aria-expanded="false" target="_blank">GPU Systems and Infrastructure</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item dropdown">
+                                
+                                    <a class="nav-link top-level header-menu-links dropdown-toggle header-nav-dropdown-toggle" href="#" id="navtoolkits" role="button" data-bs-toggle="dropdown" aria-expanded="false">Toolkits</a>
+                                    <ul class="dropdown-menu header-nav-dropdown-menu" aria-labelledby="navtoolkits">
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-ds/en/latest/index.html" target="_blank">AMD Data Science</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-finance/en/latest/index.html" target="_blank">AMD Finance</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-ls/en/latest/index.html" target="_blank">AMD Life Science</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-llmext/en/latest/index.html" target="_blank">AMD LLM Extension</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-simulation/en/latest/index.html" target="_blank">AMD Simulation</a></li>
+                                        
+                                    </ul>
+                                
+                            </li>
+                            
+                        </ul>
+                        <div class="nav-group-separator"></div>
+                        <ul class="navbar-nav nav-mega mb-2 mb-lg-0">
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://rocm.blogs.amd.com/" id="navblogs" role="button" aria-expanded="false" target="_blank">Blogs</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://www.amd.com/en/developer/resources/rocm-hub.html" id="navdeveloper-hub" role="button" aria-expanded="false" target="_blank">Developer Hub</a>
+                                
+                            </li>
+                            
+                        </ul>
+                    </div>
+                    
+                </div>
+            </div>
+        </nav>
+        
+    </header>
+    
+
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <div class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+
+<a class="navbar-brand logo" href="https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest">
+    <p>ROCm AI Ecosystem</p>
+</a></div>
+          
+        
+      </div>
+    
+    
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="index.html">
+  
+  
+  
+  
+  
+  
+    <p class="title logo__title">FlyDSL 0.3.2</p>
+  
+</a></div>
+        <div class="sidebar-primary-item">
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">Search</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script></div>
+        <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
+    <div class="bd-toc-item navbar-nav active">
+        <ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Install FlyDSL</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api_stability.html">API stability</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Language</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="language/arithmetic_types.html">Arithmetic types</a></li>
+<li class="toctree-l1"><a class="reference internal" href="language/composite_types.html">Composite types</a></li>
+<li class="toctree-l1"><a class="reference internal" href="language/storage_and_allocator.html">Storage and allocator</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="architecture_guide.html">Architecture and compilation pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="layout_system_guide.html">Layout algebra</a></li>
+<li class="toctree-l1"><a class="reference internal" href="kernel_authoring_guide.html">Kernel authoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="kernel_tuning_guide.html">Kernel tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="autotune_guide.html">Offline autotune configs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="prebuilt_kernels_guide.html">Prebuilt kernel library</a></li>
+<li class="toctree-l1"><a class="reference internal" href="testing_benchmarking_guide.html">Testing and benchmarking</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">CuTe layout algebra</a></li>
+<li class="toctree-l1"><a class="reference internal" href="extern_integration_guide.html">External bitcode integration</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">API reference</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="api/dsl.html">FlyDSL Python DSL</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/compiler.html">Compiler and pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/kernels.html">Prebuilt kernels</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Tutorials</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="tutorials/basic_usage.html">Basic usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="tutorials/kernel_development.html">Kernel development techniques</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">About</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="about/license.html">License</a></li>
+</ul>
+
+    </div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+  
+  <div id="rtd-footer-container"></div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+
+<div class="sbt-scroll-pixel-helper"></div>
+
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item"><label class="sidebar-toggle primary-toggle btn btn-sm" for="__primary" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-angle-right"></span>
+  </label></div>
+      
+        <div class="header-article-item">
+
+
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    <li class="breadcrumb-item active" aria-current="page">CuTe layout...</li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+    <div class="header-article-items__end">
+      
+        <div class="header-article-item">
+
+<div class="article-header-buttons">
+
+
+
+
+
+<div class="dropdown dropdown-source-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Source repositories">
+    <i class="fab fa-github"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL" target="_blank"
+   class="btn btn-sm btn-source-repository-button dropdown-item"
+   title="Source repository"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fab fa-github"></i>
+  </span>
+<span class="btn__text-container">Repository</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL/blob/main/docs/cute_layout_algebra_guide.md?plain=1" target="_blank"
+   class="btn btn-sm btn-source-file-button dropdown-item"
+   title="Show source"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-code"></i>
+  </span>
+<span class="btn__text-container">Show source</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL/issues/new?title=Issue%20on%20page%20%2Fcute_layout_algebra_guide.html&body=Your%20issue%20content%20here." target="_blank"
+   class="btn btn-sm btn-source-issues-button dropdown-item"
+   title="Open an issue"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-lightbulb"></i>
+  </span>
+<span class="btn__text-container">Open issue</span>
+</a>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+
+
+<div class="dropdown dropdown-download-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Download this page">
+    <i class="fas fa-download"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="_sources/cute_layout_algebra_guide.md" target="_blank"
+   class="btn btn-sm btn-download-source-button dropdown-item"
+   title="Download source file"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file"></i>
+  </span>
+<span class="btn__text-container">.md</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li>
+<button onclick="window.print()"
+  class="btn btn-sm btn-download-pdf-button dropdown-item"
+  title="Print to PDF"
+  data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file-pdf"></i>
+  </span>
+<span class="btn__text-container">.pdf</span>
+</button>
+</li>
+      
+  </ul>
+</div>
+
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script>
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm pst-navbar-icon search-button search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass fa-lg"></i>
+  </button>
+`);
+</script>
+<button class="sidebar-toggle secondary-toggle btn btn-sm" title="Toggle secondary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-list"></span>
+</button>
+</div></div>
+      
+    </div>
+  
+</div>
+</div>
+              
+              
+
+<div id="jb-print-docs-body" class="onlyprint">
+    <h1>CuTe layout algebra reference for FlyDSL</h1>
+    <!-- Table of contents -->
+    <div id="print-main-content">
+        <div id="jb-print-toc">
+            
+            <div>
+                <h2> Contents </h2>
+            </div>
+            <nav aria-label="Page">
+                <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#overview">1. Overview</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#what-is-the-cute-layout-algebra">1.1 What is the CuTe layout algebra?</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flydsl-as-an-amd-implementation">1.2 FlyDSL as an AMD implementation</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#layout-algebra-fundamentals">2. Layout algebra fundamentals</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#core-types">2.1 Core types</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#query-operations">2.2 Query operations</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#coordinate-mapping">2.3 Coordinate mapping</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#layout-algebra-operations">2.4 Layout algebra operations</a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#composition">Composition</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#complement">Complement</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#coalesce">Coalesce</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#products">Products</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#divides">Divides</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#partitioning-utilities">Partitioning utilities</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#flydsl-kernel-development">3. FlyDSL kernel development</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#thread-and-block-hierarchy">4. Thread and block hierarchy</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#tensor-creation-and-memory">5. Tensor creation and memory</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#tensor-construction">5.1 Tensor construction</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#memory-hierarchy">5.2 Memory hierarchy</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#swizzling-bank-conflict-avoidance">5.3 Swizzling (bank conflict avoidance)</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#data-movement">6. Data movement</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#copy-atoms-and-tiled-copies">6.1 Copy atoms and tiled copies</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#buffer-loads-amd-specific">6.2 Buffer loads (AMD-specific)</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#compute-operations-mfma">7. Compute operations (MFMA)</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#synchronization">8. Synchronization</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#compilation-and-execution">9. Compilation and execution</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#compilation-pipeline">9.1 Compilation pipeline</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#environment-variables">9.2 Environment variables</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#complete-example-gemm-with-layout-algebra">10. Complete example: GEMM with layout algebra</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#references">11. References</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#cute-layout-algebra-bsd-3-clause">CuTe layout algebra (BSD-3-Clause)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flydsl-source-files">FlyDSL source files</a></li>
+</ul>
+</li>
+</ul>
+            </nav>
+        </div>
+    </div>
+</div>
+
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section class="tex2jax_ignore mathjax_ignore" id="cute-layout-algebra-reference-for-flydsl">
+<h1>CuTe layout algebra reference for FlyDSL<a class="headerlink" href="#cute-layout-algebra-reference-for-flydsl" title="Link to this heading">#</a></h1>
+<p>FlyDSL implements the CuTe layout algebra for AMD GPUs. This guide covers the mathematical foundations of the layout algebra and how FlyDSL exposes them through its Python API.</p>
+<p>The CuTe layout algebra was introduced in the <a class="reference external" href="https://github.com/NVIDIA/cutlass">CUTLASS</a> C++ library under BSD-3-Clause license (<code class="docutils literal notranslate"><span class="pre">include/cute/</span></code>). FlyDSL adopts the same algebraic framework — shapes, strides, coordinate mappings, products, and divides — and provides a Python API targeting AMD ROCm/HIP GPUs via MLIR.</p>
+<hr class="docutils" />
+<section id="overview">
+<h2>1. Overview<a class="headerlink" href="#overview" title="Link to this heading">#</a></h2>
+<section id="what-is-the-cute-layout-algebra">
+<h3>1.1 What is the CuTe layout algebra?<a class="headerlink" href="#what-is-the-cute-layout-algebra" title="Link to this heading">#</a></h3>
+<p>The CuTe layout algebra is a mathematical framework for describing multidimensional data layouts as compositions of shapes, strides, and coordinate transformations. It provides:</p>
+<ul class="simple">
+<li><p><strong>Layouts</strong> as first-class objects: a pair <code class="docutils literal notranslate"><span class="pre">(Shape,</span> <span class="pre">Stride)</span></code> that maps logical coordinates to physical offsets</p></li>
+<li><p><strong>Algebraic operations</strong>: composition, complement, products, and divides that transform layouts while preserving correctness</p></li>
+<li><p><strong>Tiling and partitioning</strong>: systematic decomposition of data across threads, warps/wavefronts, and blocks</p></li>
+</ul>
+<p>The algebra is defined in the C++ headers of CUTLASS (BSD-3-Clause):</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">include/cute/layout.hpp</span></code> — Layout type, shape/stride types, core operations</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">include/cute/tensor.hpp</span></code> — Tensor type (pointer + layout)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">include/cute/algorithm/</span></code> — Copy, GEMM, and other algorithmic building blocks</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">include/cute/numeric/integral_constant.hpp</span></code> — Compile-time integer constants</p></li>
+</ul>
+<p>A pure-Python reference implementation also exists in PyTorch:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">torch/distributed/_pycute/layout.py</span></code> — Layout class with all algebra operations</p></li>
+</ul>
+</section>
+<section id="flydsl-as-an-amd-implementation">
+<h3>1.2 FlyDSL as an AMD implementation<a class="headerlink" href="#flydsl-as-an-amd-implementation" title="Link to this heading">#</a></h3>
+<p>FlyDSL implements the CuTe layout algebra for AMD GPUs through the Fly MLIR dialect:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Aspect</p></th>
+<th class="head"><p>CuTe C++ (CUTLASS)</p></th>
+<th class="head"><p>FlyDSL</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>Language</strong></p></td>
+<td><p>C++ templates</p></td>
+<td><p>Python + MLIR emission</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Hardware</strong></p></td>
+<td><p>NVIDIA CUDA GPUs</p></td>
+<td><p>AMD ROCm/HIP GPUs</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>IR backend</strong></p></td>
+<td><p>C++ templates → CUDA/PTX</p></td>
+<td><p>Fly MLIR dialect → ROCDL → HSACO</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Kernel model</strong></p></td>
+<td><p>C++ kernel functions</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> + <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Memory model</strong></p></td>
+<td><p>GMEM → SMEM → RMEM</p></td>
+<td><p>GMEM → LDS → VGPR</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Compilation</strong></p></td>
+<td><p>nvcc / CUTLASS build</p></td>
+<td><p>Python → MLIR → ROCDL → HSACO binary</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Wave/Warp size</strong></p></td>
+<td><p>32 threads (warp)</p></td>
+<td><p>64 threads (wavefront)</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="layout-algebra-fundamentals">
+<h2>2. Layout algebra fundamentals<a class="headerlink" href="#layout-algebra-fundamentals" title="Link to this heading">#</a></h2>
+<section id="core-types">
+<h3>2.1 Core types<a class="headerlink" href="#core-types" title="Link to this heading">#</a></h3>
+<p>A <strong>Layout</strong> is defined by a pair <code class="docutils literal notranslate"><span class="pre">(Shape,</span> <span class="pre">Stride)</span></code>:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Concept</p></th>
+<th class="head"><p>Mathematical definition</p></th>
+<th class="head"><p>FlyDSL API</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>Shape</strong></p></td>
+<td><p>Tuple of positive integers describing dimensions</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.make_shape(M,</span> <span class="pre">N)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Stride</strong></p></td>
+<td><p>Tuple of integers describing step sizes per dimension</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.make_stride(s0,</span> <span class="pre">s1)</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Layout</strong></p></td>
+<td><p>Pair <code class="docutils literal notranslate"><span class="pre">(Shape,</span> <span class="pre">Stride)</span></code> defining a coordinate → index mapping</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.make_layout(shape,</span> <span class="pre">stride)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Coord</strong></p></td>
+<td><p>Tuple of integers identifying a position in logical space</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.make_coord(i,</span> <span class="pre">j)</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<blockquote>
+<div><p><strong>Reference:</strong> <code class="docutils literal notranslate"><span class="pre">include/cute/layout.hpp</span></code> — <code class="docutils literal notranslate"><span class="pre">Layout&lt;Shape,</span> <span class="pre">Stride&gt;</span></code> template class.</p>
+</div></blockquote>
+<p><strong>FlyDSL example:</strong></p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">shape</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_shape</span><span class="p">(</span><span class="mi">128</span><span class="p">,</span> <span class="mi">64</span><span class="p">)</span>
+<span class="n">stride</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_stride</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">128</span><span class="p">)</span>    <span class="c1"># Column-major</span>
+<span class="n">layout</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_layout</span><span class="p">(</span><span class="n">shape</span><span class="p">,</span> <span class="n">stride</span><span class="p">)</span>
+<span class="n">coord</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_coord</span><span class="p">(</span><span class="mi">3</span><span class="p">,</span> <span class="mi">5</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="query-operations">
+<h3>2.2 Query operations<a class="headerlink" href="#query-operations" title="Link to this heading">#</a></h3>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Operation</p></th>
+<th class="head"><p>Formula</p></th>
+<th class="head"><p>FlyDSL API</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>size</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">product(shape)</span></code> — total number of elements</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.size(layout)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>cosize</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">max(index)</span> <span class="pre">+</span> <span class="pre">1</span></code> — size of the codomain</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.cosize(layout)</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><strong>rank</strong></p></td>
+<td><p>Number of modes (top-level dimensions)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.rank(layout)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>size of mode i</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">shape[i]</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.get(fx.get_shape(layout),</span> <span class="pre">i)</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<blockquote>
+<div><p><strong>Reference:</strong> <code class="docutils literal notranslate"><span class="pre">include/cute/layout.hpp</span></code> — <code class="docutils literal notranslate"><span class="pre">size()</span></code>, <code class="docutils literal notranslate"><span class="pre">cosize()</span></code>, <code class="docutils literal notranslate"><span class="pre">rank()</span></code> functions.</p>
+</div></blockquote>
+</section>
+<section id="coordinate-mapping">
+<h3>2.3 Coordinate mapping<a class="headerlink" href="#coordinate-mapping" title="Link to this heading">#</a></h3>
+<p>The fundamental operation of a layout is mapping a logical coordinate to a physical index:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">index</span> <span class="o">=</span> <span class="n">crd2idx</span><span class="p">(</span><span class="n">coord</span><span class="p">,</span> <span class="n">layout</span><span class="p">)</span> <span class="o">=</span> <span class="n">dot</span><span class="p">(</span><span class="n">coord</span><span class="p">,</span> <span class="n">stride</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>For a layout <code class="docutils literal notranslate"><span class="pre">L</span> <span class="pre">=</span> <span class="pre">((S0,</span> <span class="pre">S1),</span> <span class="pre">(d0,</span> <span class="pre">d1))</span></code> and coordinate <code class="docutils literal notranslate"><span class="pre">(c0,</span> <span class="pre">c1)</span></code>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">index</span> <span class="o">=</span> <span class="n">c0</span> <span class="o">*</span> <span class="n">d0</span> <span class="o">+</span> <span class="n">c1</span> <span class="o">*</span> <span class="n">d1</span>
+</pre></div>
+</div>
+<p>The inverse operation recovers a coordinate from a linear index:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">coord</span> <span class="o">=</span> <span class="n">idx2crd</span><span class="p">(</span><span class="n">index</span><span class="p">,</span> <span class="n">layout</span><span class="p">)</span>
+</pre></div>
+</div>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Operation</p></th>
+<th class="head"><p>Definition</p></th>
+<th class="head"><p>FlyDSL API</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>crd2idx</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">coord</span> <span class="pre">→</span> <span class="pre">index</span> <span class="pre">=</span> <span class="pre">sum(c_i</span> <span class="pre">*</span> <span class="pre">d_i)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.crd2idx(coord,</span> <span class="pre">layout)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>idx2crd</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">index</span> <span class="pre">→</span> <span class="pre">coord</span></code> (successive div/mod by shape elements)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.idx2crd(idx,</span> <span class="pre">layout)</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<blockquote>
+<div><p><strong>Reference:</strong> <code class="docutils literal notranslate"><span class="pre">include/cute/layout.hpp</span></code> — <code class="docutils literal notranslate"><span class="pre">crd2idx()</span></code>, <code class="docutils literal notranslate"><span class="pre">idx2crd()</span></code>.</p>
+</div></blockquote>
+</section>
+<section id="layout-algebra-operations">
+<h3>2.4 Layout algebra operations<a class="headerlink" href="#layout-algebra-operations" title="Link to this heading">#</a></h3>
+<p>All operations below are defined mathematically in the CuTe algebra and implemented in FlyDSL with identical semantics.</p>
+<section id="composition">
+<h4>Composition<a class="headerlink" href="#composition" title="Link to this heading">#</a></h4>
+<p>Given layouts <code class="docutils literal notranslate"><span class="pre">A</span> <span class="pre">=</span> <span class="pre">(S_A,</span> <span class="pre">d_A)</span></code> and <code class="docutils literal notranslate"><span class="pre">B</span> <span class="pre">=</span> <span class="pre">(S_B,</span> <span class="pre">d_B)</span></code>, the composition <code class="docutils literal notranslate"><span class="pre">A</span> <span class="pre">∘</span> <span class="pre">B</span></code> creates a new layout where B’s indices are fed through A:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>(A ∘ B)(c) = A(B(c))
+</pre></div>
+</div>
+<p>FlyDSL: <code class="docutils literal notranslate"><span class="pre">fx.composition(A,</span> <span class="pre">B)</span></code></p>
+<blockquote>
+<div><p><strong>Reference:</strong> <code class="docutils literal notranslate"><span class="pre">include/cute/layout.hpp</span></code> — <code class="docutils literal notranslate"><span class="pre">composition()</span></code>.</p>
+</div></blockquote>
+</section>
+<section id="complement">
+<h4>Complement<a class="headerlink" href="#complement" title="Link to this heading">#</a></h4>
+<p>The complement of layout <code class="docutils literal notranslate"><span class="pre">A</span></code> with respect to a codomain size <code class="docutils literal notranslate"><span class="pre">M</span></code> produces a layout <code class="docutils literal notranslate"><span class="pre">B</span></code> such that <code class="docutils literal notranslate"><span class="pre">(A,</span> <span class="pre">B)</span></code> together cover <code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">M)</span></code>:</p>
+<p>FlyDSL: <code class="docutils literal notranslate"><span class="pre">fx.complement(layout,</span> <span class="pre">cotarget)</span></code></p>
+<blockquote>
+<div><p><strong>Reference:</strong> <code class="docutils literal notranslate"><span class="pre">include/cute/layout.hpp</span></code> — <code class="docutils literal notranslate"><span class="pre">complement()</span></code>.</p>
+</div></blockquote>
+</section>
+<section id="coalesce">
+<h4>Coalesce<a class="headerlink" href="#coalesce" title="Link to this heading">#</a></h4>
+<p>Merges adjacent modes with compatible strides into a single mode, producing a simplified but functionally equivalent layout:</p>
+<p>FlyDSL: <code class="docutils literal notranslate"><span class="pre">fx.coalesce(layout)</span></code></p>
+<blockquote>
+<div><p><strong>Reference:</strong> <code class="docutils literal notranslate"><span class="pre">include/cute/layout.hpp</span></code> — <code class="docutils literal notranslate"><span class="pre">coalesce()</span></code>.</p>
+</div></blockquote>
+</section>
+<section id="products">
+<h4>Products<a class="headerlink" href="#products" title="Link to this heading">#</a></h4>
+<p>Products combine two layouts to create higher-rank layouts. They differ in how the result modes are organized:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Product</p></th>
+<th class="head"><p>Description</p></th>
+<th class="head"><p>FlyDSL API</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>Logical Product</strong></p></td>
+<td><p>Append B’s modes as new outer modes of A</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.logical_product(A,</span> <span class="pre">B)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Zipped Product</strong></p></td>
+<td><p>Like logical, but zip inner modes together</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.zipped_product(A,</span> <span class="pre">B)</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Tiled Product</strong></p></td>
+<td><p>Like logical, but group by tile</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.tiled_product(A,</span> <span class="pre">B)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Flat Product</strong></p></td>
+<td><p>Flatten all result modes</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.flat_product(A,</span> <span class="pre">B)</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Raked Product</strong></p></td>
+<td><p>Interleave A and B elements (raked distribution)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.raked_product(A,</span> <span class="pre">B)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Blocked Product</strong></p></td>
+<td><p>Block A elements together, then B (blocked distribution)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.blocked_product(A,</span> <span class="pre">B)</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<blockquote>
+<div><p><strong>Reference:</strong> <code class="docutils literal notranslate"><span class="pre">include/cute/layout.hpp</span></code> — <code class="docutils literal notranslate"><span class="pre">logical_product()</span></code>, <code class="docutils literal notranslate"><span class="pre">zipped_product()</span></code>, <code class="docutils literal notranslate"><span class="pre">tiled_product()</span></code>, <code class="docutils literal notranslate"><span class="pre">flat_product()</span></code>, <code class="docutils literal notranslate"><span class="pre">raked_product()</span></code>, <code class="docutils literal notranslate"><span class="pre">blocked_product()</span></code>.</p>
+</div></blockquote>
+</section>
+<section id="divides">
+<h4>Divides<a class="headerlink" href="#divides" title="Link to this heading">#</a></h4>
+<p>Divides decompose a layout by a tiler, creating a hierarchical layout with “tile” and “remainder” modes:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Divide</p></th>
+<th class="head"><p>Description</p></th>
+<th class="head"><p>FlyDSL API</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>Logical Divide</strong></p></td>
+<td><p>Split A by tiler, keep full mode hierarchy</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.logical_divide(A,</span> <span class="pre">tiler)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Zipped Divide</strong></p></td>
+<td><p>Like logical, but zip tile modes</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.zipped_divide(A,</span> <span class="pre">tiler)</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Tiled Divide</strong></p></td>
+<td><p>Like logical, but group by tile</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.tiled_divide(A,</span> <span class="pre">tiler)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Flat Divide</strong></p></td>
+<td><p>Flatten tile and remainder modes</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.flat_divide(A,</span> <span class="pre">tiler)</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<blockquote>
+<div><p><strong>Reference:</strong> <code class="docutils literal notranslate"><span class="pre">include/cute/layout.hpp</span></code> — <code class="docutils literal notranslate"><span class="pre">logical_divide()</span></code>, <code class="docutils literal notranslate"><span class="pre">zipped_divide()</span></code>, <code class="docutils literal notranslate"><span class="pre">tiled_divide()</span></code>, <code class="docutils literal notranslate"><span class="pre">flat_divide()</span></code>.</p>
+</div></blockquote>
+</section>
+<section id="partitioning-utilities">
+<h4>Partitioning utilities<a class="headerlink" href="#partitioning-utilities" title="Link to this heading">#</a></h4>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Operation</p></th>
+<th class="head"><p>Description</p></th>
+<th class="head"><p>FlyDSL API</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>local_partition</strong></p></td>
+<td><p>Partition a layout among threads/tiles</p></td>
+<td><p><em>Not yet implemented</em> — use <code class="docutils literal notranslate"><span class="pre">zipped_divide</span></code> + <code class="docutils literal notranslate"><span class="pre">slice</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>local_tile</strong></p></td>
+<td><p>Extract a tile from a layout</p></td>
+<td><p><em>Not yet implemented</em> — use <code class="docutils literal notranslate"><span class="pre">zipped_divide</span></code> + <code class="docutils literal notranslate"><span class="pre">slice</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<blockquote>
+<div><p><strong>Reference:</strong> <code class="docutils literal notranslate"><span class="pre">include/cute/algorithm/</span></code> — <code class="docutils literal notranslate"><span class="pre">local_partition.hpp</span></code>, <code class="docutils literal notranslate"><span class="pre">local_tile.hpp</span></code>. FlyDSL does not expose these as single functions; use <code class="docutils literal notranslate"><span class="pre">fx.zipped_divide()</span></code> + <code class="docutils literal notranslate"><span class="pre">fx.slice()</span></code> to achieve equivalent results.</p>
+</div></blockquote>
+</section>
+</section>
+</section>
+<hr class="docutils" />
+<section id="flydsl-kernel-development">
+<h2>3. FlyDSL kernel development<a class="headerlink" href="#flydsl-kernel-development" title="Link to this heading">#</a></h2>
+<p>FlyDSL kernels are defined using <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> for GPU device functions and <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code> for host-side launch wrappers:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.compiler</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">flyc</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.expr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">fx</span>
+
+<span class="nd">@flyc</span><span class="o">.</span><span class="n">kernel</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">my_kernel</span><span class="p">(</span>
+    <span class="n">A</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span>
+    <span class="n">B</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span>
+    <span class="n">C</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span>
+    <span class="n">block_dim</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Constexpr</span><span class="p">[</span><span class="nb">int</span><span class="p">],</span>
+<span class="p">):</span>
+    <span class="n">tid</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">thread_idx</span><span class="o">.</span><span class="n">x</span>
+    <span class="n">bid</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">block_idx</span><span class="o">.</span><span class="n">x</span>
+    <span class="c1"># Kernel body — use layout algebra here</span>
+    <span class="o">...</span>
+
+<span class="nd">@flyc</span><span class="o">.</span><span class="n">jit</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">launch</span><span class="p">(</span>
+    <span class="n">A</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">B</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">C</span><span class="p">,</span>
+    <span class="n">n</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Int32</span><span class="p">,</span>
+    <span class="n">stream</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Stream</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">Stream</span><span class="p">(</span><span class="kc">None</span><span class="p">),</span>
+<span class="p">):</span>
+    <span class="n">my_kernel</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">B</span><span class="p">,</span> <span class="n">C</span><span class="p">,</span> <span class="n">block_dim</span><span class="p">)</span><span class="o">.</span><span class="n">launch</span><span class="p">(</span>
+        <span class="n">grid</span><span class="o">=</span><span class="p">(</span><span class="n">grid_x</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span> <span class="n">block</span><span class="o">=</span><span class="p">(</span><span class="n">block_dim</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span> <span class="n">stream</span><span class="o">=</span><span class="n">stream</span><span class="p">,</span>
+    <span class="p">)</span>
+</pre></div>
+</div>
+<p><strong>Key elements:</strong></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> decorator compiles the function body into GPU IR via AST rewriting</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code> decorator wraps a host-side function that constructs and launches kernels</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">fx.Tensor</span></code> denotes a GPU tensor argument</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">fx.Constexpr[int]</span></code> denotes a compile-time constant (affects cache key)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">fx.Int32</span></code> denotes a dynamic int32 argument</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">fx.Stream</span></code> denotes a GPU stream argument</p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="thread-and-block-hierarchy">
+<h2>4. Thread and block hierarchy<a class="headerlink" href="#thread-and-block-hierarchy" title="Link to this heading">#</a></h2>
+<p>GPU kernels organize threads into a hierarchy of blocks and grids. FlyDSL provides direct access to thread/block indices:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Concept</p></th>
+<th class="head"><p>FlyDSL API</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Thread index</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.thread_idx.x</span></code></p></td>
+<td><p>Thread index within block</p></td>
+</tr>
+<tr class="row-odd"><td><p>Block index</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.block_idx.x</span></code></p></td>
+<td><p>Block index within grid</p></td>
+</tr>
+<tr class="row-even"><td><p>Block dimension</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.block_dim.x</span></code></p></td>
+<td><p>Number of threads per block</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Supported dimensions: <code class="docutils literal notranslate"><span class="pre">.x</span></code>, <code class="docutils literal notranslate"><span class="pre">.y</span></code>, <code class="docutils literal notranslate"><span class="pre">.z</span></code>.</p>
+<p><strong>Hardware mapping (NVIDIA → AMD):</strong></p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>NVIDIA concept</p></th>
+<th class="head"><p>AMD concept</p></th>
+<th class="head"><p>Notes</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Warp (32 threads)</p></td>
+<td><p>Wavefront (64 threads)</p></td>
+<td><p>Fundamental SIMD unit</p></td>
+</tr>
+<tr class="row-odd"><td><p>Thread Block</p></td>
+<td><p>Workgroup</p></td>
+<td><p>Cooperative thread group</p></td>
+</tr>
+<tr class="row-even"><td><p>SM (Streaming Multiprocessor)</p></td>
+<td><p>CU (Compute Unit)</p></td>
+<td><p>Processing unit</p></td>
+</tr>
+<tr class="row-odd"><td><p>Tensor Core (HMMA/GMMA)</p></td>
+<td><p>MFMA (Matrix Fused Multiply-Add)</p></td>
+<td><p>Matrix math unit</p></td>
+</tr>
+<tr class="row-even"><td><p>CUDA Core</p></td>
+<td><p>Shader Processor</p></td>
+<td><p>Scalar ALU</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<hr class="docutils" />
+<section id="tensor-creation-and-memory">
+<h2>5. Tensor creation and memory<a class="headerlink" href="#tensor-creation-and-memory" title="Link to this heading">#</a></h2>
+<section id="tensor-construction">
+<h3>5.1 Tensor construction<a class="headerlink" href="#tensor-construction" title="Link to this heading">#</a></h3>
+<p>FlyDSL provides tensor operations with layout-aware partitioning:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Create a buffer tensor from a tensor argument (AMD buffer descriptor)</span>
+<span class="n">A</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">make_buffer_tensor</span><span class="p">(</span><span class="n">A</span><span class="p">)</span>
+
+<span class="c1"># Partition by block, then by thread. A second logical_divide is required before</span>
+<span class="c1"># slice(..., (None, tid)) so coord rank matches layout shape/stride rank.</span>
+<span class="n">tA</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">logical_divide</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_layout</span><span class="p">(</span><span class="n">block_dim</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+<span class="n">tA</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">slice</span><span class="p">(</span><span class="n">tA</span><span class="p">,</span> <span class="p">(</span><span class="kc">None</span><span class="p">,</span> <span class="n">bid</span><span class="p">))</span>
+<span class="n">tA</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">logical_divide</span><span class="p">(</span><span class="n">tA</span><span class="p">,</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_layout</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+<span class="n">tA_thr</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">slice</span><span class="p">(</span><span class="n">tA</span><span class="p">,</span> <span class="p">(</span><span class="kc">None</span><span class="p">,</span> <span class="n">tid</span><span class="p">))</span>
+
+<span class="c1"># Allocate register memrefs / copy_atom_call: see docs/quickstart.rst or examples/01-vectorAdd.py</span>
+</pre></div>
+</div>
+</section>
+<section id="memory-hierarchy">
+<h3>5.2 Memory hierarchy<a class="headerlink" href="#memory-hierarchy" title="Link to this heading">#</a></h3>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Level</p></th>
+<th class="head"><p>NVIDIA</p></th>
+<th class="head"><p>AMD</p></th>
+<th class="head"><p>Typical size</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Global Memory (GMEM)</p></td>
+<td><p>Global Memory</p></td>
+<td><p>Global Memory (HBM)</p></td>
+<td><p>GBs</p></td>
+</tr>
+<tr class="row-odd"><td><p>Shared/Local Memory</p></td>
+<td><p>SMEM (48–228 KB)</p></td>
+<td><p>LDS (64–160 KB)</p></td>
+<td><p>Per-CU</p></td>
+</tr>
+<tr class="row-even"><td><p>Register File</p></td>
+<td><p>RMEM (256 KB/SM)</p></td>
+<td><p>VGPR (512 KB/CU)</p></td>
+<td><p>Per-thread</p></td>
+</tr>
+<tr class="row-odd"><td><p>L2 Cache</p></td>
+<td><p>L2 Cache</p></td>
+<td><p>L2 Cache</p></td>
+<td><p>MBs</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><strong>LDS allocation in FlyDSL:</strong></p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.expr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">fx</span>
+
+<span class="c1"># Declare the LDS storage layout as a @fx.struct of fx.Array fields ...</span>
+<span class="nd">@fx</span><span class="o">.</span><span class="n">struct</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">SharedStorage</span><span class="p">:</span>
+    <span class="n">tile</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Array</span><span class="p">[</span><span class="n">fx</span><span class="o">.</span><span class="n">Float16</span><span class="p">,</span> <span class="mi">128</span><span class="p">,</span> <span class="mi">64</span><span class="p">]</span>
+
+<span class="c1"># ... then allocate it inside the kernel and view each field as a layout.</span>
+<span class="n">lds</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">SharedAllocator</span><span class="p">()</span><span class="o">.</span><span class="n">allocate</span><span class="p">(</span><span class="n">SharedStorage</span><span class="p">)</span><span class="o">.</span><span class="n">peek</span><span class="p">()</span>
+<span class="n">lds_tile</span> <span class="o">=</span> <span class="n">lds</span><span class="o">.</span><span class="n">tile</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="n">fx</span><span class="o">.</span><span class="n">make_layout</span><span class="p">((</span><span class="mi">128</span><span class="p">,</span> <span class="mi">64</span><span class="p">),</span> <span class="p">(</span><span class="mi">64</span><span class="p">,</span> <span class="mi">1</span><span class="p">)))</span>
+</pre></div>
+</div>
+<p>The compiler sizes the per-leaf static LDS global automatically (default
+<code class="docutils literal notranslate"><span class="pre">static=True</span></code>), so <code class="docutils literal notranslate"><span class="pre">launch(smem=...)</span></code> is normally left unset. The legacy
+<code class="docutils literal notranslate"><span class="pre">flydsl.utils.smem_allocator.SmemAllocator</span></code> remains for un-migrated kernels.</p>
+</section>
+<section id="swizzling-bank-conflict-avoidance">
+<h3>5.3 Swizzling (bank conflict avoidance)<a class="headerlink" href="#swizzling-bank-conflict-avoidance" title="Link to this heading">#</a></h3>
+<p>Swizzling remaps addresses to avoid bank conflicts in shared/local memory. FlyDSL does not provide a built-in swizzle function; kernels implement XOR-based swizzling manually using arithmetic ops:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># XOR-based swizzle at 16-byte granularity (manual implementation)</span>
+<span class="n">col_swizzled</span> <span class="o">=</span> <span class="n">col_bytes</span> <span class="o">^</span> <span class="p">((</span><span class="n">row</span> <span class="o">%</span> <span class="n">k_blocks16</span><span class="p">)</span> <span class="o">&lt;&lt;</span> <span class="mi">4</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>The pattern XORs the row index into the column address at 16-byte boundaries, distributing accesses across LDS banks.</p>
+</section>
+</section>
+<hr class="docutils" />
+<section id="data-movement">
+<h2>6. Data movement<a class="headerlink" href="#data-movement" title="Link to this heading">#</a></h2>
+<section id="copy-atoms-and-tiled-copies">
+<h3>6.1 Copy atoms and tiled copies<a class="headerlink" href="#copy-atoms-and-tiled-copies" title="Link to this heading">#</a></h3>
+<p>FlyDSL uses the CuTe copy abstraction: a <strong>copy atom</strong> defines a single thread’s copy capability, and a <strong>tiled copy</strong> distributes the atom across all threads:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">copy_atom</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_copy_atom</span><span class="p">(</span><span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">BufferCopy128b</span><span class="p">(),</span> <span class="n">fx</span><span class="o">.</span><span class="n">Float32</span><span class="p">)</span>
+
+<span class="c1"># Create tiled copy via raked product</span>
+<span class="n">thr_layout</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_layout</span><span class="p">((</span><span class="mi">4</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span> <span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+<span class="n">val_layout</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_layout</span><span class="p">((</span><span class="mi">1</span><span class="p">,</span> <span class="mi">8</span><span class="p">),</span> <span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+<span class="n">layout_thr_val</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">raked_product</span><span class="p">(</span><span class="n">thr_layout</span><span class="p">,</span> <span class="n">val_layout</span><span class="p">)</span>
+<span class="n">tile_mn</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tile</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="mi">8</span><span class="p">)</span>
+<span class="n">tiled_copy</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tiled_copy</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">layout_thr_val</span><span class="p">,</span> <span class="n">tile_mn</span><span class="p">)</span>
+
+<span class="c1"># Get thread slice</span>
+<span class="n">thr_copy</span> <span class="o">=</span> <span class="n">tiled_copy</span><span class="o">.</span><span class="n">get_slice</span><span class="p">(</span><span class="n">tid</span><span class="p">)</span>
+<span class="n">src_partition</span> <span class="o">=</span> <span class="n">thr_copy</span><span class="o">.</span><span class="n">partition_S</span><span class="p">(</span><span class="n">src_tensor</span><span class="p">)</span>
+<span class="n">dst_partition</span> <span class="o">=</span> <span class="n">thr_copy</span><span class="o">.</span><span class="n">partition_D</span><span class="p">(</span><span class="n">dst_tensor</span><span class="p">)</span>
+
+<span class="c1"># Execute copy</span>
+<span class="n">fx</span><span class="o">.</span><span class="n">copy</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">src_partition</span><span class="p">,</span> <span class="n">dst_partition</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="buffer-loads-amd-specific">
+<h3>6.2 Buffer loads (AMD-specific)<a class="headerlink" href="#buffer-loads-amd-specific" title="Link to this heading">#</a></h3>
+<p>AMD GPUs provide buffer load instructions for efficient global memory access. FlyDSL exposes these via the <code class="docutils literal notranslate"><span class="pre">rocdl</span></code> submodule:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">A_buf</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">make_buffer_tensor</span><span class="p">(</span><span class="n">A</span><span class="p">)</span>
+
+<span class="c1"># Use buffer copy atoms for efficient memory access</span>
+<span class="n">copy_atom</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_copy_atom</span><span class="p">(</span><span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">BufferCopy128b</span><span class="p">(),</span> <span class="n">fx</span><span class="o">.</span><span class="n">Float32</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="compute-operations-mfma">
+<h2>7. Compute operations (MFMA)<a class="headerlink" href="#compute-operations-mfma" title="Link to this heading">#</a></h2>
+<p>AMD GPUs use MFMA (Matrix Fused Multiply-Add) instructions for matrix math. FlyDSL provides direct access to MFMA intrinsics:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">mma_atom</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_mma_atom</span><span class="p">(</span><span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">MFMA</span><span class="p">(</span><span class="mi">16</span><span class="p">,</span> <span class="mi">16</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="n">fx</span><span class="o">.</span><span class="n">Float32</span><span class="p">))</span>
+<span class="n">tiled_mma</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tiled_mma</span><span class="p">(</span><span class="n">mma_atom</span><span class="p">,</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_layout</span><span class="p">((</span><span class="mi">2</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span> <span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">0</span><span class="p">)))</span>
+
+<span class="c1"># Block-level tensor views bA, bB, bC (for example, after zipped_divide + slice by block)</span>
+<span class="n">thr_mma</span> <span class="o">=</span> <span class="n">tiled_mma</span><span class="o">.</span><span class="n">thr_slice</span><span class="p">(</span><span class="n">tid</span><span class="p">)</span>
+<span class="n">frag_A</span> <span class="o">=</span> <span class="n">thr_mma</span><span class="o">.</span><span class="n">make_fragment_A</span><span class="p">(</span><span class="n">bA</span><span class="p">)</span>
+<span class="n">frag_B</span> <span class="o">=</span> <span class="n">thr_mma</span><span class="o">.</span><span class="n">make_fragment_B</span><span class="p">(</span><span class="n">bB</span><span class="p">)</span>
+<span class="n">frag_C</span> <span class="o">=</span> <span class="n">thr_mma</span><span class="o">.</span><span class="n">make_fragment_C</span><span class="p">(</span><span class="n">bC</span><span class="p">)</span>
+<span class="n">fx</span><span class="o">.</span><span class="n">gemm</span><span class="p">(</span><span class="n">mma_atom</span><span class="p">,</span> <span class="n">frag_C</span><span class="p">,</span> <span class="n">frag_A</span><span class="p">,</span> <span class="n">frag_B</span><span class="p">,</span> <span class="n">frag_C</span><span class="p">)</span>
+</pre></div>
+</div>
+<p><strong>MFMA instruction reference (AMD CDNA):</strong></p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Instruction</p></th>
+<th class="head"><p>Data type</p></th>
+<th class="head"><p>M×N×K</p></th>
+<th class="head"><p>Architecture</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">mfma_f32_16x16x16f16</span></code></p></td>
+<td><p>FP16</p></td>
+<td><p>16×16×16</p></td>
+<td><p>GFX942+</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">mfma_f32_16x16x32_fp8_fp8</span></code></p></td>
+<td><p>FP8</p></td>
+<td><p>16×16×32</p></td>
+<td><p>GFX942+</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">mfma_i32_16x16x32_i8</span></code></p></td>
+<td><p>INT8</p></td>
+<td><p>16×16×32</p></td>
+<td><p>GFX942+</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">mfma_f32_32x32x8f16</span></code></p></td>
+<td><p>FP16</p></td>
+<td><p>32×32×8</p></td>
+<td><p>GFX942+</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">mfma_scale_x128</span></code></p></td>
+<td><p>MXFP4</p></td>
+<td><p>16×16×128</p></td>
+<td><p>GFX950</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><strong>K64-byte micro-step pattern (2× K32 per step):</strong></p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">for</span> <span class="n">ku</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">tile_k_bytes</span> <span class="o">//</span> <span class="mi">64</span><span class="p">):</span>
+    <span class="n">a_val</span> <span class="o">=</span> <span class="n">lds_load_pack_k32</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>   <span class="c1"># Load A from LDS</span>
+    <span class="n">b_val</span> <span class="o">=</span> <span class="n">load_b_pack_k32</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>     <span class="c1"># Load B from GMEM</span>
+    <span class="n">c_acc</span> <span class="o">=</span> <span class="n">rocdl</span><span class="o">.</span><span class="n">mfma_f32_16x16x32_fp8_fp8</span><span class="p">(</span><span class="n">a_val</span><span class="p">,</span> <span class="n">b_val</span><span class="p">,</span> <span class="n">c_acc</span><span class="p">)</span>
+    <span class="c1"># second half</span>
+    <span class="n">a_val2</span> <span class="o">=</span> <span class="n">lds_load_pack_k32</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>
+    <span class="n">b_val2</span> <span class="o">=</span> <span class="n">load_b_pack_k32</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>
+    <span class="n">c_acc</span> <span class="o">=</span> <span class="n">rocdl</span><span class="o">.</span><span class="n">mfma_f32_16x16x32_fp8_fp8</span><span class="p">(</span><span class="n">a_val2</span><span class="p">,</span> <span class="n">b_val2</span><span class="p">,</span> <span class="n">c_acc</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="synchronization">
+<h2>8. Synchronization<a class="headerlink" href="#synchronization" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>FlyDSL API</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">gpu.barrier()</span></code></p></td>
+<td><p>Workgroup-level barrier (equivalent to <code class="docutils literal notranslate"><span class="pre">__syncthreads</span></code>)</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">fx</span><span class="o">.</span><span class="n">gpu</span><span class="o">.</span><span class="n">barrier</span><span class="p">()</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="compilation-and-execution">
+<h2>9. Compilation and execution<a class="headerlink" href="#compilation-and-execution" title="Link to this heading">#</a></h2>
+<section id="compilation-pipeline">
+<h3>9.1 Compilation pipeline<a class="headerlink" href="#compilation-pipeline" title="Link to this heading">#</a></h3>
+<p>FlyDSL compiles Python → MLIR IR → ROCDL dialect → HSACO binary:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.compiler</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">flyc</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.expr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">fx</span>
+
+<span class="c1"># Define kernel and launch wrapper</span>
+<span class="nd">@flyc</span><span class="o">.</span><span class="n">kernel</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">my_kernel</span><span class="p">(</span><span class="n">A</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">B</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">C</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="o">...</span><span class="p">):</span>
+    <span class="o">...</span>
+
+<span class="nd">@flyc</span><span class="o">.</span><span class="n">jit</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">launch</span><span class="p">(</span><span class="n">A</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">B</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">C</span><span class="p">,</span> <span class="o">...</span><span class="p">,</span>
+           <span class="n">stream</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Stream</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">Stream</span><span class="p">(</span><span class="kc">None</span><span class="p">)):</span>
+    <span class="n">my_kernel</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">B</span><span class="p">,</span> <span class="n">C</span><span class="p">,</span> <span class="o">...</span><span class="p">)</span><span class="o">.</span><span class="n">launch</span><span class="p">(</span>
+        <span class="n">grid</span><span class="o">=</span><span class="p">(</span><span class="o">...</span><span class="p">),</span> <span class="n">block</span><span class="o">=</span><span class="p">(</span><span class="o">...</span><span class="p">),</span> <span class="n">stream</span><span class="o">=</span><span class="n">stream</span><span class="p">,</span>
+    <span class="p">)</span>
+
+<span class="c1"># Call the jit function — compilation happens automatically on first call</span>
+<span class="n">launch</span><span class="p">(</span><span class="n">A_torch</span><span class="p">,</span> <span class="n">B_torch</span><span class="p">,</span> <span class="n">C_torch</span><span class="p">,</span> <span class="o">...</span><span class="p">,</span> <span class="n">stream</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">Stream</span><span class="p">())</span>
+</pre></div>
+</div>
+</section>
+<section id="environment-variables">
+<h3>9.2 Environment variables<a class="headerlink" href="#environment-variables" title="Link to this heading">#</a></h3>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Variable</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_COMPILE_BACKEND=rocm</span></code></p></td>
+<td><p>Compile backend id</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">ARCH</span></code></p></td>
+<td><p>Target architecture (for example, <code class="docutils literal notranslate"><span class="pre">gfx942</span></code>, <code class="docutils literal notranslate"><span class="pre">gfx950</span></code>)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DUMP_IR=1</span></code></p></td>
+<td><p>Dump intermediate MLIR IR</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DUMP_DIR=/path</span></code></p></td>
+<td><p>IR dump location</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">COMPILE_ONLY=1</span></code></p></td>
+<td><p>Skip execution, compile only</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_RUNTIME_ENABLE_CACHE=0</span></code></p></td>
+<td><p>Disable disk cache (auto-invalidates on source changes; only needed for C++ pass or non-closure helper changes)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_RUNTIME_CACHE_DIR=/path</span></code></p></td>
+<td><p>Cache directory (default: <code class="docutils literal notranslate"><span class="pre">~/.flydsl/cache/</span></code>)</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="complete-example-gemm-with-layout-algebra">
+<h2>10. Complete example: GEMM with layout algebra<a class="headerlink" href="#complete-example-gemm-with-layout-algebra" title="Link to this heading">#</a></h2>
+<p>This example matches <code class="docutils literal notranslate"><span class="pre">examples/03-tiledMma.py</span></code>: zipped divide and block slice, then
+<code class="docutils literal notranslate"><span class="pre">tiled_copy_*</span></code> + <code class="docutils literal notranslate"><span class="pre">thr_copy.retile</span></code> + <code class="docutils literal notranslate"><span class="pre">fx.copy</span></code> into fragments, <code class="docutils literal notranslate"><span class="pre">fx.gemm</span></code>, and copy out.
+(Use <code class="docutils literal notranslate"><span class="pre">thr_mma.make_fragment_*</span></code> on the block tiles <code class="docutils literal notranslate"><span class="pre">bA</span></code>/<code class="docutils literal notranslate"><span class="pre">bB</span></code>/<code class="docutils literal notranslate"><span class="pre">bC</span></code> directly—not
+<code class="docutils literal notranslate"><span class="pre">make_fragment_*</span></code> on <code class="docutils literal notranslate"><span class="pre">partition_*</span></code> outputs.)</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.compiler</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">flyc</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.expr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">fx</span>
+
+<span class="n">block_m</span><span class="p">,</span> <span class="n">block_n</span><span class="p">,</span> <span class="n">block_k</span> <span class="o">=</span> <span class="mi">64</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="mi">8</span>
+
+<span class="nd">@flyc</span><span class="o">.</span><span class="n">kernel</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">gemm_kernel</span><span class="p">(</span><span class="n">A</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">B</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">C</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">):</span>
+    <span class="n">tid</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">thread_idx</span><span class="o">.</span><span class="n">x</span>
+    <span class="n">bid</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">block_idx</span><span class="o">.</span><span class="n">x</span>
+
+    <span class="n">tileA</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tile</span><span class="p">(</span><span class="n">block_m</span><span class="p">,</span> <span class="n">block_k</span><span class="p">)</span>
+    <span class="n">tileB</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tile</span><span class="p">(</span><span class="n">block_n</span><span class="p">,</span> <span class="n">block_k</span><span class="p">)</span>
+    <span class="n">tileC</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tile</span><span class="p">(</span><span class="n">block_m</span><span class="p">,</span> <span class="n">block_n</span><span class="p">)</span>
+
+    <span class="n">A</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">make_buffer_tensor</span><span class="p">(</span><span class="n">A</span><span class="p">)</span>
+    <span class="n">B</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">make_buffer_tensor</span><span class="p">(</span><span class="n">B</span><span class="p">)</span>
+    <span class="n">C</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">make_buffer_tensor</span><span class="p">(</span><span class="n">C</span><span class="p">)</span>
+
+    <span class="n">bA</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">zipped_divide</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">tileA</span><span class="p">)</span>
+    <span class="n">bB</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">zipped_divide</span><span class="p">(</span><span class="n">B</span><span class="p">,</span> <span class="n">tileB</span><span class="p">)</span>
+    <span class="n">bC</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">zipped_divide</span><span class="p">(</span><span class="n">C</span><span class="p">,</span> <span class="n">tileC</span><span class="p">)</span>
+
+    <span class="n">bA</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">slice</span><span class="p">(</span><span class="n">bA</span><span class="p">,</span> <span class="p">(</span><span class="kc">None</span><span class="p">,</span> <span class="n">bid</span><span class="p">))</span>
+    <span class="n">bB</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">slice</span><span class="p">(</span><span class="n">bB</span><span class="p">,</span> <span class="p">(</span><span class="kc">None</span><span class="p">,</span> <span class="n">bid</span><span class="p">))</span>
+    <span class="n">bC</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">slice</span><span class="p">(</span><span class="n">bC</span><span class="p">,</span> <span class="p">(</span><span class="kc">None</span><span class="p">,</span> <span class="n">bid</span><span class="p">))</span>
+
+    <span class="n">mma_atom</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_mma_atom</span><span class="p">(</span><span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">MFMA</span><span class="p">(</span><span class="mi">16</span><span class="p">,</span> <span class="mi">16</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="n">fx</span><span class="o">.</span><span class="n">Float32</span><span class="p">))</span>
+    <span class="n">tiled_mma</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tiled_mma</span><span class="p">(</span><span class="n">mma_atom</span><span class="p">,</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_layout</span><span class="p">((</span><span class="mi">2</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span> <span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">0</span><span class="p">)))</span>
+    <span class="n">thr_mma</span> <span class="o">=</span> <span class="n">tiled_mma</span><span class="o">.</span><span class="n">thr_slice</span><span class="p">(</span><span class="n">tid</span><span class="p">)</span>
+
+    <span class="n">copy_atom</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_copy_atom</span><span class="p">(</span><span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">BufferCopy32b</span><span class="p">(),</span> <span class="n">fx</span><span class="o">.</span><span class="n">Float32</span><span class="p">)</span>
+    <span class="n">tiled_copy_A</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tiled_copy_A</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">tiled_mma</span><span class="p">)</span>
+    <span class="n">tiled_copy_B</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tiled_copy_B</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">tiled_mma</span><span class="p">)</span>
+    <span class="n">tiled_copy_C</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tiled_copy_C</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">tiled_mma</span><span class="p">)</span>
+
+    <span class="n">thr_copy_A</span> <span class="o">=</span> <span class="n">tiled_copy_A</span><span class="o">.</span><span class="n">get_slice</span><span class="p">(</span><span class="n">tid</span><span class="p">)</span>
+    <span class="n">thr_copy_B</span> <span class="o">=</span> <span class="n">tiled_copy_B</span><span class="o">.</span><span class="n">get_slice</span><span class="p">(</span><span class="n">tid</span><span class="p">)</span>
+    <span class="n">thr_copy_C</span> <span class="o">=</span> <span class="n">tiled_copy_C</span><span class="o">.</span><span class="n">get_slice</span><span class="p">(</span><span class="n">tid</span><span class="p">)</span>
+
+    <span class="n">copy_src_A</span> <span class="o">=</span> <span class="n">thr_copy_A</span><span class="o">.</span><span class="n">partition_S</span><span class="p">(</span><span class="n">bA</span><span class="p">)</span>
+    <span class="n">copy_src_B</span> <span class="o">=</span> <span class="n">thr_copy_B</span><span class="o">.</span><span class="n">partition_S</span><span class="p">(</span><span class="n">bB</span><span class="p">)</span>
+    <span class="n">copy_dst_C</span> <span class="o">=</span> <span class="n">thr_copy_C</span><span class="o">.</span><span class="n">partition_S</span><span class="p">(</span><span class="n">bC</span><span class="p">)</span>
+
+    <span class="n">frag_A</span> <span class="o">=</span> <span class="n">thr_mma</span><span class="o">.</span><span class="n">make_fragment_A</span><span class="p">(</span><span class="n">bA</span><span class="p">)</span>
+    <span class="n">frag_B</span> <span class="o">=</span> <span class="n">thr_mma</span><span class="o">.</span><span class="n">make_fragment_B</span><span class="p">(</span><span class="n">bB</span><span class="p">)</span>
+    <span class="n">frag_C</span> <span class="o">=</span> <span class="n">thr_mma</span><span class="o">.</span><span class="n">make_fragment_C</span><span class="p">(</span><span class="n">bC</span><span class="p">)</span>
+
+    <span class="n">copy_frag_A</span> <span class="o">=</span> <span class="n">thr_copy_A</span><span class="o">.</span><span class="n">retile</span><span class="p">(</span><span class="n">frag_A</span><span class="p">)</span>
+    <span class="n">copy_frag_B</span> <span class="o">=</span> <span class="n">thr_copy_B</span><span class="o">.</span><span class="n">retile</span><span class="p">(</span><span class="n">frag_B</span><span class="p">)</span>
+    <span class="n">copy_frag_C</span> <span class="o">=</span> <span class="n">thr_copy_C</span><span class="o">.</span><span class="n">retile</span><span class="p">(</span><span class="n">frag_C</span><span class="p">)</span>
+
+    <span class="n">fx</span><span class="o">.</span><span class="n">copy</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">copy_src_A</span><span class="p">,</span> <span class="n">copy_frag_A</span><span class="p">,</span> <span class="n">pred</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span>
+    <span class="n">fx</span><span class="o">.</span><span class="n">copy</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">copy_src_B</span><span class="p">,</span> <span class="n">copy_frag_B</span><span class="p">,</span> <span class="n">pred</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span>
+
+    <span class="n">fx</span><span class="o">.</span><span class="n">gemm</span><span class="p">(</span><span class="n">mma_atom</span><span class="p">,</span> <span class="n">frag_C</span><span class="p">,</span> <span class="n">frag_A</span><span class="p">,</span> <span class="n">frag_B</span><span class="p">,</span> <span class="n">frag_C</span><span class="p">)</span>
+
+    <span class="n">fx</span><span class="o">.</span><span class="n">copy</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">copy_frag_C</span><span class="p">,</span> <span class="n">copy_dst_C</span><span class="p">,</span> <span class="n">pred</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span>
+
+<span class="nd">@flyc</span><span class="o">.</span><span class="n">jit</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">tiledMma</span><span class="p">(</span><span class="n">A</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">B</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">C</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span>
+             <span class="n">stream</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Stream</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">Stream</span><span class="p">(</span><span class="kc">None</span><span class="p">)):</span>
+    <span class="n">gemm_kernel</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">B</span><span class="p">,</span> <span class="n">C</span><span class="p">)</span><span class="o">.</span><span class="n">launch</span><span class="p">(</span><span class="n">grid</span><span class="o">=</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span> <span class="n">block</span><span class="o">=</span><span class="p">(</span><span class="mi">256</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span> <span class="n">stream</span><span class="o">=</span><span class="n">stream</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>See <code class="docutils literal notranslate"><span class="pre">examples/03-tiledMma.py</span></code> for the runnable script, and <code class="docutils literal notranslate"><span class="pre">kernels/gemm/preshuffle_gemm.py</span></code>
+for a production-quality GEMM implementation.</p>
+</section>
+<hr class="docutils" />
+<section id="references">
+<h2>11. References<a class="headerlink" href="#references" title="Link to this heading">#</a></h2>
+<section id="cute-layout-algebra-bsd-3-clause">
+<h3>CuTe layout algebra (BSD-3-Clause)<a class="headerlink" href="#cute-layout-algebra-bsd-3-clause" title="Link to this heading">#</a></h3>
+<ul class="simple">
+<li><p><strong>C++ headers:</strong> <a class="reference external" href="https://github.com/NVIDIA/cutlass/tree/main/include/cute">CUTLASS <code class="docutils literal notranslate"><span class="pre">include/cute/</span></code></a></p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">layout.hpp</span></code> — Layout type, all algebra operations</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">tensor.hpp</span></code> — Tensor type (pointer + layout)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">algorithm/</span></code> — Copy, GEMM, partitioning algorithms</p></li>
+</ul>
+</li>
+<li><p><strong>GTC presentations:</strong> “CuTe: A Layout Algebra for CUTLASS” — mathematical foundations and design rationale</p></li>
+<li><p><strong>PyCute reference:</strong> <code class="docutils literal notranslate"><span class="pre">torch/distributed/_pycute/layout.py</span></code> — pure-Python layout algebra (open source, PyTorch)</p></li>
+</ul>
+</section>
+<section id="flydsl-source-files">
+<h3>FlyDSL source files<a class="headerlink" href="#flydsl-source-files" title="Link to this heading">#</a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/expr/</span></code> — Layout algebra and expression API (<code class="docutils literal notranslate"><span class="pre">primitive.py</span></code>, <code class="docutils literal notranslate"><span class="pre">derived.py</span></code>, etc.)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/expr/rocdl/</span></code> — ROCDL-specific operations</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/</span></code> — JIT compilation pipeline (<code class="docutils literal notranslate"><span class="pre">kernel_function.py</span></code>, <code class="docutils literal notranslate"><span class="pre">jit_function.py</span></code>)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/expr/gpu.py</span></code> — <code class="docutils literal notranslate"><span class="pre">SharedAllocator</span></code> for LDS allocation (<code class="docutils literal notranslate"><span class="pre">fx.SharedAllocator</span></code>)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/utils/smem_allocator.py</span></code> — legacy <code class="docutils literal notranslate"><span class="pre">SmemAllocator</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">examples/01-vectorAdd.py</span></code> — VecAdd example with layout algebra</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">examples/02-tiledCopy.py</span></code> — Tiled copy example</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">examples/03-tiledMma.py</span></code> — Tiled MFMA GEMM example</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">kernels/gemm/preshuffle_gemm.py</span></code> — Production GEMM implementation</p></li>
+</ul>
+</section>
+</section>
+</section>
+
+
+                </article>
+              
+
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="testing_benchmarking_guide.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">Testing &amp; benchmarking guide</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="extern_integration_guide.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">External bitcode integration (<code class="docutils literal notranslate"><span class="pre">ffi</span></code> + <code class="docutils literal notranslate"><span class="pre">link_extern</span></code>)</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+    
+        
+              
+                <div class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+  <div class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> Contents
+  </div>
+  <nav class="bd-toc-nav page-toc">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#overview">1. Overview</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#what-is-the-cute-layout-algebra">1.1 What is the CuTe layout algebra?</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flydsl-as-an-amd-implementation">1.2 FlyDSL as an AMD implementation</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#layout-algebra-fundamentals">2. Layout algebra fundamentals</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#core-types">2.1 Core types</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#query-operations">2.2 Query operations</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#coordinate-mapping">2.3 Coordinate mapping</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#layout-algebra-operations">2.4 Layout algebra operations</a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#composition">Composition</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#complement">Complement</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#coalesce">Coalesce</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#products">Products</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#divides">Divides</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#partitioning-utilities">Partitioning utilities</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#flydsl-kernel-development">3. FlyDSL kernel development</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#thread-and-block-hierarchy">4. Thread and block hierarchy</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#tensor-creation-and-memory">5. Tensor creation and memory</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#tensor-construction">5.1 Tensor construction</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#memory-hierarchy">5.2 Memory hierarchy</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#swizzling-bank-conflict-avoidance">5.3 Swizzling (bank conflict avoidance)</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#data-movement">6. Data movement</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#copy-atoms-and-tiled-copies">6.1 Copy atoms and tiled copies</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#buffer-loads-amd-specific">6.2 Buffer loads (AMD-specific)</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#compute-operations-mfma">7. Compute operations (MFMA)</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#synchronization">8. Synchronization</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#compilation-and-execution">9. Compilation and execution</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#compilation-pipeline">9.1 Compilation pipeline</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#environment-variables">9.2 Environment variables</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#complete-example-gemm-with-layout-algebra">10. Complete example: GEMM with layout algebra</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#references">11. References</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#cute-layout-algebra-bsd-3-clause">CuTe layout algebra (BSD-3-Clause)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flydsl-source-files">FlyDSL source files</a></li>
+</ul>
+</li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+    
+
+          </div>
+          <footer class="bd-footer-content">
+            <p>
+  </p>
+          </footer>
+        
+
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script src="_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
+<script src="_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    
+<footer class="rocm-footer">
+    <div class="container-lg">
+        <section class="bottom-menu menu py-45">
+            <div class="row d-flex align-items-center">
+                <div class="col-12 text-center">
+                    <ul>
+                        <li><a href="https://www.amd.com/en/corporate/copyright" target="_blank">Terms and Conditions</a></li>
+                        <li><a href="https://rocm.docs.amd.com/en/latest/about/license.html">ROCm Licenses and Disclaimers</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/privacy" target="_blank">Privacy</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/trademarks" target="_blank">Trademarks</a></li>
+                        <li><a href="https://www.amd.com/content/dam/amd/en/documents/corporate/cr/supply-chain-transparency.pdf" target="_blank">Supply Chain Transparency</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/competition" target="_blank">Fair and Open Competition</a></li>
+                        <li><a href="https://www.amd.com/system/files/documents/amd-uk-tax-strategy.pdf" target="_blank">UK Tax Strategy</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/cookies" target="_blank">Cookie Policy</a></li>
+                        <!-- OneTrust Cookies Settings button start -->
+                        <li><a href="#cookie-settings" id="ot-sdk-btn" class="ot-sdk-show-settings">Cookie Settings</a></li>
+                        <!-- OneTrust Cookies Settings button end -->
+                    </ul>
+                </div>
+            </div>
+            <div class="row d-flex align-items-center">
+                <div class="col-12 text-center">
+                    <div>
+                        <span class="copyright">© 2026 Advanced Micro Devices, Inc</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+</footer>
+
+<!-- <div id="rdc-watermark-container">
+    <img id="rdc-watermark" src="_static/images/alpha-watermark.svg" alt="DRAFT watermark"/>
+</div> -->
+    
+  </body>
+</html>

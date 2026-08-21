@@ -1,0 +1,1222 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Arithmetic types &#8212; FlyDSL 0.3.2</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+
+  
+  <link href="../_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-regular-400.woff2" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=8f2a1f02" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/sphinx-book-theme.css?v=eba8b062" />
+    <link rel="stylesheet" type="text/css" href="../_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=22b90084" />
+    <link rel="stylesheet" type="text/css" href="../_static/rocm_header.css?v=037afccf" />
+    <link rel="stylesheet" type="text/css" href="../_static/rocm_footer.css?v=7095035a" />
+    <link rel="stylesheet" type="text/css" href="../_static/fonts.css?v=fcff5274" />
+    <link rel="stylesheet" type="text/css" href="../_static/sphinx-design.min.css?v=95c83b7e" />
+    <link rel="stylesheet" type="text/css" href="../_static/ai_ecosystem.css" />
+  
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
+  <script src="../_static/vendor/fontawesome/6.5.2/js/all.min.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    <script src="../_static/documentation_options.js?v=2f2e10e9"></script>
+    <script src="../_static/doctools.js?v=9bcbadda"></script>
+    <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=91c4cb68"></script>
+    <script async="async" src="../_static/code_word_breaks.js?v=327952c4"></script>
+    <script async="async" src="../_static/renameVersionLinks.js?v=929fe5e4"></script>
+    <script async="async" src="../_static/rdcMisc.js?v=01f88d96"></script>
+    <script async="async" src="../_static/theme_mode_captions.js?v=15f4ec5d"></script>
+    <script defer="defer" src="../_static/search.js?v=90a4452c"></script>
+    <script src="../_static/scripts/sphinx-book-theme.js?v=887ef09a"></script>
+    <script src="../_static/design-tabs.js?v=f930bc37"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'language/arithmetic_types';</script>
+    <script async="async" src="https://download.amd.com/js/analytics/analyticsinit.js"></script>
+    <link rel="icon" href="https://www.amd.com/content/dam/code/images/favicon/favicon.ico"/>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Composite Types" href="composite_types.html" />
+    <link rel="prev" title="API Stability" href="../api_stability.html" />
+    <meta name="google-site-verification" content="vo35SZt_GASsTHAEmdww7AYKPCvZyzLvOXBl8guBME4" />
+
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-primary-sidebar-checkbox"/>
+  <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-secondary-sidebar-checkbox"/>
+  <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
+  
+  <div class="search-button__wrapper">
+    <div class="search-button__overlay"></div>
+    <div class="search-button__search-container">
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         id="search-input"
+         placeholder="Search..."
+         aria-label="Search..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form></div>
+  </div>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="common-header" >
+        <nav class="navbar navbar-expand-xl">
+            <div class="container-fluid main-nav rocm-header">
+                <div class="header-logo">
+                    <div class="header-logo-title">
+                        
+                            <button class="navbar-toggler collapsed" id="nav-icon" data-tracking-information="mainMenuToggle" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
+                                <span></span>
+                                <span></span>
+                                <span></span>
+                            </button>
+                        
+                        <a class="navbar-brand" href="https://www.amd.com/">
+                            <img src="../_static/images/amd-header-logo.svg" alt="AMD Logo" title="AMD Logo" width="90" class="d-inline-block align-text-top hover-opacity"/>
+                        </a>
+                        <div class="vr mx-40 my-25"></div>
+                        <a class="klavika-font hover-opacity" href="https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest">ROCm&#8482; AI Ecosystem</a>
+                    </div>
+                    
+                </div>
+                <div class="icon-nav text-center d-flex ms-auto"></div>
+            </div>
+        </nav>
+        
+        <nav class="navbar navbar-expand-xl second-level-nav">
+            <div class="container-fluid main-nav">
+                <div class="navbar-nav-container collapse navbar-collapse" id="navbarSupportedContent">
+                    
+                    <div class="d-flex w-100 align-items-stretch">
+                        <ul class="navbar-nav nav-mega mb-2 mb-lg-0">
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://rocm.docs.amd.com" id="navcore-sdk" role="button" aria-expanded="false" target="_blank">Core SDK</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links fw-bold" href="https://rocm.docs.amd.com/projects/ai-ecosystem" id="navai-ecosystem" role="button" aria-expanded="false" target="_blank">AI Ecosystem</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://instinct.docs.amd.com" id="navgpu-systems-and-infrastructure" role="button" aria-expanded="false" target="_blank">GPU Systems and Infrastructure</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item dropdown">
+                                
+                                    <a class="nav-link top-level header-menu-links dropdown-toggle header-nav-dropdown-toggle" href="#" id="navtoolkits" role="button" data-bs-toggle="dropdown" aria-expanded="false">Toolkits</a>
+                                    <ul class="dropdown-menu header-nav-dropdown-menu" aria-labelledby="navtoolkits">
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-ds/en/latest/index.html" target="_blank">AMD Data Science</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-finance/en/latest/index.html" target="_blank">AMD Finance</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-ls/en/latest/index.html" target="_blank">AMD Life Science</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-llmext/en/latest/index.html" target="_blank">AMD LLM Extension</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-simulation/en/latest/index.html" target="_blank">AMD Simulation</a></li>
+                                        
+                                    </ul>
+                                
+                            </li>
+                            
+                        </ul>
+                        <div class="nav-group-separator"></div>
+                        <ul class="navbar-nav nav-mega mb-2 mb-lg-0">
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://rocm.blogs.amd.com/" id="navblogs" role="button" aria-expanded="false" target="_blank">Blogs</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://www.amd.com/en/developer/resources/rocm-hub.html" id="navdeveloper-hub" role="button" aria-expanded="false" target="_blank">Developer Hub</a>
+                                
+                            </li>
+                            
+                        </ul>
+                    </div>
+                    
+                </div>
+            </div>
+        </nav>
+        
+    </header>
+    
+
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <div class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+
+<a class="navbar-brand logo" href="https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest">
+    <p>ROCm AI Ecosystem</p>
+</a></div>
+          
+        
+      </div>
+    
+    
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+  
+    <p class="title logo__title">FlyDSL 0.3.2</p>
+  
+</a></div>
+        <div class="sidebar-primary-item">
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">Search</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script></div>
+        <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
+    <div class="bd-toc-item navbar-nav active">
+        <ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../installation.html">Install FlyDSL</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart.html">Quick start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api_stability.html">API stability</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Language</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">Arithmetic types</a></li>
+<li class="toctree-l1"><a class="reference internal" href="composite_types.html">Composite types</a></li>
+<li class="toctree-l1"><a class="reference internal" href="storage_and_allocator.html">Storage and allocator</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../architecture_guide.html">Architecture and compilation pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../layout_system_guide.html">Layout algebra</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../kernel_authoring_guide.html">Kernel authoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../kernel_tuning_guide.html">Kernel tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../autotune_guide.html">Offline autotune configs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../prebuilt_kernels_guide.html">Prebuilt kernel library</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../testing_benchmarking_guide.html">Testing and benchmarking</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cute_layout_algebra_guide.html">CuTe layout algebra</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../extern_integration_guide.html">External bitcode integration</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">API reference</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../api/dsl.html">FlyDSL Python DSL</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/compiler.html">Compiler and pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/kernels.html">Prebuilt kernels</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Tutorials</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../tutorials/basic_usage.html">Basic usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../tutorials/kernel_development.html">Kernel development techniques</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">About</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../about/license.html">License</a></li>
+</ul>
+
+    </div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+  
+  <div id="rtd-footer-container"></div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+
+<div class="sbt-scroll-pixel-helper"></div>
+
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item"><label class="sidebar-toggle primary-toggle btn btn-sm" for="__primary" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-angle-right"></span>
+  </label></div>
+      
+        <div class="header-article-item">
+
+
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="../index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    <li class="breadcrumb-item active" aria-current="page">Arithmetic types</li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+    <div class="header-article-items__end">
+      
+        <div class="header-article-item">
+
+<div class="article-header-buttons">
+
+
+
+
+
+<div class="dropdown dropdown-source-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Source repositories">
+    <i class="fab fa-github"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL" target="_blank"
+   class="btn btn-sm btn-source-repository-button dropdown-item"
+   title="Source repository"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fab fa-github"></i>
+  </span>
+<span class="btn__text-container">Repository</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL/blob/main/docs/language/arithmetic_types.md?plain=1" target="_blank"
+   class="btn btn-sm btn-source-file-button dropdown-item"
+   title="Show source"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-code"></i>
+  </span>
+<span class="btn__text-container">Show source</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL/issues/new?title=Issue%20on%20page%20%2Flanguage/arithmetic_types.html&body=Your%20issue%20content%20here." target="_blank"
+   class="btn btn-sm btn-source-issues-button dropdown-item"
+   title="Open an issue"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-lightbulb"></i>
+  </span>
+<span class="btn__text-container">Open issue</span>
+</a>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+
+
+<div class="dropdown dropdown-download-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Download this page">
+    <i class="fas fa-download"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="../_sources/language/arithmetic_types.md" target="_blank"
+   class="btn btn-sm btn-download-source-button dropdown-item"
+   title="Download source file"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file"></i>
+  </span>
+<span class="btn__text-container">.md</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li>
+<button onclick="window.print()"
+  class="btn btn-sm btn-download-pdf-button dropdown-item"
+  title="Print to PDF"
+  data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file-pdf"></i>
+  </span>
+<span class="btn__text-container">.pdf</span>
+</button>
+</li>
+      
+  </ul>
+</div>
+
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script>
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm pst-navbar-icon search-button search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass fa-lg"></i>
+  </button>
+`);
+</script>
+<button class="sidebar-toggle secondary-toggle btn btn-sm" title="Toggle secondary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-list"></span>
+</button>
+</div></div>
+      
+    </div>
+  
+</div>
+</div>
+              
+              
+
+<div id="jb-print-docs-body" class="onlyprint">
+    <h1>Arithmetic types</h1>
+    <!-- Table of contents -->
+    <div id="print-main-content">
+        <div id="jb-print-toc">
+            
+            <div>
+                <h2> Contents </h2>
+            </div>
+            <nav aria-label="Page">
+                <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#the-type-tower">The type tower</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#numeric-scalars">Numeric scalars</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#public-methods">Public methods</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#function-level-typed-arithmetic">Function-level typed arithmetic</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#vector">Vector</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#compile-time-and-run-time-values">Compile-time and run-time values</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#arithmetic-preserves-the-compile-time-property">Arithmetic preserves the compile-time property</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#integer-wrap-around">Integer wrap-around</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#python-literals">Python literals</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#using-a-compile-time-value-as-python">Using a compile-time value as Python</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#type-interoperability">Type interoperability</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#operand-normalization">Operand normalization</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#common-type">Common type</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#result-type">Result type</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#rounding-mode-control">Rounding-mode control</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#fast-math-control">Fast-math control</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flags-and-their-meanings">Flags and their meanings</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#explicit-fastmath-keyword">Explicit <code class="docutils literal notranslate"><span class="pre">fastmath=</span></code> keyword</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#with-fx-fastmath-context"><code class="docutils literal notranslate"><span class="pre">with</span> <span class="pre">fx.fastmath(...)</span></code> context</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#compilation-wide-default">Compilation-wide default</a></li>
+</ul>
+</li>
+</ul>
+            </nav>
+        </div>
+    </div>
+</div>
+
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section class="tex2jax_ignore mathjax_ignore" id="arithmetic-types">
+<h1>Arithmetic types<a class="headerlink" href="#arithmetic-types" title="Link to this heading">#</a></h1>
+<p>The arithmetic layer defines the scalar (<code class="docutils literal notranslate"><span class="pre">Numeric</span></code>) and SIMD (<code class="docutils literal notranslate"><span class="pre">Vector</span></code>) types
+that a kernel computes with, along with their public operations.</p>
+<section id="the-type-tower">
+<h2>The type tower<a class="headerlink" href="#the-type-tower" title="Link to this heading">#</a></h2>
+<p>Every arithmetic value is either a scalar <code class="docutils literal notranslate"><span class="pre">Numeric</span></code> or a <code class="docutils literal notranslate"><span class="pre">Vector</span></code> of a <code class="docutils literal notranslate"><span class="pre">Numeric</span></code>
+element type. A type class is also its constructor: <code class="docutils literal notranslate"><span class="pre">Float32(x)</span></code> builds (or
+casts to) a <code class="docutils literal notranslate"><span class="pre">Float32</span></code>.</p>
+<section id="numeric-scalars">
+<h3>Numeric scalars<a class="headerlink" href="#numeric-scalars" title="Link to this heading">#</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">Numeric</span></code> is the base of every scalar that wraps an <code class="docutils literal notranslate"><span class="pre">ir.Value</span></code>.</p>
+<ul class="simple">
+<li><p><strong>Integers</strong> — <code class="docutils literal notranslate"><span class="pre">Int4</span></code> <code class="docutils literal notranslate"><span class="pre">Int8</span></code> <code class="docutils literal notranslate"><span class="pre">Int16</span></code> <code class="docutils literal notranslate"><span class="pre">Int32</span></code> <code class="docutils literal notranslate"><span class="pre">Int64</span></code> <code class="docutils literal notranslate"><span class="pre">Int128</span></code>, <code class="docutils literal notranslate"><span class="pre">Uint8</span></code>
+<code class="docutils literal notranslate"><span class="pre">Uint16</span></code> <code class="docutils literal notranslate"><span class="pre">Uint32</span></code> <code class="docutils literal notranslate"><span class="pre">Uint64</span></code> <code class="docutils literal notranslate"><span class="pre">Uint128</span></code>. Signedness and width are fixed per type.</p></li>
+<li><p><strong>Floats</strong> — <code class="docutils literal notranslate"><span class="pre">Float16</span></code> <code class="docutils literal notranslate"><span class="pre">BFloat16</span></code> <code class="docutils literal notranslate"><span class="pre">Float32</span></code> <code class="docutils literal notranslate"><span class="pre">Float64</span></code>.</p></li>
+<li><p><strong>Narrow floats</strong> — <code class="docutils literal notranslate"><span class="pre">Float8E5M2</span></code> <code class="docutils literal notranslate"><span class="pre">Float8E4M3FN</span></code> <code class="docutils literal notranslate"><span class="pre">Float8E4M3FNUZ</span></code>
+<code class="docutils literal notranslate"><span class="pre">Float8E4M3B11FNUZ</span></code> <code class="docutils literal notranslate"><span class="pre">Float8E4M3</span></code>, <code class="docutils literal notranslate"><span class="pre">Float6E2M3FN</span></code> <code class="docutils literal notranslate"><span class="pre">Float6E3M2FN</span></code>,
+<code class="docutils literal notranslate"><span class="pre">Float8E8M0FNU</span></code>, <code class="docutils literal notranslate"><span class="pre">Float4E2M1FN</span></code>. These are storage/transport types, not meant
+for direct arithmetic, and native support is architecture-restricted.</p></li>
+<li><p><strong><code class="docutils literal notranslate"><span class="pre">Boolean</span></code></strong> — the <code class="docutils literal notranslate"><span class="pre">i1</span></code> type; the result of comparisons and predicates.</p></li>
+</ul>
+</section>
+<section id="public-methods">
+<h3>Public methods<a class="headerlink" href="#public-methods" title="Link to this heading">#</a></h3>
+<p>The following methods apply to both <code class="docutils literal notranslate"><span class="pre">Numeric</span></code> and <code class="docutils literal notranslate"><span class="pre">Vector</span></code>, and are elementwise for <code class="docutils literal notranslate"><span class="pre">Vector</span></code>:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Method</p></th>
+<th class="head"><p>Meaning</p></th>
+<th class="head"><p>Example</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">Type(x)</span></code></p></td>
+<td><p>construct or cast — the type class is its own constructor. A <code class="docutils literal notranslate"><span class="pre">Vector</span></code> alias type (<code class="docutils literal notranslate"><span class="pre">Float32x4</span></code>, …) broadcasts a scalar across every lane</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Int32(5)</span></code>, <code class="docutils literal notranslate"><span class="pre">Float32(thread_idx.x)</span></code>; <code class="docutils literal notranslate"><span class="pre">Float32x4(1.0)</span></code> → all four lanes <code class="docutils literal notranslate"><span class="pre">1.0</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>Arithmetic — <code class="docutils literal notranslate"><span class="pre">+</span></code> <code class="docutils literal notranslate"><span class="pre">-</span></code> <code class="docutils literal notranslate"><span class="pre">*</span></code> <code class="docutils literal notranslate"><span class="pre">/</span></code> <code class="docutils literal notranslate"><span class="pre">//</span></code> <code class="docutils literal notranslate"><span class="pre">%</span></code> <code class="docutils literal notranslate"><span class="pre">**</span></code>, unary <code class="docutils literal notranslate"><span class="pre">+x</span></code> <code class="docutils literal notranslate"><span class="pre">-x</span></code> <code class="docutils literal notranslate"><span class="pre">abs(x)</span></code>, <code class="docutils literal notranslate"><span class="pre">divmod(x,</span> <span class="pre">y)</span></code></p></td>
+<td><p>result type follows <em>Type interoperability</em></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Int32(3)</span> <span class="pre">+</span> <span class="pre">Int32(4)</span></code> → <code class="docutils literal notranslate"><span class="pre">Int32(7)</span></code>; <code class="docutils literal notranslate"><span class="pre">vec</span> <span class="pre">*</span> <span class="pre">2.0</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>Bitwise/shift — <code class="docutils literal notranslate"><span class="pre">&amp;</span></code> <code class="docutils literal notranslate"><span class="pre">|</span></code> <code class="docutils literal notranslate"><span class="pre">^</span></code> <code class="docutils literal notranslate"><span class="pre">&lt;&lt;</span></code> <code class="docutils literal notranslate"><span class="pre">&gt;&gt;</span></code>, unary <code class="docutils literal notranslate"><span class="pre">~x</span></code></p></td>
+<td><p>integer-only</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Int32(6)</span> <span class="pre">&amp;</span> <span class="pre">Int32(3)</span></code> → <code class="docutils literal notranslate"><span class="pre">Int32(2)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>Comparison — <code class="docutils literal notranslate"><span class="pre">&lt;</span></code> <code class="docutils literal notranslate"><span class="pre">&lt;=</span></code> <code class="docutils literal notranslate"><span class="pre">&gt;</span></code> <code class="docutils literal notranslate"><span class="pre">&gt;=</span></code> <code class="docutils literal notranslate"><span class="pre">==</span></code> <code class="docutils literal notranslate"><span class="pre">!=</span></code></p></td>
+<td><p>result is <code class="docutils literal notranslate"><span class="pre">Boolean</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">a</span> <span class="pre">&lt;</span> <span class="pre">b</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">x.bitcast(dtype)</span></code></p></td>
+<td><p>reinterpret the bits: <code class="docutils literal notranslate"><span class="pre">Numeric</span></code> equal width; <code class="docutils literal notranslate"><span class="pre">Vector</span></code> equal <em>total</em> width, recomputing the lane count</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Float32(1.0).bitcast(Int32)</span></code>; <code class="docutils literal notranslate"><span class="pre">Float32x4(0.0).bitcast(Int8)</span></code> → <code class="docutils literal notranslate"><span class="pre">Int8x16</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">x.dtype</span></code></p></td>
+<td><p>the scalar type (<code class="docutils literal notranslate"><span class="pre">Numeric</span></code>) / element type (<code class="docutils literal notranslate"><span class="pre">Vector</span></code>)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Int32(5).dtype</span></code> / <code class="docutils literal notranslate"><span class="pre">Int32x4(0).dtype</span></code> → <code class="docutils literal notranslate"><span class="pre">Int32</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">x.ir_value()</span></code></p></td>
+<td><p>the underlying <code class="docutils literal notranslate"><span class="pre">ir.Value</span></code>, materializing a constant for a compile-time value</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Int32(5).ir_value()</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">cond.select(true_value,</span> <span class="pre">false_value)</span></code></p></td>
+<td><p>ternary select; a non-<code class="docutils literal notranslate"><span class="pre">Boolean</span></code> <code class="docutils literal notranslate"><span class="pre">cond</span></code> is converted by truthiness (nonzero)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">(a</span> <span class="pre">&lt;</span> <span class="pre">b).select(a,</span> <span class="pre">b)</span></code> → min</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">x.to(dtype,</span> <span class="pre">*,</span> <span class="pre">rounding_mode=None)</span></code></p></td>
+<td><p>value-preserving conversion; the optional <code class="docutils literal notranslate"><span class="pre">rounding_mode=</span></code> applies to float-to-float casts</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Int32(5).to(Float32)</span></code> → <code class="docutils literal notranslate"><span class="pre">Float32(5.0)</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">Numeric</span></code>-only methods:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Method</p></th>
+<th class="head"><p>Meaning</p></th>
+<th class="head"><p>Example</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">x.is_static()</span></code></p></td>
+<td><p>whether the value is compile-time (Python) rather than run-time (<code class="docutils literal notranslate"><span class="pre">ir.Value</span></code>)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Int32(5).is_static()</span></code> → <code class="docutils literal notranslate"><span class="pre">True</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">Numeric.width</span></code> / <code class="docutils literal notranslate"><span class="pre">Numeric.log_width</span></code></p></td>
+<td><p>the type’s bit width, and <code class="docutils literal notranslate"><span class="pre">ceil(log2(width))</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Int32.width</span></code> → <code class="docutils literal notranslate"><span class="pre">32</span></code>; <code class="docutils literal notranslate"><span class="pre">Int32.log_width</span></code> → <code class="docutils literal notranslate"><span class="pre">5</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">as_numeric</span></code> / <code class="docutils literal notranslate"><span class="pre">Numeric.from_python_value(value)</span></code></p></td>
+<td><p>build a <code class="docutils literal notranslate"><span class="pre">Numeric</span></code> from a Python value</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">as_numeric(5)</span></code> → <code class="docutils literal notranslate"><span class="pre">Int32(5)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">Numeric.from_ir_type(ir_type)</span></code></p></td>
+<td><p>the <code class="docutils literal notranslate"><span class="pre">Numeric</span></code> type for an MLIR type</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Numeric.from_ir_type(T.f32())</span></code> → <code class="docutils literal notranslate"><span class="pre">Float32</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="function-level-typed-arithmetic">
+<h3>Function-level typed arithmetic<a class="headerlink" href="#function-level-typed-arithmetic" title="Link to this heading">#</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">fx.max</span></code>, <code class="docutils literal notranslate"><span class="pre">fx.min</span></code>, and <code class="docutils literal notranslate"><span class="pre">fx.ceildiv</span></code> normalize Python literals and DSL operands,
+resolve one common type, broadcast scalar operands to <code class="docutils literal notranslate"><span class="pre">Vector</span></code> shapes, and emit
+the dedicated MLIR operation for that type:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>API</p></th>
+<th class="head"><p>Float</p></th>
+<th class="head"><p>Signed integer</p></th>
+<th class="head"><p>Unsigned integer</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">fx.max</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">arith.maximumf</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">arith.maxsi</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">arith.maxui</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">fx.min</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">arith.minimumf</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">arith.minsi</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">arith.minui</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">fx.ceildiv</span></code></p></td>
+<td><p>unsupported</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">arith.ceildivsi</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">arith.ceildivui</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">fx.max</span></code> and <code class="docutils literal notranslate"><span class="pre">fx.min</span></code> are variadic and accept nested lists/tuples. Their float
+forms propagate NaN and order signed zero as <code class="docutils literal notranslate"><span class="pre">-0.0</span> <span class="pre">&lt;</span> <span class="pre">+0.0</span></code>. This is deliberately
+different from <code class="docutils literal notranslate"><span class="pre">fx.maxnumf</span></code>, which returns the non-NaN input when exactly one
+operand is NaN.</p>
+<p><code class="docutils literal notranslate"><span class="pre">fx.ceildiv</span></code> rounds integer division toward positive infinity. It does not use
+<code class="docutils literal notranslate"><span class="pre">(a</span> <span class="pre">+</span> <span class="pre">b</span> <span class="pre">-</span> <span class="pre">1)</span> <span class="pre">//</span> <span class="pre">b</span></code>, whose intermediate addition can overflow at run time, and
+it does not change the floor-division meaning of <code class="docutils literal notranslate"><span class="pre">//</span></code>. The similarly named
+<code class="docutils literal notranslate"><span class="pre">fx.ceil_div</span></code> remains the layout/int-tuple operation.</p>
+<p>Boolean inputs to <code class="docutils literal notranslate"><span class="pre">fx.max</span></code> / <code class="docutils literal notranslate"><span class="pre">fx.min</span></code> widen to <code class="docutils literal notranslate"><span class="pre">Int32</span></code>. Boolean, <code class="docutils literal notranslate"><span class="pre">Index</span></code>, float,
+and narrow storage-float inputs to <code class="docutils literal notranslate"><span class="pre">fx.ceildiv</span></code> are rejected. <code class="docutils literal notranslate"><span class="pre">Index</span></code> and narrow
+storage floats are also rejected by <code class="docutils literal notranslate"><span class="pre">fx.max</span></code> / <code class="docutils literal notranslate"><span class="pre">fx.min</span></code>; cast them to an
+explicit supported arithmetic type first.</p>
+</section>
+<section id="vector">
+<h3>Vector<a class="headerlink" href="#vector" title="Link to this heading">#</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">Vector</span></code> is a fixed-length sequence of <code class="docutils literal notranslate"><span class="pre">N</span></code> elements of a single <code class="docutils literal notranslate"><span class="pre">Numeric</span></code>
+element type. It has value semantics and inherits the scalar operators, applied
+elementwise; a scalar operand is auto-broadcast across the lanes.</p>
+<ul class="simple">
+<li><p><strong>Type aliases</strong> — <code class="docutils literal notranslate"><span class="pre">Float32x4</span></code>, <code class="docutils literal notranslate"><span class="pre">BFloat16x8</span></code>, <code class="docutils literal notranslate"><span class="pre">Int32x4</span></code>, … name a
+<code class="docutils literal notranslate"><span class="pre">dtype</span></code>×<code class="docutils literal notranslate"><span class="pre">N</span></code> vector type directly (<code class="docutils literal notranslate"><span class="pre">&lt;dtype&gt;x&lt;N&gt;</span></code>).</p></li>
+</ul>
+</section>
+</section>
+<section id="compile-time-and-run-time-values">
+<h2>Compile-time and run-time values<a class="headerlink" href="#compile-time-and-run-time-values" title="Link to this heading">#</a></h2>
+<p>A <code class="docutils literal notranslate"><span class="pre">Numeric</span></code> is <em>polymorphic in the value it holds</em> — the type is the same either
+way, and <code class="docutils literal notranslate"><span class="pre">is_static()</span></code> reports which:</p>
+<ul class="simple">
+<li><p>a <strong>compile-time value</strong> — a Python <code class="docutils literal notranslate"><span class="pre">int</span></code> / <code class="docutils literal notranslate"><span class="pre">float</span></code> / <code class="docutils literal notranslate"><span class="pre">bool</span></code>, known while
+tracing; or</p></li>
+<li><p>a <strong>run-time value</strong> — an <code class="docutils literal notranslate"><span class="pre">ir.Value</span></code> from an MLIR op, known only at execution.</p></li>
+</ul>
+<p>A <code class="docutils literal notranslate"><span class="pre">Vector</span></code> is always run-time — it is backed by an MLIR vector value, so it has
+no compile-time (folded) form.</p>
+<section id="arithmetic-preserves-the-compile-time-property">
+<h3>Arithmetic preserves the compile-time property<a class="headerlink" href="#arithmetic-preserves-the-compile-time-property" title="Link to this heading">#</a></h3>
+<p>If every operand is compile-time, the result is compile-time — the host folds it
+and emits no MLIR (<code class="docutils literal notranslate"><span class="pre">Int32(3)</span> <span class="pre">+</span> <span class="pre">Int32(4)</span></code> ⇒ <code class="docutils literal notranslate"><span class="pre">Int32</span></code> holding <code class="docutils literal notranslate"><span class="pre">7</span></code>). As soon as one
+operand is run-time, the result is run-time and an MLIR op is emitted. This
+holds uniformly across arithmetic, comparison, bitwise, and shift operators.</p>
+</section>
+<section id="integer-wrap-around">
+<h3>Integer wrap-around<a class="headerlink" href="#integer-wrap-around" title="Link to this heading">#</a></h3>
+<p>Folding is <em>not</em> unbounded Python arithmetic. Constructing an integer — whether
+from a Python <code class="docutils literal notranslate"><span class="pre">int</span></code>, from another integer type, or as the result of a fold —
+reduces the value modulo <code class="docutils literal notranslate"><span class="pre">2**width</span></code>, sign-extending or truncating exactly as the
+corresponding C cast would. This is what keeps a folded result equal to what the
+run-time op would have computed, since <code class="docutils literal notranslate"><span class="pre">arith.addi</span></code> / <code class="docutils literal notranslate"><span class="pre">muli</span></code> / <code class="docutils literal notranslate"><span class="pre">trunci</span></code> wrap on
+their own.</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Expression</p></th>
+<th class="head"><p>Result</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">Uint32(0xFFFFFFFF)</span> <span class="pre">+</span> <span class="pre">Uint32(2)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Uint32</span></code> holding <code class="docutils literal notranslate"><span class="pre">1</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">Uint64(0xFFFFFFFFFFFFFFFF)</span> <span class="pre">+</span> <span class="pre">Uint64(2)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Uint64</span></code> holding <code class="docutils literal notranslate"><span class="pre">1</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">Uint64(-1)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">0xFFFFFFFFFFFFFFFF</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">Int8(200)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">-56</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">Uint8(Int32(-1))</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">255</span></code> (sign-extend, then truncate)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">Uint64(Uint128(2**100</span> <span class="pre">+</span> <span class="pre">7))</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">7</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">Int4(20)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">4</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The reduction applies at every width, including <code class="docutils literal notranslate"><span class="pre">Int4</span></code> / <code class="docutils literal notranslate"><span class="pre">Int128</span></code> / <code class="docutils literal notranslate"><span class="pre">Uint128</span></code>
+and values that exceed any machine integer. <code class="docutils literal notranslate"><span class="pre">Boolean</span></code> is the one exception: it
+is one bit wide and signed, but normalizes to <code class="docutils literal notranslate"><span class="pre">0</span></code> / <code class="docutils literal notranslate"><span class="pre">1</span></code> rather than <code class="docutils literal notranslate"><span class="pre">0</span></code> / <code class="docutils literal notranslate"><span class="pre">-1</span></code>.</p>
+</section>
+<section id="python-literals">
+<h3>Python literals<a class="headerlink" href="#python-literals" title="Link to this heading">#</a></h3>
+<p>A bare literal stays plain Python while it only meets other Python values
+(<code class="docutils literal notranslate"><span class="pre">2</span> <span class="pre">+</span> <span class="pre">3</span></code> is ordinary Python). On contact with a <code class="docutils literal notranslate"><span class="pre">Numeric</span></code> it takes a DSL type
+<em>by value</em> (see <em>Operand normalization</em>) as a compile-time value; on contact
+with a <code class="docutils literal notranslate"><span class="pre">Vector</span></code> it broadcasts to the lanes and the result is run-time. After
+this the interoperability rules apply. An explicit <code class="docutils literal notranslate"><span class="pre">Int32(5)</span></code> is likewise
+compile-time until combined with a run-time value.</p>
+</section>
+<section id="using-a-compile-time-value-as-python">
+<h3>Using a compile-time value as Python<a class="headerlink" href="#using-a-compile-time-value-as-python" title="Link to this heading">#</a></h3>
+<p>Because it holds a real Python value, a compile-time <code class="docutils literal notranslate"><span class="pre">Numeric</span></code> works wherever
+Python expects one — <code class="docutils literal notranslate"><span class="pre">int(x)</span></code>, <code class="docutils literal notranslate"><span class="pre">bool(x)</span></code>, indexing, a Python <code class="docutils literal notranslate"><span class="pre">if</span></code> — so a DSL
+constant can still drive host-side control flow. A run-time <code class="docutils literal notranslate"><span class="pre">Numeric</span></code> raises if
+forced to a Python value.</p>
+</section>
+</section>
+<section id="type-interoperability">
+<h2>Type interoperability<a class="headerlink" href="#type-interoperability" title="Link to this heading">#</a></h2>
+<p>A binary operation between two DSL numeric values determines the type that its
+operands are converted to (the <em>common type</em>) and the type it produces (the
+<em>result type</em>). The rules are the same whether operands are scalar (<code class="docutils literal notranslate"><span class="pre">Numeric</span></code>),
+<code class="docutils literal notranslate"><span class="pre">Vector</span></code>, or a mix of the two; <code class="docutils literal notranslate"><span class="pre">Vector</span> <span class="pre">⊗</span> <span class="pre">Vector</span></code> additionally broadcasts shapes,
+which is independent of type and covered in the layout guides.</p>
+<section id="operand-normalization">
+<h3>Operand normalization<a class="headerlink" href="#operand-normalization" title="Link to this heading">#</a></h3>
+<p>Before the rules below apply, operands are normalized:</p>
+<ul class="simple">
+<li><p><strong>Python literals</strong> take a DSL type by value: an <code class="docutils literal notranslate"><span class="pre">int</span></code> becomes <code class="docutils literal notranslate"><span class="pre">Int32</span></code>, or
+<code class="docutils literal notranslate"><span class="pre">Int64</span></code> when it falls outside the <code class="docutils literal notranslate"><span class="pre">Int32</span></code> range; a <code class="docutils literal notranslate"><span class="pre">float</span></code> becomes <code class="docutils literal notranslate"><span class="pre">Float32</span></code>;
+a <code class="docutils literal notranslate"><span class="pre">bool</span></code> becomes <code class="docutils literal notranslate"><span class="pre">Boolean</span></code>.</p></li>
+<li><p><strong><code class="docutils literal notranslate"><span class="pre">Boolean</span></code></strong> depends on the operation:</p>
+<ul>
+<li><p>In arithmetic (<code class="docutils literal notranslate"><span class="pre">+</span> <span class="pre">-</span> <span class="pre">*</span> <span class="pre">/</span> <span class="pre">//</span> <span class="pre">%</span></code>) it is converted to <code class="docutils literal notranslate"><span class="pre">Int32</span></code> and then follows
+the <code class="docutils literal notranslate"><span class="pre">Int32</span></code> rules.</p></li>
+<li><p>In comparisons it is compared directly and the result is <code class="docutils literal notranslate"><span class="pre">Boolean</span></code>.</p></li>
+<li><p>In bitwise (<code class="docutils literal notranslate"><span class="pre">&amp;</span> <span class="pre">|</span> <span class="pre">^</span></code>) and shift (<code class="docutils literal notranslate"><span class="pre">&lt;&lt;</span> <span class="pre">&gt;&gt;</span></code>) it stays <code class="docutils literal notranslate"><span class="pre">Boolean</span></code> and the result
+is <code class="docutils literal notranslate"><span class="pre">Boolean</span></code>.</p></li>
+</ul>
+</li>
+</ul>
+</section>
+<section id="common-type">
+<h3>Common type<a class="headerlink" href="#common-type" title="Link to this heading">#</a></h3>
+<p>For two numeric operands (after normalization above; <code class="docutils literal notranslate"><span class="pre">Boolean</span></code> in arithmetic is
+already <code class="docutils literal notranslate"><span class="pre">Int32</span></code> here), the common type is:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>lhs \ rhs</p></th>
+<th class="head"><p>Int8</p></th>
+<th class="head"><p>Int16</p></th>
+<th class="head"><p>Int32</p></th>
+<th class="head"><p>Int64</p></th>
+<th class="head"><p>Uint32</p></th>
+<th class="head"><p>Float16</p></th>
+<th class="head"><p>BFloat16</p></th>
+<th class="head"><p>Float32</p></th>
+<th class="head"><p>Float64</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Int8</p></td>
+<td><p>Int8</p></td>
+<td><p>Int16</p></td>
+<td><p>Int32</p></td>
+<td><p>Int64</p></td>
+<td><p>Uint32</p></td>
+<td><p>Float16</p></td>
+<td><p>BFloat16</p></td>
+<td><p>Float32</p></td>
+<td><p>Float64</p></td>
+</tr>
+<tr class="row-odd"><td><p>Int16</p></td>
+<td><p>Int16</p></td>
+<td><p>Int16</p></td>
+<td><p>Int32</p></td>
+<td><p>Int64</p></td>
+<td><p>Uint32</p></td>
+<td><p>Float16</p></td>
+<td><p>BFloat16</p></td>
+<td><p>Float32</p></td>
+<td><p>Float64</p></td>
+</tr>
+<tr class="row-even"><td><p>Int32</p></td>
+<td><p>Int32</p></td>
+<td><p>Int32</p></td>
+<td><p>Int32</p></td>
+<td><p>Int64</p></td>
+<td><p>Uint32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float64</p></td>
+</tr>
+<tr class="row-odd"><td><p>Int64</p></td>
+<td><p>Int64</p></td>
+<td><p>Int64</p></td>
+<td><p>Int64</p></td>
+<td><p>Int64</p></td>
+<td><p>Int64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+</tr>
+<tr class="row-even"><td><p>Uint32</p></td>
+<td><p>Uint32</p></td>
+<td><p>Uint32</p></td>
+<td><p>Uint32</p></td>
+<td><p>Int64</p></td>
+<td><p>Uint32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float64</p></td>
+</tr>
+<tr class="row-odd"><td><p>Float16</p></td>
+<td><p>Float16</p></td>
+<td><p>Float16</p></td>
+<td><p>Float32</p></td>
+<td><p>Float64</p></td>
+<td><p>Float32</p></td>
+<td><p>Float16</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float64</p></td>
+</tr>
+<tr class="row-even"><td><p>BFloat16</p></td>
+<td><p>BFloat16</p></td>
+<td><p>BFloat16</p></td>
+<td><p>Float32</p></td>
+<td><p>Float64</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>BFloat16</p></td>
+<td><p>Float32</p></td>
+<td><p>Float64</p></td>
+</tr>
+<tr class="row-odd"><td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float64</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float32</p></td>
+<td><p>Float64</p></td>
+</tr>
+<tr class="row-even"><td><p>Float64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+<td><p>Float64</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The table follows these rules (other integer widths obey the same integer
+rules):</p>
+<ul class="simple">
+<li><p><strong>Same type</strong> → itself.</p></li>
+<li><p><strong>Two integers, same signedness</strong> → the wider one (<code class="docutils literal notranslate"><span class="pre">Int8</span> <span class="pre">+</span> <span class="pre">Int8</span></code> stays <code class="docutils literal notranslate"><span class="pre">Int8</span></code>;
+there is no promotion to a machine <code class="docutils literal notranslate"><span class="pre">int</span></code>).</p></li>
+<li><p><strong>Two integers, mixed signedness</strong> → the unsigned type when it is at least as
+wide as the signed one, otherwise the signed type. So <code class="docutils literal notranslate"><span class="pre">Int32</span> <span class="pre">+</span> <span class="pre">Uint32</span></code> is
+<code class="docutils literal notranslate"><span class="pre">Uint32</span></code>, and <code class="docutils literal notranslate"><span class="pre">Int64</span> <span class="pre">+</span> <span class="pre">Uint32</span></code> is <code class="docutils literal notranslate"><span class="pre">Int64</span></code>.</p></li>
+<li><p><strong>One float, one integer</strong> → the float, widened to cover the integer’s width:
+<code class="docutils literal notranslate"><span class="pre">Float16</span> <span class="pre">+</span> <span class="pre">Int32</span></code> is <code class="docutils literal notranslate"><span class="pre">Float32</span></code>, <code class="docutils literal notranslate"><span class="pre">Float32</span> <span class="pre">+</span> <span class="pre">Int64</span></code> is <code class="docutils literal notranslate"><span class="pre">Float64</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">Float16</span> <span class="pre">+</span> <span class="pre">Int8</span></code> is <code class="docutils literal notranslate"><span class="pre">Float16</span></code>.</p></li>
+<li><p><strong>Two floats</strong> → the wider one; at equal width the higher-precision one
+(<code class="docutils literal notranslate"><span class="pre">Float64</span> <span class="pre">&gt;</span> <span class="pre">Float32</span> <span class="pre">&gt;</span> <span class="pre">Float16</span></code>/<code class="docutils literal notranslate"><span class="pre">BFloat16</span></code>). <code class="docutils literal notranslate"><span class="pre">Float16</span></code> and <code class="docutils literal notranslate"><span class="pre">BFloat16</span></code> are
+equal width and neither converts to the other without loss, so they combine to
+<code class="docutils literal notranslate"><span class="pre">Float32</span></code>.</p></li>
+</ul>
+</section>
+<section id="result-type">
+<h3>Result type<a class="headerlink" href="#result-type" title="Link to this heading">#</a></h3>
+<p>Given the common type <code class="docutils literal notranslate"><span class="pre">C</span></code> from the table above:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Operation</p></th>
+<th class="head"><p>Result type</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">+</span></code>  <code class="docutils literal notranslate"><span class="pre">-</span></code>  <code class="docutils literal notranslate"><span class="pre">*</span></code> <code class="docutils literal notranslate"><span class="pre">//</span></code>  <code class="docutils literal notranslate"><span class="pre">%</span></code> <code class="docutils literal notranslate"><span class="pre">**</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">C</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">C</span></code> if <code class="docutils literal notranslate"><span class="pre">C</span></code> is a <code class="docutils literal notranslate"><span class="pre">Float</span></code>; if <code class="docutils literal notranslate"><span class="pre">C</span></code> is an <code class="docutils literal notranslate"><span class="pre">Integer</span></code>, <code class="docutils literal notranslate"><span class="pre">Float32</span></code> when its width is at most 32 bits, otherwise <code class="docutils literal notranslate"><span class="pre">Float64</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">&lt;</span></code>  <code class="docutils literal notranslate"><span class="pre">&lt;=</span></code>  <code class="docutils literal notranslate"><span class="pre">&gt;</span></code>  <code class="docutils literal notranslate"><span class="pre">&gt;=</span></code>  <code class="docutils literal notranslate"><span class="pre">==</span></code>  <code class="docutils literal notranslate"><span class="pre">!=</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Boolean</span></code> (operands are compared as <code class="docutils literal notranslate"><span class="pre">C</span></code>)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">&amp;</span></code>  <code class="docutils literal notranslate"><span class="pre">|</span></code>  <code class="docutils literal notranslate"><span class="pre">^</span></code>  <code class="docutils literal notranslate"><span class="pre">&lt;&lt;</span></code>  <code class="docutils literal notranslate"><span class="pre">&gt;&gt;</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">C</span></code>; operands must be <code class="docutils literal notranslate"><span class="pre">Integer</span></code> (a <code class="docutils literal notranslate"><span class="pre">Float</span></code> operand raises <code class="docutils literal notranslate"><span class="pre">TypeError</span></code>)</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+</section>
+<section id="rounding-mode-control">
+<h2>Rounding-mode control<a class="headerlink" href="#rounding-mode-control" title="Link to this heading">#</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">fx.RoundingMode</span></code> provides the IEEE-754 modes:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">to_nearest_even</span></code> — round to the nearest representable value; ties to even.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">downward</span></code> — round toward negative infinity.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">upward</span></code> — round toward positive infinity.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">toward_zero</span></code> — truncate toward zero.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">to_nearest_away</span></code> — round to the nearest representable value; ties away from zero.</p></li>
+</ul>
+<p>Only float-to-float casts accept a mode and any cast involving an integer raises
+<code class="docutils literal notranslate"><span class="pre">TypeError</span></code>. A compile-time constant is narrowed on the host, so passing a mode
+for one raises <code class="docutils literal notranslate"><span class="pre">ValueError</span></code>. The value must be a run-time value.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">lo</span> <span class="o">=</span> <span class="n">x</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">fx</span><span class="o">.</span><span class="n">Float16</span><span class="p">,</span> <span class="n">rounding_mode</span><span class="o">=</span><span class="n">fx</span><span class="o">.</span><span class="n">RoundingMode</span><span class="o">.</span><span class="n">downward</span><span class="p">)</span>
+<span class="n">hi</span> <span class="o">=</span> <span class="n">x</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">fx</span><span class="o">.</span><span class="n">Float16</span><span class="p">,</span> <span class="n">rounding_mode</span><span class="o">=</span><span class="n">fx</span><span class="o">.</span><span class="n">RoundingMode</span><span class="o">.</span><span class="n">upward</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>The keyword applies elementwise to a <code class="docutils literal notranslate"><span class="pre">Vector</span></code> as well.</p>
+</section>
+<section id="fast-math-control">
+<h2>Fast-math control<a class="headerlink" href="#fast-math-control" title="Link to this heading">#</a></h2>
+<p><em>Fast-math</em> flags relax IEEE-754 semantics so the compiler may reorder,
+contract, or approximate eligible operations. Consequently, they affect only
+runtime (that is, MLIR) operations with floating-point semantics. An all
+compile-time result is folded on the host and emits no op.</p>
+<section id="flags-and-their-meanings">
+<h3>Flags and their meanings<a class="headerlink" href="#flags-and-their-meanings" title="Link to this heading">#</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">fx.FastMathFlags</span></code> provides the following flags:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">none</span></code> — preserve the default floating-point semantics; enable no relaxation.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">reassoc</span></code> — allow reassociation, such as changing <code class="docutils literal notranslate"><span class="pre">(a</span> <span class="pre">+</span> <span class="pre">b)</span> <span class="pre">+</span> <span class="pre">c</span></code> to <code class="docutils literal notranslate"><span class="pre">a</span> <span class="pre">+</span> <span class="pre">(b</span> <span class="pre">+</span> <span class="pre">c)</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">nnan</span></code> — assume that NaN values do not occur.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">ninf</span></code> — assume that positive and negative infinity do not occur.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">nsz</span></code> — allow positive and negative zero to be treated as equivalent.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">arcp</span></code> — allow division to be replaced with multiplication by an approximate
+reciprocal.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">contract</span></code> — allow operations to contract, for example multiply and add into
+an FMA.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">afn</span></code> — allow approximate implementations of functions such as <code class="docutils literal notranslate"><span class="pre">exp</span></code>, <code class="docutils literal notranslate"><span class="pre">log</span></code>,
+and <code class="docutils literal notranslate"><span class="pre">sqrt</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">fast</span></code> — enable every non-<code class="docutils literal notranslate"><span class="pre">none</span></code> relaxation above.</p></li>
+</ul>
+<p>Several flags may be combined with <code class="docutils literal notranslate"><span class="pre">|</span></code>, or supplied as a <code class="docutils literal notranslate"><span class="pre">list</span></code>, <code class="docutils literal notranslate"><span class="pre">tuple</span></code>, or
+<code class="docutils literal notranslate"><span class="pre">set</span></code>. The string forms <code class="docutils literal notranslate"><span class="pre">&quot;fast&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;none&quot;</span></code>, and comma-separated combinations
+such as <code class="docutils literal notranslate"><span class="pre">&quot;nnan,ninf&quot;</span></code> are also accepted.</p>
+</section>
+<section id="explicit-fastmath-keyword">
+<h3>Explicit <code class="docutils literal notranslate"><span class="pre">fastmath=</span></code> keyword<a class="headerlink" href="#explicit-fastmath-keyword" title="Link to this heading">#</a></h3>
+<p>Named math operations such as <code class="docutils literal notranslate"><span class="pre">fx.exp</span></code>, <code class="docutils literal notranslate"><span class="pre">fx.sqrt</span></code>, <code class="docutils literal notranslate"><span class="pre">fx.rsqrt</span></code>, and <code class="docutils literal notranslate"><span class="pre">fx.exp2</span></code>
+accept an explicit <code class="docutils literal notranslate"><span class="pre">fastmath=</span></code> keyword for operation-local control:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">y</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">fastmath</span><span class="o">=</span><span class="n">fx</span><span class="o">.</span><span class="n">FastMathFlags</span><span class="o">.</span><span class="n">afn</span><span class="p">)</span>
+<span class="n">z</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">fastmath</span><span class="o">=</span><span class="s2">"fast"</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="with-fx-fastmath-context">
+<h3><code class="docutils literal notranslate"><span class="pre">with</span> <span class="pre">fx.fastmath(...)</span></code> context<a class="headerlink" href="#with-fx-fastmath-context" title="Link to this heading">#</a></h3>
+<p>Use <code class="docutils literal notranslate"><span class="pre">fx.fastmath(flags)</span></code> to establish an ambient setting for every eligible
+floating-point operation built inside a lexical scope. This form also controls
+operators, which do not take a per-operation keyword:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">with</span> <span class="n">fx</span><span class="o">.</span><span class="n">fastmath</span><span class="p">(</span><span class="n">fx</span><span class="o">.</span><span class="n">FastMathFlags</span><span class="o">.</span><span class="n">reassoc</span> <span class="o">|</span> <span class="n">fx</span><span class="o">.</span><span class="n">FastMathFlags</span><span class="o">.</span><span class="n">contract</span><span class="p">):</span>
+    <span class="n">acc</span> <span class="o">=</span> <span class="n">a</span> <span class="o">*</span> <span class="n">b</span> <span class="o">+</span> <span class="n">c</span>          <span class="c1"># may contract into an FMA</span>
+    <span class="n">total</span> <span class="o">=</span> <span class="n">acc</span> <span class="o">+</span> <span class="n">partial</span>    <span class="c1"># may be reassociated</span>
+
+<span class="k">with</span> <span class="n">fx</span><span class="o">.</span><span class="n">fastmath</span><span class="p">(</span><span class="s2">"fast"</span><span class="p">):</span>
+    <span class="n">y</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Contexts may be nested; leaving an inner context restores the enclosing setting.</p>
+</section>
+<section id="compilation-wide-default">
+<h3>Compilation-wide default<a class="headerlink" href="#compilation-wide-default" title="Link to this heading">#</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">flyc.compile</span></code> accepts two related hints for establishing the ambient fast-math
+setting while DSL traces the compiled <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code> and <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> bodies:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">fastmath</span></code> sets the ambient context to the supplied flag specification, using
+the same forms accepted by <code class="docutils literal notranslate"><span class="pre">fx.fastmath(...)</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">fast_fp_math=True</span></code> provides <code class="docutils literal notranslate"><span class="pre">&quot;fast&quot;</span></code> as a fallback when the <code class="docutils literal notranslate"><span class="pre">fastmath</span></code> key is
+absent. It also enables the corresponding fast floating-point setting in the
+ROCm backend.</p></li>
+</ul>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">contract_jit</span> <span class="o">=</span> <span class="n">flyc</span><span class="o">.</span><span class="n">compile</span><span class="p">[{</span><span class="s2">"fastmath"</span><span class="p">:</span> <span class="s2">"contract"</span><span class="p">}](</span><span class="n">jit_fn</span><span class="p">)</span>
+<span class="n">fast_jit</span> <span class="o">=</span> <span class="n">flyc</span><span class="o">.</span><span class="n">compile</span><span class="p">[{</span><span class="s2">"fast_fp_math"</span><span class="p">:</span> <span class="kc">True</span><span class="p">}](</span><span class="n">jit_fn</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>The three controls have the following precedence, from highest to lowest:</p>
+<ol class="arabic simple">
+<li><p>An explicit operation-level <code class="docutils literal notranslate"><span class="pre">fastmath=</span></code> keyword.</p></li>
+<li><p>The innermost enclosing <code class="docutils literal notranslate"><span class="pre">with</span> <span class="pre">fx.fastmath(...)</span></code> context.</p></li>
+<li><p>The resolved <code class="docutils literal notranslate"><span class="pre">flyc.compile</span></code> default: <code class="docutils literal notranslate"><span class="pre">fastmath</span></code> when that key is present,
+otherwise <code class="docutils literal notranslate"><span class="pre">&quot;fast&quot;</span></code> when <code class="docutils literal notranslate"><span class="pre">fast_fp_math=True</span></code>, otherwise no ambient setting.</p></li>
+</ol>
+<p>Thus an explicit keyword overrides a context, and a context overrides the
+resolved compilation default.</p>
+</section>
+</section>
+</section>
+
+
+                </article>
+              
+
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="../api_stability.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">API Stability</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="composite_types.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">Composite Types</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+    
+        
+              
+                <div class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+  <div class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> Contents
+  </div>
+  <nav class="bd-toc-nav page-toc">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#the-type-tower">The type tower</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#numeric-scalars">Numeric scalars</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#public-methods">Public methods</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#function-level-typed-arithmetic">Function-level typed arithmetic</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#vector">Vector</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#compile-time-and-run-time-values">Compile-time and run-time values</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#arithmetic-preserves-the-compile-time-property">Arithmetic preserves the compile-time property</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#integer-wrap-around">Integer wrap-around</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#python-literals">Python literals</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#using-a-compile-time-value-as-python">Using a compile-time value as Python</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#type-interoperability">Type interoperability</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#operand-normalization">Operand normalization</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#common-type">Common type</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#result-type">Result type</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#rounding-mode-control">Rounding-mode control</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#fast-math-control">Fast-math control</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flags-and-their-meanings">Flags and their meanings</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#explicit-fastmath-keyword">Explicit <code class="docutils literal notranslate"><span class="pre">fastmath=</span></code> keyword</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#with-fx-fastmath-context"><code class="docutils literal notranslate"><span class="pre">with</span> <span class="pre">fx.fastmath(...)</span></code> context</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#compilation-wide-default">Compilation-wide default</a></li>
+</ul>
+</li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+    
+
+          </div>
+          <footer class="bd-footer-content">
+            <p>
+  </p>
+          </footer>
+        
+
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script src="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
+<script src="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    
+<footer class="rocm-footer">
+    <div class="container-lg">
+        <section class="bottom-menu menu py-45">
+            <div class="row d-flex align-items-center">
+                <div class="col-12 text-center">
+                    <ul>
+                        <li><a href="https://www.amd.com/en/corporate/copyright" target="_blank">Terms and Conditions</a></li>
+                        <li><a href="https://rocm.docs.amd.com/en/latest/about/license.html">ROCm Licenses and Disclaimers</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/privacy" target="_blank">Privacy</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/trademarks" target="_blank">Trademarks</a></li>
+                        <li><a href="https://www.amd.com/content/dam/amd/en/documents/corporate/cr/supply-chain-transparency.pdf" target="_blank">Supply Chain Transparency</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/competition" target="_blank">Fair and Open Competition</a></li>
+                        <li><a href="https://www.amd.com/system/files/documents/amd-uk-tax-strategy.pdf" target="_blank">UK Tax Strategy</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/cookies" target="_blank">Cookie Policy</a></li>
+                        <!-- OneTrust Cookies Settings button start -->
+                        <li><a href="#cookie-settings" id="ot-sdk-btn" class="ot-sdk-show-settings">Cookie Settings</a></li>
+                        <!-- OneTrust Cookies Settings button end -->
+                    </ul>
+                </div>
+            </div>
+            <div class="row d-flex align-items-center">
+                <div class="col-12 text-center">
+                    <div>
+                        <span class="copyright">© 2026 Advanced Micro Devices, Inc</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+</footer>
+
+<!-- <div id="rdc-watermark-container">
+    <img id="rdc-watermark" src="../_static/images/alpha-watermark.svg" alt="DRAFT watermark"/>
+</div> -->
+    
+  </body>
+</html>
