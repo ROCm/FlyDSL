@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-21T19:44:13Z",
+ "updated": "2026-08-21T20:16:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "john/lazy-rescale-nan",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32505023342",
    "created_at": "2026-08-21T16:50:36Z",
-   "updated_at": "2026-08-21T18:03:04Z",
+   "updated_at": "2026-08-21T20:00:24Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
@@ -40,11 +40,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-21T18:03:02Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32505023342/job/96862813916"
+     "completed_at": "2026-08-21T20:00:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32505023342/job/96862813916",
+     "log_fetch_failed": true
     }
    ]
   },
