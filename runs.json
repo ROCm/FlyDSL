@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-21T05:15:02Z",
+ "updated": "2026-08-21T05:17:58Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32449831131,
+   "pr": 1047,
+   "commit": "eb61f68c6be23fe1624abe7fe44dfaa47e1d42ff",
+   "branch": "skill/review-flydsl-kernel",
+   "event": "pull_request",
+   "title": "Add review-flydsl-kernel: legacy-spelling scanner distilled from 479 maintainer comments",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32449831131",
+   "created_at": "2026-08-21T05:14:41Z",
+   "updated_at": "2026-08-21T05:15:55Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 32448587699,
    "pr": 1047,
@@ -10,11 +25,11 @@
    "branch": "skill/review-flydsl-kernel",
    "event": "pull_request",
    "title": "Add review-flydsl-kernel: legacy-spelling scanner distilled from 479 maintainer comments",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32448587699",
    "created_at": "2026-08-21T04:54:18Z",
-   "updated_at": "2026-08-21T04:57:24Z",
+   "updated_at": "2026-08-21T05:15:05Z",
    "actor": "jhinpan",
    "jobs": []
   },
@@ -153,9 +168,9 @@
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-21T05:11:27Z",
+     "started_at": "2026-08-21T05:14:16Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772/job/96675522323"
     },
@@ -1831,52 +1846,6 @@
      "started_at": "2026-08-20T08:17:06Z",
      "completed_at": "2026-08-20T09:36:15Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32340410707/job/96360538731",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32335449457,
-   "pr": null,
-   "commit": "8c61588de5cb84dc669d1b54fc3dcef7869f30d1",
-   "branch": "main",
-   "event": "push",
-   "title": "[CI] Track Softmax backward in the benchmark dashboard (#1026)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32335449457",
-   "created_at": "2026-08-20T05:24:02Z",
-   "updated_at": "2026-08-20T07:33:19Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T06:02:49Z",
-     "completed_at": "2026-08-20T06:17:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32335449457/job/96330968360",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T06:03:32Z",
-     "completed_at": "2026-08-20T07:33:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32335449457/job/96330968385",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T06:03:39Z",
-     "completed_at": "2026-08-20T07:07:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32335449457/job/96330968461",
      "log_fetch_failed": true
     }
    ]
