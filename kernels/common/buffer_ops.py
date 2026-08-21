@@ -40,6 +40,8 @@ from flydsl.runtime.device import is_rdna_arch
 def _get_buffer_flags(arch=None):
     """Get AMD buffer resource descriptor (V#) flags word (bits 127:96).
 
+     ``flash_attn_utils`` builds a couple of descriptors by hand and still calls it.
+
     Constructs the 32-bit flags field for rocdl.make.buffer.rsrc, following the
     same logic as LLVM's AMDGPUToROCDL makeBufferRsrc():
       https://github.com/llvm/llvm-project/blob/main/mlir/lib/Conversion/AMDGPUToROCDL/AMDGPUToROCDL.cpp
@@ -62,10 +64,6 @@ def _get_buffer_flags(arch=None):
     RDNA (gfx10+):    (7 << 12) | (4 << 15) | (1 << 24) | (2 << 28) = 0x21020070
       - bit 24 set to 1 (required on RDNA)
       - OOB_SELECT=2 (no bounds checking, matching LLVM boundsCheck=false)
-
-    ``create_buffer_resource`` no longer needs this -- ``fx.rocdl.make_buffer_ptr``
-    computes the identical word itself -- but ``flash_attn_utils`` builds a couple of
-    descriptors by hand and still calls it.
     """
     import os
 
