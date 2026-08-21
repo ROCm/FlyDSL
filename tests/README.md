@@ -62,10 +62,10 @@ context and is intended for compile-only AOT jobs. It is not a device-runtime
 executor. Its automatic memory cap requires the optional `psutil` package and
 fails with an actionable error instead of silently disabling the cap when the
 optional package is not installed or memory cannot be queried. A worker killed
-by `SIGKILL` (`exitcode=-9`, or shell form `137`; possible OOM) halves the worker
-limit before retrying and is not retried once the limit reaches one. Retries are
-appended behind jobs that have not started yet instead of jumping to the front
-of the queue.
+by `SIGKILL` (`exitcode=-9`; possible OOM) halves the worker limit at most once
+per launch wave before retrying; timeout retries use the same backoff. Healthy
+completions restore the limit additively. No backoff is applied when retries are
+disabled, and retries are appended behind jobs that have not started yet.
 Progress and final summary lines report terminal failure counts separately from
 the number of jobs that have finished. Scheduler messages use the FlyDSL logger;
 set `FLYDSL_DEBUG_LOG_TO_CONSOLE=1` and `FLYDSL_DEBUG_LOG_LEVEL=INFO` to emit
@@ -74,9 +74,10 @@ progress and summaries to the console.
 Failed results retain `compile_time=None` and include a machine-readable
 `failure` mapping. Its `kind` distinguishes `compile_error`,
 `worker_exception`, `worker_crash`, `possible_oom`, `timeout`,
-`invalid_result`, and `scheduler_error`; `reason` and `attempts` are always
-included when known, while process failures also carry `exitcode` and uncaught
-Python exceptions carry `traceback`.
+and `invalid_result`; `reason` and `attempts` are always included when known,
+while process failures also carry `exitcode`. Uncaught Python exceptions are
+not retried and carry bounded `reason` and `traceback` strings. A valid atomic
+result remains authoritative if the process is killed during teardown.
 
 Session-level pytest options are supported in `tests/conftest.py`:
 

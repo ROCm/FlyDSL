@@ -54,6 +54,13 @@ def _tracked_worker(kernel_name, index, state_path, lock_path, delay):
             fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
+def _init_tracking_state(tmp_path):
+    state_path = tmp_path / "state.json"
+    lock_path = tmp_path / "state.lock"
+    state_path.write_text(json.dumps({"active": 0, "peak": 0}), encoding="utf-8")
+    return state_path, lock_path
+
+
 def _crash_then_succeed(kernel_name, attempt_path, crashes, order_path=None):
     if order_path is not None:
         with open(order_path, "a", encoding="utf-8") as order_file:
@@ -77,6 +84,50 @@ def _sigkill_once_worker(kernel_name, attempt_path=None, delay=0.0):
     return {"kernel_name": kernel_name, "compile_time": 0.01}
 
 
+def _oom_then_track_worker(
+    kernel_name,
+    attempt_path,
+    crashes,
+    state_path,
+    lock_path,
+    delay,
+):
+    path = Path(attempt_path)
+    attempt = int(path.read_text(encoding="utf-8")) + 1
+    path.write_text(str(attempt), encoding="utf-8")
+    if attempt <= crashes:
+        os.kill(os.getpid(), signal.SIGKILL)
+    return _tracked_worker(
+        kernel_name,
+        attempt,
+        state_path,
+        lock_path,
+        delay,
+    )
+
+
+def _timeout_then_track_worker(
+    kernel_name,
+    attempt_path,
+    state_path,
+    lock_path,
+    delay,
+    timeout_delay,
+):
+    path = Path(attempt_path)
+    attempt = int(path.read_text(encoding="utf-8")) + 1
+    path.write_text(str(attempt), encoding="utf-8")
+    if attempt == 1:
+        time.sleep(timeout_delay)
+    return _tracked_worker(
+        kernel_name,
+        attempt,
+        state_path,
+        lock_path,
+        delay,
+    )
+
+
 def _deterministic_failure(kernel_name, attempt_path):
     path = Path(attempt_path)
     attempt = int(path.read_text(encoding="utf-8")) + 1
@@ -98,6 +149,10 @@ def _mixed_outcome_worker(kernel_name, outcome):
         os._exit(137)
     if outcome == "type-error":
         raise TypeError("synthetic worker type error")
+    if outcome == "system-exit":
+        raise SystemExit(3)
+    if outcome == "large-error":
+        raise RuntimeError("X" * (parallel._MAX_TRACEBACK_CHARS * 4))
     if outcome == "compile-error":
         return {
             "kernel_name": kernel_name,
@@ -108,6 +163,27 @@ def _mixed_outcome_worker(kernel_name, outcome):
             },
         }
     return {"kernel_name": kernel_name, "compile_time": 0.01}
+
+
+def _exception_marker_then_exit_zero(worker, kwargs, out_path):
+    parallel._write_json_file(
+        out_path,
+        {
+            parallel._WORKER_EXCEPTION_KEY: {
+                "kind": "worker_exception",
+                "reason": "TypeError: preserved reason",
+                "traceback": "Traceback (most recent call last): preserved frame",
+            }
+        },
+    )
+
+
+def _exit_without_result(worker, kwargs, out_path):
+    return None
+
+
+def _non_dict_worker(kernel_name):
+    return ["not", "a", "dictionary"]
 
 
 @pytest.fixture(autouse=True)
@@ -157,6 +233,54 @@ def test_results_follow_input_order():
     results = run_parallel_jobs(_success_worker, jobs)
 
     assert [result["index"] for result in results] == [0, 1, 2]
+
+
+def test_committed_result_wins_over_teardown_sigkill(monkeypatch):
+    original_write = parallel._write_json_file
+
+    def write_then_sigkill(out_path, payload):
+        original_write(out_path, payload)
+        os.kill(os.getpid(), signal.SIGKILL)
+
+    monkeypatch.setattr(parallel, "_write_json_file", write_then_sigkill)
+
+    results = run_parallel_jobs(
+        _success_worker,
+        [{"kernel_name": "committed", "index": 0}],
+    )
+
+    assert results == [
+        {
+            "kernel_name": "committed",
+            "index": 0,
+            "compile_time": 0.01,
+        }
+    ]
+
+
+def test_committed_result_wins_over_teardown_timeout(monkeypatch):
+    monkeypatch.setenv("FLYDSL_AOT_WORKERS", "1")
+    monkeypatch.setenv("FLYDSL_AOT_TIMEOUT", "0.05")
+    original_write = parallel._write_json_file
+
+    def write_then_wait(out_path, payload):
+        original_write(out_path, payload)
+        time.sleep(60)
+
+    monkeypatch.setattr(parallel, "_write_json_file", write_then_wait)
+
+    results = run_parallel_jobs(
+        _success_worker,
+        [{"kernel_name": "committed", "index": 0}],
+    )
+
+    assert results == [
+        {
+            "kernel_name": "committed",
+            "index": 0,
+            "compile_time": 0.01,
+        }
+    ]
 
 
 def test_worker_count_is_bounded(monkeypatch, tmp_path):
@@ -268,6 +392,87 @@ def test_sigkill_reduces_worker_limit_before_retry(monkeypatch, tmp_path, log_me
     assert "possible OOM); reduced worker limit 2->1; retry 1/1" in "\n".join(log_messages)
 
 
+def test_simultaneous_ooms_back_off_once_per_launch_wave(monkeypatch, tmp_path, log_messages):
+    monkeypatch.setenv("FLYDSL_AOT_WORKERS", "4")
+    monkeypatch.setenv("FLYDSL_AOT_MAX_RETRIES", "1")
+    state_path, lock_path = _init_tracking_state(tmp_path)
+    attempt_paths = [tmp_path / f"oom-attempt-{index}.txt" for index in range(4)]
+    for attempt_path in attempt_paths:
+        attempt_path.write_text("0", encoding="utf-8")
+    jobs = [
+        {
+            "kernel_name": f"oom-{index}",
+            "attempt_path": str(attempt_path),
+            "crashes": 1,
+            "state_path": str(state_path),
+            "lock_path": str(lock_path),
+            "delay": 0.1,
+        }
+        for index, attempt_path in enumerate(attempt_paths)
+    ]
+
+    results = run_parallel_jobs(_oom_then_track_worker, jobs)
+    output = "\n".join(log_messages)
+
+    assert all(result["compile_time"] is not None for result in results)
+    assert json.loads(state_path.read_text(encoding="utf-8"))["peak"] == 2
+    assert output.count("reduced worker limit 4->2") == 1
+    assert "reduced worker limit 2->1" not in output
+
+
+def test_oom_without_retries_does_not_reduce_pending_concurrency(monkeypatch, tmp_path):
+    monkeypatch.setenv("FLYDSL_AOT_WORKERS", "4")
+    monkeypatch.setenv("FLYDSL_AOT_MAX_RETRIES", "0")
+    state_path, lock_path = _init_tracking_state(tmp_path)
+    attempt_paths = [tmp_path / f"attempt-{index}.txt" for index in range(8)]
+    for attempt_path in attempt_paths:
+        attempt_path.write_text("0", encoding="utf-8")
+    jobs = [
+        {
+            "kernel_name": f"job-{index}",
+            "attempt_path": str(attempt_path),
+            "crashes": int(index == 0),
+            "state_path": str(state_path),
+            "lock_path": str(lock_path),
+            "delay": 0.2,
+        }
+        for index, attempt_path in enumerate(attempt_paths)
+    ]
+
+    results = run_parallel_jobs(_oom_then_track_worker, jobs)
+
+    assert results[0]["failure"]["kind"] == "possible_oom"
+    assert json.loads(state_path.read_text(encoding="utf-8"))["peak"] == 4
+
+
+def test_worker_limit_recovers_after_healthy_completions(monkeypatch, tmp_path, log_messages):
+    monkeypatch.setenv("FLYDSL_AOT_WORKERS", "4")
+    monkeypatch.setenv("FLYDSL_AOT_MAX_RETRIES", "1")
+    state_path, lock_path = _init_tracking_state(tmp_path)
+    attempt_paths = [tmp_path / f"attempt-{index}.txt" for index in range(13)]
+    for attempt_path in attempt_paths:
+        attempt_path.write_text("0", encoding="utf-8")
+    jobs = [
+        {
+            "kernel_name": f"job-{index}",
+            "attempt_path": str(attempt_path),
+            "crashes": int(index == 0),
+            "state_path": str(state_path),
+            "lock_path": str(lock_path),
+            "delay": 0.08,
+        }
+        for index, attempt_path in enumerate(attempt_paths)
+    ]
+
+    results = run_parallel_jobs(_oom_then_track_worker, jobs)
+    output = "\n".join(log_messages)
+
+    assert all(result["compile_time"] is not None for result in results)
+    assert json.loads(state_path.read_text(encoding="utf-8"))["peak"] == 4
+    assert "worker limit recovered 2->3" in output
+    assert "worker limit recovered 3->4" in output
+
+
 def test_sigkill_at_minimum_worker_limit_is_not_retried(monkeypatch, tmp_path, log_messages):
     monkeypatch.setenv("FLYDSL_AOT_WORKERS", "1")
     monkeypatch.setenv("FLYDSL_AOT_MAX_RETRIES", "2")
@@ -362,21 +567,110 @@ def test_failure_results_preserve_distinct_causes():
         "attempts": 1,
         "exitcode": -signal.SIGTERM,
     }
-    assert failures[1]["kind"] == "possible_oom"
-    assert failures[1]["reason"].startswith("worker exited with code 137 (possible OOM)")
-    assert failures[1]["attempts"] == 1
-    assert failures[1]["exitcode"] == 137
+    assert failures[1] == {
+        "kind": "worker_crash",
+        "reason": "worker crashed (exitcode=137)",
+        "attempts": 1,
+        "exitcode": 137,
+    }
     assert failures[2]["kind"] == "worker_exception"
     assert failures[2]["reason"] == "TypeError: synthetic worker type error"
     assert failures[2]["attempts"] == 1
     assert failures[2]["exitcode"] == 1
-    assert "TypeError: synthetic worker type error" in failures[2]["traceback"]
+    assert failures[2]["traceback"].startswith("Traceback (most recent call last):")
+    assert "test_parallel_jobs.py" in failures[2]["traceback"]
+    assert failures[2]["traceback"].endswith("TypeError: synthetic worker type error\n")
     assert failures[3] == {
         "kind": "compile_error",
         "reason": "synthetic codegen failure",
         "attempts": 1,
     }
     assert len({json.dumps(failure, sort_keys=True) for failure in failures}) == 4
+
+
+def test_python_exception_is_not_retried_or_duplicated_to_stderr(monkeypatch, capfd):
+    monkeypatch.setenv("FLYDSL_AOT_WORKERS", "1")
+    monkeypatch.setenv("FLYDSL_AOT_MAX_RETRIES", "3")
+
+    result = run_parallel_jobs(
+        _mixed_outcome_worker,
+        [{"kernel_name": "type-error", "outcome": "type-error"}],
+    )[0]
+
+    assert result["failure"]["kind"] == "worker_exception"
+    assert result["failure"]["attempts"] == 1
+    assert result["failure"]["traceback"].startswith("Traceback (most recent call last):")
+    assert capfd.readouterr().err == ""
+
+
+def test_system_exit_is_preserved_and_not_retried(monkeypatch):
+    monkeypatch.setenv("FLYDSL_AOT_WORKERS", "1")
+    monkeypatch.setenv("FLYDSL_AOT_MAX_RETRIES", "3")
+
+    result = run_parallel_jobs(
+        _mixed_outcome_worker,
+        [{"kernel_name": "system-exit", "outcome": "system-exit"}],
+    )[0]
+
+    assert result["failure"]["kind"] == "worker_exception"
+    assert result["failure"]["reason"] == "SystemExit: 3"
+    assert result["failure"]["attempts"] == 1
+    assert result["failure"]["exitcode"] == 3
+    assert result["failure"]["traceback"].endswith("SystemExit: 3\n")
+
+
+def test_large_exception_diagnostics_are_bounded():
+    result = run_parallel_jobs(
+        _mixed_outcome_worker,
+        [{"kernel_name": "large-error", "outcome": "large-error"}],
+    )[0]
+    failure = result["failure"]
+
+    assert len(failure["reason"]) <= parallel._MAX_FAILURE_REASON_CHARS
+    assert "... failure reason truncated ..." in failure["reason"]
+    assert len(failure["traceback"]) <= parallel._MAX_TRACEBACK_CHARS
+    assert failure["traceback"].startswith("Traceback (most recent call last):")
+    assert "... traceback truncated ..." in failure["traceback"]
+    assert failure["traceback"].endswith("X" * 32 + "\n")
+
+
+def test_exception_marker_is_preserved_when_process_exits_zero(monkeypatch):
+    monkeypatch.setattr(
+        parallel,
+        "_run_one_to_file",
+        _exception_marker_then_exit_zero,
+    )
+
+    result = run_parallel_jobs(
+        _success_worker,
+        [{"kernel_name": "marker", "index": 0}],
+    )[0]
+
+    assert result["failure"] == {
+        "kind": "worker_exception",
+        "reason": "TypeError: preserved reason",
+        "attempts": 1,
+        "exitcode": 0,
+        "traceback": "Traceback (most recent call last): preserved frame",
+    }
+
+
+def test_invalid_result_reasons_distinguish_missing_and_non_dict(monkeypatch):
+    non_dict = run_parallel_jobs(
+        _non_dict_worker,
+        [{"kernel_name": "non-dict"}],
+    )[0]
+
+    monkeypatch.setattr(parallel, "_run_one_to_file", _exit_without_result)
+    missing = run_parallel_jobs(
+        _success_worker,
+        [{"kernel_name": "missing", "index": 0}],
+    )[0]
+
+    assert non_dict["failure"]["kind"] == "invalid_result"
+    assert non_dict["failure"]["reason"] == "worker returned list, expected a dictionary"
+    assert missing["failure"]["kind"] == "invalid_result"
+    assert missing["failure"]["reason"] == "worker produced no result file"
 
 
 def test_failed_jobs_do_not_stop_remaining_jobs():
@@ -443,6 +737,35 @@ def test_timed_out_worker_is_killed(monkeypatch):
     assert results[0]["failure"]["exitcode"] == -signal.SIGKILL
     assert results[0]["failure"]["attempts"] == 1
     assert results[0]["failure"]["reason"] == "exceeded per-job timeout (0.05s); killed"
+
+
+def test_timeout_wave_backs_off_once_before_retry(monkeypatch, tmp_path, log_messages):
+    monkeypatch.setenv("FLYDSL_AOT_WORKERS", "4")
+    monkeypatch.setenv("FLYDSL_AOT_MAX_RETRIES", "1")
+    monkeypatch.setenv("FLYDSL_AOT_TIMEOUT", "0.2")
+    state_path, lock_path = _init_tracking_state(tmp_path)
+    attempt_paths = [tmp_path / f"timeout-attempt-{index}.txt" for index in range(4)]
+    for attempt_path in attempt_paths:
+        attempt_path.write_text("0", encoding="utf-8")
+    jobs = [
+        {
+            "kernel_name": f"timeout-{index}",
+            "attempt_path": str(attempt_path),
+            "state_path": str(state_path),
+            "lock_path": str(lock_path),
+            "delay": 0.1,
+            "timeout_delay": 1.0,
+        }
+        for index, attempt_path in enumerate(attempt_paths)
+    ]
+
+    results = run_parallel_jobs(_timeout_then_track_worker, jobs)
+    output = "\n".join(log_messages)
+
+    assert all(result["compile_time"] is not None for result in results)
+    assert json.loads(state_path.read_text(encoding="utf-8"))["peak"] == 2
+    assert output.count("reduced worker limit 4->2") == 1
+    assert "reduced worker limit 2->1" not in output
 
 
 def test_temporary_result_directory_is_removed(monkeypatch, tmp_path):

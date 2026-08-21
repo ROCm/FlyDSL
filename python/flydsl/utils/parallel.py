@@ -16,20 +16,56 @@ from collections import deque
 from collections.abc import Callable
 from multiprocessing.connection import wait as wait_for_sentinels
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .env import aot
 from .file import atomic_write
 from .logger import log
 
 _DEFAULT_MAX_WORKERS = 64
-_POSSIBLE_OOM_EXITCODES = {-signal.SIGKILL, 128 + signal.SIGKILL}
+_MAX_FAILURE_REASON_CHARS = 2 * 1024
+_MAX_TRACEBACK_CHARS = 16 * 1024
+_OOM_EXITCODE = -signal.SIGKILL
 _WORKER_EXCEPTION_KEY = "__flydsl_worker_exception__"
 
 
 def _write_json_file(out_path: str, payload: Any) -> None:
     with atomic_write(Path(out_path), mode="w", encoding="utf-8") as output:
         json.dump(payload, output)
+
+
+def _truncate_text(text: str, max_chars: int, marker: str) -> str:
+    if len(text) <= max_chars:
+        return text
+    remaining = max_chars - len(marker)
+    head = remaining // 2
+    tail = remaining - head
+    return text[:head] + marker + text[-tail:]
+
+
+def _truncate_failure_reason(reason: str) -> str:
+    return _truncate_text(
+        reason,
+        _MAX_FAILURE_REASON_CHARS,
+        "\n... failure reason truncated ...\n",
+    )
+
+
+def _truncate_traceback(traceback_text: str) -> str:
+    return _truncate_text(
+        traceback_text,
+        _MAX_TRACEBACK_CHARS,
+        "\n... traceback truncated ...\n",
+    )
+
+
+def _exception_exitcode(error: BaseException) -> int:
+    if isinstance(error, SystemExit):
+        if error.code is None:
+            return 0
+        if isinstance(error.code, int):
+            return error.code & 0xFF
+    return 1
 
 
 def _run_one_to_file(
@@ -40,18 +76,20 @@ def _run_one_to_file(
     try:
         result = worker(**kwargs)
         _write_json_file(out_path, result)
-    except Exception as error:
-        _write_json_file(
-            out_path,
-            {
-                _WORKER_EXCEPTION_KEY: {
-                    "kind": "worker_exception",
-                    "reason": f"{type(error).__name__}: {error}",
-                    "traceback": traceback.format_exc(),
-                }
-            },
-        )
-        raise
+    except BaseException as error:
+        try:
+            _write_json_file(
+                out_path,
+                {
+                    _WORKER_EXCEPTION_KEY: {
+                        "kind": "worker_exception",
+                        "reason": _truncate_failure_reason(f"{type(error).__name__}: {error}"),
+                        "traceback": _truncate_traceback(traceback.format_exc()),
+                    }
+                },
+            )
+        finally:
+            os._exit(_exception_exitcode(error))
 
 
 def _affinity_aware_cpu_count() -> int:
@@ -143,7 +181,7 @@ def _run_file_pool(
     kernel_timeout: float,
     max_retries: int,
     result_dir: str,
-) -> list[dict[str, Any] | None]:
+) -> list[dict[str, Any]]:
     """Run jobs through a Linux fork pool using files for result transport."""
     ctx = multiprocessing.get_context("fork")
     num_jobs = len(jobs)
@@ -153,9 +191,12 @@ def _run_file_pool(
     completed = 0
     failed_jobs = 0
     progress_stride = max(1, num_jobs // 20)
+    initial_max_workers = max_workers
+    launch_epoch = 0
+    successful_since_backoff = 0
 
     queue = deque(range(num_jobs))
-    running: dict[Any, tuple[int, float | None]] = {}
+    running: dict[Any, tuple[int, float | None, int]] = {}
 
     def launch() -> None:
         while queue and len(running) < max_workers:
@@ -172,7 +213,7 @@ def _run_file_pool(
             )
             process.start()
             deadline = time.monotonic() + kernel_timeout if kernel_timeout > 0 else None
-            running[process] = (index, deadline)
+            running[process] = (index, deadline, launch_epoch)
 
     def note_done(*, is_failure: bool = False) -> None:
         nonlocal completed, failed_jobs
@@ -185,6 +226,32 @@ def _run_file_pool(
                 num_jobs,
                 failed_jobs,
             )
+
+    def note_success(worker_epoch: int) -> None:
+        nonlocal max_workers, successful_since_backoff
+        if max_workers >= initial_max_workers or worker_epoch != launch_epoch:
+            return
+        successful_since_backoff += 1
+        if successful_since_backoff < max_workers:
+            return
+        previous_max_workers = max_workers
+        max_workers += 1
+        successful_since_backoff = 0
+        log().info(
+            "AOT worker limit recovered %d->%d after healthy completions",
+            previous_max_workers,
+            max_workers,
+        )
+
+    def backoff_worker_limit(worker_epoch: int, reason: str) -> str:
+        nonlocal launch_epoch, max_workers, successful_since_backoff
+        if worker_epoch != launch_epoch:
+            return f"{reason}; worker limit already reduced to {max_workers} for this failure wave"
+        previous_max_workers = max_workers
+        max_workers = max(1, max_workers // 2)
+        launch_epoch += 1
+        successful_since_backoff = 0
+        return f"{reason}; reduced worker limit {previous_max_workers}->{max_workers}"
 
     def finish_failure(
         index: int,
@@ -238,9 +305,9 @@ def _run_file_pool(
                 traceback_text=traceback_text,
             )
 
-    def reap(process: Any) -> None:
-        nonlocal max_workers
-        index, _ = running.pop(process)
+    def reap(process: Any, *, timeout_reason: str | None = None) -> None:
+        nonlocal launch_epoch, max_workers, successful_since_backoff
+        index, _, worker_epoch = running.pop(process)
         out_path = os.path.join(result_dir, f"k{index}.json")
         try:
             loaded: Any = None
@@ -254,15 +321,73 @@ def _run_file_pool(
             else:
                 load_error = "worker produced no result file"
 
-            if process.exitcode in _POSSIBLE_OOM_EXITCODES:
-                previous_max_workers = max_workers
-                max_workers = max(1, max_workers // 2)
-                reason = (
-                    "worker killed by SIGKILL (possible OOM)"
-                    if process.exitcode == -signal.SIGKILL
-                    else f"worker exited with code {process.exitcode} (possible OOM)"
+            worker_exception = loaded.get(_WORKER_EXCEPTION_KEY) if isinstance(loaded, dict) else None
+
+            # The atomic result file is the worker's commit point. Once a valid
+            # result is present, teardown-time signals must not discard it.
+            if isinstance(loaded, dict) and worker_exception is None:
+                result = loaded
+                if result.get("compile_time") is None:
+                    failure = result.get("failure")
+                    if not isinstance(failure, dict):
+                        failure = {}
+                        result["failure"] = failure
+                    failure.setdefault("kind", "compile_error")
+                    failure.setdefault("reason", "worker returned compile_time=None")
+                    failure.setdefault("attempts", attempts[index] + 1)
+                results[index] = result
+                is_failure = result.get("compile_time") is None
+                note_done(is_failure=is_failure)
+                if not is_failure:
+                    note_success(worker_epoch)
+                return
+
+            # A structured Python exception is deterministic for the same job.
+            # Preserve it even if teardown later changes the process exit code.
+            if isinstance(worker_exception, dict):
+                reason = str(
+                    worker_exception.get(
+                        "reason",
+                        f"worker raised an exception (exitcode={process.exitcode})",
+                    )
                 )
-                if max_workers == previous_max_workers:
+                traceback_text = worker_exception.get("traceback")
+                if not isinstance(traceback_text, str):
+                    traceback_text = None
+                finish_failure(
+                    index,
+                    kind="worker_exception",
+                    reason=reason,
+                    exitcode=process.exitcode,
+                    traceback_text=traceback_text,
+                )
+                return
+
+            if timeout_reason is not None:
+                if attempts[index] < max_retries and max_workers > 1:
+                    timeout_reason = backoff_worker_limit(
+                        worker_epoch,
+                        timeout_reason,
+                    )
+                retry_or_drop(
+                    index,
+                    kind="timeout",
+                    reason=timeout_reason,
+                    exitcode=process.exitcode,
+                )
+                return
+
+            if process.exitcode == _OOM_EXITCODE:
+                reason = "worker killed by SIGKILL (possible OOM)"
+                can_retry = attempts[index] < max_retries
+                if not can_retry:
+                    finish_failure(
+                        index,
+                        kind="possible_oom",
+                        reason=reason,
+                        exitcode=process.exitcode,
+                    )
+                elif max_workers <= 1:
                     finish_failure(
                         index,
                         kind="possible_oom",
@@ -270,37 +395,21 @@ def _run_file_pool(
                         exitcode=process.exitcode,
                     )
                 else:
+                    reason = backoff_worker_limit(worker_epoch, reason)
                     retry_or_drop(
                         index,
                         kind="possible_oom",
-                        reason=(f"{reason}; reduced worker limit {previous_max_workers}->{max_workers}"),
+                        reason=reason,
                         exitcode=process.exitcode,
                     )
                 return
 
             if process.exitcode != 0:
-                worker_exception = loaded.get(_WORKER_EXCEPTION_KEY) if isinstance(loaded, dict) else None
-                if isinstance(worker_exception, dict):
-                    reason = str(
-                        worker_exception.get(
-                            "reason",
-                            f"worker raised an exception (exitcode={process.exitcode})",
-                        )
-                    )
-                    traceback_text = worker_exception.get("traceback")
-                    if not isinstance(traceback_text, str):
-                        traceback_text = None
-                    kind = "worker_exception"
-                else:
-                    reason = f"worker crashed (exitcode={process.exitcode})"
-                    traceback_text = None
-                    kind = "worker_crash"
                 retry_or_drop(
                     index,
-                    kind=kind,
-                    reason=reason,
+                    kind="worker_crash",
+                    reason=f"worker crashed (exitcode={process.exitcode})",
                     exitcode=process.exitcode,
-                    traceback_text=traceback_text,
                 )
                 return
 
@@ -312,7 +421,7 @@ def _run_file_pool(
                     exitcode=process.exitcode,
                 )
                 return
-            if not isinstance(loaded, dict) or _WORKER_EXCEPTION_KEY in loaded:
+            if not isinstance(loaded, dict):
                 finish_failure(
                     index,
                     kind="invalid_result",
@@ -320,18 +429,6 @@ def _run_file_pool(
                     exitcode=process.exitcode,
                 )
                 return
-
-            result = loaded
-            if result.get("compile_time") is None:
-                failure = result.get("failure")
-                if not isinstance(failure, dict):
-                    failure = {}
-                    result["failure"] = failure
-                failure.setdefault("kind", "compile_error")
-                failure.setdefault("reason", "worker returned compile_time=None")
-                failure.setdefault("attempts", attempts[index] + 1)
-            results[index] = result
-            note_done(is_failure=result.get("compile_time") is None)
         finally:
             process.close()
 
@@ -339,7 +436,7 @@ def _run_file_pool(
         launch()
         while running:
             if kernel_timeout > 0:
-                nearest_deadline = min(deadline for _, deadline in running.values() if deadline is not None)
+                nearest_deadline = min(deadline for _, deadline, _ in running.values() if deadline is not None)
                 wait_timeout: float | None = max(0.0, nearest_deadline - time.monotonic())
             else:
                 wait_timeout = None
@@ -357,19 +454,12 @@ def _run_file_pool(
             if kernel_timeout > 0:
                 now = time.monotonic()
                 for process in list(running):
-                    index, deadline = running[process]
+                    _, deadline, _ = running[process]
                     if deadline is not None and now > deadline and process.is_alive():
+                        timeout_reason = f"exceeded per-job timeout ({kernel_timeout:g}s); killed"
                         process.kill()
                         process.join()
-                        running.pop(process)
-                        exitcode = process.exitcode
-                        process.close()
-                        retry_or_drop(
-                            index,
-                            kind="timeout",
-                            reason=f"exceeded per-job timeout ({kernel_timeout:g}s); killed",
-                            exitcode=exitcode,
-                        )
+                        reap(process, timeout_reason=timeout_reason)
 
             launch()
     finally:
@@ -395,7 +485,9 @@ def _run_file_pool(
         retries_used,
         retry_label,
     )
-    return results
+    if any(result is None for result in results):
+        raise RuntimeError("internal AOT scheduler error: unfinished jobs remain")
+    return cast(list[dict[str, Any]], results)
 
 
 def run_parallel_jobs(
@@ -410,13 +502,14 @@ def run_parallel_jobs(
     escaping as an exception. Every failed result keeps ``compile_time=None``
     for compatibility and adds a ``failure`` dictionary with machine-readable
     ``kind``, ``reason``, and ``attempts`` fields. Process failures also include
-    ``exitcode``; uncaught Python exceptions include ``traceback``.
+    ``exitcode``; uncaught Python exceptions include a bounded ``traceback`` and
+    are not retried.
 
     This executor uses the Linux ``fork`` multiprocessing context because it is
     intended for compile-only workers that inherit the initialized compiler.
-    A possible OOM exit (``-SIGKILL`` or shell-style ``137``) halves the
-    concurrency limit before retrying and is not retried once that limit
-    reaches one.
+    An OOM-like ``-SIGKILL`` halves the concurrency limit once per launch wave;
+    healthy completions then restore it additively. OOM exits are not retried
+    once the limit reaches one.
     """
     if not jobs:
         return []
@@ -430,7 +523,7 @@ def run_parallel_jobs(
 
     result_dir = tempfile.mkdtemp(prefix="flydsl_aot_results_")
     try:
-        raw_results = _run_file_pool(
+        results = _run_file_pool(
             worker,
             jobs,
             max_workers=max_workers,
@@ -440,19 +533,6 @@ def run_parallel_jobs(
         )
     finally:
         shutil.rmtree(result_dir, ignore_errors=True)
-
-    results: list[dict[str, Any]] = []
-    for job, result in zip(jobs, raw_results):
-        if result is None:
-            results.append(
-                _failure_result(
-                    job,
-                    kind="scheduler_error",
-                    reason="scheduler returned no result for the job",
-                )
-            )
-        else:
-            results.append(result)
     return results
 
 
