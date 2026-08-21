@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-21T17:32:44Z",
+ "updated": "2026-08-21T18:31:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,9 +14,38 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32505023342",
    "created_at": "2026-08-21T16:50:36Z",
-   "updated_at": "2026-08-21T17:03:50Z",
+   "updated_at": "2026-08-21T18:03:04Z",
    "actor": "JohnQinAMD",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-21T18:02:54Z",
+     "completed_at": "2026-08-21T18:17:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32505023342/job/96862813726",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-21T18:02:57Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32505023342/job/96862813760"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-21T18:03:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32505023342/job/96862813916"
+    }
+   ]
   },
   {
    "run_id": 32504338777,
@@ -40,11 +69,11 @@
    "branch": "jhinpan/fix-exp2-fastmath",
    "event": "pull_request",
    "title": "[ROCDL] Lower approximate exp2 to native intrinsic",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32503825131",
    "created_at": "2026-08-21T16:36:52Z",
-   "updated_at": "2026-08-21T17:16:33Z",
+   "updated_at": "2026-08-21T17:31:59Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -68,11 +97,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-21T17:16:33Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32503825131/job/96850235212"
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-21T17:31:59Z",
+     "completed_at": "2026-08-21T17:51:21Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32503825131/job/96850235212",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -93,11 +123,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-21T17:10:21Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32502908187/job/96846492801"
+     "completed_at": "2026-08-21T17:31:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32502908187/job/96846492801",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -160,11 +191,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-21T16:52:18Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32502318944/job/96841821902"
+     "completed_at": "2026-08-21T17:53:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32502318944/job/96841821902",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
