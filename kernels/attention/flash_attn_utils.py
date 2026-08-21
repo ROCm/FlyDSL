@@ -42,6 +42,7 @@ _VMCNT_HI_SHIFT = 14
 _VMCNT_HI_MASK = 0x3
 scf_if_dispatch = ReplaceIfWithDispatch.scf_if_dispatch
 
+
 _LDS_ALIAS_DOMAIN = '#llvm.alias_scope_domain<id = "flydsl.dualwave_swp.lds">'
 
 
@@ -2537,16 +2538,15 @@ class GenericKvGmemToLdsLoader:
             vecs.append(self.load_f16xN(ctx.v_ptr, self.global_idx(row_idx, ctx.vp_col_base)))
         return vecs
 
+    @flyc.jit
     def coop_store_v_lds_perm(self, vecs, buf_id=0):
         ctx = self.ctx
         traits = ctx.traits
         if const_expr(ctx.vp_active_threads < traits.BLOCK_SIZE):
+            # only active lanes store
             active = ctx.tid < fx.Index(ctx.vp_active_threads)
-
-            def _store_active():
+            if active:
                 self._coop_store_v_lds_perm_body(vecs, buf_id)
-
-            scf_if_dispatch(active, _store_active)
         else:
             self._coop_store_v_lds_perm_body(vecs, buf_id)
 
@@ -2916,15 +2916,13 @@ class GenericSoftmaxHelper:
             moff = (0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 24, 25, 26, 27)
         return kv_start_i32 + lane_off, moff
 
+    @flyc.jit
     def apply_kv_mask(self, s_raw_lo, s_raw_hi, kv_start):
         ctx = self.ctx
         traits = ctx.traits
         kv_start_i32 = fx.Int32(kv_start)
         if const_expr(traits.CAUSAL):
-            # Keep the runtime tile_needs_mask guard (below-diagonal tiles skip the 32
-            # selects) but drive the scf.if with the 32 scalar scores as explicit state
-            # (a Python list cannot cross a dynamic `if`) -> byte-identical to the unrolled
-            # form. The score at logical n_pos holds physical kv = kv_start + sigma(n_pos).
+            # below-diagonal tiles skip masking; guard carries the two score lists
             q_start_i32 = fx.Int32(ctx.q_start) + ctx.delta_i32
             q_mask_limit_i32 = ctx.q_row_i32 + ctx.delta_i32
             max_kv_col_i32 = kv_start_i32 + fx.Int32(traits.BLOCK_N - 1)
@@ -2932,22 +2930,20 @@ class GenericSoftmaxHelper:
             col_base_i32, moff = self._kv_mask_lane_off(kv_start_i32)
             c_neg_inf = ctx.c_neg_inf
 
-            def _apply_causal_mask(_names, *scores):
-                out = []
-                for r in range_constexpr(16):
-                    kv_col = col_base_i32 + fx.Int32(moff[r])
-                    out.append((kv_col > q_mask_limit_i32).select(c_neg_inf, scores[2 * r]))
-                    out.append(
-                        (kv_col + fx.Int32(traits.K_SUB_N) > q_mask_limit_i32).select(c_neg_inf, scores[2 * r + 1])
+            masked_lo = list(s_raw_lo)
+            masked_hi = list(s_raw_hi)
+            if tile_needs_mask:
+                masked_lo = [
+                    (col_base_i32 + fx.Int32(moff[r]) > q_mask_limit_i32).select(c_neg_inf, s_raw_lo[r])
+                    for r in range(16)
+                ]
+                masked_hi = [
+                    (col_base_i32 + fx.Int32(moff[r]) + fx.Int32(traits.K_SUB_N) > q_mask_limit_i32).select(
+                        c_neg_inf, s_raw_hi[r]
                     )
-                return out
-
-            mask_names = tuple("_sm%d" % i for i in range(32))
-            interleaved = [v for r in range(16) for v in (s_raw_lo[r], s_raw_hi[r])]
-            masked = scf_if_dispatch(
-                tile_needs_mask, _apply_causal_mask, state_names=mask_names, state_values=interleaved
-            )
-            return [masked[2 * r] for r in range(16)], [masked[2 * r + 1] for r in range(16)]
+                    for r in range(16)
+                ]
+            return masked_lo, masked_hi
 
         # Non-causal: mask physical KV columns outside seqlen so tail rows stay out of softmax.
         seq_len_i32 = fx.Int32(ctx.seqlen_kv_b)
