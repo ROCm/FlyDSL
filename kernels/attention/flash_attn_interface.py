@@ -875,14 +875,10 @@ def flydsl_flash_attn_func(
             # afterwards would consume the parts on the ambient stream while the
             # kernels are still running on `stream`, and would hold two full
             # outputs at a size where one is already several GB.
-            out = torch.empty(
-                q.shape, dtype=torch.bfloat16 if dtype_str == "fp8" else q.dtype, device=q.device
-            )
+            out = torch.empty(q.shape, dtype=torch.bfloat16 if dtype_str == "fp8" else q.dtype, device=q.device)
         for i in range(q.shape[0]):
             sl = slice(i, i + 1)
-            flydsl_flash_attn_func(
-                q[sl].contiguous(), k[sl].contiguous(), v[sl].contiguous(), out=out[sl], **kw
-            )
+            flydsl_flash_attn_func(q[sl].contiguous(), k[sl].contiguous(), v[sl].contiguous(), out=out[sl], **kw)
         return out
     if return_lse and paged_kv:
         raise NotImplementedError("flydsl_flash_attn_func: return_lse is not supported for paged KV")
