@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-21T12:32:08Z",
+ "updated": "2026-08-21T12:34:52Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "convolution",
    "event": "pull_request",
    "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32482231072",
    "created_at": "2026-08-21T12:30:44Z",
-   "updated_at": "2026-08-21T12:30:52Z",
+   "updated_at": "2026-08-21T12:32:03Z",
    "actor": "amd-nprotaso",
    "jobs": []
   },
