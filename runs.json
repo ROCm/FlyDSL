@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-21T05:55:42Z",
+ "updated": "2026-08-21T06:10:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32453078682,
+   "pr": 1045,
+   "commit": "b9889c50317f7e7c2874d6a3470daed084f95a0f",
+   "branch": "john/attn-4gib-guard",
+   "event": "pull_request",
+   "title": "[Bugfix] Refuse a batch entry the buffer descriptor cannot address",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453078682",
+   "created_at": "2026-08-21T06:06:31Z",
+   "updated_at": "2026-08-21T06:08:24Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 32452139385,
    "pr": 1033,
@@ -25,11 +40,11 @@
    "branch": "feat/rdna3-gemm-tile-selection",
    "event": "pull_request",
    "title": "[Kernel][Perf] Speed up the RDNA3 GEMM up to 1.85x by choosing the tile from the shape",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32451534261",
    "created_at": "2026-08-21T05:42:25Z",
-   "updated_at": "2026-08-21T05:43:52Z",
+   "updated_at": "2026-08-21T05:58:55Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -40,13 +55,41 @@
    "branch": "john/maxnumf-contract",
    "event": "pull_request",
    "title": "[Fix] Restore the fx.maxnumf contract, and keep ninf off the score reductions",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32451114906",
    "created_at": "2026-08-21T05:35:34Z",
-   "updated_at": "2026-08-21T05:38:30Z",
+   "updated_at": "2026-08-21T06:02:37Z",
    "actor": "JohnQinAMD",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-21T06:02:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32451114906/job/96684298126"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-21T06:03:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32451114906/job/96684298200"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-21T06:02:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32451114906/job/96684298216"
+    }
+   ]
   },
   {
    "run_id": 32450902421,
@@ -89,9 +132,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450753464",
    "created_at": "2026-08-21T05:29:49Z",
-   "updated_at": "2026-08-21T05:33:06Z",
+   "updated_at": "2026-08-21T06:03:35Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-21T05:56:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450753464/job/96683226572"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-21T05:58:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450753464/job/96683226573"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-21T06:03:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450753464/job/96683226577"
+    }
+   ]
   },
   {
    "run_id": 32450025670,
@@ -140,7 +211,7 @@
   },
   {
    "run_id": 32446827284,
-   "pr": 1020,
+   "pr": null,
    "commit": "fc155670ee194ae1d7bf6d815b02fd82beba2084",
    "branch": "fp8-softmax-normalisation",
    "event": "pull_request",
@@ -1677,52 +1748,6 @@
      "started_at": "2026-08-20T09:13:25Z",
      "completed_at": "2026-08-20T09:33:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32344192036/job/96375345183"
-    }
-   ]
-  },
-  {
-   "run_id": 32344076593,
-   "pr": 1009,
-   "commit": "0e41bfb367a16662e190952cec0985068f1032a1",
-   "branch": "john/bf16-attn-xcd-swizzle",
-   "event": "pull_request",
-   "title": "[Fix] Restore the gfx950 XCD mapping for bf16 dense attention",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32344076593",
-   "created_at": "2026-08-20T07:27:13Z",
-   "updated_at": "2026-08-20T10:06:41Z",
-   "actor": "JohnQinAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T08:11:40Z",
-     "completed_at": "2026-08-20T10:06:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32344076593/job/96359203240",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T08:26:06Z",
-     "completed_at": "2026-08-20T09:59:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32344076593/job/96359203265",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T08:18:09Z",
-     "completed_at": "2026-08-20T08:33:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32344076593/job/96359203270",
-     "log_fetch_failed": true
     }
    ]
   }
