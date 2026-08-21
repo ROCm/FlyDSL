@@ -735,7 +735,9 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         """Butterfly max reduce across MFMA column groups (strides 32, 16)."""
         w = _f32(val)
         for sh in [32, 16]:
-            w = fx.maxnumf(w, _shfl_xor_f32(w, sh))
+            # Pinned: fx.maxnumf now inherits this launcher's fast_fp_math, and
+            # test_mla_decode.py aborts here so that widening is unverified.
+            w = fx.maxnumf(w, _shfl_xor_f32(w, sh), fastmath=arith.FastMathFlags.contract)
         return w
 
     def _warp_reduce_add_16(val):
@@ -895,7 +897,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         # Local max
         local_max = scaled[0]
         for i in range_constexpr(1, P_VALS_PER_THR):
-            local_max = fx.maxnumf(local_max, scaled[i])
+            local_max = fx.maxnumf(local_max, scaled[i], fastmath=arith.FastMathFlags.contract)
 
         # Warp reduce max (within 16-lane groups)
         local_max = _warp_reduce_max_16(local_max)
@@ -905,7 +907,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             new_row_max = local_max
             rescale = c_one_f32
         else:
-            new_row_max = fx.maxnumf(local_max, row_max_old)
+            new_row_max = fx.maxnumf(local_max, row_max_old, fastmath=arith.FastMathFlags.contract)
             # rescale = exp2((old_max - new_max) * log2e)
             diff = row_max_old - new_row_max
             rescale = _fast_exp2(diff * c_log2e)

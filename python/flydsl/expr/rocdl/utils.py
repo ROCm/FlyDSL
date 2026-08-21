@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
+from ..._mlir import ir
 from ..numeric import Numeric
 
 
@@ -13,9 +14,16 @@ def normalize_s_waitcnt_field(name, value, maximum):
     Wait counters are encoded into an instruction's immediate field, so the
     value has to be known at compile time; a run-time ``Integer`` is rejected
     rather than silently materialised as a constant.
+
+    An ``ir.IntegerAttr`` is also accepted: the ODS-generated ROCDL builders
+    these wrappers shadow take ``Union[int, IntegerAttr]``, so callers written
+    against the raw builders keep working.
     """
     if value is None:
         return maximum
+
+    if isinstance(value, ir.IntegerAttr):
+        value = value.value
 
     if isinstance(value, Numeric):
         if not value.is_static():
