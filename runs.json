@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-21T00:32:29Z",
+ "updated": "2026-08-21T01:15:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "skill/review-flydsl-kernel",
    "event": "pull_request",
    "title": "Add review-flydsl-kernel skill distilled from this repo's review history",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32429571951",
    "created_at": "2026-08-20T23:39:43Z",
-   "updated_at": "2026-08-20T23:56:41Z",
+   "updated_at": "2026-08-21T01:12:16Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -30,20 +30,22 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T23:56:40Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32429571951/job/96621374930"
+     "completed_at": "2026-08-21T01:12:15Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32429571951/job/96621374930",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-20T23:56:39Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32429571951/job/96621375021"
+     "completed_at": "2026-08-21T00:38:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32429571951/job/96621375021",
+     "log_fetch_failed": true
     }
    ]
   },
