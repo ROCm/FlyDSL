@@ -43,6 +43,8 @@ _DTYPE_MAP = {torch.bfloat16: "bf16", torch.float16: "f16", torch.float8_e4m3fn:
 
 # Short varlen/paged cases use the lightweight generic path.
 _VARLEN_LIGHT_MAX_SEQ = 256
+# Largest flat element count the fp8 C-ABI can address; see the split below.
+_FP8_MAX_FLAT_ELEMS = 2**31
 _DENSE_LIGHT_CU_FALLBACK = 256
 _DENSE_DUALWAVE_MIN_SEQ = 256
 _DENSE_DUALWAVE_LARGE_BATCH = 8
@@ -689,7 +691,7 @@ def flydsl_flash_attn_func(
     # Kernel build options.
     waves_per_eu: int = 2,
     daz: bool = True,
-    dualwave_swp_lazy_rescale: bool = True,
+    dualwave_swp_lazy_rescale: Optional[bool] = None,
     dualwave_swp_setprio: bool = True,
     dualwave_swp_enable_stagger: bool = True,
     # Re-derive (head, q_block) with head as the slow axis so one head's q-blocks
@@ -779,7 +781,9 @@ def flydsl_flash_attn_func(
             otherwise it has the same dtype as q.
         waves_per_eu: Kernel occupancy hint.
         daz: Enable denormals-are-zero.
-        dualwave_swp_lazy_rescale: Enable lazy online softmax rescale.
+        dualwave_swp_lazy_rescale: Enable lazy online softmax rescale. Defaults to
+            True for bf16/fp16 and False for fp8, where the lazy path costs
+            accuracy; pass explicitly to override.
         dualwave_swp_setprio: Enable s_setprio scheduling hints.
         dualwave_swp_enable_stagger: Enable wave-group phase stagger.
         debug_counts: Float32[2] tensor; when given, counts lazy-rescale branches
@@ -802,13 +806,16 @@ def flydsl_flash_attn_func(
         raise ValueError(f"flydsl_flash_attn_func: q/k/v must share dtype; got {q.dtype}/{k.dtype}/{v.dtype}")
 
     dtype_str = _dtype_str(q)
+    if dualwave_swp_lazy_rescale is None:
+        # fp8 defaults to the eager rescale: the lazy path cannot lift P far
+        # enough to keep the softmax tail out of e4m3's flush-to-zero range.
+        dualwave_swp_lazy_rescale = dtype_str != "fp8"
     if return_lse and dtype_str == "fp8":
         raise NotImplementedError("flydsl_flash_attn_func: return_lse is not supported for fp8")
     paged_kv = any(x is not None for x in (block_table, seqlen_k))
     if dtype_str == "fp8" and paged_kv:
         raise NotImplementedError("flydsl_flash_attn_func: fp8 flash_attn does not support paged KV")
-    if return_lse and paged_kv:
-        raise NotImplementedError("flydsl_flash_attn_func: return_lse is not supported for paged KV")
+
     has_bias = bias is not None
     has_alibi = alibi_slopes is not None
     has_sink = sink is not None
@@ -821,6 +828,60 @@ def flydsl_flash_attn_func(
             raise NotImplementedError(f"flydsl_flash_attn_func: {_name} is not supported for fp8")
         if not _t.is_cuda or _t.device != q.device:
             raise ValueError(f"flydsl_flash_attn_func: {_name} must be a CUDA tensor on {q.device}, got {_t.device}")
+
+    # The fp8 path flattens Q/K/V/O to 1-D and the C-ABI packs a dynamic dim as
+    # int32, so a launch aborts once any of them reaches 2**31 (S >= 131072 at
+    # D=128, H=64). K/V are checked too: cross-attention can hold a short Q and
+    # an over-long KV. Batch entries are independent and a leading slice of a
+    # contiguous tensor is still contiguous, so one launch per entry divides the
+    # flat dim by B at no copy. bf16 passes the natural 4-D shape and is exempt.
+    if (
+        dtype_str == "fp8"
+        and not paged_kv
+        and cu_seqlens_q is None
+        and cu_seqlens_kv is None
+        and q.dim() == 4
+        and max(q.numel(), k.numel(), v.numel()) >= _FP8_MAX_FLAT_ELEMS
+    ):
+        if q.shape[0] == 1:
+            # Out of batch to divide by. Launching would abort inside the C ABI
+            # with a struct.error naming neither the tensor nor the limit.
+            raise NotImplementedError(
+                "flydsl_flash_attn_func: fp8 flattens Q/K/V/O and packs the dynamic dim as int32, so a "
+                f"single batch entry cannot exceed {_FP8_MAX_FLAT_ELEMS} elements; got q={q.numel()}, "
+                f"k={k.numel()}, v={v.numel()}. Shorten the sequence or use bf16."
+            )
+        kw = dict(
+            causal=causal,
+            num_kv_heads=num_kv_heads,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+            cross_seqlen=cross_seqlen,
+            kv_cache_layout=kv_cache_layout,
+            num_kv_splits=num_kv_splits,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            waves_per_eu=waves_per_eu,
+            daz=daz,
+            dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
+            dualwave_swp_setprio=dualwave_swp_setprio,
+            dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
+            debug_counts=debug_counts,
+            stream=stream,
+        )
+        if out is None:
+            # Allocate once and hand each launch its own slice. Concatenating
+            # afterwards would consume the parts on the ambient stream while the
+            # kernels are still running on `stream`, and would hold two full
+            # outputs at a size where one is already several GB.
+            out = torch.empty(q.shape, dtype=torch.bfloat16 if dtype_str == "fp8" else q.dtype, device=q.device)
+        for i in range(q.shape[0]):
+            sl = slice(i, i + 1)
+            flydsl_flash_attn_func(q[sl].contiguous(), k[sl].contiguous(), v[sl].contiguous(), out=out[sl], **kw)
+        return out
+    if return_lse and paged_kv:
+        raise NotImplementedError("flydsl_flash_attn_func: return_lse is not supported for paged KV")
     if has_bias:
         if bias.dtype != q.dtype:
             raise ValueError(f"flydsl_flash_attn_func: bias dtype must match q dtype {q.dtype}, got {bias.dtype}")

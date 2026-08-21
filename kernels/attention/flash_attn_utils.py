@@ -411,17 +411,24 @@ def _sub_score_pair(v_s, row_max, fm_fast):
     return Vec.from_elements(lo_sub, fx.Float32).ir_value(), Vec.from_elements(hi_sub, fx.Float32).ir_value()
 
 
-def _scale_sub_score_pair(v_s, row_max_raw, scale, zero_f, fm_fast):
+def _scale_sub_score_pair(v_s, row_max_raw, scale, zero_f, fm_fast, bias=None):
     """Fused softmax-scale + row-max subtraction (optimization 1-A).
 
-    Returns ``scale * (v_s - row_max_raw)`` per element via a single FMA
-    (``fma(s, scale, -scale*row_max_raw)``), so the fp8 QK MMA can emit raw
+    Returns ``scale * (v_s - row_max_raw) + bias`` per element via a single FMA
+    (``fma(s, scale, bias - scale*row_max_raw)``), so the fp8 QK MMA can emit raw
     (un-scaled) logits and reduce_max can run in the raw domain (scale > 0 is
     order-preserving). Replaces the separate post-QK scale multiply + subtract.
     ``-inf`` masked lanes stay ``-inf`` (scale > 0), matching the un-fused path.
+
+    ``bias`` lands in the FMA's addend, so a caller needing ``exp2`` to produce
+    ``2**bias * P`` pays nothing -- see ``DualwaveFp8SoftmaxHelper.sub_m``.
     """
     s_lo, s_hi = v_s
     neg_scaled_max = zero_f - scale * row_max_raw
+    if bias is not None:
+        # exp2 lands on 2**bias * P instead of P, at no extra instruction: the
+        # FMA's addend absorbs it.
+        neg_scaled_max = neg_scaled_max + bias
     scale_v = Vec.from_elements([scale], fx.Float32).broadcast_to(16)
     nsm_v = Vec.from_elements([neg_scaled_max], fx.Float32).broadcast_to(16)
     lo = fx.fma(Vec(s_lo), scale_v, nsm_v, fastmath=fm_fast)
@@ -5098,8 +5105,24 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
     def floor_masked_max(self, row_max):
         return fx.maxnumf(row_max, self.c_neg_floor)
 
+    # log2 of e4m3's largest finite value, 448.
+    _P_HEADROOM_LOG2 = 8.807354922057604
+
     def sub_m(self, v_s, row_max):
-        return _scale_sub_score_pair(v_s, row_max, self.c_logit_scale, self.c_zero_f, self.fm_fast)
+        # P is cast to e4m3, whose smallest subnormal is 2**-9, so a softmax
+        # over thousands of keys loses its tail to flush-to-zero -- while l_row,
+        # summed before the cast, still counts it. Scaling P up first uses the
+        # format's whole range; l_row scales with it, so the output is unchanged
+        # apart from the tail that survives. Free: it rides the FMA's addend.
+        #
+        # Available headroom is bounded by how large exp2 gets: the lazy path
+        # holds the running max until a tile exceeds it by RESCALE_THRESHOLD, so
+        # exp2 <= 2**THRESHOLD there; the eager path rebases every tile.
+        headroom = self._P_HEADROOM_LOG2
+        if const_expr(self.traits.DUALWAVE_SWP_LAZY_RESCALE):
+            headroom -= self.traits.DUALWAVE_SWP_RESCALE_THRESHOLD
+        bias = fx.Float32(headroom) if headroom > 0.0 else None
+        return _scale_sub_score_pair(v_s, row_max, self.c_logit_scale, self.c_zero_f, self.fm_fast, bias)
 
     def exp2(self, v_s, start, length):
         return _exp2_score_slice(v_s, start, length)
