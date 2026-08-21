@@ -118,7 +118,9 @@ def _memory_worker_fallback(default_workers: int, reason: str) -> int:
     )
     message = f"{reason}; limiting AOT concurrency to {fallback_workers} worker{'s' if fallback_workers != 1 else ''}"
     log().warning(message)
-    warnings.warn(message, RuntimeWarning, stacklevel=2)
+    # Public path: user -> run_parallel_jobs -> _get_max_workers ->
+    # _memory_worker_cap -> this helper.
+    warnings.warn(message, RuntimeWarning, stacklevel=5)
     return fallback_workers
 
 
@@ -184,6 +186,33 @@ def _failure_result(
         "compile_time": None,
         "failure": failure,
     }
+
+
+def _finalize_pool_results(
+    results: list[dict[str, Any] | None],
+    *,
+    num_jobs: int,
+    completed: int,
+    succeeded_jobs: int,
+    failed_jobs: int,
+    retries_used: int,
+) -> list[dict[str, Any]]:
+    if completed != num_jobs or succeeded_jobs + failed_jobs != completed or any(result is None for result in results):
+        raise RuntimeError(
+            "internal AOT scheduler error: "
+            f"{completed}/{num_jobs} jobs completed, "
+            f"{succeeded_jobs} succeeded, {failed_jobs} failed"
+        )
+
+    retry_label = "retry" if retries_used == 1 else "retries"
+    log().info(
+        "AOT: %d succeeded, %d failed; %d %s after abnormal worker exits",
+        succeeded_jobs,
+        failed_jobs,
+        retries_used,
+        retry_label,
+    )
+    return cast(list[dict[str, Any]], results)
 
 
 def _run_file_pool(
@@ -308,11 +337,12 @@ def _run_file_pool(
             else:
                 load_error = "worker produced no result file"
 
-            worker_exception = loaded.get(_WORKER_EXCEPTION_KEY) if isinstance(loaded, dict) else None
+            has_worker_exception_marker = isinstance(loaded, dict) and _WORKER_EXCEPTION_KEY in loaded
+            worker_exception = loaded.get(_WORKER_EXCEPTION_KEY) if has_worker_exception_marker else None
 
             # The atomic result file is the worker's commit point. Once a valid
             # result is present, teardown-time signals must not discard it.
-            if isinstance(loaded, dict) and worker_exception is None:
+            if isinstance(loaded, dict) and not has_worker_exception_marker:
                 result = loaded
                 if result.get("compile_time") is None:
                     failure = result.get("failure")
@@ -329,7 +359,17 @@ def _run_file_pool(
 
             # A structured Python exception is deterministic for the same job.
             # Preserve it even if teardown later changes the process exit code.
-            if isinstance(worker_exception, dict):
+            if has_worker_exception_marker:
+                if not isinstance(worker_exception, dict):
+                    finish_failure(
+                        index,
+                        kind="invalid_result",
+                        reason=(
+                            f"worker exception marker must contain a dictionary, got {type(worker_exception).__name__}"
+                        ),
+                        exitcode=process.exitcode,
+                    )
+                    return
                 reason = str(
                     worker_exception.get(
                         "reason",
@@ -357,20 +397,16 @@ def _run_file_pool(
                 )
                 return
 
-            if process.exitcode == _OOM_EXITCODE:
-                retry_or_drop(
-                    index,
-                    kind="possible_oom",
-                    reason="worker killed by SIGKILL (possible OOM)",
-                    exitcode=process.exitcode,
-                )
-                return
-
             if process.exitcode != 0:
+                possible_oom = process.exitcode == _OOM_EXITCODE
                 retry_or_drop(
                     index,
-                    kind="worker_crash",
-                    reason=f"worker crashed (exitcode={process.exitcode})",
+                    kind="possible_oom" if possible_oom else "worker_crash",
+                    reason=(
+                        "worker killed by SIGKILL (possible OOM)"
+                        if possible_oom
+                        else f"worker crashed (exitcode={process.exitcode})"
+                    ),
                     exitcode=process.exitcode,
                 )
                 return
@@ -439,22 +475,14 @@ def _run_file_pool(
                     pass
         running.clear()
 
-    if completed != num_jobs or succeeded_jobs + failed_jobs != completed or any(result is None for result in results):
-        raise RuntimeError(
-            "internal AOT scheduler error: "
-            f"{completed}/{num_jobs} jobs completed, "
-            f"{succeeded_jobs} succeeded, {failed_jobs} failed"
-        )
-
-    retry_label = "retry" if retries_used == 1 else "retries"
-    log().info(
-        "AOT: %d succeeded, %d failed; %d %s after abnormal worker exits",
-        succeeded_jobs,
-        failed_jobs,
-        retries_used,
-        retry_label,
+    return _finalize_pool_results(
+        results,
+        num_jobs=num_jobs,
+        completed=completed,
+        succeeded_jobs=succeeded_jobs,
+        failed_jobs=failed_jobs,
+        retries_used=retries_used,
     )
-    return cast(list[dict[str, Any]], results)
 
 
 def run_parallel_jobs(
@@ -474,6 +502,11 @@ def run_parallel_jobs(
 
     This executor uses the Linux ``fork`` multiprocessing context because it is
     intended for compile-only workers that inherit the initialized compiler.
+    Callers must ensure no compiler or MLIR work is active on other native
+    threads when forking; ``threading.active_count()`` does not account for all
+    native threads. Workers must not create long-lived child processes because
+    timeout and cleanup handling supervise only the direct worker process.
+
     An OOM-like ``-SIGKILL`` is reported as ``possible_oom`` and retried according
     to ``FLYDSL_AOT_MAX_RETRIES`` without changing global concurrency.
     """

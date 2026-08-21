@@ -7,6 +7,7 @@ import os
 import signal
 import sys
 import time
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -178,12 +179,26 @@ def _exception_marker_then_exit_zero(worker, kwargs, out_path):
     )
 
 
+def _malformed_exception_marker_then_exit_zero(worker, kwargs, out_path):
+    parallel._write_json_file(
+        out_path,
+        {parallel._WORKER_EXCEPTION_KEY: "not-a-dictionary"},
+    )
+
+
 def _exit_without_result(worker, kwargs, out_path):
     return None
 
 
 def _non_dict_worker(kernel_name):
     return ["not", "a", "dictionary"]
+
+
+def _always_oom_worker(kernel_name, attempt_path):
+    path = Path(attempt_path)
+    attempt = int(path.read_text(encoding="utf-8")) + 1
+    path.write_text(str(attempt), encoding="utf-8")
+    os.kill(os.getpid(), signal.SIGKILL)
 
 
 @pytest.fixture(autouse=True)
@@ -211,7 +226,7 @@ def test_empty_jobs_do_not_invoke_worker(monkeypatch):
     assert run_parallel_jobs(_success_worker, []) == []
 
 
-@pytest.mark.parametrize("workers", [None, "", "0", "-2"])
+@pytest.mark.parametrize("workers", [None, "", "   ", "0", "-2"])
 def test_non_positive_or_empty_workers_use_automatic_limit(monkeypatch, workers):
     if workers is None:
         monkeypatch.delenv("FLYDSL_AOT_WORKERS", raising=False)
@@ -391,7 +406,6 @@ def test_sigkill_retries_without_changing_worker_limit(monkeypatch, tmp_path, lo
     assert all(result["compile_time"] is not None for result in results)
     output = "\n".join(log_messages)
     assert "possible OOM); retry 1/1" in output
-    assert "worker limit" not in output
 
 
 def test_same_wave_oom_siblings_all_retry(monkeypatch, tmp_path, log_messages):
@@ -416,10 +430,9 @@ def test_same_wave_oom_siblings_all_retry(monkeypatch, tmp_path, log_messages):
     assert all(result["compile_time"] is not None for result in results)
     assert [path.read_text(encoding="utf-8") for path in attempt_paths] == ["2", "2"]
     assert output.count("possible OOM); retry 1/3") == 2
-    assert "worker limit" not in output
 
 
-def test_simultaneous_oom_retries_keep_configured_concurrency(monkeypatch, tmp_path, log_messages):
+def test_simultaneous_oom_retries_keep_configured_concurrency(monkeypatch, tmp_path):
     monkeypatch.setenv("FLYDSL_AOT_WORKERS", "4")
     monkeypatch.setenv("FLYDSL_AOT_MAX_RETRIES", "1")
     state_path, lock_path = _init_tracking_state(tmp_path)
@@ -439,11 +452,8 @@ def test_simultaneous_oom_retries_keep_configured_concurrency(monkeypatch, tmp_p
     ]
 
     results = run_parallel_jobs(_oom_then_track_worker, jobs)
-    output = "\n".join(log_messages)
-
     assert all(result["compile_time"] is not None for result in results)
     assert json.loads(state_path.read_text(encoding="utf-8"))["peak"] == 4
-    assert "worker limit" not in output
 
 
 def test_oom_without_retries_does_not_reduce_pending_concurrency(monkeypatch, tmp_path):
@@ -471,6 +481,30 @@ def test_oom_without_retries_does_not_reduce_pending_concurrency(monkeypatch, tm
     assert json.loads(state_path.read_text(encoding="utf-8"))["peak"] == 4
 
 
+def test_oom_retry_exhaustion_returns_possible_oom(monkeypatch, tmp_path, log_messages):
+    monkeypatch.setenv("FLYDSL_AOT_WORKERS", "1")
+    monkeypatch.setenv("FLYDSL_AOT_MAX_RETRIES", "2")
+    attempt_path = tmp_path / "attempt.txt"
+    attempt_path.write_text("0", encoding="utf-8")
+
+    result = run_parallel_jobs(
+        _always_oom_worker,
+        [{"kernel_name": "always-oom", "attempt_path": str(attempt_path)}],
+    )[0]
+    output = "\n".join(log_messages)
+
+    assert attempt_path.read_text(encoding="utf-8") == "3"
+    assert result["failure"] == {
+        "kind": "possible_oom",
+        "reason": "worker killed by SIGKILL (possible OOM)",
+        "attempts": 3,
+        "exitcode": -signal.SIGKILL,
+    }
+    assert "retry 1/2" in output
+    assert "retry 2/2" in output
+    assert "not retrying" in output
+
+
 def test_sigkill_at_one_worker_still_uses_retry_budget(monkeypatch, tmp_path, log_messages):
     monkeypatch.setenv("FLYDSL_AOT_WORKERS", "1")
     monkeypatch.setenv("FLYDSL_AOT_MAX_RETRIES", "2")
@@ -491,7 +525,6 @@ def test_sigkill_at_one_worker_still_uses_retry_budget(monkeypatch, tmp_path, lo
     assert results[0]["compile_time"] is not None
     output = "\n".join(log_messages)
     assert "possible OOM); retry 1/2" in output
-    assert "worker limit" not in output
 
 
 def test_retry_exhaustion_returns_failure(monkeypatch, tmp_path):
@@ -545,6 +578,20 @@ def test_final_logs_report_permanent_failures(monkeypatch, log_messages):
         assert f"AOT job {kernel_name} worker crashed (exitcode=17); not retrying" in output
     assert "... 5/5 jobs finished (3 failed)" in output
     assert "AOT: 2 succeeded, 3 failed; 6 retries after abnormal worker exits" in output
+
+
+def test_incomplete_pool_results_raise_before_summary(log_messages):
+    with pytest.raises(RuntimeError, match="0/1 jobs completed"):
+        parallel._finalize_pool_results(
+            [None],
+            num_jobs=1,
+            completed=0,
+            succeeded_jobs=0,
+            failed_jobs=0,
+            retries_used=0,
+        )
+
+    assert not any("succeeded" in message for message in log_messages)
 
 
 def test_failure_results_preserve_distinct_causes():
@@ -616,6 +663,30 @@ def test_system_exit_is_preserved_and_not_retried(monkeypatch):
     assert result["failure"]["traceback"].endswith("SystemExit: 3\n")
 
 
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (256, 0),
+        (512, 0),
+        (-1, 255),
+    ],
+)
+def test_system_exit_code_is_normalized_to_process_status(code, expected):
+    assert parallel._exception_exitcode(SystemExit(code)) == expected
+
+
+def test_traceback_truncation_exact_boundary():
+    at_limit = "A" * parallel._MAX_TRACEBACK_CHARS
+    over_limit = "B" * (parallel._MAX_TRACEBACK_CHARS + 1)
+
+    assert parallel._truncate_traceback(at_limit) == at_limit
+    truncated = parallel._truncate_traceback(over_limit)
+    assert len(truncated) == parallel._MAX_TRACEBACK_CHARS
+    assert "... traceback truncated ..." in truncated
+    assert truncated.startswith("B" * 32)
+    assert truncated.endswith("B" * 32)
+
+
 def test_large_exception_diagnostics_are_bounded():
     result = run_parallel_jobs(
         _mixed_outcome_worker,
@@ -649,6 +720,26 @@ def test_exception_marker_is_preserved_when_process_exits_zero(monkeypatch):
         "attempts": 1,
         "exitcode": 0,
         "traceback": "Traceback (most recent call last): preserved frame",
+    }
+
+
+def test_malformed_exception_marker_is_localized_to_invalid_result(monkeypatch):
+    monkeypatch.setattr(
+        parallel,
+        "_run_one_to_file",
+        _malformed_exception_marker_then_exit_zero,
+    )
+
+    result = run_parallel_jobs(
+        _success_worker,
+        [{"kernel_name": "malformed-marker", "index": 0}],
+    )[0]
+
+    assert result["failure"] == {
+        "kind": "invalid_result",
+        "reason": ("worker exception marker must contain a dictionary, got str"),
+        "attempts": 1,
+        "exitcode": 0,
     }
 
 
@@ -736,7 +827,7 @@ def test_timed_out_worker_is_killed(monkeypatch):
     assert results[0]["failure"]["reason"] == "exceeded per-job timeout (0.05s); killed"
 
 
-def test_timeout_wave_retries_without_reducing_concurrency(monkeypatch, tmp_path, log_messages):
+def test_timeout_wave_retries_without_reducing_concurrency(monkeypatch, tmp_path):
     monkeypatch.setenv("FLYDSL_AOT_WORKERS", "4")
     monkeypatch.setenv("FLYDSL_AOT_MAX_RETRIES", "1")
     monkeypatch.setenv("FLYDSL_AOT_TIMEOUT", "0.2")
@@ -757,11 +848,8 @@ def test_timeout_wave_retries_without_reducing_concurrency(monkeypatch, tmp_path
     ]
 
     results = run_parallel_jobs(_timeout_then_track_worker, jobs)
-    output = "\n".join(log_messages)
-
     assert all(result["compile_time"] is not None for result in results)
     assert json.loads(state_path.read_text(encoding="utf-8"))["peak"] == 4
-    assert "reduced worker limit" not in output
 
 
 def test_temporary_result_directory_is_removed(monkeypatch, tmp_path):
@@ -802,6 +890,30 @@ def test_missing_psutil_warns_and_uses_conservative_limit(monkeypatch, log_messa
     with pytest.warns(RuntimeWarning, match="limiting AOT concurrency to 4 workers"):
         assert parallel._get_max_workers(num_jobs=100) == 4
     assert "psutil is not installed; automatic AOT memory limiting is unavailable" in "\n".join(log_messages)
+
+
+def test_missing_psutil_warning_points_to_public_caller_and_deduplicates(
+    monkeypatch,
+):
+    monkeypatch.delenv("FLYDSL_AOT_WORKERS")
+    monkeypatch.setenv("FLYDSL_AOT_MEM_PER_WORKER_GB", "2")
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    monkeypatch.setattr(parallel, "_affinity_aware_cpu_count", lambda: 1)
+
+    def invoke_scheduler():
+        return run_parallel_jobs(
+            _success_worker,
+            [{"kernel_name": "one", "index": 0}],
+        )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("default")
+        for _ in range(5):
+            invoke_scheduler()
+
+    runtime_warnings = [warning for warning in caught if issubclass(warning.category, RuntimeWarning)]
+    assert len(runtime_warnings) == 1
+    assert runtime_warnings[0].filename == __file__
 
 
 def test_memory_query_failure_warns_and_uses_conservative_limit(monkeypatch, log_messages):

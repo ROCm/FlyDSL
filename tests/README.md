@@ -62,9 +62,14 @@ context and is intended for compile-only AOT jobs. It is not a device-runtime
 executor. Its automatic memory cap requires the optional `psutil` package and
 emits both a warning and `RuntimeWarning` before falling back to at most four
 workers when the optional package is unavailable or memory cannot be queried.
+The `RuntimeWarning` points to the public caller and follows Python's standard
+once-per-call-site filtering; the logger records each fallback.
 OOM-like `SIGKILL` (`exitcode=-9`) and timeout failures are classified
 separately and retried according to `FLYDSL_AOT_MAX_RETRIES`; neither changes
 global concurrency. Retries are appended behind jobs that have not started yet.
+Call the scheduler only when no compiler/MLIR work is active on other native
+threads, and do not let workers create long-lived child processes: the
+fork-based pool supervises only its direct workers.
 Progress and final summary lines report terminal failure counts separately from
 the number of jobs that have finished. Scheduler messages use the FlyDSL logger;
 set `FLYDSL_DEBUG_LOG_TO_CONSOLE=1` and `FLYDSL_DEBUG_LOG_LEVEL=INFO` to emit
