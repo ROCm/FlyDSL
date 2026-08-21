@@ -292,6 +292,11 @@ jobs:
           ref: ${{ env.GITHUB_COMMIT_SHA }}
           path: flydsl-test
 
+      # download-artifact overlays its destination. Self-hosted workspaces are
+      # persistent, so remove wheels left by an older package version first.
+      - name: Remove stale FlyDSL CI wheels
+        run: rm -rf "${GITHUB_WORKSPACE:?}/flydsl-ci-wheels"
+
       - name: Download FlyDSL CI wheels
         uses: actions/download-artifact@v4
         with:
@@ -300,8 +305,21 @@ jobs:
 
       - name: Verify FlyDSL CI wheels
         run: |
+          shopt -s nullglob
+          pr_wheels=(flydsl-ci-wheels/pr/*.whl)
+          if [ "${#pr_wheels[@]}" -ne 1 ]; then
+            printf 'Expected exactly one PR wheel, found %s:\n' "${#pr_wheels[@]}" >&2
+            printf '  %s\n' "${pr_wheels[@]}" >&2
+            exit 1
+          fi
           (cd flydsl-ci-wheels/pr && sha256sum -c SHA256SUMS)
           if [ -d flydsl-ci-wheels/base ]; then
+            base_wheels=(flydsl-ci-wheels/base/*.whl)
+            if [ "${#base_wheels[@]}" -ne 1 ]; then
+              printf 'Expected exactly one base wheel, found %s:\n' "${#base_wheels[@]}" >&2
+              printf '  %s\n' "${base_wheels[@]}" >&2
+              exit 1
+            fi
             (cd flydsl-ci-wheels/base && sha256sum -c SHA256SUMS)
           else
             echo "::warning title=Baseline wheel unavailable::Exact base benchmark will be skipped."
@@ -375,11 +393,11 @@ jobs:
       - name: Show tests logs
         if: failure()
         run: |
+          log_dir="$(mktemp -d "${RUNNER_TEMP}/flydsl-test-logs.XXXXXX")"
           docker exec flydsl_test bash -c 'cd /tmp && tar czf /tmp/logs.tgz *.log 2>/dev/null || echo "no logs"'
-          docker cp flydsl_test:/tmp/logs.tgz . || true
-          if [ -f logs.tgz ]; then
-            tar -xzf logs.tgz || true
-            cat *.log || true
+          if docker cp flydsl_test:/tmp/logs.tgz "${log_dir}/logs.tgz"; then
+            tar -xzf "${log_dir}/logs.tgz" -C "${log_dir}" || true
+            find "${log_dir}" -maxdepth 1 -type f -name '*.log' -print -exec cat {} \;
           else
             echo "logs.tgz not found; skipping log extraction"
           fi
@@ -526,12 +544,12 @@ jobs:
       - name: Show benchmarks logs
         if: failure()
         run: |
+          log_dir="$(mktemp -d "${RUNNER_TEMP}/flydsl-benchmark-logs.XXXXXX")"
           docker exec flydsl_test bash -c 'cd /tmp && tar czf /tmp/flydsl_bench_logs.tgz flydsl_bench* bench_*.csv 2>/dev/null || echo "no logs"'
-          docker cp flydsl_test:/tmp/flydsl_bench_logs.tgz . || true
-          if [ -f flydsl_bench_logs.tgz ]; then
-            tar -xzf flydsl_bench_logs.tgz || true
-            cat flydsl_bench*/*.log || true
-            cat bench_*.csv || true
+          if docker cp flydsl_test:/tmp/flydsl_bench_logs.tgz "${log_dir}/logs.tgz"; then
+            tar -xzf "${log_dir}/logs.tgz" -C "${log_dir}" || true
+            find "${log_dir}" -type f -name '*.log' -print -exec cat {} \;
+            find "${log_dir}" -maxdepth 1 -type f -name 'bench_*.csv' -print -exec cat {} \;
           else
             echo "flydsl_bench_logs.tgz not found; skipping log extraction"
           fi
@@ -588,6 +606,11 @@ jobs:
           ref: ${{ env.GITHUB_COMMIT_SHA }}
           path: flydsl-test
 
+      # download-artifact overlays its destination. Self-hosted workspaces are
+      # persistent, so remove wheels left by an older package version first.
+      - name: Remove stale FlyDSL CI wheels
+        run: rm -rf "${GITHUB_WORKSPACE:?}/flydsl-ci-wheels"
+
       - name: Download FlyDSL CI wheels
         uses: actions/download-artifact@v4
         with:
@@ -596,8 +619,21 @@ jobs:
 
       - name: Verify FlyDSL CI wheels
         run: |
+          shopt -s nullglob
+          pr_wheels=(flydsl-ci-wheels/pr/*.whl)
+          if [ "${#pr_wheels[@]}" -ne 1 ]; then
+            printf 'Expected exactly one PR wheel, found %s:\n' "${#pr_wheels[@]}" >&2
+            printf '  %s\n' "${pr_wheels[@]}" >&2
+            exit 1
+          fi
           (cd flydsl-ci-wheels/pr && sha256sum -c SHA256SUMS)
           if [ -d flydsl-ci-wheels/base ]; then
+            base_wheels=(flydsl-ci-wheels/base/*.whl)
+            if [ "${#base_wheels[@]}" -ne 1 ]; then
+              printf 'Expected exactly one base wheel, found %s:\n' "${#base_wheels[@]}" >&2
+              printf '  %s\n' "${base_wheels[@]}" >&2
+              exit 1
+            fi
             (cd flydsl-ci-wheels/base && sha256sum -c SHA256SUMS)
           else
             echo "::warning title=Baseline wheel unavailable::Exact base benchmark will be skipped."
@@ -768,11 +804,11 @@ jobs:
       - name: Show test logs
         if: failure()
         run: |
+          log_dir="$(mktemp -d "${RUNNER_TEMP}/flydsl-test-logs.XXXXXX")"
           docker exec flydsl_test bash -c 'cd /tmp && tar czf /tmp/logs.tgz *.log 2>/dev/null || echo "no logs"'
-          docker cp flydsl_test:/tmp/logs.tgz . || true
-          if [ -f logs.tgz ]; then
-            tar -xzf logs.tgz || true
-            cat *.log || true
+          if docker cp flydsl_test:/tmp/logs.tgz "${log_dir}/logs.tgz"; then
+            tar -xzf "${log_dir}/logs.tgz" -C "${log_dir}" || true
+            find "${log_dir}" -maxdepth 1 -type f -name '*.log' -print -exec cat {} \;
           else
             echo "logs.tgz not found; skipping log extraction"
           fi
