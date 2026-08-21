@@ -57,7 +57,8 @@ FP8_DTYPE = torch.float8_e4m3fn
 FLASH_ATTN_FUNC_KERNEL_CONFIG: dict = {
     "waves_per_eu": 2,
     "daz": True,
-    "dualwave_swp_lazy_rescale": True,
+    # None lets the library resolve it per dtype: lazy for bf16, eager for fp8.
+    "dualwave_swp_lazy_rescale": None,
     "dualwave_swp_setprio": True,
     "dualwave_swp_debug_lazy_counts": False,
     "dualwave_swp_enable_stagger": True,
@@ -990,7 +991,7 @@ def _cfg_kw():
     return dict(
         waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
         daz=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("daz", False),
-        dualwave_swp_lazy_rescale=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_lazy_rescale"],
+        dualwave_swp_lazy_rescale=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("dualwave_swp_lazy_rescale"),
         dualwave_swp_setprio=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_setprio"],
         dualwave_swp_enable_stagger=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_enable_stagger"],
     )
@@ -1696,7 +1697,7 @@ def run_fp8_config(
             out=o_bf16,
             waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
             daz=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("daz", False),
-            dualwave_swp_lazy_rescale=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_lazy_rescale"],
+            dualwave_swp_lazy_rescale=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("dualwave_swp_lazy_rescale"),
             dualwave_swp_setprio=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_setprio"],
             dualwave_swp_enable_stagger=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_enable_stagger"],
             **fp8_exec_kwargs,
@@ -1751,7 +1752,7 @@ def run_fp8_config(
                 out=o_bf16,
                 waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
                 daz=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("daz", False),
-                dualwave_swp_lazy_rescale=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_lazy_rescale"],
+                dualwave_swp_lazy_rescale=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("dualwave_swp_lazy_rescale"),
                 dualwave_swp_setprio=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_setprio"],
                 dualwave_swp_enable_stagger=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_enable_stagger"],
                 **fp8_exec_kwargs,
@@ -2686,9 +2687,9 @@ def main():
         "--no-lazy-rescale",
         action="store_false",
         dest="dualwave_swp_lazy_rescale",
-        help="Disable the DUALWAVE_SWP lazy online-softmax rescale (enabled by default)",
+        help="Disable the DUALWAVE_SWP lazy online-softmax rescale (default: on for bf16, off for fp8)",
     )
-    parser.set_defaults(dualwave_swp_lazy_rescale=True)
+    parser.set_defaults(dualwave_swp_lazy_rescale=None)
     parser.add_argument(
         "--no-setprio",
         action="store_false",
@@ -4733,3 +4734,39 @@ def test_fp8_split_result_survives_a_non_current_stream(monkeypatch):
     torch.cuda.synchronize()
 
     torch.testing.assert_close(got.float(), ref.float(), rtol=0, atol=0)
+
+
+@_requires_gfx950
+def test_fp8_default_rescale_is_the_eager_one():
+    """Omitting the keyword must give what ``dualwave_swp_lazy_rescale=False`` gives.
+
+    Every other fp8 case here passes the flag explicitly, so the per-dtype default
+    would go untested and could be flipped back without anything failing. V is all
+    ones, so the exact output is 1.0 and the two runs must also agree bit for bit.
+    """
+    B, S, H, D = 1, 4096, 8, 128
+    fp8 = torch.float8_e4m3fn
+    fp8_max = torch.finfo(fp8).max
+    torch.manual_seed(0)
+    q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1
+    k = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1 * 200.0
+    q_s = q.abs().amax().float() / fp8_max
+    k_s = k.abs().amax().float() / fp8_max
+    v_s = torch.tensor(1.0 / fp8_max, device="cuda")
+    v = (torch.ones(B, S, H, D, device="cuda", dtype=torch.bfloat16) / v_s).to(fp8)
+    kw = dict(
+        causal=False,
+        q_descale=q_s.reshape(1).contiguous(),
+        k_descale=k_s.reshape(1).contiguous(),
+        v_descale=v_s.reshape(1).contiguous(),
+    )
+    qq, kk = (q / q_s).to(fp8), (k / k_s).to(fp8)
+
+    default = flydsl_flash_attn_func(qq, kk, v, **kw)
+    eager = flydsl_flash_attn_func(qq, kk, v, dualwave_swp_lazy_rescale=False, **kw)
+    torch.cuda.synchronize()
+    default = (default[0] if isinstance(default, (tuple, list)) else default).float()
+    eager = (eager[0] if isinstance(eager, (tuple, list)) else eager).float()
+
+    torch.testing.assert_close(default, eager, rtol=0, atol=0)
+    assert (default - 1).abs().mean().item() < 0.01, f"mean |o-1| = {(default - 1).abs().mean().item():.4f}"
