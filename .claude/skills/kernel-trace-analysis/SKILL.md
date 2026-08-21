@@ -16,6 +16,11 @@ note: All analysis is done programmatically via hotspot_analyzer.py + code.json.
 Profile and analyze GPU kernel ATT traces to identify stall hotspots and produce
 an optimization plan.
 
+> If the question is only "did my change increase register pressure, spills, or
+> LDS?", use `/isa-resource-diff` first — it is compile-only, needs no GPU or
+> profiler run, and answers in seconds. Come here when you need to know *why* a
+> kernel is slow rather than *what resources it uses*.
+
 ## Arguments
 
 | Argument | Description |
