@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-21T16:13:56Z",
+ "updated": "2026-08-21T16:16:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32501887298,
+   "pr": 1033,
+   "commit": "88aeb35c92b96d03f71d994bbc1c4bc17ee7468d",
+   "branch": "john/lazy-rescale-nan",
+   "event": "pull_request",
+   "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32501887298",
+   "created_at": "2026-08-21T16:14:18Z",
+   "updated_at": "2026-08-21T16:15:07Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 32500445773,
    "pr": 1020,
@@ -25,11 +40,11 @@
    "branch": "john/lazy-rescale-nan",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32500430459",
    "created_at": "2026-08-21T15:57:53Z",
-   "updated_at": "2026-08-21T16:07:47Z",
+   "updated_at": "2026-08-21T16:14:36Z",
    "actor": "JohnQinAMD",
    "jobs": []
   },
@@ -50,11 +65,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-21T15:05:25Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32488856219/job/96813084631"
+     "completed_at": "2026-08-21T16:13:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32488856219/job/96813084631",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -1944,21 +1960,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 32363611981,
-   "pr": null,
-   "commit": "c3bd00455f711bd4f8d521951e0f5d9162437d8d",
-   "branch": "main",
-   "event": "push",
-   "title": "[Ext][Coop] Add cooperative warp- and block-scope collectives (#1031)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32363611981",
-   "created_at": "2026-08-20T11:24:00Z",
-   "updated_at": "2026-08-20T11:45:19Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
