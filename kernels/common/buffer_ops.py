@@ -31,7 +31,7 @@ from typing import Optional, Union
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import arith as std_arith
-from flydsl._mlir.dialects import fly, llvm
+from flydsl._mlir.dialects import llvm
 from flydsl._mlir.extras import types as T
 from flydsl.expr.meta import dsl_loc_tracing
 from flydsl.runtime.device import is_rdna_arch
@@ -177,12 +177,6 @@ def _add_soffset_bytes(byte_offset: ir.Value, soffset_bytes) -> ir.Value:
         if not isinstance(soffset.type, ir.IntegerType) or soffset.type.width != 32:
             soffset = _unwrap_value(std_arith.IndexCastOp(T.i32(), soffset).result)
     return _unwrap_value(std_arith.AddIOp(byte_offset, soffset).result)
-
-
-@dsl_loc_tracing
-def _byte_tile(rsrc, byte_offset: ir.Value, num_bytes: int):
-    """View the ``num_bytes`` bytes at ``byte_offset`` in ``rsrc`` as a copy-atom operand."""
-    return fx.make_view(rsrc + fx.Int32(byte_offset), fx.make_layout(num_bytes, 1))
 
 
 @dsl_loc_tracing
@@ -516,9 +510,15 @@ def buffer_load(
         )
 
     offset = _add_soffset_bytes(offset, soffset_bytes)
-    src = _byte_tile(rsrc, offset, vec_width * element_bytes)
+    src = fx.make_view(rsrc + fx.Int32(offset), fx.make_layout(vec_width * element_bytes, 1))
     atom = fx.make_copy_atom(fx.rocdl.BufferCopy(vec_width * dtype.width, cache_modifier), fx.Int8)
-    return fly.copy_atom_call_ssa([result_type], atom, src)
+    reg = fx.make_rmem_tensor(fx.make_layout(vec_width, 1), fx.Numeric.from_ir_type(dtype))
+    fx.copy(atom, src, reg)
+    loaded = fx.memref_load_vec(reg)
+    result = _unwrap_value(loaded[0] if vec_width == 1 else loaded)
+    if result.type != result_type:
+        result = _unwrap_value(std_arith.BitcastOp(result_type, result).result)
+    return result
 
 
 @dsl_loc_tracing
@@ -592,6 +592,8 @@ def buffer_store(
         offset = _unwrap_value(op.result)
 
     offset = _add_soffset_bytes(offset, soffset_bytes)
-    dst = _byte_tile(rsrc, offset, vec_width * element_bytes)
+    dst = fx.make_view(rsrc + fx.Int32(offset), fx.make_layout(vec_width * element_bytes, 1))
     atom = fx.make_copy_atom(fx.rocdl.BufferCopy(vec_width * element_type.width, cache_modifier), fx.Int8)
-    fly.copy_atom_call_ssa([], atom, data, dst=dst)
+    reg = fx.make_rmem_tensor(fx.make_layout(vec_width, 1), fx.Numeric.from_ir_type(element_type))
+    fx.memref_store_vec(data, reg)
+    fx.copy(atom, reg, dst)
