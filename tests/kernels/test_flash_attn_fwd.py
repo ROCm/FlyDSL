@@ -4601,7 +4601,5 @@ def test_fp8_lazy_rescale_keeps_the_running_max_monotonic(k_scale):
     )
     out = (out[0] if isinstance(out, (tuple, list)) else out).float()
     torch.cuda.synchronize()
-    assert torch.isfinite(out).all(), (
-        f"{int(torch.isnan(out).sum())} NaN of {out.numel()} at k_scale={k_scale}"
-    )
+    assert torch.isfinite(out).all(), f"{int(torch.isnan(out).sum())} NaN of {out.numel()} at k_scale={k_scale}"
     assert (out - 1).abs().mean().item() < 0.05, f"mean |o-1| = {(out - 1).abs().mean().item():.4f}"
