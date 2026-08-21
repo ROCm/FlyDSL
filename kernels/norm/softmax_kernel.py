@@ -80,6 +80,10 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             wave = tid // WARP_SIZE
             neutral = c_neg_inf if mode == "max" else c_zero_f
 
+            # The buffer is reused across successive reductions, and every wave
+            # broadcast-reads the previous result on exit. Only this barrier
+            # orders that read against the store below.
+            gpu.barrier()
             w = wave_reduce(val, mode)
 
             if lane == 0:
