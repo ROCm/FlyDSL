@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-21T10:51:53Z",
+ "updated": "2026-08-21T11:00:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,11 +25,11 @@
    "branch": "upstream/pa-64bit-cache-offsets",
    "event": "pull_request",
    "title": "[Bugfix][PA] Fix D192 query staging and 64-bit cache offsets",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467635411",
    "created_at": "2026-08-21T09:23:12Z",
-   "updated_at": "2026-08-21T09:25:07Z",
+   "updated_at": "2026-08-21T10:58:02Z",
    "actor": "sammysun0711",
    "jobs": []
   },
@@ -201,11 +201,11 @@
    "branch": "worktree-fix-basis2tuple",
    "event": "pull_request",
    "title": "[Fix] crd2idx uses wrong dynamic basis leaf",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457463858",
    "created_at": "2026-08-21T07:10:20Z",
-   "updated_at": "2026-08-21T09:23:25Z",
+   "updated_at": "2026-08-21T10:51:03Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -245,11 +245,11 @@
    "branch": "zhimding/jobs_parallel_0819",
    "event": "pull_request",
    "title": "[AOT] Add resilient parallel job scheduler",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457110814",
    "created_at": "2026-08-21T07:05:26Z",
-   "updated_at": "2026-08-21T09:51:56Z",
+   "updated_at": "2026-08-21T10:57:17Z",
    "actor": "zhiding512",
    "jobs": [
     {
@@ -274,11 +274,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-21T09:51:56Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457110814/job/96718613687"
+     "completed_at": "2026-08-21T10:57:16Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457110814/job/96718613687",
+     "log_fetch_failed": true
     }
    ]
   },
