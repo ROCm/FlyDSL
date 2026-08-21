@@ -4634,3 +4634,18 @@ def test_fp8_lazy_paths_do_not_roll_their_own_correction():
         assert "exp2" not in chunk, f"{name} computes its own correction instead of taking the monotonic one"
         assert "_lazy_correction" in chunk or "rescale_from_tile_max" in chunk, f"{name} has no correction source"
     assert "rescale_from_tile_max" in method("_lazy_correction"), "the shared correction is not the monotonic one"
+
+
+@pytest.mark.l0_backend_agnostic
+def test_score_max_flag_excludes_ninf():
+    """-inf is load-bearing in the score reductions; ninf would make it poison."""
+    from flydsl.expr import arith as _arith
+
+    from kernels.attention import flash_attn_utils as _fau
+
+    flag = _fau._MAX_FASTMATH
+    assert flag & _arith.FastMathFlags.nnan, "nnan is what makes maxnum lower to a bare v_max"
+    assert not (flag & _arith.FastMathFlags.ninf), "ninf must not be set"
+    src = Path(_fau.__file__).read_text()
+    bare = [ln for ln in src.splitlines() if "fx.maxnumf(" in ln and "fastmath=" not in ln]
+    assert not bare, f"these would inherit the ambient flags, ninf included: {bare}"
