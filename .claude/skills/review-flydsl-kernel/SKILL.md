@@ -1,6 +1,6 @@
 ---
 name: review-flydsl-kernel
-description: FlyDSL review rules distilled from this repo's own maintainer history. Currently one rule — legacy DSL spellings that maintainers repeatedly ask to be replaced — shipped as a diff scanner. Loaded by review-pr when a PR touches FlyDSL kernels.
+description: FlyDSL review rules distilled from this repo's own maintainer history. Two rules, both shipped as diff scanners: legacy DSL spellings maintainers repeatedly ask to be replaced, and tests a PR adds that the script entry point never runs. Loaded by review-pr when a PR touches FlyDSL kernels.
 argument-hint: <PR number>
 ---
 
@@ -8,16 +8,19 @@ argument-hint: <PR number>
 
 ## What is in here, and what is not
 
-One rule. It is here because it is the single most repeated objection in this repository's
-review history **and** because it survived a test: the scanner it ships as flags 10 of the 12
-files where a maintainer actually raised it.
+Two rules. Both are the most repeated objections in this repository's review history, both ship
+as scanners rather than prose, and both were kept because they passed the same test:
 
-Five further families were distilled from the same corpus — default arguments aliasing another
-buffer, duplicated code paths, config living inside the kernel file, tests unreachable from the
-CI entry point, unvalidated casts at the ABI boundary. They were **removed before merge** after a
-controlled test: seeded into real kernels and reviewed with and without this skill, `review-pr`
-alone already caught four of the five. Adding rules that change nothing costs reviewer attention
-and dilutes the ones that matter. They can come back if evidence does.
+| rule | corpus support | evidence it earns its place |
+|---|---|---|
+| F1 legacy spelling | 46 of 479 comments | scanner flags 10 of the 12 files a maintainer raised it on |
+| F5 added test unreachable from the script entry point | coderfeli #481, #318 | the one family `review-pr` alone missed in a controlled seeded test (4/5 → 5/5); its scanner reproduces #481's objection exactly |
+
+Four further families were distilled from the same corpus — default arguments aliasing another
+buffer, duplicated code paths, config living inside the kernel file, unvalidated casts at the ABI
+boundary. They are **not here**: seeded into real kernels and reviewed with and without this
+skill, `review-pr` alone caught all four. Rules that change nothing cost reviewer attention and
+dilute the five finding slots. They can return with evidence.
 
 That is the standard for anything added below.
 
@@ -74,7 +77,36 @@ finding rather than one per site.
 
 ---
 
-## Why this is a scanner and not a paragraph
+## F5 — A test this PR adds that the script entry point cannot reach ⚠️
+
+Several test files here run two ways: pytest collects `test_*`, and `scripts/run_benchmark.sh`
+runs the same file as a script, where only what `__main__` calls happens. A pytest test added to
+such a file does not run in the script path — the file reports coverage it does not have.
+
+> coderfeli on #481: *"These new variant tests are pytest-only today. run_benchmark.sh executes
+> this file as a script, but `__main__` only calls `test_all()`, so the fused/quant variants are
+> not exercised in that path."*
+
+```bash
+.claude/skills/review-flydsl-kernel/scan_unreachable_tests.py --diff <diff> <worktree-root>
+```
+
+It parses the file, resolves what `__main__` reaches transitively, and reports **only tests the
+diff adds**. Replaying #481 it names exactly the three the maintainer named.
+
+**FP self-check.** Pre-existing unreachable tests are the norm here — most files are pytest-first
+with a one-line `__main__`, and a first version of this scanner fired on 6 of 7 untouched tests
+in one file. Only added tests count. A file with no `__main__` at all is pytest-only by design
+and is not a finding.
+
+This is the static half of a problem `validate-kernel-pr` covers from the other side: F5 catches
+a test that will not run, its shape grid catches shapes a test that does run never reaches.
+
+→ `⚠️ [file] adds [tests] that `__main__` does not reach — wire them in, or say which job runs them`
+
+---
+
+## Why these are scanners and not paragraphs
 
 A rule that depends on the reviewer remembering to look does not fire. This was measured, not
 assumed: on aiter, a rule covering 32-bit overflow was rewritten from a variable-name list to a
