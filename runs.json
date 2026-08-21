@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-08-21T05:21:08Z",
+ "updated": "2026-08-21T05:35:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32450902421,
+   "pr": 1037,
+   "commit": "31df5d1dc8bedbe6245322608f51f3da99b2c3ca",
+   "branch": "jhinpan/fix-exp2-fastmath",
+   "event": "pull_request",
+   "title": "[ROCDL] Lower approximate exp2 to native intrinsic",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450902421",
+   "created_at": "2026-08-21T05:32:08Z",
+   "updated_at": "2026-08-21T05:32:57Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 32450764384,
+   "pr": 1050,
+   "commit": "4303f77668ba09ac7b22ee2a93a2d405162ea423",
+   "branch": "john/maxnumf-contract",
+   "event": "pull_request",
+   "title": "[Fix] Restore the fx.maxnumf contract, and keep ninf off the score reductions",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450764384",
+   "created_at": "2026-08-21T05:29:59Z",
+   "updated_at": "2026-08-21T05:31:51Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
+  {
+   "run_id": 32450753464,
+   "pr": null,
+   "commit": "bea58817f0478cc301bea9c797e54b6047781562",
+   "branch": "main",
+   "event": "push",
+   "title": "[FlyToROCDL] Fix alignment reported by ptr.load/ptr.store lowering (#\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450753464",
+   "created_at": "2026-08-21T05:29:49Z",
+   "updated_at": "2026-08-21T05:31:49Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 32450025670,
    "pr": 1033,
@@ -143,11 +188,11 @@
    "branch": "dsl-ify-scf-controlflow",
    "event": "pull_request",
    "title": "[Kernel] Replace raw scf ops with Python control flow in kernels",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772",
    "created_at": "2026-08-21T03:16:53Z",
-   "updated_at": "2026-08-21T05:11:27Z",
+   "updated_at": "2026-08-21T05:20:53Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -192,9 +237,9 @@
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-21T05:11:27Z",
+     "started_at": "2026-08-21T05:20:53Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772/job/96675522325"
     }
@@ -940,7 +985,7 @@
   },
   {
    "run_id": 32362524805,
-   "pr": 1043,
+   "pr": null,
    "commit": "cd6a73fe0bdf576f4b8aa797bc047fa7b4cfe2a7",
    "branch": "pr/fix-ptr-alignment-lowering",
    "event": "pull_request",
@@ -1741,82 +1786,6 @@
    "created_at": "2026-08-20T07:09:32Z",
    "updated_at": "2026-08-20T07:13:14Z",
    "actor": "JohnQinAMD",
-   "jobs": []
-  },
-  {
-   "run_id": 32342714471,
-   "pr": 1033,
-   "commit": "bff973c82bf47d10489f6cd3251667aa14c3e656",
-   "branch": "john/lazy-rescale-nan",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32342714471",
-   "created_at": "2026-08-20T07:09:31Z",
-   "updated_at": "2026-08-20T10:43:03Z",
-   "actor": "JohnQinAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T09:16:14Z",
-     "completed_at": "2026-08-20T10:43:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32342714471/job/96364593318",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T09:19:49Z",
-     "completed_at": "2026-08-20T09:42:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32342714471/job/96364593330",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T09:26:17Z",
-     "completed_at": "2026-08-20T10:21:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32342714471/job/96364593470",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32342140111,
-   "pr": null,
-   "commit": "88f327e34cf32cf2421604f7c6f06a46b844249d",
-   "branch": "feat/rdna3-gemm-tile-selection",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Speed up the RDNA3 GEMM up to 1.85x by choosing the tile from the shape",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32342140111",
-   "created_at": "2026-08-20T07:01:57Z",
-   "updated_at": "2026-08-20T07:13:15Z",
-   "actor": "vlluvia",
-   "jobs": []
-  },
-  {
-   "run_id": 32340953095,
-   "pr": 1037,
-   "commit": "11bea4528bb7f757b5269c132eef4d95fa405ea0",
-   "branch": "jhinpan/fix-exp2-fastmath",
-   "event": "pull_request",
-   "title": "[ROCDL] Lower approximate exp2 to native intrinsic",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32340953095",
-   "created_at": "2026-08-20T06:45:45Z",
-   "updated_at": "2026-08-20T06:47:35Z",
-   "actor": "jhinpan",
    "jobs": []
   }
  ]
