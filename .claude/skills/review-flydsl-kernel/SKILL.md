@@ -1,14 +1,31 @@
 ---
 name: review-flydsl-kernel
-description: FlyDSL-specific review rules distilled from this repo's own maintainer review history. Loaded by review-pr when a PR touches FlyDSL kernels; encodes what coderfeli, sjfeng1999, xudoyuan and yanguahe reliably ask for, so an agent reviewer raises it before a human has to. Every rule cites the PRs it came from.
+description: FlyDSL review rules distilled from this repo's own maintainer history. Currently one rule — legacy DSL spellings that maintainers repeatedly ask to be replaced — shipped as a diff scanner. Loaded by review-pr when a PR touches FlyDSL kernels.
 argument-hint: <PR number>
 ---
 
 # FlyDSL kernel review
 
-These rules are not invented. They are distilled from **479 human review comments across the
-163 of this repo's 865 PRs that carry one**, and each rule cites the PRs where a maintainer
-actually made that objection. The premise is that the dominant reviewers' taste is consistent:
+## What is in here, and what is not
+
+One rule. It is here because it is the single most repeated objection in this repository's
+review history **and** because it survived a test: the scanner it ships as flags 10 of the 12
+files where a maintainer actually raised it.
+
+Five further families were distilled from the same corpus — default arguments aliasing another
+buffer, duplicated code paths, config living inside the kernel file, tests unreachable from the
+CI entry point, unvalidated casts at the ABI boundary. They were **removed before merge** after a
+controlled test: seeded into real kernels and reviewed with and without this skill, `review-pr`
+alone already caught four of the five. Adding rules that change nothing costs reviewer attention
+and dilutes the ones that matter. They can come back if evidence does.
+
+That is the standard for anything added below.
+
+---
+
+## Provenance
+
+Mined from all 865 PRs in this repo; 163 carry human review, 479 comments in total.
 
 | reviewer | comments | PRs | active |
 |---|---|---|---|
@@ -17,18 +34,23 @@ actually made that objection. The premise is that the dominant reviewers' taste 
 | xudoyuan | 20 | 13 | 2026-03-12 → 2026-08-14 |
 | yanguahe | 11 | 5 | 2026-06-18 → 2026-08-17 |
 
-Rules are ordered by how often the objection actually occurred, not by how interesting it is.
-
-**Severity convention matches `review-pr`:** 🔴 block / ⚠️ should fix / 📝 note. Findings still
-obey that skill's output contract — at most 5, most severe first, each ending in an action.
+Eight months of consistent taste from the top two is what makes any of this encodable. The
+corpus stops at 2026-08-20; re-mine before trusting the counts.
 
 ---
 
 ## F1 — Legacy spelling where the current one exists ⚠️
 
-**46 of the 479 comments are this one objection.** It is also the only family here that a grep
-can find, so do not spend reviewer attention recalling it — Step 1 of `review-pr` prints the
-candidates via `scan_legacy_spelling.py`. Work that list.
+**46 of the 479 comments are this one objection** — by a wide margin the largest family, and the
+one thing a maintainer should never have to type again.
+
+Do not review this from memory. Step 1 of `review-pr` runs the scanner and prints the candidates;
+work that list.
+
+```bash
+.claude/skills/review-flydsl-kernel/scan_legacy_spelling.py <owner/repo> <PR>
+.claude/skills/review-flydsl-kernel/scan_legacy_spelling.py --diff /path/to.diff
+```
 
 | legacy | current | maintainers |
 |---|---|---|
@@ -40,90 +62,33 @@ candidates via `scan_legacy_spelling.py`. Work that list.
 | `make_ptr` to retype a pointer | `recast_iter` | sjfeng1999 #288 #745 |
 | hand-rolled partition | `tiledCopy.partition_src/dst` | sjfeng1999 #564 |
 
-FP self-check: fire only when the legacy spelling is on an **added** line. Pre-existing usage in
-an untouched part of the file is not this PR's debt — say so and move on.
-→ `⚠️ F1: [file:line] uses [legacy] where [current] exists — [maintainer] has asked for this on [PR]`
+**FP self-check.** Fire only when the legacy spelling is on an **added** line. Pre-existing usage
+elsewhere in a touched file is not this PR's debt — say so and move on. The scanner already
+restricts itself to added lines; do not widen it by hand.
 
-## F2 — A default argument that silently aliases another buffer 🔴
+**Severity.** ⚠️ by default. It is not a correctness defect, and it does not get one of the five
+finding slots ahead of something that produces a wrong number. Group all instances into a single
+finding rather than one per site.
 
-The most damaging pattern in this repo's review history, because it type-checks, runs, and
-corrupts an unrelated tensor. Trigger: a kernel/builder parameter defaulting to another live
-tensor (`if x is None: x = O`), where the kernel then writes a *different* dtype or semantic
-into it.
-Real examples: `return_lse=True` with no `lse` passed falls back to `Out`, so the kernel writes
-fp32 LSE into the output tensor — three separate blockers on the same PR (yanguahe #844). The
-same shape appeared independently in `debug_counts = O` on the gfx950 FMHA path (#629).
-FP self-check: if the fallback target has identical dtype *and* the kernel writes the same
-quantity, it is a convenience default, not this bug.
-→ `🔴 F2: [param] defaults to [other buffer]; when [condition] the kernel writes [what] into it — require the argument or allocate`
-
-## F3 — A duplicated code path that should be shared ⚠️
-
-Trigger: two paths in the diff (or one new path against an existing one) that differ only in an
-atom, an address, or a vector width.
-Real examples: RoPE rotation copy-pasted from `q_rope_kernel`, maintainer asked for an
-`_apply_neox_rope` helper (coderfeli #300); "vec and no-vec are two totally different code
-paths? only atom and some addr diff?" (coderfeli #855); "reuse the code with decode?"
-(coderfeli #540); "there is a similar function `_unwrap_to_raw` in kernel_function.py — same
-purpose?" (xudoyuan #238).
-→ `⚠️ F3: [path A] and [path B] differ only in [what] — extract the shared body`
-
-## F4 — Config, dispatch or tile selection living inside the kernel file ⚠️
-
-This repo keeps kernels buildable-as-told and puts selection one layer out. Trigger: a new
-kernel file that also picks its own tile size, chooses a backend, or carries a config table;
-or config added under `expr/`.
-Real examples: "could you add an extra dispatcher out of the kernel for compile and tile
-selection?" (coderfeli #780); "should not add too many configs in expr folder — leave the raw
-interface there and the config in the kernel" (coderfeli #608); "move the act out of this moe
-gemm kernel file" (coderfeli #823); "move to compiler.py? other kernels may also need it"
-(coderfeli #108).
-→ `⚠️ F4: [what] belongs in [dispatcher/config layer], not in the kernel file`
-
-## F5 — A new test that the entry point CI runs cannot reach ⚠️
-
-A test that exists but never executes is worse than none: it reports coverage that is not there.
-Trigger: new tests added as pytest functions in a file that CI also executes as a script, where
-`__main__` calls only a subset; or a shape list too narrow to exercise the path the PR adds.
-Real examples: "these new variant tests are pytest-only today. `run_benchmark.sh` executes this
-file as a script, but `__main__` only calls `test_all()`, so the fused/quant variants are not
-exercised" (coderfeli #481); "more shape cover — use 4, 8, 32, 64, 128, 8192, 16384"
-(coderfeli #318).
-Pairs with `validate-kernel-pr`: that skill runs its own shape grid precisely because a repo's
-declared coverage and its executed coverage differ. If a validation report is present, read its
-`test_policy.commented_out_shape_rows` before writing this finding.
-→ `⚠️ F5: [test] is not reached by [entry point] — wire it in, or state which job runs it`
-
-## F6 — Unvalidated cast at the C ABI boundary ⚠️
-
-Trigger: a value crossing the Python/C boundary that is cast to a narrower or unsigned type
-without a range check.
-Real example: "since this is a C ABI boundary, it would be safer to validate cluster dims before
-casting from `intptr_t` to `unsigned`; a zero/negative or overflowing value would become a
-confusing launch failure" (coderfeli #532).
-Related but distinct from `review-pr`'s D9: D9 is about device-side index arithmetic overflowing
-2^31; F6 is about host-side casts losing the sign or the range before the launch.
-→ `⚠️ F6: [value] cast to [type] at the ABI boundary with no range check — validate before casting`
+→ `⚠️ [file:line] uses [legacy] where [current] exists — [maintainer] has asked for this on [PR]`
 
 ---
 
-## What this skill deliberately does not do
+## Why this is a scanner and not a paragraph
 
-- **It does not restate `flydsl-kernel-authoring` or `kernel-code-cleanup`.** Those tell an author
-  how to write a kernel; F1 exists because reviewers still have to ask for it 46 times. If a
-  finding is really "read the authoring guide", cite the guide instead of writing a finding.
-- **It does not carry correctness rules that `review-pr` already covers** (masks, dispatch gates,
-  fake impls, atomics on uninitialised memory). Those apply to FlyDSL kernels unchanged.
-- **It does not judge performance.** No rule here fires on a number; `validate-kernel-pr` measures.
+A rule that depends on the reviewer remembering to look does not fire. This was measured, not
+assumed: on aiter, a rule covering 32-bit overflow was rewritten from a variable-name list to a
+structural criterion, and across four controlled arms over 14 PRs it caught **0 of 3** of the
+defects it targeted — including after the instruction was relocated into the step the agent
+reliably executes, with the session transcript confirming the scan ran and its output was in
+context. The scanner found all three offline.
 
-## Keeping it honest
+Prefer a check that runs over a rule that must be recalled.
 
-Every rule above cites PRs. When adding one:
+## Adding a rule here
 
-1. It must come from a real review comment in this repo, cited by PR number — not from a
-   hypothetical failure mode.
-2. Prefer a mechanical check over prose. F1 became `scan_legacy_spelling.py` because a rule that
-   depends on the reviewer remembering to look does not fire; that was measured, not assumed —
-   a rule rewritten in prose alone caught 0 of 3 target defects across four controlled arms.
-3. Record how often the objection actually occurred. A family seen once is a note; a family seen
-   46 times earns a scanner.
+1. It must come from a real review comment in this repo, cited by PR number.
+2. Record how often the objection actually occurred. Once is a note; 46 times earns a scanner.
+3. **Show it changes an outcome.** Seed the pattern into a real kernel, review it with and
+   without the rule, and keep it only if the rule catches something `review-pr` alone does not.
+   Four of the first six families failed that test and are not in this file.
