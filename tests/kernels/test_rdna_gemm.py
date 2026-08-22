@@ -9,6 +9,7 @@ Kernel implementations:
 import logging
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -247,7 +248,8 @@ def test_f16_gemm_autotuned_matches_the_heuristic_path(M, N, K):
     C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
 
     strides = (A.stride(0), B_T.stride(0), C.stride(0))
-    signature = gemm_autotune._signature(M, N, K, "bf16", "bf16", "rn", *strides)
+    arch = gemm_autotune._device_arch(A.device)
+    signature = gemm_autotune._signature(M, N, K, arch, "bf16", "bf16", "rn", *strides)
     gemm_autotune._resolved.pop(signature, None)
 
     gemm_autotune.rdna3_gemm_autotuned(C, A, B_T)
@@ -255,7 +257,7 @@ def test_f16_gemm_autotuned_matches_the_heuristic_path(M, N, K):
     assert verify_output(C.float(), A.float() @ B_T.float().T, atol=0.05, rtol=0.05)
 
     resolved = gemm_autotune._resolved[signature]
-    expected_tile = pick_tile(M, N, K)
+    expected_tile = pick_tile(M, N, K, arch=arch)
     assert resolved is gemm_autotune._build(M, N, K, "bf16", "bf16", "rn", *expected_tile, *strides)
 
     C.zero_()
@@ -477,6 +479,31 @@ def test_pick_tile_matches_the_gfx1151_measured_shapes(shape, expected):
     assert pick_tile(*shape, arch="gfx1151") == expected
 
 
+@pytest.mark.parametrize(
+    "device_index, arch, expected",
+    [
+        pytest.param(0, "gfx1100", TILE_64x64x64, id="gfx1100"),
+        pytest.param(1, "gfx1151:sramecc-:xnack+", TILE_128x128x32, id="gfx1151"),
+    ],
+)
+def test_default_config_uses_the_input_device_arch(monkeypatch, device_index, arch, expected):
+    _requires_rdna3()
+    from kernels.gemm import rdna3_f16_gemm_autotune as gemm_autotune
+
+    device = torch.device("cuda", device_index)
+    seen = []
+
+    def get_device_properties(requested):
+        seen.append(requested)
+        return SimpleNamespace(gcnArchName=arch)
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", get_device_properties)
+    config = gemm_autotune._default_config(A=SimpleNamespace(device=device), M=768, N=768, K=768)
+
+    assert seen == [device]
+    assert tuple(config.kwargs[field] for field in _TILE_FIELDS) == expected
+
+
 @pytest.mark.parametrize("shape", SELECTION_SHAPES, ids=_shape_id)
 @pytest.mark.parametrize("arch", ("gfx1100", "gfx1151"))
 def test_picked_tile_is_buildable(shape, arch):
@@ -516,6 +543,10 @@ def test_untuned_config_is_the_heuristic_tile(shape):
     tuner's default has to be exactly what pick_tile would have returned.
     """
     _requires_rdna3()
+    from kernels.gemm import rdna3_f16_gemm_autotune as gemm_autotune
+
     M, N, K = shape
-    config = _default_config(M=M, N=N, K=K)
-    assert tuple(config.kwargs[field] for field in _TILE_FIELDS) == pick_tile(*shape)
+    A = torch.empty(0, device="cuda")
+    arch = gemm_autotune._device_arch(A.device)
+    config = _default_config(A=A, M=M, N=N, K=K)
+    assert tuple(config.kwargs[field] for field in _TILE_FIELDS) == pick_tile(*shape, arch=arch)
