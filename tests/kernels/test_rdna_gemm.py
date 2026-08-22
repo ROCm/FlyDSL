@@ -9,6 +9,7 @@ Kernel implementations:
 import logging
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -25,9 +26,11 @@ from kernels.gemm.rdna3_f16_gemm_autotune import (  # noqa: E402
     _TILE_FIELDS,
     NUM_CU,
     TILE_32x32x64,
+    TILE_32x64x64,
     TILE_64x64x64,
     TILE_128x64x32,
     TILE_128x128x32,
+    TILE_256x256x32,
     _default_config,
     _ladder_for,
     _tile_workgroups,
@@ -245,7 +248,8 @@ def test_f16_gemm_autotuned_matches_the_heuristic_path(M, N, K):
     C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
 
     strides = (A.stride(0), B_T.stride(0), C.stride(0))
-    signature = gemm_autotune._signature(M, N, K, "bf16", "bf16", "rn", *strides)
+    arch = gemm_autotune._device_arch(A.device)
+    signature = gemm_autotune._signature(M, N, K, arch, "bf16", "bf16", "rn", *strides)
     gemm_autotune._resolved.pop(signature, None)
 
     gemm_autotune.rdna3_gemm_autotuned(C, A, B_T)
@@ -253,7 +257,7 @@ def test_f16_gemm_autotuned_matches_the_heuristic_path(M, N, K):
     assert verify_output(C.float(), A.float() @ B_T.float().T, atol=0.05, rtol=0.05)
 
     resolved = gemm_autotune._resolved[signature]
-    expected_tile = pick_tile(M, N, K)
+    expected_tile = pick_tile(M, N, K, arch=arch)
     assert resolved is gemm_autotune._build(M, N, K, "bf16", "bf16", "rn", *expected_tile, *strides)
 
     C.zero_()
@@ -403,7 +407,7 @@ def test_fp8_quantize():
 
 # Every shape the heuristic was timed against the whole ladder on, with the tile
 # it is expected to pick, so a heuristic edit has to state which shapes it moves.
-MEASURED_TILES = [
+MEASURED_TILES_GFX1100 = [
     pytest.param((256, 256, 4096), TILE_32x32x64, id="256x256x4096"),
     pytest.param((256, 256, 1024), TILE_64x64x64, id="256x256x1024"),
     pytest.param((384, 384, 2048), TILE_64x64x64, id="384x384x2048"),
@@ -422,6 +426,20 @@ MEASURED_TILES = [
     pytest.param((2048, 2048, 2048), TILE_128x128x32, id="2048x2048x2048"),
     pytest.param((3072, 3072, 1024), TILE_128x128x32, id="3072x3072x1024"),
     pytest.param((4096, 4096, 4096), TILE_128x128x32, id="4096x4096x4096"),
+]
+
+# Representative gfx1151 square shapes.
+MEASURED_TILES_GFX1151 = [
+    pytest.param((256, 256, 256), TILE_32x64x64, id="256x256x256"),
+    pytest.param((256, 256, 4096), TILE_32x64x64, id="256x256x4096"),
+    pytest.param((640, 640, 640), TILE_64x64x64, id="640x640x640"),
+    pytest.param((768, 768, 768), TILE_128x128x32, id="768x768x768"),
+    pytest.param((1024, 1024, 1024), TILE_64x64x64, id="1024x1024x1024"),
+    pytest.param((1152, 1152, 1152), TILE_64x64x64, id="1152x1152x1152"),
+    pytest.param((1280, 1280, 1280), TILE_128x128x32, id="1280x1280x1280"),
+    pytest.param((1536, 1536, 1536), TILE_256x256x32, id="1536x1536x1536"),
+    pytest.param((2048, 2048, 2048), TILE_128x128x32, id="2048x2048x2048"),
+    pytest.param((8192, 8192, 8192), TILE_128x128x32, id="8192x8192x8192"),
 ]
 
 # Square and skewed both ways, K on both sides of the ladder split, sizes from
@@ -449,14 +467,46 @@ SELECTION_SHAPES = [
 _shape_id = lambda shape: "x".join(map(str, shape))  # noqa: E731
 
 
-@pytest.mark.parametrize("shape, expected", MEASURED_TILES)
-def test_pick_tile_matches_the_measured_shapes(shape, expected):
+@pytest.mark.parametrize("shape, expected", MEASURED_TILES_GFX1100)
+def test_pick_tile_matches_the_gfx1100_measured_shapes(shape, expected):
     _requires_rdna3()
-    assert pick_tile(*shape) == expected
+    assert pick_tile(*shape, arch="gfx1100") == expected
+
+
+@pytest.mark.parametrize("shape, expected", MEASURED_TILES_GFX1151)
+def test_pick_tile_matches_the_gfx1151_measured_shapes(shape, expected):
+    _requires_rdna3()
+    assert pick_tile(*shape, arch="gfx1151") == expected
+
+
+@pytest.mark.parametrize(
+    "device_index, arch, expected",
+    [
+        pytest.param(0, "gfx1100", TILE_64x64x64, id="gfx1100"),
+        pytest.param(1, "gfx1151:sramecc-:xnack+", TILE_128x128x32, id="gfx1151"),
+    ],
+)
+def test_default_config_uses_the_input_device_arch(monkeypatch, device_index, arch, expected):
+    _requires_rdna3()
+    from kernels.gemm import rdna3_f16_gemm_autotune as gemm_autotune
+
+    device = torch.device("cuda", device_index)
+    seen = []
+
+    def get_device_properties(requested):
+        seen.append(requested)
+        return SimpleNamespace(gcnArchName=arch)
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", get_device_properties)
+    config = gemm_autotune._default_config(A=SimpleNamespace(device=device), M=768, N=768, K=768)
+
+    assert seen == [device]
+    assert tuple(config.kwargs[field] for field in _TILE_FIELDS) == expected
 
 
 @pytest.mark.parametrize("shape", SELECTION_SHAPES, ids=_shape_id)
-def test_picked_tile_is_buildable(shape):
+@pytest.mark.parametrize("arch", ("gfx1100", "gfx1151"))
+def test_picked_tile_is_buildable(shape, arch):
     """create_wmma_gemm_module asserts the rules _tile_workgroups screens for.
 
     Returning a tile the shape cannot use is not a slow kernel, it is an
@@ -466,7 +516,7 @@ def test_picked_tile_is_buildable(shape):
     _requires_rdna3()
     if all(_tile_workgroups(*shape, cfg) is None for cfg in _ladder_for(shape[2])):
         pytest.skip("no tile in the ladder fits this shape")
-    assert _tile_workgroups(*shape, pick_tile(*shape)) is not None
+    assert _tile_workgroups(*shape, pick_tile(*shape, arch=arch)) is not None
 
 
 @pytest.mark.parametrize("shape", SELECTION_SHAPES, ids=_shape_id)
@@ -482,7 +532,7 @@ def test_deep_grids_keep_the_default_tile(shape):
     workgroups = _tile_workgroups(*shape, TILE_128x128x32)
     if workgroups is None or workgroups < 2.5 * NUM_CU:
         pytest.skip("128x128x32's grid is not deep enough for this shape")
-    assert pick_tile(*shape) == TILE_128x128x32
+    assert pick_tile(*shape, arch="gfx1100") == TILE_128x128x32
 
 
 @pytest.mark.parametrize("shape", SELECTION_SHAPES, ids=_shape_id)
@@ -493,6 +543,10 @@ def test_untuned_config_is_the_heuristic_tile(shape):
     tuner's default has to be exactly what pick_tile would have returned.
     """
     _requires_rdna3()
+    from kernels.gemm import rdna3_f16_gemm_autotune as gemm_autotune
+
     M, N, K = shape
-    config = _default_config(M=M, N=N, K=K)
-    assert tuple(config.kwargs[field] for field in _TILE_FIELDS) == pick_tile(*shape)
+    A = torch.empty(0, device="cuda")
+    arch = gemm_autotune._device_arch(A.device)
+    config = _default_config(A=A, M=M, N=N, K=K)
+    assert tuple(config.kwargs[field] for field in _TILE_FIELDS) == pick_tile(*shape, arch=arch)

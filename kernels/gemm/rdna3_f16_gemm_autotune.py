@@ -24,6 +24,9 @@ from kernels.gemm.rdna3_f16_gemm import K_PAD, WAVE_SIZE, WMMA_K, WMMA_M, WMMA_N
 # gfx1100 CU count; thresholds shift one ladder step if this is off.
 NUM_CU = 96
 
+# gfx1151 has 40 physical CUs.
+GFX1151_NUM_CU = 40
+
 # Per-workgroup LDS budget (K_PAD comes from the kernel).
 LDS_BYTES = 64 * 1024
 
@@ -87,7 +90,7 @@ def feasible_tiles(M, N, K):
     return [(cfg, wgs) for cfg in _ladder_for(K) if (wgs := _tile_workgroups(M, N, K, cfg)) is not None]
 
 
-def pick_tile(M, N, K):
+def _pick_tile_gfx1100(M, N, K):
     """Return a tile for this shape.
 
     Prefer 64x64x64 when no wide tile is justified; escalate to 128x128x32,
@@ -112,6 +115,41 @@ def pick_tile(M, N, K):
     return list(feasible)[-1]
 
 
+def _pick_tile_gfx1151(M, N, K):
+    """Return a tile for square GEMMs measured on gfx1151."""
+    feasible = dict(feasible_tiles(M, N, K))
+    if not feasible:
+        return _ladder_for(K)[0]
+
+    if M == N == 256 and TILE_32x64x64 in feasible:
+        return TILE_32x64x64
+
+    wgs_128 = feasible.get(TILE_128x128x32, 0)
+    one_wave = 0.9 * GFX1151_NUM_CU <= wgs_128 <= 1.6 * GFX1151_NUM_CU
+    deep_grid = wgs_128 >= 2.5 * GFX1151_NUM_CU
+    if M == N and (one_wave or deep_grid):
+        wgs_256 = feasible.get(TILE_256x256x32, 0)
+        if 32 <= wgs_256 <= GFX1151_NUM_CU:
+            return TILE_256x256x32
+        if M == 1024 and K >= 1024 and TILE_64x64x64 in feasible:
+            return TILE_64x64x64
+        return TILE_128x128x32
+
+    return _pick_tile_gfx1100(M, N, K)
+
+
+def pick_tile(M, N, K, arch=None):
+    """Return a tile for this shape."""
+    arch = str(arch or "")
+    if arch.startswith("gfx1151"):
+        return _pick_tile_gfx1151(M, N, K)
+    return _pick_tile_gfx1100(M, N, K)
+
+
+def _device_arch(device):
+    return str(torch.cuda.get_device_properties(device).gcnArchName).split(":", 1)[0]
+
+
 _GRAPH_LAUNCHES = 20
 _REPLAYS_PER_ROUND = 8
 
@@ -125,8 +163,8 @@ _resolved = {}
 # the built module: a padded slice and a tight one of the same M, N, K resolve to
 # different kernels, and serving one from the other's entry reads the operands at
 # the wrong pitch.
-def _signature(M, N, K, in_dtype, out_dtype, rounding, lda, ldb, ldc):
-    return (M, N, K, in_dtype, out_dtype, rounding, lda, ldb, ldc)
+def _signature(M, N, K, arch, in_dtype, out_dtype, rounding, lda, ldb, ldc):
+    return (M, N, K, arch, in_dtype, out_dtype, rounding, lda, ldb, ldc)
 
 
 def _tile_config(tile):
@@ -186,6 +224,7 @@ def rdna3_gemm_dispatch(
     waves_n=None,
     stream=None,
     sr_seed=0,
+    arch=None,
 ):
     """Run the GEMM on one tile. Unset tile fields fall back to ``pick_tile``.
 
@@ -194,12 +233,13 @@ def rdna3_gemm_dispatch(
     stream, and enqueueing onto a stream captured before then aborts the capture.
     """
     if stream is None:
-        stream = torch.cuda.current_stream()
+        stream = torch.cuda.current_stream(A.device)
+    arch = _device_arch(A.device) if arch is None else str(arch)
     # Resolve before the cache key so a partially specified tile and the fully
     # spelled-out one it means share a single built module.
     tile = tuple(
         auto if given is None else given
-        for auto, given in zip(pick_tile(M, N, K), (reg_m, reg_n, reg_k, waves_m, waves_n))
+        for auto, given in zip(pick_tile(M, N, K, arch=arch), (reg_m, reg_n, reg_k, waves_m, waves_n))
     )
     # Taken from the tensors rather than asked of the caller, so that handing in
     # a row-padded slice is all it takes to get the padded kernel.
@@ -207,7 +247,7 @@ def rdna3_gemm_dispatch(
     launch_fn = _build(M, N, K, in_dtype, out_dtype, rounding, *tile, *strides)
     # A search calls this once per candidate and then once more on the winner,
     # so the last write is the config the tuner settled on.
-    _resolved[_signature(M, N, K, in_dtype, out_dtype, rounding, *strides)] = launch_fn
+    _resolved[_signature(M, N, K, arch, in_dtype, out_dtype, rounding, *strides)] = launch_fn
     return launch_fn(C, A, B_T, stream, sr_seed)
 
 
@@ -221,9 +261,11 @@ def _default_config(
     in_dtype="bf16",
     out_dtype="bf16",
     rounding="rn",
+    arch=None,
     **_kwargs,
 ):
-    return _tile_config(pick_tile(M, N, K))
+    arch = _device_arch(A.device) if arch is None and A is not None else arch
+    return _tile_config(pick_tile(M, N, K, arch=arch))
 
 
 def _search_configs(
@@ -236,10 +278,11 @@ def _search_configs(
     in_dtype="bf16",
     out_dtype="bf16",
     rounding="rn",
+    arch=None,
     **_kwargs,
 ):
     candidates = [_tile_config(tile) for tile, _wgs in feasible_tiles(M, N, K)]
-    return candidates or [_default_config(M=M, N=N, K=K)]
+    return candidates or [_default_config(A=A, M=M, N=N, K=K, arch=arch)]
 
 
 def _graph_bench(fn, warmup=5, rep=25):
@@ -281,7 +324,7 @@ def _graph_bench(fn, warmup=5, rep=25):
 
 _gemm_tuner = autotune(
     configs=_search_configs,
-    key=["M", "N", "K", "in_dtype", "out_dtype", "rounding"],
+    key=["M", "N", "K", "in_dtype", "out_dtype", "rounding", "arch"],
     default=_default_config,
     do_bench=_graph_bench,
     artifact_name="rdna3_f16_gemm",
@@ -302,16 +345,17 @@ def rdna3_gemm_autotuned(
     M, K = A.shape
     N = B_T.shape[0]
     M, N, K = int(M), int(N), int(K)
+    arch = _device_arch(A.device)
 
     launch_fn = _resolved.get(
-        _signature(M, N, K, in_dtype, out_dtype, rounding, A.stride(0), B_T.stride(0), C.stride(0))
+        _signature(M, N, K, arch, in_dtype, out_dtype, rounding, A.stride(0), B_T.stride(0), C.stride(0))
     )
     if launch_fn is not None:
-        return launch_fn(C, A, B_T, torch.cuda.current_stream() if stream is None else stream, sr_seed)
+        return launch_fn(C, A, B_T, torch.cuda.current_stream(A.device) if stream is None else stream, sr_seed)
 
     # Make the caller's stream current instead of passing it down, so the
     # dispatcher picks it up while a benchmark capture still gets its own.
-    launch_stream = torch.cuda.current_stream() if stream is None else stream
+    launch_stream = torch.cuda.current_stream(A.device) if stream is None else stream
     with torch.cuda.device(A.device), torch.cuda.stream(launch_stream):
         return _gemm_tuner(
             C,
@@ -325,4 +369,5 @@ def rdna3_gemm_autotuned(
             rounding=rounding,
             stream=None,
             sr_seed=sr_seed,
+            arch=arch,
         )
