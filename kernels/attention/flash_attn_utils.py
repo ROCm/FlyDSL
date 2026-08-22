@@ -772,9 +772,15 @@ def _v_buf_base(traits, buf_id):
 
 
 def _kv_tile_addr(traits, tile_start, kv_gmem_elem_offset, kv_head_elem_offset, stride_kv_n_v):
-    """Return (src_base, soffset): dense uses tile_start*stride; paged folds page offset into the descriptor."""
+    """Return (src_base, soffset): dense uses tile_start*stride; paged folds page offset into the descriptor.
+
+    When a page holds more than one KV tile (PAGE_SIZE > BLOCK_N) the descriptor still
+    points at the page base, so the tile's row offset inside the page rides on soffset.
+    """
     if const_expr(traits.PAGED):
-        return kv_head_elem_offset, 0
+        if const_expr(traits.TILES_PER_PAGE == 1):
+            return kv_head_elem_offset, 0
+        return kv_head_elem_offset, (tile_start % fx.Index(traits.PAGE_SIZE)) * stride_kv_n_v
     return kv_gmem_elem_offset, tile_start * stride_kv_n_v
 
 
@@ -1004,6 +1010,9 @@ def _init_dualwave_thread_mapping(ctx):
     # so output is bit-identical; split-K's third grid axis would not survive it.
     # Non-causal only: under a causal mask q-block i does work proportional to i, so
     # making q_block the fast axis clusters unequal work and costs 7% (measured).
+    # Measured on causal paged prefill: opting causal into this remap costs 3-5% even
+    # when paired with CAUSAL_LPT below, which removes the load imbalance this comment
+    # blames. So the causal penalty is not only imbalance, and the non-causal gate stands.
     if const_expr(
         traits.XCD_SWIZZLE and not traits.SPLITK and not traits.CAUSAL and traits.NUM_HEADS_Q % NUM_XCD_GFX950 == 0
     ):
@@ -1043,6 +1052,27 @@ def _init_dualwave_thread_mapping(ctx):
     ctx.group_id = ctx.h_idx // traits.NUM_HEADS_KV
     ctx.q_head_idx = ctx.h_kv_idx * traits.GQA_GROUP_SIZE + ctx.group_id
     ctx.kv_head_idx = ctx.h_kv_idx
+
+
+def _init_causal_lpt_order(ctx):
+    """Issue causal q-blocks longest-first by reversing the q-block grid axis.
+
+    Causal work per q-block grows with the block index and workgroups dispatch in
+    flattened-id order, so the natural order issues the heaviest block last and the
+    makespan carries its tail. Must run after the thread mapping and before anything
+    that reads q_start (sequence lengths, tile bounds, q_row).
+
+    The reversal is taken over ``grid_dim.y``, the extent the launcher actually
+    dispatched, which makes it a bijection on the dispatched q-block indices by
+    construction. Deriving it from ``seq_len`` instead would only agree while
+    ``seq_len`` is the same max the grid was sized from -- and under varlen it is a
+    per-batch maximum, so a mismatch there would silently drop or double-compute
+    q-blocks rather than merely reorder them.
+
+    Shared by DualwaveKernelContext and DualwaveFp8KernelContext.
+    """
+    ctx.q_block_idx = fx.Index(gpu.grid_dim.y) - fx.Index(1) - ctx.q_block_idx
+    ctx.q_start = ctx.q_block_idx * ctx.traits.BLOCK_M
 
 
 def _init_dualwave_q_row(ctx):
@@ -1561,6 +1591,9 @@ class DualwaveSwpTraits:
     LGKMCNT_0_ONLY: int
     RETURN_LSE: bool = False
     XCD_SWIZZLE: bool = False
+    CAUSAL_LPT: bool = False
+    PAGE_SIZE: int = 0
+    TILES_PER_PAGE: int = 1
 
     @property
     def cache_tag(self):
@@ -1585,6 +1618,8 @@ class DualwaveSwpTraits:
             self.KV_VECTORIZED,
             self.RETURN_LSE,
             self.XCD_SWIZZLE,
+            self.CAUSAL_LPT,
+            self.PAGE_SIZE,
         )
 
 
@@ -1608,6 +1643,8 @@ def _make_dualwave_swp_traits(
     kv_vectorized=None,
     return_lse=False,
     xcd_swizzle=False,
+    causal_lpt=True,
+    page_size=None,
 ):
     """Build gfx950 DUALWAVE_SWP compile-time layout traits."""
     # Tile shape and wave geometry follow the gfx950 dual-wave 8-wave CTA.
@@ -1619,6 +1656,20 @@ def _make_dualwave_swp_traits(
     num_waves = 8
     block_size = num_waves * warp_size
     rows_per_wave = 32
+
+    # A page holds PAGE_SIZE tokens while the KV pipeline consumes BLOCK_N at a time, so
+    # one page may cover several tiles. Only the page-table lookup and the in-page row
+    # offset depend on this; the tile loop itself stays BLOCK_N-granular.
+    if paged:
+        page_size = block_n if page_size is None else int(page_size)
+        if page_size < block_n or page_size % block_n != 0:
+            raise ValueError(f"paged page_size must be a positive multiple of {block_n}, got {page_size}")
+        tiles_per_page = page_size // block_n
+        if tiles_per_page > 1 and kv_cache_layout != "linear":
+            raise ValueError(f"page_size {page_size} > {block_n} requires the linear KV cache layout")
+    else:
+        page_size = 0
+        tiles_per_page = 1
 
     # QK walks D in 16-wide MFMA K steps; PV consumes K_SUB_N in two 16-token steps.
     k_step_qk = 16
@@ -1759,6 +1810,9 @@ def _make_dualwave_swp_traits(
         LGKMCNT_0_ONLY=0xC07F,
         RETURN_LSE=bool(return_lse),
         XCD_SWIZZLE=bool(xcd_swizzle),
+        CAUSAL_LPT=bool(causal_lpt) and bool(causal),
+        PAGE_SIZE=page_size,
+        TILES_PER_PAGE=tiles_per_page,
     )
 
 
@@ -3346,6 +3400,9 @@ class DualwaveKernelContext:
     def init_thread_mapping(self):
         _init_dualwave_thread_mapping(self)
 
+    def init_causal_lpt_order(self):
+        _init_causal_lpt_order(self)
+
     def init_sequence_lengths(self, CuSeqQ=None, CuSeqKv=None):
         if CuSeqQ is None:
             CuSeqQ = self.CuSeqQ
@@ -3439,7 +3496,7 @@ class DualwaveKernelContext:
         if const_expr(traits.PAGED):
             self.k_div = None
             self.v_div = None
-            page_elems = fx.Index(traits.BLOCK_N) * self.stride_kv_n_v
+            page_elems = fx.Index(traits.PAGE_SIZE) * self.stride_kv_n_v
             self.page_byte_stride = page_elems * fx.Index(traits.BF16_BYTES)
             self.page_nrec_bytes = fx.Int64(self.page_byte_stride)
             self.page_layout = fx.make_layout(fx.Int32(page_elems), fx.Int32(1))
@@ -3629,7 +3686,13 @@ class DualwavePageIdLoader(DualwaveKernelContext):
                     dst = buffer_ops.get_element_ptr(lds_bt_base_ptr, byte_offset=byte_off, elem_type=T.i8)
                     llvm.StoreOp(as_mlir_value(fx.Int32(0)), dst)
                     if tile_idx < num_kv_tiles:
-                        row_idx = batch_idx * block_table_stride_v + tile_idx
+                        # The LDS copy stays tile-indexed; when a page spans several tiles
+                        # its id is simply repeated, keeping load_page_id_lds unchanged.
+                        if const_expr(traits.TILES_PER_PAGE == 1):
+                            page_idx = tile_idx
+                        else:
+                            page_idx = tile_idx // fx.Index(traits.TILES_PER_PAGE)
+                        row_idx = batch_idx * block_table_stride_v + page_idx
                         v = fly.copy_atom_call_ssa([bt_v1i32], bt_atom, fx.slice(bt_div, (None, fx.Int32(row_idx))))
                         page_id_i32 = as_mlir_value(fx.Int32(Vec(v, (1,), fx.Int32)[0]))
                         llvm.StoreOp(page_id_i32, dst)
@@ -4413,17 +4476,7 @@ class DualwaveFp8KernelContext:
         self.stride_kv_n_v = fx.Index(self.stride_kv_n)
 
     def init_causal_lpt_order(self):
-        """Issue causal q-blocks longest-first by reversing the q-block grid axis.
-
-        Causal work per q-block grows with the block index and workgroups dispatch in
-        flattened-id order, so the natural order issues the heaviest block last and the
-        makespan carries its tail. Must run after init_thread_mapping and before
-        init_sequence_lengths / init_tile_bounds / init_q_row read q_start.
-        """
-        traits = self.traits
-        num_q_blocks = (self.seq_len_v + traits.BLOCK_M - 1) // traits.BLOCK_M
-        self.q_block_idx = num_q_blocks - fx.Index(1) - self.q_block_idx
-        self.q_start = self.q_block_idx * traits.BLOCK_M
+        _init_causal_lpt_order(self)
 
     def init_lds(self, shared_storage):
         lds = fx.SharedAllocator().allocate(shared_storage).peek()
