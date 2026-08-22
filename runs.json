@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-22T15:30:59Z",
+ "updated": "2026-08-22T18:31:42Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32590439213,
+   "pr": 1055,
+   "commit": "24ceae2e0fe2c222a7617642a3ece824963e45b3",
+   "branch": "fp8-page16-swa",
+   "event": "pull_request",
+   "title": "Add page-16 sliding-window attention support",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32590439213",
+   "created_at": "2026-08-22T18:20:22Z",
+   "updated_at": "2026-08-22T18:20:22Z",
+   "actor": "zjing14",
+   "jobs": []
+  },
   {
    "run_id": 32571744627,
    "pr": 1057,
@@ -1859,51 +1874,6 @@
      "completed_at": "2026-08-20T18:50:50Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386362772/job/96512455744",
      "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32386189717,
-   "pr": null,
-   "commit": "e2313b6d87b72a551505ad54de38d950f24eb47d",
-   "branch": "fp8-softmax-normalisation",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386189717",
-   "created_at": "2026-08-20T15:26:57Z",
-   "updated_at": "2026-08-20T19:19:50Z",
-   "actor": "JohnQinAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T17:07:56Z",
-     "completed_at": "2026-08-20T17:55:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386189717/job/96512398310",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T17:07:46Z",
-     "completed_at": "2026-08-20T19:19:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386189717/job/96512398349",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-20T17:07:48Z",
-     "completed_at": "2026-08-20T17:17:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386189717/job/96512398412"
     }
    ]
   }
