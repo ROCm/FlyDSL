@@ -4532,3 +4532,17 @@ def test_sink_lse_cross_attn_skipped_blocks(Sq, Skv):
     masked_lse = lse[:, :, :n_masked].float()
     assert (masked_lse - sink.view(1, H, 1)).abs().max().item() <= 1e-4, "all-masked rows must carry the sink LSE"
     assert out[:, :n_masked].abs().max().item() == 0.0, "all-masked rows must have zero output"
+
+
+@pytest.mark.l0_backend_agnostic
+def test_score_max_flag_excludes_ninf():
+    """-inf is load-bearing in the score reductions; ninf would make it poison."""
+    from flydsl.expr import arith as _arith
+    from kernels.attention import flash_attn_utils as _fau
+
+    flag = _fau._MAX_FASTMATH
+    assert flag & _arith.FastMathFlags.nnan, "nnan is what makes maxnum lower to a bare v_max"
+    assert not (flag & _arith.FastMathFlags.ninf), "ninf must not be set"
+    src = Path(_fau.__file__).read_text()
+    bare = [ln for ln in src.splitlines() if "fx.maxnumf(" in ln and "fastmath=" not in ln]
+    assert not bare, f"these would inherit the ambient flags, ninf included: {bare}"
