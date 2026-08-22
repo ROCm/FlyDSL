@@ -29,6 +29,7 @@
 #include "flydsl/Dialect/Fly/Utils/TiledOpUtils.h"
 
 #include <functional>
+#include <optional>
 #include <string>
 
 using namespace mlir;
@@ -2154,6 +2155,29 @@ public:
   }
 };
 
+/// Return the predicate shape for one predicate per copy atom.
+///
+/// A tiled copy encodes its value mode as
+///   ((ATOM_V, ATOM_REST), REST...)
+/// while an atom predicate intentionally drops ATOM_V:
+///   (ATOM_REST, REST...)
+///
+/// Keep this structural: ATOM_REST may itself be hierarchical, so rank
+/// differences cannot reliably identify a reduced predicate.
+static std::optional<IntTupleAttr> getReducedCopyPredicateShape(IntTupleAttr srcShape) {
+  if (srcShape.isLeaf() || srcShape.rank() == 0)
+    return std::nullopt;
+  IntTupleAttr valueMode = srcShape.at(0);
+  if (valueMode.isLeaf() || valueMode.rank() != 2)
+    return std::nullopt;
+
+  SmallVector<Attribute> modes;
+  modes.push_back(valueMode.at(1));
+  for (int32_t i = 1; i < srcShape.rank(); ++i)
+    modes.push_back(srcShape.at(i));
+  return IntTupleAttr::get(ArrayAttr::get(srcShape.getContext(), modes));
+}
+
 class ExpandCopyOpLowering : public OpRewritePattern<CopyOp> {
 public:
   using OpRewritePattern<CopyOp>::OpRewritePattern;
@@ -2205,18 +2229,34 @@ public:
       }
     }
 
-    if (pred && predLayoutAttr.rank() == srcRank - 1) {
-      LayoutBuilder<LayoutValueAdaptor> builder(rewriter, loc);
-      LayoutAttr unitAttr = LayoutAttr::get(ctx, IntTupleAttr::getLeafStatic(ctx, 1),
-                                            IntTupleAttr::getLeafStatic(ctx, 0));
-      Value unitLayout = builder.materializeConstantLayout(unitAttr).getValue();
-      Value predLayoutVal = GetLayoutOp::create(rewriter, loc, pred);
-      Value newPredLayout =
-          PrependOp::create(rewriter, loc, predLayoutVal, unitLayout, IntegerAttr());
-      Value predIter = GetIterOp::create(rewriter, loc, pred);
-      pred = MakeViewOp::create(rewriter, loc, predIter, newPredLayout);
-      predMemRefTy = cast<fly::MemRefType>(pred.getType());
-      predLayoutAttr = getLayoutAttr(predMemRefTy.getLayout());
+    if (pred) {
+      IntTupleAttr srcShape = srcLayoutAttr.getShape();
+      IntTupleAttr predShape = predLayoutAttr.getShape();
+      std::optional<IntTupleAttr> reducedPredShape = getReducedCopyPredicateShape(srcShape);
+
+      if (reducedPredShape && predShape == *reducedPredShape) {
+        // Normalize the atom-predicate contract to the full source hierarchy by
+        // broadcasting over ATOM_V:
+        //
+        //   (ATOM_REST, REST...)
+        //       -> (1, ATOM_REST, REST...)
+        //       -> ((1, ATOM_REST), REST...)
+        //
+        // The zero stride on the inserted unit mode makes one predicate gate
+        // the whole copy atom, independent of ATOM_V.
+        LayoutBuilder<LayoutValueAdaptor> builder(rewriter, loc);
+        LayoutAttr unitAttr = LayoutAttr::get(ctx, IntTupleAttr::getLeafStatic(ctx, 1),
+                                              IntTupleAttr::getLeafStatic(ctx, 0));
+        Value unitLayout = builder.materializeConstantLayout(unitAttr).getValue();
+        Value predLayoutVal = GetLayoutOp::create(rewriter, loc, pred);
+        Value predWithUnit =
+            PrependOp::create(rewriter, loc, predLayoutVal, unitLayout, IntegerAttr());
+        Value normalizedPredLayout = GroupOp::create(rewriter, loc, predWithUnit, 0, 2);
+        Value predIter = GetIterOp::create(rewriter, loc, pred);
+        pred = MakeViewOp::create(rewriter, loc, predIter, normalizedPredLayout);
+        predMemRefTy = cast<fly::MemRefType>(pred.getType());
+        predLayoutAttr = getLayoutAttr(predMemRefTy.getLayout());
+      }
     }
 
     if (srcRank == 1) {
