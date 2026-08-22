@@ -19,10 +19,14 @@ import functools
 import torch
 
 from flydsl.autotune import Config, autotune, do_bench
+from flydsl.runtime.device import get_rocm_arch
 from kernels.gemm.rdna3_f16_gemm import K_PAD, WAVE_SIZE, WMMA_K, WMMA_M, WMMA_N, create_wmma_gemm_module
 
 # gfx1100 CU count; thresholds shift one ladder step if this is off.
 NUM_CU = 96
+
+# gfx1151 has 40 physical CUs.
+GFX1151_NUM_CU = 40
 
 # Per-workgroup LDS budget (K_PAD comes from the kernel).
 LDS_BYTES = 64 * 1024
@@ -87,7 +91,7 @@ def feasible_tiles(M, N, K):
     return [(cfg, wgs) for cfg in _ladder_for(K) if (wgs := _tile_workgroups(M, N, K, cfg)) is not None]
 
 
-def pick_tile(M, N, K):
+def _pick_tile_gfx1100(M, N, K):
     """Return a tile for this shape.
 
     Prefer 64x64x64 when no wide tile is justified; escalate to 128x128x32,
@@ -110,6 +114,37 @@ def pick_tile(M, N, K):
             return TILE_32x32x64
         return TILE_64x64x64
     return list(feasible)[-1]
+
+
+def _pick_tile_gfx1151(M, N, K):
+    """Return a tile for square GEMMs measured on gfx1151."""
+    feasible = dict(feasible_tiles(M, N, K))
+    if not feasible:
+        return _ladder_for(K)[0]
+
+    if M == N == 256 and TILE_32x64x64 in feasible:
+        return TILE_32x64x64
+
+    wgs_128 = feasible.get(TILE_128x128x32, 0)
+    one_wave = 0.9 * GFX1151_NUM_CU <= wgs_128 <= 1.6 * GFX1151_NUM_CU
+    deep_grid = wgs_128 >= 2.5 * GFX1151_NUM_CU
+    if M == N and (one_wave or deep_grid):
+        wgs_256 = feasible.get(TILE_256x256x32, 0)
+        if 32 <= wgs_256 <= GFX1151_NUM_CU:
+            return TILE_256x256x32
+        if M == 1024 and K >= 1024 and TILE_64x64x64 in feasible:
+            return TILE_64x64x64
+        return TILE_128x128x32
+
+    return _pick_tile_gfx1100(M, N, K)
+
+
+def pick_tile(M, N, K, arch=None):
+    """Return a tile for this shape."""
+    arch = str(get_rocm_arch() or "") if arch is None else str(arch)
+    if arch.startswith("gfx1151"):
+        return _pick_tile_gfx1151(M, N, K)
+    return _pick_tile_gfx1100(M, N, K)
 
 
 _GRAPH_LAUNCHES = 20

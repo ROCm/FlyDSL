@@ -25,9 +25,11 @@ from kernels.gemm.rdna3_f16_gemm_autotune import (  # noqa: E402
     _TILE_FIELDS,
     NUM_CU,
     TILE_32x32x64,
+    TILE_32x64x64,
     TILE_64x64x64,
     TILE_128x64x32,
     TILE_128x128x32,
+    TILE_256x256x32,
     _default_config,
     _ladder_for,
     _tile_workgroups,
@@ -403,7 +405,7 @@ def test_fp8_quantize():
 
 # Every shape the heuristic was timed against the whole ladder on, with the tile
 # it is expected to pick, so a heuristic edit has to state which shapes it moves.
-MEASURED_TILES = [
+MEASURED_TILES_GFX1100 = [
     pytest.param((256, 256, 4096), TILE_32x32x64, id="256x256x4096"),
     pytest.param((256, 256, 1024), TILE_64x64x64, id="256x256x1024"),
     pytest.param((384, 384, 2048), TILE_64x64x64, id="384x384x2048"),
@@ -422,6 +424,20 @@ MEASURED_TILES = [
     pytest.param((2048, 2048, 2048), TILE_128x128x32, id="2048x2048x2048"),
     pytest.param((3072, 3072, 1024), TILE_128x128x32, id="3072x3072x1024"),
     pytest.param((4096, 4096, 4096), TILE_128x128x32, id="4096x4096x4096"),
+]
+
+# Representative gfx1151 square shapes.
+MEASURED_TILES_GFX1151 = [
+    pytest.param((256, 256, 256), TILE_32x64x64, id="256x256x256"),
+    pytest.param((256, 256, 4096), TILE_32x64x64, id="256x256x4096"),
+    pytest.param((640, 640, 640), TILE_64x64x64, id="640x640x640"),
+    pytest.param((768, 768, 768), TILE_128x128x32, id="768x768x768"),
+    pytest.param((1024, 1024, 1024), TILE_64x64x64, id="1024x1024x1024"),
+    pytest.param((1152, 1152, 1152), TILE_64x64x64, id="1152x1152x1152"),
+    pytest.param((1280, 1280, 1280), TILE_128x128x32, id="1280x1280x1280"),
+    pytest.param((1536, 1536, 1536), TILE_256x256x32, id="1536x1536x1536"),
+    pytest.param((2048, 2048, 2048), TILE_128x128x32, id="2048x2048x2048"),
+    pytest.param((8192, 8192, 8192), TILE_128x128x32, id="8192x8192x8192"),
 ]
 
 # Square and skewed both ways, K on both sides of the ladder split, sizes from
@@ -449,14 +465,21 @@ SELECTION_SHAPES = [
 _shape_id = lambda shape: "x".join(map(str, shape))  # noqa: E731
 
 
-@pytest.mark.parametrize("shape, expected", MEASURED_TILES)
-def test_pick_tile_matches_the_measured_shapes(shape, expected):
+@pytest.mark.parametrize("shape, expected", MEASURED_TILES_GFX1100)
+def test_pick_tile_matches_the_gfx1100_measured_shapes(shape, expected):
     _requires_rdna3()
-    assert pick_tile(*shape) == expected
+    assert pick_tile(*shape, arch="gfx1100") == expected
+
+
+@pytest.mark.parametrize("shape, expected", MEASURED_TILES_GFX1151)
+def test_pick_tile_matches_the_gfx1151_measured_shapes(shape, expected):
+    _requires_rdna3()
+    assert pick_tile(*shape, arch="gfx1151") == expected
 
 
 @pytest.mark.parametrize("shape", SELECTION_SHAPES, ids=_shape_id)
-def test_picked_tile_is_buildable(shape):
+@pytest.mark.parametrize("arch", ("gfx1100", "gfx1151"))
+def test_picked_tile_is_buildable(shape, arch):
     """create_wmma_gemm_module asserts the rules _tile_workgroups screens for.
 
     Returning a tile the shape cannot use is not a slow kernel, it is an
@@ -466,7 +489,7 @@ def test_picked_tile_is_buildable(shape):
     _requires_rdna3()
     if all(_tile_workgroups(*shape, cfg) is None for cfg in _ladder_for(shape[2])):
         pytest.skip("no tile in the ladder fits this shape")
-    assert _tile_workgroups(*shape, pick_tile(*shape)) is not None
+    assert _tile_workgroups(*shape, pick_tile(*shape, arch=arch)) is not None
 
 
 @pytest.mark.parametrize("shape", SELECTION_SHAPES, ids=_shape_id)
@@ -482,7 +505,7 @@ def test_deep_grids_keep_the_default_tile(shape):
     workgroups = _tile_workgroups(*shape, TILE_128x128x32)
     if workgroups is None or workgroups < 2.5 * NUM_CU:
         pytest.skip("128x128x32's grid is not deep enough for this shape")
-    assert pick_tile(*shape) == TILE_128x128x32
+    assert pick_tile(*shape, arch="gfx1100") == TILE_128x128x32
 
 
 @pytest.mark.parametrize("shape", SELECTION_SHAPES, ids=_shape_id)
