@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-22T09:29:47Z",
+ "updated": "2026-08-22T12:31:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32571744627,
+   "pr": 1057,
+   "commit": "cca1d61ae66d189293a6465cb528ac8536757dd5",
+   "branch": "perf/gfx1151-rdna3_5-tuning",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add gfx1151 tile selection for RDNA3 GEMM",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32571744627",
+   "created_at": "2026-08-22T11:59:01Z",
+   "updated_at": "2026-08-22T11:59:01Z",
+   "actor": "tangzzycc",
+   "jobs": []
+  },
+  {
+   "run_id": 32570314515,
+   "pr": null,
+   "commit": "3e4e2abc102237318ba49a0dc889de458387d0b9",
+   "branch": "perf/gfx1151-rdna3_5-tuning",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add gfx1151 tile selection for RDNA3 GEMM",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32570314515",
+   "created_at": "2026-08-22T11:27:11Z",
+   "updated_at": "2026-08-22T11:27:11Z",
+   "actor": "tangzzycc",
+   "jobs": []
+  },
   {
    "run_id": 32543247988,
    "pr": 1056,
@@ -1874,94 +1904,6 @@
      "started_at": "2026-08-20T17:07:48Z",
      "completed_at": "2026-08-20T17:17:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386189717/job/96512398412"
-    }
-   ]
-  },
-  {
-   "run_id": 32386186330,
-   "pr": 1033,
-   "commit": "465226df40d8c1861da46c895b41bbb017b61e26",
-   "branch": "john/lazy-rescale-nan",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386186330",
-   "created_at": "2026-08-20T15:26:55Z",
-   "updated_at": "2026-08-20T17:44:49Z",
-   "actor": "JohnQinAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T16:22:18Z",
-     "completed_at": "2026-08-20T17:34:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386186330/job/96497381029",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T16:18:41Z",
-     "completed_at": "2026-08-20T17:44:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386186330/job/96497381042",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-20T16:18:32Z",
-     "completed_at": "2026-08-20T16:27:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386186330/job/96497381062"
-    }
-   ]
-  },
-  {
-   "run_id": 32382498774,
-   "pr": null,
-   "commit": "3b0a47edf061492c5d90339f1085c7d9db75593d",
-   "branch": "convolution",
-   "event": "pull_request",
-   "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32382498774",
-   "created_at": "2026-08-20T14:50:00Z",
-   "updated_at": "2026-08-20T16:37:42Z",
-   "actor": "amd-nprotaso",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-20T16:08:11Z",
-     "completed_at": "2026-08-20T16:37:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32382498774/job/96491740997"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-20T16:01:27Z",
-     "completed_at": "2026-08-20T16:33:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32382498774/job/96491741007"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-20T16:00:18Z",
-     "completed_at": "2026-08-20T16:08:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32382498774/job/96491741101"
     }
    ]
   }
