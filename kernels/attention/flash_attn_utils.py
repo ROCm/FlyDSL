@@ -1072,6 +1072,7 @@ class FlashAttnGenericTraits:
     PAGED: bool
     KV_CACHE_LAYOUT: str
     KV_VECTORIZED: bool
+    SLIDING_WINDOW: int
     BLOCK_M: int
     BLOCK_N: int
     BLOCK_N_OUT: int
@@ -1156,6 +1157,7 @@ class FlashAttnGenericTraits:
             self.PAGED,
             self.KV_CACHE_LAYOUT,
             self.KV_VECTORIZED,
+            self.SLIDING_WINDOW,
             False,  # SPLITK is not supported by the generic builder.
             1,
             self.BLOCK_M,
@@ -1244,6 +1246,8 @@ def _make_flash_attn_generic_traits(
     cross_seqlen=False,
     paged=False,
     kv_cache_layout="linear",
+    page_size=None,
+    sliding_window=0,
     waves_per_eu=2,
     daz=True,
     fast_fp_math=True,
@@ -1318,7 +1322,9 @@ def _make_flash_attn_generic_traits(
     paged = bool(paged)
     kv_vectorized = paged and (kv_cache_layout == "vectorized")
     kv_vec_size = 8
-    page_size = block_n
+    page_size = block_n if page_size is None else int(page_size)
+    if paged:
+        assert page_size > 0 and block_n % page_size == 0
     page_stride_vec = num_kv_heads * head_dim * page_size
     head_stride_vec = head_dim * page_size
 
@@ -1343,7 +1349,7 @@ def _make_flash_attn_generic_traits(
         assert total_v8 % block_size == 0
         nv8_per_thread = total_v8 // block_size
         assert not enable_prefetch_3buf, "KV_VECTORIZED no-major V unsupported with 3-buffer prefetch"
-        v_nomajor_dma = os.getenv("FLYDSL_FLASH_ATTN_FUNC_VEC_V_DMA", "1") == "1"
+        v_nomajor_dma = page_size == block_n and os.getenv("FLYDSL_FLASH_ATTN_FUNC_VEC_V_DMA", "1") == "1"
     else:
         total_v8 = 0
         nv8_per_thread = 0
@@ -1407,6 +1413,7 @@ def _make_flash_attn_generic_traits(
         PAGED=paged,
         KV_CACHE_LAYOUT=kv_cache_layout,
         KV_VECTORIZED=kv_vectorized,
+        SLIDING_WINDOW=int(sliding_window),
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         BLOCK_N_OUT=block_n_out,
@@ -2202,6 +2209,7 @@ class GenericFlashAttnContext:
     def init_kv_bounds(self):
         traits = self.traits
         q_end = self.q_start + traits.BLOCK_M
+        self.kv_lower = fx.Index(0)
         if const_expr(traits.CAUSAL):
             self.delta_i32 = fx.Int32(self.seqlen_kv_b) - fx.Int32(self.seqlen_q_b)
             self.causal_end_raw_i32 = fx.Int32(q_end) + self.delta_i32
@@ -2210,6 +2218,11 @@ class GenericFlashAttnContext:
             )
             causal_end = fx.Index(causal_end_i32)
             self.kv_upper = fx.Index((causal_end < self.seqlen_kv_b).select(causal_end, self.seqlen_kv_b))
+            if const_expr(traits.SLIDING_WINDOW > 0):
+                window_start_i32 = fx.Int32(self.q_start) + self.delta_i32 - fx.Int32(traits.SLIDING_WINDOW - 1)
+                window_start_i32 = fx.Int32((window_start_i32 > fx.Int32(0)).select(window_start_i32, fx.Int32(0)))
+                window_start = fx.Index(window_start_i32)
+                self.kv_lower = window_start // traits.BLOCK_N_OUT * traits.BLOCK_N_OUT
         else:
             self.kv_upper = self.seqlen_kv_b
 
@@ -2282,16 +2295,19 @@ class GenericPageIdLoader:
             self.bt_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(BlockTable), fx.make_layout(1, 1))
             self.bt_stride_v = fx.Index(block_table_stride)
 
-    def page_id(self, tile_start):
+    def page_id(self, token_idx):
         ctx = self.ctx
-        tile_idx = tile_start // fx.Index(ctx.traits.PAGE_SIZE)
-        bt_off = ctx.batch_idx * self.bt_stride_v + tile_idx
+        page_idx = token_idx // fx.Index(ctx.traits.PAGE_SIZE)
+        bt_off = ctx.batch_idx * self.bt_stride_v + page_idx
         v = fly.copy_atom_call_ssa(
             [ctx.v1i32_type],
             ctx.load_atom_32,
             fx.slice(self.bt_div, (None, fx.Int32(bt_off))),
         )
         return fx.Index(Vec(v, (1,), fx.Int32)[0])
+
+    def page_row(self, token_idx):
+        return token_idx % fx.Index(self.ctx.traits.PAGE_SIZE)
 
 
 class GenericKvGmemToLdsLoader:
@@ -2369,6 +2385,10 @@ class GenericKvGmemToLdsLoader:
     def _tile_page_id(self, tile_start):
         return self.page_ids.page_id(tile_start)
 
+    def _paged_row(self, tile_start, lds_row, vectorized):
+        logical_row = tile_start + (self.sigma_kv(lds_row) if vectorized else lds_row)
+        return self.page_ids.page_id(logical_row), self.page_ids.page_row(logical_row)
+
     def coop_load_k(self, tile_start, buf_id=0):
         """Cooperative K load (row-major, XOR-swizzled)."""
         ctx = self.ctx
@@ -2377,12 +2397,12 @@ class GenericKvGmemToLdsLoader:
         row = ctx.load_row_in_batch
         col = ctx.load_col_base
         k_base = self.k_buf_base(buf_id)
-        if const_expr(traits.PAGED):
-            pid = self._tile_page_id(tile_start)
         for batch in range_constexpr(traits.NUM_BATCHES_KV):
             row_offset = batch * traits.ROWS_PER_BATCH_LOAD
             if const_expr(traits.PAGED):
-                row_idx = pid * fx.Index(traits.PAGE_SIZE) + row + row_offset
+                lds_row = row + row_offset
+                pid, page_row = self._paged_row(tile_start, lds_row, traits.KV_VECTORIZED)
+                row_idx = pid * fx.Index(traits.PAGE_SIZE) + page_row
             else:
                 row_idx = self.row_clamp(tile_start + row + row_offset)
             if const_expr(traits.KV_NEEDS_GUARD):
@@ -2395,7 +2415,7 @@ class GenericKvGmemToLdsLoader:
                 lds_row = row + row_offset
                 lds_idx = k_base + lds_row * traits.K_STRIDE + self.k_swizzle(lds_row, col)
                 if const_expr(traits.KV_VECTORIZED):
-                    vec = self.load_vectorized_k(ctx.k_ptr, pid, self.sigma_kv(lds_row), col)
+                    vec = self.load_vectorized_k(ctx.k_ptr, pid, page_row, col)
                 else:
                     vec = self.load_f16xN(ctx.k_ptr, self.global_idx(row_idx, col))
                 fx.ptr_store(vec, lds_kv + fx.Int64(lds_idx))
@@ -2404,15 +2424,18 @@ class GenericKvGmemToLdsLoader:
         ctx = self.ctx
         traits = ctx.traits
         vecs = []
-        if const_expr(traits.PAGED):
-            pid = self._tile_page_id(tile_start)
         for batch in range_constexpr(traits.NUM_BATCHES_KV):
             row_offset = batch * traits.ROWS_PER_BATCH_LOAD
             if const_expr(traits.PAGED):
-                row_idx = pid * fx.Index(traits.PAGE_SIZE) + ctx.load_row_in_batch + row_offset
+                lds_row = ctx.load_row_in_batch + row_offset
+                pid, page_row = self._paged_row(tile_start, lds_row, traits.KV_VECTORIZED)
+                row_idx = pid * fx.Index(traits.PAGE_SIZE) + page_row
             else:
                 row_idx = self.row_clamp(tile_start + ctx.load_row_in_batch + row_offset)
-            vecs.append(self.load_f16xN(ctx.k_ptr, self.global_idx(row_idx, ctx.load_col_base)))
+            if const_expr(traits.KV_VECTORIZED):
+                vecs.append(self.load_vectorized_k(ctx.k_ptr, pid, page_row, ctx.load_col_base))
+            else:
+                vecs.append(self.load_f16xN(ctx.k_ptr, self.global_idx(row_idx, ctx.load_col_base)))
         return vecs
 
     def coop_store_k_lds(self, vecs, buf_id=0):
@@ -2451,12 +2474,12 @@ class GenericKvGmemToLdsLoader:
         row = ctx.load_row_in_batch
         col = ctx.load_col_base
         v_base = self.v_buf_base(buf_id)
-        if const_expr(traits.PAGED):
-            pid = self._tile_page_id(tile_start)
         for batch in range_constexpr(traits.NUM_BATCHES_KV):
             row_offset = batch * traits.ROWS_PER_BATCH_LOAD
             if const_expr(traits.PAGED):
-                row_idx = pid * fx.Index(traits.PAGE_SIZE) + row + row_offset
+                lds_row = row + row_offset
+                pid, page_row = self._paged_row(tile_start, lds_row, traits.KV_VECTORIZED)
+                row_idx = pid * fx.Index(traits.PAGE_SIZE) + page_row
             else:
                 row_idx = self.row_clamp(tile_start + row + row_offset)
             if const_expr(traits.KV_NEEDS_GUARD):
@@ -2466,7 +2489,7 @@ class GenericKvGmemToLdsLoader:
             else:
                 lds_row = row + row_offset
                 if const_expr(traits.KV_VECTORIZED):
-                    vec = self.load_vectorized_v(ctx.v_ptr, pid, self.sigma_kv(lds_row), col)
+                    vec = self.load_vectorized_v(ctx.v_ptr, pid, page_row, col)
                 else:
                     vec = self.load_f16xN(ctx.v_ptr, self.global_idx(row_idx, col))
                 self._v_store_to_lds(v_base, lds_row, vec)
@@ -2476,23 +2499,29 @@ class GenericKvGmemToLdsLoader:
         ctx = self.ctx
         traits = ctx.traits
         if const_expr(traits.KV_VECTORIZED):
-            pid = self._tile_page_id(tile_start)
-            base_v = pid * fx.Index(traits.PAGE_STRIDE_VEC) + ctx.kv_head_idx * fx.Index(traits.HEAD_STRIDE_VEC)
             vecs = []
             for j in range_constexpr(traits.NV8_PER_THREAD):
                 flat = ctx.tid + fx.Index(j * traits.BLOCK_SIZE)
                 d = flat // fx.Index(traits.VEC_V_NGROUPS)
                 ng = flat % fx.Index(traits.VEC_V_NGROUPS)
-                src = base_v + ng * fx.Index(traits.HEAD_DIM * traits.KV_VEC_SIZE) + d * fx.Index(traits.KV_VEC_SIZE)
+                logical_row = tile_start + ng * fx.Index(traits.KV_VEC_SIZE)
+                pid = self.page_ids.page_id(logical_row)
+                page_group = self.page_ids.page_row(logical_row) // fx.Index(traits.KV_VEC_SIZE)
+                src = (
+                    pid * fx.Index(traits.PAGE_STRIDE_VEC)
+                    + ctx.kv_head_idx * fx.Index(traits.HEAD_STRIDE_VEC)
+                    + page_group * fx.Index(traits.HEAD_DIM * traits.KV_VEC_SIZE)
+                    + d * fx.Index(traits.KV_VEC_SIZE)
+                )
                 vecs.append(self.load_half_vec(ctx.v_ptr, src, traits.KV_VEC_SIZE))
             return vecs
         vecs = []
-        if const_expr(traits.PAGED):
-            pid = self._tile_page_id(tile_start)
         for batch in range_constexpr(traits.NUM_BATCHES_KV):
             row_offset = batch * traits.ROWS_PER_BATCH_LOAD
             if const_expr(traits.PAGED):
-                row_idx = pid * fx.Index(traits.PAGE_SIZE) + ctx.load_row_in_batch + row_offset
+                lds_row = ctx.load_row_in_batch + row_offset
+                pid, page_row = self._paged_row(tile_start, lds_row, False)
+                row_idx = pid * fx.Index(traits.PAGE_SIZE) + page_row
             else:
                 row_idx = self.row_clamp(tile_start + ctx.load_row_in_batch + row_offset)
             vecs.append(self.load_f16xN(ctx.v_ptr, self.global_idx(row_idx, ctx.load_col_base)))
@@ -2927,22 +2956,41 @@ class GenericSoftmaxHelper:
             q_mask_limit_i32 = ctx.q_row_i32 + ctx.delta_i32
             max_kv_col_i32 = kv_start_i32 + fx.Int32(traits.BLOCK_N - 1)
             tile_needs_mask = max_kv_col_i32 > q_start_i32
+            if const_expr(traits.SLIDING_WINDOW > 0):
+                min_kv_col_i32 = q_mask_limit_i32 - fx.Int32(traits.SLIDING_WINDOW - 1)
+                tile_needs_mask = tile_needs_mask | (kv_start_i32 < min_kv_col_i32)
             col_base_i32, moff = self._kv_mask_lane_off(kv_start_i32)
             c_neg_inf = ctx.c_neg_inf
 
             masked_lo = list(s_raw_lo)
             masked_hi = list(s_raw_hi)
             if tile_needs_mask:
-                masked_lo = [
-                    (col_base_i32 + fx.Int32(moff[r]) > q_mask_limit_i32).select(c_neg_inf, s_raw_lo[r])
-                    for r in range(16)
-                ]
-                masked_hi = [
-                    (col_base_i32 + fx.Int32(moff[r]) + fx.Int32(traits.K_SUB_N) > q_mask_limit_i32).select(
-                        c_neg_inf, s_raw_hi[r]
-                    )
-                    for r in range(16)
-                ]
+                if const_expr(traits.SLIDING_WINDOW > 0):
+                    masked_lo = [
+                        (
+                            (col_base_i32 + fx.Int32(moff[r]) > q_mask_limit_i32)
+                            | (col_base_i32 + fx.Int32(moff[r]) < min_kv_col_i32)
+                        ).select(c_neg_inf, s_raw_lo[r])
+                        for r in range(16)
+                    ]
+                    masked_hi = [
+                        (
+                            (col_base_i32 + fx.Int32(moff[r]) + fx.Int32(traits.K_SUB_N) > q_mask_limit_i32)
+                            | (col_base_i32 + fx.Int32(moff[r]) + fx.Int32(traits.K_SUB_N) < min_kv_col_i32)
+                        ).select(c_neg_inf, s_raw_hi[r])
+                        for r in range(16)
+                    ]
+                else:
+                    masked_lo = [
+                        (col_base_i32 + fx.Int32(moff[r]) > q_mask_limit_i32).select(c_neg_inf, s_raw_lo[r])
+                        for r in range(16)
+                    ]
+                    masked_hi = [
+                        (col_base_i32 + fx.Int32(moff[r]) + fx.Int32(traits.K_SUB_N) > q_mask_limit_i32).select(
+                            c_neg_inf, s_raw_hi[r]
+                        )
+                        for r in range(16)
+                    ]
             return masked_lo, masked_hi
 
         # Non-causal: mask physical KV columns outside seqlen so tail rows stay out of softmax.

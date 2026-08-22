@@ -358,7 +358,7 @@ def pa_decode_ps_launch(
                 batch_size, num_kv_heads, max_context_partition_num, eqgs, head_size, device=dev, dtype=torch.bfloat16
             )
 
-    if sliding_window > 0:
+    if sliding_window > 0 and block_size not in _PA_DECODE_PS_SMALL_BLOCK_SIZES:
         # Launch one CTA per 256-token context partition in the sliding window:
         # grid = (batch, kv_heads, max_context_partition_num).
         # The fused SW kernel is useful only when there is no real cross-partition
@@ -489,6 +489,7 @@ def pa_decode_ps_launch(
             value_scale,
             softmax_scale=softmax_scale,
             stream=s,
+            sliding_window=sliding_window,
             num_partitions=max_context_partition_num,
             pmax=max_logits,
             psum=exp_sums,
