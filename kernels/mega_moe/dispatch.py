@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 # ruff: noqa: B023, SIM102
-"""Compact dispatch path for MegaMoE v2 stage1."""
+"""Compact dispatch path for MegaMoE stage1."""
 
 from enum import IntEnum
 
@@ -139,12 +139,12 @@ def _store_expert_metadata(
     tile_row_base = crfa(addr_tile_row_base)
     srcmap = crfa(addr_srcmap)
     base_tile = local_row_base // fx.Int32(fz_tile_m)
-    for tile in range(fx.Int32(0), num_tiles, 1):
+    for tile in range(num_tiles):
         metadata_index = base_tile + tile
         buffer_ops.buffer_store(ge, sorted_expert, metadata_index)
         buffer_ops.buffer_store(local_row_base + tile * fx.Int32(fz_tile_m), tile_row_base, metadata_index)
     padding = padded_rows - total_count
-    for pad in range(fx.Int32(0), padding, 1):
+    for pad in range(padding):
         buffer_ops.buffer_store(fx.Int32(invalid_source), srcmap, local_row_base + total_count + pad)
 
 
@@ -188,7 +188,7 @@ def emit_direct_fixed_slot_payload(
     rdisp = crfa(addr_disp)
 
     def dp(i):
-        return buffer_ops.buffer_load(rdisp, fx.Int32(int(i)), vec_width=1, dtype=fx.Int64)
+        return buffer_ops.buffer_load(rdisp, fx.Int32(i), vec_width=1, dtype=fx.Int64)
 
     p_rx = dp(DispatchSlot.P2P_TOKEN)
     p_sc = dp(DispatchSlot.P2P_SCALE)
@@ -296,7 +296,7 @@ def emit_direct_fixed_slot_finalize(
     rdisp = crfa(addr_disp)
 
     def dp(i):
-        return buffer_ops.buffer_load(rdisp, fx.Int32(int(i)), vec_width=1, dtype=fx.Int64)
+        return buffer_ops.buffer_load(rdisp, fx.Int32(i), vec_width=1, dtype=fx.Int64)
 
     a_se = dp(DispatchSlot.SORTED_EXPERT)
     a_trb = dp(DispatchSlot.TILE_ROW_BASE)
@@ -337,12 +337,12 @@ def emit_direct_fixed_slot_finalize(
             if no_overflow:
                 global_expert = fx.Int32(fz_rank * fz_epr) + safe_expert
                 payload_base = safe_expert * fx.Int32(fz_cap)
-                for tile in range(fx.Int32(0), num_expert_tiles, 1):
+                for tile in range(num_expert_tiles):
                     metadata_index = metadata_base + tile
                     buffer_ops.buffer_store(global_expert, crfa(a_se), metadata_index)
                     buffer_ops.buffer_store(payload_base + tile * fx.Int32(fz_tile_m), crfa(a_trb), metadata_index)
                 padded_rows = num_expert_tiles * fx.Int32(fz_tile_m)
-                for pad in range(fx.Int32(0), padded_rows - safe_count, 1):
+                for pad in range(padded_rows - safe_count):
                     buffer_ops.buffer_store(fx.Int32(fz_npes * fz_mtpr), crfa(a_sm), payload_base + safe_count + pad)
                 buffer_ops.buffer_store(metadata_base + num_expert_tiles, crfa(a_expert_tile_end), safe_expert)
             else:
@@ -521,7 +521,7 @@ def emit_dispatch_plan(
             if valid_expert:
                 if const_expr(payload_tile_ready):
                     base_tile = local_row_base // fx.Int32(fz_tile_m)
-                    for tile in range(fx.Int32(0), num_tiles, 1):
+                    for tile in range(num_tiles):
                         tile_index = base_tile + tile
                         buffer_ops.buffer_store(fx.Int32(0), crfa(a_tile_ready), tile_index)
                         buffer_ops.buffer_store(fx.Int32(1), crfa(a_tile_expected), tile_index)
@@ -639,7 +639,7 @@ def emit_dispatch_group(
     rdisp = crfa(addr_disp)
 
     def dp(i):
-        return buffer_ops.buffer_load(rdisp, fx.Int32(int(i)), vec_width=1, dtype=fx.Int64)
+        return buffer_ops.buffer_load(rdisp, fx.Int32(i), vec_width=1, dtype=fx.Int64)
 
     a_pair_ready = dp(DispatchSlot.PAIR_READY)
     a_pair_order_ready = dp(DispatchSlot.PAIR_ORDER_READY)

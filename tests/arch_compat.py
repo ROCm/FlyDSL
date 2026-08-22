@@ -19,7 +19,7 @@ CDNA_ONLY_TESTS = frozenset(
         "test_swa_gfx950.py",
         "test_quant.py",
         "test_allreduce.py",  # custom_all_reduce requires CDNA (gfx9xx)
-        "test_mega_moe_v2.py",  # MegaMoEV2 A8W4 requires CDNA4 (gfx95x)
+        "test_mega_moe.py",  # MegaMoE A8W4/A4W4 requires CDNA4 (gfx95x)
     }
 )
 
