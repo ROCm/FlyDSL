@@ -10,6 +10,26 @@ from pathlib import Path
 
 import pytest
 
+
+def _extract_max_flat_workgroup_size(ir_text: str):
+    """Extract max_flat_workgroup_size from compiled IR (plain-text or msgpack)."""
+    m = re.search(r"max_flat_workgroup_size\s*=\s*(\d+)", ir_text)
+    if m:
+        return int(m.group(1))
+    key = ".max_flat_workgroup_size"
+    idx = ir_text.find(key)
+    if idx < 0:
+        return None
+    after = ir_text[idx + len(key) :]
+    m = re.match("\\\\CD\\\\([0-9A-Fa-f]{2})\\\\([0-9A-Fa-f]{2})", after)
+    if m:
+        return (int(m.group(1), 16) << 8) | int(m.group(2), 16)
+    m = re.match("\\\\CC\\\\([0-9A-Fa-f]{2})", after)
+    if m:
+        return int(m.group(1), 16)
+    return None
+
+
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
 try:
@@ -71,8 +91,8 @@ def test_rmsnorm_direct_specializes_known_block_size(weight_dtype, weight_dtype_
     artifact = compiled._keepalive
 
     assert "known_block_size = array<i32: 512, 1, 1>" in artifact.source_ir
-    match = re.search(r"max_flat_workgroup_size\\CD\\([0-9A-Fa-f]{2})\\([0-9A-Fa-f]{2})", artifact.ir)
-    assert match is not None and int("".join(match.groups()), 16) == 512
+    max_wg = _extract_max_flat_workgroup_size(artifact.ir)
+    assert max_wg is not None and max_wg == 512, f"expected max_flat_workgroup_size=512, got {max_wg}"
     if weight_dtype == torch.float32:
         weight_copy_type = "!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<128>, 32>"
         assert artifact.source_ir.count(weight_copy_type) >= 3
