@@ -1,11 +1,57 @@
 {
  "schema": 1,
- "updated": "2026-08-22T00:32:06Z",
+ "updated": "2026-08-22T03:14:36Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 32538119032,
+   "run_id": 32543247988,
    "pr": 1056,
+   "commit": "943152de799bf9983ab2028629c6e523abd199a7",
+   "branch": "feat/gfx950-paged-attention-vllm-kv-layouts",
+   "event": "pull_request",
+   "title": "Support vLLM paged KV cache layouts on the gfx950 attention kernel",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32543247988",
+   "created_at": "2026-08-22T01:22:40Z",
+   "updated_at": "2026-08-22T03:11:38Z",
+   "actor": "akii96",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-22T01:51:12Z",
+     "completed_at": "2026-08-22T02:26:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32543247988/job/96960722427",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-22T01:51:29Z",
+     "completed_at": "2026-08-22T03:11:37Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32543247988/job/96960722438",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-22T01:51:26Z",
+     "completed_at": "2026-08-22T03:03:31Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32543247988/job/96960722612",
+     "log_fetch_failed": true
+    }
+   ]
+  },
+  {
+   "run_id": 32538119032,
+   "pr": null,
    "commit": "635108b1e8e283d9591d6f575843142fc46723d2",
    "branch": "feat/gfx950-paged-attention-vllm-kv-layouts",
    "event": "pull_request",
@@ -1916,51 +1962,6 @@
      "started_at": "2026-08-20T16:00:18Z",
      "completed_at": "2026-08-20T16:08:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32382498774/job/96491741101"
-    }
-   ]
-  },
-  {
-   "run_id": 32366718417,
-   "pr": null,
-   "commit": "9d7accfcbe4e04e69b2e5f9a0b03e6c56def0fe5",
-   "branch": "main",
-   "event": "push",
-   "title": "[Fix] Restore the gfx950 XCD mapping for bf16 dense attention (#1009)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366718417",
-   "created_at": "2026-08-20T12:01:39Z",
-   "updated_at": "2026-08-20T16:21:50Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T15:12:43Z",
-     "completed_at": "2026-08-20T15:53:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366718417/job/96466110697",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T14:57:07Z",
-     "completed_at": "2026-08-20T16:21:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366718417/job/96466110703",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-20T14:54:25Z",
-     "completed_at": "2026-08-20T15:07:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32366718417/job/96466110762"
     }
    ]
   }
