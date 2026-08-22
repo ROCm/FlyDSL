@@ -38,6 +38,7 @@ from .typing import Array, PointerType, Tuple3D, as_ir_value
 
 __all__ = [
     "thread_idx",
+    "lane_id",
     "block_idx",
     "block_dim",
     "grid_dim",
@@ -63,12 +64,18 @@ def block_id(*args, **kwargs):
 
 
 @dsl_loc_tracing
+def lane_id():
+    """Index of the calling thread within its warp, in ``[0, num_warp_threads())``."""
+    return Int32(gpu.lane_id())
+
+
+@dsl_loc_tracing
 def barrier(*args, **kwargs):
     return gpu.barrier(*args, **kwargs)
 
 
 @dsl_loc_tracing
-@dsl_math_wrap_result
+@dsl_math_wrap_result(preserve_numeric_type=True)
 def shuffle(value, offset, width, mode="xor"):
     """Move ``value`` across lanes of a subgroup (warp) via ``gpu.shuffle``.
 

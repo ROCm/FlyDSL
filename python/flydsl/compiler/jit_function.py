@@ -2,6 +2,7 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import ctypes
+import enum
 import fcntl
 import hashlib
 import inspect
@@ -466,7 +467,7 @@ def _collect_closure_scalar_vals(func, visited_ids: Optional[Set[int]] = None) -
             val = cell.cell_contents
         except ValueError:
             continue
-        if isinstance(val, (int, float, bool, str, type(None), tuple)):
+        if isinstance(val, (int, float, bool, str, type(None), tuple, enum.Enum)):
             vals.append(f"{name}={val!r}")
         else:
             # Recurse into callable deps (KernelFunction, JitFunction, plain functions)

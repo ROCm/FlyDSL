@@ -64,6 +64,17 @@ SKIP_COUNT=0
 SOFTMAX_SHAPES='
 32768,8192,bf16
 '
+# Softmax backward: one shape per register-residency tier, since the tier is
+# selected by N and a regression can hit one tier without touching the others.
+# All three are in the correctness sweep in tests/kernels/test_softmax_bwd.py.
+# M is chosen for occupancy, not just tier coverage: the widest tier at M=64 fills
+# 0.25 workgroups per CU on a 256-CU gfx950 and swings 24% run to run, which would
+# flap the dashboard rather than report it. At M=1024 the same tier holds ~1%.
+SOFTMAX_BWD_SHAPES='
+1024,8192,bf16
+256,32768,bf16
+1024,65536,bf16
+'
 LAYERNORM_SHAPES='
 32768,8192,bf16
 '
@@ -207,13 +218,14 @@ _usage() {
 Usage:
   bash scripts/run_benchmark.sh                  # run all benchmarks (default)
   bash scripts/run_benchmark.sh softmax          # run only softmax
+  bash scripts/run_benchmark.sh softmax_bwd      # run only softmax backward
   bash scripts/run_benchmark.sh layernorm moe    # run only selected benchmarks
   bash scripts/run_benchmark.sh --only softmax,moe
   bash scripts/run_benchmark.sh --output_csv /tmp/bench.csv
   bash scripts/run_benchmark.sh --list
 
 Supported ops:
-  softmax | layernorm | rmsnorm | flash_attn | mla | gemm | moe
+  softmax | softmax_bwd | layernorm | rmsnorm | flash_attn | mla | gemm | moe
   (gemm includes preshuffle GEMM, A16W16 GEMM, and FP8 8-wave row-scale GEMM)
 USAGE
 }
@@ -304,6 +316,7 @@ _normalize_op() {
   op="${1:-}"
   case "${op}" in
     layernorm) echo "layernorm" ;;
+    softmax_bwd|softmax-bwd|softmax_backward|softmax-backward) echo "softmax_bwd" ;;
     flash|flash_attn|flash-attn|flash_attn_func|fmha) echo "flash_attn" ;;
     mla|mla_decode|mla-decode) echo "mla" ;;
     *) echo "${op}" ;;
@@ -311,8 +324,9 @@ _normalize_op() {
 }
 
 # Default: run softmax, norms, attention, GEMM, and MoE unless user selected a subset.
-# Use positional args or --only to enable others: softmax, layernorm, rmsnorm, flash_attn, mla, gemm, moe
+# Use positional args or --only to enable others: softmax, softmax_bwd, layernorm, rmsnorm, flash_attn, mla, gemm, moe
 RUN_SOFTMAX=1
+RUN_SOFTMAX_BWD=1
 RUN_LAYERNORM=1
 RUN_RMSNORM=1
 RUN_FLASH_ATTN=1
@@ -322,6 +336,7 @@ RUN_MOE=1
 
 _enable_only_ops() {
   RUN_SOFTMAX=0
+  RUN_SOFTMAX_BWD=0
   RUN_LAYERNORM=0
   RUN_RMSNORM=0
   RUN_FLASH_ATTN=0
@@ -332,6 +347,7 @@ _enable_only_ops() {
     op="$(_normalize_op "${op}")"
     case "${op}" in
       softmax) RUN_SOFTMAX=1 ;;
+      softmax_bwd) RUN_SOFTMAX_BWD=1 ;;
       layernorm) RUN_LAYERNORM=1 ;;
       rmsnorm) RUN_RMSNORM=1 ;;
       flash_attn) RUN_FLASH_ATTN=1 ;;
@@ -370,6 +386,7 @@ if [ "$#" -gt 0 ]; then
         ;;
       --list)
         echo "softmax"
+        echo "softmax_bwd"
         echo "layernorm"
         echo "rmsnorm"
         echo "flash_attn"
@@ -577,6 +594,29 @@ if [ "${RUN_SOFTMAX}" -eq 1 ]; then
       _fail_or_skip "${log}" "softmax"
     fi
     row="$(_py_parse_and_emit softmax "${M}x${N}" "${dtype}" "${log}")"
+    # row is tab-separated; default IFS includes tabs.
+    set -- $row
+    _emit_row "$1" "$2" "$3" "$4" "$5"
+  done
+fi
+
+# Softmax backward (log -> parse -> one row per residency tier)
+if [ "${RUN_SOFTMAX_BWD}" -eq 1 ]; then
+  for shape in $SOFTMAX_BWD_SHAPES; do
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    M=$1; N=$2; dtype=$3
+    export ROCDSL_SOFTMAX_BWD_SHAPES="$shape"
+    log="${BENCH_LOG_DIR}/softmax_bwd_${M}x${N}_${dtype}.log"
+    if python3 tests/kernels/test_softmax_bwd.py >"${log}" 2>&1; then
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+      _fail_or_skip "${log}" "softmax_bwd"
+    fi
+    row="$(_py_parse_and_emit softmax_bwd "${M}x${N}" "${dtype}" "${log}")"
     # row is tab-separated; default IFS includes tabs.
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"

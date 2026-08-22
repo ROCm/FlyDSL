@@ -20,6 +20,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        env:
+          # Keep checkout independent of runner-local git-cache rewrites.
+          # If that cache is unavailable, checkout fails before promotion starts.
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/flydsl-gitconfig
+          GIT_CONFIG_NOSYSTEM: "1"
         with:
           sparse-checkout: |
             scripts/install_awscli.sh
