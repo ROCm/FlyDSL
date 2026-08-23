@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-23T18:31:33Z",
+ "updated": "2026-08-23T21:30:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32661832176,
+   "pr": 1058,
+   "commit": "9cfdf5a396ad37e4f6c95bbdc85e03413d7ca0bf",
+   "branch": "perf/jit-compile-cache-fingerprint",
+   "event": "pull_request",
+   "title": "[Perf] avoid hashing when cache not enabled",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32661832176",
+   "created_at": "2026-08-23T19:37:37Z",
+   "updated_at": "2026-08-23T19:37:37Z",
+   "actor": "ppppqp",
+   "jobs": []
+  },
   {
    "run_id": 32590439213,
    "pr": 1055,
@@ -1831,51 +1846,6 @@
    "updated_at": "2026-08-20T16:25:19Z",
    "actor": "JohnQinAMD",
    "jobs": []
-  },
-  {
-   "run_id": 32386362772,
-   "pr": null,
-   "commit": "672c8979aa6a6081ae08c49ea89aa70ff3c77605",
-   "branch": "feat/rdna3-gemm-tile-selection",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Speed up the RDNA3 GEMM up to 1.85x by choosing the tile from the shape",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386362772",
-   "created_at": "2026-08-20T15:28:42Z",
-   "updated_at": "2026-08-20T19:09:44Z",
-   "actor": "vivienfanghuagood",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-20T17:17:24Z",
-     "completed_at": "2026-08-20T17:26:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386362772/job/96512455609"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T17:08:58Z",
-     "completed_at": "2026-08-20T19:09:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386362772/job/96512455658",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-20T17:32:19Z",
-     "completed_at": "2026-08-20T18:50:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32386362772/job/96512455744",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
