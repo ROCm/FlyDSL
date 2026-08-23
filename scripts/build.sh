@@ -130,6 +130,16 @@ echo "Building with -j${PARALLEL_JOBS}..."
 cmake --build . -j"${PARALLEL_JOBS}"
 
 # ---------------------------------------------------------------------------
+# Restore the generated bindings link used by editable installs. That was removed
+# before the build due to CopyFlyPythonSources
+# ---------------------------------------------------------------------------
+if [ ! -e "${_EDITABLE_MLIR_LINK}" ]; then
+  _EDITABLE_MLIR_TARGET="../../${BUILD_DIR#"${REPO_ROOT}/"}/python_packages/flydsl/_mlir"
+  ln -s "${_EDITABLE_MLIR_TARGET}" "${_EDITABLE_MLIR_LINK}"
+  echo "Restored editable-install symlink: ${_EDITABLE_MLIR_LINK} -> ${_EDITABLE_MLIR_TARGET}"
+fi
+
+# ---------------------------------------------------------------------------
 # Done
 # ---------------------------------------------------------------------------
 PYTHON_PKG_DIR="${BUILD_DIR}/python_packages"
