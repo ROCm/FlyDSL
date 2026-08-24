@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-24T18:32:32Z",
+ "updated": "2026-08-24T20:00:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32766602304,
+   "pr": 1045,
+   "commit": "df6d68130e6068c3ab19aa3dac5f8ba88420e802",
+   "branch": "john/attn-4gib-guard",
+   "event": "pull_request",
+   "title": "[Bugfix] Refuse a batch entry the buffer descriptor cannot address",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32766602304",
+   "created_at": "2026-08-24T19:10:13Z",
+   "updated_at": "2026-08-24T19:57:03Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
+  {
+   "run_id": 32766230556,
+   "pr": 1050,
+   "commit": "ca9b8487606df51a213bd63e395053b4d7462759",
+   "branch": "john/maxnumf-contract",
+   "event": "pull_request",
+   "title": "[Fix] Restore the fx.maxnumf contract, and keep ninf off the score reductions",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32766230556",
+   "created_at": "2026-08-24T19:06:22Z",
+   "updated_at": "2026-08-24T19:09:17Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 32757803812,
    "pr": 1020,
@@ -2019,67 +2049,6 @@
      "started_at": "2026-08-21T09:51:56Z",
      "completed_at": "2026-08-21T10:57:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457110814/job/96718613687",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32455927554,
-   "pr": 1038,
-   "commit": "de01efb4d0af6c77f80b9cd0d844b71902bc3cb3",
-   "branch": "zhimding/jobs_parallel_0819",
-   "event": "pull_request",
-   "title": "[AOT] Add resilient parallel job scheduler",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32455927554",
-   "created_at": "2026-08-21T06:48:54Z",
-   "updated_at": "2026-08-21T07:05:28Z",
-   "actor": "zhiding512",
-   "jobs": []
-  },
-  {
-   "run_id": 32454436875,
-   "pr": 1051,
-   "commit": "b6eadaef6cfe750d1b70ec248b014a1db036af21",
-   "branch": "phil/bump-llvm-941a04e6",
-   "event": "pull_request",
-   "title": "[FlyToROCDL] Bump LLVM to 941a04e6 and adapt gpu.launch_func lowering",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32454436875",
-   "created_at": "2026-08-21T06:27:05Z",
-   "updated_at": "2026-08-21T10:50:28Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T08:32:43Z",
-     "completed_at": "2026-08-21T08:45:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32454436875/job/96711958507",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T09:47:38Z",
-     "completed_at": "2026-08-21T10:50:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32454436875/job/96711958508",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T08:17:18Z",
-     "completed_at": "2026-08-21T09:42:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32454436875/job/96711958643",
      "log_fetch_failed": true
     }
    ]
