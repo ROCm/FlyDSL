@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-24T15:09:55Z",
+ "updated": "2026-08-24T15:32:57Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32745036269,
+   "pr": 906,
+   "commit": "f8365f8205f3310261548ddfefaed42535552ee7",
+   "branch": "fast-divmod",
+   "event": "pull_request",
+   "title": "Add fast_divmod magic-number division helper",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32745036269",
+   "created_at": "2026-08-24T15:28:08Z",
+   "updated_at": "2026-08-24T15:28:08Z",
+   "actor": "kashif",
+   "jobs": []
+  },
+  {
+   "run_id": 32743614958,
+   "pr": null,
+   "commit": "9c4db62d3de59b94376a390f6086fa822adf209d",
+   "branch": "fast-divmod",
+   "event": "pull_request",
+   "title": "Add fast_divmod magic-number division helper",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32743614958",
+   "created_at": "2026-08-24T15:14:11Z",
+   "updated_at": "2026-08-24T15:14:11Z",
+   "actor": "kashif",
+   "jobs": []
+  },
   {
    "run_id": 32741519873,
    "pr": 1065,
@@ -14,9 +44,38 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32741519873",
    "created_at": "2026-08-24T14:53:44Z",
-   "updated_at": "2026-08-24T14:55:26Z",
+   "updated_at": "2026-08-24T15:09:40Z",
    "actor": "sammysun0711",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-24T15:09:29Z",
+     "completed_at": "2026-08-24T15:25:19Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32741519873/job/97482016799",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-24T15:09:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32741519873/job/97482016820"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-24T15:09:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32741519873/job/97482016821"
+    }
+   ]
   },
   {
    "run_id": 32741517965,
@@ -50,11 +109,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-24T14:42:20Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32737985252/job/97472868254"
+     "completed_at": "2026-08-24T15:28:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32737985252/job/97472868254",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -113,11 +173,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-24T13:52:38Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32727356884/job/97446991222"
+     "completed_at": "2026-08-24T15:12:53Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32727356884/job/97446991222",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1997,36 +2058,6 @@
    "created_at": "2026-08-21T06:22:45Z",
    "updated_at": "2026-08-21T06:48:56Z",
    "actor": "zhiding512",
-   "jobs": []
-  },
-  {
-   "run_id": 32454141790,
-   "pr": 1051,
-   "commit": "04e31477a5dbe9281021f93a24e40bb094dd2676",
-   "branch": "phil/bump-llvm-941a04e6",
-   "event": "pull_request",
-   "title": "[FlyToROCDL] Bump LLVM to 941a04e6 and adapt gpu.launch_func lowering",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32454141790",
-   "created_at": "2026-08-21T06:22:32Z",
-   "updated_at": "2026-08-21T06:23:53Z",
-   "actor": "Phil-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 32453863580,
-   "pr": 1051,
-   "commit": "f98c57e67f933c7b1e359ae98dc599578c276bc6",
-   "branch": "phil/bump-llvm-941a04e6",
-   "event": "pull_request",
-   "title": "[FlyToROCDL] Bump LLVM to 941a04e6 and adapt gpu.launch_func lowering",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453863580",
-   "created_at": "2026-08-21T06:18:23Z",
-   "updated_at": "2026-08-21T06:20:31Z",
-   "actor": "Phil-amd",
    "jobs": []
   }
  ]
