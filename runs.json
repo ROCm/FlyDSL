@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-24T06:44:28Z",
+ "updated": "2026-08-24T06:51:57Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32698974837,
+   "pr": null,
+   "commit": "93d124dcbb6e7f807ce9212239d971b47aea5012",
+   "branch": "main",
+   "event": "push",
+   "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range \u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32698974837",
+   "created_at": "2026-08-24T06:50:42Z",
+   "updated_at": "2026-08-24T06:50:53Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 32698410347,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32698410347",
    "created_at": "2026-08-24T06:42:23Z",
-   "updated_at": "2026-08-24T06:42:45Z",
+   "updated_at": "2026-08-24T06:50:44Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -40,13 +55,41 @@
    "branch": "skills/dedrift-and-fix-frontmatter",
    "event": "pull_request",
    "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32696893504",
    "created_at": "2026-08-24T06:20:15Z",
-   "updated_at": "2026-08-24T06:30:56Z",
+   "updated_at": "2026-08-24T06:50:38Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-24T06:50:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32696893504/job/97346475203"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-24T06:51:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32696893504/job/97346475207"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-24T06:50:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32696893504/job/97346475354"
+    }
+   ]
   },
   {
    "run_id": 32696864649,
@@ -70,13 +113,41 @@
    "branch": "phil/isa-resource-diff-arch-general",
    "event": "pull_request",
    "title": "[Tools] Add architecture-general ISA resource diff tool",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32696828733",
    "created_at": "2026-08-24T06:19:24Z",
-   "updated_at": "2026-08-24T06:30:56Z",
+   "updated_at": "2026-08-24T06:50:35Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-24T06:50:55Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32696828733/job/97346463848"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-24T06:51:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32696828733/job/97346463858"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-24T06:51:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32696828733/job/97346463910"
+    }
+   ]
   },
   {
    "run_id": 32695957929,
@@ -412,7 +483,7 @@
   },
   {
    "run_id": 32504338777,
-   "pr": 1033,
+   "pr": null,
    "commit": "bfde8072717bc9f6407280e03cf51058673ec228",
    "branch": "john/lazy-rescale-nan",
    "event": "pull_request",
@@ -519,7 +590,7 @@
   },
   {
    "run_id": 32502893730,
-   "pr": 1033,
+   "pr": null,
    "commit": "63a05839184bb001bd4d96846f05e76178b993f5",
    "branch": "john/lazy-rescale-nan",
    "event": "pull_request",
@@ -580,7 +651,7 @@
   },
   {
    "run_id": 32501887298,
-   "pr": 1033,
+   "pr": null,
    "commit": "88aeb35c92b96d03f71d994bbc1c4bc17ee7468d",
    "branch": "john/lazy-rescale-nan",
    "event": "pull_request",
@@ -610,7 +681,7 @@
   },
   {
    "run_id": 32500430459,
-   "pr": 1033,
+   "pr": null,
    "commit": "e58637f4fd34b4d4448e421270cd8dde1b9601ca",
    "branch": "john/lazy-rescale-nan",
    "event": "pull_request",
@@ -1316,7 +1387,7 @@
   },
   {
    "run_id": 32453263454,
-   "pr": 1033,
+   "pr": null,
    "commit": "b9029e14c183c46272d1b695b06e2cac7b984eb7",
    "branch": "john/lazy-rescale-nan",
    "event": "pull_request",
@@ -1377,7 +1448,7 @@
   },
   {
    "run_id": 32452139385,
-   "pr": 1033,
+   "pr": null,
    "commit": "1899147e10856140a96d6f8cf6135472815f966b",
    "branch": "john/lazy-rescale-nan",
    "event": "pull_request",
@@ -1588,7 +1659,7 @@
   },
   {
    "run_id": 32450025670,
-   "pr": 1033,
+   "pr": null,
    "commit": "c8448409be6235cc80e7c07178f834650e9380ec",
    "branch": "john/lazy-rescale-nan",
    "event": "pull_request",
@@ -1747,70 +1818,6 @@
      "started_at": "2026-08-21T03:57:22Z",
      "completed_at": "2026-08-21T04:17:19Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32443595655/job/96661452926"
-    }
-   ]
-  },
-  {
-   "run_id": 32442823772,
-   "pr": null,
-   "commit": "da37a45baf9f97e3aaa7aebd6fa2f9bf8c3ef88e",
-   "branch": "dsl-ify-scf-controlflow",
-   "event": "pull_request",
-   "title": "[Kernel] Replace raw scf ops with Python control flow in kernels",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772",
-   "created_at": "2026-08-21T03:16:53Z",
-   "updated_at": "2026-08-21T08:31:12Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-21T08:01:54Z",
-     "completed_at": "2026-08-21T08:31:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772/job/96695224350"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T03:36:47Z",
-     "completed_at": "2026-08-21T05:11:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772/job/96695224579",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T03:36:47Z",
-     "completed_at": "2026-08-21T04:46:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772/job/96695224886",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-21T05:14:16Z",
-     "completed_at": "2026-08-21T06:15:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772/job/96695225096"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T03:36:38Z",
-     "completed_at": "2026-08-21T03:56:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442823772/job/96695225113",
-     "log_fetch_failed": true
     }
    ]
   }
