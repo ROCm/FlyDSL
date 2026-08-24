@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-24T21:31:34Z",
+ "updated": "2026-08-24T23:19:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32788613020,
+   "pr": 901,
+   "commit": "7bd801414b935ba49b6e62849503890a192700ab",
+   "branch": "moe_sorting_optimization",
+   "event": "pull_request",
+   "title": "Add Optimized MoE Routing Path",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32788613020",
+   "created_at": "2026-08-24T23:16:43Z",
+   "updated_at": "2026-08-24T23:16:53Z",
+   "actor": "amd-wsung102",
+   "jobs": []
+  },
   {
    "run_id": 32766602304,
    "pr": 1045,
@@ -506,27 +521,17 @@
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710532813",
    "created_at": "2026-08-24T09:15:33Z",
-   "updated_at": "2026-08-24T12:52:18Z",
+   "updated_at": "2026-08-24T23:16:12Z",
    "actor": "zhiding512",
    "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T11:26:11Z",
-     "completed_at": "2026-08-24T12:52:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710532813/job/97402245118",
-     "log_fetch_failed": true
-    },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
      "status": "completed",
      "conclusion": "failure",
-     "started_at": "2026-08-24T10:42:35Z",
-     "completed_at": "2026-08-24T10:58:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710532813/job/97402245139"
+     "started_at": "2026-08-24T23:05:00Z",
+     "completed_at": "2026-08-24T23:16:12Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710532813/job/97622832454"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -535,7 +540,17 @@
      "conclusion": "success",
      "started_at": "2026-08-24T11:26:11Z",
      "completed_at": "2026-08-24T12:15:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710532813/job/97402245147",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710532813/job/97622833228",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-24T11:26:11Z",
+     "completed_at": "2026-08-24T12:52:17Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710532813/job/97622833363",
      "log_fetch_failed": true
     }
    ]
@@ -2004,51 +2019,6 @@
      "started_at": "2026-08-21T09:24:05Z",
      "completed_at": "2026-08-21T09:44:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457463858/job/96727584767",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32457110814,
-   "pr": 1038,
-   "commit": "09f20909339539b4051bdabe44607440d62ad93a",
-   "branch": "zhimding/jobs_parallel_0819",
-   "event": "pull_request",
-   "title": "[AOT] Add resilient parallel job scheduler",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457110814",
-   "created_at": "2026-08-21T07:05:26Z",
-   "updated_at": "2026-08-21T10:57:17Z",
-   "actor": "zhiding512",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-21T09:12:47Z",
-     "completed_at": "2026-08-21T10:44:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457110814/job/96718613656"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T08:45:52Z",
-     "completed_at": "2026-08-21T09:04:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457110814/job/96718613670",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T09:51:56Z",
-     "completed_at": "2026-08-21T10:57:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32457110814/job/96718613687",
      "log_fetch_failed": true
     }
    ]
