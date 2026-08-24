@@ -400,3 +400,26 @@ def test_key_computation_leaves_no_in_progress_leak(tmp_path, monkeypatch):
 
     _manager_key(mod.solo, reset=True)
     assert jit_function._keys_in_progress() == set()
+
+
+def test_enum_closures_reach_the_cache_key():
+    """Regression: a captured enum selects code but left no trace in the key.
+
+    An enum member is not a scalar and has no source of its own to hash, so
+    ``_collect_closure_scalar_vals`` used to drop it. Two kernels differing only
+    by ``ReductionOp.ADD`` versus ``ReductionOp.MAX`` then shared a cache entry,
+    and the second one silently ran the first one's code.
+    """
+
+    def vals(op):
+        def traced():
+            return op
+
+        return jit_function._collect_closure_scalar_vals(traced)
+
+    baseline = vals(fx.ReductionOp.ADD)
+    assert baseline == vals(fx.ReductionOp.ADD), "the identity must be stable"
+    assert vals(fx.ReductionOp.MAX) != baseline
+
+    # No address, or the key would differ between processes and never hit.
+    assert not any("0x" in v for v in baseline), baseline

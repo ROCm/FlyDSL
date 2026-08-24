@@ -3,7 +3,7 @@
 
 from typing import List, Tuple
 
-from ...runtime.device import get_rocm_arch, is_rdna_arch
+from ...runtime.device import get_rocm_arch, get_warp_size
 from ...utils import env
 from .base import BaseBackend, GPUTarget
 
@@ -18,13 +18,11 @@ class RocmBackend(BaseBackend):
     @staticmethod
     def detect_target() -> GPUTarget:
         arch = env.compile.arch or get_rocm_arch()
-        warp_size = 32 if is_rdna_arch(arch) else 64
-        return GPUTarget(backend="rocm", arch=arch, warp_size=warp_size)
+        return GPUTarget(backend="rocm", arch=arch, warp_size=get_warp_size(arch))
 
     @classmethod
     def make_target(cls, arch: str) -> GPUTarget:
-        warp_size = 32 if is_rdna_arch(arch) else 64
-        return GPUTarget(backend="rocm", arch=arch, warp_size=warp_size)
+        return GPUTarget(backend="rocm", arch=arch, warp_size=get_warp_size(arch))
 
     @classmethod
     def llvm_address_space(cls, address_space) -> int:
@@ -74,7 +72,7 @@ class RocmBackend(BaseBackend):
             "module": "",
             "triple": "amdgcn-amd-amdhsa",
             "unsafe-math": "true" if compile_hints.get("unsafe_fp_math") else "false",
-            "wave64": "false" if is_rdna_arch(chip) else "true",
+            "wave64": "true" if get_warp_size(chip) == 64 else "false",
         }
 
         pre_binary_fragments = [
@@ -88,6 +86,7 @@ class RocmBackend(BaseBackend):
             "convert-fly-to-rocdl",
             "canonicalize",
             f"gpu.module(convert-scf-to-cf,cse,"
+            f"convert-rocdl-fastmath-ops,"
             f"convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}},"
             f"fly-rocdl-cluster-attr)",
         ]

@@ -598,7 +598,7 @@ class Constexpr:
         if not cls.is_specialized:
             raise TypeError(
                 f"{cls.__name__} must be value-specialized (e.g. Constexpr[42]) "
-                f"before reconstruction; the surrounding schema did not bind a value."
+                f"before reconstruction; the surrounding type did not bind a value."
             )
         return cls.value
 
@@ -1465,6 +1465,15 @@ class Vector(ArithValue):
         super().__init__(value, signed)
         self._shape = shape
         self._dtype = dtype
+
+    @classmethod
+    def __coerce__(cls, value):
+        if isinstance(value, cls):
+            return value
+        try:
+            return cls(value)
+        except Exception as exc:
+            raise TypeError(f"expects {cls.__name__}, got {type(value).__name__} ({exc})") from exc
 
     @property
     def dtype(self) -> Type[Numeric]:

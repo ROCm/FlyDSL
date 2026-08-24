@@ -108,9 +108,9 @@ func.func @test_buffer_copy_lds_const_imm_offset(
   %atom = fly.make_copy_atom {valBits = 32 : i32} : !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>
   %c128 = arith.constant 128 : i32
   %a1 = fly.atom.set_value(%atom, "imm_offset", %c128) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>, i32) -> !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>
+  // The trailing `0` is the cache-policy attribute, not an SSA operand.
   // LLVM-DAG: %[[C128:.*]] = llvm.mlir.constant(128 : i32) : i32
-  // LLVM-DAG: %[[C0:.*]] = llvm.mlir.constant(0 : i32) : i32
-  // LLVM: rocdl.raw.ptr.buffer.load.lds %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[C128]], %[[C0]]
+  // LLVM: rocdl.raw.ptr.buffer.load.lds %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[C128]], 0
   fly.copy_atom_call(%a1, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>, !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>, !fly.memref<f32, shared, 1:1>) -> ()
   return
 }
@@ -128,13 +128,13 @@ func.func @test_buffer_copy_lds_const_both(
   %c256 = arith.constant 256 : i32
   %a1 = fly.atom.set_value(%atom, "soffset", %c64) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>, i32) -> !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>
   %a2 = fly.atom.set_value(%a1, "imm_offset", %c256) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>, i32) -> !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>
-  // soffset = 64 * 4 (f32 elem bytes), imm_offset = 256 (constant)
+  // soffset = 64 * 4 (f32 elem bytes), imm_offset = 256 (constant); the trailing
+  // `0` is the cache-policy attribute, not an SSA operand.
   // LLVM-DAG: %[[C4:.*]] = llvm.mlir.constant(4 : i32) : i32
   // LLVM-DAG: %[[C64:.*]] = llvm.mlir.constant(64 : i32) : i32
   // LLVM-DAG: %[[C256:.*]] = llvm.mlir.constant(256 : i32) : i32
-  // LLVM-DAG: %[[C0:.*]] = llvm.mlir.constant(0 : i32) : i32
   // LLVM: %[[SOFF:.*]] = llvm.mul %[[C64]], %[[C4]]
-  // LLVM: rocdl.raw.ptr.buffer.load.lds %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[SOFF]], %[[C256]], %[[C0]]
+  // LLVM: rocdl.raw.ptr.buffer.load.lds %{{.*}}, %{{.*}}, %{{.*}}, %[[SOFF]], %[[C256]], 0
   fly.copy_atom_call(%a2, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>, !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>, !fly.memref<f32, shared, 1:1>) -> ()
   return
 }

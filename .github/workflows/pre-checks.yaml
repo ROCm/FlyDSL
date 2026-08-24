@@ -28,7 +28,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install style tools
-        run: python3 -m pip install black ruff
+        run: python3 -m pip install black ruff pyyaml
 
       - name: Install reviewdog
         if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -45,6 +45,14 @@ jobs:
           REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REVIEWDOG_REPORTER: ${{ github.event_name == 'pull_request' && 'github-pr-review' || 'github-check' }}
           REVIEWDOG_FILTER_MODE: ${{ github.event_name == 'pull_request' && 'diff_context' || 'nofilter' }}
+
+      # Single entry point for the repository's non-style pre-checks. Register
+      # new checks in scripts/check_repo.py rather than adding a step here.
+      - name: Repository pre-checks
+        run: python3 scripts/check_repo.py
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+          HEAD_SHA: ${{ github.sha }}
 
   cpp-style:
     name: Check C++ Code Style

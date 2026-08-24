@@ -15,6 +15,31 @@ from kernels.common.mem_ops import global_load_i64x2 as global_load_i64x2
 from kernels.common.mem_ops import global_ptr_from_addr as global_ptr_from_addr
 
 
+def global_pointer_from_addr(addr, dtype, *, alignment: int):
+    ptr_type = fx.PointerType.get(
+        elem_ty=dtype.ir_type,
+        address_space=fx.AddressSpace.Global,
+        alignment=alignment,
+    )
+    return fx.inttoptr(ptr_type, addr)
+
+
+def copy_load(source, offset, copy_atom, register):
+    fx.copy(copy_atom, fx.slice(source, (None, fx.Int32(offset))), register)
+    return fx.memref_load_vec(register)
+
+
+def copy_store(destination, offset, copy_atom, register, value):
+    fx.memref_store_vec(value, register)
+    fx.copy(copy_atom, register, fx.slice(destination, (None, fx.Int32(offset))))
+
+
+def load_global_16b(global_ptr, byte_offset, copy_atom, register):
+    source = fx.make_view(global_ptr + byte_offset, fx.make_layout(16, 1))
+    fx.copy(copy_atom, source, register)
+    return fx.memref_load_vec(register).bitcast(fx.Int64)
+
+
 def rcp_f32(value):
     return rocdl.rcp(T.f32, value)
 
@@ -41,8 +66,11 @@ def exp2_f32_fast(value):
     return exp2_amdgcn_scalar(raw)
 
 
-def cdiv(numer: int, denom: int) -> int:
-    return (numer + denom - 1) // denom
+def cdiv(numer, denom):
+    """Ceiling division for host integers and typed DSL integer values."""
+    if isinstance(numer, (fx.Numeric, fx.Vector)) or isinstance(denom, (fx.Numeric, fx.Vector)):
+        return fx.ceildiv(numer, denom)
+    return -(-numer // denom)
 
 
 # Alias: several kernels historically spelled this ``ceildiv``.
