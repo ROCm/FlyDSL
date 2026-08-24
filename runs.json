@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-24T08:34:29Z",
+ "updated": "2026-08-24T08:37:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32706847638,
+   "pr": 1061,
+   "commit": "7f6637d1c08a0d31d058c2f2a684b4cb5d9b37fe",
+   "branch": "gfx1250/bf16-gemm",
+   "event": "pull_request",
+   "title": "[gfx1250] Add bf16 gemm",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32706847638",
+   "created_at": "2026-08-24T08:32:39Z",
+   "updated_at": "2026-08-24T08:34:10Z",
+   "actor": "aoli26",
+   "jobs": []
+  },
   {
    "run_id": 32706760698,
    "pr": null,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32706760698",
    "created_at": "2026-08-24T08:31:35Z",
-   "updated_at": "2026-08-24T08:32:15Z",
+   "updated_at": "2026-08-24T08:33:49Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -40,11 +55,11 @@
    "branch": "gfx1250/bf16-gemm",
    "event": "pull_request",
    "title": "[gfx1250] Add bf16 gemm",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32704865450",
    "created_at": "2026-08-24T08:09:24Z",
-   "updated_at": "2026-08-24T08:12:06Z",
+   "updated_at": "2026-08-24T08:32:57Z",
    "actor": "aoli26",
    "jobs": []
   },
@@ -1856,21 +1871,6 @@
    "created_at": "2026-08-21T04:54:18Z",
    "updated_at": "2026-08-21T05:15:05Z",
    "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 32446827284,
-   "pr": null,
-   "commit": "fc155670ee194ae1d7bf6d815b02fd82beba2084",
-   "branch": "fp8-softmax-normalisation",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32446827284",
-   "created_at": "2026-08-21T04:24:20Z",
-   "updated_at": "2026-08-21T04:26:06Z",
-   "actor": "JohnQinAMD",
    "jobs": []
   }
  ]
