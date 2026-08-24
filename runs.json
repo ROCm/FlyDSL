@@ -1,8 +1,68 @@
 {
  "schema": 1,
- "updated": "2026-08-24T09:34:14Z",
+ "updated": "2026-08-24T10:32:01Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32717035159,
+   "pr": 1066,
+   "commit": "ed10596d6cb952beef503338e6a136c23397d5c5",
+   "branch": "upstream/fa-paged-fp8-asymmetric-v",
+   "event": "pull_request",
+   "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32717035159",
+   "created_at": "2026-08-24T10:29:24Z",
+   "updated_at": "2026-08-24T10:29:33Z",
+   "actor": "sammysun0711",
+   "jobs": []
+  },
+  {
+   "run_id": 32716240533,
+   "pr": null,
+   "commit": "174e57ccaa7a1ce1344de77fd14172d9c081352f",
+   "branch": "upstream/fa-paged-fp8-asymmetric-v",
+   "event": "pull_request",
+   "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32716240533",
+   "created_at": "2026-08-24T10:19:58Z",
+   "updated_at": "2026-08-24T10:29:25Z",
+   "actor": "sammysun0711",
+   "jobs": []
+  },
+  {
+   "run_id": 32713833796,
+   "pr": 1015,
+   "commit": "b0f3f3dd168589d6e09c0c82476e8495965dc5db",
+   "branch": "phil/isa-resource-diff-arch-general",
+   "event": "pull_request",
+   "title": "[Tools] Add architecture-general ISA resource diff tool",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32713833796",
+   "created_at": "2026-08-24T09:52:21Z",
+   "updated_at": "2026-08-24T09:53:45Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 32713543896,
+   "pr": 1065,
+   "commit": "26b196e0a16b73ddb549cc2689ceccf192969c17",
+   "branch": "upstream/pa-bf16-asymmetric-v",
+   "event": "pull_request",
+   "title": "[Kernel][PA] Support BF16 vectorized KV with asymmetric K/V head dim",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32713543896",
+   "created_at": "2026-08-24T09:48:57Z",
+   "updated_at": "2026-08-24T09:50:18Z",
+   "actor": "sammysun0711",
+   "jobs": []
+  },
   {
    "run_id": 32710532813,
    "pr": 1022,
@@ -10,11 +70,11 @@
    "branch": "jhinpan/softmax-autotune",
    "event": "pull_request",
    "title": "[Kernel] Add opt-in autotuning for Softmax",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710532813",
    "created_at": "2026-08-24T09:15:33Z",
-   "updated_at": "2026-08-24T09:17:18Z",
+   "updated_at": "2026-08-24T10:22:01Z",
    "actor": "zhiding512",
    "jobs": []
   },
@@ -25,13 +85,42 @@
    "branch": "upstream/pa-64bit-cache-offsets",
    "event": "pull_request",
    "title": "[Bugfix][PA] Fix D192 query staging and 64-bit cache offsets",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710290446",
    "created_at": "2026-08-24T09:12:50Z",
-   "updated_at": "2026-08-24T09:17:19Z",
+   "updated_at": "2026-08-24T09:36:06Z",
    "actor": "sammysun0711",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-24T10:04:17Z",
+     "completed_at": "2026-08-24T10:24:20Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710290446/job/97386506094",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-24T09:36:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710290446/job/97386506354"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-24T09:36:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710290446/job/97386506381"
+    }
+   ]
   },
   {
    "run_id": 32707307344,
@@ -68,11 +157,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-24T09:30:59Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32707307344/job/97385098588"
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-24T09:46:23Z",
+     "completed_at": "2026-08-24T10:03:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32707307344/job/97385098588",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -127,28 +217,28 @@
    "branch": "main",
    "event": "push",
    "title": "support ascale tile16 and add const-init test cli (#1060)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32706760698",
    "created_at": "2026-08-24T08:31:35Z",
-   "updated_at": "2026-08-24T09:20:51Z",
+   "updated_at": "2026-08-24T10:24:57Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-24T09:20:51Z",
+     "started_at": "2026-08-24T10:24:56Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32706760698/job/97382239446"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-24T09:20:51Z",
+     "started_at": "2026-08-24T09:36:50Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32706760698/job/97382239513"
     },
@@ -189,20 +279,22 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-24T09:30:20Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32705911499/job/97380925204"
+     "completed_at": "2026-08-24T09:45:57Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32705911499/job/97380925204",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-24T09:31:25Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32705911499/job/97380925245"
+     "completed_at": "2026-08-24T10:21:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32705911499/job/97380925245",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1804,156 +1896,6 @@
      "started_at": "2026-08-21T07:27:54Z",
      "completed_at": "2026-08-21T08:15:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32451534261/job/96687716602",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32451114906,
-   "pr": 1050,
-   "commit": "235ef04c64856ad3a85de14fbb6ea1f27f843293",
-   "branch": "john/maxnumf-contract",
-   "event": "pull_request",
-   "title": "[Fix] Restore the fx.maxnumf contract, and keep ninf off the score reductions",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32451114906",
-   "created_at": "2026-08-21T05:35:34Z",
-   "updated_at": "2026-08-21T07:57:48Z",
-   "actor": "JohnQinAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T06:22:43Z",
-     "completed_at": "2026-08-21T07:57:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32451114906/job/96684298126",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T06:03:08Z",
-     "completed_at": "2026-08-21T07:41:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32451114906/job/96684298200",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T06:17:11Z",
-     "completed_at": "2026-08-21T06:33:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32451114906/job/96684298216",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32450902421,
-   "pr": null,
-   "commit": "31df5d1dc8bedbe6245322608f51f3da99b2c3ca",
-   "branch": "jhinpan/fix-exp2-fastmath",
-   "event": "pull_request",
-   "title": "[ROCDL] Lower approximate exp2 to native intrinsic",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450902421",
-   "created_at": "2026-08-21T05:32:08Z",
-   "updated_at": "2026-08-21T07:30:12Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-21T07:26:33Z",
-     "completed_at": "2026-08-21T07:30:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450902421/job/96690654773"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-21T06:36:13Z",
-     "completed_at": "2026-08-21T07:30:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450902421/job/96690654778"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-21T06:36:13Z",
-     "completed_at": "2026-08-21T07:30:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450902421/job/96690654850"
-    }
-   ]
-  },
-  {
-   "run_id": 32450764384,
-   "pr": 1050,
-   "commit": "4303f77668ba09ac7b22ee2a93a2d405162ea423",
-   "branch": "john/maxnumf-contract",
-   "event": "pull_request",
-   "title": "[Fix] Restore the fx.maxnumf contract, and keep ninf off the score reductions",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450764384",
-   "created_at": "2026-08-21T05:29:59Z",
-   "updated_at": "2026-08-21T05:31:51Z",
-   "actor": "JohnQinAMD",
-   "jobs": []
-  },
-  {
-   "run_id": 32450753464,
-   "pr": null,
-   "commit": "bea58817f0478cc301bea9c797e54b6047781562",
-   "branch": "main",
-   "event": "push",
-   "title": "[FlyToROCDL] Fix alignment reported by ptr.load/ptr.store lowering (#\u2026",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450753464",
-   "created_at": "2026-08-21T05:29:49Z",
-   "updated_at": "2026-08-21T08:08:19Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T05:56:54Z",
-     "completed_at": "2026-08-21T06:16:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450753464/job/96683226572",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T05:58:50Z",
-     "completed_at": "2026-08-21T08:08:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450753464/job/96683226573",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T06:03:34Z",
-     "completed_at": "2026-08-21T07:05:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32450753464/job/96683226577",
      "log_fetch_failed": true
     }
    ]
