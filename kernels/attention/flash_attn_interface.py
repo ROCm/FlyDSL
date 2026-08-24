@@ -28,7 +28,14 @@ from typing import Optional
 import torch
 import torch.nn.functional as F  # noqa: F401  (imported for callers' convenience)
 
-from kernels.attention.flash_attn_utils import bias_addressing_error, dualwave_splitk_workspace_elems
+# Re-export so callers only need to import from this module.
+from kernels.attention.flash_attn_utils import (
+    DUALWAVE_SWP_BLOCK_M,
+    MIN_Q_BLOCKS_XCD_SWIZZLE,
+    NUM_XCD_GFX950,
+    bias_addressing_error,
+    dualwave_splitk_workspace_elems,
+)
 
 __all__ = ["flydsl_flash_attn_func", "dualwave_splitk_workspace_elems"]
 
@@ -135,6 +142,7 @@ def _build_dense_dualwave(
     has_bias: bool = False,
     has_alibi: bool = False,
     has_sink: bool = False,
+    xcd_swizzle: bool = False,
 ):
     """Build (and cache) the dense gfx950 DUALWAVE_SWP launcher."""
     from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
@@ -156,6 +164,7 @@ def _build_dense_dualwave(
         has_bias=has_bias,
         has_alibi=has_alibi,
         has_sink=has_sink,
+        _xcd_swizzle=xcd_swizzle,
     )
 
 
@@ -683,6 +692,10 @@ def flydsl_flash_attn_func(
     dualwave_swp_lazy_rescale: bool = True,
     dualwave_swp_setprio: bool = True,
     dualwave_swp_enable_stagger: bool = True,
+    # Re-derive (head, q_block) with head as the slow axis so one head's q-blocks
+    # stay on one XCD instead of every XCD re-streaming that head's K/V. None
+    # auto-selects on the shapes it helps; True/False force it. Dense non-fp8 only.
+    dualwave_swp_xcd_swizzle: Optional[bool] = None,
     # Debug: pass a pre-allocated float32[2] tensor to enable the lazy-rescale
     # branch counter (dualwave_swp_debug_lazy_counts=True). Only for dense mode.
     debug_counts: Optional[torch.Tensor] = None,
@@ -1059,6 +1072,24 @@ def flydsl_flash_attn_func(
                     or has_sink
                     or (can_dualwave and _dense_routes_to_dualwave(B, Sq))
                 ):
+                    # Workgroups map to XCDs as linear_id % 8, and linear_id is
+                    # bx + by*H + bz*H*nqb, so with H % 8 == 0 a head-fast grid pins
+                    # head h to XCD h % 8. The ~256 resident workgroups span all H
+                    # heads within one batch, leaving each XCD to juggle H/8 K/V
+                    # streams against its L2 slice. The head-slow remap in
+                    # _init_dualwave_thread_mapping puts the resident window inside a
+                    # single head instead: 1 stream. Measured penalty for leaving it
+                    # off tracks H/8 (-6% at 8 streams, -3% at 4, nil at <=2), not the
+                    # hit rate and not traffic volume. Bijective, so output is
+                    # unchanged. NB: that function's own comment states the opposite
+                    # rationale ("scatter across all XCDs") and is wrong.
+                    num_q_blocks = -(-int(Sq) // DUALWAVE_SWP_BLOCK_M)
+                    if dualwave_swp_xcd_swizzle is None:
+                        xcd_swizzle = (
+                            not causal and H % NUM_XCD_GFX950 == 0 and num_q_blocks >= MIN_Q_BLOCKS_XCD_SWIZZLE
+                        )
+                    else:
+                        xcd_swizzle = dualwave_swp_xcd_swizzle
                     exe = _build_dense_dualwave(
                         num_heads=H,
                         num_kv_heads=num_kv_heads,
@@ -1076,6 +1107,7 @@ def flydsl_flash_attn_func(
                         has_bias=has_bias,
                         has_alibi=has_alibi,
                         has_sink=has_sink,
+                        xcd_swizzle=xcd_swizzle,
                     )
                 else:
                     block_m, flat_work_group_size, path_tag = _dense_generic_tile(B, Sq, H, D, dtype_str, q.device)
