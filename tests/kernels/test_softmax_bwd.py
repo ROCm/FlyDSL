@@ -61,6 +61,7 @@ _BWD_CONFIGS = (
     (128, 32768, "f32"),  # vectorized, Y-only buffering -- middle tier
     (256, 32768, "bf16"),  # vectorized, Y-only buffering -- middle tier
     (64, 65536, "bf16"),  # vectorized, no buffering -- widest tier
+    (1024, 65536, "bf16"),  # widest tier at realistic occupancy (benchmarked shape)
 )
 
 

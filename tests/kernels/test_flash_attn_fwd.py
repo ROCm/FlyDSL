@@ -4329,6 +4329,57 @@ def test_return_lse_rejects_fp8():
         )
 
 
+@_requires_gfx950
+@pytest.mark.parametrize("H", [8, 16, 32, 64])
+def test_xcd_swizzle_is_bit_identical(H):
+    """The head-slow remap must not change a single bit of the output.
+
+    It only re-derives (head, q_block) from the same linear workgroup id, so it
+    is bijective by construction -- but a mistake in the derivation would show
+    up as a permuted or partially-recomputed output rather than as an error, so
+    this pins it. S clears the auto-dispatch threshold (num_q_blocks >= 64 at
+    BLOCK_M=256) so both settings run on the shapes the remap targets.
+    """
+    S = 64 * 256
+    dtype = torch.bfloat16
+    torch.manual_seed(H)
+    q = _rand_lse(1, S, H, 128, dtype=dtype)
+    k, v = torch.randn_like(q), torch.randn_like(q)
+
+    def run(flag):
+        return flydsl_flash_attn_func(q, k, v, causal=False, dualwave_swp_xcd_swizzle=flag).clone()
+
+    off, on = run(False), run(True)
+    torch.cuda.synchronize()
+    assert torch.equal(off, on)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("xcd_swizzle", [None, True])
+def test_xcd_swizzle_heads_not_multiple_of_xcd(xcd_swizzle):
+    """H % 8 != 0 must fall back rather than mis-map, however the flag is set.
+
+    The remap divides the linear workgroup id by the q-block count to recover
+    the head, which only lands each head on one XCD when the head count divides
+    evenly into the 8 XCDs. Two guards enforce that: the dispatch condition
+    below auto-selects against it, and _init_dualwave_thread_mapping re-checks
+    NUM_HEADS_Q % NUM_XCD_GFX950 independently -- so forcing the flag on is safe
+    and simply does not engage the remap. Both paths are checked here.
+    """
+    S, H = 64 * 256, 12
+    dtype = torch.bfloat16
+    torch.manual_seed(H)
+    q = _rand_lse(1, S, H, 128, dtype=dtype)
+    k, v = torch.randn_like(q), torch.randn_like(q)
+
+    out = flydsl_flash_attn_func(q, k, v, causal=False, dualwave_swp_xcd_swizzle=xcd_swizzle)
+    torch.cuda.synchronize()
+    ref = F.scaled_dot_product_attention(
+        q.transpose(1, 2).float(), k.transpose(1, 2).float(), v.transpose(1, 2).float()
+    ).transpose(1, 2)
+    torch.testing.assert_close(out.float(), ref, atol=_ATOL_BF16, rtol=0)
+
+
 if __name__ == "__main__":
     main()
 
@@ -4481,3 +4532,105 @@ def test_sink_lse_cross_attn_skipped_blocks(Sq, Skv):
     masked_lse = lse[:, :, :n_masked].float()
     assert (masked_lse - sink.view(1, H, 1)).abs().max().item() <= 1e-4, "all-masked rows must carry the sink LSE"
     assert out[:, :n_masked].abs().max().item() == 0.0, "all-masked rows must have zero output"
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("k_scale", [8.0, 32.0, 64.0])
+def test_lazy_rescale_survives_a_wide_score_range(k_scale):
+    """A widened logit spread must not break the lazy rescale.
+
+    Every other test here uses near-uniform attention, which never reaches the
+    branch. The eager path is the reference; the two are mathematically the same.
+    """
+    B, S, H, D = 1, 4096, 8, 128
+    torch.manual_seed(0)
+    q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16)
+    k = (torch.randn_like(q).float() * k_scale).to(torch.bfloat16)
+    v = torch.randn_like(q)
+
+    lazy = flydsl_flash_attn_func(q, k, v, causal=False)
+    eager = flydsl_flash_attn_func(q, k, v, causal=False, dualwave_swp_lazy_rescale=False)
+    torch.cuda.synchronize()
+
+    assert torch.isfinite(eager).all(), f"the eager baseline is not finite at k_scale={k_scale}"
+    n_nan = int(torch.isnan(lazy).sum())
+    n_inf = int(torch.isinf(lazy).sum())
+    assert torch.isfinite(
+        lazy
+    ).all(), f"lazy rescale produced {n_nan} NaN and {n_inf} inf of {lazy.numel()} at k_scale={k_scale}"
+    ref = torch.nn.functional.scaled_dot_product_attention(
+        q.transpose(1, 2).float(), k.transpose(1, 2).float(), v.transpose(1, 2).float()
+    ).transpose(1, 2)
+    rel = lambda o: ((o.float() - ref).norm() / ref.norm()).item()  # noqa: E731
+    assert (
+        rel(lazy) <= rel(eager) * 1.05 + 1e-4
+    ), f"lazy rel L2 {rel(lazy):.3e} is worse than eager {rel(eager):.3e} at k_scale={k_scale}"
+
+
+@_requires_gfx950
+def test_fp8_lazy_rescale_keeps_the_running_max_monotonic():
+    """Successive downward rebases must not multiply into an overflow.
+
+    One row class reads a coordinate whose tile maxima descend, the other one that
+    ascends and so fires the wave-uniform branch every tile. V is all ones, so the
+    exact output is 1.0; the unfixed kernel returns 1,048,576 of 2,097,152 as NaN.
+    """
+    B, S, H, D = 1, 2048, 8, 128
+    BLOCK_N, STEP = 64, 32.0
+    fp8 = torch.float8_e4m3fn
+    fp8_max = torch.finfo(fp8).max
+
+    q = torch.zeros(B, S, H, D, device="cuda", dtype=torch.bfloat16)
+    q[:, 0::2, :, 0] = 1.0
+    q[:, 1::2, :, 1] = 1.0
+    tile = torch.arange(S, device="cuda") // BLOCK_N
+    k = torch.zeros(B, S, H, D, device="cuda", dtype=torch.float32)
+    k[:, :, :, 0] = (-STEP * tile).view(1, S, 1)
+    k[:, :, :, 1] = (STEP * tile).view(1, S, 1)
+    k = k.to(torch.bfloat16)
+
+    q_s = torch.tensor(1.0 / fp8_max, device="cuda")
+    k_s = k.abs().amax().float() / fp8_max
+    v_s = torch.tensor(1.0 / fp8_max, device="cuda")
+    v = (torch.ones(B, S, H, D, device="cuda", dtype=torch.bfloat16) / v_s).to(fp8)
+
+    out = flydsl_flash_attn_func(
+        (q / q_s).to(fp8),
+        (k / k_s).to(fp8),
+        v,
+        causal=False,
+        q_descale=q_s.reshape(1).contiguous(),
+        k_descale=k_s.reshape(1).contiguous(),
+        v_descale=v_s.reshape(1).contiguous(),
+        dualwave_swp_lazy_rescale=True,
+    )
+    out = (out[0] if isinstance(out, (tuple, list)) else out).float()
+    torch.cuda.synchronize()
+    assert torch.isfinite(out).all(), f"{int(torch.isnan(out).sum())} NaN of {out.numel()}"
+    assert (out - 1).abs().max().item() < 0.01, f"max |o-1| = {(out - 1).abs().max().item():.4f}"
+
+
+@pytest.mark.l0_backend_agnostic
+def test_fp8_lazy_paths_do_not_roll_their_own_correction():
+    """The fp8 lazy rescales must not compute their own correction factor.
+
+    A per-step cap does not bound the product over many tiles, so the invariant is
+    structural: the correction comes from ``rescale_from_tile_max``.
+    """
+    from kernels.attention import flash_attn_utils as _fau
+
+    src = Path(_fau.__file__).read_text().splitlines()
+    start = next(i for i, ln in enumerate(src) if "class DualwaveFp8SoftmaxHelper" in ln)
+    end = next((i for i, ln in enumerate(src[start + 1 :], start + 1) if ln.startswith("class ")), len(src))
+    body = src[start:end]
+
+    def method(name):
+        i = next(k for k, ln in enumerate(body) if f"def {name}(" in ln)
+        stop = next((k for k in range(i + 1, len(body)) if body[k].startswith("    def ")), len(body))
+        return "\n".join(body[i:stop])
+
+    for name in ("lazy_rescale_o", "lazy_correct_o"):
+        chunk = method(name)
+        assert "exp2" not in chunk, f"{name} computes its own correction instead of taking the monotonic one"
+        assert "_lazy_correction" in chunk or "rescale_from_tile_max" in chunk, f"{name} has no correction source"
+    assert "rescale_from_tile_max" in method("_lazy_correction"), "the shared correction is not the monotonic one"

@@ -52,7 +52,7 @@ def launch_gemm_a8w4_mxscale(
     K_WS = tile_k // WMMA_K
     PACK_TK = tile_k // 2  # B row bytes per K-tile (FP4 packed 2/byte)
     SC_WORDS = tile_k // 4  # scale i32 words per super-row per K-tile
-    SA_SUPERS = tile_m // 32
+    SA_SUPERS = max(1, tile_m // 32)  # a sub-super tile still stages its whole containing super-row
     SB_SUPERS = tile_n // 32
     warp_tile_m = tile_m // m_warp
     warp_tile_n = tile_n // n_warp
@@ -230,6 +230,8 @@ def launch_gemm_a8w4_mxscale(
 
         def load_sa(buf, wm, ks):
             row = wmb + wm * 16 + lane16
+            if const_expr(tile_m < 32):
+                row = row + blk_m % 32  # sub-super tile: its rows sit mid-super-row
             word = (row // 32) * SC_WORDS + ks * 32 + (row % 32)
             return lds_load_b32(buf, fx.Int64(SA_OFF + word * 4))[0]
 

@@ -291,7 +291,8 @@ dispatch()
 
 Raw intrinsics hardcode fragment types, the `[a, b, c, 0, 0, 0]` tuple, and the
 instruction. Build an atom and issue it; fragment layouts/packing are handled and
-the atom is arch-dispatched (MFMA on CDNA3/4, WMMA on gfx11/gfx1250).
+you pick the atom family by target: `MFMA` for CDNA3/CDNA4, `WMMA` for
+gfx11/gfx1250.
 
 ```python
 # Before
