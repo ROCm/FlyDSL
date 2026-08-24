@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-24T20:00:17Z",
+ "updated": "2026-08-24T20:51:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,11 +25,11 @@
    "branch": "john/maxnumf-contract",
    "event": "pull_request",
    "title": "[Fix] Restore the fx.maxnumf contract, and keep ninf off the score reductions",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32766230556",
    "created_at": "2026-08-24T19:06:22Z",
-   "updated_at": "2026-08-24T19:09:17Z",
+   "updated_at": "2026-08-24T20:48:22Z",
    "actor": "JohnQinAMD",
    "jobs": []
   },
