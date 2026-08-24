@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-24T17:40:17Z",
+ "updated": "2026-08-24T17:43:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32757803812,
+   "pr": 1020,
+   "commit": "ef65bdb108071609c115046c8417ca9a85ee2ec5",
+   "branch": "fp8-softmax-normalisation",
+   "event": "pull_request",
+   "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32757803812",
+   "created_at": "2026-08-24T17:38:34Z",
+   "updated_at": "2026-08-24T17:41:28Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
   {
    "run_id": 32745036269,
    "pr": 906,
@@ -40,11 +55,11 @@
    "branch": "upstream/pa-bf16-asymmetric-v",
    "event": "pull_request",
    "title": "[Kernel][PA] Support BF16 vectorized KV with asymmetric K/V head dim",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32741519873",
    "created_at": "2026-08-24T14:53:44Z",
-   "updated_at": "2026-08-24T15:09:40Z",
+   "updated_at": "2026-08-24T17:37:57Z",
    "actor": "sammysun0711",
    "jobs": [
     {
@@ -70,11 +85,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-24T15:09:38Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32741519873/job/97482016821"
+     "completed_at": "2026-08-24T17:37:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32741519873/job/97482016821",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -2067,21 +2083,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 32454155238,
-   "pr": 1038,
-   "commit": "dd9358fe429c2d9322af84bc4293a37027dcc211",
-   "branch": "zhimding/jobs_parallel_0819",
-   "event": "pull_request",
-   "title": "[AOT] Add resilient parallel job scheduler",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32454155238",
-   "created_at": "2026-08-21T06:22:45Z",
-   "updated_at": "2026-08-21T06:48:56Z",
-   "actor": "zhiding512",
-   "jobs": []
   }
  ]
 }
