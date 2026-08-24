@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-24T08:24:33Z",
+ "updated": "2026-08-24T08:34:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32706760698,
+   "pr": null,
+   "commit": "11c0e49139b5c74b5b1e1d8912261c3be30aa1e3",
+   "branch": "main",
+   "event": "push",
+   "title": "support ascale tile16 and add const-init test cli (#1060)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32706760698",
+   "created_at": "2026-08-24T08:31:35Z",
+   "updated_at": "2026-08-24T08:32:15Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 32705911499,
    "pr": 1062,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32705911499",
    "created_at": "2026-08-24T08:21:43Z",
-   "updated_at": "2026-08-24T08:22:22Z",
+   "updated_at": "2026-08-24T08:32:21Z",
    "actor": "xudoyuan",
    "jobs": []
   },
@@ -40,29 +55,29 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range \u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32698974837",
    "created_at": "2026-08-24T06:50:42Z",
-   "updated_at": "2026-08-24T08:05:49Z",
+   "updated_at": "2026-08-24T08:32:06Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-24T08:05:48Z",
-     "completed_at": null,
+     "completed_at": "2026-08-24T08:31:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32698974837/job/97358423861"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-24T07:47:51Z",
-     "completed_at": null,
+     "completed_at": "2026-08-24T08:32:05Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32698974837/job/97358423884"
     },
     {
@@ -365,7 +380,7 @@
   },
   {
    "run_id": 32689487348,
-   "pr": 1060,
+   "pr": null,
    "commit": "5159055d2356c5cea6b7f2fd145227b3ea0e0569",
    "branch": "gfx1250/gemm-test-cli",
    "event": "pull_request",
@@ -1856,21 +1871,6 @@
    "created_at": "2026-08-21T04:24:20Z",
    "updated_at": "2026-08-21T04:26:06Z",
    "actor": "JohnQinAMD",
-   "jobs": []
-  },
-  {
-   "run_id": 32443647802,
-   "pr": null,
-   "commit": "f0f67736686d3f5659510fe8fc6ab0eecb0a90f8",
-   "branch": "yanbo/fix_multigpu_ci",
-   "event": "pull_request",
-   "title": "[CI] fix allreduce ci",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32443647802",
-   "created_at": "2026-08-21T03:30:52Z",
-   "updated_at": "2026-08-21T03:32:47Z",
-   "actor": "yanboshao",
    "jobs": []
   }
  ]
