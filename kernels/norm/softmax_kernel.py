@@ -29,7 +29,7 @@ WARP_SIZE = get_warp_size()
 
 # Bumped whenever a kernel or search-space change can change the tuned winner. The
 # scratch cache does not fingerprint kernel source, so this is what forces a retune.
-TUNING_SCHEMA = 4
+TUNING_SCHEMA = 5
 
 
 def build_softmax_module(
@@ -116,6 +116,10 @@ def build_softmax_module(
             wave = lane // WARP_SIZE
             neutral = c_neg_inf if mode == "max" else c_zero_f
 
+            # The scratch buffer is reused by the max and sum reductions. Order
+            # every wave's final read from the preceding reduction before any
+            # wave overwrites its slot for the next reduction.
+            gpu.barrier()
             w = shuffle_reduce(val, mode, WARP_SIZE)
 
             if lane_in_wave == 0:

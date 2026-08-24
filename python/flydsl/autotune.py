@@ -316,8 +316,12 @@ class Autotuner:
 
     def _sig_args(self, args, kwargs):
         """Call arguments as a {parameter name: value} mapping."""
-        sig_args = dict(zip(self.arg_names, args))
-        sig_args.update(kwargs)
+        bound = self._signature.bind_partial(*args, **kwargs)
+        bound.apply_defaults()
+        sig_args = dict(bound.arguments)
+        for name, parameter in self._signature.parameters.items():
+            if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+                sig_args.update(sig_args.pop(name, {}))
         return sig_args
 
     def _make_key(self, args, kwargs):

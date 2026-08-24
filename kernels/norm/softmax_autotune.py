@@ -380,6 +380,8 @@ def softmax_autotuned(input_t, output, stream=None):
         raise ValueError(f"dtype mismatch: input {input_t.dtype} vs output {output.dtype}")
     if input_t.device != output.device:
         raise ValueError(f"device mismatch: input {input_t.device} vs output {output.device}")
+    if stream is not None and getattr(stream, "device", input_t.device) != input_t.device:
+        raise ValueError(f"stream device mismatch: input {input_t.device} vs stream {stream.device}")
     if not input_t.is_contiguous() or not output.is_contiguous():
         raise ValueError("softmax_autotuned requires row-major contiguous storage")
 

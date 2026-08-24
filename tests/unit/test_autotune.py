@@ -1017,6 +1017,42 @@ def test_validate_hook_runs_once_per_candidate_outside_the_timed_reps(monkeypatc
     ]
 
 
+def test_validate_hook_receives_defaulted_and_variadic_arguments(monkeypatch):
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    observed = []
+
+    def fn(a, out, *extra, BLOCK, scale=2.0, stream=None, **metadata):
+        pass
+
+    @contextmanager
+    def validate(sig_args):
+        observed.append(sig_args)
+        yield
+
+    tuner = _make_tuner(
+        fn=fn,
+        configs=[Config(BLOCK=64)],
+        validate_hook=validate,
+        do_bench_fn=lambda call, warmup, rep: 1.0,
+    )
+    a = FakeTensor((8,))
+    out = FakeTensor((8,))
+    marker = object()
+    tuner(a, out, marker, stream="stream-0", tag="softmax")
+
+    assert observed == [
+        {
+            "a": a,
+            "out": out,
+            "extra": (marker,),
+            "BLOCK": 64,
+            "scale": 2.0,
+            "stream": "stream-0",
+            "tag": "softmax",
+        }
+    ]
+
+
 def test_validate_hook_rejects_a_candidate_that_does_not_write_output(monkeypatch):
     """A no-op candidate must not inherit a previous candidate's valid output."""
     monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")

@@ -183,6 +183,20 @@ def test_zero_rows_is_a_no_launch(monkeypatch):
     assert softmax_autotuned(x, torch.empty_like(x)) is None
 
 
+@pytest.mark.multi_gpu
+def test_explicit_stream_device_mismatch_is_rejected():
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs >=2 GPUs")
+
+    with torch.cuda.device(0):
+        x = torch.empty((4, 16), device="cuda:0", dtype=torch.bfloat16)
+        out = torch.empty_like(x)
+    stream = torch.cuda.Stream(device=1)
+
+    with pytest.raises(ValueError, match="stream device mismatch"):
+        softmax_autotuned(x, out, stream=stream)
+
+
 def _rank_mismatch():
     return torch.empty((4, 8, 16), device="cuda"), torch.empty((4, 8, 16), device="cuda")
 
