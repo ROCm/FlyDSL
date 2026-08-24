@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-24T12:08:56Z",
+ "updated": "2026-08-24T12:31:49Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32727356884,
+   "pr": 1062,
+   "commit": "1bab7662866856f6aa4e9fe7014ccc13ef339c8e",
+   "branch": "smem-capacity-decouple",
+   "event": "pull_request",
+   "title": "smem cleanup: move capacity helpers off legacy allocator, migrate tes\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32727356884",
+   "created_at": "2026-08-24T12:29:20Z",
+   "updated_at": "2026-08-24T12:29:55Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
+  {
+   "run_id": 32725532720,
+   "pr": 1032,
+   "commit": "67afb0bfa9f3b889082a2cf1300db62dbb4a7205",
+   "branch": "convolution",
+   "event": "pull_request",
+   "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32725532720",
+   "created_at": "2026-08-24T12:08:57Z",
+   "updated_at": "2026-08-24T12:10:36Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
   {
    "run_id": 32723404744,
    "pr": null,
@@ -10,11 +40,11 @@
    "branch": "main",
    "event": "push",
    "title": "[GEMM] Track gfx950 async LDS loads with asyncmark (#1063)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32723404744",
    "created_at": "2026-08-24T11:44:33Z",
-   "updated_at": "2026-08-24T11:45:55Z",
+   "updated_at": "2026-08-24T12:28:01Z",
    "actor": "xytpai",
    "jobs": []
   },
@@ -25,13 +55,41 @@
    "branch": "upstream/fa-paged-fp8-asymmetric-v",
    "event": "pull_request",
    "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32717035159",
    "created_at": "2026-08-24T10:29:24Z",
-   "updated_at": "2026-08-24T11:39:27Z",
+   "updated_at": "2026-08-24T12:27:42Z",
    "actor": "sammysun0711",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-24T12:27:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32717035159/job/97431105190"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-24T12:27:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32717035159/job/97431105216"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-24T12:28:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32717035159/job/97431105325"
+    }
+   ]
   },
   {
    "run_id": 32716240533,
@@ -55,11 +113,11 @@
    "branch": "phil/isa-resource-diff-arch-general",
    "event": "pull_request",
    "title": "[Tools] Add architecture-general ISA resource diff tool",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32713833796",
    "created_at": "2026-08-24T09:52:21Z",
-   "updated_at": "2026-08-24T11:37:42Z",
+   "updated_at": "2026-08-24T12:07:51Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -99,30 +157,31 @@
    "branch": "upstream/pa-bf16-asymmetric-v",
    "event": "pull_request",
    "title": "[Kernel][PA] Support BF16 vectorized KV with asymmetric K/V head dim",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32713543896",
    "created_at": "2026-08-24T09:48:57Z",
-   "updated_at": "2026-08-24T11:39:12Z",
+   "updated_at": "2026-08-24T12:16:30Z",
    "actor": "sammysun0711",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-24T11:39:12Z",
+     "started_at": "2026-08-24T12:16:29Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32713543896/job/97418048221"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-24T11:55:56Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32713543896/job/97418048308"
+     "completed_at": "2026-08-24T12:15:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32713543896/job/97418048308",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -170,11 +229,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-24T11:26:11Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710532813/job/97402245147"
+     "completed_at": "2026-08-24T12:15:34Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710532813/job/97402245147",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1244,7 +1304,7 @@
   },
   {
    "run_id": 32482231072,
-   "pr": 1032,
+   "pr": null,
    "commit": "f68e40eb69f5e2a6cbb584699e342a2a60e9ec16",
    "branch": "convolution",
    "event": "pull_request",
@@ -1932,36 +1992,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 32453078682,
-   "pr": 1045,
-   "commit": "b9889c50317f7e7c2874d6a3470daed084f95a0f",
-   "branch": "john/attn-4gib-guard",
-   "event": "pull_request",
-   "title": "[Bugfix] Refuse a batch entry the buffer descriptor cannot address",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453078682",
-   "created_at": "2026-08-21T06:06:31Z",
-   "updated_at": "2026-08-21T06:08:24Z",
-   "actor": "JohnQinAMD",
-   "jobs": []
-  },
-  {
-   "run_id": 32452139385,
-   "pr": null,
-   "commit": "1899147e10856140a96d6f8cf6135472815f966b",
-   "branch": "john/lazy-rescale-nan",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32452139385",
-   "created_at": "2026-08-21T05:52:02Z",
-   "updated_at": "2026-08-21T05:53:47Z",
-   "actor": "JohnQinAMD",
-   "jobs": []
   }
  ]
 }
