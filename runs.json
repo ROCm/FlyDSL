@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-24T11:34:33Z",
+ "updated": "2026-08-24T11:37:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -157,21 +157,22 @@
    "branch": "xyt/asyncmark",
    "event": "pull_request",
    "title": "[GEMM] Track gfx950 async LDS loads with asyncmark",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32707307344",
    "created_at": "2026-08-24T08:38:08Z",
-   "updated_at": "2026-08-24T10:37:34Z",
+   "updated_at": "2026-08-24T11:34:45Z",
    "actor": "xytpai",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-24T09:31:33Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32707307344/job/97385098444"
+     "completed_at": "2026-08-24T11:34:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32707307344/job/97385098444",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
