@@ -119,7 +119,14 @@ def test_fastdivmod_class_constant_divisor():
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
 @pytest.mark.parametrize("divisor", [1, 3, 768, 128256])
 def test_fastdivmod_dynamic_divisor(divisor):
-    """FastDivmod built from a runtime (dynamic) divisor, magic derived on device."""
+    """FastDivmod built from a runtime divisor *inside* the kernel.
+
+    Checks correctness only. This is deliberately not the pattern to copy: the
+    magic derivation emits a 64-bit divide per thread (195 instructions on
+    gfx1150 against 53 for a native divmod). Building it in the launch wrapper
+    instead, as test_fastdivmod_value_protocol_kernel_arg does, keeps the divide
+    out of the kernel and costs 27.
+    """
     BLOCK = 256
     P = BLOCK * 32
 

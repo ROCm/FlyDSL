@@ -1035,10 +1035,32 @@ class FastDivmod:
     are the carried leaves -- so an instance can cross the host/device boundary
     as a kernel argument or sit inside a ``@fx.struct`` / coordinate tuple.
 
+    **Construct it outside the kernel when the divisor is dynamic.** Deriving
+    ``magic`` costs one 64-bit divide, which is free for a Python-int divisor
+    (it folds) but is emitted per thread if an ``Int32`` divisor is handed to
+    the constructor inside a kernel -- and a 64-bit divide is worse than the
+    32-bit one being replaced. Build it in the ``@flyc.jit`` launch wrapper and
+    pass the instance as a kernel argument; the value protocol then carries the
+    already-derived leaves in. Measured on gfx1150, one divmod by a runtime
+    divisor::
+
+        native ``//`` and ``%``                 53 instructions
+        FastDivmod(d) built in the launch wrapper   27
+        FastDivmod(d) built inside the kernel      195
+
+    Only the Python-int path range-checks the divisor; a runtime ``Int32`` that
+    is zero or >= 2**31 silently yields wrong results.
+
     Example::
 
-        fdm = FastDivmod(768)      # or FastDivmod(grid_n) with a runtime Int32
+        # divisor known at trace time -- folds to constants
+        fdm = FastDivmod(768)
         q, r = fdm.divmod(idx)
+
+        # divisor known only at launch -- build it in the wrapper, not the kernel
+        @flyc.jit
+        def launch(out: fx.Tensor, d: fx.Int32, stream: fx.Stream):
+            kernel(out, FastDivmod(d)).launch(grid=..., block=..., stream=stream)
     """
 
     def __init__(self, divisor):
