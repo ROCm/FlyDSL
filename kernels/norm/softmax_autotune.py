@@ -4,6 +4,7 @@
 """Opt-in Softmax autotuning through the normal direct JIT path."""
 
 import os
+from contextlib import contextmanager
 
 from flydsl.autotune import Config, _tuning_enabled, autotune
 from kernels.norm.softmax_kernel import (
@@ -209,13 +210,17 @@ def _search_configs(A, C, m_in, N, dtype_str, **_kwargs):
     return candidate_configs(m_in=int(m_in), N=int(N), dtype_str=dtype_str)
 
 
+@contextmanager
 def _validate_candidate(sig_args):
-    """Untimed correctness gate: reject a candidate that launches but computes wrongly.
+    """Poison the output, then reject missing stores or wrong numerics.
 
     The comparison is scale-aware. Softmax elements are O(1/N), so an absolute bound
     sized for O(1) values would accept an all-zero output.
     """
     import torch
+
+    sig_args["C"].fill_(float("nan"))
+    yield
 
     dtype_str = sig_args["dtype_str"]
     out = sig_args["C"].float()

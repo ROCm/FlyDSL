@@ -443,7 +443,7 @@ class Autotuner:
             # Snapshot once before any rep runs, so restores are from pristine input.
             snapshot = self._snapshot_tensors(args, merged_kwargs)
 
-            def kernel_call():
+            def kernel_call(validation=False):
                 # Order: restore/reset the inputs first, THEN run the pre_hooks, so a
                 # hook that sets up state (incl. mutating a tensor) isn't clobbered
                 # by the restore. Each benchmark rep starts from clean inputs.
@@ -453,6 +453,12 @@ class Autotuner:
                     config.pre_hook(merged_kwargs)
                 if self.pre_hook:
                     self.pre_hook(merged_kwargs)
+                if validation:
+                    with self.validate_hook(self._sig_args(args, merged_kwargs)):
+                        self._run_with_hints(compiler_opts, args, merged_kwargs)
+                        if self.post_hook:
+                            self.post_hook(merged_kwargs)
+                    return
                 self._run_with_hints(compiler_opts, args, merged_kwargs)
                 if self.post_hook:
                     self.post_hook(merged_kwargs)
@@ -463,8 +469,7 @@ class Autotuner:
                 # numerically wrong candidate cannot win by launching successfully. A
                 # raising hook propagates as an ordinary candidate failure.
                 if self.validate_hook is not None:
-                    kernel_call()
-                    self.validate_hook(self._sig_args(args, merged_kwargs))
+                    kernel_call(validation=True)
                 return self._do_bench(kernel_call, warmup=self.warmup, rep=self.rep)
             finally:
                 # Leave the caller's tensors as a single clean run would.
@@ -762,13 +767,13 @@ def autotune(
             tuning any in-place kernel (e.g. fused-add rmsnorm).
         reset_to_zero: tensor args to zero before each rep (accumulate-into-zero
             kernels).
-        validate_hook: optional ``validate_hook(sig_args)`` numerical check run once
-            per candidate, outside the timed repetitions but under the same stream,
-            compile hints and reset/restore policy. ``sig_args`` maps every kernel
-            parameter name to its value for this call, so positional tensor args are
-            visible (``pre_hook``/``post_hook`` see only the merged kwargs). Raising
-            rejects the candidate; if every candidate is rejected the search raises
-            with the last failure chained.
+        validate_hook: optional ``validate_hook(sig_args)`` context manager around
+            one untimed candidate launch. Setup before ``yield`` can poison outputs;
+            checking after ``yield`` can reject missing stores or wrong numerics.
+            The launch uses the same stream, compile hints, reset/restore policy and
+            call arguments as timing. ``sig_args`` maps every kernel parameter name
+            to its value, including positional tensors. Raising rejects the candidate;
+            if every candidate is rejected, the last failure is chained.
         select_config: optional ``select_config(results) -> (config, time)``
             policy over the successfully measured pairs. The default chooses the
             exact minimum; adopters may use a documented tie band to avoid

@@ -16,6 +16,7 @@ with no GPU, no torch, and no compiled bindings.
 """
 
 import json
+from contextlib import contextmanager
 
 import pytest
 
@@ -965,15 +966,18 @@ def test_call_returns_none_when_fn_returns_none(monkeypatch):
 
 # ── validate_hook (untimed candidate correctness gate) ───────────────────
 def test_validate_hook_runs_once_per_candidate_outside_the_timed_reps(monkeypatch):
-    """The gate must see every candidate's real output, but must not be timed --
-    otherwise the validation cost is folded into the ranking."""
+    """Validation setup and checking must run once per candidate, but neither may
+    be folded into the timed repetitions."""
     monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
     runs = []
 
     def fn(a, out, BLOCK):
         runs.append(("run", BLOCK))
 
+    @contextmanager
     def validate(sig_args):
+        runs.append(("prepare", sig_args["BLOCK"]))
+        yield
         runs.append(("validate", sig_args["BLOCK"]))
         # The hook sees positional args by name, which pre_hook/post_hook cannot.
         assert sig_args["a"].shape == (8,)
@@ -994,16 +998,69 @@ def test_validate_hook_runs_once_per_candidate_outside_the_timed_reps(monkeypatc
     )
     tuner(FakeTensor((8,)), FakeTensor((8,)))
 
-    # Per candidate: one untimed run, then the validation, then the timed reps.
-    assert runs[:4] == [("run", 64), ("validate", 64), ("bench", 1, 1), ("run", 64)]
-    assert runs[5:9] == [("run", 128), ("validate", 128), ("bench", 1, 1), ("run", 128)]
+    # Per candidate: untimed setup/run/check, then the timed repetitions.
+    assert runs[:6] == [
+        ("prepare", 64),
+        ("run", 64),
+        ("validate", 64),
+        ("bench", 1, 1),
+        ("run", 64),
+        ("run", 64),
+    ]
+    assert runs[6:12] == [
+        ("prepare", 128),
+        ("run", 128),
+        ("validate", 128),
+        ("bench", 1, 1),
+        ("run", 128),
+        ("run", 128),
+    ]
+
+
+def test_validate_hook_rejects_a_candidate_that_does_not_write_output(monkeypatch):
+    """A no-op candidate must not inherit a previous candidate's valid output."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    bench_calls = 0
+
+    def fn(a, out, BLOCK):
+        if BLOCK == 64:
+            out._data = [1.0] * len(out._data)
+
+    @contextmanager
+    def validate(sig_args):
+        sig_args["out"]._data = [float("nan")] * len(sig_args["out"]._data)
+        yield
+        if any(value != value for value in sig_args["out"]._data):
+            raise ValueError("candidate left output elements unwritten")
+
+    def bench(call, warmup, rep):
+        nonlocal bench_calls
+        bench_calls += 1
+        call()
+        return 1.0
+
+    tuner = _make_tuner(
+        fn=fn,
+        configs=[Config(BLOCK=64), Config(BLOCK=128)],
+        validate_hook=validate,
+        do_bench_fn=bench,
+    )
+    args = (FakeTensor((8,)), FakeTensor((8,), fill=1.0))
+    tuner(*args)
+
+    key = tuner._make_key(args, {})
+    assert tuner.cache[key].kwargs["BLOCK"] == 64
+    assert bench_calls == 1
+    assert args[1]._data == [1.0] * 8
 
 
 def test_validate_hook_rejection_drops_only_that_candidate(monkeypatch):
     """A candidate that launches but computes the wrong answer must not win."""
     monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
 
+    @contextmanager
     def validate(sig_args):
+        yield
         if sig_args["BLOCK"] == 64:
             raise ValueError("wrong numerics")
 
@@ -1034,7 +1091,9 @@ def test_all_candidates_failing_chains_the_underlying_error(monkeypatch):
     compile failure once the loop has swallowed every exception."""
     monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
 
+    @contextmanager
     def validate(sig_args):
+        yield
         raise ValueError(f"bad numerics for BLOCK={sig_args['BLOCK']}")
 
     tuner = _make_tuner(

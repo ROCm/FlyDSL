@@ -55,11 +55,13 @@ bump it with any change that can move the winner. Softmax does this with
 
 ## Candidate correctness gate
 
-`validate_hook(sig_args)` runs once per candidate, outside the timed repetitions
-but under the same stream, compile hints, reset/restore policy and call arguments
-as the timing run. `sig_args` maps every kernel parameter name to its value, so
-positional tensor arguments are visible; `pre_hook` and `post_hook` see only the
-merged kwargs and both run inside the timed callable.
+`validate_hook(sig_args)` returns a context manager around one untimed candidate
+launch. Code before `yield` can poison outputs; code after `yield` validates the
+result, so skipped or partial stores cannot inherit a previous candidate's data.
+The launch uses the same stream, compile hints, reset/restore policy and arguments
+as timing, but validation work never affects ranking. `sig_args` maps every kernel
+parameter name to its value, including positional tensors. Softmax uses this hook
+to fill its output with NaNs before launch and check numerics afterward.
 
 Raising from the hook rejects that candidate. If every candidate is rejected the
 search raises `RuntimeError("All autotune configs failed")` with the last failure

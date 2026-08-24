@@ -12,6 +12,7 @@ shared-runner timing: CI must not publish a deployment winner.
 import json
 import os
 import re
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -377,7 +378,8 @@ def test_invalid_artifact_falls_back_to_the_default(monkeypatch, damage):
 
 
 # ── candidate correctness gate ───────────────────────────────────────────
-def test_a_numerically_wrong_candidate_cannot_win(monkeypatch):
+@pytest.mark.parametrize("failure_mode", ["wrong-output", "no-op"])
+def test_a_numerically_wrong_candidate_cannot_win(monkeypatch, failure_mode):
     """The gate is the whole reason a fast-but-wrong candidate is not selectable."""
     monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
     poisoned = 512
@@ -385,6 +387,8 @@ def test_a_numerically_wrong_candidate_cannot_win(monkeypatch):
     original_run = _softmax_tuner._run_with_hints
 
     def sabotage(compiler_opts, args, kwargs):
+        if kwargs.get("BLOCK_THREADS") == poisoned and failure_mode == "no-op":
+            return None
         result = original_run(compiler_opts, args, kwargs)
         if kwargs.get("BLOCK_THREADS") == poisoned:
             args[1].zero_()  # launches fine, computes garbage
@@ -417,11 +421,13 @@ def test_a_numerically_wrong_candidate_cannot_win(monkeypatch):
 
 def test_all_candidates_rejected_raises_with_the_cause(monkeypatch):
     monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
-    monkeypatch.setattr(
-        _softmax_tuner,
-        "validate_hook",
-        lambda sig_args: (_ for _ in ()).throw(ValueError("synthetic rejection")),
-    )
+
+    @contextmanager
+    def reject(_sig_args):
+        yield
+        raise ValueError("synthetic rejection")
+
+    monkeypatch.setattr(_softmax_tuner, "validate_hook", reject)
     x, out = _inputs(8, 4096, torch.bfloat16)
     with pytest.raises(RuntimeError, match="All autotune configs failed") as excinfo:
         softmax_autotuned(x, out)
