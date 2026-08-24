@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-24T12:55:02Z",
+ "updated": "2026-08-24T12:56:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -275,11 +275,11 @@
    "branch": "upstream/pa-64bit-cache-offsets",
    "event": "pull_request",
    "title": "[Bugfix][PA] Fix D192 query staging and 64-bit cache offsets",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710290446",
    "created_at": "2026-08-24T09:12:50Z",
-   "updated_at": "2026-08-24T11:38:10Z",
+   "updated_at": "2026-08-24T12:55:14Z",
    "actor": "sammysun0711",
    "jobs": [
     {
@@ -305,11 +305,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-24T11:38:10Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710290446/job/97386506381"
+     "completed_at": "2026-08-24T12:55:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710290446/job/97386506381",
+     "log_fetch_failed": true
     }
    ]
   },
