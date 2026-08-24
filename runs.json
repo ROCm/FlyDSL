@@ -1,8 +1,52 @@
 {
  "schema": 1,
- "updated": "2026-08-24T00:33:46Z",
+ "updated": "2026-08-24T02:51:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32680565571,
+   "pr": 1015,
+   "commit": "ea7fe1782fcf70114f01709c652f2da773923d77",
+   "branch": "phil/isa-resource-diff-arch-general",
+   "event": "pull_request",
+   "title": "[Tools] Add architecture-general ISA resource diff tool",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32680565571",
+   "created_at": "2026-08-24T01:40:56Z",
+   "updated_at": "2026-08-24T02:20:28Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-24T02:20:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32680565571/job/97302030897"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-24T02:20:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32680565571/job/97302030901"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-24T02:20:20Z",
+     "completed_at": "2026-08-24T02:43:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32680565571/job/97302030961",
+     "log_fetch_failed": true
+    }
+   ]
+  },
   {
    "run_id": 32661832176,
    "pr": 1058,
@@ -898,7 +942,7 @@
    "commit": "b6eadaef6cfe750d1b70ec248b014a1db036af21",
    "branch": "phil/bump-llvm-941a04e6",
    "event": "pull_request",
-   "title": "[Misc][FlyToROCDL] Bump LLVM to 941a04e6 and adapt gpu.launch_func lowering",
+   "title": "[FlyToROCDL] Bump LLVM to 941a04e6 and adapt gpu.launch_func lowering",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32454436875",
@@ -959,7 +1003,7 @@
    "commit": "04e31477a5dbe9281021f93a24e40bb094dd2676",
    "branch": "phil/bump-llvm-941a04e6",
    "event": "pull_request",
-   "title": "[Misc][FlyToROCDL] Bump LLVM to 941a04e6 and adapt gpu.launch_func lowering",
+   "title": "[FlyToROCDL] Bump LLVM to 941a04e6 and adapt gpu.launch_func lowering",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32454141790",
@@ -974,7 +1018,7 @@
    "commit": "f98c57e67f933c7b1e359ae98dc599578c276bc6",
    "branch": "phil/bump-llvm-941a04e6",
    "event": "pull_request",
-   "title": "[Misc][FlyToROCDL] Bump LLVM to 941a04e6 and adapt gpu.launch_func lowering",
+   "title": "[FlyToROCDL] Bump LLVM to 941a04e6 and adapt gpu.launch_func lowering",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453863580",
@@ -1830,21 +1874,6 @@
    "created_at": "2026-08-20T16:32:40Z",
    "updated_at": "2026-08-20T16:37:53Z",
    "actor": "amd-nprotaso",
-   "jobs": []
-  },
-  {
-   "run_id": 32391751847,
-   "pr": 1045,
-   "commit": "0904606b807e804f3e62dae8e33e10460ca34337",
-   "branch": "john/attn-4gib-guard",
-   "event": "pull_request",
-   "title": "[Bugfix] Refuse a batch entry the buffer descriptor cannot address",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32391751847",
-   "created_at": "2026-08-20T16:23:51Z",
-   "updated_at": "2026-08-20T16:25:19Z",
-   "actor": "JohnQinAMD",
    "jobs": []
   }
  ]
