@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-24T13:20:52Z",
+ "updated": "2026-08-24T14:41:28Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32737985252,
+   "pr": 972,
+   "commit": "9c1a7a72b8dc5d79a4b5ee7a8322db4166c8dba5",
+   "branch": "mega_moe_a4w4",
+   "event": "pull_request",
+   "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32737985252",
+   "created_at": "2026-08-24T14:19:26Z",
+   "updated_at": "2026-08-24T14:21:16Z",
+   "actor": "Yaowu-Xiong",
+   "jobs": []
+  },
   {
    "run_id": 32727356884,
    "pr": 1062,
@@ -14,9 +29,38 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32727356884",
    "created_at": "2026-08-24T12:29:20Z",
-   "updated_at": "2026-08-24T13:05:32Z",
+   "updated_at": "2026-08-24T14:20:32Z",
    "actor": "xudoyuan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-24T14:20:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32727356884/job/97446991194"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-24T13:27:39Z",
+     "completed_at": "2026-08-24T13:46:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32727356884/job/97446991211",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-24T13:52:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32727356884/job/97446991222"
+    }
+   ]
   },
   {
    "run_id": 32725532720,
@@ -25,30 +69,32 @@
    "branch": "convolution",
    "event": "pull_request",
    "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32725532720",
    "created_at": "2026-08-24T12:08:57Z",
-   "updated_at": "2026-08-24T12:59:14Z",
+   "updated_at": "2026-08-24T13:19:47Z",
    "actor": "amd-nprotaso",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-24T13:07:30Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32725532720/job/97440021107"
+     "completed_at": "2026-08-24T13:27:03Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32725532720/job/97440021107",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-24T12:59:14Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32725532720/job/97440021141"
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-24T13:19:47Z",
+     "completed_at": "2026-08-24T14:06:43Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32725532720/job/97440021141",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -97,11 +143,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-24T12:55:30Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32723404744/job/97435694951"
+     "completed_at": "2026-08-24T13:51:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32723404744/job/97435694951",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -112,21 +159,22 @@
    "branch": "upstream/fa-paged-fp8-asymmetric-v",
    "event": "pull_request",
    "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32717035159",
    "created_at": "2026-08-24T10:29:24Z",
-   "updated_at": "2026-08-24T12:59:48Z",
+   "updated_at": "2026-08-24T14:38:10Z",
    "actor": "sammysun0711",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-24T12:59:47Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32717035159/job/97431105190"
+     "completed_at": "2026-08-24T14:38:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32717035159/job/97431105190",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -141,11 +189,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-24T12:28:19Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32717035159/job/97431105325"
+     "completed_at": "2026-08-24T14:19:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32717035159/job/97431105325",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -2006,52 +2055,6 @@
      "started_at": "2026-08-21T07:49:15Z",
      "completed_at": "2026-08-21T09:17:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453263514/job/96809173106",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32453263454,
-   "pr": null,
-   "commit": "b9029e14c183c46272d1b695b06e2cac7b984eb7",
-   "branch": "john/lazy-rescale-nan",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453263454",
-   "created_at": "2026-08-21T06:09:26Z",
-   "updated_at": "2026-08-21T09:55:53Z",
-   "actor": "JohnQinAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T07:42:17Z",
-     "completed_at": "2026-08-21T09:55:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453263454/job/96693468590",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T07:59:04Z",
-     "completed_at": "2026-08-21T08:52:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453263454/job/96693468626",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T07:31:06Z",
-     "completed_at": "2026-08-21T07:59:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32453263454/job/96693468655",
      "log_fetch_failed": true
     }
    ]
