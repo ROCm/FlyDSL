@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-24T11:27:56Z",
+ "updated": "2026-08-24T11:34:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -70,11 +70,11 @@
    "branch": "jhinpan/softmax-autotune",
    "event": "pull_request",
    "title": "[Kernel] Add opt-in autotuning for Softmax",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710532813",
    "created_at": "2026-08-24T09:15:33Z",
-   "updated_at": "2026-08-24T10:36:55Z",
+   "updated_at": "2026-08-24T11:26:11Z",
    "actor": "zhiding512",
    "jobs": [
     {
@@ -248,11 +248,11 @@
    "branch": "main",
    "event": "push",
    "title": "support ascale tile16 and add const-init test cli (#1060)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32706760698",
    "created_at": "2026-08-24T08:31:35Z",
-   "updated_at": "2026-08-24T10:24:57Z",
+   "updated_at": "2026-08-24T11:32:47Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -278,11 +278,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-24T09:21:12Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32706760698/job/97382239556"
+     "completed_at": "2026-08-24T11:32:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32706760698/job/97382239556",
+     "log_fetch_failed": true
     }
    ]
   },
