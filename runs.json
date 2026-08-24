@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-24T08:58:22Z",
+ "updated": "2026-08-24T09:04:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32707307344",
    "created_at": "2026-08-24T08:38:08Z",
-   "updated_at": "2026-08-24T08:39:59Z",
+   "updated_at": "2026-08-24T09:01:57Z",
    "actor": "xytpai",
    "jobs": []
   },
@@ -25,11 +25,11 @@
    "branch": "gfx1250/bf16-gemm",
    "event": "pull_request",
    "title": "[gfx1250] Add bf16 gemm",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32706847638",
    "created_at": "2026-08-24T08:32:39Z",
-   "updated_at": "2026-08-24T08:34:10Z",
+   "updated_at": "2026-08-24T08:56:08Z",
    "actor": "aoli26",
    "jobs": []
   },
