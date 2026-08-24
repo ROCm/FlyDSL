@@ -67,7 +67,8 @@ FlyDSL/
 │   ├── system/                    # Cross-cutting compile/system tests
 │   ├── mlir/                      # FileCheck tests driven by scripts/run_tests.sh
 │   └── python/examples/           # AOT compile/cache pytest tests (aot_example.py)
-├── examples/                      # 01-vectorAdd, 02-tiledCopy, 03-tiledMma, 04-preshuffle_gemm
+├── examples/                      # numbered standalone scripts (01-vectorAdd ...)
+│   └── extension/<library>/       # one folder per extension library (extension/coop/)
 ├── scripts/                       # build, test, benchmark, wheel, debug helper scripts
 ├── docs/                          # Sphinx documentation source
 ├── thirdparty/                    # Vendored dlpack and tvm-ffi

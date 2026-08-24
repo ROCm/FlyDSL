@@ -85,6 +85,7 @@ def build_flash_attn_dualwave_swp_module(
     has_bias=False,
     has_alibi=False,
     has_sink=False,
+    _xcd_swizzle=False,
 ):
     """Build an DUALWAVE_SWP flash_attn launcher for D=64/128 bf16/f16 on gfx950.
 
@@ -146,6 +147,7 @@ def build_flash_attn_dualwave_swp_module(
         kv_cache_layout=kv_cache_layout,
         kv_vectorized=KV_VECTORIZED,
         return_lse=return_lse,
+        xcd_swizzle=_xcd_swizzle,
     )
     traits.BLOCK_N_OUT // traits.BLOCK_N
 

@@ -15,6 +15,9 @@
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/StringSet.h"
+#include "llvm/ADT/bit.h"
+
+#include <numeric>
 
 #include "flydsl/Conversion/FlyToROCDL/FlyToROCDL.h"
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
@@ -56,6 +59,23 @@ unsigned mapAttrToLLVMAddressSpace(Attribute attr) {
   if (isTargetAddressSpace<BufferDescAddressAttr>(attr))
     return 8;
   return 0; // default to generic address space
+}
+
+/// Byte alignment that still holds after `applySwizzleOnPtr`.
+///
+/// The swizzle XORs address bits at and above `base`, so only the low `base`
+/// bits of the address survive; whatever the pointer type promises above that
+/// no longer holds. `llvm::Align` additionally requires a power of two, which
+/// the divisibility arithmetic behind `AlignAttr` does not guarantee, so what
+/// is left is the greatest power-of-two divisor.
+static unsigned getLLVMAlignment(fly::PointerType ptrTy) {
+  int32_t align = ptrTy.getAlignment().getAlignment();
+  if (align <= 0)
+    return 0;
+  auto swizzle = ptrTy.getSwizzle();
+  if (!swizzle.isTrivialSwizzle())
+    align = std::gcd(align, int32_t{1} << swizzle.getBase());
+  return 1u << llvm::countr_zero(static_cast<unsigned>(align));
 }
 
 // Create a freshly named LDS global of `[nbytes x i8]` in `addrSpace`, inserted
@@ -412,7 +432,8 @@ public:
     } else {
       ptr = applySwizzleOnPtr(rewriter, loc, cast<TypedValue<LLVM::LLVMPointerType>>(ptr),
                               flyPtrTy.getSwizzle());
-      Value loaded = LLVM::LoadOp::create(rewriter, loc, loadTy, ptr);
+      unsigned align = getLLVMAlignment(flyPtrTy);
+      Value loaded = LLVM::LoadOp::create(rewriter, loc, loadTy, ptr, align);
       rewriter.replaceOp(op, loaded);
       return success();
     }
@@ -458,7 +479,8 @@ public:
     } else {
       ptr = applySwizzleOnPtr(rewriter, loc, cast<TypedValue<LLVM::LLVMPointerType>>(ptr),
                               flyPtrTy.getSwizzle());
-      LLVM::StoreOp::create(rewriter, loc, value, ptr);
+      unsigned align = getLLVMAlignment(flyPtrTy);
+      LLVM::StoreOp::create(rewriter, loc, value, ptr, align);
       rewriter.eraseOp(op);
       return success();
     }
