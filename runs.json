@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-24T11:37:39Z",
+ "updated": "2026-08-24T12:08:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32723404744,
+   "pr": null,
+   "commit": "dd8373349e33638c8d158a9ea009b7b28598984a",
+   "branch": "main",
+   "event": "push",
+   "title": "[GEMM] Track gfx950 async LDS loads with asyncmark (#1063)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32723404744",
+   "created_at": "2026-08-24T11:44:33Z",
+   "updated_at": "2026-08-24T11:45:55Z",
+   "actor": "xytpai",
+   "jobs": []
+  },
   {
    "run_id": 32717035159,
    "pr": 1066,
@@ -10,11 +25,11 @@
    "branch": "upstream/fa-paged-fp8-asymmetric-v",
    "event": "pull_request",
    "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32717035159",
    "created_at": "2026-08-24T10:29:24Z",
-   "updated_at": "2026-08-24T10:30:40Z",
+   "updated_at": "2026-08-24T11:39:27Z",
    "actor": "sammysun0711",
    "jobs": []
   },
@@ -40,13 +55,42 @@
    "branch": "phil/isa-resource-diff-arch-general",
    "event": "pull_request",
    "title": "[Tools] Add architecture-general ISA resource diff tool",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32713833796",
    "created_at": "2026-08-24T09:52:21Z",
-   "updated_at": "2026-08-24T10:55:21Z",
+   "updated_at": "2026-08-24T11:37:42Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-24T12:07:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32713833796/job/97417666790"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-24T11:38:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32713833796/job/97417666791"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-24T11:38:15Z",
+     "completed_at": "2026-08-24T11:55:41Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32713833796/job/97417666792",
+     "log_fetch_failed": true
+    }
+   ]
   },
   {
    "run_id": 32713543896,
@@ -55,13 +99,41 @@
    "branch": "upstream/pa-bf16-asymmetric-v",
    "event": "pull_request",
    "title": "[Kernel][PA] Support BF16 vectorized KV with asymmetric K/V head dim",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32713543896",
    "created_at": "2026-08-24T09:48:57Z",
-   "updated_at": "2026-08-24T10:56:58Z",
+   "updated_at": "2026-08-24T11:39:12Z",
    "actor": "sammysun0711",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-24T11:39:12Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32713543896/job/97418048221"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-24T11:55:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32713543896/job/97418048308"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-24T11:39:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32713543896/job/97418048832"
+    }
+   ]
   },
   {
    "run_id": 32710532813,
@@ -113,11 +185,11 @@
    "branch": "upstream/pa-64bit-cache-offsets",
    "event": "pull_request",
    "title": "[Bugfix][PA] Fix D192 query staging and 64-bit cache offsets",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710290446",
    "created_at": "2026-08-24T09:12:50Z",
-   "updated_at": "2026-08-24T09:36:06Z",
+   "updated_at": "2026-08-24T11:38:10Z",
    "actor": "sammysun0711",
    "jobs": [
     {
@@ -133,18 +205,19 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-24T10:36:07Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710290446/job/97386506354"
+     "completed_at": "2026-08-24T12:01:20Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710290446/job/97386506354",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-24T09:36:06Z",
+     "started_at": "2026-08-24T11:38:10Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710290446/job/97386506381"
     }
@@ -580,20 +653,20 @@
    "branch": "gfx1250/gemm-test-cli",
    "event": "pull_request",
    "title": "[gfx1250][GEMM] Add const-init to the test and support mxscale tile_m=16",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32692034918",
    "created_at": "2026-08-24T05:00:39Z",
-   "updated_at": "2026-08-24T06:06:55Z",
+   "updated_at": "2026-08-24T12:07:05Z",
    "actor": "aoli26",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-24T06:06:37Z",
-     "completed_at": null,
+     "completed_at": "2026-08-24T12:07:04Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32692034918/job/97337805628"
     },
     {
@@ -1889,52 +1962,6 @@
    "updated_at": "2026-08-21T05:53:47Z",
    "actor": "JohnQinAMD",
    "jobs": []
-  },
-  {
-   "run_id": 32451534261,
-   "pr": 1028,
-   "commit": "45c952471236b2d42fec8b664b0a4ceee211da09",
-   "branch": "feat/rdna3-gemm-tile-selection",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Speed up the RDNA3 GEMM up to 1.85x by choosing the tile from the shape",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32451534261",
-   "created_at": "2026-08-21T05:42:25Z",
-   "updated_at": "2026-08-21T08:15:32Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T06:34:31Z",
-     "completed_at": "2026-08-21T07:02:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32451534261/job/96687716531",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T06:23:10Z",
-     "completed_at": "2026-08-21T07:45:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32451534261/job/96687716549",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T07:27:54Z",
-     "completed_at": "2026-08-21T08:15:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32451534261/job/96687716602",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
