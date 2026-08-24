@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-24T10:56:57Z",
+ "updated": "2026-08-24T11:27:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -40,11 +40,11 @@
    "branch": "phil/isa-resource-diff-arch-general",
    "event": "pull_request",
    "title": "[Tools] Add architecture-general ISA resource diff tool",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32713833796",
    "created_at": "2026-08-24T09:52:21Z",
-   "updated_at": "2026-08-24T09:53:45Z",
+   "updated_at": "2026-08-24T10:55:21Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -55,11 +55,11 @@
    "branch": "upstream/pa-bf16-asymmetric-v",
    "event": "pull_request",
    "title": "[Kernel][PA] Support BF16 vectorized KV with asymmetric K/V head dim",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32713543896",
    "created_at": "2026-08-24T09:48:57Z",
-   "updated_at": "2026-08-24T09:50:18Z",
+   "updated_at": "2026-08-24T10:56:58Z",
    "actor": "sammysun0711",
    "jobs": []
   },
@@ -80,27 +80,27 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-24T10:36:54Z",
+     "started_at": "2026-08-24T11:26:11Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710532813/job/97402245118"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-24T10:42:35Z",
-     "completed_at": null,
+     "completed_at": "2026-08-24T10:58:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710532813/job/97402245139"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-24T10:36:54Z",
+     "started_at": "2026-08-24T11:26:11Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710532813/job/97402245147"
     }
@@ -176,11 +176,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-24T10:37:34Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32707307344/job/97385098524"
+     "completed_at": "2026-08-24T11:25:17Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32707307344/job/97385098524",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -267,11 +268,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-24T09:36:50Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32706760698/job/97382239513"
+     "completed_at": "2026-08-24T10:56:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32706760698/job/97382239513",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -291,21 +293,22 @@
    "branch": "smem-capacity-decouple",
    "event": "pull_request",
    "title": "smem cleanup: move capacity helpers off legacy allocator, migrate tes\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32705911499",
    "created_at": "2026-08-24T08:21:43Z",
-   "updated_at": "2026-08-24T09:31:26Z",
+   "updated_at": "2026-08-24T11:25:52Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-24T09:16:26Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32705911499/job/97380925193"
+     "completed_at": "2026-08-24T11:25:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32705911499/job/97380925193",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
