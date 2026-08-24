@@ -10,8 +10,6 @@ by running a kernel that compares fast_divmod against native ``//`` and ``%``
 for a runtime divisor (L2).
 """
 
-from __future__ import annotations
-
 import pytest
 
 import flydsl.compiler as flyc
@@ -188,3 +186,42 @@ def test_fastdivmod_value_protocol_kernel_arg():
     n = ((g * 2654435761) & 0x7FFFFFFF).to(torch.int64)
     assert torch.equal(q.to(torch.int64), n // DIV)
     assert torch.equal(r.to(torch.int64), n % DIV)
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize("divisor", [1, 3, 768, 128256])
+def test_fastdivmod_struct_field(divisor):
+    """FastDivmod as a @fx.struct field.
+
+    Aggregates size a field by calling ``__get_ir_types__`` unbound on the type
+    and fall back to a single leaf when it is missing, so without that
+    classmethod this reconstructs from one value instead of three and raises
+    IndexError.
+    """
+    BLOCK = 256
+
+    @fx.struct
+    class Params:
+        fdm: FastDivmod
+
+    @flyc.kernel(known_block_size=[BLOCK, 1, 1])
+    def kernel(Q: fx.Tensor, R: fx.Tensor, params: Params):
+        i = fx.Int32(fx.thread_idx.x)
+        q, r = params.fdm.divmod(i)
+        fx.memref_store(q, Q, i)
+        fx.memref_store(r, R, i)
+
+    @flyc.jit
+    def launch(Q: fx.Tensor, R: fx.Tensor, d: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+        kernel(Q, R, Params(fdm=FastDivmod(d))).launch(grid=(1, 1, 1), block=(BLOCK, 1, 1), stream=stream)
+
+    q = torch.zeros(BLOCK, dtype=torch.int32, device="cuda")
+    r = torch.zeros(BLOCK, dtype=torch.int32, device="cuda")
+    launch(q, r, divisor, stream=torch.cuda.Stream())
+    torch.cuda.synchronize()
+
+    n = torch.arange(BLOCK, dtype=torch.int64, device="cuda")
+    assert torch.equal(q.to(torch.int64), n // divisor)
+    assert torch.equal(r.to(torch.int64), n % divisor)

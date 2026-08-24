@@ -1033,7 +1033,9 @@ class FastDivmod:
 
     It implements the DSL value protocol -- ``magic``, ``shift`` and ``divisor``
     are the carried leaves -- so an instance can cross the host/device boundary
-    as a kernel argument or sit inside a ``@fx.struct`` / coordinate tuple.
+    as a kernel argument, sit in a ``@fx.struct`` field, or travel inside a
+    plain Python tuple of kernel arguments. It is *not* a valid ``int_tuple``
+    leaf: those must be a single i32/i64 value and this carries three.
 
     **Construct it outside the kernel when the divisor is dynamic.** Deriving
     ``magic`` costs one 64-bit divide, which is free for a Python-int divisor
@@ -1087,6 +1089,16 @@ class FastDivmod:
 
     def __extract_to_ir_values__(self):
         return [self.magic.ir_value(), self.shift.ir_value(), self.divisor.ir_value()]
+
+    @classmethod
+    def __get_ir_types__(cls):
+        """Leaf types, in ``__extract_to_ir_values__`` order.
+
+        Aggregates size a field by calling this unbound on the class, so it has
+        to be a classmethod; without it a ``@fx.struct`` field defaults to one
+        leaf and reconstruction runs off the end of the value list.
+        """
+        return [Uint64.ir_type, Uint32.ir_type, Int32.ir_type]
 
     @classmethod
     def __construct_from_ir_values__(cls, values, exemplar=None):
