@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-24T06:21:22Z",
+ "updated": "2026-08-24T06:32:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32696893504,
+   "pr": 1027,
+   "commit": "2c21541497c45131c04342c083cb59a8c4ba359f",
+   "branch": "skills/dedrift-and-fix-frontmatter",
+   "event": "pull_request",
+   "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32696893504",
+   "created_at": "2026-08-24T06:20:15Z",
+   "updated_at": "2026-08-24T06:30:56Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 32696864649,
    "pr": 1022,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32696864649",
    "created_at": "2026-08-24T06:19:54Z",
-   "updated_at": "2026-08-24T06:20:08Z",
+   "updated_at": "2026-08-24T06:21:36Z",
    "actor": "jhinpan",
    "jobs": []
   },
@@ -29,7 +44,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32696828733",
    "created_at": "2026-08-24T06:19:24Z",
-   "updated_at": "2026-08-24T06:20:08Z",
+   "updated_at": "2026-08-24T06:30:56Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -74,11 +89,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-24T06:06:22Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32692034918/job/97337805648"
+     "completed_at": "2026-08-24T06:29:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32692034918/job/97337805648",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -117,11 +133,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-24T05:17:15Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32690323561/job/97329772832"
+     "completed_at": "2026-08-24T06:29:06Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32690323561/job/97329772832",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -1796,52 +1813,6 @@
    "updated_at": "2026-08-21T03:06:04Z",
    "actor": "zhiding512",
    "jobs": []
-  },
-  {
-   "run_id": 32438575276,
-   "pr": null,
-   "commit": "065280213fb28f1b574b08333a1a05c05df2a195",
-   "branch": "main",
-   "event": "push",
-   "title": "fix(ci): isolate self-hosted runner artifacts (#1046)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32438575276",
-   "created_at": "2026-08-21T02:04:51Z",
-   "updated_at": "2026-08-21T04:22:49Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T02:27:54Z",
-     "completed_at": "2026-08-21T02:45:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32438575276/job/96648396034",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T02:28:06Z",
-     "completed_at": "2026-08-21T04:22:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32438575276/job/96648396078",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T02:28:06Z",
-     "completed_at": "2026-08-21T04:07:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32438575276/job/96648396079",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
