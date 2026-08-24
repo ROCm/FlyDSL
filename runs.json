@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-24T06:32:06Z",
+ "updated": "2026-08-24T06:44:28Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32698410347,
+   "pr": null,
+   "commit": "d3f3ce1a06972936640058416d6f22e957820dbc",
+   "branch": "main",
+   "event": "push",
+   "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32698410347",
+   "created_at": "2026-08-24T06:42:23Z",
+   "updated_at": "2026-08-24T06:42:45Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 32698230790,
+   "pr": null,
+   "commit": "4c686778b094abd569a787809910b269ae55d9f7",
+   "branch": "main",
+   "event": "push",
+   "title": "[ROCDL] Lower approximate exp2 to native intrinsic (#1037)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32698230790",
+   "created_at": "2026-08-24T06:39:38Z",
+   "updated_at": "2026-08-24T06:42:25Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 32696893504,
    "pr": 1027,
@@ -888,7 +918,7 @@
   },
   {
    "run_id": 32458891715,
-   "pr": 1037,
+   "pr": null,
    "commit": "05d7e6ef4a0a897fb2669432affdf4ac232a67a5",
    "branch": "jhinpan/fix-exp2-fastmath",
    "event": "pull_request",
@@ -1454,7 +1484,7 @@
   },
   {
    "run_id": 32450902421,
-   "pr": 1037,
+   "pr": null,
    "commit": "31df5d1dc8bedbe6245322608f51f3da99b2c3ca",
    "branch": "jhinpan/fix-exp2-fastmath",
    "event": "pull_request",
@@ -1783,36 +1813,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 32442154191,
-   "pr": 1038,
-   "commit": "85865086fd0493063206107f2e83029ae4ce39b2",
-   "branch": "zhimding/jobs_parallel_0819",
-   "event": "pull_request",
-   "title": "[AOT] Add resilient parallel job scheduler",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32442154191",
-   "created_at": "2026-08-21T03:05:47Z",
-   "updated_at": "2026-08-21T03:30:21Z",
-   "actor": "zhiding512",
-   "jobs": []
-  },
-  {
-   "run_id": 32440546858,
-   "pr": 1038,
-   "commit": "156d394d123f21a153d8699f951b2f25f7885925",
-   "branch": "zhimding/jobs_parallel_0819",
-   "event": "pull_request",
-   "title": "[AOT] Add resilient parallel job scheduler",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32440546858",
-   "created_at": "2026-08-21T02:38:19Z",
-   "updated_at": "2026-08-21T03:06:04Z",
-   "actor": "zhiding512",
-   "jobs": []
   }
  ]
 }
