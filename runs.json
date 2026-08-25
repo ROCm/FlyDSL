@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-25T12:34:27Z",
+ "updated": "2026-08-25T12:48:42Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -56,11 +56,11 @@
    "branch": "gfx1250/gemm-opt-0805",
    "event": "pull_request",
    "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32834388223",
    "created_at": "2026-08-25T09:53:49Z",
-   "updated_at": "2026-08-25T10:54:16Z",
+   "updated_at": "2026-08-25T12:45:38Z",
    "actor": "aoli26",
    "jobs": [
     {
@@ -76,11 +76,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-25T10:54:16Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32834388223/job/97775725977"
+     "completed_at": "2026-08-25T12:45:37Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32834388223/job/97775725977",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
