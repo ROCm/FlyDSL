@@ -46,6 +46,57 @@ Artifacts intentionally do not include a compiler or kernel-source fingerprint.
 Treat them as reviewed deployment inputs, and retune after a compiler, kernel,
 compile-hint, or search-space change that can affect the winner.
 
+The scratch winner cache has the same blind spot: it fingerprints the device,
+toolchain, environment and compile hints, but not the adopter's kernel source or
+search space. An adopter that needs stale scratch winners invalidated should
+declare an integer schema parameter on its entry point and list it in `key`, then
+bump it with any change that can move the winner. Softmax does this with
+`tuning_schema`.
+
+## Candidate correctness gate
+
+`validate_hook(sig_args)` returns a context manager around one untimed candidate
+launch. Code before `yield` can poison outputs; code after `yield` validates the
+result, so skipped or partial stores cannot inherit a previous candidate's data.
+The launch uses the same stream, compile hints, reset/restore policy and arguments
+as timing, but validation work never affects ranking. `sig_args` maps every kernel
+parameter name to its value, including positional tensors. Softmax uses this hook
+to fill its output with NaNs before launch and check numerics afterward.
+
+Raising from the hook rejects that candidate. If every candidate is rejected the
+search raises `RuntimeError("All autotune configs failed")` with the last failure
+chained, so a numerical rejection stays distinguishable from a compile failure.
+Use it wherever a candidate could launch successfully and still compute the wrong
+answer, and hold every candidate to the same tolerance as the default.
+
+## Device timing contract
+
+The shared `do_bench` timer queues a GPU-side backlog before batched event
+windows. This is required for sub-100 µs kernels: a fresh event pair on an empty
+stream can time the host enqueue gap instead of the kernel. Each window averages
+several launches, and the reported value is the median across windows. The
+callable must enqueue asynchronous work on the current stream and must not
+synchronize internally.
+
+For Softmax results within 2% of the measured minimum, selection prefers the
+compatibility default, then a config without an explicit occupancy override,
+then the candidate packing more rows per block. This prevents event granularity
+from turning equivalent 6--10 µs candidates into unstable deployment artifacts;
+an improvement outside the band still wins normally. Softmax uses 10 warmup and
+100 measured launches, split into five backlogged event windows; the larger
+sample stabilized bandwidth-scale rows that moved by more than the tie band with
+the generic 25-launch default.
+
+## Adopters
+
+| Kernel | Module | `artifact_name` | Tuned axes |
+|---|---|---|---|
+| RMSNorm | `kernels/norm/rmsnorm_autotune.py` | `rmsnorm` | `BLOCK_THREADS`, `waves_per_eu` |
+| Softmax forward | `kernels/norm/softmax_autotune.py` | `softmax_fwd` | full-row threads, `waves_per_eu`, threads/rows per block for short rows |
+
+Softmax backward is not an adopter yet; its existing kernel and dispatch are
+unchanged by `softmax_fwd` artifacts.
+
 ## Failure behavior
 
 FlyDSL ignores missing, unreadable, mismatched, or structurally invalid

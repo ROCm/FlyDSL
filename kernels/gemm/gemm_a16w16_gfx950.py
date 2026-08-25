@@ -415,7 +415,6 @@ def gemm_a16w16_gfx950_kernel(
     block_threads = param.block_threads
     ldg_a_iters = param.ldg_a_iters
     ldg_b_iters = param.ldg_b_iters
-    ldg_wait_count = ldg_a_iters + ldg_b_iters
     cshuffle_r2g_vec_size = param.cshuffle_r2g_vec_size
     elem_dtype = fx.Float16 if const_expr(param.in_dtype_id == GEMM_A16W16_DTYPE_FP16) else fx.BFloat16
     global_output_dtype = fx.Float32 if const_expr(param.out_dtype_id == GEMM_A16W16_DTYPE_FP32) else elem_dtype
@@ -633,30 +632,25 @@ def gemm_a16w16_gfx950_kernel(
     for stage in range_constexpr(stages - 1):
         async_load_b_to_lds(stage, stage)
         async_load_a_to_lds(stage, stage)
+        rocdl.asyncmark()
     rocdl.sched_barrier(0)
-
-    def hot_loop_scheduler():
-        rocdl.sched_vmem(ldg_b_iters + ldg_a_iters)
-        for _ in range_constexpr(k_mma_iters_per_wave):
-            rocdl.sched_dsrd(mma_n_iters)
-            rocdl.sched_dsrd(mma_m_iters)
-            for _ in range_constexpr(mma_m_iters):
-                rocdl.sched_mfma(mma_n_iters)
-        rocdl.sched_barrier(0)
 
     main_loop_end = k_tiles - (stages - 1)
     for k_tile in range(0, main_loop_end, 1):
         current_stage = k_tile % stages
         write_stage = (current_stage + stages - 1) % stages
-        wait_vmcnt_and_barrier((stages - 2) * ldg_wait_count)
+        rocdl.wait_asyncmark(stages - 2)
+        rocdl.s_barrier()
         async_load_b_to_lds(k_tile + (stages - 1), write_stage)
         async_load_a_to_lds(k_tile + (stages - 1), write_stage)
+        rocdl.asyncmark()
         compute_stage(current_stage, k_tile)
-        hot_loop_scheduler()
+        rocdl.sched_barrier(0)
 
     current_stage = main_loop_end % stages
     for s in range_constexpr(0, stages - 1):
-        wait_vmcnt_and_barrier((stages - 2 - s) * ldg_wait_count)
+        rocdl.wait_asyncmark(stages - 2 - s)
+        rocdl.s_barrier()
         compute_stage(current_stage, main_loop_end + s)
         current_stage = (current_stage + 1) % stages
 

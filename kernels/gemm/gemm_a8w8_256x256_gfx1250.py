@@ -56,9 +56,10 @@ def launch_gemm_a8w8_256x256(
     assert (tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers) in (
         (256, 256, 128, 2, 2, 4),
         (256, 256, 128, 2, 2, 2),
-        (128, 128, 128, 2, 2, 4),
         (128, 256, 128, 2, 2, 4),
         (128, 256, 128, 2, 2, 3),
+        # 128x128 leaves 4 WMMA slots per quadrant; mx32's extra scale seed does not fit.
+        *(((128, 128, 128, 2, 2, 4),) if block_size == 128 else ()),
     ), "only the tuned 2x2-wave profiles are supported"
     assert (
         cluster_m >= 1 and cluster_n >= 1 and 1 < cluster_m * cluster_n <= 16
