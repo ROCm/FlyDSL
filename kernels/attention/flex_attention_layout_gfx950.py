@@ -773,25 +773,8 @@ def flex_attn_fwd_gfx950_kernel(
     class _LayoutSchedTraits:
         HEAD_DIM = int(param.head_dim)
 
-    _dma_serpentine = tuple(
-        c + (1 - j) if (c // 2) % 2 else c + j
-        for c in range(0, _dma_ops_per_thread, 2) for j in range(2)
-    ) if _dma_ops_per_thread >= 4 else tuple(range(_dma_ops_per_thread))
-    _dma_serpentine_rev = tuple(reversed(_dma_serpentine))
-
     def load_kv(tile_idx, slot, ops=_dma_ops_per_thread, op_offset=0):
-        from flydsl._mlir import ir
-        from flydsl._mlir.dialects import scf
-        _is_wave0 = (fx.Int32(local_tid // GFX950_WAVE_SIZE) & fx.Int32(1)) == fx.Int32(0)
-        _if = scf.IfOp(_is_wave0.ir_value(), [], has_else=True)
-        with ir.InsertionPoint(_if.then_block):
-            for idx in range_constexpr(ops):
-                _stage_kv_to_lds(tile_idx, slot, True, True, ops=1, op_offset=op_offset + _dma_serpentine[idx])
-            scf.YieldOp([])
-        with ir.InsertionPoint(_if.else_block):
-            for idx in range_constexpr(ops):
-                _stage_kv_to_lds(tile_idx, slot, True, True, ops=1, op_offset=op_offset + _dma_serpentine_rev[idx])
-            scf.YieldOp([])
+        _stage_kv_to_lds(tile_idx, slot, True, True, ops=ops, op_offset=op_offset)
         return []
 
     def load_k(tile_idx, slot, ops=_dma_ops_per_thread, op_offset=0):
