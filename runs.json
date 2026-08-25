@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-08-25T15:33:38Z",
+ "updated": "2026-08-25T16:27:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32871559109,
+   "pr": 972,
+   "commit": "be5e68fd845d49a5b91dbd60e4e7b9c5bb47002e",
+   "branch": "mega_moe_a4w4",
+   "event": "pull_request",
+   "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32871559109",
+   "created_at": "2026-08-25T16:22:19Z",
+   "updated_at": "2026-08-25T16:24:26Z",
+   "actor": "Yaowu-Xiong",
+   "jobs": []
+  },
+  {
+   "run_id": 32867561048,
+   "pr": 971,
+   "commit": "50855d5e25ca9e796970613c7f4a93951e60819b",
+   "branch": "gfx1250/gemm-opt-0805",
+   "event": "pull_request",
+   "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32867561048",
+   "created_at": "2026-08-25T15:43:25Z",
+   "updated_at": "2026-08-25T16:06:33Z",
+   "actor": "aoli26",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-25T16:05:26Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32867561048/job/97873614989"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-25T16:05:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32867561048/job/97873615043"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-25T16:06:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32867561048/job/97873615220"
+    }
+   ]
+  },
   {
    "run_id": 32865889554,
    "pr": 972,
@@ -1983,67 +2041,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32502893730",
    "created_at": "2026-08-21T16:26:04Z",
    "updated_at": "2026-08-21T16:43:34Z",
-   "actor": "JohnQinAMD",
-   "jobs": []
-  },
-  {
-   "run_id": 32502318944,
-   "pr": 971,
-   "commit": "44158f9e3a1aa6ca76abb96affa1439781cecc50",
-   "branch": "gfx1250/gemm-opt-0805",
-   "event": "pull_request",
-   "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32502318944",
-   "created_at": "2026-08-21T16:19:21Z",
-   "updated_at": "2026-08-21T19:10:38Z",
-   "actor": "aoli26",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T16:47:26Z",
-     "completed_at": "2026-08-21T19:10:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32502318944/job/96841821879",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T16:52:18Z",
-     "completed_at": "2026-08-21T17:53:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32502318944/job/96841821902",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T16:46:46Z",
-     "completed_at": "2026-08-21T17:10:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32502318944/job/96841821937",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32501887298,
-   "pr": null,
-   "commit": "88aeb35c92b96d03f71d994bbc1c4bc17ee7468d",
-   "branch": "john/lazy-rescale-nan",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32501887298",
-   "created_at": "2026-08-21T16:14:18Z",
-   "updated_at": "2026-08-21T16:26:22Z",
    "actor": "JohnQinAMD",
    "jobs": []
   }
