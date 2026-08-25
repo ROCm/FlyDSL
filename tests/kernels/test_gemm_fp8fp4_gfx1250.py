@@ -649,6 +649,17 @@ def _parse_csv_ints(value: str, n: int, name: str) -> list[int]:
     return parts
 
 
+def _per_run(groups: list, n_modes: int, n_shapes: int, name: str) -> list:
+    """Spread one group over every run, one group per mode, or one per (mode, shape) run."""
+    if len(groups) == 1:
+        groups = groups * n_modes
+    if len(groups) == n_modes:
+        groups = [g for g in groups for _ in range(n_shapes)]
+    if len(groups) != n_modes * n_shapes:
+        raise SystemExit(f"-{name} needs 1, {n_modes} (per mode) or {n_modes * n_shapes} (per run) values")
+    return groups
+
+
 def _parse_init_mode(value: str) -> float | None:
     """'random' -> None (random fill); 'const,<float>' -> that constant A/B fill value."""
     if value == "random":
@@ -674,15 +685,17 @@ def _print_table(headers: list[str], rows: list[list[str]]) -> None:
 
 def _main():
     import argparse
-    import itertools
 
-    parser = argparse.ArgumentParser(description="Manual correctness/perf run for the gfx1250 GEMM kernels")
-    parser.add_argument("-mode", choices=sorted(_MODES), required=True)
+    parser = argparse.ArgumentParser(
+        description="Manual correctness/perf run for the gfx1250 GEMM kernels. Every mode runs every shape; "
+        "-tiles/-warps/-nb/-cluster take one value, one per mode, or one per (mode, shape) run.",
+    )
+    parser.add_argument("-mode", nargs="+", choices=sorted(_MODES), required=True)
     parser.add_argument("-mnk", nargs="+", required=True, metavar="M,N,K", help="one or more shapes")
-    parser.add_argument("-tiles", required=True, help="tile_m,tile_n,tile_k")
-    parser.add_argument("-warps", required=True, help="m_warp,n_warp")
-    parser.add_argument("-nb", type=int, required=True, help="num_buffers")
-    parser.add_argument("-cluster", help="cluster_m,cluster_n; default: the mode's own")
+    parser.add_argument("-tiles", nargs="+", required=True, help="tile_m,tile_n,tile_k")
+    parser.add_argument("-warps", nargs="+", required=True, help="m_warp,n_warp")
+    parser.add_argument("-nb", nargs="+", type=int, required=True, help="num_buffers")
+    parser.add_argument("-cluster", nargs="+", help="cluster_m,cluster_n; default: each mode's own")
     parser.add_argument("-out-dtype", default="bf16", choices=["bf16", "f16"])
     parser.add_argument("-bench", action="store_true", help="also measure perf (warmup=10, iters=100)")
     parser.add_argument(
@@ -695,33 +708,43 @@ def _main():
     args = parser.parse_args()
 
     shapes = [_parse_csv_ints(v, 3, "mnk") for v in args.mnk]
-    tile_m, tile_n, tile_k = _parse_csv_ints(args.tiles, 3, "tiles")
-    m_warp, n_warp = _parse_csv_ints(args.warps, 2, "warps")
-    cfg = _MODES[args.mode]
+    runs = [(mode, mnk) for mode in args.mode for mnk in shapes]
+    spread = functools.partial(_per_run, n_modes=len(args.mode), n_shapes=len(shapes))
+    tiles = spread([_parse_csv_ints(v, 3, "tiles") for v in args.tiles], name="tiles")
+    warps = spread([_parse_csv_ints(v, 2, "warps") for v in args.warps], name="warps")
+    tile_cfgs = [(*t, *w, nb) for t, w, nb in zip(tiles, warps, spread(args.nb, name="nb"))]
     # The hand-scheduled kernels reject a 1x1 cluster outright, so default to their own.
-    tuned_cluster = ",".join(str(c) for c in cfg["profile"]["cluster"]) if "profile" in cfg else "1,1"
-    cluster_m, cluster_n = _parse_csv_ints(args.cluster or tuned_cluster, 2, "cluster")
-    out_dtype = args.out_dtype if cfg["supports_out_dtype"] else "bf16"
+    clusters = (
+        spread([_parse_csv_ints(v, 2, "cluster") for v in args.cluster], name="cluster")
+        if args.cluster
+        else [_MODES[m].get("profile", {}).get("cluster", (1, 1)) for m, _ in runs]
+    )
 
     rows = []
-    for (M, N, K), init in itertools.product(shapes, args.init_mode):
-        kwargs = {"cluster_m": cluster_m, "cluster_n": cluster_n, "const_val": _parse_init_mode(init)}
-        if cfg["supports_out_dtype"]:
-            kwargs["out_dtype"] = args.out_dtype
-        c_gpu, make_args, compiled, error = _run_and_check(
-            cfg["build"], cfg["launch"], M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, args.nb, **kwargs
-        )
-        perf = ["-", "-", "-"]
-        if args.bench:
-            us = _bench_us(lambda: compiled(*make_args(torch.cuda.current_stream())), c_gpu, warmup=10, iters=100)
-            moved = cfg["bytes_moved"](M, N, K)
-            perf = [f"{us:.3f}", f"{_tflops(M, N, K, us):.2f}", f"{moved / (us * 1e-6) / 1e12:.3f}"]
-        rows.append([args.mode, str(M), str(N), str(K), out_dtype, init, *perf, "PASS" if error is None else "FAIL"])
-        if error is not None:
-            print(f"\n{M}x{N}x{K} {init}: {error}\n")
+    for (mode, (M, N, K)), tile_cfg, (cluster_m, cluster_n) in zip(runs, tile_cfgs, clusters):
+        cfg = _MODES[mode]
+        out_dtype = args.out_dtype if cfg["supports_out_dtype"] else "bf16"
+        config = "t{},{},{} w{},{} nb{} c{},{}".format(*tile_cfg, cluster_m, cluster_n)
+        for init in args.init_mode:
+            kwargs = {"cluster_m": cluster_m, "cluster_n": cluster_n, "const_val": _parse_init_mode(init)}
+            if cfg["supports_out_dtype"]:
+                kwargs["out_dtype"] = args.out_dtype
+            c_gpu, make_args, compiled, error = _run_and_check(
+                cfg["build"], cfg["launch"], M, N, K, *tile_cfg, **kwargs
+            )
+            perf = ["-", "-", "-"]
+            if args.bench:
+                us = _bench_us(lambda: compiled(*make_args(torch.cuda.current_stream())), c_gpu, warmup=10, iters=100)
+                moved = cfg["bytes_moved"](M, N, K)
+                perf = [f"{us:.3f}", f"{_tflops(M, N, K, us):.2f}", f"{moved / (us * 1e-6) / 1e12:.3f}"]
+            result = "PASS" if error is None else "FAIL"
+            rows.append([mode, str(M), str(N), str(K), config, out_dtype, init, *perf, result])
+            if error is not None:
+                print(f"\n{mode} {M}x{N}x{K} {init}: {error}\n")
 
-    print(f"\ntiles={tile_m},{tile_n},{tile_k} warps={m_warp},{n_warp} nb={args.nb} cluster={cluster_m},{cluster_n}")
-    _print_table(["mode", "M", "N", "K", "out", "init_mode", "latency us", "TFLOPS", "BW TB/s", "result"], rows)
+    print()
+    headers = ["mode", "M", "N", "K", "config", "out", "init_mode", "latency us", "TFLOPS", "BW TB/s", "result"]
+    _print_table(headers, rows)
     if any(r[-1] == "FAIL" for r in rows):
         raise SystemExit(1)
 
