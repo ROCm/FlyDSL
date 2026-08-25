@@ -873,10 +873,14 @@ def flex_attn_fwd_gfx950_kernel(
     read_v_slot = [_make_read_v(i) for i in range_constexpr(_lds_ring_slots)]
 
     def read_k_work(slot):
-        """Full K tile read: all _k_iters ki panels, D-lo from sK, D-hi from sK_upper."""
-        #read_k_work_split(ki_count=_k_half, ki_offset=0, slot=slot)
-        #read_k_work_split(ki_count=_k_half, ki_offset=_k_half, slot=slot)
-        read_k_work_split(ki_count=_k_iters, ki_offset=0, slot=slot)
+        """Full K tile read: zigzag D-lo/D-hi for cross-wave bank diversity.
+
+        Reads ki in order 0,7,1,6,2,5,3,4 so consecutive ds_read_b128
+        in the lgkm queue hit disjoint bank groups (0-7 vs 24-31, 8-15 vs 16-23, etc).
+        """
+        for i in range_constexpr(_k_half):
+            read_k_work_split(ki_count=1, ki_offset=i, slot=slot)
+            read_k_work_split(ki_count=1, ki_offset=_k_iters - 1 - i, slot=slot)
         return []
 
     _k_iters = int(param.head_dim) // int(param.mma_k)   # 128/16 → 8 ki panels
@@ -993,12 +997,15 @@ def flex_attn_fwd_gfx950_kernel(
                     frag_S_acc[None, m, n],
                 )
 
+    _qk_k_half = _qk_k_reps // 2
+
     def gemm1_qk_unrolled(frag_Q_in, frag_K_in):
-        """QK GEMM with explicit per-ki MFMA calls."""
+        """QK GEMM with zigzag ki order matching read_k_work bank diversity."""
         frag_S_out = thr_qk.make_fragment_C(sP)
         frag_S_out.fill(0.0)
-        for ki in range_constexpr(_qk_k_reps):
-            gemm1_qk_mfma(frag_S_out, frag_Q_in, frag_K_in, ki)
+        for i in range_constexpr(_qk_k_half):
+            gemm1_qk_mfma(frag_S_out, frag_Q_in, frag_K_in, i)
+            gemm1_qk_mfma(frag_S_out, frag_Q_in, frag_K_in, _qk_k_reps - 1 - i)
         return [frag_S_out]
 
     # ── Flex score/mask mod application ────────────────────────────────────
