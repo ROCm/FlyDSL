@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-08-25T06:55:15Z",
+ "updated": "2026-08-25T07:39:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32820821407,
+   "pr": 1032,
+   "commit": "670f45e56de8ed56f4622d157ab6dc0ba6e1d099",
+   "branch": "convolution",
+   "event": "pull_request",
+   "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32820821407",
+   "created_at": "2026-08-25T07:16:51Z",
+   "updated_at": "2026-08-25T07:36:37Z",
+   "actor": "amd-nprotaso",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-25T07:36:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32820821407/job/97723053777"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-25T07:36:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32820821407/job/97723053870"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-25T07:36:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32820821407/job/97723053982"
+    }
+   ]
+  },
   {
    "run_id": 32814244598,
    "pr": 1064,
@@ -39,11 +82,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-25T06:24:37Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32814244598/job/97706445403"
+     "completed_at": "2026-08-25T07:13:12Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32814244598/job/97706445403",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -236,21 +280,22 @@
    "branch": "phil/isa-resource-diff-arch-general",
    "event": "pull_request",
    "title": "[Tools] Add architecture-general ISA resource diff tool",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32790747134",
    "created_at": "2026-08-24T23:45:20Z",
-   "updated_at": "2026-08-25T06:51:58Z",
+   "updated_at": "2026-08-25T07:36:45Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-25T06:52:55Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32790747134/job/97712595151"
+     "completed_at": "2026-08-25T07:36:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32790747134/job/97712595151",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -554,7 +599,7 @@
   },
   {
    "run_id": 32725532720,
-   "pr": 1032,
+   "pr": null,
    "commit": "67afb0bfa9f3b889082a2cf1300db62dbb4a7205",
    "branch": "convolution",
    "event": "pull_request",
@@ -1966,52 +2011,6 @@
    "updated_at": "2026-08-21T12:30:45Z",
    "actor": "amd-nprotaso",
    "jobs": []
-  },
-  {
-   "run_id": 32467943760,
-   "pr": null,
-   "commit": "73db4b58c095f11a8fc1df07460f82626f25e7bc",
-   "branch": "main",
-   "event": "push",
-   "title": "[Kernel][Perf] Optimize paged-attention metadata decode (#910)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467943760",
-   "created_at": "2026-08-21T09:27:02Z",
-   "updated_at": "2026-08-21T13:28:47Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T12:33:52Z",
-     "completed_at": "2026-08-21T13:28:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467943760/job/96754075090",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T11:28:11Z",
-     "completed_at": "2026-08-21T12:44:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467943760/job/96754075121",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T11:19:09Z",
-     "completed_at": "2026-08-21T11:33:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467943760/job/96754075183",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
