@@ -1160,6 +1160,7 @@ def flex_attn_fwd_gfx950_kernel(
         # Double-buffered KV loop via scf.for with loop-carried m/l/O state.
         load_kv(_kv_lo, 0)
         rocdl.s_waitcnt(0)
+        rocdl.s_barrier()
 
         if const_expr(_enable_stagger):
             rocdl.sched_barrier(0)
@@ -1180,6 +1181,8 @@ def flex_attn_fwd_gfx950_kernel(
             valid: runtime i1 flag; when False the tile's scores are masked to
             -inf so softmax produces all-zero P and PV GEMM is a no-op.
             """
+            rocdl.s_waitcnt(vmcnt=0)
+            rocdl.s_barrier()
             read_k_work(read_slot)
             rocdl.sched_barrier(0)
             if has_next:
@@ -1220,6 +1223,8 @@ def flex_attn_fwd_gfx950_kernel(
             in s_scaled_prev were computed relative to m_i_prev's max.
             """
             # ── Cluster 0: mem tile 0 ──
+            rocdl.s_waitcnt(vmcnt=0)
+            rocdl.s_barrier()
             read_k_work(0)
             v_lo_regs_0, v_hi_regs_0 = read_v_slot[0]()
             load_kv(kv_i32 + fx.Int32(1), 1)
@@ -1241,6 +1246,8 @@ def flex_attn_fwd_gfx950_kernel(
             dualwave_cluster_sync(1)
 
             # ── Cluster 2: mem tile 1 ──
+            rocdl.s_waitcnt(vmcnt=0)
+            rocdl.s_barrier()
             read_k_work(1)
             v_lo_regs_1, v_hi_regs_1 = read_v_slot[1]()
             if has_next:
@@ -1276,8 +1283,8 @@ def flex_attn_fwd_gfx950_kernel(
             rescaling.  Raw QK scores are fed directly as P into PV GEMM.
             m_i / l_i are passed through unchanged.
             """
-            #rocdl.sched_barrier(0)
-            #rocdl.s_barrier()
+            rocdl.s_waitcnt(vmcnt=0)
+            rocdl.s_barrier()
             read_k_work(read_slot)
             v_lo_regs, v_hi_regs = read_v_slot[read_slot]()
             if has_next:
