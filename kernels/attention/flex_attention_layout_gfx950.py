@@ -966,10 +966,30 @@ def flex_attn_fwd_gfx950_kernel(
 
 
 
+    _qk_mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype))
+
     def gemm1_qk(frag_Q_in, frag_K_in):
         frag_S_out = thr_qk.make_fragment_C(sP)
         frag_S_out.fill(0.0)
         fx.gemm(tiled_mma_qk, frag_S_out, frag_K_in, frag_Q_in, frag_S_out)
+        return [frag_S_out]
+
+    def gemm1_qk_mfma(frag_S_acc, frag_Q_in, frag_K_in, ki):
+        """Single QK MFMA for K-group ki. Caller controls scheduling."""
+        fx.mma_atom_call(
+            _qk_mma_atom,
+            frag_S_acc[None],
+            frag_K_in[None, None, ki],
+            frag_Q_in[None, None, ki],
+            frag_S_acc[None],
+        )
+
+    def gemm1_qk_unrolled(frag_Q_in, frag_K_in):
+        """QK GEMM with explicit per-ki MFMA calls (same result as gemm1_qk)."""
+        frag_S_out = thr_qk.make_fragment_C(sP)
+        frag_S_out.fill(0.0)
+        for ki in range_constexpr(_k_iters):
+            gemm1_qk_mfma(frag_S_out, frag_Q_in, frag_K_in, ki)
         return [frag_S_out]
 
     # ── Flex score/mask mod application ────────────────────────────────────
@@ -1177,64 +1197,68 @@ def flex_attn_fwd_gfx950_kernel(
             return m_i, l_i, o_accs
 
         def _do_tile_overlapping_softmax(kv_i32, m_i, l_i, o_accs, read_slot, dma_slot, has_next,
-                    valid=None):
-            """One non-pipelined iteration on a compile-time slot.
+                    s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, has_softmax_prev,
+                    m_i_prev):
+            """Two-tile iteration with deferred PV GEMM overlapping QK GEMM.
 
-            valid: runtime i1 flag; when False the tile's scores are masked to
-            -inf so softmax produces all-zero P and PV GEMM is a no-op.
+            PV GEMM from the previous tile runs alongside the current tile's
+            QK GEMM (both are MFMA-bound, writing different accumulators).
+            softmax_finish waits for the deferred PV to complete before
+            rescaling o_accs.  The current tile's PV is deferred to the next call.
+
+            m_i_prev: the m_i snapshot from when the deferred softmax_start ran.
+            softmax_finish needs this (not the current m_i) because the scores
+            in s_scaled_prev were computed relative to m_i_prev's max.
             """
-            # Cluster 0 mem tile 0
+            # ── Cluster 0: mem tile 0 ──
             read_k_work(0)
-            rocdl.sched_barrier(0)
+            v_lo_regs_0, v_hi_regs_0 = read_v_slot[0]()
             load_kv(kv_i32 + fx.Int32(1), 1)
-            v_lo_regs, v_hi_regs = read_v_slot[0]()
             rocdl.s_waitcnt(lgkmcnt=0)
             dualwave_cluster_sync(0)
 
-            # Cluster 1 compute tile 0
-            rocdl.s_setprio(0)
+            # ── Cluster 1: QK GEMM tile 0 + deferred PV from prev ──
             frag_S, = gemm1_qk(frag_Q, frag_K[0])
+            if has_softmax_prev:
+                out_sm_prev = softmax_finish(s_scaled_prev, m_i_prev, l_i, o_accs, corr_scalar_prev)
+                pv_gemm_register(out_sm_prev[0], v_lo_prev, v_hi_prev, out_sm_prev[3])
+                l_i, o_accs = out_sm_prev[2], out_sm_prev[3]
             s_raw = [frag_S[i] for i in range_constexpr(n_c)]
             if const_expr(mod_has_score or mod_has_mask):
                 apply_mods(s_raw, kv_i32)
-            #f valid is not None:
-            #   _neg_inf = fx.Float32(-1e9)
-            #   s_raw = [valid.select(s_raw[i], _neg_inf) for i in range_constexpr(n_c)]
-            corr_scalar, s_scaled, m_new = softmax_start(s_raw, m_i)
-            m_i = [m_new] + [m_i[r] for r in range_constexpr(1, npair)]
-            out_sm = softmax_finish(s_scaled, m_i, l_i, o_accs, corr_scalar)
-            frag_P = out_sm[0]
-            l_i, o_accs = out_sm[2], out_sm[3]
-            pv_gemm_register(frag_P, v_lo_regs, v_hi_regs, o_accs)
+            corr_scalar_0, s_scaled_0, m_new = softmax_start(s_raw, m_i)
+            m_i_at_tile0 = [m_new] + [m_i[r] for r in range_constexpr(1, npair)]
+            m_i = m_i_at_tile0
             dualwave_cluster_sync(1)
 
-            # Cluster 2 mem tile 1
+            # ── Cluster 2: mem tile 1 ──
             read_k_work(1)
-            rocdl.sched_barrier(0)
+            v_lo_regs_1, v_hi_regs_1 = read_v_slot[1]()
             if has_next:
                 load_kv(kv_i32 + fx.Int32(2), 0)
-            v_lo_regs, v_hi_regs = read_v_slot[1]()
             rocdl.s_waitcnt(lgkmcnt=0)
             dualwave_cluster_sync(0)
 
-            # Cluster 2 compute tile 1
-            rocdl.s_setprio(0)
+            # ── Cluster 3: QK GEMM tile 1 + PV from tile 0 ──
             frag_S, = gemm1_qk(frag_Q, frag_K[1])
+            out_sm_0 = softmax_finish(s_scaled_0, m_i_at_tile0, l_i, o_accs, corr_scalar_0)
+            pv_gemm_register(out_sm_0[0], v_lo_regs_0, v_hi_regs_0, out_sm_0[3])
+            l_i, o_accs = out_sm_0[2], out_sm_0[3]
             s_raw = [frag_S[i] for i in range_constexpr(n_c)]
             if const_expr(mod_has_score or mod_has_mask):
-                apply_mods(s_raw, kv_i32)
-            #f valid is not None:
-            #   _neg_inf = fx.Float32(-1e9)
-            #   s_raw = [valid.select(s_raw[i], _neg_inf) for i in range_constexpr(n_c)]
-            corr_scalar, s_scaled, m_new = softmax_start(s_raw, m_i)
-            m_i = [m_new] + [m_i[r] for r in range_constexpr(1, npair)]
-            out_sm = softmax_finish(s_scaled, m_i, l_i, o_accs, corr_scalar)
-            frag_P = out_sm[0]
-            l_i, o_accs = out_sm[2], out_sm[3]
-            pv_gemm_register(frag_P, v_lo_regs, v_hi_regs, o_accs)
+                apply_mods(s_raw, kv_i32 + fx.Int32(1))
+            corr_scalar_1, s_scaled_1, m_new = softmax_start(s_raw, m_i)
+            m_i_at_tile1 = [m_new] + [m_i[r] for r in range_constexpr(1, npair)]
+            m_i = m_i_at_tile1
             dualwave_cluster_sync(1)
 
-            return m_i, l_i, o_accs
+            return (
+                m_i, l_i, o_accs,
+                s_scaled_1, corr_scalar_1,
+                v_lo_regs_1, v_hi_regs_1,
+                fx.Boolean(True),
+                m_i_at_tile1,
+            )
 
         def _do_tile_passthrough(kv_i32, m_i, l_i, o_accs, read_slot, dma_slot, has_next):
             """Passthrough iteration: memory transfers + GEMMs only, no softmax.
@@ -1272,6 +1296,7 @@ def flex_attn_fwd_gfx950_kernel(
         has_softmax_prev = fx.Boolean(False)
         v_lo_prev, v_hi_prev = read_v_slot[0]()
 
+        m_i_prev = [fx.Float32(_M_NEG_FLOOR_SCALED) for _ in range_constexpr(npair)]
         _sm_base = _o + _n_d_chunks
         init_args = (
             [m_i[r] for r in range_constexpr(npair)]
@@ -1281,10 +1306,11 @@ def flex_attn_fwd_gfx950_kernel(
             + [corr_scalar_prev, has_softmax_prev]
             + [v_lo_prev[dc] for dc in range_constexpr(_n_d_chunks)]
             + [v_hi_prev[dc] for dc in range_constexpr(_n_d_chunks)]
+            + [m_i_prev[r] for r in range_constexpr(npair)]
         )
         loop_results = init_args
 
-        overlap_softmax = True
+        overlap_softmax = False
         for kv_pair, loop_args in range(
             fx.Int32(0),
             _kv_pairs,
@@ -1307,6 +1333,8 @@ def flex_attn_fwd_gfx950_kernel(
                 loop_args[_v_base + _n_d_chunks + dc]
                 for dc in range_constexpr(_n_d_chunks)
             ]
+            _mi_prev_base = _v_base + 2 * _n_d_chunks
+            m_i_prev = [loop_args[_mi_prev_base + r] for r in range_constexpr(npair)]
 
             kv_even = _kv_lo + fx.Int32(arith.index_cast(T.i32, kv_pair)) * fx.Int32(2)
             kv_odd = kv_even + fx.Int32(1)
@@ -1315,9 +1343,14 @@ def flex_attn_fwd_gfx950_kernel(
 
             passthrough = False
             if const_expr(overlap_softmax):
-                # To tiles at once
                 has_next_even = (kv_even + fx.Int32(2)) < _kv_hi
-                m_i, l_i, o_accs = _do_tile_overlapping_softmax(kv_even, m_i, l_i, o_accs, 0, 1, has_next_even)
+                m_i, l_i, o_accs, s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, has_softmax_prev, m_i_prev = (
+                    _do_tile_overlapping_softmax(
+                        kv_even, m_i, l_i, o_accs, 0, 1, has_next_even,
+                        s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev,
+                        has_softmax_prev, m_i_prev,
+                    )
+                )
             elif const_expr(passthrough):
                 m_i, l_i, o_accs = _do_tile_passthrough(kv_even, m_i, l_i, o_accs, 0, 1, has_next_even)
                 m_i, l_i, o_accs = _do_tile_passthrough(kv_odd, m_i, l_i, o_accs, 1, 0, has_next_odd)
@@ -1340,6 +1373,7 @@ def flex_attn_fwd_gfx950_kernel(
                 + [corr_scalar_prev, has_softmax_prev]
                 + [v_lo_prev[dc] for dc in range_constexpr(_n_d_chunks)]
                 + [v_hi_prev[dc] for dc in range_constexpr(_n_d_chunks)]
+                + [m_i_prev[r] for r in range_constexpr(npair)]
             )
 
         m_i = [loop_results[r] for r in range_constexpr(npair)]
@@ -1354,7 +1388,14 @@ def flex_attn_fwd_gfx950_kernel(
             loop_results[_v_base + _n_d_chunks + dc]
             for dc in range_constexpr(_n_d_chunks)
         ]
+        _mi_prev_base = _v_base + 2 * _n_d_chunks
+        m_i_prev = [loop_results[_mi_prev_base + r] for r in range_constexpr(npair)]
 
+        if const_expr(overlap_softmax):
+            if has_softmax_prev:
+                out_sm_final = softmax_finish(s_scaled_prev, m_i_prev, l_i, o_accs, corr_scalar_prev)
+                pv_gemm_register(out_sm_final[0], v_lo_prev, v_hi_prev, out_sm_final[3])
+                l_i, o_accs = out_sm_final[2], out_sm_final[3]
 
         if const_expr(_enable_stagger):
             _stagger_extra_barrier_if_zero(infra.stagger_i32)
