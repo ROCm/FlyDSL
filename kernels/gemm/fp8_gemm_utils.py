@@ -270,12 +270,6 @@ class Mfma16x16x128:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def _as_index(v):
-    # c_rows/c_cols may be a runtime value (dense/grouped NT/NN: N, m_end) or a
-    # compile-time int (wgrad CShuffle: OUT_N). Coerce both to an MLIR index.
-    return arith.index(v) if isinstance(v, int) else arith.index_cast(T.index, v)
-
-
 def _readfirstlane_i32(v):
     """Force a wave-uniform-in-value i32 into an SGPR via s_readfirstlane."""
     raw = _raw(v)
@@ -289,8 +283,8 @@ def make_fp8_buffer_tensor_rebased(arg_i8, fp8_ir_t, base_elems, num_records_byt
     # Pin the wave-uniform shifted base + num_records to SGPRs: the group-scan base reads
     # as VGPR -> VGPR SRD -> readfirstlane waterfall per K-loop load. Pin keeps it scalar.
     base = _readfirstlane_i32(base + arith.index_cast(T.i64, base_elems))
-    nr = arith.minui(arith.index_cast(T.index, num_records_bytes), arith.index(0xFFFFFFFF))
-    nrec = fx.Int64(_readfirstlane_i32(arith.index_cast(T.i64, nr)))
+    nr = fx.min(fx.Int64(arith.index_cast(T.i64, num_records_bytes)), fx.Int64(0xFFFFFFFF))
+    nrec = fx.Int64(_readfirstlane_i32(nr))
     flags = _buffer_ops._get_buffer_flags()
     # global int8 ptr at the shifted addr -> int8 BufferDesc fat ptr -> recast fp8.
     base_ptr = fx.inttoptr(fx.PointerType.get(elem_ty=T.i8, address_space=1, alignment=16), base)
@@ -391,16 +385,16 @@ class ScaleS2R:
 
 
 def make_row_band_resource(c_base, base_row, c_rows, c_cols, elem_bytes):
-    elem = arith.index(elem_bytes)
-    cols_i = _as_index(c_cols)
-    row_i = _as_index(base_row)
-    rows_i = _as_index(c_rows)
-    row_c = arith.minui(row_i, rows_i)
-    band_base = c_base + row_c * cols_i * elem
+    elem = fx.Int64(elem_bytes)
+    cols_i = fx.Int64(c_cols)
+    row_i = fx.Int64(base_row)
+    rows_i = fx.Int64(c_rows)
+    row_c = fx.min(row_i, rows_i)
+    band_base = fx.Int64(c_base) + row_c * cols_i * elem
     # cap at 0x7FFFFFFF so a masked-out buffer_store (voffset=0x7FFFFFFF) is always OOB
-    nrec = arith.minui((rows_i - row_c) * cols_i * elem, arith.index(0x7FFFFFFF))
-    band_base_i64 = _readfirstlane_i32(arith.index_cast(T.i64, band_base))
-    nrec_pinned = arith.index_cast(T.index, _readfirstlane_i32(arith.index_cast(T.i64, nrec)))
+    nrec = fx.min((rows_i - row_c) * cols_i * elem, fx.Int64(0x7FFFFFFF))
+    band_base_i64 = _readfirstlane_i32(band_base)
+    nrec_pinned = _readfirstlane_i32(nrec)
     return _buffer_ops.create_buffer_resource_from_addr(band_base_i64, num_records_bytes=nrec_pinned)
 
 
