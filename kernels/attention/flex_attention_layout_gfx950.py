@@ -388,6 +388,7 @@ def make_flex_attn_kernel_name(param: FlexAttnParam) -> str:
 
 
 _FM = fx.arith.FastMathFlags.fast
+_FM_CONTRACT = fx.arith.FastMathFlags.contract
 
 
 def _elem_dtype(dtype_id):
@@ -415,6 +416,22 @@ def _to_elem(val, elem_ty):
 
 def _hw_exp2(x):
     return fx.Float32(rocdl.exp2(T.f32, fx.Float32(x).ir_value()))
+
+def _fsub(a, b):
+    return fx.Float32(arith.subf(fx.Float32(a).ir_value(), fx.Float32(b).ir_value(), fastmath=_FM_CONTRACT))
+
+def _fmul(a, b):
+    return fx.Float32(arith.mulf(fx.Float32(a).ir_value(), fx.Float32(b).ir_value(), fastmath=_FM_CONTRACT))
+
+def _fadd(a, b):
+    return fx.Float32(arith.addf(fx.Float32(a).ir_value(), fx.Float32(b).ir_value(), fastmath=_FM_CONTRACT))
+
+def _fdiv(a, b):
+    return fx.Float32(arith.divf(fx.Float32(a).ir_value(), fx.Float32(b).ir_value(), fastmath=_FM_CONTRACT))
+
+def _vmulf(a_ir, b_ir):
+    """Vector mulf with contract fastmath — enables FMA fusion, avoids v_mul_f32_e64."""
+    return arith.mulf(a_ir, b_ir, fastmath=_FM_CONTRACT)
 
 
 def _permlane32_reduce(x, mode):
@@ -1059,30 +1076,24 @@ def flex_attn_fwd_gfx950_kernel(
         return o_out
 
     def softmax_start(frag_S_in, m_i_in):
-        # Pre-scale S by log2e, return scaled scores as a list of SSA values.
         _sl2e_vec = Vec.from_elements([scale_log2e], fx.Float32).broadcast_to(16)
         s_elems = [frag_S_in[i] for i in range_constexpr(n_c)]
         s_scaled = Vec.from_elements(s_elems, fx.Float32) * _sl2e_vec
         s_out = [s_scaled[i] for i in range_constexpr(n_c)]
-        # Max reduce + cross-lane
         tile_max = s_out[0]
         for i in range_constexpr(1, n_c):
             tile_max = tile_max.maximumf(s_out[i])
         tile_max = _permlane32_reduce(tile_max, "max")
-        # m_new and correction factor (return m_new; do not mutate m_i_in in place).
         m_new = m_i_in[0].maximumf(tile_max)
         corr_scalar = _hw_exp2(m_i_in[0] - m_new)
         return corr_scalar, s_out, m_new
 
     def softmax_finish(s_scaled, m_i_in, l_i_in, o_accs_in, corr_scalar):
-        # s_scaled: list of n_c pre-scaled SSA values from softmax_start.
         m_new = m_i_in[0]
         p_elems = [_hw_exp2(s_scaled[i] - m_new) for i in range_constexpr(n_c)]
-        # Sum reduce + cross-lane
         p_vec = Vec.from_elements(p_elems, fx.Float32)
         local_sum = p_vec.reduce("add", init_val=fx.Float32(0.0), fastmath=_FM)
         local_sum = _permlane32_reduce(local_sum, "sum")
-        # l_i update + O rescale (functional; no in-place mutation).
         corr = [corr_scalar]
         l_new = l_i_in[0] * corr_scalar + local_sum
         l_i_out = [l_new] + [l_i_in[r] for r in range_constexpr(1, npair)]
