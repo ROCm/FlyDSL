@@ -1,19 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""MXFP8 (a8w8, per-1x32 E8M0 block-scaled fp8 x fp8) dense GEMM host entry, gfx950.
-
-The device kernel lives in ``kernels/gemm/fp8_gemm_8wave.py`` as the block-scale
-mode of the shared HipKittens FP8_8wave pipeline (``compile_mxfp8_gemm_8w``).
-This module keeps the dense host wrapper: raw E8M0 -> broadcast-int32 scale
-preshuffle fused into the GEMM launch, plus per-shape autotune and workspace
-caching. Ported from Primus-Turbo PR AMD-AGI/Primus-Turbo#390.
-"""
+"""MXFP8 (a8w8, per-1x32 E8M0 block-scaled fp8 x fp8) dense GEMM host entry, gfx950."""
 
 import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from kernels.common.tensor_shim import _run_compiled
 
 # Shared fp8 GEMM primitives plus the merged mxfp8 kernel builder (block-scale mode
 # of the shared 8-wave pipeline) from fp8_gemm_8wave.py.
@@ -54,19 +48,12 @@ _PRESHUF_BLK = 256  # preshuffle kernel block size (matches build_preshuffle_ab_
 
 # (K, bm, gm, xcd, gn, cbsz, blgp, out_fp16) -> launch_mxfp8_fused (preshuffle+gemm jit)
 _MXFP8_FUSED_CACHE: dict = {}
-_MXFP8_AT_CACHE: dict = {}  # (M,N,K,bm,gm,xcd,gn,cbsz,blgp,out_fp16) -> [raw_launch, compiled_or_None]
 # (M, N, K128, device, stream) -> (a_sp, b_sp, a_blocks, a_ngrp, b_ngrp). Caller-owned
 # scale workspace (turbo-style): the fused stub's preshuffle writes a_sp/b_sp then the
 # gemm reads them, in stream order, so reuse across same-shape calls on one stream is safe.
 _MXFP8_WS_CACHE: dict = {}
 
-# Per-shape NT autotune candidates (BLOCK_M, GROUP_M, num_xcd); BLOCK_N fixed 256.
-# BLOCK_M=128 doubles the tiles (fills the CUs on skinny/small shapes), 256 wins big
-# square / B-streaming; GROUP_M is the per-XCD L2-reuse super-block depth.
-# BLOCK_M fixed at 256 (n_tiles_a = 256//64 = 4): the A-scale preshuffle layout is
-# bm-dependent and the fused stub preshuffles the raw E8M0 scales to int32 (one fixed
-# config) before the gemm, so the gemm cannot re-pack per candidate -> BLOCK_M constant.
-# autotune sweeps only GROUP_M / num_xcd / group_n (none of which change the layout).
+# Per-shape NT autotune candidates (BLOCK_M, GROUP_M, num_xcd);
 _MXFP8_NT_CANDIDATES = [
     (256, 4, 8),
     (256, 8, 8),
@@ -76,39 +63,16 @@ _MXFP8_NT_CANDIDATES = [
 _MXFP8_AUTOTUNE_CACHE: dict = {}  # (M,N,K,out_dtype,cbsz,blgp) -> (BLOCK_M, GROUP_M, num_xcd, group_n)
 
 
-def _mx_nt_gn_cands(N):
-    """NT 2D N-band candidate widths for the autotune stage-2 sweep. The seed band
-    (gn=0, NT's 1D swizzle) is measured separately as the baseline, so the final
-    pick can never regress. Only offer a band when there are >= 2*gn 256-col
-    N-blocks (else the band can't create the cross-tile B reuse it exists for).
-    Winners are shape-dependent (NT: 7B GateUp gn16, 70B QKV gn8/16), so the
-    per-shape bench picks rather than a single heuristic. Set env MX_DISABLE_NT_GN
-    to force the seed band (NT -> 1D swizzle)."""
+def _mxfp8_nt_gn_cands(N):
     import os
 
     if os.environ.get("MX_DISABLE_NT_GN"):
         return []
     n_blocks = (N + _BLOCK_N - 1) // _BLOCK_N
-    # gn=32 was probed and dropped: its only win (NT 7B_GateUp +1.7% over gn16) is
-    # coupled to tile (256,4), but stage-1 picks the tile at the seed band and lands
-    # on (256,8) there, so the gn=32 win isn't reliably reachable — not worth the
-    # extra autotune compile on every N>=16384 shape. {4,8,16} captures the robust
-    # wins. (A fuller tile x gn cross-sweep could reach it but costs far more.)
     return [g for g in (4, 8, 16) if n_blocks >= 2 * g]
 
 
 def _compile_mxfp8_fused(K, bm, gm, xcd, gn=0, cbsz=0, blgp=0, out_fp16=False):
-    """Build the turbo-style fused @flyc.jit ``launch_mxfp8_fused``: ONE host stub
-    that enqueues the A+B scale preshuffle kernel and then the NT mxfp8 GEMM kernel
-    on the same stream (single Python dispatch, no separate preshuffle launch, no
-    CPU sync). The preshuffle repacks raw E8M0 (int32-viewed) into the caller-owned
-    a_sp / b_sp workspace; the gemm reads it in stream order. gn = autotuned 2D
-    N-band width (0 = 1D swizzle); cbsz/blgp = per-operand fp8 format (0=E4M3,1=E5M2).
-
-    NOTE: never name this jit (or any module global) ``launch`` -- the ``.launch()``
-    method attribute lands in co_names and the cache-key dependency walker would
-    resolve a module-global ``launch`` back to this JitFunction (infinite recursion).
-    """
     K128 = K // 128
     pre_kern, n_kt = build_preshuffle_ab_kernel(K128)
     gemm_kern, BM, BN, wpe = _build_mxfp8_nt_kernel(
@@ -168,13 +132,7 @@ def _get_mxfp8_fused_launch(K, bm, gm, xcd, gn=0, cbsz=0, blgp=0, out_fp16=False
     return launch
 
 
-def _get_mx_workspace(M, N, K128, device, stream):
-    """Caller-owned scale workspace (a_sp/b_sp) + the preshuffle launch dims, cached
-    by (M, N, K128, device, stream). a_sp/b_sp are flat int32 buffers the fused stub's
-    preshuffle writes and the gemm reads; sizing mirrors the A (layout-1) / combined-B
-    (layout-3) repack (A: cdiv(M,64) groups; B: cdiv(N,256)*4 groups; each group*K128*256
-    i32). cdiv for A (not M//64): a partial last 64-row group covers general (non-64) M,
-    the preshuffle masks its OOB rows to 0 and the gemm StoreC drops their output."""
+def _get_mxfp8_workspace(M, N, K128, device, stream):
     key = (M, N, K128, device, stream)
     e = _MXFP8_WS_CACHE.get(key)
     if e is None:
@@ -191,15 +149,6 @@ def _get_mx_workspace(M, N, K128, device, stream):
 def _autotune_mxfp8(
     a8, b8, out_view, a_raw, b_raw, a_sp, b_sp, M, N, K, a_blocks, a_ngrp, b_ngrp, out_dtype, cbsz=0, blgp=0
 ):
-    """First-call micro-bench of the candidates for (M,N,K); cache the fastest cfg by
-    shape. Returns (BLOCK_M, GROUP_M, num_xcd, group_n). Each candidate times the FUSED
-    stub (preshuffle + gemm): the preshuffle config is fixed (same K128) so it is a
-    constant offset across candidates and the gemm-config ranking is preserved.
-
-    Two-stage for NT: stage 1 picks (BM,GM,XCD) at group_n=0 (1D swizzle); stage 2
-    fixes that tile and sweeps the 2D N-band width group_n. gn=0 is measured in
-    stage 1, so the staged pick can never regress vs the gn-less NT path — it only
-    captures the big-/mid-N L2-reuse win on shapes where a band helps."""
     key = (M, N, K, out_dtype, cbsz, blgp)
     _ofp16 = out_dtype == torch.float16
     cached = _MXFP8_AUTOTUNE_CACHE.get(key)
@@ -237,7 +186,7 @@ def _autotune_mxfp8(
         )
     # Stage 2: sweep 2D N-band width; adopt only if it beats re-measured seed by >1.5%.
     # gn=0 wins by default (bgn=seed_gn); sweep only visits non-seed bands.
-    gn_cands = _mx_nt_gn_cands(N)
+    gn_cands = _mxfp8_nt_gn_cands(N)
     if gn_cands:
         bm, gm, xcd, _ = best
 
@@ -255,7 +204,7 @@ def _autotune_mxfp8(
     return best
 
 
-def gemm_mxfp8_flydsl_kernel(
+def gemm_mxfp8(
     a: torch.Tensor,
     a_scale: torch.Tensor,
     b: torch.Tensor,
@@ -265,20 +214,7 @@ def gemm_mxfp8_flydsl_kernel(
     trans_b: bool = True,
     out_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
-    """MXFP8 (per-1x32 E8M0 block-scaled) dense GEMM, gfx950. Returns C [M,N].
-
-    NT only (trans_a=False, trans_b=True): A [M,K], B [N,K], C = a @ b^T.
-
-    ``a_scale`` / ``b_scale`` are the RAW E8M0 block scales ([M, K//32] / [N, K//32],
-    uint8/e8m0): this kernel preshuffles them to the broadcast int32 layout itself,
-    fused into the GEMM launch (turbo-style single dispatch -- one @flyc.jit host stub
-    enqueues the A+B preshuffle kernel then the gemm kernel on the same stream, with a
-    caller-owned int32 workspace, so there is no separate preshuffle launch and no CPU
-    sync). The quant emits only raw E8M0 scales.
-
-    Constraints: K % 128 == 0 and K >= 256; M >= 1; N >= 1 (general M/N: the A-scale
-    preshuffle / gemm size A by cdiv(M,64) and bound the partial tail by the StoreC clamp).
-    """
+    """MXFP8 (per-1x32 E8M0 block-scaled) dense GEMM, gfx950. Returns C [M,N]."""
     assert a.dim() == 2 and b.dim() == 2, "a, b must be 2D"
     assert out_dtype in (torch.bfloat16, torch.float16), "mxfp8 FlyDSL store emits bf16/fp16"
     # Per-operand fp8 format -> MFMA cbsz(srcA)/blgp(srcB): 0=E4M3, 1=E5M2.
@@ -301,38 +237,20 @@ def gemm_mxfp8_flydsl_kernel(
     assert a_scale.shape[1] == K // 32 and b_scale.shape[1] == K // 32, "raw E8M0 scales are [dim, K//32]"
 
     K128 = K // 128
-    # Raw E8M0 byte scales viewed little-endian as flat int32 [dim*K128] (the preshuffle
-    # kernel reads grow*K128+gk); contiguous straight out of quant, copy only if a view broke it.
     a_raw = (a_scale if a_scale.is_contiguous() else a_scale.contiguous()).view(torch.int32).reshape(-1)
     b_raw = (b_scale if b_scale.is_contiguous() else b_scale.contiguous()).view(torch.int32).reshape(-1)
     out = torch.empty((M, N), dtype=out_dtype, device=a.device)
-    # Keep 2D int8 views (NOT flat 1D): FlyDSL marshals each shape dim as int32, so a
-    # 1D [M*K] view overflows when M*K > 2^31. The kernel addresses via i64 SRD re-base
-    # (extract_base_index reads only the base ptr), so the 2D shape is just metadata.
     a8 = a.contiguous().view(torch.int8)
     b8 = b.contiguous().view(torch.int8)
     stream = torch.cuda.current_stream()
-    a_sp, b_sp, a_blocks, a_ngrp, b_ngrp = _get_mx_workspace(M, N, K128, a.device, stream)
-    # Per-shape cfg: first call benches GROUP_M/num_xcd/group_n (BLOCK_M fixed 256) on
-    # the fused stub, caches the winner by (M,N,K).
+    a_sp, b_sp, a_blocks, a_ngrp, b_ngrp = _get_mxfp8_workspace(M, N, K128, a.device, stream)
     bm, gm, xcd, gn = _autotune_mxfp8(
         a8, b8, out, a_raw, b_raw, a_sp, b_sp, M, N, K, a_blocks, a_ngrp, b_ngrp, out_dtype, cbsz, blgp
     )
     launch = _get_mxfp8_fused_launch(K, bm, gm, xcd, gn, cbsz=cbsz, blgp=blgp, out_fp16=out_fp16)
     args = (a8, b8, out, a_raw, b_raw, a_sp, b_sp, M, N, a_blocks, a_ngrp, b_ngrp, stream)
-    # [raw, compiled]: raw for CUDA-graph capture (flyc.compile regresses under capture);
-    # compiled for eager (skips per-call jit dispatch overhead). Mirrors _GROUPED_AT_CACHE.
-    at_key = (M, N, K, bm, gm, xcd, gn, cbsz, blgp, out_fp16)
-    entry = _MXFP8_AT_CACHE.get(at_key)
-    if entry is None:
-        entry = [launch, None]
-        _MXFP8_AT_CACHE[at_key] = entry
-    raw, compiled = entry
     if torch.cuda.is_current_stream_capturing():
-        raw(*args)
+        launch(*args)
     else:
-        if compiled is None:
-            compiled = flyc.compile(raw, *args)
-            entry[1] = compiled
-        compiled(*args)
+        _run_compiled(launch, *args)
     return out

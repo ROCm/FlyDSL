@@ -418,30 +418,6 @@ def compile_mxfp8_gemm_8w(
     blgp: int = 0,  # srcB fp8 format: 0=E4M3, 1=E5M2
     out_fp16: bool = False,  # fp16 output (else bf16)
 ):
-    """MXFP8 (per-1x32 E8M0 block-scaled) NT GEMM builder for gfx950.
-
-    Same HipKittens FP8_8wave pipeline as ``compile_fp8_gemm_8w`` (both A and B
-    staged in LDS, double-buffered). Deltas vs the tensorwise path:
-
-      * scaled MFMA (``MfmaScale16x16x128``) with a per-K-iteration E8M0 scale
-        operand per operand tile, plus a 1-deep scale prefetch, vs the unscaled
-        ``Mfma16x16x128``.
-      * plain FP32->BF16/FP16 store (all scaling already folded into the
-        accumulator by the MMA), vs the scaled ``StoreC`` epilogue.
-      * i64 SRD re-base + XCD / block_mn tile swizzle in the dense wrapper.
-
-    Scale operand semantics (gfx950): the MMA takes one i32 scale per operand,
-    holding 4 packed E8M0 bytes -- one byte per 32-K block. A single 16x16x128
-    MFMA spans K=128 == 4 micro-blocks, so exactly one i32 scale per
-    (row/col tile, K-iteration).
-
-    Scale tensors are passed pre-packed (broadcast int32) from the fused host
-    stub's preshuffle: A_scale int32 [M, K//128], B_scale int32 [N, K//128].
-
-    Returns ``(bare_kernel, BLOCK_M, BLOCK_N, waves_per_eu)``: the caller's
-    ``@flyc.jit`` stub sizes the grid + value_attrs and issues the preshuffle
-    kernel + this GEMM on one stream.
-    """
     BLOCK_K = 128
     assert GROUP_M >= 1
     assert BLOCK_M >= 128 and BLOCK_N >= 256 and BLOCK_M % 128 == 0 and BLOCK_N % 256 == 0
@@ -715,7 +691,4 @@ def compile_mxfp8_gemm_8w(
         store_c.store(c10_frag, base_row + LDS_BLOCK_M, base_col + 0)
         store_c.store(c11_frag, base_row + LDS_BLOCK_M, base_col + LDS_BLOCK_N)
 
-    # Bare kernel (NOT a launch): the fused factory issues it + the preshuffle kernel
-    # from a single @flyc.jit host stub. BLOCK_M/BLOCK_N/waves_per_eu are returned so
-    # that stub can size the grid + value_attrs.
     return kernel_mxfp8_nt, BLOCK_M, BLOCK_N, waves_per_eu

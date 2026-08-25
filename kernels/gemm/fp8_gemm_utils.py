@@ -267,14 +267,6 @@ class Mfma16x16x128:
 
 # ═══════════════════════════════════════════════════════════════════════════
 # MXFP8 (per-1x32 E8M0 block-scaled) dense-GEMM primitives.
-#
-# Copied from Primus-Turbo PR AMD-AGI/Primus-Turbo#390 (primus_turbo/flydsl/
-# utils/gemm_helper.py) as the initial faithful port; to be refactored into the
-# FlyDSL idiom incrementally without perf regression. The mxfp8 dense GEMM is
-# itself derived from HipKittens FP8_8wave
-# (https://github.com/HazyResearch/HipKittens/tree/main/kernels/cdna4/gemm/mxfp8),
-# via kernels/gemm/fp8_gemm_8wave.py (tensorwise), with the E8M0 scale fed to
-# v_mfma_scale_f32_16x16x128_f8f6f4 per K-iteration.
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -285,13 +277,7 @@ def _as_index(v):
 
 
 def _readfirstlane_i32(v):
-    """Force a wave-uniform-in-value i32 into an SGPR via s_readfirstlane.
-
-    The output buffer descriptor's num_records is uniform across a tile's wave,
-    but the compiler's divergence analysis treats a per-tile group-scan value as
-    divergent -> the SRD lands in VGPRs -> every buffer_store is wrapped in a
-    readfirstlane/saveexec waterfall loop. Pinning collapses the SRD to scalar
-    regs and drops the per-store waterfall."""
+    """Force a wave-uniform-in-value i32 into an SGPR via s_readfirstlane."""
     raw = _raw(v)
     r = rocdl.readfirstlane(res=raw.type, src=raw)
     rv = r.result if hasattr(r, "result") else r
@@ -299,11 +285,6 @@ def _readfirstlane_i32(v):
 
 
 def make_fp8_buffer_tensor_rebased(arg_i8, fp8_ir_t, base_elems, num_records_bytes):
-    """make_fp8_buffer_tensor with the SRD base advanced by ``base_elems`` (fp8/int8
-    = 1 byte/elem), in 64-bit. Folds a per-tile huge element offset into the
-    descriptor base so the buffer voffset/soffset stay small int32 -> addresses
-    inputs > 2^31 elems / > 4GB that the flat-shape pack and 32-bit voffset cannot.
-    ``num_records_bytes`` bounds the SRD from the shifted base (HW OOB clamp)."""
     base = arith.index_cast(T.i64, _buffer_ops.extract_base_index(arg_i8))
     # Pin the wave-uniform shifted base + num_records to SGPRs: the group-scan base reads
     # as VGPR -> VGPR SRD -> readfirstlane waterfall per K-loop load. Pin keeps it scalar.
@@ -327,15 +308,6 @@ def make_fp8_buffer_tensor_rebased(arg_i8, fp8_ir_t, base_elems, num_records_byt
 
 
 class MfmaScale16x16x128:
-    """16x16x128 f8f6f4 MFMA with per-block E8M0 scale operands, via the ``fx.gemm``
-    scaled-MMA atom idiom (as in ``mxfp4_8wave``).
-
-    ``cbsz`` / ``blgp`` select the srcA / srcB fp8 sub-format (0 = E4M3, 1 = E5M2), so
-    the ``MFMA_Scale`` atom is built per-operand dtype. The scale preshuffle emits the
-    broadcast E8M0 layout (same byte in all 4), so ``opsel`` stays 0 and one atom covers
-    the K=128 (4 x 32-K micro-block) MFMA with one i32 scale per operand.
-    """
-
     def __init__(self, n_tiles_a, n_tiles_b, cbsz=0, blgp=0):
         self.zero_value = Vec.filled(4, 0.0, fx.Float32)
         self.n_tiles_a = n_tiles_a
@@ -364,8 +336,8 @@ class MfmaScale16x16x128:
             a_frag,
             b_frag,
             c_frag,
-            scale_a=Vec.from_elements([ArithValue(sa)], fx.Int32),
-            scale_b=Vec.from_elements([ArithValue(sb)], fx.Int32),
+            scale_a=Vec.from_elements([fx.Int32(sa)], fx.Int32),
+            scale_b=Vec.from_elements([fx.Int32(sb)], fx.Int32),
         )
         return c_frag.load().ir_value()
 
@@ -383,12 +355,6 @@ class MfmaScale16x16x128:
 
 
 class ScaleBComb:
-    """Combined B scale loader (pairs with the combined-B preshuffle, layout 3:
-    ``build_preshuffle_ab_kernel`` B region).
-
-    One dwordx4 per lane returns [s0,s1,s2,s3]; (s0,s1)=b0 sub-tiles, (s2,s3)=b1.
-    """
-
     def __init__(self, sp_tensor, dim, K):
         self.K128 = K // 128  # number of K-groups (one i32 per K-iter)
         self.lane = fx.thread_idx.x % 64
@@ -407,42 +373,17 @@ class ScaleBComb:
 
 
 class ScaleS2R:
-    """Per-lane E8M0 scale loader for v_mfma_scale_f32_16x16x128 (preshuffled).
-
-    The 16x16x128 MFMA distributes K=128 so lane ``(g, r)`` with
-    ``g = lane//16`` (0..3) and ``r = lane%16`` holds the A/B data for matrix
-    row/col ``r`` and the 32-K micro-block ``g``. With opsel==0 the hardware
-    samples byte 0 of each lane's scale operand, so lane ``(g, r)`` just needs
-    ``scale[r, 4k+g]`` in a register.
-
-    To make that a single fully-coalesced dword load with no per-lane ALU, the
-    host pre-shuffles the raw E8M0 [DIM, K//32] into
-
-        SP[rt, k, lane] = broadcast_u8_to_u32( scale[rt*16 + lane%16, 4k + lane//16] )
-
-    laid out int32 [DIM//16, K//128, 64]. For row-tile ``rt`` and K-iter ``k``
-    the 64 lanes of a wave read 64 contiguous dwords. The A-operand preshuffle
-    (layout 1) is produced by ``build_preshuffle_ab_kernel`` (A region), fused into
-    the mxfp8 GEMM launch.
-    """
+    """Per-lane E8M0 scale loader for v_mfma_scale_f32_16x16x128 (preshuffled)."""
 
     def __init__(self, sp_tensor, dim, K, n_tiles):
         self.K128 = K // 128  # number of K-groups (one i32 per K-iter)
         self.n_tiles = n_tiles
         self.group_span = 16 * n_tiles
         self.lane = fx.thread_idx.x % 64  # == (lane//16)*16 + lane%16
-        # cdiv (not floor): a non-group_span-multiple ``dim`` (general M) still needs the
-        # partial last 64-row group resident so its valid rows read real scales; the
-        # group's OOB rows were preshuffle-masked to 0 and StoreC drops their output.
         nbytes = ceildiv(dim, self.group_span) * self.K128 * 64 * n_tiles * 4  # int32 records
         self.rsrc = _buffer_ops.create_buffer_resource(sp_tensor, max_size=False, num_records_bytes=nbytes)
 
     def load(self, base, k):
-        """base: runtime global row/col base for this (region, wave). Returns n_tiles i32.
-
-        One vectorized dword{n_tiles} load: the n_tiles sub-tile scales for this
-        wave at (group, k) are contiguous per lane (A-operand preshuffle layout 1).
-        """
         grp = base // self.group_span
         idx = ((grp * self.K128 + k) * 64 + self.lane) * self.n_tiles
         v = Vec(_buffer_ops.buffer_load(self.rsrc, idx, vec_width=self.n_tiles, dtype=T.i32))
@@ -450,11 +391,6 @@ class ScaleS2R:
 
 
 def make_row_band_resource(c_base, base_row, c_rows, c_cols, elem_bytes):
-    """Buffer resource re-based at this workgroup's row band [base_row, c_rows), in
-    64-bit ``index`` arith, so a 32-bit offset only spans the band (handles outputs
-    whose flat M*N exceeds 2^31 / 4GB). base_row clamped to [0, c_rows] so a
-    partial/fully-OOB last row tile bases 0 records (its stores drop). base/num_records
-    are pinned to SGPRs via ``_readfirstlane_i32`` (see its docstring)."""
     elem = arith.index(elem_bytes)
     cols_i = _as_index(c_cols)
     row_i = _as_index(base_row)
@@ -469,17 +405,6 @@ def make_row_band_resource(c_base, base_row, c_rows, c_cols, elem_bytes):
 
 
 class StoreCPerTensor:
-    """Scalar output store: out = (acc [* a_scale * b_scale]).to(out_ty).
-
-    Shared by the per-tensor GEMM and the mxfp8 GEMM. ``A_scale``/``B_scale`` are
-    optional: when given, both are read once from length-1 buffers and applied
-    uniformly (per-tensor); when ``None`` the scale is already folded into the
-    accumulator by the scaled MMA (mxfp8), so the store is plain. The output is
-    re-based per row band in 64-bit index (int64-safe, M*N > 4GB) via
-    ``make_row_band_resource``; columns past c_cols clamp to an OOB index (HW SRD
-    drop). out_ty bf16/fp16; pass C as 2D so its shape packs within int32.
-    """
-
     def __init__(self, A_scale, B_scale, C, c_rows, c_cols, c_idx_fn, n_tiles_a, n_tiles_b, out_ty):
         self.c_rows = c_rows
         self.c_cols = c_cols
@@ -535,9 +460,6 @@ def make_value_attrs(waves_per_eu, agpr_alloc, fwg):
 
 
 def xcd_remap_pid(pid, total_pids, num_xcd):
-    """Remap the tile id so same-XCD workgroups gather into one contiguous
-    block, keeping each XCD's L2 reuse within that XCD. Bijection over
-    [0, total_pids); identity when num_xcd <= 1."""
     if num_xcd <= 1:
         return pid
     per_xcd = total_pids // num_xcd  # floor
@@ -575,21 +497,10 @@ def block_mn(pid, num_pid_m, n_blocks, GM, GN):
     return fpm + (pig % gsm), pig // gsm
 
 
-# E8M0 scale preshuffle (FlyDSL, LDS-tiled): raw E8M0 [DIM,K//32] -> preshuffled int32.
-# Tile by k: coalesced load of 64 rows x KT cols into LDS, coalesced dwordx4 store of the
-# [KT,64,4] block (wave-lane transpose via LDS, both DRAM sides coalesced). n_tiles=4.
-#
-# The preshuffle is NOT a standalone launch: ``build_preshuffle_ab_kernel`` returns the
-# bare @flyc.kernel so the mxfp8 GEMM can launch it + the gemm kernel from ONE @flyc.jit
-# host stub (turbo-style single dispatch, scales repacked into a caller-owned workspace
-# in stream order right before the gemm reads them -- no separate Python/launch dispatch).
-
 _PRESHUF_KT = 16  # k-tile (rows*KT dwords staged in LDS per workgroup)
 
 
 def _lds_barrier():
-    # Drain outstanding LDS writes (lgkmcnt) BEFORE the workgroup barrier, else
-    # readers may observe stale LDS (a bare s_barrier doesn't wait on ds_write).
     _llvm.inline_asm(
         res=None,
         operands_=[],
@@ -600,9 +511,6 @@ def _lds_barrier():
 
 
 def _emit_lds_repack(is_a, grp, k0, tile, rin, rout, dim, K128, KT, tid, BLK):
-    # LDS-tiled transpose body (one workgroup, one (grp,k-chunk)); all vars local so it
-    # is safe inside a workgroup-uniform kernel `if`. KT/BLK chosen so TILE=NOUT are exact
-    # multiples of BLK -> no `if` guard needed (data bounds via the load/store masks).
     NT = 4
     TILE = 64 * KT
     NOUT = KT * 64
@@ -641,17 +549,7 @@ def _emit_lds_repack(is_a, grp, k0, tile, rin, rout, dim, K128, KT, tid, BLK):
 
 
 def build_preshuffle_ab_kernel(K128: int, KT: int = _PRESHUF_KT, BLK: int = 256):
-    """Build the fused A (layout 1) + B-comb (layout 3) scale-preshuffle @flyc.kernel.
-
-    Returns ``(kern, n_kt)``. ``kern`` is a bare KernelFunction (NOT a launch): the
-    mxfp8 GEMM factory calls it inside its own @flyc.jit so the preshuffle + gemm
-    issue from a single host stub. One workgroup repacks one (group, KT-chunk) of
-    raw E8M0 [DIM, K//32] (viewed int32 [DIM, K128]) into the broadcast int32 layout
-    the gemm's ScaleS2R / ScaleBComb consume; region by block id ([0,a_blocks)->A,
-    rest->B), bid being workgroup-uniform so the branch + its LDS barrier are
-    divergence-free. n_kt = ceildiv(K128, KT) is the per-group block count; the
-    caller sizes the grid as ``a_blocks + b_ngrp * n_kt``.
-    """
+    """Build the fused A (layout 1) + B-comb (layout 3) scale-preshuffle @flyc.kernel."""
     TILE = 64 * KT
     n_kt = ceildiv(K128, KT)
 
