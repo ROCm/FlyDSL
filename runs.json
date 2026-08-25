@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-25T02:59:41Z",
+ "updated": "2026-08-25T03:28:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32804792911,
+   "pr": null,
+   "commit": "b33938b00ed444f9719805f910f094a4d1858cbf",
+   "branch": "main",
+   "event": "push",
+   "title": "[Kernel] Add opt-in autotuning for Softmax (#1022)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32804792911",
+   "created_at": "2026-08-25T03:20:24Z",
+   "updated_at": "2026-08-25T03:22:39Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 32799153612,
    "pr": 1064,
@@ -10,11 +25,11 @@
    "branch": "upstream/pa-64bit-cache-offsets",
    "event": "pull_request",
    "title": "[Bugfix][PA] Fix D192 query staging and 64-bit cache offsets",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32799153612",
    "created_at": "2026-08-25T01:51:38Z",
-   "updated_at": "2026-08-25T02:17:14Z",
+   "updated_at": "2026-08-25T03:26:15Z",
    "actor": "sammysun0711",
    "jobs": [
     {
@@ -29,11 +44,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-25T02:06:35Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32799153612/job/97659116072"
+     "completed_at": "2026-08-25T03:26:15Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32799153612/job/97659116072",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -138,7 +154,7 @@
   },
   {
    "run_id": 32790217031,
-   "pr": 1022,
+   "pr": null,
    "commit": "692b0b132ce3ad60cba6bba1363b393e1912beb9",
    "branch": "jhinpan/softmax-autotune",
    "event": "pull_request",
@@ -660,7 +676,7 @@
   },
   {
    "run_id": 32710532813,
-   "pr": 1022,
+   "pr": null,
    "commit": "d50e1e45af4d9068aa1e05c3f01614157cee4f17",
    "branch": "jhinpan/softmax-autotune",
    "event": "pull_request",
@@ -1069,7 +1085,7 @@
   },
   {
    "run_id": 32696864649,
-   "pr": 1022,
+   "pr": null,
    "commit": "66dcf5f2c48d9a3022cd246f3273b1b99ccd7a8a",
    "branch": "jhinpan/softmax-autotune",
    "event": "pull_request",
@@ -1935,70 +1951,6 @@
    "updated_at": "2026-08-21T09:27:04Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 32467139450,
-   "pr": 1025,
-   "commit": "d1c669acb0e0256ab6303139864a015ee98f0782",
-   "branch": "dsl-ify-scf-controlflow",
-   "event": "pull_request",
-   "title": "[Kernel] Replace raw scf ops with Python control flow in kernels",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467139450",
-   "created_at": "2026-08-21T09:17:01Z",
-   "updated_at": "2026-08-21T14:31:20Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T10:49:11Z",
-     "completed_at": "2026-08-21T12:49:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467139450/job/96747437756",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T12:17:23Z",
-     "completed_at": "2026-08-21T13:29:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467139450/job/96747437762",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T10:48:57Z",
-     "completed_at": "2026-08-21T11:03:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467139450/job/96747437837",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-21T13:29:54Z",
-     "completed_at": "2026-08-21T14:31:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467139450/job/96785904027"
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-21T13:29:54Z",
-     "completed_at": "2026-08-21T14:23:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467139450/job/96785904108"
-    }
-   ]
   }
  ]
 }
