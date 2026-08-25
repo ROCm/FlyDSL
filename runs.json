@@ -1,8 +1,52 @@
 {
  "schema": 1,
- "updated": "2026-08-25T03:35:35Z",
+ "updated": "2026-08-25T05:47:48Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32810503599,
+   "pr": 1061,
+   "commit": "bf3e121c4561fcd6f6ffa89259bbcbf9161d1ec9",
+   "branch": "gfx1250/bf16-gemm",
+   "event": "pull_request",
+   "title": "[gfx1250] Add bf16 gemm",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32810503599",
+   "created_at": "2026-08-25T04:50:44Z",
+   "updated_at": "2026-08-25T05:06:10Z",
+   "actor": "aoli26",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-25T05:06:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32810503599/job/97691416020"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-25T05:06:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32810503599/job/97691416035"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-25T05:06:00Z",
+     "completed_at": "2026-08-25T05:25:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32810503599/job/97691416036",
+     "log_fetch_failed": true
+    }
+   ]
+  },
   {
    "run_id": 32804792911,
    "pr": null,
@@ -10,13 +54,44 @@
    "branch": "main",
    "event": "push",
    "title": "[Kernel] Add opt-in autotuning for Softmax (#1022)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32804792911",
    "created_at": "2026-08-25T03:20:24Z",
-   "updated_at": "2026-08-25T03:22:39Z",
+   "updated_at": "2026-08-25T05:45:32Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-25T04:00:54Z",
+     "completed_at": "2026-08-25T05:45:31Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32804792911/job/97679789538",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-25T04:01:08Z",
+     "completed_at": "2026-08-25T05:13:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32804792911/job/97679789614",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-25T04:00:56Z",
+     "completed_at": "2026-08-25T04:23:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32804792911/job/97679789627",
+     "log_fetch_failed": true
+    }
+   ]
   },
   {
    "run_id": 32799153612,
@@ -144,11 +219,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-25T01:56:11Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32790747134/job/97657213172"
+     "completed_at": "2026-08-25T03:47:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32790747134/job/97657213172",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1936,21 +2012,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 32467612345,
-   "pr": null,
-   "commit": "ff196ddfd5bba243166140a6752d5df3a9af296c",
-   "branch": "main",
-   "event": "push",
-   "title": "[Kernel] Replace raw scf ops with Python control flow in kernels (#1025)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467612345",
-   "created_at": "2026-08-21T09:22:56Z",
-   "updated_at": "2026-08-21T09:27:04Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
