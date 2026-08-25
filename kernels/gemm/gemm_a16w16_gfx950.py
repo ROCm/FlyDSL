@@ -285,6 +285,7 @@ def async_load_to_lds(
     ) = context
     elem_bytes = src_base.dtype.width // 8
     lds_ptr = lds_base + fx.Int32(wave_offset) // elem_bytes
+    g2s_copy_layout = fx.make_layout(async_load_vec_size, 1)
     for i in range_constexpr(load_iters):
         global_tid = block_threads * i + tid
         if const_expr(is_k_major):
@@ -317,9 +318,8 @@ def async_load_to_lds(
             global_offset = global_k_idx * leading_stride + safe_global_outer_idx
         else:
             global_offset = safe_global_outer_idx * leading_stride + global_k_idx
-        unit_layout = fx.make_layout(1, 1)
-        src = fx.make_view(src_base + global_offset, unit_layout)
-        dst = fx.make_view(lds_ptr, unit_layout)
+        src = fx.make_view(src_base + global_offset, g2s_copy_layout)
+        dst = fx.make_view(lds_ptr, g2s_copy_layout)
         rocdl.sched_barrier(0)
         fx.copy_atom_call(copy_atom, src, dst)
         rocdl.sched_barrier(0)
