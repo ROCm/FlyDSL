@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-25T07:49:19Z",
+ "updated": "2026-08-25T08:58:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32829004377,
+   "pr": 1067,
+   "commit": "d759fdfec91fff22692b2899f0b9f91830a2dd12",
+   "branch": "mxfp8_8w",
+   "event": "pull_request",
+   "title": "[MI355]support mxfp8 8wave pipeline",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32829004377",
+   "created_at": "2026-08-25T08:53:44Z",
+   "updated_at": "2026-08-25T08:56:08Z",
+   "actor": "solinzby1",
+   "jobs": []
+  },
   {
    "run_id": 32820821407,
    "pr": 1032,
@@ -20,20 +35,22 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-25T07:36:33Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32820821407/job/97723053777"
+     "completed_at": "2026-08-25T08:50:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32820821407/job/97723053777",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-25T07:36:06Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32820821407/job/97723053870"
+     "completed_at": "2026-08-25T07:57:20Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32820821407/job/97723053870",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -1997,21 +2014,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 32481172063,
-   "pr": null,
-   "commit": "f4c6e8c67764afc842149cab4e2da5ffd9191333",
-   "branch": "convolution",
-   "event": "pull_request",
-   "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32481172063",
-   "created_at": "2026-08-21T12:17:21Z",
-   "updated_at": "2026-08-21T12:30:45Z",
-   "actor": "amd-nprotaso",
-   "jobs": []
   }
  ]
 }
