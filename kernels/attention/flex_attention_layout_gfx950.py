@@ -1011,28 +1011,12 @@ def flex_attn_fwd_gfx950_kernel(
                     frag_S_acc[None, m, n],
                 )
 
-    _qk_serpentine = tuple(
-        c + (1 - j) if (c // 2) % 2 else c + j
-        for c in range(0, _qk_k_reps, 2) for j in range(2)
-    )
-    _qk_serpentine_rev = tuple(reversed(_qk_serpentine))
-
     def gemm1_qk_unrolled(frag_Q_in, frag_K_in):
-        """Per-wave serpentine QK GEMM matching read_k_work bank diversity."""
-        from flydsl._mlir import ir
-        from flydsl._mlir.dialects import scf
+        """QK GEMM with explicit per-ki MFMA calls (register-only, no bank concerns)."""
         frag_S_out = thr_qk.make_fragment_C(sP)
         frag_S_out.fill(0.0)
-        _is_wave0 = (fx.Int32(local_tid // GFX950_WAVE_SIZE) & fx.Int32(1)) == fx.Int32(0)
-        _if = scf.IfOp(_is_wave0.ir_value(), [], has_else=True)
-        with ir.InsertionPoint(_if.then_block):
-            for idx in range_constexpr(_qk_k_reps):
-                gemm1_qk_mfma(frag_S_out, frag_Q_in, frag_K_in, _qk_serpentine[idx])
-            scf.YieldOp([])
-        with ir.InsertionPoint(_if.else_block):
-            for idx in range_constexpr(_qk_k_reps):
-                gemm1_qk_mfma(frag_S_out, frag_Q_in, frag_K_in, _qk_serpentine_rev[idx])
-            scf.YieldOp([])
+        for ki in range_constexpr(_qk_k_reps):
+            gemm1_qk_mfma(frag_S_out, frag_Q_in, frag_K_in, ki)
         return [frag_S_out]
 
     # ── Flex score/mask mod application ────────────────────────────────────
