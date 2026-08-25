@@ -873,18 +873,21 @@ def flex_attn_fwd_gfx950_kernel(
     read_v_slot = [_make_read_v(i) for i in range_constexpr(_lds_ring_slots)]
 
     def read_k_work(slot):
-        """Full K tile read: zigzag D-lo/D-hi for cross-wave bank diversity.
+        """Full K tile read: serpentine order for bank diversity.
 
-        Reads ki in order 0,7,1,6,2,5,3,4 so consecutive ds_read_b128
-        in the lgkm queue hit disjoint bank groups (0-7 vs 24-31, 8-15 vs 16-23, etc).
+        Reads ki in order [0,1,3,2,4,5,7,6] — forward 2, backward 2, repeat.
+        Every consecutive pair hits a different LDS bank group.
         """
-        for i in range_constexpr(_k_half):
-            read_k_work_split(ki_count=1, ki_offset=i, slot=slot)
-            read_k_work_split(ki_count=1, ki_offset=_k_iters - 1 - i, slot=slot)
+        for idx in range_constexpr(_k_iters):
+            read_k_work_split(ki_count=1, ki_offset=_k_serpentine[idx], slot=slot)
         return []
 
     _k_iters = int(param.head_dim) // int(param.mma_k)   # 128/16 → 8 ki panels
     _k_half  = _k_iters // 2                             # 4 ki per half (D-lo / D-hi)
+    _k_serpentine = tuple(
+        c + (1 - j) if (c // 2) % 2 else c + j
+        for c in range(0, _k_iters, 2) for j in range(2)
+    )
     _k_frag_retile_0 = tcA_k_lds[0].retile(frag_K[0])
     _k_frag_retile_1 = tcA_k_lds[1].retile(frag_K[1])
 
@@ -997,15 +1000,17 @@ def flex_attn_fwd_gfx950_kernel(
                     frag_S_acc[None, m, n],
                 )
 
-    _qk_k_half = _qk_k_reps // 2
+    _qk_serpentine = tuple(
+        c + (1 - j) if (c // 2) % 2 else c + j
+        for c in range(0, _qk_k_reps, 2) for j in range(2)
+    )
 
     def gemm1_qk_unrolled(frag_Q_in, frag_K_in):
-        """QK GEMM with zigzag ki order matching read_k_work bank diversity."""
+        """QK GEMM with serpentine ki order matching read_k_work bank diversity."""
         frag_S_out = thr_qk.make_fragment_C(sP)
         frag_S_out.fill(0.0)
-        for i in range_constexpr(_qk_k_half):
-            gemm1_qk_mfma(frag_S_out, frag_Q_in, frag_K_in, i)
-            gemm1_qk_mfma(frag_S_out, frag_Q_in, frag_K_in, _qk_k_reps - 1 - i)
+        for idx in range_constexpr(_qk_k_reps):
+            gemm1_qk_mfma(frag_S_out, frag_Q_in, frag_K_in, _qk_serpentine[idx])
         return [frag_S_out]
 
     # ── Flex score/mask mod application ────────────────────────────────────
