@@ -7,6 +7,7 @@
 #include "mlir/Pass/Pass.h"
 
 namespace mlir {
+#define GEN_PASS_DECL_CONVERTROCDLFASTMATHOPSPASS
 #define GEN_PASS_DECL_FLYTOROCDLCONVERSIONPASS
 #define GEN_PASS_DECL_FLYROCDLCLUSTERATTRPASS
 #include "flydsl/Conversion/FlyToROCDL/Passes.h.inc"

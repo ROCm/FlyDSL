@@ -17,15 +17,13 @@ from .gemm_a16w16_gfx950_utils import (
     SPLIT_K_SEMAPHORE_MAX_LEN,
     BlockSwizzle,
     SplitKProtocol,
-    __barrier,
-    buffer_load_lds_inline,
     get_wave_lds_offset,
     make_lds_layout,
     make_transposed_lds_layout,
-    make_wave_lds_ptr,
     run_cached,
     swizzled_col_idx,
     transposed_contiguous_idx,
+    wait_vmcnt_and_barrier,
 )
 
 GEMM_A16W16_DTYPE_FP32 = 1
@@ -264,7 +262,8 @@ def make_gemm_a16w16_gfx950_kernel_name(param: GemmA16W16Gfx950Param):
 
 def async_load_to_lds(
     lds_base,
-    rsrc,
+    src_base,
+    copy_atom,
     lds_layout,
     outer_tile_size,
     outer_bound,
@@ -283,10 +282,9 @@ def async_load_to_lds(
         ldg_x_threads,
         ks_begin,
         block_k,
-        in_data_bytes,
-        async_load_bytes,
     ) = context
-    lds_ptr = make_wave_lds_ptr(lds_base, wave_offset)
+    elem_bytes = src_base.dtype.width // 8
+    lds_ptr = lds_base + fx.Int32(wave_offset) // elem_bytes
     for i in range_constexpr(load_iters):
         global_tid = block_threads * i + tid
         if const_expr(is_k_major):
@@ -316,12 +314,17 @@ def async_load_to_lds(
         global_outer_idx = global_outer_offset + outer_local_idx
         safe_global_outer_idx = (global_outer_idx < outer_bound).select(global_outer_idx, 0)
         if const_expr(is_k_major):
-            global_offset = (global_k_idx * leading_stride + safe_global_outer_idx) * in_data_bytes
+            global_offset = global_k_idx * leading_stride + safe_global_outer_idx
         else:
-            global_offset = (safe_global_outer_idx * leading_stride + global_k_idx) * in_data_bytes
-        buffer_load_lds_inline(rsrc, lds_ptr, global_offset, async_load_bytes)
+            global_offset = safe_global_outer_idx * leading_stride + global_k_idx
+        unit_layout = fx.make_layout(1, 1)
+        src = fx.make_view(src_base + global_offset, unit_layout)
+        dst = fx.make_view(lds_ptr, unit_layout)
+        rocdl.sched_barrier(0)
+        fx.copy_atom_call(copy_atom, src, dst)
+        rocdl.sched_barrier(0)
         if i < load_iters - 1:
-            lds_ptr = lds_ptr + block_threads * async_load_bytes
+            lds_ptr = lds_ptr + block_threads * async_load_vec_size
 
 
 @flyc.jit
@@ -412,7 +415,6 @@ def gemm_a16w16_gfx950_kernel(
     block_threads = param.block_threads
     ldg_a_iters = param.ldg_a_iters
     ldg_b_iters = param.ldg_b_iters
-    ldg_wait_count = ldg_a_iters + ldg_b_iters
     cshuffle_r2g_vec_size = param.cshuffle_r2g_vec_size
     elem_dtype = fx.Float16 if const_expr(param.in_dtype_id == GEMM_A16W16_DTYPE_FP16) else fx.BFloat16
     global_output_dtype = fx.Float32 if const_expr(param.out_dtype_id == GEMM_A16W16_DTYPE_FP32) else elem_dtype
@@ -465,9 +467,6 @@ def gemm_a16w16_gfx950_kernel(
     else:
         bias_buf = None
 
-    a_rsrc = fx.rocdl.get_buffer_rsrc(fx.get_iter(a_buf))
-    b_rsrc = fx.rocdl.get_buffer_rsrc(fx.get_iter(b_buf))
-
     if const_expr(is_split_k):
         splitk_protocol.init(
             semaphore,
@@ -487,6 +486,7 @@ def gemm_a16w16_gfx950_kernel(
 
     uni_copy_atom = fx.make_copy_atom(fx.UniversalCopy128b(), elem_dtype)
     buffer_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_dtype)
+    async_g2s_copy_atom = fx.make_copy_atom(fx.rocdl.cdna4.BufferLoadAsyncLDS128b(), 128)
 
     if const_expr(param.a_is_transposed):
         a_s2r_copy_atom = fx.make_copy_atom(fx.rocdl.cdna4.LDSReadTrans16_64b(), elem_dtype)
@@ -562,14 +562,13 @@ def gemm_a16w16_gfx950_kernel(
         ldg_x_threads,
         ks_begin,
         block_k,
-        in_data_bytes,
-        async_load_bytes,
     )
 
     def async_load_a_to_lds(k_tile, stage):
         async_load_to_lds(
             smem_a + stage * block_m * block_k,
-            a_rsrc,
+            fx.get_iter(a_buf),
+            async_g2s_copy_atom,
             a_lds_layout,
             block_m,
             m,
@@ -584,7 +583,8 @@ def gemm_a16w16_gfx950_kernel(
     def async_load_b_to_lds(k_tile, stage):
         async_load_to_lds(
             smem_b + stage * block_n * block_k,
-            b_rsrc,
+            fx.get_iter(b_buf),
+            async_g2s_copy_atom,
             b_lds_layout,
             block_n,
             n,
@@ -632,30 +632,25 @@ def gemm_a16w16_gfx950_kernel(
     for stage in range_constexpr(stages - 1):
         async_load_b_to_lds(stage, stage)
         async_load_a_to_lds(stage, stage)
+        rocdl.asyncmark()
     rocdl.sched_barrier(0)
-
-    def hot_loop_scheduler():
-        rocdl.sched_vmem(ldg_b_iters + ldg_a_iters)
-        for _ in range_constexpr(k_mma_iters_per_wave):
-            rocdl.sched_dsrd(mma_n_iters)
-            rocdl.sched_dsrd(mma_m_iters)
-            for _ in range_constexpr(mma_m_iters):
-                rocdl.sched_mfma(mma_n_iters)
-        rocdl.sched_barrier(0)
 
     main_loop_end = k_tiles - (stages - 1)
     for k_tile in range(0, main_loop_end, 1):
         current_stage = k_tile % stages
         write_stage = (current_stage + stages - 1) % stages
-        __barrier((stages - 2) * ldg_wait_count)
+        rocdl.wait_asyncmark(stages - 2)
+        rocdl.s_barrier()
         async_load_b_to_lds(k_tile + (stages - 1), write_stage)
         async_load_a_to_lds(k_tile + (stages - 1), write_stage)
+        rocdl.asyncmark()
         compute_stage(current_stage, k_tile)
-        hot_loop_scheduler()
+        rocdl.sched_barrier(0)
 
     current_stage = main_loop_end % stages
     for s in range_constexpr(0, stages - 1):
-        __barrier((stages - 2 - s) * ldg_wait_count)
+        rocdl.wait_asyncmark(stages - 2 - s)
+        rocdl.s_barrier()
         compute_stage(current_stage, main_loop_end + s)
         current_stage = (current_stage + 1) % stages
 
@@ -790,9 +785,6 @@ def gemm_a16w16_hti_gfx950_kernel(
     else:
         bias_buf = None
 
-    a_rsrc = fx.rocdl.get_buffer_rsrc(fx.get_iter(a_buf))
-    b_rsrc = fx.rocdl.get_buffer_rsrc(fx.get_iter(b_buf))
-
     if const_expr(is_split_k):
         splitk_protocol.init(
             semaphore,
@@ -812,6 +804,7 @@ def gemm_a16w16_hti_gfx950_kernel(
 
     uni_copy_atom = fx.make_copy_atom(fx.UniversalCopy128b(), elem_dtype)
     buffer_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_dtype)
+    async_g2s_copy_atom = fx.make_copy_atom(fx.rocdl.cdna4.BufferLoadAsyncLDS128b(), 128)
 
     if const_expr(param.a_is_transposed):
         a_s2r_copy_atom = fx.make_copy_atom(fx.rocdl.cdna4.LDSReadTrans16_64b(), elem_dtype)
@@ -858,14 +851,13 @@ def gemm_a16w16_hti_gfx950_kernel(
         ldg_x_threads,
         ks_begin,
         block_k,
-        in_data_bytes,
-        async_load_bytes,
     )
 
     def async_load_a_to_lds(m_part, k_tile, stage):
         async_load_to_lds(
             half_a_base(stage, m_part),
-            a_rsrc,
+            fx.get_iter(a_buf),
+            async_g2s_copy_atom,
             a_lds_layout,
             half_block_m,
             m,
@@ -880,7 +872,8 @@ def gemm_a16w16_hti_gfx950_kernel(
     def async_load_b_to_lds(n_part, k_tile, stage):
         async_load_to_lds(
             half_b_base(stage, n_part),
-            b_rsrc,
+            fx.get_iter(b_buf),
+            async_g2s_copy_atom,
             b_lds_layout,
             half_block_n,
             n,
@@ -1030,7 +1023,7 @@ def gemm_a16w16_hti_gfx950_kernel(
     async_load_a_to_lds(0, 1, 1)
     async_load_b_to_lds(1, 1, 1)
     rocdl.sched_barrier(0)
-    __barrier(half_ldg_b_iters + half_ldg_a_iters)
+    wait_vmcnt_and_barrier(half_ldg_b_iters + half_ldg_a_iters)
 
     main_loop_end = k_tiles - 2
     for k_tile in range(0, main_loop_end, 2):
@@ -1054,7 +1047,7 @@ def gemm_a16w16_hti_gfx950_kernel(
         rocdl.s_barrier()
         b0 = load_b_fragment(0, 1)
         async_load_b_to_lds(1, next_k_tile, 0)
-        __barrier(2 * half_ldg_b_iters + half_ldg_a_iters)
+        wait_vmcnt_and_barrier(2 * half_ldg_b_iters + half_ldg_a_iters)
         consume(c11, a1, b1, True)
         rocdl.s_barrier()
         # 1
@@ -1074,14 +1067,14 @@ def gemm_a16w16_hti_gfx950_kernel(
         consume(c10, a1, b0, True)
         rocdl.s_barrier()
         async_load_b_to_lds(1, next_k_tile + 1, 1)
-        __barrier(half_ldg_b_iters + half_ldg_a_iters)
+        wait_vmcnt_and_barrier(half_ldg_b_iters + half_ldg_a_iters)
         consume(c11, a1, b1, True)
         rocdl.s_barrier()
 
     k_tile = main_loop_end
     # 0
     if const_expr(is_split_k):
-        __barrier(0)
+        wait_vmcnt_and_barrier(0)
     b0 = load_b_fragment(0, 0)
     a0 = load_a_fragment(0, 0)
     async_load_a_to_lds(1, k_tile + 1, 1)
@@ -1099,7 +1092,7 @@ def gemm_a16w16_hti_gfx950_kernel(
     b0 = load_b_fragment(0, 1)
     rocdl.s_barrier()
     consume(c11, a1, b1, True)
-    __barrier(0)
+    wait_vmcnt_and_barrier(0)
     # 1
     a0 = load_a_fragment(0, 1)
     rocdl.s_barrier()
@@ -1133,13 +1126,13 @@ def gemm_a16w16_hti_gfx950_kernel(
         store_half_tile_to_global(1, 1)
         splitk_protocol.finish_split(split_k)
     else:
-        __barrier(0)
+        wait_vmcnt_and_barrier(0)
         store_half_tile_to_global(0, 0)
         store_half_tile_to_global(0, 1)
-        __barrier(0)
+        wait_vmcnt_and_barrier(0)
         store_half_tile_to_lds(1, 0, c10)
         store_half_tile_to_lds(1, 1, c11)
-        __barrier(0)
+        wait_vmcnt_and_barrier(0)
         store_half_tile_to_global(1, 0)
         store_half_tile_to_global(1, 1)
 

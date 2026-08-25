@@ -35,11 +35,72 @@ from __future__ import annotations
 
 from typing import Callable
 
+import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects.arith import CmpIPredicate
 from flydsl.expr.typing import T
-from kernels.common.kernels_common import _if_then
+
+# --- split-LDS dynamic-branch helpers -------------------------------------
+# @flyc.jit so their Python if/else lowers to scf.if; branch data passed as args.
+
+
+@flyc.jit
+def _cshuffle_write_row_split(
+    is_group_b,
+    write_row_to_lds,
+    mi,
+    ii,
+    row_in_tile,
+    row,
+    row_base_lds,
+    col_base_local_b,
+    col_base_local_a,
+    num_acc_n,
+    lds_out_split,
+    lds_out,
+):
+    """Write one row into this wave-group's LDS buffer (B → split, A → main)."""
+    if is_group_b:
+        write_row_to_lds(
+            mi=mi,
+            ii=ii,
+            row_in_tile=row_in_tile,
+            row=row,
+            row_base_lds=row_base_lds,
+            col_base_local=col_base_local_b,
+            num_acc_n=num_acc_n,
+            lds_out=lds_out_split,
+        )
+    else:
+        write_row_to_lds(
+            mi=mi,
+            ii=ii,
+            row_in_tile=row_in_tile,
+            row=row,
+            row_base_lds=row_base_lds,
+            col_base_local=col_base_local_a,
+            num_acc_n=num_acc_n,
+            lds_out=lds_out,
+        )
+
+
+@flyc.jit
+def _cshuffle_load_group_frag(is_group_b, vector, vec_frag, lds_out, lds_out_split, lds_idx):
+    """Read the half2 fragment from this wave-group's LDS buffer."""
+    # hoisted default; both branches overwrite it (dead, DCE'd)
+    frag = vector.load(vec_frag, fx.as_ir_value(lds_out), [fx.as_ir_value(lds_idx)])
+    if is_group_b:
+        frag = vector.load(vec_frag, fx.as_ir_value(lds_out_split), [fx.as_ir_value(lds_idx)])
+    else:
+        frag = vector.load(vec_frag, fx.as_ir_value(lds_out), [fx.as_ir_value(lds_idx)])
+    return frag
+
+
+@flyc.jit
+def _cshuffle_guarded_store(row_pred, store_fn):
+    """Run the per-row store only when the runtime row predicate holds."""
+    if row_pred:
+        store_fn()
 
 
 def default_epilog(
@@ -69,7 +130,7 @@ def default_epilog(
     ii_idx_list = [fx.Index(ii) for ii in range(4)]
 
     for mi in range_constexpr(m_repeat):
-        mi_base = arith.constant(mi * 16, index=True)
+        mi_base = fx.Index(mi * 16)
         for ii in range_constexpr(4):
             row_off = lane_div_16_mul4 + ii_idx_list[ii]
             row_in_tile = mi_base + row_off
@@ -82,7 +143,6 @@ def c_shuffle_epilog(
     arith,
     vector,
     gpu,
-    scf=None,
     range_constexpr,
     # Tile params
     tile_m: int,
@@ -141,9 +201,6 @@ def c_shuffle_epilog(
     #   Group B (waves N/2..N-1) uses lds_out_split, columns [tile_n/2, tile_n)
     # Each group writes/reads independently; same barriers synchronise all waves.
     if lds_out_split is not None:
-        if scf is None:
-            raise ValueError("scf module is required for split-LDS cshuffle")
-
         _half_n = int(tile_n) // 2
         _half_threads = int(block_size) // 2
         EVec = int(e_vec)
@@ -157,11 +214,12 @@ def c_shuffle_epilog(
         m_reps_s = int(tile_m) // CShuffleMLane_s
         n_reps_s = _half_n // (CShuffleNLane_s * EVec)
 
-        _half_n_idx = arith.constant(_half_n, index=True)
-        _half_thr_idx = arith.constant(_half_threads, index=True)
-        _zero_idx = arith.constant(0, index=True)
+        _half_n_idx = fx.Index(_half_n)
+        _half_thr_idx = fx.Index(_half_threads)
+        _zero_idx = fx.Index(0)
 
-        _is_group_b = arith.cmpi(CmpIPredicate.uge, tx, _half_thr_idx)
+        # group B = upper-half waves
+        _is_group_b = (tx) >= (_half_thr_idx)
 
         # -- write phase (all waves, each to its group's LDS buffer) --
         n_tile_base_v = n_tile_base
@@ -169,32 +227,20 @@ def c_shuffle_epilog(
         col_base_local_b = col_base_local_a - _half_n_idx
 
         def _write_row_split(mi: int, ii: int, row_in_tile, row):
-            row_base_lds = row_in_tile * _half_n_idx
-            _if_g = scf.IfOp(_is_group_b)
-            with ir.InsertionPoint(_if_g.then_block):
-                write_row_to_lds(
-                    mi=mi,
-                    ii=ii,
-                    row_in_tile=row_in_tile,
-                    row=row,
-                    row_base_lds=row_base_lds,
-                    col_base_local=col_base_local_b,
-                    num_acc_n=num_acc_n,
-                    lds_out=lds_out_split,
-                )
-                scf.YieldOp([])
-            with ir.InsertionPoint(_if_g.else_block):
-                write_row_to_lds(
-                    mi=mi,
-                    ii=ii,
-                    row_in_tile=row_in_tile,
-                    row=row,
-                    row_base_lds=row_base_lds,
-                    col_base_local=col_base_local_a,
-                    num_acc_n=num_acc_n,
-                    lds_out=lds_out,
-                )
-                scf.YieldOp([])
+            _cshuffle_write_row_split(
+                _is_group_b,
+                write_row_to_lds,
+                mi,
+                ii,
+                row_in_tile,
+                row,
+                row_in_tile * _half_n_idx,
+                col_base_local_b,
+                col_base_local_a,
+                num_acc_n,
+                lds_out_split,
+                lds_out,
+            )
 
         gpu.barrier()
         default_epilog(
@@ -208,11 +254,11 @@ def c_shuffle_epilog(
         gpu.barrier()
 
         # -- read phase (each group reads from its own LDS buffer) --
-        tx_local = tx - arith.select(_is_group_b, _half_thr_idx, _zero_idx)
-        c_nlane_s = arith.constant(CShuffleNLane_s, index=True)
+        tx_local = tx - _is_group_b.select(_half_thr_idx, _zero_idx)
+        c_nlane_s = fx.Index(CShuffleNLane_s)
         m_lane_s = tx_local / c_nlane_s
         n_lane_s = tx_local % c_nlane_s
-        c_evec = arith.constant(EVec, index=True)
+        c_evec = fx.Index(EVec)
 
         if frag_elem_type is None:
             frag_elem_type = T.f16
@@ -222,13 +268,13 @@ def c_shuffle_epilog(
 
         _precomputed_rows_s = []
         for mr in range_constexpr(m_reps_s):
-            row_base_m = arith.constant(mr * CShuffleMLane_s, index=True)
+            row_base_m = fx.Index(mr * CShuffleMLane_s)
             row_local = row_base_m + m_lane_s
             row = bx_m_v + row_local
             row_ctx_raw = precompute_row(row_local=row_local, row=row) if precompute_row is not None else None
             row_ctx = row_ctx_raw
             row_pred = None
-            if scf is not None and row_ctx_raw is not None and isinstance(row_ctx_raw, tuple) and len(row_ctx_raw) == 2:
+            if row_ctx_raw is not None and isinstance(row_ctx_raw, tuple) and len(row_ctx_raw) == 2:
                 row_ctx, row_pred = row_ctx_raw
             _precomputed_rows_s.append((row_local, row, row_ctx, row_pred))
 
@@ -238,20 +284,13 @@ def c_shuffle_epilog(
             def _do_store_row_split():
                 row_base_lds = row_local * _half_n_idx
                 for nr in range_constexpr(n_reps_s):
-                    col_base_nr = arith.constant(nr * (CShuffleNLane_s * EVec), index=True)
+                    col_base_nr = fx.Index(nr * (CShuffleNLane_s * EVec))
                     col_pair0_local = col_base_nr + (n_lane_s * c_evec)
                     lds_idx = row_base_lds + col_pair0_local
 
-                    _if_ld = scf.IfOp(_is_group_b, [vec_frag])
-                    with ir.InsertionPoint(_if_ld.then_block):
-                        fb = vector.load(vec_frag, fx.as_ir_value(lds_out_split), [fx.as_ir_value(lds_idx)])
-                        scf.YieldOp([fb])
-                    with ir.InsertionPoint(_if_ld.else_block):
-                        fa = vector.load(vec_frag, fx.as_ir_value(lds_out), [fx.as_ir_value(lds_idx)])
-                        scf.YieldOp([fa])
-                    frag = _if_ld.results[0]
+                    frag = _cshuffle_load_group_frag(_is_group_b, vector, vec_frag, lds_out, lds_out_split, lds_idx)
 
-                    col_pair0 = col_pair0_local + arith.select(_is_group_b, _half_n_idx, _zero_idx)
+                    col_pair0 = col_pair0_local + _is_group_b.select(_half_n_idx, _zero_idx)
                     store_pair(
                         row_local=row_local,
                         row=row,
@@ -262,9 +301,7 @@ def c_shuffle_epilog(
                     )
 
             if row_pred is not None:
-                _if_row = scf.IfOp(row_pred)
-                with _if_then(_if_row, scf):
-                    _do_store_row_split()
+                _cshuffle_guarded_store(row_pred, _do_store_row_split)
             else:
                 _do_store_row_split()
 
@@ -273,7 +310,7 @@ def c_shuffle_epilog(
     # ===================== Standard (non-split) path below =====================
 
     # ---------------- Step 1: write C tile to LDS (row-major, fp16) ----------------
-    tile_n_idx = arith.constant(int(tile_n), index=True)
+    tile_n_idx = fx.Index(int(tile_n))
     n_tile_base_v = n_tile_base
     col_base_local = n_tile_base_v + lane_mod_16  # index within [0,tile_n)
 
@@ -332,17 +369,16 @@ def c_shuffle_epilog(
     # them instead of serializing each load with s_waitcnt vmcnt(0).
     _precomputed_rows = []
     for mr in range_constexpr(m_reps_shuffle):
-        row_base_m = arith.constant(mr * CShuffleMLane, index=True)
+        row_base_m = fx.Index(mr * CShuffleMLane)
         row_local = row_base_m + m_lane
         row = bx_m_v + row_local
 
         row_ctx_raw = precompute_row(row_local=row_local, row=row) if precompute_row is not None else None
 
-        # Optional row-level predicate: if `precompute_row` returns `(ctx, pred_i1)` and `scf`
-        # is provided, we can skip the entire N-loop for invalid rows (cheaper than per-store checks).
+        # optional (ctx, pred_i1) from precompute_row: skip the N-loop for invalid rows
         row_ctx = row_ctx_raw
         row_pred = None
-        if scf is not None and row_ctx_raw is not None and isinstance(row_ctx_raw, tuple) and len(row_ctx_raw) == 2:
+        if row_ctx_raw is not None and isinstance(row_ctx_raw, tuple) and len(row_ctx_raw) == 2:
             row_ctx, row_pred = row_ctx_raw
 
         _precomputed_rows.append((row_local, row, row_ctx, row_pred))
@@ -356,7 +392,7 @@ def c_shuffle_epilog(
             if _lds_row_base_offset is not None:
                 row_base_lds = row_base_lds + _lds_row_base_offset
             for nr in range_constexpr(n_reps_shuffle):
-                col_base_nr = arith.constant(nr * (CShuffleNLane * EVec), index=True)
+                col_base_nr = fx.Index(nr * (CShuffleNLane * EVec))
                 col_pair0 = col_base_nr + (n_lane * c_evec)  # even col within tile
 
                 lds_idx_pair = row_base_lds + col_pair0
@@ -372,9 +408,7 @@ def c_shuffle_epilog(
                 )
 
         if row_pred is not None:
-            _if_row = scf.IfOp(row_pred)
-            with _if_then(_if_row, scf):
-                _do_store_row()
+            _cshuffle_guarded_store(row_pred, _do_store_row)
         else:
             _do_store_row()
 
@@ -393,7 +427,6 @@ def mfma_epilog(
     # CShuffle epilog (required when use_cshuffle=True)
     vector=None,
     gpu=None,
-    scf=None,
     tile_m: int | None = None,
     tile_n: int | None = None,
     e_vec: int = 2,
@@ -426,7 +459,6 @@ def mfma_epilog(
         arith=arith,
         vector=vector,
         gpu=gpu,
-        scf=scf,
         range_constexpr=range_constexpr,
         tile_m=int(tile_m),
         tile_n=int(tile_n),
