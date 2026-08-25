@@ -968,6 +968,13 @@ def flex_attn_fwd_gfx950_kernel(
 
     _qk_mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype))
 
+    def _frag_reps(tensor, mode):
+        return fx.size(fx.get_shape(tensor)[mode]).to_py_value()
+
+    _qk_k_reps = _frag_reps(frag_K[0], 2)
+    _qk_a_m_reps = _frag_reps(frag_K[0], 1)
+    _qk_b_n_reps = _frag_reps(frag_Q, 1)
+
     def gemm1_qk(frag_Q_in, frag_K_in):
         frag_S_out = thr_qk.make_fragment_C(sP)
         frag_S_out.fill(0.0)
@@ -975,20 +982,22 @@ def flex_attn_fwd_gfx950_kernel(
         return [frag_S_out]
 
     def gemm1_qk_mfma(frag_S_acc, frag_Q_in, frag_K_in, ki):
-        """Single QK MFMA for K-group ki. Caller controls scheduling."""
-        fx.mma_atom_call(
-            _qk_mma_atom,
-            frag_S_acc[None],
-            frag_K_in[None, None, ki],
-            frag_Q_in[None, None, ki],
-            frag_S_acc[None],
-        )
+        """All M×N MFMAs for one K-group ki. Caller controls ki scheduling."""
+        for m in range_constexpr(_qk_a_m_reps):
+            for n in range_constexpr(_qk_b_n_reps):
+                fx.mma_atom_call(
+                    _qk_mma_atom,
+                    frag_S_acc[None, m, n],
+                    frag_K_in[None, m, ki],
+                    frag_Q_in[None, n, ki],
+                    frag_S_acc[None, m, n],
+                )
 
     def gemm1_qk_unrolled(frag_Q_in, frag_K_in):
-        """QK GEMM with explicit per-ki MFMA calls (same result as gemm1_qk)."""
+        """QK GEMM with explicit per-ki MFMA calls."""
         frag_S_out = thr_qk.make_fragment_C(sP)
         frag_S_out.fill(0.0)
-        for ki in range_constexpr(_k_iters):
+        for ki in range_constexpr(_qk_k_reps):
             gemm1_qk_mfma(frag_S_out, frag_Q_in, frag_K_in, ki)
         return [frag_S_out]
 
@@ -1180,13 +1189,13 @@ def flex_attn_fwd_gfx950_kernel(
             dualwave_cluster_sync(0)
 
             rocdl.s_setprio(0)
-            frag_S, = gemm1_qk(frag_Q, frag_K[read_slot])
+            frag_S, = gemm1_qk_unrolled(frag_Q, frag_K[read_slot])
             s_raw = [frag_S[i] for i in range_constexpr(n_c)]
             if const_expr(mod_has_score or mod_has_mask):
                 apply_mods(s_raw, kv_i32)
-            #f valid is not None:
-            #   _neg_inf = fx.Float32(-1e9)
-            #   s_raw = [valid.select(s_raw[i], _neg_inf) for i in range_constexpr(n_c)]
+            if valid is not None:
+                _neg_inf = fx.Float32(-1e9)
+                s_raw = [valid.select(s_raw[i], _neg_inf) for i in range_constexpr(n_c)]
             corr_scalar, s_scaled, m_new = softmax_start(s_raw, m_i)
             m_i = [m_new] + [m_i[r] for r in range_constexpr(1, npair)]
             out_sm = softmax_finish(s_scaled, m_i, l_i, o_accs, corr_scalar)
@@ -1355,6 +1364,7 @@ def flex_attn_fwd_gfx950_kernel(
                 m_i, l_i, o_accs = _do_tile_passthrough(kv_even, m_i, l_i, o_accs, 0, 1, has_next_even)
                 m_i, l_i, o_accs = _do_tile_passthrough(kv_odd, m_i, l_i, o_accs, 1, 0, has_next_odd)
             else:
+                odd_valid = kv_odd < _kv_hi
                 ##########################################################
                 # Even iteration: slot 0 → DMA next into slot 1.
                 m_i, l_i, o_accs = _do_tile(kv_even, m_i, l_i, o_accs, 0, 1, has_next_even)
@@ -1363,7 +1373,7 @@ def flex_attn_fwd_gfx950_kernel(
                 # When range is odd, last pair's odd tile is past _kv_hi — mask
                 # its scores to -inf so softmax/PV are a no-op.
                 m_i, l_i, o_accs = _do_tile(kv_odd, m_i, l_i, o_accs, 1, 0,
-                                            has_next_odd)
+                                            has_next_odd, valid=odd_valid)
 
             loop_results = yield (
                 [m_i[r] for r in range_constexpr(npair)]
