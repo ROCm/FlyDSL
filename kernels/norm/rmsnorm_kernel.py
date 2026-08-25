@@ -54,8 +54,8 @@ except ImportError:
 
 KERNEL_NAME = "rmsnorm"
 
-# The small-N path derives its own block geometry and is not tuned.
 SMALL_N_THRESHOLD = 2048
+FWD_MULTI_ROW_THRESHOLD = 8192
 
 
 def _quant_dtype_to_elem_type(dtype_str: str):
@@ -79,9 +79,6 @@ def build_rmsnorm_module(
     weight_dtype_str: str | None = None,
 ):
     weight_dtype_str = _resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
-    if N <= SMALL_N_THRESHOLD:
-        return _build_rmsnorm_large_m_small_n_module(N, dtype_str, store_rstd, eps, weight_dtype_str)
-
     arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
@@ -289,6 +286,17 @@ def build_rmsnorm_module(
                     y_e = _to_elem_scalar(dtype_str, elem_dtype, y)
                     _store_scalar(copy_atom_s, elem_dtype, out_div, idx, y_e)
 
+    if N <= SMALL_N_THRESHOLD:
+        return _build_rmsnorm_large_m_small_n_module(
+            N,
+            dtype_str,
+            store_rstd,
+            eps,
+            weight_dtype_str,
+            one_row_kernel=rmsnorm_kernel,
+            one_row_block_threads=BLOCK_THREADS,
+        )
+
     if store_rstd:
 
         @flyc.jit
@@ -358,6 +366,9 @@ def _build_rmsnorm_large_m_small_n_module(
     store_rstd: bool = False,
     eps: float = EPS,
     weight_dtype_str: str | None = None,
+    *,
+    one_row_kernel,
+    one_row_block_threads: int,
 ):
     weight_dtype_str = _resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
     BLOCK_N = 1 << (N - 1).bit_length()
@@ -542,12 +553,30 @@ def _build_rmsnorm_large_m_small_n_module(
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
-            launcher = rmsnorm_large_m_small_n_kernel(Input, Gamma, Rstd, Output, m_in)
-            launcher.launch(
-                grid=((m_in + BLOCK_M - 1) // BLOCK_M, 1, 1),
-                block=(BLOCK_THREADS_SPECIAL, 1, 1),
-                stream=stream,
-            )
+            def launch_one_row():
+                launcher = one_row_kernel(Input, Gamma, Rstd, Output)
+                launcher.launch(
+                    grid=(m_in, 1, 1),
+                    block=(one_row_block_threads, 1, 1),
+                    stream=stream,
+                )
+
+            def launch_multi_row():
+                launcher = rmsnorm_large_m_small_n_kernel(Input, Gamma, Rstd, Output, m_in)
+                launcher.launch(
+                    grid=((m_in + BLOCK_M - 1) // BLOCK_M, 1, 1),
+                    block=(BLOCK_THREADS_SPECIAL, 1, 1),
+                    stream=stream,
+                )
+
+            @flyc.jit
+            def dispatch():
+                if m_in > fx.Int32(FWD_MULTI_ROW_THRESHOLD):
+                    launch_multi_row()
+                else:
+                    launch_one_row()
+
+            dispatch()
 
         return launch_rmsnorm_large_m_small_n
 
@@ -559,14 +588,31 @@ def _build_rmsnorm_large_m_small_n_module(
         m_in: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        # store_rstd=False path: the Rstd slot is an unused placeholder here, so
-        # we pass Gamma to fill the argument (it is never dereferenced in-kernel).
-        launcher = rmsnorm_large_m_small_n_kernel(Input, Gamma, Gamma, Output, m_in)
-        launcher.launch(
-            grid=((m_in + BLOCK_M - 1) // BLOCK_M, 1, 1),
-            block=(BLOCK_THREADS_SPECIAL, 1, 1),
-            stream=stream,
-        )
+        def launch_one_row():
+            # The Rstd slot is unused when store_rstd=False.
+            launcher = one_row_kernel(Input, Gamma, Gamma, Output)
+            launcher.launch(
+                grid=(m_in, 1, 1),
+                block=(one_row_block_threads, 1, 1),
+                stream=stream,
+            )
+
+        def launch_multi_row():
+            launcher = rmsnorm_large_m_small_n_kernel(Input, Gamma, Gamma, Output, m_in)
+            launcher.launch(
+                grid=((m_in + BLOCK_M - 1) // BLOCK_M, 1, 1),
+                block=(BLOCK_THREADS_SPECIAL, 1, 1),
+                stream=stream,
+            )
+
+        @flyc.jit
+        def dispatch():
+            if m_in > fx.Int32(FWD_MULTI_ROW_THRESHOLD):
+                launch_multi_row()
+            else:
+                launch_one_row()
+
+        dispatch()
 
     return launch_rmsnorm_large_m_small_n
 
