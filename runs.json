@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-25T00:06:16Z",
+ "updated": "2026-08-25T00:22:10Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32792301710,
+   "pr": 1022,
+   "commit": "ba70102299c931bc2a5e3ca5e66f6f591db45f02",
+   "branch": "jhinpan/softmax-autotune",
+   "event": "pull_request",
+   "title": "[Kernel] Add opt-in autotuning for Softmax",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32792301710",
+   "created_at": "2026-08-25T00:07:09Z",
+   "updated_at": "2026-08-25T00:08:54Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 32790747134,
    "pr": 1015,
@@ -40,11 +55,11 @@
    "branch": "moe_sorting_optimization",
    "event": "pull_request",
    "title": "Add Optimized MoE Routing Path",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32788613020",
    "created_at": "2026-08-24T23:16:43Z",
-   "updated_at": "2026-08-24T23:19:27Z",
+   "updated_at": "2026-08-25T00:05:46Z",
    "actor": "amd-wsung102",
    "jobs": []
   },
@@ -1896,52 +1911,6 @@
    "updated_at": "2026-08-21T09:22:58Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 32458891715,
-   "pr": null,
-   "commit": "05d7e6ef4a0a897fb2669432affdf4ac232a67a5",
-   "branch": "jhinpan/fix-exp2-fastmath",
-   "event": "pull_request",
-   "title": "[ROCDL] Lower approximate exp2 to native intrinsic",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458891715",
-   "created_at": "2026-08-21T07:30:00Z",
-   "updated_at": "2026-08-21T12:16:15Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T09:56:19Z",
-     "completed_at": "2026-08-21T12:01:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458891715/job/96734106092",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T11:34:27Z",
-     "completed_at": "2026-08-21T12:16:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458891715/job/96734106143",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T10:05:36Z",
-     "completed_at": "2026-08-21T10:23:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32458891715/job/96734106175",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
