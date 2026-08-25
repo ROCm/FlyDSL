@@ -52,16 +52,16 @@ def _const_code(val: float, *, fp4: bool) -> int:
 def _fp8_bytes(rows: int, cols: int, const_val: float | None = None) -> torch.Tensor:
     """Finite FP8 E4M3 bytes (avoids the 0x7F/0xFF NaN encodings), or a constant fill."""
     if const_val is None:
-        return torch.randint(0, 126, (rows, cols), dtype=torch.uint8)
-    return torch.full((rows, cols), _const_code(const_val, fp4=False), dtype=torch.uint8)
+        return torch.randint(0, 126, (rows, cols), dtype=torch.uint8, device="cuda")
+    return torch.full((rows, cols), _const_code(const_val, fp4=False), dtype=torch.uint8, device="cuda")
 
 
 def _fp4_bytes(rows: int, K: int, const_val: float | None = None) -> torch.Tensor:
     """Packed FP4 E2M1 bytes [rows, K//2], random or a constant fill."""
     if const_val is None:
-        return gemm_common_utils.random_fp4_packed(rows, K)
+        return gemm_common_utils.random_fp4_packed(rows, K, device="cuda")
     code = _const_code(const_val, fp4=True)
-    return torch.full((rows, K // 2), code | (code << 4), dtype=torch.uint8)
+    return torch.full((rows, K // 2), code | (code << 4), dtype=torch.uint8, device="cuda")
 
 
 def _with_strided_a(a: torch.Tensor, K: int, lda: int) -> torch.Tensor:
@@ -168,6 +168,7 @@ def _build_a8w4_case(
     cluster_m=1,
     cluster_n=1,
     const_val=None,
+    b_preshuffle=True,
 ):
     torch.manual_seed(0)
     a = _fp8_bytes(M, K, const_val)
@@ -175,15 +176,13 @@ def _build_a8w4_case(
     # f16 output overflows (~65504 max) with the default E8M0 exponent range at this K;
     # pin scales to 1.0 so f16 accumulation stays in range like the other dtypes.
     scale_exp = {"low_exp": 127, "high_exp": 127} if out_dtype == "f16" else {}
-    a_scale = gemm_common_utils.random_e8m0(M, K // SCALE_BLOCK_32, **scale_exp)
-    b_scale = gemm_common_utils.random_e8m0(N, K // SCALE_BLOCK_32, **scale_exp)
-    a, b = a.cuda(), b.cuda()
-    a_scale, b_scale = a_scale.cuda(), b_scale.cuda()
+    a_scale = gemm_common_utils.random_e8m0(M, K // SCALE_BLOCK_32, device="cuda", **scale_exp)
+    b_scale = gemm_common_utils.random_e8m0(N, K // SCALE_BLOCK_32, device="cuda", **scale_exp)
     ref = _reference_a8w4(a, b, a_scale, b_scale, M, N, K)
 
     lda, ldc = K + lda_extra, N + ldc_extra
     a_gpu = _with_strided_a(a, K, lda)
-    b_gpu = gemm_common_utils.preshuffle_b_16x16(b, N, K // 2)
+    b_gpu = gemm_common_utils.preshuffle_b_16x16(b, N, K // 2) if b_preshuffle else b
     as_gpu = _preshuffle_scale_32x4(a_scale)
     bs_gpu = _preshuffle_scale_32x4(b_scale)
     c_gpu = torch.zeros(M, ldc, dtype=_DT[out_dtype], device="cuda")
@@ -211,6 +210,7 @@ def _build_a8w4_case(
             num_buffers,
             cluster_m,
             cluster_n,
+            b_preshuffle,
         )
 
     return c_gpu, make_args, ref, _a8w4_tolerances(a_scale, b_scale, K)
@@ -279,10 +279,8 @@ def _build_a8w8_ptpc_case(
     torch.manual_seed(0)
     a = _fp8_bytes(M, K, const_val)
     b = _fp8_bytes(N, K, const_val)
-    sa = (scale_scale * (0.5 + torch.rand(M, dtype=torch.float32))).contiguous()
-    sb = (scale_scale * (0.5 + torch.rand(N, dtype=torch.float32))).contiguous()
-    a, b = a.cuda(), b.cuda()
-    sa_gpu, sb_gpu = sa.cuda().contiguous(), sb.cuda().contiguous()
+    sa_gpu = (scale_scale * (0.5 + torch.rand(M, dtype=torch.float32, device="cuda"))).contiguous()
+    sb_gpu = (scale_scale * (0.5 + torch.rand(N, dtype=torch.float32, device="cuda"))).contiguous()
     ref = _reference_ptpc(a, b, sa_gpu, sb_gpu, M, N, K)
 
     lda, ldc = K + lda_extra, N + ldc_extra
@@ -392,10 +390,8 @@ def _build_a8w8_blockscale_case(
     a = _fp8_bytes(M, K, const_val)
     b = _fp8_bytes(N, K, const_val)
     scale_k = K // SCALE_BLOCK_128
-    a_scale = gemm_common_utils.random_e8m0(M, scale_k, low_exp=126, high_exp=129)
-    b_scale = gemm_common_utils.random_e8m0(N // SCALE_BLOCK_128, scale_k, low_exp=126, high_exp=129)
-    a, b = a.cuda(), b.cuda()
-    a_scale, b_scale = a_scale.cuda(), b_scale.cuda()
+    a_scale = gemm_common_utils.random_e8m0(M, scale_k, low_exp=126, high_exp=129, device="cuda")
+    b_scale = gemm_common_utils.random_e8m0(N // SCALE_BLOCK_128, scale_k, low_exp=126, high_exp=129, device="cuda")
     ref = _reference_blockscale(a, b, a_scale, b_scale, M, N, K)
 
     lda, ldc = K + lda_extra, N + ldc_extra
@@ -582,10 +578,16 @@ def _main():
     parser.add_argument("-mnk", nargs="+", required=True, metavar="M,N,K", help="one or more shapes")
     parser.add_argument("-tiles", required=True, help="tile_m,tile_n,tile_k")
     parser.add_argument("-warps", required=True, help="m_warp,n_warp")
-    parser.add_argument("-nb", type=int, required=True, help="num_buffers")
+    parser.add_argument("-nb", "-n", type=int, required=True, help="num_buffers")
     parser.add_argument("-cluster", default="1,1", help="cluster_m,cluster_n")
     parser.add_argument("-out-dtype", default="bf16", choices=["bf16", "f16"])
     parser.add_argument("-bench", action="store_true", help="also measure perf (warmup=10, iters=100)")
+    parser.add_argument(
+        "-no-b-preshuffle",
+        dest="b_preshuffle",
+        action="store_false",
+        help="disable the 16x16 B preshuffle for mxscale_a8w4 (default: enabled)",
+    )
     parser.add_argument(
         "--init-mode",
         nargs="+",
@@ -606,6 +608,8 @@ def _main():
     rows = []
     for (M, N, K), init in itertools.product(shapes, args.init_mode):
         kwargs = {"cluster_m": cluster_m, "cluster_n": cluster_n, "const_val": _parse_init_mode(init)}
+        if args.mode == "mxscale_a8w4":
+            kwargs["b_preshuffle"] = args.b_preshuffle
         if cfg["supports_out_dtype"]:
             kwargs["out_dtype"] = args.out_dtype
         c_gpu, make_args, compiled, error = _run_and_check(
@@ -620,7 +624,13 @@ def _main():
         if error is not None:
             print(f"\n{M}x{N}x{K} {init}: {error}\n")
 
-    print(f"\ntiles={tile_m},{tile_n},{tile_k} warps={m_warp},{n_warp} nb={args.nb} cluster={cluster_m},{cluster_n}")
+    b_layout = ""
+    if args.mode == "mxscale_a8w4":
+        b_layout = f" b_layout={'preshuffle' if args.b_preshuffle else 'row-major+pad'}"
+    print(
+        f"\ntiles={tile_m},{tile_n},{tile_k} warps={m_warp},{n_warp} nb={args.nb} "
+        f"cluster={cluster_m},{cluster_n}{b_layout}"
+    )
     _print_table(["mode", "M", "N", "K", "out", "init_mode", "latency us", "TFLOPS", "BW TB/s", "result"], rows)
     if any(r[-1] == "FAIL" for r in rows):
         raise SystemExit(1)
