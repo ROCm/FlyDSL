@@ -1,8 +1,52 @@
 {
  "schema": 1,
- "updated": "2026-08-25T16:27:02Z",
+ "updated": "2026-08-25T17:49:49Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32872823775,
+   "pr": 1064,
+   "commit": "be4ee6eca52b0544fd18275a10c47ba859efa149",
+   "branch": "upstream/pa-64bit-cache-offsets",
+   "event": "pull_request",
+   "title": "[Bugfix][PA] Fix D192 query staging and 64-bit cache offsets",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32872823775",
+   "created_at": "2026-08-25T16:34:58Z",
+   "updated_at": "2026-08-25T16:53:27Z",
+   "actor": "sammysun0711",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-25T16:53:26Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32872823775/job/97889107021"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-25T16:52:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32872823775/job/97889107159"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-25T16:52:33Z",
+     "completed_at": "2026-08-25T17:10:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32872823775/job/97889107185",
+     "log_fetch_failed": true
+    }
+   ]
+  },
   {
    "run_id": 32871559109,
    "pr": 972,
@@ -25,39 +69,42 @@
    "branch": "gfx1250/gemm-opt-0805",
    "event": "pull_request",
    "title": "[gfx1250] Add 256x256 compute-bound GEMM (WIP)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32867561048",
    "created_at": "2026-08-25T15:43:25Z",
-   "updated_at": "2026-08-25T16:06:33Z",
+   "updated_at": "2026-08-25T17:45:10Z",
    "actor": "aoli26",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-25T16:05:26Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32867561048/job/97873614989"
+     "completed_at": "2026-08-25T16:25:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32867561048/job/97873614989",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-25T16:05:45Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32867561048/job/97873615043"
+     "completed_at": "2026-08-25T17:07:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32867561048/job/97873615043",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-25T16:06:32Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32867561048/job/97873615220"
+     "completed_at": "2026-08-25T17:45:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32867561048/job/97873615220",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -277,7 +324,7 @@
   },
   {
    "run_id": 32814244598,
-   "pr": 1064,
+   "pr": null,
    "commit": "fbe011558026aa0d1e09cf5a1d1910e0a5337475",
    "branch": "upstream/pa-64bit-cache-offsets",
    "event": "pull_request",
@@ -2028,21 +2075,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 32502893730,
-   "pr": null,
-   "commit": "63a05839184bb001bd4d96846f05e76178b993f5",
-   "branch": "john/lazy-rescale-nan",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32502893730",
-   "created_at": "2026-08-21T16:26:04Z",
-   "updated_at": "2026-08-21T16:43:34Z",
-   "actor": "JohnQinAMD",
-   "jobs": []
   }
  ]
 }
