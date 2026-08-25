@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-08-25T05:47:48Z",
+ "updated": "2026-08-25T06:33:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32814244598,
+   "pr": 1064,
+   "commit": "fbe011558026aa0d1e09cf5a1d1910e0a5337475",
+   "branch": "upstream/pa-64bit-cache-offsets",
+   "event": "pull_request",
+   "title": "[Bugfix][PA] Fix D192 query staging and 64-bit cache offsets",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32814244598",
+   "created_at": "2026-08-25T05:47:41Z",
+   "updated_at": "2026-08-25T06:24:39Z",
+   "actor": "sammysun0711",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-25T06:24:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32814244598/job/97706445394"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-25T06:24:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32814244598/job/97706445401"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-25T06:24:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32814244598/job/97706445403"
+    }
+   ]
+  },
   {
    "run_id": 32810503599,
    "pr": 1061,
@@ -20,11 +63,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-25T05:06:09Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32810503599/job/97691416020"
+     "completed_at": "2026-08-25T06:07:22Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32810503599/job/97691416020",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -95,7 +139,7 @@
   },
   {
    "run_id": 32799153612,
-   "pr": 1064,
+   "pr": null,
    "commit": "3b619a1360dfa9697650c8a6f14795fb8e5c06a4",
    "branch": "upstream/pa-64bit-cache-offsets",
    "event": "pull_request",
@@ -1963,52 +2007,6 @@
      "started_at": "2026-08-21T11:19:09Z",
      "completed_at": "2026-08-21T11:33:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467943760/job/96754075183",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32467635411,
-   "pr": 1053,
-   "commit": "06ac7988679a9edf5c470aa487cf3410db92ee0e",
-   "branch": "upstream/pa-64bit-cache-offsets",
-   "event": "pull_request",
-   "title": "[Bugfix][PA] Fix D192 query staging and 64-bit cache offsets",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467635411",
-   "created_at": "2026-08-21T09:23:12Z",
-   "updated_at": "2026-08-21T13:43:49Z",
-   "actor": "sammysun0711",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T11:56:55Z",
-     "completed_at": "2026-08-21T13:43:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467635411/job/96757504835",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T11:34:30Z",
-     "completed_at": "2026-08-21T11:49:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467635411/job/96757504879",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T12:33:54Z",
-     "completed_at": "2026-08-21T13:28:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32467635411/job/96757504917",
      "log_fetch_failed": true
     }
    ]
