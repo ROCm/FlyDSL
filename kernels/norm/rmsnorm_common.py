@@ -117,6 +117,18 @@ def to_elem_vec(dtype_str: str, elem_dtype, use_hw_cvt_bf16: bool, y):
     return y.to(elem_dtype)
 
 
+def to_elem_vec_rna(dtype_str: str, elem_dtype, use_hw_cvt_bf16: bool, y):
+    """Pack BF16 with round-to-nearest-away, avoiding the RNE tie fixup."""
+    if const_expr(dtype_str == "bf16" and not use_hw_cvt_bf16):
+        bf16_bits = (y.bitcast(fx.Uint32) + 0x8000) >> 16
+        even = bf16_bits.shuffle(bf16_bits, [0, 2, 4, 6])
+        odd = bf16_bits.shuffle(bf16_bits, [1, 3, 5, 7])
+        odd_sh = odd << 16
+        packed = even | odd_sh
+        return packed.bitcast(elem_dtype)
+    return to_elem_vec(dtype_str, elem_dtype, use_hw_cvt_bf16, y)
+
+
 def resolve_rmsnorm_weight_dtype(dtype_str: str, weight_dtype_str: str | None = None) -> str:
     """Return the supported weight dtype for an activation specialization."""
     weight_dtype_str = dtype_str if weight_dtype_str is None else weight_dtype_str
