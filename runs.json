@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-25T12:48:42Z",
+ "updated": "2026-08-25T15:31:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32865889554,
+   "pr": 972,
+   "commit": "97cc272392f6042a7bac65b5460a3ecaef8b49be",
+   "branch": "mega_moe_a4w4",
+   "event": "pull_request",
+   "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32865889554",
+   "created_at": "2026-08-25T15:27:18Z",
+   "updated_at": "2026-08-25T15:29:34Z",
+   "actor": "Yaowu-Xiong",
+   "jobs": []
+  },
   {
    "run_id": 32836764786,
    "pr": 1068,
@@ -2029,21 +2044,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32501887298",
    "created_at": "2026-08-21T16:14:18Z",
    "updated_at": "2026-08-21T16:26:22Z",
-   "actor": "JohnQinAMD",
-   "jobs": []
-  },
-  {
-   "run_id": 32500445773,
-   "pr": null,
-   "commit": "2f23ade79f655b9dc98222b2d832ddd68747b7a0",
-   "branch": "fp8-softmax-normalisation",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32500445773",
-   "created_at": "2026-08-21T15:58:04Z",
-   "updated_at": "2026-08-21T16:26:32Z",
    "actor": "JohnQinAMD",
    "jobs": []
   }
