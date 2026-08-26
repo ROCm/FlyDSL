@@ -1124,20 +1124,26 @@ def flex_attn_fwd_gfx950_kernel(
     # After QK swap (K=A, Q=B), C's M-rows = score indices.
     # C→B is register-local: pack 16 f32 → 2 × v8bf16.
     # V is loaded as A from LDS per D-chunk.
+    # PV GEMM uses bf16 MFMA for fp8 (HIPREC mode) or native dtype MFMA for bf16/f16.
     if const_expr(_is_fp8):
-        _pv_mma_atom = fx.make_mma_atom(rocdl.cdna4.MFMA_Scale(param.mma_m, param.mma_n, param.mma_k, elem_dtype))
+        _pv_mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(32, 32, 16, fx.BFloat16))
     else:
         _pv_mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype))
 
     _is_bf16 = int(param.dtype_id) == FLEX_DTYPE_BF16
 
     def _pack_8_f32_to_v8elem(vals_8):
-        """Pack 8 f32 values into v8 of elem_dtype (bf16 or f16)."""
-        if const_expr(_is_bf16):
+        """Pack 8 f32 values into v8 of elem_dtype (bf16 or f16).
+
+        For FP8: uses bf16 packing — the PV GEMM currently uses the bf16
+        MFMA path even for fp8 input (HIPREC mode). Full fp8 PV with
+        cvt_pk_fp8_f32 + scaled MFMA is a follow-up.
+        """
+        if const_expr(_is_bf16 or _is_fp8):
             pairs = []
             for j in range_constexpr(4):
                 pairs.append(rocdl.cvt_pk_bf16_f32(vals_8[j * 2], vals_8[j * 2 + 1]))
-            return Vec.from_elements(pairs, fx.Int32).bitcast(elem_dtype).ir_value()
+            return Vec.from_elements(pairs, fx.Int32).bitcast(fx.BFloat16).ir_value()
         else:
             elems = []
             for j in range_constexpr(8):
