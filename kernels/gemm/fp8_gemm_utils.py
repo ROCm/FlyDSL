@@ -5,11 +5,10 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
-from flydsl.expr import arith, const_expr, range_constexpr, rocdl
+from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
-from flydsl.expr.utils.arith import ArithValue
 from kernels.common import buffer_ops as _buffer_ops
 
 # ceildiv is the canonical cdiv from the shared layer; re-exported here for the
@@ -200,7 +199,7 @@ class StoreC:
                 for i in range_constexpr(4):
                     scaled = (vec_f32[i] * (a_scales[ti][i] * b_scales[tj])).to(fx.BFloat16)
                     c_index = (row + i) * self.c_cols + col
-                    self._store_bf16(scaled, arith.select(col_valid, c_index, oob))
+                    self._store_bf16(scaled, col_valid.select(c_index, oob))
 
 
 def wait_barrier(count):
@@ -270,21 +269,21 @@ class Mfma16x16x128:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def _readfirstlane_i32(v):
-    """Force a wave-uniform-in-value i32 into an SGPR via s_readfirstlane."""
+def _readfirstlane_i64(v):
+    """Force a wave-uniform-in-value i64 into SGPRs via s_readfirstlane."""
     raw = _raw(v)
     r = rocdl.readfirstlane(res=raw.type, src=raw)
     rv = r.result if hasattr(r, "result") else r
-    return ArithValue(rv)
+    return fx.Int64(rv)
 
 
 def make_fp8_buffer_tensor_rebased(arg_i8, fp8_ir_t, base_elems, num_records_bytes):
-    base = arith.index_cast(T.i64, _buffer_ops.extract_base_index(arg_i8))
+    base = fx.Int64(_buffer_ops.extract_base_index(arg_i8))
     # Pin the wave-uniform shifted base + num_records to SGPRs: the group-scan base reads
     # as VGPR -> VGPR SRD -> readfirstlane waterfall per K-loop load. Pin keeps it scalar.
-    base = _readfirstlane_i32(base + arith.index_cast(T.i64, base_elems))
-    nr = fx.min(fx.Int64(arith.index_cast(T.i64, num_records_bytes)), fx.Int64(0xFFFFFFFF))
-    nrec = fx.Int64(_readfirstlane_i32(nr))
+    base = _readfirstlane_i64(base + base_elems)
+    nr = fx.min(num_records_bytes, fx.Int64(0xFFFFFFFF))
+    nrec = _readfirstlane_i64(nr)
     flags = _buffer_ops._get_buffer_flags()
     # global int8 ptr at the shifted addr -> int8 BufferDesc fat ptr -> recast fp8.
     base_ptr = fx.inttoptr(fx.PointerType.get(elem_ty=T.i8, address_space=1, alignment=16), base)
@@ -393,8 +392,8 @@ def make_row_band_resource(c_base, base_row, c_rows, c_cols, elem_bytes):
     band_base = fx.Int64(c_base) + row_c * cols_i * elem
     # cap at 0x7FFFFFFF so a masked-out buffer_store (voffset=0x7FFFFFFF) is always OOB
     nrec = fx.min((rows_i - row_c) * cols_i * elem, fx.Int64(0x7FFFFFFF))
-    band_base_i64 = _readfirstlane_i32(band_base)
-    nrec_pinned = _readfirstlane_i32(nrec)
+    band_base_i64 = _readfirstlane_i64(band_base)
+    nrec_pinned = _readfirstlane_i64(nrec)
     return _buffer_ops.create_buffer_resource_from_addr(band_base_i64, num_records_bytes=nrec_pinned)
 
 
@@ -460,7 +459,7 @@ def xcd_remap_pid(pid, total_pids, num_xcd):
     rem = total_pids - per_xcd * num_xcd
     xcd = pid % num_xcd
     local = pid // num_xcd
-    offset = xcd * per_xcd + arith.select(xcd < rem, xcd, rem)
+    offset = xcd * per_xcd + (xcd < rem).select(xcd, rem)
     return offset + local
 
 
@@ -474,20 +473,20 @@ def block_mn(pid, num_pid_m, n_blocks, GM, GN):
         pid_in_band = pid % band_tiles
         band_n0 = band * GN
         rem_n = n_blocks - band_n0
-        band_w = arith.select(rem_n < GN, rem_n, fx.Int32(GN))
+        band_w = (rem_n < GN).select(rem_n, fx.Int32(GN))
         nig = GM * band_w
         gid = pid_in_band // nig
         pig = pid_in_band % nig
         fpm = gid * GM
         rem_m = num_pid_m - fpm
-        gsm = arith.select(rem_m < GM, rem_m, fx.Int32(GM))
+        gsm = (rem_m < GM).select(rem_m, fx.Int32(GM))
         return fpm + (pig % gsm), band_n0 + (pig // gsm)
     nig = GM * n_blocks
     gid = pid // nig
     pig = pid % nig
     fpm = gid * GM
     rem_m = num_pid_m - fpm
-    gsm = arith.select(rem_m < GM, rem_m, fx.Int32(GM))
+    gsm = (rem_m < GM).select(rem_m, fx.Int32(GM))
     return fpm + (pig % gsm), pig // gsm
 
 
