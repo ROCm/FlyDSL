@@ -1,11 +1,41 @@
 {
  "schema": 1,
- "updated": "2026-08-26T15:01:46Z",
+ "updated": "2026-08-26T15:53:37Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 32983331587,
+   "run_id": 32984299025,
    "pr": 1066,
+   "commit": "32dac38d22b56925a2151705d5f8fd02c009beff",
+   "branch": "upstream/fa-paged-fp8-asymmetric-v",
+   "event": "pull_request",
+   "title": "Fly DSL test",
+   "status": "completed",
+   "conclusion": "startup_failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32984299025",
+   "created_at": "2026-08-26T15:10:54Z",
+   "updated_at": "2026-08-26T15:10:54Z",
+   "actor": "sammysun0711",
+   "jobs": []
+  },
+  {
+   "run_id": 32984196394,
+   "pr": 1066,
+   "commit": "32dac38d22b56925a2151705d5f8fd02c009beff",
+   "branch": "upstream/fa-paged-fp8-asymmetric-v",
+   "event": "pull_request",
+   "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32984196394",
+   "created_at": "2026-08-26T15:08:49Z",
+   "updated_at": "2026-08-26T15:08:49Z",
+   "actor": "sammysun0711",
+   "jobs": []
+  },
+  {
+   "run_id": 32983331587,
+   "pr": null,
    "commit": "b22846f0482b3bb6d0c73fe87f26ffd517d86bed",
    "branch": "upstream/fa-paged-fp8-asymmetric-v",
    "event": "pull_request",
@@ -2123,65 +2153,6 @@
      "started_at": "2026-08-24T09:31:25Z",
      "completed_at": "2026-08-24T10:21:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32705911499/job/97380925245",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32704865450,
-   "pr": 1061,
-   "commit": "185887588c8836c94b5e33b8440e045c5d72e742",
-   "branch": "gfx1250/bf16-gemm",
-   "event": "pull_request",
-   "title": "[gfx1250] Add bf16 gemm",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32704865450",
-   "created_at": "2026-08-24T08:09:24Z",
-   "updated_at": "2026-08-24T08:32:57Z",
-   "actor": "aoli26",
-   "jobs": []
-  },
-  {
-   "run_id": 32698974837,
-   "pr": null,
-   "commit": "93d124dcbb6e7f807ce9212239d971b47aea5012",
-   "branch": "main",
-   "event": "push",
-   "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range \u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32698974837",
-   "created_at": "2026-08-24T06:50:42Z",
-   "updated_at": "2026-08-24T08:32:06Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-24T08:05:48Z",
-     "completed_at": "2026-08-24T08:31:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32698974837/job/97358423861"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-24T07:47:51Z",
-     "completed_at": "2026-08-24T08:32:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32698974837/job/97358423884"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T07:55:55Z",
-     "completed_at": "2026-08-24T08:15:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32698974837/job/97358424019",
      "log_fetch_failed": true
     }
    ]
