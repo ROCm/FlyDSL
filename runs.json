@@ -1,11 +1,26 @@
 {
  "schema": 1,
- "updated": "2026-08-26T08:11:48Z",
+ "updated": "2026-08-26T08:28:19Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 32946210420,
+   "run_id": 32947284483,
    "pr": 1020,
+   "commit": "a84b831a1d9c9d191dac3ba2b930f0ecec81a493",
+   "branch": "fp8-softmax-normalisation",
+   "event": "pull_request",
+   "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32947284483",
+   "created_at": "2026-08-26T08:20:54Z",
+   "updated_at": "2026-08-26T08:24:44Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
+  {
+   "run_id": 32946210420,
+   "pr": null,
    "commit": "0ad16ff86caf2141de8ed0788c1dba86c627b9a7",
    "branch": "fp8-softmax-normalisation",
    "event": "pull_request",
@@ -44,9 +59,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32941094070",
    "created_at": "2026-08-26T07:05:41Z",
-   "updated_at": "2026-08-26T07:08:20Z",
+   "updated_at": "2026-08-26T08:22:20Z",
    "actor": "Yaowu-Xiong",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-26T08:22:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32941094070/job/98110771776"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-26T08:21:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32941094070/job/98110771793"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-26T08:22:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32941094070/job/98110771861"
+    }
+   ]
   },
   {
    "run_id": 32938927483,
@@ -70,21 +113,22 @@
    "branch": "main",
    "event": "push",
    "title": "refine g2s load ptr (#1068)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32933223938",
    "created_at": "2026-08-26T05:13:38Z",
-   "updated_at": "2026-08-26T05:50:11Z",
+   "updated_at": "2026-08-26T08:26:29Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-26T05:50:09Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32933223938/job/98075877652"
+     "completed_at": "2026-08-26T08:26:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32933223938/job/98075877652",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -2045,21 +2089,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32690323561/job/97351590225"
     }
    ]
-  },
-  {
-   "run_id": 32689487348,
-   "pr": null,
-   "commit": "5159055d2356c5cea6b7f2fd145227b3ea0e0569",
-   "branch": "gfx1250/gemm-test-cli",
-   "event": "pull_request",
-   "title": "[gfx1250][GEMM] Add const-init to the test and support mxscale tile_m=16",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32689487348",
-   "created_at": "2026-08-24T04:18:04Z",
-   "updated_at": "2026-08-24T05:00:45Z",
-   "actor": "aoli26",
-   "jobs": []
   }
  ]
 }
