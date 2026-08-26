@@ -1288,6 +1288,8 @@ def flex_attn_fwd_gfx950_kernel(
             rocdl.s_waitcnt(vmcnt=0)
             odd_valid = (kv_i32 + fx.Int32(1)) < _kv_hi
             has_next = (kv_i32 + fx.Int32(2)) < _kv_hi
+            rocdl.s_waitcnt(vmcnt=0)
+            rocdl.s_barrier()
             read_k_work(0)
             v_lo_regs_0, v_hi_regs_0 = read_v_slot[0]()
             if odd_valid:
@@ -1311,7 +1313,7 @@ def flex_attn_fwd_gfx950_kernel(
 
             # ── Cluster 2: mem tile 1 ──
             rocdl.s_waitcnt(vmcnt=0)
-            rocdl.s_nop(2)
+            rocdl.s_barrier()
             read_k_work(1)
             v_lo_regs_1, v_hi_regs_1 = read_v_slot[1]()
             if has_next:
@@ -1320,7 +1322,6 @@ def flex_attn_fwd_gfx950_kernel(
             dualwave_cluster_sync(2)
 
             # ── Cluster 3: QK GEMM tile 1 + PV from tile 0 ──
-            rocdl.s_nop(3)    
             frag_S, = gemm1_qk_unrolled(frag_Q, frag_K[1])
             out_sm_0 = softmax_finish(s_scaled_0, m_i_at_tile0, l_i, o_accs, corr_scalar_0)
             pv_gemm_register(out_sm_0[0], v_lo_regs_0, v_hi_regs_0, out_sm_0[3])
