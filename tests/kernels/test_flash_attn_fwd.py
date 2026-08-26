@@ -4509,6 +4509,15 @@ def test_paged_fp8_d192_cache_offsets_above_4gib():
     value_page_bytes = page_size * value_head_dim
     high_page = math.ceil(2**32 / min(key_page_bytes, value_page_bytes))
     num_pages = high_page + 1
+    cache_bytes = num_pages * (key_page_bytes + value_page_bytes)
+    required_free_bytes = cache_bytes + 2 * 2**30
+    torch.cuda.empty_cache()
+    free_bytes, _ = torch.cuda.mem_get_info()
+    if free_bytes < required_free_bytes:
+        pytest.skip(
+            f"requires {required_free_bytes / 2**30:.1f} GiB free VRAM for "
+            f">4 GiB K/V offsets, got {free_bytes / 2**30:.1f} GiB"
+        )
 
     query, query_descale = quantize_per_tensor_fp8(torch.randn(1, 16, head_dim, device="cuda") * 0.2)
     key = torch.empty(num_pages, 1, head_dim // 16, page_size, 16, dtype=FP8_DTYPE, device="cuda")
