@@ -1276,18 +1276,11 @@ def flex_attn_fwd_gfx950_kernel(
             dualwave_cluster_sync(1)
             return m_i, l_i, o_accs
 
-        def _do_tile_overlapping_softmax(kv_i32, m_i, l_i, o_accs,
-                    s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, has_softmax_prev,
-                    m_i_prev):
-            """Two-tile iteration with deferred PV GEMM overlapping QK GEMM.
-
-            Processes tiles kv_i32 (even, slot 0) and kv_i32+1 (odd, slot 1).
-            odd_valid and has_next are computed internally from _kv_hi.
-            """
-            # ── Cluster 0: mem tile 0 ──
-            rocdl.s_waitcnt(vmcnt=0)
+        def _do_tile_overlapping_softmax_prologue(kv_i32, m_i, l_i, o_accs):
+            """First pair: no deferred PV from previous. Has odd_valid/has_next guards."""
             odd_valid = (kv_i32 + fx.Int32(1)) < _kv_hi
             has_next = (kv_i32 + fx.Int32(2)) < _kv_hi
+            # ── Cluster 0: mem tile 0 ──
             rocdl.s_waitcnt(vmcnt=0)
             rocdl.s_barrier()
             read_k_work(0)
@@ -1297,12 +1290,8 @@ def flex_attn_fwd_gfx950_kernel(
             rocdl.s_waitcnt(lgkmcnt=0)
             dualwave_cluster_sync(0)
 
-            # ── Cluster 1: QK GEMM tile 0 + deferred PV from prev ──
+            # ── Cluster 1: QK GEMM tile 0, no deferred PV ──
             frag_S, = gemm1_qk_unrolled(frag_Q, frag_K[0])
-            if has_softmax_prev:
-                out_sm_prev = softmax_finish(s_scaled_prev, m_i_prev, l_i, o_accs, corr_scalar_prev)
-                pv_gemm_register(out_sm_prev[0], v_lo_prev, v_hi_prev, out_sm_prev[3])
-                l_i, o_accs = out_sm_prev[2], out_sm_prev[3]
             s_raw = [frag_S[i] for i in range_constexpr(n_c)]
             if const_expr(mod_has_score or mod_has_mask):
                 apply_mods(s_raw, kv_i32)
@@ -1329,7 +1318,6 @@ def flex_attn_fwd_gfx950_kernel(
             s_raw = [frag_S[i] for i in range_constexpr(n_c)]
             if const_expr(mod_has_score or mod_has_mask):
                 apply_mods(s_raw, kv_i32 + fx.Int32(1))
-            # Mask tile 1 scores when odd tile is past _kv_hi
             _neg_inf = fx.Float32(-1e9)
             s_raw = [odd_valid.select(s_raw[i], _neg_inf) for i in range_constexpr(n_c)]
             corr_scalar_1, s_scaled_1, m_new = softmax_start(s_raw, m_i)
@@ -1337,13 +1325,114 @@ def flex_attn_fwd_gfx950_kernel(
             m_i = m_i_at_tile1
             dualwave_cluster_sync(3)
 
-            return (
-                m_i, l_i, o_accs,
-                s_scaled_1, corr_scalar_1,
-                v_lo_regs_1, v_hi_regs_1,
-                fx.Boolean(True),
-                m_i_at_tile1,
-            )
+            return (m_i, l_i, o_accs, s_scaled_1, corr_scalar_1,
+                    v_lo_regs_1, v_hi_regs_1, m_i_at_tile1)
+
+        def _do_tile_overlapping_softmax_main(kv_i32, m_i, l_i, o_accs,
+                    s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, m_i_prev):
+            """Steady-state: always has deferred PV, always has odd tile and next."""
+            # ── Cluster 0: mem tile 0 ──
+            rocdl.s_waitcnt(vmcnt=0)
+            rocdl.s_barrier()
+            read_k_work(0)
+            v_lo_regs_0, v_hi_regs_0 = read_v_slot[0]()
+            load_kv(kv_i32 + fx.Int32(1), 1)
+            rocdl.s_waitcnt(lgkmcnt=0)
+            dualwave_cluster_sync(0)
+
+            # ── Cluster 1: QK GEMM tile 0 + deferred PV from prev ──
+            frag_S, = gemm1_qk_unrolled(frag_Q, frag_K[0])
+            out_sm_prev = softmax_finish(s_scaled_prev, m_i_prev, l_i, o_accs, corr_scalar_prev)
+            pv_gemm_register(out_sm_prev[0], v_lo_prev, v_hi_prev, out_sm_prev[3])
+            l_i, o_accs = out_sm_prev[2], out_sm_prev[3]
+            s_raw = [frag_S[i] for i in range_constexpr(n_c)]
+            if const_expr(mod_has_score or mod_has_mask):
+                apply_mods(s_raw, kv_i32)
+            corr_scalar_0, s_scaled_0, m_new = softmax_start(s_raw, m_i)
+            m_i_at_tile0 = [m_new] + [m_i[r] for r in range_constexpr(1, npair)]
+            m_i = m_i_at_tile0
+            dualwave_cluster_sync(1)
+
+            # ── Cluster 2: mem tile 1 ──
+            rocdl.s_waitcnt(vmcnt=0)
+            rocdl.s_barrier()
+            read_k_work(1)
+            v_lo_regs_1, v_hi_regs_1 = read_v_slot[1]()
+            load_kv(kv_i32 + fx.Int32(2), 0)
+            rocdl.s_waitcnt(lgkmcnt=0)
+            dualwave_cluster_sync(2)
+
+            # ── Cluster 3: QK GEMM tile 1 + PV from tile 0 ──
+            frag_S, = gemm1_qk_unrolled(frag_Q, frag_K[1])
+            out_sm_0 = softmax_finish(s_scaled_0, m_i_at_tile0, l_i, o_accs, corr_scalar_0)
+            pv_gemm_register(out_sm_0[0], v_lo_regs_0, v_hi_regs_0, out_sm_0[3])
+            l_i, o_accs = out_sm_0[2], out_sm_0[3]
+            s_raw = [frag_S[i] for i in range_constexpr(n_c)]
+            if const_expr(mod_has_score or mod_has_mask):
+                apply_mods(s_raw, kv_i32 + fx.Int32(1))
+            corr_scalar_1, s_scaled_1, m_new = softmax_start(s_raw, m_i)
+            m_i_at_tile1 = [m_new] + [m_i[r] for r in range_constexpr(1, npair)]
+            m_i = m_i_at_tile1
+            dualwave_cluster_sync(3)
+
+            return (m_i, l_i, o_accs, s_scaled_1, corr_scalar_1,
+                    v_lo_regs_1, v_hi_regs_1, m_i_at_tile1)
+
+        def _do_tile_overlapping_softmax_epilogue(kv_i32, m_i, l_i, o_accs,
+                    s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, m_i_prev):
+            """Last pair: has deferred PV, odd tile may be invalid, no next DMA."""
+            odd_valid = (kv_i32 + fx.Int32(1)) < _kv_hi
+            has_next = (kv_i32 + fx.Int32(2)) < _kv_hi
+            # ── Cluster 0: mem tile 0 ──
+            rocdl.s_waitcnt(vmcnt=0)
+            rocdl.s_barrier()
+            read_k_work(0)
+            v_lo_regs_0, v_hi_regs_0 = read_v_slot[0]()
+            if odd_valid:
+                load_kv(kv_i32 + fx.Int32(1), 1)
+            rocdl.s_waitcnt(lgkmcnt=0)
+            dualwave_cluster_sync(0)
+
+            # ── Cluster 1: QK GEMM tile 0 + deferred PV from prev ──
+            frag_S, = gemm1_qk_unrolled(frag_Q, frag_K[0])
+            out_sm_prev = softmax_finish(s_scaled_prev, m_i_prev, l_i, o_accs, corr_scalar_prev)
+            pv_gemm_register(out_sm_prev[0], v_lo_prev, v_hi_prev, out_sm_prev[3])
+            l_i, o_accs = out_sm_prev[2], out_sm_prev[3]
+            s_raw = [frag_S[i] for i in range_constexpr(n_c)]
+            if const_expr(mod_has_score or mod_has_mask):
+                apply_mods(s_raw, kv_i32)
+            corr_scalar_0, s_scaled_0, m_new = softmax_start(s_raw, m_i)
+            m_i_at_tile0 = [m_new] + [m_i[r] for r in range_constexpr(1, npair)]
+            m_i = m_i_at_tile0
+            dualwave_cluster_sync(1)
+
+            # ── Cluster 2: mem tile 1 ──
+            rocdl.s_waitcnt(vmcnt=0)
+            rocdl.s_barrier()
+            read_k_work(1)
+            v_lo_regs_1, v_hi_regs_1 = read_v_slot[1]()
+            if has_next:
+                load_kv(kv_i32 + fx.Int32(2), 0)
+            rocdl.s_waitcnt(lgkmcnt=0)
+            dualwave_cluster_sync(2)
+
+            # ── Cluster 3: QK GEMM tile 1 + PV from tile 0 ──
+            frag_S, = gemm1_qk_unrolled(frag_Q, frag_K[1])
+            out_sm_0 = softmax_finish(s_scaled_0, m_i_at_tile0, l_i, o_accs, corr_scalar_0)
+            pv_gemm_register(out_sm_0[0], v_lo_regs_0, v_hi_regs_0, out_sm_0[3])
+            l_i, o_accs = out_sm_0[2], out_sm_0[3]
+            s_raw = [frag_S[i] for i in range_constexpr(n_c)]
+            if const_expr(mod_has_score or mod_has_mask):
+                apply_mods(s_raw, kv_i32 + fx.Int32(1))
+            _neg_inf = fx.Float32(-1e9)
+            s_raw = [odd_valid.select(s_raw[i], _neg_inf) for i in range_constexpr(n_c)]
+            corr_scalar_1, s_scaled_1, m_new = softmax_start(s_raw, m_i)
+            m_i_at_tile1 = [m_new] + [m_i[r] for r in range_constexpr(1, npair)]
+            m_i = m_i_at_tile1
+            dualwave_cluster_sync(3)
+
+            return (m_i, l_i, o_accs, s_scaled_1, corr_scalar_1,
+                    v_lo_regs_1, v_hi_regs_1, m_i_at_tile1)
 
         def _do_tile_passthrough(kv_i32, m_i, l_i, o_accs, read_slot, dma_slot, has_next):
             """Passthrough iteration: memory transfers + GEMMs only, no softmax.
@@ -1376,111 +1465,119 @@ def flex_attn_fwd_gfx950_kernel(
         _kv_range = _kv_hi - _kv_lo
         _kv_pairs = (_kv_range + fx.Int32(1)) // fx.Int32(2)
 
-        s_scaled_prev = [fx.Float32(_M_NEG_FLOOR_SCALED) for _ in range_constexpr(n_c)]
-        corr_scalar_prev = fx.Float32(1.0)
-        has_softmax_prev = fx.Boolean(False)
-        v_lo_prev, v_hi_prev = read_v_slot[0]()
-
-        m_i_prev = [fx.Float32(_M_NEG_FLOOR_SCALED) for _ in range_constexpr(npair)]
         _sm_base = _o + _n_d_chunks
-        init_args = (
-            [m_i[r] for r in range_constexpr(npair)]
-            + [l_i[r] for r in range_constexpr(npair)]
-            + [o_accs[dc] for dc in range_constexpr(_n_d_chunks)]
-            + [s_scaled_prev[i] for i in range_constexpr(n_c)]
-            + [corr_scalar_prev, has_softmax_prev]
-            + [v_lo_prev[dc] for dc in range_constexpr(_n_d_chunks)]
-            + [v_hi_prev[dc] for dc in range_constexpr(_n_d_chunks)]
-            + [m_i_prev[r] for r in range_constexpr(npair)]
-        )
-        loop_results = init_args
+        overlap_softmax = True
 
         overlap_softmax = True
-        for kv_pair, loop_args in range(
-            fx.Int32(0),
-            _kv_pairs,
-            fx.Int32(1),
-            init=init_args,
-        ):
-            m_i = [loop_args[r] for r in range_constexpr(npair)]
-            l_i = [loop_args[npair + r] for r in range_constexpr(npair)]
-            o_accs = [loop_args[_o + dc] for dc in range_constexpr(_n_d_chunks)]
-            s_scaled_prev = [
-                loop_args[_sm_base + i] for i in range_constexpr(n_c)
-            ]
-            corr_scalar_prev = loop_args[_sm_base + n_c]
-            has_softmax_prev = loop_args[_sm_base + n_c + 1]
-            _v_base = _sm_base + n_c + 2
-            v_lo_prev = [
-                loop_args[_v_base + dc] for dc in range_constexpr(_n_d_chunks)
-            ]
-            v_hi_prev = [
-                loop_args[_v_base + _n_d_chunks + dc]
-                for dc in range_constexpr(_n_d_chunks)
-            ]
+
+        if const_expr(overlap_softmax):
+            _v_base = _sm_base + n_c + 1
             _mi_prev_base = _v_base + 2 * _n_d_chunks
-            m_i_prev = [loop_args[_mi_prev_base + r] for r in range_constexpr(npair)]
 
-            kv_even = _kv_lo + fx.Int32(arith.index_cast(T.i32, kv_pair)) * fx.Int32(2)
-            kv_odd = kv_even + fx.Int32(1)
-            has_next_even = (kv_even + fx.Int32(1)) < _kv_hi
-            has_next_odd = (kv_odd + fx.Int32(1)) < _kv_hi
+            # ── Prologue: first pair, no deferred PV ──
+            # Uses the dedicated prologue function which skips the deferred PV
+            # entirely. It keeps odd_valid/has_next runtime guards for edge cases
+            # (_kv_pairs==1: odd tile may be invalid, no next pair to DMA).
+            m_i, l_i, o_accs, s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, m_i_prev = (
+                _do_tile_overlapping_softmax_prologue(_kv_lo, m_i, l_i, o_accs)
+            )
 
-            passthrough = False
-            if const_expr(overlap_softmax):
-                m_i, l_i, o_accs, s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, has_softmax_prev, m_i_prev = (
-                    _do_tile_overlapping_softmax(
-                        kv_even, m_i, l_i, o_accs,
-                        s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev,
-                        has_softmax_prev, m_i_prev,
-                    )
-                )
-            elif const_expr(passthrough):
-                m_i, l_i, o_accs = _do_tile_passthrough(kv_even, m_i, l_i, o_accs, 0, 1, has_next_even)
-                m_i, l_i, o_accs = _do_tile_passthrough(kv_odd, m_i, l_i, o_accs, 1, 0, has_next_odd)
-            else:
-                odd_valid = kv_odd < _kv_hi
-                ##########################################################
-                # Even iteration: slot 0 → DMA next into slot 1.
-                m_i, l_i, o_accs = _do_tile(kv_even, m_i, l_i, o_accs, 0, 1, has_next_even)
-                ##########################################################
-                # Odd iteration: slot 1 → DMA next into slot 0 (if exists).
-                # When range is odd, last pair's odd tile is past _kv_hi — mask
-                # its scores to -inf so softmax/PV are a no-op.
-                m_i, l_i, o_accs = _do_tile(kv_odd, m_i, l_i, o_accs, 1, 0,
-                                            has_next_odd, valid=odd_valid)
-
-            loop_results = yield (
+            # ── Main loop: remaining pairs, all with deferred PV ──
+            _remaining_pairs = _kv_pairs - fx.Int32(1)
+            init_args = (
                 [m_i[r] for r in range_constexpr(npair)]
                 + [l_i[r] for r in range_constexpr(npair)]
                 + [o_accs[dc] for dc in range_constexpr(_n_d_chunks)]
                 + [s_scaled_prev[i] for i in range_constexpr(n_c)]
-                + [corr_scalar_prev, has_softmax_prev]
+                + [corr_scalar_prev]
                 + [v_lo_prev[dc] for dc in range_constexpr(_n_d_chunks)]
                 + [v_hi_prev[dc] for dc in range_constexpr(_n_d_chunks)]
                 + [m_i_prev[r] for r in range_constexpr(npair)]
             )
+            loop_results = init_args
 
-        m_i = [loop_results[r] for r in range_constexpr(npair)]
-        l_i = [loop_results[npair + r] for r in range_constexpr(npair)]
-        o_accs = [loop_results[_o + dc] for dc in range_constexpr(_n_d_chunks)]
-        s_scaled_prev = [loop_results[_sm_base + i] for i in range_constexpr(n_c)]
-        corr_scalar_prev = loop_results[_sm_base + n_c]
-        has_softmax_prev = loop_results[_sm_base + n_c + 1]
-        _v_base = _sm_base + n_c + 2
-        v_lo_prev = [loop_results[_v_base + dc] for dc in range_constexpr(_n_d_chunks)]
-        v_hi_prev = [
-            loop_results[_v_base + _n_d_chunks + dc]
-            for dc in range_constexpr(_n_d_chunks)
-        ]
-        _mi_prev_base = _v_base + 2 * _n_d_chunks
-        m_i_prev = [loop_results[_mi_prev_base + r] for r in range_constexpr(npair)]
+            for kv_rem, loop_args in range(
+                fx.Int32(0),
+                _remaining_pairs,
+                fx.Int32(1),
+                init=init_args,
+            ):
+                m_i = [loop_args[r] for r in range_constexpr(npair)]
+                l_i = [loop_args[npair + r] for r in range_constexpr(npair)]
+                o_accs = [loop_args[_o + dc] for dc in range_constexpr(_n_d_chunks)]
+                s_scaled_prev = [loop_args[_sm_base + i] for i in range_constexpr(n_c)]
+                corr_scalar_prev = loop_args[_sm_base + n_c]
+                v_lo_prev = [loop_args[_v_base + dc] for dc in range_constexpr(_n_d_chunks)]
+                v_hi_prev = [loop_args[_v_base + _n_d_chunks + dc] for dc in range_constexpr(_n_d_chunks)]
+                m_i_prev = [loop_args[_mi_prev_base + r] for r in range_constexpr(npair)]
 
-        if const_expr(overlap_softmax):
-            if has_softmax_prev:
-                out_sm_final = softmax_finish(s_scaled_prev, m_i_prev, l_i, o_accs, corr_scalar_prev)
-                pv_gemm_register(out_sm_final[0], v_lo_prev, v_hi_prev, out_sm_final[3])
-                l_i, o_accs = out_sm_final[2], out_sm_final[3]
+                kv_even = _kv_lo + (fx.Int32(arith.index_cast(T.i32, kv_rem)) + fx.Int32(1)) * fx.Int32(2)
+                m_i, l_i, o_accs, s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, m_i_prev = (
+                    _do_tile_overlapping_softmax_epilogue(
+                        kv_even, m_i, l_i, o_accs,
+                        s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, m_i_prev,
+                    )
+                )
+
+                loop_results = yield (
+                    [m_i[r] for r in range_constexpr(npair)]
+                    + [l_i[r] for r in range_constexpr(npair)]
+                    + [o_accs[dc] for dc in range_constexpr(_n_d_chunks)]
+                    + [s_scaled_prev[i] for i in range_constexpr(n_c)]
+                    + [corr_scalar_prev]
+                    + [v_lo_prev[dc] for dc in range_constexpr(_n_d_chunks)]
+                    + [v_hi_prev[dc] for dc in range_constexpr(_n_d_chunks)]
+                    + [m_i_prev[r] for r in range_constexpr(npair)]
+                )
+
+            m_i = [loop_results[r] for r in range_constexpr(npair)]
+            l_i = [loop_results[npair + r] for r in range_constexpr(npair)]
+            o_accs = [loop_results[_o + dc] for dc in range_constexpr(_n_d_chunks)]
+            s_scaled_prev = [loop_results[_sm_base + i] for i in range_constexpr(n_c)]
+            corr_scalar_prev = loop_results[_sm_base + n_c]
+            v_lo_prev = [loop_results[_v_base + dc] for dc in range_constexpr(_n_d_chunks)]
+            v_hi_prev = [loop_results[_v_base + _n_d_chunks + dc] for dc in range_constexpr(_n_d_chunks)]
+            m_i_prev = [loop_results[_mi_prev_base + r] for r in range_constexpr(npair)]
+
+            # Final deferred PV from the last tile
+            out_sm_final = softmax_finish(s_scaled_prev, m_i_prev, l_i, o_accs, corr_scalar_prev)
+            pv_gemm_register(out_sm_final[0], v_lo_prev, v_hi_prev, out_sm_final[3])
+            l_i, o_accs = out_sm_final[2], out_sm_final[3]
+
+        else:
+            # Non-overlapping path
+            init_args = (
+                [m_i[r] for r in range_constexpr(npair)]
+                + [l_i[r] for r in range_constexpr(npair)]
+                + [o_accs[dc] for dc in range_constexpr(_n_d_chunks)]
+            )
+            loop_results = init_args
+            for kv_pair, loop_args in range(
+                fx.Int32(0),
+                _kv_pairs,
+                fx.Int32(1),
+                init=init_args,
+            ):
+                m_i = [loop_args[r] for r in range_constexpr(npair)]
+                l_i = [loop_args[npair + r] for r in range_constexpr(npair)]
+                o_accs = [loop_args[_o + dc] for dc in range_constexpr(_n_d_chunks)]
+
+                kv_even = _kv_lo + fx.Int32(arith.index_cast(T.i32, kv_pair)) * fx.Int32(2)
+                kv_odd = kv_even + fx.Int32(1)
+                has_next_even = (kv_even + fx.Int32(1)) < _kv_hi
+                has_next_odd = (kv_odd + fx.Int32(1)) < _kv_hi
+                odd_valid = kv_odd < _kv_hi
+                m_i, l_i, o_accs = _do_tile(kv_even, m_i, l_i, o_accs, 0, 1, has_next_even)
+                m_i, l_i, o_accs = _do_tile(kv_odd, m_i, l_i, o_accs, 1, 0,
+                                            has_next_odd, valid=odd_valid)
+                loop_results = yield (
+                    [m_i[r] for r in range_constexpr(npair)]
+                    + [l_i[r] for r in range_constexpr(npair)]
+                    + [o_accs[dc] for dc in range_constexpr(_n_d_chunks)]
+                )
+            m_i = [loop_results[r] for r in range_constexpr(npair)]
+            l_i = [loop_results[npair + r] for r in range_constexpr(npair)]
+            o_accs = [loop_results[_o + dc] for dc in range_constexpr(_n_d_chunks)]
 
         if const_expr(_enable_stagger):
             _stagger_extra_barrier_if_zero(infra.stagger_i32)
