@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-26T13:52:27Z",
+ "updated": "2026-08-26T13:54:18Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32976669574,
+   "pr": 1065,
+   "commit": "cc5bbdb54e8e8c6ce7e2756293047a31d4c8a8f0",
+   "branch": "upstream/pa-bf16-asymmetric-v",
+   "event": "pull_request",
+   "title": "[Kernel][PA] Support BF16 vectorized KV with asymmetric K/V head dim",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32976669574",
+   "created_at": "2026-08-26T13:51:05Z",
+   "updated_at": "2026-08-26T13:52:52Z",
+   "actor": "sammysun0711",
+   "jobs": []
+  },
   {
    "run_id": 32961854312,
    "pr": 1069,
@@ -2141,51 +2156,6 @@
    "updated_at": "2026-08-24T06:42:25Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 32696893504,
-   "pr": 1027,
-   "commit": "2c21541497c45131c04342c083cb59a8c4ba359f",
-   "branch": "skills/dedrift-and-fix-frontmatter",
-   "event": "pull_request",
-   "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and CLAUDE.md",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32696893504",
-   "created_at": "2026-08-24T06:20:15Z",
-   "updated_at": "2026-08-24T08:21:59Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T06:51:05Z",
-     "completed_at": "2026-08-24T08:21:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32696893504/job/97346475203",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-24T06:51:03Z",
-     "completed_at": "2026-08-24T08:05:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32696893504/job/97346475207"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T07:29:07Z",
-     "completed_at": "2026-08-24T07:55:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32696893504/job/97346475354",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
