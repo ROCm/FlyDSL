@@ -578,14 +578,30 @@ def flex_attn_fwd_gfx950_kernel(
 
     # Q resident: load once into the GEMM1 B-fragment (reused every KV tile).
     # QK uses K=A, Q=B so C's M-rows = score indices, allowing register C→B pack for PV.
-    tcB_q = fx.make_tiled_copy_B(ca, tiled_mma_qk).get_slice(local_tid)
-    frag_Q = thr_qk.make_fragment_B(gQ)
-    fx.copy(ca, tcB_q.partition_S(gQ), tcB_q.retile(frag_Q))
+    #
+    # FP8 workaround: the layout API's make_tiled_copy_B does not support fp8
+    # element types — the MLIR lowering fails with "unresolved materialization
+    # from vector<8xf8E4M3FN> to vector<8xi8>". Flash works around this by
+    # loading Q to LDS as raw bytes and reading i32x8 packs directly. For now,
+    # we use the layout API for bf16/f16 and skip Q loading for fp8 (TODO:
+    # implement manual Q load from global to i32x8 registers for fp8).
     _is_32x32 = int(param.mma_m) == 32
-    if const_expr(_is_32x32 and not _is_fp8):
-        n_q = _size_scalar(frag_Q.shape)
-        for qi in range_constexpr(n_q):
-            frag_Q[qi] = _to_elem(_to_elem(frag_Q[qi], fx.Float32) * scale, elem_dtype)
+    if const_expr(not _is_fp8):
+        tcB_q = fx.make_tiled_copy_B(ca, tiled_mma_qk).get_slice(local_tid)
+        frag_Q = thr_qk.make_fragment_B(gQ)
+        fx.copy(ca, tcB_q.partition_S(gQ), tcB_q.retile(frag_Q))
+        if const_expr(_is_32x32):
+            n_q = _size_scalar(frag_Q.shape)
+            for qi in range_constexpr(n_q):
+                frag_Q[qi] = _to_elem(_to_elem(frag_Q[qi], fx.Float32) * scale, elem_dtype)
+    else:
+        # FP8: the layout API's make_fragment_B / make_tiled_copy_B does not
+        # support fp8 element types — the MLIR lowering fails with "unresolved
+        # materialization from vector<8xf8E4M3FN> to vector<8xi8>".
+        # Flash works around this by loading Q/K as raw i8 bytes to LDS, then
+        # reading i32x8 packs via ds_read_b128 for the scaled MFMA operands.
+        # TODO: implement manual fp8 Q/K load (stage to LDS + read_i32x8_lds).
+        frag_Q = None  # placeholder — kernel will fail at QK GEMM for fp8
 
     # Persistent O accumulator: 4 × v16f32 (one per D-chunk).
     # With V=A, P=B PV GEMM: each v16f32 has 16 D-values at 1 query-row per lane.
@@ -643,6 +659,10 @@ def flex_attn_fwd_gfx950_kernel(
     # retile(frag_K[slot]) is the MFMA A fragment register target for gemm1_qk.
     #
     # Upper-D half (ki >= 4): DMA wrote with +16B skew → read via sK_upper (+16B base).
+    # FP8 blocker: make_tiled_copy_A and make_fragment_A fail for fp8 element
+    # types with the same "unresolved materialization" MLIR lowering error.
+    # The entire K read path (tiled copy, fragment, retile) must be manual for fp8.
+    # TODO: for fp8, bypass layout API and implement direct i32x8 reads from LDS.
     tcA_k_lds = [fx.make_tiled_copy_A(uca, tiled_mma_qk).get_slice(local_tid) for _ in range_constexpr(_lds_ring_slots)]
     frag_K = [thr_qk.make_fragment_A(sK[i]) for i in range_constexpr(_lds_ring_slots)]
 
