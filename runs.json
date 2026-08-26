@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-26T11:46:06Z",
+ "updated": "2026-08-26T12:32:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,9 +14,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32961854312",
    "created_at": "2026-08-26T11:09:03Z",
-   "updated_at": "2026-08-26T11:18:33Z",
+   "updated_at": "2026-08-26T12:17:59Z",
    "actor": "huizzhan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-26T12:17:35Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32961854312/job/98173908446"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-26T12:17:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32961854312/job/98173908463"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-26T12:17:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32961854312/job/98173908483"
+    }
+   ]
   },
   {
    "run_id": 32956568566,
@@ -29,9 +57,38 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32956568566",
    "created_at": "2026-08-26T10:06:48Z",
-   "updated_at": "2026-08-26T10:50:35Z",
+   "updated_at": "2026-08-26T11:47:47Z",
    "actor": "solinzby1",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-26T11:47:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32956568566/job/98165650600"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-26T11:47:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32956568566/job/98165650674"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-26T11:47:36Z",
+     "completed_at": "2026-08-26T12:03:19Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32956568566/job/98165650690",
+     "log_fetch_failed": true
+    }
+   ]
   },
   {
    "run_id": 32956302525,
@@ -84,11 +141,11 @@
    "branch": "phil/bump-llvm-941a04e6",
    "event": "pull_request",
    "title": "[FlyToROCDL] Bump LLVM to 941a04e6 and adapt gpu.launch_func lowering",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32954898547",
    "created_at": "2026-08-26T09:47:51Z",
-   "updated_at": "2026-08-26T11:17:38Z",
+   "updated_at": "2026-08-26T11:43:55Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -138,11 +195,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-26T10:30:14Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32949223451/job/98145310363"
+     "completed_at": "2026-08-26T12:00:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32949223451/job/98145310363",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
