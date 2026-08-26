@@ -79,6 +79,7 @@ _K_HALF_BANK_SKEW_BYTES = 0
 _K_HALF_BANK_SKEW_ELEMS = _K_HALF_BANK_SKEW_BYTES // 2
 FLEX_DTYPE_BF16 = 2
 FLEX_DTYPE_FP16 = 3
+FLEX_DTYPE_FP8 = 4
 
 _LOG2E = 1.4426950408889634
 
@@ -268,7 +269,7 @@ def make_flex_attn_param(
     mask_window: int = 0,
     score_alibi_slope: float = 0.0,
 ) -> FlexAttnParam:
-    if dtype_id not in (FLEX_DTYPE_BF16, FLEX_DTYPE_FP16):
+    if dtype_id not in (FLEX_DTYPE_BF16, FLEX_DTYPE_FP16, FLEX_DTYPE_FP8):
         raise ValueError(f"unsupported dtype_id={dtype_id}")
     if block_m <= 0 or block_n <= 0 or head_dim <= 0:
         raise ValueError("block_m, block_n, head_dim must be positive")
@@ -276,8 +277,11 @@ def make_flex_attn_param(
     # a lowering bug on this build, so both GEMMs use mma_k=32 -> block_n multiple of
     # 32. The C-fragment slot->row map is only locked for block_m=32 (2 M-waves x
     # mma_m=16), one N-wave; larger block_m needs a per-slot row map (TODO perf).
-    if not (mma_m == mma_n and (mma_m, mma_k) in ((16, 32), (16, 16), (32, 16), (32, 8))):
-        raise ValueError(f"unsupported MMA shape {mma_m}x{mma_n}x{mma_k}")
+    _valid_mma = ((16, 32), (16, 16), (32, 16), (32, 8))
+    if dtype_id == FLEX_DTYPE_FP8:
+        _valid_mma = ((32, 64),)  # scaled MFMA 32x32x64
+    if not (mma_m == mma_n and (mma_m, mma_k) in _valid_mma):
+        raise ValueError(f"unsupported MMA shape {mma_m}x{mma_n}x{mma_k} for dtype_id={dtype_id}")
     if block_m % (m_waves * mma_m) != 0:
         raise ValueError(f"block_m ({block_m}) must be divisible by m_waves*mma_m ({m_waves * mma_m})")
     if block_n % (n_waves * mma_n) != 0:
@@ -314,7 +318,7 @@ def make_flex_attn_param(
             stacklevel=2,
         )
 
-    in_dbytes = 2  # bf16/f16
+    in_dbytes = 1 if dtype_id == FLEX_DTYPE_FP8 else 2
 
     group_threads = m_waves * n_waves * GFX950_WAVE_SIZE
     block_threads = num_groups * group_threads
