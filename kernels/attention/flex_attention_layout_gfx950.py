@@ -396,7 +396,11 @@ _FM_CONTRACT = fx.arith.FastMathFlags.contract
 
 
 def _elem_dtype(dtype_id):
-    return fx.Float16 if dtype_id == FLEX_DTYPE_FP16 else fx.BFloat16
+    if dtype_id == FLEX_DTYPE_FP16:
+        return fx.Float16
+    if dtype_id == FLEX_DTYPE_FP8:
+        return fx.Float8E4M3FN
+    return fx.BFloat16
 
 
 def _size_scalar(shape) -> int:
