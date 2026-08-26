@@ -1333,7 +1333,6 @@ def flex_attn_fwd_gfx950_kernel(
             """Steady-state: always has deferred PV, always has odd tile and next."""
             # ── Cluster 0: mem tile 0 ──
             rocdl.s_waitcnt(vmcnt=0)
-            rocdl.s_barrier()
             read_k_work(0)
             v_lo_regs_0, v_hi_regs_0 = read_v_slot[0]()
             load_kv(kv_i32 + fx.Int32(1), 1)
@@ -1355,7 +1354,6 @@ def flex_attn_fwd_gfx950_kernel(
 
             # ── Cluster 2: mem tile 1 ──
             rocdl.s_waitcnt(vmcnt=0)
-            rocdl.s_barrier()
             read_k_work(1)
             v_lo_regs_1, v_hi_regs_1 = read_v_slot[1]()
             load_kv(kv_i32 + fx.Int32(2), 0)
@@ -1468,8 +1466,6 @@ def flex_attn_fwd_gfx950_kernel(
         _sm_base = _o + _n_d_chunks
         overlap_softmax = True
 
-        overlap_softmax = True
-
         if const_expr(overlap_softmax):
             _v_base = _sm_base + n_c + 1
             _mi_prev_base = _v_base + 2 * _n_d_chunks
@@ -1482,8 +1478,9 @@ def flex_attn_fwd_gfx950_kernel(
                 _do_tile_overlapping_softmax_prologue(_kv_lo, m_i, l_i, o_accs)
             )
 
-            # ── Main loop: remaining pairs, all with deferred PV ──
-            _remaining_pairs = _kv_pairs - fx.Int32(1)
+            # ── Main loop: pairs 1 .. _kv_pairs-2, no runtime branches ──
+            # All middle pairs have valid odd tile + guaranteed has_next.
+            _main_loop_count = _kv_pairs - fx.Int32(2)  # 0 when _kv_pairs <= 2
             init_args = (
                 [m_i[r] for r in range_constexpr(npair)]
                 + [l_i[r] for r in range_constexpr(npair)]
@@ -1496,9 +1493,9 @@ def flex_attn_fwd_gfx950_kernel(
             )
             loop_results = init_args
 
-            for kv_rem, loop_args in range(
+            for kv_mid, loop_args in range(
                 fx.Int32(0),
-                _remaining_pairs,
+                _main_loop_count,
                 fx.Int32(1),
                 init=init_args,
             ):
@@ -1511,9 +1508,9 @@ def flex_attn_fwd_gfx950_kernel(
                 v_hi_prev = [loop_args[_v_base + _n_d_chunks + dc] for dc in range_constexpr(_n_d_chunks)]
                 m_i_prev = [loop_args[_mi_prev_base + r] for r in range_constexpr(npair)]
 
-                kv_even = _kv_lo + (fx.Int32(arith.index_cast(T.i32, kv_rem)) + fx.Int32(1)) * fx.Int32(2)
+                kv_even = _kv_lo + (fx.Int32(arith.index_cast(T.i32, kv_mid)) + fx.Int32(1)) * fx.Int32(2)
                 m_i, l_i, o_accs, s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, m_i_prev = (
-                    _do_tile_overlapping_softmax_epilogue(
+                    _do_tile_overlapping_softmax_main(
                         kv_even, m_i, l_i, o_accs,
                         s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, m_i_prev,
                     )
@@ -1538,6 +1535,65 @@ def flex_attn_fwd_gfx950_kernel(
             v_lo_prev = [loop_results[_v_base + dc] for dc in range_constexpr(_n_d_chunks)]
             v_hi_prev = [loop_results[_v_base + _n_d_chunks + dc] for dc in range_constexpr(_n_d_chunks)]
             m_i_prev = [loop_results[_mi_prev_base + r] for r in range_constexpr(npair)]
+
+            # ── Epilogue: last pair (runs 0 or 1 times), has odd_valid/has_next guards ──
+            # Uses scf.for with trip count min(_kv_pairs-1, 1) to avoid scf.if dominance issues.
+            # When _kv_pairs==1, prologue handled the only pair; skip straight to final PV.
+            _epilogue_count = (_kv_pairs > fx.Int32(1)).select(fx.Int32(1), fx.Int32(0))
+            epi_init = (
+                [m_i[r] for r in range_constexpr(npair)]
+                + [l_i[r] for r in range_constexpr(npair)]
+                + [o_accs[dc] for dc in range_constexpr(_n_d_chunks)]
+                + [s_scaled_prev[i] for i in range_constexpr(n_c)]
+                + [corr_scalar_prev]
+                + [v_lo_prev[dc] for dc in range_constexpr(_n_d_chunks)]
+                + [v_hi_prev[dc] for dc in range_constexpr(_n_d_chunks)]
+                + [m_i_prev[r] for r in range_constexpr(npair)]
+            )
+            epi_results = epi_init
+
+            for _epi_i, epi_args in range(
+                fx.Int32(0),
+                _epilogue_count,
+                fx.Int32(1),
+                init=epi_init,
+            ):
+                m_i = [epi_args[r] for r in range_constexpr(npair)]
+                l_i = [epi_args[npair + r] for r in range_constexpr(npair)]
+                o_accs = [epi_args[_o + dc] for dc in range_constexpr(_n_d_chunks)]
+                s_scaled_prev = [epi_args[_sm_base + i] for i in range_constexpr(n_c)]
+                corr_scalar_prev = epi_args[_sm_base + n_c]
+                v_lo_prev = [epi_args[_v_base + dc] for dc in range_constexpr(_n_d_chunks)]
+                v_hi_prev = [epi_args[_v_base + _n_d_chunks + dc] for dc in range_constexpr(_n_d_chunks)]
+                m_i_prev = [epi_args[_mi_prev_base + r] for r in range_constexpr(npair)]
+
+                kv_last = _kv_lo + (_kv_pairs - fx.Int32(1)) * fx.Int32(2)
+                m_i, l_i, o_accs, s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, m_i_prev = (
+                    _do_tile_overlapping_softmax_epilogue(
+                        kv_last, m_i, l_i, o_accs,
+                        s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, m_i_prev,
+                    )
+                )
+
+                epi_results = yield (
+                    [m_i[r] for r in range_constexpr(npair)]
+                    + [l_i[r] for r in range_constexpr(npair)]
+                    + [o_accs[dc] for dc in range_constexpr(_n_d_chunks)]
+                    + [s_scaled_prev[i] for i in range_constexpr(n_c)]
+                    + [corr_scalar_prev]
+                    + [v_lo_prev[dc] for dc in range_constexpr(_n_d_chunks)]
+                    + [v_hi_prev[dc] for dc in range_constexpr(_n_d_chunks)]
+                    + [m_i_prev[r] for r in range_constexpr(npair)]
+                )
+
+            m_i = [epi_results[r] for r in range_constexpr(npair)]
+            l_i = [epi_results[npair + r] for r in range_constexpr(npair)]
+            o_accs = [epi_results[_o + dc] for dc in range_constexpr(_n_d_chunks)]
+            s_scaled_prev = [epi_results[_sm_base + i] for i in range_constexpr(n_c)]
+            corr_scalar_prev = epi_results[_sm_base + n_c]
+            v_lo_prev = [epi_results[_v_base + dc] for dc in range_constexpr(_n_d_chunks)]
+            v_hi_prev = [epi_results[_v_base + _n_d_chunks + dc] for dc in range_constexpr(_n_d_chunks)]
+            m_i_prev = [epi_results[_mi_prev_base + r] for r in range_constexpr(npair)]
 
             # Final deferred PV from the last tile
             out_sm_final = softmax_finish(s_scaled_prev, m_i_prev, l_i, o_accs, corr_scalar_prev)
