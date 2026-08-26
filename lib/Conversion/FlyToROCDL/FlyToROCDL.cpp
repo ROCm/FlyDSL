@@ -813,6 +813,28 @@ public:
         [&](fly::TiledCopyType tiledTy) -> Type { return convertType(tiledTy.getCopyAtom()); });
     addConversion(
         [&](fly::TiledMmaType tiledTy) -> Type { return convertType(tiledTy.getMmaAtom()); });
+
+    // Materialization callbacks for fp8 <-> i8 bridging.
+    // The fp8 -> i8 type conversion (width < 16 floats) creates a type gap
+    // when legal-dialect ops (vector.bitcast, scf.for) carry fp8 vectors.
+    // These callbacks emit llvm.bitcast to bridge the gap — valid because
+    // fp8 and i8 have the same bit width, so the cast is a no-op in hardware.
+    addSourceMaterialization(
+        [](OpBuilder &builder, Type resultType, ValueRange inputs,
+           Location loc) -> std::optional<Value> {
+          if (inputs.size() != 1)
+            return std::nullopt;
+          return LLVM::BitcastOp::create(builder, loc, resultType, inputs[0])
+              .getResult();
+        });
+    addTargetMaterialization(
+        [](OpBuilder &builder, Type resultType, ValueRange inputs,
+           Location loc) -> std::optional<Value> {
+          if (inputs.size() != 1)
+            return std::nullopt;
+          return LLVM::BitcastOp::create(builder, loc, resultType, inputs[0])
+              .getResult();
+        });
   }
 };
 
