@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-26T11:40:04Z",
+ "updated": "2026-08-26T11:46:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -103,9 +103,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-26T11:17:38Z",
+     "started_at": "2026-08-26T11:43:54Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32954898547/job/98158013619"
     },
@@ -172,11 +172,11 @@
    "branch": "fp8-softmax-normalisation",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32947284483",
    "created_at": "2026-08-26T08:20:54Z",
-   "updated_at": "2026-08-26T10:04:35Z",
+   "updated_at": "2026-08-26T11:43:39Z",
    "actor": "JohnQinAMD",
    "jobs": [
     {
@@ -192,20 +192,22 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-26T10:04:24Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32947284483/job/98138510914"
+     "completed_at": "2026-08-26T11:43:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32947284483/job/98138510914",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-26T10:04:34Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32947284483/job/98138510980"
+     "completed_at": "2026-08-26T11:38:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32947284483/job/98138510980",
+     "log_fetch_failed": true
     }
    ]
   },
