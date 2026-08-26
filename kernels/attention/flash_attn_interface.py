@@ -43,6 +43,10 @@ _DTYPE_MAP = {torch.bfloat16: "bf16", torch.float16: "f16", torch.float8_e4m3fn:
 
 # Short varlen/paged cases use the lightweight generic path.
 _VARLEN_LIGHT_MAX_SEQ = 256
+# A buffer descriptor is built per batch entry and carries a 32-bit byte count,
+# addressed by a 32-bit voffset. One entry above this writes only
+# (bytes mod 2**32) of its output and reports nothing.
+_MAX_DESCRIPTOR_BYTES = 2**32
 _DENSE_LIGHT_CU_FALLBACK = 256
 _DENSE_DUALWAVE_MIN_SEQ = 256
 _DENSE_DUALWAVE_LARGE_BATCH = 8
@@ -802,6 +806,23 @@ def flydsl_flash_attn_func(
         raise ValueError(f"flydsl_flash_attn_func: q/k/v must share dtype; got {q.dtype}/{k.dtype}/{v.dtype}")
 
     dtype_str = _dtype_str(q)
+    if q.dim() == 4:
+        # Descriptors span one batch entry, so the bound is per entry, not per tensor.
+        _out_elem = 2 if dtype_str == "fp8" else q.element_size()
+        for _name, _t, _elem in (
+            ("q", q, q.element_size()),
+            ("k", k, k.element_size()),
+            ("v", v, v.element_size()),
+            ("out", q, _out_elem),
+        ):
+            _entry_bytes = (_t.numel() // _t.shape[0]) * _elem
+            if _entry_bytes >= _MAX_DESCRIPTOR_BYTES:
+                raise NotImplementedError(
+                    f"flydsl_flash_attn_func: one batch entry of {_name} is {_entry_bytes} bytes, at or over the "
+                    f"{_MAX_DESCRIPTOR_BYTES} bytes a buffer descriptor can address. Its byte count and its offset "
+                    "are both 32-bit, so the span wraps and the kernel returns a wrong result without reporting "
+                    "anything. Shorten the sequence or use fewer heads."
+                )
     if return_lse and dtype_str == "fp8":
         raise NotImplementedError("flydsl_flash_attn_func: return_lse is not supported for fp8")
     paged_kv = any(x is not None for x in (block_table, seqlen_k))
