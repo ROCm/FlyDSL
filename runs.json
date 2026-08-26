@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-26T03:37:47Z",
+ "updated": "2026-08-26T03:39:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "fp8-softmax-normalisation",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32927052651",
    "created_at": "2026-08-26T03:36:00Z",
-   "updated_at": "2026-08-26T03:36:34Z",
+   "updated_at": "2026-08-26T03:37:46Z",
    "actor": "JohnQinAMD",
    "jobs": []
   },
