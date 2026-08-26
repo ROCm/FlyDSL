@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-26T06:32:17Z",
+ "updated": "2026-08-26T06:40:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32938927483,
+   "pr": 972,
+   "commit": "898afe0df71d67ca3f4a05b96f6faadb8848750f",
+   "branch": "mega_moe_a4w4",
+   "event": "pull_request",
+   "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32938927483",
+   "created_at": "2026-08-26T06:37:03Z",
+   "updated_at": "2026-08-26T06:37:52Z",
+   "actor": "Yaowu-Xiong",
+   "jobs": []
+  },
   {
    "run_id": 32933223938,
    "pr": null,
@@ -128,11 +143,11 @@
    "branch": "mega_moe_a4w4",
    "event": "pull_request",
    "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32922097019",
    "created_at": "2026-08-26T02:16:13Z",
-   "updated_at": "2026-08-26T06:20:20Z",
+   "updated_at": "2026-08-26T06:37:21Z",
    "actor": "Yaowu-Xiong",
    "jobs": [
     {
@@ -168,19 +183,19 @@
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-26T06:21:46Z",
-     "completed_at": null,
+     "completed_at": "2026-08-26T06:37:20Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32922097019/job/98082162119"
     },
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-26T06:20:20Z",
-     "completed_at": null,
+     "completed_at": "2026-08-26T06:37:03Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32922097019/job/98082162193"
     }
    ]
@@ -2073,21 +2088,6 @@
    "created_at": "2026-08-22T18:20:22Z",
    "updated_at": "2026-08-22T18:20:22Z",
    "actor": "zjing14",
-   "jobs": []
-  },
-  {
-   "run_id": 32571744627,
-   "pr": 1057,
-   "commit": "cca1d61ae66d189293a6465cb528ac8536757dd5",
-   "branch": "perf/gfx1151-rdna3_5-tuning",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Add gfx1151 tile selection for RDNA3 GEMM",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32571744627",
-   "created_at": "2026-08-22T11:59:01Z",
-   "updated_at": "2026-08-22T11:59:01Z",
-   "actor": "tangzzycc",
    "jobs": []
   }
  ]
