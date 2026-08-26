@@ -340,3 +340,49 @@ def test_minmax_unflagged_outside_block(op_name):
 
     ir_text = _build(build, [ir.F32Type.get, ir.F32Type.get])
     assert f"arith.{op_name}" in ir_text and "fastmath" not in ir_text
+
+
+@pytest.mark.l0_backend_agnostic
+def test_maxnumf_keeps_its_result_contract():
+    """``fx.maxnumf`` is a stable API that returns the DSL type of ``a``.
+
+    The generic flat wrapper drops a keyword binding to a raw value, flattens a
+    logical shape, and pins a generic vector dtype to a concrete one, so this
+    one stays hand-wrapped.
+    """
+    from flydsl.expr.numeric import Float
+    from flydsl.expr.typing import Vector
+
+    def build_scalar(a, b):
+        fa, fb = Float32(a), Float32(b)
+        assert isinstance(fx.maxnumf(fa, fb), Float32), "positional scalar"
+        assert isinstance(fx.maxnumf(a=fa, b=fb), Float32), "keyword scalar"
+
+    def build_vector(a, b):
+        va, vb = Vector(a, (2, 2), Float32), Vector(b, (2, 2), Float32)
+        assert fx.maxnumf(a=va, b=vb).shape == (2, 2), "keyword vector keeps its logical shape"
+        ga, gb = Vector(a, (4,), Float), Vector(b, (4,), Float)
+        assert fx.maxnumf(ga, gb).dtype is Float, "generic vector dtype is preserved"
+
+    _build(build_scalar, [ir.F32Type.get, ir.F32Type.get])
+    _vec = lambda: ir.VectorType.get([4], ir.F32Type.get())  # noqa: E731
+    _build(build_vector, [_vec, _vec])
+
+
+@pytest.mark.l0_backend_agnostic
+def test_maxnumf_can_carry_nnan_without_ninf():
+    """The score reductions need nnan but must not get ninf.
+
+    Their scores are finite or the -inf mask sentinel, and an infinite operand
+    under ninf is poison, so an ambient ``fast`` must not reach them.
+    """
+
+    def build(a, b):
+        fa, fb = Float32(a), Float32(b)
+        with fx.fastmath(fx.FastMathFlags.fast):
+            fx.maxnumf(fa, fb, fastmath=fx.FastMathFlags.nnan)
+
+    ir_text = _build(build, [ir.F32Type.get, ir.F32Type.get])
+    assert "arith.maxnumf" in ir_text
+    assert "fastmath<nnan>" in ir_text, ir_text
+    assert "ninf" not in ir_text, ir_text

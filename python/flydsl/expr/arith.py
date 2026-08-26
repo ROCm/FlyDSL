@@ -290,10 +290,22 @@ def ceildiv(lhs, rhs, **kwargs):
 
 
 @dsl_loc_tracing
-@dsl_math_wrap_result
 def maxnumf(a, b, *, fastmath=None, **kwargs):
-    """Floating-point maximum, returning the non-NaN operand when one input is NaN (libm ``fmax``)."""
-    return arith.maxnumf(as_ir_value(a), as_ir_value(b), fastmath=fastmath, **kwargs)
+    """Floating-point maximum, returning the non-NaN operand when one input is NaN (libm ``fmax``).
+
+    Wrapped by hand rather than by ``dsl_math_wrap_result``: this is a stable API
+    that returns the DSL type of ``a``, including a generic vector dtype and a
+    logical shape the flat wrapper would not preserve.
+    """
+    from .numeric import Numeric
+    from .typing import Vector
+
+    result = arith.maxnumf(as_ir_value(a), as_ir_value(b), fastmath=resolve_fastmath(fastmath), **kwargs)
+    if isinstance(a, Vector):
+        return Vector(result, a.shape, a.dtype)
+    if isinstance(a, Numeric):
+        return Numeric.from_ir_type(result.type)(result)
+    return result
 
 
 @dsl_loc_tracing
