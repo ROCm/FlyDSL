@@ -471,7 +471,7 @@ def _mfma_acc(a, b, c, mma_atom):
 
 @flyc.kernel
 def flex_attn_fwd_gfx950_kernel(
-    o: fx.Tensor,       # [B, Sq, Hq, D]
+    o: fx.Tensor,       # [B, Sq, Hq, D]  — output, always bf16 for fp8
     q: fx.Tensor,       # [B, Sq, Hq, D]
     k: fx.Tensor,       # [B, Skv, Hkv, D]
     v: fx.Tensor,       # [B, Skv, Hkv, D]
@@ -482,11 +482,15 @@ def flex_attn_fwd_gfx950_kernel(
     tiled_mma_qk: fx.TiledMma,
     tiled_mma_pv: fx.TiledMma,
     param: FlexAttnParam,
+    q_descale: fx.Float32 = fx.Float32(1.0),  # fp8 per-tensor Q descale
+    k_descale: fx.Float32 = fx.Float32(1.0),  # fp8 per-tensor K descale
+    v_descale: fx.Float32 = fx.Float32(1.0),  # fp8 per-tensor V descale
 ):
     block_m = param.block_m
     block_n = param.block_n
     head_dim = param.head_dim
     elem_dtype = _elem_dtype(param.dtype_id)
+    _is_fp8 = int(param.dtype_id) == FLEX_DTYPE_FP8
 
     tid = fx.thread_idx.x
     # Strategy A: num_groups independent 2-wave query subtiles per workgroup, all
@@ -578,7 +582,7 @@ def flex_attn_fwd_gfx950_kernel(
     frag_Q = thr_qk.make_fragment_B(gQ)
     fx.copy(ca, tcB_q.partition_S(gQ), tcB_q.retile(frag_Q))
     _is_32x32 = int(param.mma_m) == 32
-    if const_expr(_is_32x32):
+    if const_expr(_is_32x32 and not _is_fp8):
         n_q = _size_scalar(frag_Q.shape)
         for qi in range_constexpr(n_q):
             frag_Q[qi] = _to_elem(_to_elem(frag_Q[qi], fx.Float32) * scale, elem_dtype)
@@ -606,7 +610,9 @@ def flex_attn_fwd_gfx950_kernel(
     else:
         npair = n_c // 2
 
-    if const_expr(_is_32x32):
+    if const_expr(_is_fp8):
+        scale_log2e = scale * fx.Float32(_LOG2E) * q_descale * k_descale
+    elif const_expr(_is_32x32):
         scale_log2e = fx.Float32(_LOG2E)
     else:
         scale_log2e = scale * fx.Float32(_LOG2E)
@@ -643,7 +649,6 @@ def flex_attn_fwd_gfx950_kernel(
     # V is loaded as A operand for PV GEMM (V=A, P=B).
     # V LDS has 4 compact sub-tiles [block_n, 32]:(32, 1). LDSReadTrans16_64b
     # transposes each [block_n, 32] → [32, block_n] = A[M=D_chunk, K=score].
-    _is_fp8 = int(param.dtype_id) == FLEX_DTYPE_FP8
     if const_expr(_is_fp8):
         _v_tr_atom = fx.make_copy_atom(rocdl.cdna4.LDSReadTrans8_64b(), elem_dtype)
     else:
@@ -1480,6 +1485,8 @@ def flex_attn_fwd_gfx950_kernel(
         inv_l = fx.Float32(1.0) / _safe_l
     else:
         inv_l = fx.Float32(1.0) / l_i[0]
+    if const_expr(_is_fp8):
+        inv_l = inv_l * v_descale
     inv_l_vec = Vec.from_elements([inv_l], fx.Float32).broadcast_to(16)
     for dc in range_constexpr(_n_d_chunks):
         o_accs[dc] = (Vec(o_accs[dc]) * inv_l_vec).ir_value()
@@ -1491,12 +1498,13 @@ def flex_attn_fwd_gfx950_kernel(
     _qrow = fx.Int32(local_tid % 32)
     _group_d_base = fx.Int32((local_tid // 32) * 4)
     _o_row_stride = hq * head_dim
+    _out_elem_dtype = fx.BFloat16 if const_expr(_is_fp8) else elem_dtype
 
-    _o_store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), elem_dtype)
-    o_store_reg = fx.make_rmem_tensor(fx.make_layout(4, 1), elem_dtype)
+    _o_store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), _out_elem_dtype)
+    o_store_reg = fx.make_rmem_tensor(fx.make_layout(4, 1), _out_elem_dtype)
     o_div = fx.logical_divide(
         fx.rocdl.make_buffer_tensor(
-            fx.Tensor(fx.make_view(fx.recast_iter(elem_dtype, fx.get_iter(o)),
+            fx.Tensor(fx.make_view(fx.recast_iter(_out_elem_dtype, fx.get_iter(o)),
                                    fx.make_layout(0x7FFFFFFF, 1))),
             max_size=True,
         ),
@@ -1509,7 +1517,7 @@ def flex_attn_fwd_gfx950_kernel(
         for k in range_constexpr(4):
             col = dc * 32 + _group_d_base + fx.Int32(k * 8)
             elems = [o_vec[k * 4 + e] for e in range_constexpr(4)]
-            vbf = Vec.from_elements(elems, fx.Float32).to(elem_dtype)
+            vbf = Vec.from_elements(elems, fx.Float32).to(_out_elem_dtype)
             off = o_base + col
             fx.memref_store_vec(vbf, o_store_reg)
             fx.copy(_o_store_atom, o_store_reg, fx.slice(o_div, (None, fx.Int32(off))))
