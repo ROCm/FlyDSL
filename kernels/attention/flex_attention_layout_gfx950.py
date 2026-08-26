@@ -763,7 +763,10 @@ def flex_attn_fwd_gfx950_kernel(
                 _if = scf.IfOp(in_phase, [], has_else=False)
                 with ir.InsertionPoint(_if.then_block):
                     _wave_off = rocdl.readfirstlane(fx.Int32.ir_type, fx.Int32(tid // GFX950_WAVE_SIZE * GFX950_WAVE_SIZE * _dma_bytes))
-                    lds_k = fx.add_offset(sK_i8[buf], _wave_off + (op_offset + i) * block_threads * _dma_bytes)
+                    _lds_off = _wave_off + (op_offset + i) * block_threads * _dma_bytes
+                    if const_expr(_K_HALF_BANK_SKEW_BYTES > 0 and stride_phase == 1):
+                        _lds_off = _lds_off + _K_HALF_BANK_SKEW_BYTES
+                    lds_k = fx.add_offset(sK_i8[buf], _lds_off)
                     fx.copy(
                         dma_atom,
                         fx.slice(k_div, (None, fx.Int32(gmem_byte))),
@@ -808,7 +811,14 @@ def flex_attn_fwd_gfx950_kernel(
         HEAD_DIM = int(param.head_dim)
 
     def load_kv(tile_idx, slot, ops=_dma_ops_per_thread, op_offset=0):
-        _stage_kv_to_lds(tile_idx, slot, True, True, ops=ops, op_offset=op_offset)
+        if _K_HALF_BANK_SKEW_BYTES > 0:
+            # Split K DMA by D-half so each half gets its own m0 with/without skew.
+            # Phase 0 = D-lo (no skew), Phase 1 = D-hi (+skew). V is phase 2.
+            _stage_kv_to_lds_strided(tile_idx, slot, 0, ops=ops, op_offset=op_offset)
+            _stage_kv_to_lds_strided(tile_idx, slot, 1, ops=ops, op_offset=op_offset)
+            _stage_kv_to_lds_strided(tile_idx, slot, 2, ops=ops, op_offset=op_offset)
+        else:
+            _stage_kv_to_lds(tile_idx, slot, True, True, ops=ops, op_offset=op_offset)
         return []
 
     def load_k(tile_idx, slot, ops=_dma_ops_per_thread, op_offset=0):
