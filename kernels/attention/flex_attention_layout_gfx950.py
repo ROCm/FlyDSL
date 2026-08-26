@@ -1532,6 +1532,9 @@ def launch_flex_attn_gfx950(
     scale: fx.Float32,
     param: FlexAttnParam,
     stream: fx.Stream = fx.Stream(None),
+    q_descale: fx.Float32 = fx.Float32(1.0),
+    k_descale: fx.Float32 = fx.Float32(1.0),
+    v_descale: fx.Float32 = fx.Float32(1.0),
 ):
     b = fx.Int32(fx.get_scalar(q.shape[0]))
     seqlen_q = fx.Int32(fx.get_scalar(q.shape[1]))
@@ -1573,6 +1576,7 @@ def launch_flex_attn_gfx950(
     _waves_per_eu = max(1, _total_waves // 4)
     flex_attn_fwd_gfx950_kernel(
         o, q, k, v, seqlen_q, seqlen_kv, b, scale, tiled_mma_qk, tiled_mma_pv, param,
+        q_descale, k_descale, v_descale,
         value_attrs={
             "rocdl.waves_per_eu": _waves_per_eu,
             "rocdl.flat_work_group_size": f"{param.block_threads},{param.block_threads}",
@@ -1695,5 +1699,84 @@ def flydsl_flex_attention_layout(
     launch_flex_attn_gfx950(
         out.contiguous(), q.contiguous(), k.contiguous(), v.contiguous(),
         fx.Float32(scale), param, stream,
+    )
+    return out
+
+
+def flydsl_flex_attention_layout_fp8(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    q_descale: float,
+    k_descale: float,
+    v_descale: float,
+    *,
+    scale: Optional[float] = None,
+    num_kv_heads: Optional[int] = None,
+    out: Optional[torch.Tensor] = None,
+    block_m: int = 32,
+    block_n: int = 32,
+    num_groups: int = 2,
+    accurate_softmax: bool = True,
+    mask_type: int = MASK_NONE,
+    score_type: int = SCORE_NONE,
+    mask_window: int = 0,
+    score_alibi_slope: float = 0.0,
+    stream: Optional[torch.cuda.Stream] = None,
+) -> torch.Tensor:
+    """FP8 flex-attention forward on the layout API (gfx950).
+
+    q/k/v: ``[B, S, H, D]`` (BSHD), float8_e4m3fn.
+    q/k/v_descale: per-tensor f32 descale scalars.
+    Returns ``[B, Sq, Hq, D]`` in bf16.
+    """
+    arch = get_rocm_arch()
+    if not arch.startswith("gfx950"):
+        raise RuntimeError(f"flex_attention_layout targets gfx950; got {arch!r}")
+    if not (q.is_cuda and k.is_cuda and v.is_cuda):
+        raise ValueError("q/k/v must be CUDA tensors")
+    if q.dtype != torch.float8_e4m3fn:
+        raise ValueError(f"expected float8_e4m3fn, got {q.dtype}")
+    if q.dim() != 4:
+        raise ValueError(f"q must be 4D [B,S,H,D], got {q.dim()}D")
+
+    B, Sq, Hq, D = q.shape
+    Skv, Hkv = k.shape[1], k.shape[2]
+    if num_kv_heads is not None and num_kv_heads != Hkv:
+        raise ValueError(f"num_kv_heads {num_kv_heads} != k head count {Hkv}")
+    rows_per_wg = block_m * num_groups
+    if Sq % rows_per_wg != 0:
+        raise ValueError(
+            f"seqlen_q ({Sq}) must be a multiple of block_m*num_groups ({rows_per_wg})"
+        )
+    if scale is None:
+        scale = 1.0 / (D ** 0.5)
+    if stream is None:
+        stream = torch.cuda.current_stream()
+    if out is None:
+        out = torch.empty(B, Sq, Hq, D, dtype=torch.bfloat16, device=q.device)
+
+    param = make_flex_attn_param(
+        seqlen_kv=Skv,
+        dtype_id=FLEX_DTYPE_FP8,
+        block_m=block_m,
+        block_n=block_n,
+        head_dim=D,
+        num_heads_q=Hq,
+        num_heads_kv=Hkv,
+        num_groups=num_groups,
+        mma_m=32,
+        mma_n=32,
+        mma_k=64,
+        accurate_softmax=accurate_softmax,
+        mask_type=mask_type,
+        score_type=score_type,
+        mask_window=mask_window,
+        score_alibi_slope=score_alibi_slope,
+    )
+    launch_flex_attn_gfx950(
+        out.contiguous(), q.contiguous(), k.contiguous(), v.contiguous(),
+        fx.Float32(scale), param, stream,
+        fx.Float32(q_descale), fx.Float32(k_descale), fx.Float32(v_descale),
     )
     return out
