@@ -187,9 +187,9 @@ def compile_pa_decode_tile(
     def pa_decode_tile_kernel(
         output_ptr: fx.Tensor,  # [num_seqs*query_length, num_q_heads, v_head_dim]  (written directly when NP==1)
         # per-partition partial outputs (combined by the reduce kernel when NP>1):
-        pmax_ptr: fx.Tensor,  # [num_seqs*query_length, num_kv_heads, num_partitions, query_group_size]   row max
-        psum_ptr: fx.Tensor,  # [num_seqs*query_length, num_kv_heads, num_partitions, query_group_size]   row sum
-        pout_ptr: fx.Tensor,  # [num_seqs*query_length, num_kv_heads, num_partitions, query_group_size, v_head_dim] Q_DTYPE, normalized O_p/l_p
+        pmax_ptr: fx.Tensor,  # [num_seqs, num_kv_heads, num_partitions, total_rows] row max
+        psum_ptr: fx.Tensor,  # [num_seqs, num_kv_heads, num_partitions, total_rows] row sum
+        pout_ptr: fx.Tensor,  # [num_seqs, num_kv_heads, num_partitions, total_rows, v_head_dim] normalized O_p/l_p
         query_ptr: fx.Tensor,  # [num_seqs*query_length, num_q_heads, head_dim] -- row = seq*query_length + qi (MTP position)
         key_cache_ptr: fx.Tensor,  # fp8 vector-16 or bf16 vector-8, see module docstring
         value_cache_ptr: fx.Tensor,  # fp8 vector-16 or bf16 vector-8, see module docstring
@@ -1185,6 +1185,9 @@ def pa_decode_tile(
     assert (
         value_cache.dtype == key_cache.dtype
     ), f"key/value cache dtype mismatch: {key_cache.dtype} vs {value_cache.dtype}"
+    assert num_q_heads % num_kv_heads == 0, (
+        f"num_q_heads ({num_q_heads}) must be divisible by " f"num_kv_heads ({num_kv_heads})"
+    )
     assert block_tables.dtype == torch.int32, f"block_tables must be int32, got {block_tables.dtype}"
     assert context_lengths.dtype == torch.int32, f"context_lengths must be int32, got {context_lengths.dtype}"
     query_group_size = num_q_heads // num_kv_heads
