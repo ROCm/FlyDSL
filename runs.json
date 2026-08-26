@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-26T13:36:09Z",
+ "updated": "2026-08-26T13:52:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "feature/qwenimage-vae-conv-tests",
    "event": "pull_request",
    "title": "[Flydsl] Add Qwen-Image VAE classic conv shapes to conv3d tests",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32961854312",
    "created_at": "2026-08-26T11:09:03Z",
-   "updated_at": "2026-08-26T12:17:59Z",
+   "updated_at": "2026-08-26T13:50:13Z",
    "actor": "huizzhan",
    "jobs": [
     {
@@ -30,20 +30,22 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-26T12:17:46Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32961854312/job/98173908463"
+     "completed_at": "2026-08-26T13:50:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32961854312/job/98173908463",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-26T12:17:58Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32961854312/job/98173908483"
+     "completed_at": "2026-08-26T13:43:21Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32961854312/job/98173908483",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1361,7 +1363,7 @@
   },
   {
    "run_id": 32741519873,
-   "pr": 1065,
+   "pr": null,
    "commit": "4ea457e4aedc493a20eeb003954b2a319e2abe26",
    "branch": "upstream/pa-bf16-asymmetric-v",
    "event": "pull_request",
