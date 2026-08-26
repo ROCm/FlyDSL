@@ -128,11 +128,13 @@ def create_kv_cache(
     seed: int = 0,
     device: Optional[str] = "cuda",
     itemsize: int = 1,
+    value_head_size: Optional[int] = None,
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
     if cache_dtype == "fp8" and head_size % 16:
         raise ValueError(f"Does not support fp8 key cache with head_size={head_size}")
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     elements_per_vector = 16 // itemsize
+    value_head_size = head_size if value_head_size is None else value_head_size
     key_cache_shape = (
         num_blocks,
         num_heads,
@@ -140,7 +142,7 @@ def create_kv_cache(
         block_size,
         elements_per_vector,
     )
-    value_cache_shape = (num_blocks, num_heads, head_size, block_size)
+    value_cache_shape = (num_blocks, num_heads, value_head_size, block_size)
     key_caches: List[torch.Tensor] = []
     value_caches: List[torch.Tensor] = []
     setup_seed(seed)
@@ -229,15 +231,16 @@ def torch_mha_extend(
     sliding_window=0,
 ) -> torch.Tensor:
     """PyTorch reference implementation of paged attention."""
-    num_blocks, num_heads, head_size, block_size = value_cache.shape
-    softmax_scale = 1.0 / (head_size**0.5)
+    num_blocks, num_heads, value_head_size, block_size = value_cache.shape
+    key_head_size = key_cache.shape[2] * key_cache.shape[4]
+    softmax_scale = 1.0 / (key_head_size**0.5)
 
     output_dtype = query.dtype
     kv_dtype = key_cache.dtype
 
     queries_split = torch.tensor_split(query, query_output_indptr.tolist()[1:])
-    key_cache_flat = key_cache.permute(0, 3, 1, 2, 4).contiguous().view(-1, num_heads, head_size)
-    value_cache_flat = value_cache.permute(0, 3, 1, 2).contiguous().view(-1, num_heads, head_size)
+    key_cache_flat = key_cache.permute(0, 3, 1, 2, 4).contiguous().view(-1, num_heads, key_head_size)
+    value_cache_flat = value_cache.permute(0, 3, 1, 2).contiguous().view(-1, num_heads, value_head_size)
 
     batch_size = query_output_indptr.shape[0] - 1
     outputs = []
@@ -286,7 +289,8 @@ def quantize_kv_cache_symmetric(
     torch.Tensor,
     torch.Tensor,
 ]:
-    num_blocks, num_heads, head_dim, block_size = value_cache.shape
+    num_blocks, num_heads, value_head_dim, block_size = value_cache.shape
+    key_head_dim = key_cache.shape[2] * key_cache.shape[4]
     total_tokens = num_blocks * block_size
     key_cache_reshaped = key_cache.permute(0, 1, 3, 2, 4).reshape(num_blocks, num_heads, block_size, -1).contiguous()
     value_cache_reshaped = value_cache.permute(0, 1, 3, 2).reshape(num_blocks, num_heads, block_size, -1).contiguous()
@@ -298,14 +302,16 @@ def quantize_kv_cache_symmetric(
             num_blocks,
             num_heads,
             block_size,
-            head_dim // elements_per_vector,
+            key_head_dim // elements_per_vector,
             elements_per_vector,
         )
         .permute(0, 1, 3, 2, 4)
         .contiguous()
     )
     quantized_values = (
-        quantized_values.view(num_blocks, num_heads, block_size, head_dim).permute(0, 1, 3, 2).contiguous()
+        quantized_values.view(num_blocks, num_heads, block_size, value_head_dim)
+        .permute(0, 1, 3, 2)
+        .contiguous()
     )
     key_scales_flat = key_scales_original.permute(1, 0, 2, 3).contiguous().view(num_heads, total_tokens)
     value_scales_flat = value_scales_original.permute(1, 0, 2, 3).contiguous().view(num_heads, total_tokens)
@@ -331,7 +337,8 @@ def quantize_kv_cache_per_tensor(
     torch.Tensor,
     torch.Tensor,
 ]:
-    num_blocks, num_heads, head_dim, block_size = value_cache.shape
+    num_blocks, num_heads, _, block_size = value_cache.shape
+    key_head_dim = key_cache.shape[2] * key_cache.shape[4]
     elements_per_vector = 16 // quant_dtype.itemsize
     key_cache_reshaped = key_cache.permute(0, 1, 3, 2, 4).reshape(num_blocks, num_heads, block_size, -1).contiguous()
     key_cache_reshaped = (
@@ -339,7 +346,7 @@ def quantize_kv_cache_per_tensor(
             num_blocks,
             num_heads,
             block_size,
-            head_dim // elements_per_vector,
+            key_head_dim // elements_per_vector,
             elements_per_vector,
         )
         .permute(0, 1, 3, 2, 4)
@@ -1128,36 +1135,36 @@ def test_normal_accuracy(
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @_requires_tile_pa
-@pytest.mark.parametrize("compute_type", ["fp8"])
+@pytest.mark.parametrize(
+    ("compute_type", "query_length", "value_head_size"),
+    [
+        pytest.param("bf16", 1, 128, id="bf16-qlen1-v128"),
+        pytest.param("bf16", 1, 192, id="bf16-qlen1-v192"),
+        pytest.param("bf16", 4, 128, id="bf16-qlen4-v128"),
+        pytest.param("bf16", 4, 192, id="bf16-qlen4-v192"),
+        pytest.param("fp8", 4, 128, id="fp8-qlen4-v128"),
+        pytest.param("fp8", 4, 192, id="fp8-qlen4-v192"),
+    ],
+)
 @pytest.mark.parametrize("num_partitions", [4])
 @pytest.mark.parametrize("head_size", [192])
 @pytest.mark.parametrize("num_heads", [(16, 1)])
-@pytest.mark.parametrize("query_length", [4])
-@pytest.mark.parametrize("quant_mode", ["per_tensor"])
 @pytest.mark.parametrize("context_length", [1027])
 @pytest.mark.parametrize("batch_size", [2])
-@pytest.mark.parametrize("trans_v", [True])
-@pytest.mark.parametrize("kv_varlen", [False])
 @pytest.mark.parametrize("block_size", [64])
-@pytest.mark.parametrize("sliding_window", [0])
-def test_fp8_head_dim_192_matches_torch(
+def test_tile_pa_vectorized_5d_matches_torch(
     compute_type: str,
+    query_length: int,
+    value_head_size: int,
     num_partitions: int,
     head_size: int,
     num_heads: Tuple[int, int],
-    query_length: int,
-    quant_mode: str,
     context_length: int,
     batch_size: int,
-    trans_v: bool,
-    kv_varlen: bool,
     block_size: int,
-    sliding_window: int,
 ) -> None:
     from kernels.attention.pa_decode_tile import pa_decode_tile
 
-    assert quant_mode == "per_tensor"
-    assert not kv_varlen
     num_query_heads, num_kv_heads = num_heads
     blocks_per_sequence = triton.cdiv(context_length, block_size)
     total_blocks = batch_size * blocks_per_sequence
@@ -1182,16 +1189,28 @@ def test_fp8_head_dim_192_matches_torch(
         torch.bfloat16,
         seed=20260821,
         device=str(device),
-        itemsize=1,
+        itemsize=1 if compute_type == "fp8" else cache_dtype.itemsize,
+        value_head_size=value_head_size,
     )
-    (
-        key_cache,
-        key_scale_flat,
-        value_cache,
-        value_scale_flat,
-        key_scale,
-        value_scale,
-    ) = quantize_kv_cache_per_tensor(key_caches[0], value_caches[0], quant_dtype=cache_dtype)
+    key_cache = key_caches[0]
+    value_cache = value_caches[0]
+    key_scale_flat = None
+    value_scale_flat = None
+    key_scale = None
+    value_scale = None
+    if compute_type == "fp8":
+        (
+            key_cache,
+            key_scale_flat,
+            value_cache,
+            value_scale_flat,
+            key_scale,
+            value_scale,
+        ) = quantize_kv_cache_per_tensor(
+            key_cache,
+            value_cache,
+            quant_dtype=cache_dtype,
+        )
     block_tables = torch.arange(total_blocks - 1, -1, -1, dtype=torch.int32, device=device).reshape(
         batch_size, blocks_per_sequence
     )
@@ -1212,25 +1231,41 @@ def test_fp8_head_dim_192_matches_torch(
         query_output_indptr,
         key_scale_flat,
         value_scale_flat,
-        sliding_window=sliding_window,
     )
-    actual = torch.full_like(query, float("nan"))
+    partial_shape = (
+        batch_size,
+        num_kv_heads,
+        num_partitions,
+        query_length * (num_query_heads // num_kv_heads),
+    )
+    actual = torch.full(
+        (batch_size * query_length, num_query_heads, value_head_size),
+        float("nan"),
+        dtype=query.dtype,
+        device=device,
+    )
     pa_decode_tile(
         output=actual,
         query=query,
         key_cache=key_cache,
-        value_cache=shuffle_value_cache_layout(value_cache) if trans_v else value_cache,
+        value_cache=shuffle_value_cache_layout(value_cache),
         block_tables=block_tables,
         context_lengths=context_lengths,
         key_scale=key_scale,
         value_scale=value_scale,
         softmax_scale=head_size**-0.5,
         num_partitions=num_partitions,
+        pmax=torch.empty(partial_shape, dtype=torch.float32, device=device),
+        psum=torch.empty(partial_shape, dtype=torch.float32, device=device),
+        pout=torch.empty(
+            (*partial_shape, value_head_size), dtype=query.dtype, device=device
+        ),
     )
     torch.cuda.synchronize()
 
+    tolerance = 2.0e-2 if compute_type == "fp8" else 5.0e-3
     assert bool(torch.isfinite(actual).all().item())
-    torch.testing.assert_close(actual, expected, rtol=2.0e-2, atol=2.0e-2)
+    torch.testing.assert_close(actual, expected, rtol=tolerance, atol=tolerance)
 
 
 @pytest.mark.large_shape
