@@ -643,7 +643,11 @@ def flex_attn_fwd_gfx950_kernel(
     # V is loaded as A operand for PV GEMM (V=A, P=B).
     # V LDS has 4 compact sub-tiles [block_n, 32]:(32, 1). LDSReadTrans16_64b
     # transposes each [block_n, 32] → [32, block_n] = A[M=D_chunk, K=score].
-    _v_tr_atom = fx.make_copy_atom(rocdl.cdna4.LDSReadTrans16_64b(), elem_dtype)
+    _is_fp8 = int(param.dtype_id) == FLEX_DTYPE_FP8
+    if const_expr(_is_fp8):
+        _v_tr_atom = fx.make_copy_atom(rocdl.cdna4.LDSReadTrans8_64b(), elem_dtype)
+    else:
+        _v_tr_atom = fx.make_copy_atom(rocdl.cdna4.LDSReadTrans16_64b(), elem_dtype)
     # View sub-tiles as [M=32(D), K=block_n(score)]:(1, 32) — column-major.
     # The transpose atom reads score-contiguous data from LDS and delivers A[M=D, K=score].
     # DMA infrastructure
@@ -1009,7 +1013,10 @@ def flex_attn_fwd_gfx950_kernel(
 
 
 
-    _qk_mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype))
+    if const_expr(_is_fp8):
+        _qk_mma_atom = fx.make_mma_atom(rocdl.cdna4.MFMA_Scale(param.mma_m, param.mma_n, param.mma_k, elem_dtype))
+    else:
+        _qk_mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype))
 
     def _frag_reps(tensor, mode):
         return fx.size(fx.get_shape(tensor)[mode]).to_py_value()
@@ -1112,7 +1119,10 @@ def flex_attn_fwd_gfx950_kernel(
     # After QK swap (K=A, Q=B), C's M-rows = score indices.
     # C→B is register-local: pack 16 f32 → 2 × v8bf16.
     # V is loaded as A from LDS per D-chunk.
-    _pv_mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype))
+    if const_expr(_is_fp8):
+        _pv_mma_atom = fx.make_mma_atom(rocdl.cdna4.MFMA_Scale(param.mma_m, param.mma_n, param.mma_k, elem_dtype))
+    else:
+        _pv_mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype))
 
     _is_bf16 = int(param.dtype_id) == FLEX_DTYPE_BF16
 
@@ -1527,13 +1537,22 @@ def launch_flex_attn_gfx950(
     wave_layout = fx.make_layout(
         (param.m_waves, param.n_waves, 1), (param.n_waves, 1, 0)
     )
-    mma_atom_qk = fx.make_mma_atom(
-        fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype)
-    )
+    _is_fp8_launch = int(param.dtype_id) == FLEX_DTYPE_FP8
+    if const_expr(_is_fp8_launch):
+        mma_atom_qk = fx.make_mma_atom(
+            rocdl.cdna4.MFMA_Scale(param.mma_m, param.mma_n, param.mma_k, elem_dtype)
+        )
+        mma_atom_pv = fx.make_mma_atom(
+            rocdl.cdna4.MFMA_Scale(param.mma_m, param.mma_n, param.mma_k, elem_dtype)
+        )
+    else:
+        mma_atom_qk = fx.make_mma_atom(
+            fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype)
+        )
+        mma_atom_pv = fx.make_mma_atom(
+            fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype)
+        )
     tiled_mma_qk = fx.make_tiled_mma(mma_atom_qk, wave_layout)
-    mma_atom_pv = fx.make_mma_atom(
-        fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype)
-    )
     tiled_mma_pv = fx.make_tiled_mma(mma_atom_pv, wave_layout)
 
     # Each workgroup covers num_groups query subtiles of block_m rows.
