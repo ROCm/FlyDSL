@@ -1,11 +1,70 @@
 {
  "schema": 1,
- "updated": "2026-08-26T13:54:18Z",
+ "updated": "2026-08-26T15:01:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 32976669574,
+   "run_id": 32983331587,
+   "pr": 1066,
+   "commit": "b22846f0482b3bb6d0c73fe87f26ffd517d86bed",
+   "branch": "upstream/fa-paged-fp8-asymmetric-v",
+   "event": "pull_request",
+   "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32983331587",
+   "created_at": "2026-08-26T14:56:21Z",
+   "updated_at": "2026-08-26T14:58:44Z",
+   "actor": "sammysun0711",
+   "jobs": []
+  },
+  {
+   "run_id": 32980135497,
    "pr": 1065,
+   "commit": "ad712fb47ec357f687b130e820179c3dff6462da",
+   "branch": "upstream/pa-bf16-asymmetric-v",
+   "event": "pull_request",
+   "title": "[Kernel][PA] Support BF16 vectorized KV with asymmetric K/V head dim",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32980135497",
+   "created_at": "2026-08-26T14:24:56Z",
+   "updated_at": "2026-08-26T14:44:59Z",
+   "actor": "sammysun0711",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-26T14:44:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32980135497/job/98220787271"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-26T14:44:58Z",
+     "completed_at": "2026-08-26T14:58:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32980135497/job/98220787337"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-26T14:43:54Z",
+     "completed_at": "2026-08-26T14:57:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32980135497/job/98220787347",
+     "log_fetch_failed": true
+    }
+   ]
+  },
+  {
+   "run_id": 32976669574,
+   "pr": null,
    "commit": "cc5bbdb54e8e8c6ce7e2756293047a31d4c8a8f0",
    "branch": "upstream/pa-bf16-asymmetric-v",
    "event": "pull_request",
@@ -1643,7 +1702,7 @@
   },
   {
    "run_id": 32717035159,
-   "pr": 1066,
+   "pr": null,
    "commit": "ed10596d6cb952beef503338e6a136c23397d5c5",
    "branch": "upstream/fa-paged-fp8-asymmetric-v",
    "event": "pull_request",
@@ -2126,36 +2185,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 32698410347,
-   "pr": null,
-   "commit": "d3f3ce1a06972936640058416d6f22e957820dbc",
-   "branch": "main",
-   "event": "push",
-   "title": "[Skills] Fix silently-ignored frontmatter, de-drift kernel skills and\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32698410347",
-   "created_at": "2026-08-24T06:42:23Z",
-   "updated_at": "2026-08-24T06:50:44Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 32698230790,
-   "pr": null,
-   "commit": "4c686778b094abd569a787809910b269ae55d9f7",
-   "branch": "main",
-   "event": "push",
-   "title": "[ROCDL] Lower approximate exp2 to native intrinsic (#1037)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32698230790",
-   "created_at": "2026-08-24T06:39:38Z",
-   "updated_at": "2026-08-24T06:42:25Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
