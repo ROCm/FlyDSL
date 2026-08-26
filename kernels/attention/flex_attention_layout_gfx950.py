@@ -1276,22 +1276,18 @@ def flex_attn_fwd_gfx950_kernel(
             dualwave_cluster_sync(1)
             return m_i, l_i, o_accs
 
-        def _do_tile_overlapping_softmax(kv_i32, m_i, l_i, o_accs, read_slot, dma_slot, has_next,
+        def _do_tile_overlapping_softmax(kv_i32, m_i, l_i, o_accs,
                     s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, has_softmax_prev,
-                    m_i_prev, odd_valid):
+                    m_i_prev):
             """Two-tile iteration with deferred PV GEMM overlapping QK GEMM.
 
-            PV GEMM from the previous tile runs alongside the current tile's
-            QK GEMM (both are MFMA-bound, writing different accumulators).
-            softmax_finish waits for the deferred PV to complete before
-            rescaling o_accs.  The current tile's PV is deferred to the next call.
-
-            m_i_prev: the m_i snapshot from when the deferred softmax_start ran.
-            odd_valid: runtime flag — False when kv_i32+1 >= _kv_hi (odd tile OOB).
+            Processes tiles kv_i32 (even, slot 0) and kv_i32+1 (odd, slot 1).
+            odd_valid and has_next are computed internally from _kv_hi.
             """
             # ── Cluster 0: mem tile 0 ──
             rocdl.s_waitcnt(vmcnt=0)
-            rocdl.s_barrier()
+            odd_valid = (kv_i32 + fx.Int32(1)) < _kv_hi
+            has_next = (kv_i32 + fx.Int32(2)) < _kv_hi
             read_k_work(0)
             v_lo_regs_0, v_hi_regs_0 = read_v_slot[0]()
             if odd_valid:
@@ -1315,15 +1311,16 @@ def flex_attn_fwd_gfx950_kernel(
 
             # ── Cluster 2: mem tile 1 ──
             rocdl.s_waitcnt(vmcnt=0)
-            rocdl.s_barrier()
+            rocdl.s_nop(2)
             read_k_work(1)
             v_lo_regs_1, v_hi_regs_1 = read_v_slot[1]()
             if has_next:
                 load_kv(kv_i32 + fx.Int32(2), 0)
             rocdl.s_waitcnt(lgkmcnt=0)
-            dualwave_cluster_sync(0)
+            dualwave_cluster_sync(2)
 
             # ── Cluster 3: QK GEMM tile 1 + PV from tile 0 ──
+            rocdl.s_nop(3)    
             frag_S, = gemm1_qk_unrolled(frag_Q, frag_K[1])
             out_sm_0 = softmax_finish(s_scaled_0, m_i_at_tile0, l_i, o_accs, corr_scalar_0)
             pv_gemm_register(out_sm_0[0], v_lo_regs_0, v_hi_regs_0, out_sm_0[3])
@@ -1337,7 +1334,7 @@ def flex_attn_fwd_gfx950_kernel(
             corr_scalar_1, s_scaled_1, m_new = softmax_start(s_raw, m_i)
             m_i_at_tile1 = [m_new] + [m_i[r] for r in range_constexpr(1, npair)]
             m_i = m_i_at_tile1
-            dualwave_cluster_sync(1)
+            dualwave_cluster_sync(3)
 
             return (
                 m_i, l_i, o_accs,
@@ -1430,13 +1427,11 @@ def flex_attn_fwd_gfx950_kernel(
 
             passthrough = False
             if const_expr(overlap_softmax):
-                odd_valid = kv_odd < _kv_hi
-                has_next_even = (kv_even + fx.Int32(2)) < _kv_hi
                 m_i, l_i, o_accs, s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, has_softmax_prev, m_i_prev = (
                     _do_tile_overlapping_softmax(
-                        kv_even, m_i, l_i, o_accs, 0, 1, has_next_even,
+                        kv_even, m_i, l_i, o_accs,
                         s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev,
-                        has_softmax_prev, m_i_prev, odd_valid,
+                        has_softmax_prev, m_i_prev,
                     )
                 )
             elif const_expr(passthrough):
