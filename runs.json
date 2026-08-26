@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-26T13:19:23Z",
+ "updated": "2026-08-26T13:36:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -190,11 +190,11 @@
    "branch": "mega_moe_a4w4",
    "event": "pull_request",
    "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32949223451",
    "created_at": "2026-08-26T08:43:25Z",
-   "updated_at": "2026-08-26T13:05:57Z",
+   "updated_at": "2026-08-26T13:33:59Z",
    "actor": "Yaowu-Xiong",
    "jobs": [
     {
@@ -230,20 +230,22 @@
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-26T13:05:56Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32949223451/job/98180016320"
+     "completed_at": "2026-08-26T13:22:41Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32949223451/job/98180016320",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-26T12:39:02Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32949223451/job/98180016380"
+     "completed_at": "2026-08-26T13:33:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32949223451/job/98180016380",
+     "log_fetch_failed": true
     }
    ]
   },
