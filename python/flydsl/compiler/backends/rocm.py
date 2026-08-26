@@ -101,6 +101,7 @@ class RocmBackend(BaseBackend):
             "convert-arith-to-llvm",
             "convert-func-to-llvm",
             "reconcile-unrealized-casts",
+            "fly-fix-bitcast-width",  # clean up fp8↔i8 unrealized casts from convert-gpu-to-rocdl
             *(
                 ["ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}"]
                 if env.debug.enable_debug_info

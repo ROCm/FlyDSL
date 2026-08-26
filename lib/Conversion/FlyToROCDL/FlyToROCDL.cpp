@@ -821,17 +821,17 @@ public:
     // fp8 and i8 have the same bit width, so the cast is a no-op in hardware.
     addSourceMaterialization(
         [](OpBuilder &builder, Type resultType, ValueRange inputs,
-           Location loc) -> std::optional<Value> {
+           Location loc) -> Value {
           if (inputs.size() != 1)
-            return std::nullopt;
+            return Value();
           return LLVM::BitcastOp::create(builder, loc, resultType, inputs[0])
               .getResult();
         });
     addTargetMaterialization(
         [](OpBuilder &builder, Type resultType, ValueRange inputs,
-           Location loc) -> std::optional<Value> {
+           Location loc) -> Value {
           if (inputs.size() != 1)
-            return std::nullopt;
+            return Value();
           return LLVM::BitcastOp::create(builder, loc, resultType, inputs[0])
               .getResult();
         });

@@ -83,6 +83,36 @@ public:
         directMismatch.push_back(op);
     });
 
+    // Replace unrealized_conversion_cast ops that bridge same-width integer
+    // and float vector types (e.g. vector<8xi8> ↔ vector<8xf8E4M3FN>).
+    // These arise when convert-gpu-to-rocdl inserts casts for fp8 types
+    // that the reconcile-unrealized-casts pass cannot fold.
+    SmallVector<UnrealizedConversionCastOp> fp8Casts;
+    moduleOp->walk([&](UnrealizedConversionCastOp op) {
+      if (op.getNumOperands() != 1 || op.getNumResults() != 1)
+        return;
+      Type srcTy = op.getOperand(0).getType();
+      Type dstTy = op.getResult(0).getType();
+      auto srcVec = dyn_cast<VectorType>(srcTy);
+      auto dstVec = dyn_cast<VectorType>(dstTy);
+      if (!srcVec || !dstVec)
+        return;
+      if (srcVec.getNumElements() != dstVec.getNumElements())
+        return;
+      unsigned srcBW = srcVec.getElementType().getIntOrFloatBitWidth();
+      unsigned dstBW = dstVec.getElementType().getIntOrFloatBitWidth();
+      if (srcBW == dstBW)
+        fp8Casts.push_back(op);
+    });
+    for (auto op : fp8Casts) {
+      OpBuilder b(op);
+      Value bc = LLVM::BitcastOp::create(b, op.getLoc(),
+                                          op.getResult(0).getType(),
+                                          op.getOperand(0));
+      op.getResult(0).replaceAllUsesWith(bc);
+      op->erase();
+    }
+
     if (extractsToProtect.empty() && directMismatch.empty())
       return;
 
