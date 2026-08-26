@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-26T06:40:20Z",
+ "updated": "2026-08-26T07:08:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32941094070,
+   "pr": 972,
+   "commit": "58aca1e8c0c7d4e25e53f52ecfe9a217007fb12e",
+   "branch": "mega_moe_a4w4",
+   "event": "pull_request",
+   "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32941094070",
+   "created_at": "2026-08-26T07:05:41Z",
+   "updated_at": "2026-08-26T07:05:59Z",
+   "actor": "Yaowu-Xiong",
+   "jobs": []
+  },
   {
    "run_id": 32938927483,
    "pr": 972,
@@ -10,11 +25,11 @@
    "branch": "mega_moe_a4w4",
    "event": "pull_request",
    "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32938927483",
    "created_at": "2026-08-26T06:37:03Z",
-   "updated_at": "2026-08-26T06:37:52Z",
+   "updated_at": "2026-08-26T07:05:59Z",
    "actor": "Yaowu-Xiong",
    "jobs": []
   },
@@ -54,11 +69,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-26T05:50:11Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32933223938/job/98075877722"
+     "completed_at": "2026-08-26T06:50:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32933223938/job/98075877722",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -2073,21 +2089,6 @@
    "created_at": "2026-08-23T19:37:37Z",
    "updated_at": "2026-08-23T19:37:37Z",
    "actor": "ppppqp",
-   "jobs": []
-  },
-  {
-   "run_id": 32590439213,
-   "pr": 1055,
-   "commit": "24ceae2e0fe2c222a7617642a3ece824963e45b3",
-   "branch": "fp8-page16-swa",
-   "event": "pull_request",
-   "title": "Add page-16 sliding-window attention support",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32590439213",
-   "created_at": "2026-08-22T18:20:22Z",
-   "updated_at": "2026-08-22T18:20:22Z",
-   "actor": "zjing14",
    "jobs": []
   }
  ]
