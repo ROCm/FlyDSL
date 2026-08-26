@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-26T00:35:26Z",
+ "updated": "2026-08-26T00:48:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32916237351,
+   "pr": 957,
+   "commit": "d12ba2dbee03c6f37032618f51e5036d5f6b962d",
+   "branch": "xiaoyu/svd-quark",
+   "event": "pull_request",
+   "title": "Add SVD quant for Quark",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32916237351",
+   "created_at": "2026-08-26T00:43:45Z",
+   "updated_at": "2026-08-26T00:45:38Z",
+   "actor": "amd-xiaoyu12",
+   "jobs": []
+  },
   {
    "run_id": 32872823775,
    "pr": 1064,
@@ -2028,52 +2043,6 @@
      "started_at": "2026-08-21T17:31:59Z",
      "completed_at": "2026-08-21T17:51:21Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32503825131/job/96850235212",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32502908187,
-   "pr": null,
-   "commit": "6de2a3764eb62fe94776f1ca3b823d07b29bdd87",
-   "branch": "fp8-softmax-normalisation",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32502908187",
-   "created_at": "2026-08-21T16:26:14Z",
-   "updated_at": "2026-08-21T19:10:56Z",
-   "actor": "JohnQinAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T17:10:21Z",
-     "completed_at": "2026-08-21T17:31:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32502908187/job/96846492801",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T17:16:25Z",
-     "completed_at": "2026-08-21T19:00:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32502908187/job/96846492895",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T17:03:43Z",
-     "completed_at": "2026-08-21T19:10:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32502908187/job/96846493021",
      "log_fetch_failed": true
     }
    ]
