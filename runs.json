@@ -1,8 +1,82 @@
 {
  "schema": 1,
- "updated": "2026-08-26T00:48:27Z",
+ "updated": "2026-08-26T03:37:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 32927052651,
+   "pr": 1020,
+   "commit": "363946b240b88326c7873e7deeffc782270d6d39",
+   "branch": "fp8-softmax-normalisation",
+   "event": "pull_request",
+   "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32927052651",
+   "created_at": "2026-08-26T03:36:00Z",
+   "updated_at": "2026-08-26T03:36:34Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
+  {
+   "run_id": 32922097019,
+   "pr": 972,
+   "commit": "1656f91dad7aa7805b3cdcaabf0c3556f3c64445",
+   "branch": "mega_moe_a4w4",
+   "event": "pull_request",
+   "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32922097019",
+   "created_at": "2026-08-26T02:16:13Z",
+   "updated_at": "2026-08-26T02:54:08Z",
+   "actor": "Yaowu-Xiong",
+   "jobs": []
+  },
+  {
+   "run_id": 32921056773,
+   "pr": null,
+   "commit": "127de4d9bcb2d26e343c018d498132c97352b3ee",
+   "branch": "fp8-softmax-normalisation",
+   "event": "pull_request",
+   "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32921056773",
+   "created_at": "2026-08-26T01:59:55Z",
+   "updated_at": "2026-08-26T03:36:21Z",
+   "actor": "JohnQinAMD",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-08-26T03:08:59Z",
+     "completed_at": "2026-08-26T03:36:18Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32921056773/job/98046808452"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-08-26T03:08:53Z",
+     "completed_at": "2026-08-26T03:36:19Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32921056773/job/98046808453"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-26T03:08:39Z",
+     "completed_at": "2026-08-26T03:28:31Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32921056773/job/98046808493",
+     "log_fetch_failed": true
+    }
+   ]
+  },
   {
    "run_id": 32916237351,
    "pr": 957,
@@ -675,7 +749,7 @@
   },
   {
    "run_id": 32757803812,
-   "pr": 1020,
+   "pr": null,
    "commit": "ef65bdb108071609c115046c8417ca9a85ee2ec5",
    "branch": "fp8-softmax-normalisation",
    "event": "pull_request",
@@ -1939,113 +2013,6 @@
    "updated_at": "2026-08-21T23:49:03Z",
    "actor": "akii96",
    "jobs": []
-  },
-  {
-   "run_id": 32505023342,
-   "pr": 1033,
-   "commit": "9a0cc11ac5ddc08506042a5cbd62a6850ceb4cdb",
-   "branch": "john/lazy-rescale-nan",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32505023342",
-   "created_at": "2026-08-21T16:50:36Z",
-   "updated_at": "2026-08-21T20:00:24Z",
-   "actor": "JohnQinAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T18:02:54Z",
-     "completed_at": "2026-08-21T18:17:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32505023342/job/96862813726",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T18:02:57Z",
-     "completed_at": "2026-08-21T18:53:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32505023342/job/96862813760",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T18:03:02Z",
-     "completed_at": "2026-08-21T20:00:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32505023342/job/96862813916",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32504338777,
-   "pr": null,
-   "commit": "bfde8072717bc9f6407280e03cf51058673ec228",
-   "branch": "john/lazy-rescale-nan",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix NaN from the lazy rescale on a wide score range",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32504338777",
-   "created_at": "2026-08-21T16:42:49Z",
-   "updated_at": "2026-08-21T16:50:54Z",
-   "actor": "JohnQinAMD",
-   "jobs": []
-  },
-  {
-   "run_id": 32503825131,
-   "pr": 1037,
-   "commit": "dee33a46bce7398b250deabc4b947b98cfdaa24e",
-   "branch": "jhinpan/fix-exp2-fastmath",
-   "event": "pull_request",
-   "title": "[ROCDL] Lower approximate exp2 to native intrinsic",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32503825131",
-   "created_at": "2026-08-21T16:36:52Z",
-   "updated_at": "2026-08-21T19:41:12Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T17:17:36Z",
-     "completed_at": "2026-08-21T19:41:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32503825131/job/96850235134",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T17:17:44Z",
-     "completed_at": "2026-08-21T18:59:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32503825131/job/96850235207",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-21T17:31:59Z",
-     "completed_at": "2026-08-21T17:51:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32503825131/job/96850235212",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
