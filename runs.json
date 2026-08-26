@@ -1,20 +1,35 @@
 {
  "schema": 1,
- "updated": "2026-08-26T03:39:46Z",
+ "updated": "2026-08-26T04:07:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 32927052651,
+   "run_id": 32928817509,
    "pr": 1020,
-   "commit": "363946b240b88326c7873e7deeffc782270d6d39",
+   "commit": "4f81e71220ad1e2f8dcbf012ec029bc2f2c78e62",
    "branch": "fp8-softmax-normalisation",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
    "status": "queued",
    "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32928817509",
+   "created_at": "2026-08-26T04:04:17Z",
+   "updated_at": "2026-08-26T04:04:34Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
+  {
+   "run_id": 32927052651,
+   "pr": null,
+   "commit": "363946b240b88326c7873e7deeffc782270d6d39",
+   "branch": "fp8-softmax-normalisation",
+   "event": "pull_request",
+   "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32927052651",
    "created_at": "2026-08-26T03:36:00Z",
-   "updated_at": "2026-08-26T03:37:46Z",
+   "updated_at": "2026-08-26T04:04:34Z",
    "actor": "JohnQinAMD",
    "jobs": []
   },
@@ -1998,21 +2013,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 32538119032,
-   "pr": null,
-   "commit": "635108b1e8e283d9591d6f575843142fc46723d2",
-   "branch": "feat/gfx950-paged-attention-vllm-kv-layouts",
-   "event": "pull_request",
-   "title": "Support vLLM paged KV cache layouts on the gfx950 attention kernel",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32538119032",
-   "created_at": "2026-08-21T23:47:15Z",
-   "updated_at": "2026-08-21T23:49:03Z",
-   "actor": "akii96",
-   "jobs": []
   }
  ]
 }
