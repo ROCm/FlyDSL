@@ -848,7 +848,7 @@ def _run_full_e2e(
         ms.shmem_barrier_all()
 
         def _mega_s2_body():
-            moe._run_stage2(run_tokens, None, True)
+            moe._run_stage2(run_tokens, None, True, moe._active_config)
 
         _t_mega_s2 = _cg_time(_mega_s2_body)
 
