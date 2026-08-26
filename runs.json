@@ -1,20 +1,35 @@
 {
  "schema": 1,
- "updated": "2026-08-26T04:07:41Z",
+ "updated": "2026-08-26T04:10:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 32928817509,
+   "run_id": 32928995662,
    "pr": 1020,
-   "commit": "4f81e71220ad1e2f8dcbf012ec029bc2f2c78e62",
+   "commit": "637e448fecc5cfaddbe432893e93614b0b89e968",
    "branch": "fp8-softmax-normalisation",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
    "status": "queued",
    "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32928995662",
+   "created_at": "2026-08-26T04:07:03Z",
+   "updated_at": "2026-08-26T04:08:25Z",
+   "actor": "JohnQinAMD",
+   "jobs": []
+  },
+  {
+   "run_id": 32928817509,
+   "pr": null,
+   "commit": "4f81e71220ad1e2f8dcbf012ec029bc2f2c78e62",
+   "branch": "fp8-softmax-normalisation",
+   "event": "pull_request",
+   "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32928817509",
    "created_at": "2026-08-26T04:04:17Z",
-   "updated_at": "2026-08-26T04:04:34Z",
+   "updated_at": "2026-08-26T04:07:05Z",
    "actor": "JohnQinAMD",
    "jobs": []
   },
@@ -1967,52 +1982,6 @@
    "updated_at": "2026-08-22T11:27:11Z",
    "actor": "tangzzycc",
    "jobs": []
-  },
-  {
-   "run_id": 32543247988,
-   "pr": 1056,
-   "commit": "943152de799bf9983ab2028629c6e523abd199a7",
-   "branch": "feat/gfx950-paged-attention-vllm-kv-layouts",
-   "event": "pull_request",
-   "title": "Support vLLM paged KV cache layouts on the gfx950 attention kernel",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32543247988",
-   "created_at": "2026-08-22T01:22:40Z",
-   "updated_at": "2026-08-22T03:11:38Z",
-   "actor": "akii96",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-22T01:51:12Z",
-     "completed_at": "2026-08-22T02:26:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32543247988/job/96960722427",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-22T01:51:29Z",
-     "completed_at": "2026-08-22T03:11:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32543247988/job/96960722438",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-22T01:51:26Z",
-     "completed_at": "2026-08-22T03:03:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32543247988/job/96960722612",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
