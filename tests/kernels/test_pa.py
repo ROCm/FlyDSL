@@ -309,9 +309,7 @@ def quantize_kv_cache_symmetric(
         .contiguous()
     )
     quantized_values = (
-        quantized_values.view(num_blocks, num_heads, block_size, value_head_dim)
-        .permute(0, 1, 3, 2)
-        .contiguous()
+        quantized_values.view(num_blocks, num_heads, block_size, value_head_dim).permute(0, 1, 3, 2).contiguous()
     )
     key_scales_flat = key_scales_original.permute(1, 0, 2, 3).contiguous().view(num_heads, total_tokens)
     value_scales_flat = value_scales_original.permute(1, 0, 2, 3).contiguous().view(num_heads, total_tokens)
@@ -1032,8 +1030,7 @@ def run_multi_pa_decode_ps_test(
         sampler = random.Random(1234)
         test_configs = [cfg for cfg in test_configs if sampler.random() < sample_rate]
         print(
-            f"Using random sampling: running {len(test_configs)} out of {total} cases "
-            f"(sample_rate={sample_rate:.2%})"
+            f"Using random sampling: running {len(test_configs)} out of {total} cases (sample_rate={sample_rate:.2%})"
         )
     else:
         print(f"Running all {total} cases")
@@ -1257,9 +1254,7 @@ def test_tile_pa_vectorized_5d_matches_torch(
         num_partitions=num_partitions,
         pmax=torch.empty(partial_shape, dtype=torch.float32, device=device),
         psum=torch.empty(partial_shape, dtype=torch.float32, device=device),
-        pout=torch.empty(
-            (*partial_shape, value_head_size), dtype=query.dtype, device=device
-        ),
+        pout=torch.empty((*partial_shape, value_head_size), dtype=query.dtype, device=device),
     )
     torch.cuda.synchronize()
 
