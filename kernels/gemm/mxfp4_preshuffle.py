@@ -8,7 +8,7 @@ matches the host preshuffle (shuffle_weight_w4(.,16) + shuffle_scale_w4)."""
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import fly
-from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fx_math
 from flydsl.expr.typing import (
     BFloat16,
@@ -19,10 +19,12 @@ from flydsl.expr.typing import (
     Float16,
     Float32,
     Int8,
+    Int16,
     Int32,
     T,
 )
 from flydsl.expr.typing import Vector as Vec
+from kernels.common import buffer_ops
 from kernels.common.mma.mfma_preshuffle_pipeline import xcd_remap_bx_by
 
 _A_ELEM = {"fp4": Float4E2M1FN, "fp6": Float6E2M3FN, "fp8": Float8E4M3FN}
@@ -63,6 +65,8 @@ def launch_gemm(
     arg_scale_a: fx.Pointer,
     arg_scale_b: fx.Pointer,
     arg_bias: fx.Pointer,
+    arg_d: fx.Pointer,
+    arg_l2: fx.Pointer,
     i32_m: fx.Int32,
     i32_n: fx.Int32,
     stream: fx.Stream,
@@ -84,6 +88,8 @@ def launch_gemm(
     waves_per_eu: Constexpr[int],
     xcd_swizzle: Constexpr[int] = 0,
     epilogue: Constexpr[str] = "none",
+    rank: Constexpr[int] = 0,
+    svd_use_mfma: Constexpr[bool] = True,
 ):
     """Direct @flyc.jit launcher. Operands are fx.Pointer (pass ptr_arg(t): raw data_ptr, no
     per-launch DLPack). Compile once with flyc.compile, then cf(*runtime). a_dtype fp4/fp6/fp8
@@ -99,11 +105,20 @@ def launch_gemm(
         out_elem = Float16
 
     # Fused epilogue: per-N bias add (+ optional activation) folded into the C store.
-    # "none"/"bias"/"bias_relu"/"bias_silu"/"bias_gelu" (tanh-approx GELU).
-    _has_bias = epilogue in ("bias", "bias_relu", "bias_silu", "bias_gelu")
+    # "none"/"bias"/"bias_relu"/"bias_silu"/"bias_gelu" (tanh-approx GELU), plus the
+    # SVDQuant low-rank up-projection "svd"/"svd_bias" (y += d @ L2^T, see below).
+    _has_bias = epilogue in ("bias", "bias_relu", "bias_silu", "bias_gelu", "svd_bias")
     _has_relu = epilogue == "bias_relu"
     _has_silu = epilogue == "bias_silu"
     _has_gelu = epilogue == "bias_gelu"
+    _has_svd = epilogue in ("svd", "svd_bias")
+    if _has_svd and rank <= 0:
+        raise ValueError(f"epilogue={epilogue!r} requires rank > 0, got {rank!r}")
+    # MFMA fast path folds d @ L2^T into the f32 accumulators; needs one bf16 16x16x16 MFMA
+    # per 16-wide rank block, so rank must be a multiple of 16 and the operands bf16.
+    # Everything else falls back to the per-element scalar dot in the store loop.
+    _svd_mfma = _has_svd and svd_use_mfma and rank % 16 == 0 and out_dtype == "bf16"
+    _svd_scalar = _has_svd and not _svd_mfma
 
     # Row sizes + read_a fragment layout (i32 units): fp6/fp8 read two b128 halves -> i32[A_NDW], fp4 one -> i32[4].
     if const_expr(a_dtype == "fp4"):  # 2 codes/byte
@@ -160,6 +175,8 @@ def launch_gemm(
         arg_scale_a: fx.Int64,
         arg_scale_b: fx.Int64,
         arg_bias: fx.Int64,
+        arg_d: fx.Int64,
+        arg_l2: fx.Int64,
         i32_m: fx.Int32,
         i32_n: fx.Int32,
     ):
@@ -471,17 +488,101 @@ def launch_gemm(
             bias_ptr_ty = fx.PointerType.get(out_elem.ir_type, address_space=fx.AddressSpace.Global, alignment=2)
             bias_view = fx.Tensor(fx.make_view(fx.inttoptr(bias_ptr_ty, arg_bias), fx.make_layout(N, 1)))
             bias_rsrc = buffer_ops.create_buffer_resource(bias_view, max_size=True)
+        # SVDQuant low-rank operands: d = x @ L1^T (M x rank) and L2 (N x rank), both
+        # out_elem row-major. d is bounded to i32_m rows so ragged-M lanes read 0.
+        d_rsrc = None
+        l2_rsrc = None
+        if const_expr(_has_svd):
+            svd_ptr_ty = fx.PointerType.get(out_elem.ir_type, address_space=fx.AddressSpace.Global, alignment=2)
+            d_view = fx.Tensor(fx.make_view(fx.inttoptr(svd_ptr_ty, arg_d), fx.make_layout(1 << 28, 1)))
+            d_rsrc = buffer_ops.create_buffer_resource(d_view, num_records_bytes=fx.Int64(i32_m) * fx.Int64(rank * 2))
+            l2_view = fx.Tensor(fx.make_view(fx.inttoptr(svd_ptr_ty, arg_l2), fx.make_layout(N * rank, 1)))
+            l2_rsrc = buffer_ops.create_buffer_resource(l2_view, max_size=True)
+
+        # y += d @ L2^T as a small bf16 GEMM contracted over `rank`, accumulated into the
+        # SAME f32 accumulators as the main loop: d is the A operand, L2 the B operand, one
+        # mfma_f32_16x16x16_bf16 per 16-wide rank block. Fragments follow the main MFMA
+        # convention -- lane_mod_16 picks the row (d) / column (L2), lane_div_16*4 the rank
+        # offset -- so each lane reads 4 contiguous elements (stride `rank`) as one vec4.
+        if const_expr(_svd_mfma):
+            svd_acc_ty = Vec.make_type(4, Float32)
+            rank_blocks = rank // 16
+            r_lane = lane_div_16 * 4
+            a_d = [
+                [
+                    Vec(
+                        buffer_ops.buffer_load(
+                            d_rsrc,
+                            (bx_m + mi * 16 + lane_mod_16) * rank + kb * 16 + r_lane,
+                            vec_width=4,
+                            dtype=out_elem.ir_type,
+                        )
+                    ).bitcast(Int16)
+                    for kb in range_constexpr(rank_blocks)
+                ]
+                for mi in range_constexpr(m_chunks)
+            ]
+            b_l2 = [
+                [
+                    Vec(
+                        buffer_ops.buffer_load(
+                            l2_rsrc,
+                            (col_w + ni * 16) * rank + kb * 16 + r_lane,
+                            vec_width=4,
+                            dtype=out_elem.ir_type,
+                        )
+                    ).bitcast(Int16)
+                    for kb in range_constexpr(rank_blocks)
+                ]
+                for ni in range_constexpr(num_acc_n)
+            ]
+            for mi in range_constexpr(m_chunks):
+                for ni in range_constexpr(num_acc_n):
+                    acc_idx = mi * num_acc_n + ni
+                    acc_v = accs[acc_idx]
+                    for kb in range_constexpr(rank_blocks):
+                        acc_v = rocdl.mfma_f32_16x16x16bf16_1k(svd_acc_ty, [a_d[mi][kb], b_l2[ni][kb], acc_v, 0, 0, 0])
+                    accs[acc_idx] = acc_v
+
+        # Scalar fallback: L2[col, :] is row-independent, so hoist it out of the store loop.
+        l2_pre = None
+        if const_expr(_svd_scalar):
+            l2_pre = [
+                [
+                    fx.Float32(
+                        buffer_ops.buffer_load(
+                            l2_rsrc, (col_w + ni * 16) * rank + r, vec_width=1, dtype=out_elem.ir_type
+                        )
+                    )
+                    for r in range_constexpr(rank)
+                ]
+                for ni in range_constexpr(num_acc_n)
+            ]
         for mi in range_constexpr(m_chunks):
             row_m = bx_m + mi * 16 + lane_div_16 * 4
             for ni in range_constexpr(num_acc_n):
                 col = col_w + ni * 16
-                if const_expr(_has_bias):
+                if const_expr(_has_bias or _svd_scalar):
                     # bias is per output column (N); apply + activation in f32.
                     acc_f = Vec(accs[mi * num_acc_n + ni])  # f32 accumulator
-                    bval = fx.Float32(buffer_ops.buffer_load(bias_rsrc, col, vec_width=1, dtype=out_elem.ir_type))
+                    bval = None
+                    if const_expr(_has_bias):
+                        bval = fx.Float32(buffer_ops.buffer_load(bias_rsrc, col, vec_width=1, dtype=out_elem.ir_type))
                     outs = []
                     for ii in range_constexpr(4):
-                        v = fx.Float32(acc_f[ii]) + bval
+                        v = fx.Float32(acc_f[ii])
+                        if const_expr(_has_bias):
+                            v = v + bval
+                        if const_expr(_svd_scalar):
+                            # y[row, col] += sum_r d[row, r] * L2[col, r], accumulated in f32.
+                            d_row = (row_m + ii) * rank
+                            svd_dot = fx.Float32(0.0)
+                            for r in range_constexpr(rank):
+                                dv = fx.Float32(
+                                    buffer_ops.buffer_load(d_rsrc, d_row + r, vec_width=1, dtype=out_elem.ir_type)
+                                )
+                                svd_dot = svd_dot + dv * l2_pre[ni][r]
+                            v = v + svd_dot
                         if const_expr(_has_relu):
                             v = fx.Float32(v).maximumf(fx.Float32(0.0))
                         elif const_expr(_has_silu):
@@ -494,7 +595,8 @@ def launch_gemm(
                             e = fx_math.exp(fx.Float32(-2.0) * abs_y)
                             denom = fx.Float32(1.0) + e
                             one_plus_tanh = (y >= fx.Float32(0.0)).select(
-                                fx.Float32(2.0) / denom, (fx.Float32(2.0) * e) / denom)
+                                fx.Float32(2.0) / denom, (fx.Float32(2.0) * e) / denom
+                            )
                             v = fx.Float32(0.5) * v * one_plus_tanh
                         outs.append(v)
                     acc = Vec.from_elements(outs, fx.Float32).to(out_elem)
@@ -512,6 +614,8 @@ def launch_gemm(
     sa_addr = fx.Int64(fx.ptrtoint(arg_scale_a))
     sb_addr = fx.Int64(fx.ptrtoint(arg_scale_b))
     bias_addr = fx.Int64(fx.ptrtoint(arg_bias))
+    d_addr = fx.Int64(fx.ptrtoint(arg_d))
+    l2_addr = fx.Int64(fx.ptrtoint(arg_l2))
     if const_expr(waves_per_eu > 0):
         wpe = waves_per_eu
     else:
@@ -525,6 +629,8 @@ def launch_gemm(
         sa_addr,
         sb_addr,
         bias_addr,
+        d_addr,
+        l2_addr,
         i32_m,
         i32_n,
         value_attrs={"rocdl.waves_per_eu": wpe},

@@ -8,6 +8,7 @@ operands @ matmul), reports cosine / max / min / min-abs / mean-abs / pct
 error metrics, covers edge (ragged M, N=192) and production (Wan) shapes, and
 verifies repeatability 3x. Also checks the fused-bias epilogue.
 """
+
 import os
 import sys
 
@@ -32,12 +33,12 @@ from tests.kernels.utils import gemm_common_utils as G  # noqa: E402
 # large N), independent of the small-N edge — tracked separately. We still assert it runs
 # finite and is deterministic, but relax the cosine floor for tile_n=64 cases.
 SHAPES = [
-    (1856, 3072, 3072, 64, 256, 128, 0.99),    # attn qkv/out (M tile-aligned)
-    (1800, 3072, 3072, 64, 256, 128, 0.99),    # ragged M
-    (1856, 14336, 3072, 64, 256, 128, 0.99),   # ffn up
-    (1856, 3072, 14336, 64, 256, 128, 0.99),   # ffn down
-    (512, 3072, 3072, 64, 256, 128, 0.99),     # text-stream M
-    (1856, 192, 3072, 64, 64, 128, 0.95),      # small-N edge (tile_n=64, degraded config)
+    (1856, 3072, 3072, 64, 256, 128, 0.99),  # attn qkv/out (M tile-aligned)
+    (1800, 3072, 3072, 64, 256, 128, 0.99),  # ragged M
+    (1856, 14336, 3072, 64, 256, 128, 0.99),  # ffn up
+    (1856, 3072, 14336, 64, 256, 128, 0.99),  # ffn down
+    (512, 3072, 3072, 64, 256, 128, 0.99),  # text-stream M
+    (1856, 192, 3072, 64, 64, 128, 0.95),  # small-N edge (tile_n=64, degraded config)
 ]
 
 
@@ -70,9 +71,9 @@ def _run_a8w4(M, N, K, tile=(64, 256, 128), bias=None, epilogue="none"):
     a = torch.randn(Mp, K, device=dev, dtype=torch.float32) * 0.1
     b = torch.randn(N, K, device=dev, dtype=torch.float32) * 0.1
 
-    a_q, a_sc = G.per_1x32_f8_quant(a)             # fp8 activation + e8m0 scale
+    a_q, a_sc = G.per_1x32_f8_quant(a)  # fp8 activation + e8m0 scale
     a_q = a_q[:M]
-    b_q, b_sc, _ = G.per_1x32_f4_quant(b)          # mxfp4 weight + e8m0 scale
+    b_q, b_sc, _ = G.per_1x32_f4_quant(b)  # mxfp4 weight + e8m0 scale
 
     # bf16 reference: dequantize both operands, matmul.
     a_f = G.fp8_e4m3_to_f32(a_q)
@@ -96,10 +97,35 @@ def _run_a8w4(M, N, K, tile=(64, 256, 128), bias=None, epilogue="none"):
     c = torch.zeros(M, N, dtype=torch.bfloat16, device=dev)
     bt = bias if bias is not None else torch.empty(0, dtype=torch.bfloat16, device=dev)
     launch_gemm(
-        _ptr(c), _ptr(a_q), _ptr(b_shuf), _ptr(a_sc_shuf), _ptr(b_sc_shuf), _ptr(bt),
-        M, N, torch.cuda.current_stream(),
-        N, K, tm, tn, tk, "fp8", "bf16", "fp4",
-        1, -1, -1, -1, -1, -1, -1, 0, 0, epilogue,
+        _ptr(c),
+        _ptr(a_q),
+        _ptr(b_shuf),
+        _ptr(a_sc_shuf),
+        _ptr(b_sc_shuf),
+        _ptr(bt),
+        _ptr(bt),
+        _ptr(bt),  # d / L2: unused, this test never selects an svd epilogue
+        M,
+        N,
+        torch.cuda.current_stream(),
+        N,
+        K,
+        tm,
+        tn,
+        tk,
+        "fp8",
+        "bf16",
+        "fp4",
+        1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        0,
+        0,
+        epilogue,
     )
     torch.cuda.synchronize()
     return c, ref
@@ -141,7 +167,7 @@ if __name__ == "__main__":
         print("SKIP: requires gfx950")
         raise SystemExit(0)
     ok = True
-    for (M, N, K, tm, tn, tk, min_cos) in SHAPES:
+    for M, N, K, tm, tn, tk, min_cos in SHAPES:
         try:
             test_a8w4_numerics(M, N, K, tm, tn, tk, min_cos)
         except AssertionError as e:

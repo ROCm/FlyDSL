@@ -50,12 +50,18 @@ def _mxfp4_launcher(N, K, tile_m, tile_n, tile_k, out_dtype, a_dtype, waves_per_
     the tests use. launch_gemm is a thin @flyc.jit that caches per Constexpr config."""
 
     def _launch(c, a, b, sa, sb, bias, M, N_, stream):
+        # d / L2 are read only by the SVDQuant epilogue; these tests run epilogue="none",
+        # so the bias tensor doubles as an unused placeholder for both.
+        bias_ptr = _ptr(bias)
         launch_gemm(
             _ptr(c),
             _ptr(a),
             _ptr(b),
             _ptr(sa),
             _ptr(sb),
+            bias_ptr,
+            bias_ptr,
+            bias_ptr,
             M,
             N_,
             stream,
