@@ -324,6 +324,7 @@ def emit_direct_fixed_slot_payload(
     smooth_rsrc, smooth_scale_rsrc, model_dim,
     addr_disp, addr_in_tok, addr_in_idx, addr_in_wts, addr_in_sc,
     i32_cur_tok, dispatch_blocks, producer_slot, parity, expected,
+    destination_groups,
 ):
 # fmt: on
     """Allocate and publish routes directly into destination fixed slots."""
@@ -350,8 +351,8 @@ def emit_direct_fixed_slot_payload(
     # The remote running counter still selects the destination fixed slot, and
     # the single completion leader publishes all destinations only after every
     # active producer has drained its payload stores.
-    destination_groups = (
-        1 if smoothquant_mode == "bf16_route" else 2
+    assert destination_groups in (1, 2, 4, 8), (
+        "direct fixed-slot destination groups must be 1, 2, 4, or 8"
     )
     assert dispatch_blocks % destination_groups == 0, "direct fixed-slot dispatch needs even producer groups"
     producers_per_group = dispatch_blocks // destination_groups

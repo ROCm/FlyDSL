@@ -99,7 +99,24 @@ def test_fixed_and_bounded_compact_profiles_remain_specialized():
     fixed = select_mega_moe_config(128, 128, **M13_A8W4)
     bounded = select_mega_moe_config(512, 512, **M13_A8W4)
 
-    assert (fixed.stage1.tile_n, fixed.stage1.num_waves, fixed.stage1.num_dispatch_cu) == (128, 4, 224)
+    assert (
+        fixed.stage1.tile_n,
+        fixed.stage1.num_waves,
+        fixed.stage1.grid_mult,
+        fixed.stage1.num_dispatch_cu,
+    ) == (256, 8, 2, 224)
+    # Native direct-fixed dispatch uses eight destination completion groups.
+    # The 224 producer slots plus four summaries per group exactly fill the
+    # dedicated 256-entry GROUP_DONE workspace without overlap.
+    destination_groups = 8
+    completion_cohort = 8
+    producers = fixed.stage1.num_dispatch_cu
+    assert producers % destination_groups == 0
+    producers_per_group = producers // destination_groups
+    completion_summaries = destination_groups * (
+        (producers_per_group + completion_cohort - 1) // completion_cohort
+    )
+    assert producers + completion_summaries == 256
     assert not fixed.stage1.payload_tile_ready and fixed.p2p_quant == "none"
     assert (bounded.stage1.sort_block_m, bounded.stage1.grid_mult) == (64, 2)
     assert bounded.stage1.num_dispatch_cu == 64

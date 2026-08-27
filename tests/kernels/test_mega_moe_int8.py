@@ -707,14 +707,21 @@ def test_m13_native_a8w4_8gpu_acceptance():
     _require_gfx95(WORLD)
     from tests.kernels.test_mega_moe_v2 import _run_mega_8gpu
 
-    _run_mega_8gpu(
-        network="m13",
-        quant="a8w4",
-        bs_list="1,4,8,16,32,64,128,256,512",
-        iters=int(os.environ.get("MEGAMOE_M13_A8W4_CI_ITERS", "20")),
-        measure_perf=True,
-        skip_acc=False,
-    )
+    # Native decode requires tokens=MTPR, so every point is a distinct
+    # production operator configuration.  Isolate those configurations in
+    # separate torchrun processes: this also gives CI a bounded timeout and a
+    # complete result for each shape instead of losing an entire matrix behind
+    # one buffered subprocess.
+    for tokens in (1, 4, 8, 16, 32, 64, 128, 256, 512):
+        _run_mega_8gpu(
+            network="m13",
+            quant="a8w4",
+            bs_list=str(tokens),
+            iters=int(os.environ.get("MEGAMOE_M13_A8W4_CI_ITERS", "20")),
+            measure_perf=True,
+            skip_acc=False,
+            timeout=300,
+        )
 
 
 @pytest.mark.multi_gpu

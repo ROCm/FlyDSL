@@ -511,6 +511,9 @@ def compile_mega_moe_stage1(
                     addr_in_tok=addr_in_tok, addr_in_idx=addr_in_idx, addr_in_wts=addr_in_wts, addr_in_sc=addr_in_sc,
                     i32_cur_tok=i32_cur_tok, dispatch_blocks=dispatch_blocks, producer_slot=producer_slot,
                     parity=payload_parity, expected=payload_expected,
+                    destination_groups=(
+                        1 if smoothquant_mode == "bf16_route" else 2
+                    ),
                 )
             else:
                 if const_expr(external_grouping):

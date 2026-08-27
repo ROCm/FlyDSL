@@ -452,6 +452,22 @@ def _apply_quant_and_shape_rules(
 ) -> tuple[Stage1Config, Stage2Config]:
     bucket = workload.bucket
 
+    if workload.quant_mode == "a8w4" and bucket == 128:
+        # M13 decode: 48 active M tiles x 10 N tiles.  TN256/W8 halves the
+        # consumer work from the older TN128 geometry while a two-grid launch
+        # still covers all 480 tiles without serial work per consumer CTA.
+        stage1 = replace(
+            stage1,
+            sort_block_m=32,
+            tile_n=256,
+            num_waves=8,
+            grid_mult=2,
+            num_dispatch_cu=_fit_dispatch_cu(224, workload),
+            b_nt=3,
+            waves_per_eu_hint=2,
+            swizzle_a=True,
+        )
+
     if workload.quant_mode == "a8w4smooth" and workload.fixed_slot and bucket <= 8:
         stage1 = replace(
             stage1,

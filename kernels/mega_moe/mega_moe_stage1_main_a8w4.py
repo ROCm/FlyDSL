@@ -195,6 +195,8 @@ def compile_mega_moe_stage1(
         f"rb{replacement_blocks}"
         f"bc{int(bounded_compact_roles)}"
     )
+    destination_groups = 8
+    destination_group_suffix = f"_dg{destination_groups}" if direct_fixed_slot else ""
     kernel_name = (
         f"megamoe_stage1_{dispatch_path}_t{sort_block_m}x{tile_n}x{tile_k}"
         f"_r{fz_rank}"
@@ -202,7 +204,7 @@ def compile_mega_moe_stage1(
         f"_dcu{dispatch_blocks}_pw{int(pipe_weights)}ma{int(mfma_amajor)}sw{int(swizzle_a)}"
         f"aa{int(async_a_copy)}"
         f"_tr{int(use_tile_resource)}wpe{waves_per_eu_hint}_bnt{b_cache_modifier}"
-        f"{role_suffix}"
+        f"{role_suffix}{destination_group_suffix}"
         f"{swiglu_suffix}_dualslot1_norelayagent1_nestedexpert1"
     )
 
@@ -341,6 +343,7 @@ def compile_mega_moe_stage1(
                     addr_in_tok=addr_in_tok, addr_in_idx=addr_in_idx, addr_in_wts=addr_in_wts, addr_in_sc=addr_in_sc,
                     i32_cur_tok=i32_cur_tok, dispatch_blocks=dispatch_blocks, producer_slot=producer_slot,
                     parity=payload_parity, expected=payload_expected,
+                    destination_groups=destination_groups,
                 )
             else:
                 if tid == fx.Int32(0):
