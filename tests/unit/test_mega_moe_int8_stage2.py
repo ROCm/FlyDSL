@@ -58,7 +58,7 @@ def test_stage2_launcher_threads_lqq_qparams():
 def test_m13_token_128_uses_32x128x256_gemm2():
     config = select_mega_moe_config(
         128,
-        32768,
+        128,
         experts_per_rank=48,
         model_dim=3584,
         inter_dim=1280,
@@ -71,18 +71,26 @@ def test_m13_token_128_uses_32x128x256_gemm2():
 def test_m13_a8w4_config_remains_unchanged():
     a8w4 = select_mega_moe_config(
         128,
-        32768,
+        128,
         experts_per_rank=48,
         model_dim=3584,
         inter_dim=1280,
     )
     int8 = select_mega_moe_config(
         128,
-        32768,
+        128,
         experts_per_rank=48,
         model_dim=3584,
         inter_dim=1280,
         quant_mode="a8w4smooth",
     )
     assert (a8w4.stage2.block_m, a8w4.stage2.block_n) == (32, 128)
-    assert int8.stage2 == a8w4.stage2
+    assert (int8.stage2.block_m, int8.stage2.block_n, int8.stage2.block_k) == (
+        a8w4.stage2.block_m,
+        a8w4.stage2.block_n,
+        a8w4.stage2.block_k,
+    )
+    # The native decode and SmoothQuant selectors intentionally retain their
+    # independently validated persistent-CU settings.
+    assert a8w4.stage2.persist_cu == 240
+    assert int8.stage2.persist_cu == 96

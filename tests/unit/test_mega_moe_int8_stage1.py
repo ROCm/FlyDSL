@@ -7,6 +7,7 @@ import pytest
 
 import kernels.mega_moe.mega_moe_stage1 as stage1_module
 import kernels.mega_moe.mega_moe_stage1_main_a8w4 as native_stage1_module
+import kernels.mega_moe.mega_moe_stage1_role as role_stage1_module
 import kernels.mega_moe.mega_moe_stage1_smooth as smooth_stage1_module
 from kernels.mega_moe.dispatch import DISPATCH_TABLE_SIZE, DispatchSlot
 from kernels.mega_moe.mega_moe import Int8Stage1Output
@@ -14,6 +15,7 @@ from kernels.mega_moe.mega_moe_stage1 import (
     ENTRY_EPOCH_SLOT_COUNT,
     _entry_epoch_slot,
     _stage1_quant_traits,
+    _use_m13_t4096_mxfp4_role,
     compile_mega_moe_stage1,
 )
 
@@ -32,6 +34,76 @@ def test_native_resident_fixed_consumers_cover_worst_case_once(
     ]
     assert len(covered) == total_work
     assert len(set(covered)) == total_work
+
+
+def _m13_t4096_role_common():
+    return dict(
+        model_dim=3584,
+        inter_dim=1280,
+        experts_per_rank=48,
+        fuse_npes=8,
+        fuse_topk=8,
+        fuse_mtpr=32768,
+        fixed_slot_dispatch=False,
+    )
+
+
+def test_m13_t4096_role_path_is_exactly_scoped():
+    common = _m13_t4096_role_common()
+    assert _use_m13_t4096_mxfp4_role(
+        common, quant_mode="w8a8smooth", mxfp4_transport=True
+    )
+    for changed in (
+        {"fuse_mtpr": 512},
+        {"fixed_slot_dispatch": True},
+        {"model_dim": 4096},
+    ):
+        candidate = dict(common, **changed)
+        assert not _use_m13_t4096_mxfp4_role(
+            candidate, quant_mode="w8a8smooth", mxfp4_transport=True
+        )
+    assert not _use_m13_t4096_mxfp4_role(
+        common, quant_mode="w8a8smooth", mxfp4_transport=False
+    )
+    assert not _use_m13_t4096_mxfp4_role(
+        common, quant_mode="a8w4", mxfp4_transport=True
+    )
+    assert not _use_m13_t4096_mxfp4_role(
+        common, quant_mode="a8w4smooth", mxfp4_transport=True
+    )
+
+
+def test_m13_t4096_role_launcher_uses_frozen_geometry(monkeypatch):
+    monkeypatch.setattr(stage1_module, "get_rocm_arch", lambda: "gfx950")
+    monkeypatch.setattr(role_stage1_module, "get_rocm_arch", lambda: "gfx950")
+    role_stage1_module.compile_mega_moe_stage1.cache_clear()
+    launcher = compile_mega_moe_stage1(
+        model_dim=3584,
+        inter_dim=1280,
+        rank=0,
+        experts_per_rank=48,
+        fuse_npes=8,
+        fuse_topk=8,
+        fuse_cap=40960,
+        fuse_mtpr=32768,
+        fuse_scale_dim=112,
+        fixed_slot_dispatch=False,
+        sort_block_m=128,
+        tile_n=256,
+        tile_k=256,
+        num_waves=8,
+        grid_mult=1,
+        num_cu=256,
+        num_dispatch_cu=64,
+        work_shards=4,
+        external_grouping=True,
+        external_counting=True,
+        payload_chunk_rows=384,
+        payload_tile_ready=True,
+        quant_mode="w8a8smooth",
+        mxfp4_transport=True,
+    )
+    assert callable(launcher)
 
 
 @pytest.mark.parametrize(

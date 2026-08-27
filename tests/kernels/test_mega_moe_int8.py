@@ -29,6 +29,8 @@ try:
     import mori.shmem as ms
 
     from kernels.mega_moe import MegaMoEV2
+    from kernels.mega_moe.quant import per_1x32_mx_quant
+    from tests.kernels.mega_moe_mxfp4_smooth_oracle import decode_mxfp4_e8m0
     from tests.utils import shuffle_weight
 
     _IMPORT_ERROR = None
@@ -47,7 +49,30 @@ WEIGHT_SCALE = 1.0e-3
 REL_L2_LIMIT = 0.01
 STAGE1_REL_L2_LIMIT = 0.001
 GRAPH_REPLAY_REL_L2_LIMIT = 1.0e-6
+GRAPH_REPLAY_CHECKS = int(os.environ.get("MEGAMOE_GRAPH_REPLAY_CHECKS", "20"))
+GRAPH_CAPTURE_WARM_REPLAYS = int(os.environ.get("MEGAMOE_GRAPH_CAPTURE_WARM_REPLAYS", "10"))
+GRAPH_PHASE_MARKERS = os.environ.get("MEGAMOE_GRAPH_PHASE_MARKERS", "0").strip().lower() not in {
+    "", "0", "false", "no"
+}
 LEGACY_TARGET_US = 212.0
+MXFP4_PREFILL_MTPR = 32768
+MXFP4_PREFILL_PERF_TOL = 0.07
+MXFP4_PREFILL_E2E_US = {
+    # Stable same-code baselines.  The separately measured tuned values for
+    # tokens 8..128 change Stage1 dispatch geometry and are intentionally not
+    # used by this acceptance-only change.
+    1: 191.8,
+    4: 298.5,
+    8: 325.0,
+    16: 379.3,
+    32: 430.2,
+    64: 426.0,
+    128: 464.7,
+    256: 534.1,
+    512: 651.0,
+    # SP8 32K prefill: 4096 live tokens/rank with MTPR fixed at 32768.
+    4096: 1915.1,
+}
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -257,12 +282,16 @@ def _torch_aiter_oracle(
     w2_scale,
     rank,
     actual_moe,
+    dispatch_quant=None,
 ):
     """Distributed torch GEMM oracle with AITER's exact smooth quantizers."""
     from aiter.ops.quant import smooth_per_token_scaled_quant
 
     actual_stage1 = actual_moe._int8_stage1_output
     x_all, ids_all, weights_all = _gather_routes(x, ids, weights)
+    if dispatch_quant == "mxfp4":
+        fp4, mx_scale = per_1x32_mx_quant(x_all, quant_mode="fp4")
+        x_all = decode_mxfp4_e8m0(fp4, mx_scale).to(torch.bfloat16)
     total_tokens = x_all.shape[0]
     q1 = torch.zeros((total_tokens, TOPK, MODEL_DIM), dtype=torch.int8, device=x.device)
     s1 = torch.zeros((total_tokens, TOPK, 1), dtype=torch.float32, device=x.device)
@@ -293,7 +322,19 @@ def _torch_aiter_oracle(
         a2[rows] = (torch.nn.functional.silu(gate) * up).to(torch.float16)
     local_rows = (flat_ids >= expert_begin) & (flat_ids < expert_end)
     stage1_reference = a2[local_rows].float()
-    stage1_actual = actual_stage1.a2[: total_tokens * TOPK][local_rows].float()
+    # The packed token id embedded in Stage1 metadata uses MTPR as its rank
+    # stride.  Prefill acceptance intentionally exercises tokens < MTPR, so
+    # gather the produced rows through that sparse layout instead of treating
+    # the receive buffer as a dense WORLD*tokens array.
+    dense_tokens = torch.arange(total_tokens, device=x.device)
+    source_ranks = torch.div(dense_tokens, x.shape[0], rounding_mode="floor")
+    source_lids = dense_tokens - source_ranks * x.shape[0]
+    sparse_tokens = source_ranks * actual_moe.mtpr + source_lids
+    sparse_rows = (
+        sparse_tokens[:, None] * TOPK
+        + torch.arange(TOPK, device=x.device)[None, :]
+    ).reshape(-1)
+    stage1_actual = actual_stage1.a2[sparse_rows[local_rows]].float()
     stage1_rel_l2 = float(
         (
             torch.linalg.vector_norm(stage1_actual - stage1_reference)
@@ -331,17 +372,28 @@ def _torch_aiter_oracle(
     return oracle[start : start + x.shape[0]], stage1_rel_l2
 
 
-def _capture_graph(body):
+def _capture_graph(body, label="graph"):
+    def marker(phase):
+        if GRAPH_PHASE_MARKERS and (not dist.is_initialized() or dist.get_rank() == 0):
+            print(f"[M13-GRAPH-PHASE] {label}:{phase}", flush=True)
+
+    marker("warm_body_begin")
     body()
+    marker("warm_body_sync_begin")
     torch.cuda.synchronize()
+    marker("warm_body_sync_end")
     ms.shmem_barrier_all()
     capture_stream = torch.cuda.Stream()
     graph = torch.cuda.CUDAGraph()
+    marker("capture_begin")
     with torch.cuda.graph(graph, stream=capture_stream):
         body()
-    for _ in range(10):
+    marker("capture_end")
+    for _ in range(GRAPH_CAPTURE_WARM_REPLAYS):
         graph.replay()
+    marker(f"warm_replay_{GRAPH_CAPTURE_WARM_REPLAYS}_sync_begin")
     torch.cuda.synchronize()
+    marker(f"warm_replay_{GRAPH_CAPTURE_WARM_REPLAYS}_sync_end")
     ms.shmem_barrier_all()
     return graph
 
@@ -372,7 +424,12 @@ def _run_bucket(
     fc2,
     trace_dir=None,
     eager_trace=False,
+    dispatch_quant=None,
+    max_tok_per_rank=None,
 ):
+    mtpr = tokens if max_tok_per_rank is None else int(max_tok_per_rank)
+    if mtpr < tokens or mtpr & (mtpr - 1):
+        raise ValueError(f"MTPR must be a power of two >= tokens, got {mtpr}")
     x, ids, routing_weights = _make_inputs(tokens, rank, device)
     moe = MegaMoEV2(
         rank=rank,
@@ -382,9 +439,10 @@ def _run_bucket(
         experts=EXPERTS,
         topk=TOPK,
         quant=mode,
-        max_tok_per_rank=tokens,
+        max_tok_per_rank=mtpr,
         fc1_smooth_scale=fc1,
         fc2_smooth_scale=fc2,
+        dispatch_quant=dispatch_quant,
         **weights,
     )
     holder = {}
@@ -399,7 +457,7 @@ def _run_bucket(
         ms.shmem_barrier_all()
         e2e_graph = None
     else:
-        e2e_graph = _capture_graph(e2e_body)
+        e2e_graph = _capture_graph(e2e_body, "e2e")
 
     if e2e_graph is None:
         replay_rel_l2_all = []
@@ -408,7 +466,7 @@ def _run_bucket(
     else:
         replay_reference = holder["output"][:tokens].float().clone()
         local_replay_rel_l2 = 0.0
-        for _ in range(3):
+        for replay_index in range(GRAPH_REPLAY_CHECKS):
             e2e_graph.replay()
             torch.cuda.synchronize()
             ms.shmem_barrier_all()
@@ -443,6 +501,7 @@ def _run_bucket(
             weights["w2_scale"],
             rank,
             moe,
+            dispatch_quant,
         )
         rel_l2 = float(
             (torch.linalg.vector_norm(output - oracle) / torch.linalg.vector_norm(oracle).clamp_min(1e-12)).item()
@@ -470,10 +529,19 @@ def _run_bucket(
         stage1_holder = {}
 
         def stage1_body():
-            front_q, front_scale = moe._run_int8_front_quant(x, ids)
-            stage1_holder["output"] = moe._run_int8_stage1(front_q, front_scale, routing_weights, ids)
+            if dispatch_quant == "mxfp4":
+                front_q, front_scale = moe._run_mxfp4_front_quant(x)
+            else:
+                front_q, front_scale = moe._run_int8_front_quant(x, ids)
+            stage1_holder["output"] = moe._run_int8_stage1(
+                front_q,
+                front_scale,
+                routing_weights,
+                ids,
+                mxfp4_transport=dispatch_quant == "mxfp4",
+            )
 
-        stage1_graph = _capture_graph(stage1_body)
+        stage1_graph = _capture_graph(stage1_body, "stage1")
         stage1_us = _time_graph(stage1_graph, iterations, device)
         stage1_body()
         torch.cuda.synchronize()
@@ -491,7 +559,7 @@ def _run_bucket(
                 True,
             )
 
-        stage2_graph = _capture_graph(stage2_body)
+        stage2_graph = _capture_graph(stage2_body, "stage2")
         stage2_us = _time_graph(stage2_graph, iterations, device)
         e2e_us = _time_graph(e2e_graph, iterations, device)
 
@@ -510,7 +578,15 @@ def _run_bucket(
             )
         )
 
-    passed = finite_all and replay_stable and (
+    perf_ok = True
+    perf_limit_us = -1.0
+    if measure_perf and dispatch_quant == "mxfp4":
+        baseline_us = MXFP4_PREFILL_E2E_US.get(tokens)
+        if baseline_us is None:
+            raise ValueError(f"no MXFP4 prefill performance baseline for tokens={tokens}")
+        perf_limit_us = baseline_us * (1.0 + MXFP4_PREFILL_PERF_TOL)
+        perf_ok = e2e_us <= perf_limit_us
+    passed = finite_all and replay_stable and perf_ok and (
         skip_acc
         or (
             rel_l2_max < REL_L2_LIMIT
@@ -527,10 +603,14 @@ def _run_bucket(
                 f"e2e={e2e_us:.1f}us vs {LEGACY_TARGET_US:.0f}us={delta:+.1f}%"
             )
         print(
-            f"[M13-INT8] mode={mode} bs={tokens} relL2max={accuracy} "
+            f"[M13-INT8] mode={mode} dispatch={dispatch_quant or 'int8'} "
+            f"mtpr={mtpr} bs={tokens} relL2max={accuracy} "
             f"stage1RelL2max={'skip' if skip_acc else f'{stage1_rel_l2_max:.4e}'} "
             f"finite={finite_all} graphReplayRelL2max={replay_rel_l2_max:.4e} "
-            f"graph_replay={'PASS' if replay_stable else 'FAIL'} {perf} "
+            f"graph_replay={GRAPH_REPLAY_CHECKS}:"
+            f"{'PASS' if replay_stable else 'FAIL'} {perf} "
+            f"perf_gate={'PASS' if perf_ok else 'FAIL'}"
+            f"{'' if perf_limit_us < 0 else f' limit={perf_limit_us:.1f}us'} "
             f"=> {'PASS' if passed else 'FAIL'}",
             flush=True,
         )
@@ -587,8 +667,21 @@ def main():
         default=os.environ.get("MEGAMOE_INT8_TRACE_DIR", ""),
     )
     parser.add_argument("--eager-trace", action="store_true")
+    parser.add_argument(
+        "--dispatch-quant",
+        choices=("int8", "mxfp4"),
+        default=os.environ.get("MEGAMOE_DISPATCH_QUANT", "int8"),
+    )
+    parser.add_argument(
+        "--mtpr",
+        type=int,
+        default=int(os.environ.get("MEGAMOE_MTPR", "0")),
+        help="max tokens per rank; 0 uses the current batch size",
+    )
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
+    if args.dispatch_quant == "mxfp4" and args.mode != "w8a8smooth":
+        parser.error("MXFP4 transport is supported only by w8a8smooth prefill")
 
     rank, _, device = _setup_dist()
     torch.manual_seed(1234)
@@ -613,6 +706,8 @@ def main():
             fc2,
             args.trace_dir or None,
             args.eager_trace,
+            None if args.dispatch_quant == "int8" else args.dispatch_quant,
+            args.mtpr or tokens,
         )
     global_failures = _all_max(device, failures)
     _cleanup_dist()
@@ -721,6 +816,40 @@ def test_m13_native_a8w4_8gpu_acceptance():
             measure_perf=True,
             skip_acc=False,
             timeout=300,
+        )
+
+
+@pytest.mark.multi_gpu
+def test_m13_w8a8smooth_mxfp4_prefill_8gpu_acceptance():
+    """Gate the full M13 prefill matrix with MXFP4 communication."""
+    _require_gfx95(WORLD)
+    # Keep each shape in a fresh process.  Besides giving every failure a
+    # bounded timeout and an unambiguous shape, this matches the process-level
+    # isolation used to establish the performance baselines above.
+    for tokens in MXFP4_PREFILL_E2E_US:
+        _run_subprocess(
+            [
+                sys.executable,
+                "-m",
+                "torch.distributed.run",
+                "--standalone",
+                f"--nproc_per_node={WORLD}",
+                os.path.abspath(__file__),
+                "--mode",
+                "w8a8smooth",
+                "--dispatch-quant",
+                "mxfp4",
+                "--mtpr",
+                str(MXFP4_PREFILL_MTPR),
+                "--bs-list",
+                str(tokens),
+                "--iters",
+                os.environ.get("MEGAMOE_M13_MXFP4_CI_ITERS", "20"),
+                "--measure-perf",
+                "--strict",
+            ],
+            timeout=300,
+            extra_env={"MORI_SHMEM_HEAP_SIZE": "64G"},
         )
 
 

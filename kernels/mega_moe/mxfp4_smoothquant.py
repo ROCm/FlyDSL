@@ -7,6 +7,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.extras import types as T
 from flydsl.expr import const_expr, range_constexpr
+from flydsl.expr.buffer_ops import _unwrap_value
 from flydsl.expr.typing import Vector as Vec
 from kernels.common import buffer_ops
 
@@ -488,3 +489,112 @@ def convert_mxfp4_smoothquant_row(
                 output_base + fx.Int32(word * 4),
                 offset_is_bytes=True,
             )
+
+
+@flyc.jit
+def convert_mxfp4_smoothquant_row_wavewise(
+    payload_rsrc,
+    mx_scale_rsrc,
+    smooth_rsrc,
+    output_rsrc,
+    output_scale_rsrc,
+    row,
+    expert,
+    *,
+    cols,
+):
+    """Convert one row per wave in one read pass without CTA barriers."""
+    if cols % 32:
+        raise ValueError(f"cols={cols} must be divisible by 32")
+    blocks_per_row = cols // 32
+    block_rounds = (blocks_per_row + WAVE_SIZE - 1) // WAVE_SIZE
+    packed_i32_per_row = cols // 8
+    vec2_f32_ty = T.VectorType.get([2], T.f32())
+
+    lane = fx.thread_idx.x % fx.Int32(WAVE_SIZE)
+    local_max = fx.Float32(1e-10)
+    saved_rounds = []
+    for block_round in range_constexpr(block_rounds):
+        block = lane + fx.Int32(block_round * WAVE_SIZE)
+        active = block < fx.Int32(blocks_per_row)
+        safe_block = active.select(block, fx.Int32(0))
+        scale_byte = buffer_ops.buffer_load(
+            mx_scale_rsrc,
+            row * fx.Int32(blocks_per_row) + safe_block,
+            vec_width=1,
+            dtype=T.i8(),
+        )
+        e8m0 = fx.Uint8(scale_byte).to(fx.Int32)
+        block_scale = (e8m0 << fx.Int32(23)).bitcast(fx.Float32)
+        packed_base = row * fx.Int32(packed_i32_per_row) + safe_block * fx.Int32(4)
+        smooth_base = expert * fx.Int32(cols) + safe_block * fx.Int32(32)
+        round_words = []
+        for word in range_constexpr(4):
+            packed = buffer_ops.buffer_load(
+                payload_rsrc,
+                packed_base + fx.Int32(word),
+                vec_width=1,
+                dtype=T.i32(),
+            )
+            smooth = []
+            for half in range_constexpr(2):
+                smooth.extend(
+                    Vec(
+                        buffer_ops.buffer_load(
+                            smooth_rsrc,
+                            smooth_base + fx.Int32(word * 8 + half * 4),
+                            vec_width=4,
+                            dtype=T.f32(),
+                        )
+                    )
+                )
+            transformed = []
+            for pair in range_constexpr(4):
+                decoded = Vec(
+                    fx.rocdl.cvt_scalef32_pk_f32_fp4(
+                        vec2_f32_ty,
+                        _unwrap_value(packed),
+                        block_scale.ir_value(),
+                        pair,
+                    )
+                )
+                for elem in range_constexpr(2):
+                    value = active.select(
+                        decoded[elem] * smooth[pair * 2 + elem],
+                        fx.Float32(0.0),
+                    )
+                    transformed.append(value)
+                    local_max = local_max.maximumf(
+                        value.maximumf(fx.Float32(0.0) - value)
+                    )
+            round_words.append(transformed)
+        saved_rounds.append((active, safe_block, round_words))
+
+    for offset in (32, 16, 8, 4, 2, 1):
+        local_max = local_max.maximumf(
+            local_max.shuffle_xor(fx.Int32(offset), fx.Int32(WAVE_SIZE))
+        )
+    row_quant_scale = local_max / fx.Float32(127.0)
+    if lane == fx.Int32(0):
+        buffer_ops.buffer_store(row_quant_scale, output_scale_rsrc, row)
+    inv_scale = fx.Float32(1.0) / row_quant_scale
+
+    for active, safe_block, round_words in saved_rounds:
+        output_base = row * fx.Int32(cols) + safe_block * fx.Int32(32)
+        if active:
+            for word in range_constexpr(4):
+                quant_i32 = (
+                    Vec.from_elements(
+                        [value * inv_scale for value in round_words[word]],
+                        fx.Float32,
+                    )
+                    .to(fx.Int8)
+                    .bitcast(fx.Int32)
+                )
+                for half in range_constexpr(2):
+                    buffer_ops.buffer_store(
+                        quant_i32[half],
+                        output_rsrc,
+                        output_base + fx.Int32(word * 8 + half * 4),
+                        offset_is_bytes=True,
+                    )

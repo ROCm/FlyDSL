@@ -129,6 +129,24 @@ def _validate_a8w4smooth_decode(common, *, mxfp4_transport, smoothquant_mode):
         )
 
 
+def _use_m13_t4096_mxfp4_role(common, *, quant_mode, mxfp4_transport):
+    """Select the frozen customer-validated role-specialized prefill kernel."""
+    return (
+        quant_mode == "w8a8smooth"
+        and bool(mxfp4_transport)
+        and not bool(common["fixed_slot_dispatch"])
+        and (
+            common["model_dim"],
+            common["inter_dim"],
+            common["experts_per_rank"],
+            common["fuse_npes"],
+            common["fuse_topk"],
+            common["fuse_mtpr"],
+        )
+        == (3584, 1280, 48, 8, 8, 32768)
+    )
+
+
 # fmt: off
 def compile_mega_moe_stage1(
     *, model_dim: int, inter_dim: int, rank: int, experts_per_rank: int, fuse_npes: int, fuse_topk: int,
@@ -189,6 +207,28 @@ def compile_mega_moe_stage1(
         payload_chunk_rows=payload_chunk_rows,
         payload_tile_ready=payload_tile_ready,
     )
+    if _use_m13_t4096_mxfp4_role(
+        smooth_common,
+        quant_mode=quant_mode,
+        mxfp4_transport=mxfp4_transport,
+    ):
+        from .mega_moe_stage1_role import (
+            compile_mega_moe_stage1 as compile_role,
+        )
+
+        role_common = dict(
+            smooth_common,
+            num_dispatch_cu=192,
+            external_grouping=False,
+            external_counting=False,
+            payload_chunk_rows=0,
+            payload_tile_ready=False,
+        )
+        return compile_role(
+            **role_common,
+            quant_mode=quant_mode,
+            mxfp4_transport=True,
+        )
     if quant_mode == "a8w4smooth":
         _validate_a8w4smooth_decode(
             smooth_common,
@@ -212,6 +252,12 @@ def _clear_stage1_compile_caches():
 
     compile_a8w4.cache_clear()
     compile_smooth.cache_clear()
+    try:
+        from .mega_moe_stage1_role import compile_mega_moe_stage1 as compile_role
+    except ImportError:
+        pass
+    else:
+        compile_role.cache_clear()
 
 
 compile_mega_moe_stage1.cache_clear = _clear_stage1_compile_caches
@@ -283,6 +329,34 @@ def run_mega_moe_stage1(out, x, w, scale_x, scale_w, sorted_token_ids, expert_id
         payload_chunk_rows=payload_chunk_rows,
         payload_tile_ready=payload_tile_ready,
     )
+    if _use_m13_t4096_mxfp4_role(
+        smooth_common,
+        quant_mode=quant_mode,
+        mxfp4_transport=mxfp4_transport,
+    ):
+        from .mega_moe_stage1_role import run_mega_moe_stage1 as run_role
+
+        role_common = dict(
+            smooth_common,
+            num_dispatch_cu=192,
+            external_grouping=False,
+            external_counting=False,
+            payload_chunk_rows=0,
+            payload_tile_ready=False,
+        )
+        return run_role(
+            *positional,
+            **role_common,
+            quant_mode=quant_mode,
+            compact_src=compact_src,
+            compact_experts=compact_experts,
+            compact_weights=compact_weights,
+            qscale_w=qscale_w,
+            qzero_w=qzero_w,
+            mxfp4_transport=True,
+            transport_smooth=transport_smooth,
+            addr_quant_count=addr_quant_count,
+        )
     if quant_mode == "a8w4smooth":
         _validate_a8w4smooth_decode(
             smooth_common,

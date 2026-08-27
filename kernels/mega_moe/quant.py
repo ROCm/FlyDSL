@@ -255,7 +255,7 @@ def _get_launcher(n: int, quant_mode: str):
     return launcher
 
 
-def per_1x32_mx_quant(x, quant_mode="fp4", stream=None):
+def per_1x32_mx_quant(x, quant_mode="fp4", stream=None, *, out=None, scale=None):
     """Quantize BF16 rows to MXFP4 or MXFP8 payloads with E8M0 scales."""
     assert x.dtype == torch.bfloat16, f"x must be bf16, got {x.dtype}"
     x = x.contiguous()
@@ -263,12 +263,43 @@ def per_1x32_mx_quant(x, quant_mode="fp4", stream=None):
     assert n % GROUP == 0, f"n={n} must be divisible by {GROUP}"
     scale_n = n // GROUP
     if quant_mode == "fp4":
-        y = torch.empty((m, n // 2), dtype=torch.uint8, device=x.device)
+        expected_out_shape = (m, n // 2)
+        if out is None:
+            y = torch.empty(expected_out_shape, dtype=torch.uint8, device=x.device)
+        else:
+            if out.dtype not in (torch.uint8, torch.float4_e2m1fn_x2):
+                raise ValueError(f"FP4 out must use uint8/float4 storage, got {out.dtype}")
+            if tuple(out.shape) != expected_out_shape or not out.is_contiguous():
+                raise ValueError(f"FP4 out must be contiguous with shape {expected_out_shape}")
+            if out.device != x.device:
+                raise ValueError("out and x must be on the same device")
+            y = out.view(torch.uint8)
     elif quant_mode == "fp8":
-        y = torch.empty((m, n), dtype=torch.float8_e4m3fn, device=x.device)
+        expected_out_shape = (m, n)
+        if out is None:
+            y = torch.empty(expected_out_shape, dtype=torch.float8_e4m3fn, device=x.device)
+        else:
+            if out.dtype != torch.float8_e4m3fn:
+                raise ValueError(f"FP8 out must use float8_e4m3fn, got {out.dtype}")
+            if tuple(out.shape) != expected_out_shape or not out.is_contiguous():
+                raise ValueError(f"FP8 out must be contiguous with shape {expected_out_shape}")
+            if out.device != x.device:
+                raise ValueError("out and x must be on the same device")
+            y = out
     else:
         raise ValueError(f"quant_mode must be fp4|fp8, got {quant_mode!r}")
-    scale = torch.empty((m, scale_n), dtype=torch.uint8, device=x.device)
+    expected_scale_shape = (m, scale_n)
+    if scale is None:
+        scale = torch.empty(expected_scale_shape, dtype=torch.uint8, device=x.device)
+    elif (
+        scale.dtype != torch.uint8
+        or tuple(scale.shape) != expected_scale_shape
+        or not scale.is_contiguous()
+        or scale.device != x.device
+    ):
+        raise ValueError(
+            f"scale must be contiguous uint8 with shape {expected_scale_shape} on {x.device}"
+        )
     grid_blocks = (m * scale_n + BLOCK - 1) // BLOCK
     fx_stream = fx.Stream(stream if stream is not None else torch.cuda.current_stream().cuda_stream)
     # Store FP4 as bytes and return the payload with aiter's packed FP4 dtype.
