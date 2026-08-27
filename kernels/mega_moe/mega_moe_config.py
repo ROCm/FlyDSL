@@ -13,16 +13,17 @@ from dataclasses import dataclass, replace
 from functools import cache
 
 TOKEN_BUCKETS = (1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768)
+A8W4_DECODE_MTPRS = (1, 4, 8, 16, 32, 64, 128, 256, 512)
 P2P_FP8_MIN_MTPR = 1024
 FIXED_SLOT_MAX_MTPR = 255
 A8W4SMOOTH_FIXED_SLOT_MAX_MTPR = 512
+A8W4SMOOTH_DECODE_MTPRS = (1, 4, 8, 16, 32, 64, 128, 256, 512)
 MAX_MTPR_CLASS = 32768
 REFERENCE_EXPERTS_PER_RANK = 48
 EXPERT_CONFIG_GRANULARITY = 64
 REFERENCE_WORLD_SIZE = 8
 REFERENCE_TOPK = 8
 REFERENCE_NUM_CU = 256
-FIXED_SLOT_WORKSPACE_BUDGET_BYTES = 1280 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,23 +101,6 @@ def expert_config_class(experts_per_rank: int) -> int:
     return (experts_per_rank + EXPERT_CONFIG_GRANULARITY - 1) // EXPERT_CONFIG_GRANULARITY * EXPERT_CONFIG_GRANULARITY
 
 
-def _is_narrow_int_decode_shape(
-    quant_mode: str,
-    experts_per_rank: int,
-    model_dim: int,
-    inter_dim: int,
-) -> bool:
-    """Whether the shape fits the low-pressure INT8xINT4 decode kernel class."""
-    return (
-        quant_mode == "a8w4smooth"
-        and experts_per_rank <= EXPERT_CONFIG_GRANULARITY
-        and model_dim <= 4096
-        and inter_dim <= 1280
-        and model_dim % 256 == 0
-        and inter_dim % 256 == 0
-    )
-
-
 def fixed_slot_max_mtpr(
     quant_mode: str,
     experts_per_rank: int,
@@ -125,18 +109,12 @@ def fixed_slot_max_mtpr(
     world_size: int = REFERENCE_WORLD_SIZE,
     topk: int = REFERENCE_TOPK,
 ) -> int:
-    """Return the fixed-slot limit derived from format and workspace pressure."""
-    expert_class = expert_config_class(experts_per_rank)
-    candidate = A8W4SMOOTH_FIXED_SLOT_MAX_MTPR
-    payload_rows = expert_class * world_size * candidate
-    route_rows = world_size * candidate * topk
-    payload_row_bytes = model_dim + 3 * 4
-    workspace_bytes = payload_rows * payload_row_bytes + route_rows * inter_dim * 2
-    expanded_fixed_slot = (
-        _is_narrow_int_decode_shape(quant_mode, expert_class, model_dim, inter_dim)
-        and workspace_bytes <= FIXED_SLOT_WORKSPACE_BUDGET_BYTES
-    )
-    return candidate if expanded_fixed_slot else FIXED_SLOT_MAX_MTPR
+    """Return the production fixed-slot limit for each quantization mode."""
+    if quant_mode == "w8a8smooth":
+        return 0
+    if quant_mode == "a8w4smooth":
+        return A8W4SMOOTH_FIXED_SLOT_MAX_MTPR
+    return FIXED_SLOT_MAX_MTPR
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,15 +141,6 @@ class _Workload:
     @property
     def int_smooth(self) -> bool:
         return self.quant_mode in ("a8w4smooth", "w8a8smooth")
-
-    @property
-    def narrow_int_decode(self) -> bool:
-        return _is_narrow_int_decode_shape(
-            self.quant_mode,
-            self.experts_per_rank,
-            self.model_dim,
-            self.inter_dim,
-        )
 
     @property
     def routes_per_rank(self) -> int:
@@ -262,12 +231,20 @@ def _derive_stage1(workload: _Workload) -> Stage1Config:
     bucket = workload.bucket
     if workload.fixed_slot:
         grid_mult = max(1, bucket // 4) if bucket <= 16 else 3
+        dispatch_request = _fixed_dispatch_request(bucket)
+        if workload.quant_mode == "a8w4":
+            # Match the validated production MX-scale A8W4 crossover points.
+            # SmoothQuant modes retain their shape-specific overrides below.
+            if bucket == 1:
+                dispatch_request = 160
+            elif bucket == 8:
+                dispatch_request = 32
         return Stage1Config(
             sort_block_m=32,
             tile_n=256 if bucket <= 8 else 128,
             num_waves=4,
             grid_mult=grid_mult,
-            num_dispatch_cu=_fit_dispatch_cu(_fixed_dispatch_request(bucket), workload),
+            num_dispatch_cu=_fit_dispatch_cu(dispatch_request, workload),
             mfma_amajor=False,
             async_a_copy=False,
             use_tile_resource=bucket <= 16,
@@ -313,6 +290,8 @@ def _derive_stage1(workload: _Workload) -> Stage1Config:
         raise ValueError(f"bounded MTPR does not support token bucket {bucket}")
     grid_mult = 1 if bucket <= 256 else 2
     dispatch_request = _bounded_dispatch_request(bucket) if bucket <= 128 else 160 if bucket == 256 else 128
+    if workload.quant_mode == "a8w4" and bucket == 512:
+        dispatch_request = 64
     use_tile_resource = bucket == 256
     b_nt = 0 if bucket == 1 or bucket >= 1024 else 3
     if workload.mtpr_class > bucket:
@@ -414,7 +393,6 @@ def _apply_narrow_int_fixed_rules(
             num_dispatch_cu=_fit_dispatch_cu(192, workload),
             b_nt=0,
             waves_per_eu_hint=2,
-            work_shards=2,
             swizzle_a=False,
         )
     elif bucket <= 128 and bucket >= 16:
@@ -429,7 +407,6 @@ def _apply_narrow_int_fixed_rules(
             num_dispatch_cu=_fit_dispatch_cu(dispatch_request, workload),
             b_nt=0,
             waves_per_eu_hint=1 if low_pressure else 2,
-            work_shards=2 if routes <= 128 else 8,
             swizzle_a=low_pressure,
         )
     elif 128 < bucket <= A8W4SMOOTH_FIXED_SLOT_MAX_MTPR:
@@ -447,7 +424,6 @@ def _apply_narrow_int_fixed_rules(
             num_dispatch_cu=_fit_dispatch_cu(workload.num_cu - consumer_reserve, workload),
             b_nt=0,
             waves_per_eu_hint=2 if one_tile_density else 1,
-            work_shards=8 if one_tile_density else 4,
             swizzle_a=True,
         )
 
@@ -476,22 +452,6 @@ def _apply_quant_and_shape_rules(
 ) -> tuple[Stage1Config, Stage2Config]:
     bucket = workload.bucket
 
-    if workload.large_capacity and workload.quant_mode == "a8w4smooth":
-        if bucket == 2048:
-            # INT route payloads already contain per-route scales; the compact
-            # external-count/chunk protocol adds overhead at this density.
-            stage1 = replace(
-                stage1,
-                external_grouping=False,
-                external_counting=False,
-                payload_chunk_rows=0,
-                payload_tile_ready=False,
-            )
-            stage2 = replace(stage2, persist_cu=240)
-        elif bucket == 4096:
-            stage1 = replace(stage1, sort_block_m=64)
-            stage2 = replace(stage2, block_m=32)
-
     if workload.quant_mode == "a8w4smooth" and workload.fixed_slot and bucket <= 8:
         stage1 = replace(
             stage1,
@@ -501,26 +461,15 @@ def _apply_quant_and_shape_rules(
             b_nt=0 if bucket <= 4 else 3,
         )
         stage2 = replace(stage2, use_nt=False)
-    elif workload.quant_mode == "a8w4smooth" and bucket == 512:
-        stage2 = replace(stage2, persist_cu=224)
 
     if workload.int_smooth and bucket == 128:
         stage2 = replace(stage2, block_m=32, block_n=128, block_k=256)
 
-    if workload.narrow_int_decode:
+    if workload.quant_mode == "a8w4smooth":
         # INT Stage1 keeps separate gate/up B fragments. Carrying the next full
         # B step doubles live state, so retain only A-register/LDS ping-pong.
         stage1 = replace(stage1, pipe_weights=False, async_a_copy=False)
-        if bucket == 512 and not workload.fixed_slot:
-            stage1 = replace(
-                stage1,
-                grid_mult=1,
-                num_dispatch_cu=_fit_dispatch_cu(224, workload),
-                b_nt=0,
-                waves_per_eu_hint=1,
-            )
-        if workload.fixed_slot:
-            stage1, stage2 = _apply_narrow_int_fixed_rules(workload, stage1, stage2)
+        stage1, stage2 = _apply_narrow_int_fixed_rules(workload, stage1, stage2)
     return stage1, stage2
 
 
@@ -571,6 +520,7 @@ def select_mega_moe_config(
     model_dim: int = 7168,
     inter_dim: int = 3072,
     quant_mode: str = "a8w4",
+    dispatch_quant: str | None = None,
     world_size: int = REFERENCE_WORLD_SIZE,
     topk: int = REFERENCE_TOPK,
     num_cu: int = REFERENCE_NUM_CU,
@@ -585,6 +535,38 @@ def select_mega_moe_config(
         raise ValueError(f"invalid model shape {model_dim}x{inter_dim}")
     if quant_mode not in ("a8w4", "a8w4smooth", "w8a8smooth"):
         raise ValueError(f"unsupported quant_mode={quant_mode!r}")
+    if dispatch_quant not in (None, "mxfp4"):
+        raise ValueError(f"unsupported dispatch_quant={dispatch_quant!r}")
+    if dispatch_quant == "mxfp4" and quant_mode != "w8a8smooth":
+        raise ValueError(
+            "dispatch_quant='mxfp4' is only supported by w8a8smooth prefill"
+        )
+    if quant_mode == "a8w4":
+        shape = (model_dim, inter_dim, experts_per_rank, world_size, topk)
+        if shape != (3584, 1280, 48, 8, 8):
+            raise ValueError(
+                "native A8W4 is decode-only for M13 "
+                "(D=3584, I=1280, EPR=48, EP=8, topk=8)"
+            )
+        if tokens != mtpr or mtpr not in A8W4_DECODE_MTPRS:
+            raise ValueError(
+                "native A8W4 requires tokens=MTPR in "
+                f"{A8W4_DECODE_MTPRS}, got tokens={tokens}, MTPR={mtpr}"
+            )
+    elif quant_mode == "a8w4smooth":
+        if tokens != mtpr or mtpr not in A8W4SMOOTH_DECODE_MTPRS:
+            raise ValueError(
+                "a8w4smooth decode requires tokens=MTPR in "
+                "{1,4,8,16,32,64,128,256,512}"
+            )
+        if (
+            experts_per_rank,
+            model_dim,
+            inter_dim,
+            world_size,
+            topk,
+        ) != (48, 3584, 1280, 8, 8):
+            raise ValueError("a8w4smooth decode is specialized for M13 EP8")
     if world_size <= 0 or topk <= 0:
         raise ValueError(f"invalid routing shape world_size={world_size}, topk={topk}")
     if num_cu <= max(32, world_size):

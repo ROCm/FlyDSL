@@ -15,6 +15,8 @@ from kernels.comm.flydsl_dispatch_combine_intranode_op import (
 
 from .dispatch import DISPATCH_TABLE_SIZE, DispatchSlot
 from .mega_moe_config import (
+    A8W4_DECODE_MTPRS,
+    A8W4SMOOTH_DECODE_MTPRS,
     MegaMoEConfig,
     Stage1Config,
     fixed_slot_max_mtpr,
@@ -34,12 +36,24 @@ _SUPPORTED_QUANT_MODES = ("a8w4", "a8w4smooth", "w8a8smooth")
 _SUPPORTED_WEIGHT_FORMATS = ("megamoe", "aiter_lqq")
 
 
-def _dispatch_quant_config(quant: str, model_dim: int):
+def _dispatch_quant_config(
+    quant: str, model_dim: int, dispatch_quant: str | None = None
+):
     """Return the dispatch dtype and scale ABI for a MegaMoEV2 quant mode."""
     if quant not in _SUPPORTED_QUANT_MODES:
         raise ValueError(
             f"unsupported quant={quant!r}; expected one of {_SUPPORTED_QUANT_MODES}"
         )
+    if dispatch_quant not in (None, "mxfp4"):
+        raise ValueError(
+            f"unsupported dispatch_quant={dispatch_quant!r}; expected None or 'mxfp4'"
+        )
+    if dispatch_quant == "mxfp4":
+        if quant != "w8a8smooth":
+            raise ValueError(
+                "dispatch_quant='mxfp4' is only supported by w8a8smooth prefill"
+            )
+        return torch.float4_e2m1fn_x2, int(model_dim) // 32, 1
     if quant == "a8w4":
         return torch.float8_e4m3fn, int(model_dim) // 32, 1
     return torch.int8, 1, 4
@@ -49,7 +63,7 @@ def _combine_launch_geometry(quant: str, mtpr: int):
     """Return low-overhead combine geometry for tiny A8W4 decode buckets."""
     if quant != "a8w4smooth" or mtpr > 8:
         return None, None
-    return (32 if mtpr in (2, 4) else 64), 4
+    return (32 if mtpr == 4 else 64), 4
 
 
 def _as_packed_i32(tensor):
@@ -79,17 +93,44 @@ class MegaMoEV2:
         w1_lqq_scale: torch.Tensor | None = None, w1_lqq_zero: torch.Tensor | None = None,
         w2_lqq_scale: torch.Tensor | None = None, w2_lqq_zero: torch.Tensor | None = None,
         fc1_smooth_scale: torch.Tensor | None = None, fc2_smooth_scale: torch.Tensor | None = None,
-        weight_format: str = "megamoe"):
+        weight_format: str = "megamoe", dispatch_quant: str | None = None):
     # fmt: on
-        dispatch_dtype, scale_dim, scale_type_size = _dispatch_quant_config(quant, model_dim)
+        dispatch_dtype, scale_dim, scale_type_size = _dispatch_quant_config(
+            quant, model_dim, dispatch_quant
+        )
+        if quant in ("a8w4", "a8w4smooth"):
+            if (
+                model_dim,
+                inter_dim,
+                experts,
+                world_size,
+                topk,
+            ) != (3584, 1280, 384, 8, 8):
+                raise ValueError(
+                    f"{quant} decode is specialized for M13 EP8 "
+                    "(D=3584,I=1280,E=384,EP=8,topk=8)"
+                )
+            decode_mtprs = (
+                A8W4_DECODE_MTPRS
+                if quant == "a8w4"
+                else A8W4SMOOTH_DECODE_MTPRS
+            )
+            if max_tok_per_rank not in decode_mtprs:
+                raise ValueError(f"{quant} decode requires MTPR in {decode_mtprs}")
         if weight_format not in _SUPPORTED_WEIGHT_FORMATS:
             raise ValueError(
                 f"unsupported weight_format={weight_format!r}; "
                 f"expected one of {_SUPPORTED_WEIGHT_FORMATS}"
             )
         self.quant = quant
+        self.dispatch_quant = dispatch_quant
+        self._s1_mxfp4_transport = dispatch_quant == "mxfp4"
         is_a8w4smooth = quant == "a8w4smooth"
         self._is_int8_smooth = quant in ("a8w4smooth", "w8a8smooth")
+        # A8W4 Smooth uses the customer AITER route-aware front quantizer.
+        # Stage1 therefore consumes route-major INT8 rows and one f32 scale
+        # per route; it does not compile the integrated bf16_route prepare.
+        self._s1_smoothquant_mode = "none"
         if weight_format == "aiter_lqq":
             if not is_a8w4smooth:
                 raise ValueError(
@@ -157,6 +198,10 @@ class MegaMoEV2:
         compact = self.mtpr > fixed_slot_limit
         capacity_tile_m = 128 if compact else 32
         self._s1_fixed_slot = not compact
+        if is_a8w4smooth and not self._s1_fixed_slot:
+            raise ValueError(
+                "a8w4smooth is decode-only and requires fixed-slot MTPR <= 512"
+            )
         self._s1_scale_dim = scale_dim
         combine_block_num, combine_warp_num = _combine_launch_geometry(
             quant, self.mtpr
@@ -228,16 +273,16 @@ class MegaMoEV2:
             .contiguous()
         )
 
-        # Front quant is token/slot-major because each route selects expert-specific
-        # FC1 smooth scales. Requant uses the ATOM row contract over all received rows.
-        front_rows = self.mtpr * self.topk
+        # Both standalone Smooth paths materialize route-major front quant.
         requant_rows = self.max_recv * self.topk
-        self._int8_front_q = torch.zeros(
-            (front_rows, self.model_dim), dtype=torch.int8, device=self.dev
-        )
-        self._int8_front_scale = torch.zeros(
-            (front_rows,), dtype=torch.float32, device=self.dev
-        )
+        if self._is_int8_smooth and not self._s1_mxfp4_transport:
+            front_rows = self.mtpr * self.topk
+            self._int8_front_q = torch.zeros(
+                (front_rows, self.model_dim), dtype=torch.int8, device=self.dev
+            )
+            self._int8_front_scale = torch.zeros(
+                (front_rows,), dtype=torch.float32, device=self.dev
+            )
         self._int8_requant_q = torch.zeros(
             (requant_rows, self.inter_dim), dtype=torch.int8, device=self.dev
         )
@@ -289,6 +334,28 @@ class MegaMoEV2:
         self._int8_dummy_out_scale = torch.empty(
             1, dtype=torch.uint8, device=self.dev
         )
+        if self._s1_mxfp4_transport:
+            self._mxfp4_front_q = torch.empty(
+                (self.mtpr, self.model_dim // 2),
+                dtype=torch.uint8,
+                device=self.dev,
+            )
+            self._mxfp4_front_scale = torch.empty(
+                (self.mtpr, self.model_dim // 32),
+                dtype=torch.uint8,
+                device=self.dev,
+            )
+            self._int8_stage1_q = torch.zeros(
+                (self._s1_nvm, self.model_dim), dtype=torch.int8, device=self.dev
+            )
+            self._int8_stage1_scale = torch.zeros(
+                (self._s1_nvm,), dtype=torch.float32, device=self.dev
+            )
+            # One counter per received M tile publishes completion of all row
+            # conversion partitions.
+            self._int8_quant_count = torch.zeros(
+                metadata_blocks, dtype=torch.int32, device=self.dev
+            )
         self._int8_stage1_output = Int8Stage1Output(
             a2=self._int8_a2,
             sorted_token_ids=self._int8_sorted_tokens,
@@ -336,31 +403,141 @@ class MegaMoEV2:
         self._build_v2_disp_table()
 
     def _allocate_dispatch_workspace(self, op, metadata_blocks):
+        from .mega_moe_stage1 import (
+            A8W4_ENTRY_COUNT_SHARDS,
+            ENTRY_COUNT_SHARDS,
+            ENTRY_EPOCH_SLOT_COUNT,
+        )
+
+        if self.quant == "a8w4":
+            total_experts = self.world_size * self.epr
+            workspace = {
+                "entry_count": torch.zeros(
+                    A8W4_ENTRY_COUNT_SHARDS,
+                    dtype=torch.int64,
+                    device=self.dev,
+                ),
+                "epoch_gate": torch.zeros(1, dtype=torch.int32, device=self.dev),
+                "launch_ready": op._sym((self.world_size,), torch.int32),
+                "count_done": op._sym((2 * self.world_size,), torch.int32),
+                "plan_ready": op._sym((2 * self.world_size,), torch.int32),
+                "max_expert_tiles": torch.zeros(
+                    1, dtype=torch.int32, device=self.dev
+                ),
+            }
+            if self._s1_fixed_slot:
+                workspace.update(
+                    group_done=torch.zeros(
+                        self._s1_num_cu, dtype=torch.int32, device=self.dev
+                    ),
+                )
+            else:
+                workspace.update(
+                    local_hist=torch.zeros(
+                        total_experts, dtype=torch.int32, device=self.dev
+                    ),
+                    local_cursor=torch.zeros(
+                        total_experts, dtype=torch.int32, device=self.dev
+                    ),
+                    pair_order=torch.empty(
+                        self.mtpr * self.topk,
+                        dtype=torch.int32,
+                        device=self.dev,
+                    ),
+                    pair_base=torch.empty(
+                        total_experts, dtype=torch.int32, device=self.dev
+                    ),
+                    pair_ready=torch.zeros(2, dtype=torch.int32, device=self.dev),
+                    pair_order_ready=torch.zeros(
+                        2, dtype=torch.int32, device=self.dev
+                    ),
+                    bigcnt=op._sym(
+                        (self.world_size * total_experts,), torch.int32
+                    ),
+                    my_base=op._sym((total_experts,), torch.int32),
+                    payload_ready=op._sym((2 * self.epr,), torch.int32),
+                )
+            ms.shmem_barrier_all()
+            for name in ("count_done", "plan_ready", "launch_ready"):
+                workspace[f"p2p_{name}"] = op._p2p_table(workspace[name])
+            if not self._s1_fixed_slot:
+                for name in ("bigcnt", "my_base", "payload_ready"):
+                    workspace[f"p2p_{name}"] = op._p2p_table(workspace[name])
+            self._s1_dispatch_workspace = workspace
+            return
+
         total_experts = self.world_size * self.epr
+        fixed_decode = self.quant == "a8w4smooth" and self._s1_fixed_slot
+        if fixed_decode:
+            workspace = {
+                "entry_count": torch.zeros(
+                    A8W4_ENTRY_COUNT_SHARDS,
+                    dtype=torch.int64,
+                    device=self.dev,
+                ),
+                "epoch_gate": torch.zeros(1, dtype=torch.int32, device=self.dev),
+                "group_done": torch.zeros(
+                    self._s1_num_cu, dtype=torch.int32, device=self.dev
+                ),
+                "count_done": op._sym((2 * self.world_size,), torch.int32),
+                "plan_ready": op._sym((2 * self.world_size,), torch.int32),
+                "launch_ready": op._sym((self.world_size,), torch.int32),
+                "max_expert_tiles": torch.zeros(
+                    1, dtype=torch.int32, device=self.dev
+                ),
+                "dest_counter": torch.zeros(
+                    self.world_size, dtype=torch.int32, device=self.dev
+                ),
+                "recv_num": op._sym((self.world_size,), torch.int32),
+            }
+            workspace["recv_num"].fill_(-1)
+            ms.shmem_barrier_all()
+            workspace["p2p_count_done"] = op._p2p_table(workspace["count_done"])
+            workspace["p2p_plan_ready"] = op._p2p_table(workspace["plan_ready"])
+            workspace["p2p_launch_ready"] = op._p2p_table(
+                workspace["launch_ready"]
+            )
+            workspace["p2p_recv_num"] = op._p2p_table(workspace["recv_num"])
+            self._s1_dispatch_workspace = workspace
+            return
+
         workspace = {
             "local_hist": torch.zeros(total_experts, dtype=torch.int32, device=self.dev),
             "local_cursor": torch.zeros(total_experts, dtype=torch.int32, device=self.dev),
             "pair_order": torch.empty(self.mtpr * self.topk, dtype=torch.int32, device=self.dev),
             "pair_base": torch.empty(total_experts, dtype=torch.int32, device=self.dev),
             "pair_ready": torch.zeros(2, dtype=torch.int32, device=self.dev),
-            "entry_count": torch.zeros(10, dtype=torch.int64, device=self.dev),
-            "epoch_gate": torch.zeros(10, dtype=torch.int32, device=self.dev),
+            # Compact W8 prefill keeps the full geometry-keyed generation table.
+            "entry_count": torch.zeros(
+                ENTRY_EPOCH_SLOT_COUNT * ENTRY_COUNT_SHARDS,
+                dtype=torch.int64,
+                device=self.dev,
+            ),
+            "epoch_gate": torch.zeros(
+                ENTRY_EPOCH_SLOT_COUNT,
+                dtype=torch.int32,
+                device=self.dev,
+            ),
             "pair_order_ready": torch.zeros(2, dtype=torch.int32, device=self.dev),
             "work_head": torch.zeros(8 * 16, dtype=torch.int32, device=self.dev),
-            "work_tail": torch.zeros(1, dtype=torch.int32, device=self.dev),
-            "expert_tile_end": torch.empty(self.epr, dtype=torch.int32, device=self.dev),
             "max_expert_tiles": torch.zeros(1, dtype=torch.int32, device=self.dev),
             "payload_chunk_done": torch.zeros(total_experts, dtype=torch.int32, device=self.dev),
             "tile_expected": torch.zeros(metadata_blocks, dtype=torch.int32, device=self.dev),
             "active_payload_blocks": torch.zeros(1, dtype=torch.int32, device=self.dev),
             "payload_blocks_per_destination": torch.zeros(self.world_size, dtype=torch.int32, device=self.dev),
-            "payload_chunks_per_destination": torch.zeros(self.world_size, dtype=torch.int32, device=self.dev),
-            # Direct fixed-slot uses per-producer epoch flags plus hierarchical
-            # summaries; compact external grouping uses slot 0 as its counter.
+            # Compact external grouping uses slot 0 as its completion counter.
             "group_done": torch.zeros(self._s1_num_cu, dtype=torch.int32, device=self.dev),
             "dest_counter": torch.zeros(self.world_size, dtype=torch.int32, device=self.dev),
         }
-        workspace["bigcnt"] = op._sym((self.world_size * self.epr,), torch.int32)
+        # Keep the complete [source_rank][global_expert] count matrix on every
+        # rank.  The compact all-gather planner uses it to derive both the
+        # receiver layout and this rank's destination offsets locally, avoiding
+        # the receiver->sender TASK_ROW_BASE/PLAN_READY return trip.  The legacy
+        # planner continues to use the leading [source_rank][local_expert]
+        # portion of the same allocation.
+        workspace["bigcnt"] = op._sym(
+            (self.world_size * total_experts,), torch.int32
+        )
         workspace["count_done"] = op._sym((2 * self.world_size,), torch.int32)
         workspace["my_base"] = op._sym((total_experts,), torch.int32)
         workspace["plan_ready"] = op._sym((2 * self.world_size,), torch.int32)
@@ -370,6 +547,7 @@ class MegaMoEV2:
         workspace["payload_ready_rows"] = op._sym((1,), torch.int32)
         workspace["recv_num"] = op._sym((self.world_size,), torch.int32)
         workspace["recv_num"].fill_(-1)
+        workspace["row_scale"] = op._sym((self._s1_nvm,), torch.float32)
         ms.shmem_barrier_all()
         workspace["p2p_bigcnt"] = op._p2p_table(workspace["bigcnt"])
         workspace["p2p_count_done"] = op._p2p_table(workspace["count_done"])
@@ -380,12 +558,91 @@ class MegaMoEV2:
         workspace["p2p_tile_ready"] = op._p2p_table(workspace["tile_ready"])
         workspace["p2p_payload_ready_rows"] = op._p2p_table(workspace["payload_ready_rows"])
         workspace["p2p_recv_num"] = op._p2p_table(workspace["recv_num"])
+        workspace["p2p_row_scale"] = op._p2p_table(workspace["row_scale"])
         self._s1_dispatch_workspace = workspace
 
     def _build_v2_disp_table(self):
         op = self._s1_op
         workspace = self._s1_dispatch_workspace
         table = [0] * DISPATCH_TABLE_SIZE
+        if self.quant == "a8w4":
+            table[DispatchSlot.P2P_TOKEN] = op.p2p_rx_em.data_ptr()
+            table[DispatchSlot.P2P_SCALE] = op.p2p_scale_em.data_ptr()
+            table[DispatchSlot.P2P_WEIGHT] = op.p2p_wts_em.data_ptr()
+            table[DispatchSlot.P2P_SRCMAP] = op.p2p_srcmap_em.data_ptr()
+            table[DispatchSlot.SORTED_EXPERT] = op.sorted_expert_ids.data_ptr()
+            table[DispatchSlot.TILE_ROW_BASE] = op.tile_row_base.data_ptr()
+            table[DispatchSlot.NUM_VALID] = op.num_valid.data_ptr()
+            table[DispatchSlot.SRCMAP] = op.srcmap_em.data_ptr()
+            table[DispatchSlot.RUNNING] = op.running.data_ptr()
+            table[DispatchSlot.P2P_RUNNING] = op.p2p_running.data_ptr()
+            table[DispatchSlot.TOTAL_RECV] = op.total_recv.data_ptr()
+            slots = {
+                DispatchSlot.PAIR_BASE: "pair_base",
+                DispatchSlot.LOCAL_HIST: "local_hist",
+                DispatchSlot.COUNT_MATRIX: "bigcnt",
+                DispatchSlot.P2P_COUNT_MATRIX: "p2p_bigcnt",
+                DispatchSlot.COUNT_DONE: "count_done",
+                DispatchSlot.P2P_COUNT_DONE: "p2p_count_done",
+                DispatchSlot.TASK_ROW_BASE: "my_base",
+                DispatchSlot.LOCAL_CURSOR: "local_cursor",
+                DispatchSlot.P2P_PAYLOAD_READY: "p2p_payload_ready",
+                DispatchSlot.PAIR_ORDER: "pair_order",
+                DispatchSlot.P2P_TASK_ROW_BASE: "p2p_my_base",
+                DispatchSlot.P2P_PLAN_READY: "p2p_plan_ready",
+                DispatchSlot.PLAN_READY: "plan_ready",
+                DispatchSlot.PAIR_READY: "pair_ready",
+                DispatchSlot.ENTRY_COUNT: "entry_count",
+                DispatchSlot.EPOCH_GATE: "epoch_gate",
+                DispatchSlot.PAIR_ORDER_READY: "pair_order_ready",
+                DispatchSlot.GROUP_DONE: "group_done",
+                DispatchSlot.LAUNCH_READY: "launch_ready",
+                DispatchSlot.P2P_LAUNCH_READY: "p2p_launch_ready",
+                DispatchSlot.MAX_EXPERT_TILES: "max_expert_tiles",
+            }
+            for slot, name in slots.items():
+                tensor = workspace.get(name)
+                if tensor is not None:
+                    table[slot] = tensor.data_ptr()
+            self._s1_disp = torch.tensor(
+                table, dtype=torch.int64, device=self.dev
+            )
+            return
+
+        if self.quant == "a8w4smooth" and self._s1_fixed_slot:
+            fixed_bindings = {
+                DispatchSlot.P2P_TOKEN: op.p2p_rx_em,
+                DispatchSlot.P2P_SCALE: op.p2p_scale_em,
+                DispatchSlot.P2P_WEIGHT: op.p2p_wts_em,
+                DispatchSlot.P2P_SRCMAP: op.p2p_srcmap_em,
+                DispatchSlot.SORTED_EXPERT: op.sorted_expert_ids,
+                DispatchSlot.TILE_ROW_BASE: op.tile_row_base,
+                DispatchSlot.NUM_VALID: op.num_valid,
+                DispatchSlot.SRCMAP: op.srcmap_em,
+                DispatchSlot.RUNNING: op.running,
+                DispatchSlot.P2P_RUNNING: op.p2p_running,
+                DispatchSlot.ENTRY_COUNT: workspace["entry_count"],
+                DispatchSlot.EPOCH_GATE: workspace["epoch_gate"],
+                DispatchSlot.GROUP_DONE: workspace["group_done"],
+                DispatchSlot.COUNT_DONE: workspace["count_done"],
+                DispatchSlot.P2P_COUNT_DONE: workspace["p2p_count_done"],
+                DispatchSlot.PLAN_READY: workspace["plan_ready"],
+                DispatchSlot.P2P_PLAN_READY: workspace["p2p_plan_ready"],
+                DispatchSlot.LAUNCH_READY: workspace["launch_ready"],
+                DispatchSlot.P2P_LAUNCH_READY: workspace["p2p_launch_ready"],
+                DispatchSlot.MAX_EXPERT_TILES: workspace["max_expert_tiles"],
+                DispatchSlot.TOTAL_RECV: op.total_recv,
+                DispatchSlot.DEST_COUNTER: workspace["dest_counter"],
+                DispatchSlot.RECV_NUM: workspace["recv_num"],
+                DispatchSlot.P2P_RECV_NUM: workspace["p2p_recv_num"],
+            }
+            for slot, tensor in fixed_bindings.items():
+                table[slot] = tensor.data_ptr()
+            self._s1_disp = torch.tensor(
+                table, dtype=torch.int64, device=self.dev
+            )
+            return
+
         table[DispatchSlot.PAIR_BASE] = workspace["pair_base"].data_ptr()
         table[DispatchSlot.P2P_TOKEN] = op.p2p_rx_em.data_ptr()
         table[DispatchSlot.P2P_SCALE] = op.p2p_scale_em.data_ptr()
@@ -412,8 +669,6 @@ class MegaMoEV2:
         table[DispatchSlot.EPOCH_GATE] = workspace["epoch_gate"].data_ptr()
         table[DispatchSlot.PAIR_ORDER_READY] = workspace["pair_order_ready"].data_ptr()
         table[DispatchSlot.WORK_HEAD] = workspace["work_head"].data_ptr()
-        table[DispatchSlot.WORK_TAIL] = workspace["work_tail"].data_ptr()
-        table[DispatchSlot.EXPERT_TILE_END] = workspace["expert_tile_end"].data_ptr()
         table[DispatchSlot.GROUP_DONE] = workspace["group_done"].data_ptr()
         table[DispatchSlot.RUNNING] = op.running.data_ptr()
         table[DispatchSlot.P2P_RUNNING] = op.p2p_running.data_ptr()
@@ -430,13 +685,12 @@ class MegaMoEV2:
         table[DispatchSlot.PAYLOAD_BLOCKS_PER_DESTINATION] = workspace[
             "payload_blocks_per_destination"
         ].data_ptr()
-        table[DispatchSlot.PAYLOAD_CHUNKS_PER_DESTINATION] = workspace[
-            "payload_chunks_per_destination"
-        ].data_ptr()
         table[DispatchSlot.TOTAL_RECV] = op.total_recv.data_ptr()
         table[DispatchSlot.DEST_COUNTER] = workspace["dest_counter"].data_ptr()
         table[DispatchSlot.RECV_NUM] = workspace["recv_num"].data_ptr()
         table[DispatchSlot.P2P_RECV_NUM] = workspace["p2p_recv_num"].data_ptr()
+        table[DispatchSlot.ROW_SCALE] = workspace["row_scale"].data_ptr()
+        table[DispatchSlot.P2P_ROW_SCALE] = workspace["p2p_row_scale"].data_ptr()
         self._s1_disp = torch.tensor(table, dtype=torch.int64, device=self.dev)
 
     def _select_config(self, tokens: int) -> MegaMoEConfig:
@@ -447,6 +701,7 @@ class MegaMoEV2:
             model_dim=self.model_dim,
             inter_dim=self.inter_dim,
             quant_mode=self.quant,
+            dispatch_quant=self.dispatch_quant,
             world_size=self.world_size,
             topk=self.topk,
             num_cu=self._s1_num_cu,
@@ -460,6 +715,11 @@ class MegaMoEV2:
         cur_tok = int(x.shape[0])
         if cur_tok > self.mtpr:
             raise ValueError(f"run_tokens={cur_tok} > max_tok_per_rank={self.mtpr}")
+        if self.quant == "a8w4" and cur_tok != self.mtpr:
+            raise ValueError(
+                "A8W4 MX-scale decode requires tokens per rank to equal MTPR "
+                f"(tokens={cur_tok}, MTPR={self.mtpr})"
+            )
         if x.dtype != torch.float8_e4m3fn or not x.is_contiguous():
             raise ValueError("x must be contiguous float8_e4m3fn")
         if tuple(x.shape) != (cur_tok, self.model_dim):
@@ -494,9 +754,6 @@ class MegaMoEV2:
             async_a_copy=config.async_a_copy, num_dispatch_cu=config.num_dispatch_cu,
             use_tile_resource=config.use_tile_resource,
             waves_per_eu_hint=config.waves_per_eu_hint, b_nt=config.b_nt,
-            work_shards=config.work_shards, external_grouping=config.external_grouping,
-            external_counting=config.external_counting, payload_chunk_rows=config.payload_chunk_rows,
-            payload_tile_ready=config.payload_tile_ready,
             swiglu_limit=self.swiglu_limit)
         # fmt: on
         self._s1_active_tile_m = config.sort_block_m
@@ -528,7 +785,7 @@ class MegaMoEV2:
         return out_tok[:run_tokens] if slice_output else out_tok
 
     def _run_int8_front_quant(self, x_bf16, topk_ids):
-        """Run the standalone AITER front quant into preallocated route-major buffers."""
+        """Run the established AITER W8A8 prefill quantization path."""
         run_tokens = int(x_bf16.shape[0])
         out = self._int8_front_q[: run_tokens * self.topk].view(
             run_tokens, self.topk, self.model_dim
@@ -549,24 +806,90 @@ class MegaMoEV2:
         )
         return out, scales
 
-    def _run_int8_stage1(self, front_q, front_scale, wts, topk_ids, *, stream=None):
+    def _run_mxfp4_front_quant(self, x_bf16):
+        """Quantize each source token once into preallocated MXFP4 transport buffers."""
+        run_tokens = int(x_bf16.shape[0])
+        return per_1x32_mx_quant(
+            x_bf16,
+            quant_mode="fp4",
+            out=self._mxfp4_front_q[:run_tokens],
+            scale=self._mxfp4_front_scale[:run_tokens],
+        )
+
+    def _run_int8_stage1(
+        self,
+        front_q,
+        front_scale,
+        wts,
+        topk_ids,
+        *,
+        stream=None,
+        mxfp4_transport=False,
+    ):
         """Dispatch per-route INT8 rows and run gfx950 INT8 GEMM1."""
         if stream is None:
             stream = fx.Stream(torch.cuda.current_stream())
         cur_tok = int(front_q.shape[0])
-        if front_q.dtype != torch.int8 or not front_q.is_contiguous():
-            raise ValueError("front_q must be contiguous int8")
-        if tuple(front_q.shape) != (cur_tok, self.topk, self.model_dim):
-            raise ValueError(
-                f"front_q must have shape ({cur_tok}, {self.topk}, {self.model_dim})"
-            )
-        if front_scale.dtype != torch.float32 or not front_scale.is_contiguous():
-            raise ValueError("front_scale must be contiguous float32")
-        if tuple(front_scale.shape) != (cur_tok, self.topk, 1):
-            raise ValueError(
-                f"front_scale must have shape ({cur_tok}, {self.topk}, 1)"
-            )
+        smoothquant_mode = self._s1_smoothquant_mode
+        if smoothquant_mode == "bf16_route":
+            if mxfp4_transport:
+                raise ValueError(
+                    "fused BF16 SmoothQuant prepare cannot use MXFP4 transport"
+                )
+            if front_q.dtype != torch.bfloat16 or not front_q.is_contiguous():
+                raise ValueError("fused SmoothQuant input must be contiguous bfloat16")
+            if tuple(front_q.shape) != (cur_tok, self.model_dim):
+                raise ValueError(
+                    f"fused SmoothQuant input must have shape "
+                    f"({cur_tok}, {self.model_dim})"
+                )
+            if front_scale is not None:
+                raise ValueError(
+                    "fused SmoothQuant prepare does not accept a front scale tensor"
+                )
+            compute_x = self._s1_rx
+            compute_scale = self._s1_scale_i32
+            front_scale_addr = 0
+        elif mxfp4_transport:
+            if not self._s1_mxfp4_transport:
+                raise ValueError("MXFP4 Stage1 requested without dispatch_quant='mxfp4'")
+            if front_q.dtype != torch.float4_e2m1fn_x2 or not front_q.is_contiguous():
+                raise ValueError("front_q must be contiguous float4_e2m1fn_x2")
+            if tuple(front_q.shape) != (cur_tok, self.model_dim // 2):
+                raise ValueError(
+                    f"front_q must have shape ({cur_tok}, {self.model_dim // 2})"
+                )
+            if front_scale.dtype != torch.uint8 or not front_scale.is_contiguous():
+                raise ValueError("front_scale must be contiguous uint8 E8M0")
+            if tuple(front_scale.shape) != (cur_tok, self.model_dim // 32):
+                raise ValueError(
+                    f"front_scale must have shape ({cur_tok}, {self.model_dim // 32})"
+                )
+            compute_x = self._int8_stage1_q
+            compute_scale = self._int8_stage1_scale
+            front_scale_addr = front_scale.data_ptr()
+        else:
+            if front_q.dtype != torch.int8 or not front_q.is_contiguous():
+                raise ValueError("front_q must be contiguous int8")
+            if tuple(front_q.shape) != (cur_tok, self.topk, self.model_dim):
+                raise ValueError(
+                    f"front_q must have shape ({cur_tok}, {self.topk}, {self.model_dim})"
+                )
+            if front_scale.dtype != torch.float32 or not front_scale.is_contiguous():
+                raise ValueError("front_scale must be contiguous float32")
+            if tuple(front_scale.shape) != (cur_tok, self.topk, 1):
+                raise ValueError(
+                    f"front_scale must have shape ({cur_tok}, {self.topk}, 1)"
+                )
+            compute_x = self._s1_rx
+            compute_scale = self._s1_scale_i32
+            front_scale_addr = front_scale.data_ptr()
         config = self._select_config(cur_tok).stage1
+        stage1_scale_bytes = (
+            4
+            if self.quant == "a8w4smooth" and smoothquant_mode == "none"
+            else self._s1_scale_dim
+        )
         qscale = (
             self._int8_w1_lqq_scale
             if self._int8_w1_lqq_scale is not None
@@ -579,9 +902,9 @@ class MegaMoEV2:
         )
         self._int8_stage1(
             self._int8_a2,
-            self._s1_rx,
+            compute_x,
             self._int8_w1,
-            self._s1_scale_i32,
+            compute_scale,
             self._int8_w1_scale,
             self._s1_op.tile_row_base,
             self._s1_op.sorted_expert_ids,
@@ -593,7 +916,7 @@ class MegaMoEV2:
             fx.Int64(front_q.data_ptr()),
             fx.Int64(topk_ids.data_ptr()),
             fx.Int64(wts.data_ptr()),
-            fx.Int64(front_scale.data_ptr()),
+            fx.Int64(front_scale_addr),
             fx.Int64(self._s1_epoch_parity.data_ptr()),
             fx.Int64(self._s1_epoch_expected.data_ptr()),
             stream,
@@ -605,7 +928,7 @@ class MegaMoEV2:
             fuse_topk=self.topk,
             fuse_cap=self._s1_cap,
             fuse_mtpr=self.mtpr,
-            fuse_scale_dim=4,
+            fuse_scale_dim=stage1_scale_bytes,
             fixed_slot_dispatch=self._s1_fixed_slot,
             num_cu=self._s1_num_cu,
             sort_block_m=config.sort_block_m,
@@ -621,11 +944,21 @@ class MegaMoEV2:
             use_tile_resource=False,
             waves_per_eu_hint=config.waves_per_eu_hint,
             b_nt=config.b_nt,
-            work_shards=config.work_shards,
-            external_grouping=config.external_grouping,
-            external_counting=config.external_counting,
-            payload_chunk_rows=config.payload_chunk_rows,
-            payload_tile_ready=config.payload_tile_ready,
+            work_shards=(
+                config.work_shards if self.quant == "w8a8smooth" else None
+            ),
+            external_grouping=(
+                config.external_grouping if self.quant == "w8a8smooth" else None
+            ),
+            external_counting=(
+                config.external_counting if self.quant == "w8a8smooth" else None
+            ),
+            payload_chunk_rows=(
+                config.payload_chunk_rows if self.quant == "w8a8smooth" else 0
+            ),
+            payload_tile_ready=(
+                config.payload_tile_ready if self.quant == "w8a8smooth" else False
+            ),
             swiglu_limit=self.swiglu_limit,
             quant_mode=self.quant,
             compact_src=self._int8_sorted_tokens,
@@ -633,6 +966,16 @@ class MegaMoEV2:
             compact_weights=self._int8_sorted_weights,
             qscale_w=qscale,
             qzero_w=qzero,
+            mxfp4_transport=mxfp4_transport,
+            transport_smooth=(
+                self._int8_fc1_smooth
+                if mxfp4_transport or smoothquant_mode == "bf16_route"
+                else None
+            ),
+            addr_quant_count=(
+                self._int8_quant_count.data_ptr() if mxfp4_transport else 0
+            ),
+            smoothquant_mode=smoothquant_mode,
         )
         self._int8_stage1_output.sort_block_m = config.sort_block_m
         return self._int8_stage1_output
@@ -740,9 +1083,19 @@ class MegaMoEV2:
 
     def _forward_int8(self, x_bf16, wts, topk_ids, *, stream=None, slice_output=True):
         """Host-visible INT8 pipeline: front quant -> Stage1 -> requant -> Stage2."""
-        front_q, front_scale = self._run_int8_front_quant(x_bf16, topk_ids)
+        if self._s1_mxfp4_transport:
+            front_q, front_scale = self._run_mxfp4_front_quant(x_bf16)
+        elif self._s1_smoothquant_mode == "bf16_route":
+            front_q, front_scale = x_bf16, None
+        else:
+            front_q, front_scale = self._run_int8_front_quant(x_bf16, topk_ids)
         stage1_output = self._run_int8_stage1(
-            front_q, front_scale, wts, topk_ids, stream=stream
+            front_q,
+            front_scale,
+            wts,
+            topk_ids,
+            stream=stream,
+            mxfp4_transport=self._s1_mxfp4_transport,
         )
         requant_q, requant_scale = self._run_int8_requant(stage1_output, topk_ids)
         return self._run_int8_stage2(
@@ -758,6 +1111,11 @@ class MegaMoEV2:
         run_tokens = int(x_bf16.shape[0])
         if run_tokens > self.mtpr:
             raise ValueError(f"run_tokens={run_tokens} > max_tok_per_rank={self.mtpr}")
+        if self.quant in ("a8w4", "a8w4smooth") and run_tokens != self.mtpr:
+            raise ValueError(
+                f"{self.quant} decode requires tokens per rank to equal MTPR "
+                f"(tokens={run_tokens}, MTPR={self.mtpr})"
+            )
         if x_bf16.dtype != torch.bfloat16 or not x_bf16.is_contiguous():
             raise ValueError("x_bf16 must be contiguous bfloat16")
         if wts.dtype != torch.float32 or not wts.is_contiguous():
@@ -836,7 +1194,8 @@ class MegaMoEV2:
             fx.Int64(op.sorted_expert_ids.data_ptr()), fx.Int64(op.num_valid.data_ptr()),
             fx.Int64(self._s1_dispatch_workspace["max_expert_tiles"].data_ptr()),
             fx.Int64(op.srcmap_em.data_ptr()), fx.Int64(op.wts_em.data_ptr()),
-            fx.Int64(op.tile_row_base.data_ptr()), comb_op._fx_p2p_comb_inp, self._s1_nvm,
+            fx.Int64(op.tile_row_base.data_ptr()), comb_op._fx_p2p_comb_inp,
+            self._s1_nvm,
             self._g2v2_inter, self._g2v2_hidden, s_fx, BM=stage2.block_m,
             SBM=config.stage1.sort_block_m, BN=stage2.block_n, BK=stage2.block_k,
             use_nt=stage2.use_nt, g2_bhoist=stage2.b_hoist,

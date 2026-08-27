@@ -44,6 +44,7 @@ except Exception as _exc:  # noqa: BLE001
 
 
 NETWORKS = {
+    "m13": dict(model_dim=3584, inter_dim=1280, experts=384, topk=8),
     "r1_v3": dict(model_dim=7168, inter_dim=2048, experts=256, topk=8),
     "v4_flash": dict(model_dim=4096, inter_dim=2048, experts=256, topk=6),
     "v4_pro": dict(model_dim=7168, inter_dim=3072, experts=384, topk=6, swiglu_limit=10.0),
@@ -910,6 +911,18 @@ def _run_full_e2e(
 
 _PERF_BASELINE_CACHE = {}
 _MEGA_PERF_BASELINE = {
+    # MI355X EP8, M13 native A8W4 decode, tokens=MTPR.  Values are the
+    # cross-rank maximum CUDAGraph E2E latency in milliseconds.  The committed
+    # pytest gate adds the common tolerance below for normal CI jitter.
+    "m13:a8w4:1": 0.0653,
+    "m13:a8w4:4": 0.0978,
+    "m13:a8w4:8": 0.1093,
+    "m13:a8w4:16": 0.1370,
+    "m13:a8w4:32": 0.1316,
+    "m13:a8w4:64": 0.1373,
+    "m13:a8w4:128": 0.1540,
+    "m13:a8w4:256": 0.2100,
+    "m13:a8w4:512": 0.3299,
     "v4_flash:a8w4:8": 0.1135,
     "v4_flash:a8w4:16": 0.1232,
     "v4_flash:a8w4:32": 0.1274,
@@ -1285,13 +1298,25 @@ def _run_mega_only(
                 args.profile_dir,
                 dict(tokens=run_tokens, network=args.network, quant=quant),
             )
+        graph_replay_rel = _relL2(
+            _out["o"][:run_tokens].float().cpu().numpy(), out_mega
+        )
+        graph_replay_rel_max = _all_max(dev, graph_replay_rel)
+        graph_replay_ok = graph_replay_rel_max < 1.0e-6
         _base = _perf_baseline_lookup(getattr(args, "perf_baseline", ""), args.network, quant, run_tokens)
         if _base is not None and _base > 0:
             _tol = float(args.perf_tol)
-            perf_ok = mega_ms <= _base * (1.0 + _tol)
-            perf_note = f"baseline={_base:.4f}ms +{_tol:.0%} -> {'OK' if perf_ok else 'REGRESSION'}"
+            perf_ok = mega_max_ms <= _base * (1.0 + _tol)
+            perf_note = (
+                f"rank-max baseline={_base:.4f}ms +{_tol:.0%} -> "
+                f"{'OK' if perf_ok else 'REGRESSION'}"
+            )
         else:
             perf_note = "no committed baseline for this config (perf gate skipped)"
+        perf_ok = perf_ok and graph_replay_ok
+    else:
+        graph_replay_rel_max = -1.0
+        graph_replay_ok = True
 
     ok = acc_ok and perf_ok
     _all_ok = _all_max(dev, 0.0 if ok else 1.0) < 0.5
@@ -1309,7 +1334,9 @@ def _run_mega_only(
             f"stage1={stage1_ms:.4f}/{_s1_ms_max:.4f}ms "
             f"stage2={stage2_ms:.4f}/{_s2_ms_max:.4f}ms "
             f"prequant_e2e={prequant_ms:.4f}/{_prequant_ms_max:.4f}ms "
-            f"bf16_e2e={mega_ms:.4f}/{_ms_max:.4f}ms(mean/max)  {perf_note}"
+            f"bf16_e2e={mega_ms:.4f}/{_ms_max:.4f}ms(mean/max) "
+            f"graphReplayRelL2max={graph_replay_rel_max:.3e} "
+            f"graph_replay={'PASS' if graph_replay_ok else 'FAIL'}  {perf_note}"
             if measure_perf
             else "perf:skip"
         )
@@ -1333,6 +1360,7 @@ def _run_mega_only(
         mega_prequant_max_ms=prequant_max_ms,
         mega_only_ms=mega_ms,
         mega_only_max_ms=mega_max_ms,
+        graph_replay_rel_l2_max=graph_replay_rel_max,
         full_e2e_pass=bool(_all_ok),
     )
 
@@ -1348,7 +1376,13 @@ def run_one(args, rank, world, dev):
         raise SystemExit(f"experts={experts} must divide world={world}")
     epr = experts // world
 
-    mtpr = int(args.mtpr) if int(args.mtpr) > 0 else max(16, 1 << (run_tokens - 1).bit_length())
+    mtpr = (
+        int(args.mtpr)
+        if int(args.mtpr) > 0
+        else run_tokens
+        if args.network == "m13" and args.quant == "a8w4"
+        else max(16, 1 << (run_tokens - 1).bit_length())
+    )
     mega_only = bool(getattr(args, "mega_only", False))
     local_experts_only = mega_only and (args.skip_acc or args.stage1_only or int(args.layers) == 1)
     keep_ref = bool(args.stage1_only or (mega_only and not args.skip_acc and int(args.layers) == 1))

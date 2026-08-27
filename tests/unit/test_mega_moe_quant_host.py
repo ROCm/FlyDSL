@@ -38,11 +38,21 @@ def test_unknown_quant_mode_is_rejected():
         _dispatch_quant_config("int8", 256)
 
 
+def test_mxfp4_transport_is_w8a8smooth_prefill_only():
+    assert _dispatch_quant_config("w8a8smooth", 3584, "mxfp4") == (
+        torch.float4_e2m1fn_x2,
+        112,
+        1,
+    )
+    for quant in ("a8w4", "a8w4smooth"):
+        with pytest.raises(ValueError, match="only supported by w8a8smooth"):
+            _dispatch_quant_config(quant, 3584, "mxfp4")
+
+
 @pytest.mark.parametrize(
     "quant,mtpr,expected",
     [
         ("a8w4smooth", 1, (64, 4)),
-        ("a8w4smooth", 2, (32, 4)),
         ("a8w4smooth", 4, (32, 4)),
         ("a8w4smooth", 8, (64, 4)),
         ("a8w4smooth", 16, (None, None)),
@@ -101,6 +111,7 @@ def test_a8w4_constructor_contract_is_unchanged():
     ):
         assert params[name].default is None
     assert params["weight_format"].default == "megamoe"
+    assert params["dispatch_quant"].default is None
 
 
 def test_lqq_conversion_shape_and_layout_formula():

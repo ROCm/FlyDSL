@@ -702,6 +702,22 @@ def test_m13_int8_8gpu_e2e(mode):
 
 
 @pytest.mark.multi_gpu
+def test_m13_native_a8w4_8gpu_acceptance():
+    """Gate the production MXFP8/E8M0 decode path over its full contract."""
+    _require_gfx95(WORLD)
+    from tests.kernels.test_mega_moe_v2 import _run_mega_8gpu
+
+    _run_mega_8gpu(
+        network="m13",
+        quant="a8w4",
+        bs_list="1,4,8,16,32,64,128,256,512",
+        iters=int(os.environ.get("MEGAMOE_M13_A8W4_CI_ITERS", "20")),
+        measure_perf=True,
+        skip_acc=False,
+    )
+
+
+@pytest.mark.multi_gpu
 @pytest.mark.parametrize("mode", ["a8w4smooth", "w8a8smooth"])
 def test_int8_stage1_distributed_smoke(mode):
     _require_gfx95(WORLD)
