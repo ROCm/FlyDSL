@@ -1,11 +1,26 @@
 {
  "schema": 1,
- "updated": "2026-08-27T12:23:36Z",
+ "updated": "2026-08-27T12:31:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 33071360194,
+   "run_id": 33071819224,
    "pr": 1073,
+   "commit": "e5faff3c0d5dcccd4e6e57ebfd349e4b85aac26a",
+   "branch": "rdna3-int8-wmma-gemm",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add RDNA3 INT8 WMMA GEMM, 1.23-2.80x over torch",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33071819224",
+   "created_at": "2026-08-27T12:25:52Z",
+   "updated_at": "2026-08-27T12:28:13Z",
+   "actor": "vlluvia",
+   "jobs": []
+  },
+  {
+   "run_id": 33071360194,
+   "pr": null,
    "commit": "a5d23f8c72fe1720fa4dd3791bc19a85a2d3111c",
    "branch": "rdna3-int8-wmma-gemm",
    "event": "pull_request",
@@ -1959,72 +1974,6 @@
    "updated_at": "2026-08-24T14:56:30Z",
    "actor": "sammysun0711",
    "jobs": []
-  },
-  {
-   "run_id": 32737985252,
-   "pr": 972,
-   "commit": "9c1a7a72b8dc5d79a4b5ee7a8322db4166c8dba5",
-   "branch": "mega_moe_a4w4",
-   "event": "pull_request",
-   "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32737985252",
-   "created_at": "2026-08-24T14:19:26Z",
-   "updated_at": "2026-08-24T17:34:26Z",
-   "actor": "Yaowu-Xiong",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T14:42:20Z",
-     "completed_at": "2026-08-24T15:28:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32737985252/job/97472868254",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T14:44:28Z",
-     "completed_at": "2026-08-24T16:08:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32737985252/job/97472868257",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T14:42:11Z",
-     "completed_at": "2026-08-24T14:59:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32737985252/job/97472868271",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T16:29:54Z",
-     "completed_at": "2026-08-24T17:34:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32737985252/job/97501492712",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T16:32:09Z",
-     "completed_at": "2026-08-24T17:24:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32737985252/job/97501492738",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
