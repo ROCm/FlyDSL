@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-08-27T05:06:51Z",
+ "updated": "2026-08-27T07:19:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33049109959,
+   "pr": 1072,
+   "commit": "bd8a6ec08330e645c8ac0ad1c1833c5eb669f3c5",
+   "branch": "ci/base-llvm-baseline-probe-1051",
+   "event": "pull_request",
+   "title": "[CI][DO NOT MERGE] Probe: LLVM pin bump on top of #1071",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33049109959",
+   "created_at": "2026-08-27T07:17:24Z",
+   "updated_at": "2026-08-27T07:18:10Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 33048662101,
+   "pr": 1072,
+   "commit": "54a85467063702f8065466d8d45540b41ba14be9",
+   "branch": "ci/base-llvm-baseline-probe-1051",
+   "event": "pull_request",
+   "title": "[CI][DO NOT MERGE] Probe: LLVM pin bump on top of #1071",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33048662101",
+   "created_at": "2026-08-27T07:10:46Z",
+   "updated_at": "2026-08-27T07:17:26Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 33048248167,
+   "pr": 1071,
+   "commit": "770cf113b23bef18b2953eebc324fdc4f3b52f08",
+   "branch": "ci/base-llvm-baseline",
+   "event": "pull_request",
+   "title": "[CI] Build the benchmark baseline wheel against the base commit's LLVM",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33048248167",
+   "created_at": "2026-08-27T07:04:38Z",
+   "updated_at": "2026-08-27T07:05:50Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 33038905462,
    "pr": 1056,
@@ -1987,143 +2032,6 @@
      "started_at": "2026-08-24T11:39:48Z",
      "completed_at": "2026-08-24T12:33:42Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32713543896/job/97418048832"
-    }
-   ]
-  },
-  {
-   "run_id": 32710532813,
-   "pr": null,
-   "commit": "d50e1e45af4d9068aa1e05c3f01614157cee4f17",
-   "branch": "jhinpan/softmax-autotune",
-   "event": "pull_request",
-   "title": "[Kernel] Add opt-in autotuning for Softmax",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710532813",
-   "created_at": "2026-08-24T09:15:33Z",
-   "updated_at": "2026-08-24T23:16:12Z",
-   "actor": "zhiding512",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-24T23:05:00Z",
-     "completed_at": "2026-08-24T23:16:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710532813/job/97622832454"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T11:26:11Z",
-     "completed_at": "2026-08-24T12:15:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710532813/job/97622833228",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T11:26:11Z",
-     "completed_at": "2026-08-24T12:52:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710532813/job/97622833363",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32710290446,
-   "pr": null,
-   "commit": "52297281065fd11d3a77bf2e31361eb937f12c41",
-   "branch": "upstream/pa-64bit-cache-offsets",
-   "event": "pull_request",
-   "title": "[Bugfix][PA] Fix D192 query staging and 64-bit cache offsets",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710290446",
-   "created_at": "2026-08-24T09:12:50Z",
-   "updated_at": "2026-08-24T12:55:14Z",
-   "actor": "sammysun0711",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T10:04:17Z",
-     "completed_at": "2026-08-24T10:24:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710290446/job/97386506094",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T10:36:07Z",
-     "completed_at": "2026-08-24T12:01:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710290446/job/97386506354",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T11:38:10Z",
-     "completed_at": "2026-08-24T12:55:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32710290446/job/97386506381",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32707307344,
-   "pr": 1063,
-   "commit": "bc544b642c673d461f72e7429876515f4c685b17",
-   "branch": "xyt/asyncmark",
-   "event": "pull_request",
-   "title": "[GEMM] Track gfx950 async LDS loads with asyncmark",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32707307344",
-   "created_at": "2026-08-24T08:38:08Z",
-   "updated_at": "2026-08-24T11:34:45Z",
-   "actor": "xytpai",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T09:31:33Z",
-     "completed_at": "2026-08-24T11:34:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32707307344/job/97385098444",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T10:37:34Z",
-     "completed_at": "2026-08-24T11:25:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32707307344/job/97385098524",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T09:46:23Z",
-     "completed_at": "2026-08-24T10:03:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32707307344/job/97385098588",
-     "log_fetch_failed": true
     }
    ]
   }
