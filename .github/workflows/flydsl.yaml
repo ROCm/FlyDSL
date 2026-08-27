@@ -297,6 +297,78 @@ jobs:
           docker cp flydsl_mlir_cache:/llvm-project/mlir_install.tgz ./mlir_install.tgz
           test -s ./mlir_install.tgz
 
+      # ---------------------------------------------------------------------
+      # PROBE SCAFFOLDING - PR #1072 only, never for main.
+      #
+      # The baseline entry this PR needs is keyed on main's LLVM inputs, and
+      # nothing has saved it: caches a PR creates are scoped to that PR's merge
+      # ref, so #1071 cannot warm it for anyone else. Only a push to main can.
+      #
+      # Rather than wait for that merge, build the base pin here and save it
+      # under the base key at THIS PR's own scope. First run: miss, build, save,
+      # and the rest of the chain runs against a real base MLIR. Re-run: the
+      # restore hits, exercising the actual cache path end to end.
+      # ---------------------------------------------------------------------
+      - name: Build baseline LLVM (probe scaffolding)
+        if: >-
+          steps.base-pin.outputs.pin_changed == 'true' &&
+          steps.base-mlir-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 45
+        run: |
+          set -ex
+          docker exec -e LLVM_BUILD_PROFILE -e BASE_REPO_NAME -e BASE_COMMIT_SHA flydsl_mlir_cache bash -c '
+            set -e
+            cd /flydsl-test
+            git worktree prune || true
+            rm -rf /tmp/flydsl-ci-base-llvm
+            git fetch "https://github.com/${BASE_REPO_NAME}.git" "${BASE_COMMIT_SHA}" --no-tags --depth=1
+            git worktree add --detach /tmp/flydsl-ci-base-llvm FETCH_HEAD
+            cd /tmp/flydsl-ci-base-llvm
+            mkdir -p /llvm-project-base
+            LLVM_INSTALL_DIR=/llvm-project-base/mlir_install \
+            LLVM_INSTALL_TGZ=/llvm-project-base/mlir_install.tgz \
+              bash scripts/build_llvm.sh
+          '
+          docker cp flydsl_mlir_cache:/llvm-project-base/mlir_install.tgz ./mlir_install_base.tgz
+          test -s ./mlir_install_base.tgz
+          # Drop the second source and build tree NOW: the wheel build below
+          # would otherwise run with both LLVM trees on disk.
+          docker exec flydsl_mlir_cache bash -c "
+            rm -rf /tmp/llvm-project /llvm-project-base
+            cd /flydsl-test && git worktree remove --force /tmp/flydsl-ci-base-llvm 2>/dev/null || true
+            git -C /flydsl-test worktree prune || true
+          " || true
+          df -h / | tail -1
+
+      # actions/cache derives its version from the path list, so the entry has
+      # to be saved under the same name the restore asks for.
+      - name: Stage baseline tarball for save (probe scaffolding)
+        id: probe-stage
+        if: >-
+          steps.base-pin.outputs.pin_changed == 'true' &&
+          steps.base-mlir-cache.outputs.cache-hit != 'true' &&
+          hashFiles('mlir_install_base.tgz') != ''
+        run: |
+          set -euo pipefail
+          mv mlir_install.tgz mlir_install_shared.tgz
+          cp mlir_install_base.tgz mlir_install.tgz
+
+      - name: Save baseline MLIR cache (probe scaffolding)
+        if: steps.probe-stage.outcome == 'success'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: mlir_install.tgz
+          key: ${{ steps.keys.outputs.base }}
+
+      - name: Restore tarball names (probe scaffolding)
+        if: always() && steps.probe-stage.outcome == 'success'
+        run: |
+          set -euo pipefail
+          rm -f mlir_install.tgz
+          mv mlir_install_shared.tgz mlir_install.tgz
+
       # Checked against the VCSRevision.h the install ships: a wrong-pin baseline
       # is worse than none, since it yields a plausible number nobody questions.
       #
