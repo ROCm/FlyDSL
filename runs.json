@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-27T13:18:28Z",
+ "updated": "2026-08-27T13:24:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33076498887,
+   "pr": null,
+   "commit": "3c40cd39243aa2f7c9e69a5aa7e25931f841ab2d",
+   "branch": "main",
+   "event": "push",
+   "title": "[CI] Add MI35x runners for validation tests (#1075)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33076498887",
+   "created_at": "2026-08-27T13:22:37Z",
+   "updated_at": "2026-08-27T13:23:03Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 33075816668,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[gfx1250] Add bf16 gemm (#1061)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33075816668",
    "created_at": "2026-08-27T13:14:40Z",
-   "updated_at": "2026-08-27T13:15:55Z",
+   "updated_at": "2026-08-27T13:22:49Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1957,21 +1972,6 @@
    "created_at": "2026-08-24T17:38:34Z",
    "updated_at": "2026-08-24T17:41:28Z",
    "actor": "JohnQinAMD",
-   "jobs": []
-  },
-  {
-   "run_id": 32745036269,
-   "pr": 906,
-   "commit": "f8365f8205f3310261548ddfefaed42535552ee7",
-   "branch": "fast-divmod",
-   "event": "pull_request",
-   "title": "Add fast_divmod magic-number division helper",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32745036269",
-   "created_at": "2026-08-24T15:28:08Z",
-   "updated_at": "2026-08-24T15:28:08Z",
-   "actor": "kashif",
    "jobs": []
   }
  ]
