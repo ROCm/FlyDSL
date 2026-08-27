@@ -143,12 +143,109 @@ jobs:
           ref: ${{ env.GITHUB_COMMIT_SHA }}
           path: flydsl-test
 
+      # A pin bump leaves the base source uncompilable against the PR's MLIR, so
+      # the baseline wheel needs the base commit's own install. Every step gated
+      # on pin_changed is skipped for a PR that leaves the LLVM inputs alone.
+      - name: Resolve base LLVM pin
+        id: base-pin
+        # `run:` blocks are `bash -e`, and nothing decided here is worth failing
+        # prepare-mlir over: with no outputs written, the gated steps skip.
+        continue-on-error: true
+        # Some self-hosted runners rewrite GitHub URLs to a git cache, and this
+        # is the only fetch here that runs on the host, not in the container.
+        env:
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/flydsl-gitconfig
+          GIT_CONFIG_NOSYSTEM: "1"
+        run: |
+          set -uo pipefail
+          # Self-hosted workspaces are reused; drop what the last run left.
+          rm -rf base-pin
+          rm -f mlir_install_base.tgz
+          mkdir -p base-pin/thirdparty base-pin/scripts
+          if ! git -C flydsl-test fetch "https://github.com/${BASE_REPO_NAME}.git" \
+                 "${BASE_COMMIT_SHA}" --no-tags --depth=1; then
+            echo "Could not fetch base ${BASE_REPO_NAME}@${BASE_COMMIT_SHA}; treating LLVM pin as unchanged."
+            echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          for f in thirdparty/llvm-build-info.json thirdparty/llvm-rocdl-lld-argv0.patch scripts/build_llvm.sh; do
+            if ! git -C flydsl-test show "FETCH_HEAD:${f}" >"base-pin/${f}"; then
+              echo "Base commit has no ${f}; treating LLVM pin as unchanged."
+              echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
+              exit 0
+            fi
+          done
+          changed=false
+          for f in thirdparty/llvm-build-info.json thirdparty/llvm-rocdl-lld-argv0.patch scripts/build_llvm.sh; do
+            if ! diff -q "flydsl-test/${f}" "base-pin/${f}" >/dev/null; then
+              echo "LLVM input differs from base: ${f}"
+              changed=true
+            fi
+          done
+          # sed, not python3: every other python call here runs in the container
+          # and the runners promise no host interpreter. Scoped to "upstream" so a
+          # second entry carrying its own llvm_hash cannot be picked up.
+          base_hash="$(sed -n '/"upstream"/,/}/ s/.*"llvm_hash"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' \
+            base-pin/thirdparty/llvm-build-info.json)"
+          if [ -z "${base_hash}" ]; then
+            echo "Could not read the base LLVM hash; treating LLVM pin as unchanged."
+            echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "pin_changed=${changed}" >>"${GITHUB_OUTPUT}"
+          echo "base_llvm_hash=${base_hash}" >>"${GITHUB_OUTPUT}"
+          echo "Base LLVM pin: ${base_hash}"
+
+      # One script for both keys so they cannot drift; content-derived, which is
+      # what makes the base commit's key computable from the extracted files.
+      - name: Compute MLIR cache keys
+        id: keys
+        run: |
+          set -euo pipefail
+          self_key="$(bash flydsl-test/scripts/ci_mlir_cache_key.sh flydsl-test)"
+          echo "self=${self_key}" >>"${GITHUB_OUTPUT}"
+          echo "Shared MLIR cache key: ${self_key}"
+          if [ "${{ steps.base-pin.outputs.pin_changed }}" = "true" ]; then
+            base_key="$(bash flydsl-test/scripts/ci_mlir_cache_key.sh base-pin)"
+            echo "base=${base_key}" >>"${GITHUB_OUTPUT}"
+            echo "Baseline MLIR cache key: ${base_key}"
+          fi
+
+      # Restored before the shared entry and under the same `path`, then moved
+      # aside: actions/cache derives its version from the path list, so an entry
+      # saved as `mlir_install.tgz` is only findable under that name. No
+      # restore-keys either - a prefix fallback would return an install built
+      # from another pin.
+      #
+      # This is the entry every PR that leaves LLVM alone restores on every run,
+      # so it stays warm. A PR that also changes MLIR_CACHE_VERSION or
+      # LLVM_BUILD_PROFILE misses, since both feed the key from the PR side.
+      - name: Restore baseline MLIR cache
+        id: base-mlir-cache
+        if: steps.base-pin.outputs.pin_changed == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: mlir_install.tgz
+          key: ${{ steps.keys.outputs.base }}
+
+      - name: Stash baseline MLIR tarball
+        if: steps.base-mlir-cache.outputs.cache-hit == 'true'
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          if [ ! -s mlir_install.tgz ]; then
+            echo "::warning title=Benchmark baseline unavailable::Baseline MLIR cache reported a hit but produced no tarball."
+            rm -f mlir_install.tgz
+            exit 0
+          fi
+          mv mlir_install.tgz mlir_install_base.tgz
+
       - name: Restore shared MLIR cache
         id: mlir-cache
         uses: actions/cache/restore@v4
         with:
           path: mlir_install.tgz
-          key: mlir-install-${{ runner.os }}-${{ runner.arch }}-${{ env.MLIR_CACHE_VERSION }}-${{ env.LLVM_BUILD_PROFILE }}-${{ hashFiles('flydsl-test/thirdparty/llvm-build-info.json', 'flydsl-test/thirdparty/llvm-rocdl-lld-argv0.patch', 'flydsl-test/scripts/build_llvm.sh') }}
+          key: ${{ steps.keys.outputs.self }}
 
       - name: Start MLIR build container
         run: |
@@ -200,12 +297,128 @@ jobs:
           docker cp flydsl_mlir_cache:/llvm-project/mlir_install.tgz ./mlir_install.tgz
           test -s ./mlir_install.tgz
 
+      # ---------------------------------------------------------------------
+      # PROBE SCAFFOLDING - PR #1072 only, never for main.
+      #
+      # The baseline entry this PR needs is keyed on main's LLVM inputs, and
+      # nothing has saved it: caches a PR creates are scoped to that PR's merge
+      # ref, so #1071 cannot warm it for anyone else. Only a push to main can.
+      #
+      # Rather than wait for that merge, build the base pin here and save it
+      # under the base key at THIS PR's own scope. First run: miss, build, save,
+      # and the rest of the chain runs against a real base MLIR. Re-run: the
+      # restore hits, exercising the actual cache path end to end.
+      # ---------------------------------------------------------------------
+      - name: Build baseline LLVM (probe scaffolding)
+        if: >-
+          steps.base-pin.outputs.pin_changed == 'true' &&
+          steps.base-mlir-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 45
+        run: |
+          set -ex
+          docker exec -e LLVM_BUILD_PROFILE -e BASE_REPO_NAME -e BASE_COMMIT_SHA flydsl_mlir_cache bash -c '
+            set -e
+            cd /flydsl-test
+            git worktree prune || true
+            rm -rf /tmp/flydsl-ci-base-llvm
+            git fetch "https://github.com/${BASE_REPO_NAME}.git" "${BASE_COMMIT_SHA}" --no-tags --depth=1
+            git worktree add --detach /tmp/flydsl-ci-base-llvm FETCH_HEAD
+            cd /tmp/flydsl-ci-base-llvm
+            mkdir -p /llvm-project-base
+            LLVM_INSTALL_DIR=/llvm-project-base/mlir_install \
+            LLVM_INSTALL_TGZ=/llvm-project-base/mlir_install.tgz \
+              bash scripts/build_llvm.sh
+          '
+          docker cp flydsl_mlir_cache:/llvm-project-base/mlir_install.tgz ./mlir_install_base.tgz
+          test -s ./mlir_install_base.tgz
+          # Drop the second source and build tree NOW: the wheel build below
+          # would otherwise run with both LLVM trees on disk.
+          docker exec flydsl_mlir_cache bash -c "
+            rm -rf /tmp/llvm-project /llvm-project-base
+            cd /flydsl-test && git worktree remove --force /tmp/flydsl-ci-base-llvm 2>/dev/null || true
+            git -C /flydsl-test worktree prune || true
+          " || true
+          df -h / | tail -1
+
+      # actions/cache derives its version from the path list, so the entry has
+      # to be saved under the same name the restore asks for.
+      - name: Stage baseline tarball for save (probe scaffolding)
+        id: probe-stage
+        if: >-
+          steps.base-pin.outputs.pin_changed == 'true' &&
+          steps.base-mlir-cache.outputs.cache-hit != 'true' &&
+          hashFiles('mlir_install_base.tgz') != ''
+        run: |
+          set -euo pipefail
+          mv mlir_install.tgz mlir_install_shared.tgz
+          cp mlir_install_base.tgz mlir_install.tgz
+
+      - name: Save baseline MLIR cache (probe scaffolding)
+        if: steps.probe-stage.outcome == 'success'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: mlir_install.tgz
+          key: ${{ steps.keys.outputs.base }}
+
+      - name: Restore tarball names (probe scaffolding)
+        if: always() && steps.probe-stage.outcome == 'success'
+        run: |
+          set -euo pipefail
+          rm -f mlir_install.tgz
+          mv mlir_install_shared.tgz mlir_install.tgz
+
+      # Checked against the VCSRevision.h the install ships: a wrong-pin baseline
+      # is worse than none, since it yields a plausible number nobody questions.
+      #
+      # Only a cache hit produces a baseline. Building the old pin here would
+      # cost a second llvm-project clone and full LLVM build on a GPU runner, per
+      # push, for an advisory number. Revisit if the logs show misses are common.
+      - name: Unpack and verify baseline MLIR
+        id: base-mlir
+        if: steps.base-pin.outputs.pin_changed == 'true'
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          if [ ! -s ./mlir_install_base.tgz ]; then
+            echo "::notice title=Benchmark baseline skipped::No cached MLIR install for the base commit's LLVM (${{ steps.base-pin.outputs.base_llvm_hash }}), so the vs-main comparison is skipped; vs latest tag is unaffected. This resolves itself once main has run under that pin."
+            exit 0
+          fi
+          docker cp ./mlir_install_base.tgz flydsl_mlir_cache:/tmp/mlir_install_base.tgz
+          docker exec flydsl_mlir_cache bash -c "
+            set -e
+            rm -rf /llvm-project/mlir_install_base
+            mkdir -p /tmp/mlir_base_extract
+            tar -xzf /tmp/mlir_install_base.tgz -C /tmp/mlir_base_extract
+            mv /tmp/mlir_base_extract/mlir_install /llvm-project/mlir_install_base
+            rmdir /tmp/mlir_base_extract
+            test -d /llvm-project/mlir_install_base/lib/cmake/mlir
+          " || { echo "::warning title=Benchmark baseline unavailable::Baseline MLIR install could not be unpacked."; exit 0; }
+          want="${{ steps.base-pin.outputs.base_llvm_hash }}"
+          got="$(docker exec flydsl_mlir_cache sed -n 's/.*LLVM_REVISION R"(\([0-9a-f]\{40\}\))".*/\1/p' \
+                   /llvm-project/mlir_install_base/include/llvm/Support/VCSRevision.h 2>/dev/null)"
+          if [ -z "${got}" ]; then
+            echo "Baseline MLIR carries no VC revision; relying on the content-derived cache key alone."
+          elif [ "${got}" != "${want}" ]; then
+            echo "::warning title=Benchmark baseline unavailable::Baseline MLIR is LLVM ${got}, expected ${want}; refusing to use it."
+            docker exec flydsl_mlir_cache rm -rf /llvm-project/mlir_install_base
+            exit 0
+          else
+            echo "Baseline MLIR verified at LLVM ${got}"
+          fi
+          echo "ready=true" >>"${GITHUB_OUTPUT}"
+
       - name: Build current and base FlyDSL wheels
+        env:
+          BASE_MLIR_PATH: ${{ steps.base-mlir.outputs.ready == 'true' && '/llvm-project/mlir_install_base' || '' }}
+          BASELINE_LLVM_HASH: ${{ steps.base-pin.outputs.base_llvm_hash }}
         run: |
           docker exec \
             -e BASE_REPO_NAME \
             -e BASE_COMMIT_SHA \
             -e ROCM_PATH \
+            -e BASE_MLIR_PATH \
             flydsl_mlir_cache bash -c '
               export MLIR_PATH=/llvm-project/mlir_install
               export PATH="$(rocm-sdk path --bin):$PATH"
@@ -217,10 +430,24 @@ jobs:
           (cd flydsl-ci-wheels/pr && sha256sum -c SHA256SUMS)
           if [ -d flydsl-ci-wheels/base ]; then
             (cd flydsl-ci-wheels/base && sha256sum -c SHA256SUMS)
+            # Mark which LLVM the wheel was really built against. A bump needing
+            # no source adaptation still builds from the shared MLIR; labelling
+            # that "old LLVM" points at a codegen difference that is not there.
+            if [ -n "${BASE_MLIR_PATH}" ] && [ -n "${BASELINE_LLVM_HASH}" ]; then
+              printf '%s\n' "${BASELINE_LLVM_HASH}" >flydsl-ci-wheels/base/BASELINE_LLVM
+            fi
           else
             echo "::warning title=Baseline wheel unavailable::Uploading PR wheel without an exact base benchmark."
           fi
           (cd flydsl-ci-wheels/tools && sha256sum -c SHA256SUMS)
+
+      # The second install is the whole disk cost, and nothing below needs it.
+      - name: Drop baseline MLIR install
+        if: always() && steps.base-pin.outputs.pin_changed == 'true'
+        continue-on-error: true
+        run: |
+          rm -f ./mlir_install_base.tgz
+          docker exec flydsl_mlir_cache bash -c "rm -rf /llvm-project/mlir_install_base /tmp/mlir_install_base.tgz" || true
 
       - name: Save shared MLIR cache
         if: >-
@@ -436,6 +663,14 @@ jobs:
           elif git fetch "${base_repo_url}" "${BASE_COMMIT_SHA}" --no-tags --depth=1; then
             commit="$(git rev-parse FETCH_HEAD)"
             label="main"
+            # From prepare-mlir's marker, not from the pinned hashes: this job
+            # cannot see which MLIR the baseline wheel was compiled with.
+            display_label="main@${commit:0:8}"
+            baseline_llvm="$(cat /flydsl-ci-wheels/base/BASELINE_LLVM 2>/dev/null || true)"
+            if [ -n "${baseline_llvm}" ]; then
+              display_label="${display_label} (llvm ${baseline_llvm:0:8})"
+              echo "::notice title=Benchmark baseline uses a different LLVM::Baseline was built against LLVM ${baseline_llvm:0:8}, the PR against its own pin; deltas include LLVM codegen changes."
+            fi
             worktree="/tmp/flydsl-bench-main"
             csv="/tmp/bench_main_candidate.csv"
             output="/tmp/bench_main.out"
@@ -460,7 +695,7 @@ jobs:
               status=$?
               if [ "${status}" -eq 0 ] && [ -s "${csv}" ]; then
                 cp "${csv}" /tmp/bench_main.csv
-                echo "${label}" >/tmp/bench_main_label
+                echo "${display_label}" >/tmp/bench_main_label
               else
                 echo "Exact main benchmark baseline failed; not retrying older commits."
               fi
