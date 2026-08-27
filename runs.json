@@ -1,11 +1,84 @@
 {
  "schema": 1,
- "updated": "2026-08-27T12:31:05Z",
+ "updated": "2026-08-27T13:18:28Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 33071819224,
+   "run_id": 33075816668,
+   "pr": null,
+   "commit": "a5824452fb559469182b47ff1f2b3467584c74f3",
+   "branch": "main",
+   "event": "push",
+   "title": "[gfx1250] Add bf16 gemm (#1061)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33075816668",
+   "created_at": "2026-08-27T13:14:40Z",
+   "updated_at": "2026-08-27T13:15:55Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 33075521829,
+   "pr": 1075,
+   "commit": "9e8aa513f5be0960a04e2a30dbc75cf775906c47",
+   "branch": "ci/add-mi35x-runners",
+   "event": "pull_request",
+   "title": "[CI] Add MI35x runners for validation tests",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33075521829",
+   "created_at": "2026-08-27T13:11:14Z",
+   "updated_at": "2026-08-27T13:13:34Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 33072268362,
    "pr": 1073,
+   "commit": "2782595c814c30e30ee5d57f33591cb3cc377aac",
+   "branch": "rdna3-int8-wmma-gemm",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add RDNA3 INT8 WMMA GEMM, 1.23-2.80x over torch",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33072268362",
+   "created_at": "2026-08-27T12:31:30Z",
+   "updated_at": "2026-08-27T12:52:05Z",
+   "actor": "vlluvia",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-27T12:52:00Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33072268362/job/98522930073"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-27T12:51:50Z",
+     "completed_at": "2026-08-27T13:07:43Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33072268362/job/98522930110"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-27T12:52:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33072268362/job/98522930161"
+    }
+   ]
+  },
+  {
+   "run_id": 33071819224,
+   "pr": null,
    "commit": "e5faff3c0d5dcccd4e6e57ebfd349e4b85aac26a",
    "branch": "rdna3-int8-wmma-gemm",
    "event": "pull_request",
@@ -68,11 +141,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-27T11:52:24Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066761109/job/98506912628"
+     "completed_at": "2026-08-27T12:35:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066761109/job/98506912628",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -83,20 +157,20 @@
    "branch": "main",
    "event": "push",
    "title": "[CI] Build the benchmark baseline wheel against the base commit's LLV\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066723521",
    "created_at": "2026-08-27T11:17:31Z",
-   "updated_at": "2026-08-27T11:52:24Z",
+   "updated_at": "2026-08-27T13:15:17Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-27T11:52:23Z",
-     "completed_at": null,
+     "completed_at": "2026-08-27T13:15:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066723521/job/98506874752"
     },
     {
@@ -111,11 +185,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-27T11:51:47Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066723521/job/98506874817"
+     "completed_at": "2026-08-27T12:46:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066723521/job/98506874817",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1897,82 +1972,6 @@
    "created_at": "2026-08-24T15:28:08Z",
    "updated_at": "2026-08-24T15:28:08Z",
    "actor": "kashif",
-   "jobs": []
-  },
-  {
-   "run_id": 32743614958,
-   "pr": null,
-   "commit": "9c4db62d3de59b94376a390f6086fa822adf209d",
-   "branch": "fast-divmod",
-   "event": "pull_request",
-   "title": "Add fast_divmod magic-number division helper",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32743614958",
-   "created_at": "2026-08-24T15:14:11Z",
-   "updated_at": "2026-08-24T15:14:11Z",
-   "actor": "kashif",
-   "jobs": []
-  },
-  {
-   "run_id": 32741519873,
-   "pr": null,
-   "commit": "4ea457e4aedc493a20eeb003954b2a319e2abe26",
-   "branch": "upstream/pa-bf16-asymmetric-v",
-   "event": "pull_request",
-   "title": "[Kernel][PA] Support BF16 vectorized KV with asymmetric K/V head dim",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32741519873",
-   "created_at": "2026-08-24T14:53:44Z",
-   "updated_at": "2026-08-24T17:37:57Z",
-   "actor": "sammysun0711",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T15:09:29Z",
-     "completed_at": "2026-08-24T15:25:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32741519873/job/97482016799",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T15:09:38Z",
-     "completed_at": "2026-08-24T17:05:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32741519873/job/97482016820",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T15:09:38Z",
-     "completed_at": "2026-08-24T17:37:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32741519873/job/97482016821",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32741517965,
-   "pr": null,
-   "commit": "9087a4ee251bf94458dc129b3eede7a60ac2c357",
-   "branch": "upstream/pa-64bit-cache-offsets",
-   "event": "pull_request",
-   "title": "[Bugfix][PA] Fix D192 query staging and 64-bit cache offsets",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32741517965",
-   "created_at": "2026-08-24T14:53:43Z",
-   "updated_at": "2026-08-24T14:56:30Z",
-   "actor": "sammysun0711",
    "jobs": []
   }
  ]
