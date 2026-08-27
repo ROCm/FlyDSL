@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-27T03:10:35Z",
+ "updated": "2026-08-27T04:21:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33038905462,
+   "pr": 1056,
+   "commit": "bce20846d02f49d1f17444894ad07a6bf8e7d474",
+   "branch": "feat/gfx950-paged-attention-vllm-kv-layouts",
+   "event": "pull_request",
+   "title": "Support vLLM paged KV cache layouts on the gfx950 attention kernel",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33038905462",
+   "created_at": "2026-08-27T04:16:20Z",
+   "updated_at": "2026-08-27T04:17:58Z",
+   "actor": "akii96",
+   "jobs": []
+  },
   {
    "run_id": 33027370865,
    "pr": 1067,
@@ -2108,52 +2123,6 @@
      "started_at": "2026-08-24T09:46:23Z",
      "completed_at": "2026-08-24T10:03:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32707307344/job/97385098588",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32706847638,
-   "pr": 1061,
-   "commit": "7f6637d1c08a0d31d058c2f2a684b4cb5d9b37fe",
-   "branch": "gfx1250/bf16-gemm",
-   "event": "pull_request",
-   "title": "[gfx1250] Add bf16 gemm",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32706847638",
-   "created_at": "2026-08-24T08:32:39Z",
-   "updated_at": "2026-08-24T10:54:30Z",
-   "actor": "aoli26",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T09:12:44Z",
-     "completed_at": "2026-08-24T09:29:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32706847638/job/97379862398",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T09:21:56Z",
-     "completed_at": "2026-08-24T10:54:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32706847638/job/97379862458",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T09:12:53Z",
-     "completed_at": "2026-08-24T10:35:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32706847638/job/97379862517",
      "log_fetch_failed": true
     }
    ]
