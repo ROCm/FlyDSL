@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-27T13:24:32Z",
+ "updated": "2026-08-27T13:54:03Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33078414918,
+   "pr": 1076,
+   "commit": "3302378b9a26ca0cefe414440a976dd8f7c5a957",
+   "branch": "ci/mi35x-runners-aiter-image",
+   "event": "pull_request",
+   "title": "Ci/change image to speedup ci",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33078414918",
+   "created_at": "2026-08-27T13:44:28Z",
+   "updated_at": "2026-08-27T13:51:40Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 33076498887,
    "pr": null,
@@ -10,13 +25,41 @@
    "branch": "main",
    "event": "push",
    "title": "[CI] Add MI35x runners for validation tests (#1075)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33076498887",
    "created_at": "2026-08-27T13:22:37Z",
-   "updated_at": "2026-08-27T13:23:03Z",
+   "updated_at": "2026-08-27T13:48:24Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-27T13:49:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33076498887/job/98539924383"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-27T13:51:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33076498887/job/98539924429"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-27T13:49:05Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33076498887/job/98539924432"
+    }
+   ]
   },
   {
    "run_id": 33075816668,
@@ -40,13 +83,41 @@
    "branch": "ci/add-mi35x-runners",
    "event": "pull_request",
    "title": "[CI] Add MI35x runners for validation tests",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33075521829",
    "created_at": "2026-08-27T13:11:14Z",
-   "updated_at": "2026-08-27T13:13:34Z",
+   "updated_at": "2026-08-27T13:34:24Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-27T13:34:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33075521829/job/98535539273"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-27T13:34:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33075521829/job/98535539283"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-27T13:34:31Z",
+     "completed_at": "2026-08-27T13:51:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33075521829/job/98535539450"
+    }
+   ]
   },
   {
    "run_id": 33072268362,
@@ -65,11 +136,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-27T12:52:00Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33072268362/job/98522930073"
+     "completed_at": "2026-08-27T13:42:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33072268362/job/98522930073",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -128,11 +200,11 @@
    "branch": "phil/bump-llvm-941a04e6",
    "event": "pull_request",
    "title": "[FlyToROCDL] Bump LLVM to 941a04e6 and adapt gpu.launch_func lowering",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066761109",
    "created_at": "2026-08-27T11:18:03Z",
-   "updated_at": "2026-08-27T12:08:55Z",
+   "updated_at": "2026-08-27T13:47:46Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -147,11 +219,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-27T11:52:24Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066761109/job/98506912606"
+     "completed_at": "2026-08-27T13:47:45Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066761109/job/98506912606",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -1956,21 +2029,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/32766230556",
    "created_at": "2026-08-24T19:06:22Z",
    "updated_at": "2026-08-24T20:48:22Z",
-   "actor": "JohnQinAMD",
-   "jobs": []
-  },
-  {
-   "run_id": 32757803812,
-   "pr": null,
-   "commit": "ef65bdb108071609c115046c8417ca9a85ee2ec5",
-   "branch": "fp8-softmax-normalisation",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32757803812",
-   "created_at": "2026-08-24T17:38:34Z",
-   "updated_at": "2026-08-24T17:41:28Z",
    "actor": "JohnQinAMD",
    "jobs": []
   }
