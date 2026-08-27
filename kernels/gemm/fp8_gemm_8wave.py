@@ -20,7 +20,8 @@ double-buffered):
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import const_expr, range_constexpr, rocdl
+from flydsl.expr import arith, const_expr, range_constexpr, rocdl
+from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from kernels.gemm.fp8_gemm_utils import (
     G2SLoader,
@@ -488,13 +489,13 @@ def compile_mxfp8_gemm_8w(
         block_m, block_n = block_mn(pid, num_pid_m, n_blocks, GROUP_M, group_n)
 
         # i64 input re-base (same as tensorwise NT): fold the per-tile row base
-        # (m_row*K, n_row*K) into the SRD base in fx.Int64; A/B_T are
+        # (m_row*K, n_row*K) into the SRD base in T.index (64-bit); A/B_T are
         # K-contiguous (foldable), so the running k*BLOCK_K offset stays small int32
         # -> no 2^31/2^32 cap. The store re-bases per band in i64 as well.
-        a_base = fx.Int64(block_m * BLOCK_M) * fx.Int64(K)
-        b_base = fx.Int64(block_n * BLOCK_N) * fx.Int64(K)
-        a_nrec = (fx.Int64(c_m) - fx.Int64(block_m * BLOCK_M)) * fx.Int64(K)
-        b_nrec = (fx.Int64(c_n) - fx.Int64(block_n * BLOCK_N)) * fx.Int64(K)
+        a_base = arith.index_cast(T.index, block_m * BLOCK_M) * arith.index(K)
+        b_base = arith.index_cast(T.index, block_n * BLOCK_N) * arith.index(K)
+        a_nrec = (arith.index_cast(T.index, c_m) - arith.index_cast(T.index, block_m * BLOCK_M)) * arith.index(K)
+        b_nrec = (arith.index_cast(T.index, c_n) - arith.index_cast(T.index, block_n * BLOCK_N)) * arith.index(K)
         A0_gl_offset = 0
         A1_gl_offset = LDS_BLOCK_M * K
         B0_gl_offset = 0
@@ -574,12 +575,12 @@ def compile_mxfp8_gemm_8w(
 
             b1_frag = b_s2r.load(b_cur1)
             b_g2s.load(b_cur0, B0_gl_offset + (k + 2) * BLOCK_K)
-            sb_alln = sb_s2r.load(sb_base0, k + 1)  # one dwordx4 = both B regions
             rocdl.s_barrier()
 
             rocdl.s_setprio(1)
             c01_frag = mfma.call(a0_frag, b1_frag, c01_frag, sa0, sb1)
             rocdl.s_setprio(0)
+            sb_alln = sb_s2r.load(sb_base0, k + 1)  # one dwordx4 = both B regions
             rocdl.s_barrier()
 
             a1_frag = a_s2r.load(a_cur1)
