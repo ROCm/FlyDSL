@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-27T14:36:03Z",
+ "updated": "2026-08-27T15:20:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -93,11 +93,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-27T13:34:46Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33075521829/job/98535539273"
+     "completed_at": "2026-08-27T15:02:15Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33075521829/job/98535539273",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -126,11 +127,11 @@
    "branch": "rdna3-int8-wmma-gemm",
    "event": "pull_request",
    "title": "[Kernel][Perf] Add RDNA3 INT8 WMMA GEMM, 1.23-2.80x over torch",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33072268362",
    "created_at": "2026-08-27T12:31:30Z",
-   "updated_at": "2026-08-27T12:52:05Z",
+   "updated_at": "2026-08-27T15:17:45Z",
    "actor": "vlluvia",
    "jobs": [
     {
@@ -155,11 +156,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-27T12:52:04Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33072268362/job/98522930161"
+     "completed_at": "2026-08-27T15:17:43Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33072268362/job/98522930161",
+     "log_fetch_failed": true
     }
    ]
   },
