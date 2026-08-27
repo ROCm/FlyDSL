@@ -339,12 +339,14 @@ mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 32, T.i4, T.i32, sign_a=True, sign_b=T
 
 On RDNA4 (`gfx1200` / `gfx1201`) the same factory builds `MmaOpGFX120X_WMMAType`
 instead. RDNA4 shares the v8 register ABI but keeps the gfx11 instruction
-shapes, so the only valid form is `16x16x16` f16/bf16 → f32 — the 16x16x32 and
-fp8 K=64/128 shapes above are gfx1250-only and are rejected by the atom's
-verifier. See `kernels/gemm/rdna_f16_gemm.py` for a full pipelined example.
+shapes, so the valid forms are `16x16x16` f16/bf16/fp8(E4M3FN) → f32 — the
+16x16x32 and fp8 K=64/128 shapes above are gfx1250-only and are rejected by the
+atom's verifier. See `kernels/gemm/rdna_f16_gemm.py` for a full pipelined f16
+example and `kernels/gemm/rdna4_fp8_blockscale.py` for raw FP8 operands.
 
 ```python
 mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 16, fx.BFloat16, fx.Float32))  # RDNA4
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 16, fx.Float8E4M3FN, fx.Float32))  # RDNA4 FP8
 ```
 
 **MX-scaled WMMA** — `rocdl.WMMAScale(m, n, k, elem_ty_a, elem_ty_b=None,

@@ -90,8 +90,9 @@ def _compile_single_wmma(elem_cls):
     [
         (fx.BFloat16, torch.bfloat16),
         (fx.Float16, torch.float16),
+        (fx.Float8E4M3FN, torch.float8_e4m3fn),
     ],
-    ids=["bf16", "f16"],
+    ids=["bf16", "f16", "fp8"],
 )
 def test_single_wmma_atom(elem_cls, torch_dtype):
     """A single gfx120x.wmma atom call must match A @ B.T exactly for integers.

@@ -3,7 +3,7 @@
 // RUN: %fly-opt %s --fly-rewrite-func-signature --fly-canonicalize --fly-layout-lowering --convert-fly-to-rocdl | FileCheck %s
 
 // GFX120X (RDNA4: gfx1200 / gfx1201) WMMA wave32 atom lowering tests:
-//   fly.mma_atom_call -> rocdl.wmma.f32.16x16x16.{f16,bf16} intrinsic
+//   fly.mma_atom_call -> rocdl.wmma.f32.16x16x16.{f16,bf16,fp8_fp8} intrinsic
 //
 // RDNA4 keeps the gfx11 16x16x16 instruction shapes but uses the gfx1250
 // "v8" register ABI, so the per-lane fragment shapes are half the gfx11 ones:
@@ -12,6 +12,37 @@
 //
 // The bf16 intrinsic takes integer operands, so bf16 A/B lower to
 // vector<8xi16>.
+
+// CHECK-LABEL: @test_gfx120x_wmma_atom_call_fp8
+// CHECK-SAME: (%[[D:.*]]: !llvm.ptr<5>, %[[A:.*]]: !llvm.ptr<5>, %[[B:.*]]: !llvm.ptr<5>, %[[C:.*]]: !llvm.ptr<5>)
+func.func @test_gfx120x_wmma_atom_call_fp8(
+    %d: !fly.memref<f32, register, 8:1>,
+    %a: !fly.memref<f8E4M3FN, register, 8:1>,
+    %b: !fly.memref<f8E4M3FN, register, 8:1>,
+    %c: !fly.memref<f32, register, 8:1>) {
+  %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (f8E4M3FN, f8E4M3FN) -> f32, signA = false, signB = false, clamp = false>>
+  // CHECK: %[[A_VAL:.*]] = llvm.load %[[A]] : !llvm.ptr<5> -> vector<2xi32>
+  // CHECK: %[[B_VAL:.*]] = llvm.load %[[B]] : !llvm.ptr<5> -> vector<2xi32>
+  // CHECK: %[[C_VAL:.*]] = llvm.load %[[C]] : !llvm.ptr<5> -> vector<8xf32>
+  // CHECK: %[[RES:.*]] = rocdl.wmma.f32.16x16x16.fp8_fp8 %[[A_VAL]], %[[B_VAL]], %[[C_VAL]]
+  // CHECK: llvm.store %[[RES]], %[[D]] : vector<8xf32>, !llvm.ptr<5>
+  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (f8E4M3FN, f8E4M3FN) -> f32, signA = false, signB = false, clamp = false>>, !fly.memref<f32, register, 8:1>, !fly.memref<f8E4M3FN, register, 8:1>, !fly.memref<f8E4M3FN, register, 8:1>, !fly.memref<f32, register, 8:1>) -> ()
+  return
+}
+
+// CHECK-LABEL: @test_gfx120x_wmma_atom_call_ssa_fp8
+// CHECK-SAME: (%[[A:.*]]: vector<8xi8>, %[[B:.*]]: vector<8xi8>, %[[C:.*]]: vector<8xf32>)
+func.func @test_gfx120x_wmma_atom_call_ssa_fp8(
+    %a: vector<8xf8E4M3FN>,
+    %b: vector<8xf8E4M3FN>,
+    %c: vector<8xf32>) -> vector<8xf32> {
+  %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (f8E4M3FN, f8E4M3FN) -> f32, signA = false, signB = false, clamp = false>>
+  // CHECK: %[[A_CAST:.*]] = llvm.bitcast %[[A]] : vector<8xi8> to vector<2xi32>
+  // CHECK: %[[B_CAST:.*]] = llvm.bitcast %[[B]] : vector<8xi8> to vector<2xi32>
+  // CHECK: %[[RES:.*]] = rocdl.wmma.f32.16x16x16.fp8_fp8 %[[A_CAST]], %[[B_CAST]], %[[C]]
+  %res = fly.mma_atom_call_ssa(%atom, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (f8E4M3FN, f8E4M3FN) -> f32, signA = false, signB = false, clamp = false>>, vector<8xf8E4M3FN>, vector<8xf8E4M3FN>, vector<8xf32>) -> vector<8xf32>
+  return %res : vector<8xf32>
+}
 
 // CHECK-LABEL: @test_gfx120x_wmma_atom_call_bf16
 // CHECK-SAME: (%[[D:.*]]: !llvm.ptr<5>, %[[A:.*]]: !llvm.ptr<5>, %[[B:.*]]: !llvm.ptr<5>, %[[C:.*]]: !llvm.ptr<5>)

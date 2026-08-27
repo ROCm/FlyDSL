@@ -20,7 +20,7 @@ namespace mlir::fly_rocdl {
 // GFX120X (RDNA4: gfx1200, gfx1201) WMMA wave32.
 //
 // RDNA4 sits between the two existing WMMA atoms:
-//   * Instruction shapes are the gfx11 ones (16x16x16 fp16/bf16/iu8), and the
+//   * Instruction shapes are the gfx11 ones (16x16x16 fp16/bf16/fp8/iu8), and the
 //     ROCDL intrinsics take the plain 3-operand {a, b, c} form — unlike
 //     gfx1250, whose 16x16x32 ops carry mods/reuse operands.
 //   * The register ABI is the gfx1250 "v8" one — each lane holds K/2 = 8 A/B
@@ -72,18 +72,20 @@ LogicalResult MmaOpGFX120X_WMMAType::verify(function_ref<InFlightDiagnostic()> e
                        << " (the 16x16x32 shapes are gfx1250-only; use gfx1250.wmma there)";
   }
 
+  const bool isFp8 =
+      isa<Float8E4M3FNType>(elemTyA) && isa<Float8E4M3FNType>(elemTyB) && elemTyAcc.isF32();
   const bool isFp = (elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF32()) ||
-                    (elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isF32());
+                    (elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isF32()) || isFp8;
 
   if (!isFp) {
     return emitError() << "unsupported GFX120X WMMA configuration: " << m << "x" << n << "x" << k
                        << " with A=" << elemTyA << ", B=" << elemTyB << ", Acc=" << elemTyAcc;
   }
 
-  // The fp16/bf16 intrinsics have no sign/clamp operands; refuse to build an
+  // The floating-point intrinsics have no sign/clamp operands; refuse to build an
   // atom promising something codegen cannot deliver.
   if (signA || signB || clamp) {
-    return emitError() << "GFX120X WMMA fp16/bf16 path does not accept signA/signB/clamp "
+    return emitError() << "GFX120X WMMA floating-point path does not accept signA/signB/clamp "
                           "(the ROCDL fp WMMA intrinsics have no such operands); got signA="
                        << signA << ", signB=" << signB << ", clamp=" << clamp;
   }
@@ -99,7 +101,10 @@ LogicalResult MmaOpGFX120X_WMMAType::verify(function_ref<InFlightDiagnostic()> e
 // per lane.
 //   fp16 -> vector<8xf16>
 //   bf16 -> vector<8xi16>   (the bf16 WMMA intrinsic takes integer operands)
+//   fp8  -> vector<2xi32>   (8 packed fp8 values)
 static Type getWmmaABType(MLIRContext *ctx, Type elemTy) {
+  if (isa<Float8E4M3FNType>(elemTy))
+    return VectorType::get({2}, IntegerType::get(ctx, 32));
   if (elemTy.isBF16())
     return VectorType::get({8}, IntegerType::get(ctx, 16));
   if (elemTy.isF16())
@@ -148,6 +153,8 @@ FailureOr<Value> MmaOpGFX120X_WMMAType::emitAtomCallSSA(OpBuilder &builder, Loca
     return ROCDL::wmma_f32_16x16x16_f16::create(builder, loc, rawAccTy, a, b, c).getResult();
   if (elemTyA.isBF16() && elemTyB.isBF16())
     return ROCDL::wmma_f32_16x16x16_bf16::create(builder, loc, rawAccTy, a, b, c).getResult();
+  if (isa<Float8E4M3FNType>(elemTyA) && isa<Float8E4M3FNType>(elemTyB))
+    return ROCDL::wmma_f32_16x16x16_fp8_fp8::create(builder, loc, rawAccTy, a, b, c).getResult();
 
   return failure();
 }

@@ -231,7 +231,7 @@ def FlyROCDL_MmaOpGFX120X_WMMA : FlyROCDL_MmaOp<"MmaOpGFX120X_WMMA", "gfx120x.wm
     "Type":$elemTyB,
     "Type":$elemTyAcc,
     // Integer-WMMA controls, forwarded to the ROCDL iu8/iu4 intrinsic. Ignored
-    // (and required to be false) on the fp16/bf16 paths. Always printed.
+    // (and required to be false) on the floating-point paths. Always printed.
     "bool":$signA,
     "bool":$signB,
     "bool":$clamp
