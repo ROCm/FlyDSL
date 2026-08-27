@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-27T16:02:44Z",
+ "updated": "2026-08-27T21:23:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33117631657,
+   "pr": 1051,
+   "commit": "0afb7f87d68c364d57ea0d3ba60b13b780ca348b",
+   "branch": "phil/bump-llvm-941a04e6",
+   "event": "pull_request",
+   "title": "[FlyToROCDL] Bump LLVM to 941a04e6 and adapt gpu.launch_func lowering",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33117631657",
+   "created_at": "2026-08-27T21:19:48Z",
+   "updated_at": "2026-08-27T21:20:31Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 33117174604,
+   "pr": 1015,
+   "commit": "a3e74b4490ac10d8b6a74b81c65842ec2b8be3fb",
+   "branch": "phil/isa-resource-diff-arch-general",
+   "event": "pull_request",
+   "title": "[Tools] Add architecture-general ISA resource diff tool",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33117174604",
+   "created_at": "2026-08-27T21:14:03Z",
+   "updated_at": "2026-08-27T21:15:51Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 33078414918,
    "pr": 1076,
@@ -54,11 +84,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-27T13:49:05Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33076498887/job/98539924432"
+     "completed_at": "2026-08-27T16:16:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33076498887/job/98539924432",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -205,42 +236,12 @@
    "event": "pull_request",
    "title": "[FlyToROCDL] Bump LLVM to 941a04e6 and adapt gpu.launch_func lowering",
    "status": "completed",
-   "conclusion": "failure",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066761109",
    "created_at": "2026-08-27T11:18:03Z",
-   "updated_at": "2026-08-27T13:47:46Z",
+   "updated_at": "2026-08-27T21:20:06Z",
    "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-27T12:08:55Z",
-     "completed_at": "2026-08-27T12:17:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066761109/job/98506912602"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-27T11:52:24Z",
-     "completed_at": "2026-08-27T13:47:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066761109/job/98506912606",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-27T11:52:24Z",
-     "completed_at": "2026-08-27T12:35:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066761109/job/98506912628",
-     "log_fetch_failed": true
-    }
-   ]
+   "jobs": []
   },
   {
    "run_id": 33066723521,
@@ -2004,36 +2005,6 @@
    "created_at": "2026-08-24T23:16:43Z",
    "updated_at": "2026-08-25T00:05:46Z",
    "actor": "amd-wsung102",
-   "jobs": []
-  },
-  {
-   "run_id": 32766602304,
-   "pr": 1045,
-   "commit": "df6d68130e6068c3ab19aa3dac5f8ba88420e802",
-   "branch": "john/attn-4gib-guard",
-   "event": "pull_request",
-   "title": "[Bugfix] Refuse a batch entry the buffer descriptor cannot address",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32766602304",
-   "created_at": "2026-08-24T19:10:13Z",
-   "updated_at": "2026-08-24T19:57:03Z",
-   "actor": "JohnQinAMD",
-   "jobs": []
-  },
-  {
-   "run_id": 32766230556,
-   "pr": 1050,
-   "commit": "ca9b8487606df51a213bd63e395053b4d7462759",
-   "branch": "john/maxnumf-contract",
-   "event": "pull_request",
-   "title": "[Fix] Restore the fx.maxnumf contract, and keep ninf off the score reductions",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32766230556",
-   "created_at": "2026-08-24T19:06:22Z",
-   "updated_at": "2026-08-24T20:48:22Z",
-   "actor": "JohnQinAMD",
    "jobs": []
   }
  ]
