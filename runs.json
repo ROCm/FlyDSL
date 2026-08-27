@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-27T11:58:15Z",
+ "updated": "2026-08-27T12:23:36Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33071360194,
+   "pr": 1073,
+   "commit": "a5d23f8c72fe1720fa4dd3791bc19a85a2d3111c",
+   "branch": "rdna3-int8-wmma-gemm",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add RDNA3 INT8 WMMA GEMM, 1.23-2.80x over torch",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33071360194",
+   "created_at": "2026-08-27T12:19:59Z",
+   "updated_at": "2026-08-27T12:22:21Z",
+   "actor": "vlluvia",
+   "jobs": []
+  },
   {
    "run_id": 33066761109,
    "pr": 1051,
@@ -10,20 +25,20 @@
    "branch": "phil/bump-llvm-941a04e6",
    "event": "pull_request",
    "title": "[FlyToROCDL] Bump LLVM to 941a04e6 and adapt gpu.launch_func lowering",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066761109",
    "created_at": "2026-08-27T11:18:03Z",
-   "updated_at": "2026-08-27T11:51:40Z",
+   "updated_at": "2026-08-27T12:08:55Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-27T11:51:40Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-27T12:08:55Z",
+     "completed_at": "2026-08-27T12:17:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066761109/job/98506912602"
     },
     {
@@ -72,10 +87,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-27T11:51:36Z",
-     "completed_at": null,
+     "completed_at": "2026-08-27T12:08:49Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066723521/job/98506874814"
     },
     {
@@ -91,7 +106,7 @@
   },
   {
    "run_id": 33059511112,
-   "pr": 1073,
+   "pr": null,
    "commit": "b06fb9f2c1e962f236ab451f42abcbbce55b42cb",
    "branch": "rdna3-int8-wmma-gemm",
    "event": "pull_request",
@@ -2007,52 +2022,6 @@
      "started_at": "2026-08-24T16:32:09Z",
      "completed_at": "2026-08-24T17:24:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32737985252/job/97501492738",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32727356884,
-   "pr": 1062,
-   "commit": "1bab7662866856f6aa4e9fe7014ccc13ef339c8e",
-   "branch": "smem-capacity-decouple",
-   "event": "pull_request",
-   "title": "smem cleanup: move capacity helpers off legacy allocator, migrate tes\u2026",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32727356884",
-   "created_at": "2026-08-24T12:29:20Z",
-   "updated_at": "2026-08-24T16:03:52Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T14:20:32Z",
-     "completed_at": "2026-08-24T16:03:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32727356884/job/97446991194",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T13:27:39Z",
-     "completed_at": "2026-08-24T13:46:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32727356884/job/97446991211",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T13:52:38Z",
-     "completed_at": "2026-08-24T15:12:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32727356884/job/97446991222",
      "log_fetch_failed": true
     }
    ]
