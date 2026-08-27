@@ -20,10 +20,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  DOCKER_IMAGE: "rocm/pytorch:rocm7.14_ubuntu24.04_py3.12_pytorch_release_2.12.0@sha256:c38eeda81d85f00fbe35d3d50ce42ce59c524e87d810624f4eb5c52fddb3b9ad"
+  DOCKER_IMAGE: "rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0"
   LLVM_BUILD_PROFILE: "amd-minimal"
   # Bump when the container or LLVM build environment changes incompatibly.
-  MLIR_CACHE_VERSION: "rocm7.14-ubuntu24.04-py3.12-v1"
+  MLIR_CACHE_VERSION: "rocm7.2.4-ubuntu24.04-py3.12-v1"
   GITHUB_REPO_NAME: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
   GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.event.head_commit.id || github.sha }}
   # PRs compare against their exact base; main pushes compare against the previous commit.
@@ -267,9 +267,9 @@ jobs:
           docker exec flydsl_mlir_cache bash -c "apt-get update && apt-get install -y cmake build-essential patchelf"
           docker exec flydsl_mlir_cache bash -c "python3 -m pip install -U pip setuptools wheel"
           docker exec flydsl_mlir_cache bash -c "python3 -m pip install ninja>=1.11.1"
-          docker exec flydsl_mlir_cache bash -c "python3 -m pip install --index-url https://repo.amd.com/rocm/whl-multi-arch/ 'rocm[devel]==7.14.0' && rocm-sdk init"
+          docker exec flydsl_mlir_cache bash -c "if command -v rocm-sdk >/dev/null 2>&1; then rocm-sdk init; fi"
           docker exec flydsl_mlir_cache bash -c "git config --global --add safe.directory /flydsl-test"
-          sdk_root="$(docker exec flydsl_mlir_cache rocm-sdk path --root)"
+          sdk_root="$(docker exec flydsl_mlir_cache bash -c 'if command -v rocm-sdk >/dev/null 2>&1; then rocm-sdk path --root; elif [ -d /opt/rocm ]; then printf "/opt/rocm\n"; fi')"
           test -n "${sdk_root}"
           docker exec flydsl_mlir_cache test -d "${sdk_root}"
           printf 'ROCM_PATH=%s\n' "${sdk_root}" >>"${GITHUB_ENV}"
@@ -350,8 +350,15 @@ jobs:
             -e BASE_MLIR_PATH \
             flydsl_mlir_cache bash -c '
               export MLIR_PATH=/llvm-project/mlir_install
-              export PATH="$(rocm-sdk path --bin):$PATH"
-              export CMAKE_PREFIX_PATH="$(rocm-sdk path --cmake)${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
+              if command -v rocm-sdk >/dev/null 2>&1; then
+                rocm_bin="$(rocm-sdk path --bin)"
+                rocm_cmake="$(rocm-sdk path --cmake)"
+              else
+                rocm_bin="${ROCM_PATH}/bin"
+                rocm_cmake="${ROCM_PATH}/lib/cmake"
+              fi
+              export PATH="${rocm_bin}:$PATH"
+              export CMAKE_PREFIX_PATH="${rocm_cmake}${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
               cd /flydsl-test
               bash scripts/build_ci_wheels.sh
             '
@@ -519,10 +526,10 @@ jobs:
           docker exec flydsl_test bash -c "apt-get update && apt-get install -y cmake build-essential patchelf"
           docker exec flydsl_test bash -c "python3 -m pip install -U pip setuptools wheel"
           docker exec flydsl_test bash -c "python3 -m pip install ninja>=1.11.1"
-          docker exec flydsl_test bash -c "python3 -m pip install --index-url https://repo.amd.com/rocm/whl-multi-arch/ 'rocm[devel]==7.14.0' && rocm-sdk init"
+          docker exec flydsl_test bash -c "if command -v rocm-sdk >/dev/null 2>&1; then rocm-sdk init; fi"
           docker exec flydsl_test bash -c "python3 -m pip install -U 'hypothesis>=6.82.0'"
           docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl-test && cd /flydsl-test && git log"
-          sdk_root="$(docker exec flydsl_test rocm-sdk path --root)"
+          sdk_root="$(docker exec flydsl_test bash -c 'if command -v rocm-sdk >/dev/null 2>&1; then rocm-sdk path --root; elif [ -d /opt/rocm ]; then printf "/opt/rocm\n"; fi')"
           test -n "${sdk_root}"
           docker exec flydsl_test test -d "${sdk_root}"
           printf 'ROCM_PATH=%s\n' "${sdk_root}" >>"${GITHUB_ENV}"
@@ -836,10 +843,10 @@ jobs:
           docker exec flydsl_test bash -c "apt-get update && apt-get install -y cmake build-essential patchelf"
           docker exec flydsl_test bash -c "python3 -m pip install -U pip setuptools wheel"
           docker exec flydsl_test bash -c "python3 -m pip install ninja>=1.11.1"
-          docker exec flydsl_test bash -c "python3 -m pip install --index-url https://repo.amd.com/rocm/whl-multi-arch/ 'rocm[devel]==7.14.0' && rocm-sdk init"
+          docker exec flydsl_test bash -c "if command -v rocm-sdk >/dev/null 2>&1; then rocm-sdk init; fi"
           docker exec flydsl_test bash -c "python3 -m pip install -U 'hypothesis>=6.82.0'"
           docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl-test && cd /flydsl-test && git log"
-          sdk_root="$(docker exec flydsl_test rocm-sdk path --root)"
+          sdk_root="$(docker exec flydsl_test bash -c 'if command -v rocm-sdk >/dev/null 2>&1; then rocm-sdk path --root; elif [ -d /opt/rocm ]; then printf "/opt/rocm\n"; fi')"
           test -n "${sdk_root}"
           docker exec flydsl_test test -d "${sdk_root}"
           printf 'ROCM_PATH=%s\n' "${sdk_root}" >>"${GITHUB_ENV}"
