@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-27T10:41:04Z",
+ "updated": "2026-08-27T10:45:49Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -188,11 +188,11 @@
    "branch": "ci/base-llvm-baseline",
    "event": "pull_request",
    "title": "[CI] Build the benchmark baseline wheel against the base commit's LLVM",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33048248167",
    "created_at": "2026-08-27T07:04:38Z",
-   "updated_at": "2026-08-27T09:08:50Z",
+   "updated_at": "2026-08-27T10:42:56Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -207,11 +207,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-27T09:08:50Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33048248167/job/98465283542"
+     "completed_at": "2026-08-27T10:42:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33048248167/job/98465283542",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
