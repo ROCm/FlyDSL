@@ -1,8 +1,94 @@
 {
  "schema": 1,
- "updated": "2026-08-27T10:45:49Z",
+ "updated": "2026-08-27T11:58:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33066761109,
+   "pr": 1051,
+   "commit": "3f40950f501dbd531afe95dd42edf4b56e23be46",
+   "branch": "phil/bump-llvm-941a04e6",
+   "event": "pull_request",
+   "title": "[FlyToROCDL] Bump LLVM to 941a04e6 and adapt gpu.launch_func lowering",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066761109",
+   "created_at": "2026-08-27T11:18:03Z",
+   "updated_at": "2026-08-27T11:51:40Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-27T11:51:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066761109/job/98506912602"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-27T11:52:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066761109/job/98506912606"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-27T11:52:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066761109/job/98506912628"
+    }
+   ]
+  },
+  {
+   "run_id": 33066723521,
+   "pr": null,
+   "commit": "b7751d8a3e9f6f47165962a9745b72e5faaa5ac9",
+   "branch": "main",
+   "event": "push",
+   "title": "[CI] Build the benchmark baseline wheel against the base commit's LLV\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066723521",
+   "created_at": "2026-08-27T11:17:31Z",
+   "updated_at": "2026-08-27T11:52:24Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-27T11:52:23Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066723521/job/98506874752"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-27T11:51:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066723521/job/98506874814"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-27T11:51:47Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066723521/job/98506874817"
+    }
+   ]
+  },
   {
    "run_id": 33059511112,
    "pr": 1073,
@@ -10,38 +96,40 @@
    "branch": "rdna3-int8-wmma-gemm",
    "event": "pull_request",
    "title": "[Kernel][Perf] Add RDNA3 INT8 WMMA GEMM, 1.23-2.80x over torch",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33059511112",
    "created_at": "2026-08-27T09:38:51Z",
-   "updated_at": "2026-08-27T10:29:44Z",
+   "updated_at": "2026-08-27T11:55:03Z",
    "actor": "vlluvia",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-27T10:29:12Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33059511112/job/98486806297"
+     "completed_at": "2026-08-27T11:48:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33059511112/job/98486806297",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-27T10:29:44Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33059511112/job/98486806301"
+     "completed_at": "2026-08-27T11:55:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33059511112/job/98486806301",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-08-27T10:28:58Z",
-     "completed_at": null,
+     "completed_at": "2026-08-27T10:45:29Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33059511112/job/98486806357"
     }
    ]
@@ -1965,98 +2053,6 @@
      "started_at": "2026-08-24T13:52:38Z",
      "completed_at": "2026-08-24T15:12:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32727356884/job/97446991222",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32725532720,
-   "pr": null,
-   "commit": "67afb0bfa9f3b889082a2cf1300db62dbb4a7205",
-   "branch": "convolution",
-   "event": "pull_request",
-   "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32725532720",
-   "created_at": "2026-08-24T12:08:57Z",
-   "updated_at": "2026-08-24T15:08:19Z",
-   "actor": "amd-nprotaso",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T13:07:30Z",
-     "completed_at": "2026-08-24T13:27:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32725532720/job/97440021107",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T13:19:47Z",
-     "completed_at": "2026-08-24T14:06:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32725532720/job/97440021141",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T12:59:52Z",
-     "completed_at": "2026-08-24T15:08:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32725532720/job/97440021207",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32723404744,
-   "pr": null,
-   "commit": "dd8373349e33638c8d158a9ea009b7b28598984a",
-   "branch": "main",
-   "event": "push",
-   "title": "[GEMM] Track gfx950 async LDS loads with asyncmark (#1063)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32723404744",
-   "created_at": "2026-08-24T11:44:33Z",
-   "updated_at": "2026-08-24T14:44:05Z",
-   "actor": "xytpai",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T12:49:12Z",
-     "completed_at": "2026-08-24T13:07:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32723404744/job/97435694870",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T12:44:31Z",
-     "completed_at": "2026-08-24T14:44:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32723404744/job/97435694911",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-24T12:55:30Z",
-     "completed_at": "2026-08-24T13:51:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32723404744/job/97435694951",
      "log_fetch_failed": true
     }
    ]
