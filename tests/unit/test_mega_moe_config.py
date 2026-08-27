@@ -159,7 +159,7 @@ def test_small_fixed_slot_profiles_use_low_overhead_geometry():
         for tokens in (1, 4, 8)
     ]
 
-    assert [config.stage1.num_dispatch_cu for config in generic] == [160, 128, 32]
+    assert [config.stage1.num_dispatch_cu for config in generic] == [128, 96, 32]
     assert [config.stage1.grid_mult for config in generic] == [1, 1, 2]
     assert [config.stage1.tile_n for config in generic] == [256, 256, 256]
     assert all(config.stage2.use_nt for config in generic)

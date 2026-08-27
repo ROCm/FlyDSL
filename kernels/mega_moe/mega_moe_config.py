@@ -236,7 +236,9 @@ def _derive_stage1(workload: _Workload) -> Stage1Config:
             # Match the validated production MX-scale A8W4 crossover points.
             # SmoothQuant modes retain their shape-specific overrides below.
             if bucket == 1:
-                dispatch_request = 160
+                dispatch_request = 128
+            elif bucket == 4:
+                dispatch_request = 96
             elif bucket == 8:
                 dispatch_request = 32
         return Stage1Config(

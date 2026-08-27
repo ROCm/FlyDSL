@@ -87,6 +87,19 @@ def _validate_bounded_consumer_mapping(launch_grid_x, role_prefix_blocks):
     return initial_consumers
 
 
+def _validate_retired_consumer_coverage(consumer_blocks, total_work):
+    """Validate static ordinal/stride coverage after all control CTAs retire."""
+    if consumer_blocks <= 0:
+        raise ValueError("resident fixed-slot launch must leave a consumer")
+    covered = [
+        work
+        for ordinal in range(consumer_blocks)
+        for work in range(ordinal, total_work, consumer_blocks)
+    ]
+    if sorted(covered) != list(range(total_work)):
+        raise ValueError("resident fixed-slot work mapping is not bijective")
+
+
 # fmt: off
 @functools.cache
 def compile_mega_moe_stage1(
@@ -117,6 +130,9 @@ def compile_mega_moe_stage1(
     planner_blocks = 1
     role_prefix_blocks = dispatch_blocks
     bounded_compact_roles = not fixed_slot_dispatch
+    bounded_fixed_resident = bool(fixed_slot_dispatch) and int(fuse_mtpr) <= 4
+    if bounded_fixed_resident and int(grid_mult) != 1:
+        raise ValueError("M13 A8W4 MTPR<=4 requires the resident gm1 role grid")
     if planner_blocks + role_prefix_blocks >= num_cu:
         raise ValueError(
             "planner and producer roles must leave at least one resident consumer CU"
@@ -124,12 +140,22 @@ def compile_mega_moe_stage1(
     # Bound compact launches to the configured persistent grid.  Their
     # finite planner/producer prefix joins the GEMM queue after dispatch, so a
     # shape change cannot leave a replacement cohort on a stale generation.
-    # Fixed-slot dispatch retains replacement CTAs for its retired roles.
+    # Larger fixed-slot dispatch retains replacement CTAs for retired roles;
+    # the MTPR<=4 resident specialization launches exactly one grid wave.
     if bounded_compact_roles:
         replacement_blocks = 0
         launch_grid_x = num_cu * grid_mult
         initial_consumer_blocks = _validate_bounded_consumer_mapping(
             launch_grid_x, role_prefix_blocks
+        )
+    elif bounded_fixed_resident:
+        # Exactly one CTA per CU is sufficient to make the complete finite
+        # owner/producer/consumer population resident.  Control CTAs still
+        # retire; only the remaining suffix executes static GEMM work.
+        replacement_blocks = 0
+        launch_grid_x = num_cu
+        initial_consumer_blocks = (
+            launch_grid_x - planner_blocks - role_prefix_blocks
         )
     else:
         replacement_blocks = planner_blocks + role_prefix_blocks
@@ -140,6 +166,9 @@ def compile_mega_moe_stage1(
     grid_x = launch_grid_x - planner_blocks - role_prefix_blocks
     assert grid_x > 0, "consumer grid must remain positive"
     assert launch_grid_x <= num_cu * 33 + 1
+    if bounded_fixed_resident:
+        max_fixed_tiles = experts_per_rank * (fuse_cap // sort_block_m)
+        _validate_retired_consumer_coverage(grid_x, max_fixed_tiles * N_TILES)
     M_REPEAT = sort_block_m // 16
     NUM_ACC_N = n_per_wave // 16
     assert NUM_ACC_N % 2 == 0 and M_REPEAT % 2 == 0
@@ -194,6 +223,7 @@ def compile_mega_moe_stage1(
     role_suffix = (
         f"rb{replacement_blocks}"
         f"bc{int(bounded_compact_roles)}"
+        f"bfr{int(bounded_fixed_resident)}"
     )
     destination_groups = 8
     destination_group_suffix = f"_dg{destination_groups}" if direct_fixed_slot else ""

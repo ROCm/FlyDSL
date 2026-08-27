@@ -18,6 +18,22 @@ from kernels.mega_moe.mega_moe_stage1 import (
 )
 
 
+@pytest.mark.parametrize("consumers,total_work", [(127, 480), (159, 480)])
+def test_native_resident_fixed_consumers_cover_worst_case_once(
+    consumers, total_work
+):
+    native_stage1_module._validate_retired_consumer_coverage(
+        consumers, total_work
+    )
+    covered = [
+        work
+        for ordinal in range(consumers)
+        for work in range(ordinal, total_work, consumers)
+    ]
+    assert len(covered) == total_work
+    assert len(set(covered)) == total_work
+
+
 @pytest.mark.parametrize(
     "mode,packed,n_tiles,mx_scale_lds",
     [

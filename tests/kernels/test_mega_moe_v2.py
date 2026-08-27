@@ -910,6 +910,14 @@ def _run_full_e2e(
 
 
 _PERF_BASELINE_CACHE = {}
+_MEGA_GRAPH_REPLAY_CHECKS = int(
+    os.environ.get("MEGAMOE_GRAPH_REPLAY_CHECKS", "20")
+)
+if _MEGA_GRAPH_REPLAY_CHECKS < 1:
+    raise ValueError("MEGAMOE_GRAPH_REPLAY_CHECKS must be positive")
+_MEGA_GRAPH_PHASE_MARKERS = os.environ.get(
+    "MEGAMOE_GRAPH_PHASE_MARKERS", "0"
+).strip().lower() not in ("", "0", "false", "no")
 _MEGA_PERF_BASELINE = {
     # MI355X EP8, M13 native A8W4 decode, tokens=MTPR.  Values are the
     # cross-rank maximum CUDAGraph E2E latency in milliseconds.  The committed
@@ -1245,18 +1253,27 @@ def _run_mega_only(
     if measure_perf:
         _n = max(1, int(args.iters))
 
-        def _time_graph(fn):
+        def _phase(label, phase):
+            if _MEGA_GRAPH_PHASE_MARKERS and rank == 0:
+                print(f"[MEGA-GRAPH-PHASE] {label}:{phase}", flush=True)
+
+        def _time_graph(fn, *, label, return_graph=False):
+            _phase(label, "warm_begin")
             ms.shmem_barrier_all()
             fn()
             torch.cuda.synchronize()
             ms.shmem_barrier_all()
+            _phase(label, "warm_end")
             capture_stream = torch.cuda.Stream()
             graph = torch.cuda.CUDAGraph()
+            _phase(label, "capture_begin")
             with torch.cuda.graph(graph, stream=capture_stream):
                 fn()
+            _phase(label, "capture_end")
             for _ in range(10):
                 graph.replay()
             torch.cuda.synchronize()
+            _phase(label, "warm_replay_end")
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
             start.record()
@@ -1264,8 +1281,10 @@ def _run_mega_only(
                 graph.replay()
             end.record()
             torch.cuda.synchronize()
+            _phase(label, "timed_replay_end")
             local_ms = start.elapsed_time(end) / _n
-            return _all_mean(dev, local_ms), _all_max(dev, local_ms)
+            timing = (_all_mean(dev, local_ms), _all_max(dev, local_ms))
+            return (*timing, graph) if return_graph else timing
 
         x_s1, scale_s1 = moe.quantize(x_in)
 
@@ -1275,7 +1294,9 @@ def _run_mega_only(
         def _prequant_body():
             _out["o"] = moe.forward_prequant(x_s1, scale_s1, wc, ic)
 
-        stage1_ms, stage1_max_ms = _time_graph(_stage1_body)
+        stage1_ms, stage1_max_ms = _time_graph(
+            _stage1_body, label="stage1"
+        )
         moe._run_fused_stage1(x_s1, wc, scale_s1, ic)
         torch.cuda.synchronize()
         ms.shmem_barrier_all()
@@ -1283,9 +1304,15 @@ def _run_mega_only(
         def _stage2_body():
             _out["o"] = moe._run_stage2(run_tokens, None, True, moe._active_config)
 
-        stage2_ms, stage2_max_ms = _time_graph(_stage2_body)
-        prequant_ms, prequant_max_ms = _time_graph(_prequant_body)
-        mega_ms, mega_max_ms = _time_graph(_body)
+        stage2_ms, stage2_max_ms = _time_graph(
+            _stage2_body, label="stage2"
+        )
+        prequant_ms, prequant_max_ms = _time_graph(
+            _prequant_body, label="prequant"
+        )
+        mega_ms, mega_max_ms, mega_graph = _time_graph(
+            _body, label="bf16_e2e", return_graph=True
+        )
         if args.profile:
             _profile_body(
                 _body,
@@ -1298,10 +1325,19 @@ def _run_mega_only(
                 args.profile_dir,
                 dict(tokens=run_tokens, network=args.network, quant=quant),
             )
-        graph_replay_rel = _relL2(
-            _out["o"][:run_tokens].float().cpu().numpy(), out_mega
-        )
-        graph_replay_rel_max = _all_max(dev, graph_replay_rel)
+        local_graph_replay_rel_max = 0.0
+        for replay_index in range(_MEGA_GRAPH_REPLAY_CHECKS):
+            _phase("bf16_e2e", f"gate_replay_{replay_index}_begin")
+            mega_graph.replay()
+            torch.cuda.synchronize()
+            _phase("bf16_e2e", f"gate_replay_{replay_index}_end")
+            graph_replay_rel = _relL2(
+                _out["o"][:run_tokens].float().cpu().numpy(), out_mega
+            )
+            local_graph_replay_rel_max = max(
+                local_graph_replay_rel_max, graph_replay_rel
+            )
+        graph_replay_rel_max = _all_max(dev, local_graph_replay_rel_max)
         graph_replay_ok = graph_replay_rel_max < 1.0e-6
         _base = _perf_baseline_lookup(getattr(args, "perf_baseline", ""), args.network, quant, run_tokens)
         if _base is not None and _base > 0:
@@ -1336,7 +1372,8 @@ def _run_mega_only(
             f"prequant_e2e={prequant_ms:.4f}/{_prequant_ms_max:.4f}ms "
             f"bf16_e2e={mega_ms:.4f}/{_ms_max:.4f}ms(mean/max) "
             f"graphReplayRelL2max={graph_replay_rel_max:.3e} "
-            f"graph_replay={'PASS' if graph_replay_ok else 'FAIL'}  {perf_note}"
+            f"graph_replay={_MEGA_GRAPH_REPLAY_CHECKS}:"
+            f"{'PASS' if graph_replay_ok else 'FAIL'}  {perf_note}"
             if measure_perf
             else "perf:skip"
         )
