@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-27T13:54:03Z",
+ "updated": "2026-08-27T13:56:42Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "ci/mi35x-runners-aiter-image",
    "event": "pull_request",
    "title": "Ci/change image to speedup ci",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33078414918",
    "created_at": "2026-08-27T13:44:28Z",
-   "updated_at": "2026-08-27T13:51:40Z",
+   "updated_at": "2026-08-27T13:54:10Z",
    "actor": "coderfeli",
    "jobs": []
   },
