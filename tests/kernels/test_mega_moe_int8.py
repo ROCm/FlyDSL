@@ -3,11 +3,12 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 """M13 MegaMoEV2 INT8 smooth-quant correctness and performance tests.
 
-Run the full EP8 matrix directly:
+Run the EP8 W8A8 prefill case (SP8 32K means 4096 tokens per rank):
 
     MORI_SHMEM_HEAP_SIZE=16G PYTHONPATH=/path/to/aiter:. \
       torchrun --standalone --nproc_per_node=8 \
-      tests/kernels/test_mega_moe_int8.py --mode a8w4smooth --bs-list 32,128
+      tests/kernels/test_mega_moe_int8.py --mode w8a8smooth \
+      --dispatch-quant mxfp4 --bs-list 4096
 
 ``MEGAMOE_INT8_MEASURE_PERF`` and ``MEGAMOE_INT8_SKIP_ACC`` provide
 environment equivalents for the matching command-line switches.
@@ -20,6 +21,7 @@ import math
 import os
 import subprocess
 import sys
+from dataclasses import fields, replace
 
 import pytest
 import torch
@@ -41,26 +43,19 @@ except Exception as exc:  # noqa: BLE001
 
 MODEL_DIM = 3584
 INTER_DIM = 1280
-EXPERTS = 384
 TOPK = 8
-WORLD = 8
-EXPERTS_PER_RANK = EXPERTS // WORLD
+WORLD = int(os.environ.get("MEGAMOE_INT8_WORLD", "8"))
+EXPERTS_PER_RANK = 48
+EXPERTS = EXPERTS_PER_RANK * WORLD
 WEIGHT_SCALE = 1.0e-3
 REL_L2_LIMIT = 0.01
 STAGE1_REL_L2_LIMIT = 0.001
 GRAPH_REPLAY_REL_L2_LIMIT = 1.0e-6
 GRAPH_REPLAY_CHECKS = int(os.environ.get("MEGAMOE_GRAPH_REPLAY_CHECKS", "20"))
-GRAPH_CAPTURE_WARM_REPLAYS = int(os.environ.get("MEGAMOE_GRAPH_CAPTURE_WARM_REPLAYS", "10"))
-GRAPH_PHASE_MARKERS = os.environ.get("MEGAMOE_GRAPH_PHASE_MARKERS", "0").strip().lower() not in {
-    "", "0", "false", "no"
-}
 LEGACY_TARGET_US = 212.0
 MXFP4_PREFILL_MTPR = 32768
 MXFP4_PREFILL_PERF_TOL = 0.07
 MXFP4_PREFILL_E2E_US = {
-    # Stable same-code baselines.  The separately measured tuned values for
-    # tokens 8..128 change Stage1 dispatch geometry and are intentionally not
-    # used by this acceptance-only change.
     1: 191.8,
     4: 298.5,
     8: 325.0,
@@ -70,7 +65,6 @@ MXFP4_PREFILL_E2E_US = {
     128: 464.7,
     256: 534.1,
     512: 651.0,
-    # SP8 32K prefill: 4096 live tokens/rank with MTPR fixed at 32768.
     4096: 1915.1,
 }
 
@@ -85,7 +79,10 @@ def _setup_dist():
     local_rank = int(os.environ.get("LOCAL_RANK", str(rank)))
     world = int(os.environ.get("WORLD_SIZE", "1"))
     if world != WORLD:
-        raise RuntimeError(f"M13 test requires WORLD_SIZE={WORLD}, got {world}")
+        raise RuntimeError(
+            f"M13 test requires WORLD_SIZE={WORLD}, got {world}; "
+            "set MEGAMOE_INT8_WORLD to the torchrun process count"
+        )
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
     dist.init_process_group(
@@ -233,7 +230,7 @@ def _build_weights(mode: str, rank: int, device, *, keep_reference: bool):
     return common, (w1_ref, w2_ref)
 
 
-def _make_inputs(tokens: int, rank: int, device):
+def _make_inputs(tokens: int, rank: int, device, hot_fraction: float = 0.0):
     generator = torch.Generator(device=device).manual_seed(9109 + rank)
     x = torch.randn(
         (tokens, MODEL_DIM),
@@ -247,6 +244,13 @@ def _make_inputs(tokens: int, rank: int, device):
         device=device,
         generator=generator,
     )
+    if not 0.0 <= hot_fraction <= 1.0:
+        raise ValueError(f"hot_fraction must be in [0, 1], got {hot_fraction}")
+    hot_rows = int(tokens * hot_fraction)
+    if hot_rows:
+        # Force one common hot expert while retaining seven unique random
+        # routes.  This models a cross-rank prefill gating long tail.
+        scores[:hot_rows, 0] = 2.0
     ids = scores.topk(TOPK, dim=-1).indices.to(torch.int32).contiguous()
     weights = torch.rand(
         (tokens, TOPK),
@@ -322,10 +326,9 @@ def _torch_aiter_oracle(
         a2[rows] = (torch.nn.functional.silu(gate) * up).to(torch.float16)
     local_rows = (flat_ids >= expert_begin) & (flat_ids < expert_end)
     stage1_reference = a2[local_rows].float()
-    # The packed token id embedded in Stage1 metadata uses MTPR as its rank
-    # stride.  Prefill acceptance intentionally exercises tokens < MTPR, so
-    # gather the produced rows through that sparse layout instead of treating
-    # the receive buffer as a dense WORLD*tokens array.
+    # Stage1 stores by the 24-bit global source encoding, whose rank stride is
+    # MTPR rather than the live token count.  Map the dense oracle rows into
+    # that sparse ATOM layout when MTPR > tokens_per_rank.
     dense_tokens = torch.arange(total_tokens, device=x.device)
     source_ranks = torch.div(dense_tokens, x.shape[0], rounding_mode="floor")
     source_lids = dense_tokens - source_ranks * x.shape[0]
@@ -372,28 +375,17 @@ def _torch_aiter_oracle(
     return oracle[start : start + x.shape[0]], stage1_rel_l2
 
 
-def _capture_graph(body, label="graph"):
-    def marker(phase):
-        if GRAPH_PHASE_MARKERS and (not dist.is_initialized() or dist.get_rank() == 0):
-            print(f"[M13-GRAPH-PHASE] {label}:{phase}", flush=True)
-
-    marker("warm_body_begin")
+def _capture_graph(body):
     body()
-    marker("warm_body_sync_begin")
     torch.cuda.synchronize()
-    marker("warm_body_sync_end")
     ms.shmem_barrier_all()
     capture_stream = torch.cuda.Stream()
     graph = torch.cuda.CUDAGraph()
-    marker("capture_begin")
     with torch.cuda.graph(graph, stream=capture_stream):
         body()
-    marker("capture_end")
-    for _ in range(GRAPH_CAPTURE_WARM_REPLAYS):
+    for _ in range(10):
         graph.replay()
-    marker(f"warm_replay_{GRAPH_CAPTURE_WARM_REPLAYS}_sync_begin")
     torch.cuda.synchronize()
-    marker(f"warm_replay_{GRAPH_CAPTURE_WARM_REPLAYS}_sync_end")
     ms.shmem_barrier_all()
     return graph
 
@@ -425,12 +417,16 @@ def _run_bucket(
     trace_dir=None,
     eager_trace=False,
     dispatch_quant=None,
+    stage1_override=None,
+    stage2_override=None,
+    route_hot_fraction=0.0,
+    debug_replay_stages=False,
     max_tok_per_rank=None,
 ):
     mtpr = tokens if max_tok_per_rank is None else int(max_tok_per_rank)
     if mtpr < tokens or mtpr & (mtpr - 1):
-        raise ValueError(f"MTPR must be a power of two >= tokens, got {mtpr}")
-    x, ids, routing_weights = _make_inputs(tokens, rank, device)
+        raise ValueError(f"mtpr must be a power of two >= tokens, got tokens={tokens}, mtpr={mtpr}")
+    x, ids, routing_weights = _make_inputs(tokens, rank, device, route_hot_fraction)
     moe = MegaMoEV2(
         rank=rank,
         world_size=WORLD,
@@ -445,6 +441,30 @@ def _run_bucket(
         dispatch_quant=dispatch_quant,
         **weights,
     )
+    if os.environ.get("MEGAMOE_DEBUG_SKIP_STAGE1_GEMM", "0") == "1":
+        moe._int8_a2.zero_()
+    if stage1_override or stage2_override:
+        tuned = moe._select_config(tokens)
+        if stage1_override:
+            tuned = replace(
+                tuned,
+                stage1=replace(tuned.stage1, **stage1_override),
+            )
+        if stage2_override:
+            tuned = replace(
+                tuned,
+                stage2=replace(tuned.stage2, **stage2_override),
+            )
+
+        def select_tuned_config(_tokens):
+            # MegaMoEV2._select_config also publishes the selected Stage2
+            # configuration for the INT8 pipeline.  Preserve that side effect
+            # so test-only Stage2 overrides reach _run_int8_stage2.
+            moe._active_config = tuned
+            return tuned
+
+        moe._select_config = select_tuned_config
+
     holder = {}
 
     def e2e_body():
@@ -457,7 +477,19 @@ def _run_bucket(
         ms.shmem_barrier_all()
         e2e_graph = None
     else:
-        e2e_graph = _capture_graph(e2e_body, "e2e")
+        e2e_graph = _capture_graph(e2e_body)
+
+    if _env_flag("MEGAMOE_DEBUG_PRINT_NUM_VALID", False):
+        torch.cuda.synchronize()
+        local_num_valid = [int(value) for value in moe._s1_op.num_valid.tolist()]
+        gathered_num_valid = [None for _ in range(WORLD)] if rank == 0 else None
+        dist.gather_object(local_num_valid, gathered_num_valid, dst=0)
+        if rank == 0:
+            print(
+                f"[M13-INT8-DEBUG] num_valid_by_rank={gathered_num_valid} "
+                f"sort_block_m={moe._select_config(tokens).stage1.sort_block_m}",
+                flush=True,
+            )
 
     if e2e_graph is None:
         replay_rel_l2_all = []
@@ -465,6 +497,25 @@ def _run_bucket(
         replay_stable = True
     else:
         replay_reference = holder["output"][:tokens].float().clone()
+        e2e_debug_reference = None
+        if debug_replay_stages:
+            ref_meta = moe._int8_sorted_tokens.clone()
+            ref_token = ref_meta.bitwise_and(0x00FFFFFF).long()
+            ref_slot = ref_meta.bitwise_right_shift(24).long()
+            ref_valid = (ref_token < moe.max_recv) & (ref_slot < TOPK)
+            ref_sources = torch.sort(ref_meta[ref_valid]).values
+            ref_rows = ref_token[ref_valid] * TOPK + ref_slot[ref_valid]
+            p2p_rows = tokens * TOPK
+            e2e_debug_reference = {
+                "sources": ref_sources,
+                "rows": ref_rows,
+                "a2": moe._int8_a2.view(-1, INTER_DIM)[ref_rows].clone(),
+                "q": moe._int8_requant_q.view(-1, INTER_DIM)[ref_rows].clone(),
+                "scale": moe._int8_requant_scale.view(-1)[ref_rows].clone(),
+                "p2p": moe.comb_op.shmem_comb_inp_tok.view(torch.bfloat16)
+                .view(-1, MODEL_DIM)[:p2p_rows]
+                .clone(),
+            }
         local_replay_rel_l2 = 0.0
         for replay_index in range(GRAPH_REPLAY_CHECKS):
             e2e_graph.replay()
@@ -478,6 +529,70 @@ def _run_bucket(
                 ).item()
             )
             local_replay_rel_l2 = max(local_replay_rel_l2, replay_rel_l2)
+            if e2e_debug_reference is not None and replay_rel_l2 >= GRAPH_REPLAY_REL_L2_LIMIT:
+                current_meta = moe._int8_sorted_tokens
+                current_token = current_meta.bitwise_and(0x00FFFFFF)
+                current_slot = current_meta.bitwise_right_shift(24)
+                current_valid = (current_token < moe.max_recv) & (current_slot < TOPK)
+                current_sources = torch.sort(current_meta[current_valid]).values
+                ref_rows = e2e_debug_reference["rows"]
+                current_a2 = moe._int8_a2.view(-1, INTER_DIM)[ref_rows]
+                current_q = moe._int8_requant_q.view(-1, INTER_DIM)[ref_rows]
+                current_scale = moe._int8_requant_scale.view(-1)[ref_rows]
+                current_p2p = (
+                    moe.comb_op.shmem_comb_inp_tok.view(torch.bfloat16)
+                    .view(-1, MODEL_DIM)[: tokens * TOPK]
+                )
+                source_count_delta = abs(
+                    int(current_sources.numel())
+                    - int(e2e_debug_reference["sources"].numel())
+                )
+                source_mismatch = source_count_delta
+                if source_count_delta == 0:
+                    source_mismatch += int(
+                        torch.count_nonzero(
+                            current_sources != e2e_debug_reference["sources"]
+                        ).item()
+                    )
+                a2_mismatch = int(
+                    torch.count_nonzero(current_a2 != e2e_debug_reference["a2"]).item()
+                )
+                q_mismatch = int(
+                    torch.count_nonzero(current_q != e2e_debug_reference["q"]).item()
+                )
+                scale_max_abs = float(
+                    (current_scale - e2e_debug_reference["scale"]).abs().max().item()
+                )
+                p2p_mismatch = int(
+                    torch.count_nonzero(current_p2p != e2e_debug_reference["p2p"]).item()
+                )
+                p2p_row_mismatch = torch.count_nonzero(
+                    current_p2p != e2e_debug_reference["p2p"], dim=1
+                )
+                bad_rows = torch.nonzero(p2p_row_mismatch, as_tuple=False).flatten()
+                p2p_detail = ""
+                if bad_rows.numel():
+                    bad_row = int(bad_rows[0].item())
+                    cur_row = current_p2p[bad_row].float()
+                    ref_row = e2e_debug_reference["p2p"][bad_row].float()
+                    p2p_detail = (
+                        f" badRows={bad_rows[:4].cpu().tolist()} badRow={bad_row} "
+                        f"rowMismatch={int(p2p_row_mismatch[bad_row].item())} "
+                        f"curZero={int(torch.count_nonzero(cur_row == 0).item())} "
+                        f"refZero={int(torch.count_nonzero(ref_row == 0).item())} "
+                        f"curNorm={float(torch.linalg.vector_norm(cur_row).item()):.4e} "
+                        f"refNorm={float(torch.linalg.vector_norm(ref_row).item()):.4e} "
+                        f"curHead={cur_row[:8].cpu().tolist()} "
+                        f"refHead={ref_row[:8].cpu().tolist()}"
+                    )
+                print(
+                    f"[M13-INT8-E2E-DEBUG] rank={rank} replay={replay_index} "
+                    f"outputRelL2={replay_rel_l2:.4e} metaMismatch={source_mismatch} "
+                    f"a2Mismatch={a2_mismatch} qMismatch={q_mismatch} "
+                    f"scaleMaxAbs={scale_max_abs:.4e} p2pMismatch={p2p_mismatch}"
+                    f"{p2p_detail}",
+                    flush=True,
+                )
         local_replay_rel = torch.tensor(local_replay_rel_l2, dtype=torch.float64, device=device)
         gathered_replay_rel = [torch.empty_like(local_replay_rel) for _ in range(WORLD)]
         dist.all_gather(gathered_replay_rel, local_replay_rel)
@@ -525,12 +640,17 @@ def _run_bucket(
     finite_all = _all_min_bool(device, finite)
 
     stage1_us = stage2_us = e2e_us = -1.0
+    unfused_gemm1_us = unfused_serial_us = -1.0
+    stage1_replay_stable = True
+    stage2_replay_stable = True
     if measure_perf and not eager_trace:
         stage1_holder = {}
 
         def stage1_body():
             if dispatch_quant == "mxfp4":
                 front_q, front_scale = moe._run_mxfp4_front_quant(x)
+            elif moe._s1_smoothquant_mode == "bf16_route":
+                front_q, front_scale = x, None
             else:
                 front_q, front_scale = moe._run_int8_front_quant(x, ids)
             stage1_holder["output"] = moe._run_int8_stage1(
@@ -541,8 +661,214 @@ def _run_bucket(
                 mxfp4_transport=dispatch_quant == "mxfp4",
             )
 
-        stage1_graph = _capture_graph(stage1_body, "stage1")
+        stage1_graph = _capture_graph(stage1_body)
+        if hasattr(moe, "_int8_stage1_q"):
+            stage1_input_q = moe._int8_stage1_q
+            stage1_input_scale = moe._int8_stage1_scale
+        else:
+            # Standalone SmoothQuant dispatches route-major INT8 rows directly
+            # into the fixed-slot transport buffers; no converted MX buffer is
+            # allocated in this mode.
+            stage1_input_q = moe._s1_rx
+            stage1_input_scale = moe._s1_scale_i32.view(torch.float32)
+        unfused_gemm1_graph = unfused_serial_graph = None
+        if _env_flag("MEGAMOE_BENCH_UNFUSED_STAGE1", False):
+            if os.environ.get("MEGAMOE_DEBUG_SKIP_STAGE1_GEMM", "0") != "1":
+                raise RuntimeError(
+                    "MEGAMOE_BENCH_UNFUSED_STAGE1 requires "
+                    "MEGAMOE_DEBUG_SKIP_STAGE1_GEMM=1 so Stage1 measures only "
+                    "front-quant/dispatch/dequant/SmoothQuant"
+                )
+            from flydsl import expr as fx
+            from kernels.mega_moe.gemm1 import int8_gemm1_kernel
+
+            selected_stage1 = moe._select_config(tokens).stage1
+            qscale = (
+                moe._int8_w1_lqq_scale
+                if moe._int8_w1_lqq_scale is not None
+                else moe._int8_w1_scale
+            )
+            qzero = (
+                moe._int8_w1_lqq_zero
+                if moe._int8_w1_lqq_zero is not None
+                else moe._int8_w1_scale
+            )
+            def unfused_gemm1_body():
+                int8_gemm1_kernel(
+                    moe._int8_a2,
+                    stage1_input_q,
+                    moe._int8_w1,
+                    stage1_input_scale,
+                    moe._int8_w1_scale,
+                    moe._s1_op.tile_row_base,
+                    moe._s1_op.sorted_expert_ids,
+                    moe._s1_op.num_valid,
+                    moe._s1_op.srcmap_em,
+                    moe._s1_op.wts_em,
+                    moe._int8_sorted_tokens,
+                    moe._int8_sorted_experts,
+                    moe._int8_sorted_weights,
+                    qscale,
+                    qzero,
+                    fx.Stream(torch.cuda.current_stream()),
+                    model_dim=MODEL_DIM,
+                    inter_dim=INTER_DIM,
+                    expert_offset=rank * EXPERTS_PER_RANK,
+                    atom_tokens=WORLD * mtpr,
+                    topk=TOPK,
+                    packed_int4=mode == "a8w4smooth",
+                    sort_block_m=selected_stage1.sort_block_m,
+                    tile_n=selected_stage1.tile_n,
+                    tile_k=selected_stage1.tile_k,
+                    num_waves=selected_stage1.num_waves,
+                    swizzle_a=selected_stage1.swizzle_a,
+                    async_a_copy=selected_stage1.async_a_copy,
+                    waves_per_eu_hint=selected_stage1.waves_per_eu_hint,
+                    b_cache_modifier=selected_stage1.b_nt,
+                    swiglu_limit=moe.swiglu_limit,
+                    num_cu=moe._s1_num_cu,
+                )
+
+            def unfused_serial_body():
+                stage1_body()
+                unfused_gemm1_body()
+
+            # Compile and capture the exact shared GEMM body separately, then
+            # capture the serialized unfused chain to include launch ordering.
+            unfused_gemm1_graph = _capture_graph(unfused_gemm1_body)
+            unfused_serial_graph = _capture_graph(unfused_serial_body)
+        if debug_replay_stages:
+            stage1_body()
+            torch.cuda.synchronize()
+            ms.shmem_barrier_all()
+            ref_stage1 = stage1_holder["output"]
+            ref_q, ref_scale = moe._run_int8_requant(ref_stage1, ids)
+            torch.cuda.synchronize()
+            ref_tokens = ref_stage1.sorted_token_ids.clone()
+            ref_token = ref_tokens.bitwise_and(0x00FFFFFF).long()
+            ref_slot = ref_tokens.bitwise_right_shift(24).long()
+            ref_valid = (ref_token < moe.max_recv) & (ref_slot < TOPK)
+            ref_sources = torch.sort(ref_tokens[ref_valid]).values
+            ref_rows = ref_token[ref_valid] * TOPK + ref_slot[ref_valid]
+            ref_valid_positions = torch.nonzero(ref_valid, as_tuple=False).flatten()
+            ref_transport_q = (
+                moe._s1_rx.view(torch.uint8)
+                .view(moe._s1_nvm, -1)[ref_valid_positions]
+                .clone()
+            )
+            ref_transport_scale = (
+                moe._s1_scale_i32.view(torch.uint8)
+                .view(moe._s1_nvm, -1)[ref_valid_positions]
+                .clone()
+            )
+            ref_stage1_input_q = stage1_input_q[ref_valid_positions].clone()
+            ref_stage1_input_scale = stage1_input_scale[ref_valid_positions].clone()
+            ref_a2 = ref_stage1.a2.view(-1, INTER_DIM)[ref_rows].clone()
+            ref_q = ref_q.view(-1, INTER_DIM)[ref_rows].clone()
+            ref_scale = ref_scale.view(-1)[ref_rows].clone()
+            a2_mismatch = q_mismatch = meta_mismatch = 0
+            scale_delta = 0.0
+            for replay_index in range(int(os.environ.get("MEGAMOE_STAGE1_REPLAY_CHECKS", "20"))):
+                stage1_graph.replay()
+                torch.cuda.synchronize()
+                ms.shmem_barrier_all()
+                current = stage1_holder["output"]
+                current_q, current_scale = moe._run_int8_requant(current, ids)
+                torch.cuda.synchronize()
+                current_a2 = current.a2.view(-1, INTER_DIM)[ref_rows]
+                current_a2_row_mismatch = torch.count_nonzero(
+                    current_a2 != ref_a2, dim=1
+                )
+                current_a2_mismatch = int(current_a2_row_mismatch.sum().item())
+                a2_mismatch = max(a2_mismatch, current_a2_mismatch)
+                q_mismatch = max(
+                    q_mismatch,
+                    int(
+                        torch.count_nonzero(
+                            current_q.view(-1, INTER_DIM)[ref_rows] != ref_q
+                        ).item()
+                    ),
+                )
+                current_token = current.sorted_token_ids.bitwise_and(0x00FFFFFF)
+                current_slot = current.sorted_token_ids.bitwise_right_shift(24)
+                current_valid = (current_token < moe.max_recv) & (current_slot < TOPK)
+                current_rows = (
+                    current_token[current_valid].long() * TOPK
+                    + current_slot[current_valid].long()
+                )
+                if current_a2_mismatch:
+                    bad_selection = int(
+                        torch.nonzero(current_a2_row_mismatch, as_tuple=False)[0].item()
+                    )
+                    bad_route_row = int(ref_rows[bad_selection].item())
+                    current_match = torch.nonzero(
+                        current_rows == bad_route_row, as_tuple=False
+                    ).flatten()
+                    input_detail = " currentRouteMissing"
+                    if current_match.numel():
+                        current_valid_positions = torch.nonzero(
+                            current_valid, as_tuple=False
+                        ).flatten()
+                        current_position = int(
+                            current_valid_positions[int(current_match[0].item())].item()
+                        )
+                        current_input_q = stage1_input_q[current_position]
+                        ref_input_q = ref_stage1_input_q[bad_selection]
+                        current_transport_q = (
+                            moe._s1_rx.view(torch.uint8)
+                            .view(moe._s1_nvm, -1)[current_position]
+                        )
+                        current_transport_scale = (
+                            moe._s1_scale_i32.view(torch.uint8)
+                            .view(moe._s1_nvm, -1)[current_position]
+                        )
+                        input_detail = (
+                            f" inputMismatch={int(torch.count_nonzero(current_input_q != ref_input_q).item())} "
+                            f"inputScaleAbs={float((stage1_input_scale[current_position] - ref_stage1_input_scale[bad_selection]).abs().item()):.4e} "
+                            f"transportMismatch={int(torch.count_nonzero(current_transport_q != ref_transport_q[bad_selection]).item())} "
+                            f"transportScaleMismatch={int(torch.count_nonzero(current_transport_scale != ref_transport_scale[bad_selection]).item())}"
+                        )
+                    print(
+                        f"[M13-INT8-STAGE1-ROW] rank={rank} replay={replay_index} "
+                        f"routeRow={bad_route_row} a2Mismatch={current_a2_mismatch}"
+                        f"{input_detail}",
+                        flush=True,
+                    )
+                current_sources = torch.sort(current.sorted_token_ids[current_valid]).values
+                meta_mismatch = max(
+                    meta_mismatch,
+                    abs(int(current_sources.numel()) - int(ref_sources.numel()))
+                    + int(torch.count_nonzero(current_sources != ref_sources).item()),
+                )
+                scale_delta = max(
+                    scale_delta,
+                    float((current_scale.view(-1)[ref_rows] - ref_scale).abs().max().item()),
+                )
+            q_mismatch = int(_all_max(device, q_mismatch))
+            a2_mismatch = int(_all_max(device, a2_mismatch))
+            meta_mismatch = int(_all_max(device, meta_mismatch))
+            scale_delta = _all_max(device, scale_delta)
+            stage1_replay_stable = (
+                a2_mismatch == 0
+                and q_mismatch == 0
+                and meta_mismatch == 0
+                and scale_delta == 0.0
+            )
+            if rank == 0:
+                print(
+                    f"[M13-INT8-DEBUG] stage1 a2_mismatch={a2_mismatch} "
+                    f"q_mismatch={q_mismatch} "
+                    f"meta_mismatch={meta_mismatch} scale_max_abs={scale_delta:.4e}",
+                    flush=True,
+                )
         stage1_us = _time_graph(stage1_graph, iterations, device)
+        if unfused_gemm1_graph is not None:
+            unfused_gemm1_us = _time_graph(
+                unfused_gemm1_graph, iterations, device
+            )
+            unfused_serial_us = _time_graph(
+                unfused_serial_graph, iterations, device
+            )
         stage1_body()
         torch.cuda.synchronize()
         ms.shmem_barrier_all()
@@ -559,7 +885,29 @@ def _run_bucket(
                 True,
             )
 
-        stage2_graph = _capture_graph(stage2_body, "stage2")
+        stage2_graph = _capture_graph(stage2_body)
+        if debug_replay_stages:
+            stage2_body()
+            torch.cuda.synchronize()
+            ms.shmem_barrier_all()
+            ref_stage2 = holder["stage2"][:tokens].float().clone()
+            stage2_rel = 0.0
+            for _ in range(int(os.environ.get("MEGAMOE_STAGE2_REPLAY_CHECKS", "20"))):
+                stage2_graph.replay()
+                torch.cuda.synchronize()
+                ms.shmem_barrier_all()
+                current = holder["stage2"][:tokens].float()
+                stage2_rel = max(
+                    stage2_rel,
+                    float(
+                        (torch.linalg.vector_norm(current - ref_stage2)
+                         / torch.linalg.vector_norm(ref_stage2).clamp_min(1e-12)).item()
+                    ),
+                )
+            stage2_rel = _all_max(device, stage2_rel)
+            stage2_replay_stable = stage2_rel < GRAPH_REPLAY_REL_L2_LIMIT
+            if rank == 0:
+                print(f"[M13-INT8-DEBUG] stage2 relL2max={stage2_rel:.4e}", flush=True)
         stage2_us = _time_graph(stage2_graph, iterations, device)
         e2e_us = _time_graph(e2e_graph, iterations, device)
 
@@ -586,29 +934,48 @@ def _run_bucket(
             raise ValueError(f"no MXFP4 prefill performance baseline for tokens={tokens}")
         perf_limit_us = baseline_us * (1.0 + MXFP4_PREFILL_PERF_TOL)
         perf_ok = e2e_us <= perf_limit_us
-    passed = finite_all and replay_stable and perf_ok and (
-        skip_acc
-        or (
-            rel_l2_max < REL_L2_LIMIT
-            and stage1_rel_l2_max < STAGE1_REL_L2_LIMIT
+
+    passed = (
+        finite_all
+        and replay_stable
+        and stage1_replay_stable
+        and stage2_replay_stable
+        and perf_ok
+        and (
+            skip_acc
+            or (
+                rel_l2_max < REL_L2_LIMIT
+                and stage1_rel_l2_max < STAGE1_REL_L2_LIMIT
+            )
         )
     )
     if rank == 0:
         accuracy = "skip" if skip_acc else f"{rel_l2_max:.4e}"
         perf = "skip"
+        stage_replay = ""
+        if measure_perf and debug_replay_stages:
+            stage_replay = (
+                f" stage_replay=s1:{'PASS' if stage1_replay_stable else 'FAIL'},"
+                f"s2:{'PASS' if stage2_replay_stable else 'FAIL'}"
+            )
         if measure_perf:
             delta = (e2e_us / LEGACY_TARGET_US - 1.0) * 100.0
             perf = (
                 f"stage1={stage1_us:.1f}us stage2={stage2_us:.1f}us "
                 f"e2e={e2e_us:.1f}us vs {LEGACY_TARGET_US:.0f}us={delta:+.1f}%"
             )
+            if unfused_gemm1_us >= 0:
+                perf += (
+                    f" prologue={stage1_us:.1f}us"
+                    f" standaloneGemm1={unfused_gemm1_us:.1f}us"
+                    f" serialStage1={unfused_serial_us:.1f}us"
+                )
         print(
             f"[M13-INT8] mode={mode} dispatch={dispatch_quant or 'int8'} "
-            f"mtpr={mtpr} bs={tokens} relL2max={accuracy} "
+            f"bs={tokens} relL2max={accuracy} "
             f"stage1RelL2max={'skip' if skip_acc else f'{stage1_rel_l2_max:.4e}'} "
             f"finite={finite_all} graphReplayRelL2max={replay_rel_l2_max:.4e} "
-            f"graph_replay={GRAPH_REPLAY_CHECKS}:"
-            f"{'PASS' if replay_stable else 'FAIL'} {perf} "
+            f"graph_replay={'PASS' if replay_stable else 'FAIL'}{stage_replay} {perf} "
             f"perf_gate={'PASS' if perf_ok else 'FAIL'}"
             f"{'' if perf_limit_us < 0 else f' limit={perf_limit_us:.1f}us'} "
             f"=> {'PASS' if passed else 'FAIL'}",
@@ -616,17 +983,18 @@ def _run_bucket(
         )
         if not skip_acc:
             print(
-                "  8-rank relL2: " + " ".join(f"r{index}={value:.4e}" for index, value in enumerate(rel_l2_all)),
+                f"  {WORLD}-rank relL2: "
+                + " ".join(f"r{index}={value:.4e}" for index, value in enumerate(rel_l2_all)),
                 flush=True,
             )
             print(
-                "  8-rank stage1 relL2: "
+                f"  {WORLD}-rank stage1 relL2: "
                 + " ".join(f"r{index}={value:.4e}" for index, value in enumerate(stage1_rel_l2_all)),
                 flush=True,
             )
         if replay_rel_l2_all:
             print(
-                "  8-rank graph replay relL2: "
+                f"  {WORLD}-rank graph replay relL2: "
                 + " ".join(f"r{index}={value:.4e}" for index, value in enumerate(replay_rel_l2_all)),
                 flush=True,
             )
@@ -676,12 +1044,55 @@ def main():
         "--mtpr",
         type=int,
         default=int(os.environ.get("MEGAMOE_MTPR", "0")),
-        help="max tokens per rank; 0 uses the current batch size",
+        help="max tokens per rank; 0 uses the current --bs-list value",
     )
+    parser.add_argument(
+        "--stage1-override",
+        default=os.environ.get("MEGAMOE_STAGE1_OVERRIDE", ""),
+        help="test-only Stage1Config overrides, for example tile_n=256,grid_mult=3",
+    )
+    parser.add_argument(
+        "--stage2-override",
+        default=os.environ.get("MEGAMOE_STAGE2_OVERRIDE", ""),
+        help="test-only Stage2Config overrides, for example persist_cu=224,skew_cu=64",
+    )
+    parser.add_argument(
+        "--hot-route-fraction",
+        type=float,
+        default=float(os.environ.get("MEGAMOE_HOT_ROUTE_FRACTION", "0")),
+        help="fraction of local tokens forced to include global expert 0",
+    )
+    parser.add_argument("--debug-replay-stages", action="store_true")
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
-    if args.dispatch_quant == "mxfp4" and args.mode != "w8a8smooth":
-        parser.error("MXFP4 transport is supported only by w8a8smooth prefill")
+    if args.mode == "a8w4smooth" and args.dispatch_quant == "mxfp4":
+        parser.error(
+            "a8w4smooth decode supports only standalone AITER SmoothQuant; "
+            "MXFP4 transport is w8a8smooth-only"
+        )
+
+    def parse_override(spec, config_type):
+        parsed = {}
+        if not spec:
+            return parsed
+
+        field_names = {field.name for field in fields(config_type)}
+        for item in spec.split(","):
+            name, value = item.split("=", 1)
+            name = name.strip()
+            value = value.strip()
+            if name not in field_names:
+                raise ValueError(f"unknown {config_type.__name__} field {name!r}")
+            if value.lower() in ("true", "false"):
+                parsed[name] = value.lower() == "true"
+            else:
+                parsed[name] = int(value)
+        return parsed
+
+    from kernels.mega_moe.mega_moe_config import Stage1Config, Stage2Config
+
+    stage1_override = parse_override(args.stage1_override, Stage1Config)
+    stage2_override = parse_override(args.stage2_override, Stage2Config)
 
     rank, _, device = _setup_dist()
     torch.manual_seed(1234)
@@ -707,6 +1118,10 @@ def main():
             args.trace_dir or None,
             args.eager_trace,
             None if args.dispatch_quant == "int8" else args.dispatch_quant,
+            stage1_override,
+            stage2_override,
+            args.hot_route_fraction,
+            args.debug_replay_stages,
             args.mtpr or tokens,
         )
     global_failures = _all_max(device, failures)
@@ -802,11 +1217,6 @@ def test_m13_native_a8w4_8gpu_acceptance():
     _require_gfx95(WORLD)
     from tests.kernels.test_mega_moe_v2 import _run_mega_8gpu
 
-    # Native decode requires tokens=MTPR, so every point is a distinct
-    # production operator configuration.  Isolate those configurations in
-    # separate torchrun processes: this also gives CI a bounded timeout and a
-    # complete result for each shape instead of losing an entire matrix behind
-    # one buffered subprocess.
     for tokens in (1, 4, 8, 16, 32, 64, 128, 256, 512):
         _run_mega_8gpu(
             network="m13",
@@ -821,11 +1231,8 @@ def test_m13_native_a8w4_8gpu_acceptance():
 
 @pytest.mark.multi_gpu
 def test_m13_w8a8smooth_mxfp4_prefill_8gpu_acceptance():
-    """Gate the full M13 prefill matrix with MXFP4 communication."""
+    """Gate M13 MXFP4-communication prefill correctness and latency."""
     _require_gfx95(WORLD)
-    # Keep each shape in a fresh process.  Besides giving every failure a
-    # bounded timeout and an unambiguous shape, this matches the process-level
-    # isolation used to establish the performance baselines above.
     for tokens in MXFP4_PREFILL_E2E_US:
         _run_subprocess(
             [

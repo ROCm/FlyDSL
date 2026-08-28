@@ -200,7 +200,7 @@ class MegaMoEV2:
         self._s1_fixed_slot = not compact
         if is_a8w4smooth and not self._s1_fixed_slot:
             raise ValueError(
-                "a8w4smooth is decode-only and requires fixed-slot MTPR <= 512"
+                "a8w4smooth is decode-only and requires fixed-slot MTPR <= 1024"
             )
         self._s1_scale_dim = scale_dim
         combine_block_num, combine_warp_num = _combine_launch_geometry(

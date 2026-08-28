@@ -142,7 +142,7 @@ def test_a8w4smooth_decode_contract(tokens):
 
     assert fixed_slot_max_mtpr(
         "a8w4smooth", 48, 3584, 1280, world_size=8, topk=8
-    ) == 512
+    ) == 1024
     assert not stage1.external_grouping
     assert not stage1.external_counting
     assert stage1.payload_chunk_rows == 0
@@ -165,7 +165,7 @@ def test_small_fixed_slot_profiles_use_low_overhead_geometry():
     assert all(config.stage2.use_nt for config in generic)
     assert [config.stage1.num_dispatch_cu for config in tuned] == [64, 64, 192]
     assert [config.stage1.grid_mult for config in tuned] == [1, 1, 1]
-    assert [config.stage1.tile_n for config in tuned] == [128, 128, 256]
+    assert [config.stage1.tile_n for config in tuned] == [128, 256, 256]
     assert [config.stage1.b_nt for config in tuned] == [0, 0, 0]
     assert not any(config.stage2.use_nt for config in tuned)
 
@@ -183,7 +183,9 @@ def test_a8w4smooth_is_decode_only():
     assert generic512.stage2.persist_cu == 240
     assert tuned512.stage2.persist_cu == 240
 
-    for mtpr in (1024, 2048, 4096, 32768):
+    select_mega_moe_config(1024, 1024, **M13_A8W4SMOOTH)
+
+    for mtpr in (2048, 4096, 32768):
         with pytest.raises(ValueError, match="tokens=MTPR"):
             select_mega_moe_config(min(512, mtpr), mtpr, **M13_A8W4SMOOTH)
 
@@ -260,13 +262,15 @@ def test_m13_token128_int8_uses_validated_tiles_without_p2p_quant(quant_mode):
 @pytest.mark.parametrize(
     "tokens,stage1_expected,persist_cu",
     [
+        (4, (32, 256, 8, 1, 64, 0, 2, False), 0),
         (8, (32, 256, 8, 1, 192, 0, 2, False), 0),
         (16, (32, 128, 4, 2, 96, 0, 1, True), 0),
-        (32, (32, 128, 4, 2, 192, 0, 2, False), 0),
-        (64, (32, 128, 4, 2, 128, 0, 1, True), 0),
-        (128, (32, 128, 4, 2, 192, 0, 2, False), 96),
-        (256, (64, 256, 8, 3, 224, 0, 2, True), 128),
+        (32, (32, 256, 8, 1, 64, 0, 1, True), 0),
+        (64, (32, 256, 8, 1, 96, 0, 1, True), 0),
+        (128, (32, 256, 8, 1, 128, 0, 1, True), 36),
+        (256, (64, 256, 8, 1, 224, 0, 2, True), 128),
         (512, (64, 256, 8, 1, 208, 0, 1, True), 240),
+        (1024, (64, 256, 8, 1, 208, 0, 1, True), 240),
     ],
 )
 def test_m13_a8w4smooth_fixed_slot_uses_cudagraph_tuning(tokens, stage1_expected, persist_cu):
@@ -343,7 +347,7 @@ def test_narrow_int_stage2_residency_tracks_route_pressure():
         token128.stage2.persist_cu,
         token256.stage2.persist_cu,
         token512.stage2.persist_cu,
-    ] == [96, 128, 240]
+    ] == [36, 128, 240]
     assert token128.stage2.use_nt and token256.stage2.use_nt
     assert not token512.stage2.use_nt
 

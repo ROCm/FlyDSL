@@ -93,4 +93,4 @@ def test_m13_a8w4_config_remains_unchanged():
     # The native decode and SmoothQuant selectors intentionally retain their
     # independently validated persistent-CU settings.
     assert a8w4.stage2.persist_cu == 240
-    assert int8.stage2.persist_cu == 96
+    assert int8.stage2.persist_cu == 36

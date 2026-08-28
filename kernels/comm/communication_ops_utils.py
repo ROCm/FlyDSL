@@ -29,6 +29,7 @@ __all__ = [
     "fence_release",
     "fence_system_acquire",
     "fence_system_release",
+    "fence_system_seq_cst",
     "fence_agent_acquire",
     "fence_agent_release",
     "load_i64_global",
@@ -84,6 +85,12 @@ def fence_system_acquire():
 def fence_system_release():
     """System-scope release fence."""
     fence_release(fx.rocdl.SyncScope.OneAs)
+
+
+def fence_system_seq_cst():
+    """True system-scope full fence, matching HIP ``__threadfence_system``."""
+    # No explicit LLVM syncscope means the cross-address-space system scope.
+    _llvm_d.FenceOp(_llvm_d.AtomicOrdering.seq_cst)
 
 
 def fence_agent_acquire():

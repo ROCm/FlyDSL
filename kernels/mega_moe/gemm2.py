@@ -154,7 +154,6 @@ def gemm2_compute_int8(
     arg_qscale,
     arg_qzero,
     arg_eids,
-    arg_stids,
     bx_i32,
     lane,
     wave,
@@ -168,6 +167,7 @@ def gemm2_compute_int8(
     INTER_DIM,
     TOPK,
     ATOM_TOKENS,
+    LDS_PACKED_OFF,
     packed_int4,
     use_nt,
 ):
@@ -192,7 +192,6 @@ def gemm2_compute_int8(
     num_acc_n = (BN // 4) // 16
     k_iters = fx.Int32(i32_inter) // fx.Int32(BK)
     a_rsrc = buffer_ops.create_buffer_resource_from_addr(arg_aq)
-    stids_rsrc = buffer_ops.create_buffer_resource_from_addr(arg_stids)
     w_rsrc = _make_buffer_from_addr(arg_bq, fx.Int32, 4)
     qs_rsrc = _make_buffer_from_addr(arg_qscale, fx.Int32)
     qz_rsrc = _make_buffer_from_addr(arg_qzero, fx.Int32)
@@ -207,6 +206,11 @@ def gemm2_compute_int8(
     )
     mfma = MfmaInt8GU(m_repeat=m_repeat, num_acc_n=num_acc_n)
     acc = [mfma.zero_value for _ in range(m_repeat * num_acc_n)]
+    row_base = (
+        expert * fx.Int32(i32_hidden)
+        + n_block_idx * fx.Int32(BN)
+        + wave * fx.Int32(BN // 4)
+    )
 
     chunks_per_row = BK // 16
     chunks_per_thread = BM * chunks_per_row // 256
@@ -221,13 +225,19 @@ def gemm2_compute_int8(
         acc = [Vec(value) for value in state]
         step = fx.Int32(step_i)
         gpu.barrier()
+        a_chunks = []
         for rep in range_constexpr(chunks_per_thread):
             linear = fx.thread_idx.x + fx.Int32(rep * 256)
             row = linear // fx.Int32(chunks_per_row)
             chunk = linear - row * fx.Int32(chunks_per_row)
-            sorted_row = m_row + row
-            fused = buffer_ops.buffer_load(
-                stids_rsrc, sorted_row, vec_width=1, dtype=T.i32
+            fused = fx.ptr_load(
+                lds_typed_ptr(
+                    lds_base_i32
+                    + fx.Int32(LDS_PACKED_OFF)
+                    + row * fx.Int32(4),
+                    T.i32,
+                    align=4,
+                )
             )
             token = fused & mask24
             slot = fused >> fx.Int32(24)
@@ -252,6 +262,13 @@ def gemm2_compute_int8(
                 fx.Int32,
             )
             lds_byte = row * fx.Int32(BK) + chunk * fx.Int32(16)
+            a_chunks.append((raw, lds_byte))
+
+        # Keep the older A requests in flight while loading/dequantizing B.
+        # The B dependency waits also retire A, hiding the two serial VMEM
+        # bubbles visible in ATT without changing the LDS/MFMA schedule.
+        b_step = b_loader.load_single_step(row_base, step)
+        for raw, lds_byte in a_chunks:
             for item in range_constexpr(4):
                 fx.ptr_store(
                     raw[item],
@@ -262,13 +279,6 @@ def gemm2_compute_int8(
                     ),
                 )
         wait_lds_barrier()
-
-        row_base = (
-            expert * fx.Int32(i32_hidden)
-            + n_block_idx * fx.Int32(BN)
-            + wave * fx.Int32(BN // 4)
-        )
-        b_step = b_loader.load_single_step(row_base, step)
 
         def a_load(mi, ksub):
             row = fx.Int32(mi * 16) + lane % fx.Int32(16)

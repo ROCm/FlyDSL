@@ -699,6 +699,15 @@ class Int8BWeightLoader:
             ],
         )
 
+    def load_projection_pair_ni(
+        self, gate_row_i32, up_row_i32, ni, kstep_i32
+    ):
+        """Load one gate/up N fragment for an interleaved next-K pipeline."""
+        return (
+            self._load_projection_ni(gate_row_i32, ni, kstep_i32),
+            self._load_projection_ni(up_row_i32, ni, kstep_i32),
+        )
+
     def load_single_step(self, row_base_i32, kstep_i32):
         """Load one Stage2 projection for a 256-K INT8 step."""
         by_ni = [
@@ -709,7 +718,6 @@ class Int8BWeightLoader:
             [by_ni[ni][ksub] for ni in range_constexpr(self._num_acc_n)]
             for ksub in range_constexpr(4)
         ]
-
 
 class MfmaInt8GU:
     """gfx950 signed INT8 K64 MFMA with i32 accumulation."""
@@ -755,6 +763,48 @@ class MfmaInt8GU:
                     )
         return gate_acc, up_acc
 
+    def call_pipe(
+        self, a_load, gate_prev, up_prev, gate_acc, up_acc, load_next
+    ):
+        """Consume current gate/up B while progressively loading next-K B."""
+        gate_next = [
+            [None for _ in range(self._num_acc_n)]
+            for _ in range(4)
+        ]
+        up_next = [
+            [None for _ in range(self._num_acc_n)]
+            for _ in range(4)
+        ]
+        groups = 4 * self._m_repeat
+        group = 0
+        loaded = 0
+        for ksub in range_constexpr(4):
+            for mi in range_constexpr(self._m_repeat):
+                a_op = a_load(mi, ksub)
+                target = ((group + 1) * self._num_acc_n) // groups
+                while loaded < target:
+                    gate_ni, up_ni = load_next(loaded)
+                    for next_ksub in range_constexpr(4):
+                        gate_next[next_ksub][loaded] = gate_ni[next_ksub]
+                        up_next[next_ksub][loaded] = up_ni[next_ksub]
+                    loaded += 1
+                for ni in range_constexpr(self._num_acc_n):
+                    index = mi * self._num_acc_n + ni
+                    gate_acc[index] = self._mfma(
+                        a_op, gate_prev[ksub][ni], gate_acc[index]
+                    )
+                    up_acc[index] = self._mfma(
+                        a_op, up_prev[ksub][ni], up_acc[index]
+                    )
+                group += 1
+        while loaded < self._num_acc_n:
+            gate_ni, up_ni = load_next(loaded)
+            for next_ksub in range_constexpr(4):
+                gate_next[next_ksub][loaded] = gate_ni[next_ksub]
+                up_next[next_ksub][loaded] = up_ni[next_ksub]
+            loaded += 1
+        return gate_acc, up_acc, gate_next, up_next
+
     def call_single(self, a_load, b_step, acc):
         """Accumulate one Stage2 projection."""
         for ksub in range_constexpr(4):
@@ -790,6 +840,8 @@ class SiluF16AtomEpilogue:
         num_waves,
         lds_out,
         swiglu_limit=0.0,
+        out_tensor=None,
+        direct_output=False,
     ):
         self._out = out_rsrc
         self._sx = sx_rsrc
@@ -809,10 +861,47 @@ class SiluF16AtomEpilogue:
         self._num_waves = num_waves
         self._lds = lds_out
         self._swiglu_limit = float(swiglu_limit)
+        self._out_tensor = out_tensor
+        self._direct_output = bool(direct_output)
 
     def _silu(self, value):
         exp = (value * fx.Float32(-1.4426950408889634)).exp2()
         return value / (fx.Float32(1.0) + exp)
+
+    def _store_atom(self, value, physical_row, column, n_tile_base_i32):
+        source = _buffer_load(self._srcmap, physical_row, fx.Int32)
+        token = source & fx.Int32(0xFFFFFF)
+        slot = source >> fx.Int32(24)
+        valid = token < fx.Int32(self._atom_tokens)
+        if self._out_tensor is not None:
+            atom_row_i64 = fx.Int64(token) * fx.Int64(self._topk) + fx.Int64(slot)
+            out_index_i64 = (
+                atom_row_i64 * fx.Int64(self._inter_dim)
+                + fx.Int64(n_tile_base_i32)
+                + fx.Int64(column)
+            )
+
+            @flyc.jit
+            def store_valid_atom():
+                if valid:
+                    out_ptr = fx.add_offset(
+                        fx.get_iter(self._out_tensor), out_index_i64
+                    )
+                    fx.ptr_store(
+                        Vec.from_elements([value.to(fx.Float16)], fx.Float16),
+                        out_ptr,
+                    )
+
+            store_valid_atom()
+        else:
+            atom_row = token * fx.Int32(self._topk) + slot
+            out_index = (
+                atom_row * fx.Int32(self._inter_dim)
+                + n_tile_base_i32
+                + column
+            )
+            out_index = valid.select(out_index, fx.Int32(0x40000000))
+            _buffer_store(self._out, out_index, value.to(fx.Float16), fx.Float16)
 
     def store(
         self,
@@ -858,44 +947,44 @@ class SiluF16AtomEpilogue:
                         gate = -(-gate).maximumf(-limit)
                         up = fx.clampf(up, -limit, limit)
                     value = self._silu(gate) * up
-                    ptr = fx.add_offset(
-                        self._lds.ptr,
-                        fx.make_int_tuple(row * fx.Int32(self._tile_n) + column),
-                    )
-                    fx.ptr_store(Vec.from_elements([value], fx.Float32), ptr)
-        gpu.barrier()
-
-        total_threads = self._num_waves * 64
-        for base in range_constexpr(
-            0, self._sort_block_m * self._tile_n, total_threads
-        ):
-            linear = tx + fx.Int32(base)
-            row = linear // fx.Int32(self._tile_n)
-            column = linear - row * fx.Int32(self._tile_n)
-            physical_row = tile_row_base_i32 + row
-            source = _buffer_load(self._srcmap, physical_row, fx.Int32)
-            token = source & fx.Int32(0xFFFFFF)
-            slot = source >> fx.Int32(24)
-            valid = token < fx.Int32(self._atom_tokens)
-            value = Vec(
-                fx.make_view(
-                    fx.add_offset(
-                        self._lds.ptr,
-                        fx.make_int_tuple(row * fx.Int32(self._tile_n) + column),
-                    ),
-                    fx.make_layout(1, 1),
-                ).load()
-            )[0]
-            atom_row = token * fx.Int32(self._topk) + slot
-            out_index = (
-                atom_row * fx.Int32(self._inter_dim)
-                + n_tile_base_i32
-                + column
-            )
-            out_index = valid.select(out_index, fx.Int32(0x40000000))
-            _buffer_store(
-                self._out, out_index, value.to(fx.Float16), fx.Float16
-            )
+                    if const_expr(self._direct_output):
+                        self._store_atom(
+                            value, physical_row, column, n_tile_base_i32
+                        )
+                    else:
+                        ptr = fx.add_offset(
+                            self._lds.ptr,
+                            fx.make_int_tuple(
+                                row * fx.Int32(self._tile_n) + column
+                            ),
+                        )
+                        fx.ptr_store(
+                            Vec.from_elements([value], fx.Float32), ptr
+                        )
+        if const_expr(not self._direct_output):
+            gpu.barrier()
+            total_threads = self._num_waves * 64
+            for base in range_constexpr(
+                0, self._sort_block_m * self._tile_n, total_threads
+            ):
+                linear = tx + fx.Int32(base)
+                row = linear // fx.Int32(self._tile_n)
+                column = linear - row * fx.Int32(self._tile_n)
+                physical_row = tile_row_base_i32 + row
+                value = Vec(
+                    fx.make_view(
+                        fx.add_offset(
+                            self._lds.ptr,
+                            fx.make_int_tuple(
+                                row * fx.Int32(self._tile_n) + column
+                            ),
+                        ),
+                        fx.make_layout(1, 1),
+                    ).load()
+                )[0]
+                self._store_atom(
+                    value, physical_row, column, n_tile_base_i32
+                )
 
         valid_meta_row = tx < fx.Int32(self._sort_block_m)
         safe_row = valid_meta_row.select(tx, fx.Int32(0))

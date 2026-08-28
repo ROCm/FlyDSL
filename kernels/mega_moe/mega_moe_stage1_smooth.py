@@ -34,11 +34,11 @@ from .gemm_util import (
     _make_buffer_from_addr,
     wait_all,
 )
-from .mxfp4_smoothquant import convert_mxfp4_smoothquant_row
 from .mega_moe_stage1 import (
     A8W4_ENTRY_COUNT_SHARDS,
     ENTRY_EPOCH_SLOT_COUNT,
 )
+from .mxfp4_smoothquant import convert_mxfp4_smoothquant_row
 
 _SC0_CACHE = 1
 _BUFFER_OFFSET_ABI_BYTES = 1 << 32
@@ -288,7 +288,7 @@ def compile_mega_moe_stage1(
         f"iscs{int(int8_static_schedule)}"
         f"_pbc{payload_block_cap}"
         f"_rr{int(retire_control_roles)}rb{planner_blocks + role_prefix_blocks if retire_control_roles else 0}"
-        f"_rrep{int(retire_control_roles)}"
+        f"_rdir{2 if retire_control_roles else 0}"
         f"_dg1{int(smoothquant_mode == 'bf16_route')}"
         f"_qp{int(packed_int4)}{swiglu_suffix}"
     )
@@ -351,8 +351,6 @@ def compile_mega_moe_stage1(
                     ),
                     ticket_scratch,
                 )
-            fx.barrier()
-            generation = Vec(ticket_view.load())[0]
             ticket = block_index
         else:
             if tid == fx.Int32(0):
@@ -367,7 +365,8 @@ def compile_mega_moe_stage1(
             generation = ticket64 // fx.Int64(launch_grid_x)
             ticket = fx.Int32(ticket64 - generation * fx.Int64(launch_grid_x))
         gate_addr = a_epoch_gate + fx.Int64(grid_epoch_slot * 4)
-        gate_epoch = fx.Int32(generation + fx.Int64(1))
+        if const_expr(not retire_control_roles):
+            gate_epoch = fx.Int32(generation + fx.Int64(1))
         compact_owner = ticket == fx.Int32(0)
         compact_producer = (ticket > fx.Int32(0)) & (ticket <= fx.Int32(dispatch_blocks))
         producer_slot = ticket - fx.Int32(1)
@@ -426,6 +425,18 @@ def compile_mega_moe_stage1(
                                 fx.Int32(0),
                                 fx.Int32,
                             )
+            elif const_expr(direct_fixed_slot):
+                if tid == fx.Int32(0):
+                    group_done_rsrc = _make_buffer_from_addr(
+                        a_group_done, fx.Int32
+                    )
+                    for destination in range_constexpr(fz_npes):
+                        _buffer_store(
+                            group_done_rsrc,
+                            fx.Int32(destination),
+                            fx.Int32(0),
+                            fx.Int32,
+                        )
             if const_expr(mxfp4_transport):
                 quant_count_rsrc = _make_buffer_from_addr(addr_quant_count, fx.Int32)
                 for base in range_constexpr(0, quant_count_slots, TOTAL_THREADS):
@@ -451,12 +462,28 @@ def compile_mega_moe_stage1(
                 _buffer_store(parity_rsrc, fx.Int32(0), next_parity, fx.Int32)
                 wait_all()
                 comm_ops.fence_agent_release()
-                comm_ops.store_i32_system(gate_addr, fx.Int32(0), gate_epoch)
+                if const_expr(retire_control_roles):
+                    owner_gate_epoch = fx.Int32(
+                        Vec(ticket_view.load())[0] + fx.Int64(1)
+                    )
+                else:
+                    owner_gate_epoch = gate_epoch
+                comm_ops.store_i32_system(
+                    gate_addr, fx.Int32(0), owner_gate_epoch
+                )
             wait_all()
             fx.barrier()
         else:
             if tid == fx.Int32(0):
-                mori_shmem.int32_wait_until_equals(gate_addr, gate_epoch)
+                if const_expr(retire_control_roles):
+                    consumer_gate_epoch = fx.Int32(
+                        Vec(ticket_view.load())[0] + fx.Int64(1)
+                    )
+                else:
+                    consumer_gate_epoch = gate_epoch
+                mori_shmem.int32_wait_until_equals(
+                    gate_addr, consumer_gate_epoch
+                )
                 if const_expr(direct_fixed_slot):
                     comm_ops.fence_system_acquire()
                 else:
@@ -710,8 +737,9 @@ def compile_mega_moe_stage1(
 
         static_consumer_ticket = ticket > fx.Int32(dispatch_blocks)
         if const_expr(int8_static_schedule):
-            # Owner and producers retire immediately after finalization/payload.
-            # Only the over-issued consumer suffix participates in the plan gate.
+            # Match native fixed decode: owner/producers retire after their
+            # finite control work, while only the static consumer suffix enters
+            # the plan gate and GEMM loop.
             if static_consumer_ticket:
                 if tid == fx.Int32(0):
                     local_plan_ready = _buffer_load(
@@ -728,7 +756,26 @@ def compile_mega_moe_stage1(
                         + fx.Int64(ready_index) * fx.Int64(4),
                         payload_expected,
                     )
+                    # PLAN_READY publishes NUM_VALID.  Acquire and load it once
+                    # per CTA, then reuse the ticket LDS word for the broadcast.
+                    comm_ops.fence_system_acquire()
+                    num_valid_lane = _buffer_load(
+                        nv_rsrc, fx.Int32(0), fx.Int32
+                    )
+                    fx.ptr_store(
+                        Vec.from_elements(
+                            [fx.Int64(num_valid_lane)], fx.Int64
+                        ),
+                        ticket_scratch,
+                    )
                 fx.barrier()
+                num_valid = fx.Int32(Vec(ticket_view.load())[0])
+                num_m_tiles = (num_valid + fx.Int32(sort_block_m - 1)) // fx.Int32(sort_block_m)
+                total_work = num_m_tiles * fx.Int32(N_TILES)
+                work = ticket - fx.Int32(planner_blocks + dispatch_blocks)
+                while work < total_work:
+                    _do_scheduled_tile(work)
+                    work = work + fx.Int32(grid_x)
         else:
             if tid == fx.Int32(0):
                 local_plan_ready = _buffer_load(
@@ -746,52 +793,45 @@ def compile_mega_moe_stage1(
                     payload_expected,
                 )
             fx.barrier()
-        # All consumer waves read planner-owned tile/expert metadata.
-        if const_expr(direct_fixed_slot):
-            comm_ops.fence_system_acquire()
-        else:
             comm_ops.fence_agent_acquire()
 
-        num_valid = _buffer_load(nv_rsrc, fx.Int32(0), fx.Int32)
-        num_m_tiles = ceildiv(num_valid, fx.Int32(sort_block_m))
-        total_work = num_m_tiles * fx.Int32(N_TILES)
-        consumer_work_limit = total_work
+            num_valid = _buffer_load(nv_rsrc, fx.Int32(0), fx.Int32)
+            num_m_tiles = ceildiv(num_valid, fx.Int32(sort_block_m))
+            total_work = num_m_tiles * fx.Int32(N_TILES)
 
-        def _wait_tile_payload(flat):
-            if const_expr(payload_tile_ready):
-                tile_index = flat // fx.Int32(N_TILES)
-                expected_tiles = _buffer_load(
-                    _make_buffer_from_addr(addr_tile_expected, fx.Int32), tile_index, fx.Int32
-                )
-                mori_shmem.int32_wait_until_equals(
-                    addr_tile_ready + fx.Int64(tile_index) * fx.Int64(4), expected_tiles
-                )
-            else:
-                pe = expert_of_flat(flat)
-                pe_index = payload_parity * fx.Int32(fz_epr) + pe
-                mori_shmem.int32_wait_until_equals(
-                    addr_payload_ready + fx.Int64(pe_index) * fx.Int64(4), payload_expected
-                )
+            def _wait_tile_payload(flat):
+                if const_expr(payload_tile_ready):
+                    tile_index = flat // fx.Int32(N_TILES)
+                    expected_tiles = _buffer_load(
+                        _make_buffer_from_addr(addr_tile_expected, fx.Int32),
+                        tile_index,
+                        fx.Int32,
+                    )
+                    mori_shmem.int32_wait_until_equals(
+                        addr_tile_ready + fx.Int64(tile_index) * fx.Int64(4),
+                        expected_tiles,
+                    )
+                else:
+                    pe = expert_of_flat(flat)
+                    pe_index = payload_parity * fx.Int32(fz_epr) + pe
+                    mori_shmem.int32_wait_until_equals(
+                        addr_payload_ready + fx.Int64(pe_index) * fx.Int64(4),
+                        payload_expected,
+                    )
 
-        # Dynamic compact consumers share sharded work heads. Fixed decode uses
-        # an overissued static suffix; owner/producers retire after publication.
-        consumer_active = (
-            static_consumer_ticket
-            if const_expr(int8_static_schedule)
-            else fx.Int32(1) == fx.Int32(1)
-        )
-        static_work_item = ticket - fx.Int32(planner_blocks + dispatch_blocks)
-        work_scratch = fx.recast_iter(fx.Int32, a_buf.ptr)
-        has_work_scratch = fx.add_offset(work_scratch, fx.make_int_tuple(1))
-        work_scratch_view = fx.make_view(work_scratch, fx.make_layout(1, 1))
-        has_work_scratch_view = fx.make_view(
-            has_work_scratch, fx.make_layout(1, 1)
-        )
-        work_shard = ticket & fx.Int32(WORK_SHARDS - 1)
-        while consumer_active:
-            if const_expr(int8_static_schedule):
-                work = static_work_item
-            else:
+            work_scratch = fx.recast_iter(fx.Int32, a_buf.ptr)
+            has_work_scratch = fx.add_offset(
+                work_scratch, fx.make_int_tuple(1)
+            )
+            work_scratch_view = fx.make_view(
+                work_scratch, fx.make_layout(1, 1)
+            )
+            has_work_scratch_view = fx.make_view(
+                has_work_scratch, fx.make_layout(1, 1)
+            )
+            work_shard = ticket & fx.Int32(WORK_SHARDS - 1)
+            consumer_active = fx.Int32(1) == fx.Int32(1)
+            while consumer_active:
                 # Give the dynamic SCF branch a concrete loop-carried type;
                 # lane 0 overwrites this value before the CTA reloads it.
                 work = fx.Int32(0)
@@ -809,64 +849,62 @@ def compile_mega_moe_stage1(
                     )
                 fx.barrier()
                 work = Vec(work_scratch_view.load())[0]
-            has_work = fx.Int32(0)
-            if const_expr(int8_static_schedule):
-                has_work = (work < consumer_work_limit).select(
-                    fx.Int32(1), fx.Int32(0)
-                )
-            elif tid == fx.Int32(0):
-                has_work = (work < total_work).select(fx.Int32(1), fx.Int32(0))
-                if has_work != fx.Int32(0):  # noqa: SIM102 - keep the device and compile-time branches separate.
-                    _wait_tile_payload(work)
-                fx.ptr_store(
-                    Vec.from_elements([has_work], fx.Int32), has_work_scratch
-                )
-            if not const_expr(int8_static_schedule):
+                has_work = fx.Int32(0)
+                if tid == fx.Int32(0):
+                    has_work = (work < total_work).select(
+                        fx.Int32(1), fx.Int32(0)
+                    )
+                    if has_work != fx.Int32(0):  # noqa: SIM102 - keep the device and compile-time branches separate.
+                        _wait_tile_payload(work)
+                    fx.ptr_store(
+                        Vec.from_elements([has_work], fx.Int32),
+                        has_work_scratch,
+                    )
                 fx.barrier()
                 has_work = Vec(has_work_scratch_view.load())[0]
-            if has_work != fx.Int32(0):
-                if const_expr(not int8_static_schedule):
+                if has_work != fx.Int32(0):
                     comm_ops.fence_system_acquire()
-                if const_expr(mxfp4_transport):
-                    m_tile = work // fx.Int32(N_TILES)
-                    n_tile = work - m_tile * fx.Int32(N_TILES)
-                    tile_row_base = _buffer_load(trb_rsrc, m_tile, fx.Int32)
-                    local_expert = expert_of_flat(work)
-                    for row_offset in range_constexpr(sort_block_m):
-                        if n_tile == fx.Int32(row_offset % N_TILES):
-                            convert_mxfp4_smoothquant_row(
-                                transport_payload_rsrc,
-                                transport_scale_rsrc,
-                                transport_smooth_rsrc,
-                                converted_x_rsrc,
-                                converted_scale_rsrc,
-                                quant_reduction_scratch,
-                                tile_row_base + fx.Int32(row_offset),
-                                local_expert + fx.Int32(fz_rank * fz_epr),
-                                cols=model_dim,
-                                total_threads=TOTAL_THREADS,
+                    if const_expr(mxfp4_transport):
+                        m_tile = work // fx.Int32(N_TILES)
+                        n_tile = work - m_tile * fx.Int32(N_TILES)
+                        tile_row_base = _buffer_load(
+                            trb_rsrc, m_tile, fx.Int32
+                        )
+                        local_expert = expert_of_flat(work)
+                        for row_offset in range_constexpr(sort_block_m):
+                            if n_tile == fx.Int32(row_offset % N_TILES):
+                                convert_mxfp4_smoothquant_row(
+                                    transport_payload_rsrc,
+                                    transport_scale_rsrc,
+                                    transport_smooth_rsrc,
+                                    converted_x_rsrc,
+                                    converted_scale_rsrc,
+                                    quant_reduction_scratch,
+                                    tile_row_base + fx.Int32(row_offset),
+                                    local_expert
+                                    + fx.Int32(fz_rank * fz_epr),
+                                    cols=model_dim,
+                                    total_threads=TOTAL_THREADS,
+                                )
+                        wait_all()
+                        comm_ops.fence_agent_release()
+                        fx.barrier()
+                        if tid == fx.Int32(0):
+                            comm_ops.atomic_add_agent(
+                                addr_quant_count
+                                + fx.Int64(m_tile) * fx.Int64(4),
+                                fx.Int32(1),
                             )
-                    wait_all()
-                    comm_ops.fence_agent_release()
-                    fx.barrier()
-                    if tid == fx.Int32(0):
-                        comm_ops.atomic_add_agent(
-                            addr_quant_count + fx.Int64(m_tile) * fx.Int64(4),
-                            fx.Int32(1),
-                        )
-                    fx.barrier()
-                    if tid == fx.Int32(0):
-                        mori_shmem.int32_wait_until_equals(
-                            addr_quant_count + fx.Int64(m_tile) * fx.Int64(4),
-                            fx.Int32(N_TILES),
-                        )
-                        comm_ops.fence_agent_acquire()
-                    fx.barrier()
-                _do_scheduled_tile(work)
-            if const_expr(int8_static_schedule):
-                static_work_item = static_work_item + fx.Int32(grid_x)
-                consumer_active = static_work_item < total_work
-            else:
+                        fx.barrier()
+                        if tid == fx.Int32(0):
+                            mori_shmem.int32_wait_until_equals(
+                                addr_quant_count
+                                + fx.Int64(m_tile) * fx.Int64(4),
+                                fx.Int32(N_TILES),
+                            )
+                            comm_ops.fence_agent_acquire()
+                        fx.barrier()
+                    _do_scheduled_tile(work)
                 consumer_active = has_work != fx.Int32(0)
 
     @flyc.jit

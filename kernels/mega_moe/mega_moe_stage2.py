@@ -382,6 +382,8 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         f"_bh{int(g2_bhoist)}apf{int(g2_ascale_pf)}sp{g2_group_num}x{g2_m01}"
         f"_bf16lds{int(g2_bf16_lds)}_{p2p_quant_type}"
         f"_{quant_mode}"
+        f"_sidlds{int(int8_mode)}"
+        f"_abov{int(int8_mode)}"
     )
 
     # fmt: off
@@ -466,9 +468,10 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
             if const_expr(int8_mode):
                 accm_vecs, m_row, n_block_idx, _n_out_rt = gemm2_compute_int8(
                     lds_base_i32, arg_aq, arg_ascale, arg_bq, arg_bscale, arg_qscale, arg_qzero,
-                    arg_eids, arg_stids, unit_bx, lane, wave, i32_inter, i32_hidden,
+                    arg_eids, unit_bx, lane, wave, i32_inter, i32_hidden,
                     BM=BM, BN=BN, BK=BK, SBM=SBM, INTER_DIM=inter_dim, TOPK=topk,
-                    ATOM_TOKENS=_recv_cap, packed_int4=packed_int4, use_nt=use_nt)
+                    ATOM_TOKENS=_recv_cap, LDS_PACKED_OFF=lds_packed_off,
+                    packed_int4=packed_int4, use_nt=use_nt)
             else:
                 accm_vecs, m_row, n_block_idx, _n_out_rt = gemm2_compute_v2(lds_base_i32, arg_ascale, arg_bq,
                     arg_bscale, arg_eids, arg_aq, i32_max_m_blocks, unit_bx, lane, wave, i32_inter, i32_hidden,

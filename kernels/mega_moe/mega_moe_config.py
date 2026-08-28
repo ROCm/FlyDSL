@@ -16,8 +16,8 @@ TOKEN_BUCKETS = (1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 163
 A8W4_DECODE_MTPRS = (1, 4, 8, 16, 32, 64, 128, 256, 512)
 P2P_FP8_MIN_MTPR = 1024
 FIXED_SLOT_MAX_MTPR = 255
-A8W4SMOOTH_FIXED_SLOT_MAX_MTPR = 512
-A8W4SMOOTH_DECODE_MTPRS = (1, 4, 8, 16, 32, 64, 128, 256, 512)
+A8W4SMOOTH_FIXED_SLOT_MAX_MTPR = 1024
+A8W4SMOOTH_DECODE_MTPRS = (1, 4, 8, 16, 32, 64, 128, 256, 512, 1024)
 MAX_MTPR_CLASS = 32768
 REFERENCE_EXPERTS_PER_RANK = 48
 EXPERT_CONFIG_GRANULARITY = 64
@@ -385,7 +385,19 @@ def _apply_narrow_int_fixed_rules(
     """Derive the tuned narrow A8W4Smooth fixed-slot configuration."""
     bucket = workload.bucket
     routes = workload.routes_per_rank
-    if bucket == 8:
+    if bucket == 4:
+        stage1 = replace(
+            stage1,
+            sort_block_m=32,
+            tile_n=256,
+            num_waves=8,
+            grid_mult=1,
+            num_dispatch_cu=_fit_dispatch_cu(64, workload),
+            b_nt=0,
+            waves_per_eu_hint=2,
+            swizzle_a=False,
+        )
+    elif bucket == 8:
         stage1 = replace(
             stage1,
             sort_block_m=32,
@@ -397,7 +409,46 @@ def _apply_narrow_int_fixed_rules(
             waves_per_eu_hint=2,
             swizzle_a=False,
         )
-    elif bucket <= 128 and bucket >= 16:
+    elif bucket == 32:
+        stage1 = replace(
+            stage1,
+            sort_block_m=32,
+            tile_n=256,
+            num_waves=8,
+            grid_mult=1,
+            num_dispatch_cu=_fit_dispatch_cu(64, workload),
+            b_nt=0,
+            waves_per_eu_hint=1,
+            swizzle_a=True,
+        )
+    elif bucket == 64:
+        stage1 = replace(
+            stage1,
+            sort_block_m=32,
+            tile_n=256,
+            num_waves=8,
+            grid_mult=1,
+            num_dispatch_cu=_fit_dispatch_cu(96, workload),
+            b_nt=0,
+            waves_per_eu_hint=1,
+            swizzle_a=True,
+        )
+    elif bucket == 128:
+        # M13 decode is latency-bound at this point.  The wider N tile halves
+        # the consumer work count, while one 128-CU dispatch cohort still
+        # covers the fixed-slot payload without a second grid wave.
+        stage1 = replace(
+            stage1,
+            sort_block_m=32,
+            tile_n=256,
+            num_waves=8,
+            grid_mult=1,
+            num_dispatch_cu=_fit_dispatch_cu(128, workload),
+            b_nt=0,
+            waves_per_eu_hint=1,
+            swizzle_a=True,
+        )
+    elif bucket < 128 and bucket >= 16:
         dispatch_request = _narrow_int_dispatch_request(routes)
         low_pressure = dispatch_request <= 128
         stage1 = replace(
@@ -412,9 +463,9 @@ def _apply_narrow_int_fixed_rules(
             swizzle_a=low_pressure,
         )
     elif 128 < bucket <= A8W4SMOOTH_FIXED_SLOT_MAX_MTPR:
-        # At 256 the expected expert density leaves one M tile/expert and needs
-        # a deep consumer grid; at 512 it becomes two tiles/expert, so one grid
-        # wave plus producer retirement supplies enough GEMM workers.
+        # The replacement-consumer schedule has enough work coverage with one
+        # consumer grid wave throughout this range; extra waves only add idle
+        # admission traffic at the one-tile 256-token point.
         one_tile_density = workload.rows_per_expert < 48
         consumer_reserve = 32 if one_tile_density else 48
         stage1 = replace(
@@ -422,7 +473,7 @@ def _apply_narrow_int_fixed_rules(
             sort_block_m=64,
             tile_n=256,
             num_waves=8,
-            grid_mult=3 if one_tile_density else 1,
+            grid_mult=1,
             num_dispatch_cu=_fit_dispatch_cu(workload.num_cu - consumer_reserve, workload),
             b_nt=0,
             waves_per_eu_hint=2 if one_tile_density else 1,
@@ -430,11 +481,13 @@ def _apply_narrow_int_fixed_rules(
         )
 
     if 128 <= bucket <= A8W4SMOOTH_FIXED_SLOT_MAX_MTPR:
-        # One Stage2 CTA consumes roughly 16 routes in this shape class.  Keep
-        # a 96-CU latency floor and reserve 16 CUs at saturation for combine.
-        persist_cu = min(
-            workload.num_cu - 16,
-            max(96, routes // 16),
+        # t128 is latency-bound: two adjacent perf10 runs selected 36 CUs over
+        # the former 96-CU floor.  Denser shapes still scale one CTA per
+        # roughly 16 routes and reserve 16 CUs for combine.
+        persist_cu = (
+            36
+            if bucket == 128
+            else min(workload.num_cu - 16, max(96, routes // 16))
         )
         stage2 = replace(
             stage2,
@@ -575,7 +628,7 @@ def select_mega_moe_config(
         if tokens != mtpr or mtpr not in A8W4SMOOTH_DECODE_MTPRS:
             raise ValueError(
                 "a8w4smooth decode requires tokens=MTPR in "
-                "{1,4,8,16,32,64,128,256,512}"
+                f"{A8W4SMOOTH_DECODE_MTPRS}"
             )
         if (
             experts_per_rank,

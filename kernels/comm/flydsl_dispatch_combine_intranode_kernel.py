@@ -34,13 +34,14 @@ from kernels.common.buffer_ops import (
 from .communication_ops_utils import (
     atomic_add_global_at,
     fence_system_acquire,
+    fence_system_seq_cst,
     load_i64_global,
     store_i32_system,
     store_i64_global_system,
 )
 
 # Bump when generated kernel shape changes.
-_DISPATCH_COMBINE_JIT_SCHEMA_VERSION = "v10-stage2-blockwise-fp8-scale-prefetch"
+_DISPATCH_COMBINE_JIT_SCHEMA_VERSION = "v16-stage2-p2p-system-fence"
 
 # Stage-3 switches from narrow step=64 to wide step=128/256 above this threshold.
 _S3_WIDE_PATH_THRESHOLD_I32 = 895
@@ -773,18 +774,21 @@ def make_combine_kernel(
                         wt_val = buffer_load(rsrc_wt_src, lane, vec_width=1, dtype=T.i32())
                         buffer_store(wt_val, rsrc_wt_dst, lane)
 
-        # Stage 2: CrossDeviceBarrier. Each rank publishes xdb_cur_flag into every
-        # peer's xdev_bar_mem[rank], then waits to observe it from all peers.
+        # Stage 2: CrossDeviceBarrier.  The combine launch follows the Stage2
+        # producer on the same stream.  One system-scope fence after every local
+        # combine block arrives makes the preceding P2P stores visible before
+        # block 0 publishes this rank's epoch to its peers.
         fx.barrier()
         if tid == 0:
             atomic_add_global_at(addr_comb_bar, 1)
 
-        if grid_thread_id < npes:
+        if grid_thread_id == 0:
             mori_shmem.int32_wait_until_equals(addr_comb_bar, block_num)
-            # Acquire fence pairs with the per-block release atomic_add on
-            # ``addr_comb_bar``; makes Stage 1 P2P writes visible.
-            fence_system_acquire()
+            fence_system_seq_cst()
             buffer_store(fx.Int32(0), _r_comb_bar, 0)
+
+        fx.barrier()
+        if grid_thread_id < npes:
             xdb_remote_addr = buffer_load(_r_p2p_xdb, grid_thread_id, vec_width=1, dtype=T.i64()) + fx.Int64(rank) * 8
             store_i64_global_system(xdb_remote_addr, xdb_cur_flag)
 
@@ -794,8 +798,8 @@ def make_combine_kernel(
         if tid < npes:
             xdb_peer_slot = addr_shmem_xdb_mem + fx.Int64(tid) * 8
             mori_shmem.uint64_wait_until_equals(xdb_peer_slot, xdb_cur_flag)
-            # wait_until_equals' relaxed-system load does not invalidate L2, so a
-            # paired acquire fence is required before Stage 3 reads peer shmem_comb_inp.
+            # Mori waits use relaxed-system loads; pair them with an acquire
+            # before Stage 3 consumes peer shmem_comb_inp.
             fence_system_acquire()
 
         fx.barrier()

@@ -5,6 +5,7 @@
 from flydsl.runtime.device import get_rocm_arch  # re-exported for test overrides
 
 from .mega_moe_config import A8W4_DECODE_MTPRS, A8W4SMOOTH_DECODE_MTPRS
+
 __all__ = [
     "A8W4_ENTRY_COUNT_SHARDS",
     "ENTRY_COUNT_SHARDS",
@@ -112,7 +113,7 @@ def _validate_a8w4smooth_decode(common, *, mxfp4_transport, smoothquant_mode):
     if common["fuse_mtpr"] not in A8W4SMOOTH_DECODE_MTPRS:
         raise ValueError(
             "a8w4smooth decode requires MTPR in "
-            "{1,4,8,16,32,64,128,256,512}"
+            f"{A8W4SMOOTH_DECODE_MTPRS}"
         )
     if any(
         (
