@@ -113,6 +113,11 @@ def FlyROCDL_MmaOpGFX1250_WMMA : FlyROCDL_MmaOp<"MmaOpGFX1250_WMMA", "gfx1250.wm
                    signA, signB, clamp,
                    /*modC=*/0, /*reuseA=*/false, /*reuseB=*/false);
     }]>,
+    TypeBuilderWithInferredContext<(ins "int32_t":$m, "int32_t":$n, "int32_t":$k, "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc, "bool":$signA, "bool":$signB, "bool":$clamp, "int32_t":$modC), [{
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc,
+                   signA, signB, clamp, modC,
+                   /*reuseA=*/false, /*reuseB=*/false);
+    }]>,
     TypeBuilderWithInferredContext<(ins "int32_t":$m, "int32_t":$n, "int32_t":$k, "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc, "bool":$signA, "bool":$signB, "bool":$clamp, "int32_t":$modC, "bool":$reuseA, "bool":$reuseB), [{
       return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc,
                    signA, signB, clamp, modC, reuseA, reuseB);
