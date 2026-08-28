@@ -165,8 +165,14 @@ SmallVector<int32_t> tileShape(const Geometry &geometry);
 /// tensor with it is what the caller still does in IR; everything up to it is static and
 /// is folded here, which is why this hands back a layout rather than a tensor.
 ///
-/// `smemLayout` decides the split. Inverting it gives the order the tile is laid out in
-/// LDS; that order is cut into `numWarps` equal chunks and the first ATOM values of a
+/// Only mode-0 -- the TDM box one call fills -- is related here: `smemLayout` and
+/// `coordShape` are cut by their mode-0, whose sizes must agree, while any remaining "rest"
+/// modes (e.g. PIPE on the LDS side, k-tiles on the coordinate side) pass through untouched
+/// and may differ. The caller applies the returned mode-0 tiler by-mode (padding the rest
+/// with pass-through), so mode 0 is reshaped and the rest is left alone.
+///
+/// `smemLayout`'s mode-0 decides the split. Inverting it gives the order the box is laid out
+/// in LDS; that order is cut into `numWarps` equal chunks and the first ATOM values of a
 /// chunk are what one descriptor fills. The padding is divided out first, because a pad is
 /// a hole in the addresses and not in the values.
 ///
