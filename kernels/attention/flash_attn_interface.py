@@ -81,6 +81,25 @@ def _dense_routes_to_dualwave(batch: int, seq_len: int) -> bool:
     return seq_len >= _DENSE_DUALWAVE_MIN_SEQ
 
 
+def _varlen_causal_lpt(causal_lpt, batch: int, max_seqlen_q: int) -> bool:
+    """Resolve causal_lpt=None for the varlen route; True/False stay as given.
+
+    Varlen sizes grid_dim.y from the batch-wide max seqlen, so every sequence shorter
+    than that leaves inactive workgroups on the axis LPT reverses. While one sequence
+    spans at least twice as many q-blocks as the batch has sequences, reversing shortens
+    the causal tail as intended (measured 1.006-1.075x); past that the batch axis
+    dominates the dispatch and the reversal costs up to 4%.
+
+    The factor of two is not slack. Sweeping B as a fraction of the q-block count at
+    max_seqlen_q 8k/16k/32k puts the crossover at 0.75-0.875 of it, consistently across
+    all three, so admitting the whole range would keep LPT on over a band that measures
+    0.974-0.998x. Half is the widest round threshold whose entire range is a win.
+    """
+    if causal_lpt is not None:
+        return bool(causal_lpt)
+    return 2 * batch <= -(-int(max_seqlen_q) // DUALWAVE_SWP_BLOCK_M)
+
+
 def _dense_light_cu(device: torch.device) -> int:
     try:
         return int(torch.cuda.get_device_properties(device.index).multi_processor_count)
@@ -225,6 +244,7 @@ def _build_varlen(
     setprio: bool,
     debug_lazy_counts: bool,
     enable_stagger: bool,
+    causal_lpt: bool = True,
     return_lse: bool = False,
     has_bias: bool = False,
     has_alibi: bool = False,
@@ -247,6 +267,7 @@ def _build_varlen(
         dualwave_swp_setprio=setprio,
         dualwave_swp_debug_lazy_counts=debug_lazy_counts,
         dualwave_swp_enable_stagger=enable_stagger,
+        causal_lpt=causal_lpt,
         return_lse=return_lse,
         has_bias=has_bias,
         has_alibi=has_alibi,
@@ -302,6 +323,7 @@ def _build_splitk(
     lazy_rescale: bool,
     setprio: bool,
     enable_stagger: bool,
+    causal_lpt: bool = True,
     return_lse: bool = False,
     has_bias: bool = False,
     has_alibi: bool = False,
@@ -322,6 +344,7 @@ def _build_splitk(
         dualwave_swp_lazy_rescale=lazy_rescale,
         dualwave_swp_setprio=setprio,
         dualwave_swp_enable_stagger=enable_stagger,
+        causal_lpt=causal_lpt,
         return_lse=return_lse,
         has_bias=has_bias,
         has_alibi=has_alibi,
@@ -395,7 +418,6 @@ def _build_paged(
 
 # KV tile length the dualwave pipeline consumes per step; a page holds one or more.
 _PAGED_TILE = 64
-_PAGED_PAGE_SIZES = (64, 128)
 # Block-table entries (one per KV tile) staged in LDS per split.
 _PAGED_BT_LDS_SIZE = 2048
 
@@ -419,7 +441,16 @@ def _paged_kv_row_stride(k, v, page_size, num_kv_heads, head_dim):
         return None
     if num_kv_heads > 1 and head_stride != head_dim:
         return None
-    return None if row_stride == dense_row else row_stride
+    if row_stride == dense_row:
+        return None
+    # The page descriptor spans one page, page_size * row_stride elements, and is built
+    # as a signed-int32 element extent and a 32-bit unsigned byte span. A pitch that
+    # overflows either wraps silently and reads the wrong rows, so report it as dense
+    # and let the caller copy into a layout that fits.
+    page_elems = page_size * row_stride
+    if page_elems >= 2**31 or page_elems * k.element_size() >= 2**32:
+        return None
+    return row_stride
 
 
 def _flydsl_flash_attn_paged(
@@ -445,14 +476,15 @@ def _flydsl_flash_attn_paged(
     dualwave_swp_lazy_rescale: bool,
     dualwave_swp_setprio: bool,
     dualwave_swp_enable_stagger: bool,
-    causal_lpt: bool,
+    causal_lpt: Optional[bool],
     stream,
 ) -> torch.Tensor:
     """Native paged-KV attention on the gfx950 dualwave kernel.
 
-    Supported config ONLY (anything else raises): linear (page_size 64 or 128) or
-    vectorized (page_size 64) cache layout [NumBlocks, PageSize, NumKVHeads, HeadDim],
-    vLLM lookup (block_table + seqlen_k), causal, D=64/128, dtype bf16/f16.
+    Supported config ONLY (anything else raises): linear (page_size any multiple of the
+    64-token KV tile) or vectorized (page_size 64) cache layout
+    [NumBlocks, PageSize, NumKVHeads, HeadDim], vLLM lookup (block_table + seqlen_k),
+    causal, D=64/128, dtype bf16/f16.
     - Dense 4D Q ``[B, Sq, H, D]``: split-K (num_kv_splits>1) supported (seq_len>=384).
     - Varlen packed Q ``[total_q, H, D]`` (cu_seqlens_q given): paged K/V looked up
       per kv-tile via block_table; split-K not supported (matches dense varlen).
@@ -509,9 +541,10 @@ def _flydsl_flash_attn_paged(
         raise NotImplementedError(
             f"flydsl_flash_attn_func: vectorized paged KV supports page_size={_PAGED_TILE} only, got {page_size}"
         )
-    if page_size not in _PAGED_PAGE_SIZES:
+    if page_size < _PAGED_TILE or page_size % _PAGED_TILE != 0:
         raise NotImplementedError(
-            f"flydsl_flash_attn_func: native paged KV supports page_size in {_PAGED_PAGE_SIZES}, got {page_size}"
+            f"flydsl_flash_attn_func: native paged KV supports page_size as a multiple of "
+            f"{_PAGED_TILE}, got {page_size}"
         )
     if D not in (64, 128):
         raise NotImplementedError(f"flydsl_flash_attn_func: native paged KV supports head_dim=64 or 128, got {D}")
@@ -631,7 +664,7 @@ def _flydsl_flash_attn_paged(
                 varlen=varlen,
                 kv_cache_layout=kv_cache_layout,
                 has_bias=bias is not None,
-                causal_lpt=causal_lpt,
+                causal_lpt=_varlen_causal_lpt(causal_lpt, B, Sq) if varlen else causal_lpt is not False,
                 page_size=page_size,
             )
         if out is None:
@@ -761,8 +794,10 @@ def flydsl_flash_attn_func(
     dualwave_swp_xcd_swizzle: Optional[bool] = None,
     # Reverse the causal q-block grid axis so the heaviest blocks issue first,
     # shortening the makespan tail. Bit-identical, being a permutation of
-    # workgroup -> q-block. See flash_attn_utils._init_causal_lpt_order.
-    causal_lpt: bool = True,
+    # workgroup -> q-block. None auto-selects on varlen, where a batch holding more than
+    # half as many sequences as one sequence has q-blocks makes the reversal
+    # counterproductive; True/False force it. See flash_attn_utils._init_causal_lpt_order.
+    causal_lpt: Optional[bool] = None,
     # Debug: pass a pre-allocated float32[2] tensor to enable the lazy-rescale
     # branch counter (dualwave_swp_debug_lazy_counts=True). Only for dense mode.
     debug_counts: Optional[torch.Tensor] = None,
@@ -780,8 +815,8 @@ def flydsl_flash_attn_func(
            Paged KV cache (future ABI): physical K/V cache tensors. Supported
            ``kv_cache_layout`` values:
            - ``linear``: 4D paged K/V, ``[NumBlocks, PageSize, NumKVHeads, HeadDim]``,
-             page_size 64 or 128. K/V may be views into a wider packed cache row as
-             long as pages stay ``PageSize`` rows apart.
+             page_size any multiple of the 64-token KV tile. K/V may be views into a
+             wider packed cache row as long as pages stay ``PageSize`` rows apart.
            - ``linear3d``: page_size=1 special case,
              ``[NumBlocks, NumKVHeads, HeadDim]``.
            - ``vectorized``: aiter-style 5D K/V, where
@@ -1106,6 +1141,7 @@ def flydsl_flash_attn_func(
                 lazy_rescale=dualwave_swp_lazy_rescale,
                 setprio=dualwave_swp_setprio,
                 enable_stagger=dualwave_swp_enable_stagger,
+                causal_lpt=causal_lpt is not False,
                 return_lse=return_lse,
                 has_bias=has_bias,
                 has_alibi=has_alibi,
@@ -1154,6 +1190,7 @@ def flydsl_flash_attn_func(
                     setprio=dualwave_swp_setprio,
                     debug_lazy_counts=debug_lazy,
                     enable_stagger=dualwave_swp_enable_stagger,
+                    causal_lpt=_varlen_causal_lpt(causal_lpt, B, Sq),
                     return_lse=return_lse,
                     has_bias=has_bias,
                     has_alibi=has_alibi,
@@ -1226,7 +1263,7 @@ def flydsl_flash_attn_func(
                         setprio=dualwave_swp_setprio,
                         debug_lazy_counts=debug_lazy,
                         enable_stagger=dualwave_swp_enable_stagger,
-                        causal_lpt=causal_lpt,
+                        causal_lpt=causal_lpt is not False,
                         return_lse=return_lse,
                         has_bias=has_bias,
                         has_alibi=has_alibi,
