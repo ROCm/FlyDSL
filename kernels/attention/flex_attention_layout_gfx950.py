@@ -78,7 +78,6 @@ _K_HALF_BANK_SKEW_BYTES = 0
 _K_HALF_BANK_SKEW_ELEMS = _K_HALF_BANK_SKEW_BYTES // 2
 FLEX_DTYPE_BF16 = 2
 FLEX_DTYPE_FP16 = 3
-FLEX_DTYPE_FP8 = 4
 
 _LOG2E = 1.4426950408889634
 
@@ -270,7 +269,7 @@ def make_flex_attn_param(
     score_alibi_slope: float = 0.0,
     num_kv_splits: int = 1,
 ) -> FlexAttnParam:
-    if dtype_id not in (FLEX_DTYPE_BF16, FLEX_DTYPE_FP16, FLEX_DTYPE_FP8):
+    if dtype_id not in (FLEX_DTYPE_BF16, FLEX_DTYPE_FP16):
         raise ValueError(f"unsupported dtype_id={dtype_id}")
     if block_m <= 0 or block_n <= 0 or head_dim <= 0:
         raise ValueError("block_m, block_n, head_dim must be positive")
@@ -279,8 +278,6 @@ def make_flex_attn_param(
     # 32. The C-fragment slot->row map is only locked for block_m=32 (2 M-waves x
     # mma_m=16), one N-wave; larger block_m needs a per-slot row map (TODO perf).
     _valid_mma = ((16, 32), (16, 16), (32, 16), (32, 8))
-    if dtype_id == FLEX_DTYPE_FP8:
-        _valid_mma = ((32, 64),)  # scaled MFMA 32x32x64
     if not (mma_m == mma_n and (mma_m, mma_k) in _valid_mma):
         raise ValueError(f"unsupported MMA shape {mma_m}x{mma_n}x{mma_k} for dtype_id={dtype_id}")
     if block_m % (m_waves * mma_m) != 0:
@@ -319,7 +316,7 @@ def make_flex_attn_param(
             stacklevel=2,
         )
 
-    in_dbytes = 1 if dtype_id == FLEX_DTYPE_FP8 else 2
+    in_dbytes = 2
 
     group_threads = m_waves * n_waves * GFX950_WAVE_SIZE
     block_threads = num_groups * group_threads
@@ -400,8 +397,6 @@ _FM_CONTRACT = fx.arith.FastMathFlags.contract
 def _elem_dtype(dtype_id):
     if dtype_id == FLEX_DTYPE_FP16:
         return fx.Float16
-    if dtype_id == FLEX_DTYPE_FP8:
-        return fx.Float8E4M3FN
     return fx.BFloat16
 
 
@@ -473,7 +468,7 @@ def _mfma_acc(a, b, c, mma_atom):
 
 @flyc.kernel
 def flex_attn_fwd_gfx950_kernel(
-    o: fx.Tensor,       # [B, Sq, Hq, D]  — output, always bf16 for fp8
+    o: fx.Tensor,       # [B, Sq, Hq, D]
     q: fx.Tensor,       # [B, Sq, Hq, D]
     k: fx.Tensor,       # [B, Skv, Hkv, D]
     v: fx.Tensor,       # [B, Skv, Hkv, D]
@@ -484,9 +479,6 @@ def flex_attn_fwd_gfx950_kernel(
     tiled_mma_qk: fx.TiledMma,
     tiled_mma_pv: fx.TiledMma,
     param: FlexAttnParam,
-    q_descale: fx.Float32 = fx.Float32(1.0),
-    k_descale: fx.Float32 = fx.Float32(1.0),
-    v_descale: fx.Float32 = fx.Float32(1.0),
     ws_o: fx.Tensor = fx.Tensor,
     ws_ml: fx.Tensor = fx.Tensor,
 ):
@@ -494,7 +486,6 @@ def flex_attn_fwd_gfx950_kernel(
     block_n = param.block_n
     head_dim = param.head_dim
     elem_dtype = _elem_dtype(param.dtype_id)
-    _is_fp8 = int(param.dtype_id) == FLEX_DTYPE_FP8
 
     tid = fx.thread_idx.x
     # Strategy A: num_groups independent 2-wave query subtiles per workgroup, all
@@ -592,7 +583,7 @@ def flex_attn_fwd_gfx950_kernel(
     tcB_q = fx.make_tiled_copy_B(ca, tiled_mma_qk).get_slice(local_tid)
     frag_Q = thr_qk.make_fragment_B(gQ)
     fx.copy(ca, tcB_q.partition_S(gQ), tcB_q.retile(frag_Q))
-    if const_expr(_is_32x32 and not _is_fp8):
+    if const_expr(_is_32x32):
         n_q = _size_scalar(frag_Q.shape)
         for qi in range_constexpr(n_q):
             frag_Q[qi] = _to_elem(_to_elem(frag_Q[qi], fx.Float32) * scale, elem_dtype)
@@ -620,9 +611,7 @@ def flex_attn_fwd_gfx950_kernel(
     else:
         npair = n_c // 2
 
-    if const_expr(_is_fp8):
-        scale_log2e = scale * fx.Float32(_LOG2E) * q_descale * k_descale
-    elif const_expr(_is_32x32):
+    if const_expr(_is_32x32):
         scale_log2e = fx.Float32(_LOG2E)
     else:
         scale_log2e = scale * fx.Float32(_LOG2E)
@@ -659,10 +648,7 @@ def flex_attn_fwd_gfx950_kernel(
     # V is loaded as A operand for PV GEMM (V=A, P=B).
     # V LDS has 4 compact sub-tiles [block_n, 32]:(32, 1). LDSReadTrans16_64b
     # transposes each [block_n, 32] → [32, block_n] = A[M=D_chunk, K=score].
-    if const_expr(_is_fp8):
-        _v_tr_atom = fx.make_copy_atom(rocdl.cdna4.LDSReadTrans8_64b(), elem_dtype)
-    else:
-        _v_tr_atom = fx.make_copy_atom(rocdl.cdna4.LDSReadTrans16_64b(), elem_dtype)
+    _v_tr_atom = fx.make_copy_atom(rocdl.cdna4.LDSReadTrans16_64b(), elem_dtype)
     # View sub-tiles as [M=32(D), K=block_n(score)]:(1, 32) — column-major.
     # The transpose atom reads score-contiguous data from LDS and delivers A[M=D, K=score].
     # DMA infrastructure
@@ -975,10 +961,7 @@ def flex_attn_fwd_gfx950_kernel(
 
 
 
-    if const_expr(_is_fp8):
-        _qk_mma_atom = fx.make_mma_atom(rocdl.cdna4.MFMA_Scale(param.mma_m, param.mma_n, param.mma_k, elem_dtype))
-    else:
-        _qk_mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype))
+    _qk_mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype))
 
     def _frag_reps(tensor, mode):
         return fx.size(fx.get_shape(tensor)[mode]).to_py_value()
@@ -1081,22 +1064,13 @@ def flex_attn_fwd_gfx950_kernel(
     # After QK swap (K=A, Q=B), C's M-rows = score indices.
     # C→B is register-local: pack 16 f32 → 2 × v8bf16.
     # V is loaded as A from LDS per D-chunk.
-    # PV GEMM uses bf16 MFMA for fp8 (HIPREC mode) or native dtype MFMA for bf16/f16.
-    if const_expr(_is_fp8):
-        _pv_mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(32, 32, 16, fx.BFloat16))
-    else:
-        _pv_mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype))
+    _pv_mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype))
 
     _is_bf16 = int(param.dtype_id) == FLEX_DTYPE_BF16
 
     def _pack_8_f32_to_v8elem(vals_8):
-        """Pack 8 f32 values into v8 of elem_dtype (bf16 or f16).
-
-        For FP8: uses bf16 packing — the PV GEMM currently uses the bf16
-        MFMA path even for fp8 input (HIPREC mode). Full fp8 PV with
-        cvt_pk_fp8_f32 + scaled MFMA is a follow-up.
-        """
-        if const_expr(_is_bf16 or _is_fp8):
+        """Pack 8 f32 values into v8 of elem_dtype (bf16 or f16)."""
+        if const_expr(_is_bf16):
             pairs = []
             for j in range_constexpr(4):
                 pairs.append(rocdl.cvt_pk_bf16_f32(vals_8[j * 2], vals_8[j * 2 + 1]))
@@ -1581,8 +1555,6 @@ def flex_attn_fwd_gfx950_kernel(
         inv_l = fx.Float32(1.0) / _safe_l
     else:
         inv_l = fx.Float32(1.0) / l_i[0]
-    if const_expr(_is_fp8):
-        inv_l = inv_l * v_descale
     inv_l_vec = Vec.from_elements([inv_l], fx.Float32).broadcast_to(16)
     for dc in range_constexpr(_n_d_chunks):
         o_accs[dc] = (Vec(o_accs[dc]) * inv_l_vec).ir_value()
@@ -1594,7 +1566,7 @@ def flex_attn_fwd_gfx950_kernel(
     _qrow = fx.Int32(local_tid % 32)
     _group_d_base = fx.Int32((local_tid // 32) * 4)
     _o_row_stride = hq * head_dim
-    _out_elem_dtype = fx.BFloat16 if const_expr(_is_fp8) else elem_dtype
+    _out_elem_dtype = elem_dtype
 
     if const_expr(_SPLITK):
         # Split-K: write normalized partial O (f32) + (m, l) to workspace.
@@ -1760,7 +1732,7 @@ def flex_splitk_combine_kernel(
     _sq = _rem % _Sq
     _o_off = _b * _Sq * _Hq * fx.Int32(head_dim) + _sq * _Hq * fx.Int32(head_dim) + _h * fx.Int32(head_dim) + d_col
 
-    _out_elem = fx.BFloat16 if const_expr(out_dtype_id == FLEX_DTYPE_BF16 or out_dtype_id == FLEX_DTYPE_FP8) else fx.Float16
+    _out_elem = fx.BFloat16 if const_expr(out_dtype_id == FLEX_DTYPE_BF16) else fx.Float16
     o_it = fx.recast_iter(_out_elem, fx.get_iter(o))
     for e in range_constexpr(4):
         val = result[e].to(_out_elem)
@@ -1776,9 +1748,6 @@ def launch_flex_attn_gfx950(
     scale: fx.Float32,
     param: FlexAttnParam,
     stream: fx.Stream = fx.Stream(None),
-    q_descale: fx.Float32 = fx.Float32(1.0),
-    k_descale: fx.Float32 = fx.Float32(1.0),
-    v_descale: fx.Float32 = fx.Float32(1.0),
     ws_o: fx.Tensor = fx.Tensor,
     ws_ml: fx.Tensor = fx.Tensor,
 ):
@@ -1794,21 +1763,12 @@ def launch_flex_attn_gfx950(
     wave_layout = fx.make_layout(
         (param.m_waves, param.n_waves, 1), (param.n_waves, 1, 0)
     )
-    _is_fp8_launch = int(param.dtype_id) == FLEX_DTYPE_FP8
-    if const_expr(_is_fp8_launch):
-        mma_atom_qk = fx.make_mma_atom(
-            rocdl.cdna4.MFMA_Scale(param.mma_m, param.mma_n, param.mma_k, elem_dtype)
-        )
-        mma_atom_pv = fx.make_mma_atom(
-            rocdl.cdna4.MFMA_Scale(param.mma_m, param.mma_n, param.mma_k, elem_dtype)
-        )
-    else:
-        mma_atom_qk = fx.make_mma_atom(
-            fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype)
-        )
-        mma_atom_pv = fx.make_mma_atom(
-            fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype)
-        )
+    mma_atom_qk = fx.make_mma_atom(
+        fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype)
+    )
+    mma_atom_pv = fx.make_mma_atom(
+        fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype)
+    )
     tiled_mma_qk = fx.make_tiled_mma(mma_atom_qk, wave_layout)
     tiled_mma_pv = fx.make_tiled_mma(mma_atom_pv, wave_layout)
 
@@ -1827,7 +1787,7 @@ def launch_flex_attn_gfx950(
 
     flex_attn_fwd_gfx950_kernel(
         o, q, k, v, seqlen_q, seqlen_kv, b, scale, tiled_mma_qk, tiled_mma_pv, param,
-        q_descale, k_descale, v_descale, ws_o, ws_ml,
+        ws_o, ws_ml,
         value_attrs={
             "rocdl.waves_per_eu": _waves_per_eu,
             "rocdl.flat_work_group_size": f"{param.block_threads},{param.block_threads}",
@@ -1977,80 +1937,10 @@ def flydsl_flex_attention_layout(
     return out
 
 
-def flydsl_flex_attention_layout_fp8(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    q_descale: float,
-    k_descale: float,
-    v_descale: float,
-    *,
-    scale: Optional[float] = None,
-    num_kv_heads: Optional[int] = None,
-    out: Optional[torch.Tensor] = None,
-    block_m: int = 32,
-    block_n: int = 32,
-    num_groups: int = 2,
-    accurate_softmax: bool = True,
-    mask_type: int = MASK_NONE,
-    score_type: int = SCORE_NONE,
-    mask_window: int = 0,
-    score_alibi_slope: float = 0.0,
-    stream: Optional[torch.cuda.Stream] = None,
-) -> torch.Tensor:
-    """FP8 flex-attention forward on the layout API (gfx950).
+FLEX_DTYPE_FP8 = 4  # stub for test imports
 
-    q/k/v: ``[B, S, H, D]`` (BSHD), float8_e4m3fn.
-    q/k/v_descale: per-tensor f32 descale scalars.
-    Returns ``[B, Sq, Hq, D]`` in bf16.
-    """
-    arch = get_rocm_arch()
-    if not arch.startswith("gfx950"):
-        raise RuntimeError(f"flex_attention_layout targets gfx950; got {arch!r}")
-    if not (q.is_cuda and k.is_cuda and v.is_cuda):
-        raise ValueError("q/k/v must be CUDA tensors")
-    if q.dtype != torch.float8_e4m3fn:
-        raise ValueError(f"expected float8_e4m3fn, got {q.dtype}")
-    if q.dim() != 4:
-        raise ValueError(f"q must be 4D [B,S,H,D], got {q.dim()}D")
 
-    B, Sq, Hq, D = q.shape
-    Skv, Hkv = k.shape[1], k.shape[2]
-    if num_kv_heads is not None and num_kv_heads != Hkv:
-        raise ValueError(f"num_kv_heads {num_kv_heads} != k head count {Hkv}")
-    rows_per_wg = block_m * num_groups
-    if Sq % rows_per_wg != 0:
-        raise ValueError(
-            f"seqlen_q ({Sq}) must be a multiple of block_m*num_groups ({rows_per_wg})"
-        )
-    if scale is None:
-        scale = 1.0 / (D ** 0.5)
-    if stream is None:
-        stream = torch.cuda.current_stream()
-    if out is None:
-        out = torch.empty(B, Sq, Hq, D, dtype=torch.bfloat16, device=q.device)
+def flydsl_flex_attention_layout_fp8(*args, **kwargs):
+    raise NotImplementedError("FP8 flex attention is not supported in this build")
 
-    param = make_flex_attn_param(
-        seqlen_kv=Skv,
-        dtype_id=FLEX_DTYPE_FP8,
-        block_m=block_m,
-        block_n=block_n,
-        head_dim=D,
-        num_heads_q=Hq,
-        num_heads_kv=Hkv,
-        num_groups=num_groups,
-        mma_m=32,
-        mma_n=32,
-        mma_k=64,
-        accurate_softmax=accurate_softmax,
-        mask_type=mask_type,
-        score_type=score_type,
-        mask_window=mask_window,
-        score_alibi_slope=score_alibi_slope,
-    )
-    launch_flex_attn_gfx950(
-        out.contiguous(), q.contiguous(), k.contiguous(), v.contiguous(),
-        fx.Float32(scale), param, stream,
-        fx.Float32(q_descale), fx.Float32(k_descale), fx.Float32(v_descale),
-    )
-    return out
+
