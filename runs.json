@@ -1,8 +1,81 @@
 {
  "schema": 1,
- "updated": "2026-08-28T02:43:34Z",
+ "updated": "2026-08-28T03:27:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33137993066,
+   "pr": 1058,
+   "commit": "65c02a347333fdbb019fc4c4ee4929e8f2dc653c",
+   "branch": "perf/jit-compile-cache-fingerprint",
+   "event": "pull_request",
+   "title": "[Perf] avoid hashing when cache not enabled",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33137993066",
+   "created_at": "2026-08-28T03:07:54Z",
+   "updated_at": "2026-08-28T03:07:54Z",
+   "actor": "ppppqp",
+   "jobs": []
+  },
+  {
+   "run_id": 33137638181,
+   "pr": 1077,
+   "commit": "b1e1275d7f1cb47e7a2dae3b8ce3f162b6e8b8fe",
+   "branch": "bf16_ds_read_b256_optimization",
+   "event": "pull_request",
+   "title": "i[gfx1250] Switch BF16 GEMM LDS loads to ds_read_b256, +0.4 TB/s",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33137638181",
+   "created_at": "2026-08-28T03:00:56Z",
+   "updated_at": "2026-08-28T03:19:57Z",
+   "actor": "amd-hhashemi",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-28T03:20:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33137638181/job/98744049170"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-28T03:20:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33137638181/job/98744049204"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-28T03:19:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33137638181/job/98744049219"
+    }
+   ]
+  },
+  {
+   "run_id": 33137307493,
+   "pr": 1073,
+   "commit": "319420730e4fcdfef3fc7743f87673759ee50f47",
+   "branch": "rdna3-int8-wmma-gemm",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add RDNA3 INT8 WMMA GEMM, 1.23-2.80x over torch",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33137307493",
+   "created_at": "2026-08-28T02:54:16Z",
+   "updated_at": "2026-08-28T03:04:02Z",
+   "actor": "vlluvia",
+   "jobs": []
+  },
   {
    "run_id": 33117631657,
    "pr": 1051,
@@ -104,9 +177,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33078414918",
    "created_at": "2026-08-27T13:44:28Z",
-   "updated_at": "2026-08-28T02:28:45Z",
+   "updated_at": "2026-08-28T03:24:27Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-28T03:24:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33078414918/job/98744736768"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-28T03:24:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33078414918/job/98744736779"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-08-28T03:24:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33078414918/job/98744736796"
+    }
+   ]
   },
   {
    "run_id": 33076498887,
@@ -215,7 +316,7 @@
   },
   {
    "run_id": 33072268362,
-   "pr": 1073,
+   "pr": null,
    "commit": "2782595c814c30e30ee5d57f33591cb3cc377aac",
    "branch": "rdna3-int8-wmma-gemm",
    "event": "pull_request",
@@ -1990,82 +2091,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 32790747134,
-   "pr": 1015,
-   "commit": "b491815eb1f1b1f348388aeaadda4a284414b580",
-   "branch": "phil/isa-resource-diff-arch-general",
-   "event": "pull_request",
-   "title": "[Tools] Add architecture-general ISA resource diff tool",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32790747134",
-   "created_at": "2026-08-24T23:45:20Z",
-   "updated_at": "2026-08-25T07:36:45Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-25T06:52:55Z",
-     "completed_at": "2026-08-25T07:36:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32790747134/job/97712595151",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-25T01:56:11Z",
-     "completed_at": "2026-08-25T03:47:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32790747134/job/97712595649",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-25T01:56:01Z",
-     "completed_at": "2026-08-25T02:16:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32790747134/job/97712627172",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32790217031,
-   "pr": null,
-   "commit": "692b0b132ce3ad60cba6bba1363b393e1912beb9",
-   "branch": "jhinpan/softmax-autotune",
-   "event": "pull_request",
-   "title": "[Kernel] Add opt-in autotuning for Softmax",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32790217031",
-   "created_at": "2026-08-24T23:38:10Z",
-   "updated_at": "2026-08-25T00:04:43Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 32788613020,
-   "pr": 901,
-   "commit": "7bd801414b935ba49b6e62849503890a192700ab",
-   "branch": "moe_sorting_optimization",
-   "event": "pull_request",
-   "title": "Add Optimized MoE Routing Path",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32788613020",
-   "created_at": "2026-08-24T23:16:43Z",
-   "updated_at": "2026-08-25T00:05:46Z",
-   "actor": "amd-wsung102",
-   "jobs": []
   }
  ]
 }
