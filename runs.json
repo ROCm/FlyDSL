@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-28T12:47:10Z",
+ "updated": "2026-08-28T13:01:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -615,11 +615,11 @@
    "branch": "main",
    "event": "push",
    "title": "[CI] Add MI35x runners for validation tests (#1075)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33076498887",
    "created_at": "2026-08-27T13:22:37Z",
-   "updated_at": "2026-08-27T13:48:24Z",
+   "updated_at": "2026-08-28T12:59:54Z",
    "actor": "coderfeli",
    "jobs": [
     {
