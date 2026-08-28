@@ -61,7 +61,7 @@ def test_wmma_scale_type_roundtrip():
         assert ir.Type.parse(str(t_reuse)) == t_reuse
 
 
-def test_wmma_type_modc_reuse_roundtrip():
+def test_wmma_type_modc_roundtrip():
     with _ctx(), ir.Location.unknown():
         from flydsl._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaOpGFX1250_WMMAType
         from flydsl._mlir.dialects import fly_rocdl  # noqa: F401
@@ -71,12 +71,12 @@ def test_wmma_type_modc_reuse_roundtrip():
 
         t_default = MmaOpGFX1250_WMMAType.get(16, 16, 32, bf16, bf16, f32)
         assert "gfx1250.wmma<" in str(t_default)
-        # Defaults (modC=0, reuseA/reuseB=false) are elided from the printed form.
+        # Defaults (modC=0) are elided from the printed form.
         assert "modC" not in str(t_default)
         assert ir.Type.parse(str(t_default)) == t_default
 
-        t_modc = MmaOpGFX1250_WMMAType.get(16, 16, 32, bf16, bf16, f32, mod_c=1, reuse_a=True, reuse_b=True)
-        assert "modC = 1, reuseA = true, reuseB = true" in str(t_modc)
+        t_modc = MmaOpGFX1250_WMMAType.get(16, 16, 32, bf16, bf16, f32, mod_c=1)
+        assert "modC = 1" in str(t_modc)
         assert ir.Type.parse(str(t_modc)) == t_modc
         assert t_modc != t_default
 
