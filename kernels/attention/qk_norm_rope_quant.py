@@ -290,7 +290,7 @@ def _build_kernel(
 
         def _ptr_buffer_resource(ptr, num_records_bytes=None):
             addr = fx.ptrtoint(ptr)
-            addr_i64 = arith.index_cast(T.i64, addr)
+            addr_i64 = as_ir_value(fx.Int64(addr))
             if num_records_bytes is None:
                 return buffer_ops.create_buffer_resource_from_addr(addr_i64)
             return buffer_ops.create_buffer_resource_from_addr(addr_i64, num_records_bytes=num_records_bytes)

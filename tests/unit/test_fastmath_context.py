@@ -301,3 +301,42 @@ def test_hint_changes_cache_key():
 
     assert key_none != key_fast
     assert key_fast != key_contract
+
+
+@pytest.mark.l0_backend_agnostic
+@pytest.mark.parametrize("op_name", ["maxnumf", "maximumf", "minimumf"])
+def test_minmax_inherits_ambient(op_name):
+    """These reach the raw MLIR builder, so they need the ambient lookup themselves."""
+    op = getattr(fx, op_name)
+
+    def build(a, b):
+        fa, fb = Float32(a), Float32(b)
+        with fx.fastmath(fx.FastMathFlags.fast):
+            op(fa, fb)
+
+    ir_text = _build(build, [ir.F32Type.get, ir.F32Type.get])
+    assert f"arith.{op_name}" in ir_text
+    assert "fastmath<fast>" in ir_text, f"{op_name} did not inherit the ambient flags:\n{ir_text}"
+
+
+@pytest.mark.l0_backend_agnostic
+@pytest.mark.parametrize("op_name", ["maxnumf", "maximumf", "minimumf"])
+def test_minmax_explicit_arg_overrides_ambient(op_name):
+    def build(a, b):
+        fa, fb = Float32(a), Float32(b)
+        with fx.fastmath(fx.FastMathFlags.fast):
+            getattr(fx, op_name)(fa, fb, fastmath="contract")
+
+    ir_text = _build(build, [ir.F32Type.get, ir.F32Type.get])
+    assert "fastmath<contract>" in ir_text and "fastmath<fast>" not in ir_text
+
+
+@pytest.mark.l0_backend_agnostic
+@pytest.mark.parametrize("op_name", ["maxnumf", "maximumf", "minimumf"])
+def test_minmax_unflagged_outside_block(op_name):
+    def build(a, b):
+        fa, fb = Float32(a), Float32(b)
+        getattr(fx, op_name)(fa, fb)
+
+    ir_text = _build(build, [ir.F32Type.get, ir.F32Type.get])
+    assert f"arith.{op_name}" in ir_text and "fastmath" not in ir_text

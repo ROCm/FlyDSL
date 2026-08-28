@@ -64,6 +64,17 @@ SKIP_COUNT=0
 SOFTMAX_SHAPES='
 32768,8192,bf16
 '
+# Softmax backward: one shape per register-residency tier, since the tier is
+# selected by N and a regression can hit one tier without touching the others.
+# All three are in the correctness sweep in tests/kernels/test_softmax_bwd.py.
+# M is chosen for occupancy, not just tier coverage: the widest tier at M=64 fills
+# 0.25 workgroups per CU on a 256-CU gfx950 and swings 24% run to run, which would
+# flap the dashboard rather than report it. At M=1024 the same tier holds ~1%.
+SOFTMAX_BWD_SHAPES='
+1024,8192,bf16
+256,32768,bf16
+1024,65536,bf16
+'
 LAYERNORM_SHAPES='
 32768,8192,bf16
 '
@@ -130,11 +141,12 @@ fp8,8192,8192,8192,128,256,128,2
 int8,9728,8192,8320,128,256,128,2
 '
 
-# SplitK HGEMM shapes:
-# "dtype,M,N,K,tile_m,tile_n,tile_k,stages,split_k,block_m_warps,block_n_warps,block_k_warps"
+# A16W16 GEMM shapes:
+# "dtype,M,N,K,tile_m,tile_n,tile_k,stages,split_k,m_waves,n_waves,k_waves[,use_hti]"
 HGEMM_SHAPES_GFX950='
 fp16,2048,2048,2048,128,128,64,4,1,4,4,1
 bf16,32,384,7168,32,64,64,5,16,2,2,1
+bf16,8192,8192,8192,256,256,64,2,1,2,4,1,true
 '
 HGEMM_SHAPES_CDNA3='
 fp16,4096,4096,4096,128,128,64,2,1,2,2,1
@@ -206,14 +218,15 @@ _usage() {
 Usage:
   bash scripts/run_benchmark.sh                  # run all benchmarks (default)
   bash scripts/run_benchmark.sh softmax          # run only softmax
+  bash scripts/run_benchmark.sh softmax_bwd      # run only softmax backward
   bash scripts/run_benchmark.sh layernorm moe    # run only selected benchmarks
   bash scripts/run_benchmark.sh --only softmax,moe
   bash scripts/run_benchmark.sh --output_csv /tmp/bench.csv
   bash scripts/run_benchmark.sh --list
 
 Supported ops:
-  softmax | layernorm | rmsnorm | flash_attn | mla | gemm | moe
-  (gemm includes preshuffle GEMM, SplitK HGEMM, and FP8 8-wave row-scale GEMM)
+  softmax | softmax_bwd | layernorm | rmsnorm | flash_attn | mla | gemm | moe
+  (gemm includes preshuffle GEMM, A16W16 GEMM, and FP8 8-wave row-scale GEMM)
 USAGE
 }
 
@@ -303,6 +316,7 @@ _normalize_op() {
   op="${1:-}"
   case "${op}" in
     layernorm) echo "layernorm" ;;
+    softmax_bwd|softmax-bwd|softmax_backward|softmax-backward) echo "softmax_bwd" ;;
     flash|flash_attn|flash-attn|flash_attn_func|fmha) echo "flash_attn" ;;
     mla|mla_decode|mla-decode) echo "mla" ;;
     *) echo "${op}" ;;
@@ -310,8 +324,9 @@ _normalize_op() {
 }
 
 # Default: run softmax, norms, attention, GEMM, and MoE unless user selected a subset.
-# Use positional args or --only to enable others: softmax, layernorm, rmsnorm, flash_attn, mla, gemm, moe
+# Use positional args or --only to enable others: softmax, softmax_bwd, layernorm, rmsnorm, flash_attn, mla, gemm, moe
 RUN_SOFTMAX=1
+RUN_SOFTMAX_BWD=1
 RUN_LAYERNORM=1
 RUN_RMSNORM=1
 RUN_FLASH_ATTN=1
@@ -321,6 +336,7 @@ RUN_MOE=1
 
 _enable_only_ops() {
   RUN_SOFTMAX=0
+  RUN_SOFTMAX_BWD=0
   RUN_LAYERNORM=0
   RUN_RMSNORM=0
   RUN_FLASH_ATTN=0
@@ -331,6 +347,7 @@ _enable_only_ops() {
     op="$(_normalize_op "${op}")"
     case "${op}" in
       softmax) RUN_SOFTMAX=1 ;;
+      softmax_bwd) RUN_SOFTMAX_BWD=1 ;;
       layernorm) RUN_LAYERNORM=1 ;;
       rmsnorm) RUN_RMSNORM=1 ;;
       flash_attn) RUN_FLASH_ATTN=1 ;;
@@ -369,6 +386,7 @@ if [ "$#" -gt 0 ]; then
         ;;
       --list)
         echo "softmax"
+        echo "softmax_bwd"
         echo "layernorm"
         echo "rmsnorm"
         echo "flash_attn"
@@ -576,6 +594,29 @@ if [ "${RUN_SOFTMAX}" -eq 1 ]; then
       _fail_or_skip "${log}" "softmax"
     fi
     row="$(_py_parse_and_emit softmax "${M}x${N}" "${dtype}" "${log}")"
+    # row is tab-separated; default IFS includes tabs.
+    set -- $row
+    _emit_row "$1" "$2" "$3" "$4" "$5"
+  done
+fi
+
+# Softmax backward (log -> parse -> one row per residency tier)
+if [ "${RUN_SOFTMAX_BWD}" -eq 1 ]; then
+  for shape in $SOFTMAX_BWD_SHAPES; do
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    M=$1; N=$2; dtype=$3
+    export ROCDSL_SOFTMAX_BWD_SHAPES="$shape"
+    log="${BENCH_LOG_DIR}/softmax_bwd_${M}x${N}_${dtype}.log"
+    if python3 tests/kernels/test_softmax_bwd.py >"${log}" 2>&1; then
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+      _fail_or_skip "${log}" "softmax_bwd"
+    fi
+    row="$(_py_parse_and_emit softmax_bwd "${M}x${N}" "${dtype}" "${log}")"
     # row is tab-separated; default IFS includes tabs.
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
@@ -819,14 +860,16 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     _emit_row "$1" "$2" "$3" "$4" "$5"
   done
 
-  if [ -n "${HGEMM_SHAPES:-}" ]; then
-    hgemm_shapes="${HGEMM_SHAPES}"
-  else
-    case "${GPU_ARCH}" in
-      gfx95*) hgemm_shapes="${HGEMM_SHAPES_GFX950}" ;;
-      *) hgemm_shapes="${HGEMM_SHAPES_CDNA3}" ;;
-    esac
-  fi
+  hgemm_shapes=""
+  case "${GPU_ARCH}" in
+    gfx95*)
+      if [ -n "${HGEMM_SHAPES:-}" ]; then
+        hgemm_shapes="${HGEMM_SHAPES}"
+      else
+        hgemm_shapes="${HGEMM_SHAPES_GFX950}"
+      fi
+      ;;
+  esac
 
   for shape in $hgemm_shapes; do
     oldIFS=$IFS
@@ -835,9 +878,16 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     set -- $shape
     IFS=$oldIFS
     dtype=$1; M=$2; N=$3; K=$4; tile_m=$5; tile_n=$6; tile_k=$7
-    stages=$8; split_k=$9; block_m_warps=${10}; block_n_warps=${11}; block_k_warps=${12}
-    log="${BENCH_LOG_DIR}/hgemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}_s${stages}_sk${split_k}.log"
-    if python3 tests/kernels/test_hgemm_splitk.py \
+    stages=$8; split_k=$9; m_waves=${10}; n_waves=${11}; k_waves=${12}
+    use_hti="${13:-false}"
+    hti_flag="--no-hti"
+    hti_tag=""
+    if [ "${use_hti}" = "1" ] || [ "${use_hti}" = "true" ]; then
+      hti_flag="--hti"
+      hti_tag="_hti"
+    fi
+    log="${BENCH_LOG_DIR}/hgemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}_s${stages}_sk${split_k}${hti_tag}.log"
+    if python3 tests/kernels/test_gemm_a16w16_gfx950.py \
       --dtype "$dtype" \
       --num_warmup 3 \
       --num_iters 50 \
@@ -849,15 +899,16 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       --TILE_K "$tile_k" \
       --STAGES "$stages" \
       --SPLIT_K "$split_k" \
-      --BLOCK_M_WARPS "$block_m_warps" \
-      --BLOCK_N_WARPS "$block_n_warps" \
-      --BLOCK_K_WARPS "$block_k_warps" >"${log}" 2>&1; then
+      --BLOCK_M_WARPS "$m_waves" \
+      --BLOCK_N_WARPS "$n_waves" \
+      --BLOCK_K_WARPS "$k_waves" \
+      "${hti_flag}" >"${log}" 2>&1; then
       if grep -q "Skipped:" "${log}"; then
-        shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_sk${split_k}"
+        shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_sk${split_k}${hti_tag}"
         _emit_row "hgemm" "${shape_tag}" "${dtype}" "skip" "skip"
       else
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-        shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_sk${split_k}"
+        shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_sk${split_k}${hti_tag}"
         row="$(_py_parse_and_emit hgemm "${shape_tag}" "${dtype}" "${log}")"
         set -- $row
         _emit_row "$1" "$2" "$3" "$4" "$5"
@@ -971,7 +1022,10 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     IFS=$oldIFS
     tokens=$1; model_dim=$2; inter_dim=$3; experts=$4; topk=$5; tile_m=$6; tile_n=$7; tile_k=$8; tile_n2=$9; tile_k2=${10}
     log="${BENCH_LOG_DIR}/moe_t${tokens}_md${model_dim}_id${inter_dim}_e${experts}_k${topk}.log"
-    if python3 tests/kernels/test_moe_gemm.py \
+    # fp8 MOE_SHAPES drive kernels/moe/moe_gemm_2stage (as in v0.3.0). #948 rerouted
+    # test_moe_gemm.py to mxfp_moe, which silently dropped these rows (exit 0, no
+    # output), so this points at the package's own CLI instead.
+    if FLYDSL_RUNTIME_ENABLE_CACHE=0 python3 tests/kernels/test_moe_gemm_2stage.py \
       --in_dtype fp8 \
       -dim "$model_dim,$inter_dim" \
       -t "$tokens" \
@@ -984,8 +1038,7 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       --tile_k "$tile_k" \
       --tile_n2 "$tile_n2" \
       --tile_k2 "$tile_k2" \
-      --skip_ref false \
-      --compare_aiter_ck false >"${log}" 2>&1; then
+      --skip_ref false >"${log}" 2>&1; then
       SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
       _fail_or_skip "${log}" "moe"
@@ -1163,6 +1216,10 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     fi
   done
 fi
+
+# MoE 2-stage (kernels/moe/moe_gemm_2stage; CDNA only — uses MFMA).
+# Benchmarks stage1 and stage2 (atomic + reduce) via the test_moe_gemm_2stage.py
+# CLI. Uses in_dtype=fp8 to match the moe_gemm1/moe_gemm2 rows above.
 
 # RDNA WMMA GEMM benchmarks (gfx11* or gfx12*, via benchmark_common.py).
 # FP8 WMMA is gfx12-only and is skipped inside run_wmma_sweep on gfx11*.

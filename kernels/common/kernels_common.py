@@ -7,55 +7,17 @@ Keep helper naming consistent with other kernel helpers (e.g. `mfma_preshuffle_p
 but this module is intentionally small and MLIR-dialect facing.
 """
 
-from contextlib import contextmanager
-
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import builtin
 from flydsl._mlir.dialects import gpu as _gpu
-from flydsl._mlir.dialects import scf as _scf
-from flydsl.runtime.device import get_rocm_arch, is_rdna_arch
+from flydsl.runtime.device import get_rocm_arch
+from flydsl.runtime.device import get_warp_size as get_warp_size
 
 # Memory/atomic primitives now live in mem_ops; re-exported here for back-compat.
 from kernels.common.mem_ops import _create_llvm_ptr
 from kernels.common.mem_ops import atomic_add as atomic_add
 from kernels.common.mem_ops import get_llvm_ptr as get_llvm_ptr
-
-
-@contextmanager
-def _if_then(if_op, scf=None):
-    """Context manager for SCF IfOp then-region across old/new Python APIs.
-
-    Ensures the then block always ends with a YieldOp.
-    The optional *scf* parameter is accepted for backward compatibility
-    but ignored — the module-level import is used.
-    """
-    with ir.InsertionPoint(if_op.then_block):
-        try:
-            yield if_op.then_block
-        finally:
-            blk = if_op.then_block
-            if (not blk.operations) or not isinstance(blk.operations[-1], _scf.YieldOp):
-                _scf.YieldOp([])
-
-
-@contextmanager
-def _if_else(if_op, scf=None):
-    """Context manager for SCF IfOp else-region across old/new Python APIs.
-
-    Ensures the else block always ends with a YieldOp. The optional *scf*
-    parameter is accepted for backward compatibility but ignored.
-    """
-    if getattr(if_op, "else_block", None) is None:
-        raise RuntimeError("IfOp has no else block")
-    with ir.InsertionPoint(if_op.else_block):
-        try:
-            yield if_op.else_block
-        finally:
-            blk = if_op.else_block
-            if (not blk.operations) or not isinstance(blk.operations[-1], _scf.YieldOp):
-                _scf.YieldOp([])
-
 
 _VALID_A_DTYPES = frozenset(("fp8", "fp16", "int8", "fp4"))
 _VALID_B_DTYPES = frozenset(("fp8", "fp16", "int8", "int4", "fp4"))
@@ -92,16 +54,6 @@ def cvt_sr_f32_to_bf16(x, rand):
     """
     bits = fx.Float32(x).bitcast(fx.Uint32) + (fx.Uint32(rand) & fx.Uint32(0xFFFF))
     return fx.Uint16(bits >> fx.Uint32(16)).bitcast(fx.BFloat16)
-
-
-def get_warp_size(arch=None):
-    """Return the wavefront/warp size for the given GPU architecture.
-
-    CDNA (gfx9xx) uses wave64, RDNA (gfx10xx/gfx11xx/gfx12xx) uses wave32.
-    """
-    if arch is None:
-        arch = get_rocm_arch()
-    return 32 if is_rdna_arch(arch) else 64
 
 
 def default_f8_type() -> ir.Type:

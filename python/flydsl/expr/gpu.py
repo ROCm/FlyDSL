@@ -19,6 +19,7 @@ Usage::
 from .._mlir import ir
 from .._mlir.dialects import gpu
 from .._mlir.dialects._fly_enum_gen import AddressSpace
+from ..compiler.backends import current_target
 from ..compiler.protocol import dsl_align_of, dsl_size_of
 from .math import dsl_math_wrap_result
 from .meta import dsl_loc_tracing, tracing_option
@@ -37,6 +38,7 @@ from .typing import Array, PointerType, Tuple3D, as_ir_value
 
 __all__ = [
     "thread_idx",
+    "lane_id",
     "block_idx",
     "block_dim",
     "grid_dim",
@@ -46,6 +48,7 @@ __all__ = [
     "shuffle_down",
     "shuffle_idx",
     "known_block_size",
+    "num_warp_threads",
     "SharedAllocator",
 ]
 
@@ -61,12 +64,18 @@ def block_id(*args, **kwargs):
 
 
 @dsl_loc_tracing
+def lane_id():
+    """Index of the calling thread within its warp, in ``[0, num_warp_threads())``."""
+    return Int32(gpu.lane_id())
+
+
+@dsl_loc_tracing
 def barrier(*args, **kwargs):
     return gpu.barrier(*args, **kwargs)
 
 
 @dsl_loc_tracing
-@dsl_math_wrap_result
+@dsl_math_wrap_result(preserve_numeric_type=True)
 def shuffle(value, offset, width, mode="xor"):
     """Move ``value`` across lanes of a subgroup (warp) via ``gpu.shuffle``.
 
@@ -113,6 +122,11 @@ def known_block_size():
     if size is None:
         raise RuntimeError("no compile-time block size is in scope.")
     return size
+
+
+def num_warp_threads():
+    """Lanes per warp on the target being compiled for, as a Python int."""
+    return current_target().warp_size
 
 
 thread_idx = Tuple3D(gpu.thread_id)

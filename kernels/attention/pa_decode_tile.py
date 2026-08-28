@@ -32,9 +32,9 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.compiler.protocol import dsl_size_of
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
-from flydsl.expr import math as fmath
 from flydsl.expr.typing import ReductionOp, T
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common import buffer_ops, dpp_utils
@@ -112,6 +112,7 @@ def compile_pa_decode_tile(
     # as the absmax butterfly width); QCHUNK scales with head_dim instead.
     NQCHUNK = 16
     QCHUNK = head_dim // NQCHUNK  # f16 elements per lane's load chunk (8 for head_dim=128, 4 for head_dim=64)
+    assert QCHUNK % 4 == 0, f"head_dim {head_dim} must provide a whole number of packed FP8 query words"
 
     VHE_CHUNKS = head_dim // (NWARP * MFMA_MNK)  # 2 for head_dim=128, 1 for head_dim=64
 
@@ -211,8 +212,11 @@ def compile_pa_decode_tile(
         _k_load_fp8x16 = _make_flat_loader(key_cache_ptr, FP8, 16, fx.UniversalCopy128b())
         _v_load_fp8x16 = _make_flat_loader(value_cache_ptr, FP8, 16, fx.UniversalCopy128b())
         # Per-lane Q chunk (QCHUNK 16-bit elems) fetched in QLOAD_UNIT-wide
-        # pieces (128b max per buffer load): head_dim=256 needs 2 pieces.
-        QLOAD_UNIT = QCHUNK if QCHUNK < 8 else 8
+        # pieces (128b max per buffer load). Use 64-bit loads when QCHUNK is
+        # not divisible by 8: head_dim=192 gives QCHUNK=12 and therefore needs
+        # three 4-element loads. Rounding it down to one 8-element load leaves
+        # one third of every query row unstaged in LDS.
+        QLOAD_UNIT = 8 if QCHUNK % 8 == 0 else 4
         N_QLOADS = QCHUNK // QLOAD_UNIT
         _q_copy_op = fx.rocdl.BufferCopy128b() if QLOAD_UNIT == 8 else fx.rocdl.BufferCopy64b()
         _q_load_chunk = _make_flat_loader(query_ptr, Q_DTYPE, QLOAD_UNIT, _q_copy_op)
@@ -348,6 +352,9 @@ def compile_pa_decode_tile(
         # token = warp*TOK_CHUNK + a*c16 + lane16 (the softmax mask and P-pack
         # write position below must encode this same formula).
         def _k_ops(phys, a):
+            # Physical page ids fit in i32, but their element offsets do not
+            # once an individual KV cache grows beyond 2 GiB.
+            phys = fx.Int64(phys)
             within_page_tok = (a * c16 + lane16) % block_size
             ops = []
             for qkhe in range_constexpr(QKHE_LOOP):
@@ -397,7 +404,6 @@ def compile_pa_decode_tile(
             v_scale_f = fx.Float32(value_scale)
         NEG_INF = fx.Float32(float("-inf"))
         ZERO_F = fx.Float32(0.0)
-        fm_contract = arith.FastMathFlags.contract
         # Softmax scores are finite or the -inf mask sentinel -- never NaN -- so
         # nnan lets maxnum lower to a bare v_max (no v_cmp_u NaN check + its s_nop
         # hazard) and fuse to v_max3. (ninf must NOT be set: -inf is load-bearing.)
@@ -452,9 +458,9 @@ def compile_pa_decode_tile(
             # (a buffer load is 128b max); head_dim=256 splits into 2 pieces.
             q_units = [_q_load_chunk(base_elem + u * QLOAD_UNIT) for u in range_constexpr(N_QLOADS)]
 
-            absmax = fmath.absf(q_units[0]).reduce(ReductionOp.MAX).to(fx.Float32)
+            absmax = fx.absf(q_units[0]).reduce(ReductionOp.MAX).to(fx.Float32)
             for u in range_constexpr(1, N_QLOADS):
-                absmax = fx.maxnumf(absmax, fmath.absf(q_units[u]).reduce(ReductionOp.MAX).to(fx.Float32))
+                absmax = fx.maxnumf(absmax, fx.absf(q_units[u]).reduce(ReductionOp.MAX).to(fx.Float32))
             for sh in (8, 4, 2, 1):
                 absmax = fx.maxnumf(absmax, dpp_utils.dpp_xor_f32(absmax, sh))
 
@@ -537,11 +543,12 @@ def compile_pa_decode_tile(
             head_element = head_group * 16 + lane16
             ops = []
             for sub in range_constexpr(PAGES_PER_CHUNK):
+                phys = fx.Int64(phys_row[sub])
                 for step in range_constexpr(STEPS_PER_PAGE):
                     if const_expr(trans_v):
-                        base = (((phys_row[sub] * n_kv + kv_h) * STEPS_PER_PAGE + step) * head_dim + head_element) * 16
+                        base = (((phys * n_kv + kv_h) * STEPS_PER_PAGE + step) * head_dim + head_element) * 16
                     else:
-                        base = ((phys_row[sub] * n_kv + kv_h) * head_dim + head_element) * block_size + step * 16
+                        base = ((phys * n_kv + kv_h) * head_dim + head_element) * block_size + step * 16
                     w = _v_load16(base)
                     if const_expr(block_size == 16):
                         # help the scheduler overlap the per-page gathered loads (see _k_ops)
@@ -742,7 +749,7 @@ def compile_pa_decode_tile(
                             p_off0 + a * (c16 // 4) * f32, fx.Int32, fx.Vector.from_elements([words[a]], dtype=fx.Int32)
                         )
                     for sh in (16, 32):
-                        ls = ls.addf(ls.shuffle_xor(sh, WAVE), fastmath=fm_contract)
+                        ls = ls + ls.shuffle_xor(sh, WAVE)
                     # PV output is [head-dim, query-row=lane16] after the operand
                     # swap, so correction/denominator are per-lane scalars (no sCorr).
                     safe_prev = arith.select(m_prev > NEG_INF, m_prev, ZERO_F)
@@ -751,9 +758,7 @@ def compile_pa_decode_tile(
                         _st_lw(sLsum_off, lane16, warp, ls)
                     gpu.barrier()
                     gsum = _ld_lw_row(sLsum_off, lane16).reduce(ReductionOp.ADD)
-                    l_new = fx.Float32(
-                        arith.mulf(arith.unwrap(l_prev), arith.unwrap(corr_reg), fastmath=fm_contract)
-                    ).addf(gsum, fastmath=fm_contract)
+                    l_new = l_prev * corr_reg + gsum
 
                     p_ops = _lds_load(sP_off + lane16 * SP_ROW_BYTES + rgroup * 64, fx.Int64, NVOPS)
 
@@ -879,7 +884,7 @@ def compile_pa_decode_tile(
                 if const_expr(head_dim == 64):
                     fx.rocdl.sched_dswr(NCHUNK)
                 for sh in (16, 32):
-                    ls = ls.addf(ls.shuffle_xor(sh, WAVE), fastmath=fm_contract)
+                    ls = ls + ls.shuffle_xor(sh, WAVE)
                 # PV (V=A, P=B) -> output [head-dim, query-row=lane16]; same as
                 # the phase-split path.
                 corr_reg = fx.Float32(exp2_amdgcn_scalar(m_prev - m_new))
@@ -887,9 +892,7 @@ def compile_pa_decode_tile(
                     _st_lw(sLsum_off, lane16, warp, ls)
                 gpu.barrier()
                 gsum = _ld_lw_row(sLsum_off, lane16).reduce(ReductionOp.ADD)
-                l_new = fx.Float32(arith.mulf(arith.unwrap(l_prev), arith.unwrap(corr_reg), fastmath=fm_contract)).addf(
-                    gsum, fastmath=fm_contract
-                )
+                l_new = l_prev * corr_reg + gsum
                 p_ops = _lds_load(sP_off + lane16 * SP_ROW_BYTES + rgroup * 64, fx.Int64, NVOPS)
                 corr_b = fx.Vector.from_elements([corr_reg], dtype=fx.Float32).broadcast_to(OP_ELEMS)
                 # Single tile: batch both vh's V loads upfront (no sibling chain
@@ -919,13 +922,7 @@ def compile_pa_decode_tile(
             if const_expr(per_token_kv):
                 o_scale = inv_l
             else:
-                o_scale = fx.Float32(
-                    arith.mulf(
-                        arith.unwrap(inv_l),
-                        arith.unwrap(v_scale_f * inv_fp8),
-                        fastmath=fm_contract,
-                    )
-                )
+                o_scale = inv_l * (v_scale_f * inv_fp8)
             o_scale_b = fx.Vector.from_elements([o_scale], dtype=fx.Float32).broadcast_to(OP_ELEMS)
             qi_e = row // query_group_size
             gs_head_e = row - qi_e * query_group_size
@@ -983,24 +980,25 @@ def compile_pa_decode_tile(
         stride_q_head: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        pa_decode_tile_kernel(
-            output,
-            pmax,
-            psum,
-            pout,
-            query,
-            key_cache,
-            value_cache,
-            block_tables,
-            context_lengths,
-            key_scale,
-            value_scale,
-            max_blocks_per_seq,
-            stride_ks_block,
-            stride_ks_head,
-            stride_q_row,
-            stride_q_head,
-        ).launch(grid=(num_seqs, num_kv_heads, NP), block=(BLOCK_THREADS, 1, 1), stream=stream)
+        with CompilationContext.compile_hints({"fastmath": arith.FastMathFlags.contract}):
+            pa_decode_tile_kernel(
+                output,
+                pmax,
+                psum,
+                pout,
+                query,
+                key_cache,
+                value_cache,
+                block_tables,
+                context_lengths,
+                key_scale,
+                value_scale,
+                max_blocks_per_seq,
+                stride_ks_block,
+                stride_ks_head,
+                stride_q_row,
+                stride_q_head,
+            ).launch(grid=(num_seqs, num_kv_heads, NP), block=(BLOCK_THREADS, 1, 1), stream=stream)
 
     return {"launch": pa_decode_tile_launch, "kernel": pa_decode_tile_kernel}
 

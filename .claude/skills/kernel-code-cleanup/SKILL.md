@@ -132,7 +132,10 @@ fx.copy(copy, fx.slice(tA, (None, tid)), rA)   # after partitioning tA (§7b: pr
 | `arith.index_cast(T.i32, v)` | `fx.Int32(v)` |
 | `arith.select(cond, t, f)` | `cond.select(t, f)` |
 | `arith.cmpi(slt, a, b)` | `a < b` |
-| `arith.maxnumf(a,b)` | `a.maximumf(b)` |
+| `arith.maximumf/minimumf(a,b)` | `fx.max(a, b)` / `fx.min(a, b)` |
+| `arith.maxsi/maxui/minsi/minui(a,b)` | `fx.max(a, b)` / `fx.min(a, b)` |
+| `arith.maxnumf(a,b)` | `fx.maxnumf(a, b)` — different NaN semantics from `fx.max` |
+| `arith.ceildivsi/ceildivui(a,b)` | `fx.ceildiv(a, b)` |
 
 Keep `arith.cmpf` / explicit `*FOp` only where no operator exists or fastmath is
 needed.
@@ -288,7 +291,8 @@ dispatch()
 
 Raw intrinsics hardcode fragment types, the `[a, b, c, 0, 0, 0]` tuple, and the
 instruction. Build an atom and issue it; fragment layouts/packing are handled and
-the atom is arch-dispatched (MFMA on CDNA3/4, WMMA on gfx11/gfx1250).
+you pick the atom family by target: `MFMA` for CDNA3/CDNA4, `WMMA` for
+gfx11/gfx1250.
 
 ```python
 # Before
@@ -427,7 +431,7 @@ def _run_compiled(exe, *args):             # in-tree
 ```
 
 - Pass flat scalars/pointers (`data_ptr()`, `stride(i)`, sizes, `stream`) — it
-  bypasses DLPack. See `pa_decode_fp8.py`, `hgemm_splitk.py`.
+  bypasses DLPack. See `pa_decode_fp8.py`.
 - Reuse the shim; don't add a second copy.
 - Worth it for small kernels in tight loops, not cold one-shot launches. Arg
   order/types must match the compiled signature — verify.
@@ -471,6 +475,7 @@ def _run_compiled(exe, *args):             # in-tree
 | `arith.unwrap(v)` / `_to_raw(v)` | `v.ir_value()` (boundary only) |
 | `fx.Index(n)` / `arith.index` / `arith.index_cast` | explicit `fx.Int64/Int32(...)` |
 | `arith.mulf/addf/trunc_f/select` | `*`, `+`, `.to(ty)`, `.select(...)` |
+| raw integer min/max or ceil-div | `fx.max` / `fx.min` / `fx.ceildiv` |
 | `vector.extract/bitcast/splat` | `fx.Vector(v)[i]` / `.bitcast(ty)` / `.filled(...)` |
 | `scf.ForOp` / `scf.IfOp` | `range_constexpr` / `range(..., init=)` / Python `if` / `const_expr` |
 | `buffer_ops.*` + offsets | `fx.rocdl.make_buffer_tensor` + layout + `fx.copy` |

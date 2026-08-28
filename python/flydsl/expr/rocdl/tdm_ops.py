@@ -70,6 +70,13 @@ __all__ = [
 ]
 
 
+def _cache_policy_attr(val):
+    """Convert an int cache-policy to an IntegerAttr for TDM ops."""
+    if val is None or isinstance(val, ir.Attribute):
+        return val
+    return ir.IntegerAttr.get(ir.IntegerType.get_signless(32), int(val))
+
+
 # ---------------------------------------------------------------------------
 # Pure-Python helpers (compile-time, no IR emission)
 # ---------------------------------------------------------------------------
@@ -374,7 +381,13 @@ def make_tensor_descriptor_2d(
         1 << 31, type=T.i32
     )  # type field = 2 in [31:30]
     dgroup0 = vector.from_elements(
-        T.vec(4, T.i32), [as_ir_value(g0_s0), as_ir_value(g0_s1), as_ir_value(g0_s2), as_ir_value(g0_s3)]
+        T.vec(4, T.i32),
+        [
+            as_ir_value(g0_s0),
+            as_ir_value(g0_s1),
+            as_ir_value(g0_s2),
+            as_ir_value(g0_s3),
+        ],
     )
 
     # ================================================================
@@ -676,7 +689,10 @@ def make_tensor_gather_descriptor(
             lo = row_indices[lo_idx] if lo_idx < num_indices else zero
             hi = row_indices[hi_idx] if hi_idx < num_indices else zero
             lo_masked = arith.andi(lo, arith.constant(0xFFFF, type=T.i32))
-            hi_shifted = arith.shli(arith.andi(hi, arith.constant(0xFFFF, type=T.i32)), arith.constant(16, type=T.i32))
+            hi_shifted = arith.shli(
+                arith.andi(hi, arith.constant(0xFFFF, type=T.i32)),
+                arith.constant(16, type=T.i32),
+            )
             g2_vals.append(arith.ori(lo_masked, hi_shifted))
         # Group 3: indices [8..15] packed into 4 x i32
         g3_vals = []
@@ -686,7 +702,10 @@ def make_tensor_gather_descriptor(
             lo = row_indices[lo_idx] if lo_idx < num_indices else zero
             hi = row_indices[hi_idx] if hi_idx < num_indices else zero
             lo_masked = arith.andi(lo, arith.constant(0xFFFF, type=T.i32))
-            hi_shifted = arith.shli(arith.andi(hi, arith.constant(0xFFFF, type=T.i32)), arith.constant(16, type=T.i32))
+            hi_shifted = arith.shli(
+                arith.andi(hi, arith.constant(0xFFFF, type=T.i32)),
+                arith.constant(16, type=T.i32),
+            )
             g3_vals.append(arith.ori(lo_masked, hi_shifted))
 
     dgroup2 = vector.from_elements(T.vec(4, T.i32), [as_ir_value(v) for v in g2_vals])
@@ -744,7 +763,13 @@ def make_tensor_gather_dgroup0(
     hi_raw = _ArithValue(_raw(glb_base_i64)).shrui(arith.constant(32, type=T.i64))
     g0_s3 = _ArithValue(std_arith.TruncIOp(i32, _raw(hi_raw)).result) | arith.constant(1 << 31, type=T.i32)
     return vector.from_elements(
-        T.vec(4, T.i32), [as_ir_value(g0_s0), as_ir_value(g0_s1), as_ir_value(g0_s2), as_ir_value(g0_s3)]
+        T.vec(4, T.i32),
+        [
+            as_ir_value(g0_s0),
+            as_ir_value(g0_s1),
+            as_ir_value(g0_s2),
+            as_ir_value(g0_s3),
+        ],
     )
 
 
@@ -769,7 +794,7 @@ def tensor_load_gather(
         _raw(desc.dgroup2),
         _raw(desc.dgroup3),
         dg4,
-        cache_policy,
+        cache_policy=_cache_policy_attr(cache_policy),
     )
 
 
@@ -794,7 +819,7 @@ def tensor_store_gather(
         _raw(desc.dgroup2),
         _raw(desc.dgroup3),
         dg4,
-        cache_policy,
+        cache_policy=_cache_policy_attr(cache_policy),
     )
 
 
@@ -1110,7 +1135,14 @@ def tensor_load_2d(
     dg2 = _raw(_zero_dgroup_v4i32())
     dg3 = _raw(_zero_dgroup_v4i32())
     dg4 = _raw(_zero_dgroup_v8i32())
-    rocdl.tensor_load_to_lds(_raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, dg4, cache_policy)
+    rocdl.tensor_load_to_lds(
+        _raw(desc.dgroup0),
+        _raw(desc.dgroup1),
+        dg2,
+        dg3,
+        dg4,
+        cache_policy=_cache_policy_attr(cache_policy),
+    )
 
 
 @dsl_loc_tracing
@@ -1130,7 +1162,14 @@ def tensor_store_2d(
     dg2 = _raw(_zero_dgroup_v4i32())
     dg3 = _raw(_zero_dgroup_v4i32())
     dg4 = _raw(_zero_dgroup_v8i32())
-    rocdl.tensor_store_from_lds(_raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, dg4, cache_policy)
+    rocdl.tensor_store_from_lds(
+        _raw(desc.dgroup0),
+        _raw(desc.dgroup1),
+        dg2,
+        dg3,
+        dg4,
+        cache_policy=_cache_policy_attr(cache_policy),
+    )
 
 
 @dsl_loc_tracing
@@ -1224,4 +1263,4 @@ def l2_prefetch_tile(
     # NOTE: rocdl.global_prefetch lowers to llvm.amdgcn.global.prefetch, which
     # requires LLVM ISel support for gfx1250 global_prefetch_b8. If the LLVM
     # build lacks this pattern, the instruction will be silently dropped.
-    rocdl.global_prefetch(ptr_val, scope)
+    rocdl.global_prefetch(ptr_val, cache_policy=_cache_policy_attr(scope))

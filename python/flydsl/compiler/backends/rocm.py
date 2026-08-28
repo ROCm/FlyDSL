@@ -3,7 +3,7 @@
 
 from typing import List, Tuple
 
-from ...runtime.device import get_rocm_arch, is_rdna_arch
+from ...runtime.device import get_rocm_arch, get_warp_size
 from ...utils import env
 from .base import BaseBackend, GPUTarget
 
@@ -18,13 +18,11 @@ class RocmBackend(BaseBackend):
     @staticmethod
     def detect_target() -> GPUTarget:
         arch = env.compile.arch or get_rocm_arch()
-        warp_size = 32 if is_rdna_arch(arch) else 64
-        return GPUTarget(backend="rocm", arch=arch, warp_size=warp_size)
+        return GPUTarget(backend="rocm", arch=arch, warp_size=get_warp_size(arch))
 
     @classmethod
     def make_target(cls, arch: str) -> GPUTarget:
-        warp_size = 32 if is_rdna_arch(arch) else 64
-        return GPUTarget(backend="rocm", arch=arch, warp_size=warp_size)
+        return GPUTarget(backend="rocm", arch=arch, warp_size=get_warp_size(arch))
 
     @classmethod
     def llvm_address_space(cls, address_space) -> int:
@@ -74,7 +72,7 @@ class RocmBackend(BaseBackend):
             "module": "",
             "triple": "amdgcn-amd-amdhsa",
             "unsafe-math": "true" if compile_hints.get("unsafe_fp_math") else "false",
-            "wave64": "false" if is_rdna_arch(chip) else "true",
+            "wave64": "true" if get_warp_size(chip) == 64 else "false",
         }
 
         pre_binary_fragments = [
@@ -88,6 +86,7 @@ class RocmBackend(BaseBackend):
             "convert-fly-to-rocdl",
             "canonicalize",
             f"gpu.module(convert-scf-to-cf,cse,"
+            f"convert-rocdl-fastmath-ops,"
             f"convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}},"
             f"fly-rocdl-cluster-attr)",
         ]
@@ -129,12 +128,11 @@ class RocmBackend(BaseBackend):
             return
 
         with module.context:
+            from ..._mlir import ir as _ir
+
+            wpe_attr = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), waves_per_eu)
             for func_op in _iter_gpu_kernel_funcs(module):
-                # rocdl.waves_per_eu expresses a minimum. Replace it with the exact
-                # min/max LLVM passthrough for an explicit compile-hint override.
-                if "rocdl.waves_per_eu" in func_op.attributes:
-                    del func_op.attributes["rocdl.waves_per_eu"]
-                _set_passthrough(func_op, "amdgpu-waves-per-eu", f"{waves_per_eu},{waves_per_eu}")
+                func_op.attributes["rocdl.waves_per_eu"] = wpe_attr
 
     def gpu_module_targets(self) -> List[str]:
         chip = self.target.arch
@@ -164,7 +162,7 @@ def _iter_gpu_kernel_funcs(module):
         if top.operation.name != "gpu.module":
             continue
         for op in top.regions[0].blocks[0].operations:
-            if op.operation.name == "gpu.func" and "gpu.kernel" in op.attributes:
+            if op.operation.name == "gpu.func" and ("kernel" in op.attributes or "gpu.kernel" in op.attributes):
                 yield op
 
 
