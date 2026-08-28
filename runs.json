@@ -1,20 +1,35 @@
 {
  "schema": 1,
- "updated": "2026-08-28T04:44:11Z",
+ "updated": "2026-08-28T04:47:01Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 33142554094,
+   "run_id": 33142704939,
    "pr": 1001,
-   "commit": "76a005d2c3393fa21132010af891bc086a818bca",
+   "commit": "6e47a21f5ac0bf57e103afd665980733f817c8d3",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
    "title": "[WIP][Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
    "status": "queued",
    "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33142704939",
+   "created_at": "2026-08-28T04:44:57Z",
+   "updated_at": "2026-08-28T04:44:57Z",
+   "actor": "Boss2002n",
+   "jobs": []
+  },
+  {
+   "run_id": 33142554094,
+   "pr": null,
+   "commit": "76a005d2c3393fa21132010af891bc086a818bca",
+   "branch": "jli/gfx1250/fix-mma-atom",
+   "event": "pull_request",
+   "title": "[WIP][Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33142554094",
    "created_at": "2026-08-28T04:41:51Z",
-   "updated_at": "2026-08-28T04:41:51Z",
+   "updated_at": "2026-08-28T04:43:32Z",
    "actor": "Boss2002n",
    "jobs": []
   },
@@ -1925,52 +1940,6 @@
    "updated_at": "2026-08-25T08:56:08Z",
    "actor": "solinzby1",
    "jobs": []
-  },
-  {
-   "run_id": 32820821407,
-   "pr": 1032,
-   "commit": "670f45e56de8ed56f4622d157ab6dc0ba6e1d099",
-   "branch": "convolution",
-   "event": "pull_request",
-   "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32820821407",
-   "created_at": "2026-08-25T07:16:51Z",
-   "updated_at": "2026-08-25T09:29:18Z",
-   "actor": "amd-nprotaso",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-25T07:36:33Z",
-     "completed_at": "2026-08-25T08:50:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32820821407/job/97723053777",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-25T07:36:06Z",
-     "completed_at": "2026-08-25T07:57:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32820821407/job/97723053870",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-25T07:36:36Z",
-     "completed_at": "2026-08-25T09:29:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32820821407/job/97723053982",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
