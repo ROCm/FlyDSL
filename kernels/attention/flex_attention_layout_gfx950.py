@@ -488,6 +488,8 @@ def flex_attn_fwd_gfx950_kernel(
     q_descale: fx.Float32 = fx.Float32(1.0),
     k_descale: fx.Float32 = fx.Float32(1.0),
     v_descale: fx.Float32 = fx.Float32(1.0),
+    ws_o: fx.Tensor = fx.Tensor,
+    ws_ml: fx.Tensor = fx.Tensor,
 ):
     block_m = param.block_m
     block_n = param.block_n
@@ -1680,28 +1682,82 @@ def flex_attn_fwd_gfx950_kernel(
     _o_row_stride = hq * head_dim
     _out_elem_dtype = fx.BFloat16 if const_expr(_is_fp8) else elem_dtype
 
-    # TODO: split-K partial store path (write O/m/l to workspace instead of final O)
-    _o_store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), _out_elem_dtype)
-    o_store_reg = fx.make_rmem_tensor(fx.make_layout(4, 1), _out_elem_dtype)
-    o_div = fx.logical_divide(
-        fx.rocdl.make_buffer_tensor(
-            fx.Tensor(fx.make_view(fx.recast_iter(_out_elem_dtype, fx.get_iter(o)),
-                                   fx.make_layout(0x7FFFFFFF, 1))),
-            max_size=True,
-        ),
-        fx.make_layout(1, 1),
-    )
+    if const_expr(_SPLITK):
+        # Split-K: write normalized partial O (f32) + (m, l) to workspace.
+        _ws_o_store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
+        ws_o_reg = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Float32)
+        ws_o_div = fx.logical_divide(
+            fx.rocdl.make_buffer_tensor(
+                fx.Tensor(fx.make_view(fx.recast_iter(fx.Float32, fx.get_iter(ws_o)),
+                                       fx.make_layout(0x7FFFFFFF, 1))),
+                max_size=True,
+            ),
+            fx.make_layout(1, 1),
+        )
+        # ws_o layout: [num_splits, B, Hq, Sq, D] — compute flat offset.
+        _ws_sq = seqlen_q
+        _ws_o_row_stride = fx.Int32(head_dim)
+        _ws_o_head_stride = _ws_sq * _ws_o_row_stride
+        _ws_o_batch_stride = hq * _ws_o_head_stride
+        _ws_o_split_stride = num_batches * _ws_o_batch_stride
+        _ws_o_base = (split_idx * _ws_o_split_stride
+                      + b_idx * _ws_o_batch_stride
+                      + fx.Int32(arith.index_cast(T.i32, h_idx)) * _ws_o_head_stride
+                      + (q_start + _qrow) * _ws_o_row_stride)
+        for dc in range_constexpr(_n_d_chunks):
+            o_vec = Vec(o_accs[dc])
+            for k in range_constexpr(4):
+                col = dc * 32 + _group_d_base + fx.Int32(k * 8)
+                elems = [o_vec[k * 4 + e] for e in range_constexpr(4)]
+                v4f = Vec.from_elements(elems, fx.Float32)
+                off = _ws_o_base + col
+                fx.memref_store_vec(v4f, ws_o_reg)
+                fx.copy(_ws_o_store_atom, ws_o_reg, fx.slice(ws_o_div, (None, fx.Int32(off))))
 
-    o_base = o_off + _qrow * _o_row_stride
-    for dc in range_constexpr(_n_d_chunks):
-        o_vec = Vec(o_accs[dc])
-        for k in range_constexpr(4):
-            col = dc * 32 + _group_d_base + fx.Int32(k * 8)
-            elems = [o_vec[k * 4 + e] for e in range_constexpr(4)]
-            vbf = Vec.from_elements(elems, fx.Float32).to(_out_elem_dtype)
-            off = o_base + col
-            fx.memref_store_vec(vbf, o_store_reg)
-            fx.copy(_o_store_atom, o_store_reg, fx.slice(o_div, (None, fx.Int32(off))))
+        # Store (m, l) per query row. Each lane in the wave has the same m_i/l_i
+        # (permlane32 reduced), so only one lane per row writes.
+        _ws_ml_store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), fx.Float32)
+        ws_ml_reg = fx.make_rmem_tensor(fx.make_layout(2, 1), fx.Float32)
+        ws_ml_div = fx.logical_divide(
+            fx.rocdl.make_buffer_tensor(
+                fx.Tensor(fx.make_view(fx.recast_iter(fx.Float32, fx.get_iter(ws_ml)),
+                                       fx.make_layout(0x7FFFFFFF, 1))),
+                max_size=True,
+            ),
+            fx.make_layout(1, 1),
+        )
+        _ws_ml_row_stride = fx.Int32(2)
+        _ws_ml_head_stride = _ws_sq * _ws_ml_row_stride
+        _ws_ml_batch_stride = hq * _ws_ml_head_stride
+        _ws_ml_split_stride = num_batches * _ws_ml_batch_stride
+        _ws_ml_base = (split_idx * _ws_ml_split_stride
+                       + b_idx * _ws_ml_batch_stride
+                       + fx.Int32(arith.index_cast(T.i32, h_idx)) * _ws_ml_head_stride
+                       + (q_start + _qrow) * _ws_ml_row_stride)
+        ml_vec = Vec.from_elements([m_i[0], l_i[0]], fx.Float32)
+        fx.memref_store_vec(ml_vec, ws_ml_reg)
+        fx.copy(_ws_ml_store_atom, ws_ml_reg, fx.slice(ws_ml_div, (None, fx.Int32(_ws_ml_base))))
+    else:
+        _o_store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), _out_elem_dtype)
+        o_store_reg = fx.make_rmem_tensor(fx.make_layout(4, 1), _out_elem_dtype)
+        o_div = fx.logical_divide(
+            fx.rocdl.make_buffer_tensor(
+                fx.Tensor(fx.make_view(fx.recast_iter(_out_elem_dtype, fx.get_iter(o)),
+                                       fx.make_layout(0x7FFFFFFF, 1))),
+                max_size=True,
+            ),
+            fx.make_layout(1, 1),
+        )
+        o_base = o_off + _qrow * _o_row_stride
+        for dc in range_constexpr(_n_d_chunks):
+            o_vec = Vec(o_accs[dc])
+            for k in range_constexpr(4):
+                col = dc * 32 + _group_d_base + fx.Int32(k * 8)
+                elems = [o_vec[k * 4 + e] for e in range_constexpr(4)]
+                vbf = Vec.from_elements(elems, fx.Float32).to(_out_elem_dtype)
+                off = o_base + col
+                fx.memref_store_vec(vbf, o_store_reg)
+                fx.copy(_o_store_atom, o_store_reg, fx.slice(o_div, (None, fx.Int32(off))))
 
 
 _COMBINE_BLOCK = 256
@@ -1754,7 +1810,7 @@ def flex_splitk_combine_kernel(
     # First pass: find m_max across all splits
     for s in range_constexpr(num_splits):
         ml_off = fx.Int32(s) * _split_ml_stride + global_row * fx.Int32(2)
-        m_s = fx.Float32(fx.load(ws_ml_it + fx.Int32(ml_off)))
+        m_s = fx.Float32(fx.ptr_load(ws_ml_it + fx.Int32(ml_off)))
         m_max = m_max.maximumf(m_s)
 
     # Second pass: weighted accumulate O and denominator
@@ -1763,12 +1819,12 @@ def flex_splitk_combine_kernel(
     den = fx.Float32(0.0)
     for s in range_constexpr(num_splits):
         ml_off = fx.Int32(s) * _split_ml_stride + global_row * fx.Int32(2)
-        m_s = fx.Float32(fx.load(ws_ml_it + fx.Int32(ml_off)))
-        l_s = fx.Float32(fx.load(ws_ml_it + fx.Int32(ml_off + fx.Int32(1))))
+        m_s = fx.Float32(fx.ptr_load(ws_ml_it + fx.Int32(ml_off)))
+        l_s = fx.Float32(fx.ptr_load(ws_ml_it + fx.Int32(ml_off + fx.Int32(1))))
         w_s = _hw_exp2(m_s - m_max) * l_s
 
         o_off = fx.Int32(s) * _split_o_stride + global_row * fx.Int32(head_dim) + d_col
-        o_vals = [fx.Float32(fx.load(ws_o_it + fx.Int32(o_off + fx.Int32(e))))
+        o_vals = [fx.Float32(fx.ptr_load(ws_o_it + fx.Int32(o_off + fx.Int32(e))))
                   for e in range_constexpr(4)]
         o_vec = Vec.from_elements(o_vals, fx.Float32)
         w_vec = Vec.from_elements([w_s], fx.Float32).broadcast_to(4)
@@ -1780,9 +1836,8 @@ def flex_splitk_combine_kernel(
     inv_vec = Vec.from_elements([inv_den], fx.Float32).broadcast_to(4)
     result = acc * inv_vec
 
-    # Write to output O [B, Sq, Hq, D] — need to map global_row back to BSHD offset.
-    # global_row = b * Hq * Sq + h * Sq + sq_pos (from ws_ml layout [splits, B, Hq, Sq, 2])
-    # But O is [B, Sq, Hq, D] — different layout! O offset = b*Sq*Hq*D + sq*Hq*D + h*D + d
+    # Write to output O [B, Sq, Hq, D] — map global_row back to BSHD offset.
+    # global_row indexes [B, Hq, Sq] (workspace layout), O is [B, Sq, Hq, D].
     _Hq = fx.Int32(fx.get_scalar(ws_ml.shape[2]))
     _Sq = fx.Int32(fx.get_scalar(ws_ml.shape[3]))
     _b = global_row // (_Hq * _Sq)
@@ -1795,7 +1850,7 @@ def flex_splitk_combine_kernel(
     o_it = fx.recast_iter(_out_elem, fx.get_iter(o))
     for e in range_constexpr(4):
         val = result[e].to(_out_elem)
-        fx.store(o_it + fx.Int32(_o_off + fx.Int32(e)), val)
+        fx.ptr_store(val, o_it + fx.Int32(_o_off + fx.Int32(e)))
 
 
 @flyc.jit
@@ -1810,6 +1865,8 @@ def launch_flex_attn_gfx950(
     q_descale: fx.Float32 = fx.Float32(1.0),
     k_descale: fx.Float32 = fx.Float32(1.0),
     v_descale: fx.Float32 = fx.Float32(1.0),
+    ws_o: fx.Tensor = fx.Tensor,
+    ws_ml: fx.Tensor = fx.Tensor,
 ):
     b = fx.Int32(fx.get_scalar(q.shape[0]))
     seqlen_q = fx.Int32(fx.get_scalar(q.shape[1]))
@@ -1856,7 +1913,7 @@ def launch_flex_attn_gfx950(
 
     flex_attn_fwd_gfx950_kernel(
         o, q, k, v, seqlen_q, seqlen_kv, b, scale, tiled_mma_qk, tiled_mma_pv, param,
-        q_descale, k_descale, v_descale,
+        q_descale, k_descale, v_descale, ws_o, ws_ml,
         value_attrs={
             "rocdl.waves_per_eu": _waves_per_eu,
             "rocdl.flat_work_group_size": f"{param.block_threads},{param.block_threads}",
@@ -1995,12 +2052,13 @@ def flydsl_flex_attention_layout(
         ws_o = torch.zeros(num_kv_splits, B, Hq, Sq, D, dtype=torch.float32, device=q.device)
         ws_ml = torch.full((num_kv_splits, B, Hq, Sq, 2), -1e30, dtype=torch.float32, device=q.device)
     else:
-        ws_o = None
-        ws_ml = None
+        ws_o = torch.empty(1, dtype=torch.float32, device=q.device)
+        ws_ml = torch.empty(1, dtype=torch.float32, device=q.device)
 
     launch_flex_attn_gfx950(
         out.contiguous(), q.contiguous(), k.contiguous(), v.contiguous(),
         fx.Float32(scale), param, stream,
+        ws_o=ws_o, ws_ml=ws_ml,
     )
     return out
 
