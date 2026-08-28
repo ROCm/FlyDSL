@@ -1,11 +1,26 @@
 {
  "schema": 1,
- "updated": "2026-08-28T04:24:16Z",
+ "updated": "2026-08-28T04:26:57Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 33141560905,
+   "run_id": 33141670336,
    "pr": 1001,
+   "commit": "da14c079a7dabc9d4a2b550c9bc8f46b6514739e",
+   "branch": "jli/gfx1250/fix-mma-atom",
+   "event": "pull_request",
+   "title": "[WIP][Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33141670336",
+   "created_at": "2026-08-28T04:23:25Z",
+   "updated_at": "2026-08-28T04:24:50Z",
+   "actor": "Boss2002n",
+   "jobs": []
+  },
+  {
+   "run_id": 33141560905,
+   "pr": null,
    "commit": "8ce8604922e8759f62841a501a358a5a29a7b568",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
@@ -2014,52 +2029,6 @@
      "started_at": "2026-08-25T05:06:00Z",
      "completed_at": "2026-08-25T05:25:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32810503599/job/97691416036",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32804792911,
-   "pr": null,
-   "commit": "b33938b00ed444f9719805f910f094a4d1858cbf",
-   "branch": "main",
-   "event": "push",
-   "title": "[Kernel] Add opt-in autotuning for Softmax (#1022)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32804792911",
-   "created_at": "2026-08-25T03:20:24Z",
-   "updated_at": "2026-08-25T05:45:32Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-25T04:00:54Z",
-     "completed_at": "2026-08-25T05:45:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32804792911/job/97679789538",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-25T04:01:08Z",
-     "completed_at": "2026-08-25T05:13:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32804792911/job/97679789614",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-25T04:00:56Z",
-     "completed_at": "2026-08-25T04:23:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32804792911/job/97679789627",
      "log_fetch_failed": true
     }
    ]
