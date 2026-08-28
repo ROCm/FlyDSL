@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-08-28T04:47:01Z",
+ "updated": "2026-08-28T07:22:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33150776088,
+   "pr": 1056,
+   "commit": "e5ed3c5e3c4cae2abf40cc04cad839eaa1e7c9be",
+   "branch": "feat/gfx950-paged-attention-vllm-kv-layouts",
+   "event": "pull_request",
+   "title": "Support vLLM paged KV cache layouts on the gfx950 attention kernel",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33150776088",
+   "created_at": "2026-08-28T07:15:12Z",
+   "updated_at": "2026-08-28T07:18:57Z",
+   "actor": "akii96",
+   "jobs": []
+  },
+  {
+   "run_id": 33147196732,
+   "pr": 891,
+   "commit": "2a3b1080836ae0168eabaa180bc3899ed02d05bc",
+   "branch": "add-wmma-tests-gfx1250",
+   "event": "pull_request",
+   "title": "[Test] Add gfx1250 WMMA lowering tests for additional dtypes",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33147196732",
+   "created_at": "2026-08-28T06:13:11Z",
+   "updated_at": "2026-08-28T06:13:11Z",
+   "actor": "AiyyappanMR",
+   "jobs": []
+  },
+  {
+   "run_id": 33147025602,
+   "pr": 918,
+   "commit": "742a6a69011c117c4c259c6c34efe7d081595a96",
+   "branch": "fix-atomicrmw-vector-check",
+   "event": "pull_request",
+   "title": "[Bugfix][Dialect] Reject vector operands in atomic copy atoms",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33147025602",
+   "created_at": "2026-08-28T06:10:03Z",
+   "updated_at": "2026-08-28T06:10:03Z",
+   "actor": "AiyyappanMR",
+   "jobs": []
+  },
   {
    "run_id": 33142704939,
    "pr": 1001,
@@ -14,9 +59,38 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33142704939",
    "created_at": "2026-08-28T04:44:57Z",
-   "updated_at": "2026-08-28T04:44:57Z",
+   "updated_at": "2026-08-28T06:03:48Z",
    "actor": "Boss2002n",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-28T06:03:56Z",
+     "completed_at": "2026-08-28T06:19:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33142704939/job/98769152436",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-28T06:04:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33142704939/job/98769152443"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-28T06:04:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33142704939/job/98769152451"
+    }
+   ]
   },
   {
    "run_id": 33142554094,
@@ -95,11 +169,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-28T04:14:19Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33139751646/job/98752209351"
+     "completed_at": "2026-08-28T05:16:30Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33139751646/job/98752209351",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -114,11 +189,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-28T04:31:43Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33139751646/job/98752209439"
+     "completed_at": "2026-08-28T06:33:57Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33139751646/job/98752209439",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -174,11 +250,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-28T04:09:38Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33137638181/job/98744049219"
+     "completed_at": "2026-08-28T05:45:15Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33137638181/job/98744049219",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -324,11 +401,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-28T04:09:42Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33078414918/job/98744736796"
+     "completed_at": "2026-08-28T05:40:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33078414918/job/98744736796",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -798,7 +876,7 @@
   },
   {
    "run_id": 33038905462,
-   "pr": 1056,
+   "pr": null,
    "commit": "bce20846d02f49d1f17444894ad07a6bf8e7d474",
    "branch": "feat/gfx950-paged-attention-vllm-kv-layouts",
    "event": "pull_request",
@@ -1833,113 +1911,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 32834388223,
-   "pr": 971,
-   "commit": "d37a0a9b809b8ba61ee6ba537fd0da5c963cd2e6",
-   "branch": "gfx1250/gemm-opt-0805",
-   "event": "pull_request",
-   "title": "[gfx1250] Add A8W8/A8W4/A4W4 compute-bound GEMM",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32834388223",
-   "created_at": "2026-08-25T09:53:49Z",
-   "updated_at": "2026-08-25T12:45:38Z",
-   "actor": "aoli26",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-25T10:54:16Z",
-     "completed_at": "2026-08-25T12:12:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32834388223/job/97775725969",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-25T10:54:16Z",
-     "completed_at": "2026-08-25T12:45:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32834388223/job/97775725977",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-25T10:54:06Z",
-     "completed_at": "2026-08-25T11:13:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32834388223/job/97775726043",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32832581456,
-   "pr": null,
-   "commit": "706910857edba028e6c8a6634d27143d2f2178e7",
-   "branch": "mxfp8_8w",
-   "event": "pull_request",
-   "title": "[MI355]support mxfp8 8wave pipeline",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32832581456",
-   "created_at": "2026-08-25T09:33:23Z",
-   "updated_at": "2026-08-25T12:01:32Z",
-   "actor": "solinzby1",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-25T10:13:56Z",
-     "completed_at": "2026-08-25T12:01:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32832581456/job/97765158052",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-25T10:13:38Z",
-     "completed_at": "2026-08-25T10:34:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32832581456/job/97765158099",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-25T10:13:53Z",
-     "completed_at": "2026-08-25T11:29:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32832581456/job/97765158108",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32829004377,
-   "pr": null,
-   "commit": "d759fdfec91fff22692b2899f0b9f91830a2dd12",
-   "branch": "mxfp8_8w",
-   "event": "pull_request",
-   "title": "[MI355]support mxfp8 8wave pipeline",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32829004377",
-   "created_at": "2026-08-25T08:53:44Z",
-   "updated_at": "2026-08-25T08:56:08Z",
-   "actor": "solinzby1",
-   "jobs": []
   }
  ]
 }
