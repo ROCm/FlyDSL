@@ -206,8 +206,12 @@ def launch_gemm_bf16(
             for ks in range_constexpr(K_WS):
                 nxt = _load_ks(buf, ks + 1) if const_expr(ks + 1 < K_WS) else None
                 rocdl.s_wait_dscnt(KS_DS if const_expr(nxt is not None) else 0)
+                if const_expr(ks == 0 and prefetch_kt is not None and wmma_m_rep > 1):
+                    rocdl.sched_barrier(0)
+                    issue(prefetch_kt % num_buffers, prefetch_kt)
+                    rocdl.sched_barrier(0)
                 _mma_ks(cur)
-                if const_expr(ks == 0 and prefetch_kt is not None):
+                if const_expr(ks == 0 and prefetch_kt is not None and wmma_m_rep == 1):
                     rocdl.sched_barrier(0)
                     issue(prefetch_kt % num_buffers, prefetch_kt)
                     rocdl.sched_barrier(0)

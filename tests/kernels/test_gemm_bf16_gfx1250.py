@@ -63,14 +63,18 @@ def _build_case(
     *,
     cluster_m=1,
     cluster_n=1,
+    const_val=None,
 ):
     """Inputs, a make_args(stream) thunk, the f32 reference, and tolerances."""
     if (N // tile_n) % cluster_n:
         raise ValueError(f"cluster_n={cluster_n} needs N/tile_n={N // tile_n} to be a multiple of it")
-    torch.manual_seed(0)
     dt = _DT[dtype]
-    a = torch.randn(M, K, dtype=torch.float32, device="cuda").to(dt)
-    b = torch.randn(N, K, dtype=torch.float32, device="cuda").to(dt)
+    if const_val is None:
+        a = torch.randn(M, K, dtype=torch.float32, device="cuda").to(dt)
+        b = torch.randn(N, K, dtype=torch.float32, device="cuda").to(dt)
+    else:
+        a = torch.full((M, K), const_val, dtype=dt, device="cuda")
+        b = torch.full((N, K), const_val, dtype=dt, device="cuda")
     c = torch.zeros(M, N, dtype=dt, device="cuda")
     ref = torch.matmul(a.float(), b.float().T)
 
@@ -172,6 +176,18 @@ def _parse_csv_ints(value, n, name):
     return parts
 
 
+def _parse_init_mode(value):
+    """'random' -> None; 'const' or 'const,<float>' -> constant A/B fill (default 0.1)."""
+    if value == "random":
+        return None
+    if value == "const":
+        return 0.1
+    kind, _, num = value.partition(",")
+    if kind == "const" and num:
+        return float(num)
+    raise SystemExit(f"--init-mode expects 'random', 'const', or 'const,<float>', got {value!r}")
+
+
 def _print_table(headers, rows):
     widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
 
@@ -196,6 +212,13 @@ def _main():
     parser.add_argument("-dtype", default="bf16", choices=["bf16", "f16"], nargs="+")
     parser.add_argument("-cluster", default="1,1", help="cluster_m,cluster_n (1,1 disables clustering)")
     parser.add_argument("-bench", action="store_true", help="also measure perf (warmup=10, iters=100)")
+    parser.add_argument(
+        "--init-mode",
+        nargs="+",
+        default=["random", "const"],
+        metavar="MODE",
+        help="A/B fill(s): 'random' and/or 'const' (0.1) or 'const,<float>' (default: both)",
+    )
     args = parser.parse_args()
 
     shapes = [_parse_csv_ints(v, 3, "mnk") for v in args.mnk]
@@ -205,7 +228,7 @@ def _main():
     dtypes = args.dtype if isinstance(args.dtype, list) else [args.dtype]
 
     rows = []
-    for (M, N, K), dtype in itertools.product(shapes, dtypes):
+    for (M, N, K), dtype, init in itertools.product(shapes, dtypes, args.init_mode):
         c, make_args, ref, (rtol, atol) = _build_case(
             M,
             N,
@@ -216,6 +239,7 @@ def _main():
             dtype,
             cluster_m=cluster[0],
             cluster_n=cluster[1],
+            const_val=_parse_init_mode(init),
         )
         compiled = flyc.compile(launch_gemm_bf16, *make_args(torch.cuda.current_stream()))
         torch.cuda.synchronize()
@@ -227,14 +251,27 @@ def _main():
             moved = _bytes_moved(M, N, K)
             perf = [f"{us:.3f}", f"{_tflops(M, N, K, us):.2f}", f"{moved / (us * 1e-6) / 1e12:.3f}"]
         rows.append(
-            [str(M), str(N), str(K), dtype, *perf, f"{max_err:.4g}", f"{rel_err:.3g}", "PASS" if ok else "FAIL"]
+            [
+                str(M),
+                str(N),
+                str(K),
+                dtype,
+                init,
+                *perf,
+                f"{max_err:.4g}",
+                f"{rel_err:.3g}",
+                "PASS" if ok else "FAIL",
+            ]
         )
 
     print(
         f"\ntiles={tiles[0]},{tiles[1]},{tiles[2]} warps={warps[0]},{warps[1]} "
         f"nb={args.nb} cluster={cluster[0]},{cluster[1]}"
     )
-    _print_table(["M", "N", "K", "dtype", "latency us", "TFLOPS", "BW TB/s", "max_err", "rel_err", "result"], rows)
+    _print_table(
+        ["M", "N", "K", "dtype", "init_mode", "latency us", "TFLOPS", "BW TB/s", "max_err", "rel_err", "result"],
+        rows,
+    )
     if any(r[-1] == "FAIL" for r in rows):
         raise SystemExit(1)
 
