@@ -245,6 +245,7 @@ class FlexAttnParam:
     score_type: fx.Constexpr[int]
     mask_window: fx.Constexpr[int]  # sliding window size (only used when mask_type==MASK_SLIDING_WINDOW)
     score_alibi_slope: fx.Constexpr[float]  # alibi slope (only used when score_type==SCORE_ALIBI)
+    num_kv_splits: fx.Constexpr[int]  # split-K: partition KV range across this many WGs (1=disabled)
 
 
 def make_flex_attn_param(
@@ -268,6 +269,7 @@ def make_flex_attn_param(
     score_type: int = SCORE_NONE,
     mask_window: int = 0,
     score_alibi_slope: float = 0.0,
+    num_kv_splits: int = 1,
 ) -> FlexAttnParam:
     if dtype_id not in (FLEX_DTYPE_BF16, FLEX_DTYPE_FP16, FLEX_DTYPE_FP8):
         raise ValueError(f"unsupported dtype_id={dtype_id}")
@@ -357,6 +359,7 @@ def make_flex_attn_param(
         score_type=score_type,
         mask_window=mask_window,
         score_alibi_slope=score_alibi_slope,
+        num_kv_splits=num_kv_splits,
     )
 
 
@@ -482,9 +485,9 @@ def flex_attn_fwd_gfx950_kernel(
     tiled_mma_qk: fx.TiledMma,
     tiled_mma_pv: fx.TiledMma,
     param: FlexAttnParam,
-    q_descale: fx.Float32 = fx.Float32(1.0),  # fp8 per-tensor Q descale
-    k_descale: fx.Float32 = fx.Float32(1.0),  # fp8 per-tensor K descale
-    v_descale: fx.Float32 = fx.Float32(1.0),  # fp8 per-tensor V descale
+    q_descale: fx.Float32 = fx.Float32(1.0),
+    k_descale: fx.Float32 = fx.Float32(1.0),
+    v_descale: fx.Float32 = fx.Float32(1.0),
 ):
     block_m = param.block_m
     block_n = param.block_n
@@ -501,10 +504,16 @@ def flex_attn_fwd_gfx950_kernel(
     group_threads = param.group_threads  # 128 (m_waves*n_waves*wave_size)
     group = tid // group_threads
     local_tid = tid % group_threads
-    # grid.x = super-tile index (num_groups query subtiles); grid.y = head; grid.z = batch.
+    # grid.x = q_tile; grid.y = head; grid.z = batch (or batch * num_kv_splits if split-K).
+    _SPLITK = int(param.num_kv_splits) > 1
+    _num_kv_splits = int(param.num_kv_splits)
     q_tile = fx.block_idx.x
     h_idx = fx.block_idx.y
-    b_idx = fx.block_idx.z
+    if const_expr(_SPLITK):
+        b_idx = fx.block_idx.z // fx.Index(_num_kv_splits)
+        split_idx = fx.Int32(arith.index_cast(T.i32, fx.block_idx.z % fx.Index(_num_kv_splits)))
+    else:
+        b_idx = fx.block_idx.z
     kv_head = h_idx // param.gqa_group
 
     q_start = (q_tile * num_groups + group) * block_m
@@ -1222,6 +1231,12 @@ def flex_attn_fwd_gfx950_kernel(
         _q_min_wg = fx.Int32(arith.index_cast(T.i32, q_tile)) * fx.Int32(num_groups * block_m)
         _q_max_wg = _q_min_wg + fx.Int32(num_groups * block_m - 1)
         _kv_lo, _kv_hi = flex_mod.kv_range(_q_min_wg, _q_max_wg, n_kv_tiles, block_n)
+        if const_expr(_SPLITK):
+            _total_tiles = _kv_hi - _kv_lo
+            _chunk = (_total_tiles + fx.Int32(_num_kv_splits - 1)) // fx.Int32(_num_kv_splits)
+            _kv_lo = _kv_lo + split_idx * _chunk
+            _kv_hi_split = _kv_lo + _chunk
+            _kv_hi = fx.Int32(arith.minsi(_kv_hi_split.ir_value(), _kv_hi.ir_value()))
         rocdl.s_barrier()
         rocdl.s_barrier()
 
@@ -1665,6 +1680,7 @@ def flex_attn_fwd_gfx950_kernel(
     _o_row_stride = hq * head_dim
     _out_elem_dtype = fx.BFloat16 if const_expr(_is_fp8) else elem_dtype
 
+    # TODO: split-K partial store path (write O/m/l to workspace instead of final O)
     _o_store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), _out_elem_dtype)
     o_store_reg = fx.make_rmem_tensor(fx.make_layout(4, 1), _out_elem_dtype)
     o_div = fx.logical_divide(
@@ -1688,6 +1704,100 @@ def flex_attn_fwd_gfx950_kernel(
             fx.copy(_o_store_atom, o_store_reg, fx.slice(o_div, (None, fx.Int32(off))))
 
 
+_COMBINE_BLOCK = 256
+
+
+@flyc.kernel(known_block_size=[_COMBINE_BLOCK, 1, 1])
+def flex_splitk_combine_kernel(
+    o: fx.Tensor,            # [B, Sq, Hq, D] output (bf16/f16)
+    ws_o: fx.Tensor,         # [num_splits, B, Hq, Sq, D] f32 partial O
+    ws_ml: fx.Tensor,        # [num_splits, B, Hq, Sq, 2] f32 (m, l) per split
+    num_splits: fx.Constexpr[int],
+    head_dim: fx.Constexpr[int],
+    out_dtype_id: fx.Constexpr[int],
+):
+    """Combine split-K partial outputs into final O.
+
+    Each thread handles 4 D-values at one query row. Block covers
+    head_dim/4 lanes × (256 / (head_dim/4)) rows per workgroup.
+    """
+    from flydsl.expr.primitive import range_constexpr, const_expr
+
+    tid = fx.thread_idx.x
+    bid = fx.block_idx.x
+
+    _lanes_per_row = head_dim // 4
+    _rows_per_block = _COMBINE_BLOCK // _lanes_per_row
+    lane_in_row = tid % _lanes_per_row
+    row_in_block = tid // _lanes_per_row
+
+    # Global row = bid * rows_per_block + row_in_block
+    # This row maps to (batch, head, seq_pos) in the flattened [B*Hq*Sq] space.
+    global_row = fx.Int32(arith.index_cast(T.i32, bid)) * fx.Int32(_rows_per_block) + fx.Int32(row_in_block)
+
+    # ws_o is [num_splits, B, Hq, Sq, D] — stride for split dim = B*Hq*Sq*D
+    _total_rows = fx.Int32(fx.get_scalar(ws_ml.shape[1])) * fx.Int32(fx.get_scalar(ws_ml.shape[2])) * fx.Int32(fx.get_scalar(ws_ml.shape[3]))
+    _split_o_stride = _total_rows * fx.Int32(head_dim)
+    _split_ml_stride = _total_rows * fx.Int32(2)
+
+    # D column offset: lane_in_row * 4
+    d_col = fx.Int32(lane_in_row) * fx.Int32(4)
+
+    # Load per-split (m, l) and find m_max
+    _M_NEG_INF = fx.Float32(-1e30)
+    m_max = _M_NEG_INF
+
+    # ws_ml descriptor
+    ws_ml_it = fx.recast_iter(fx.Float32, fx.get_iter(ws_ml))
+    ws_o_it = fx.recast_iter(fx.Float32, fx.get_iter(ws_o))
+
+    # First pass: find m_max across all splits
+    for s in range_constexpr(num_splits):
+        ml_off = fx.Int32(s) * _split_ml_stride + global_row * fx.Int32(2)
+        m_s = fx.Float32(fx.load(ws_ml_it + fx.Int32(ml_off)))
+        m_max = m_max.maximumf(m_s)
+
+    # Second pass: weighted accumulate O and denominator
+    Vec = fx.Vector
+    acc = Vec.filled(4, 0.0, fx.Float32)
+    den = fx.Float32(0.0)
+    for s in range_constexpr(num_splits):
+        ml_off = fx.Int32(s) * _split_ml_stride + global_row * fx.Int32(2)
+        m_s = fx.Float32(fx.load(ws_ml_it + fx.Int32(ml_off)))
+        l_s = fx.Float32(fx.load(ws_ml_it + fx.Int32(ml_off + fx.Int32(1))))
+        w_s = _hw_exp2(m_s - m_max) * l_s
+
+        o_off = fx.Int32(s) * _split_o_stride + global_row * fx.Int32(head_dim) + d_col
+        o_vals = [fx.Float32(fx.load(ws_o_it + fx.Int32(o_off + fx.Int32(e))))
+                  for e in range_constexpr(4)]
+        o_vec = Vec.from_elements(o_vals, fx.Float32)
+        w_vec = Vec.from_elements([w_s], fx.Float32).broadcast_to(4)
+        acc = acc + o_vec * w_vec
+        den = den + w_s
+
+    # Normalize and store
+    inv_den = fx.Float32(1.0) / den.maximumf(fx.Float32(1e-12))
+    inv_vec = Vec.from_elements([inv_den], fx.Float32).broadcast_to(4)
+    result = acc * inv_vec
+
+    # Write to output O [B, Sq, Hq, D] — need to map global_row back to BSHD offset.
+    # global_row = b * Hq * Sq + h * Sq + sq_pos (from ws_ml layout [splits, B, Hq, Sq, 2])
+    # But O is [B, Sq, Hq, D] — different layout! O offset = b*Sq*Hq*D + sq*Hq*D + h*D + d
+    _Hq = fx.Int32(fx.get_scalar(ws_ml.shape[2]))
+    _Sq = fx.Int32(fx.get_scalar(ws_ml.shape[3]))
+    _b = global_row // (_Hq * _Sq)
+    _rem = global_row % (_Hq * _Sq)
+    _h = _rem // _Sq
+    _sq = _rem % _Sq
+    _o_off = _b * _Sq * _Hq * fx.Int32(head_dim) + _sq * _Hq * fx.Int32(head_dim) + _h * fx.Int32(head_dim) + d_col
+
+    _out_elem = fx.BFloat16 if const_expr(out_dtype_id == FLEX_DTYPE_BF16 or out_dtype_id == FLEX_DTYPE_FP8) else fx.Float16
+    o_it = fx.recast_iter(_out_elem, fx.get_iter(o))
+    for e in range_constexpr(4):
+        val = result[e].to(_out_elem)
+        fx.store(o_it + fx.Int32(_o_off + fx.Int32(e)), val)
+
+
 @flyc.jit
 def launch_flex_attn_gfx950(
     o: fx.Tensor,
@@ -1707,9 +1817,9 @@ def launch_flex_attn_gfx950(
     seqlen_kv = fx.Int32(fx.get_scalar(k.shape[1]))
 
     elem_dtype = _elem_dtype(param.dtype_id)
+    _SPLITK = int(param.num_kv_splits) > 1
+    _num_kv_splits = int(param.num_kv_splits)
 
-    # Both GEMMs use the same MFMA atom + wave layout as the validated probe:
-    # make_tiled_mma(atom, (m_waves, n_waves, 1)) with no K-permutation tile.
     wave_layout = fx.make_layout(
         (param.m_waves, param.n_waves, 1), (param.n_waves, 1, 0)
     )
@@ -1731,7 +1841,6 @@ def launch_flex_attn_gfx950(
     tiled_mma_qk = fx.make_tiled_mma(mma_atom_qk, wave_layout)
     tiled_mma_pv = fx.make_tiled_mma(mma_atom_pv, wave_layout)
 
-    # Each workgroup covers num_groups query subtiles of block_m rows.
     rows_per_wg = param.block_m * param.num_groups
     num_q_tiles = (seqlen_q + rows_per_wg - 1) // rows_per_wg
 
@@ -1739,6 +1848,12 @@ def launch_flex_attn_gfx950(
     flex_attn_fwd_gfx950_kernel._func.__name__ = make_flex_attn_kernel_name(param)
     _total_waves = int(param.block_threads) // GFX950_WAVE_SIZE
     _waves_per_eu = max(1, _total_waves // 4)
+
+    if const_expr(_SPLITK):
+        grid_z = b * fx.Int32(_num_kv_splits)
+    else:
+        grid_z = b
+
     flex_attn_fwd_gfx950_kernel(
         o, q, k, v, seqlen_q, seqlen_kv, b, scale, tiled_mma_qk, tiled_mma_pv, param,
         q_descale, k_descale, v_descale,
@@ -1747,10 +1862,24 @@ def launch_flex_attn_gfx950(
             "rocdl.flat_work_group_size": f"{param.block_threads},{param.block_threads}",
         },
     ).launch(
-        grid=(num_q_tiles, hq, b),
+        grid=(num_q_tiles, hq, grid_z),
         block=(param.block_threads, 1, 1),
         stream=stream,
     )
+
+    if const_expr(_SPLITK):
+        _head_dim = int(param.head_dim)
+        _lanes_per_row = _head_dim // 4
+        _rows_per_block = _COMBINE_BLOCK // _lanes_per_row
+        _total_rows = b * hq * seqlen_q
+        _combine_blocks = (_total_rows + fx.Int32(_rows_per_block - 1)) // fx.Int32(_rows_per_block)
+        flex_splitk_combine_kernel(
+            o, ws_o, ws_ml, _num_kv_splits, _head_dim, int(param.dtype_id),
+        ).launch(
+            grid=(_combine_blocks, fx.Index(1), fx.Index(1)),
+            block=(_COMBINE_BLOCK, 1, 1),
+            stream=stream,
+        )
 
 
 # fast_fp_math breaks pipe_depth=2 when seqlen_kv == block_n (single KV tile); omit it.
@@ -1783,6 +1912,7 @@ def flydsl_flex_attention_layout(
     score_type: int = SCORE_NONE,
     mask_window: int = 0,
     score_alibi_slope: float = 0.0,
+    num_kv_splits: int = 1,
     stream: Optional[torch.cuda.Stream] = None,
 ) -> torch.Tensor:
     """Flash-attention forward on the layout API (gfx950) with flex score/mask mods.
@@ -1858,9 +1988,16 @@ def flydsl_flex_attention_layout(
         score_type=score_type,
         mask_window=mask_window,
         score_alibi_slope=score_alibi_slope,
+        num_kv_splits=num_kv_splits,
     )
-    # V stays in BSHD layout [B, Skv, Hkv, D]; the kernel tiles V into compact
-    # [block_n, 32] D-chunk sub-tiles in LDS and uses LDSReadTrans16_64b to transpose.
+
+    if num_kv_splits > 1:
+        ws_o = torch.zeros(num_kv_splits, B, Hq, Sq, D, dtype=torch.float32, device=q.device)
+        ws_ml = torch.full((num_kv_splits, B, Hq, Sq, 2), -1e30, dtype=torch.float32, device=q.device)
+    else:
+        ws_o = None
+        ws_ml = None
+
     launch_flex_attn_gfx950(
         out.contiguous(), q.contiguous(), k.contiguous(), v.contiguous(),
         fx.Float32(scale), param, stream,
