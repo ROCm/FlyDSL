@@ -57,6 +57,8 @@ def launch_gemm_bf16(
     n_acc = wmma_m_rep * wmma_n_rep
     num_waves = m_warp * n_warp
     block = num_waves * WAVE
+    HM, HN = tile_m // 2, tile_n // 2  # A/B halves, one per staging wave
+    TDM_PW = 4 // min(num_waves, 4)  # TDM descriptors each wave issues per K-tile
     use_cluster = cluster_m > 1 or cluster_n > 1
 
     if tile_k % WMMA_K or warp_tile_m % WMMA_M or warp_tile_n % WMMA_N:
@@ -139,21 +141,27 @@ def launch_gemm_bf16(
         gB_base = fx.recast_iter(fx.Int8, arg_b)
         gC_base = fx.recast_iter(fx.PointerType.get(elem_cls.ir_type, arg_c.address_space), arg_c)
 
-        W_A, W_B = 0, 1 % num_waves
-        gA = _gv(gA_base, fx.Int64(blk_m) * lda_b, (tile_m, KB), (KB, 1))
-        atomA = _tdm(gA, mn_oob, lda_b, a_mask)
-        gB = _gv(gB_base, fx.Int64(blk_n) * ldb_b, (tile_n, KB), (KB, 1))
-        atomB = _tdm(gB, None, ldb_b, b_mask)
+        # Waves 0/1 stage a half of A each, waves 2/3 a half of B each.
+        gA0 = _gv(gA_base, fx.Int64(blk_m) * lda_b, (HM, KB), (KB, 1))
+        gA1 = _gv(gA_base, fx.Int64(blk_m + HM) * lda_b, (HM, KB), (KB, 1))
+        atomA0 = _tdm(gA0, mn_oob, lda_b, a_mask)
+        atomA1 = _tdm(gA1, mn_oob - HM, lda_b, a_mask)
+        gB0 = _gv(gB_base, fx.Int64(blk_n) * ldb_b, (HN, KB), (KB, 1))
+        gB1 = _gv(gB_base, fx.Int64(blk_n + HN) * ldb_b, (HN, KB), (KB, 1))
+        atomB0 = _tdm(gB0, None, ldb_b, b_mask)
+        atomB1 = _tdm(gB1, None, ldb_b, b_mask)
 
         def _wcopy(w, atom, gt, lv, imm_offset):
-            if wave == w:
+            if wave == w % num_waves:
                 fx.copy(atom, gt, lv, imm_offset=imm_offset)
 
         def issue(s, kt):
             pa = _buf_ptr(s)
             koff = fx.Int64(kt) * fx.Int64(KB)
-            _wcopy(W_A, atomA, gA, _lv(pa, (tile_m, KB), (LDS_ROW, 1)), koff)
-            _wcopy(W_B, atomB, gB, _lv(fx.add_offset(pa, STAGE_A), (tile_n, KB), (LDS_ROW, 1)), koff)
+            _wcopy(0, atomA0, gA0, _lv(pa, (HM, KB), (LDS_ROW, 1)), koff)
+            _wcopy(1, atomA1, gA1, _lv(fx.add_offset(pa, HM * LDS_ROW), (HM, KB), (LDS_ROW, 1)), koff)
+            _wcopy(2, atomB0, gB0, _lv(fx.add_offset(pa, STAGE_A), (HN, KB), (LDS_ROW, 1)), koff)
+            _wcopy(3, atomB1, gB1, _lv(fx.add_offset(pa, STAGE_A + HN * LDS_ROW), (HN, KB), (LDS_ROW, 1)), koff)
 
         wmb = wave_m * warp_tile_m
         wnb = wave_n * warp_tile_n
@@ -227,14 +235,14 @@ def launch_gemm_bf16(
         n_steady = K_TILES - (num_buffers - 1)
         for kt in range(n_steady):
             buf = _bidx(_buf_ptr(kt % num_buffers))
-            pipeline_fence(outstanding=(num_buffers - 2), use_cluster=False)
+            pipeline_fence(outstanding=TDM_PW * (num_buffers - 2), use_cluster=False)
             compute_ktile(buf, kt + (num_buffers - 1))
             if const_expr(use_cluster) and kt % num_buffers == num_buffers - 1:
                 cluster.cluster_barrier()
         for j in range_constexpr(num_buffers - 1):
             kt = n_steady + j
             buf = _bidx(_buf_ptr(kt % num_buffers))
-            pipeline_fence(outstanding=(num_buffers - 2 - j), use_cluster=False)
+            pipeline_fence(outstanding=TDM_PW * (num_buffers - 2 - j), use_cluster=False)
             compute_ktile(buf, None)
 
         accs = [c_frags[idx].load() for idx in range_constexpr(n_acc)]
