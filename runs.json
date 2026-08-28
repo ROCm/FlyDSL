@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-28T10:43:23Z",
+ "updated": "2026-08-28T11:04:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33165604259,
+   "pr": 1078,
+   "commit": "5ce2fc5037a847bc8de6a9b9f8115e2f9a8f0f4a",
+   "branch": "gfx1250/bf16-gemm-opt-0828",
+   "event": "pull_request",
+   "title": "[gfx1250] Bf16 GEMM: Issue tdm prefetch earlier for wide tiles and add const init test",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33165604259",
+   "created_at": "2026-08-28T11:01:58Z",
+   "updated_at": "2026-08-28T11:02:47Z",
+   "actor": "aoli26",
+   "jobs": []
+  },
   {
    "run_id": 33164202834,
    "pr": 1078,
@@ -10,11 +25,11 @@
    "branch": "gfx1250/bf16-gemm-opt-0828",
    "event": "pull_request",
    "title": "[gfx1250] Bf16 GEMM: Issue tdm prefetch earlier for wide tiles and add const init test",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33164202834",
    "created_at": "2026-08-28T10:39:46Z",
-   "updated_at": "2026-08-28T10:40:26Z",
+   "updated_at": "2026-08-28T11:02:18Z",
    "actor": "aoli26",
    "jobs": []
   },
@@ -134,11 +149,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-28T08:48:45Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33154122125/job/98801240743"
+     "completed_at": "2026-08-28T10:44:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33154122125/job/98801240743",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -1893,52 +1909,6 @@
    "updated_at": "2026-08-26T00:45:38Z",
    "actor": "amd-xiaoyu12",
    "jobs": []
-  },
-  {
-   "run_id": 32872823775,
-   "pr": 1064,
-   "commit": "be4ee6eca52b0544fd18275a10c47ba859efa149",
-   "branch": "upstream/pa-64bit-cache-offsets",
-   "event": "pull_request",
-   "title": "[Bugfix][PA] Fix D192 query staging and 64-bit cache offsets",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32872823775",
-   "created_at": "2026-08-25T16:34:58Z",
-   "updated_at": "2026-08-25T18:27:51Z",
-   "actor": "sammysun0711",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-25T16:53:26Z",
-     "completed_at": "2026-08-25T18:27:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32872823775/job/97889107021",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-25T16:52:46Z",
-     "completed_at": "2026-08-25T18:16:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32872823775/job/97889107159",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-25T16:52:33Z",
-     "completed_at": "2026-08-25T17:10:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32872823775/job/97889107185",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
