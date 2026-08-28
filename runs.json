@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-28T11:04:53Z",
+ "updated": "2026-08-28T12:47:10Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,43 @@
    "branch": "gfx1250/bf16-gemm-opt-0828",
    "event": "pull_request",
    "title": "[gfx1250] Bf16 GEMM: Issue tdm prefetch earlier for wide tiles and add const init test",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33165604259",
    "created_at": "2026-08-28T11:01:58Z",
-   "updated_at": "2026-08-28T11:02:47Z",
+   "updated_at": "2026-08-28T11:24:18Z",
    "actor": "aoli26",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-28T11:24:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33165604259/job/98834754149"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-28T11:24:42Z",
+     "completed_at": "2026-08-28T11:42:15Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33165604259/job/98834754181",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-28T11:24:40Z",
+     "completed_at": "2026-08-28T12:09:32Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33165604259/job/98834754199",
+     "log_fetch_failed": true
+    }
+   ]
   },
   {
    "run_id": 33164202834,
@@ -94,11 +124,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-28T08:45:05Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33154548148/job/98800426449"
+     "completed_at": "2026-08-28T11:08:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33154548148/job/98800426449",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -159,11 +190,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-28T08:49:03Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33154122125/job/98801240751"
+     "completed_at": "2026-08-28T11:19:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33154122125/job/98801240751",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -643,11 +675,11 @@
    "branch": "ci/add-mi35x-runners",
    "event": "pull_request",
    "title": "[CI] Add MI35x runners for validation tests",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33075521829",
    "created_at": "2026-08-27T13:11:14Z",
-   "updated_at": "2026-08-27T13:34:24Z",
+   "updated_at": "2026-08-28T12:45:20Z",
    "actor": "coderfeli",
    "jobs": [
     {
