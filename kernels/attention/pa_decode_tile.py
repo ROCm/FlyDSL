@@ -71,13 +71,13 @@ def compile_pa_decode_tile(
     per_token_kv: bool = False,
     query_length: int = 1,
     trans_v: bool = True,
-    bf16_kv: bool = False,
+    kv_dtype: str = "fp8",
 ):
     """Build the tile-programming PA-decode kernel + launch wrapper.
 
-    ``block_size``, Q/K ``head_dim``, ``v_head_dim``, and ``query_dtype`` are
-    compile-time constants (lru_cache keys). ``query_length`` (MTP) and
-    ``query_group_size`` flatten into
+    ``block_size``, Q/K ``head_dim``, ``v_head_dim``, ``query_dtype``, and
+    ``kv_dtype`` are compile-time constants (lru_cache keys). ``query_length``
+    (MTP) and ``query_group_size`` flatten into
     ``TOTAL_ROWS = query_length * query_group_size``, tiled into
     ``M_TILES = ceil(TOTAL_ROWS / 16)`` independent 16-row MFMA tiles; each
     extra M-tile duplicates loop-carried state, so VGPR/LDS/occupancy scale
@@ -85,6 +85,9 @@ def compile_pa_decode_tile(
     """
     arch = str(get_rocm_arch()).split(":", 1)[0]
     is_gfx950 = "gfx95" in arch
+    if kv_dtype not in ("fp8", "bf16"):
+        raise ValueError(f"pa_decode_tile only supports kv_dtype in ('fp8', 'bf16'), got {kv_dtype!r}")
+    is_bf16_kv = kv_dtype == "bf16"
     FP8 = fx.Float8E4M3FN if is_gfx950 else fx.Float8E4M3FNUZ
     FP8_MAX = 448.0 if is_gfx950 else 240.0  # max representable magnitude of the format above
 
@@ -98,7 +101,7 @@ def compile_pa_decode_tile(
         "bf16",
     ), f"pa_decode_tile only supports query_dtype in ('f16', 'bf16'), got {query_dtype}"
     Q_DTYPE = fx.BFloat16 if query_dtype == "bf16" else fx.Float16
-    if bf16_kv:
+    if is_bf16_kv:
         if arch not in BF16_KV_SUPPORTED_ARCHS:
             raise ValueError("BF16 vectorized-5D PA decode requires gfx942 or gfx950; " f"got {arch}")
         assert query_dtype == "bf16", "BF16 KV MFMA requires a BF16 query"
@@ -124,8 +127,8 @@ def compile_pa_decode_tile(
     QK_CHUNK_ELEMS = 16
     QKHE_LOOP = head_dim // (RGROUP_QUARTERS * QK_CHUNK_ELEMS)
     assert QKHE_LOOP >= 1, f"head_dim {head_dim} must be at least {RGROUP_QUARTERS * QK_CHUNK_ELEMS}"
-    MFMA_K = BF16_MFMA_K if bf16_kv else FP8_MFMA_K
-    MFMA_VALUES_PER_LANE = 4 if bf16_kv else 8
+    MFMA_K = BF16_MFMA_K if is_bf16_kv else FP8_MFMA_K
+    MFMA_VALUES_PER_LANE = 4 if is_bf16_kv else 8
     N_SUBCHUNKS = QKHE_LOOP * (QK_CHUNK_ELEMS // MFMA_VALUES_PER_LANE)
 
     # Q-quant chunk width: NQCHUNK stays fixed at 16 (tied to `lane16`'s role
@@ -150,7 +153,7 @@ def compile_pa_decode_tile(
     # scale staging. No sO/sM/sL/sCorr: PV output is register-resident/loop-carried
     # and stored straight to global (V=A/P=B swap).
     f32 = 4
-    QP_ELEM_BYTES = 2 if bf16_kv else 1
+    QP_ELEM_BYTES = 2 if is_bf16_kv else 1
     sQ_bytes = ROWS_PADDED * head_dim * QP_ELEM_BYTES
     sP_off = sQ_bytes
     # +16B row padding breaks a 32-bank LDS conflict on the P-pack writes while
@@ -265,7 +268,7 @@ def compile_pa_decode_tile(
             return fx.Vector.from_elements([word], dtype=fx.Int64).bitcast(fx.Int16)
 
         def _mfma(a, b, acc):
-            if const_expr(bf16_kv):
+            if const_expr(is_bf16_kv):
                 return fx.rocdl.mfma_f32_16x16x16bf16_1k(
                     T.f32x4,
                     [_bf16_mfma_operand(a), _bf16_mfma_operand(b), acc, 0, 0, 0],
@@ -285,7 +288,7 @@ def compile_pa_decode_tile(
         vs_rsrc = buffer_ops.create_buffer_resource(value_scale_ptr, max_size=True)
         # Per-tensor: a single global scale, read once. Per-token: read
         # per-token instead (see _kv_scale_ops/_stage_kv_scale_to_lds below).
-        if const_expr(not per_token_kv and not bf16_kv):
+        if const_expr(not per_token_kv and not is_bf16_kv):
             key_scale = fx.Int32(
                 buffer_ops.buffer_load(ks_rsrc, arith.constant(0, type=T.i32), vec_width=1, is_scalar=True)
             ).bitcast(fx.Float32)
@@ -403,7 +406,7 @@ def compile_pa_decode_tile(
             ops = []
             for qkhe in range_constexpr(QKHE_LOOP):
                 he_idx = qkhe * RGROUP_QUARTERS + rgroup
-                if const_expr(bf16_kv):
+                if const_expr(is_bf16_kv):
                     for qkr in range_constexpr(2):
                         he8_idx = he_idx * 2 + qkr
                         base = (((phys * n_kv + kv_h) * (head_dim // 8) + he8_idx) * block_size + within_page_tok) * 8
@@ -450,7 +453,7 @@ def compile_pa_decode_tile(
         # below) and v_scale_f is unused (replaced by v_max_scaled).
         if const_expr(per_token_kv):
             scale_qk = fx.Float32(softmax_scale * LOG2E)
-        elif const_expr(bf16_kv):
+        elif const_expr(is_bf16_kv):
             scale_qk = fx.Float32(softmax_scale * LOG2E)
             v_scale_f = fx.Float32(1.0)
         else:
@@ -512,7 +515,7 @@ def compile_pa_decode_tile(
             # (a buffer load is 128b max); head_dim=256 splits into 2 pieces.
             q_units = [_q_load_chunk(base_elem + u * QLOAD_UNIT) for u in range_constexpr(N_QLOADS)]
 
-            if const_expr(bf16_kv):
+            if const_expr(is_bf16_kv):
                 for u in range_constexpr(N_QLOADS):
                     elem_off = qh_local * head_dim + lane16 * QCHUNK + u * QLOAD_UNIT
                     _lds_store(q_row_off + elem_off * 2, fx.BFloat16, q_units[u])
@@ -554,7 +557,7 @@ def compile_pa_decode_tile(
             elif flat_idx < TOTAL_ROWS:
                 _stage_q_row(m, qi, gs_head, q_row_off)
             else:
-                if const_expr(bf16_kv):
+                if const_expr(is_bf16_kv):
                     for u in range_constexpr(N_QLOADS):
                         elem_off = qh_local * head_dim + lane16 * QCHUNK + u * QLOAD_UNIT
                         _lds_store(
@@ -588,9 +591,9 @@ def compile_pa_decode_tile(
                 chunk = _lds_load(
                     q_row_off + elem_off * QP_ELEM_BYTES,
                     fx.Int64,
-                    4 if bf16_kv else 2,
+                    4 if is_bf16_kv else 2,
                 )
-                for qkr in range_constexpr(4 if bf16_kv else 2):
+                for qkr in range_constexpr(4 if is_bf16_kv else 2):
                     q_ops_all.append(chunk[qkr])
 
         # QK in NCHUNK chunks of 4 tokens: each chunk yields a f32x4
@@ -608,7 +611,7 @@ def compile_pa_decode_tile(
         # FP8 uses K32 MFMA operands; BF16 uses K16 operands packed as four
         # i16 values in each i64 word.
         NVOPS = TILE_TOK // MFMA_K
-        STEPS_PER_PAGE = block_size // (8 if bf16_kv else 16)
+        STEPS_PER_PAGE = block_size // (8 if is_bf16_kv else 16)
 
         def _v_ops(phys_row, vh):
             head_group = ((vh * VHE_SIZE) // 16) + warp
@@ -618,13 +621,13 @@ def compile_pa_decode_tile(
                 phys = fx.Int64(phys_row[sub])
                 for step in range_constexpr(STEPS_PER_PAGE):
                     if const_expr(trans_v):
-                        vector_width = 8 if bf16_kv else 16
+                        vector_width = 8 if is_bf16_kv else 16
                         base = (
                             ((phys * n_kv + kv_h) * STEPS_PER_PAGE + step) * v_head_dim + head_element
                         ) * vector_width
                     else:
                         base = ((phys * n_kv + kv_h) * v_head_dim + head_element) * block_size + step * 16
-                    if const_expr(bf16_kv):
+                    if const_expr(is_bf16_kv):
                         words = _v_load_bf16x8_words(base)
                         ops.extend([words[0], words[1]])
                     else:
@@ -692,7 +695,7 @@ def compile_pa_decode_tile(
             # q_scale doesn't depend on `m`; read the whole M_TILES-wide row once
             # (contiguous via the transposed [qh][m] sQscale layout).
             q_scale_vec = None
-            if const_expr(M_TILES > 1 and not bf16_kv):
+            if const_expr(M_TILES > 1 and not is_bf16_kv):
                 q_scale_vec = _lds_load(sQscale_off + lane16 * (M_TILES * f32), fx.Float32, M_TILES)
 
             def _lmax_off_m(m):
@@ -730,7 +733,7 @@ def compile_pa_decode_tile(
                             )
                         frag_Ss.append(fx.Vector(acc))
 
-                    scale = scale_qk if const_expr(bf16_kv) else scale_qk * fx.Float32(q_scale_vec[m])
+                    scale = scale_qk if const_expr(is_bf16_kv) else scale_qk * fx.Float32(q_scale_vec[m])
                     n_valid_tile = (causal_bound[m] - tok0).to(fx.Float32)
                     base_tok_f = fx.Int32(warp * TOK_CHUNK + rgroup * 4).to(fx.Float32)
                     thr = fx.Vector.from_elements([n_valid_tile - base_tok_f], dtype=fx.Float32).broadcast_to(4)
@@ -817,18 +820,18 @@ def compile_pa_decode_tile(
                                 else v_scale_shared[a]
                             )
                             p_scaled = Pa * v_sc * norm_factor_b
-                        elif const_expr(bf16_kv):
+                        elif const_expr(is_bf16_kv):
                             p_scaled = Pa
                         else:
                             p_scaled = Pa * fx.Vector.filled(4, FP8_MAX, fx.Float32)
-                        if const_expr(bf16_kv):
+                        if const_expr(is_bf16_kv):
                             p_chunks.append(p_scaled.to(fx.BFloat16))
                         else:
                             p_chunks.append(_f32_to_fp8_words(p_scaled)[0])
 
                     p_off0 = sP_off + lane16 * SP_ROW_BYTES + (warp * TOK_CHUNK + rgroup * 4) * QP_ELEM_BYTES
                     for a in range_constexpr(NCHUNK):
-                        if const_expr(bf16_kv):
+                        if const_expr(is_bf16_kv):
                             _lds_store(
                                 p_off0 + a * c16 * QP_ELEM_BYTES,
                                 fx.BFloat16,
@@ -902,7 +905,7 @@ def compile_pa_decode_tile(
                         _stage_kv_scale_to_lds(phys_vec1, _kv_buf_off(tt1))
                 next_state[K_SLOT] = k_next
                 # Softmax: each lane owns one qhead (lane%16); register reduce + shuffle_xor.
-                scale = scale_qk if const_expr(bf16_kv) else scale_qk * _ld1(sQscale_off, lane16)
+                scale = scale_qk if const_expr(is_bf16_kv) else scale_qk * _ld1(sQscale_off, lane16)
                 n_valid_tile = (causal_bound[0] - tok0).to(fx.Float32)
                 base_tok_f = fx.Int32(warp * TOK_CHUNK + rgroup * 4).to(fx.Float32)
                 thr = fx.Vector.from_elements([n_valid_tile - base_tok_f], dtype=fx.Float32).broadcast_to(4)
@@ -970,17 +973,17 @@ def compile_pa_decode_tile(
                             else v_scale_vecs[a]
                         )
                         p_scaled = Pa * v_scale_this * norm_factor_b
-                    elif const_expr(bf16_kv):
+                    elif const_expr(is_bf16_kv):
                         p_scaled = Pa
                     else:
                         p_scaled = Pa * fx.Vector.filled(4, FP8_MAX, fx.Float32)
-                    if const_expr(bf16_kv):
+                    if const_expr(is_bf16_kv):
                         p_chunks.append(p_scaled.to(fx.BFloat16))
                     else:
                         p_chunks.append(_f32_to_fp8_words(p_scaled)[0])
                 p_off0 = sP_off + lane16 * SP_ROW_BYTES + (warp * TOK_CHUNK + rgroup * 4) * QP_ELEM_BYTES
                 for a in range_constexpr(NCHUNK):
-                    if const_expr(bf16_kv):
+                    if const_expr(is_bf16_kv):
                         _lds_store(
                             p_off0 + a * c16 * QP_ELEM_BYTES,
                             fx.BFloat16,
@@ -1034,7 +1037,7 @@ def compile_pa_decode_tile(
             l_row = o_final[_l_slot(m)]
             safe_l = arith.select(l_row > ZERO_F, l_row, fx.Float32(1.0))
             inv_l = fx.Float32(rcp_f32(safe_l))
-            if const_expr(per_token_kv or bf16_kv):
+            if const_expr(per_token_kv or is_bf16_kv):
                 o_scale = inv_l
             else:
                 o_scale = inv_l * (v_scale_f * inv_fp8)
@@ -1156,9 +1159,10 @@ def pa_decode_tile(
     fp8_dtype = torch.float8_e4m3fn if "gfx95" in arch else torch.float8_e4m3fnuz
     if key_cache.dtype not in (torch.bfloat16, fp8_dtype):
         raise ValueError(f"pa_decode_tile supports BF16 or {fp8_dtype} KV cache on {arch}, got {key_cache.dtype}")
-    bf16_kv = key_cache.dtype == torch.bfloat16
+    is_bf16_kv = key_cache.dtype == torch.bfloat16
+    kv_dtype = "bf16" if is_bf16_kv else "fp8"
 
-    expected_vector = 8 if bf16_kv else 16
+    expected_vector = 8 if is_bf16_kv else 16
     assert num_hgroups == head_dim // expected_vector and hgroup_width == expected_vector, (
         f"key_cache shape {tuple(key_cache.shape)} does not match head_dim={head_dim}, "
         f"vector_width={expected_vector}"
@@ -1175,7 +1179,7 @@ def pa_decode_tile(
             f"block_size={block_size}, value_head_dim={value_head_dim}"
         )
     else:
-        assert not bf16_kv, "BF16 KV requires the vectorized-5D value-cache layout"
+        assert not is_bf16_kv, "BF16 KV requires the vectorized-5D value-cache layout"
         _, v_num_kv_heads, v_head_dim, v_block_size = value_cache.shape
         assert v_head_dim == value_head_dim and v_block_size == block_size, (
             f"value_cache shape {tuple(value_cache.shape)} doesn't match "
@@ -1211,7 +1215,7 @@ def pa_decode_tile(
     )
 
     dev = query.device
-    if bf16_kv:
+    if is_bf16_kv:
         if key_scale is not None or value_scale is not None:
             raise ValueError("BF16 KV is unscaled; key_scale and value_scale must be None")
         # The BF16 specialization does not dereference scale pointers. Reuse an
@@ -1247,7 +1251,7 @@ def pa_decode_tile(
     else:
         stride_ks_block = 0
         stride_ks_head = 0
-    if not bf16_kv:
+    if not is_bf16_kv:
         assert (
             key_scale_t.dtype == torch.float32 and key_scale_t.device == dev
         ), f"key_scale tensor must be float32 on {dev}, got {key_scale_t.dtype} on {key_scale_t.device}"
@@ -1276,7 +1280,7 @@ def pa_decode_tile(
         per_token_kv=per_token_kv,
         query_length=query_length,
         trans_v=trans_v,
-        bf16_kv=bf16_kv,
+        kv_dtype=kv_dtype,
     )
     from kernels.attention.pa_decode_fp8 import _is_current_stream_capturing
 
