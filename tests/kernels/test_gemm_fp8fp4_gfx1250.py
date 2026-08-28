@@ -52,7 +52,7 @@ def _i8(t: torch.Tensor):
 
 
 def _u8(t: torch.Tensor):
-    return flyc.from_c_void_p(fx.Uint8, t.data_ptr())
+    return flyc.from_c_void_p(fx.Uint8, t.data_ptr(), assumed_align=16)
 
 
 def _const_code(val: float, *, fp4: bool) -> int:
@@ -68,16 +68,16 @@ def _const_code(val: float, *, fp4: bool) -> int:
 def _fp8_bytes(rows: int, cols: int, const_val: float | None = None) -> torch.Tensor:
     """Finite FP8 E4M3 bytes (avoids the 0x7F/0xFF NaN encodings), or a constant fill."""
     if const_val is None:
-        return torch.randint(0, 126, (rows, cols), dtype=torch.uint8)
-    return torch.full((rows, cols), _const_code(const_val, fp4=False), dtype=torch.uint8)
+        return torch.randint(0, 126, (rows, cols), dtype=torch.uint8, device="cuda")
+    return torch.full((rows, cols), _const_code(const_val, fp4=False), dtype=torch.uint8, device="cuda")
 
 
 def _fp4_bytes(rows: int, K: int, const_val: float | None = None) -> torch.Tensor:
     """Packed FP4 E2M1 bytes [rows, K//2], random or a constant fill."""
     if const_val is None:
-        return gemm_common_utils.random_fp4_packed(rows, K)
+        return gemm_common_utils.random_fp4_packed(rows, K, device="cuda")
     code = _const_code(const_val, fp4=True)
-    return torch.full((rows, K // 2), code | (code << 4), dtype=torch.uint8)
+    return torch.full((rows, K // 2), code | (code << 4), dtype=torch.uint8, device="cuda")
 
 
 def _with_strided_a(a: torch.Tensor, K: int, lda: int) -> torch.Tensor:
@@ -254,6 +254,7 @@ def _build_case(
     const_val=None,
     c_guard_rows=0,
     split_k=1,
+    b_preshuffle=True,
 ):
     """Build one case: inputs, the launch-argument factory, the reference and its tolerance.
 
@@ -265,7 +266,6 @@ def _build_case(
     torch.manual_seed(0)
     a = _fp4_bytes(M, K, const_val) if kind.fp4_act else _fp8_bytes(M, K, const_val)
     b = _fp4_bytes(N, K, const_val) if kind.fp4_w else _fp8_bytes(N, K, const_val)
-    a, b = a.cuda(), b.cuda()
     a_f32 = gemm_common_utils.mxfp4_to_f32(a) if kind.fp4_act else gemm_common_utils.fp8_e4m3_to_f32(a)
     b_f32 = gemm_common_utils.mxfp4_to_f32(b) if kind.fp4_w else gemm_common_utils.fp8_e4m3_to_f32(b)
 
@@ -276,23 +276,23 @@ def _build_case(
             exp = dict(low_exp=127, high_exp=127)
         else:
             exp = {} if kind.fp4_w else dict(low_exp=126, high_exp=129)
-        a_scale = gemm_common_utils.random_e8m0(M, K // SCALE_BLOCK_32, **exp).cuda()
-        b_scale = gemm_common_utils.random_e8m0(N, K // SCALE_BLOCK_32, **exp).cuda()
+        a_scale = gemm_common_utils.random_e8m0(M, K // SCALE_BLOCK_32, device="cuda", **exp)
+        b_scale = gemm_common_utils.random_e8m0(N, K // SCALE_BLOCK_32, device="cuda", **exp)
         ref = _reference_mx32(a_f32, b_f32, a_scale, b_scale, M, N, K)
         as_gpu, bs_gpu = _preshuffle_scale_32x4(a_scale), _preshuffle_scale_32x4(b_scale)
         stride_ascale_k = 0
         tol = _a8w4_tolerances(a_scale, b_scale, K) if kind.fp4_w else (1e-2, 5e-2)
     elif kind.scale == SCALE_BLOCK_128:
         scale_k = K // SCALE_BLOCK_128
-        a_scale = gemm_common_utils.random_e8m0(M, scale_k, low_exp=126, high_exp=129).cuda()
-        b_scale = gemm_common_utils.random_e8m0(N // SCALE_BLOCK_128, scale_k, low_exp=126, high_exp=129).cuda()
+        a_scale = gemm_common_utils.random_e8m0(M, scale_k, low_exp=126, high_exp=129, device="cuda")
+        b_scale = gemm_common_utils.random_e8m0(N // SCALE_BLOCK_128, scale_k, low_exp=126, high_exp=129, device="cuda")
         ref = _reference_blockscale(a_f32, b_f32, a_scale, b_scale, M, N, K)
         as_gpu, bs_gpu = a_scale.T.contiguous(), b_scale  # A-scale is [K/128, M], row stride M
         stride_ascale_k = M
         tol = (1e-2, 5e-2)
     else:
-        as_gpu = (scale_scale * (0.5 + torch.rand(M, dtype=torch.float32))).cuda().contiguous()
-        bs_gpu = (scale_scale * (0.5 + torch.rand(N, dtype=torch.float32))).cuda().contiguous()
+        as_gpu = (scale_scale * (0.5 + torch.rand(M, dtype=torch.float32, device="cuda"))).contiguous()
+        bs_gpu = (scale_scale * (0.5 + torch.rand(N, dtype=torch.float32, device="cuda"))).contiguous()
         ref = _reference_ptpc(a_f32, b_f32, as_gpu, bs_gpu, M, N, K)
         stride_ascale_k = 0
         tol = (2e-2, max(5e-2, 2e-2 * float(ref.abs().max())))
@@ -301,7 +301,10 @@ def _build_case(
 
     lda, ldc = K + lda_extra, N + ldc_extra
     a_gpu = _with_strided_a(a, K // 2 if kind.fp4_act else K, lda // 2 if kind.fp4_act else lda)
-    b_gpu = gemm_common_utils.preshuffle_b_16x16(b, N, K // 2 if kind.fp4_w else K)
+    packed_k = K // 2 if kind.fp4_w else K
+    # Row-major B is only valid for mxscale_a8w4 (LDS pad path). Other kernels always preshuffle.
+    use_preshuffle = b_preshuffle or kind is not _A8W4_MX
+    b_gpu = gemm_common_utils.preshuffle_b_16x16(b, N, packed_k) if use_preshuffle else b
     # Guard rows are filled with NaN and must stay NaN: nothing may be stored at/after row M.
     fill = float("nan") if c_guard_rows else 0.0
     c_gpu = torch.full((M + c_guard_rows, ldc), fill, dtype=_DT[out_dtype], device="cuda")
@@ -332,6 +335,7 @@ def _build_case(
             cluster_n,
             *mx_args,  # is_mxscale, block_size
             split_k,
+            *((b_preshuffle,) if kind is _A8W4_MX else ()),
         )
 
     epilogue = None if partials is None else (lambda: _splitk_reduce(partials, c_gpu, N, split_k))
@@ -694,10 +698,16 @@ def _main():
     parser.add_argument("-mnk", nargs="+", required=True, metavar="M,N,K", help="one or more shapes")
     parser.add_argument("-tiles", nargs="+", required=True, help="tile_m,tile_n,tile_k")
     parser.add_argument("-warps", nargs="+", required=True, help="m_warp,n_warp")
-    parser.add_argument("-nb", nargs="+", type=int, required=True, help="num_buffers")
+    parser.add_argument("-nb", "-n", nargs="+", type=int, required=True, help="num_buffers")
     parser.add_argument("-cluster", nargs="+", help="cluster_m,cluster_n; default: each mode's own")
     parser.add_argument("-out-dtype", default="bf16", choices=["bf16", "f16"])
     parser.add_argument("-bench", action="store_true", help="also measure perf (warmup=10, iters=100)")
+    parser.add_argument(
+        "-no-b-preshuffle",
+        dest="b_preshuffle",
+        action="store_false",
+        help="disable the 16x16 B preshuffle for mxscale_a8w4 (default: enabled)",
+    )
     parser.add_argument(
         "--init-mode",
         nargs="+",
@@ -725,8 +735,12 @@ def _main():
         cfg = _MODES[mode]
         out_dtype = args.out_dtype if cfg["supports_out_dtype"] else "bf16"
         config = "t{},{},{} w{},{} nb{} c{},{}".format(*tile_cfg, cluster_m, cluster_n)
+        if mode == "mxscale_a8w4":
+            config += f" b={'preshuffle' if args.b_preshuffle else 'row-major+pad'}"
         for init in args.init_mode:
             kwargs = {"cluster_m": cluster_m, "cluster_n": cluster_n, "const_val": _parse_init_mode(init)}
+            if mode == "mxscale_a8w4":
+                kwargs["b_preshuffle"] = args.b_preshuffle
             if cfg["supports_out_dtype"]:
                 kwargs["out_dtype"] = args.out_dtype
             c_gpu, make_args, compiled, error = _run_and_check(

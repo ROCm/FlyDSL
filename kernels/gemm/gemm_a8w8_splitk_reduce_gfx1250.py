@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: MIT
-# Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 FlyDSL Project Contributors
 
 """Split-K partial reduction epilogue for the gfx1250 a8w8 preshuffle GEMM."""
 

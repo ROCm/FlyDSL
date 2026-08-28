@@ -43,8 +43,11 @@ def launch_gemm_a8w4_mxscale(
     cluster_m: Constexpr[int],
     cluster_n: Constexpr[int],
     split_k: Constexpr[int] = 1,
+    b_preshuffle: Constexpr[bool] = True,
 ):
-    """A: [M, K] uint8 (FP8 E4M3). B: [N, K//2] uint8, 16x16-preshuffled FP4 (E2M1)."""
+    """A: [M, K] uint8 (FP8 E4M3). B: uint8 packed FP4 (E2M1), 16x16-preshuffled
+    [N//16, 16*K//2] when ``b_preshuffle``, else row-major [N, K//2] staged with a
+    16-byte LDS row pad (costs one LDS stage slot, drops the 16-row global stride)."""
 
     use_cluster = cluster_m > 1 or cluster_n > 1
     WMMA_M = WMMA_N = 16
@@ -64,15 +67,19 @@ def launch_gemm_a8w4_mxscale(
     block = num_waves * WAVE
 
     LDS_PAD_A = 16
+    B_NBLOCK = 16 if b_preshuffle else 1
+    LDS_PAD_B = 0 if b_preshuffle else 16
     A_LDS_ROW = tile_k + LDS_PAD_A
-    B_LDS_ROW = PACK_TK * 16
+    B_INNER = PACK_TK * B_NBLOCK
+    B_OUTER = tile_n // B_NBLOCK
+    B_LDS_ROW = B_INNER + LDS_PAD_B
     STAGE_A = ((tile_m * A_LDS_ROW + 15) // 16) * 16
-    STAGE_B = (((tile_n // 16) * B_LDS_ROW + 15) // 16) * 16
+    STAGE_B = ((B_OUTER * B_LDS_ROW + 15) // 16) * 16
     STAGE_SA = ((SA_SUPERS * tile_k + 15) // 16) * 16
     STAGE_SB = ((SB_SUPERS * tile_k + 15) // 16) * 16
     SA_OFF = STAGE_A + STAGE_B
-    SB_OFF = STAGE_A + STAGE_B + STAGE_SA
-    PITCH = ((STAGE_A + STAGE_B + STAGE_SA + STAGE_SB + 1023) // 1024) * 1024
+    SB_OFF = SA_OFF + STAGE_SA
+    PITCH = ((SB_OFF + STAGE_SB + 1023) // 1024) * 1024
 
     C_STORE_B = ((tile_m * tile_n * 2 + 127) // 128) * 128
     ARENA_B = max(num_buffers * PITCH, C_STORE_B)
@@ -95,7 +102,7 @@ def launch_gemm_a8w4_mxscale(
         k64 = fx.Int64(i32_k)
         lda64 = fx.Int64(i32_lda)
         ldc64 = fx.Int64(i32_ldc)
-        Kp16 = (k64 // 2) * 16
+        b_block_stride = (k64 // 2) * B_NBLOCK
 
         tid = fx.thread_idx.x
         bid_x, bid_y, bid_z = fx.block_idx
@@ -150,7 +157,7 @@ def launch_gemm_a8w4_mxscale(
 
         W_A, W_B, W_SA, W_SB = 0, 1, 2 % num_waves, 3 % num_waves
         a_off0 = blk_m64 * lda64
-        b_off0 = (blk_n64 // 16) * Kp16
+        b_off0 = (blk_n64 // B_NBLOCK) * b_block_stride
         sa_off0 = (blk_m64 // 32) * k64
         sb_off0 = (blk_n64 // 32) * k64
 
@@ -168,9 +175,17 @@ def launch_gemm_a8w4_mxscale(
             "workgroup_mask",
             a_mask,
         )
-        gB = _gv(gB_base, b_off0, (tile_n // 16, PACK_TK * 16), (PACK_TK * 16, 1))
+        gB = _gv(gB_base, b_off0, (B_OUTER, B_INNER), (B_INNER, 1))
         atomB = fx.atom_set_value(
-            fx.rocdl.make_tdm_atom(gB, [None, None], strides=[Kp16, None], num_warps=1, early_timeout=True),
+            fx.rocdl.make_tdm_atom(
+                gB,
+                [None, None],
+                strides=[b_block_stride, None],
+                num_warps=1,
+                pad_interval=B_INNER if LDS_PAD_B else 0,
+                pad_amount=LDS_PAD_B,
+                early_timeout=True,
+            ),
             "workgroup_mask",
             b_mask,
         )
@@ -191,8 +206,8 @@ def launch_gemm_a8w4_mxscale(
                 W_B,
                 atomB,
                 gB,
-                _lv(fx.add_offset(pa, STAGE_A), (tile_n // 16, PACK_TK * 16), (B_LDS_ROW, 1)),
-                ktg * fx.Int64(PACK_TK * 16),
+                _lv(fx.add_offset(pa, STAGE_A), (B_OUTER, B_INNER), (B_LDS_ROW, 1)),
+                ktg * fx.Int64(B_INNER),
             )
             _wcopy(
                 W_SA,
@@ -224,10 +239,14 @@ def launch_gemm_a8w4_mxscale(
             return v01.shuffle(v23, list(range(16)))
 
         def load_b(buf, wn, ks):
-            nbl = wnb // 16 + wn
-            b0 = fx.Int64(STAGE_A + nbl * B_LDS_ROW + ks * 1024 + kgrp * 256 + lane16 * 16)
+            n_base = wnb + wn * 16
+            n_group = (n_base + lane16) // B_NBLOCK
+            n_lane = lane16 % B_NBLOCK
+            b0 = fx.Int64(
+                STAGE_A + n_group * B_LDS_ROW + ks * (WMMA_K // 2) * B_NBLOCK + kgrp * 16 * B_NBLOCK + n_lane * 16
+            )
             v0 = lds_load_b128(buf, b0)
-            v1 = lds_load_b128(buf, b0 + 512)
+            v1 = lds_load_b128(buf, b0 + 32 * B_NBLOCK)
             return v0.shuffle(v1, list(range(8)))
 
         def load_sa(buf, wm, ks):
@@ -268,12 +287,19 @@ def launch_gemm_a8w4_mxscale(
 
         DS_A, DS_B = 4, 2
         _BS_DS = wmma_n_rep * DS_B + wmma_n_rep + wmma_m_rep
+        KS_DS = wmma_m_rep * DS_A + _BS_DS  # ds_reads for one whole WMMA K-step
 
         def _load_b_scales(buf, ks):
             wt = [_rmem(8, load_b(buf, wn, ks)) for wn in range_constexpr(wmma_n_rep)]
             sb_k = [load_sb(buf, wn, ks) for wn in range_constexpr(wmma_n_rep)]
             sa_k = [load_sa(buf, wm, ks) for wm in range_constexpr(wmma_m_rep)]
             return wt, sb_k, sa_k
+
+        def _load_ks(buf, ks):
+            """Every A/B/scale fragment for one WMMA K-step."""
+            wt, sb_k, sa_k = _load_b_scales(buf, ks)
+            act = [_rmem(16, load_a(buf, wm, ks)) for wm in range_constexpr(wmma_m_rep)]
+            return act, wt, sb_k, sa_k
 
         def _kstep(buf, ks, wt, sb_k, sa_k, nxt_ks, prefetch_kt=None):
             act_f = [_rmem(16, load_a(buf, wm, ks)) for wm in _FRONT]
@@ -292,7 +318,27 @@ def launch_gemm_a8w4_mxscale(
                 _mma_rows(_BACK, act_b, wt, sa_k, sb_k)
             return _load_b_scales(buf, nxt_ks) if const_expr(nxt_ks is not None) else None
 
-        def compute_ktile(buf, prefetch_kt):
+        def _compute_ktile_flat(buf, prefetch_kt):
+            """Single M-row: keep the next K-step's reads in flight across the WMMAs."""
+            cur = _load_ks(buf, 0)
+            for ks in range_constexpr(K_WS):
+                nxt = _load_ks(buf, ks + 1) if const_expr(ks + 1 < K_WS) else None
+                rocdl.s_wait_dscnt(KS_DS if const_expr(nxt is not None) else 0)
+                _mma_rows(_FRONT, cur[0], cur[1], cur[3], cur[2])
+                if const_expr(ks == 0 and prefetch_kt is not None):
+                    rocdl.sched_barrier(0)
+                    issue(prefetch_kt % num_buffers, prefetch_kt)
+                    rocdl.sched_barrier(0)
+                if const_expr(nxt is not None):
+                    cur = nxt
+            rocdl.sched_dsrd(KS_DS)
+            for _ks in range_constexpr(K_WS):
+                if const_expr(_ks < K_WS - 1):
+                    rocdl.sched_dsrd(KS_DS)
+                rocdl.sched_mfma(n_acc)
+            rocdl.sched_barrier(0)
+
+        def _compute_ktile_split(buf, prefetch_kt):
             prev = _load_b_scales(buf, 0)
             for ks in range_constexpr(K_WS):
                 nxt_ks = ks + 1 if const_expr(ks + 1 < K_WS) else None
@@ -307,6 +353,8 @@ def launch_gemm_a8w4_mxscale(
                 if const_expr(_ks < K_WS - 1):
                     rocdl.sched_dsrd(_BS_DS)
             rocdl.sched_barrier(0)
+
+        compute_ktile = _compute_ktile_flat if const_expr(len(_BACK) == 0) else _compute_ktile_split
 
         if const_expr(use_cluster):
             cluster.cluster_barrier()
