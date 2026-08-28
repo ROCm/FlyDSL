@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-28T09:30:50Z",
+ "updated": "2026-08-28T10:43:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33164202834,
+   "pr": 1078,
+   "commit": "8871895405ff8105475b03a7c2517ce31a401385",
+   "branch": "gfx1250/bf16-gemm-opt-0828",
+   "event": "pull_request",
+   "title": "[gfx1250] Bf16 GEMM: Issue tdm prefetch earlier for wide tiles and add const init test",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33164202834",
+   "created_at": "2026-08-28T10:39:46Z",
+   "updated_at": "2026-08-28T10:40:26Z",
+   "actor": "aoli26",
+   "jobs": []
+  },
   {
    "run_id": 33159363986,
    "pr": 1078,
@@ -10,13 +25,42 @@
    "branch": "gfx1250/bf16-gemm-opt-0828",
    "event": "pull_request",
    "title": "[gfx1250] Bf16 GEMM: Issue tdm prefetch earlier for wide tiles and add const init test",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33159363986",
    "created_at": "2026-08-28T09:26:19Z",
-   "updated_at": "2026-08-28T09:28:37Z",
+   "updated_at": "2026-08-28T10:40:26Z",
    "actor": "aoli26",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-08-28T09:48:23Z",
+     "completed_at": "2026-08-28T10:40:17Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33159363986/job/98814529309"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-28T09:48:05Z",
+     "completed_at": "2026-08-28T10:04:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33159363986/job/98814529327",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-08-28T09:48:24Z",
+     "completed_at": "2026-08-28T10:40:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33159363986/job/98814529445"
+    }
+   ]
   },
   {
    "run_id": 33154548148,
@@ -54,11 +98,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-28T08:45:05Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33154548148/job/98800426568"
+     "completed_at": "2026-08-28T10:34:34Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33154548148/job/98800426568",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1894,21 +1939,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 32871559109,
-   "pr": 972,
-   "commit": "be5e68fd845d49a5b91dbd60e4e7b9c5bb47002e",
-   "branch": "mega_moe_a4w4",
-   "event": "pull_request",
-   "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32871559109",
-   "created_at": "2026-08-25T16:22:19Z",
-   "updated_at": "2026-08-25T16:24:26Z",
-   "actor": "Yaowu-Xiong",
-   "jobs": []
   }
  ]
 }
