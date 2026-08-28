@@ -64,6 +64,7 @@ def compile_pa_decode_tile(
     per_token_kv: bool = False,
     query_length: int = 1,
     trans_v: bool = True,
+    sliding_window: int = 0,
 ):
     """Build the tile-programming PA-decode kernel + launch wrapper.
 
@@ -88,6 +89,7 @@ def compile_pa_decode_tile(
 
     assert head_dim % 64 == 0, f"pa_decode_tile only supports head_dim that's a multiple of 64, got {head_dim}"
     assert query_length >= 1, f"query_length must be >= 1, got {query_length}"
+    assert sliding_window >= 0, f"sliding_window must be >= 0, got {sliding_window}"
     # Flattened query-row axis (MTP outer, GQA head inner), tiled into 16-row M-tiles.
     TOTAL_ROWS = query_length * query_group_size
     M_TILES = cdiv(TOTAL_ROWS, MFMA_MNK)
@@ -249,11 +251,18 @@ def compile_pa_decode_tile(
                 buffer_ops.buffer_load(vs_rsrc, arith.constant(0, type=T.i32), vec_width=1, is_scalar=True)
             ).bitcast(fx.Float32)
 
-        num_tiles = cdiv(context_len, TILE_TOK)
+        num_tiles_total = cdiv(context_len, TILE_TOK)
+        if const_expr(sliding_window > 0):
+            first_token = context_len - fx.Int32(query_length + sliding_window)
+            first_token = arith.select(first_token > 0, first_token, 0)
+            first_tile = first_token // fx.Int32(TILE_TOK)
+        else:
+            first_tile = fx.Int32(0)
+        num_tiles = num_tiles_total - first_tile
         tiles_per_part = cdiv(num_tiles, NP)
-        part_start = part * tiles_per_part
+        part_start = first_tile + part * tiles_per_part
         part_end_raw = part_start + tiles_per_part
-        part_end = arith.select(part_end_raw < num_tiles, part_end_raw, num_tiles)
+        part_end = arith.select(part_end_raw < num_tiles_total, part_end_raw, num_tiles_total)
 
         # One i8 blob carved into typed byte-offset pointers. `lds_base` is an
         # ir.Value pointer (safe inside scf control flow); the Python `lds`
@@ -562,9 +571,14 @@ def compile_pa_decode_tile(
         # per-lane `lane16` would cost a live VGPR for no behavioral change).
         if const_expr(query_length == 1):
             causal_bound = [context_len for _m in range_constexpr(M_TILES)]
+            window_start = [context_len - fx.Int32(1 + sliding_window) for _m in range_constexpr(M_TILES)]
         else:
             causal_bound = [
                 context_len - (query_length - 1) + (m * MFMA_MNK + lane16) // query_group_size
+                for m in range_constexpr(M_TILES)
+            ]
+            window_start = [
+                context_len - fx.Int32(query_length + sliding_window) + (m * MFMA_MNK + lane16) // query_group_size
                 for m in range_constexpr(M_TILES)
             ]
 
@@ -660,7 +674,14 @@ def compile_pa_decode_tile(
                     else:
                         scaled_frags = frag_Ss
 
-                    masked_chunks = [(_ct[a] < thr).select(scaled_frags[a], neg4) for a in range_constexpr(NCHUNK)]
+                    if const_expr(sliding_window > 0):
+                        lower = (window_start[m] - tok0).to(fx.Float32)
+                        masked_chunks = [
+                            (((_ct[a] + base_tok_f) >= lower) & (_ct[a] < thr)).select(scaled_frags[a], neg4)
+                            for a in range_constexpr(NCHUNK)
+                        ]
+                    else:
+                        masked_chunks = [(_ct[a] < thr).select(scaled_frags[a], neg4) for a in range_constexpr(NCHUNK)]
 
                     pm = fx.Float32(float("-inf"))
                     for a in range_constexpr(NCHUNK):
@@ -821,7 +842,14 @@ def compile_pa_decode_tile(
                 else:
                     scaled_frags = frag_Ss
                 # Reused in pass 2 below, halving the mask instruction count.
-                masked_chunks = [(_ct[a] < thr).select(scaled_frags[a], neg4) for a in range_constexpr(NCHUNK)]
+                if const_expr(sliding_window > 0):
+                    lower = (window_start[0] - tok0).to(fx.Float32)
+                    masked_chunks = [
+                        (((_ct[a] + base_tok_f) >= lower) & (_ct[a] < thr)).select(scaled_frags[a], neg4)
+                        for a in range_constexpr(NCHUNK)
+                    ]
+                else:
+                    masked_chunks = [(_ct[a] < thr).select(scaled_frags[a], neg4) for a in range_constexpr(NCHUNK)]
                 # pass 1: per-warp max for this qhead
                 pm = fx.Float32(float("-inf"))
                 for a in range_constexpr(NCHUNK):
@@ -1015,6 +1043,7 @@ def pa_decode_tile(
     softmax_scale: float | None = None,
     stream=None,
     *,
+    sliding_window: int = 0,
     num_partitions: int | None = None,
     pmax: torch.Tensor | None = None,
     psum: torch.Tensor | None = None,
@@ -1113,6 +1142,7 @@ def pa_decode_tile(
         per_token_kv=per_token_kv,
         query_length=query_length,
         trans_v=trans_v,
+        sliding_window=sliding_window,
     )
     from kernels.attention.pa_decode_fp8 import _is_current_stream_capturing
 
