@@ -15,11 +15,10 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, const_expr, range_constexpr, rocdl
+from flydsl.expr.rocdl.universal import make_buffer_ptr
 from flydsl.expr.typing import T
-from kernels.common import buffer_ops
 from kernels.common.mem_ops import buffer_atomic_add
 
 TILE_K = 32
@@ -46,12 +45,18 @@ def _autotune_enabled():
 _WEIGHT_CACHE = {}
 
 
+def _pad_channels(c):
+    return (c + LDG_VEC - 1) // LDG_VEC * LDG_VEC
+
+
 def _prep_weight(w, k, kt, kh, kw, c):
     key = id(w)
     ent = _WEIGHT_CACHE.get(key)
     if ent is not None and ent[0]() is w:
         return ent[1]
-    wk = w.permute(0, 2, 3, 4, 1).contiguous().reshape(k, kt * kh * kw * c)
+    cp = _pad_channels(c)
+    wsrc = torch.nn.functional.pad(w, (0, 0, 0, 0, 0, 0, 0, cp - c)) if cp != c else w
+    wk = wsrc.permute(0, 2, 3, 4, 1).contiguous().reshape(k, kt * kh * kw * cp)
     _WEIGHT_CACHE[key] = (weakref.ref(w), wk)
     return wk
 
@@ -67,16 +72,26 @@ _TR_LDS_S = TR_TILE + _TR_PAD
 
 @functools.lru_cache(maxsize=64)
 def compile_transpose_ncdhw_ndhwc(n, c, s):
-    """Transpose flat (N, C, S) -> (N, S, C) (S == T*H*W). Requires c%8==0, s%8==0."""
+    """Transpose flat (N, C, S) -> (N, S, C) (S == T*H*W). Requires c%8==0."""
     grid_s = (s + TR_TILE - 1) // TR_TILE
     grid_c = (c + TR_TILE - 1) // TR_TILE
     elem_ty = fx.BFloat16
     BIG = (n * c * s) > 0x7FFFFFFF
 
+    # 1-D element view so the flat gather/scatter offsets index elements. Both
+    # descriptors stay max_size: an exact num_records would zero the whole
+    # straddling tail read.
+    _TR_FLAT = n * c * s
+    _TR_REBASED_FLAT = 0xFFFFFFFF // BF16_BYTES
+
+    def _flat_div(buf_ptr, elems):
+        return fx.logical_divide(
+            fx.Tensor(fx.make_view(buf_ptr, fx.make_layout(elems, 1))),
+            fx.make_layout(1, 1),
+        )
+
     @flyc.kernel(known_block_size=[TR_THREADS, 1, 1])
     def transpose_kernel(out: fx.Tensor, inp: fx.Tensor):
-        in_rsrc = buffer_ops.create_buffer_resource(inp)
-        out_rsrc = buffer_ops.create_buffer_resource(out)
         lds_alloc = fx.SharedAllocator(static=False)
         lds = lds_alloc.allocate(fx.Array[elem_ty, TR_TILE * _TR_LDS_S, 16]).peek()
 
@@ -88,19 +103,27 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
         c0 = fx.block_idx.y * TR_TILE
         nb = fx.block_idx.z
         if const_expr(BIG):
+            # Rebase onto this block's tile origin so the per-tile offsets stay in i32.
+            GPtrTy = fx.PointerType.get(elem_ty.ir_type, 1, BF16_BYTES)
+
+            def _rebased(tensor, base_elem):
+                addr = fx.Int64(fx.ptrtoint(fx.get_iter(tensor))) + fx.Int64(base_elem) * fx.Int64(BF16_BYTES)
+                return _flat_div(make_buffer_ptr(fx.inttoptr(GPtrTy, addr)), _TR_REBASED_FLAT)
+
             in_base_elem = fx.Index(nb) * fx.Index(c) * fx.Index(s) + fx.Index(c0) * fx.Index(s) + fx.Index(s0)
-            in_addr = fx.Int64(buffer_ops.extract_base_index(inp)) + fx.Int64(in_base_elem) * fx.Int64(2)
-            in_rsrc = buffer_ops.create_buffer_resource_from_addr(in_addr)
+            in_div = _rebased(inp, in_base_elem)
             out_base_elem = fx.Index(nb) * fx.Index(s) * fx.Index(c) + fx.Index(s0) * fx.Index(c) + fx.Index(c0)
-            out_addr = fx.Int64(buffer_ops.extract_base_index(out)) + fx.Int64(out_base_elem) * fx.Int64(2)
-            out_rsrc = buffer_ops.create_buffer_resource_from_addr(out_addr)
+            out_div = _rebased(out, out_base_elem)
         else:
             in_base = nb * c * s
             out_base = nb * s * c
+            in_div = _flat_div(fx.get_iter(fx.rocdl.make_buffer_tensor(inp)), _TR_FLAT)
+            out_div = _flat_div(fx.get_iter(fx.rocdl.make_buffer_tensor(out)), _TR_FLAT)
+        tr_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_ty)
+        tr_reg = fx.make_rmem_tensor(TR_VEC, elem_ty)
 
         def lds_store_vec8(elem_offset, value):
-            base = fx.Int64(fx.ptrtoint(lds.ptr)) + fx.Int64(elem_offset * 2)
-            ptr = buffer_ops.create_llvm_ptr(base, address_space=3)
+            ptr = (fx.recast_iter(fx.Uint8, lds.ptr) + fx.Int32(elem_offset * 2)).llvm_ptr
             llvm.StoreOp(value, ptr, alignment=16)
 
         def lds_load_scalar(elem_offset):
@@ -120,8 +143,9 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
             else:
                 g = fx.Int32(in_base + cc * s + ss)
             safe = arith.select(valid, g, fx.Int32(0))
-            v = buffer_ops.buffer_load(in_rsrc, safe, vec_width=TR_VEC, dtype=elem_ty)
-            lds_store_vec8(rc * _TR_LDS_S + sv, v)
+            fx.copy(tr_atom, fx.slice(in_div, (None, safe)), tr_reg)
+            v = fx.memref_load_vec(tr_reg)
+            lds_store_vec8(rc * _TR_LDS_S + sv, v.ir_value() if hasattr(v, "ir_value") else v)
 
         llvm.InlineAsmOp(None, [], "s_waitcnt lgkmcnt(0)\n\ts_barrier", "", has_side_effects=True)
 
@@ -139,7 +163,8 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
                     go = fx.Int32(rs * c + cv)
                 else:
                     go = fx.Int32(out_base + ss * c + cc)
-                buffer_ops.buffer_store(vv, out_rsrc, go)
+                fx.memref_store_vec(vv, tr_reg)
+                fx.copy(tr_atom, tr_reg, fx.slice(out_div, (None, go)))
 
     @flyc.jit
     def launch_transpose(out: fx.Tensor, inp: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
@@ -156,7 +181,7 @@ def _ncdhw_to_ndhwc(x, stream):
     """Fast NCDHW->NDHWC via the tiled transpose kernel; falls back to torch."""
     n, c, t, h, w = x.shape
     s = t * h * w
-    if not (x.is_contiguous() and x.dtype == torch.bfloat16 and c % 8 == 0 and s % 8 == 0):
+    if not (x.is_contiguous() and x.dtype == torch.bfloat16 and c % TR_VEC == 0):
         return x.permute(0, 2, 3, 4, 1).contiguous()
     out = torch.empty((n, t, h, w, c), device=x.device, dtype=x.dtype)
     exe = compile_transpose_ncdhw_ndhwc(n, c, s)
@@ -186,7 +211,7 @@ def compile_conv3d_implicit(
     assert (TILE_M * TILE_K) % BLOCK_VECS == 0, f"A tile {TILE_M}x{TILE_K} not a multiple of {BLOCK_VECS} vecs"
     assert (TILE_N * TILE_K) % BLOCK_VECS == 0, f"B tile {TILE_N}x{TILE_K} not a multiple of {BLOCK_VECS} vecs"
     assert LDG_A_COUNT >= 1 and LDG_B_COUNT >= 1
-    assert c % LDG_VEC == 0
+    assert c % LDG_VEC == 0, f"c={c} must be a multiple of LDG_VEC={LDG_VEC}; use _conv3d_impl to pad"
     assert BLOCK_THREADS <= 1024, f"BLOCK_THREADS={BLOCK_THREADS} exceeds 1024"
 
     do = (d + 2 * pt - kt) // st + 1
@@ -214,10 +239,13 @@ def compile_conv3d_implicit(
 
     n_tail = k % TILE_N != 0
     grid_n = (k + TILE_N - 1) // TILE_N
+    _row_chk = npq % TILE_M != 0
+    _need_chk = _row_chk or n_tail
 
     splitk = max(1, min(splitk, k_tiles))
     tiles_per_split = k_tiles // splitk
     use_splitk = splitk > 1
+    _vec_store = (n == 1) and (not use_splitk) and (dhw % MFMA_C_VALUES == 0) and (not BIG_OUT)
 
     # Software-pipeline depth. 4 stages is optimal across all shapes on gfx950 --
     # even short-K, memory-bound 3x1x1 depends more (not less) on deep prefetch to
@@ -246,12 +274,33 @@ def compile_conv3d_implicit(
 
     @flyc.kernel(known_block_size=[BLOCK_THREADS, 1, 1])
     def conv3d_implicit_kernel(y: fx.Tensor, x: fx.Tensor, weight: fx.Tensor, bias: fx.Tensor):
-        w_rsrc = buffer_ops.create_buffer_resource(weight, num_records_bytes=W_BYTES)
+        y_buf = fx.rocdl.make_buffer_tensor(y)
+        if const_expr(use_splitk):
+            # buffer_atomic_add needs the raw !llvm.ptr<8> descriptor, not a tensor.
+            y_rsrc = fx.rocdl.get_buffer_rsrc(fx.get_iter(y_buf))
+        else:
+            y_div = fx.logical_divide(
+                fx.Tensor(fx.make_view(fx.get_iter(y_buf), fx.make_layout(npq * k, 1))),
+                fx.make_layout(1, 1),
+            )
+            y_atom_1 = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), elem_ty)
+            y_reg_1 = fx.make_rmem_tensor(1, elem_ty)
+            if const_expr(_vec_store):
+                y_atom_4 = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), elem_ty)
+                y_reg_4 = fx.make_rmem_tensor(MFMA_C_VALUES, elem_ty)
+        # Buffer tensors for the im2col gather, flattened to a 1-D element view so the
+        # per-thread flat gather offset indexes elements (multi-dim views would not).
+        w_buf0 = fx.rocdl.make_buffer_tensor(weight, max_size=False)
+        w_buf = fx.Tensor(fx.make_view(fx.get_iter(w_buf0), fx.make_layout(k * crs, 1)))
+        w_div = fx.logical_divide(w_buf, fx.make_layout(1, 1))
         if const_expr(not BIG_IN):
-            x_rsrc = buffer_ops.create_buffer_resource(x, num_records_bytes=X_BYTES)
-        y_rsrc = buffer_ops.create_buffer_resource(y)
+            x_buf0 = fx.rocdl.make_buffer_tensor(x, max_size=False)
+            x_buf = fx.Tensor(fx.make_view(fx.get_iter(x_buf0), fx.make_layout(n * c * d * h * w, 1)))
+            x_div = fx.logical_divide(x_buf, fx.make_layout(1, 1))
         if const_expr(has_bias):
-            bias_rsrc = buffer_ops.create_buffer_resource(bias)
+            bias_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(bias), fx.make_layout(1, 1))
+            bias_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+            bias_reg = fx.make_rmem_tensor(1, fx.Float32)
 
         lds_alloc = fx.SharedAllocator(static=False)
         a_lds = lds_alloc.allocate(fx.Array[elem_ty, LDS_A_SIZE, 16]).peek()
@@ -276,16 +325,28 @@ def compile_conv3d_implicit(
         else:
             k_off = 0
 
+        # BIG_IN (>2GB): flat buffer tensor from a rebased address with explicit ~2GB
+        # num_records (same mechanism as x_div, replacing create_buffer_resource_from_addr).
+        GXPtrTy = fx.PointerType.get(elem_ty.ir_type, 1, BF16_BYTES) if const_expr(BIG_IN) else None
+        GYPtrTy = fx.PointerType.get(elem_ty.ir_type, 1, BF16_BYTES) if const_expr(BIG_OUT) else None
+
+        def _x_div_from_addr(addr_i64):
+            gptr = fx.inttoptr(GXPtrTy, addr_i64)
+            buf_ptr = make_buffer_ptr(gptr, num_records_bytes=BIG_IN_NR)
+            # 1-D element view so the flat im2col gather offset indexes elements.
+            buf = fx.Tensor(fx.make_view(buf_ptr, fx.make_layout(BIG_IN_NR // BF16_BYTES, 1)))
+            return fx.logical_divide(buf, fx.make_layout(1, 1))
+
         if const_expr(BIG_IN_N1):
             nbase = m_offset // dhw
             ot_base0 = (m_offset % dhw) // hw_o
             base_t = ot_base0 - fx.Index(pt)
             base_t = arith.select(base_t < fx.Index(0), fx.Index(0), base_t)
             x_base_elem = ((nbase * fx.Index(d) + base_t) * fx.Index(h) + fx.Index(0)) * fx.Index(w) * fx.Index(c)
-            x_addr = fx.Int64(buffer_ops.extract_base_index(x)) + fx.Int64(x_base_elem) * fx.Int64(2)
-            x_rsrc = buffer_ops.create_buffer_resource_from_addr(x_addr, num_records_bytes=BIG_IN_NR)
+            x_addr = fx.Int64(fx.ptrtoint(fx.get_iter(x))) + fx.Int64(x_base_elem) * fx.Int64(2)
+            x_div_big = _x_div_from_addr(x_addr)
         if const_expr(BIG_IN_NM):
-            x_base_addr = fx.Int64(buffer_ops.extract_base_index(x))
+            x_base_addr = fx.Int64(fx.ptrtoint(fx.get_iter(x)))
 
         wid = tid // WARP_SIZE
         lane = tid % WARP_SIZE
@@ -420,27 +481,24 @@ def compile_conv3d_implicit(
             return g_off, col_valid
 
         # ---- global -> LDS DMA copy, masking via OOB routing ----
-        DMA_BYTES = LDG_VEC * BF16_BYTES  # 16
-        OOB_ELEM = fx.Int32(OOB_SENTINEL_ELEM)
+        # OOB sentinel element indices: a gather past num_records makes the buffer
+        # hardware return 0, reproducing the padding/halo zeroing.
+        X_ELEMS = fx.Int32(n * c * d * h * w)
+        W_ELEMS = fx.Int32(k * c * kt * kh * kw)
+        BIG_OOB_ELEM = fx.Int32(BIG_IN_NR // BF16_BYTES)
 
-        def _lds_dma_ptr(lds_array, stage_tile, i):
-            off_elems = fx.Index(stage_tile) + (fx.Index(tid) + fx.Index(i * BLOCK_THREADS)) * fx.Index(LDG_VEC)
-            base_bytes = off_elems * fx.Index(BF16_BYTES)
-            addr = fx.Int64(fx.ptrtoint(lds_array.ptr)) + fx.Int64(base_bytes)
-            addr = rocdl.readfirstlane(T.i64, arith.index_cast(T.i64, addr.ir_value()))
-            return llvm.inttoptr(ir.Type.parse("!llvm.ptr<3>"), addr)
+        # global->LDS DMA (BufferCopyLDS128b): gather offset as a flat element index;
+        # OOB padding routes past-end. Used for both non-BIG and BIG_IN gathers.
+        g2s_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
+        LdsPtrTy = fx.PointerType.get(elem_ty.ir_type, 2, 512)
 
-        def _dma_to_lds(rsrc, lds_ptr, voff_elem):
-            voff_b = (voff_elem * fx.Int32(BF16_BYTES)).ir_value()
-            rocdl.raw_ptr_buffer_load_lds(
-                rsrc,
-                lds_ptr,
-                arith.constant(DMA_BYTES, type=T.i32),
-                voff_b,
-                arith.constant(0, type=T.i32),
-                arith.constant(0, type=T.i32),
-                arith.constant(0, type=T.i32),
-            )
+        def _copy_g2s(src_div, lds_array, stage_tile, i, src_elem):
+            off_elems = fx.Int32(stage_tile) + (fx.Int32(tid) + fx.Int32(i * BLOCK_THREADS)) * fx.Int32(LDG_VEC)
+            lds_byte_addr = fx.Int32(fx.ptrtoint(lds_array.ptr)) + off_elems * fx.Int32(BF16_BYTES)
+            lds_ptr = fx.inttoptr(LdsPtrTy, lds_byte_addr)
+            dst = fx.make_view(lds_ptr, fx.make_layout(1, 1))
+            src = fx.slice(src_div, (None, fx.Int32(src_elem)))
+            fx.copy(g2s_atom, src, dst)
 
         def _load_a(stage, k_base):
             kbase_i = fx.Index(k_base)
@@ -451,26 +509,32 @@ def compile_conv3d_implicit(
             stage_tile = fx.Index(stage) * TILE_M * TILE_K
             for i in range_constexpr(LDG_A_COUNT):
                 if const_expr(BIG_IN_NM):
+                    # Rebase the buffer tensor per load to the sample base.
                     addr_ret = _a_addr(i, kbase_i, cc_base, ckk_base)
                     g_off_i, valid, n_idx_i = addr_ret
                     sample_addr = x_base_addr + fx.Int64(n_idx_i) * fx.Int64(X_SAMPLE_BYTES)
-                    x_rsrc_i = buffer_ops.create_buffer_resource_from_addr(sample_addr, num_records_bytes=BIG_IN_NR)
-                    voff = fx.Int32(arith.select(valid, g_off_i, OOB_ELEM))
-                    _dma_to_lds(x_rsrc_i, _lds_dma_ptr(a_lds, stage_tile, i), voff)
+                    x_div_i = _x_div_from_addr(sample_addr)
+                    voff = fx.Int32(arith.select(valid, g_off_i, BIG_OOB_ELEM))
+                    _copy_g2s(x_div_i, a_lds, stage_tile, i, voff)
+                elif const_expr(BIG_IN):
+                    # BIG_IN_N1: rebased buffer tensor (built once above).
+                    g_off_i, valid = _a_addr(i, kbase_i, cc_base, ckk_base)
+                    voff = fx.Int32(arith.select(valid, g_off_i, BIG_OOB_ELEM))
+                    _copy_g2s(x_div_big, a_lds, stage_tile, i, voff)
                 else:
                     g_off_i, valid = _a_addr(i, kbase_i, cc_base, ckk_base)
-                    voff = fx.Int32(arith.select(valid, g_off_i, OOB_ELEM))
-                    _dma_to_lds(x_rsrc, _lds_dma_ptr(a_lds, stage_tile, i), voff)
+                    voff = fx.Int32(arith.select(valid, g_off_i, X_ELEMS))
+                    _copy_g2s(x_div, a_lds, stage_tile, i, voff)
 
         def _load_b(stage, k_base):
             stage_tile = fx.Index(stage) * TILE_N * TILE_K
             for i in range_constexpr(LDG_B_COUNT):
                 g_off, col_valid = _b_addr(i, k_base)
                 if const_expr(n_tail):
-                    voff = fx.Int32(arith.select(col_valid, g_off, OOB_ELEM))
+                    voff = fx.Int32(arith.select(col_valid, g_off, W_ELEMS))
                 else:
                     voff = g_off
-                _dma_to_lds(w_rsrc, _lds_dma_ptr(b_lds, stage_tile, i), voff)
+                _copy_g2s(w_div, b_lds, stage_tile, i, voff)
 
         # ---- single-vec ds_read (LDS -> register), indexed by per-wave MFMA row ----
         def read_a_vec(stage, mi):
@@ -531,26 +595,22 @@ def compile_conv3d_implicit(
                 rocdl.sched_vmem(LDG_A_COUNT + LDG_B_COUNT)
             acc = do_compute(acc, a_frags, b_frags)
 
-        _row_chk = npq % TILE_M != 0
-        _need_chk = _row_chk or n_tail
-        _vec_store = (n == 1) and (not use_splitk) and (dhw % MFMA_C_VALUES == 0) and (not BIG_OUT)
-
         if const_expr(BIG_OUT):
-            y_elem_base = fx.Int64(buffer_ops.extract_base_index(y))
+            y_elem_base = fx.Int64(fx.ptrtoint(fx.get_iter(y)))
 
         def _big_store(off_nk_i64, value):
             addr = y_elem_base + off_nk_i64 * fx.Int64(BF16_BYTES)
-            ptr = buffer_ops.create_llvm_ptr(addr, address_space=1)
+            ptr = fx.inttoptr(GYPtrTy, addr).llvm_ptr
             llvm.StoreOp(value.ir_value() if hasattr(value, "ir_value") else value, ptr, alignment=2)
 
         def _valid_raw(row, col):
             if const_expr(_row_chk and n_tail):
-                return arith.andi(row < fx.Index(npq), col < fx.Index(k))
+                return fx.as_ir_value((row < fx.Index(npq)) & (col < fx.Index(k)))
             if const_expr(_row_chk):
                 v = row < fx.Index(npq)
-                return arith.andi(v, v)
+                return fx.as_ir_value(v & v)
             v = col < fx.Index(k)
-            return arith.andi(v, v)
+            return fx.as_ir_value(v & v)
 
         def store_acc():
             for mi in range_constexpr(MI_M):
@@ -562,7 +622,8 @@ def compile_conv3d_implicit(
                         col_i = fx.Int32(col)
                         if const_expr(n_tail):
                             col_i = arith.select(col < fx.Index(k), col_i, fx.Int32(0))
-                        bias_val = fx.Float32(buffer_ops.buffer_load(bias_rsrc, col_i, vec_width=1, dtype=fx.Float32))
+                        fx.copy(bias_atom, fx.slice(bias_div, (None, col_i)), bias_reg)
+                        bias_val = fx.Float32(fx.memref_load_vec(bias_reg)[0])
 
                     if const_expr(_vec_store):
                         row0 = fx.Index(row_base)
@@ -574,7 +635,8 @@ def compile_conv3d_implicit(
                                 cval = (a[i] + bias_val) if const_expr(has_bias) else a[i]
                                 vals.append(cval.to(elem_ty))
                             v4 = fx.Vector.from_elements(vals, dtype=elem_ty)
-                            buffer_ops.buffer_store(v4, y_rsrc, off_nk0)
+                            fx.memref_store_vec(v4, y_reg_4)
+                            fx.copy(y_atom_4, y_reg_4, fx.slice(y_div, (None, fx.Int32(off_nk0))))
 
                         if const_expr(_need_chk):
                             if _valid_raw(row0, col):
@@ -604,7 +666,8 @@ def compile_conv3d_implicit(
                                 if const_expr(BIG_OUT):
                                     _big_store(fx.Int64(off_nk), cval)
                                 else:
-                                    buffer_ops.buffer_store(cval, y_rsrc, off_nk)
+                                    fx.memref_store_vec(fx.Vector.filled(1, cval, elem_ty), y_reg_1)
+                                    fx.copy(y_atom_1, y_reg_1, fx.slice(y_div, (None, fx.Int32(off_nk))))
 
                         if const_expr(_need_chk):
                             if _valid_raw(row, col):
@@ -676,6 +739,12 @@ def _conv3d_impl(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=
     ho = (h + 2 * ph - kh) // sh + 1
     wo = (w + 2 * pw - kw) // sw + 1
     npq = n * do * ho * wo
+
+    # Zero-pad C to the gather's vector width; padded channels see zero weights.
+    cp = _pad_channels(c)
+    if cp != c:
+        x = torch.nn.functional.pad(x, (0, 0, 0, 0, 0, 0, 0, cp - c))
+    c = cp
     crs = c * kt * kh * kw
 
     launch_stream = torch.cuda.current_stream() if stream is None else stream
@@ -683,7 +752,7 @@ def _conv3d_impl(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=
     bias_arg = bias.to(torch.float32).contiguous() if has_bias else torch.empty(1, device=x.device, dtype=torch.float32)
 
     x_ndhwc = _ncdhw_to_ndhwc(x, stream)
-    w_packed = _prep_weight(weight, k, kt, kh, kw, c)
+    w_packed = _prep_weight(weight, k, kt, kh, kw, wc)
 
     shape = (n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias)
 
@@ -703,7 +772,7 @@ def _conv3d_impl(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=
         chosen_tile = tuple(tile)
         chosen_wgm = 1
     elif autotune or (autotune is None and _autotune_enabled()):
-        from kernels.conv.conv3d_implicit_autotune import BF16_CANDIDATES, WGM_VALUES, autotune_conv3d
+        from kernels.conv.conv3d_autotune import BF16_CANDIDATES, WGM_VALUES, autotune_conv3d
 
         candidates = [(t, w) for t in BF16_CANDIDATES for w in WGM_VALUES]
         best = autotune_conv3d("bf16", shape, "bf16", candidates, x.device, lambda tw: _run(tw[0], tw[1])[0])

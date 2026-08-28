@@ -1,22 +1,23 @@
-# Pre-built Kernel Library Guide
+# Pre-built kernel library guide
 
-> Available FlyDSL kernels: Normalization, Softmax, GEMM — configuration, data types, pipelines, and shared utilities.
+This guide covers the available FlyDSL kernels — normalization, softmax, GEMM, and attention — along with their configuration options, supported data types, pipeline designs, and shared utilities.
 
-## Quick Reference
+## Quick reference
 
-| Kernel | Builder Function | API Style | Dtypes | Key Feature |
+| Kernel | Builder function | API style | Dtypes | Key feature |
 |---|---|---|---|---|
 | **LayerNorm** | `build_layernorm_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | Two-pass vectorized normalization |
 | **RMSNorm** | `build_rmsnorm_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16; optional fp32 weight | LDS-cached 3-pass pipeline |
-| **Softmax** | `build_softmax_module(M, N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | Online softmax, adaptive block size |
+| **Softmax** | `build_softmax_module(M, N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | Register-buffered softmax, opt-in autotuning |
+| **Softmax backward** | `build_softmax_bwd_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | fp32 dot reduction, native-dtype register buffering |
 | **GEMM** | `compile_preshuffle_gemm(...)` | `@flyc.kernel` | fp8, int8, fp16, bf16 | Preshuffle B, ping-pong LDS, MFMA 16x16 |
 | **FlashAttention** | `build_flash_attn_func_module(...)` | `@flyc.kernel` | bf16, f16 (any arch); fp8 e4m3fn (gfx950, D=128, dense) | Dual-wave SWP fwd, GQA/MQA, causal, descale ABI |
 
-> **Note on API styles**: All kernels use the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`).
+All kernels use the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`).
 
 ---
 
-## 1. Normalization Kernels
+## 1. Normalization kernels
 
 ### 1.1 LayerNorm (`kernels/norm/layernorm_kernel.py`)
 
@@ -29,7 +30,7 @@ from kernels.norm.layernorm_kernel import build_layernorm_module
 executor = build_layernorm_module(N=8192, dtype_str="bf16")
 ```
 
-**Configuration Constants:**
+**Configuration constants:**
 | Constant | Value | Description |
 |---|---|---|
 | `BLOCK_THREADS` | 256 | Threads per block |
@@ -41,7 +42,7 @@ executor = build_layernorm_module(N=8192, dtype_str="bf16")
 
 **Algorithm:**
 - **Two-pass normalization**: Pass 1 computes mean and variance, Pass 2 applies affine transform
-- **Fast path**: When `N == BLOCK_THREADS * VEC_WIDTH * 4` (e.g., N=8192), uses fully register-resident computation with no scalar tail
+- **Fast path**: When `N == BLOCK_THREADS * VEC_WIDTH * 4` (for example, N=8192), uses fully register-resident computation with no scalar tail
 - **Generic path**: Handles arbitrary N with vector body + scalar tail
 - **bf16 handling**: Software round-to-nearest-even (RNE) pack on gfx942; hardware `cvt_pk_bf16_f32` on gfx950+
 - **Warp reduction**: XOR-shuffle-based intra-wave reduction (shifts: 32, 16, 8, 4, 2, 1), then LDS-based cross-wave synchronization
@@ -77,13 +78,13 @@ support FP32 weights.
 **Backward:** `build_rmsnorm_bwd_module(N, dtype_str,
 weight_dtype_str=None)` builds the fused RMSNorm backward kernel (grid `(M,)`,
 one block per row). Kernel signature
-`rmsnorm_bwd_kernel(Input, Gamma, DY, Rstd, DX, DWeight)`: it reads the forward
-`Rstd`, writes `DX` (input grad) and atomic-adds into `DWeight` (fp32 weight
-grad). `eps` is baked into `Rstd` by the forward, so it is not needed here.
+`rmsnorm_bwd_kernel(Input, Gamma, DY, Rstd, DX, DWeight)`: reads the forward
+`Rstd`, writes `DX` (input grad), and atomic-adds into `DWeight` (fp32 weight
+grad). The forward bakes `eps` into `Rstd`, so the backward does not need it.
 The public plain and fused-add training wrappers return `dweight` in the
 original weight dtype.
 
-**Configuration Constants:** Same as LayerNorm (BLOCK_THREADS=256, VEC_WIDTH=8, etc.)
+**Configuration constants:** Same as LayerNorm (BLOCK_THREADS=256, VEC_WIDTH=8, etc.)
 
 **Algorithm (3-pass with LDS caching):**
 1. **Pass 0**: Global → LDS row cache (one-pass global read, vectorized)
@@ -100,7 +101,7 @@ rmsnorm_kernel(self, Input, Gamma, Output, m_in)
 
 ---
 
-## 2. Softmax Kernel
+## 2. Softmax kernel
 
 ### 2.1 Softmax (`kernels/norm/softmax_kernel.py`)
 
@@ -116,35 +117,136 @@ executor = build_softmax_module(M=32768, N=8192, dtype_str="bf16")
 **Configuration:**
 | Parameter | Value | Description |
 |---|---|---|
-| `BLOCK_SIZE` | `min(256, next_power_of_2(N))`, min 32 | Adaptive block size |
-| `VEC_WIDTH` | 8 | Vector load/store width |
-| `WARP_SIZE` | 64 | AMD wavefront size |
+| `BLOCK_THREADS` | 256 by default; 64/128/256/512 for full-row candidates | Total threads per block |
+| `THREADS_PER_ROW` | Defaults to `BLOCK_THREADS`; 8/16/32/64 for short-row candidates | Reduction subgroup assigned to one row |
+| `ROWS_PER_BLOCK` | 1 by default; derived from `BLOCK_THREADS / THREADS_PER_ROW` | Independent rows packed into one block |
+| `vec_width` | `128 // elem_bits` (8 for f16/bf16, 4 for f32) | Derived from the 128-bit transaction contract |
+| `WARP_SIZE` | 64 on CDNA, 32 on RDNA | Wavefront size, resolved from the target arch |
+
+`THREADS_PER_ROW` also selects the data-movement path: with
+`tile_cols = THREADS_PER_ROW * vec_width`, a row takes the vectorized fast path when
+`N % tile_cols == 0` and the scalar generic path otherwise.
+
+**Opt-in autotuning** (`kernels/norm/softmax_autotune.py`):
+```python
+from kernels.norm.softmax_autotune import softmax_autotuned
+
+softmax_autotuned(x, y)              # serves the tuned or default config, never searches
+```
+Ordinary calls follow the searched-winner cache → offline artifact → compatibility default
+(`BLOCK_THREADS=256`) ordering and never benchmark. `FLYDSL_AUTOTUNE=1` forces a search over
+a bounded, shape-aware space:
+
+- full-row `BLOCK_THREADS ∈ {64,128,256,512}` ×
+  `waves_per_eu ∈ {none,1,2,4}`;
+- Quack-style short-row packing that decouples `THREADS_PER_ROW` from total
+  block threads and processes several rows per block.
+
+The search-space rationale was checked against AITER
+`536118aaf94047b0b559e0730749352659419b34`, SGLang
+`955704544c60e920672aa434cefa2ce78c0ceb4c`, and Tri Dao's Quack
+`60d88082272a256fa9b3b2ab631c82cfa78337c6`. Quack's portable ideas are the
+row-width-dependent reduction subgroup, a separate 128/256-thread CTA size,
+multiple rows per CTA, and an online/non-online algorithm choice; its
+multi-CTA cluster reduction is NVIDIA-specific. AITER's standalone Triton
+kernel is a fixed two-pass online/reload implementation (`.cg`, eight warps,
+two stages, `waves_per_eu=2`), not an autotuned space. The pinned SGLang tree
+has attention-local and top-k softmax implementations but no directly comparable
+standalone row-wise kernel; attention tile/stage choices are therefore not
+imported here.
+
+Every candidate is numerically validated before ranking and uses the shared
+GPU-backlog and batched-event timer. Input cache policy is deliberately not a
+search axis: on gfx950, non-temporal loads changed rank between repeated use of
+one address and rotation across fresh addresses. Cache residency is absent from
+the shape-only artifact identity, so persisting either result would encode an
+unstated workload assumption. The tested three-pass reload algorithm is also
+excluded because it lost to the register-buffered compatibility path; a future
+algorithm axis should implement a true online pair reduction before entering
+the default search.
+
+Within a 2% timing tie, the selector favors the compatibility default, then no
+explicit `waves_per_eu`, then more rows per block. Larger measured improvements
+still win; the tie rule only avoids persisting noise-level differences between
+6–10 µs candidates. Softmax uses 10 warmup and 100 measured launches, divided
+into five GPU-backlogged event windows, so bandwidth-scale candidates are also
+ranked from a stable sample.
+
+Artifacts use the name `softmax_fwd` and cover forward only. Softmax backward
+has no autotune adopter in this change. See [`autotune_guide.md`](autotune_guide.md).
 
 **Algorithm (6 stages):**
-1. **Load Data**: Vectorized global loads into register buffer with validity masks
-2. **Local Max**: Per-thread vector reduction (`maxnumf`)
-3. **Global Max**: Block-wide shuffle reduction (intra-wave XOR → wave0 finalize via LDS)
-4. **Local Exp + Sum**: `exp2(x * log2(e))` approximation, accumulate partial sums
-5. **Global Sum**: Block-wide reduction for sum
-6. **Normalize + Store**: Divide by sum, convert to output dtype, vectorized store
+1. **Load data**: Vectorized global loads into register buffer with validity masks
+2. **Local max**: Per-thread vector reduction (`maxnumf`)
+3. **Global max**: Block-wide shuffle reduction (intra-wave XOR → wave0 finalize via LDS)
+4. **Local exp + sum**: `exp2(x * log2(e))` approximation, accumulate partial sums
+5. **Global sum**: Block-wide reduction for sum
+6. **Normalize + store**: Divide by sum, convert to output dtype, vectorized store
 
 **Kernel signature:**
-```
-GPU_MODULE_NAME = f"softmax_{dtype_str}"
+```python
+build_softmax_module(M, N, dtype_str="f32", BLOCK_THREADS=256)  # M is vestigial
+launch_softmax(A, C, m_in, stream=...)                          # returned launcher
 
-@kernel
-softmax_kernel(self, A, C, m_in)
+# Direct-JIT entry point used by the autotuner
+softmax_direct(A, C, m_in, N, dtype_str, BLOCK_THREADS, tuning_schema, stream=...)
 ```
+
+### 2.2 Softmax backward (`kernels/norm/softmax_bwd_kernel.py`)
+
+Computes the row-wise Softmax gradient: `dx = y * (dy - sum(dy * y))`, with the
+dot reduction accumulated in fp32.
+
+**Builder:**
+```python
+from kernels.norm.softmax_bwd_kernel import build_softmax_bwd_module
+
+launch = build_softmax_bwd_module(N=8192, dtype_str="bf16")
+launch(dy, y, dx, M, stream=torch.cuda.current_stream())
+```
+
+The builder takes `N` only; the row count is the runtime `m_in` launch argument.
+Inputs must be **contiguous 2-D** tensors — reshape a 4-D attention gradient to
+`(B*H*S, S)` before calling, since the buffer-tensor path assumes row-major rows.
+
+**Paths:**
+| Condition | Behaviour |
+|---|---|
+| `N >= tile_cols and N % tile_cols == 0` | 128-bit vectorized load/store (`tile_cols` = 1024 for f32, 2048 for 16-bit) |
+| otherwise | masked scalar path for arbitrary `N` |
+| `N <= 16384` | both operands register-resident across the reduction — ideal 3-unit traffic |
+| `16384 < N <= 32768` | `Y` resident, `DY` re-read — 4 units |
+| `N > 32768` | neither resident — 5 units |
+
+Ideal traffic is 3 units (read `Y`, read `DY`, write `DX`); each operand dropped
+from registers adds one more. The residency cap is on elements held per thread
+(`N / BLOCK_THREADS`), so the tier boundaries fall at the same `N` for every
+dtype. Use `softmax_bwd_buffered_operands(N, dtype_str)` to query the tier.
+
+Both bounds are measured on an idle gfx950, not assumed. Pushing the middle tier
+out to `N = 65536` spills and costs 29% (337.4 µs vs 261.8 µs at 2048x65536
+bf16); dropping the middle tier costs 30-38% on the shapes it covers (4096x32768
+bf16: 169.3 µs with `Y` resident vs 220.4 µs without).
+
+Benchmark these on an **idle** GPU. A neighbouring tenant on the same device
+distorts results by 20-35%, and single-sample idleness checks miss bursty
+neighbours — sample repeatedly and reject a device that is busy in any sample.
+
+**Notes:**
+- One block per row. Small `M`/`N` are launch-bound rather than bandwidth-bound;
+  effective bandwidth reads as a few percent of peak there and that is expected.
+- The generic path unrolls `2 * ceil(N / 256)` scalar bodies, so compile time
+  grows with `N` for large non-aligned rows.
 
 ---
 
-## 3. GEMM Kernel
+## 3. GEMM kernel
 
 ### 3.1 Preshuffle GEMM (`kernels/gemm/preshuffle_gemm.py`)
 
 MFMA 16x16-based GEMM with B-matrix preshuffle layout: `C[M,N] = A[M,K] @ B[N,K]^T`.
 
-Uses the new `@flyc.kernel` / `@flyc.jit` API.
+Uses the `@flyc.kernel` / `@flyc.jit` API.
 
 **Builder:**
 ```python
@@ -202,14 +304,13 @@ Covered by `tests/kernels/test_preshuffle_gemm.py`.
 launch_fn(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, arg_bias, M_val, N_val, stream)
 ```
 
-Where:
 - `arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, arg_bias`: PyTorch tensors (auto-converted to memref). `arg_bias` is the fused epilogue bias (per-N, `out_dtype`); unused when `epilogue == "none"`.
 - `M_val, N_val`: Python int (auto-converted to Int32)
 - `stream`: `fx.Stream` (default stream if omitted)
 
 ---
 
-## 3b. FlashAttention Forward (`kernels/attention/flash_attn_generic.py`, `kernels/attention/flash_attn_gfx950.py`, `kernels/attention/flash_attn_fp8_gfx950.py`)
+## 3b. FlashAttention forward (`kernels/attention/flash_attn_generic.py`, `kernels/attention/flash_attn_gfx950.py`, `kernels/attention/flash_attn_fp8_gfx950.py`)
 
 Dense FlashAttention forward. `build_flash_attn_func_module(num_heads, head_dim,
 causal=..., dtype_str=..., num_kv_heads=...)` is the public builder; on
@@ -251,22 +352,22 @@ python3 tests/kernels/test_flash_attn_fwd.py --dtype fp8 --compare --warmup 10 -
 
 ---
 
-## 4. Shared Utilities
+## 4. Shared utilities
 
-### 4.1 Common Kernel Helpers (`kernels/common/kernels_common.py`)
+### 4.1 Common kernel helpers (`kernels/common/kernels_common.py`)
 
 Shared kernel utilities used across GEMM/MoE/norm kernels.
 
 | Function | Description |
 |---|---|
-| `get_warp_size(arch=None)` | Wave size for the arch: `32` on RDNA, else `64` |
+| `get_warp_size(arch=None)` | Wave size for the arch: `32` on gfx10/11/12, else `64` |
 | `dtype_to_elem_type(dtype_str)` | Map a dtype string to the Fly element type |
 | `validate_moe_dtypes(a_dtype, b_dtype)` | Validate an allowed MoE A/B dtype pairing |
 | `get_llvm_ptr(ptr, offset, dtype_bytes, ...)` | Compute a byte-offset LLVM pointer |
 | `atomic_add(...)` | Emit an atomic add |
 | `_if_then(if_op, scf=None)` / `_if_else(if_op, scf=None)` | SCF `if`/`else` region context managers |
 
-### 4.2 MFMA Epilogues (`kernels/mma/mfma_epilogues.py`)
+### 4.2 MFMA epilogues (`kernels/mma/mfma_epilogues.py`)
 
 Configurable epilogue strategies for MFMA 16x16 kernels.
 
@@ -276,7 +377,7 @@ Configurable epilogue strategies for MFMA 16x16 kernels.
 | `c_shuffle_epilog(...)` | CK-style LDS CShuffle: write to LDS → barrier → remap threads → half2 store |
 | `mfma_epilog(use_cshuffle, ...)` | Dispatcher: calls default or CShuffle based on flag |
 
-### 4.3 Preshuffle Pipeline (`kernels/mma/mfma_preshuffle_pipeline.py`)
+### 4.3 Preshuffle pipeline (`kernels/mma/mfma_preshuffle_pipeline.py`)
 
 Shared data movement and layout utilities for preshuffle GEMM kernels.
 
@@ -290,7 +391,7 @@ Shared data movement and layout utilities for preshuffle GEMM kernels.
 | `lds_load_pack_k32(...)` | Load A-pack from LDS for K32 micro-step |
 | `swizzle_xor16(...)` | XOR-based swizzle for LDS bank-conflict avoidance |
 
-### 4.4 Layout Coordinate Helpers
+### 4.4 Layout coordinate helpers
 
 Native Fly dialect coordinate mapping (in `flydsl.expr` and `kernels/mma/mfma_preshuffle_pipeline.py`):
 
@@ -303,7 +404,7 @@ Native Fly dialect coordinate mapping (in `flydsl.expr` and `kernels/mma/mfma_pr
 
 ---
 
-## 5. Kernel API Comparison
+## 5. Kernel API comparison
 
 ### New API (GEMM)
 
@@ -326,7 +427,7 @@ def launch_fn(arg_c: fx.Tensor, ..., stream: fx.Stream = fx.Stream(None)):
 
 ---
 
-## 6. Kernel Decision Tree
+## 6. Kernel decision tree
 
 ```
 What operation do you need?
@@ -336,7 +437,8 @@ What operation do you need?
 │   └── No bias term?         → RMSNorm (kernels/norm/rmsnorm_kernel.py)
 │
 ├── Softmax
-│   └── Row-wise softmax      → Softmax (kernels/norm/softmax_kernel.py)
+│   ├── Row-wise softmax      → Softmax (kernels/norm/softmax_kernel.py)
+│   └── Softmax gradient      → Softmax backward (kernels/norm/softmax_bwd_kernel.py)
 │
 ├── Matrix Multiply (GEMM)
 │   ├── Standard GEMM (uniform precision)
@@ -359,13 +461,11 @@ What operation do you need?
 
 ---
 
-## 7. Source Files
+## 7. Source files
 
 | File | Description |
 |---|---|
 | `kernels/gemm/preshuffle_gemm.py` | GEMM (preshuffle layout) |
-| `kernels/gemm/blockscale_preshuffle_gemm.py` | Blockscale GEMM |
-| `kernels/gemm/hgemm_splitk.py` | FP16 GEMM split-K |
 | `kernels/moe/moe_gemm_2stage.py` | MoE GEMM 2-stage (gate/up + reduce) |
 | `kernels/moe/mxfp_moe/` | Fused a4w4/a8w4 MoE 2-stage GEMM (device fp4 re-quant) |
 | `kernels/attention/pa_decode_fp8.py` | Paged attention decode (FP8) |
@@ -375,6 +475,8 @@ What operation do you need?
 | `kernels/norm/layernorm_kernel.py` | LayerNorm (layout API) |
 | `kernels/norm/rmsnorm_kernel.py` | RMSNorm (layout API) |
 | `kernels/norm/softmax_kernel.py` | Softmax (layout API) |
+| `kernels/norm/softmax_bwd_kernel.py` | Softmax backward (layout API) |
+| `kernels/norm/softmax_autotune.py` | Softmax opt-in autotune adopter |
 | `kernels/attention/fused_rope_cache_kernel.py` | Fused RoPE + KV cache |
 | `kernels/comm/custom_all_reduce.py` | Multi-GPU all-reduce |
 | `kernels/gemm/rdna_f16_gemm.py` | RDNA FP16 GEMM |
@@ -388,13 +490,11 @@ What operation do you need?
 | `kernels/common/kernels_common.py` | Common kernel utilities |
 | `kernels/common/tensor_shim.py` | GTensor/STensor abstraction |
 
-## 8. Test Files
+## 8. Test files
 
 | File | Tests |
 |---|---|
 | `tests/kernels/test_preshuffle_gemm.py` | GEMM fp8/int8/fp16/bf16 |
-| `tests/kernels/test_blockscale_preshuffle_gemm.py` | Blockscale GEMM |
-| `tests/kernels/test_hgemm_splitk.py` | FP16 GEMM split-K |
 | `tests/kernels/test_moe_gemm.py` | MoE GEMM |
 | `tests/kernels/test_moe_reduce.py` | MoE reduce kernel |
 | `tests/kernels/test_pa.py` | Paged attention decode |
@@ -402,6 +502,8 @@ What operation do you need?
 | `tests/kernels/test_layernorm.py` | LayerNorm |
 | `tests/kernels/test_rmsnorm.py` | RMSNorm |
 | `tests/kernels/test_softmax.py` | Softmax |
+| `tests/kernels/test_softmax_bwd.py` | Softmax backward |
+| `tests/kernels/test_softmax_autotune.py` | Softmax autotune selection and candidate correctness |
 | `tests/kernels/test_fused_rope_cache.py` | Fused RoPE + KV cache |
 | `tests/kernels/test_allreduce.py` | Multi-GPU all-reduce |
 | `tests/kernels/test_rdna_gemm.py` | RDNA GEMM |

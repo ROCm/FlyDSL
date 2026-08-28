@@ -1,20 +1,19 @@
-Basic Usage
+Basic usage
 ===========
 
 This tutorial covers the fundamentals of using FlyDSL to write and run GPU
 kernels.
 
-Setting Up the Environment
+Setting up the environment
 --------------------------
 
-After :doc:`installing FlyDSL <../installation>`, ensure the Python path is
-configured:
+After :doc:`installing FlyDSL <../installation>`, configure the Python path:
 
 .. code-block:: bash
 
    export PYTHONPATH=$(pwd)/build-fly/python_packages:$(pwd):$PYTHONPATH
 
-Understanding Layouts
+Understanding layouts
 ---------------------
 
 Layouts are the core abstraction in FlyDSL. A layout maps logical coordinates
@@ -44,10 +43,10 @@ Layout operations (all used inside kernel/jit functions):
 - **fx.crd2idx(coord, layout)** -- coordinate to linear index
 - **fx.idx2crd(index, layout)** -- linear index to coordinate
 
-Defining a Kernel
+Defining a kernel
 -----------------
 
-Kernels are defined using the ``@flyc.kernel`` decorator:
+Define kernels using the ``@flyc.kernel`` decorator:
 
 .. code-block:: python
 
@@ -70,10 +69,10 @@ Key points:
 - ``fx.Constexpr[int]`` denotes a compile-time constant (affects cache key)
 - GPU intrinsics are accessed via ``fx.thread_idx``, ``fx.block_idx``, etc.
 
-Launching Kernels
+Launching kernels
 ------------------
 
-Kernels are launched via ``@flyc.jit`` host-side functions:
+Launch kernels via ``@flyc.jit`` host-side functions:
 
 .. code-block:: python
 
@@ -95,7 +94,7 @@ Kernels are launched via ``@flyc.jit`` host-side functions:
    launch(data, 1024, stream=torch.cuda.Stream())
    torch.cuda.synchronize()
 
-Next Steps
+Next steps
 ----------
 
 - :doc:`kernel_development` -- advanced kernel techniques

@@ -69,7 +69,8 @@ def test_rocm_external_pipeline_split_matches_full_pipeline():
 
     assert full == [*pre_binary, binary]
     assert pre_binary[-1] == "reconcile-unrealized-casts"
-    assert any(fragment.startswith("gpu.module(") for fragment in pre_binary)
+    gpu_pipeline = next(fragment for fragment in pre_binary if fragment.startswith("gpu.module("))
+    assert "convert-rocdl-fastmath-ops,convert-gpu-to-rocdl{" in gpu_pipeline
     assert binary.startswith("gpu-module-to-binary")
     assert "--amdgpu-waves-per-eu=2" in binary
     assert "--amdgpu-num-vgpr=128" in binary
@@ -106,11 +107,9 @@ def test_rocm_lower_wpe_preserves_source_default_and_overrides_kernel_entries():
         }
 
     for name in ("a", "b"):
-        assert funcs[name].count("amdgpu-waves-per-eu") == 1
-        assert '"amdgpu-waves-per-eu", "2,2"' in funcs[name]
-        assert "rocdl.waves_per_eu" not in funcs[name]
+        assert "rocdl.waves_per_eu = 2" in funcs[name]
     assert '"keep", "yes"' in funcs["a"]
-    assert "amdgpu-waves-per-eu" not in funcs["helper"]
+    assert "rocdl.waves_per_eu" not in funcs["helper"]
 
 
 @pytest.mark.parametrize(
@@ -146,7 +145,7 @@ def test_rocm_wpe_reaches_native_llvm_as_exact_constraint():
         PassManager.parse(f"builtin.module({','.join(pre_binary)})", ctx).run(module.operation)
         llvm_ir = translate_module_to_llvmir(module.body.operations[0].operation)
 
-    assert '"amdgpu-waves-per-eu"="2,2"' in llvm_ir
+    assert '"amdgpu-waves-per-eu"="2"' in llvm_ir
     assert '"amdgpu-waves-per-eu"="1"' not in llvm_ir
 
 

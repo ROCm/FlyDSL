@@ -79,7 +79,7 @@ func.func @test_mma_scale_atom_call_16x16x128(
   // CHECK-DAG: %[[C_VAL:.*]] = llvm.load %[[C]] : !llvm.ptr<5> -> vector<4xf32>
   // CHECK-DAG: %[[SA_VAL:.*]] = llvm.extractvalue %[[A2]][0]
   // CHECK-DAG: %[[SB_VAL:.*]] = llvm.extractvalue %[[A2]][1]
-  // CHECK: %[[RES:.*]] = rocdl.mfma.scale.f32.16x16x128.f8f6f4 %[[A_VAL]], %[[B_VAL]], %[[C_VAL]], 0, 0, 0, %[[SA_VAL]], 0, %[[SB_VAL]]
+  // CHECK: %[[RES:.*]] = rocdl.mfma.scale.f32.16x16x128.f8f6f4 %[[A_VAL]], %[[B_VAL]], %[[C_VAL]], fp8_e4m3, fp8_e4m3, 0, %[[SA_VAL]], 0, %[[SB_VAL]]
   // CHECK: llvm.store %[[RES]], %[[D]] : vector<4xf32>, !llvm.ptr<5>
   fly.mma_atom_call(%atom_ab, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.cdna4.mfma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0>>, !fly.memref<f32, register, 4:1>, !fly.memref<f8E4M3FN, register, 32:1>, !fly.memref<f8E4M3FN, register, 32:1>, !fly.memref<f32, register, 4:1>) -> ()
   return
@@ -100,7 +100,7 @@ func.func @test_mma_scale_atom_call_32x32x64_mixed(
   %b = fly.memref.alloca(%lay_ab) : (!fly.layout<32:1>) -> !fly.memref<f8E5M2, register, 32:1>
   %c = fly.memref.alloca(%lay_cd) : (!fly.layout<16:1>) -> !fly.memref<f32, register, 16:1>
 
-  // CHECK: rocdl.mfma.scale.f32.32x32x64.f8f6f4 %{{.*}}, %{{.*}}, %{{.*}}, 4, 1, 0, %{{.*}}, 0, %{{.*}}
+  // CHECK: rocdl.mfma.scale.f32.32x32x64.f8f6f4 %{{.*}}, %{{.*}}, %{{.*}}, fp4_e2m1, fp8_e5m2, 0, %{{.*}}, 0, %{{.*}}
   fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.cdna4.mfma_scale<32x32x64, (f4E2M1FN, f8E5M2) -> f32, opselA = 0, opselB = 0>>, !fly.memref<f32, register, 16:1>, !fly.memref<f4E2M1FN, register, 32:1>, !fly.memref<f8E5M2, register, 32:1>, !fly.memref<f32, register, 16:1>) -> ()
   return
 }
@@ -122,7 +122,7 @@ func.func @test_mma_scale_atom_call_with_opsel(
   %b = fly.memref.alloca(%lay_ab) : (!fly.layout<32:1>) -> !fly.memref<f8E4M3FN, register, 32:1>
   %c = fly.memref.alloca(%lay_cd) : (!fly.layout<4:1>) -> !fly.memref<f32, register, 4:1>
 
-  // CHECK: rocdl.mfma.scale.f32.16x16x128.f8f6f4 %{{.*}}, %{{.*}}, %{{.*}}, 0, 0, 2, %{{.*}}, 3, %{{.*}}
+  // CHECK: rocdl.mfma.scale.f32.16x16x128.f8f6f4 %{{.*}}, %{{.*}}, %{{.*}}, fp8_e4m3, fp8_e4m3, 2, %{{.*}}, 3, %{{.*}}
   fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.cdna4.mfma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 2, opselB = 3>>, !fly.memref<f32, register, 4:1>, !fly.memref<f8E4M3FN, register, 32:1>, !fly.memref<f8E4M3FN, register, 32:1>, !fly.memref<f32, register, 4:1>) -> ()
   return
 }

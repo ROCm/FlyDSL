@@ -45,6 +45,18 @@ def compile_backend_name() -> str:
     return (env.compile.backend or "rocm").lower()
 
 
+def resolve_llvm_address_space(address_space) -> int:
+    """Map a Fly pointer address space using the active compile backend."""
+    name = compile_backend_name()
+    backend_cls = _registry.get(name)
+    if backend_cls is None:
+        if name in _import_errors:
+            raise ImportError(f"Compile backend '{name}' failed to import") from _import_errors[name]
+        available = ", ".join(sorted(_registry)) or "(none)"
+        raise ValueError(f"Unknown compile backend '{name}'. Registered backends: {available}")
+    return backend_cls.llvm_address_space(address_space)
+
+
 @lru_cache(maxsize=4)
 def _make_backend(name: str, arch: str) -> BaseBackend:
     """Internal: create and cache a backend instance for *(name, arch)*.
@@ -87,6 +99,11 @@ def get_backend(name: Optional[str] = None, *, arch: str = "") -> BaseBackend:
             raise ValueError(f"Unknown compile backend '{name}'. Registered backends: {available}")
         arch = backend_cls.detect_target().arch
     return _make_backend(name, arch)
+
+
+def current_target() -> GPUTarget:
+    """The :class:`GPUTarget` being compiled for right now."""
+    return get_backend().target
 
 
 # -- auto-discover built-in backends (Triton-style directory scan) --------
@@ -162,6 +179,8 @@ __all__ = [
     "BaseBackend",
     "GPUTarget",
     "compile_backend_name",
+    "current_target",
     "get_backend",
     "register_backend",
+    "resolve_llvm_address_space",
 ]
