@@ -41,6 +41,8 @@ def launch_gemm_bf16(
     is_f16: Constexpr[int] = 0,
     cluster_m: Constexpr[int] = 1,
     cluster_n: Constexpr[int] = 1,
+    tdm_balance: Constexpr[int] = 0,
+    wmma_b2b: Constexpr[int] = 0,
 ):
     """Requires N % tile_n == 0 and K % tile_k == 0; M is clamped per tile."""
     WMMA_M = WMMA_N = 16
@@ -57,6 +59,9 @@ def launch_gemm_bf16(
     n_acc = wmma_m_rep * wmma_n_rep
     num_waves = m_warp * n_warp
     block = num_waves * WAVE
+    tdm_parts = 2 if tdm_balance else 1  # TDM descriptors per operand
+    A_ROWS, B_ROWS = tile_m // tdm_parts, tile_n // tdm_parts
+    TDM_PW = max(1, (2 * tdm_parts) // num_waves)
     use_cluster = cluster_m > 1 or cluster_n > 1
 
     if tile_k % WMMA_K or warp_tile_m % WMMA_M or warp_tile_n % WMMA_N:
@@ -85,6 +90,8 @@ def launch_gemm_bf16(
         i32_ldb: fx.Int32,
         i32_ldc: fx.Int32,
     ):
+        if const_expr(wmma_b2b):
+            rocdl.disable_xdl_arb_stall()
         K_TILES = i32_k // tile_k
         lda_b = fx.Int64(i32_lda) * EB  # global row strides in bytes
         ldb_b = fx.Int64(i32_ldb) * EB
@@ -139,21 +146,26 @@ def launch_gemm_bf16(
         gB_base = fx.recast_iter(fx.Int8, arg_b)
         gC_base = fx.recast_iter(fx.PointerType.get(elem_cls.ir_type, arg_c.address_space), arg_c)
 
-        W_A, W_B = 0, 1 % num_waves
-        gA = _gv(gA_base, fx.Int64(blk_m) * lda_b, (tile_m, KB), (KB, 1))
-        atomA = _tdm(gA, mn_oob, lda_b, a_mask)
-        gB = _gv(gB_base, fx.Int64(blk_n) * ldb_b, (tile_n, KB), (KB, 1))
-        atomB = _tdm(gB, None, ldb_b, b_mask)
-
-        def _wcopy(w, atom, gt, lv, imm_offset):
-            if wave == w:
-                fx.copy(atom, gt, lv, imm_offset=imm_offset)
+        a_jobs = [
+            (2 * p, p, _gv(gA_base, fx.Int64(blk_m + p * A_ROWS) * lda_b, (A_ROWS, KB), (KB, 1)))
+            for p in range_constexpr(tdm_parts)
+        ]
+        b_jobs = [
+            (2 * p + 1, p, _gv(gB_base, fx.Int64(blk_n + p * B_ROWS) * ldb_b, (B_ROWS, KB), (KB, 1)))
+            for p in range_constexpr(tdm_parts)
+        ]
+        tdm_jobs = [
+            (w, _tdm(gt, mn_oob - p * A_ROWS, lda_b, a_mask), gt, p * A_ROWS * LDS_ROW, A_ROWS) for w, p, gt in a_jobs
+        ] + [(w, _tdm(gt, None, ldb_b, b_mask), gt, STAGE_A + p * B_ROWS * LDS_ROW, B_ROWS) for w, p, gt in b_jobs]
 
         def issue(s, kt):
             pa = _buf_ptr(s)
             koff = fx.Int64(kt) * fx.Int64(KB)
-            _wcopy(W_A, atomA, gA, _lv(pa, (tile_m, KB), (LDS_ROW, 1)), koff)
-            _wcopy(W_B, atomB, gB, _lv(fx.add_offset(pa, STAGE_A), (tile_n, KB), (LDS_ROW, 1)), koff)
+            for j in range_constexpr(len(tdm_jobs)):
+                w, atom, gt, lds_off, rows = tdm_jobs[j]
+                if wave == w % num_waves:
+                    dst = pa if const_expr(lds_off == 0) else fx.add_offset(pa, lds_off)
+                    fx.copy(atom, gt, _lv(dst, (rows, KB), (LDS_ROW, 1)), imm_offset=koff)
 
         wmb = wave_m * warp_tile_m
         wnb = wave_n * warp_tile_n
@@ -231,14 +243,14 @@ def launch_gemm_bf16(
         n_steady = K_TILES - (num_buffers - 1)
         for kt in range(n_steady):
             buf = _bidx(_buf_ptr(kt % num_buffers))
-            pipeline_fence(outstanding=(num_buffers - 2), use_cluster=False)
+            pipeline_fence(outstanding=TDM_PW * (num_buffers - 2), use_cluster=False)
             compute_ktile(buf, kt + (num_buffers - 1))
             if const_expr(use_cluster) and kt % num_buffers == num_buffers - 1:
                 cluster.cluster_barrier()
         for j in range_constexpr(num_buffers - 1):
             kt = n_steady + j
             buf = _bidx(_buf_ptr(kt % num_buffers))
-            pipeline_fence(outstanding=(num_buffers - 2 - j), use_cluster=False)
+            pipeline_fence(outstanding=TDM_PW * (num_buffers - 2 - j), use_cluster=False)
             compute_ktile(buf, None)
 
         accs = [c_frags[idx].load() for idx in range_constexpr(n_acc)]

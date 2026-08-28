@@ -64,6 +64,8 @@ def _build_case(
     cluster_m=1,
     cluster_n=1,
     const_val=None,
+    tdm_balance=0,
+    wmma_b2b=0,
 ):
     """Inputs, a make_args(stream) thunk, the f32 reference, and tolerances."""
     if (N // tile_n) % cluster_n:
@@ -99,6 +101,8 @@ def _build_case(
             1 if dtype == "f16" else 0,
             cluster_m,
             cluster_n,
+            tdm_balance,
+            wmma_b2b,
         )
 
     # bf16/f16 inputs with f32 accumulation: error grows with sqrt(K).
@@ -219,6 +223,26 @@ def _main():
         metavar="MODE",
         help="A/B fill(s): 'random' and/or 'const' (0.1) or 'const,<float>' (default: both)",
     )
+    parser.add_argument(
+        "--tdm-balance",
+        nargs="+",
+        type=int,
+        default=[0],
+        choices=[0, 1],
+        metavar="0|1",
+        help="TDM staging: 0 = one fat descriptor per operand, 1 = each operand halved "
+        "over two waves. Pass both to sweep (default: 0)",
+    )
+    parser.add_argument(
+        "--wmma-b2b",
+        nargs="+",
+        type=int,
+        default=[0],
+        choices=[0, 1],
+        metavar="0|1",
+        help="1 sets SCHED_MODE.DISABLE_XDL_ARB_STALL so a wave can issue back-to-back "
+        "WMMAs. Pass both to sweep (default: 0)",
+    )
     args = parser.parse_args()
 
     shapes = [_parse_csv_ints(v, 3, "mnk") for v in args.mnk]
@@ -228,7 +252,8 @@ def _main():
     dtypes = args.dtype if isinstance(args.dtype, list) else [args.dtype]
 
     rows = []
-    for (M, N, K), dtype, init in itertools.product(shapes, dtypes, args.init_mode):
+    sweep = itertools.product(shapes, dtypes, args.init_mode, args.tdm_balance, args.wmma_b2b)
+    for (M, N, K), dtype, init, tdm_bal, b2b in sweep:
         c, make_args, ref, (rtol, atol) = _build_case(
             M,
             N,
@@ -240,6 +265,8 @@ def _main():
             cluster_m=cluster[0],
             cluster_n=cluster[1],
             const_val=_parse_init_mode(init),
+            tdm_balance=tdm_bal,
+            wmma_b2b=b2b,
         )
         compiled = flyc.compile(launch_gemm_bf16, *make_args(torch.cuda.current_stream()))
         torch.cuda.synchronize()
@@ -257,6 +284,8 @@ def _main():
                 str(K),
                 dtype,
                 init,
+                str(tdm_bal),
+                str(b2b),
                 *perf,
                 f"{max_err:.4g}",
                 f"{rel_err:.3g}",
@@ -269,7 +298,21 @@ def _main():
         f"nb={args.nb} cluster={cluster[0]},{cluster[1]}"
     )
     _print_table(
-        ["M", "N", "K", "dtype", "init_mode", "latency us", "TFLOPS", "BW TB/s", "max_err", "rel_err", "result"],
+        [
+            "M",
+            "N",
+            "K",
+            "dtype",
+            "init_mode",
+            "tdm_bal",
+            "wmma_b2b",
+            "latency us",
+            "TFLOPS",
+            "BW TB/s",
+            "max_err",
+            "rel_err",
+            "result",
+        ],
         rows,
     )
     if any(r[-1] == "FAIL" for r in rows):
