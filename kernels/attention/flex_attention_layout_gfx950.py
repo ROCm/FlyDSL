@@ -499,7 +499,12 @@ def flex_attn_fwd_gfx950_kernel(
     # grid.x = q_tile; grid.y = head; grid.z = batch (or batch * num_kv_splits if split-K).
     _SPLITK = int(param.num_kv_splits) > 1
     _num_kv_splits = int(param.num_kv_splits)
-    q_tile = fx.block_idx.x
+    _is_causal = int(param.mask_type) == MASK_CAUSAL
+    if const_expr(_is_causal):
+        _num_q_tiles = (seqlen_q + fx.Int32(num_groups * block_m - 1)) // fx.Int32(num_groups * block_m)
+        q_tile = fx.Index(arith.index_cast(T.index, _num_q_tiles - fx.Int32(1) - fx.Int32(arith.index_cast(T.i32, fx.block_idx.x))))
+    else:
+        q_tile = fx.block_idx.x
     h_idx = fx.block_idx.y
     if const_expr(_SPLITK):
         b_idx = fx.block_idx.z // fx.Index(_num_kv_splits)
