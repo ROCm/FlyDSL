@@ -1149,6 +1149,11 @@ def test_normal_accuracy(
 @pytest.mark.parametrize("context_length", [1027])
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize("block_size", [64])
+@pytest.mark.parametrize(
+    "entrypoint",
+    ["tile", "ps-allocate", "ps-preallocated"],
+    ids=["direct", "ps-allocate", "ps-preallocated"],
+)
 def test_tile_pa_vectorized_5d_matches_torch(
     compute_type: str,
     query_length: int,
@@ -1159,6 +1164,7 @@ def test_tile_pa_vectorized_5d_matches_torch(
     context_length: int,
     batch_size: int,
     block_size: int,
+    entrypoint: str,
 ) -> None:
     from kernels.attention.pa_decode_tile import pa_decode_tile
 
@@ -1241,26 +1247,170 @@ def test_tile_pa_vectorized_5d_matches_torch(
         dtype=query.dtype,
         device=device,
     )
-    pa_decode_tile(
-        output=actual,
-        query=query,
-        key_cache=key_cache,
-        value_cache=shuffle_value_cache_layout(value_cache),
-        block_tables=block_tables,
-        context_lengths=context_lengths,
-        key_scale=key_scale,
-        value_scale=value_scale,
-        softmax_scale=head_size**-0.5,
-        num_partitions=num_partitions,
-        pmax=torch.empty(partial_shape, dtype=torch.float32, device=device),
-        psum=torch.empty(partial_shape, dtype=torch.float32, device=device),
-        pout=torch.empty((*partial_shape, value_head_size), dtype=query.dtype, device=device),
-    )
+    pmax = torch.empty(partial_shape, dtype=torch.float32, device=device)
+    psum = torch.empty(partial_shape, dtype=torch.float32, device=device)
+    pout = torch.empty((*partial_shape, value_head_size), dtype=query.dtype, device=device)
+    value_cache = shuffle_value_cache_layout(value_cache)
+    if entrypoint == "direct":
+        pa_decode_tile(
+            output=actual,
+            query=query,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            block_tables=block_tables,
+            context_lengths=context_lengths,
+            key_scale=key_scale,
+            value_scale=value_scale,
+            softmax_scale=head_size**-0.5,
+            num_partitions=num_partitions,
+            pmax=pmax,
+            psum=psum,
+            pout=pout,
+        )
+    else:
+        if not HAS_FLYDSL_PS:
+            pytest.skip("FlyDSL `pa_decode_ps_launch` is not available")
+        kv_page_indices = block_tables.flatten()
+        kv_indptr = torch.arange(
+            0,
+            (batch_size + 1) * blocks_per_sequence,
+            blocks_per_sequence,
+            dtype=torch.int32,
+            device=device,
+        )
+
+        def launch_ps():
+            return flydsl_ps_launch(
+                output=actual,
+                query=query,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                context_lengths=context_lengths,
+                kv_page_indices=kv_page_indices,
+                kv_indptr=kv_indptr,
+                softmax_scale=head_size**-0.5,
+                key_scale=key_scale,
+                value_scale=value_scale,
+                block_tables=block_tables,
+                max_context_partition_num=num_partitions,
+                exp_sums=psum if entrypoint == "ps-preallocated" else None,
+                max_logits=pmax if entrypoint == "ps-preallocated" else None,
+                temporary_output=pout if entrypoint == "ps-preallocated" else None,
+            )
+
+        path = launch_ps()
+        assert path == "ps_small_block"
+        if entrypoint == "ps-preallocated" and compute_type == "bf16" and query_length == 4 and value_head_size == 128:
+            capture_stream = torch.cuda.Stream()
+            capture_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(capture_stream):
+                launch_ps()
+            torch.cuda.current_stream().wait_stream(capture_stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=capture_stream):
+                launch_ps()
+            graph.replay()
     torch.cuda.synchronize()
 
     tolerance = 2.0e-2 if compute_type == "fp8" else 5.0e-3
     assert bool(torch.isfinite(actual).all().item())
     torch.testing.assert_close(actual, expected, rtol=tolerance, atol=tolerance)
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@_requires_tile_pa
+@pytest.mark.parametrize(
+    ("compute_type", "block_size", "sliding_window"),
+    [
+        pytest.param("bf16", 1024, 0, id="bf16-page1024"),
+        pytest.param("fp8", 64, 128, id="asymmetric-fp8-sliding-window"),
+    ],
+)
+def test_pa_decode_ps_rejects_unsupported_bf16_asymmetric_paths(
+    compute_type: str, block_size: int, sliding_window: int
+) -> None:
+    if not HAS_FLYDSL_PS:
+        pytest.skip("FlyDSL `pa_decode_ps_launch` is not available")
+
+    device = torch.device("cuda:0")
+    head_size = 192
+    value_head_size = 128
+    num_query_heads = 16
+    num_kv_heads = 1
+    cache_dtype = dtypes.d_dtypes[compute_type]
+    vector_width = 8 if compute_type == "bf16" else 16
+    query = torch.empty(1, num_query_heads, head_size, dtype=torch.bfloat16, device=device)
+    output = torch.empty(1, num_query_heads, value_head_size, dtype=query.dtype, device=device)
+    key_cache = torch.empty(
+        1,
+        num_kv_heads,
+        head_size // vector_width,
+        block_size,
+        vector_width,
+        dtype=cache_dtype,
+        device=device,
+    )
+    value_cache = torch.empty(
+        1,
+        num_kv_heads,
+        block_size // vector_width,
+        value_head_size,
+        vector_width,
+        dtype=cache_dtype,
+        device=device,
+    )
+    scale = None
+    if compute_type == "fp8":
+        scale = torch.ones(1, dtype=torch.float32, device=device)
+
+    with pytest.raises(
+        ValueError,
+        match="BF16 KV and asymmetric value dimensions currently require",
+    ):
+        flydsl_ps_launch(
+            output=output,
+            query=query,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            context_lengths=torch.ones(1, dtype=torch.int32, device=device),
+            kv_page_indices=torch.zeros(1, dtype=torch.int32, device=device),
+            kv_indptr=torch.tensor([0, 1], dtype=torch.int32, device=device),
+            softmax_scale=head_size**-0.5,
+            key_scale=scale,
+            value_scale=scale,
+            sliding_window=sliding_window,
+            block_tables=torch.zeros((1, 1), dtype=torch.int32, device=device),
+            max_context_partition_num=1,
+        )
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@_requires_tile_pa
+def test_pa_decode_ps_rejects_non_divisible_gqa_heads() -> None:
+    if not HAS_FLYDSL_PS:
+        pytest.skip("FlyDSL `pa_decode_ps_launch` is not available")
+
+    device = torch.device("cuda:0")
+    query = torch.empty(1, 3, 192, dtype=torch.bfloat16, device=device)
+    output = torch.empty(1, 3, 128, dtype=query.dtype, device=device)
+    key_cache = torch.empty(1, 2, 24, 64, 8, dtype=torch.bfloat16, device=device)
+    value_cache = torch.empty(1, 2, 8, 128, 8, dtype=torch.bfloat16, device=device)
+
+    with pytest.raises(ValueError, match="must be divisible"):
+        flydsl_ps_launch(
+            output=output,
+            query=query,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            context_lengths=torch.ones(1, dtype=torch.int32, device=device),
+            kv_page_indices=torch.zeros(1, dtype=torch.int32, device=device),
+            kv_indptr=torch.tensor([0, 1], dtype=torch.int32, device=device),
+            softmax_scale=192**-0.5,
+            block_tables=torch.zeros((1, 1), dtype=torch.int32, device=device),
+            max_context_partition_num=1,
+        )
 
 
 @pytest.mark.large_shape
