@@ -68,7 +68,6 @@ except ImportError:
 GFX950_WAVE_SIZE = 64
 
 # When True, _do_tile_passthrough prints per-thread K LDS b128 bank info (first KV tile only).
-_DEBUG_LDS_BANKS = True
 GFX950_DMA_BYTES = 16
 # Ring slot 1 base skew vs slot 0: rotate LDS banks during ping-pong DMA/read overlap.
 # 16 bytes = 4 banks; keeps BufferCopyLDS128b 16-byte aligned. Experimental only.
@@ -832,22 +831,6 @@ def flex_attn_fwd_gfx950_kernel(
             _stage_kv_to_lds(tile_idx, slot, True, True, ops=ops, op_offset=op_offset)
         return []
 
-    def load_k(tile_idx, slot, ops=_dma_ops_per_thread, op_offset=0):
-        _stage_kv_to_lds(tile_idx, slot, True, False, ops=ops, op_offset=op_offset)
-        return []
-
-    def load_v(tile_idx, slot, ops=_dma_ops_per_thread, op_offset=0):
-        _stage_kv_to_lds(tile_idx, slot, False, True, ops=ops, op_offset=op_offset)
-        return []
-
-    def load_k_strided(tile_idx, slot, stride_phase, ops=_dma_ops_per_thread, op_offset=0):
-        _stage_kv_to_lds_strided(tile_idx, slot, stride_phase, ops=ops, op_offset=op_offset)
-        return []
-
-    def load_v_strided(tile_idx, slot, ops=_dma_ops_per_thread, op_offset=0):
-        _stage_kv_to_lds_strided(tile_idx, slot, 2, ops=ops, op_offset=op_offset)
-        return []
-
     # ── V transpose read (swa pattern) ─────────────────────────────────────
     # LDS stores V as padded [block_n score, 32 D] sub-tiles per dc (D-chunk).
     # read path: LDS [score,D] ──ds_read_tr16_b64──► 4 bf16/lane ──shuffle──► v8elem MFMA A.
@@ -959,53 +942,6 @@ def flex_attn_fwd_gfx950_kernel(
 
     # Passthrough LDS bank debug phase ids (see _debug_lds_phase / _debug_print_k_b128).
     _PH_K_HALF0 = 0
-    _PH_DMA0 = 1
-    _PH_K_HALF1 = 2
-    _PH_DMA1 = 3
-    _PH_V_READ = 4
-    _PH_QK_GEMM = 5
-    _PH_PV_GEMM = 6
-
-    def _debug_print_k_b128(phase, ki, slot, k_src):
-        """Log ds_read_b128 source: LDS byte offset and LDS banks [b0..b3] for 128b read."""
-        if const_expr(not _DEBUG_LDS_BANKS):
-            return
-        # crd2idx on the per-thread K partition layout (not ptrtoint — LDS iter bases
-        # are not distinct per lane until lowering).
-        elem_off = fx.get_scalar(
-            fx.crd2idx(fx.make_int_tuple((0, 0, ki)), fx.get_layout(k_src))
-        )
-        lds_byte = elem_off * fx.Int32(param.in_data_bytes)
-        bank0 = (lds_byte // fx.Int32(4)) % fx.Int32(32)
-        bank3 = ((lds_byte + fx.Int32(12)) // fx.Int32(4)) % fx.Int32(32)
-        wave = fx.Int32(local_tid // GFX950_WAVE_SIZE)
-        lane = fx.Int32(local_tid % GFX950_WAVE_SIZE)
-        fx.printf(
-            "LDS_K tid={} w={} lane={} ph={} ki={} slot={} byte={} b0={} b3={}\n",
-            fx.Int32(local_tid),
-            wave,
-            lane,
-            fx.Int32(phase),
-            fx.Int32(ki),
-            fx.Int32(slot),
-            lds_byte,
-            bank0,
-            bank3,
-        )
-
-    def _debug_lds_phase(phase, kv_i32, slot):
-        """Mark pipeline step boundaries in passthrough (no bank math)."""
-        if const_expr(not _DEBUG_LDS_BANKS):
-            return
-        wave = fx.Int32(local_tid // GFX950_WAVE_SIZE)
-        fx.printf(
-            "PHASE tid={} w={} ph={} kv={} slot={}\n",
-            fx.Int32(local_tid),
-            wave,
-            fx.Int32(phase),
-            kv_i32,
-            fx.Int32(slot),
-        )
 
     def read_k_work_split(ki_count=_k_half, ki_offset=0, slot=0, phase=_PH_K_HALF0, emit_debug=False):
         """Read ki_count K-panels from LDS into frag_K[slot] for QK MFMA A.
@@ -1448,28 +1384,6 @@ def flex_attn_fwd_gfx950_kernel(
 
             return (m_i, l_i, o_accs, s_scaled_1, corr_scalar_1,
                     v_lo_regs_1, v_hi_regs_1, m_i_at_tile1)
-
-        def _do_tile_passthrough(kv_i32, m_i, l_i, o_accs, read_slot, dma_slot, has_next):
-            """Passthrough iteration: memory transfers + GEMMs only, no softmax.
-
-            Measures theoretical peak by skipping score mods, softmax, and O
-            rescaling.  Raw QK scores are fed directly as P into PV GEMM.
-            m_i / l_i are passed through unchanged.
-            """
-            rocdl.s_waitcnt(vmcnt=0)
-            rocdl.s_barrier()
-            read_k_work(read_slot)
-            v_lo_regs, v_hi_regs = read_v_slot[read_slot]()
-            if has_next:
-                load_kv(kv_i32 + fx.Int32(1), dma_slot)
-            rocdl.s_waitcnt(lgkmcnt=8)
-            dualwave_cluster_sync(0)
-            frag_S, = gemm1_qk(frag_Q, frag_K[read_slot])
-
-            frag_P = [frag_S[i] for i in range_constexpr(n_c)]
-            pv_gemm_register(frag_P, v_lo_regs, v_hi_regs, o_accs)
-            dualwave_cluster_sync(1)
-            return m_i, l_i, o_accs
 
         # Pad tile count to pairs: ceil(range / 2).  When range is odd the
         # last pair's odd call lands past _kv_hi — _do_tile's has_next=False
