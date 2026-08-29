@@ -23,6 +23,7 @@ import flydsl.expr as fx  # noqa: E402
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.gemm.gemm_bf16_gfx1250 import launch_gemm_bf16  # noqa: E402
+from tests.test_common import run_perftest  # noqa: E402
 
 _DT = {"bf16": torch.bfloat16, "f16": torch.float16}
 
@@ -80,7 +81,7 @@ def _build_case(
     c = torch.zeros(M, N, dtype=dt, device="cuda")
     ref = torch.matmul(a.float(), b.float().T)
 
-    def make_args(stream):
+    def make_args(stream, c=c, a=a, b=b):
         return (
             flyc.from_c_void_p(fx.Uint8, c.data_ptr()),
             flyc.from_c_void_p(fx.Uint8, a.data_ptr()),
@@ -107,7 +108,7 @@ def _build_case(
 
     # bf16/f16 inputs with f32 accumulation: error grows with sqrt(K).
     tol = (2e-2, 2e-2 * math.sqrt(K))
-    return c, make_args, ref, tol
+    return c, a, b, make_args, ref, tol
 
 
 def _bench_us(launch, *, warmup=10, iters=100):
@@ -130,7 +131,7 @@ def _bench_us(launch, *, warmup=10, iters=100):
 
 def _run_case(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, dtype="bf16", **kw):
     _require_gfx1250()
-    c, make_args, ref, (rtol, atol) = _build_case(
+    c, _a, _b, make_args, ref, (rtol, atol) = _build_case(
         M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, dtype, **kw
     )
     compiled = flyc.compile(launch_gemm_bf16, *make_args(torch.cuda.current_stream()))
@@ -181,15 +182,17 @@ def _parse_csv_ints(value, n, name):
 
 
 def _parse_init_mode(value):
-    """'random' -> None; 'const' or 'const,<float>' -> constant A/B fill (default 0.1)."""
+    """'random' -> None; 'zero' -> 0.0; 'const' or 'const,<float>' -> constant A/B fill (default 0.1)."""
     if value == "random":
         return None
+    if value == "zero":
+        return 0.0
     if value == "const":
         return 0.1
     kind, _, num = value.partition(",")
     if kind == "const" and num:
         return float(num)
-    raise SystemExit(f"--init-mode expects 'random', 'const', or 'const,<float>', got {value!r}")
+    raise SystemExit(f"--init-mode expects 'random', 'zero', 'const', or 'const,<float>', got {value!r}")
 
 
 def _print_table(headers, rows):
@@ -221,7 +224,13 @@ def _main():
         nargs="+",
         default=["random", "const"],
         metavar="MODE",
-        help="A/B fill(s): 'random' and/or 'const' (0.1) or 'const,<float>' (default: both)",
+        help="A/B fill(s): 'random', 'zero', 'const' (0.1) or 'const,<float>' (default: random+const)",
+    )
+    parser.add_argument(
+        "-rotate_buf",
+        action="store_true",
+        help="benchmark via run_perftest with rotating buffers: cycle through deep-copied A/B/C "
+        "sets (auto-sized from L2 cache) to defeat caching; default reuses one set (needs -bench)",
     )
     parser.add_argument(
         "--tdm-balance",
@@ -254,7 +263,7 @@ def _main():
     rows = []
     sweep = itertools.product(shapes, dtypes, args.init_mode, args.tdm_balance, args.wmma_b2b)
     for (M, N, K), dtype, init, tdm_bal, b2b in sweep:
-        c, make_args, ref, (rtol, atol) = _build_case(
+        c, a, b, make_args, ref, (rtol, atol) = _build_case(
             M,
             N,
             K,
@@ -274,7 +283,15 @@ def _main():
         ok = torch.allclose(c.float(), ref, rtol=rtol, atol=atol)
         perf = ["-", "-", "-"]
         if args.bench:
-            us = _bench_us(lambda: compiled(*make_args(torch.cuda.current_stream())))
+            if args.rotate_buf:
+
+                def _launch(c_t, a_t, b_t):
+                    compiled(*make_args(torch.cuda.current_stream(), c_t, a_t, b_t))
+
+                # num_rotate_args=0 lets run_perftest auto-size the rotating buffer set.
+                _, us = run_perftest(_launch, c, a, b, num_iters=100, num_warmup=10, num_rotate_args=0)
+            else:
+                us = _bench_us(lambda: compiled(*make_args(torch.cuda.current_stream())))
             moved = _bytes_moved(M, N, K)
             perf = [f"{us:.3f}", f"{_tflops(M, N, K, us):.2f}", f"{moved / (us * 1e-6) / 1e12:.3f}"]
         rows.append(
