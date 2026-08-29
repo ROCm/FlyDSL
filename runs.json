@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-08-29T18:29:28Z",
+ "updated": "2026-08-29T20:29:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33269020743,
+   "pr": 1032,
+   "commit": "f9417e1c8eb9135b86a7afad482dc52f2b058598",
+   "branch": "convolution",
+   "event": "pull_request",
+   "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33269020743",
+   "created_at": "2026-08-29T18:43:12Z",
+   "updated_at": "2026-08-29T19:00:45Z",
+   "actor": "amd-nprotaso",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-29T19:01:18Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33269020743/job/99146009288"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-29T19:01:07Z",
+     "completed_at": "2026-08-29T19:16:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33269020743/job/99146009305"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-29T19:01:18Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33269020743/job/99146009394"
+    }
+   ]
+  },
   {
    "run_id": 33257823993,
    "pr": 1078,
@@ -583,11 +626,11 @@
    "branch": "rdna3-int8-wmma-gemm",
    "event": "pull_request",
    "title": "[Kernel][Perf] Add RDNA3 INT8 WMMA GEMM, 1.23-2.80x over torch",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33139751646",
    "created_at": "2026-08-28T03:44:01Z",
-   "updated_at": "2026-08-28T04:13:31Z",
+   "updated_at": "2026-08-29T20:25:52Z",
    "actor": "vlluvia",
    "jobs": [
     {
@@ -1966,51 +2009,6 @@
      "started_at": "2026-08-26T05:50:11Z",
      "completed_at": "2026-08-26T06:50:33Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32933223938/job/98075877722",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32928995662,
-   "pr": null,
-   "commit": "637e448fecc5cfaddbe432893e93614b0b89e968",
-   "branch": "fp8-softmax-normalisation",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32928995662",
-   "created_at": "2026-08-26T04:07:03Z",
-   "updated_at": "2026-08-26T07:17:40Z",
-   "actor": "JohnQinAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-26T05:15:52Z",
-     "completed_at": "2026-08-26T07:10:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32928995662/job/98069475251"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-26T05:16:24Z",
-     "completed_at": "2026-08-26T07:17:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32928995662/job/98069475268",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-26T05:15:17Z",
-     "completed_at": "2026-08-26T05:33:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32928995662/job/98069475289",
      "log_fetch_failed": true
     }
    ]
