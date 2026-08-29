@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-29T03:29:36Z",
+ "updated": "2026-08-29T06:38:36Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33238363342,
+   "pr": 1015,
+   "commit": "7eff378a08c7975b7355a75c4bf480492d9616ed",
+   "branch": "phil/isa-resource-diff-arch-general",
+   "event": "pull_request",
+   "title": "[Tools] Add architecture-general ISA resource diff tool",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33238363342",
+   "created_at": "2026-08-29T06:23:53Z",
+   "updated_at": "2026-08-29T06:25:57Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 33229430076,
    "pr": 1065,
@@ -10,13 +25,43 @@
    "branch": "upstream/pa-bf16-asymmetric-v",
    "event": "pull_request",
    "title": "[Kernel][PA] Support BF16 vectorized KV with asymmetric K/V head dim",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33229430076",
    "created_at": "2026-08-29T02:37:49Z",
-   "updated_at": "2026-08-29T02:39:31Z",
+   "updated_at": "2026-08-29T03:53:53Z",
    "actor": "sammysun0711",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-29T06:11:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33229430076/job/99047674631"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-29T03:54:00Z",
+     "completed_at": "2026-08-29T04:16:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33229430076/job/99047674635",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-29T03:54:09Z",
+     "completed_at": "2026-08-29T05:15:57Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33229430076/job/99047674640",
+     "log_fetch_failed": true
+    }
+   ]
   },
   {
    "run_id": 33165604259,
@@ -1896,50 +1941,6 @@
      "started_at": "2026-08-26T06:20:20Z",
      "completed_at": "2026-08-26T06:37:03Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32922097019/job/98082162193"
-    }
-   ]
-  },
-  {
-   "run_id": 32921056773,
-   "pr": null,
-   "commit": "127de4d9bcb2d26e343c018d498132c97352b3ee",
-   "branch": "fp8-softmax-normalisation",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix fp8 dense attention: softmax normalisation and an int32 dim overflow",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32921056773",
-   "created_at": "2026-08-26T01:59:55Z",
-   "updated_at": "2026-08-26T03:36:21Z",
-   "actor": "JohnQinAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-26T03:08:59Z",
-     "completed_at": "2026-08-26T03:36:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32921056773/job/98046808452"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-26T03:08:53Z",
-     "completed_at": "2026-08-26T03:36:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32921056773/job/98046808453"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-26T03:08:39Z",
-     "completed_at": "2026-08-26T03:28:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32921056773/job/98046808493",
-     "log_fetch_failed": true
     }
    ]
   }
