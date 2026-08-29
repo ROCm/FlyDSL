@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-29T11:00:15Z",
+ "updated": "2026-08-29T12:23:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -556,11 +556,11 @@
    "branch": "bf16_ds_read_b256_optimization",
    "event": "pull_request",
    "title": "i[gfx1250] Switch BF16 GEMM LDS loads to ds_read_b256, +0.4 TB/s",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33137638181",
    "created_at": "2026-08-28T03:00:56Z",
-   "updated_at": "2026-08-28T03:19:57Z",
+   "updated_at": "2026-08-29T12:21:15Z",
    "actor": "amd-hhashemi",
    "jobs": [
     {
