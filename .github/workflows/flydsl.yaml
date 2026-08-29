@@ -224,13 +224,41 @@ jobs:
       - name: Restore baseline MLIR cache
         id: base-mlir-cache
         if: steps.base-pin.outputs.pin_changed == 'true'
+        continue-on-error: true
+        timeout-minutes: 25
+        uses: actions/cache/restore@v4
+        with:
+          path: mlir_install.tgz
+          key: ${{ steps.keys.outputs.base }}
+
+      # This install is ~1.4 GB and these runners are spread across regions, so
+      # the transfer is slow enough (~1.6 MB/s observed) to be interrupted:
+      #
+      #   Received 1010827264 of 1396566653 (72.4%), 1.6 MBs/sec
+      #   ##[warning]Failed to restore: Server failed to authenticate the
+      #             request ... Authorization header ... signature.
+      #   Cache not found for input keys: mlir-install-...-4087a417...
+      #
+      # The entry was there and matched; the blob SAS auth failed mid-download,
+      # which actions/cache reports as a plain miss. One retry costs nothing on
+      # the normal path and is the difference between having a baseline and
+      # silently not having one.
+      - name: Retry baseline MLIR cache restore
+        id: base-mlir-cache-retry
+        if: >-
+          steps.base-pin.outputs.pin_changed == 'true' &&
+          steps.base-mlir-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 25
         uses: actions/cache/restore@v4
         with:
           path: mlir_install.tgz
           key: ${{ steps.keys.outputs.base }}
 
       - name: Stash baseline MLIR tarball
-        if: steps.base-mlir-cache.outputs.cache-hit == 'true'
+        if: >-
+          steps.base-mlir-cache.outputs.cache-hit == 'true' ||
+          steps.base-mlir-cache-retry.outputs.cache-hit == 'true'
         continue-on-error: true
         run: |
           set -uo pipefail
