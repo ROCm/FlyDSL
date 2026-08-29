@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-29T00:54:47Z",
+ "updated": "2026-08-29T03:29:36Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33229430076,
+   "pr": 1065,
+   "commit": "53236d0bcc2ffe8978fbf83a24fd118f19334d5c",
+   "branch": "upstream/pa-bf16-asymmetric-v",
+   "event": "pull_request",
+   "title": "[Kernel][PA] Support BF16 vectorized KV with asymmetric K/V head dim",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33229430076",
+   "created_at": "2026-08-29T02:37:49Z",
+   "updated_at": "2026-08-29T02:39:31Z",
+   "actor": "sammysun0711",
+   "jobs": []
+  },
   {
    "run_id": 33165604259,
    "pr": 1078,
@@ -1227,7 +1242,7 @@
   },
   {
    "run_id": 32980135497,
-   "pr": 1065,
+   "pr": null,
    "commit": "ad712fb47ec357f687b130e820179c3dff6462da",
    "branch": "upstream/pa-bf16-asymmetric-v",
    "event": "pull_request",
@@ -1927,21 +1942,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 32916237351,
-   "pr": 957,
-   "commit": "d12ba2dbee03c6f37032618f51e5036d5f6b962d",
-   "branch": "xiaoyu/svd-quark",
-   "event": "pull_request",
-   "title": "Add SVD quant for Quark",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32916237351",
-   "created_at": "2026-08-26T00:43:45Z",
-   "updated_at": "2026-08-26T00:45:38Z",
-   "actor": "amd-xiaoyu12",
-   "jobs": []
   }
  ]
 }
