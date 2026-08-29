@@ -112,6 +112,7 @@ def compile_pa_decode_tile(
     # as the absmax butterfly width); QCHUNK scales with head_dim instead.
     NQCHUNK = 16
     QCHUNK = head_dim // NQCHUNK  # f16 elements per lane's load chunk (8 for head_dim=128, 4 for head_dim=64)
+    assert QCHUNK % 4 == 0, f"head_dim {head_dim} must provide a whole number of packed FP8 query words"
 
     VHE_CHUNKS = head_dim // (NWARP * MFMA_MNK)  # 2 for head_dim=128, 1 for head_dim=64
 
@@ -211,8 +212,11 @@ def compile_pa_decode_tile(
         _k_load_fp8x16 = _make_flat_loader(key_cache_ptr, FP8, 16, fx.UniversalCopy128b())
         _v_load_fp8x16 = _make_flat_loader(value_cache_ptr, FP8, 16, fx.UniversalCopy128b())
         # Per-lane Q chunk (QCHUNK 16-bit elems) fetched in QLOAD_UNIT-wide
-        # pieces (128b max per buffer load): head_dim=256 needs 2 pieces.
-        QLOAD_UNIT = QCHUNK if QCHUNK < 8 else 8
+        # pieces (128b max per buffer load). Use 64-bit loads when QCHUNK is
+        # not divisible by 8: head_dim=192 gives QCHUNK=12 and therefore needs
+        # three 4-element loads. Rounding it down to one 8-element load leaves
+        # one third of every query row unstaged in LDS.
+        QLOAD_UNIT = 8 if QCHUNK % 8 == 0 else 4
         N_QLOADS = QCHUNK // QLOAD_UNIT
         _q_copy_op = fx.rocdl.BufferCopy128b() if QLOAD_UNIT == 8 else fx.rocdl.BufferCopy64b()
         _q_load_chunk = _make_flat_loader(query_ptr, Q_DTYPE, QLOAD_UNIT, _q_copy_op)
@@ -348,6 +352,9 @@ def compile_pa_decode_tile(
         # token = warp*TOK_CHUNK + a*c16 + lane16 (the softmax mask and P-pack
         # write position below must encode this same formula).
         def _k_ops(phys, a):
+            # Physical page ids fit in i32, but their element offsets do not
+            # once an individual KV cache grows beyond 2 GiB.
+            phys = fx.Int64(phys)
             within_page_tok = (a * c16 + lane16) % block_size
             ops = []
             for qkhe in range_constexpr(QKHE_LOOP):
@@ -536,11 +543,12 @@ def compile_pa_decode_tile(
             head_element = head_group * 16 + lane16
             ops = []
             for sub in range_constexpr(PAGES_PER_CHUNK):
+                phys = fx.Int64(phys_row[sub])
                 for step in range_constexpr(STEPS_PER_PAGE):
                     if const_expr(trans_v):
-                        base = (((phys_row[sub] * n_kv + kv_h) * STEPS_PER_PAGE + step) * head_dim + head_element) * 16
+                        base = (((phys * n_kv + kv_h) * STEPS_PER_PAGE + step) * head_dim + head_element) * 16
                     else:
-                        base = ((phys_row[sub] * n_kv + kv_h) * head_dim + head_element) * block_size + step * 16
+                        base = ((phys * n_kv + kv_h) * head_dim + head_element) * block_size + step * 16
                     w = _v_load16(base)
                     if const_expr(block_size == 16):
                         # help the scheduler overlap the per-page gathered loads (see _k_ops)
