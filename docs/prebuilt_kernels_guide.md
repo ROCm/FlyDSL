@@ -11,6 +11,7 @@ This guide covers the available FlyDSL kernels — normalization, softmax, GEMM,
 | **Softmax** | `build_softmax_module(M, N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | Register-buffered softmax, opt-in autotuning |
 | **Softmax backward** | `build_softmax_bwd_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | fp32 dot reduction, native-dtype register buffering |
 | **GEMM** | `compile_preshuffle_gemm(...)` | `@flyc.kernel` | fp8, int8, fp16, bf16 | Preshuffle B, ping-pong LDS, MFMA 16x16 |
+| **A8W4 SVDQuant GEMM** | `launch_gemm(..., epilogue="svd")` | `@flyc.jit` | MXFP8 x MXFP4 | gfx950 residual GEMM with optional fused low-rank up-projection |
 | **FlashAttention** | `build_flash_attn_func_module(...)` | `@flyc.kernel` | bf16, f16 (any arch); fp8 e4m3fn (gfx950, D=128, dense) | Dual-wave SWP fwd, GQA/MQA, causal, descale ABI |
 
 All kernels use the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`).
@@ -291,24 +292,41 @@ the separate `compile_mxfp4_gemm` in `kernels/gemm/gemm_fp8fp4_gfx1250.py` is th
 distinct gfx1250 kernel. `batch>1` runs a strided-batched GEMM over `grid.z`.
 Covered by `tests/kernels/test_preshuffle_gemm.py`.
 
-**Pipeline details:**
-- **lds_stage=2 (ping-pong)**: Two LDS buffers for A tiles. Cross-tile A0 prefetch overlaps VMEM with LDS reads
-- **lds_stage=1 (single)**: CK-style intrawave schedule with single LDS buffer
-- **K64-byte micro-step**: Each step issues 2x K32 MFMA operations
-- **XOR16 swizzle**: Byte-level swizzle on LDS to avoid bank conflicts
-- **B-preshuffle**: Shape (N0, K0, KLane, NLane, KPackBytes) = (N/16, K/64, 4, 16, kpack_bytes)
-- **Fused epilogue**: selected via `epilogue=` (bias add + optional relu/silu/gelu activation)
+### 3.2 SVDQuant epilogue (`kernels/gemm/mxfp4_preshuffle.py`)
 
-**Launch function signature:**
+The same `launch_gemm` launcher fuses the SVDQuant low-rank up-projection into
+the residual GEMM, for integrations that precompute the down-projection
+`d = x @ L1.T` outside FlyDSL:
+
 ```python
-launch_fn(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, arg_bias, M_val, N_val, stream)
+from kernels.gemm.mxfp4_preshuffle import launch_gemm
+
+launch_gemm(
+    c_ptr, a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, bias_ptr, d_ptr, l2_ptr,
+    M, N, stream,
+    N, K, tile_m, tile_n, tile_k,
+    "fp8", "bf16", "fp4",          # a_dtype, out_dtype, b_dtype
+    1, -1, -1, -1, -1, -1, -1, 0, 0,
+    "svd_bias",                    # epilogue
+    32,                            # rank
+    True,                          # svd_use_mfma
+)
 ```
 
-- `arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, arg_bias`: PyTorch tensors (auto-converted to memref). `arg_bias` is the fused epilogue bias (per-N, `out_dtype`); unused when `epilogue == "none"`.
-- `M_val, N_val`: Python int (auto-converted to Int32)
-- `stream`: `fx.Stream` (default stream if omitted)
+`epilogue` supports `"none"`, the bias/activation variants (`"bias"`,
+`"bias_relu"`, `"bias_silu"`, `"bias_gelu"`), plus `"svd"` and `"svd_bias"`.
+The SVD modes add `d @ L2.T` in f32 before conversion to the output type;
+`"svd_bias"` additionally adds a per-N bias. `d` is `(M, rank)` and `L2` is
+`(N, rank)`, both row-major in the output dtype. `rank` is a compile-time value
+and must be > 0 for the SVD epilogues.
 
----
+When `rank` is divisible by 16 and `out_dtype="bf16"`, the default
+`svd_use_mfma=True` folds the up-projection into the same f32 accumulators
+using one BF16 16x16x16 MFMA per 16-wide rank block. Other ranks, or
+`svd_use_mfma=False`, use the scalar per-element fallback. Pass empty tensors
+for `bias`, `d`, and `L2` when the selected epilogue does not read them; the
+kernel handles ragged `M` through its runtime buffer bounds. Covered by
+`tests/kernels/test_preshuffle_gemm_a8w4.py`.
 
 ## 3b. FlashAttention forward (`kernels/attention/flash_attn_generic.py`, `kernels/attention/flash_attn_gfx950.py`, `kernels/attention/flash_attn_fp8_gfx950.py`)
 
