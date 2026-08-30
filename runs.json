@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-30T11:24:10Z",
+ "updated": "2026-08-30T12:04:57Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "main",
    "event": "push",
    "title": "[gfx1250] Bf16 GEMM: Issue tdm prefetch earlier for wide tiles and ad\u2026",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33307430832",
    "created_at": "2026-08-30T10:50:06Z",
-   "updated_at": "2026-08-30T10:52:52Z",
+   "updated_at": "2026-08-30T11:31:50Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-30T11:33:05Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33307430832/job/99250939241"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-30T11:32:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33307430832/job/99250939269"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-30T11:32:23Z",
+     "completed_at": "2026-08-30T11:47:30Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33307430832/job/99250939316"
+    }
+   ]
   },
   {
    "run_id": 33269020743,
@@ -537,11 +565,11 @@
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
    "title": "[WIP][Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33142704939",
    "created_at": "2026-08-28T04:44:57Z",
-   "updated_at": "2026-08-28T06:03:48Z",
+   "updated_at": "2026-08-30T12:02:23Z",
    "actor": "Boss2002n",
    "jobs": [
     {
