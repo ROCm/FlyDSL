@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-30T10:34:32Z",
+ "updated": "2026-08-30T11:22:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33307430832,
+   "pr": null,
+   "commit": "a7d7c4a9923309d32837c8bbef4b5ff191dbfda0",
+   "branch": "main",
+   "event": "push",
+   "title": "[gfx1250] Bf16 GEMM: Issue tdm prefetch earlier for wide tiles and ad\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33307430832",
+   "created_at": "2026-08-30T10:50:06Z",
+   "updated_at": "2026-08-30T10:52:52Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 33269020743,
    "pr": 1032,
@@ -95,7 +110,7 @@
   },
   {
    "run_id": 33253991829,
-   "pr": 1078,
+   "pr": null,
    "commit": "f57ae5838614828791c03edfecfbbbe2587c7643",
    "branch": "gfx1250/bf16-gemm-opt-0828",
    "event": "pull_request",
@@ -275,7 +290,7 @@
   },
   {
    "run_id": 33165604259,
-   "pr": 1078,
+   "pr": null,
    "commit": "5ce2fc5037a847bc8de6a9b9f8115e2f9a8f0f4a",
    "branch": "gfx1250/bf16-gemm-opt-0828",
    "event": "pull_request",
@@ -321,7 +336,7 @@
   },
   {
    "run_id": 33164202834,
-   "pr": 1078,
+   "pr": null,
    "commit": "8871895405ff8105475b03a7c2517ce31a401385",
    "branch": "gfx1250/bf16-gemm-opt-0828",
    "event": "pull_request",
@@ -336,7 +351,7 @@
   },
   {
    "run_id": 33159363986,
-   "pr": 1078,
+   "pr": null,
    "commit": "48338ca3eef11e5e4ef6b931880d9d90629d6049",
    "branch": "gfx1250/bf16-gemm-opt-0828",
    "event": "pull_request",
@@ -431,11 +446,11 @@
    "branch": "feat/gfx950-paged-attention-vllm-kv-layouts",
    "event": "pull_request",
    "title": "Support vLLM paged KV cache layouts on the gfx950 attention kernel",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33154122125",
    "created_at": "2026-08-28T08:07:54Z",
-   "updated_at": "2026-08-28T08:47:44Z",
+   "updated_at": "2026-08-30T11:21:18Z",
    "actor": "akii96",
    "jobs": [
     {
@@ -1968,52 +1983,6 @@
    "updated_at": "2026-08-26T07:05:59Z",
    "actor": "Yaowu-Xiong",
    "jobs": []
-  },
-  {
-   "run_id": 32933223938,
-   "pr": null,
-   "commit": "4a6f955f692aa2831fe7fc46478061791e9f5809",
-   "branch": "main",
-   "event": "push",
-   "title": "refine g2s load ptr (#1068)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32933223938",
-   "created_at": "2026-08-26T05:13:38Z",
-   "updated_at": "2026-08-26T08:26:29Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-26T05:50:09Z",
-     "completed_at": "2026-08-26T08:26:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32933223938/job/98075877652",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-26T05:49:28Z",
-     "completed_at": "2026-08-26T06:11:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32933223938/job/98075877665",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-26T05:50:11Z",
-     "completed_at": "2026-08-26T06:50:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32933223938/job/98075877722",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
