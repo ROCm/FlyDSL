@@ -37,11 +37,13 @@ from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.attention import flash_attn_interface  # noqa: E402
 from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module  # noqa: E402
 from kernels.attention.flash_attn_interface import (  # noqa: E402
+    _PAGED_TILE,
     _build_dense_dualwave,
     _build_paged,
     _build_splitk,
     _build_varlen,
     _paged_kv_row_stride,
+    _paged_page_descriptor_fits,
     _varlen_causal_lpt,
     flydsl_flash_attn_func,
 )
@@ -4890,6 +4892,67 @@ def test_paged_kv_row_stride_dense_reports_none():
     dense_row = num_kv_heads * head_dim
     kv = _FakeKV((page_size * dense_row, dense_row, head_dim, 1))
     assert _paged_kv_row_stride(kv, kv, page_size, num_kv_heads, head_dim) is None
+
+
+@pytest.mark.parametrize(
+    "page_size, num_kv_heads, head_dim, elem_size, fits",
+    [
+        (128, 1, 128, 2, True),  # ordinary vLLM page
+        (256, 8, 128, 2, True),  # a 4-tile page with 8 KV heads is still tiny
+        (2**24 - 64, 1, 128, 2, True),  # widest addressable page at Hkv=1, D=128
+        (2**24, 1, 128, 2, False),  # exactly 2**31 elements, wraps the int32 extent
+        (2**21, 8, 128, 2, False),  # more KV heads reach the bound at a smaller page
+        (2**23, 1, 128, 4, False),  # 2**30 elements fits, but 2**32 bytes does not
+    ],
+)
+def test_paged_page_descriptor_fits_is_exclusive_on_both_bounds(page_size, num_kv_heads, head_dim, elem_size, fits):
+    """The shared predicate's arithmetic, at the boundary from both directions.
+
+    This pins the numbers only. That the dense pitch is actually put through it on the
+    launch path is test_paged_oversized_dense_page_is_rejected.
+
+    A dense cache returns from the row-stride gate before its page-span check, so once
+    page_size became any multiple of the tile, page_size * Hkv * D was unbounded on that
+    path. It cannot fall back to a copy the way an overwide strided pitch does, since
+    dense is already the narrowest layout, so the entry point rejects it instead. The
+    fourth case is the boundary; the last shows the byte bound binding before the element
+    bound once an element is wider than two bytes.
+    """
+    assert _paged_page_descriptor_fits(page_size * num_kv_heads * head_dim, elem_size) is fits
+
+
+@_requires_gfx950
+def test_paged_oversized_dense_page_is_rejected():
+    """An oversized dense page must be refused at the entry point rather than wrapped.
+
+    A page wide enough to overrun the descriptor spans gigabytes, but nothing before the
+    check reads the pages themselves, so a stride-0 expand buys a real cache shape at no
+    allocation cost. That keeps the arguments the check is called with under test, which
+    a stubbed predicate would not.
+
+    The second case is the same wrap reached through the head count rather than the page:
+    the kernel strides the dense case by the resolved num_kv_heads, so a cache whose own
+    page fits can still be oversized once the caller asks for more KV heads than it holds.
+    """
+    D = 128
+    q = _rand_lse(1, 256, 8, D, dtype=torch.bfloat16)
+    one = torch.empty(1, 1, 1, D, dtype=torch.bfloat16, device=q.device)
+    paged_kw = dict(
+        causal=True,
+        block_table=torch.zeros(1, 1, dtype=torch.int32, device=q.device),
+        seqlen_k=torch.full((1,), _PAGED_TILE, dtype=torch.int32, device=q.device),
+        max_seqlen_kv=_PAGED_TILE,
+    )
+
+    # 2**24 * 1 * 128 is exactly 2**31 elements, the first page that does not fit.
+    too_wide = one.expand(1, 2**24, 1, D)
+    with pytest.raises(NotImplementedError, match="page descriptor"):
+        flydsl_flash_attn_func(q, too_wide, too_wide, **paged_kw)
+
+    # 2**21 * 1 * 128 fits; 2**21 * 8 * 128 is again exactly 2**31.
+    fits_alone = one.expand(1, 2**21, 1, D)
+    with pytest.raises(NotImplementedError, match="page descriptor"):
+        flydsl_flash_attn_func(q, fits_alone, fits_alone, num_kv_heads=8, **paged_kw)
 
 
 @_requires_gfx950

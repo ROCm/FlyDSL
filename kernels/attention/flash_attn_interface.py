@@ -422,6 +422,14 @@ _PAGED_TILE = 64
 _PAGED_BT_LDS_SIZE = 2048
 
 
+def _paged_page_descriptor_fits(page_elems, elem_size):
+    """A page descriptor carries a signed-int32 element extent and a 32-bit byte span.
+
+    Overflowing either wraps silently and reads the wrong rows.
+    """
+    return page_elems < 2**31 and page_elems * elem_size < 2**32
+
+
 def _paged_kv_row_stride(k, v, page_size, num_kv_heads, head_dim):
     """Element stride between KV rows of a [NumBlocks, PageSize, Hkv, D] page cache.
 
@@ -443,12 +451,7 @@ def _paged_kv_row_stride(k, v, page_size, num_kv_heads, head_dim):
         return None
     if row_stride == dense_row:
         return None
-    # The page descriptor spans one page, page_size * row_stride elements, and is built
-    # as a signed-int32 element extent and a 32-bit unsigned byte span. A pitch that
-    # overflows either wraps silently and reads the wrong rows, so report it as dense
-    # and let the caller copy into a layout that fits.
-    page_elems = page_size * row_stride
-    if page_elems >= 2**31 or page_elems * k.element_size() >= 2**32:
+    if not _paged_page_descriptor_fits(page_size * row_stride, k.element_size()):
         return None
     return row_stride
 
@@ -550,11 +553,21 @@ def _flydsl_flash_attn_paged(
         raise NotImplementedError(f"flydsl_flash_attn_func: native paged KV supports head_dim=64 or 128, got {D}")
     if k_head_dim != D:
         raise ValueError(f"flydsl_flash_attn_func: paged K head_dim ({k_head_dim}) must match q head_dim ({D})")
-
     if num_kv_heads is None:
         num_kv_heads = Hkv
     if H % num_kv_heads != 0:
         raise ValueError(f"flydsl_flash_attn_func: num_heads ({H}) must be divisible by num_kv_heads ({num_kv_heads})")
+
+    # Dense is the narrowest pitch, so unlike a strided one it has no copy to fall back on.
+    # num_kv_heads, not Hkv: the kernel builds DEFAULT_STRIDE_KV_N from the resolved value.
+    dense_page_elems = page_size * num_kv_heads * D
+    if not _paged_page_descriptor_fits(dense_page_elems, k.element_size()):
+        raise NotImplementedError(
+            f"flydsl_flash_attn_func: paged page_size {page_size} with {num_kv_heads} KV heads and "
+            f"head_dim {D} needs a {dense_page_elems}-element "
+            f"({dense_page_elems * k.element_size()}-byte) page descriptor, which exceeds its "
+            f"limits of {2**31} elements and {2**32} bytes"
+        )
 
     # Split-K (paged, dense only): split the KV dimension across grid_z = B*num_kv_splits
     # workgroups + a combine pass. Fills the GPU for low-occupancy shapes (small B / few
