@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-08-30T13:35:13Z",
+ "updated": "2026-08-30T15:25:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33316875801,
+   "pr": 1001,
+   "commit": "84a50c785e51f538e9d03bd6c15dd0c993bea49d",
+   "branch": "jli/gfx1250/fix-mma-atom",
+   "event": "pull_request",
+   "title": "[WIP][Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33316875801",
+   "created_at": "2026-08-30T14:26:35Z",
+   "updated_at": "2026-08-30T15:14:20Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-30T15:15:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33316875801/job/99277724177"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-30T15:15:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33316875801/job/99277724195"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-30T15:15:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33316875801/job/99277724208"
+    }
+   ]
+  },
   {
    "run_id": 33307430832,
    "pr": null,
@@ -20,11 +63,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-30T11:33:05Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33307430832/job/99250939241"
+     "completed_at": "2026-08-30T13:44:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33307430832/job/99250939241",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -561,7 +605,7 @@
   },
   {
    "run_id": 33142704939,
-   "pr": 1001,
+   "pr": null,
    "commit": "6e47a21f5ac0bf57e103afd665980733f817c8d3",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
@@ -1997,21 +2041,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32941094070/job/98110771861"
     }
    ]
-  },
-  {
-   "run_id": 32938927483,
-   "pr": 972,
-   "commit": "898afe0df71d67ca3f4a05b96f6faadb8848750f",
-   "branch": "mega_moe_a4w4",
-   "event": "pull_request",
-   "title": "add A4W4 and FP8 P2P transport support to MegaMoE",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32938927483",
-   "created_at": "2026-08-26T06:37:03Z",
-   "updated_at": "2026-08-26T07:05:59Z",
-   "actor": "Yaowu-Xiong",
-   "jobs": []
   }
  ]
 }
