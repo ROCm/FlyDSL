@@ -195,6 +195,13 @@ def test_runner_of_matches_known_box_and_rejects_unknown():
     assert ingest.runner_of("") is None
 
 
+def test_runner_of_resolves_shared_job_from_actual_runner():
+    shared_job = "test (linux-flydsl-gfx950)"
+    assert ingest.runner_of(shared_job, "linux-flydsl-mi355-1-g2mdh-runner-d6jzr") == "linux-flydsl-mi355-1"
+    assert ingest.runner_of(shared_job, "linux-flydsl-mi35x-1-runner-abcd") is None
+    assert ingest.runner_of(shared_job, "linux-flydsl-mi35x-8-runner-efgh") is None
+
+
 # --------------------------------------------------------------------------- #
 # list_runs — default scans all branches (so PR runs are included)
 # --------------------------------------------------------------------------- #

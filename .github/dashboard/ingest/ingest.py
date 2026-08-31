@@ -3,7 +3,7 @@
 
 For each recent run of the benchmark workflow (``flydsl.yaml`` / "Fly DSL test") this:
 
-1. finds the three single-GPU benchmark jobs (``test (linux-flydsl-<box>)``),
+1. finds benchmark jobs by their actual runner identity,
 2. downloads each job's log and parses it with :mod:`parse_bench`,
 3. merges the resulting records into ``history.json`` (idempotent per run+runner),
 4. snapshots recent runs + per-job status into ``runs.json`` for the live CI board.
@@ -84,7 +84,18 @@ def run_jobs(repo: str, run_id: int) -> list[dict]:
     return jobs
 
 
-def runner_of(job_name: str) -> str | None:
+def runner_of(job_name: str, runner_name: str | None = None) -> str | None:
+    """Return the stable benchmark runner behind a job.
+
+    Shared runner labels make the job name intentionally hardware-agnostic, so
+    prefer the concrete ephemeral runner name reported by the Actions jobs API.
+    Fall back to the historical job-name convention for older runs.
+    """
+    if runner_name:
+        for runner in BENCH_RUNNERS:
+            if runner_name == runner or runner_name.startswith(f"{runner}-"):
+                return runner
+        return None
     m = JOB_RUNNER.search(job_name or "")
     return m.group(1) if m and m.group(1) in BENCH_RUNNERS else None
 
@@ -134,7 +145,7 @@ def ingest_run(repo: str, run: dict, regression_pct: float) -> tuple[list[dict],
     records: list[dict] = []
     job_status: list[dict] = []
     for job in jobs:
-        runner = runner_of(job.get("name", ""))
+        runner = runner_of(job.get("name", ""), job.get("runner_name"))
         if not runner:
             continue
         js = {

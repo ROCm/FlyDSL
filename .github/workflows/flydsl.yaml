@@ -98,15 +98,18 @@ jobs:
       ${{ always()
           && needs.detect-changes.result == 'success'
           && needs.detect-changes.outputs.code_changed != 'true' }}
-    name: test
+    # Preserve the existing required-check contexts while the gfx950 entry
+    # dispatches through a shared runner label.
+    name: test (${{ matrix.check }})
     strategy:
       matrix:
-        runners: [
-          'linux-flydsl-mi325-1',
-          'linux-flydsl-mi355-1',
-          'linux-flydsl-mi35x-1',
-          'linux-flydsl-navi-2',
-        ]
+        include:
+          - runners: linux-flydsl-mi325-1
+            check: linux-flydsl-mi325-1
+          - runners: linux-flydsl-gfx950
+            check: linux-flydsl-mi355-1
+          - runners: linux-flydsl-navi-2
+            check: linux-flydsl-navi-2
     runs-on: ubuntu-latest
     steps:
       - name: Report skipped GPU tests (green) or fail if pre-checks failed (red)
@@ -405,11 +408,15 @@ jobs:
           docker rm flydsl_mlir_cache || true
 
   # ---------------------------------------------------------------------------
-  # Single-GPU tests: kernels, unit, examples, MLIR FileCheck, benchmarks.
-  # Runs on 1-GPU and Navi runners only.
+  # Single-visible-GPU tests: kernels, unit, examples, MLIR FileCheck, benchmarks.
+  # The shared gfx950 label lets an idle MI355-1, MI35x-1, or MI35x-8 pool
+  # claim the one validation job. The 8-GPU pool exposes only device 0 here.
   # ---------------------------------------------------------------------------
   test:
     needs: [check-signal, detect-changes, prepare-mlir]
+    # Keep the established required-check name even when a different gfx950
+    # runner pool claims the shared validation job.
+    name: test (${{ matrix.check }})
     # Run only when check-signal passed AND the change touched code. Docs-only
     # changes (code_changed == 'false') skip this job entirely, so no GPU runner
     # is used; a detect-changes failure falls back to running.
@@ -425,15 +432,16 @@ jobs:
       GIT_CONFIG_GLOBAL: /dev/null
       GIT_CONFIG_NOSYSTEM: "1"
       # Temporary quarantine for linux-flydsl-navi-2 GPU 1; see #858.
-      CI_HIP_VISIBLE_DEVICES: ${{ contains(matrix.runners, 'navi') && '3' || '' }}
+      CI_HIP_VISIBLE_DEVICES: ${{ contains(matrix.runners, 'navi') && '3' || matrix.runners == 'linux-flydsl-gfx950' && '0' || '' }}
     strategy:
       matrix:
-        runners: [
-          'linux-flydsl-mi325-1',
-          'linux-flydsl-mi355-1',
-          'linux-flydsl-mi35x-1',
-          'linux-flydsl-navi-2',
-        ]
+        include:
+          - runners: linux-flydsl-mi325-1
+            check: linux-flydsl-mi325-1
+          - runners: linux-flydsl-gfx950
+            check: linux-flydsl-mi355-1
+          - runners: linux-flydsl-navi-2
+            check: linux-flydsl-navi-2
       fail-fast: false
     runs-on: ${{ matrix.runners }}
     steps:
@@ -561,6 +569,9 @@ jobs:
 
       - name: Run benchmarks
         id: benchmarks
+        # Preserve a stable gfx950 performance baseline: shared-pool validation
+        # on MI35x runners runs tests only and is intentionally not benchmarked.
+        if: ${{ matrix.runners != 'linux-flydsl-gfx950' || startsWith(runner.name, 'linux-flydsl-mi355-1') }}
         run: |
           docker exec -i -e ROCM_PATH flydsl_test bash <<'BASH'
           set -e -o pipefail
@@ -573,6 +584,7 @@ jobs:
 
       - name: Run benchmark baselines
         id: bench-baselines
+        if: ${{ matrix.runners != 'linux-flydsl-gfx950' || startsWith(runner.name, 'linux-flydsl-mi355-1') }}
         timeout-minutes: 45
         continue-on-error: true
         run: |
@@ -707,7 +719,7 @@ jobs:
           "
 
       - name: Show benchmarks logs
-        if: failure()
+        if: failure() && (matrix.runners != 'linux-flydsl-gfx950' || startsWith(runner.name, 'linux-flydsl-mi355-1'))
         run: |
           log_dir="$(mktemp -d "${RUNNER_TEMP}/flydsl-benchmark-logs.XXXXXX")"
           docker exec flydsl_test bash -c 'cd /tmp && tar czf /tmp/flydsl_bench_logs.tgz flydsl_bench* bench_*.csv 2>/dev/null || echo "no logs"'

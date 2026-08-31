@@ -13,6 +13,11 @@ runners:
   linux-flydsl-mi355-8:
     gpu_arch: MI355
     gpu_count: 8
+  # Shared validation label assigned to the MI355-1, MI35x-1, and MI35x-8
+  # runner pools. Workflows expose one GPU even when the 8-GPU pool claims it.
+  linux-flydsl-gfx950:
+    gpu_arch: gfx950
+    gpu_count: 1
   linux-flydsl-mi35x-1:
     gpu_arch: MI350
     gpu_count: 1
