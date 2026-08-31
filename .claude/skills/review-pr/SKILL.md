@@ -155,9 +155,9 @@ Otherwise -> Tier 3 (one kernel / one op).
 | Tier | Files | Failure mode |
 |---|---|---|
 | **1** | `compiler/jit_function.py`, `kernel_function.py`, `ast_rewriter.py`, `expr/typing.py`, `expr/numeric.py`, `expr/primitive.py`, `compiler/backends/rocm.py` | Every kernel: wrong codegen or mass compile failure |
-| **1** | `lib/Dialect/Fly/Transforms/LayoutLowering.cpp`, `lib/Conversion/FlyToROCDL/FlyToROCDL.cpp`, `lib/Dialect/Fly/IR/FlyOps.cpp`, `lib/Dialect/Fly/Utils/LayoutUtils.cpp` | Every kernel: wrong addresses, usually with no crash |
+| **1** | `lib/Dialect/Fly/Transforms/LayoutLowering.cpp`, `lib/Conversion/FlyToROCDL/FlyToROCDL.cpp`, `lib/Dialect/Fly/IR/FlyOps.cpp`, `lib/Dialect/Fly/Utils/IntTupleUtils.cpp`, `lib/Dialect/Fly/Utils/NormalForm.cpp` | Every kernel: wrong addresses, usually with no crash |
 | **1c** | `_flydsl_key()`, `_CACHE_INVALIDATING_ENV_VARS`, `jit_argument.py` `__cache_signature__`, per-kernel `cache_tag` tuples | Stale or missed artifact — **silent by construction** |
-| **2** | `runtime/device.py` (`get_warp_size`, `is_rdna_arch`), `utils/smem_allocator.py` (`SMEM_CAPACITY_MAP`), `lib/Dialect/FlyROCDL/{CDNA3,CDNA4,GFX11,GFX120X,GFX1250}/`, `expr/rocdl/` | One architecture family |
+| **2** | `runtime/device.py` (`get_warp_size`, `is_rdna_arch`), `utils/smem_allocator.py` (`SMEM_CAPACITY_MAP`), the per-family atom directories under `lib/Dialect/FlyROCDL/` (CDNA3, CDNA4, GFX11, GFX120X, GFX1250), `expr/rocdl/` | One architecture family |
 | **3** | `kernels/**`, most `tests/kernels/test_*.py` | One kernel or op |
 
 **Mandatory Tier 1 / 1c checks — answer before writing the verdict:**

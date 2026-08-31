@@ -274,5 +274,5 @@ failing on a seeded defect; these have not been:
 
 A new stage must be able to **fail on a seeded defect**. Before adding one: seed the defect
 it is meant to catch, confirm the stage goes red, confirm the clean baseline stays green,
-and add both to `tests/test_validator.py`. A stage that has never been observed failing is
+and add both to `.claude/skills/validate-kernel-pr/tests/test_validator.py`. A stage that has never been observed failing is
 not a check.
