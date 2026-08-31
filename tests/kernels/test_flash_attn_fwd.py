@@ -4582,6 +4582,32 @@ def test_paged_fp8_d192_rejects_flattened_int32_overflow(monkeypatch, value_head
 
 
 @_requires_gfx950
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_paged_legacy_dtype_accepts_host_only_seqlen_metadata(dtype):
+    """BF16/F16 paged attention retains its permissive seqlen_k ABI."""
+    query = torch.zeros((1, 64, 1, 128), device="cuda", dtype=dtype)
+    key = torch.zeros((1, 64, 1, 128), device="cuda", dtype=dtype)
+    value = torch.zeros_like(key)
+    block_table = torch.zeros((1, 1), device="cuda", dtype=torch.int32)
+    seqlen_k = torch.tensor([64, 0], device="cuda", dtype=torch.int64)
+
+    output = flydsl_flash_attn_func(
+        query,
+        key,
+        value,
+        causal=True,
+        num_kv_heads=1,
+        block_table=block_table,
+        seqlen_k=seqlen_k,
+        kv_cache_layout="linear",
+    )
+    torch.cuda.synchronize()
+
+    assert output.shape == query.shape
+    assert torch.count_nonzero(output) == 0
+
+
+@_requires_gfx950
 @pytest.mark.large_shape
 def test_paged_fp8_d192_cache_offsets_above_4gib():
     """Physical K and V page rebasing remains 64-bit beyond 4 GiB."""

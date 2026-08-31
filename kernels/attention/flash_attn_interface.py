@@ -619,9 +619,9 @@ def _flydsl_flash_attn_paged(
             f"flydsl_flash_attn_func: block_table must be 2D on {q.device}, "
             f"got shape={tuple(block_table.shape)} device={block_table.device}"
         )
-    if seqlen_k.dtype != torch.int32 or seqlen_k.device != q.device or seqlen_k.numel() != B:
+    if paged_fp8 and (seqlen_k.dtype != torch.int32 or seqlen_k.device != q.device or seqlen_k.numel() != B):
         raise ValueError(
-            f"flydsl_flash_attn_func: seqlen_k must be int32 [{B}] on {q.device}, "
+            f"flydsl_flash_attn_func: paged FP8 seqlen_k must be int32 [{B}] on {q.device}, "
             f"got shape={tuple(seqlen_k.shape)} dtype={seqlen_k.dtype} device={seqlen_k.device}"
         )
     block_table_stride = int(block_table.shape[1])
