@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-31T01:26:14Z",
+ "updated": "2026-08-31T03:28:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33353867337,
+   "pr": null,
+   "commit": "612c715af547613f75c1f5de0f1376e0faa3e0ba",
+   "branch": "main",
+   "event": "push",
+   "title": "add A4W4 and FP8 P2P transport support to MegaMoE (#972)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33353867337",
+   "created_at": "2026-08-31T03:26:42Z",
+   "updated_at": "2026-08-31T03:26:44Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 33343144185,
    "pr": 1056,
@@ -29,20 +44,22 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-31T00:12:06Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33343144185/job/99344155180"
+     "completed_at": "2026-08-31T01:31:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33343144185/job/99344155180",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-31T00:12:08Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33343144185/job/99344155182"
+     "completed_at": "2026-08-31T02:09:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33343144185/job/99344155182",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -98,11 +115,11 @@
    "branch": "main",
    "event": "push",
    "title": "[gfx1250] Bf16 GEMM: Issue tdm prefetch earlier for wide tiles and ad\u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33307430832",
    "created_at": "2026-08-30T10:50:06Z",
-   "updated_at": "2026-08-30T11:31:50Z",
+   "updated_at": "2026-08-31T03:26:44Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -1996,52 +2013,6 @@
    "updated_at": "2026-08-26T08:10:06Z",
    "actor": "JohnQinAMD",
    "jobs": []
-  },
-  {
-   "run_id": 32944995179,
-   "pr": 1015,
-   "commit": "aa9b7307a9b636ff549ef9ae725076b192b32c19",
-   "branch": "phil/isa-resource-diff-arch-general",
-   "event": "pull_request",
-   "title": "[Tools] Add architecture-general ISA resource diff tool",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32944995179",
-   "created_at": "2026-08-26T07:53:43Z",
-   "updated_at": "2026-08-26T11:36:38Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-26T09:00:09Z",
-     "completed_at": "2026-08-26T11:36:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32944995179/job/98120853732",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-26T09:00:17Z",
-     "completed_at": "2026-08-26T11:10:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32944995179/job/98120853808",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-26T08:59:27Z",
-     "completed_at": "2026-08-26T09:16:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32944995179/job/98120853818",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
