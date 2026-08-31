@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-08-31T10:24:06Z",
+ "updated": "2026-08-31T10:25:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -40,13 +40,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Kernel][PA] Support BF16 vectorized KV with asymmetric K/V head dim \u2026",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33376385452",
    "created_at": "2026-08-31T09:10:48Z",
-   "updated_at": "2026-08-31T09:13:57Z",
+   "updated_at": "2026-08-31T10:23:27Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-31T10:23:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33376385452/job/99456818744"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-31T10:23:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33376385452/job/99456818753"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-31T10:24:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33376385452/job/99456818764"
+    }
+   ]
   },
   {
    "run_id": 33371227239,
@@ -621,11 +649,11 @@
    "branch": "upstream/pa-bf16-asymmetric-v",
    "event": "pull_request",
    "title": "[Kernel][PA] Support BF16 vectorized KV with asymmetric K/V head dim",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33229430076",
    "created_at": "2026-08-29T02:37:49Z",
-   "updated_at": "2026-08-29T03:53:53Z",
+   "updated_at": "2026-08-31T10:22:04Z",
    "actor": "sammysun0711",
    "jobs": [
     {
