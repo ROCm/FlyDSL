@@ -626,6 +626,14 @@ def _flydsl_flash_attn_paged(
         )
     block_table_stride = int(block_table.shape[1])
     expected_out_shape = (*q.shape[:-1], value_head_dim)
+    q_flat_elems = q.numel()
+    out_flat_elems = q_flat_elems // D * value_head_dim
+    if paged_fp8 and max(q_flat_elems, out_flat_elems) >= _FP8_MAX_FLAT_ELEMS:
+        raise NotImplementedError(
+            "flydsl_flash_attn_func: paged FP8 flattens Q/O and packs the dynamic "
+            f"dimension as int32, so each must contain fewer than {_FP8_MAX_FLAT_ELEMS} "
+            f"elements; got q={q_flat_elems}, out={out_flat_elems}. Shorten the packed query."
+        )
 
     if out is not None:
         if out.shape != expected_out_shape or not out.is_contiguous():

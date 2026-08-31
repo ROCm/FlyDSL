@@ -4543,6 +4543,45 @@ def test_paged_fp8_d192_asymmetric_value_matches_torch(value_head_dim, use_non_d
 
 
 @_requires_gfx950
+@pytest.mark.parametrize("value_head_dim", [128, 192])
+def test_paged_fp8_d192_rejects_flattened_int32_overflow(monkeypatch, value_head_dim):
+    """Reject flattened Q/O dimensions before entering the signed-int32 C ABI."""
+    query = torch.zeros((1, 16, 192), device="cuda", dtype=FP8_DTYPE)
+    key = torch.zeros((1, 1, 12, 64, 16), device="cuda", dtype=FP8_DTYPE)
+    value = torch.zeros((1, 1, 4, value_head_dim, 16), device="cuda", dtype=FP8_DTYPE)
+    indptr = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
+    block_table = torch.zeros((1, 1), device="cuda", dtype=torch.int32)
+    seqlen_k = torch.ones((1,), device="cuda", dtype=torch.int32)
+    scale = torch.ones((1,), device="cuda", dtype=torch.float32)
+    expected_out_elems = query.numel() // query.shape[-1] * value_head_dim
+    monkeypatch.setattr(
+        flash_attn_interface,
+        "_FP8_MAX_FLAT_ELEMS",
+        max(query.numel(), expected_out_elems),
+    )
+
+    with pytest.raises(NotImplementedError, match="paged FP8.*int32"):
+        flydsl_flash_attn_func(
+            query,
+            key,
+            value,
+            causal=True,
+            num_kv_heads=1,
+            cu_seqlens_q=indptr,
+            cu_seqlens_kv=indptr,
+            max_seqlen_q=1,
+            max_seqlen_kv=1,
+            cross_seqlen=True,
+            block_table=block_table,
+            seqlen_k=seqlen_k,
+            kv_cache_layout="vectorized",
+            q_descale=scale,
+            k_descale=scale,
+            v_descale=scale,
+        )
+
+
+@_requires_gfx950
 @pytest.mark.large_shape
 def test_paged_fp8_d192_cache_offsets_above_4gib():
     """Physical K and V page rebasing remains 64-bit beyond 4 GiB."""
