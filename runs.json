@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-31T09:37:02Z",
+ "updated": "2026-08-31T09:50:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33379508788,
+   "pr": 1081,
+   "commit": "55cb571e17ba577d756f0b118a459d516d7fa189",
+   "branch": "fix_mxf8",
+   "event": "pull_request",
+   "title": "add mxfp8 a8w8(blockscale&mx1*32)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33379508788",
+   "created_at": "2026-08-31T09:48:46Z",
+   "updated_at": "2026-08-31T09:49:26Z",
+   "actor": "solinzby1",
+   "jobs": []
+  },
   {
    "run_id": 33377511770,
    "pr": 1084,
@@ -55,11 +70,11 @@
    "branch": "fix_mxf8",
    "event": "pull_request",
    "title": "add mxfp8 a8w8(blockscale&mx1*32)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33363993156",
    "created_at": "2026-08-31T06:23:20Z",
-   "updated_at": "2026-08-31T08:32:10Z",
+   "updated_at": "2026-08-31T09:49:17Z",
    "actor": "solinzby1",
    "jobs": [
     {
@@ -84,10 +99,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-31T08:33:24Z",
-     "completed_at": null,
+     "completed_at": "2026-08-31T09:49:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33363993156/job/99429225959"
     }
    ]
@@ -128,11 +143,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-08-31T06:55:06Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33363916494/job/99406854006"
+     "completed_at": "2026-08-31T09:41:17Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33363916494/job/99406854006",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1940,21 +1956,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 32976669574,
-   "pr": null,
-   "commit": "cc5bbdb54e8e8c6ce7e2756293047a31d4c8a8f0",
-   "branch": "upstream/pa-bf16-asymmetric-v",
-   "event": "pull_request",
-   "title": "[Kernel][PA] Support BF16 vectorized KV with asymmetric K/V head dim",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32976669574",
-   "created_at": "2026-08-26T13:51:05Z",
-   "updated_at": "2026-08-26T13:52:52Z",
-   "actor": "sammysun0711",
-   "jobs": []
   }
  ]
 }
