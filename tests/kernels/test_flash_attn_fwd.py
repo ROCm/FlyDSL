@@ -4429,8 +4429,12 @@ def test_return_lse_rejects_fp8():
 
 @_requires_gfx950
 @pytest.mark.parametrize("value_head_dim", [128, 192])
-@pytest.mark.parametrize("use_non_default_stream", [False, True])
-def test_paged_fp8_d192_asymmetric_value_matches_torch(value_head_dim, use_non_default_stream):
+@pytest.mark.parametrize(
+    ("use_non_default_stream", "force_internal_copies"),
+    [(False, False), (True, False), (True, True)],
+    ids=["default", "side", "side-copies"],
+)
+def test_paged_fp8_d192_asymmetric_value_matches_torch(value_head_dim, use_non_default_stream, force_internal_copies):
     """Packed causal FP8 page-64 attention supports native V/output width."""
     torch.manual_seed(17)
     query_lengths = [64, 32]
@@ -4447,13 +4451,24 @@ def test_paged_fp8_d192_asymmetric_value_matches_torch(value_head_dim, use_non_d
         torch.randn(num_pages, 1, 4, value_head_dim, 16, device="cuda") * 0.2
     )
 
-    stream = torch.cuda.Stream() if use_non_default_stream else None
-    if stream is not None:
-        torch.cuda.synchronize()
-    actual = flydsl_flash_attn_func(
-        query,
-        key,
-        value,
+    if force_internal_copies:
+
+        def noncontiguous_copy(tensor):
+            storage = torch.empty(
+                (*tensor.shape[:-1], tensor.shape[-1] * 2),
+                dtype=tensor.dtype,
+                device=tensor.device,
+            )
+            view = storage[..., ::2]
+            view.copy_(tensor)
+            return view
+
+        query = noncontiguous_copy(query)
+        key = noncontiguous_copy(key)
+        value = noncontiguous_copy(value)
+        block_table = block_table.to(torch.int64)
+
+    call_kwargs = dict(
         causal=True,
         num_kv_heads=1,
         cu_seqlens_q=q_indptr,
@@ -4461,18 +4476,47 @@ def test_paged_fp8_d192_asymmetric_value_matches_torch(value_head_dim, use_non_d
         max_seqlen_q=max(query_lengths),
         max_seqlen_kv=max(kv_lengths),
         cross_seqlen=True,
-        block_table=block_table,
         seqlen_k=seqlen_k,
         kv_cache_layout="vectorized",
         q_descale=query_descale,
         k_descale=key_descale,
         v_descale=value_descale,
+    )
+    copy_reference = None
+    if force_internal_copies:
+        copy_reference = flydsl_flash_attn_func(
+            query.contiguous(),
+            key.contiguous(),
+            value.contiguous(),
+            block_table=block_table.to(torch.int32).contiguous(),
+            **call_kwargs,
+        )
+        torch.cuda.synchronize()
+
+    stream = torch.cuda.Stream() if use_non_default_stream else None
+    if stream is not None:
+        torch.cuda.synchronize()
+    default_done = None
+    if force_internal_copies:
+        torch.cuda._sleep(3_000_000_000)
+        default_done = torch.cuda.Event()
+        default_done.record()
+    actual = flydsl_flash_attn_func(
+        query,
+        key,
+        value,
+        block_table=block_table,
         stream=stream,
+        **call_kwargs,
     )
     if stream is not None:
         stream.synchronize()
     else:
         torch.cuda.synchronize()
+    if default_done is not None:
+        assert not default_done.query(), "side stream unexpectedly waited for the blocked default stream"
+        torch.cuda.synchronize()
+        torch.testing.assert_close(actual, copy_reference, rtol=0, atol=0)
 
     expected = []
     for batch_idx, (query_length, kv_length) in enumerate(zip(query_lengths, kv_lengths)):

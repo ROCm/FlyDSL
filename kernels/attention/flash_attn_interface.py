@@ -625,10 +625,20 @@ def _flydsl_flash_attn_paged(
             f"got shape={tuple(seqlen_k.shape)} dtype={seqlen_k.dtype} device={seqlen_k.device}"
         )
     block_table_stride = int(block_table.shape[1])
-    # Flatten so the kernel's flat row-major index addresses block_table correctly.
-    block_table_i32 = (
-        (block_table if block_table.dtype == torch.int32 else block_table.to(torch.int32)).contiguous().reshape(-1)
-    )
+    expected_out_shape = (*q.shape[:-1], value_head_dim)
+
+    if out is not None:
+        if out.shape != expected_out_shape or not out.is_contiguous():
+            raise ValueError(
+                f"flydsl_flash_attn_func: paged output must be contiguous with shape {expected_out_shape}, "
+                f"got shape={tuple(out.shape)} strides={out.stride()}"
+            )
+        if paged_fp8 and out.dtype != torch.bfloat16:
+            raise ValueError(f"flydsl_flash_attn_func: paged FP8 output must be bf16, got {out.dtype}")
+        if not paged_fp8 and out.dtype != q.dtype:
+            raise ValueError(
+                f"flydsl_flash_attn_func: paged output dtype must match q dtype {q.dtype}, got {out.dtype}"
+            )
 
     with torch.cuda.device(q.device.index):
         launch_stream = torch.cuda.current_stream(q.device) if stream is None else stream
@@ -688,43 +698,48 @@ def _flydsl_flash_attn_paged(
                 kv_cache_layout=kv_cache_layout,
                 has_bias=bias is not None,
             )
-        expected_out_shape = (*q.shape[:-1], value_head_dim)
-        if out is None:
-            out_dtype = torch.bfloat16 if paged_fp8 else q.dtype
-            out = torch.empty(expected_out_shape, dtype=out_dtype, device=q.device)
-        elif out.shape != expected_out_shape or not out.is_contiguous():
-            raise ValueError(
-                f"flydsl_flash_attn_func: paged output must be contiguous with shape {expected_out_shape}, "
-                f"got shape={tuple(out.shape)} strides={out.stride()}"
+        with torch.cuda.stream(launch_stream):
+            # Keep wrapper-owned casts and copies ordered with an explicit
+            # non-current launch stream.
+            block_table_i32 = (
+                (block_table if block_table.dtype == torch.int32 else block_table.to(torch.int32))
+                .contiguous()
+                .reshape(-1)
             )
-        elif paged_fp8 and out.dtype != torch.bfloat16:
-            raise ValueError(f"flydsl_flash_attn_func: paged FP8 output must be bf16, got {out.dtype}")
-        elif not paged_fp8 and out.dtype != q.dtype:
-            raise ValueError(
-                f"flydsl_flash_attn_func: paged output dtype must match q dtype {q.dtype}, got {out.dtype}"
+            if out is None:
+                out_dtype = torch.bfloat16 if paged_fp8 else q.dtype
+                out = torch.empty(expected_out_shape, dtype=out_dtype, device=q.device)
+            # Keep serving-sized physical K/V caches rank-5 because flattening
+            # their dynamic memref shape can exceed signed int32. The FP8
+            # schedule consumes Q/O as flat token-major buffers, matching its
+            # explicit runtime strides.
+            q_flat = q.contiguous().view(-1) if paged_fp8 else q.contiguous()
+            k_flat = k.contiguous()
+            v_flat = v.contiguous()
+            o_flat = out.view(-1) if paged_fp8 else out
+            kwargs = dict(
+                block_table=block_table_i32,
+                block_table_stride=block_table_stride,
+                stream=launch_stream,
             )
-        # Keep serving-sized physical K/V caches rank-5 because flattening their
-        # dynamic memref shape can exceed signed int32. The FP8 schedule consumes
-        # Q/O as flat token-major buffers, matching its explicit runtime strides.
-        q_flat = q.contiguous().view(-1) if paged_fp8 else q.contiguous()
-        k_flat = k.contiguous()
-        v_flat = v.contiguous()
-        o_flat = out.contiguous().view(-1) if paged_fp8 else out.contiguous()
-        kwargs = dict(block_table=block_table_i32, block_table_stride=block_table_stride, stream=launch_stream)
-        if paged_fp8:
-            kwargs.update(q_descale=q_descale, k_descale=k_descale, v_descale=v_descale)
-        if bias is not None:
-            kwargs["bias"] = bias
-        if varlen:
-            kwargs["cu_seqlens_q"] = cu_seqlens_q
-            kwargs["cu_seqlens_kv"] = cu_seqlens_kv
-        if cross:
-            kwargs["seq_len_kv"] = skv
-        if splitk:
-            ws_elems = dualwave_splitk_workspace_elems(B, H, Sq, int(num_kv_splits), head_dim=D)
-            _ws = torch.empty(ws_elems, dtype=torch.float32, device=q.device)
-            kwargs["workspace"] = _ws
-        exe(q_flat, k_flat, v_flat, o_flat, B, Sq, **kwargs)
+            if paged_fp8:
+                kwargs.update(
+                    q_descale=q_descale,
+                    k_descale=k_descale,
+                    v_descale=v_descale,
+                )
+            if bias is not None:
+                kwargs["bias"] = bias
+            if varlen:
+                kwargs["cu_seqlens_q"] = cu_seqlens_q
+                kwargs["cu_seqlens_kv"] = cu_seqlens_kv
+            if cross:
+                kwargs["seq_len_kv"] = skv
+            if splitk:
+                ws_elems = dualwave_splitk_workspace_elems(B, H, Sq, int(num_kv_splits), head_dim=D)
+                _ws = torch.empty(ws_elems, dtype=torch.float32, device=q.device)
+                kwargs["workspace"] = _ws
+            exe(q_flat, k_flat, v_flat, o_flat, B, Sq, **kwargs)
 
     return out
 
