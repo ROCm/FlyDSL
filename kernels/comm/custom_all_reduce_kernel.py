@@ -12,9 +12,7 @@ import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm, rocdl, scf
-from flydsl.compiler.ast_rewriter import ASTRewriter
+from flydsl._mlir.dialects import llvm, rocdl
 from flydsl.expr import arith as ea
 from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64, Stream, T
@@ -165,30 +163,9 @@ def _u64(v):
     return fx.Uint64(fx.Uint32(v))
 
 
-def _raw(v):
-    """Unwrap FlyDSL wrapper values when low-level MLIR ops need raw ir.Value."""
-    return v.ir_value() if hasattr(v, "ir_value") else v
-
-
 def _c64(v):
     """Create i64 constant with concise syntax."""
     return ea.constant(v, type=T.i64)
-
-
-class _IfOnlyASTRewriter(ASTRewriter):
-    """AST rewriter variant that lowers Python if, keeps while untouched."""
-
-    transformers = [t for t in ASTRewriter.transformers if t.__name__ != "CanonicalizeWhile"]
-    rewrite_globals = {
-        name: value
-        for name, value in ASTRewriter.rewrite_globals.items()
-        if name not in {"scf_while_gen", "scf_while_init"}
-    }
-
-
-def _dsl_if_only(func):
-    """Rewrite helper-level Python if into scf.if without touching while."""
-    return _IfOnlyASTRewriter.transform(func)
 
 
 # ---------------------------------------------------------------------------
@@ -196,10 +173,9 @@ def _dsl_if_only(func):
 # ---------------------------------------------------------------------------
 
 
-@_dsl_if_only
+@flyc.jit
 def _signal_start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int):
     """Start-sync: write start flag to all peers, wait for all to arrive."""
-    i32 = T.i32
 
     # Flag table is uint32 per block; compute byte address in i64.
     flag_addr = self_sg_i64 + _c64(_SG_FLAG_OFF_B) + _u64(bid_i32) * _c64(4)
@@ -220,17 +196,10 @@ def _signal_start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngp
         peer_signal_base = _extract_i64(_pack_i64_vec(sgs_i64), lane_i32)
         peer_signal_rsrc = _make_rsrc(peer_signal_base + start_rank_off)
         _store_i32_uncached(peer_signal_rsrc, flag)
-        initial_wait_value = _load_i32_uncached(wait_rsrc)
-        wait_loop = scf.WhileOp([i32], [initial_wait_value])
-        wait_cond_block = ir.Block.create_at_start(wait_loop.before, [i32])
-        wait_body_block = ir.Block.create_at_start(wait_loop.after, [i32])
-        with ir.InsertionPoint(wait_cond_block):
-            current_wait_value = wait_cond_block.arguments[0]
-            # Poll until local wait slot reaches current flag.
-            should_wait = _u(current_wait_value) < flag
-            scf.ConditionOp(_raw(should_wait), [current_wait_value])
-        with ir.InsertionPoint(wait_body_block):
-            scf.YieldOp([_load_i32_uncached(wait_rsrc)])
+        # spin until wait slot reaches flag; reload stays in the loop body
+        current_wait_value = _load_i32_uncached(wait_rsrc)
+        while _u(current_wait_value) < flag:
+            current_wait_value = _load_i32_uncached(wait_rsrc)
 
     gpu.barrier()
     is_lane0 = lane_i32 == 0
@@ -240,11 +209,9 @@ def _signal_start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngp
     return flag_addr
 
 
-@_dsl_if_only
+@flyc.jit
 def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int):
     """End-sync: write end flag to all peers, wait for all to finish."""
-
-    i32 = T.i32
 
     # Flag table is uint32 per block; compute byte address in i64.
     flag_addr = self_sg_i64 + _c64(_SG_FLAG_OFF_B) + _u64(bid_i32) * _c64(4)
@@ -265,20 +232,11 @@ def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus
         peer_signal_base = _extract_i64(_pack_i64_vec(sgs_i64), lane_i32)
         peer_signal_rsrc = _make_rsrc(peer_signal_base + end_rank_off)
         _store_i32_uncached(peer_signal_rsrc, flag)
-        initial_wait_value = _load_i32_uncached(wait_rsrc)
-        wait_loop = scf.WhileOp([i32], [initial_wait_value])
-        wait_cond_block = ir.Block.create_at_start(wait_loop.before, [i32])
-        wait_body_block = ir.Block.create_at_start(wait_loop.after, [i32])
-        with ir.InsertionPoint(wait_cond_block):
-            current_wait_value = wait_cond_block.arguments[0]
-            # Poll until local wait slot reaches current flag.
-            should_wait = _u(current_wait_value) < flag
-            scf.ConditionOp(_raw(should_wait), [current_wait_value])
-        with ir.InsertionPoint(wait_body_block):
-            next_wait_value = _load_i32_uncached(wait_rsrc)
-            # Drop stale L1 lines before next poll iteration.
-            _invalidate_l1()
-            scf.YieldOp([next_wait_value])
+        # spin until wait slot reaches flag; reload stays in the loop body
+        current_wait_value = _load_i32_uncached(wait_rsrc)
+        while _u(current_wait_value) < flag:
+            current_wait_value = _load_i32_uncached(wait_rsrc)
+            _invalidate_l1()  # drop stale L1 before next poll
 
     gpu.barrier()
     is_lane0 = lane_i32 == 0

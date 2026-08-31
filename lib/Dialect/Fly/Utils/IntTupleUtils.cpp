@@ -782,8 +782,27 @@ IntTupleValueAdaptor intTupleBasis2Tuple(const IntTupleBuilder<IntTupleValueAdap
                                          IntTupleValueAdaptor basis) {
   assert(basis.isLeafBasis());
   IntTupleAttr attr = builder.getAttr(basis);
-  IntTupleAttr newAttr = intTupleBasis2Tuple(builder.getAttrBuilder(), attr);
-  return IntTupleValueAdaptor{basis.getValue(), newAttr};
+  BasisAttr basisAttr = attr.getLeafAsBasis();
+  ArrayRef<int32_t> modes = basisAttr.getModes();
+  assert(!modes.empty() && "modes must not be empty");
+
+  // The scalar value belongs to the leaf that sits under `modes`; wrapping it in the
+  // enclosing tuples keeps the adaptor invariant, so later `at()` reads the leaf back
+  // from a MakeIntTupleOp operand instead of re-interpreting the scalar's defining op.
+  IntAttr zero = IntAttr::getStatic(attr.getContext(), 0);
+  IntTupleValueAdaptor result =
+      basisAttr.getValue().isStatic()
+          ? builder.materializeConstantLeaf(basisAttr.getValue())
+          : IntTupleValueAdaptor{basis.getValue(), IntTupleAttr::get(basisAttr.getValue())};
+  for (auto it = modes.rbegin(); it != modes.rend(); ++it) {
+    IntTupleBuilder<IntTupleValueAdaptor>::ElemCollector elements;
+    for (int32_t i = 0; i < *it; ++i) {
+      elements.push_back(builder.materializeConstantLeaf(zero));
+    }
+    elements.push_back(result);
+    result = builder.makeTuple(elements);
+  }
+  return result;
 }
 
 static IntTupleAttr intTupleMakeBasisTupleLikeImpl(MLIRContext *ctx, IntTupleAttr profile,

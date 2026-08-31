@@ -33,6 +33,7 @@ if not torch.cuda.is_available():
 import pytest  # noqa: E402
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
+from kernels.attention import flash_attn_interface  # noqa: E402
 from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module  # noqa: E402
 from kernels.attention.flash_attn_interface import flydsl_flash_attn_func  # noqa: E402
 from kernels.attention.flash_attn_utils import (  # noqa: E402
@@ -4301,6 +4302,103 @@ def test_lse_fully_masked_rows():
     _assert_lse_matches(lse, ref, _ATOL_BF16)
 
 
+@pytest.mark.parametrize("lazy_rescale, atol", [(True, 0.06), (False, 0.05)])
+@pytest.mark.parametrize("S", [1024, 12288])
+@pytest.mark.parametrize("k_scale", [1.0, 200.0])
+def test_fp8_softmax_normalises(S, k_scale, lazy_rescale, atol):
+    """With V all ones the output is exactly 1.0, because softmax normalises.
+
+    Nothing about V or the PV product can move it, and 1.0 is representable in
+    e4m3, so any deviation is the softmax's own normalisation. `k_scale` widens
+    the score range: the failure this guards against is invisible on
+    near-uniform attention and severe on peaked attention.
+
+    Both rescale paths are checked, with different bounds, because the headroom
+    for lifting P differs. The lazy path leaves ``exp2`` free to reach
+    ``2**RESCALE_THRESHOLD`` and can use only the remainder, so it improves
+    without becoming exact; the eager path rebases every tile and gets all of
+    it. Before the fix these reached 0.64 and 0.50 respectively. The lazy bound
+    also pins the per-length threshold: pinned at 6 the widest case here reaches
+    0.09, and at bf16's 8 it reaches 0.23, both past the 0.06 allowed.
+    """
+    if get_rocm_arch() != "gfx950":
+        pytest.skip("dense fp8 attention is gfx950-only")
+
+    B, H, D = 2, 8, 128
+    torch.manual_seed(0)
+    q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1
+    k = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1 * k_scale
+
+    fp8 = torch.float8_e4m3fn
+    fp8_max = torch.finfo(fp8).max
+    q_s = q.abs().amax().float() / fp8_max
+    k_s = k.abs().amax().float() / fp8_max
+    v_s = torch.tensor(1.0 / fp8_max, device="cuda")
+    v = (torch.ones(B, S, H, D, device="cuda", dtype=torch.bfloat16) / v_s).to(fp8)
+
+    out = flydsl_flash_attn_func(
+        (q / q_s).to(fp8),
+        (k / k_s).to(fp8),
+        v,
+        causal=False,
+        q_descale=q_s.reshape(1).contiguous(),
+        k_descale=k_s.reshape(1).contiguous(),
+        v_descale=v_s.reshape(1).contiguous(),
+        dualwave_swp_lazy_rescale=lazy_rescale,
+    )
+    if isinstance(out, (tuple, list)):
+        out = out[0]
+    out = out.float()
+
+    # e4m3 rounding of P leaves a per-row residue that the lift cannot remove.
+    torch.testing.assert_close(out, torch.ones_like(out), rtol=0, atol=atol)
+
+
+@pytest.mark.parametrize("split", [False, True])
+def test_fp8_out_tensor_is_filled_and_returned(monkeypatch, split):
+    """A caller-supplied ``out`` must come back filled, and be the same tensor.
+
+    ``split=True`` lowers the overflow bound so the batch-splitting path runs on
+    a small tensor: reaching it for real needs 2**31 elements, i.e. ~10 GB of
+    q/k/v/out, which is why it must be reachable another way to be covered at
+    all. Each launch writes into its own ``out[i:i+1]`` view, so returning a
+    concatenation would both copy several GB at the sizes that reach it and hand
+    back a different tensor than the caller passed. Splitting must also leave
+    the result unchanged, which is what comparing against the unsplit reference
+    checks.
+    """
+    if get_rocm_arch() != "gfx950":
+        pytest.skip("dense fp8 attention is gfx950-only")
+
+    B, S, H, D = 2, 1024, 8, 128
+    torch.manual_seed(0)
+    fp8 = torch.float8_e4m3fn
+    fp8_max = torch.finfo(fp8).max
+    q, k, v = (torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1 for _ in range(3))
+    scales = [t.abs().amax().float() / fp8_max for t in (q, k, v)]
+    qq, kq, vq = ((t / s).to(fp8) for t, s in zip((q, k, v), scales))
+    descales = [s.reshape(1).contiguous() for s in scales]
+
+    ref = flydsl_flash_attn_func(
+        qq, kq, vq, causal=False, q_descale=descales[0], k_descale=descales[1], v_descale=descales[2]
+    )
+    if isinstance(ref, (tuple, list)):
+        ref = ref[0]
+
+    if split:
+        monkeypatch.setattr(flash_attn_interface, "_FP8_MAX_FLAT_ELEMS", qq.numel())
+
+    out = torch.empty(B, S, H, D, device="cuda", dtype=torch.bfloat16)
+    got = flydsl_flash_attn_func(
+        qq, kq, vq, causal=False, q_descale=descales[0], k_descale=descales[1], v_descale=descales[2], out=out
+    )
+    if isinstance(got, (tuple, list)):
+        got = got[0]
+
+    assert got.data_ptr() == out.data_ptr(), "out was not returned to the caller"
+    torch.testing.assert_close(out, ref, rtol=0, atol=0)
+
+
 def test_return_lse_false_returns_only_out():
     """Backwards-compat: default return_lse=False returns a bare tensor."""
     dtype = torch.bfloat16
@@ -4327,6 +4425,57 @@ def test_return_lse_rejects_fp8():
             v_descale=torch.ones(1, device="cuda"),
             return_lse=True,
         )
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("H", [8, 16, 32, 64])
+def test_xcd_swizzle_is_bit_identical(H):
+    """The head-slow remap must not change a single bit of the output.
+
+    It only re-derives (head, q_block) from the same linear workgroup id, so it
+    is bijective by construction -- but a mistake in the derivation would show
+    up as a permuted or partially-recomputed output rather than as an error, so
+    this pins it. S clears the auto-dispatch threshold (num_q_blocks >= 64 at
+    BLOCK_M=256) so both settings run on the shapes the remap targets.
+    """
+    S = 64 * 256
+    dtype = torch.bfloat16
+    torch.manual_seed(H)
+    q = _rand_lse(1, S, H, 128, dtype=dtype)
+    k, v = torch.randn_like(q), torch.randn_like(q)
+
+    def run(flag):
+        return flydsl_flash_attn_func(q, k, v, causal=False, dualwave_swp_xcd_swizzle=flag).clone()
+
+    off, on = run(False), run(True)
+    torch.cuda.synchronize()
+    assert torch.equal(off, on)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("xcd_swizzle", [None, True])
+def test_xcd_swizzle_heads_not_multiple_of_xcd(xcd_swizzle):
+    """H % 8 != 0 must fall back rather than mis-map, however the flag is set.
+
+    The remap divides the linear workgroup id by the q-block count to recover
+    the head, which only lands each head on one XCD when the head count divides
+    evenly into the 8 XCDs. Two guards enforce that: the dispatch condition
+    below auto-selects against it, and _init_dualwave_thread_mapping re-checks
+    NUM_HEADS_Q % NUM_XCD_GFX950 independently -- so forcing the flag on is safe
+    and simply does not engage the remap. Both paths are checked here.
+    """
+    S, H = 64 * 256, 12
+    dtype = torch.bfloat16
+    torch.manual_seed(H)
+    q = _rand_lse(1, S, H, 128, dtype=dtype)
+    k, v = torch.randn_like(q), torch.randn_like(q)
+
+    out = flydsl_flash_attn_func(q, k, v, causal=False, dualwave_swp_xcd_swizzle=xcd_swizzle)
+    torch.cuda.synchronize()
+    ref = F.scaled_dot_product_attention(
+        q.transpose(1, 2).float(), k.transpose(1, 2).float(), v.transpose(1, 2).float()
+    ).transpose(1, 2)
+    torch.testing.assert_close(out.float(), ref, atol=_ATOL_BF16, rtol=0)
 
 
 if __name__ == "__main__":
@@ -4481,3 +4630,260 @@ def test_sink_lse_cross_attn_skipped_blocks(Sq, Skv):
     masked_lse = lse[:, :, :n_masked].float()
     assert (masked_lse - sink.view(1, H, 1)).abs().max().item() <= 1e-4, "all-masked rows must carry the sink LSE"
     assert out[:, :n_masked].abs().max().item() == 0.0, "all-masked rows must have zero output"
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("k_scale", [8.0, 32.0, 64.0])
+def test_lazy_rescale_survives_a_wide_score_range(k_scale):
+    """A widened logit spread must not break the lazy rescale.
+
+    Every other test here uses near-uniform attention, which never reaches the
+    branch. The eager path is the reference; the two are mathematically the same.
+    """
+    B, S, H, D = 1, 4096, 8, 128
+    torch.manual_seed(0)
+    q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16)
+    k = (torch.randn_like(q).float() * k_scale).to(torch.bfloat16)
+    v = torch.randn_like(q)
+
+    lazy = flydsl_flash_attn_func(q, k, v, causal=False)
+    eager = flydsl_flash_attn_func(q, k, v, causal=False, dualwave_swp_lazy_rescale=False)
+    torch.cuda.synchronize()
+
+    assert torch.isfinite(eager).all(), f"the eager baseline is not finite at k_scale={k_scale}"
+    n_nan = int(torch.isnan(lazy).sum())
+    n_inf = int(torch.isinf(lazy).sum())
+    assert torch.isfinite(
+        lazy
+    ).all(), f"lazy rescale produced {n_nan} NaN and {n_inf} inf of {lazy.numel()} at k_scale={k_scale}"
+    ref = torch.nn.functional.scaled_dot_product_attention(
+        q.transpose(1, 2).float(), k.transpose(1, 2).float(), v.transpose(1, 2).float()
+    ).transpose(1, 2)
+    rel = lambda o: ((o.float() - ref).norm() / ref.norm()).item()  # noqa: E731
+    assert (
+        rel(lazy) <= rel(eager) * 1.05 + 1e-4
+    ), f"lazy rel L2 {rel(lazy):.3e} is worse than eager {rel(eager):.3e} at k_scale={k_scale}"
+
+
+@_requires_gfx950
+def test_fp8_lazy_rescale_keeps_the_running_max_monotonic():
+    """Successive downward rebases must not multiply into an overflow.
+
+    One row class reads a coordinate whose tile maxima descend, the other one that
+    ascends and so fires the wave-uniform branch every tile. V is all ones, so the
+    exact output is 1.0; the unfixed kernel returns 1,048,576 of 2,097,152 as NaN.
+    """
+    B, S, H, D = 1, 2048, 8, 128
+    BLOCK_N, STEP = 64, 32.0
+    fp8 = torch.float8_e4m3fn
+    fp8_max = torch.finfo(fp8).max
+
+    q = torch.zeros(B, S, H, D, device="cuda", dtype=torch.bfloat16)
+    q[:, 0::2, :, 0] = 1.0
+    q[:, 1::2, :, 1] = 1.0
+    tile = torch.arange(S, device="cuda") // BLOCK_N
+    k = torch.zeros(B, S, H, D, device="cuda", dtype=torch.float32)
+    k[:, :, :, 0] = (-STEP * tile).view(1, S, 1)
+    k[:, :, :, 1] = (STEP * tile).view(1, S, 1)
+    k = k.to(torch.bfloat16)
+
+    q_s = torch.tensor(1.0 / fp8_max, device="cuda")
+    k_s = k.abs().amax().float() / fp8_max
+    v_s = torch.tensor(1.0 / fp8_max, device="cuda")
+    v = (torch.ones(B, S, H, D, device="cuda", dtype=torch.bfloat16) / v_s).to(fp8)
+
+    out = flydsl_flash_attn_func(
+        (q / q_s).to(fp8),
+        (k / k_s).to(fp8),
+        v,
+        causal=False,
+        q_descale=q_s.reshape(1).contiguous(),
+        k_descale=k_s.reshape(1).contiguous(),
+        v_descale=v_s.reshape(1).contiguous(),
+        dualwave_swp_lazy_rescale=True,
+    )
+    out = (out[0] if isinstance(out, (tuple, list)) else out).float()
+    torch.cuda.synchronize()
+    assert torch.isfinite(out).all(), f"{int(torch.isnan(out).sum())} NaN of {out.numel()}"
+    assert (out - 1).abs().max().item() < 0.01, f"max |o-1| = {(out - 1).abs().max().item():.4f}"
+
+
+@pytest.mark.l0_backend_agnostic
+def test_fp8_lazy_paths_do_not_roll_their_own_correction():
+    """The fp8 lazy rescales must not compute their own correction factor.
+
+    A per-step cap does not bound the product over many tiles, so the invariant is
+    structural: the correction comes from ``rescale_from_tile_max``.
+    """
+    from kernels.attention import flash_attn_utils as _fau
+
+    src = Path(_fau.__file__).read_text().splitlines()
+    start = next(i for i, ln in enumerate(src) if "class DualwaveFp8SoftmaxHelper" in ln)
+    end = next((i for i, ln in enumerate(src[start + 1 :], start + 1) if ln.startswith("class ")), len(src))
+    body = src[start:end]
+
+    def method(name):
+        i = next(k for k, ln in enumerate(body) if f"def {name}(" in ln)
+        stop = next((k for k in range(i + 1, len(body)) if body[k].startswith("    def ")), len(body))
+        return "\n".join(body[i:stop])
+
+    for name in ("lazy_rescale_o", "lazy_correct_o"):
+        chunk = method(name)
+        assert "exp2" not in chunk, f"{name} computes its own correction instead of taking the monotonic one"
+        assert "_lazy_correction" in chunk or "rescale_from_tile_max" in chunk, f"{name} has no correction source"
+    assert "rescale_from_tile_max" in method("_lazy_correction"), "the shared correction is not the monotonic one"
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("case", ["b1_too_large", "per_slice_still_too_large", "kv_only_over_limit"])
+def test_fp8_flat_overflow_guard_covers_every_tensor(monkeypatch, case):
+    """The int32 flat-dim guard has to see K and V, and to give up loudly.
+
+    Splitting divides the flat dim by B, so it only helps while B > 1 and while
+    one entry fits. Cross-attention can also put the excess in K/V rather than
+    Q. Each case lowers the bound rather than allocating 2**31 elements.
+    """
+    torch.manual_seed(0)
+    fp8 = torch.float8_e4m3fn
+    fp8_max = torch.finfo(fp8).max
+    H, D = 8, 128
+
+    def quant(t):
+        s = t.abs().amax().float() / fp8_max
+        return (t / s).to(fp8), s.reshape(1).contiguous()
+
+    B, Sq, Skv = (1, 1024, 1024) if case == "b1_too_large" else (2, 1024, 1024)
+    if case == "kv_only_over_limit":
+        Sq = 256
+    q = torch.randn(B, Sq, H, D, device="cuda", dtype=torch.bfloat16) * 0.1
+    k = torch.randn(B, Skv, H, D, device="cuda", dtype=torch.bfloat16) * 0.1
+    v = torch.randn_like(k)
+    qq, qs = quant(q)
+    kq, ks = quant(k)
+    vq, vs = quant(v)
+    kw = dict(causal=False, q_descale=qs, k_descale=ks, v_descale=vs)
+
+    if case == "kv_only_over_limit":
+        # Between q's count and k's, so only the K/V check can fire. B=2 splits.
+        ref = flydsl_flash_attn_func(qq, kq, vq, **kw)
+        ref = ref[0] if isinstance(ref, (tuple, list)) else ref
+        monkeypatch.setattr(flash_attn_interface, "_FP8_MAX_FLAT_ELEMS", kq.numel())
+        got = flydsl_flash_attn_func(qq, kq, vq, **kw)
+        got = got[0] if isinstance(got, (tuple, list)) else got
+        torch.testing.assert_close(got.float(), ref.float(), rtol=0, atol=0)
+        return
+
+    # b1_too_large has no batch to divide; per_slice_still_too_large has B=2 but
+    # a bound low enough that one entry is still over, so the recursion hits the
+    # same wall. Both must raise rather than launch.
+    bound = qq.numel() if case == "b1_too_large" else qq.numel() // 2
+    monkeypatch.setattr(flash_attn_interface, "_FP8_MAX_FLAT_ELEMS", bound)
+    with pytest.raises(NotImplementedError, match="int32"):
+        flydsl_flash_attn_func(qq, kq, vq, **kw)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("modifier", ["bias", "alibi_slopes", "sink"])
+def test_fp8_split_still_rejects_modifiers(monkeypatch, modifier):
+    """The flat-dim split must not swallow an unsupported modifier.
+
+    It runs before the fp8 modifier check and does not forward bias, alibi or
+    sink, so a call large enough to split used to return plain attention while
+    the same call one element smaller raised.
+    """
+    B, S, H, D = 2, 256, 8, 128
+    monkeypatch.setattr(flash_attn_interface, "_FP8_MAX_FLAT_ELEMS", B * S * H * D // 2)
+    fp8 = torch.float8_e4m3fn
+    q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16).to(fp8)
+    k, v = q.clone(), q.clone()
+    scale = torch.ones(1, device="cuda")
+    kw = dict(causal=False, q_descale=scale, k_descale=scale, v_descale=scale)
+    arg = {
+        "bias": torch.zeros(S, S, device="cuda", dtype=torch.bfloat16),
+        "alibi_slopes": torch.zeros(H, device="cuda", dtype=torch.float32),
+        "sink": torch.zeros(H, device="cuda", dtype=torch.float32),
+    }[modifier]
+    with pytest.raises(NotImplementedError, match=f"{modifier} is not supported for fp8"):
+        flydsl_flash_attn_func(q, k, v, **{modifier: arg}, **kw)
+
+
+@_requires_gfx950
+def test_fp8_split_result_survives_a_non_current_stream(monkeypatch):
+    """The split must not be consumed on a stream that is not the one it ran on.
+
+    Every launch goes to ``stream``; building the result on the ambient stream
+    reads it while those kernels are still queued, and the damage survives a
+    later synchronize because the copy already happened.
+    """
+    B, S, H, D = 2, 512, 8, 128
+    fp8 = torch.float8_e4m3fn
+    torch.manual_seed(0)
+    q = (torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1).to(fp8)
+    k, v = q.clone(), q.clone()
+    scale = torch.ones(1, device="cuda")
+    kw = dict(causal=False, q_descale=scale, k_descale=scale, v_descale=scale)
+
+    ref = flydsl_flash_attn_func(q, k, v, **kw)
+    torch.cuda.synchronize()
+
+    # over the whole tensor, under one batch entry, so it splits and each launch fits
+    monkeypatch.setattr(flash_attn_interface, "_FP8_MAX_FLAT_ELEMS", B * S * H * D * 3 // 4)
+    side = torch.cuda.Stream()
+    filler = torch.randn(4096, 4096, device="cuda")
+    with torch.cuda.stream(side):
+        for _ in range(20):  # keep the stream busy so the attention starts late
+            filler = filler @ filler.T
+    got = flydsl_flash_attn_func(q, k, v, stream=side, **kw)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(got.float(), ref.float(), rtol=0, atol=0)
+
+
+def test_fp8_rescale_threshold_drops_past_the_long_sequence_bound():
+    """fp8 picks its rescale threshold from the KV length.
+
+    Below the bound 6 and 4 are equally accurate and 6 is cheaper; above it the
+    running max spans enough tiles that 4's extra two log2 units of P lift are
+    worth its ~0.3%. The kernel is not specialised on S, so this widens the
+    build cache to two variants -- keep it two.
+    """
+    f = flash_attn_interface._fp8_rescale_threshold
+    assert f(1024) == 6.0
+    assert f(flash_attn_interface._FP8_LONG_SEQ) == 6.0
+    assert f(flash_attn_interface._FP8_LONG_SEQ + 1) == 4.0
+    assert f(131072) == 4.0
+    assert set(f(s) for s in (1, 1024, 4096, 4097, 8192, 131072)) == {6.0, 4.0}
+
+
+@_requires_gfx950
+def test_fp8_default_is_the_lazy_rescale():
+    """Every other fp8 case passes the flag, so the default would go untested.
+
+    V is all ones, so the exact output is 1.0 and the two runs must also agree
+    bit for bit.
+    """
+    B, S, H, D = 1, 4096, 8, 128
+    fp8 = torch.float8_e4m3fn
+    fp8_max = torch.finfo(fp8).max
+    torch.manual_seed(0)
+    q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1
+    k = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1 * 200.0
+    q_s = q.abs().amax().float() / fp8_max
+    k_s = k.abs().amax().float() / fp8_max
+    v_s = torch.tensor(1.0 / fp8_max, device="cuda")
+    v = (torch.ones(B, S, H, D, device="cuda", dtype=torch.bfloat16) / v_s).to(fp8)
+    kw = dict(
+        causal=False,
+        q_descale=q_s.reshape(1).contiguous(),
+        k_descale=k_s.reshape(1).contiguous(),
+        v_descale=v_s.reshape(1).contiguous(),
+    )
+    qq, kk = (q / q_s).to(fp8), (k / k_s).to(fp8)
+
+    default = flydsl_flash_attn_func(qq, kk, v, **kw)
+    lazy = flydsl_flash_attn_func(qq, kk, v, dualwave_swp_lazy_rescale=True, **kw)
+    torch.cuda.synchronize()
+    default = (default[0] if isinstance(default, (tuple, list)) else default).float()
+    lazy = (lazy[0] if isinstance(lazy, (tuple, list)) else lazy).float()
+
+    torch.testing.assert_close(default, lazy, rtol=0, atol=0)

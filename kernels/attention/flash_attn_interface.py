@@ -28,7 +28,14 @@ from typing import Optional
 import torch
 import torch.nn.functional as F  # noqa: F401  (imported for callers' convenience)
 
-from kernels.attention.flash_attn_utils import bias_addressing_error, dualwave_splitk_workspace_elems
+# Re-export so callers only need to import from this module.
+from kernels.attention.flash_attn_utils import (
+    DUALWAVE_SWP_BLOCK_M,
+    MIN_Q_BLOCKS_XCD_SWIZZLE,
+    NUM_XCD_GFX950,
+    bias_addressing_error,
+    dualwave_splitk_workspace_elems,
+)
 
 __all__ = ["flydsl_flash_attn_func", "dualwave_splitk_workspace_elems"]
 
@@ -36,11 +43,22 @@ _DTYPE_MAP = {torch.bfloat16: "bf16", torch.float16: "f16", torch.float8_e4m3fn:
 
 # Short varlen/paged cases use the lightweight generic path.
 _VARLEN_LIGHT_MAX_SEQ = 256
+# Largest flat element count the fp8 C-ABI can address; see the split below.
+_FP8_MAX_FLAT_ELEMS = 2**31
+# fp8 lifts P by log2(448) - RESCALE_THRESHOLD. Past this KV length enough tiles
+# sit far below the running max that the extra two log2 units matter more than
+# the ~0.3% the lower threshold costs there; below it the two are equally
+# accurate and 6 is cheaper.
+_FP8_LONG_SEQ = 4096
 _DENSE_LIGHT_CU_FALLBACK = 256
 _DENSE_DUALWAVE_MIN_SEQ = 256
 _DENSE_DUALWAVE_LARGE_BATCH = 8
 _DENSE_DUALWAVE_MIN_SEQ_LARGE_BATCH = 192
 _DENSE_M256_MIN_TOKENS = 4096
+
+
+def _fp8_rescale_threshold(seqlen_kv: int) -> float:
+    return 6.0 if seqlen_kv <= _FP8_LONG_SEQ else 4.0
 
 
 def _dtype_str(t: torch.Tensor) -> str:
@@ -135,6 +153,7 @@ def _build_dense_dualwave(
     has_bias: bool = False,
     has_alibi: bool = False,
     has_sink: bool = False,
+    xcd_swizzle: bool = False,
 ):
     """Build (and cache) the dense gfx950 DUALWAVE_SWP launcher."""
     from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
@@ -156,6 +175,7 @@ def _build_dense_dualwave(
         has_bias=has_bias,
         has_alibi=has_alibi,
         has_sink=has_sink,
+        _xcd_swizzle=xcd_swizzle,
     )
 
 
@@ -164,6 +184,7 @@ def _build_dense_fp8(
     num_heads: int,
     num_kv_heads: int,
     causal: bool,
+    rescale_threshold: float,
     waves_per_eu: int,
     daz: bool,
     lazy_rescale: bool,
@@ -181,6 +202,7 @@ def _build_dense_fp8(
         num_kv_heads=num_kv_heads,
         waves_per_eu=waves_per_eu,
         daz=daz,
+        rescale_threshold=rescale_threshold,
         dualwave_swp_lazy_rescale=lazy_rescale,
         dualwave_swp_setprio=setprio,
         dualwave_swp_enable_stagger=enable_stagger,
@@ -683,6 +705,10 @@ def flydsl_flash_attn_func(
     dualwave_swp_lazy_rescale: bool = True,
     dualwave_swp_setprio: bool = True,
     dualwave_swp_enable_stagger: bool = True,
+    # Re-derive (head, q_block) with head as the slow axis so one head's q-blocks
+    # stay on one XCD instead of every XCD re-streaming that head's K/V. None
+    # auto-selects on the shapes it helps; True/False force it. Dense non-fp8 only.
+    dualwave_swp_xcd_swizzle: Optional[bool] = None,
     # Debug: pass a pre-allocated float32[2] tensor to enable the lazy-rescale
     # branch counter (dualwave_swp_debug_lazy_counts=True). Only for dense mode.
     debug_counts: Optional[torch.Tensor] = None,
@@ -808,6 +834,58 @@ def flydsl_flash_attn_func(
             raise NotImplementedError(f"flydsl_flash_attn_func: {_name} is not supported for fp8")
         if not _t.is_cuda or _t.device != q.device:
             raise ValueError(f"flydsl_flash_attn_func: {_name} must be a CUDA tensor on {q.device}, got {_t.device}")
+
+    # The fp8 path flattens Q/K/V/O to 1-D and the C-ABI packs a dynamic dim as
+    # int32, so a launch aborts once any of them reaches 2**31 (S >= 131072 at
+    # D=128, H=64). K/V are checked too: cross-attention can hold a short Q and
+    # an over-long KV. Batch entries are independent and a leading slice of a
+    # contiguous tensor is still contiguous, so one launch per entry divides the
+    # flat dim by B at no copy. bf16 passes the natural 4-D shape and is exempt.
+    if (
+        dtype_str == "fp8"
+        and not paged_kv
+        and cu_seqlens_q is None
+        and cu_seqlens_kv is None
+        and q.dim() == 4
+        and max(q.numel(), k.numel(), v.numel()) >= _FP8_MAX_FLAT_ELEMS
+    ):
+        if q.shape[0] == 1:
+            # Out of batch to divide by. Launching would abort inside the C ABI
+            # with a struct.error naming neither the tensor nor the limit.
+            raise NotImplementedError(
+                "flydsl_flash_attn_func: fp8 flattens Q/K/V/O and packs the dynamic dim as int32, so a "
+                f"single batch entry cannot exceed {_FP8_MAX_FLAT_ELEMS} elements; got q={q.numel()}, "
+                f"k={k.numel()}, v={v.numel()}. Shorten the sequence or use bf16."
+            )
+        kw = dict(
+            causal=causal,
+            num_kv_heads=num_kv_heads,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+            cross_seqlen=cross_seqlen,
+            kv_cache_layout=kv_cache_layout,
+            num_kv_splits=num_kv_splits,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            waves_per_eu=waves_per_eu,
+            daz=daz,
+            dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
+            dualwave_swp_setprio=dualwave_swp_setprio,
+            dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
+            debug_counts=debug_counts,
+            stream=stream,
+        )
+        if out is None:
+            # Allocate once and hand each launch its own slice. Concatenating
+            # afterwards would consume the parts on the ambient stream while the
+            # kernels are still running on `stream`, and would hold two full
+            # outputs at a size where one is already several GB.
+            out = torch.empty(q.shape, dtype=torch.bfloat16 if dtype_str == "fp8" else q.dtype, device=q.device)
+        for i in range(q.shape[0]):
+            sl = slice(i, i + 1)
+            flydsl_flash_attn_func(q[sl].contiguous(), k[sl].contiguous(), v[sl].contiguous(), out=out[sl], **kw)
+        return out
     if has_bias:
         if bias.dtype != q.dtype:
             raise ValueError(f"flydsl_flash_attn_func: bias dtype must match q dtype {q.dtype}, got {bias.dtype}")
@@ -1033,6 +1111,7 @@ def flydsl_flash_attn_func(
                     num_heads=H,
                     num_kv_heads=num_kv_heads,
                     causal=causal,
+                    rescale_threshold=_fp8_rescale_threshold(int(Skv)),
                     waves_per_eu=waves_per_eu,
                     daz=daz,
                     lazy_rescale=dualwave_swp_lazy_rescale,
@@ -1059,6 +1138,24 @@ def flydsl_flash_attn_func(
                     or has_sink
                     or (can_dualwave and _dense_routes_to_dualwave(B, Sq))
                 ):
+                    # Workgroups map to XCDs as linear_id % 8, and linear_id is
+                    # bx + by*H + bz*H*nqb, so with H % 8 == 0 a head-fast grid pins
+                    # head h to XCD h % 8. The ~256 resident workgroups span all H
+                    # heads within one batch, leaving each XCD to juggle H/8 K/V
+                    # streams against its L2 slice. The head-slow remap in
+                    # _init_dualwave_thread_mapping puts the resident window inside a
+                    # single head instead: 1 stream. Measured penalty for leaving it
+                    # off tracks H/8 (-6% at 8 streams, -3% at 4, nil at <=2), not the
+                    # hit rate and not traffic volume. Bijective, so output is
+                    # unchanged. NB: that function's own comment states the opposite
+                    # rationale ("scatter across all XCDs") and is wrong.
+                    num_q_blocks = -(-int(Sq) // DUALWAVE_SWP_BLOCK_M)
+                    if dualwave_swp_xcd_swizzle is None:
+                        xcd_swizzle = (
+                            not causal and H % NUM_XCD_GFX950 == 0 and num_q_blocks >= MIN_Q_BLOCKS_XCD_SWIZZLE
+                        )
+                    else:
+                        xcd_swizzle = dualwave_swp_xcd_swizzle
                     exe = _build_dense_dualwave(
                         num_heads=H,
                         num_kv_heads=num_kv_heads,
@@ -1076,6 +1173,7 @@ def flydsl_flash_attn_func(
                         has_bias=has_bias,
                         has_alibi=has_alibi,
                         has_sink=has_sink,
+                        xcd_swizzle=xcd_swizzle,
                     )
                 else:
                     block_m, flat_work_group_size, path_tag = _dense_generic_tile(B, Sq, H, D, dtype_str, q.device)

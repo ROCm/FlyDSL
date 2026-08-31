@@ -159,8 +159,6 @@ def test_mfma_a8_flyc_preshuffle(
         # operator's operand!"), while CDNA4 (gfx950) handles it. Restrict async
         # copy to gfx950 until the gfx942 codegen path is supported.
         pytest.skip(f"async copy (buffer_load_lds) is only supported on gfx950, not {get_rocm_arch()}")
-    if use_async_copy and in_dtype not in ("fp8", "int8"):
-        pytest.skip("async copy (buffer_load_lds) only supports 8-bit inputs (fp8/int8)")
     print("=" * 80)
     print(f"[flyc] MFMA {in_dtype.upper()} GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k})")
     print("=" * 80)
@@ -980,3 +978,62 @@ def test_fused_epilogue_correctness(epilogue):
         f"✓ Fused epilogue {epilogue} correctness verified: "
         f"max_abs_diff={max_diff:.4f}, max_rel={rel:.4f}, ref_max={ref.abs().max().item():.2f}"
     )
+
+
+@pytest.mark.parametrize("tile_m", [48, 80, 112, 144])
+def test_preshuffle_rejects_partial_a_tile(tile_m):
+    """Reject tile_m values that leave a partial 16B A load per thread.
+
+    Each of the 256 threads copies tile_m * tile_k * elem_bytes / 256 bytes of the A
+    tile in 16B chunks. When that is not a multiple of 16 the chunk count truncates and
+    the tail of the A tile is never fetched, which used to yield wrong results with no
+    diagnostic. For bf16 with tile_k=64 the product must be a multiple of 4096.
+    """
+    if get_rocm_arch() not in ("gfx942", "gfx950"):
+        pytest.skip(f"v2 preshuffle GEMM requires gfx942/gfx950, got {get_rocm_arch()}")
+    with pytest.raises(ValueError, match=r"must be a multiple of"):
+        compile_preshuffle_gemm(N=1024, K=2048, tile_m=tile_m, tile_n=256, tile_k=64, in_dtype="bf16", out_dtype="bf16")
+
+
+@pytest.mark.parametrize("tile_m", [64, 96, 128, 160])
+def test_preshuffle_accepts_whole_a_tile(tile_m):
+    """tile_m values that divide the A tile evenly across threads must still compile."""
+    if get_rocm_arch() not in ("gfx942", "gfx950"):
+        pytest.skip(f"v2 preshuffle GEMM requires gfx942/gfx950, got {get_rocm_arch()}")
+    compile_preshuffle_gemm(N=1024, K=2048, tile_m=tile_m, tile_n=256, tile_k=64, in_dtype="bf16", out_dtype="bf16")
+
+
+@pytest.mark.parametrize("in_dtype", ["fp16", "bf16"])
+@pytest.mark.parametrize("tile_k", [64, 128])
+def test_preshuffle_async_copy_2byte_dtypes(in_dtype, tile_k):
+    """The gmem->LDS DMA must match the sync path for 2-byte input dtypes.
+
+    tile_k is parametrized because the DMA's LDS swizzle width derives from
+    ``tile_k * elem_bytes``, so tile_k=128 exercises a different swizzle than the
+    tile_k=64 case that the fixed Swizzle<3,3,3> happened to match.
+    """
+    if get_rocm_arch() != "gfx950":
+        pytest.skip(f"async copy (buffer_load_lds) requires gfx950, got {get_rocm_arch()}")
+    test_mfma_a8_flyc_preshuffle(
+        in_dtype,
+        M=512,
+        N=1024,
+        K=2048,
+        tile_m=128,
+        tile_n=256,
+        tile_k=tile_k,
+        use_async_copy=True,
+        test_graph=False,
+        run_aiter_bench=False,
+    )
+
+
+@pytest.mark.parametrize("bad", [(1,), (1, 2, 3), (-1, 0), (0, -1), 4])
+def test_preshuffle_preload_validation(bad):
+    """preload is a public knob, so reject malformed values instead of emitting bad hints."""
+    if get_rocm_arch() not in ("gfx942", "gfx950"):
+        pytest.skip(f"v2 preshuffle GEMM requires gfx942/gfx950, got {get_rocm_arch()}")
+    with pytest.raises((ValueError, TypeError)):
+        compile_preshuffle_gemm(
+            N=1024, K=2048, tile_m=128, tile_n=256, tile_k=64, in_dtype="bf16", out_dtype="bf16", preload=bad
+        )
