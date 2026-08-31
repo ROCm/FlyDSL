@@ -4582,6 +4582,40 @@ def test_paged_fp8_d192_rejects_flattened_int32_overflow(monkeypatch, value_head
 
 
 @_requires_gfx950
+def test_paged_fp8_d192_rejects_output_on_wrong_device():
+    """A caller-owned output must reside on the same device as Q/K/V."""
+    query = torch.zeros((1, 16, 192), device="cuda", dtype=FP8_DTYPE)
+    key = torch.zeros((1, 1, 12, 64, 16), device="cuda", dtype=FP8_DTYPE)
+    value = torch.zeros((1, 1, 4, 128, 16), device="cuda", dtype=FP8_DTYPE)
+    output = torch.empty((1, 16, 128), device="cpu", dtype=torch.bfloat16)
+    indptr = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
+    block_table = torch.zeros((1, 1), device="cuda", dtype=torch.int32)
+    seqlen_k = torch.ones((1,), device="cuda", dtype=torch.int32)
+    scale = torch.ones((1,), device="cuda", dtype=torch.float32)
+
+    with pytest.raises(ValueError, match="paged output must be on cuda"):
+        flydsl_flash_attn_func(
+            query,
+            key,
+            value,
+            causal=True,
+            num_kv_heads=1,
+            cu_seqlens_q=indptr,
+            cu_seqlens_kv=indptr,
+            max_seqlen_q=1,
+            max_seqlen_kv=1,
+            cross_seqlen=True,
+            block_table=block_table,
+            seqlen_k=seqlen_k,
+            kv_cache_layout="vectorized",
+            q_descale=scale,
+            k_descale=scale,
+            v_descale=scale,
+            out=output,
+        )
+
+
+@_requires_gfx950
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_paged_legacy_dtype_accepts_host_only_seqlen_metadata(dtype):
     """BF16/F16 paged attention retains its permissive seqlen_k ABI."""

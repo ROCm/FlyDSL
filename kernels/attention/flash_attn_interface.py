@@ -636,6 +636,8 @@ def _flydsl_flash_attn_paged(
         )
 
     if out is not None:
+        if out.device != q.device:
+            raise ValueError(f"flydsl_flash_attn_func: paged output must be on {q.device}, " f"got {out.device}")
         if out.shape != expected_out_shape or not out.is_contiguous():
             raise ValueError(
                 f"flydsl_flash_attn_func: paged output must be contiguous with shape {expected_out_shape}, "
