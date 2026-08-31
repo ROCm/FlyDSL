@@ -117,10 +117,10 @@ jobs:
           CHECK_SIGNAL_RESULT: ${{ needs.check-signal.result }}
         run: |
           if [ "$CHECK_SIGNAL_RESULT" = "failure" ] || [ "$CHECK_SIGNAL_RESULT" = "cancelled" ]; then
-            echo "::error::check-signal ${CHECK_SIGNAL_RESULT}; failing 'test (${{ matrix.runners }})' for this docs-only change."
+            echo "::error::check-signal ${CHECK_SIGNAL_RESULT}; failing 'test (${{ matrix.check }})' for this docs-only change."
             exit 1
           fi
-          echo "Docs-only change: GPU tests skipped (check-signal=${CHECK_SIGNAL_RESULT}); reporting 'test (${{ matrix.runners }})' as passed."
+          echo "Docs-only change: GPU tests skipped (check-signal=${CHECK_SIGNAL_RESULT}); reporting 'test (${{ matrix.check }})' as passed."
 
   # ---------------------------------------------------------------------------
   # Prepare one shared MLIR install, then build current/base FlyDSL wheels once.
@@ -567,11 +567,40 @@ jobs:
             echo "logs.tgz not found; skipping log extraction"
           fi
 
+      # Dashboard performance history stays MI355-only, so the shared gfx950 job
+      # benchmarks only when an MI355-1 box claimed it. Which pool won the label
+      # is not knowable until the job starts, so resolve it here once and record
+      # the outcome — an unbenchmarked run must not look like a clean perf pass.
+      - name: Resolve benchmark eligibility
+        run: |
+          # Match the ephemeral-runner naming the dashboard ingest also relies on:
+          # exactly the pool label, or the label plus an ARC "-<set>-runner-<id>" suffix.
+          case "${RUNNER_NAME}" in
+            linux-flydsl-mi355-1|linux-flydsl-mi355-1-*) is_mi355=true ;;
+            *) is_mi355=false ;;
+          esac
+          if [ "${{ matrix.runners }}" != 'linux-flydsl-gfx950' ]; then
+            run_bench=true
+            note="dedicated runner ${RUNNER_NAME}"
+          elif [ "${is_mi355}" = true ]; then
+            run_bench=true
+            note="shared gfx950 label claimed by MI355-1 (${RUNNER_NAME})"
+          else
+            run_bench=false
+            note="shared gfx950 label claimed by ${RUNNER_NAME}, not MI355-1"
+          fi
+          echo "RUN_BENCH=${run_bench}" >> "$GITHUB_ENV"
+          if [ "${run_bench}" = true ]; then
+            echo "::notice title=Benchmarks enabled::${note}"
+            echo "Benchmarks: **enabled** — ${note}." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning title=Benchmarks skipped::${note}; tests ran but this run has no benchmark numbers and no perf comparison against main or the latest tag."
+            echo "Benchmarks: **skipped** — ${note}. Tests ran; no perf comparison for this run." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Run benchmarks
         id: benchmarks
-        # Preserve a stable gfx950 performance baseline: shared-pool validation
-        # on MI35x runners runs tests only and is intentionally not benchmarked.
-        if: ${{ matrix.runners != 'linux-flydsl-gfx950' || startsWith(runner.name, 'linux-flydsl-mi355-1') }}
+        if: env.RUN_BENCH == 'true'
         run: |
           docker exec -i -e ROCM_PATH flydsl_test bash <<'BASH'
           set -e -o pipefail
@@ -584,7 +613,7 @@ jobs:
 
       - name: Run benchmark baselines
         id: bench-baselines
-        if: ${{ matrix.runners != 'linux-flydsl-gfx950' || startsWith(runner.name, 'linux-flydsl-mi355-1') }}
+        if: env.RUN_BENCH == 'true'
         timeout-minutes: 45
         continue-on-error: true
         run: |
@@ -719,7 +748,7 @@ jobs:
           "
 
       - name: Show benchmarks logs
-        if: failure() && (matrix.runners != 'linux-flydsl-gfx950' || startsWith(runner.name, 'linux-flydsl-mi355-1'))
+        if: failure() && env.RUN_BENCH == 'true'
         run: |
           log_dir="$(mktemp -d "${RUNNER_TEMP}/flydsl-benchmark-logs.XXXXXX")"
           docker exec flydsl_test bash -c 'cd /tmp && tar czf /tmp/flydsl_bench_logs.tgz flydsl_bench* bench_*.csv 2>/dev/null || echo "no logs"'
