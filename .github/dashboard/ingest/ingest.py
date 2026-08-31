@@ -87,17 +87,27 @@ def run_jobs(repo: str, run_id: int) -> list[dict]:
 def runner_of(job_name: str, runner_name: str | None = None) -> str | None:
     """Return the stable benchmark runner behind a job.
 
-    Shared runner labels make the job name intentionally hardware-agnostic, so
-    prefer the concrete ephemeral runner name reported by the Actions jobs API.
-    Fall back to the historical job-name convention for older runs.
+    Only per-runner matrix jobs qualify, i.e. those whose name carries a
+    ``(<label>)`` suffix. A plain job that merely happens to be scheduled on a
+    benchmark box (``prepare-mlir`` runs on ``linux-flydsl-mi325-1``) is not a
+    benchmark job: admitting it would download its build log for parsing and
+    let its status overwrite the real test job's entry for that runner.
+
+    For qualifying jobs the concrete ephemeral runner name from the Actions
+    jobs API wins over the label in the name, because the shared gfx950 entry
+    reports a fixed hardware-agnostic label that no longer identifies the box.
+    The API omits ``runner_name`` until a job is picked up, so a queued job
+    still resolves by name and is re-attributed once it starts.
     """
+    m = JOB_RUNNER.search(job_name or "")
+    if not m:
+        return None
     if runner_name:
         for runner in BENCH_RUNNERS:
             if runner_name == runner or runner_name.startswith(f"{runner}-"):
                 return runner
         return None
-    m = JOB_RUNNER.search(job_name or "")
-    return m.group(1) if m and m.group(1) in BENCH_RUNNERS else None
+    return m.group(1) if m.group(1) in BENCH_RUNNERS else None
 
 
 _PR_CACHE: dict[tuple[str, str], list[dict]] = {}

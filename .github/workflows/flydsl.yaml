@@ -550,27 +550,12 @@ jobs:
           docker exec flydsl_test bash -c "python3 -c \"from pathlib import Path; src = Path('/tmp/aiter/requirements.txt'); dst = Path('/tmp/aiter/requirements-flydsl-ci.txt'); lines = [line for line in src.read_text().splitlines() if line.strip() and not line.strip().startswith('flydsl==')]; dst.write_text('\\n'.join(lines) + '\\n')\" && python3 -m pip install -r /tmp/aiter/requirements-flydsl-ci.txt"
           docker exec flydsl_test bash -c "python3 -c 'import torch; import triton; assert tuple(map(int, triton.__version__.split(\"+\", 1)[0].split(\".\")[:3])) >= (3, 6, 0), triton.__version__; print(\"Using image Triton\", triton.__version__, \"with PyTorch\", torch.__version__)'"
 
-      - name: Run tests
-        timeout-minutes: 60
-        run: |
-          docker exec -e ROCM_PATH flydsl_test bash -c 'export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /flydsl-test && RUN_TESTS_FULL=1 bash scripts/run_tests.sh'
-
-      - name: Show tests logs
-        if: failure()
-        run: |
-          log_dir="$(mktemp -d "${RUNNER_TEMP}/flydsl-test-logs.XXXXXX")"
-          docker exec flydsl_test bash -c 'cd /tmp && tar czf /tmp/logs.tgz *.log 2>/dev/null || echo "no logs"'
-          if docker cp flydsl_test:/tmp/logs.tgz "${log_dir}/logs.tgz"; then
-            tar -xzf "${log_dir}/logs.tgz" -C "${log_dir}" || true
-            find "${log_dir}" -maxdepth 1 -type f -name '*.log' -print -exec cat {} \;
-          else
-            echo "logs.tgz not found; skipping log extraction"
-          fi
-
       # Dashboard performance history stays MI355-only, so the shared gfx950 job
       # benchmarks only when an MI355-1 box claimed it. Which pool won the label
-      # is not knowable until the job starts, so resolve it here once and record
-      # the outcome — an unbenchmarked run must not look like a clean perf pass.
+      # is not knowable until the job starts, so resolve it once here. This runs
+      # before the tests so the annotation still says which pool claimed the job
+      # when they fail, and so an unbenchmarked run cannot be mistaken for a
+      # clean perf pass.
       - name: Resolve benchmark eligibility
         run: |
           # Match the ephemeral-runner naming the dashboard ingest also relies on:
@@ -594,8 +579,25 @@ jobs:
             echo "::notice title=Benchmarks enabled::${note}"
             echo "Benchmarks: **enabled** — ${note}." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "::warning title=Benchmarks skipped::${note}; tests ran but this run has no benchmark numbers and no perf comparison against main or the latest tag."
-            echo "Benchmarks: **skipped** — ${note}. Tests ran; no perf comparison for this run." >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=Benchmarks skipped::${note}; this run has no benchmark numbers and no perf comparison against main or the latest tag."
+            echo "Benchmarks: **skipped** — ${note}. Tests still ran; no perf comparison for this run." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Run tests
+        timeout-minutes: 60
+        run: |
+          docker exec -e ROCM_PATH flydsl_test bash -c 'export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /flydsl-test && RUN_TESTS_FULL=1 bash scripts/run_tests.sh'
+
+      - name: Show tests logs
+        if: failure()
+        run: |
+          log_dir="$(mktemp -d "${RUNNER_TEMP}/flydsl-test-logs.XXXXXX")"
+          docker exec flydsl_test bash -c 'cd /tmp && tar czf /tmp/logs.tgz *.log 2>/dev/null || echo "no logs"'
+          if docker cp flydsl_test:/tmp/logs.tgz "${log_dir}/logs.tgz"; then
+            tar -xzf "${log_dir}/logs.tgz" -C "${log_dir}" || true
+            find "${log_dir}" -maxdepth 1 -type f -name '*.log' -print -exec cat {} \;
+          else
+            echo "logs.tgz not found; skipping log extraction"
           fi
 
       - name: Run benchmarks
