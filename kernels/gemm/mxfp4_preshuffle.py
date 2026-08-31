@@ -101,7 +101,7 @@ def launch_gemm(
     the [M,B,*] mbn layout. waves_per_eu<=0 = unset.
     """
     BM, BN, BK = tile_m, tile_n, tile_k
-    assert blockscale in ("none", "a", "b", "ab"), f"unknown blockscale mode {blockscale!r}"
+    assert blockscale in ("none", "ab"), f"blockscale must be 'none' or 'ab', got {blockscale!r}"
     assert BK in (128, 256), f"tile_k must be 128 or 256 (tiles_per_chunk = 256 // tile_k), got {BK}"
     assert BM % 32 == 0, f"tile_m must be a multiple of 32 (the A e8m0 scale is 32-row granular), got {BM}"
     assert BN % 16 == 0, f"tile_n must be a multiple of 16, got {BN}"
@@ -148,8 +148,12 @@ def launch_gemm(
     _scale_chunk_dw_a = ((K + 255) // 256) * _sc_k0_a
     _scale_chunk_dw_b = ((K + 255) // 256) * _sc_k0_b
     _b_sc_rows = (N // 128) if _bs_b else (N // 32)  # B scale super-rows
-    n_coop = A_LDS_B // num_threads // 16  # 16B cooperative loads per thread
-    assert n_coop >= 1, f"{A_LDS_B}B of LDS-A cannot fill {num_threads} threads x 16B; raise tile_m or tile_k"
+    a_copy_granularity = num_threads * 16  # bytes one cooperative round covers
+    assert A_LDS_B % a_copy_granularity == 0, (
+        f"A_LDS_B ({A_LDS_B}B) must be divisible by num_threads*16 ({a_copy_granularity}B), else part "
+        "of the A tile is never DMA'd; adjust tile_m / tile_k"
+    )
+    n_coop = A_LDS_B // a_copy_granularity  # 16B cooperative loads per thread
     assert k_batch == 1 or (c_row_stride < 0 and c_batch_stride < 0), (
         "split-K writes tmp[batch*k_batch, M, N] as a contiguous fp32 slab, so k_batch > 1 "
         "requires the default c_row_stride / c_batch_stride (-1)"
