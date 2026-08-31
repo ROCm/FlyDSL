@@ -1,0 +1,99 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FlyDSL validation report",
+  "description": "Deterministic execution evidence for one FlyDSL PR head. Consumed by the review-pr skill, which must reject any report whose repo.head does not match the exact PR head.",
+  "type": "object",
+  "required": ["schema_version", "repo", "environment", "stages", "findings", "verdict"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "label": { "type": "string" },
+    "generated_at": { "type": "string" },
+    "repo": {
+      "type": "object",
+      "required": ["base"],
+      "properties": {
+        "base": { "type": "string", "description": "base commit the patch was applied to" },
+        "head": {
+          "type": ["string", "null"],
+          "description": "exact remote PR head this patch represents; null means the report cannot be used as PR evidence"
+        },
+        "patch_sha256": { "type": "string" },
+        "patch_paths": { "type": "array", "items": { "type": "string" } },
+        "base_dir": { "type": "string" },
+        "head_dir": { "type": "string" }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "description": "Facts that decide whether a number means anything.",
+      "properties": {
+        "arch": { "type": "string" },
+        "gpu": { "type": "object" },
+        "container": { "type": "boolean" },
+        "isolation": { "type": "string" },
+        "python": { "type": "string" },
+        "cold_cache_required": {
+          "type": "boolean",
+          "description": "true when the patch touches paths the JIT cache key does not track, so FLYDSL_RUNTIME_ENABLE_CACHE=0 was forced"
+        },
+        "cold_cache_reason": { "type": "string" }
+      }
+    },
+    "test_selection": {
+      "type": "object",
+      "description": "A verdict applies only to these named inputs.",
+      "properties": {
+        "test_target": { "type": "string" },
+        "runner": { "type": "string", "enum": ["pytest", "script", "none"] },
+        "runner_reason": { "type": "string" },
+        "bench_cmd": { "type": "string" },
+        "perf_rounds": { "type": "integer" },
+        "metric_format": { "type": "string" }
+      }
+    },
+    "degraded_mode": {
+      "type": ["string", "null"],
+      "enum": ["NO_GPU", null]
+    },
+    "stages": {
+      "type": "object",
+      "description": "Every declared stage is always present. A stage that did not run is an object with status 'skip' and a reason; it never disappears and never becomes a bare string.",
+      "required": [
+        "merge_sim",
+        "gpu_claim",
+        "runtime_compat",
+        "test_policy",
+        "correctness",
+        "perf",
+        "diff_scan"
+      ],
+      "additionalProperties": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": { "type": "string", "enum": ["pass", "fail", "skip", "info"] },
+          "reason": { "type": "string" },
+          "detail": { "type": "object" }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["severity", "stage", "detail"],
+        "properties": {
+          "severity": { "type": "string", "enum": ["blocker", "should-fix", "note"] },
+          "stage": { "type": "string" },
+          "detail": { "type": "string" }
+        }
+      }
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["PASS", "NEEDS_WORK", "BLOCK", "INCONCLUSIVE"],
+      "description": "BLOCK if a reproducible defect fired, NEEDS_WORK for a deterministic policy concern, INCONCLUSIVE if any required stage did not complete, else PASS. PASS therefore means merge_sim, gpu_claim, runtime_compat, test_policy, correctness AND perf all ran and passed."
+    }
+  },
+  "$comment": "perf stage detail contract: rows[] each carry label, status (regression|improvement|unchanged|incomparable), base_median, head_median, gain, change_pct, noise_floor, control_deviation, base_spread, and sample counts. noise_floor is measured on this machine during this run from the A/A control, not configured in advance."
+}
