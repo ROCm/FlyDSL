@@ -660,12 +660,17 @@ def _extract_isa_text(mlir_asm: str) -> str:
     return "".join(chars)
 
 
-def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_name: str = "15_final_isa"):
+def _dump_isa(
+    *, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, bin_opts: str = "", stage_name: str = "15_final_isa"
+):
     """Best-effort dump of final GPU ISA/assembly (.s).
 
     Runs ``gpu-module-to-binary{format=isa}`` on a *cloned* module so the
     main compilation is not affected.  The raw ISA text is extracted from the
     MLIR ``assembly = "..."`` attribute and written as a clean ``.s`` file.
+
+    ``bin_opts`` must be the same LLVM CLI options the real binary fragment uses,
+    otherwise the dumped ISA does not correspond to the shipped code object.
     """
     try:
         mod = ir.Module.parse(asm, context=ctx)
@@ -673,7 +678,7 @@ def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_
             "ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}," if env.debug.enable_debug_info else ""
         )
         pm = PassManager.parse(
-            f'builtin.module({di_pass}gpu-module-to-binary{{format=isa opts="{"-g" if env.debug.enable_debug_info else ""}" section= toolkit=}})',
+            f'builtin.module({di_pass}gpu-module-to-binary{{format=isa opts="{bin_opts}" section= toolkit=}})',
             context=ctx,
         )
         pm.enable_verifier(bool(verify))
@@ -803,6 +808,19 @@ class MlirCompiler:
                 "use embedded codegen for kernels that require #fly.explicit_module."
             )
 
+        hack_asm = env.debug.hack_ut_asm.strip()
+        if hack_asm:
+            if external_binary:
+                raise RuntimeError(
+                    "FLYDSL_HACK_UT_ASM is not supported with FLYDSL_COMPILE_LLVM_DIR "
+                    "external codegen; unset one of them."
+                )
+            if not hasattr(backend, "isa_assemble_arch"):
+                raise RuntimeError(
+                    f"FLYDSL_HACK_UT_ASM is only supported on the rocm backend, not {type(backend).__name__}."
+                )
+            hack_kernel_names = _infer_kernel_names_from_asm(module.operation.get_asm())
+
         if link_libs:
             link_opt = _format_link_lib_options(link_libs)
             fragments, found_attach_target = _append_link_lib_options_to_attach_targets(fragments, link_opt)
@@ -891,6 +909,7 @@ class MlirCompiler:
                             ctx=module.context,
                             asm=asm_for_isa,
                             verify=env.debug.enable_verifier,
+                            bin_opts=backend.binary_cli_options(compile_hints=compile_hints),
                             stage_name=isa_stage,
                         )
                         if isa_out is not None:
@@ -928,6 +947,18 @@ class MlirCompiler:
                         verifier=env.debug.enable_verifier,
                         print_after_all=env.debug.print_after_all,
                     )
+
+            # Both branches above ran the real pipeline; external codegen, the one path
+            # that does not produce a gpu.binary here, is rejected before this point.
+            if hack_asm:
+                from .hack_asm import substitute_hacked_asm
+
+                substitute_hacked_asm(
+                    module,
+                    arch=backend.isa_assemble_arch(),
+                    func_name=func_name,
+                    module_kernel_names=hack_kernel_names,
+                )
 
         return module
 
@@ -1396,6 +1427,14 @@ class JitFunction:
 
         ensure_compile_runtime_pairing_from_env(compile_backend_name())
 
+        # A hand-edited .s is not part of the cache key, so the disk cache is skipped
+        # entirely while it is set: editing the .s never needs a cache clear, and the
+        # hacked artifact never leaks into a normal run.  The in-process caches stay
+        # live -- the env var is fixed for the process, so everything they hold was
+        # built from the same .s, and re-assembling per call would dominate any
+        # benchmark taken through this path.
+        hack_asm = bool(env.debug.hack_ut_asm.strip())
+
         # Fast path: reuse pre-built CallState (no ctypes alloc, no DLPack)
         call_state = self._call_state_cache.get(cache_key)
         if call_state is not None:
@@ -1407,11 +1446,16 @@ class JitFunction:
         # In run_only mode the disk cache is read regardless of enable_cache, since
         # AOT-only execution treats the on-disk cache as the deployment artifact.
         run_only = env.runtime.run_only
+        if run_only and hack_asm:
+            raise RuntimeError(
+                "FLYDSL_RUNTIME_RUN_ONLY=1 is incompatible with FLYDSL_HACK_UT_ASM: "
+                "run-only serves the disk cache, which the .s override bypasses."
+            )
         use_disk_cache = env.runtime.enable_cache or run_only
         allow_disk_cache = use_disk_cache and cache_key not in self._extern_linkage_keys
         _rejected_link_libs = False
         cached_func = self._mem_cache.get(cache_key)
-        if cached_func is None and allow_disk_cache and not env.debug.dump_ir:
+        if cached_func is None and allow_disk_cache and not env.debug.dump_ir and not hack_asm:
             str_key = self._cache_key_to_str(cache_key)
             cached_func = self.cache_manager.get(str_key) if self.cache_manager else None
             if cached_func is not None and getattr(cached_func, "_link_libs", None):
@@ -1455,7 +1499,7 @@ class JitFunction:
         compiled_func = None  # will be set inside lock or compile path
 
         # Determine whether to use compile_lock for cross-process safety.
-        _use_compile_lock = use_disk_cache and self.cache_manager and not env.debug.dump_ir
+        _use_compile_lock = use_disk_cache and self.cache_manager and not env.debug.dump_ir and not hack_asm
         if _use_compile_lock:
             str_key = self._cache_key_to_str(cache_key)
             _compile_lock_ctx = self.cache_manager.compile_lock(str_key)

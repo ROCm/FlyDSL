@@ -250,6 +250,15 @@ class DebugEnvManager(EnvManager):
     dump_dir = OptStr(
         str(Path.home() / ".flydsl" / "debug"), env_var="FLYDSL_DUMP_DIR", description="Directory for dumping IR"
     )
+    hack_ut_asm = OptStr(
+        "",
+        env_var="FLYDSL_HACK_UT_ASM",
+        description=(
+            "DEBUG/UT ONLY: path to a hand-edited GCN .s (as dumped by FLYDSL_DUMP_IR). "
+            "The JIT assembles it with the ROCm clang and substitutes it for the generated "
+            "device code object, bypassing the JIT cache. Not a stable API"
+        ),
+    )
 
     ast_diff = OptBool(False, description="Print AST diff during rewrite")
 

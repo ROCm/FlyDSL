@@ -50,6 +50,7 @@ Use the same names as [`python/flydsl/utils/env.py`](../python/flydsl/utils/env.
 | Force autotuning search | `FLYDSL_AUTOTUNE` (`1` / `true` to ignore the heuristic/cached best) |
 | Autotune result cache directory | `FLYDSL_AUTOTUNE_CACHE_DIR` |
 | IR dump | `FLYDSL_DUMP_IR`, `FLYDSL_DUMP_DIR` |
+| Run a hand-edited `.s` instead of generated ISA | `FLYDSL_HACK_UT_ASM` (path to a dumped/edited `.s`; debug/UT only, bypasses the disk cache) |
 | Device runtime kind | `FLYDSL_RUNTIME_KIND` |
 | ROCm arch hints (detection helpers) | `FLYDSL_GPU_ARCH`, `HSA_OVERRIDE_GFX_VERSION` |
 

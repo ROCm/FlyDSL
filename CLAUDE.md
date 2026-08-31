@@ -147,6 +147,7 @@ Use names from `python/flydsl/utils/env.py`; do not introduce alternate spelling
 | AOT-cache-only execution | `FLYDSL_RUNTIME_RUN_ONLY` (`1` skips JIT; loads disk cache only, raises on cache miss; incompatible with `FLYDSL_DUMP_IR=1`) |
 | External LLVM/MLIR codegen | `FLYDSL_COMPILE_LLVM_DIR` (install prefix; enables external-binary final codegen, part of the JIT cache key) |
 | IR dumps | `FLYDSL_DUMP_IR`, `FLYDSL_DUMP_DIR` |
+| Run a hand-edited `.s` | `FLYDSL_HACK_UT_ASM` (path to a `.s` dumped by `FLYDSL_DUMP_IR`; assembled with the ROCm `clang` and substituted for the generated device object, bypassing the disk cache. Debug/UT only, rocm backend only, incompatible with `FLYDSL_COMPILE_LLVM_DIR` / `FLYDSL_RUNTIME_RUN_ONLY`. See `python/flydsl/compiler/hack_asm.py`) |
 | Runtime kind | `FLYDSL_RUNTIME_KIND` |
 | GPU arch hints | `FLYDSL_GPU_ARCH`, `HSA_OVERRIDE_GFX_VERSION` |
 | Debug info / pass diagnostics | `FLYDSL_DEBUG_ENABLE_DEBUG_INFO`, `FLYDSL_DEBUG_PRINT_AFTER_ALL`, `FLYDSL_DEBUG_AST_DIFF` |

@@ -47,8 +47,8 @@ class RocmBackend(BaseBackend):
         """Format {key: value, ...} as 'key=value key2=value2' for MLIR pass options."""
         return " ".join(f"{k}={v}" for k, v in opts.items())
 
-    def _pipeline_parts(self, *, compile_hints: dict) -> Tuple[List[str], str]:
-        chip = self.target.arch
+    def binary_cli_options(self, *, compile_hints: dict) -> str:
+        """LLVM CLI options handed to ``gpu-module-to-binary`` as ``opts="..."``."""
         waves_per_eu = compile_hints.get("waves_per_eu")
         maxnreg = compile_hints.get("maxnreg")
 
@@ -59,6 +59,15 @@ class RocmBackend(BaseBackend):
             bin_cli_opts.append(f"--amdgpu-waves-per-eu={waves_per_eu}")
         if maxnreg:
             bin_cli_opts.append(f"--amdgpu-num-vgpr={maxnreg}")
+        return " ".join(bin_cli_opts)
+
+    def isa_assemble_arch(self) -> str:
+        """``-mcpu`` used to assemble a hand-edited ``.s`` back into a code object."""
+        return self.target.arch
+
+    def _pipeline_parts(self, *, compile_hints: dict) -> Tuple[List[str], str]:
+        chip = self.target.arch
+        bin_cli_opts = self.binary_cli_options(compile_hints=compile_hints)
 
         rocdl_opts = {
             "O": 2,
@@ -105,7 +114,7 @@ class RocmBackend(BaseBackend):
                 else []
             ),
         ]
-        binary_fragment = f'gpu-module-to-binary{{format=fatbin opts="{" ".join(bin_cli_opts)}"}}'
+        binary_fragment = f'gpu-module-to-binary{{format=fatbin opts="{bin_cli_opts}"}}'
         return [*pre_binary_fragments, *binary_prep_fragments], binary_fragment
 
     def pipeline_fragments(self, *, compile_hints: dict) -> List[str]:

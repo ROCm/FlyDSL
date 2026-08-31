@@ -387,6 +387,7 @@ Transforms Python control flow to MLIR ops at the AST level:
 | `FLYDSL_DUMP_IR` | `false` | Dump intermediate IR at each pipeline stage. |
 | `FLYDSL_DUMP_DIR` | `~/.flydsl/debug` | Directory for IR dumps. |
 | `FLYDSL_DEBUG_DUMP_ASM` | `false` | Dump final AMD ISA assembly. |
+| `FLYDSL_HACK_UT_ASM` | `""` | Path to a hand-edited `.s` to assemble and run instead of the generated device object. Debug/UT only. |
 | `FLYDSL_DEBUG_AST_DIFF` | `false` | Print AST diff during rewrite. |
 | `FLYDSL_DEBUG_PRINT_ORIGIN_IR` | `false` | Print origin IR before compilation. |
 | `FLYDSL_DEBUG_PRINT_AFTER_ALL` | `false` | Print IR after each MLIR pass. |
@@ -460,6 +461,29 @@ dumps/my_func_name/
 ```
 
 If `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, the debug-info pass adds an extra numbered dump before `gpu_module_to_binary`.
+
+### Running a hand-edited `.s`
+
+`FLYDSL_HACK_UT_ASM` closes the loop on the ISA dump: point it at a `.s` and the JIT
+assembles that file with the ROCm toolchain's `clang` — which drives the same LLVM MC
+assembler and `ld.lld` that `gpu-module-to-binary` reaches internally — and substitutes
+the result for the device code object it would have generated. Everything else is
+unchanged, so an existing test or benchmark runs the hand-tuned assembly without edits:
+
+```bash
+FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=./dumps python test_my_kernel.py   # writes 21_final_isa.s
+vim dumps/my_kernel/21_final_isa.s                                  # edit the ISA
+FLYDSL_HACK_UT_ASM=dumps/my_kernel/21_final_isa.s python test_my_kernel.py
+```
+
+The kernel symbol must stay the same — the host side still resolves the kernel by name
+and takes grid/block/shared-memory from the traced `gpu.launch_func`, so a renamed
+kernel is rejected rather than silently ignored. The disk cache is bypassed while the
+variable is set, so edits take effect without a cache clear and the hacked artifact
+never reaches a normal run. A `.s` dumped for a different arch is refused by the
+assembler's target-id check rather than mis-assembled. Debug/UT only: rocm backend, not
+compatible with `FLYDSL_COMPILE_LLVM_DIR` or `FLYDSL_RUNTIME_RUN_ONLY`.
+Implementation: [`python/flydsl/compiler/hack_asm.py`](../python/flydsl/compiler/hack_asm.py).
 
 ---
 
