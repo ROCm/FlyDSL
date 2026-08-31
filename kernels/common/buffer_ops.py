@@ -26,7 +26,7 @@ Example:
     >>> buffer_ops.buffer_store(data, rsrc, offset)
 """
 
-from typing import Optional, Union
+from __future__ import annotations
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
@@ -77,14 +77,14 @@ def _get_buffer_flags(arch=None):
 
 
 __all__ = [
-    "create_llvm_ptr",
-    "get_element_ptr",
-    "create_buffer_resource",
-    "create_buffer_resource_from_addr",
+    "BufferResourceDescriptor",
     "buffer_load",
     "buffer_store",
-    "BufferResourceDescriptor",
+    "create_buffer_resource",
+    "create_buffer_resource_from_addr",
+    "create_llvm_ptr",
     "extract_base_index",
+    "get_element_ptr",
 ]
 
 _MAX_NUM_RECORDS = 0xFFFFFFFF
@@ -97,6 +97,7 @@ def _unwrap_value(value):
     - FlyDSL ArithValue (has ._value)
     - flyc DSL Numeric like fx.Int32 (has .ir_value() method)
     - flyc ArithValue (is already ir.Value subclass)
+    - a bare single-result OpView (has .result), e.g. ``arith.TruncIOp(...)``
     """
     # DSL Numeric (Int32, Float32, etc.) — use ir_value() to materialize
     if hasattr(value, "ir_value") and not isinstance(value, ir.Value):
@@ -106,6 +107,8 @@ def _unwrap_value(value):
     while depth < max_depth and not isinstance(value, ir.Value):
         if hasattr(value, "_value"):
             value = value._value
+        elif hasattr(value, "result"):
+            value = value.result
         elif hasattr(value, "value"):
             value = value.value
         else:
@@ -138,7 +141,7 @@ def _ptr8_to_v4i32(ptr8_val) -> ir.Value:
     return llvm.bitcast(v4i32_ty, i128_val)
 
 
-def _as_num_records(num_records_bytes) -> Optional[fx.Int64]:
+def _as_num_records(num_records_bytes) -> fx.Int64 | None:
     """Normalize a descriptor byte count to ``fx.Int64`` for ``make_buffer_ptr``."""
     if num_records_bytes is None:
         return None
@@ -215,9 +218,9 @@ def extract_base_index(tensor, address_space: int = 1) -> ir.Value:
 @dsl_loc_tracing
 def get_element_ptr(
     base_ptr,
-    byte_offset: Union[int, ir.Value, None] = None,
+    byte_offset: int | ir.Value | None = None,
     static_byte_offset: int = 0,
-    elem_type: Optional[ir.Type] = None,
+    elem_type: ir.Type | None = None,
     no_wrap_flags=None,
 ) -> ir.Value:
     """Build an LLVM GEP from a base pointer plus byte offsets."""
@@ -264,7 +267,7 @@ def get_element_ptr(
     ).result
 
 
-def _num_records_from_memref_type(memref_val) -> Optional[int]:
+def _num_records_from_memref_type(memref_val) -> int | None:
     try:
         mt = ir.MemRefType(_unwrap_value(memref_val).type)
         shape = list(mt.shape)
@@ -281,7 +284,8 @@ def _num_records_from_memref_type(memref_val) -> Optional[int]:
         for d in shape:
             num_elems *= int(d)
         return int(num_elems) * int(elem_bytes)
-    except Exception:
+    # best-effort size probe: any failure just means "unknown"
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -306,9 +310,9 @@ class BufferResourceDescriptor:
         stride: int = 0,
         max_size: bool = True,
         data_format: str = "f32",
-        num_records_bytes: Optional[Union[int, ir.Value]] = None,
-        base_byte_offset: Optional[Union[int, ir.Value]] = None,
-    ) -> "BufferResourceDescriptor":
+        num_records_bytes: int | ir.Value | None = None,
+        base_byte_offset: int | ir.Value | None = None,
+    ) -> BufferResourceDescriptor:
         """Create buffer resource descriptor from memref.
 
         Args:
@@ -341,7 +345,7 @@ class BufferResourceDescriptor:
 def create_buffer_resource_from_addr(
     addr_i64: ir.Value,
     *,
-    num_records_bytes: Optional[Union[int, ir.Value]] = None,
+    num_records_bytes: int | ir.Value | None = None,
 ) -> ir.Value:
     """Create AMD buffer resource descriptor from a raw i64 device address.
 
@@ -372,8 +376,8 @@ def create_buffer_resource(
     stride: int = 0,
     max_size: bool = True,
     *,
-    num_records_bytes: Optional[Union[int, ir.Value]] = None,
-    base_byte_offset: Optional[Union[int, ir.Value]] = None,
+    num_records_bytes: int | ir.Value | None = None,
+    base_byte_offset: int | ir.Value | None = None,
 ) -> ir.Value:
     """Create AMD buffer resource descriptor from memref.
 
@@ -409,9 +413,9 @@ def buffer_load(
     offset: ir.Value,
     vec_width: int = 4,
     dtype=None,
-    mask: Optional[ir.Value] = None,
+    mask: ir.Value | None = None,
     cache_modifier: int = 0,
-    soffset_bytes: Optional[Union[int, ir.Value]] = None,
+    soffset_bytes: int | ir.Value | None = None,
     is_scalar: bool = False,
 ) -> ir.Value:
     """AMD buffer load operation.
@@ -524,10 +528,10 @@ def buffer_store(
     data: ir.Value,
     rsrc: ir.Value,
     offset: ir.Value,
-    mask: Optional[ir.Value] = None,
+    mask: ir.Value | None = None,
     cache_modifier: int = 0,
     *,
-    soffset_bytes: Optional[Union[int, ir.Value]] = None,
+    soffset_bytes: int | ir.Value | None = None,
     offset_is_bytes: bool = False,
 ):
     """AMD buffer store operation.
