@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-08-31T06:54:06Z",
+ "updated": "2026-08-31T08:07:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33371227239,
+   "pr": 1032,
+   "commit": "1c6b5af935c66e50fd2aba2e4b1824b44d9c22c0",
+   "branch": "convolution",
+   "event": "pull_request",
+   "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33371227239",
+   "created_at": "2026-08-31T08:05:04Z",
+   "updated_at": "2026-08-31T08:05:18Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
   {
    "run_id": 33363993156,
    "pr": 1081,
@@ -25,13 +40,42 @@
    "branch": "skills/pr-review-and-perf-validation",
    "event": "pull_request",
    "title": "[Skills] Add PR review and performance-regression validation skills",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33363916494",
    "created_at": "2026-08-31T06:22:11Z",
-   "updated_at": "2026-08-31T06:24:20Z",
+   "updated_at": "2026-08-31T06:54:12Z",
    "actor": "zhiding512",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-31T07:04:07Z",
+     "completed_at": "2026-08-31T07:18:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33363916494/job/99406853965"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-08-31T06:54:50Z",
+     "completed_at": "2026-08-31T08:01:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33363916494/job/99406853990",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-08-31T06:55:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33363916494/job/99406854006"
+    }
+   ]
   },
   {
    "run_id": 33361837028,
@@ -108,10 +152,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-31T06:37:24Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-08-31T06:52:25Z",
+     "completed_at": "2026-08-31T07:03:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33353867337/job/99403545352"
     },
     {
@@ -271,16 +315,16 @@
   },
   {
    "run_id": 33269020743,
-   "pr": 1032,
+   "pr": null,
    "commit": "f9417e1c8eb9135b86a7afad482dc52f2b058598",
    "branch": "convolution",
    "event": "pull_request",
    "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33269020743",
    "created_at": "2026-08-29T18:43:12Z",
-   "updated_at": "2026-08-29T19:00:45Z",
+   "updated_at": "2026-08-31T08:05:06Z",
    "actor": "amd-nprotaso",
    "jobs": [
     {
@@ -1938,50 +1982,6 @@
      "completed_at": "2026-08-26T12:03:19Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/32956568566/job/98165650690",
      "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 32956302525,
-   "pr": 1069,
-   "commit": "e599cc1cb467a995b72ce2a7efe222041533f39c",
-   "branch": "feature/qwenimage-vae-conv-tests",
-   "event": "pull_request",
-   "title": "[Flydsl] Add Qwen-Image VAE classic conv shapes to conv3d tests",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/32956302525",
-   "created_at": "2026-08-26T10:03:50Z",
-   "updated_at": "2026-08-26T11:09:21Z",
-   "actor": "huizzhan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-26T10:49:19Z",
-     "completed_at": "2026-08-26T11:09:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32956302525/job/98150559381"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-26T10:50:34Z",
-     "completed_at": "2026-08-26T11:05:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32956302525/job/98150559430",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-26T10:51:23Z",
-     "completed_at": "2026-08-26T11:09:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/32956302525/job/98150559490"
     }
    ]
   }
