@@ -1951,10 +1951,9 @@ def _make_dualwave_swp_fp8_traits(
     smem_linear_wave = warp_size * 16 // elem_bytes
     smem_n_per_wave = smem_linear_wave // d_128b_size
     smem_n_rpt = block_n // smem_n_per_wave
-    # D192 needs a second 128-byte K repeat.  In vectorized page-64 mode the
-    # final four 16-byte lane buckets naturally land beyond the page descriptor
-    # and read zero, giving the QK MFMA a correctly padded D256 LDS tile without
-    # ever crossing into another physical page.
+    # D192 needs a second 128-byte K repeat for the D256-shaped LDS tile. The
+    # QK reader consumes only the 12 physical D192 groups; the remaining four
+    # DMA groups are unused padding.
     smem_d_rpt = (head_dim + d_128b_size - 1) // d_128b_size
     smem_k_pad = 16 // elem_bytes
     smem_v_pad = 64 // elem_bytes
@@ -4985,19 +4984,15 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
         if const_expr(traits.KV_VECTORIZED):
             page_id = self.load_page_id(tile_start)
             src_div = self.make_page_view(self.k_base_iter, page_id)
-            # Each wave owns two 64-lane octet rows at D192.  The physical K
-            # page has only 12 d-groups; the final four groups address beyond
-            # the page descriptor and the gfx950 buffer load supplies zeros.
+            # Each wave owns two 64-lane octet rows for the D256-shaped LDS
+            # tile. The QK reader ignores the four groups beyond physical D192.
             for d in range_constexpr(self.NUM_DMA_K):
-                oct_idx = (
-                    self.wave_id_uni * (traits.WARP_SIZE * traits.SMEM_D_RPT) + d * traits.WARP_SIZE + self.lane_in_warp
-                )
-                ni = oct_idx % traits.BLOCK_N
-                dg = oct_idx // traits.BLOCK_N
-                src_oct = dg * traits.BLOCK_N + _sigma_k_tile_n(ni)
-                src_elem = (
-                    self.kv_head_idx * (traits.HEAD_DIM // traits.KV_VEC_SIZE) * traits.BLOCK_N * traits.KV_VEC_SIZE
-                    + src_oct * traits.KV_VEC_SIZE
+                src_elem = _vec_k_src_elem(
+                    traits,
+                    d,
+                    self.wave_id_uni,
+                    self.lane_in_warp,
+                    self.kv_head_idx,
                 )
                 lds_addr = (
                     k_lds_byte_base + (self.wave_id_uni * traits.SMEM_D_RPT + d) * traits.WARP_SIZE * traits.KV_VEC_SIZE
@@ -5114,7 +5109,7 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
                 # sigma(n).  Apply the same (involutive) permutation to V;
                 # otherwise selective attention pairs K[sigma(n)] with V[n]
                 # even though near-uniform low-amplitude tests appear valid.
-                bf = [bf[(i & 3) | ((i & 8) >> 1) | ((i & 4) << 1)] for i in range_constexpr(16)]
+                bf = [bf[_sigma_k_tile_n(i)] for i in range_constexpr(16)]
 
                 # The bf16 vectorized LDS layout groups eight tokens.  Split
                 # the 16-token SHUFFLE vector into two aligned v8 stores.
@@ -5392,8 +5387,6 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         return fx.maxnumf(a, b)
 
     def floor_masked_max(self, row_max):
-        if const_expr(self.traits.PAGED):
-            return fx.maxnumf(row_max, self.c_neg_floor)
         return fx.maxnumf(row_max, self.c_neg_floor)
 
     # log2 of e4m3's largest finite value, 448.
@@ -5424,8 +5417,6 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         return _score_pair_sum(v_p, self.c_zero_f, self.fm_fast)
 
     def reduce_sum(self, l_row, v_p):
-        if const_expr(self.traits.PAGED):
-            return l_row + self.tile_sum(v_p)
         return l_row + self.tile_sum(v_p)
 
     def cast_p(self, v_p):
@@ -5467,8 +5458,6 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         return row_max, rescale
 
     def apply_l_rescale(self, l_row, rescale):
-        if const_expr(self.traits.PAGED):
-            return l_row * rescale
         return l_row * rescale
 
     def rescale_o(self, v_o, m_row, l_row, m_tile_max, v_p):
