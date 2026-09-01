@@ -19,7 +19,6 @@ gfx950 LDS swizzles; it is NOT expected to run on gfx942.
 """
 
 from typing import Optional
-import warnings
 
 import torch
 
@@ -333,22 +332,11 @@ def make_flex_attn_param(
             "pipe_depth>=2 requires pipeline stagger: num_groups>=2 and m_waves>=2 "
             f"(got num_groups={num_groups}, m_waves={m_waves})"
         )
-    if pipe_stages >= 2 and not pipeline_stagger_enabled(
-        depth=pipe_depth, num_groups=num_groups, m_waves=m_waves,
-    ):
-        warnings.warn(
-            "pipe_stages=2 does not enable stagger; stagger is auto when "
-            "pipe_depth>=2, num_groups>=2, and m_waves>=2",
-            stacklevel=2,
-        )
 
     in_dbytes = 2
 
     group_threads = m_waves * n_waves * GFX950_WAVE_SIZE
     block_threads = num_groups * group_threads
-    print("m_waves", m_waves, "n_waves", n_waves, "num_groups", num_groups)
-    print("block_threads", block_threads)
-    print("group_threads", group_threads)
     _max_waves = 8
     if block_threads > _max_waves * GFX950_WAVE_SIZE:
         raise ValueError(
@@ -489,7 +477,6 @@ def flex_attn_fwd_gfx950_kernel(
     num_batches: fx.Int32,
     scale: fx.Float32,
     tiled_mma_qk: fx.TiledMma,
-    tiled_mma_pv: fx.TiledMma,
     param: FlexAttnParam,
     ws_o: fx.Tensor = fx.Tensor,
     ws_ml: fx.Tensor = fx.Tensor,
@@ -757,8 +744,7 @@ def flex_attn_fwd_gfx950_kernel(
                 score_row = tile_row % block_n
                 v_step = dc * 4 + score_row // 8
                 row_in_step = score_row % 8
-                dc_shift_bytes = 0
-                lds_byte = v_step * _v_step_bytes + row_in_step * _v_subtile_row_bytes + dc_shift_bytes + tile_col_byte
+                lds_byte = v_step * _v_step_bytes + row_in_step * _v_subtile_row_bytes + tile_col_byte
                 lds_v = fx.add_offset(sV_i8[buf], lds_byte)
                 d_global_byte = dc * 32 * param.in_data_bytes + tile_col_byte
                 gmem_byte = fx.Int32(v_global_base) + score_row * fx.Int32(_v_row_stride_bytes) + d_global_byte
@@ -790,8 +776,7 @@ def flex_attn_fwd_gfx950_kernel(
             score_row = tile_row % block_n
             v_step = dc * 4 + score_row // 8
             row_in_step = score_row % 8
-            dc_shift_bytes = 0
-            lds_byte = v_step * _v_step_bytes + row_in_step * _v_subtile_row_bytes + dc_shift_bytes + tile_col_byte
+            lds_byte = v_step * _v_step_bytes + row_in_step * _v_subtile_row_bytes + tile_col_byte
             lds_v = fx.add_offset(sV_i8[buf], lds_byte)
             d_global_byte = dc * 32 * param.in_data_bytes + tile_col_byte
             gmem_byte = fx.Int32(v_global_base) + score_row * fx.Int32(_v_row_stride_bytes) + d_global_byte
@@ -846,11 +831,9 @@ def flex_attn_fwd_gfx950_kernel(
                 score_row = tile_row % block_n
                 v_step = dc * 4 + score_row // 8
                 row_in_step = score_row % 8
-                dc_shift_bytes = 0
                 lds_byte = (
                     v_step * _v_step_bytes
                     + row_in_step * _v_subtile_row_bytes
-                    + dc_shift_bytes
                     + tile_col_byte
                 )
                 lds_v = fx.add_offset(sV_i8[buf], lds_byte)
@@ -866,9 +849,6 @@ def flex_attn_fwd_gfx950_kernel(
         InfraContext,
         pipeline_stagger_enabled,
     )
-
-    class _LayoutSchedTraits:
-        HEAD_DIM = int(param.head_dim)
 
     def load_kv(tile_idx, slot, ops=_dma_ops_per_thread, op_offset=0):
         if const_expr(_paged):
@@ -1060,7 +1040,6 @@ def flex_attn_fwd_gfx950_kernel(
     mod_has_mask = flex_mod.has_mask
     _mod_apply_score = flex_mod.apply_score
     _mod_apply_mask = flex_mod.apply_mask
-    _mod_tile_needs_mask = flex_mod.tile_needs_mask
     b_i32 = fx.Int32(arith.index_cast(T.i32, b_idx))
     h_i32 = fx.Int32(arith.index_cast(T.i32, h_idx))
     q_idx_mod = fx.Int32(arith.index_cast(T.i32, q_start)) + fx.Int32(local_tid % 32)
@@ -1160,8 +1139,7 @@ def flex_attn_fwd_gfx950_kernel(
 
 
     if const_expr(_is_32x32):
-        _total_waves = int(param.block_threads) // GFX950_WAVE_SIZE
-        _enable_stagger =  True#_total_waves >= 4
+        _enable_stagger = True
     else:
         _enable_stagger = pipeline_stagger_enabled(
             depth=int(param.pipe_depth),
@@ -1170,11 +1148,6 @@ def flex_attn_fwd_gfx950_kernel(
         )
 
     infra = InfraContext()
-    infra.head_dim = head_dim
-    infra.tiled_mma_qk = tiled_mma_qk
-    infra.tiled_mma_pv = tiled_mma_pv
-    infra.elem_dtype = elem_dtype
-    infra.n_kv_tiles = n_kv_tiles
     if const_expr(_enable_stagger):
         if const_expr(_is_32x32):
             _stagger_div = _flex_stagger_divisor(int(param.block_threads))
@@ -1188,7 +1161,6 @@ def flex_attn_fwd_gfx950_kernel(
                 fx.Int32.ir_type, fx.Int32(local_tid // GFX950_WAVE_SIZE),
             )
 
-    infra.traits = _LayoutSchedTraits()
 
     # ── Paged KV: load block table into LDS ──────────────────────────────
     if const_expr(_paged):
@@ -1203,8 +1175,6 @@ def flex_attn_fwd_gfx950_kernel(
         _bt_div = fx.logical_divide(_bt_flat, fx.make_layout(1, 1))
         _bt_batch_off = fx.Int32(arith.index_cast(T.i32, b_idx)) * block_table_stride
         _bt_entries = n_kv_tiles
-        _bt_per_thread = (_bt_entries + fx.Int32(block_threads - 1)) // fx.Int32(block_threads)
-        _bt_reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
         for _bt_pass in range_constexpr((_PAGED_BT_LDS_SIZE + block_threads - 1) // block_threads):
             _bt_local = fx.Int32(_bt_pass) * fx.Int32(block_threads) + fx.Int32(tid)
             _bt_in_range = _bt_local < _bt_entries
@@ -1792,11 +1762,7 @@ def launch_flex_attn_gfx950(
     mma_atom_qk = fx.make_mma_atom(
         fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype)
     )
-    mma_atom_pv = fx.make_mma_atom(
-        fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype)
-    )
     tiled_mma_qk = fx.make_tiled_mma(mma_atom_qk, wave_layout)
-    tiled_mma_pv = fx.make_tiled_mma(mma_atom_pv, wave_layout)
 
     rows_per_wg = param.block_m * param.num_groups
     num_q_tiles = (seqlen_q + rows_per_wg - 1) // rows_per_wg
@@ -1812,7 +1778,7 @@ def launch_flex_attn_gfx950(
         grid_z = b
 
     flex_attn_fwd_gfx950_kernel(
-        o, q, k, v, seqlen_q, seqlen_kv, b, scale, tiled_mma_qk, tiled_mma_pv, param,
+        o, q, k, v, seqlen_q, seqlen_kv, b, scale, tiled_mma_qk, param,
         ws_o, ws_ml, block_table, block_table_stride, context_lens,
         value_attrs={
             "rocdl.waves_per_eu": _waves_per_eu,
