@@ -5388,13 +5388,15 @@ class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
         for dc in range_constexpr(traits.D_CHUNKS):
             d_row = fx.Index(dc * traits.D_CHUNK) + self.lane_mod_32
             row_base = tile_base + d_row * fx.Index(row_stride) + token_base
-            for ks in range_constexpr(4):
+            for half in range_constexpr(2):
                 ptr = buffer_ops.get_element_ptr(
                     self.lds_vt_base_ptr,
-                    byte_offset=fx.Int32(row_base + fx.Index(ks * 8) - self.lds_vt_base_idx),
+                    byte_offset=fx.Int32(row_base + fx.Index(half * 16) - self.lds_vt_base_idx),
                     elem_type=T.i8,
                 )
-                packs[ks][dc] = llvm.LoadOp(T.i64, ptr, alignment=8).result
+                pair = Vec(llvm.LoadOp(Vec.make_type(2, fx.Int64), ptr, alignment=16).result, (2,), fx.Int64)
+                packs[half * 2][dc] = as_mlir_value(fx.Int64(pair[0]))
+                packs[half * 2 + 1][dc] = as_mlir_value(fx.Int64(pair[1]))
         return packs
 
     def load_v_steps(self, buf_id, first_step, num_steps):
