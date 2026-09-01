@@ -51,6 +51,7 @@ def build_flash_attn_paged_fp8_module(
     cross_seqlen=False,
     paged=False,
     kv_cache_layout="linear",
+    paged_bn128=False,
 ):
     """Build the gfx950 packed-varlen page-64 FP8 attention launcher."""
     gpu_arch = get_hip_arch()
@@ -78,6 +79,8 @@ def build_flash_attn_paged_fp8_module(
 
     if num_kv_heads is None:
         num_kv_heads = num_heads
+    if paged_bn128 and (head_dim, value_head_dim) != (128, 128):
+        raise RuntimeError("paged BN128 currently requires head_dim=value_head_dim=128")
     assert num_heads % num_kv_heads == 0
     NUM_KV_SPLITS = int(num_kv_splits)
     assert NUM_KV_SPLITS >= 1
@@ -99,7 +102,7 @@ def build_flash_attn_paged_fp8_module(
         dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
         dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
         num_kv_splits=num_kv_splits,
-        varlen=varlen,
+        varlen=False if paged_bn128 else varlen,
         cross_seqlen=cross_seqlen,
         paged=paged,
         kv_cache_layout=kv_cache_layout,
@@ -111,16 +114,219 @@ def build_flash_attn_paged_fp8_module(
     HEAD_DIM = traits.HEAD_DIM
     NUM_HEADS_Q = traits.NUM_HEADS_Q
     PAGED = traits.PAGED
+    PAGED_BN128 = bool(paged_bn128)
     DEFAULT_STRIDE_Q_N = traits.DEFAULT_STRIDE_Q_N
     DEFAULT_STRIDE_O_N = traits.NUM_HEADS_Q * traits.V_HEAD_DIM
     DEFAULT_STRIDE_KV_N = traits.DEFAULT_STRIDE_KV_N
     _dualwave_swp_fp8_cache_tag = traits.cache_tag
     _lds_elem_dtype = dtype_to_elem_type(traits.DTYPE_STR)
 
-    @fx.struct
-    class SharedStorage:
-        kv: fx.Array[_lds_elem_dtype, traits.LDS_KV_TOTAL_SIZE, 16]
-        vt: fx.Array[fx.BFloat16, traits.VT_BF16_TOTAL, 16]
+    if PAGED_BN128:
+
+        @fx.struct
+        class SharedStorage:
+            kv: fx.Array[_lds_elem_dtype, traits.LDS_KV_TOTAL_SIZE, 16]
+            vt: fx.Array[fx.BFloat16, traits.VT_BF16_TOTAL, 16]
+            q: fx.Array[_lds_elem_dtype, BLOCK_M * HEAD_DIM, 16]
+
+    else:
+
+        @fx.struct
+        class SharedStorage:
+            kv: fx.Array[_lds_elem_dtype, traits.LDS_KV_TOTAL_SIZE, 16]
+            vt: fx.Array[fx.BFloat16, traits.VT_BF16_TOTAL, 16]
+
+    # BN128: two BLOCK_N=64 KV tiles per iteration, one merged softmax correction.
+    @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1])
+    def flash_attn_paged_fp8_bn128_kernel(
+        Q: fx.Tensor,
+        K: fx.Tensor,
+        V: fx.Tensor,
+        O: fx.Tensor,  # noqa: E741
+        DebugCounts: fx.Tensor,
+        CuSeqQ: fx.Tensor,
+        CuSeqKv: fx.Tensor,
+        BlockTable: fx.Tensor,
+        block_table_stride: fx.Int32,
+        QDescale: fx.Tensor,
+        KDescale: fx.Tensor,
+        VDescale: fx.Tensor,
+        seq_len: fx.Int32,
+        seq_len_kv: fx.Int32,
+        stride_q_n: fx.Int32,
+        stride_kv_n: fx.Int32,
+        head_dim_runtime: fx.Int32,
+    ):
+        ctx = DualwaveFp8KernelContext(
+            traits,
+            Q,
+            K,
+            V,
+            O,
+            DebugCounts,
+            CuSeqQ,
+            CuSeqKv,
+            QDescale,
+            KDescale,
+            VDescale,
+            seq_len,
+            seq_len_kv,
+            stride_q_n,
+            stride_kv_n,
+            head_dim_runtime,
+            stride_o_n=DEFAULT_STRIDE_O_N,
+            BlockTable=BlockTable,
+            block_table_stride=block_table_stride,
+        )
+        ctx.init_types_and_constants()
+        ctx.init_runtime_indices()
+        ctx.init_lds(SharedStorage)
+        ctx.init_thread_mapping()
+        if const_expr(traits.CAUSAL):
+            ctx.init_causal_lpt_order()
+        ctx.init_sequence_lengths()
+        ctx.init_descriptors()
+        ctx.init_atoms_and_lds_ptrs()
+        ctx.init_dma_thread_offsets()
+        ctx.init_descale()
+        ctx.init_tile_bounds()
+        ctx.init_workspace_io()
+
+        q_loader = DualwaveFp8QLoader(ctx)
+        gemm_helper = DualwaveFp8GemmHelper(ctx)
+        softmax_helper = DualwaveFp8SoftmaxHelper(ctx)
+        kv_gmem_to_lds = DualwaveFp8KvGmemToLdsLoader(ctx)
+        kv_lds_to_regs = DualwaveFp8KvLdsToVgprLoader(ctx)
+        output_store = DualwaveFp8StoreHelper(ctx)
+
+        BN = traits.BLOCK_N
+        D_CHUNKS = traits.D_CHUNKS
+        NPF = const_expr(traits.NUM_PREFETCH_K)
+        t0 = ctx.split_t0
+        t_end = ctx.split_t_end
+
+        def _softmax_part(v_s, l_row, m_new):
+            v_s = softmax_helper.sub_m(v_s, m_new)
+            v_p = softmax_helper.exp2(v_s, 0, 16)
+            v_p = softmax_helper.exp2(v_p, 16, 16)
+            l_row = softmax_helper.reduce_sum(l_row, v_p)
+            v_p = gemm_helper.cast_p_fp8_direct(v_p)
+            return v_p, l_row
+
+        def _pv_part(v_p, v_v, v_o):
+            v_o = gemm_helper.pv(v_p, v_v, v_o)
+            return softmax_helper.anchor_v_o(v_o)
+
+        def _subtile_tail(v_s, v_v, v_o, l_row, m_new):
+            v_p, l_row = _softmax_part(v_s, l_row, m_new)
+            v_o = _pv_part(v_p, v_v, v_o)
+            return v_o, l_row
+
+        def _mask_pair(v_s_a, v_s_b, j):
+            if const_expr(traits.CAUSAL):
+                return softmax_helper.causal_mask_pair_if_needed(v_s_a, v_s_b, j)
+            return v_s_a, v_s_b
+
+        def _correct_o(v_o, m_row, l_row, m_tile):
+            if const_expr(traits.DUALWAVE_SWP_LAZY_RESCALE):
+                return softmax_helper.lazy_correct_o(v_o, m_row, l_row, m_tile)
+            m_new, corr = softmax_helper.rescale_from_tile_max(m_row, m_tile)
+            softmax_helper.scale_o(v_o, corr)
+            return v_o, m_new, softmax_helper.apply_l_rescale(l_row, corr)
+
+        def _merge_tile_max(v_s_a, v_s_b):
+            m_tile = softmax_helper.max2(softmax_helper.reduce_max(v_s_a), softmax_helper.reduce_max(v_s_b))
+            if const_expr(traits.CAUSAL):
+                m_tile = softmax_helper.floor_masked_max(m_tile)
+            return m_tile
+
+        page_t0, page_t1 = ctx.load_page_id_pair(t0 * BN)
+        kv_gmem_to_lds.load_k(t0 * BN, t0 % fx.Index(NPF), page_id=page_t0)
+        if const_expr(traits.QREG):
+            q_loader.stage_q_to_lds()
+        rocdl.s_waitcnt(0)
+        rocdl.sched_barrier(0)
+        rocdl.s_barrier()
+
+        ctx.init_q_row()
+        q_row = ctx.q_row
+
+        q_wide = gemm_helper.load_q_wide() if const_expr(traits.QREG) else None
+
+        page_t2, page_t3 = ctx.load_page_id_pair((t0 + 2) * BN)
+        kv_gmem_to_lds.load_k((t0 + 1) * BN, (t0 + 1) % fx.Index(NPF), page_id=page_t1)
+        kv_gmem_to_lds.load_v(t0 * BN, t0 % fx.Index(NPF), page_id=page_t0)
+        kv_gmem_to_lds.load_v((t0 + 1) * BN, (t0 + 1) % fx.Index(NPF), page_id=page_t1)
+        kv_gmem_to_lds.load_k((t0 + 2) * BN, (t0 + 2) % fx.Index(NPF), page_id=page_t2)
+        kv_gmem_to_lds.load_k((t0 + 3) * BN, (t0 + 3) % fx.Index(NPF), page_id=page_t3)
+        kv_gmem_to_lds.load_v((t0 + 2) * BN, (t0 + 2) % fx.Index(NPF), page_id=page_t2)
+        kv_gmem_to_lds.load_v((t0 + 3) * BN, (t0 + 3) % fx.Index(NPF), page_id=page_t3)
+        rocdl.s_waitcnt(0)
+        rocdl.sched_barrier(0)
+        rocdl.s_barrier()
+        rocdl.sched_barrier(0)
+
+        m_row = ctx.c_neg_inf
+        l_row = ctx.c_zero_f
+        v_o = [ctx.c_zero_v16f32 for _ in range_constexpr(D_CHUNKS)]
+
+        NPF_I = const_expr(fx.Index(NPF))
+
+        def _ring_wrap(x):
+            return (x >= NPF_I).select(x - NPF_I, x)
+
+        init_args = [m_row, l_row] + v_o + [t0 % fx.Index(NPF)]
+        loop_results = init_args
+        for j, loop_args in range(fx.Index(t0), t_end, fx.Index(2), init=init_args):
+            m_row = loop_args[0]
+            l_row = loop_args[1]
+            v_o = [loop_args[2 + i] for i in range_constexpr(D_CHUNKS)]
+
+            a_buf = loop_args[2 + D_CHUNKS]
+            b_buf = _ring_wrap(a_buf + fx.Index(1))
+            nn_a_buf = _ring_wrap(a_buf + fx.Index(2))
+            f_a_buf = _ring_wrap(a_buf + fx.Index(4))
+            f_b_buf = _ring_wrap(a_buf + fx.Index(5))
+
+            v_k_a = kv_lds_to_regs.load_k(a_buf)
+            v_k_b = kv_lds_to_regs.load_k(b_buf)
+            v_v_a = kv_lds_to_regs.load_v(a_buf)
+
+            page_f_a, page_f_b = ctx.load_page_id_pair((j + fx.Index(4)) * BN)
+            kv_gmem_to_lds.load_k((j + fx.Index(4)) * BN, f_a_buf, page_id=page_f_a)
+            kv_gmem_to_lds.load_k((j + fx.Index(5)) * BN, f_b_buf, page_id=page_f_b)
+            kv_gmem_to_lds.load_v((j + fx.Index(4)) * BN, f_a_buf, page_id=page_f_a)
+            kv_gmem_to_lds.load_v((j + fx.Index(5)) * BN, f_b_buf, page_id=page_f_b)
+
+            v_s_a = gemm_helper.qk(v_k_a, q_wide)
+            v_s_b = gemm_helper.qk(v_k_b, q_wide)
+            v_s_a, v_s_b = _mask_pair(v_s_a, v_s_b, j)
+            m_tile = _merge_tile_max(v_s_a, v_s_b)
+            v_o, m_new, l_row = _correct_o(v_o, m_row, l_row, m_tile)
+            v_o = softmax_helper.anchor_v_o(v_o)
+
+            v_o, l_row = _subtile_tail(v_s_a, v_v_a, v_o, l_row, m_new)
+            v_v_b = kv_lds_to_regs.load_v(b_buf)
+            v_o, l_row = _subtile_tail(v_s_b, v_v_b, v_o, l_row, m_new)
+            m_row = m_new
+
+            rocdl.s_waitcnt(0)
+            rocdl.sched_barrier(0)
+            rocdl.s_barrier()
+            rocdl.sched_barrier(0)
+
+            loop_results = yield [m_row, l_row] + v_o + [nn_a_buf]
+        m_row = loop_results[0]
+        l_row = loop_results[1]
+        v_o = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
+
+        inv_l_rcp = rocdl.rcp(T.f32, _raw(l_row))
+        inv_l = ArithValue(fx.Float32(l_row) > ctx.c_zero_f).select(inv_l_rcp, ctx.c_zero_f)
+        if const_expr(traits.FP8_PV):
+            inv_l = ArithValue(inv_l) * ctx.vd_fp8
+        softmax_helper.scale_o(v_o, inv_l)
+        rocdl.s_barrier()
+        output_store.store_final_o(v_o, q_row)
 
     @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1])
     def flash_attn_dualwave_swp_fp8_gfx950_kernel(
@@ -795,35 +1001,62 @@ def build_flash_attn_paged_fp8_module(
             if const_expr(daz)
             else None
         )
-        flash_attn_dualwave_swp_fp8_gfx950_kernel(
-            Q,
-            K,
-            V,
-            O,
-            DebugCounts,
-            CuSeqQ,
-            CuSeqKv,
-            BlockTable,
-            block_table_stride,
-            QDescale,
-            KDescale,
-            VDescale,
-            seq_len,
-            seq_len_kv,
-            stride_q_n,
-            stride_o_n,
-            stride_kv_n,
-            head_dim_runtime,
-            value_attrs={
-                "rocdl.waves_per_eu": waves_per_eu,
-                "rocdl.flat_work_group_size": f"{BLOCK_SIZE},{BLOCK_SIZE}",
-                "passthrough": passthrough_entries,
-            },
-        ).launch(
-            grid=(NUM_HEADS_Q, num_q_blocks, grid_z),
-            block=(BLOCK_SIZE, 1, 1),
-            stream=stream,
-        )
+        kernel_attrs = {
+            "rocdl.waves_per_eu": waves_per_eu,
+            "rocdl.flat_work_group_size": f"{BLOCK_SIZE},{BLOCK_SIZE}",
+            "passthrough": passthrough_entries,
+        }
+        if const_expr(PAGED_BN128):
+            flash_attn_paged_fp8_bn128_kernel(
+                Q,
+                K,
+                V,
+                O,
+                DebugCounts,
+                CuSeqQ,
+                CuSeqKv,
+                BlockTable,
+                block_table_stride,
+                QDescale,
+                KDescale,
+                VDescale,
+                seq_len,
+                seq_len_kv,
+                stride_q_n,
+                stride_kv_n,
+                head_dim_runtime,
+                value_attrs=kernel_attrs,
+            ).launch(
+                grid=(NUM_HEADS_Q, num_q_blocks, grid_z),
+                block=(BLOCK_SIZE, 1, 1),
+                stream=stream,
+            )
+        else:
+            flash_attn_dualwave_swp_fp8_gfx950_kernel(
+                Q,
+                K,
+                V,
+                O,
+                DebugCounts,
+                CuSeqQ,
+                CuSeqKv,
+                BlockTable,
+                block_table_stride,
+                QDescale,
+                KDescale,
+                VDescale,
+                seq_len,
+                seq_len_kv,
+                stride_q_n,
+                stride_o_n,
+                stride_kv_n,
+                head_dim_runtime,
+                value_attrs=kernel_attrs,
+            ).launch(
+                grid=(NUM_HEADS_Q, num_q_blocks, grid_z),
+                block=(BLOCK_SIZE, 1, 1),
+                stream=stream,
+            )
         if const_expr(SPLITK):
             combine_rows = bs_idx * NUM_HEADS_Q * sl_idx
             flash_attn_splitk_combine_kernel(O, DebugCounts, batch_size, seq_len, stride_o_n).launch(
@@ -841,6 +1074,24 @@ def build_flash_attn_paged_fp8_module(
             "disable-machine-sink": True,
         },
     }
+
+    def _validate_paged_bn128_launch(batch_size, seq_len_kv, block_table_stride):
+        if not PAGED_BN128:
+            return
+        batch_size = int(batch_size)
+        seq_len_kv = int(seq_len_kv)
+        block_table_stride = int(block_table_stride)
+        num_kv_pages = (seq_len_kv + traits.PAGE_SIZE - 1) // traits.PAGE_SIZE
+        if batch_size != 1 or num_kv_pages < 2 or num_kv_pages % 2 != 0:
+            raise ValueError(
+                "paged BN128 requires batch_size=1 and a positive even number "
+                f"of KV pages; got batch_size={batch_size}, seq_len_kv={seq_len_kv}, "
+                f"page_size={traits.PAGE_SIZE}"
+            )
+        if block_table_stride < num_kv_pages:
+            raise ValueError(
+                "paged BN128 block table has too few entries: " f"need {num_kv_pages}, got stride {block_table_stride}"
+            )
 
     def _launch(
         Q,
@@ -895,6 +1146,7 @@ def build_flash_attn_paged_fp8_module(
             block_table_stride = 0
         if PAGED and block_table is O:
             raise ValueError("paged fp8 flash_attn requires block_table")
+        _validate_paged_bn128_launch(batch_size, seq_len_kv, block_table_stride)
         # Per-tensor fp8 descales (shape-[1] fp32). The kernel only reads them on
         # the fp8 path; bf16/f16 launches pass O as an unused placeholder.
         if q_descale is None:
@@ -997,6 +1249,7 @@ def build_flash_attn_paged_fp8_module(
             block_table = O
         if block_table_stride is None:
             block_table_stride = 0
+        _validate_paged_bn128_launch(batch_size, seq_len_kv, block_table_stride)
         if q_descale is None:
             q_descale = O
         if k_descale is None:
