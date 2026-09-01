@@ -4438,21 +4438,38 @@ def test_return_lse_rejects_fp8():
     [(False, False), (True, False), (True, True)],
     ids=["default", "side", "side-copies"],
 )
+@pytest.mark.parametrize(
+    ("query_lengths", "kv_lengths", "block_table_rows"),
+    [
+        ([64, 32], [128, 96], [[2, 0], [3, 1]]),
+        ([64], [128], [[1, 0]]),
+        ([64], [192], [[2, 0, 1]]),
+    ],
+    ids=["ragged", "single-sequence-even-pages", "single-sequence-odd-pages"],
+)
 def test_paged_fp8_asymmetric_value_matches_torch(
     head_dim,
     value_head_dim,
     use_non_default_stream,
     force_internal_copies,
+    query_lengths,
+    kv_lengths,
+    block_table_rows,
 ):
     """Packed causal FP8 page-64 attention supports native Q/K and V widths."""
+    if len(query_lengths) == 1 and force_internal_copies and head_dim == 192:
+        pytest.skip("D192 wrapper-copy stream ordering is covered by the ragged cases")
     torch.manual_seed(17)
-    query_lengths = [64, 32]
-    kv_lengths = [128, 96]
-    q_indptr = torch.tensor([0, 64, 96], device="cuda", dtype=torch.int32)
-    kv_indptr = torch.tensor([0, 128, 224], device="cuda", dtype=torch.int32)
-    block_table = torch.tensor([[2, 0], [3, 1]], device="cuda", dtype=torch.int32)
+    q_offsets = [0]
+    kv_offsets = [0]
+    for query_length, kv_length in zip(query_lengths, kv_lengths):
+        q_offsets.append(q_offsets[-1] + query_length)
+        kv_offsets.append(kv_offsets[-1] + kv_length)
+    q_indptr = torch.tensor(q_offsets, device="cuda", dtype=torch.int32)
+    kv_indptr = torch.tensor(kv_offsets, device="cuda", dtype=torch.int32)
+    block_table = torch.tensor(block_table_rows, device="cuda", dtype=torch.int32)
     seqlen_k = torch.tensor(kv_lengths, device="cuda", dtype=torch.int32)
-    num_pages = 4
+    num_pages = max(max(row) for row in block_table_rows) + 1
 
     query, query_descale = quantize_per_tensor_fp8(torch.randn(sum(query_lengths), 16, head_dim, device="cuda") * 0.2)
     key, key_descale = quantize_per_tensor_fp8(torch.randn(num_pages, 1, head_dim // 16, 64, 16, device="cuda") * 0.2)
@@ -4559,6 +4576,187 @@ def test_paged_fp8_asymmetric_value_matches_torch(
     assert actual.shape == (sum(query_lengths), 16, value_head_dim)
     assert bool(torch.isfinite(actual).all().item())
     torch.testing.assert_close(actual, expected, rtol=2.0e-2, atol=2.0e-2)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize(
+    ("head_dim", "value_head_dim"),
+    [(128, 128), (192, 128), (192, 192)],
+    ids=["d128-v128", "d192-v128", "d192-v192"],
+)
+def test_paged_fp8_long_context_random_pages_matches_torch(head_dim, value_head_dim):
+    """Long context, shuffled pages, and a partial tail preserve accuracy."""
+    torch.manual_seed(23)
+    query_length = 63
+    kv_length = 8161
+    num_pages = (kv_length + 63) // 64
+
+    query, query_descale = quantize_per_tensor_fp8(torch.randn(query_length, 16, head_dim, device="cuda") * 0.2)
+    key, key_descale = quantize_per_tensor_fp8(torch.randn(num_pages, 1, head_dim // 16, 64, 16, device="cuda") * 0.2)
+    value, value_descale = quantize_per_tensor_fp8(
+        torch.randn(num_pages, 1, 4, value_head_dim, 16, device="cuda") * 0.2
+    )
+    block_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).reshape(1, num_pages)
+    q_indptr = torch.tensor([0, query_length], device="cuda", dtype=torch.int32)
+    kv_indptr = torch.tensor([0, kv_length], device="cuda", dtype=torch.int32)
+    seqlen_k = torch.tensor([kv_length], device="cuda", dtype=torch.int32)
+
+    actual = flydsl_flash_attn_func(
+        query,
+        key,
+        value,
+        causal=True,
+        num_kv_heads=1,
+        cu_seqlens_q=q_indptr,
+        cu_seqlens_kv=kv_indptr,
+        max_seqlen_q=query_length,
+        max_seqlen_kv=kv_length,
+        cross_seqlen=True,
+        block_table=block_table,
+        seqlen_k=seqlen_k,
+        kv_cache_layout="vectorized",
+        q_descale=query_descale,
+        k_descale=key_descale,
+        v_descale=value_descale,
+    )
+    torch.cuda.synchronize()
+
+    physical_pages = block_table[0].long()
+    query_ref = query.float() * query_descale
+    key_ref = (
+        key[physical_pages].permute(0, 3, 1, 2, 4).reshape(-1, 1, head_dim)[:kv_length].float() * key_descale
+    ).expand(-1, 16, -1)
+    value_ref = (
+        value[physical_pages].permute(0, 2, 4, 1, 3).reshape(-1, 1, value_head_dim)[:kv_length].float() * value_descale
+    ).expand(-1, 16, -1)
+    logits = torch.einsum("qhd,khd->hqk", query_ref, key_ref) / math.sqrt(head_dim)
+    query_positions = torch.arange(query_length, device="cuda")
+    key_positions = torch.arange(kv_length, device="cuda")
+    causal_mask = key_positions[None, :] <= (kv_length - query_length + query_positions)[:, None]
+    logits.masked_fill_(~causal_mask[None, :, :], float("-inf"))
+    expected = torch.einsum("hqk,khd->qhd", torch.softmax(logits, dim=-1), value_ref).to(torch.bfloat16)
+
+    assert bool(torch.isfinite(actual).all().item())
+    torch.testing.assert_close(actual, expected, rtol=2.0e-2, atol=2.0e-2)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize(
+    ("head_dim", "value_head_dim"),
+    [(128, 128), (192, 128), (192, 192)],
+    ids=["d128-v128", "d192-v128", "d192-v192"],
+)
+def test_paged_fp8_graph_replay_matches_torch(head_dim, value_head_dim):
+    """The optimized paged variants preserve caller-owned graph output."""
+    torch.manual_seed(29)
+    query_length = 63
+    kv_length = 128
+    num_pages = kv_length // 64
+
+    query, query_descale = quantize_per_tensor_fp8(torch.randn(query_length, 16, head_dim, device="cuda") * 0.2)
+    key, key_descale = quantize_per_tensor_fp8(torch.randn(num_pages, 1, head_dim // 16, 64, 16, device="cuda") * 0.2)
+    value, value_descale = quantize_per_tensor_fp8(
+        torch.randn(num_pages, 1, 4, value_head_dim, 16, device="cuda") * 0.2
+    )
+    output = torch.empty(query_length, 16, value_head_dim, device="cuda", dtype=torch.bfloat16)
+    block_table = torch.tensor([[1, 0]], device="cuda", dtype=torch.int32)
+    q_indptr = torch.tensor([0, query_length], device="cuda", dtype=torch.int32)
+    kv_indptr = torch.tensor([0, kv_length], device="cuda", dtype=torch.int32)
+    seqlen_k = torch.tensor([kv_length], device="cuda", dtype=torch.int32)
+    kwargs = dict(
+        causal=True,
+        num_kv_heads=1,
+        cu_seqlens_q=q_indptr,
+        cu_seqlens_kv=kv_indptr,
+        max_seqlen_q=query_length,
+        max_seqlen_kv=kv_length,
+        cross_seqlen=True,
+        block_table=block_table,
+        seqlen_k=seqlen_k,
+        kv_cache_layout="vectorized",
+        q_descale=query_descale,
+        k_descale=key_descale,
+        v_descale=value_descale,
+        out=output,
+    )
+
+    warmup_stream = torch.cuda.Stream()
+    with torch.cuda.stream(warmup_stream):
+        flydsl_flash_attn_func(query, key, value, **kwargs)
+    torch.cuda.current_stream().wait_stream(warmup_stream)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = flydsl_flash_attn_func(query, key, value, **kwargs)
+    graph.replay()
+    torch.cuda.synchronize()
+
+    physical_pages = block_table[0].long()
+    query_ref = query.float() * query_descale
+    key_ref = (
+        key[physical_pages].permute(0, 3, 1, 2, 4).reshape(-1, 1, head_dim)[:kv_length].float() * key_descale
+    ).expand(-1, 16, -1)
+    value_ref = (
+        value[physical_pages].permute(0, 2, 4, 1, 3).reshape(-1, 1, value_head_dim)[:kv_length].float() * value_descale
+    ).expand(-1, 16, -1)
+    logits = torch.einsum("qhd,khd->hqk", query_ref, key_ref) / math.sqrt(head_dim)
+    query_positions = torch.arange(query_length, device="cuda")
+    key_positions = torch.arange(kv_length, device="cuda")
+    causal_mask = key_positions[None, :] <= (kv_length - query_length + query_positions)[:, None]
+    logits.masked_fill_(~causal_mask[None, :, :], float("-inf"))
+    expected = torch.einsum("hqk,khd->qhd", torch.softmax(logits, dim=-1), value_ref).to(torch.bfloat16)
+
+    assert captured.data_ptr() == output.data_ptr()
+    assert bool(torch.isfinite(output).all().item())
+    torch.testing.assert_close(output, expected, rtol=2.0e-2, atol=2.0e-2)
+
+
+@_requires_gfx950
+def test_paged_fp8_bn128_launcher_rejects_unsupported_shapes():
+    """Direct BN128 launches must preserve the single-sequence page-pair contract."""
+    from kernels.attention.flash_attn_fp8_paged_gfx950 import build_flash_attn_paged_fp8_module
+
+    launch = build_flash_attn_paged_fp8_module(
+        num_heads=16,
+        num_kv_heads=1,
+        head_dim=128,
+        value_head_dim=128,
+        causal=True,
+        dtype_str="fp8",
+        varlen=True,
+        cross_seqlen=True,
+        paged=True,
+        kv_cache_layout="vectorized",
+        paged_bn128=True,
+    )
+    tensor = torch.empty(1, dtype=FP8_DTYPE, device="cuda")
+    output = torch.empty(1, dtype=torch.bfloat16, device="cuda")
+    block_table = torch.zeros(3, dtype=torch.int32, device="cuda")
+
+    with pytest.raises(ValueError, match="batch_size=1"):
+        launch(
+            tensor,
+            tensor,
+            tensor,
+            output,
+            batch_size=2,
+            seq_len=64,
+            seq_len_kv=128,
+            block_table=block_table,
+            block_table_stride=2,
+        )
+    with pytest.raises(ValueError, match="positive even number"):
+        launch(
+            tensor,
+            tensor,
+            tensor,
+            output,
+            batch_size=1,
+            seq_len=64,
+            seq_len_kv=192,
+            block_table=block_table,
+            block_table_stride=3,
+        )
 
 
 @_requires_gfx950

@@ -393,6 +393,7 @@ def _build_paged_fp8(
     lazy_rescale: bool,
     setprio: bool,
     enable_stagger: bool,
+    use_bn128: bool,
 ):
     """Build the gfx950 packed-varlen, vectorized page-64 FP8 launcher."""
     from kernels.attention.flash_attn_fp8_paged_gfx950 import build_flash_attn_paged_fp8_module
@@ -414,6 +415,7 @@ def _build_paged_fp8(
         cross_seqlen=True,
         paged=True,
         kv_cache_layout="vectorized",
+        paged_bn128=use_bn128,
     )
 
 
@@ -668,6 +670,8 @@ def _flydsl_flash_attn_paged(
             and (not _arch.startswith("gfx950") or Sq <= _VARLEN_LIGHT_MAX_SEQ)
         )
         if paged_fp8:
+            num_kv_pages = (skv + page_size - 1) // page_size
+            use_bn128 = fp8_head_dims == (128, 128) and B == 1 and num_kv_pages % 2 == 0
             paged_setprio = dualwave_swp_setprio and D != 192
             paged_stagger = dualwave_swp_enable_stagger and not (fp8_head_dims == (192, 192) and skv >= 65536)
             exe = _build_paged_fp8(
@@ -680,6 +684,7 @@ def _flydsl_flash_attn_paged(
                 lazy_rescale=dualwave_swp_lazy_rescale,
                 setprio=paged_setprio,
                 enable_stagger=paged_stagger,
+                use_bn128=use_bn128,
             )
         elif _paged_light_ok:
             exe = _build_paged_light(
