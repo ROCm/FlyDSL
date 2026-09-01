@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-08-31T21:27:35Z",
+ "updated": "2026-09-01T01:09:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33457454040,
+   "pr": 1084,
+   "commit": "df5ef61837700c286f7daa04c8fbf315dd7f5b16",
+   "branch": "ci/shared-gfx950-runner",
+   "event": "pull_request",
+   "title": "[CI] Share gfx950 validation across runner pools",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33457454040",
+   "created_at": "2026-09-01T01:06:50Z",
+   "updated_at": "2026-09-01T01:07:26Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 33457189017,
+   "pr": 1085,
+   "commit": "be7ed1dd441b2a729756d535bbeacc75164917b4",
+   "branch": "bump-version-0.3.3",
+   "event": "pull_request",
+   "title": "Release: bump version to 0.3.3",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33457189017",
+   "created_at": "2026-09-01T01:02:51Z",
+   "updated_at": "2026-09-01T01:05:40Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 33407587633,
    "pr": 1032,
@@ -115,11 +145,11 @@
    "branch": "ci/shared-gfx950-runner",
    "event": "pull_request",
    "title": "[CI] Share gfx950 validation across runner pools",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33397592944",
    "created_at": "2026-08-31T13:33:12Z",
-   "updated_at": "2026-08-31T15:03:51Z",
+   "updated_at": "2026-09-01T01:06:52Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -135,10 +165,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-08-31T15:03:51Z",
-     "completed_at": null,
+     "completed_at": "2026-09-01T01:06:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33397592944/job/99534502507"
     },
     {
@@ -2039,67 +2069,6 @@
      "started_at": "2026-08-27T09:04:27Z",
      "completed_at": "2026-08-27T10:37:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33048248167/job/98465283584",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 33038905462,
-   "pr": null,
-   "commit": "bce20846d02f49d1f17444894ad07a6bf8e7d474",
-   "branch": "feat/gfx950-paged-attention-vllm-kv-layouts",
-   "event": "pull_request",
-   "title": "Support vLLM paged KV cache layouts on the gfx950 attention kernel",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33038905462",
-   "created_at": "2026-08-27T04:16:20Z",
-   "updated_at": "2026-08-27T04:17:58Z",
-   "actor": "akii96",
-   "jobs": []
-  },
-  {
-   "run_id": 33027370865,
-   "pr": 1067,
-   "commit": "82bc59f1ff83debebb4d239fd8042c42016438cf",
-   "branch": "mxfp8_8w",
-   "event": "pull_request",
-   "title": "[MI355]support mxfp8 8wave pipeline",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33027370865",
-   "created_at": "2026-08-27T00:35:48Z",
-   "updated_at": "2026-08-27T03:07:02Z",
-   "actor": "solinzby1",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-27T00:52:49Z",
-     "completed_at": "2026-08-27T01:08:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33027370865/job/98374550742",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-27T00:53:05Z",
-     "completed_at": "2026-08-27T03:07:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33027370865/job/98374550786",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-27T00:53:00Z",
-     "completed_at": "2026-08-27T01:45:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33027370865/job/98374550795",
      "log_fetch_failed": true
     }
    ]
