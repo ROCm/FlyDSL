@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-01T09:07:49Z",
+ "updated": "2026-09-01T09:28:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,21 +10,22 @@
    "branch": "xyt/refine_async",
    "event": "pull_request",
    "title": "[A16W16 GEMM] Consolidate gfx950 A/B load setup",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33479103086",
    "created_at": "2026-09-01T06:47:02Z",
-   "updated_at": "2026-09-01T07:25:45Z",
+   "updated_at": "2026-09-01T09:17:50Z",
    "actor": "xytpai",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-01T07:26:31Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33479103086/job/99773739827"
+     "completed_at": "2026-09-01T09:10:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33479103086/job/99773739827",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -49,9 +50,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-01T07:25:45Z",
+     "started_at": "2026-09-01T09:17:49Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33479103086/job/99773739963"
     }
@@ -64,13 +65,50 @@
    "branch": "add-minnumf-wrapper",
    "event": "pull_request",
    "title": "[Bugfix] Add type-safe fx.minnumf wrapper matching maxnumf",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33478947923",
    "created_at": "2026-09-01T06:44:56Z",
-   "updated_at": "2026-09-01T09:00:54Z",
+   "updated_at": "2026-09-01T09:14:09Z",
    "actor": "LWenH",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-01T09:15:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33478947923/job/99802649421"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-01T09:14:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33478947923/job/99802649432"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-01T09:15:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33478947923/job/99802649461"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-01T09:15:18Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33478947923/job/99802649468"
+    }
+   ]
   },
   {
    "run_id": 33477401202,
@@ -455,11 +493,11 @@
    "branch": "bump-version-0.3.3",
    "event": "pull_request",
    "title": "Release: bump version to 0.3.3",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33457189017",
    "created_at": "2026-09-01T01:02:51Z",
-   "updated_at": "2026-09-01T08:13:07Z",
+   "updated_at": "2026-09-01T09:27:14Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -474,11 +512,12 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-01T08:13:06Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33457189017/job/99705572959"
+     "completed_at": "2026-09-01T09:27:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33457189017/job/99705572959",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -508,19 +547,19 @@
    "branch": "convolution",
    "event": "pull_request",
    "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33407587633",
    "created_at": "2026-08-31T15:17:25Z",
-   "updated_at": "2026-08-31T17:23:38Z",
+   "updated_at": "2026-09-01T09:06:53Z",
    "actor": "amd-nprotaso",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-31T17:23:38Z",
+     "started_at": "2026-09-01T09:06:52Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33407587633/job/99577505259"
     },
