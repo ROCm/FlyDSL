@@ -1,8 +1,85 @@
 {
  "schema": 1,
- "updated": "2026-09-01T05:12:44Z",
+ "updated": "2026-09-01T06:21:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33476979982,
+   "pr": 1086,
+   "commit": "8c32839ab85a24acd46e4b1f06fb62c82b18aabf",
+   "branch": "xyt/refine_async",
+   "event": "pull_request",
+   "title": "[A16W16 GEMM] Consolidate gfx950 A/B load setup",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33476979982",
+   "created_at": "2026-09-01T06:17:32Z",
+   "updated_at": "2026-09-01T06:19:33Z",
+   "actor": "xytpai",
+   "jobs": []
+  },
+  {
+   "run_id": 33473397006,
+   "pr": 1084,
+   "commit": "28e6db8a4a778db4764c06d117288f883061d381",
+   "branch": "ci/shared-gfx950-runner",
+   "event": "pull_request",
+   "title": "[CI] Run gfx950 validation on the MI355 and MI35x pools",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33473397006",
+   "created_at": "2026-09-01T05:23:08Z",
+   "updated_at": "2026-09-01T05:58:09Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-01T05:58:52Z",
+     "completed_at": "2026-09-01T06:16:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33473397006/job/99754191561",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-01T05:58:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33473397006/job/99754191593"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-01T06:01:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33473397006/job/99754191603"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-01T05:58:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33473397006/job/99754191609"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-8",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-01T06:01:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33473397006/job/99754191632"
+    }
+   ]
+  },
   {
    "run_id": 33467360238,
    "pr": 1074,
@@ -44,11 +121,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-01T04:15:28Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33466887196/job/99734858998"
+     "completed_at": "2026-09-01T05:38:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33466887196/job/99734858998",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -77,7 +155,7 @@
    "commit": "ec4b9ae69698cca06d025589ed3dd3e425a45f98",
    "branch": "ci/shared-gfx950-runner",
    "event": "pull_request",
-   "title": "[CI] Revert to runner labels that have live runners",
+   "title": "[CI] Run gfx950 validation on the MI355 and MI35x pools",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33464111861",
@@ -245,7 +323,7 @@
    "commit": "df5ef61837700c286f7daa04c8fbf315dd7f5b16",
    "branch": "ci/shared-gfx950-runner",
    "event": "pull_request",
-   "title": "[CI] Revert to runner labels that have live runners",
+   "title": "[CI] Run gfx950 validation on the MI355 and MI35x pools",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33457454040",
@@ -465,7 +543,7 @@
    "commit": "8c0010aded0800f28647105953c3e3f8d4d5cc30",
    "branch": "ci/shared-gfx950-runner",
    "event": "pull_request",
-   "title": "[CI] Revert to runner labels that have live runners",
+   "title": "[CI] Run gfx950 validation on the MI355 and MI35x pools",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33397592944",
@@ -617,7 +695,7 @@
    "commit": "be8147cda9d2748d239312c92bb321df6963eb96",
    "branch": "ci/shared-gfx950-runner",
    "event": "pull_request",
-   "title": "[CI] Revert to runner labels that have live runners",
+   "title": "[CI] Run gfx950 validation on the MI355 and MI35x pools",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33377511770",
@@ -2385,95 +2463,6 @@
    "updated_at": "2026-08-27T21:20:06Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 33066723521,
-   "pr": null,
-   "commit": "b7751d8a3e9f6f47165962a9745b72e5faaa5ac9",
-   "branch": "main",
-   "event": "push",
-   "title": "[CI] Build the benchmark baseline wheel against the base commit's LLV\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066723521",
-   "created_at": "2026-08-27T11:17:31Z",
-   "updated_at": "2026-08-27T13:15:17Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-27T11:52:23Z",
-     "completed_at": "2026-08-27T13:15:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066723521/job/98506874752"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-27T11:51:36Z",
-     "completed_at": "2026-08-27T12:08:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066723521/job/98506874814"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-27T11:51:47Z",
-     "completed_at": "2026-08-27T12:46:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33066723521/job/98506874817",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 33059511112,
-   "pr": null,
-   "commit": "b06fb9f2c1e962f236ab451f42abcbbce55b42cb",
-   "branch": "rdna3-int8-wmma-gemm",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Add RDNA3 INT8 WMMA GEMM, 1.23-2.80x over torch",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33059511112",
-   "created_at": "2026-08-27T09:38:51Z",
-   "updated_at": "2026-08-27T11:55:03Z",
-   "actor": "vlluvia",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-27T10:29:12Z",
-     "completed_at": "2026-08-27T11:48:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33059511112/job/98486806297",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-27T10:29:44Z",
-     "completed_at": "2026-08-27T11:55:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33059511112/job/98486806301",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-27T10:28:58Z",
-     "completed_at": "2026-08-27T10:45:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33059511112/job/98486806357"
-    }
-   ]
   }
  ]
 }
