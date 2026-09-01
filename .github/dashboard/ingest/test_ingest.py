@@ -189,42 +189,9 @@ def test_merge_history_sorted_by_ts_then_runner_op_shape():
 # --------------------------------------------------------------------------- #
 def test_runner_of_matches_known_box_and_rejects_unknown():
     assert ingest.runner_of("test (linux-flydsl-mi355-1)") == "linux-flydsl-mi355-1"
-    assert ingest.runner_of("test (linux-flydsl-mi35x-1)") is None  # MI35x test results stay out of the dashboard
     assert ingest.runner_of("test (linux-flydsl-unknown-9)") is None  # not in RUNNER_ARCH
     assert ingest.runner_of("build") is None
     assert ingest.runner_of("") is None
-
-
-def test_runner_of_resolves_shared_job_from_actual_runner():
-    # The shared gfx950 entry reports a fixed check name, so only the concrete
-    # runner distinguishes an MI355 box (benchmarked) from an MI35x one.
-    shared_job = "test (linux-flydsl-mi355-1)"
-    assert ingest.runner_of(shared_job, "linux-flydsl-mi355-1-g2mdh-runner-d6jzr") == "linux-flydsl-mi355-1"
-    assert ingest.runner_of(shared_job, "linux-flydsl-mi35x-1-runner-abcd") is None
-    assert ingest.runner_of(shared_job, "linux-flydsl-mi35x-8-runner-efgh") is None
-    # Persistent (non-ephemeral) runners report the bare label.
-    assert ingest.runner_of("test (linux-flydsl-navi-2)", "linux-flydsl-navi-2") == "linux-flydsl-navi-2"
-    # A longer box in the same family must not match by prefix alone.
-    assert ingest.runner_of(shared_job, "linux-flydsl-mi355-10-runner-x") is None
-
-
-def test_runner_of_ignores_non_matrix_jobs_on_benchmark_boxes():
-    # prepare-mlir runs on linux-flydsl-mi325-1 but is a build job, not a
-    # benchmark job. Admitting it would parse its LLVM build log and clobber the
-    # real test job's board entry for that runner.
-    assert ingest.runner_of("prepare-mlir", "linux-flydsl-mi325-1-tnxdf-runner-g5txn") is None
-    assert ingest.runner_of("build", "linux-flydsl-mi355-1-g2mdh-runner-d6jzr") is None
-    # Per-runner matrix jobs on the same boxes still resolve.
-    assert ingest.runner_of("test (linux-flydsl-mi325-1)", "linux-flydsl-mi325-1-tnxdf-runner-77w7n") == (
-        "linux-flydsl-mi325-1"
-    )
-    assert (
-        ingest.runner_of(
-            "Multi-GPU Communication Operator Tests (linux-flydsl-mi355-8)",
-            "linux-flydsl-mi355-8-abcd-runner-efgh",
-        )
-        == "linux-flydsl-mi355-8"
-    )
 
 
 # --------------------------------------------------------------------------- #

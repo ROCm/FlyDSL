@@ -3,7 +3,7 @@
 
 For each recent run of the benchmark workflow (``flydsl.yaml`` / "Fly DSL test") this:
 
-1. finds benchmark jobs by their actual runner identity,
+1. finds the three single-GPU benchmark jobs (``test (linux-flydsl-<box>)``),
 2. downloads each job's log and parses it with :mod:`parse_bench`,
 3. merges the resulting records into ``history.json`` (idempotent per run+runner),
 4. snapshots recent runs + per-job status into ``runs.json`` for the live CI board.
@@ -84,30 +84,9 @@ def run_jobs(repo: str, run_id: int) -> list[dict]:
     return jobs
 
 
-def runner_of(job_name: str, runner_name: str | None = None) -> str | None:
-    """Return the stable benchmark runner behind a job.
-
-    Only per-runner matrix jobs qualify, i.e. those whose name carries a
-    ``(<label>)`` suffix. A plain job that merely happens to be scheduled on a
-    benchmark box (``prepare-mlir`` runs on ``linux-flydsl-mi325-1``) is not a
-    benchmark job: admitting it would download its build log for parsing and
-    let its status overwrite the real test job's entry for that runner.
-
-    For qualifying jobs the concrete ephemeral runner name from the Actions
-    jobs API wins over the label in the name, because the shared gfx950 entry
-    reports a fixed hardware-agnostic label that no longer identifies the box.
-    The API omits ``runner_name`` until a job is picked up, so a queued job
-    still resolves by name and is re-attributed once it starts.
-    """
+def runner_of(job_name: str) -> str | None:
     m = JOB_RUNNER.search(job_name or "")
-    if not m:
-        return None
-    if runner_name:
-        for runner in BENCH_RUNNERS:
-            if runner_name == runner or runner_name.startswith(f"{runner}-"):
-                return runner
-        return None
-    return m.group(1) if m.group(1) in BENCH_RUNNERS else None
+    return m.group(1) if m and m.group(1) in BENCH_RUNNERS else None
 
 
 _PR_CACHE: dict[tuple[str, str], list[dict]] = {}
@@ -155,7 +134,7 @@ def ingest_run(repo: str, run: dict, regression_pct: float) -> tuple[list[dict],
     records: list[dict] = []
     job_status: list[dict] = []
     for job in jobs:
-        runner = runner_of(job.get("name", ""), job.get("runner_name"))
+        runner = runner_of(job.get("name", ""))
         if not runner:
             continue
         js = {

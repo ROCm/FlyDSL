@@ -15,12 +15,9 @@ jobs:
       # If that cache is unavailable, checkout fails before the tests start.
       GIT_CONFIG_GLOBAL: /dev/null
       GIT_CONFIG_NOSYSTEM: "1"
-      # Keep the shared gfx950 entry on one deterministic device regardless of
-      # which pool claims it.
-      CI_HIP_VISIBLE_DEVICES: ${{ matrix.runners == 'linux-flydsl-gfx950' && '0' || '' }}
     strategy:
       matrix:
-        runners: ['linux-flydsl-mi325-1', 'linux-flydsl-gfx950']
+        runners: ['linux-flydsl-mi325-1', 'linux-flydsl-mi355-1']
       fail-fast: false
     runs-on: ${{ matrix.runners }}
     permissions:
@@ -51,12 +48,7 @@ jobs:
             DEVICE_FLAG="--device /dev/dri"
           fi
 
-          GPU_ENV_ARGS=()
-          if [ -n "${CI_HIP_VISIBLE_DEVICES}" ]; then
-            GPU_ENV_ARGS=(--env "HIP_VISIBLE_DEVICES=${CI_HIP_VISIBLE_DEVICES}")
-          fi
-
-          docker run -dt --network=host --user root --device=/dev/kfd $DEVICE_FLAG "${GPU_ENV_ARGS[@]}" \
+          docker run -dt --network=host --user root --device=/dev/kfd $DEVICE_FLAG \
             -v "${GITHUB_WORKSPACE}/flydsl:/flydsl" \
             -v "${GITHUB_WORKSPACE}/dist:/dist" \
             --ipc=host --group-add video \
@@ -109,9 +101,7 @@ jobs:
       - name: Test summary
         if: always()
         env:
-          # matrix.runners is the hardware-agnostic label for the shared gfx950
-          # entry, so report the box that actually ran the wheel.
-          SUMMARY_RUNNER: ${{ runner.name }}
+          SUMMARY_RUNNER: ${{ matrix.runners }}
           SUMMARY_INSTALL_OUTCOME: ${{ steps.install.outcome }}
           SUMMARY_TESTS_OUTCOME: ${{ steps.tests.outcome }}
           SUMMARY_BENCHMARKS_OUTCOME: ${{ steps.benchmarks.outcome }}

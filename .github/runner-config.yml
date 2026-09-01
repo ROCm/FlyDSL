@@ -13,19 +13,6 @@ runners:
   linux-flydsl-mi355-8:
     gpu_arch: MI355
     gpu_count: 8
-  # Shared validation label assigned to the MI355-1 and MI35x-1 pools below — an
-  # alias for capacity already listed here, not extra hardware. Keep it on
-  # single-GPU pools only: a job holds its entire runner, so an 8-GPU pool would
-  # sit with 7 idle GPUs and block multi-GPU work for the job's full duration.
-  linux-flydsl-gfx950:
-    gpu_arch: MI350/MI355
-    gpu_count: 1
-  linux-flydsl-mi35x-1:
-    gpu_arch: MI350
-    gpu_count: 1
-  linux-flydsl-mi35x-8:
-    gpu_arch: MI350
-    gpu_count: 8
   linux-flydsl-navi-2:
     gpu_arch: Navi
     gpu_count: 2
