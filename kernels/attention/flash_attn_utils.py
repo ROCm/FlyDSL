@@ -5206,30 +5206,7 @@ class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
         # Read all V packs from the bf16 vt scratch for buffer `buf_id`.
         traits = self.traits
         if const_expr(traits.KV_VECTORIZED):
-            v_base = buf_id * traits.VT_BF16_ELEMS
-            lane_base = (
-                (self.lane_mod_32 // traits.SMEM_N_PER_WAVE) * traits.VEC_V_ROW_STRIDE
-                + self.lane_div_32 * traits.D128_BF
-                + (self.lane_mod_32 % traits.SMEM_N_PER_WAVE) * traits.VEC_BF
-            )
-            v_base_ptr = buffer_ops.get_element_ptr(
-                self.lds_vt_base_ptr,
-                byte_offset=fx.Int32((v_base + lane_base) * traits.EB_BF),
-                elem_type=T.i8,
-            )
-            packs = [[None] * traits.D_CHUNKS for _ in range(4)]
-            for dc in range_constexpr(traits.D_CHUNKS):
-                for k_substep in range_constexpr(4):
-                    const_off = dc * (
-                        traits.D_CHUNK // traits.SMEM_N_PER_WAVE
-                    ) * traits.VEC_V_ROW_STRIDE + k_substep * (2 * traits.D128_BF)
-                    ptr = buffer_ops.get_element_ptr(
-                        v_base_ptr,
-                        byte_offset=fx.Int32(const_off * traits.EB_BF),
-                        elem_type=T.i8,
-                    )
-                    packs[k_substep][dc] = llvm.LoadOp(self.v8bf16_type, ptr, alignment=16).result
-            return packs
+            return self.load_v_steps(buf_id, 0, 4)
 
         urv = (
             self.lane_div_32 * traits.URV_GRPK_BF
@@ -5246,6 +5223,44 @@ class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
                 a = _ds_read_tr16_b64_imm(self.v4bf16_type, fx.Int32(byte0), imm_lo)
                 b = _ds_read_tr16_b64_imm(self.v4bf16_type, fx.Int32(byte0), imm_lo + traits.URV_I5_BF * traits.EB_BF)
                 packs[k_substep][dc] = Vec(a).shuffle(Vec(b), [0, 1, 2, 3, 4, 5, 6, 7]).ir_value()
+        return packs
+
+    def load_v_steps(self, buf_id, first_step, num_steps):
+        """Read a compile-time subset of vectorized HIPREC V K-steps.
+
+        V192 otherwise keeps all 24 v8bf16 packs live together with six output
+        accumulators and spills. Loading two K-steps at a time bounds that
+        transient register set while preserving the existing LDS layout.
+        """
+        traits = self.traits
+        if const_expr(not traits.KV_VECTORIZED or traits.FP8_PV):
+            raise RuntimeError("load_v_steps requires vectorized HIPREC V")
+        if const_expr(first_step < 0 or num_steps < 1 or first_step + num_steps > 4):
+            raise RuntimeError("invalid V K-step range")
+
+        v_base = buf_id * traits.VT_BF16_ELEMS
+        lane_base = (
+            (self.lane_mod_32 // traits.SMEM_N_PER_WAVE) * traits.VEC_V_ROW_STRIDE
+            + self.lane_div_32 * traits.D128_BF
+            + (self.lane_mod_32 % traits.SMEM_N_PER_WAVE) * traits.VEC_BF
+        )
+        v_base_ptr = buffer_ops.get_element_ptr(
+            self.lds_vt_base_ptr,
+            byte_offset=fx.Int32((v_base + lane_base) * traits.EB_BF),
+            elem_type=T.i8,
+        )
+        packs = [[None] * traits.D_CHUNKS for _ in range(4)]
+        for dc in range_constexpr(traits.D_CHUNKS):
+            for k_substep in range_constexpr(first_step, first_step + num_steps):
+                const_off = dc * (traits.D_CHUNK // traits.SMEM_N_PER_WAVE) * traits.VEC_V_ROW_STRIDE + k_substep * (
+                    2 * traits.D128_BF
+                )
+                ptr = buffer_ops.get_element_ptr(
+                    v_base_ptr,
+                    byte_offset=fx.Int32(const_off * traits.EB_BF),
+                    elem_type=T.i8,
+                )
+                packs[k_substep][dc] = llvm.LoadOp(self.v8bf16_type, ptr, alignment=16).result
         return packs
 
     def _load_v_fp8_block(self, buf_id):

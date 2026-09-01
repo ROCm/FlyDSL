@@ -662,6 +662,8 @@ def _flydsl_flash_attn_paged(
             and (not _arch.startswith("gfx950") or Sq <= _VARLEN_LIGHT_MAX_SEQ)
         )
         if paged_fp8:
+            paged_setprio = dualwave_swp_setprio and D != 192
+            paged_stagger = dualwave_swp_enable_stagger and not ((D, value_head_dim) == (192, 192) and skv >= 65536)
             exe = _build_paged_fp8(
                 num_heads=H,
                 num_kv_heads=num_kv_heads,
@@ -670,8 +672,8 @@ def _flydsl_flash_attn_paged(
                 waves_per_eu=waves_per_eu,
                 daz=daz,
                 lazy_rescale=dualwave_swp_lazy_rescale,
-                setprio=dualwave_swp_setprio,
-                enable_stagger=dualwave_swp_enable_stagger,
+                setprio=paged_setprio,
+                enable_stagger=paged_stagger,
             )
         elif _paged_light_ok:
             exe = _build_paged_light(
