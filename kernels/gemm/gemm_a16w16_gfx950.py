@@ -468,8 +468,6 @@ def gemm_a16w16_gfx950_kernel(
     block_k = param.block_k
     k_waves = param.k_waves
     k_mma_iters_per_wave = block_k // (k_waves * param.mma_k)
-    mma_m_iters = block_m // (param.m_waves * param.mma_m)
-    mma_n_iters = block_n // (param.n_waves * param.mma_n)
     stages = param.stages
     block_threads = param.block_threads
     ldg_a_iters = param.ldg_a_iters
@@ -1264,9 +1262,9 @@ def assert_no_k_tail(k: int, kwargs: dict):
     working_k = (k + split_k - 1) // split_k
     working_k = (working_k + async_load_vec_size - 1) // async_load_vec_size * async_load_vec_size
     last_working_k = k - (split_k - 1) * working_k
-    assert working_k % block_k == 0, (
-        f"K-tail is unsupported: aligned split-K partition size {working_k} is not divisible by block_k={block_k}"
-    )
+    assert (
+        working_k % block_k == 0
+    ), f"K-tail is unsupported: aligned split-K partition size {working_k} is not divisible by block_k={block_k}"
     assert last_working_k > 0 and last_working_k % block_k == 0, (
         "K-tail is unsupported: final split-K partition size "
         f"{last_working_k} must be positive and divisible by block_k={block_k}"
@@ -1274,16 +1272,16 @@ def assert_no_k_tail(k: int, kwargs: dict):
     working_k_tiles = working_k // block_k
     last_working_k_tiles = last_working_k // block_k
     min_k_tiles = stages - 1
-    assert working_k_tiles >= min_k_tiles, (
-        f"split-K partitions require at least {min_k_tiles} K tiles, got {working_k_tiles}"
-    )
-    assert last_working_k_tiles >= min_k_tiles, (
-        f"the final split-K partition requires at least {min_k_tiles} K tiles, got {last_working_k_tiles}"
-    )
+    assert (
+        working_k_tiles >= min_k_tiles
+    ), f"split-K partitions require at least {min_k_tiles} K tiles, got {working_k_tiles}"
+    assert (
+        last_working_k_tiles >= min_k_tiles
+    ), f"the final split-K partition requires at least {min_k_tiles} K tiles, got {last_working_k_tiles}"
     if use_half_tile_interleaved:
-        assert working_k_tiles >= 2 and working_k_tiles % 2 == 0, (
-            f"HTI requires at least two and an even number of K tiles per split-K partition, got {working_k_tiles}"
-        )
+        assert (
+            working_k_tiles >= 2 and working_k_tiles % 2 == 0
+        ), f"HTI requires at least two and an even number of K tiles per split-K partition, got {working_k_tiles}"
         assert last_working_k_tiles >= 2 and last_working_k_tiles % 2 == 0, (
             "HTI requires at least two and an even number of K tiles "
             "in the final split-K partition, "
