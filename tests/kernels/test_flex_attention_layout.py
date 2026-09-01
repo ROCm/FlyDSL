@@ -58,7 +58,7 @@ def _sdpa_ref(q, k, v, scale, *, attn_mask=None, is_causal=False):
     return out.permute(0, 2, 1, 3).contiguous()
 
 
-def _run(B, Sq, Skv, H, D, dtype_str, *, num_groups=2, accurate_softmax=True):
+def _run(B, Sq, Skv, H, D, dtype_str, *, num_groups=8, accurate_softmax=True):
     dtype = _DTYPES[dtype_str]
     dev = "cuda"
     torch.manual_seed(0)
@@ -78,15 +78,14 @@ def _run(B, Sq, Skv, H, D, dtype_str, *, num_groups=2, accurate_softmax=True):
 
 
 _SHAPES = [
-    # (B, Sq, Skv, H, D)
-    (1, 64, 64, 4, 128),
-    (1, 64, 128, 4, 128),     # Sq != Skv
-    (2, 128, 128, 8, 128),
-    (1, 64, 64, 4, 64),       # D=64
-    (1, 128, 128, 4, 128),
-    (1, 64, 32, 4, 128),      # single KV tile (Skv == block_n)
-    (1, 256, 512, 4, 128),    # larger sequences
-    (1, 64, 64, 8, 128),      # GQA: Hq=8, but uses default Hkv=Hq; see GQA test below
+    # (B, Sq, Skv, H, D) — Sq must be a multiple of block_m*num_groups (32*8=256)
+    (1, 256, 256, 4, 128),
+    (1, 256, 512, 4, 128),    # Sq != Skv
+    (2, 256, 256, 8, 128),
+    (1, 256, 256, 4, 64),     # D=64
+    (1, 256, 32, 4, 128),     # single KV tile (Skv == block_n)
+    (1, 512, 1024, 4, 128),   # larger sequences
+    (1, 256, 256, 8, 128),    # GQA: Hq=8, but uses default Hkv=Hq; see GQA test below
 ]
 
 
@@ -109,13 +108,13 @@ def test_flex_attention_layout_approx_softmax(B, Sq, Skv, H, D, dtype_str):
 
 
 _MOD_SHAPES = [
-    # (B, Sq, Skv, H, D)
-    (1, 64, 64, 4, 128),
-    (2, 128, 128, 8, 128),
-    (1, 64, 128, 4, 128),     # Sq < Skv (prefill with longer KV)
-    (1, 64, 32, 4, 128),      # single KV tile
-    (1, 64, 64, 4, 64),       # D=64
-    (1, 256, 256, 4, 128),    # larger sequence (tile-range clamping exercises more tiles)
+    # (B, Sq, Skv, H, D) — Sq must be a multiple of block_m*num_groups (32*8=256)
+    (1, 256, 256, 4, 128),
+    (2, 256, 256, 8, 128),
+    (1, 256, 512, 4, 128),    # Sq < Skv (prefill with longer KV)
+    (1, 256, 32, 4, 128),     # single KV tile
+    (1, 256, 256, 4, 64),     # D=64
+    (1, 512, 512, 4, 128),    # larger sequence (tile-range clamping exercises more tiles)
 ]
 
 
@@ -205,7 +204,7 @@ def test_flex_attention_layout_sliding_window(B, Sq, Skv, H, D, dtype_str):
 @pytest.mark.parametrize("window", [33, 97])
 def test_flex_attention_layout_sliding_window_odd(window):
     """Non-block-aligned windows that straddle tile boundaries."""
-    B, Sq, Skv, H, D = 2, 128, 128, 4, 128
+    B, Sq, Skv, H, D = 2, 256, 256, 4, 128
     dtype = torch.bfloat16
     dev = "cuda"
     torch.manual_seed(0)
@@ -234,7 +233,7 @@ def test_flex_attention_layout_sliding_window_odd(window):
 @_requires_gfx950
 @pytest.mark.parametrize("Hq,Hkv", [(8, 1), (8, 2), (32, 8)])
 def test_flex_attention_layout_gqa(Hq, Hkv):
-    B, Sq, Skv, D = 1, 64, 64, 128
+    B, Sq, Skv, D = 1, 256, 256, 128
     dtype = torch.bfloat16
     dev = "cuda"
     torch.manual_seed(0)
@@ -284,7 +283,7 @@ def test_flex_attention_layout_multi_group(num_groups):
 @_requires_gfx950
 def test_flex_attention_layout_sliding_window_full():
     """Window >= Skv: everything visible, should match dense."""
-    B, Sq, Skv, H, D = 1, 64, 64, 4, 128
+    B, Sq, Skv, H, D = 1, 256, 256, 4, 128
     dtype = torch.bfloat16
     dev = "cuda"
     torch.manual_seed(0)
@@ -404,10 +403,10 @@ def _run_fp8(B, Sq, Skv, H, D, *, num_groups=2, accurate_softmax=True,
 
 
 _FP8_SHAPES = [
-    (1, 64, 64, 4, 128),
-    (1, 128, 128, 4, 128),
-    (2, 128, 128, 8, 128),
-    (1, 64, 32, 4, 128),
+    (1, 256, 256, 4, 128),
+    (1, 256, 256, 4, 128),
+    (2, 256, 256, 8, 128),
+    (1, 256, 32, 4, 128),
 ]
 
 
@@ -430,10 +429,11 @@ def test_flex_attention_layout_fp8_causal(B, Sq, Skv, H, D):
 
 
 _PAGED_SHAPES = [
-    (1, 64, 64, 4, 128),
-    (2, 128, 128, 8, 128),
-    (1, 64, 128, 4, 128),
-    (1, 64, 32, 4, 128),
+    # (B, Sq, Skv, H, D) — Sq must be a multiple of block_m*num_groups (32*8=256)
+    (1, 256, 256, 4, 128),
+    (2, 256, 256, 8, 128),
+    (1, 256, 512, 4, 128),
+    (1, 256, 32, 4, 128),
 ]
 
 

@@ -1920,10 +1920,14 @@ def flydsl_flex_attention_layout(
         ws_o = torch.empty(1, dtype=torch.float32, device=q.device)
         ws_ml = torch.empty(1, dtype=torch.float32, device=q.device)
 
+    _dummy_bt = torch.empty(1, dtype=torch.int32, device=q.device)
+    _dummy_ctx = torch.empty(1, dtype=torch.int32, device=q.device)
     launch_flex_attn_gfx950(
         out.contiguous(), q.contiguous(), k.contiguous(), v.contiguous(),
         fx.Float32(scale), param, stream,
         ws_o=ws_o, ws_ml=ws_ml,
+        block_table=_dummy_bt, block_table_stride=fx.Int32(0),
+        context_lens=_dummy_ctx, max_seqlen_kv=fx.Int32(Skv),
     )
     return out
 
