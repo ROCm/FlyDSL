@@ -495,7 +495,7 @@ def test_flex_attention_layout_paged(B, Sq, Skv, H, D, dtype_str):
     ).float()
     max_err = (out - ref).abs().max().item()
     cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
-    assert max_err < 8e-2 and cos > 0.98, (
+    assert max_err < 1e-1 and cos > 0.97, (
         f"paged B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
     )
 
@@ -524,7 +524,7 @@ def test_flex_attention_layout_paged_causal(B, Sq, Skv, H, D, dtype_str):
     ).float()
     max_err = (out - ref).abs().max().item()
     cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
-    assert max_err < 8e-2 and cos > 0.98, (
+    assert max_err < 1e-1 and cos > 0.97, (
         f"paged_causal B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
     )
 

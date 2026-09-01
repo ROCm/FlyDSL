@@ -730,14 +730,11 @@ def flex_attn_fwd_gfx950_kernel(
         return elem_off % head_dim
 
     # ── Stage: DMA K+V global → LDS ─────────────────────────────────────
-    def _stage_kv_to_lds(kv_idx, buf, do_k, do_v, ops=_dma_ops_per_thread, op_offset=0, page_id=None):
+    def _stage_kv_to_lds_contiguous(kv_idx, buf, do_k, do_v, ops=_dma_ops_per_thread, op_offset=0):
         wave_off = rocdl.readfirstlane(fx.Int32.ir_type, fx.Int32(tid // GFX950_WAVE_SIZE * GFX950_WAVE_SIZE * _dma_bytes))
         _step_bytes = block_threads * _dma_bytes
         if const_expr(do_k):
-            if page_id is not None:
-                k_global_base = page_id * fx.Int32(_page_byte_stride) + _kv_head_byte_offset
-            else:
-                k_global_base = k_off * param.in_data_bytes + kv_idx * block_n * _k_row_stride_bytes
+            k_global_base = k_off * param.in_data_bytes + kv_idx * block_n * _k_row_stride_bytes
             lds_k = fx.add_offset(sK_i8[buf], wave_off + op_offset * _step_bytes)
             for i in range_constexpr(ops):
                 if const_expr(i > 0):
@@ -750,10 +747,7 @@ def flex_attn_fwd_gfx950_kernel(
                 fx.copy(dma_atom, fx.slice(k_div, (None, fx.Int32(gmem_byte))),
                         fx.make_view(lds_k, fx.make_layout(1, 1)))
         if const_expr(do_v):
-            if page_id is not None:
-                v_global_base = page_id * fx.Int32(_page_byte_stride) + _kv_head_byte_offset
-            else:
-                v_global_base = v_off * param.in_data_bytes + kv_idx * fx.Int32(block_n * _v_row_stride_bytes)
+            v_global_base = v_off * param.in_data_bytes + kv_idx * fx.Int32(block_n * _v_row_stride_bytes)
             _v_step_bytes = _v_step_elems * param.in_data_bytes
             for i in range_constexpr(ops):
                 flat_byte = (op_offset + i) * block_threads * _dma_bytes + tid * _dma_bytes
@@ -770,6 +764,39 @@ def flex_attn_fwd_gfx950_kernel(
                 gmem_byte = fx.Int32(v_global_base) + score_row * fx.Int32(_v_row_stride_bytes) + d_global_byte
                 fx.copy(dma_atom, fx.slice(v_div, (None, fx.Int32(gmem_byte))),
                         fx.make_view(lds_v, fx.make_layout(1, 1)))
+
+    def _stage_kv_to_lds_paged(page_id, buf, ops=_dma_ops_per_thread, op_offset=0):
+        wave_off = rocdl.readfirstlane(fx.Int32.ir_type, fx.Int32(tid // GFX950_WAVE_SIZE * GFX950_WAVE_SIZE * _dma_bytes))
+        _step_bytes = block_threads * _dma_bytes
+        k_global_base = page_id * fx.Int32(_page_byte_stride) + _kv_head_byte_offset
+        lds_k = fx.add_offset(sK_i8[buf], wave_off + op_offset * _step_bytes)
+        for i in range_constexpr(ops):
+            if const_expr(i > 0):
+                lds_k = fx.add_offset(lds_k, _step_bytes)
+            flat_byte = (op_offset + i) * block_threads * _dma_bytes + tid * _dma_bytes
+            tile_row = flat_byte // _k_row_bytes
+            tile_col_elem = (flat_byte % _k_row_bytes) // param.in_data_bytes
+            swiz_col = _k_swizzled_col(tile_row, tile_col_elem)
+            gmem_byte = k_global_base + tile_row * _k_row_stride_bytes + swiz_col * param.in_data_bytes
+            fx.copy(dma_atom, fx.slice(k_div, (None, fx.Int32(gmem_byte))),
+                    fx.make_view(lds_k, fx.make_layout(1, 1)))
+        v_global_base = page_id * fx.Int32(_page_byte_stride) + _kv_head_byte_offset
+        _v_step_bytes = _v_step_elems * param.in_data_bytes
+        for i in range_constexpr(ops):
+            flat_byte = (op_offset + i) * block_threads * _dma_bytes + tid * _dma_bytes
+            tile_row = flat_byte // _v_subtile_row_bytes
+            tile_col_byte = flat_byte % _v_subtile_row_bytes
+            dc = tile_row // block_n
+            score_row = tile_row % block_n
+            v_step = dc * 4 + score_row // 8
+            row_in_step = score_row % 8
+            dc_shift_bytes = 0
+            lds_byte = v_step * _v_step_bytes + row_in_step * _v_subtile_row_bytes + dc_shift_bytes + tile_col_byte
+            lds_v = fx.add_offset(sV_i8[buf], lds_byte)
+            d_global_byte = dc * 32 * param.in_data_bytes + tile_col_byte
+            gmem_byte = fx.Int32(v_global_base) + score_row * fx.Int32(_v_row_stride_bytes) + d_global_byte
+            fx.copy(dma_atom, fx.slice(v_div, (None, fx.Int32(gmem_byte))),
+                    fx.make_view(lds_v, fx.make_layout(1, 1)))
 
     # stride_phase: 0 = K D-lo, 1 = K D-hi, 2 = V tile (for split prefetch vs K reads).
     def _stage_kv_to_lds_strided(kv_idx, buf, stride_phase, ops=_dma_ops_per_thread, op_offset=0):
@@ -846,13 +873,13 @@ def flex_attn_fwd_gfx950_kernel(
     def load_kv(tile_idx, slot, ops=_dma_ops_per_thread, op_offset=0):
         if const_expr(_paged):
             _pid = _load_page_id(tile_idx)
-            _stage_kv_to_lds(tile_idx, slot, True, True, ops=ops, op_offset=op_offset, page_id=_pid)
+            _stage_kv_to_lds_paged(_pid, slot, ops=ops, op_offset=op_offset)
         elif _K_HALF_BANK_SKEW_BYTES > 0:
             _stage_kv_to_lds_strided(tile_idx, slot, 0, ops=ops, op_offset=op_offset)
             _stage_kv_to_lds_strided(tile_idx, slot, 1, ops=ops, op_offset=op_offset)
             _stage_kv_to_lds_strided(tile_idx, slot, 2, ops=ops, op_offset=op_offset)
         else:
-            _stage_kv_to_lds(tile_idx, slot, True, True, ops=ops, op_offset=op_offset)
+            _stage_kv_to_lds_contiguous(tile_idx, slot, True, True, ops=ops, op_offset=op_offset)
         return []
 
     # ── V transpose read ────────────────────────────────────────────────────
