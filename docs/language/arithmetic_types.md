@@ -61,8 +61,8 @@ the dedicated MLIR operation for that type:
 
 `fx.max` and `fx.min` are variadic and accept nested lists/tuples. Their float
 forms propagate NaN and order signed zero as `-0.0 < +0.0`. This is deliberately
-different from `fx.maxnumf`, which returns the non-NaN input when exactly one
-operand is NaN.
+different from `fx.maxnumf` / `fx.minnumf`, which return the non-NaN input when
+exactly one operand is NaN.
 
 `fx.ceildiv` rounds integer division toward positive infinity. It does not use
 `(a + b - 1) // b`, whose intermediate addition can overflow at run time, and
