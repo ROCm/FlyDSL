@@ -296,15 +296,15 @@ def build_flash_attn_paged_fp8_module(
             page_f_a, page_f_b = ctx.load_page_id_pair((j + fx.Index(4)) * BN)
             # Keep only one prefetched V vector live at a time and overlap each
             # load with one of the two independent QK contractions.
-            v_f_a = kv_gmem_to_lds._load_v_fp8_vectorized_bn128((j + fx.Index(4)) * BN, page_id=page_f_a)
+            v_f_a = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source((j + fx.Index(4)) * BN, page_id=page_f_a)
             kv_gmem_to_lds.load_k((j + fx.Index(4)) * BN, f_a_buf, page_id=page_f_a)
             kv_gmem_to_lds.load_k((j + fx.Index(5)) * BN, f_b_buf, page_id=page_f_b)
 
             v_s_a = gemm_helper.qk(v_k_a, q_wide)
-            kv_gmem_to_lds._store_v_fp8_vectorized_bn128(v_f_a, f_a_buf)
-            v_f_b = kv_gmem_to_lds._load_v_fp8_vectorized_bn128((j + fx.Index(5)) * BN, page_id=page_f_b)
+            kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(v_f_a, f_a_buf)
+            v_f_b = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source((j + fx.Index(5)) * BN, page_id=page_f_b)
             v_s_b = gemm_helper.qk(v_k_b, q_wide)
-            kv_gmem_to_lds._store_v_fp8_vectorized_bn128(v_f_b, f_b_buf)
+            kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(v_f_b, f_b_buf)
             v_s_a, v_s_b = _mask_pair(v_s_a, v_s_b, j)
             m_tile = _merge_tile_max(v_s_a, v_s_b)
             v_o, m_new, l_row = _correct_o(v_o, m_row, l_row, m_tile)
