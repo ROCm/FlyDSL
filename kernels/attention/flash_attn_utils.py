@@ -1773,9 +1773,11 @@ def _make_dualwave_swp_traits(
 class DualwaveSwpFp8Traits:
     """Pure compile-time tile/layout constants for the gfx950 DUALWAVE_SWP fp8 kernel.
 
-    fp8 runs a single path: WIDE QK (32x32x64 mfma_scale) feeding HIPREC PV (fp8 V
-    dequantized into a bf16 ``vt`` LDS scratch, then a bf16 PV MMA). The ``*_BF``
-    fields describe that bf16 vt layout; ``ELEM_BYTES`` is 1 (Q/K/V are fp8)."""
+    QK uses WIDE 32x32x64 ``mfma_scale``.  P*V either uses the HIPREC path
+    (FP8 V dequantized into BF16 LDS scratch) or the D128 native-FP8 path.  The
+    ``*_BF`` fields describe the HIPREC layout; ``ELEM_BYTES`` is 1 because
+    Q/K/V are FP8.
+    """
 
     BLOCK_M: int
     BLOCK_N: int
@@ -1996,8 +1998,10 @@ def _make_dualwave_swp_fp8_traits(
     kv_vectorized = paged and kv_cache_layout == "vectorized"
     page_size = block_n
 
-    fp8_pv = not paged and os.getenv("FLYDSL_FA_FP8_PV", "0") == "1"
-    fp8_pv_direct = bn128 and not paged
+    # D128 paged attention can consume its native FP8 V cache directly once
+    # the vectorized cache is transposed into the existing FP8 PV LDS layout.
+    fp8_pv = (paged and head_dim == value_head_dim == 128) or (not paged and os.getenv("FLYDSL_FA_FP8_PV", "0") == "1")
+    fp8_pv_direct = bn128 and (not paged or fp8_pv)
     if fp8_pv_direct:
         fp8_pv = True
 
@@ -4889,7 +4893,10 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
         return v_o
 
     def _pv_step_fp8(self, step, v_p, v_v, v_o):
-        if const_expr(step == 0):
+        # The paged pipeline performs its online-softmax correction between
+        # steps 0 and 1. Repack P after that correction before the remaining
+        # output chunks consume it.
+        if const_expr(step == 0 or (self.traits.PAGED and step == 1)):
             self._pv_p_fp8_cache = self._p_to_fp8_i32x8(v_p)
         v_op = self._v_concat_i32x8(v_v, step)
         v_o[step] = self._mfma_acc_fp8_wide(v_op, self._pv_p_fp8_cache, v_o[step])
@@ -5011,9 +5018,13 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
             src_elem = self.kv_gmem_elem_offset + n_in_tile * self.stride_kv_n_v + global_d
             self.buffer_load_lds_128(self.k_div, lds_addr, src_elem, tile_start * self.stride_kv_n_v)
 
-    def load_v(self, tile_start, buf_id):
-        if const_expr(self.traits.KV_VECTORIZED):
-            self._stage_vt_dequant_fp8_vectorized(tile_start, buf_id)
+    def load_v(self, tile_start, buf_id, page_id=None):
+        if const_expr(self.traits.KV_VECTORIZED and self.traits.FP8_PV_DIRECT):
+            self._stage_v_fp8_vectorized_bn128(tile_start, buf_id, page_id=page_id)
+        elif const_expr(self.traits.KV_VECTORIZED and self.traits.FP8_PV):
+            self._stage_v_fp8_vectorized_dense_layout(tile_start, buf_id, page_id=page_id)
+        elif const_expr(self.traits.KV_VECTORIZED):
+            self._stage_vt_dequant_fp8_vectorized(tile_start, buf_id, page_id=page_id)
         elif const_expr(self.traits.FP8_PV):
             self._stage_v_fp8_block(tile_start, buf_id)
         else:
@@ -5073,10 +5084,11 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
         src_elem = self.kv_gmem_elem_offset + fx.Index(n) * self.stride_kv_n_v + d_block * fx.Index(16)
         self.buffer_load_lds_128(self.v_div, lds_addr, src_elem, tile_start * self.stride_kv_n_v)
 
-    def _stage_vt_dequant_fp8_vectorized(self, tile_start, buf_id):
+    def _stage_vt_dequant_fp8_vectorized(self, tile_start, buf_id, page_id=None):
         """Dequantize SHUFFLE V [H,4,D,16] into the bf16 vectorized LDS tile."""
         traits = self.traits
-        page_id = self.load_page_id(tile_start)
+        if page_id is None:
+            page_id = self.load_page_id(tile_start)
         src_div = self.make_page_view(self.v_base_iter, page_id, is_value=True)
         vt_buf = buf_id * traits.VT_BF16_ELEMS
         token_groups16 = traits.BLOCK_N // traits.KV_VEC_SIZE
@@ -5126,6 +5138,53 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
                         elem_type=T.i8,
                     )
                     llvm.StoreOp(as_mlir_value(v8bf), lds_ptr, alignment=16)
+
+            scf_if_dispatch(flat < fx.Index(total_v16), _load_store_active)
+
+    def _stage_v_fp8_vectorized_dense_layout(self, tile_start, buf_id, page_id=None):
+        """Transpose vectorized V into the LDS layout used by direct FP8 P*V."""
+        traits = self.traits
+        if page_id is None:
+            page_id = self.load_page_id(tile_start)
+        src_div = self.make_page_view(self.v_base_iter, page_id, is_value=True)
+        v_tile_bytes = (traits.BLOCK_N // 8) * (traits.V_HEAD_DIM // 16) * 128
+        aligned_base = ((self.lds_vt_base_idx + fx.Index(127)) // fx.Index(128)) * fx.Index(128)
+        dst_base = aligned_base + fx.Index(buf_id * v_tile_bytes)
+        token_groups16 = traits.BLOCK_N // traits.KV_VEC_SIZE
+        total_v16 = traits.V_HEAD_DIM * token_groups16
+        passes = (total_v16 + traits.BLOCK_SIZE - 1) // traits.BLOCK_SIZE
+
+        for pass_id in range_constexpr(passes):
+            flat = self.tid + fx.Index(pass_id * traits.BLOCK_SIZE)
+
+            def _load_store_active():
+                n_group16 = flat % fx.Index(token_groups16)
+                d_col = flat // fx.Index(token_groups16)
+                src_elem = (
+                    self.kv_head_idx * token_groups16 * traits.V_HEAD_DIM * traits.KV_VEC_SIZE
+                    + n_group16 * traits.V_HEAD_DIM * traits.KV_VEC_SIZE
+                    + d_col * traits.KV_VEC_SIZE
+                )
+                src_i32x4 = self.buffer_load_fp8x16(src_div, src_elem)
+                src_bytes = Vec(src_i32x4, (4,), fx.Int32).bitcast(fx.Int8)
+                d_block = d_col // fx.Index(16)
+                d_in_block = d_col % fx.Index(16)
+                for n_in_group in range_constexpr(16):
+                    n = n_group16 * fx.Index(16) + fx.Index(n_in_group)
+                    dest_wave = n // fx.Index(8)
+                    dest_n = n % fx.Index(8)
+                    dst_byte = (
+                        dst_base
+                        + (dest_wave * fx.Index(traits.V_HEAD_DIM // 16) + d_block) * fx.Index(128)
+                        + dest_n * fx.Index(16)
+                        + d_in_block
+                    )
+                    ptr = buffer_ops.get_element_ptr(
+                        self.lds_vt_base_ptr,
+                        byte_offset=fx.Int32(dst_byte - self.lds_vt_base_idx),
+                        elem_type=T.i8,
+                    )
+                    llvm.StoreOp(as_mlir_value(src_bytes[_sigma_k_tile_n(n_in_group)]), ptr, alignment=1)
 
             scf_if_dispatch(flat < fx.Index(total_v16), _load_store_active)
 

@@ -4428,14 +4428,23 @@ def test_return_lse_rejects_fp8():
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("value_head_dim", [128, 192])
+@pytest.mark.parametrize(
+    ("head_dim", "value_head_dim"),
+    [(128, 128), (192, 128), (192, 192)],
+    ids=["d128-v128", "d192-v128", "d192-v192"],
+)
 @pytest.mark.parametrize(
     ("use_non_default_stream", "force_internal_copies"),
     [(False, False), (True, False), (True, True)],
     ids=["default", "side", "side-copies"],
 )
-def test_paged_fp8_d192_asymmetric_value_matches_torch(value_head_dim, use_non_default_stream, force_internal_copies):
-    """Packed causal FP8 page-64 attention supports native V/output width."""
+def test_paged_fp8_asymmetric_value_matches_torch(
+    head_dim,
+    value_head_dim,
+    use_non_default_stream,
+    force_internal_copies,
+):
+    """Packed causal FP8 page-64 attention supports native Q/K and V widths."""
     torch.manual_seed(17)
     query_lengths = [64, 32]
     kv_lengths = [128, 96]
@@ -4445,8 +4454,8 @@ def test_paged_fp8_d192_asymmetric_value_matches_torch(value_head_dim, use_non_d
     seqlen_k = torch.tensor(kv_lengths, device="cuda", dtype=torch.int32)
     num_pages = 4
 
-    query, query_descale = quantize_per_tensor_fp8(torch.randn(sum(query_lengths), 16, 192, device="cuda") * 0.2)
-    key, key_descale = quantize_per_tensor_fp8(torch.randn(num_pages, 1, 12, 64, 16, device="cuda") * 0.2)
+    query, query_descale = quantize_per_tensor_fp8(torch.randn(sum(query_lengths), 16, head_dim, device="cuda") * 0.2)
+    key, key_descale = quantize_per_tensor_fp8(torch.randn(num_pages, 1, head_dim // 16, 64, 16, device="cuda") * 0.2)
     value, value_descale = quantize_per_tensor_fp8(
         torch.randn(num_pages, 1, 4, value_head_dim, 16, device="cuda") * 0.2
     )
@@ -4496,6 +4505,16 @@ def test_paged_fp8_d192_asymmetric_value_matches_torch(value_head_dim, use_non_d
     stream = torch.cuda.Stream() if use_non_default_stream else None
     if stream is not None:
         torch.cuda.synchronize()
+    if force_internal_copies and stream is not None:
+        flydsl_flash_attn_func(
+            query.contiguous(),
+            key.contiguous(),
+            value.contiguous(),
+            block_table=block_table.to(torch.int32).contiguous(),
+            stream=stream,
+            **call_kwargs,
+        )
+        stream.synchronize()
     default_done = None
     if force_internal_copies:
         torch.cuda._sleep(3_000_000_000)
@@ -4523,13 +4542,13 @@ def test_paged_fp8_d192_asymmetric_value_matches_torch(value_head_dim, use_non_d
         query_batch = query[q_indptr[batch_idx] : q_indptr[batch_idx + 1]].float() * query_descale
         physical_pages = block_table[batch_idx].long()
         key_batch = (
-            key[physical_pages].permute(0, 3, 1, 2, 4).reshape(-1, 1, 192)[:kv_length].float() * key_descale
+            key[physical_pages].permute(0, 3, 1, 2, 4).reshape(-1, 1, head_dim)[:kv_length].float() * key_descale
         ).expand(-1, 16, -1)
         value_batch = (
             value[physical_pages].permute(0, 2, 4, 1, 3).reshape(-1, 1, value_head_dim)[:kv_length].float()
             * value_descale
         ).expand(-1, 16, -1)
-        logits = torch.einsum("qhd,khd->hqk", query_batch, key_batch) / math.sqrt(192)
+        logits = torch.einsum("qhd,khd->hqk", query_batch, key_batch) / math.sqrt(head_dim)
         query_positions = torch.arange(query_length, device="cuda")
         key_positions = torch.arange(kv_length, device="cuda")
         causal_mask = key_positions[None, :] <= (kv_length - query_length + query_positions)[:, None]

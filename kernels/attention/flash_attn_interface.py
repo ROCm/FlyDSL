@@ -457,7 +457,8 @@ def _flydsl_flash_attn_paged(
     Supported config ONLY (anything else raises): linear/vectorized cache layout
     with page size 64 and vLLM ``block_table`` / ``seqlen_k`` metadata. BF16/F16
     support D64/D128. gfx950 FP8 additionally supports packed-varlen causal
-    Q/K D192 with vectorized V/output D128 or D192.
+    Q/K D128 with V/output D128, or Q/K D192 with vectorized V/output
+    D128 or D192.
     - Dense 4D Q ``[B, Sq, H, D]``: split-K (num_kv_splits>1) supported (seq_len>=384).
     - Varlen packed Q ``[total_q, H, D]`` (cu_seqlens_q given): paged K/V looked up
       per kv-tile via block_table; split-K not supported (matches dense varlen).
@@ -532,12 +533,17 @@ def _flydsl_flash_attn_paged(
         _arch = _gpu_arch(q.device)
         if not _arch.startswith("gfx950"):
             raise ValueError(f"flydsl_flash_attn_func: paged FP8 requires gfx950, got '{_arch or 'unknown'}'")
+        fp8_head_dims = (D, value_head_dim)
         if not (
-            causal and varlen and cross_seqlen is not False and vectorized and D == 192 and value_head_dim in (128, 192)
+            causal
+            and varlen
+            and cross_seqlen is not False
+            and vectorized
+            and fp8_head_dims in ((128, 128), (192, 128), (192, 192))
         ):
             raise NotImplementedError(
                 "flydsl_flash_attn_func: paged FP8 requires causal packed-varlen vectorized KV, "
-                f"Q/K D192, and V D128/D192; got causal={causal}, varlen={varlen}, "
+                f"Q/K-V D128-D128, D192-D128, or D192-D192; got causal={causal}, varlen={varlen}, "
                 f"layout={kv_cache_layout!r}, Q/K D{D}, V D{value_head_dim}"
             )
         if num_kv_splits != 1:
@@ -663,7 +669,7 @@ def _flydsl_flash_attn_paged(
         )
         if paged_fp8:
             paged_setprio = dualwave_swp_setprio and D != 192
-            paged_stagger = dualwave_swp_enable_stagger and not ((D, value_head_dim) == (192, 192) and skv >= 65536)
+            paged_stagger = dualwave_swp_enable_stagger and not (fp8_head_dims == (192, 192) and skv >= 65536)
             exe = _build_paged_fp8(
                 num_heads=H,
                 num_kv_heads=num_kv_heads,
@@ -889,7 +895,8 @@ def flydsl_flash_attn_func(
         block_table / seqlen_k: vLLM-style 2D block table metadata. Enables the
             native paged-KV path, which supports ``bias`` but not
             ``alibi_slopes``, ``sink``, or ``return_lse``. gfx950 FP8 supports
-            the causal packed-varlen vectorized page-64 D192 path with V D128/D192.
+            causal packed-varlen vectorized page-64 D128/V128 and
+            D192/V128-or-V192 paths.
         num_kv_splits: Split-K factor (>1: gfx950 only, D=64/128, bf16/f16, seq>=384).
         bias: Additive attention bias with the same dtype as q, folded in as
             ``softmax(q @ k^T * sm_scale + bias)`` -- after the scale, before the
