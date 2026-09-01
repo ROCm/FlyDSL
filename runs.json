@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-01T10:50:43Z",
+ "updated": "2026-09-01T11:01:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -66,11 +66,11 @@
    "branch": "add-minnumf-wrapper",
    "event": "pull_request",
    "title": "[Bugfix] Add type-safe fx.minnumf wrapper matching maxnumf",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33478947923",
    "created_at": "2026-09-01T06:44:56Z",
-   "updated_at": "2026-09-01T09:29:25Z",
+   "updated_at": "2026-09-01T10:59:20Z",
    "actor": "LWenH",
    "jobs": [
     {
@@ -86,20 +86,22 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-01T09:29:24Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33478947923/job/99802649432"
+     "completed_at": "2026-09-01T10:59:19Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33478947923/job/99802649432",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-01T09:15:22Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33478947923/job/99802649461"
+     "completed_at": "2026-09-01T10:51:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33478947923/job/99802649461",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
