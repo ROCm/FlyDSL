@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-01T01:09:23Z",
+ "updated": "2026-09-01T01:13:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -9,12 +9,12 @@
    "commit": "df5ef61837700c286f7daa04c8fbf315dd7f5b16",
    "branch": "ci/shared-gfx950-runner",
    "event": "pull_request",
-   "title": "[CI] Share gfx950 validation across runner pools",
+   "title": "[CI] Revert to runner labels that have live runners",
    "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33457454040",
    "created_at": "2026-09-01T01:06:50Z",
-   "updated_at": "2026-09-01T01:07:26Z",
+   "updated_at": "2026-09-01T01:09:54Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -144,7 +144,7 @@
    "commit": "8c0010aded0800f28647105953c3e3f8d4d5cc30",
    "branch": "ci/shared-gfx950-runner",
    "event": "pull_request",
-   "title": "[CI] Share gfx950 validation across runner pools",
+   "title": "[CI] Revert to runner labels that have live runners",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33397592944",
@@ -278,7 +278,7 @@
    "commit": "be8147cda9d2748d239312c92bb321df6963eb96",
    "branch": "ci/shared-gfx950-runner",
    "event": "pull_request",
-   "title": "[CI] Share gfx950 validation across runner pools",
+   "title": "[CI] Revert to runner labels that have live runners",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33377511770",
