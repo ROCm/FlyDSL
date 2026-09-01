@@ -104,6 +104,8 @@ jobs:
         runners: [
           'linux-flydsl-mi325-1',
           'linux-flydsl-mi355-1',
+          'linux-flydsl-mi35x-1',
+          'linux-flydsl-mi35x-8',
           'linux-flydsl-navi-2',
         ]
     runs-on: ubuntu-latest
@@ -440,7 +442,17 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Single-GPU tests: kernels, unit, examples, MLIR FileCheck, benchmarks.
-  # Runs on 1-GPU and Navi runners only.
+  #
+  # The gfx950 pools (MI355-1, MI35x-1, MI35x-8) each get their own entry so a
+  # change is validated on whichever of them has capacity. Actions has no
+  # "whichever label is free" primitive -- multiple labels in runs-on mean AND,
+  # not OR -- so this is a fan-out, not a hand-off, and the entries do not
+  # substitute for one another.
+  #
+  # Only linux-flydsl-mi325-1 and linux-flydsl-mi355-1 are required checks, so
+  # those two must stay pinned to their own pool: pointing a required context at
+  # a pool that is out of capacity leaves it pending and blocks every merge.
+  # The MI35x entries are additive coverage and are not required.
   # ---------------------------------------------------------------------------
   test:
     needs: [check-signal, detect-changes, prepare-mlir]
@@ -458,13 +470,17 @@ jobs:
       # If that cache is unavailable, checkout fails before the tests start.
       GIT_CONFIG_GLOBAL: /dev/null
       GIT_CONFIG_NOSYSTEM: "1"
-      # Temporary quarantine for linux-flydsl-navi-2 GPU 1; see #858.
-      CI_HIP_VISIBLE_DEVICES: ${{ contains(matrix.runners, 'navi') && '3' || '' }}
+      # Temporary quarantine for linux-flydsl-navi-2 GPU 1; see #858. The 8-GPU
+      # gfx950 pool runs the same single-GPU suite, so pin it to device 0 rather
+      # than letting run_tests.sh pick by free VRAM.
+      CI_HIP_VISIBLE_DEVICES: ${{ contains(matrix.runners, 'navi') && '3' || matrix.runners == 'linux-flydsl-mi35x-8' && '0' || '' }}
     strategy:
       matrix:
         runners: [
           'linux-flydsl-mi325-1',
           'linux-flydsl-mi355-1',
+          'linux-flydsl-mi35x-1',
+          'linux-flydsl-mi35x-8',
           'linux-flydsl-navi-2',
         ]
       fail-fast: false
@@ -760,7 +776,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Multi-GPU communication operator tests: ONLY for 8-GPU runners.
-  # Runs on BOTH linux-flydsl-mi325-8 AND linux-flydsl-mi355-8 independently.
+  # Runs on linux-flydsl-mi325-8, linux-flydsl-mi355-8, and linux-flydsl-mi35x-8 independently.
   # Triggered when PR has label "multi-gpu" (added by a maintainer), or when
   # the workflow is manually dispatched.
   # fail-fast: false ensures both runners always complete even if one fails.
@@ -789,6 +805,7 @@ jobs:
         runners: [
           'linux-flydsl-mi325-8',
           'linux-flydsl-mi355-8',
+          'linux-flydsl-mi35x-8',
         ]
       fail-fast: false
     runs-on: ${{ matrix.runners }}
