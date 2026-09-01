@@ -5176,14 +5176,15 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
 
     def _stage_v_fp8_vectorized_bn128(self, tile_start, buf_id, page_id=None):
         """Stage V in a bank-padded D-major layout for paged BN128 P*V."""
+        src_i32x4 = self._load_v_fp8_vectorized_bn128(tile_start, page_id=page_id)
+        self._store_v_fp8_vectorized_bn128(src_i32x4, buf_id)
+
+    def _load_v_fp8_vectorized_bn128(self, tile_start, page_id=None):
+        """Issue one vectorized paged-V load for the BN128 direct-FP8 path."""
         traits = self.traits
         if page_id is None:
             page_id = self.load_page_id(tile_start)
         src_div = self.make_page_view(self.v_base_iter, page_id, is_value=True)
-        row_stride = traits.FP8_V_ROW_STRIDE
-        v_tile_bytes = traits.V_HEAD_DIM * row_stride
-        aligned_base = ((self.lds_vt_base_idx + fx.Index(127)) // fx.Index(128)) * fx.Index(128)
-        dst_base = aligned_base + fx.Index(buf_id * v_tile_bytes)
         token_groups16 = traits.BLOCK_N // traits.KV_VEC_SIZE
         # permlane16 requires a full EXEC mask. D128/V128 has exactly one
         # 16-byte V vector per CTA thread, so no per-lane bounds branch is needed.
@@ -5195,7 +5196,17 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
             + n_group16 * traits.V_HEAD_DIM * traits.KV_VEC_SIZE
             + d_col * traits.KV_VEC_SIZE
         )
-        src_i32x4 = self.buffer_load_fp8x16(src_div, src_elem)
+        return self.buffer_load_fp8x16(src_div, src_elem)
+
+    def _store_v_fp8_vectorized_bn128(self, src_i32x4, buf_id):
+        """Permute a prefetched BN128 V vector and store it into LDS."""
+        traits = self.traits
+        row_stride = traits.FP8_V_ROW_STRIDE
+        v_tile_bytes = traits.V_HEAD_DIM * row_stride
+        aligned_base = ((self.lds_vt_base_idx + fx.Index(127)) // fx.Index(128)) * fx.Index(128)
+        dst_base = aligned_base + fx.Index(buf_id * v_tile_bytes)
+        n_group16 = self.lane_in_warp // fx.Index(16)
+        d_col = self.wave_id * fx.Index(16) + self.lane_in_warp % fx.Index(16)
         src_words = Vec(src_i32x4, (4,), fx.Int32)
         pair_ty = ir.Type.parse("!llvm.struct<(i32, i32)>")
         pair_lo = rocdl.permlane16_swap(
