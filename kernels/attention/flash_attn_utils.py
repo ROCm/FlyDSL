@@ -4957,7 +4957,12 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
             rocdl.sched_group_barrier(traits.SCHED_MFMA_MASK, 1, 12)
             rocdl.sched_group_barrier(traits.SCHED_DS_READ_MASK, n_ds // 2, 12)
             rocdl.sched_group_barrier(traits.SCHED_MFMA_MASK, n_mfma - 1, 12)
-        if const_expr(traits.PAGED):
+        # Generic paged D192 keeps logits in scaled log2 units because its
+        # HIPREC softmax path was built around that representation.  The
+        # paired D128 path follows dense BN128 instead: defer scaling to the
+        # score-minus-max FMA so it does not materialize a separate multiply
+        # for every QK accumulator element.
+        if const_expr(traits.PAGED and not traits.BN128):
             scale_vec = Vec.from_elements([self.c_logit_scale], fx.Float32).broadcast_to(16)
             v_s_lo = as_mlir_value(Vec(v_s_lo) * scale_vec)
             v_s_hi = as_mlir_value(Vec(v_s_hi) * scale_vec)
@@ -5592,7 +5597,7 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
     _P_HEADROOM_LOG2 = 8.807354922057604
 
     def sub_m(self, v_s, row_max):
-        if const_expr(self.traits.PAGED):
+        if const_expr(self.traits.PAGED and not self.traits.BN128):
             return _sub_score_pair(v_s, row_max, self.fm_fast)
         # P is cast to e4m3, whose smallest subnormal is 2**-9, so a softmax
         # over thousands of keys loses its tail to flush-to-zero -- while l_row,
@@ -5649,7 +5654,7 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         return _safe_l_inv(l_row, self.c_zero_f)
 
     def rescale_from_tile_max(self, m_row, m_tile_max):
-        if const_expr(self.traits.PAGED):
+        if const_expr(self.traits.PAGED and not self.traits.BN128):
             return _rescale_from_tile_max(m_row, m_tile_max, self.fm_fast)
         row_max = fx.maxnumf(m_row, m_tile_max)
         diff_scaled = (m_row - row_max) * self.c_logit_scale
