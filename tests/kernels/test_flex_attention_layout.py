@@ -34,6 +34,7 @@ from kernels.attention.flex_attention_layout_gfx950 import (  # noqa: E402
     MASK_NONE,
     MASK_CAUSAL,
     MASK_SLIDING_WINDOW,
+    MASK_PREFIX_LM,
     SCORE_NONE,
     SCORE_ALIBI,
 )
@@ -299,6 +300,35 @@ def test_flex_attention_layout_sliding_window_full():
     cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
     assert max_err < 8e-2 and cos > 0.98, (
         f"sw_full: max_err={max_err} cos={cos}"
+    )
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("dtype_str", ["bf16", "f16"])
+@pytest.mark.parametrize("B,Sq,Skv,H,D", _MOD_SHAPES)
+def test_flex_attention_layout_prefix_lm(B, Sq, Skv, H, D, dtype_str):
+    prefix_len = max(1, Sq // 4)
+    dtype = _DTYPES[dtype_str]
+    dev = "cuda"
+    torch.manual_seed(0)
+    q = torch.empty(B, Sq, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    k = torch.empty(B, Skv, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    v = torch.empty(B, Skv, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    scale = 1.0 / math.sqrt(D)
+
+    out = flydsl_flex_attention_layout(
+        q, k, v, scale=scale, mask_type=MASK_PREFIX_LM, mask_prefix_len=prefix_len,
+    ).float()
+    qi = torch.arange(Sq, device=dev).unsqueeze(1)
+    ki = torch.arange(Skv, device=dev).unsqueeze(0)
+    visible = (ki <= qi) | (ki < prefix_len)
+    mask = visible.float().unsqueeze(0).unsqueeze(0)
+    mask = mask.masked_fill(mask == 0, float("-inf")).masked_fill(mask == 1, 0.0)
+    ref = _sdpa_ref(q, k, v, scale, attn_mask=mask).float()
+    max_err = (out - ref).abs().max().item()
+    cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
+    assert max_err < 8e-2 and cos > 0.98, (
+        f"prefix_lm B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
     )
 
 

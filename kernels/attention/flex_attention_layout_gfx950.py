@@ -11,7 +11,7 @@ One workgroup computes ``num_groups`` independent ``[BLOCK_M, D]`` query tiles:
 load Q resident, loop over KV ``[BLOCK_N, D]`` tiles doing GEMM1 (S = Q@K^T),
 online softmax, the C->B bridge (scores packed as MFMA B operand), then
 GEMM2 (O += P@V with V=A, P=B); epilogue normalizes O by the row sum and
-stores it.  Supports optional flex score/mask mods (causal, sliding window,
+stores it.  Supports optional flex score/mask mods (causal, sliding window, prefix LM,
 alibi) and an overlapping-softmax pipeline for the KV loop.
 
 Target arch: gfx950 (CDNA4). Uses the cdna4 LDS transpose-read atom and the
@@ -82,6 +82,7 @@ _LOG2E = 1.4426950408889634
 MASK_NONE = 0
 MASK_CAUSAL = 1
 MASK_SLIDING_WINDOW = 2
+MASK_PREFIX_LM = 3
 
 SCORE_NONE = 0
 SCORE_ALIBI = 1
@@ -149,6 +150,27 @@ class SlidingWindowMask(FlexMod):
         return (causal & in_window).select(score, fx.Float32(-1e9))
 
 
+class PrefixLMMask(FlexMod):
+    has_mask = True
+    needs_safe_norm = True
+
+    def __init__(self, prefix_len):
+        self.prefix_len = prefix_len
+
+    def kv_range(self, q_min_wg, q_max_wg, n_kv_tiles, block_n):
+        raw_hi = (q_max_wg + fx.Int32(block_n)) // fx.Int32(block_n)
+        kv_hi = fx.Int32(arith.minsi(raw_hi.ir_value(), fx.Int32(n_kv_tiles).ir_value()))
+        return fx.Int32(0), kv_hi
+
+    def tile_needs_mask(self, kv_tile_idx, q_idx, block_n):
+        kv_tile_end = kv_tile_idx * fx.Int32(block_n) + fx.Int32(block_n - 1)
+        return kv_tile_end > q_idx
+
+    def apply_mask(self, score, q_idx, kv_idx):
+        visible = (kv_idx <= q_idx) | (kv_idx < fx.Int32(self.prefix_len))
+        return visible.select(score, fx.Float32(-1e9))
+
+
 class AlibiScore(FlexMod):
     has_score = True
 
@@ -191,11 +213,12 @@ def _make_k_lds_layout(block_n, head_dim):
     return base_layout
 
 
-def _build_mod(mask_type, score_type, mask_window=0, score_alibi_slope=0.0):
+def _build_mod(mask_type, score_type, mask_window=0, score_alibi_slope=0.0, mask_prefix_len=0):
     _mask = {
         MASK_NONE: FlexMod(),
         MASK_CAUSAL: CausalMask(),
         MASK_SLIDING_WINDOW: SlidingWindowMask(mask_window),
+        MASK_PREFIX_LM: PrefixLMMask(mask_prefix_len),
     }[mask_type]
     _score = {
         SCORE_NONE: FlexMod(),
@@ -217,10 +240,12 @@ class FlexAttnParam:
     # wave tiling
     m_waves: fx.Constexpr[int]
     n_waves: fx.Constexpr[int]
-    # num_groups independent 2-wave query subtiles per workgroup, all sharing the
-    # same KV loop. Each group runs the validated 32-row body on rows
-    # [group*block_m : (group+1)*block_m); K/V are meant to be loaded once and reused
-    # across all groups (strategy A). Total query rows per workgroup = num_groups*block_m.
+    # num_groups independent query subtiles per workgroup, all sharing the same KV
+    # loop. Each group runs the validated 32-row body on rows
+    # [group*block_m : (group+1)*block_m); K/V are loaded once and reused across all
+    # groups (strategy A). Total query rows per workgroup = num_groups*block_m.
+    # Default 8: fills all 8 SIMDs/CU (8 groups × 1 wave × 64 threads = 512) and
+    # enables wave-group stagger for overlapping DMA with compute.
     num_groups: fx.Constexpr[int]
     # mma shape
     mma_m: fx.Constexpr[int]
@@ -236,10 +261,11 @@ class FlexAttnParam:
     pipe_stages: fx.Constexpr[int]  # deprecated: stagger follows num_groups/pipe_depth/m_waves
     # True = exact per-row softmax; False = approximate column softmax (mma_m=32 only)
     accurate_softmax: fx.Constexpr[bool]
-    # flex mods: integer type IDs (MASK_NONE/CAUSAL/SLIDING_WINDOW, SCORE_NONE/ALIBI)
+    # flex mods: integer type IDs (MASK_NONE/CAUSAL/SLIDING_WINDOW/PREFIX_LM, SCORE_NONE/ALIBI)
     mask_type: fx.Constexpr[int]
     score_type: fx.Constexpr[int]
     mask_window: fx.Constexpr[int]  # sliding window size (only used when mask_type==MASK_SLIDING_WINDOW)
+    mask_prefix_len: fx.Constexpr[int]  # prefix length (only used when mask_type==MASK_PREFIX_LM)
     score_alibi_slope: fx.Constexpr[float]  # alibi slope (only used when score_type==SCORE_ALIBI)
     num_kv_splits: fx.Constexpr[int]  # split-K: partition KV range across this many WGs (1=disabled)
 
@@ -254,7 +280,7 @@ def make_flex_attn_param(
     num_heads_kv: int = 8,
     m_waves: int = 1,
     n_waves: int = 1,
-    num_groups: int = 1,
+    num_groups: int = 8,
     mma_m: int = 32,
     mma_n: int = 32,
     mma_k: int = 16,
@@ -264,6 +290,7 @@ def make_flex_attn_param(
     mask_type: int = MASK_NONE,
     score_type: int = SCORE_NONE,
     mask_window: int = 0,
+    mask_prefix_len: int = 0,
     score_alibi_slope: float = 0.0,
     num_kv_splits: int = 1,
 ) -> FlexAttnParam:
@@ -348,6 +375,7 @@ def make_flex_attn_param(
         mask_type=mask_type,
         score_type=score_type,
         mask_window=mask_window,
+        mask_prefix_len=mask_prefix_len,
         score_alibi_slope=score_alibi_slope,
         num_kv_splits=num_kv_splits,
     )
@@ -477,7 +505,7 @@ def flex_attn_fwd_gfx950_kernel(
     # grid.x = q_tile; grid.y = head; grid.z = batch (or batch * num_kv_splits if split-K).
     _SPLITK = int(param.num_kv_splits) > 1
     _num_kv_splits = int(param.num_kv_splits)
-    _is_causal = int(param.mask_type) == MASK_CAUSAL
+    _is_causal = int(param.mask_type) in (MASK_CAUSAL, MASK_PREFIX_LM)
     if const_expr(_is_causal):
         _num_q_tiles = (seqlen_q + fx.Int32(num_groups * block_m - 1)) // fx.Int32(num_groups * block_m)
         q_tile = fx.Index(arith.index_cast(T.index, _num_q_tiles - fx.Int32(1) - fx.Int32(arith.index_cast(T.i32, fx.block_idx.x))))
@@ -964,7 +992,8 @@ def flex_attn_fwd_gfx950_kernel(
     #   q_idx = q_start + local_tid % 32 (same for all 16 elements)
     #   kv_in_tile(e) = 8*(e//4) + e%4 + 4*(local_tid//32)
     flex_mod = _build_mod(int(param.mask_type), int(param.score_type),
-                          int(param.mask_window), float(param.score_alibi_slope))
+                          int(param.mask_window), float(param.score_alibi_slope),
+                          int(param.mask_prefix_len))
     mod_has_score = flex_mod.has_score
     mod_has_mask = flex_mod.has_mask
     _mod_apply_score = flex_mod.apply_score
@@ -1723,13 +1752,14 @@ def flydsl_flex_attention_layout(
     out: Optional[torch.Tensor] = None,
     block_m: int = 32,
     block_n: int = 32,
-    num_groups: int = 2,
+    num_groups: int = 8,
     pipe_depth: int = 1,
     pipe_stages: int = 1,
     accurate_softmax: bool = True,
     mask_type: int = MASK_NONE,
     score_type: int = SCORE_NONE,
     mask_window: int = 0,
+    mask_prefix_len: int = 0,
     score_alibi_slope: float = 0.0,
     num_kv_splits: int = 1,
     stream: Optional[torch.cuda.Stream] = None,
@@ -1796,6 +1826,7 @@ def flydsl_flex_attention_layout(
         mask_type=mask_type,
         score_type=score_type,
         mask_window=mask_window,
+        mask_prefix_len=mask_prefix_len,
         score_alibi_slope=score_alibi_slope,
         num_kv_splits=num_kv_splits,
     )
