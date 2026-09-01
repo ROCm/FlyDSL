@@ -214,8 +214,9 @@ def build_flash_attn_paged_fp8_module(
             return v_p, l_row
 
         def _pv_part(v_p, v_v, v_o):
-            v_o = gemm_helper.pv(v_p, v_v, v_o)
-            return softmax_helper.anchor_v_o(v_o)
+            # Keep the post-MFMA accumulators in SSA. Pinning them after each
+            # subtile lengthens the paged schedule without reducing registers.
+            return gemm_helper.pv(v_p, v_v, v_o)
 
         def _subtile_tail(v_s, v_v, v_o, l_row, m_new):
             v_p, l_row = _softmax_part(v_s, l_row, m_new)
