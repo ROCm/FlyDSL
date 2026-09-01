@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-01T08:08:38Z",
+ "updated": "2026-09-01T08:59:28Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -39,11 +39,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-01T07:26:47Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33479103086/job/99773739928"
+     "completed_at": "2026-09-01T08:41:43Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33479103086/job/99773739928",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi35x-1",
@@ -63,11 +64,11 @@
    "branch": "add-minnumf-wrapper",
    "event": "pull_request",
    "title": "[Bugfix] Add type-safe fx.minnumf wrapper matching maxnumf",
-   "status": "completed",
-   "conclusion": "action_required",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33478947923",
    "created_at": "2026-09-01T06:44:56Z",
-   "updated_at": "2026-09-01T06:44:56Z",
+   "updated_at": "2026-09-01T08:57:23Z",
    "actor": "LWenH",
    "jobs": []
   },
@@ -128,11 +129,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-01T07:13:53Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33473397006/job/99754191593"
+     "completed_at": "2026-09-01T08:13:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33473397006/job/99754191593",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -339,20 +341,20 @@
    "branch": "add-minnumf-wrapper",
    "event": "pull_request",
    "title": "[Bugfix] Add type-safe fx.minnumf wrapper matching maxnumf",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33459400149",
    "created_at": "2026-09-01T01:36:34Z",
-   "updated_at": "2026-09-01T01:57:29Z",
+   "updated_at": "2026-09-01T08:57:23Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-01T01:57:29Z",
-     "completed_at": null,
+     "completed_at": "2026-09-01T08:57:23Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33459400149/job/99710047989"
     },
     {
@@ -452,11 +454,11 @@
    "branch": "bump-version-0.3.3",
    "event": "pull_request",
    "title": "Release: bump version to 0.3.3",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33457189017",
    "created_at": "2026-09-01T01:02:51Z",
-   "updated_at": "2026-09-01T01:33:27Z",
+   "updated_at": "2026-09-01T08:13:07Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -471,9 +473,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-01T01:33:27Z",
+     "started_at": "2026-09-01T08:13:06Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33457189017/job/99705572959"
     },
@@ -2055,11 +2057,11 @@
    "branch": "perf/jit-compile-cache-fingerprint",
    "event": "pull_request",
    "title": "[Perf] avoid hashing when cache not enabled",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33137993066",
    "created_at": "2026-08-28T03:07:54Z",
-   "updated_at": "2026-09-01T02:16:15Z",
+   "updated_at": "2026-09-01T08:11:45Z",
    "actor": "ppppqp",
    "jobs": [
     {
@@ -2085,9 +2087,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-01T02:16:15Z",
+     "started_at": "2026-09-01T08:11:44Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33137993066/job/99713615881"
     },
