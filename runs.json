@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-01T11:01:41Z",
+ "updated": "2026-09-01T12:39:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33506137133,
+   "pr": 1032,
+   "commit": "7124d387671ee6962b1ee92e60a0a18e728f4c48",
+   "branch": "convolution",
+   "event": "pull_request",
+   "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33506137133",
+   "created_at": "2026-09-01T12:09:15Z",
+   "updated_at": "2026-09-01T12:12:24Z",
+   "actor": "amd-nprotaso",
+   "jobs": []
+  },
   {
    "run_id": 33479103086,
    "pr": 1086,
@@ -547,7 +562,7 @@
   },
   {
    "run_id": 33407587633,
-   "pr": 1032,
+   "pr": null,
    "commit": "6f6fe0a0c17a886b13d236b4f479b08686583d7e",
    "branch": "convolution",
    "event": "pull_request",
@@ -2504,51 +2519,6 @@
      "started_at": "2026-08-27T13:34:31Z",
      "completed_at": "2026-08-27T13:51:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33075521829/job/98535539450"
-    }
-   ]
-  },
-  {
-   "run_id": 33072268362,
-   "pr": null,
-   "commit": "2782595c814c30e30ee5d57f33591cb3cc377aac",
-   "branch": "rdna3-int8-wmma-gemm",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Add RDNA3 INT8 WMMA GEMM, 1.23-2.80x over torch",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33072268362",
-   "created_at": "2026-08-27T12:31:30Z",
-   "updated_at": "2026-08-28T02:41:44Z",
-   "actor": "vlluvia",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-28T02:29:05Z",
-     "completed_at": "2026-08-28T02:41:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33072268362/job/98736080240"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-27T12:52:00Z",
-     "completed_at": "2026-08-27T13:42:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33072268362/job/98736080700",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-27T12:52:04Z",
-     "completed_at": "2026-08-27T15:17:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33072268362/job/98736081497",
-     "log_fetch_failed": true
     }
    ]
   }
