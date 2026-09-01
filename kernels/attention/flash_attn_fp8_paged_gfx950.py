@@ -65,14 +65,14 @@ def build_flash_attn_paged_fp8_module(
         or not causal
         or not varlen
         or not cross_seqlen
-        or head_dim != 192
-        or value_head_dim not in (128, 192)
+        or (head_dim, value_head_dim) not in ((128, 128), (192, 128), (192, 192))
         or kv_cache_layout != "vectorized"
         or int(num_kv_splits) != 1
     ):
         raise RuntimeError(
             "paged FP8 flash_attn requires gfx950, causal packed-varlen cross-attention, "
-            "page-64 vectorized KV, head_dim=192, value_head_dim in {128,192}, "
+            "page-64 vectorized KV, (head_dim,value_head_dim) in "
+            "{(128,128),(192,128),(192,192)}, "
             "and num_kv_splits=1"
         )
 
@@ -693,10 +693,12 @@ def build_flash_attn_paged_fp8_module(
             # Normalize by l_row; zero rows become zero instead of NaN.
             # Split-K normalizes before packing so O_partial keeps useful mantissa
             # range; the combine kernel later applies w_s*l_s.
-            # HIPREC already folds v_descale into the bf16 vt scratch, so O only needs
-            # the 1/l normalization here.
+            # HIPREC folds v_descale into the bf16 vt scratch. The direct FP8
+            # D128 path keeps raw V and applies its descale once at the end.
             inv_l_rcp = rocdl.rcp(T.f32, _raw(l_row))
             inv_l = ArithValue(fx.Float32(l_row) > ctx.c_zero_f).select(inv_l_rcp, ctx.c_zero_f)
+            if const_expr(traits.FP8_PV):
+                inv_l = ArithValue(inv_l) * ctx.vd_fp8
             softmax_helper.scale_o(v_o, inv_l)
 
             # CLOSE the phase shift: one extra s_barrier on group A (complement of
