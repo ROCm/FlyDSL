@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-01T01:13:53Z",
+ "updated": "2026-09-01T01:37:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33459249211,
+   "pr": null,
+   "commit": "fdf0451c8717b7d926014beee0447e45be745ff0",
+   "branch": "main",
+   "event": "push",
+   "title": "bump version to 0.3.3 (#1085)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33459249211",
+   "created_at": "2026-09-01T01:34:16Z",
+   "updated_at": "2026-09-01T01:34:57Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 33457454040,
    "pr": 1084,
@@ -10,13 +25,41 @@
    "branch": "ci/shared-gfx950-runner",
    "event": "pull_request",
    "title": "[CI] Revert to runner labels that have live runners",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33457454040",
    "created_at": "2026-09-01T01:06:50Z",
-   "updated_at": "2026-09-01T01:09:54Z",
+   "updated_at": "2026-09-01T01:34:08Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-01T01:34:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33457454040/job/99705702102"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-01T01:34:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33457454040/job/99705702130"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-01T01:34:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33457454040/job/99705702239"
+    }
+   ]
   },
   {
    "run_id": 33457189017,
@@ -25,13 +68,41 @@
    "branch": "bump-version-0.3.3",
    "event": "pull_request",
    "title": "Release: bump version to 0.3.3",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33457189017",
    "created_at": "2026-09-01T01:02:51Z",
-   "updated_at": "2026-09-01T01:05:40Z",
+   "updated_at": "2026-09-01T01:33:27Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-01T01:34:17Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33457189017/job/99705572911"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-01T01:34:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33457189017/job/99705572967"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-01T01:34:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33457189017/job/99705573028"
+    }
+   ]
   },
   {
    "run_id": 33407587633,
@@ -85,11 +156,11 @@
    "branch": "main",
    "event": "push",
    "title": "add mxfp8 a8w8(blockscale&mx1*32) (#1081)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33401100150",
    "created_at": "2026-08-31T14:10:35Z",
-   "updated_at": "2026-08-31T15:25:38Z",
+   "updated_at": "2026-09-01T01:34:18Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -2027,51 +2098,6 @@
    "updated_at": "2026-08-27T07:17:26Z",
    "actor": "Phil-amd",
    "jobs": []
-  },
-  {
-   "run_id": 33048248167,
-   "pr": 1071,
-   "commit": "770cf113b23bef18b2953eebc324fdc4f3b52f08",
-   "branch": "ci/base-llvm-baseline",
-   "event": "pull_request",
-   "title": "[CI] Build the benchmark baseline wheel against the base commit's LLVM",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33048248167",
-   "created_at": "2026-08-27T07:04:38Z",
-   "updated_at": "2026-08-27T10:42:56Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-27T09:03:09Z",
-     "completed_at": "2026-08-27T09:21:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33048248167/job/98465283486"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-27T09:08:50Z",
-     "completed_at": "2026-08-27T10:42:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33048248167/job/98465283542",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-27T09:04:27Z",
-     "completed_at": "2026-08-27T10:37:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33048248167/job/98465283584",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
