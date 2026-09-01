@@ -110,7 +110,7 @@ def make_gemm_a16w16_gfx950_param(
     if in_dtype_id not in (GEMM_A16W16_DTYPE_BF16, GEMM_A16W16_DTYPE_FP16):
         raise ValueError(f"unsupported in_dtype_id={in_dtype_id}")
     if out_dtype_id not in (in_dtype_id, GEMM_A16W16_DTYPE_FP32):
-        raise ValueError(f"unsupported out_dtype_id={out_dtype_id} " f"for in_dtype_id={in_dtype_id}")
+        raise ValueError(f"unsupported out_dtype_id={out_dtype_id} for in_dtype_id={in_dtype_id}")
     if block_m <= 0 or block_n <= 0 or block_k <= 0 or stages <= 0 or split_k <= 0:
         raise ValueError("block_m, block_n, block_k, stages, and split_k must be positive")
     if (mma_m, mma_n, mma_k) != (16, 16, 32):
@@ -286,13 +286,9 @@ def make_gemm_a16w16_gfx950_kernel_name(param: GemmA16W16Gfx950Param):
     return name
 
 
-def make_gemm_ab_lds_layouts(
-    rows_a, rows_b, block_k, a_is_transposed, b_is_transposed
-):
+def make_gemm_ab_lds_layouts(rows_a, rows_b, block_k, a_is_transposed, b_is_transposed):
     a_lds_layout = (
-        make_transposed_lds_layout(rows_a, block_k)
-        if const_expr(a_is_transposed)
-        else make_lds_layout(rows_a, block_k)
+        make_transposed_lds_layout(rows_a, block_k) if const_expr(a_is_transposed) else make_lds_layout(rows_a, block_k)
     )
     b_lds_layout = (
         make_transposed_lds_layout(rows_b, block_k)
@@ -1269,7 +1265,7 @@ def assert_no_k_tail(k: int, kwargs: dict):
     working_k = (working_k + async_load_vec_size - 1) // async_load_vec_size * async_load_vec_size
     last_working_k = k - (split_k - 1) * working_k
     assert working_k % block_k == 0, (
-        "K-tail is unsupported: aligned split-K partition size " f"{working_k} is not divisible by block_k={block_k}"
+        f"K-tail is unsupported: aligned split-K partition size {working_k} is not divisible by block_k={block_k}"
     )
     assert last_working_k > 0 and last_working_k % block_k == 0, (
         "K-tail is unsupported: final split-K partition size "
@@ -1279,16 +1275,14 @@ def assert_no_k_tail(k: int, kwargs: dict):
     last_working_k_tiles = last_working_k // block_k
     min_k_tiles = stages - 1
     assert working_k_tiles >= min_k_tiles, (
-        f"split-K partitions require at least {min_k_tiles} K tiles, " f"got {working_k_tiles}"
+        f"split-K partitions require at least {min_k_tiles} K tiles, got {working_k_tiles}"
     )
     assert last_working_k_tiles >= min_k_tiles, (
-        f"the final split-K partition requires at least {min_k_tiles} K tiles, " f"got {last_working_k_tiles}"
+        f"the final split-K partition requires at least {min_k_tiles} K tiles, got {last_working_k_tiles}"
     )
     if use_half_tile_interleaved:
         assert working_k_tiles >= 2 and working_k_tiles % 2 == 0, (
-            "HTI requires at least two and an even number of K tiles "
-            "per split-K partition, "
-            f"got {working_k_tiles}"
+            f"HTI requires at least two and an even number of K tiles per split-K partition, got {working_k_tiles}"
         )
         assert last_working_k_tiles >= 2 and last_working_k_tiles % 2 == 0, (
             "HTI requires at least two and an even number of K tiles "
@@ -1331,7 +1325,7 @@ def gemm_a16w16(
         stream = torch.cuda.current_stream()
     layout = layout.lower()
     if layout not in ("nn", "nt", "tn", "tt"):
-        raise ValueError(f"unsupported GEMM layout: {layout!r}; " "expected 'nn', 'nt', 'tn', or 'tt'")
+        raise ValueError(f"unsupported GEMM layout: {layout!r}; expected 'nn', 'nt', 'tn', or 'tt'")
     a_is_transposed = layout[0] == "t"
     b_is_transposed = layout[1] == "t"
     device = a.device
