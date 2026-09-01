@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-01T10:31:55Z",
+ "updated": "2026-09-01T10:50:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "xyt/refine_async",
    "event": "pull_request",
    "title": "[A16W16 GEMM] Consolidate gfx950 A/B load setup",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33479103086",
    "created_at": "2026-09-01T06:47:02Z",
-   "updated_at": "2026-09-01T09:17:50Z",
+   "updated_at": "2026-09-01T10:49:12Z",
    "actor": "xytpai",
    "jobs": [
     {
@@ -50,11 +50,12 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-01T09:17:49Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33479103086/job/99773739963"
+     "completed_at": "2026-09-01T10:49:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33479103086/job/99773739963",
+     "log_fetch_failed": true
     }
    ]
   },
