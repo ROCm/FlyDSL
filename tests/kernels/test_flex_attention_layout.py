@@ -30,6 +30,7 @@ import pytest  # noqa: E402
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.attention.flex_attention_layout_gfx950 import (  # noqa: E402
     flydsl_flex_attention_layout,
+    flydsl_flex_attention_layout_paged,
     flydsl_flex_attention_layout_fp8,
     MASK_NONE,
     MASK_CAUSAL,
@@ -425,6 +426,106 @@ def test_flex_attention_layout_fp8_causal(B, Sq, Skv, H, D):
     max_err, cos = _run_fp8(B, Sq, Skv, H, D, mask_type=MASK_CAUSAL)
     assert max_err < 8e-2 and cos > 0.98, (
         f"fp8 causal B{B} Sq{Sq} Skv{Skv} H{H} D{D}: max_err={max_err} cos={cos}"
+    )
+
+
+_PAGED_SHAPES = [
+    (1, 64, 64, 4, 128),
+    (2, 128, 128, 8, 128),
+    (1, 64, 128, 4, 128),
+    (1, 64, 32, 4, 128),
+]
+
+
+def _scatter_to_paged(k_contig, v_contig, block_n, block_table, context_lens):
+    """Scatter contiguous [B, Skv, H, D] KV into paged cache [num_blocks, block_n, H, D]."""
+    B, Skv, H, D = k_contig.shape
+    num_blocks = int(block_table.max().item()) + 1
+    k_cache = torch.zeros(num_blocks, block_n, H, D, dtype=k_contig.dtype, device=k_contig.device)
+    v_cache = torch.zeros(num_blocks, block_n, H, D, dtype=v_contig.dtype, device=v_contig.device)
+    for b in range(B):
+        ctx = int(context_lens[b].item())
+        for t in range(ctx):
+            page_idx = t // block_n
+            within_page = t % block_n
+            phys_page = int(block_table[b, page_idx].item())
+            k_cache[phys_page, within_page] = k_contig[b, t]
+            v_cache[phys_page, within_page] = v_contig[b, t]
+    return k_cache, v_cache
+
+
+def _make_block_table(B, Skv, block_n, device):
+    """Create a random block table and context_lens for paged tests."""
+    num_pages_per_seq = (Skv + block_n - 1) // block_n
+    total_pages = B * num_pages_per_seq * 2
+    context_lens = torch.full((B,), Skv, dtype=torch.int32, device=device)
+    block_table = torch.zeros(B, num_pages_per_seq, dtype=torch.int32, device=device)
+    used = set()
+    for b in range(B):
+        for p in range(num_pages_per_seq):
+            while True:
+                pid = torch.randint(0, total_pages, (1,)).item()
+                if pid not in used:
+                    used.add(pid)
+                    break
+            block_table[b, p] = pid
+    return block_table, context_lens, total_pages
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("dtype_str", ["bf16", "f16"])
+@pytest.mark.parametrize("B,Sq,Skv,H,D", _PAGED_SHAPES)
+def test_flex_attention_layout_paged(B, Sq, Skv, H, D, dtype_str):
+    dtype = _DTYPES[dtype_str]
+    dev = "cuda"
+    block_n = 32
+    torch.manual_seed(0)
+    q = torch.empty(B, Sq, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    k = torch.empty(B, Skv, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    v = torch.empty(B, Skv, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    scale = 1.0 / math.sqrt(D)
+
+    ref = _sdpa_ref(q, k, v, scale).float()
+
+    block_table, context_lens, total_pages = _make_block_table(B, Skv, block_n, dev)
+    k_cache, v_cache = _scatter_to_paged(k, v, block_n, block_table, context_lens)
+
+    out = flydsl_flex_attention_layout_paged(
+        q, k_cache, v_cache, block_table, context_lens, scale=scale,
+    ).float()
+    max_err = (out - ref).abs().max().item()
+    cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
+    assert max_err < 8e-2 and cos > 0.98, (
+        f"paged B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
+    )
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("dtype_str", ["bf16", "f16"])
+@pytest.mark.parametrize("B,Sq,Skv,H,D", _PAGED_SHAPES)
+def test_flex_attention_layout_paged_causal(B, Sq, Skv, H, D, dtype_str):
+    dtype = _DTYPES[dtype_str]
+    dev = "cuda"
+    block_n = 32
+    torch.manual_seed(0)
+    q = torch.empty(B, Sq, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    k = torch.empty(B, Skv, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    v = torch.empty(B, Skv, H, D, dtype=dtype, device=dev).uniform_(-1, 1)
+    scale = 1.0 / math.sqrt(D)
+
+    ref = _sdpa_ref(q, k, v, scale, is_causal=True).float()
+
+    block_table, context_lens, total_pages = _make_block_table(B, Skv, block_n, dev)
+    k_cache, v_cache = _scatter_to_paged(k, v, block_n, block_table, context_lens)
+
+    out = flydsl_flex_attention_layout_paged(
+        q, k_cache, v_cache, block_table, context_lens,
+        scale=scale, mask_type=MASK_CAUSAL,
+    ).float()
+    max_err = (out - ref).abs().max().item()
+    cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
+    assert max_err < 8e-2 and cos > 0.98, (
+        f"paged_causal B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
     )
 
 

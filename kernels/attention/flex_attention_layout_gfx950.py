@@ -268,6 +268,10 @@ class FlexAttnParam:
     mask_prefix_len: fx.Constexpr[int]  # prefix length (only used when mask_type==MASK_PREFIX_LM)
     score_alibi_slope: fx.Constexpr[float]  # alibi slope (only used when score_type==SCORE_ALIBI)
     num_kv_splits: fx.Constexpr[int]  # split-K: partition KV range across this many WGs (1=disabled)
+    paged: fx.Constexpr[bool]  # True = paged KV cache, False = contiguous
+
+
+_PAGED_BT_LDS_SIZE = 2048
 
 
 def make_flex_attn_param(
@@ -293,6 +297,7 @@ def make_flex_attn_param(
     mask_prefix_len: int = 0,
     score_alibi_slope: float = 0.0,
     num_kv_splits: int = 1,
+    paged: bool = False,
 ) -> FlexAttnParam:
     if dtype_id not in (FLEX_DTYPE_BF16, FLEX_DTYPE_FP16):
         raise ValueError(f"unsupported dtype_id={dtype_id}")
@@ -378,6 +383,7 @@ def make_flex_attn_param(
         mask_prefix_len=mask_prefix_len,
         score_alibi_slope=score_alibi_slope,
         num_kv_splits=num_kv_splits,
+        paged=paged,
     )
 
 
@@ -487,11 +493,15 @@ def flex_attn_fwd_gfx950_kernel(
     param: FlexAttnParam,
     ws_o: fx.Tensor = fx.Tensor,
     ws_ml: fx.Tensor = fx.Tensor,
+    block_table: fx.Tensor = fx.Tensor,  # [B * max_pages_per_seq] i32, flat
+    block_table_stride: fx.Int32 = fx.Int32(0),
+    context_lens: fx.Tensor = fx.Tensor,  # [B] i32
 ):
     block_m = param.block_m
     block_n = param.block_n
     head_dim = param.head_dim
     elem_dtype = _elem_dtype(param.dtype_id)
+    _paged = bool(param.paged)
 
     tid = fx.thread_idx.x
     # Strategy A: num_groups independent 2-wave query subtiles per workgroup, all
@@ -521,7 +531,12 @@ def flex_attn_fwd_gfx950_kernel(
 
     q_start = (q_tile * num_groups + group) * block_m
 
-    n_kv_tiles = param.n_kv_tiles  # compile-time: seqlen_kv // block_n (validated on host)
+    if const_expr(_paged):
+        _ctx_len_it = fx.recast_iter(fx.Int32, fx.get_iter(context_lens))
+        _ctx_len = fx.Int32(fx.ptr_load(_ctx_len_it + fx.Int32(arith.index_cast(T.i32, b_idx))))
+        n_kv_tiles = (_ctx_len + fx.Int32(block_n - 1)) // fx.Int32(block_n)
+    else:
+        n_kv_tiles = param.n_kv_tiles
 
     # ── LDS: K/V staging (shared across all groups) + per-group P bridge ──────
     kv_tile_elems = block_n * head_dim
@@ -531,13 +546,23 @@ def flex_attn_fwd_gfx950_kernel(
 
     _k_lds_pad_elems = _K_HALF_BANK_SKEW_ELEMS + _LDS_RING_BANK_SKEW_ELEMS
 
-    @fx.struct
-    class SharedStorage:
-        k_lds_0: fx.Array[elem_dtype, kv_tile_elems + _K_HALF_BANK_SKEW_ELEMS, 16]
-        k_lds_1: fx.Array[elem_dtype, kv_tile_elems + _k_lds_pad_elems, 16]
-        v_lds_0: fx.Array[elem_dtype, kv_tile_elems, 16]
-        v_lds_1: fx.Array[elem_dtype, kv_tile_elems + _LDS_RING_BANK_SKEW_ELEMS, 16]
-        p: fx.Array[elem_dtype, num_groups * block_m * block_n, 16]
+    if const_expr(_paged):
+        @fx.struct
+        class SharedStorage:
+            k_lds_0: fx.Array[elem_dtype, kv_tile_elems + _K_HALF_BANK_SKEW_ELEMS, 16]
+            k_lds_1: fx.Array[elem_dtype, kv_tile_elems + _k_lds_pad_elems, 16]
+            v_lds_0: fx.Array[elem_dtype, kv_tile_elems, 16]
+            v_lds_1: fx.Array[elem_dtype, kv_tile_elems + _LDS_RING_BANK_SKEW_ELEMS, 16]
+            p: fx.Array[elem_dtype, num_groups * block_m * block_n, 16]
+            bt: fx.Array[fx.Int32, _PAGED_BT_LDS_SIZE, 16]
+    else:
+        @fx.struct
+        class SharedStorage:
+            k_lds_0: fx.Array[elem_dtype, kv_tile_elems + _K_HALF_BANK_SKEW_ELEMS, 16]
+            k_lds_1: fx.Array[elem_dtype, kv_tile_elems + _k_lds_pad_elems, 16]
+            v_lds_0: fx.Array[elem_dtype, kv_tile_elems, 16]
+            v_lds_1: fx.Array[elem_dtype, kv_tile_elems + _LDS_RING_BANK_SKEW_ELEMS, 16]
+            p: fx.Array[elem_dtype, num_groups * block_m * block_n, 16]
 
     storage = fx.SharedAllocator().allocate(SharedStorage)
     _k1_ptr = storage.k_lds_1.peek().ptr
@@ -668,6 +693,9 @@ def flex_attn_fwd_gfx950_kernel(
     # is hkv * head_dim elements (V is [B, Skv, Hkv, D], D contiguous per score row).
     _v_subtile_row_bytes = 32 * param.in_data_bytes  # 64 bytes per sub-tile row
     _v_row_stride_bytes = hkv * head_dim * param.in_data_bytes
+    # Paged KV cache: [num_blocks, block_n, Hkv, D] — page stride and head offset.
+    _page_byte_stride = block_n * hkv * head_dim * param.in_data_bytes
+    _kv_head_byte_offset = fx.Int32(arith.index_cast(T.i32, kv_head)) * fx.Int32(head_dim * param.in_data_bytes)
     gK_flat = fx.rocdl.make_buffer_tensor(
         fx.Tensor(fx.make_view(fx.recast_iter(fx.Int8, fx.get_iter(k)), fx.make_layout(0x7FFFFFFF, 1))),
         max_size=True,
@@ -702,11 +730,14 @@ def flex_attn_fwd_gfx950_kernel(
         return elem_off % head_dim
 
     # ── Stage: DMA K+V global → LDS ─────────────────────────────────────
-    def _stage_kv_to_lds(kv_idx, buf, do_k, do_v, ops=_dma_ops_per_thread, op_offset=0):
+    def _stage_kv_to_lds(kv_idx, buf, do_k, do_v, ops=_dma_ops_per_thread, op_offset=0, page_id=None):
         wave_off = rocdl.readfirstlane(fx.Int32.ir_type, fx.Int32(tid // GFX950_WAVE_SIZE * GFX950_WAVE_SIZE * _dma_bytes))
         _step_bytes = block_threads * _dma_bytes
         if const_expr(do_k):
-            k_global_base = k_off * param.in_data_bytes + kv_idx * block_n * _k_row_stride_bytes
+            if page_id is not None:
+                k_global_base = page_id * fx.Int32(_page_byte_stride) + _kv_head_byte_offset
+            else:
+                k_global_base = k_off * param.in_data_bytes + kv_idx * block_n * _k_row_stride_bytes
             lds_k = fx.add_offset(sK_i8[buf], wave_off + op_offset * _step_bytes)
             for i in range_constexpr(ops):
                 if const_expr(i > 0):
@@ -719,7 +750,10 @@ def flex_attn_fwd_gfx950_kernel(
                 fx.copy(dma_atom, fx.slice(k_div, (None, fx.Int32(gmem_byte))),
                         fx.make_view(lds_k, fx.make_layout(1, 1)))
         if const_expr(do_v):
-            v_global_base = v_off * param.in_data_bytes + kv_idx * fx.Int32(block_n * _v_row_stride_bytes)
+            if page_id is not None:
+                v_global_base = page_id * fx.Int32(_page_byte_stride) + _kv_head_byte_offset
+            else:
+                v_global_base = v_off * param.in_data_bytes + kv_idx * fx.Int32(block_n * _v_row_stride_bytes)
             _v_step_bytes = _v_step_elems * param.in_data_bytes
             for i in range_constexpr(ops):
                 flat_byte = (op_offset + i) * block_threads * _dma_bytes + tid * _dma_bytes
@@ -810,9 +844,10 @@ def flex_attn_fwd_gfx950_kernel(
         HEAD_DIM = int(param.head_dim)
 
     def load_kv(tile_idx, slot, ops=_dma_ops_per_thread, op_offset=0):
-        if _K_HALF_BANK_SKEW_BYTES > 0:
-            # Split K DMA by D-half so each half gets its own m0 with/without skew.
-            # Phase 0 = D-lo (no skew), Phase 1 = D-hi (+skew). V is phase 2.
+        if const_expr(_paged):
+            _pid = _load_page_id(tile_idx)
+            _stage_kv_to_lds(tile_idx, slot, True, True, ops=ops, op_offset=op_offset, page_id=_pid)
+        elif _K_HALF_BANK_SKEW_BYTES > 0:
             _stage_kv_to_lds_strided(tile_idx, slot, 0, ops=ops, op_offset=op_offset)
             _stage_kv_to_lds_strided(tile_idx, slot, 1, ops=ops, op_offset=op_offset)
             _stage_kv_to_lds_strided(tile_idx, slot, 2, ops=ops, op_offset=op_offset)
@@ -1127,6 +1162,45 @@ def flex_attn_fwd_gfx950_kernel(
             )
 
     infra.traits = _LayoutSchedTraits()
+
+    # ── Paged KV: load block table into LDS ──────────────────────────────
+    if const_expr(_paged):
+        from flydsl._mlir.dialects import llvm as _llvm
+        _bt_lds_ptr = storage.bt.peek().ptr
+        _bt_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
+        _bt_flat = fx.rocdl.make_buffer_tensor(
+            fx.Tensor(fx.make_view(fx.recast_iter(fx.Int32, fx.get_iter(block_table)),
+                                   fx.make_layout(0x7FFFFFFF, 1))),
+            max_size=True,
+        )
+        _bt_div = fx.logical_divide(_bt_flat, fx.make_layout(1, 1))
+        _bt_batch_off = fx.Int32(arith.index_cast(T.i32, b_idx)) * block_table_stride
+        _bt_entries = n_kv_tiles
+        _bt_per_thread = (_bt_entries + fx.Int32(block_threads - 1)) // fx.Int32(block_threads)
+        _bt_reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
+        for _bt_pass in range_constexpr((_PAGED_BT_LDS_SIZE + block_threads - 1) // block_threads):
+            _bt_local = fx.Int32(_bt_pass) * fx.Int32(block_threads) + fx.Int32(tid)
+            _bt_in_range = _bt_local < _bt_entries
+            _bt_global = _bt_batch_off + _bt_local
+            _bt_lds_dst = fx.add_offset(fx.recast_iter(fx.Int32, _bt_lds_ptr),
+                                        fx.make_int_tuple(_bt_local))
+            if _bt_in_range:
+                fx.copy(_bt_copy_atom, fx.slice(_bt_div, (None, fx.Int32(_bt_global))),
+                        fx.make_view(_bt_lds_dst, fx.make_layout(1, 1)))
+            else:
+                fx.ptr_store(fx.Int32(0), _bt_lds_dst)
+        rocdl.s_waitcnt(0)
+        rocdl.s_barrier()
+
+        def _load_page_id(tile_idx):
+            _byte_off = tile_idx * fx.Int32(4)
+            _lds_i8 = fx.recast_iter(fx.Int8, _bt_lds_ptr)
+            _raw = _llvm.LoadOp(T.i32, fx.to_llvm_ptr(fx.add_offset(_lds_i8, _byte_off)))
+            rocdl.s_waitcnt(lgkmcnt=0)
+            return fx.Int32(rocdl.readfirstlane(fx.Int32.ir_type, _raw.result))
+    else:
+        def _load_page_id(tile_idx):
+            return fx.Int32(0)
 
     # KV tile range: clamp to the mask's valid range to skip fully-masked tiles.
     _q_min_wg = fx.Int32(arith.index_cast(T.i32, q_tile)) * fx.Int32(num_groups * block_m)
@@ -1667,11 +1741,19 @@ def launch_flex_attn_gfx950(
     stream: fx.Stream = fx.Stream(None),
     ws_o: fx.Tensor = fx.Tensor,
     ws_ml: fx.Tensor = fx.Tensor,
+    block_table: fx.Tensor = fx.Tensor,
+    block_table_stride: fx.Int32 = fx.Int32(0),
+    context_lens: fx.Tensor = fx.Tensor,
+    max_seqlen_kv: fx.Int32 = fx.Int32(0),
 ):
     b = fx.Int32(fx.get_scalar(q.shape[0]))
     seqlen_q = fx.Int32(fx.get_scalar(q.shape[1]))
     hq = fx.Int32(fx.get_scalar(q.shape[2]))
-    seqlen_kv = fx.Int32(fx.get_scalar(k.shape[1]))
+    _paged = bool(param.paged)
+    if const_expr(_paged):
+        seqlen_kv = max_seqlen_kv
+    else:
+        seqlen_kv = fx.Int32(fx.get_scalar(k.shape[1]))
 
     elem_dtype = _elem_dtype(param.dtype_id)
     _SPLITK = int(param.num_kv_splits) > 1
@@ -1704,7 +1786,7 @@ def launch_flex_attn_gfx950(
 
     flex_attn_fwd_gfx950_kernel(
         o, q, k, v, seqlen_q, seqlen_kv, b, scale, tiled_mma_qk, tiled_mma_pv, param,
-        ws_o, ws_ml,
+        ws_o, ws_ml, block_table, block_table_stride, context_lens,
         value_attrs={
             "rocdl.waves_per_eu": _waves_per_eu,
             "rocdl.flat_work_group_size": f"{param.block_threads},{param.block_threads}",
@@ -1842,6 +1924,107 @@ def flydsl_flex_attention_layout(
         out.contiguous(), q.contiguous(), k.contiguous(), v.contiguous(),
         fx.Float32(scale), param, stream,
         ws_o=ws_o, ws_ml=ws_ml,
+    )
+    return out
+
+
+def flydsl_flex_attention_layout_paged(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    context_lens: torch.Tensor,
+    *,
+    scale: Optional[float] = None,
+    num_kv_heads: Optional[int] = None,
+    out: Optional[torch.Tensor] = None,
+    block_m: int = 32,
+    num_groups: int = 8,
+    accurate_softmax: bool = True,
+    mask_type: int = MASK_NONE,
+    score_type: int = SCORE_NONE,
+    mask_window: int = 0,
+    mask_prefix_len: int = 0,
+    score_alibi_slope: float = 0.0,
+    stream: Optional[torch.cuda.Stream] = None,
+) -> torch.Tensor:
+    """Paged-KV-cache flex attention forward (gfx950).
+
+    q: ``[B, Sq, Hq, D]`` bf16/f16.
+    k_cache/v_cache: ``[num_blocks, page_size, Hkv, D]`` bf16/f16 (linear layout).
+    block_table: ``[B, max_pages_per_seq]`` i32 physical page IDs.
+    context_lens: ``[B]`` i32 per-sequence KV context length.
+    Returns ``[B, Sq, Hq, D]``.
+    """
+    arch = get_rocm_arch()
+    if not arch.startswith("gfx950"):
+        raise RuntimeError(f"flex_attention_layout_paged targets gfx950; got {arch!r}")
+    if not (q.is_cuda and k_cache.is_cuda and v_cache.is_cuda):
+        raise ValueError("q/k_cache/v_cache must be CUDA tensors")
+    if q.dtype != k_cache.dtype or q.dtype != v_cache.dtype:
+        raise ValueError("q/k_cache/v_cache must share dtype")
+    if q.dim() != 4:
+        raise ValueError(f"q must be 4D [B,Sq,H,D], got {q.dim()}D")
+    if k_cache.dim() != 4:
+        raise ValueError(f"k_cache must be 4D [num_blocks,page_size,Hkv,D], got {k_cache.dim()}D")
+
+    dtype_id = FLEX_DTYPE_FP16 if q.dtype is torch.float16 else FLEX_DTYPE_BF16
+    if q.dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError(f"unsupported dtype {q.dtype}")
+
+    B, Sq, Hq, D = q.shape
+    page_size = k_cache.shape[1]
+    Hkv = k_cache.shape[2]
+    block_n = page_size
+
+    if num_kv_heads is not None and num_kv_heads != Hkv:
+        raise ValueError(f"num_kv_heads {num_kv_heads} != k_cache head count {Hkv}")
+    rows_per_wg = block_m * num_groups
+    if Sq % rows_per_wg != 0:
+        raise ValueError(
+            f"seqlen_q ({Sq}) must be a multiple of block_m*num_groups ({rows_per_wg})"
+        )
+    if scale is None:
+        scale = 1.0 / (D ** 0.5)
+    if stream is None:
+        stream = torch.cuda.current_stream()
+    if out is None:
+        out = torch.empty(q.shape, dtype=q.dtype, device=q.device)
+
+    max_ctx = int(context_lens.max().item())
+    max_seqlen_kv = ((max_ctx + block_n - 1) // block_n) * block_n
+
+    bt_i32 = block_table.to(torch.int32).contiguous().reshape(-1)
+    bt_stride = block_table.shape[1]
+    ctx_i32 = context_lens.to(torch.int32).contiguous()
+
+    param = make_flex_attn_param(
+        seqlen_kv=max_seqlen_kv,
+        dtype_id=dtype_id,
+        block_m=block_m,
+        block_n=block_n,
+        head_dim=D,
+        num_heads_q=Hq,
+        num_heads_kv=Hkv,
+        num_groups=num_groups,
+        accurate_softmax=accurate_softmax,
+        mask_type=mask_type,
+        score_type=score_type,
+        mask_window=mask_window,
+        mask_prefix_len=mask_prefix_len,
+        score_alibi_slope=score_alibi_slope,
+        paged=True,
+    )
+
+    ws_o = torch.empty(1, dtype=torch.float32, device=q.device)
+    ws_ml = torch.empty(1, dtype=torch.float32, device=q.device)
+
+    launch_flex_attn_gfx950(
+        out.contiguous(), q.contiguous(), k_cache.contiguous(), v_cache.contiguous(),
+        fx.Float32(scale), param, stream,
+        ws_o=ws_o, ws_ml=ws_ml,
+        block_table=bt_i32, block_table_stride=fx.Int32(bt_stride),
+        context_lens=ctx_i32, max_seqlen_kv=fx.Int32(max_seqlen_kv),
     )
     return out
 
