@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-01T01:37:13Z",
+ "updated": "2026-09-01T01:40:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33459400149,
+   "pr": 1082,
+   "commit": "e6b52f22cbc1e05a875984fe7e146f5d0bf8e4f0",
+   "branch": "add-minnumf-wrapper",
+   "event": "pull_request",
+   "title": "[Bugfix] Add type-safe fx.minnumf wrapper matching maxnumf",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33459400149",
+   "created_at": "2026-09-01T01:36:34Z",
+   "updated_at": "2026-09-01T01:36:59Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 33459249211,
    "pr": null,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33459249211",
    "created_at": "2026-09-01T01:34:16Z",
-   "updated_at": "2026-09-01T01:34:57Z",
+   "updated_at": "2026-09-01T01:37:03Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -44,18 +59,18 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-01T01:34:08Z",
+     "started_at": "2026-09-01T01:35:10Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33457454040/job/99705702130"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-01T01:34:08Z",
+     "started_at": "2026-09-01T01:35:14Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33457454040/job/99705702239"
     }
@@ -538,16 +553,16 @@
   },
   {
    "run_id": 33361837028,
-   "pr": 1082,
+   "pr": null,
    "commit": "d694f594b8d679c05c34738a6c58431627629c15",
    "branch": "add-minnumf-wrapper",
    "event": "pull_request",
    "title": "[Bugfix] Add type-safe fx.minnumf wrapper matching maxnumf",
    "status": "completed",
-   "conclusion": "action_required",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33361837028",
    "created_at": "2026-08-31T05:48:36Z",
-   "updated_at": "2026-08-31T05:48:36Z",
+   "updated_at": "2026-09-01T01:36:59Z",
    "actor": "LWenH",
    "jobs": []
   },
@@ -1445,11 +1460,11 @@
    "branch": "perf/jit-compile-cache-fingerprint",
    "event": "pull_request",
    "title": "[Perf] avoid hashing when cache not enabled",
-   "status": "completed",
-   "conclusion": "action_required",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33137993066",
    "created_at": "2026-08-28T03:07:54Z",
-   "updated_at": "2026-08-28T03:07:54Z",
+   "updated_at": "2026-09-01T01:36:52Z",
    "actor": "ppppqp",
    "jobs": []
   },
@@ -2083,21 +2098,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 33048662101,
-   "pr": 1072,
-   "commit": "54a85467063702f8065466d8d45540b41ba14be9",
-   "branch": "ci/base-llvm-baseline-probe-1051",
-   "event": "pull_request",
-   "title": "[CI][DO NOT MERGE] Probe: LLVM pin bump on top of #1071",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33048662101",
-   "created_at": "2026-08-27T07:10:46Z",
-   "updated_at": "2026-08-27T07:17:26Z",
-   "actor": "Phil-amd",
-   "jobs": []
   }
  ]
 }
