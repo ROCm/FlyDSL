@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
+# Optimized by KernelAgent-Oink(https://github.com/meta-pytorch/KernelAgent)
 
 """Shared module-level helpers for the gfx950 dual-wave, software-pipelined
 flash-attention kernels.
@@ -5009,7 +5010,7 @@ class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
                 packs[k_substep][dc] = Vec(a).shuffle(Vec(b), [0, 1, 2, 3, 4, 5, 6, 7]).ir_value()
         return packs
 
-    def _load_v_fp8_block(self, buf_id):
+    def v_fp8_lds_base(self, buf_id):
         traits = self.traits
         v_tile_bytes = (traits.BLOCK_N // 8) * (traits.HEAD_DIM // 16) * 128
         buf_off = buf_id * v_tile_bytes
@@ -5018,9 +5019,13 @@ class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
         l16 = self.lane % fx.Index(16)
         lane_hi = self.lane // fx.Index(32)
         aligned_base = ((self.lds_vt_base_idx + fx.Index(127)) // fx.Index(128)) * fx.Index(128)
-        base = fx.Int32(
+        return fx.Int32(
             aligned_base + buf_off + rh * fx.Index(128) + l16 * fx.Index(8) + lane_hi * fx.Index(nbands * 128)
         )
+
+    def load_v_fp8_from_base(self, base):
+        traits = self.traits
+        nbands = traits.HEAD_DIM // 16  # 8
 
         def _tr8(imm):
             r = _ds_read_tr8_b64_imm(self.v2i32_type, base, imm)
@@ -5032,6 +5037,9 @@ class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
                 imm0 = (2 * ks * nbands + dc * 2) * 128
                 packs[ks][dc] = _tr8(imm0)
         return packs
+
+    def _load_v_fp8_block(self, buf_id):
+        return self.load_v_fp8_from_base(self.v_fp8_lds_base(buf_id))
 
 
 class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):

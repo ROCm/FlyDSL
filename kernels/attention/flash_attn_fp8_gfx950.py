@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
+# Optimized by KernelAgent-Oink(https://github.com/meta-pytorch/KernelAgent)
 
 """gfx950 DUALWAVE_SWP FP8 flash attention."""
 
@@ -274,6 +275,10 @@ def build_flash_attn_dualwave_swp_fp8_module(
             f_a_buf = _ring_wrap(a_buf + fx.Index(4))
             f_b_buf = _ring_wrap(a_buf + fx.Index(5))
 
+            if const_expr(traits.FP8_PV):
+                v_a_base = kv_lds_to_regs.v_fp8_lds_base(a_buf)
+                v_b_base = kv_lds_to_regs.v_fp8_lds_base(b_buf)
+
             v_k_a = kv_lds_to_regs.load_k(a_buf)
             v_k_b = kv_lds_to_regs.load_k(b_buf)
 
@@ -284,7 +289,10 @@ def build_flash_attn_dualwave_swp_fp8_module(
                 v_s_b = _mask_sub(v_s_b, j + fx.Index(1))
                 v_s_a, v_s_b = _mask_pair(v_s_a, v_s_b, j)
 
-            v_v_a = kv_lds_to_regs.load_v(a_buf)
+            if const_expr(traits.FP8_PV):
+                v_v_a = kv_lds_to_regs.load_v_fp8_from_base(v_a_base)
+            else:
+                v_v_a = kv_lds_to_regs.load_v(a_buf)
 
             kv_gmem_to_lds.load_k((j + fx.Index(4)) * BN, f_a_buf)
             kv_gmem_to_lds.load_k((j + fx.Index(5)) * BN, f_b_buf)
@@ -303,7 +311,10 @@ def build_flash_attn_dualwave_swp_fp8_module(
                 v_p_a, l_row = _softmax_part(v_s_a, l_row, m_new)
                 _phase_bar()
                 _pp_prio(1)
-                v_v_b = kv_lds_to_regs.load_v(b_buf)
+                if const_expr(traits.FP8_PV):
+                    v_v_b = kv_lds_to_regs.load_v_fp8_from_base(v_b_base)
+                else:
+                    v_v_b = kv_lds_to_regs.load_v(b_buf)
                 v_o = _pv_part(v_p_a, v_v_a, v_o)
                 _phase_bar()
                 _pp_prio(0)
@@ -330,7 +341,10 @@ def build_flash_attn_dualwave_swp_fp8_module(
                 v_o = softmax_helper.anchor_v_o(v_o)
 
                 v_o, l_row = _subtile_tail(v_s_a, v_v_a, v_o, l_row, m_new)
-                v_v_b = kv_lds_to_regs.load_v(b_buf)
+                if const_expr(traits.FP8_PV):
+                    v_v_b = kv_lds_to_regs.load_v_fp8_from_base(v_b_base)
+                else:
+                    v_v_b = kv_lds_to_regs.load_v(b_buf)
                 v_o, l_row = _subtile_tail(v_s_b, v_v_b, v_o, l_row, m_new)
                 m_row = m_new
 
