@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-01T06:46:23Z",
+ "updated": "2026-09-01T07:06:57Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33479103086,
+   "pr": 1086,
+   "commit": "faf8dd275f638fa98b42b0ce8a98ecea99521f16",
+   "branch": "xyt/refine_async",
+   "event": "pull_request",
+   "title": "[A16W16 GEMM] Consolidate gfx950 A/B load setup",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33479103086",
+   "created_at": "2026-09-01T06:47:02Z",
+   "updated_at": "2026-09-01T06:48:15Z",
+   "actor": "xytpai",
+   "jobs": []
+  },
+  {
+   "run_id": 33478947923,
+   "pr": 1082,
+   "commit": "252934e516ab92a165d30c1f0329faf4b02a517a",
+   "branch": "add-minnumf-wrapper",
+   "event": "pull_request",
+   "title": "[Bugfix] Add type-safe fx.minnumf wrapper matching maxnumf",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33478947923",
+   "created_at": "2026-09-01T06:44:56Z",
+   "updated_at": "2026-09-01T06:44:56Z",
+   "actor": "LWenH",
+   "jobs": []
+  },
   {
    "run_id": 33477401202,
    "pr": 1086,
@@ -265,7 +295,7 @@
   },
   {
    "run_id": 33459400149,
-   "pr": 1082,
+   "pr": null,
    "commit": "e6b52f22cbc1e05a875984fe7e146f5d0bf8e4f0",
    "branch": "add-minnumf-wrapper",
    "event": "pull_request",
@@ -613,9 +643,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-31T15:03:22Z",
+     "started_at": "2026-09-01T07:04:57Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33397185598/job/99534348403"
     },
@@ -677,9 +707,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-08-31T10:57:45Z",
+     "started_at": "2026-09-01T07:04:52Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33379508788/job/99464750993"
     },
@@ -877,11 +907,11 @@
    "branch": "skills/pr-review-and-perf-validation",
    "event": "pull_request",
    "title": "[Skills] Add PR review and performance-regression validation skills",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33363916494",
    "created_at": "2026-08-31T06:22:11Z",
-   "updated_at": "2026-08-31T06:54:12Z",
+   "updated_at": "2026-09-01T07:04:21Z",
    "actor": "zhiding512",
    "jobs": [
     {
@@ -916,10 +946,10 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-31T06:54:12Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-01T07:04:14Z",
+     "completed_at": "2026-09-01T07:04:21Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33363916494/job/99406854013"
     }
    ]
@@ -1052,20 +1082,20 @@
    "branch": "feat/gfx950-paged-attention-vllm-kv-layouts",
    "event": "pull_request",
    "title": "Support vLLM paged KV cache layouts on the gfx950 attention kernel",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33343144185",
    "created_at": "2026-08-30T23:57:07Z",
-   "updated_at": "2026-08-31T00:11:38Z",
+   "updated_at": "2026-09-01T07:04:20Z",
    "actor": "akii96",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-31T00:11:38Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-01T07:04:12Z",
+     "completed_at": "2026-09-01T07:04:19Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33343144185/job/99344155154"
     },
     {
@@ -1106,11 +1136,11 @@
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
    "title": "[WIP][Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33316875801",
    "created_at": "2026-08-30T14:26:35Z",
-   "updated_at": "2026-08-30T15:14:20Z",
+   "updated_at": "2026-09-01T07:04:20Z",
    "actor": "jli-melchior",
    "jobs": [
     {
@@ -1126,10 +1156,10 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-08-30T15:14:19Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-01T07:04:12Z",
+     "completed_at": "2026-09-01T07:04:19Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33316875801/job/99277724186"
     },
     {
@@ -2433,36 +2463,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 33071819224,
-   "pr": null,
-   "commit": "e5faff3c0d5dcccd4e6e57ebfd349e4b85aac26a",
-   "branch": "rdna3-int8-wmma-gemm",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Add RDNA3 INT8 WMMA GEMM, 1.23-2.80x over torch",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33071819224",
-   "created_at": "2026-08-27T12:25:52Z",
-   "updated_at": "2026-08-27T12:28:13Z",
-   "actor": "vlluvia",
-   "jobs": []
-  },
-  {
-   "run_id": 33071360194,
-   "pr": null,
-   "commit": "a5d23f8c72fe1720fa4dd3791bc19a85a2d3111c",
-   "branch": "rdna3-int8-wmma-gemm",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Add RDNA3 INT8 WMMA GEMM, 1.23-2.80x over torch",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33071360194",
-   "created_at": "2026-08-27T12:19:59Z",
-   "updated_at": "2026-08-27T12:22:21Z",
-   "actor": "vlluvia",
-   "jobs": []
   }
  ]
 }
