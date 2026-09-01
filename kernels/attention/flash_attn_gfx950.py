@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
+# Optimized by KernelAgent-Oink(https://github.com/meta-pytorch/KernelAgent)
 
 """Dual-wave, software-pipelined flash-attention kernel for gfx950 (D=64/128, bf16/fp16).
 
@@ -7,7 +8,7 @@ The gfx950 fast path of FlyDSL flash attention: same math as the generic
 ``flash_attn_generic.py`` BLOCK_M=256 path, but with a hand-built software
 pipeline and two-wave-group time-multiplexing instead of the compiler schedule.
 Dispatched only when gpu_arch >= gfx950, head_dim in (64, 128), dtype in (bf16, fp16),
-and (at runtime) seq_len >= 384. seq_len need NOT be a multiple of 256/64: a
+and (at runtime) seq_len >= 256. seq_len need NOT be a multiple of 256/64: a
 partial last q-block and a partial/odd kv-tile count are handled the same way as
 the hand-written reference asm (num_records bound on Q/K/V/O, tile count rounded
 up to even, and a kv padding-mask on the non-causal path).
@@ -126,6 +127,22 @@ def build_flash_attn_dualwave_swp_module(
     HAS_BIAS = bool(has_bias)
     HAS_ALIBI = bool(has_alibi)
     HAS_SINK = bool(has_sink)
+    BF16_CAUSAL_LPT = (
+        causal
+        and dtype_str == "bf16"
+        and num_heads == 32
+        and num_kv_heads == 4
+        and head_dim == 128
+        and not SPLITK
+        and not VARLEN
+        and not PAGED
+        and not cross_seqlen
+        and not return_lse
+        and not HAS_BIAS
+        and not HAS_ALIBI
+        and not HAS_SINK
+        and not _xcd_swizzle
+    )
     BIAS_LOG2E = host_math.log2(host_math.e)
 
     traits = _make_dualwave_swp_traits(
@@ -232,6 +249,8 @@ def build_flash_attn_dualwave_swp_module(
         ctx.init_runtime_indices()
         ctx.init_lds(SharedStorage)
         ctx.init_thread_mapping()
+        if const_expr(BF16_CAUSAL_LPT):
+            ctx.init_causal_lpt_order()
         ctx.init_sequence_lengths()
         ctx.init_descriptors()
         ctx.init_workspace()

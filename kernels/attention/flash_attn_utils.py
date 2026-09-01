@@ -3395,6 +3395,12 @@ class DualwaveKernelContext:
     def init_thread_mapping(self):
         _init_dualwave_thread_mapping(self)
 
+    def init_causal_lpt_order(self):
+        """Reverse the q-block grid axis so longer causal blocks issue first."""
+        num_q_blocks = fx.Index(gpu.grid_dim.y)
+        self.q_block_idx = num_q_blocks - fx.Index(1) - self.q_block_idx
+        self.q_start = self.q_block_idx * self.traits.BLOCK_M
+
     def init_sequence_lengths(self, CuSeqQ=None, CuSeqKv=None):
         if CuSeqQ is None:
             CuSeqQ = self.CuSeqQ
