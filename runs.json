@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-01T15:47:23Z",
+ "updated": "2026-09-01T16:43:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33532114706,
+   "pr": 1066,
+   "commit": "50990780e1ffd88643466b312d89feb737f04a43",
+   "branch": "upstream/fa-paged-fp8-asymmetric-v",
+   "event": "pull_request",
+   "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33532114706",
+   "created_at": "2026-09-01T16:29:48Z",
+   "updated_at": "2026-09-01T16:32:11Z",
+   "actor": "sammysun0711",
+   "jobs": []
+  },
+  {
+   "run_id": 33531388649,
+   "pr": 1074,
+   "commit": "269e59feffed498bbbf1cd5e8a971e32760d5f49",
+   "branch": "codex/gfx120x-fp8-wmma-atom",
+   "event": "pull_request",
+   "title": "[Dialect] Add FP8 support to GFX120X WMMA atom",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33531388649",
+   "created_at": "2026-09-01T16:22:30Z",
+   "updated_at": "2026-09-01T16:22:30Z",
+   "actor": "big-yellow-duck",
+   "jobs": []
+  },
   {
    "run_id": 33521009982,
    "pr": 1015,
@@ -20,20 +50,22 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-01T15:27:59Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33521009982/job/99916362694"
+     "completed_at": "2026-09-01T16:38:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33521009982/job/99916362694",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-01T15:28:05Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33521009982/job/99916362797"
+     "completed_at": "2026-09-01T16:09:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33521009982/job/99916362797",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -63,39 +95,42 @@
    "branch": "main",
    "event": "push",
    "title": "Fly DSL test",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33520614777",
    "created_at": "2026-09-01T14:37:16Z",
-   "updated_at": "2026-09-01T15:00:35Z",
+   "updated_at": "2026-09-01T16:40:41Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-01T15:00:35Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33520614777/job/99906117909"
+     "completed_at": "2026-09-01T16:40:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33520614777/job/99906117909",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-01T14:59:22Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33520614777/job/99906117944"
+     "completed_at": "2026-09-01T16:12:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33520614777/job/99906117944",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-01T15:00:20Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33520614777/job/99906117986"
+     "completed_at": "2026-09-01T16:05:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33520614777/job/99906117986",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -419,7 +454,7 @@
   },
   {
    "run_id": 33467360238,
-   "pr": 1074,
+   "pr": null,
    "commit": "d5c9c7d72876a242170d3a4d7f513b187e272eb1",
    "branch": "codex/gfx120x-fp8-wmma-atom",
    "event": "pull_request",
@@ -922,7 +957,7 @@
   },
   {
    "run_id": 33397185598,
-   "pr": 1066,
+   "pr": null,
    "commit": "68f0587dd98d2343f90553b603df0c0e6a39c5dd",
    "branch": "upstream/fa-paged-fp8-asymmetric-v",
    "event": "pull_request",
@@ -2410,75 +2445,6 @@
      "started_at": "2026-08-28T03:19:57Z",
      "completed_at": "2026-08-29T12:21:14Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33137638181/job/98744049849"
-    }
-   ]
-  },
-  {
-   "run_id": 33137307493,
-   "pr": null,
-   "commit": "319420730e4fcdfef3fc7743f87673759ee50f47",
-   "branch": "rdna3-int8-wmma-gemm",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Add RDNA3 INT8 WMMA GEMM, 1.23-2.80x over torch",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33137307493",
-   "created_at": "2026-08-28T02:54:16Z",
-   "updated_at": "2026-08-28T03:44:19Z",
-   "actor": "vlluvia",
-   "jobs": []
-  },
-  {
-   "run_id": 33117631657,
-   "pr": 1051,
-   "commit": "0afb7f87d68c364d57ea0d3ba60b13b780ca348b",
-   "branch": "phil/bump-llvm-941a04e6",
-   "event": "pull_request",
-   "title": "[FlyToROCDL] Bump LLVM to 941a04e6 and adapt gpu.launch_func lowering",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33117631657",
-   "created_at": "2026-08-27T21:19:48Z",
-   "updated_at": "2026-08-28T21:07:09Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-27T21:57:40Z",
-     "completed_at": "2026-08-27T23:38:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33117631657/job/98685488305",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-27T21:57:53Z",
-     "completed_at": "2026-08-27T23:15:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33117631657/job/98685488331",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-27T21:56:17Z",
-     "completed_at": "2026-08-28T21:07:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33117631657/job/98685488336"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-27T22:14:22Z",
-     "completed_at": "2026-08-27T22:22:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33117631657/job/98685488350"
     }
    ]
   }
