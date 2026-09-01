@@ -4986,7 +4986,14 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
         for pks in range_constexpr(self.traits.PV_K_STEPS):
             p_base = pks * 8
             f32 += [hi_full[p_base + s] for s in range_constexpr(8)]
-        return self._pack_fp8_i32x8(f32)
+        packed = self._pack_fp8_i32x8(f32)
+        if const_expr(self.traits.PAGED and self.traits.FP8_PV_DIRECT):
+            words = Vec(packed, (8,), fx.Int32)
+            return Vec.from_elements(
+                [words[i] for i in (0, 2, 1, 3, 4, 6, 5, 7)],
+                fx.Int32,
+            ).ir_value()
+        return packed
 
     def _pv_fp8_direct(self, p_fp8, v_v, v_o):
         v_o = _anchor_v_o(self.traits, v_o)
@@ -5208,8 +5215,8 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
         reordered = Vec.from_elements(
             [
                 fx.Int32(llvm.extractvalue(T.i32, pair_lo, [0])),
-                fx.Int32(llvm.extractvalue(T.i32, pair_hi, [0])),
                 fx.Int32(llvm.extractvalue(T.i32, pair_lo, [1])),
+                fx.Int32(llvm.extractvalue(T.i32, pair_hi, [0])),
                 fx.Int32(llvm.extractvalue(T.i32, pair_hi, [1])),
             ],
             fx.Int32,
