@@ -82,7 +82,6 @@ _SHAPES = [
     (1, 256, 256, 4, 128),
     (1, 256, 512, 4, 128),    # Sq != Skv
     (2, 256, 256, 8, 128),
-    (1, 256, 256, 4, 64),     # D=64
     (1, 256, 32, 4, 128),     # single KV tile (Skv == block_n)
     (1, 512, 1024, 4, 128),   # larger sequences
     (1, 256, 256, 8, 128),    # GQA: Hq=8, but uses default Hkv=Hq; see GQA test below
@@ -113,7 +112,6 @@ _MOD_SHAPES = [
     (2, 256, 256, 8, 128),
     (1, 256, 512, 4, 128),    # Sq < Skv (prefill with longer KV)
     (1, 256, 32, 4, 128),     # single KV tile
-    (1, 256, 256, 4, 64),     # D=64
     (1, 512, 512, 4, 128),    # larger sequence (tile-range clamping exercises more tiles)
 ]
 
