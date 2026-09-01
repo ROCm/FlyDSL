@@ -5178,58 +5178,50 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
         aligned_base = ((self.lds_vt_base_idx + fx.Index(127)) // fx.Index(128)) * fx.Index(128)
         dst_base = aligned_base + fx.Index(buf_id * v_tile_bytes)
         token_groups16 = traits.BLOCK_N // traits.KV_VEC_SIZE
-        total_v16 = traits.V_HEAD_DIM * token_groups16
-        passes = (total_v16 + traits.BLOCK_SIZE - 1) // traits.BLOCK_SIZE
-
-        for pass_id in range_constexpr(passes):
-            flat = self.tid + fx.Index(pass_id * traits.BLOCK_SIZE)
-
-            def _load_store_active():
-                n_group16 = flat % fx.Index(token_groups16)
-                d_col = flat // fx.Index(token_groups16)
-                src_elem = (
-                    self.kv_head_idx * token_groups16 * traits.V_HEAD_DIM * traits.KV_VEC_SIZE
-                    + n_group16 * traits.V_HEAD_DIM * traits.KV_VEC_SIZE
-                    + d_col * traits.KV_VEC_SIZE
-                )
-                src_i32x4 = self.buffer_load_fp8x16(src_div, src_elem)
-                src_words = Vec(src_i32x4, (4,), fx.Int32)
-                # gfx9 DPP quad_perm [1,0,3,2] is lane^1 without using the LDS
-                # cross-lane pipe, which remains busy serving the P*V fragments.
-                peer_words = [
-                    fx.Int32(
-                        rocdl.update_dpp(
-                            T.i32,
-                            as_mlir_value(fx.Int32(src_words[i])),
-                            as_mlir_value(fx.Int32(src_words[i])),
-                            0xB1,
-                            0xF,
-                            0xF,
-                            True,
-                        )
-                    )
-                    for i in range_constexpr(4)
-                ]
-                odd_group = (fx.Int32(n_group16) & fx.Int32(1)) != fx.Int32(0)
-                reordered = Vec.from_elements(
-                    [
-                        odd_group.select(peer_words[1], src_words[0]),
-                        odd_group.select(peer_words[3], src_words[2]),
-                        odd_group.select(src_words[1], peer_words[0]),
-                        odd_group.select(src_words[3], peer_words[2]),
-                    ],
-                    fx.Int32,
-                )
-                dest_group16 = (n_group16 % fx.Index(2)) * fx.Index(2) + n_group16 // fx.Index(2)
-                dst_byte = dst_base + d_col * fx.Index(row_stride) + dest_group16 * fx.Index(16)
-                ptr = buffer_ops.get_element_ptr(
-                    self.lds_vt_base_ptr,
-                    byte_offset=fx.Int32(dst_byte - self.lds_vt_base_idx),
-                    elem_type=T.i8,
-                )
-                llvm.StoreOp(as_mlir_value(reordered), ptr, alignment=16)
-
-            scf_if_dispatch(flat < fx.Index(total_v16), _load_store_active)
+        # permlane16 requires a full EXEC mask. D128/V128 has exactly one
+        # 16-byte V vector per CTA thread, so no per-lane bounds branch is needed.
+        assert traits.V_HEAD_DIM * token_groups16 == traits.BLOCK_SIZE
+        n_group16 = self.lane_in_warp // fx.Index(16)
+        d_col = self.wave_id * fx.Index(16) + self.lane_in_warp % fx.Index(16)
+        src_elem = (
+            self.kv_head_idx * token_groups16 * traits.V_HEAD_DIM * traits.KV_VEC_SIZE
+            + n_group16 * traits.V_HEAD_DIM * traits.KV_VEC_SIZE
+            + d_col * traits.KV_VEC_SIZE
+        )
+        src_i32x4 = self.buffer_load_fp8x16(src_div, src_elem)
+        src_words = Vec(src_i32x4, (4,), fx.Int32)
+        pair_ty = ir.Type.parse("!llvm.struct<(i32, i32)>")
+        pair_lo = rocdl.permlane16_swap(
+            pair_ty,
+            as_mlir_value(fx.Int32(src_words[0])),
+            as_mlir_value(fx.Int32(src_words[1])),
+            False,
+            False,
+        )
+        pair_hi = rocdl.permlane16_swap(
+            pair_ty,
+            as_mlir_value(fx.Int32(src_words[2])),
+            as_mlir_value(fx.Int32(src_words[3])),
+            False,
+            False,
+        )
+        reordered = Vec.from_elements(
+            [
+                fx.Int32(llvm.extractvalue(T.i32, pair_lo, [0])),
+                fx.Int32(llvm.extractvalue(T.i32, pair_hi, [0])),
+                fx.Int32(llvm.extractvalue(T.i32, pair_lo, [1])),
+                fx.Int32(llvm.extractvalue(T.i32, pair_hi, [1])),
+            ],
+            fx.Int32,
+        )
+        dest_group16 = (n_group16 % fx.Index(2)) * fx.Index(2) + n_group16 // fx.Index(2)
+        dst_byte = dst_base + d_col * fx.Index(row_stride) + dest_group16 * fx.Index(16)
+        ptr = buffer_ops.get_element_ptr(
+            self.lds_vt_base_ptr,
+            byte_offset=fx.Int32(dst_byte - self.lds_vt_base_idx),
+            elem_type=T.i8,
+        )
+        llvm.StoreOp(as_mlir_value(reordered), ptr, alignment=16)
 
     def _stage_v_fp8_vectorized_dense_layout(self, tile_start, buf_id, page_id=None):
         """Transpose vectorized V into the LDS layout used by direct FP8 P*V."""
