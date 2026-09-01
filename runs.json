@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-01T14:39:28Z",
+ "updated": "2026-09-01T14:42:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33520614777,
+   "pr": null,
+   "commit": "15553b3f10c1a55713f967eaf978c45c607e1cf2",
+   "branch": "main",
+   "event": "push",
+   "title": "Fly DSL test",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33520614777",
+   "created_at": "2026-09-01T14:37:16Z",
+   "updated_at": "2026-09-01T14:39:11Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 33520523624,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "Fly DSL test",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33520523624",
    "created_at": "2026-09-01T14:36:19Z",
-   "updated_at": "2026-09-01T14:36:54Z",
+   "updated_at": "2026-09-01T14:38:00Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -2427,61 +2442,6 @@
      "started_at": "2026-08-27T21:53:34Z",
      "completed_at": "2026-08-27T22:14:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33117174604/job/98684691043"
-    }
-   ]
-  },
-  {
-   "run_id": 33078414918,
-   "pr": 1076,
-   "commit": "3302378b9a26ca0cefe414440a976dd8f7c5a957",
-   "branch": "ci/mi35x-runners-aiter-image",
-   "event": "pull_request",
-   "title": "Ci/change image to speedup ci",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33078414918",
-   "created_at": "2026-08-27T13:44:28Z",
-   "updated_at": "2026-08-29T12:21:52Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-28T03:41:41Z",
-     "completed_at": "2026-08-28T04:00:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33078414918/job/98744736768",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-28T03:36:25Z",
-     "completed_at": "2026-08-28T04:18:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33078414918/job/98744736779",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-28T03:24:27Z",
-     "completed_at": "2026-08-29T12:21:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33078414918/job/98744736783"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-28T04:09:42Z",
-     "completed_at": "2026-08-28T05:40:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33078414918/job/98744736796",
-     "log_fetch_failed": true
     }
    ]
   }
