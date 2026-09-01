@@ -1808,6 +1808,7 @@ class DualwaveSwpFp8Traits:
     CROSS_SEQLEN: bool
     FP8_PV: bool
     FP8_PV_DIRECT: bool
+    FP8_V_BANKPAD: bool
     BN128: bool
     BN128_PF: bool
     QREG: bool
@@ -1896,6 +1897,7 @@ class DualwaveSwpFp8Traits:
             self.FP8_V_ROW_STRIDE,
             self.FP8_PV,
             self.FP8_PV_DIRECT,
+            self.FP8_V_BANKPAD,
             self.NUM_PREFETCH_K,
             self.BN128,
             self.BN128_PF,
@@ -1989,23 +1991,26 @@ def _make_dualwave_swp_fp8_traits(
     sdrpt_bf = value_head_dim // d128_bf
     vls_bf = slw_bf + 64 // eb_bf
     vt_bf16_elems = snrpt_bf * sdrpt_bf * vls_bf
+    paged = bool(paged)
+    fp8_v_bankpad = paged and value_head_dim == 128
     fp8_v_row_stride = block_n + 16
     fp8_v_tile_bytes = (block_n // 8) * (head_dim // 16) * 128
-    if paged and bn128 and head_dim == value_head_dim == 128:
+    if fp8_v_bankpad:
         fp8_v_tile_bytes = value_head_dim * fp8_v_row_stride
-    if bn128_pf:
+    if fp8_v_bankpad:
+        vt_bf16_total = num_prefetch_k * (fp8_v_tile_bytes // eb_bf) + 128
+    elif bn128_pf:
         vt_bf16_total = num_prefetch_k * (fp8_v_tile_bytes // eb_bf) + 128
     else:
         vt_bf16_total = (2 if deep_ring else num_prefetch_k) * vt_bf16_elems
 
     splitk = num_kv_splits > 1
-    paged = bool(paged)
     kv_vectorized = paged and kv_cache_layout == "vectorized"
     page_size = block_n
 
-    # D128 paged attention can consume its native FP8 V cache directly once
-    # the vectorized cache is transposed into the existing FP8 PV LDS layout.
-    fp8_pv = (paged and head_dim == value_head_dim == 128) or (not paged and os.getenv("FLYDSL_FA_FP8_PV", "0") == "1")
+    # Paged V128 attention can consume its native FP8 V cache directly once
+    # the vectorized cache is transposed into the bank-padded FP8 P*V layout.
+    fp8_pv = (paged and value_head_dim == 128) or (not paged and os.getenv("FLYDSL_FA_FP8_PV", "0") == "1")
     fp8_pv_direct = bn128 and (not paged or fp8_pv)
     if fp8_pv_direct:
         fp8_pv = True
@@ -2040,6 +2045,7 @@ def _make_dualwave_swp_fp8_traits(
         CROSS_SEQLEN=bool(cross_seqlen),
         FP8_PV=fp8_pv,
         FP8_PV_DIRECT=bool(fp8_pv_direct),
+        FP8_V_BANKPAD=bool(fp8_v_bankpad),
         BN128=bool(bn128),
         BN128_PF=bool(bn128_pf),
         QREG=bool(qreg),
@@ -4894,7 +4900,14 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
         f32 = []
         for pk in (p_lo[0], p_lo[1], p_hi[0], p_hi[1]):
             f32 += self._v8bf16_to_f32(pk)
-        return self._pack_fp8_i32x8(f32)
+        packed = self._pack_fp8_i32x8(f32)
+        if const_expr(self.traits.PAGED and self.traits.FP8_V_BANKPAD):
+            words = Vec(packed, (8,), fx.Int32)
+            return Vec.from_elements(
+                [words[i] for i in (0, 2, 1, 3, 4, 6, 5, 7)],
+                fx.Int32,
+            ).ir_value()
+        return packed
 
     def _v_concat_i32x8(self, v_v, dc):
         words = []
@@ -5048,8 +5061,8 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
             self.buffer_load_lds_128(self.k_div, lds_addr, src_elem, tile_start * self.stride_kv_n_v)
 
     def load_v(self, tile_start, buf_id, page_id=None):
-        if const_expr(self.traits.KV_VECTORIZED and self.traits.FP8_PV_DIRECT):
-            self._stage_v_fp8_vectorized_bn128(tile_start, buf_id, page_id=page_id)
+        if const_expr(self.traits.KV_VECTORIZED and self.traits.FP8_V_BANKPAD):
+            self._stage_v_fp8_vectorized_bankpad(tile_start, buf_id, page_id=page_id)
         elif const_expr(self.traits.KV_VECTORIZED and self.traits.FP8_PV):
             self._stage_v_fp8_vectorized_dense_layout(tile_start, buf_id, page_id=page_id)
         elif const_expr(self.traits.KV_VECTORIZED):
@@ -5170,20 +5183,20 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
 
             scf_if_dispatch(flat < fx.Index(total_v16), _load_store_active)
 
-    def _stage_v_fp8_vectorized_bn128(self, tile_start, buf_id, page_id=None):
-        """Stage V in a bank-padded D-major layout for paged BN128 P*V."""
-        src_i32x4 = self._load_v_fp8_vectorized_bn128(tile_start, page_id=page_id)
-        self._store_v_fp8_vectorized_bn128(src_i32x4, buf_id)
+    def _stage_v_fp8_vectorized_bankpad(self, tile_start, buf_id, page_id=None):
+        """Stage vectorized paged V in the bank-padded direct-FP8 layout."""
+        src_i32x4 = self._load_v_fp8_vectorized_bankpad_source(tile_start, page_id=page_id)
+        self._store_v_fp8_vectorized_bankpad(src_i32x4, buf_id)
 
-    def _load_v_fp8_vectorized_bn128(self, tile_start, page_id=None):
-        """Issue one vectorized paged-V load for the BN128 direct-FP8 path."""
+    def _load_v_fp8_vectorized_bankpad_source(self, tile_start, page_id=None):
+        """Issue one vectorized paged-V load for the bank-padded path."""
         traits = self.traits
         if page_id is None:
             page_id = self.load_page_id(tile_start)
         src_div = self.make_page_view(self.v_base_iter, page_id, is_value=True)
         token_groups16 = traits.BLOCK_N // traits.KV_VEC_SIZE
-        # permlane16 requires a full EXEC mask. D128/V128 has exactly one
-        # 16-byte V vector per CTA thread, so no per-lane bounds branch is needed.
+        # permlane16 requires a full EXEC mask. V128 has exactly one vector per
+        # CTA thread, so no per-lane bounds branch is needed.
         assert traits.V_HEAD_DIM * token_groups16 == traits.BLOCK_SIZE
         n_group16 = self.lane_in_warp // fx.Index(16)
         d_col = self.wave_id * fx.Index(16) + self.lane_in_warp % fx.Index(16)
@@ -5194,8 +5207,8 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
         )
         return self.buffer_load_fp8x16(src_div, src_elem)
 
-    def _store_v_fp8_vectorized_bn128(self, src_i32x4, buf_id):
-        """Permute a prefetched BN128 V vector and store it into LDS."""
+    def _store_v_fp8_vectorized_bankpad(self, src_i32x4, buf_id):
+        """Permute a prefetched V vector and store it into bank-padded LDS."""
         traits = self.traits
         row_stride = traits.FP8_V_ROW_STRIDE
         v_tile_bytes = traits.V_HEAD_DIM * row_stride
@@ -5357,8 +5370,8 @@ class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
 
     def load_v(self, buf_id):
         if const_expr(self.traits.FP8_PV):
-            if const_expr(self.traits.KV_VECTORIZED and self.traits.FP8_PV_DIRECT):
-                return self._load_v_fp8_vectorized_bn128(buf_id)
+            if const_expr(self.traits.KV_VECTORIZED and self.traits.FP8_V_BANKPAD):
+                return self._load_v_fp8_vectorized_bankpad(buf_id)
             return self._load_v_fp8_block(buf_id)
         # Read all V packs from the bf16 vt scratch for buffer `buf_id`.
         traits = self.traits
@@ -5382,7 +5395,7 @@ class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
                 packs[k_substep][dc] = Vec(a).shuffle(Vec(b), [0, 1, 2, 3, 4, 5, 6, 7]).ir_value()
         return packs
 
-    def _load_v_fp8_vectorized_bn128(self, buf_id):
+    def _load_v_fp8_vectorized_bankpad(self, buf_id):
         """Read the padded D-major V tile into the FP8 MFMA A fragment."""
         traits = self.traits
         row_stride = traits.FP8_V_ROW_STRIDE
