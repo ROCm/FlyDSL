@@ -615,8 +615,9 @@ def flex_attn_fwd_gfx950_kernel(
     fx.copy(ca, tcB_q.partition_S(gQ), tcB_q.retile(frag_Q))
     if const_expr(_is_32x32):
         n_q = _size_scalar(frag_Q.shape)
+        _scale_log2e_f32 = scale * fx.Float32(_LOG2E)
         for qi in range_constexpr(n_q):
-            frag_Q[qi] = _to_elem(_to_elem(frag_Q[qi], fx.Float32) * scale, elem_dtype)
+            frag_Q[qi] = _to_elem(_to_elem(frag_Q[qi], fx.Float32) * _scale_log2e_f32, elem_dtype)
 
     # Persistent O accumulator: 4 × v16f32 (one per D-chunk).
     # With V=A, P=B PV GEMM: each v16f32 has 16 D-values at 1 query-row per lane.
@@ -641,7 +642,7 @@ def flex_attn_fwd_gfx950_kernel(
         npair = n_c // 2
 
     if const_expr(_is_32x32):
-        scale_log2e = fx.Float32(_LOG2E)
+        scale_log2e = fx.Float32(1.0)
     else:
         scale_log2e = scale * fx.Float32(_LOG2E)
 
@@ -1080,11 +1081,16 @@ def flex_attn_fwd_gfx950_kernel(
             o_out.append((o_vec * scale_vec).ir_value())
         return o_out
 
+    _prescaled_q = const_expr(_is_32x32)
+
     def softmax_start(frag_S_in, m_i_in):
-        _sl2e_vec = Vec.from_elements([scale_log2e], fx.Float32).broadcast_to(16)
         s_elems = [frag_S_in[i] for i in range_constexpr(n_c)]
-        s_scaled = Vec.from_elements(s_elems, fx.Float32) * _sl2e_vec
-        s_out = [s_scaled[i] for i in range_constexpr(n_c)]
+        if const_expr(not _prescaled_q):
+            _sl2e_vec = Vec.from_elements([scale_log2e], fx.Float32).broadcast_to(16)
+            s_scaled = Vec.from_elements(s_elems, fx.Float32) * _sl2e_vec
+            s_out = [s_scaled[i] for i in range_constexpr(n_c)]
+        else:
+            s_out = s_elems
         tile_max = s_out[0]
         for i in range_constexpr(1, n_c):
             tile_max = tile_max.maximumf(s_out[i])
@@ -1100,7 +1106,7 @@ def flex_attn_fwd_gfx950_kernel(
         local_sum = p_vec.reduce("add", init_val=fx.Float32(0.0), fastmath=_FM)
         local_sum = _permlane32_reduce(local_sum, "sum")
         corr = [corr_scalar]
-        l_new = l_i_in[0] * corr_scalar + local_sum
+        l_new = fx.Float32(fx.fma(l_i_in[0], corr_scalar, local_sum, fastmath=_FM))
         l_i_out = [l_new] + [l_i_in[r] for r in range_constexpr(1, npair)]
         o_accs_out = _scale_o_vec(o_accs_in, corr_scalar)
         return [p_elems, m_i_in, l_i_out, o_accs_out, corr]
@@ -1567,9 +1573,9 @@ def flex_attn_fwd_gfx950_kernel(
     # Guard against fully-masked rows (l_i == 0) producing NaN.
     if const_expr(flex_mod.needs_safe_norm):
         _safe_l = l_i[0].maximumf(fx.Float32(1e-12))
-        inv_l = fx.Float32(1.0) / _safe_l
+        inv_l = fx.Float32(rocdl.rcp(T.f32, _safe_l.ir_value()))
     else:
-        inv_l = fx.Float32(1.0) / l_i[0]
+        inv_l = fx.Float32(rocdl.rcp(T.f32, l_i[0].ir_value()))
     inv_l_vec = Vec.from_elements([inv_l], fx.Float32).broadcast_to(16)
     for dc in range_constexpr(_n_d_chunks):
         o_accs[dc] = (Vec(o_accs[dc]) * inv_l_vec).ir_value()
