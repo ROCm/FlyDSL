@@ -165,7 +165,10 @@ def MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
 def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
     """Create an arch-appropriate WMMA atom.
 
-    Supported kwargs (integer paths only — iu8 / iu4):
+    Supported kwargs:
+        elem_ty_b: optional B operand type for mixed-type instructions; defaults
+            to ``elem_ty_ab``. RDNA4 accepts every FP8(E4M3FN)/BF8(E5M2)
+            combination.
         sign_a (bool, default False): treat A operand as signed.
         sign_b (bool, default False): treat B operand as signed.
         clamp  (bool, default False): saturate integer accumulator.
@@ -175,7 +178,9 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
     intrinsic has no such operands. Future WMMA ops for new architectures
     should extend kwargs here rather than growing the positional signature.
     """
-    ty_ab = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
+    ty_a = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
+    elem_ty_b = kwargs.pop("elem_ty_b", None)
+    ty_b = ty_a if elem_ty_b is None else (elem_ty_b.ir_type if hasattr(elem_ty_b, "ir_type") else elem_ty_b)
     if elem_ty_acc is None:
         ty_acc = ir.F32Type.get()
     else:
@@ -191,14 +196,14 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
 
     arch = get_rocm_arch() or ""
     if arch.startswith("gfx11"):
-        return MmaOpGFX11_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc, **kwargs)
+        return MmaOpGFX11_WMMAType.get(m, n, k, ty_a, ty_b, ty_acc, **kwargs)
     if arch.startswith("gfx1250"):
         return MmaOpGFX1250_WMMAType.get(
             m,
             n,
             k,
-            ty_ab,
-            ty_ab,
+            ty_a,
+            ty_b,
             ty_acc,
             sign_a=bool(kwargs.get("sign_a", False)),
             sign_b=bool(kwargs.get("sign_b", False)),
@@ -209,8 +214,8 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
             m,
             n,
             k,
-            ty_ab,
-            ty_ab,
+            ty_a,
+            ty_b,
             ty_acc,
             sign_a=bool(kwargs.get("sign_a", False)),
             sign_b=bool(kwargs.get("sign_b", False)),
