@@ -4584,12 +4584,14 @@ def test_paged_fp8_asymmetric_value_matches_torch(
     [(128, 128), (192, 128), (192, 192)],
     ids=["d128-v128", "d192-v128", "d192-v192"],
 )
-def test_paged_fp8_long_context_random_pages_matches_torch(head_dim, value_head_dim):
+def test_paged_fp8_long_context_random_pages_matches_torch(head_dim, value_head_dim, monkeypatch):
     """Long context, shuffled pages, and a partial tail preserve accuracy."""
     torch.manual_seed(23)
     query_length = 63
     kv_length = 8161
     num_pages = (kv_length + 63) // 64
+    if (head_dim, value_head_dim) == (192, 192):
+        monkeypatch.setattr(flash_attn_interface, "_PAGED_FP8_V192_ON_DEMAND_MIN_KV", kv_length)
 
     query, query_descale = quantize_per_tensor_fp8(torch.randn(query_length, 16, head_dim, device="cuda") * 0.2)
     key, key_descale = quantize_per_tensor_fp8(torch.randn(num_pages, 1, head_dim // 16, 64, 16, device="cuda") * 0.2)
@@ -4646,12 +4648,14 @@ def test_paged_fp8_long_context_random_pages_matches_torch(head_dim, value_head_
     [(128, 128), (192, 128), (192, 192)],
     ids=["d128-v128", "d192-v128", "d192-v192"],
 )
-def test_paged_fp8_graph_replay_matches_torch(head_dim, value_head_dim):
+def test_paged_fp8_graph_replay_matches_torch(head_dim, value_head_dim, monkeypatch):
     """The optimized paged variants preserve caller-owned graph output."""
     torch.manual_seed(29)
     query_length = 63
     kv_length = 128
     num_pages = kv_length // 64
+    if (head_dim, value_head_dim) == (192, 192):
+        monkeypatch.setattr(flash_attn_interface, "_PAGED_FP8_V192_ON_DEMAND_MIN_KV", kv_length)
 
     query, query_descale = quantize_per_tensor_fp8(torch.randn(query_length, 16, head_dim, device="cuda") * 0.2)
     key, key_descale = quantize_per_tensor_fp8(torch.randn(num_pages, 1, head_dim // 16, 64, 16, device="cuda") * 0.2)
@@ -5351,6 +5355,19 @@ def test_fp8_rescale_threshold_drops_past_the_long_sequence_bound():
     assert f(flash_attn_interface._FP8_LONG_SEQ + 1) == 4.0
     assert f(131072) == 4.0
     assert set(f(s) for s in (1, 1024, 4096, 4097, 8192, 131072)) == {6.0, 4.0}
+
+
+@pytest.mark.parametrize(
+    ("head_dims", "max_seqlen_kv", "expected"),
+    [
+        ((192, 192), 65535, False),
+        ((192, 192), 65536, True),
+        ((192, 128), 65536, False),
+        ((128, 128), 65536, False),
+    ],
+)
+def test_paged_fp8_v192_on_demand_dispatch_boundary(head_dims, max_seqlen_kv, expected):
+    assert flash_attn_interface._use_paged_fp8_v192_on_demand(head_dims, max_seqlen_kv) is expected
 
 
 @_requires_gfx950
