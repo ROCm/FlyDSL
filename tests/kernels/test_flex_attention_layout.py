@@ -29,15 +29,15 @@ import pytest  # noqa: E402
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.attention.flex_attention_layout_gfx950 import (  # noqa: E402
-    flydsl_flex_attention_layout,
-    flydsl_flex_attention_layout_paged,
-    flydsl_flex_attention_layout_fp8,
-    MASK_NONE,
     MASK_CAUSAL,
-    MASK_SLIDING_WINDOW,
+    MASK_NONE,
     MASK_PREFIX_LM,
-    SCORE_NONE,
+    MASK_SLIDING_WINDOW,
     SCORE_ALIBI,
+    SCORE_NONE,
+    flydsl_flex_attention_layout,
+    flydsl_flex_attention_layout_fp8,
+    flydsl_flex_attention_layout_paged,
 )
 
 _requires_gfx950 = pytest.mark.skipif(
@@ -53,7 +53,12 @@ def _sdpa_ref(q, k, v, scale, *, attn_mask=None, is_causal=False):
     kh = k.permute(0, 2, 1, 3).float()
     vh = v.permute(0, 2, 1, 3).float()
     out = F.scaled_dot_product_attention(
-        qh, kh, vh, scale=scale, attn_mask=attn_mask, is_causal=is_causal,
+        qh,
+        kh,
+        vh,
+        scale=scale,
+        attn_mask=attn_mask,
+        is_causal=is_causal,
     )
     return out.permute(0, 2, 1, 3).contiguous()
 
@@ -68,7 +73,11 @@ def _run(B, Sq, Skv, H, D, dtype_str, *, num_groups=8, accurate_softmax=True):
     scale = 1.0 / math.sqrt(D)
 
     out = flydsl_flex_attention_layout(
-        q, k, v, scale=scale, num_groups=num_groups,
+        q,
+        k,
+        v,
+        scale=scale,
+        num_groups=num_groups,
         accurate_softmax=accurate_softmax,
     ).float()
     ref = _sdpa_ref(q, k, v, scale).float()
@@ -80,11 +89,11 @@ def _run(B, Sq, Skv, H, D, dtype_str, *, num_groups=8, accurate_softmax=True):
 _SHAPES = [
     # (B, Sq, Skv, H, D) — Sq must be a multiple of block_m*num_groups (32*8=256)
     (1, 256, 256, 4, 128),
-    (1, 256, 512, 4, 128),    # Sq != Skv
+    (1, 256, 512, 4, 128),  # Sq != Skv
     (2, 256, 256, 8, 128),
-    (1, 256, 32, 4, 128),     # single KV tile (Skv == block_n)
-    (1, 512, 1024, 4, 128),   # larger sequences
-    (1, 256, 256, 8, 128),    # GQA: Hq=8, but uses default Hkv=Hq; see GQA test below
+    (1, 256, 32, 4, 128),  # single KV tile (Skv == block_n)
+    (1, 512, 1024, 4, 128),  # larger sequences
+    (1, 256, 256, 8, 128),  # GQA: Hq=8, but uses default Hkv=Hq; see GQA test below
 ]
 
 
@@ -93,9 +102,7 @@ _SHAPES = [
 @pytest.mark.parametrize("B,Sq,Skv,H,D", _SHAPES)
 def test_flex_attention_layout(B, Sq, Skv, H, D, dtype_str):
     max_err, cos = _run(B, Sq, Skv, H, D, dtype_str)
-    assert max_err < 8e-2 and cos > 0.98, (
-        f"B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
-    )
+    assert max_err < 8e-2 and cos > 0.98, f"B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
 
 
 @_requires_gfx950
@@ -110,9 +117,9 @@ _MOD_SHAPES = [
     # (B, Sq, Skv, H, D) — Sq must be a multiple of block_m*num_groups (32*8=256)
     (1, 256, 256, 4, 128),
     (2, 256, 256, 8, 128),
-    (1, 256, 512, 4, 128),    # Sq < Skv (prefill with longer KV)
-    (1, 256, 32, 4, 128),     # single KV tile
-    (1, 512, 512, 4, 128),    # larger sequence (tile-range clamping exercises more tiles)
+    (1, 256, 512, 4, 128),  # Sq < Skv (prefill with longer KV)
+    (1, 256, 32, 4, 128),  # single KV tile
+    (1, 512, 512, 4, 128),  # larger sequence (tile-range clamping exercises more tiles)
 ]
 
 
@@ -129,14 +136,18 @@ def test_flex_attention_layout_causal(B, Sq, Skv, H, D, dtype_str):
     scale = 1.0 / math.sqrt(D)
 
     out = flydsl_flex_attention_layout(
-        q, k, v, scale=scale, mask_type=MASK_CAUSAL,
+        q,
+        k,
+        v,
+        scale=scale,
+        mask_type=MASK_CAUSAL,
     ).float()
     ref = _sdpa_ref(q, k, v, scale, is_causal=True).float()
     max_err = (out - ref).abs().max().item()
     cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
-    assert max_err < 8e-2 and cos > 0.98, (
-        f"causal B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
-    )
+    assert (
+        max_err < 8e-2 and cos > 0.98
+    ), f"causal B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
 
 
 @_requires_gfx950
@@ -153,7 +164,12 @@ def test_flex_attention_layout_alibi(B, Sq, Skv, H, D, dtype_str):
     slope = 0.125
 
     out = flydsl_flex_attention_layout(
-        q, k, v, scale=scale, score_type=SCORE_ALIBI, score_alibi_slope=slope,
+        q,
+        k,
+        v,
+        scale=scale,
+        score_type=SCORE_ALIBI,
+        score_alibi_slope=slope,
     ).float()
     # Reference: manually add alibi bias to SDPA attn_mask
     qi = torch.arange(Sq, device=dev).unsqueeze(1)
@@ -162,9 +178,9 @@ def test_flex_attention_layout_alibi(B, Sq, Skv, H, D, dtype_str):
     ref = _sdpa_ref(q, k, v, scale, attn_mask=alibi_bias).float()
     max_err = (out - ref).abs().max().item()
     cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
-    assert max_err < 8e-2 and cos > 0.98, (
-        f"alibi B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
-    )
+    assert (
+        max_err < 8e-2 and cos > 0.98
+    ), f"alibi B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
 
 
 @_requires_gfx950
@@ -181,7 +197,12 @@ def test_flex_attention_layout_sliding_window(B, Sq, Skv, H, D, dtype_str):
     window = 16
 
     out = flydsl_flex_attention_layout(
-        q, k, v, scale=scale, mask_type=MASK_SLIDING_WINDOW, mask_window=window,
+        q,
+        k,
+        v,
+        scale=scale,
+        mask_type=MASK_SLIDING_WINDOW,
+        mask_window=window,
     ).float()
     # Reference: causal + window distance mask
     qi = torch.arange(Sq, device=dev).unsqueeze(1)
@@ -193,9 +214,7 @@ def test_flex_attention_layout_sliding_window(B, Sq, Skv, H, D, dtype_str):
     ref = _sdpa_ref(q, k, v, scale, attn_mask=mask).float()
     max_err = (out - ref).abs().max().item()
     cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
-    assert max_err < 8e-2 and cos > 0.97, (
-        f"sw B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
-    )
+    assert max_err < 8e-2 and cos > 0.97, f"sw B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
 
 
 @_requires_gfx950
@@ -212,7 +231,12 @@ def test_flex_attention_layout_sliding_window_odd(window):
     scale = 1.0 / math.sqrt(D)
 
     out = flydsl_flex_attention_layout(
-        q, k, v, scale=scale, mask_type=MASK_SLIDING_WINDOW, mask_window=window,
+        q,
+        k,
+        v,
+        scale=scale,
+        mask_type=MASK_SLIDING_WINDOW,
+        mask_window=window,
     ).float()
     qi = torch.arange(Sq, device=dev).unsqueeze(1)
     ki = torch.arange(Skv, device=dev).unsqueeze(0)
@@ -223,9 +247,7 @@ def test_flex_attention_layout_sliding_window_odd(window):
     ref = _sdpa_ref(q, k, v, scale, attn_mask=mask).float()
     max_err = (out - ref).abs().max().item()
     cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
-    assert max_err < 8e-2 and cos > 0.97, (
-        f"sw_odd w={window}: max_err={max_err} cos={cos}"
-    )
+    assert max_err < 8e-2 and cos > 0.97, f"sw_odd w={window}: max_err={max_err} cos={cos}"
 
 
 @_requires_gfx950
@@ -241,7 +263,11 @@ def test_flex_attention_layout_gqa(Hq, Hkv):
     scale = 1.0 / math.sqrt(D)
 
     out = flydsl_flex_attention_layout(
-        q, k, v, scale=scale, num_kv_heads=Hkv,
+        q,
+        k,
+        v,
+        scale=scale,
+        num_kv_heads=Hkv,
     ).float()
     # SDPA reference needs [B,H,S,D] with K/V expanded for GQA
     qh = q.permute(0, 2, 1, 3).float()
@@ -250,9 +276,7 @@ def test_flex_attention_layout_gqa(Hq, Hkv):
     ref = F.scaled_dot_product_attention(qh, kh, vh, scale=scale).permute(0, 2, 1, 3).contiguous()
     max_err = (out - ref).abs().max().item()
     cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
-    assert max_err < 8e-2 and cos > 0.98, (
-        f"gqa Hq{Hq} Hkv{Hkv}: max_err={max_err} cos={cos}"
-    )
+    assert max_err < 8e-2 and cos > 0.98, f"gqa Hq{Hq} Hkv{Hkv}: max_err={max_err} cos={cos}"
 
 
 @_requires_gfx950
@@ -268,14 +292,16 @@ def test_flex_attention_layout_multi_group(num_groups):
     scale = 1.0 / math.sqrt(D)
 
     out = flydsl_flex_attention_layout(
-        q, k, v, scale=scale, num_groups=num_groups,
+        q,
+        k,
+        v,
+        scale=scale,
+        num_groups=num_groups,
     ).float()
     ref = _sdpa_ref(q, k, v, scale).float()
     max_err = (out - ref).abs().max().item()
     cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
-    assert max_err < 8e-2 and cos > 0.98, (
-        f"groups={num_groups}: max_err={max_err} cos={cos}"
-    )
+    assert max_err < 8e-2 and cos > 0.98, f"groups={num_groups}: max_err={max_err} cos={cos}"
 
 
 @_requires_gfx950
@@ -291,14 +317,17 @@ def test_flex_attention_layout_sliding_window_full():
     scale = 1.0 / math.sqrt(D)
 
     out = flydsl_flex_attention_layout(
-        q, k, v, scale=scale, mask_type=MASK_SLIDING_WINDOW, mask_window=Skv,
+        q,
+        k,
+        v,
+        scale=scale,
+        mask_type=MASK_SLIDING_WINDOW,
+        mask_window=Skv,
     ).float()
     ref = _sdpa_ref(q, k, v, scale, is_causal=True).float()
     max_err = (out - ref).abs().max().item()
     cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
-    assert max_err < 8e-2 and cos > 0.98, (
-        f"sw_full: max_err={max_err} cos={cos}"
-    )
+    assert max_err < 8e-2 and cos > 0.98, f"sw_full: max_err={max_err} cos={cos}"
 
 
 @_requires_gfx950
@@ -315,7 +344,12 @@ def test_flex_attention_layout_prefix_lm(B, Sq, Skv, H, D, dtype_str):
     scale = 1.0 / math.sqrt(D)
 
     out = flydsl_flex_attention_layout(
-        q, k, v, scale=scale, mask_type=MASK_PREFIX_LM, mask_prefix_len=prefix_len,
+        q,
+        k,
+        v,
+        scale=scale,
+        mask_type=MASK_PREFIX_LM,
+        mask_prefix_len=prefix_len,
     ).float()
     qi = torch.arange(Sq, device=dev).unsqueeze(1)
     ki = torch.arange(Skv, device=dev).unsqueeze(0)
@@ -325,9 +359,9 @@ def test_flex_attention_layout_prefix_lm(B, Sq, Skv, H, D, dtype_str):
     ref = _sdpa_ref(q, k, v, scale, attn_mask=mask).float()
     max_err = (out - ref).abs().max().item()
     cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
-    assert max_err < 8e-2 and cos > 0.98, (
-        f"prefix_lm B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
-    )
+    assert (
+        max_err < 8e-2 and cos > 0.98
+    ), f"prefix_lm B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
 
 
 @_requires_gfx950
@@ -343,14 +377,17 @@ def test_flex_attention_layout_causal_multi_group(num_groups):
     scale = 1.0 / math.sqrt(D)
 
     out = flydsl_flex_attention_layout(
-        q, k, v, scale=scale, mask_type=MASK_CAUSAL, num_groups=num_groups,
+        q,
+        k,
+        v,
+        scale=scale,
+        mask_type=MASK_CAUSAL,
+        num_groups=num_groups,
     ).float()
     ref = _sdpa_ref(q, k, v, scale, is_causal=True).float()
     max_err = (out - ref).abs().max().item()
     cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
-    assert max_err < 8e-2 and cos > 0.98, (
-        f"causal groups={num_groups}: max_err={max_err} cos={cos}"
-    )
+    assert max_err < 8e-2 and cos > 0.98, f"causal groups={num_groups}: max_err={max_err} cos={cos}"
 
 
 # ── FP8 tests ──────────────────────────────────────────────────────────────────
@@ -366,9 +403,20 @@ def _quantize_fp8(x_bf16):
     return x_fp8, descale
 
 
-def _run_fp8(B, Sq, Skv, H, D, *, num_groups=2, accurate_softmax=True,
-             mask_type=MASK_NONE, score_type=SCORE_NONE, mask_window=0,
-             score_alibi_slope=0.0):
+def _run_fp8(
+    B,
+    Sq,
+    Skv,
+    H,
+    D,
+    *,
+    num_groups=2,
+    accurate_softmax=True,
+    mask_type=MASK_NONE,
+    score_type=SCORE_NONE,
+    mask_window=0,
+    score_alibi_slope=0.0,
+):
     dev = "cuda"
     torch.manual_seed(0)
     q_bf16 = torch.empty(B, Sq, H, D, dtype=torch.bfloat16, device=dev).uniform_(-1, 1)
@@ -381,19 +429,26 @@ def _run_fp8(B, Sq, Skv, H, D, *, num_groups=2, accurate_softmax=True,
     v_fp8, vd = _quantize_fp8(v_bf16)
 
     out = flydsl_flex_attention_layout_fp8(
-        q_fp8, k_fp8, v_fp8, qd, kd, vd,
-        scale=scale, num_groups=num_groups,
+        q_fp8,
+        k_fp8,
+        v_fp8,
+        qd,
+        kd,
+        vd,
+        scale=scale,
+        num_groups=num_groups,
         accurate_softmax=accurate_softmax,
-        mask_type=mask_type, score_type=score_type,
-        mask_window=mask_window, score_alibi_slope=score_alibi_slope,
+        mask_type=mask_type,
+        score_type=score_type,
+        mask_window=mask_window,
+        score_alibi_slope=score_alibi_slope,
     ).float()
 
     q_deq = q_fp8.float() * qd
     k_deq = k_fp8.float() * kd
     v_deq = v_fp8.float() * vd
     is_causal = mask_type == MASK_CAUSAL
-    ref = _sdpa_ref(q_deq.bfloat16(), k_deq.bfloat16(), v_deq.bfloat16(), scale,
-                    is_causal=is_causal).float()
+    ref = _sdpa_ref(q_deq.bfloat16(), k_deq.bfloat16(), v_deq.bfloat16(), scale, is_causal=is_causal).float()
 
     max_err = (out - ref).abs().max().item()
     cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
@@ -412,18 +467,14 @@ _FP8_SHAPES = [
 @pytest.mark.parametrize("B,Sq,Skv,H,D", _FP8_SHAPES)
 def test_flex_attention_layout_fp8(B, Sq, Skv, H, D):
     max_err, cos = _run_fp8(B, Sq, Skv, H, D)
-    assert max_err < 8e-2 and cos > 0.98, (
-        f"fp8 B{B} Sq{Sq} Skv{Skv} H{H} D{D}: max_err={max_err} cos={cos}"
-    )
+    assert max_err < 8e-2 and cos > 0.98, f"fp8 B{B} Sq{Sq} Skv{Skv} H{H} D{D}: max_err={max_err} cos={cos}"
 
 
 @_requires_gfx950
 @pytest.mark.parametrize("B,Sq,Skv,H,D", _FP8_SHAPES)
 def test_flex_attention_layout_fp8_causal(B, Sq, Skv, H, D):
     max_err, cos = _run_fp8(B, Sq, Skv, H, D, mask_type=MASK_CAUSAL)
-    assert max_err < 8e-2 and cos > 0.98, (
-        f"fp8 causal B{B} Sq{Sq} Skv{Skv} H{H} D{D}: max_err={max_err} cos={cos}"
-    )
+    assert max_err < 8e-2 and cos > 0.98, f"fp8 causal B{B} Sq{Sq} Skv{Skv} H{H} D{D}: max_err={max_err} cos={cos}"
 
 
 _PAGED_SHAPES = [
@@ -489,13 +540,18 @@ def test_flex_attention_layout_paged(B, Sq, Skv, H, D, dtype_str):
     k_cache, v_cache = _scatter_to_paged(k, v, block_n, block_table, context_lens)
 
     out = flydsl_flex_attention_layout_paged(
-        q, k_cache, v_cache, block_table, context_lens, scale=scale,
+        q,
+        k_cache,
+        v_cache,
+        block_table,
+        context_lens,
+        scale=scale,
     ).float()
     max_err = (out - ref).abs().max().item()
     cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
-    assert max_err < 1e-1 and cos > 0.97, (
-        f"paged B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
-    )
+    assert (
+        max_err < 1e-1 and cos > 0.97
+    ), f"paged B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
 
 
 @_requires_gfx950
@@ -517,24 +573,28 @@ def test_flex_attention_layout_paged_causal(B, Sq, Skv, H, D, dtype_str):
     k_cache, v_cache = _scatter_to_paged(k, v, block_n, block_table, context_lens)
 
     out = flydsl_flex_attention_layout_paged(
-        q, k_cache, v_cache, block_table, context_lens,
-        scale=scale, mask_type=MASK_CAUSAL,
+        q,
+        k_cache,
+        v_cache,
+        block_table,
+        context_lens,
+        scale=scale,
+        mask_type=MASK_CAUSAL,
     ).float()
     max_err = (out - ref).abs().max().item()
     cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
-    assert max_err < 1e-1 and cos > 0.97, (
-        f"paged_causal B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
-    )
+    assert (
+        max_err < 1e-1 and cos > 0.97
+    ), f"paged_causal B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
 
 
 def main():
-    for (B, Sq, Skv, H, D) in _SHAPES:
+    for B, Sq, Skv, H, D in _SHAPES:
         for dt in ["bf16", "f16"]:
             me, cos = _run(B, Sq, Skv, H, D, dt)
             ok = me < 3e-2 and cos > 0.99
             print(
-                f"B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dt}: "
-                f"max_err={me:.4g} cos={cos:.5f} -> {'PASS' if ok else 'FAIL'}"
+                f"B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dt}: " f"max_err={me:.4g} cos={cos:.5f} -> {'PASS' if ok else 'FAIL'}"
             )
 
 

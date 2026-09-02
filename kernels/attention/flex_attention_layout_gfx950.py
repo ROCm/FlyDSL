@@ -24,24 +24,22 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import const_expr, range_constexpr, rocdl, arith
-
+from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
-
-from kernels.attention.pipeline import (
-    pipeline_stagger_enabled,
-)
 from kernels.attention.flash_attn_utils import (
     _stagger_extra_barrier_if_one,
     _stagger_extra_barrier_if_zero,
+)
+from kernels.attention.pipeline import (
+    pipeline_stagger_enabled,
 )
 
 try:
     from flydsl.expr.rocdl.universal import make_buffer_ptr as _make_buffer_ptr
 except ImportError:
-    from flydsl.expr import buffer_ops
     from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
+    from flydsl.expr import buffer_ops
 
     def _make_buffer_ptr(ptr, num_records_bytes=None):
         if num_records_bytes is None:
@@ -62,6 +60,7 @@ except ImportError:
                 fx.Int32(buffer_ops._get_buffer_flags()).ir_value(),
             ],
         )
+
 
 GFX950_WAVE_SIZE = 64
 
@@ -326,7 +325,9 @@ def make_flex_attn_param(
     if pipe_stages >= 2 and pipe_depth < 2:
         raise ValueError("pipe_stages=2 requires pipe_depth>=2 (decomposed pipeline)")
     if pipe_depth >= 2 and not pipeline_stagger_enabled(
-        depth=pipe_depth, num_groups=num_groups, m_waves=m_waves,
+        depth=pipe_depth,
+        num_groups=num_groups,
+        m_waves=m_waves,
     ):
         raise ValueError(
             "pipe_depth>=2 requires pipeline stagger: num_groups>=2 and m_waves>=2 "
@@ -434,7 +435,6 @@ def _to_elem(val, elem_ty):
     return fx.Float32(val).to(elem_ty)
 
 
-
 def _hw_exp2(x):
     return fx.Float32(rocdl.exp2(T.f32, fx.Float32(x).ir_value()))
 
@@ -444,6 +444,7 @@ def _permlane32_reduce(x, mode):
     from flydsl._mlir import ir
     from flydsl._mlir.dialects import arith as _arith
     from flydsl._mlir.dialects import llvm
+
     v_i32 = fx.Int32(_arith.bitcast(T.i32, fx.Float32(x).ir_value()))
     pair_ty = ir.Type.parse("!llvm.struct<(i32, i32)>")
     swapped = rocdl.permlane32_swap(pair_ty, v_i32.ir_value(), v_i32.ir_value(), False, True)
@@ -457,21 +458,20 @@ def _permlane32_reduce(x, mode):
         return lhs.addf(rhs, fastmath=_FM)
 
 
-
 def _mfma_acc(a, b, c, mma_atom):
     """Single MFMA call: C += A × B. Returns updated accumulator."""
     from flydsl._mlir.dialects import fly
+
     acc_ty = c.type
     return fly.mma_atom_call_ssa([acc_ty], mma_atom, a, b, c)
 
 
-
 @flyc.kernel
 def flex_attn_fwd_gfx950_kernel(
-    o: fx.Tensor,       # [B, Sq, Hq, D]
-    q: fx.Tensor,       # [B, Sq, Hq, D]
-    k: fx.Tensor,       # [B, Skv, Hkv, D]
-    v: fx.Tensor,       # [B, Skv, Hkv, D]
+    o: fx.Tensor,  # [B, Sq, Hq, D]
+    q: fx.Tensor,  # [B, Sq, Hq, D]
+    k: fx.Tensor,  # [B, Skv, Hkv, D]
+    v: fx.Tensor,  # [B, Skv, Hkv, D]
     seqlen_q: fx.Int32,
     seqlen_kv: fx.Int32,
     num_batches: fx.Int32,
@@ -505,7 +505,9 @@ def flex_attn_fwd_gfx950_kernel(
     _is_causal = int(param.mask_type) in (MASK_CAUSAL, MASK_PREFIX_LM)
     if const_expr(_is_causal):
         _num_q_tiles = (seqlen_q + fx.Int32(num_groups * block_m - 1)) // fx.Int32(num_groups * block_m)
-        q_tile = fx.Index(arith.index_cast(T.index, _num_q_tiles - fx.Int32(1) - fx.Int32(arith.index_cast(T.i32, fx.block_idx.x))))
+        q_tile = fx.Index(
+            arith.index_cast(T.index, _num_q_tiles - fx.Int32(1) - fx.Int32(arith.index_cast(T.i32, fx.block_idx.x)))
+        )
     else:
         q_tile = fx.block_idx.x
     h_idx = fx.block_idx.y
@@ -534,6 +536,7 @@ def flex_attn_fwd_gfx950_kernel(
     _k_lds_pad_elems = _K_HALF_BANK_SKEW_ELEMS + _LDS_RING_BANK_SKEW_ELEMS
 
     if const_expr(_paged):
+
         @fx.struct
         class SharedStorage:
             k_lds_0: fx.Array[elem_dtype, kv_tile_elems + _K_HALF_BANK_SKEW_ELEMS, 16]
@@ -542,7 +545,9 @@ def flex_attn_fwd_gfx950_kernel(
             v_lds_1: fx.Array[elem_dtype, kv_tile_elems + _LDS_RING_BANK_SKEW_ELEMS, 16]
             p: fx.Array[elem_dtype, num_groups * block_m * block_n, 16]
             bt: fx.Array[fx.Int32, _PAGED_BT_LDS_SIZE, 16]
+
     else:
+
         @fx.struct
         class SharedStorage:
             k_lds_0: fx.Array[elem_dtype, kv_tile_elems + _K_HALF_BANK_SKEW_ELEMS, 16]
@@ -613,8 +618,7 @@ def flex_attn_fwd_gfx950_kernel(
     # With V=A, P=B PV GEMM: each v16f32 has 16 D-values at 1 query-row per lane.
     Vec = fx.Vector
     _n_d_chunks = head_dim // 32
-    o_accs_init = [Vec.filled(16, 0.0, fx.Float32).ir_value()
-                   for _ in range_constexpr(_n_d_chunks)]
+    o_accs_init = [Vec.filled(16, 0.0, fx.Float32).ir_value() for _ in range_constexpr(_n_d_chunks)]
 
     # Per-slot row map: thr_qk.partition_C partitions by THIS thread's wave, so
     # n_c is always this lane's slot count (not the full tile). For MFMA 16x16
@@ -704,21 +708,18 @@ def flex_attn_fwd_gfx950_kernel(
         )
         for i in range_constexpr(_lds_ring_slots)
     ]
-    sK_upper = [
-        fx.make_view(sK_upper_ptr[i], _k_base_layout)
-        for i in range_constexpr(_lds_ring_slots)
-    ]
+    sK_upper = [fx.make_view(sK_upper_ptr[i], _k_base_layout) for i in range_constexpr(_lds_ring_slots)]
 
     def _k_swizzled_col(tile_row, tile_col_elem):
         """Apply K swizzle to get the global column index for a given LDS position."""
-        elem_off = fx.get_scalar(fx.crd2idx(
-            fx.make_int_tuple((tile_row, tile_col_elem)), _k_base_layout
-        ))
+        elem_off = fx.get_scalar(fx.crd2idx(fx.make_int_tuple((tile_row, tile_col_elem)), _k_base_layout))
         return elem_off % head_dim
 
     # ── Stage: DMA K+V global → LDS ─────────────────────────────────────
     def _stage_kv_to_lds_contiguous(kv_idx, buf, do_k, do_v, ops=_dma_ops_per_thread, op_offset=0):
-        wave_off = rocdl.readfirstlane(fx.Int32.ir_type, fx.Int32(tid // GFX950_WAVE_SIZE * GFX950_WAVE_SIZE * _dma_bytes))
+        wave_off = rocdl.readfirstlane(
+            fx.Int32.ir_type, fx.Int32(tid // GFX950_WAVE_SIZE * GFX950_WAVE_SIZE * _dma_bytes)
+        )
         _step_bytes = block_threads * _dma_bytes
         if const_expr(do_k):
             k_global_base = k_off * param.in_data_bytes + kv_idx * block_n * _k_row_stride_bytes
@@ -731,8 +732,9 @@ def flex_attn_fwd_gfx950_kernel(
                 tile_col_elem = (flat_byte % _k_row_bytes) // param.in_data_bytes
                 swiz_col = _k_swizzled_col(tile_row, tile_col_elem)
                 gmem_byte = k_global_base + tile_row * _k_row_stride_bytes + swiz_col * param.in_data_bytes
-                fx.copy(dma_atom, fx.slice(k_div, (None, fx.Int32(gmem_byte))),
-                        fx.make_view(lds_k, fx.make_layout(1, 1)))
+                fx.copy(
+                    dma_atom, fx.slice(k_div, (None, fx.Int32(gmem_byte))), fx.make_view(lds_k, fx.make_layout(1, 1))
+                )
         if const_expr(do_v):
             v_global_base = v_off * param.in_data_bytes + kv_idx * fx.Int32(block_n * _v_row_stride_bytes)
             _v_step_bytes = _v_step_elems * param.in_data_bytes
@@ -748,11 +750,14 @@ def flex_attn_fwd_gfx950_kernel(
                 lds_v = fx.add_offset(sV_i8[buf], lds_byte)
                 d_global_byte = dc * 32 * param.in_data_bytes + tile_col_byte
                 gmem_byte = fx.Int32(v_global_base) + score_row * fx.Int32(_v_row_stride_bytes) + d_global_byte
-                fx.copy(dma_atom, fx.slice(v_div, (None, fx.Int32(gmem_byte))),
-                        fx.make_view(lds_v, fx.make_layout(1, 1)))
+                fx.copy(
+                    dma_atom, fx.slice(v_div, (None, fx.Int32(gmem_byte))), fx.make_view(lds_v, fx.make_layout(1, 1))
+                )
 
     def _stage_kv_to_lds_paged(page_id, buf, ops=_dma_ops_per_thread, op_offset=0):
-        wave_off = rocdl.readfirstlane(fx.Int32.ir_type, fx.Int32(tid // GFX950_WAVE_SIZE * GFX950_WAVE_SIZE * _dma_bytes))
+        wave_off = rocdl.readfirstlane(
+            fx.Int32.ir_type, fx.Int32(tid // GFX950_WAVE_SIZE * GFX950_WAVE_SIZE * _dma_bytes)
+        )
         _step_bytes = block_threads * _dma_bytes
         k_global_base = page_id * fx.Int32(_page_byte_stride) + _kv_head_byte_offset
         lds_k = fx.add_offset(sK_i8[buf], wave_off + op_offset * _step_bytes)
@@ -764,8 +769,7 @@ def flex_attn_fwd_gfx950_kernel(
             tile_col_elem = (flat_byte % _k_row_bytes) // param.in_data_bytes
             swiz_col = _k_swizzled_col(tile_row, tile_col_elem)
             gmem_byte = k_global_base + tile_row * _k_row_stride_bytes + swiz_col * param.in_data_bytes
-            fx.copy(dma_atom, fx.slice(k_div, (None, fx.Int32(gmem_byte))),
-                    fx.make_view(lds_k, fx.make_layout(1, 1)))
+            fx.copy(dma_atom, fx.slice(k_div, (None, fx.Int32(gmem_byte))), fx.make_view(lds_k, fx.make_layout(1, 1)))
         v_global_base = page_id * fx.Int32(_page_byte_stride) + _kv_head_byte_offset
         _v_step_bytes = _v_step_elems * param.in_data_bytes
         for i in range_constexpr(ops):
@@ -780,15 +784,13 @@ def flex_attn_fwd_gfx950_kernel(
             lds_v = fx.add_offset(sV_i8[buf], lds_byte)
             d_global_byte = dc * 32 * param.in_data_bytes + tile_col_byte
             gmem_byte = fx.Int32(v_global_base) + score_row * fx.Int32(_v_row_stride_bytes) + d_global_byte
-            fx.copy(dma_atom, fx.slice(v_div, (None, fx.Int32(gmem_byte))),
-                    fx.make_view(lds_v, fx.make_layout(1, 1)))
+            fx.copy(dma_atom, fx.slice(v_div, (None, fx.Int32(gmem_byte))), fx.make_view(lds_v, fx.make_layout(1, 1)))
 
     # stride_phase: 0 = K D-lo, 1 = K D-hi, 2 = V tile (for split prefetch vs K reads).
     def _stage_kv_to_lds_strided(kv_idx, buf, stride_phase, ops=_dma_ops_per_thread, op_offset=0):
         from flydsl._mlir import ir
         from flydsl._mlir.dialects import scf
         from flydsl.expr import arith
-        from flydsl.expr.typing import T
 
         if const_expr(stride_phase == 0 or stride_phase == 1):
             k_global_base = k_off * param.in_data_bytes + kv_idx * block_n * _k_row_stride_bytes
@@ -801,15 +803,21 @@ def flex_attn_fwd_gfx950_kernel(
                 gmem_byte = k_global_base + tile_row * _k_row_stride_bytes + swiz_col * param.in_data_bytes
                 if const_expr(stride_phase == 0):
                     in_phase = arith.cmpi(
-                        arith.CmpIPredicate.ult, tile_col_elem, _half_d_i32,
+                        arith.CmpIPredicate.ult,
+                        tile_col_elem,
+                        _half_d_i32,
                     )
                 else:
                     in_phase = arith.cmpi(
-                        arith.CmpIPredicate.uge, tile_col_elem, _half_d_i32,
+                        arith.CmpIPredicate.uge,
+                        tile_col_elem,
+                        _half_d_i32,
                     )
                 _if = scf.IfOp(in_phase, [], has_else=False)
                 with ir.InsertionPoint(_if.then_block):
-                    _wave_off = rocdl.readfirstlane(fx.Int32.ir_type, fx.Int32(tid // GFX950_WAVE_SIZE * GFX950_WAVE_SIZE * _dma_bytes))
+                    _wave_off = rocdl.readfirstlane(
+                        fx.Int32.ir_type, fx.Int32(tid // GFX950_WAVE_SIZE * GFX950_WAVE_SIZE * _dma_bytes)
+                    )
                     _lds_off = _wave_off + (op_offset + i) * block_threads * _dma_bytes
                     if const_expr(_K_HALF_BANK_SKEW_BYTES > 0 and stride_phase == 1):
                         _lds_off = _lds_off + _K_HALF_BANK_SKEW_BYTES
@@ -831,11 +839,7 @@ def flex_attn_fwd_gfx950_kernel(
                 score_row = tile_row % block_n
                 v_step = dc * 4 + score_row // 8
                 row_in_step = score_row % 8
-                lds_byte = (
-                    v_step * _v_step_bytes
-                    + row_in_step * _v_subtile_row_bytes
-                    + tile_col_byte
-                )
+                lds_byte = v_step * _v_step_bytes + row_in_step * _v_subtile_row_bytes + tile_col_byte
                 lds_v = fx.add_offset(sV_i8[buf], lds_byte)
                 d_global_byte = dc * 32 * param.in_data_bytes + tile_col_byte
                 gmem_byte = fx.Int32(v_global_base) + score_row * fx.Int32(_v_row_stride_bytes) + d_global_byte
@@ -845,10 +849,7 @@ def flex_attn_fwd_gfx950_kernel(
                     fx.make_view(lds_v, fx.make_layout(1, 1)),
                 )
 
-    from kernels.attention.pipeline import (
-        InfraContext,
-        pipeline_stagger_enabled,
-    )
+    from kernels.attention.pipeline import InfraContext
 
     def load_kv(tile_idx, slot, ops=_dma_ops_per_thread, op_offset=0):
         if const_expr(_paged):
@@ -910,6 +911,7 @@ def flex_attn_fwd_gfx950_kernel(
           off   — elem offset from lane base into padded V LDS (v_step / dc_shift layout).
         """
         _slot_v_ptr = sV_ptr[slot]
+
         def _read():
             # Lane-specific base into [32,32] sub-tile for score_row/d_col above.
             base_ptr = fx.add_offset(_slot_v_ptr, fx.make_int_tuple(_v_lane_elem))
@@ -918,7 +920,7 @@ def flex_attn_fwd_gfx950_kernel(
             for k_sub in range_constexpr(4):
                 for dc in range_constexpr(_n_d_chunks):
                     # Jump to dc-th D-chunk × k_sub-th score strip in padded LDS.
-                    off = (dc * 4 + k_sub) * _v_step_elems 
+                    off = (dc * 4 + k_sub) * _v_step_elems
                     src = fx.make_view(
                         fx.add_offset(base_ptr, fx.make_int_tuple(off)),
                         _v_tr_layout,
@@ -936,6 +938,7 @@ def flex_attn_fwd_gfx950_kernel(
                 # k_sub 2,3 → v_hi_regs[dc] fed to _mfma_acc(..., p_hi, ...)  (PV K-hi)
                 v_hi_out[dc] = halves[dc][2].shuffle(halves[dc][3], list(range(8))).ir_value()
             return v_lo_out, v_hi_out
+
         return _read
 
     read_v_slot = [_make_read_v(i) for i in range_constexpr(_lds_ring_slots)]
@@ -948,6 +951,7 @@ def flex_attn_fwd_gfx950_kernel(
         """
         from flydsl._mlir import ir
         from flydsl._mlir.dialects import scf
+
         _is_wave0 = (fx.Int32(local_tid // GFX950_WAVE_SIZE) & fx.Int32(1)) == fx.Int32(0)
         _if = scf.IfOp(_is_wave0.ir_value(), [], has_else=True)
         with ir.InsertionPoint(_if.then_block):
@@ -960,12 +964,9 @@ def flex_attn_fwd_gfx950_kernel(
             scf.YieldOp([])
         return []
 
-    _k_iters = int(param.head_dim) // int(param.mma_k)   # 128/16 → 8 ki panels
-    _k_half  = _k_iters // 2                             # 4 ki per half (D-lo / D-hi)
-    _k_serpentine = tuple(
-        c + (1 - j) if (c // 2) % 2 else c + j
-        for c in range(0, _k_iters, 2) for j in range(2)
-    )
+    _k_iters = int(param.head_dim) // int(param.mma_k)  # 128/16 → 8 ki panels
+    _k_half = _k_iters // 2  # 4 ki per half (D-lo / D-hi)
+    _k_serpentine = tuple(c + (1 - j) if (c // 2) % 2 else c + j for c in range(0, _k_iters, 2) for j in range(2))
     _k_serpentine_rev = tuple(reversed(_k_serpentine))
     _k_frag_retile_0 = tcA_k_lds[0].retile(frag_K[0])
     _k_frag_retile_1 = tcA_k_lds[1].retile(frag_K[1])
@@ -988,7 +989,7 @@ def flex_attn_fwd_gfx950_kernel(
         if const_expr(_use_k_half_skew):
             k_src = tcA_k_lds[slot].partition_S(sK_upper[slot])  # D-hi: skewed base
         else:
-            k_src = tcA_k_lds[slot].partition_S(sK[slot])       # D-lo: normal base
+            k_src = tcA_k_lds[slot].partition_S(sK[slot])  # D-lo: normal base
         for ki in range_constexpr(ki_count):
             k_idx = ki_offset + ki
             if const_expr(slot == 0):
@@ -997,8 +998,6 @@ def flex_attn_fwd_gfx950_kernel(
             else:
                 fx.copy(uca, k_src[None, None, k_idx], _k_frag_retile_1[None, None, k_idx])
         return []
-
-
 
     _qk_mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype))
 
@@ -1033,9 +1032,13 @@ def flex_attn_fwd_gfx950_kernel(
     # MFMA 32x32x16 C fragment with K=A, Q=B swap:
     #   q_idx = q_start + local_tid % 32 (same for all 16 elements)
     #   kv_in_tile(e) = 8*(e//4) + e%4 + 4*(local_tid//32)
-    flex_mod = _build_mod(int(param.mask_type), int(param.score_type),
-                          int(param.mask_window), float(param.score_alibi_slope),
-                          int(param.mask_prefix_len))
+    flex_mod = _build_mod(
+        int(param.mask_type),
+        int(param.score_type),
+        int(param.mask_window),
+        float(param.score_alibi_slope),
+        int(param.mask_prefix_len),
+    )
     mod_has_score = flex_mod.has_score
     mod_has_mask = flex_mod.has_mask
     _mod_apply_score = flex_mod.apply_score
@@ -1120,7 +1123,6 @@ def flex_attn_fwd_gfx950_kernel(
         p_hi = _pack_8_f32_to_v8elem([frag_P_in[8 + i] for i in range(8)])
         return p_lo, p_hi
 
-
     def pv_gemm_register(frag_P_in, v_lo_regs, v_hi_regs, o_accs):
         """PV GEMM without LDS P bridge: P packed as B, V pre-read as A.
 
@@ -1136,7 +1138,6 @@ def flex_attn_fwd_gfx950_kernel(
         rocdl.sched_barrier(0)
         rocdl.s_barrier()
         rocdl.sched_barrier(0)
-
 
     if const_expr(_is_32x32):
         _enable_stagger = True
@@ -1158,18 +1159,18 @@ def flex_attn_fwd_gfx950_kernel(
             )
         else:
             infra.stagger_i32 = rocdl.readfirstlane(
-                fx.Int32.ir_type, fx.Int32(local_tid // GFX950_WAVE_SIZE),
+                fx.Int32.ir_type,
+                fx.Int32(local_tid // GFX950_WAVE_SIZE),
             )
-
 
     # ── Paged KV: load block table into LDS ──────────────────────────────
     if const_expr(_paged):
         from flydsl._mlir.dialects import llvm as _llvm
+
         _bt_lds_ptr = storage.bt.peek().ptr
         _bt_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
         _bt_flat = fx.rocdl.make_buffer_tensor(
-            fx.Tensor(fx.make_view(fx.recast_iter(fx.Int32, fx.get_iter(block_table)),
-                                   fx.make_layout(0x7FFFFFFF, 1))),
+            fx.Tensor(fx.make_view(fx.recast_iter(fx.Int32, fx.get_iter(block_table)), fx.make_layout(0x7FFFFFFF, 1))),
             max_size=True,
         )
         _bt_div = fx.logical_divide(_bt_flat, fx.make_layout(1, 1))
@@ -1179,11 +1180,13 @@ def flex_attn_fwd_gfx950_kernel(
             _bt_local = fx.Int32(_bt_pass) * fx.Int32(block_threads) + fx.Int32(tid)
             _bt_in_range = _bt_local < _bt_entries
             _bt_global = _bt_batch_off + _bt_local
-            _bt_lds_dst = fx.add_offset(fx.recast_iter(fx.Int32, _bt_lds_ptr),
-                                        fx.make_int_tuple(_bt_local))
+            _bt_lds_dst = fx.add_offset(fx.recast_iter(fx.Int32, _bt_lds_ptr), fx.make_int_tuple(_bt_local))
             if _bt_in_range:
-                fx.copy(_bt_copy_atom, fx.slice(_bt_div, (None, fx.Int32(_bt_global))),
-                        fx.make_view(_bt_lds_dst, fx.make_layout(1, 1)))
+                fx.copy(
+                    _bt_copy_atom,
+                    fx.slice(_bt_div, (None, fx.Int32(_bt_global))),
+                    fx.make_view(_bt_lds_dst, fx.make_layout(1, 1)),
+                )
             else:
                 fx.ptr_store(fx.Int32(0), _bt_lds_dst)
         rocdl.s_waitcnt(0)
@@ -1195,7 +1198,9 @@ def flex_attn_fwd_gfx950_kernel(
             _raw = _llvm.LoadOp(T.i32, fx.to_llvm_ptr(fx.add_offset(_lds_i8, _byte_off)))
             rocdl.s_waitcnt(lgkmcnt=0)
             return fx.Int32(rocdl.readfirstlane(fx.Int32.ir_type, _raw.result))
+
     else:
+
         def _load_page_id(tile_idx):
             return fx.Int32(0)
 
@@ -1244,7 +1249,7 @@ def flex_attn_fwd_gfx950_kernel(
         dualwave_cluster_sync(0)
 
         # ── Cluster 1: QK GEMM tile 0, no deferred PV ──
-        frag_S, = gemm1_qk_unrolled(frag_Q, frag_K[0])
+        (frag_S,) = gemm1_qk_unrolled(frag_Q, frag_K[0])
         s_raw = [frag_S[i] for i in range_constexpr(n_c)]
         if const_expr(mod_has_score or mod_has_mask):
             apply_mods(s_raw, kv_i32)
@@ -1264,7 +1269,7 @@ def flex_attn_fwd_gfx950_kernel(
         dualwave_cluster_sync(2)
 
         # ── Cluster 3: QK GEMM tile 1 + PV from tile 0 ──
-        frag_S, = gemm1_qk_unrolled(frag_Q, frag_K[1])
+        (frag_S,) = gemm1_qk_unrolled(frag_Q, frag_K[1])
         out_sm_0 = softmax_finish(s_scaled_0, m_i_at_tile0, l_i, o_accs, corr_scalar_0)
         pv_gemm_register(out_sm_0[0], v_lo_regs_0, v_hi_regs_0, out_sm_0[3])
         l_i, o_accs = out_sm_0[2], out_sm_0[3]
@@ -1278,11 +1283,11 @@ def flex_attn_fwd_gfx950_kernel(
         m_i = m_i_at_tile1
         dualwave_cluster_sync(3)
 
-        return (m_i, l_i, o_accs, s_scaled_1, corr_scalar_1,
-                v_lo_regs_1, v_hi_regs_1, m_i_at_tile1)
+        return (m_i, l_i, o_accs, s_scaled_1, corr_scalar_1, v_lo_regs_1, v_hi_regs_1, m_i_at_tile1)
 
-    def _do_tile_overlapping_softmax_main(kv_i32, m_i, l_i, o_accs,
-                s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, m_i_prev):
+    def _do_tile_overlapping_softmax_main(
+        kv_i32, m_i, l_i, o_accs, s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, m_i_prev
+    ):
         """Steady-state: always has deferred PV, always has odd tile and next."""
         # ── Cluster 0: mem tile 0 ──
         rocdl.s_waitcnt(vmcnt=0)
@@ -1293,7 +1298,7 @@ def flex_attn_fwd_gfx950_kernel(
         dualwave_cluster_sync(0)
 
         # ── Cluster 1: QK GEMM tile 0 + deferred PV from prev ──
-        frag_S, = gemm1_qk_unrolled(frag_Q, frag_K[0])
+        (frag_S,) = gemm1_qk_unrolled(frag_Q, frag_K[0])
         out_sm_prev = softmax_finish(s_scaled_prev, m_i_prev, l_i, o_accs, corr_scalar_prev)
         pv_gemm_register(out_sm_prev[0], v_lo_prev, v_hi_prev, out_sm_prev[3])
         l_i, o_accs = out_sm_prev[2], out_sm_prev[3]
@@ -1314,7 +1319,7 @@ def flex_attn_fwd_gfx950_kernel(
         dualwave_cluster_sync(2)
 
         # ── Cluster 3: QK GEMM tile 1 + PV from tile 0 ──
-        frag_S, = gemm1_qk_unrolled(frag_Q, frag_K[1])
+        (frag_S,) = gemm1_qk_unrolled(frag_Q, frag_K[1])
         out_sm_0 = softmax_finish(s_scaled_0, m_i_at_tile0, l_i, o_accs, corr_scalar_0)
         pv_gemm_register(out_sm_0[0], v_lo_regs_0, v_hi_regs_0, out_sm_0[3])
         l_i, o_accs = out_sm_0[2], out_sm_0[3]
@@ -1326,11 +1331,11 @@ def flex_attn_fwd_gfx950_kernel(
         m_i = m_i_at_tile1
         dualwave_cluster_sync(3)
 
-        return (m_i, l_i, o_accs, s_scaled_1, corr_scalar_1,
-                v_lo_regs_1, v_hi_regs_1, m_i_at_tile1)
+        return (m_i, l_i, o_accs, s_scaled_1, corr_scalar_1, v_lo_regs_1, v_hi_regs_1, m_i_at_tile1)
 
-    def _do_tile_overlapping_softmax_epilogue(kv_i32, m_i, l_i, o_accs,
-                s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, m_i_prev):
+    def _do_tile_overlapping_softmax_epilogue(
+        kv_i32, m_i, l_i, o_accs, s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, m_i_prev
+    ):
         """Last pair: has deferred PV, odd tile may be invalid, no next DMA."""
         odd_valid = (kv_i32 + fx.Int32(1)) < _kv_hi
         has_next = (kv_i32 + fx.Int32(2)) < _kv_hi
@@ -1345,7 +1350,7 @@ def flex_attn_fwd_gfx950_kernel(
         dualwave_cluster_sync(0)
 
         # ── Cluster 1: QK GEMM tile 0 + deferred PV from prev ──
-        frag_S, = gemm1_qk_unrolled(frag_Q, frag_K[0])
+        (frag_S,) = gemm1_qk_unrolled(frag_Q, frag_K[0])
         out_sm_prev = softmax_finish(s_scaled_prev, m_i_prev, l_i, o_accs, corr_scalar_prev)
         pv_gemm_register(out_sm_prev[0], v_lo_prev, v_hi_prev, out_sm_prev[3])
         l_i, o_accs = out_sm_prev[2], out_sm_prev[3]
@@ -1368,7 +1373,7 @@ def flex_attn_fwd_gfx950_kernel(
         dualwave_cluster_sync(2)
 
         # ── Cluster 3: QK GEMM tile 1 + PV from tile 0 ──
-        frag_S, = gemm1_qk_unrolled(frag_Q, frag_K[1])
+        (frag_S,) = gemm1_qk_unrolled(frag_Q, frag_K[1])
         out_sm_0 = softmax_finish(s_scaled_0, m_i_at_tile0, l_i, o_accs, corr_scalar_0)
         pv_gemm_register(out_sm_0[0], v_lo_regs_0, v_hi_regs_0, out_sm_0[3])
         l_i, o_accs = out_sm_0[2], out_sm_0[3]
@@ -1382,8 +1387,7 @@ def flex_attn_fwd_gfx950_kernel(
         m_i = m_i_at_tile1
         dualwave_cluster_sync(3)
 
-        return (m_i, l_i, o_accs, s_scaled_1, corr_scalar_1,
-                v_lo_regs_1, v_hi_regs_1, m_i_at_tile1)
+        return (m_i, l_i, o_accs, s_scaled_1, corr_scalar_1, v_lo_regs_1, v_hi_regs_1, m_i_at_tile1)
 
     # Pad tile count to pairs: ceil(range / 2).  When range is odd the
     # last pair's odd tile lands past _kv_hi — has_next=False skips the
@@ -1439,8 +1443,15 @@ def flex_attn_fwd_gfx950_kernel(
         kv_even = _kv_lo + (fx.Int32(arith.index_cast(T.i32, kv_mid)) + fx.Int32(1)) * fx.Int32(2)
         m_i, l_i, o_accs, s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, m_i_prev = (
             _do_tile_overlapping_softmax_main(
-                kv_even, m_i, l_i, o_accs,
-                s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, m_i_prev,
+                kv_even,
+                m_i,
+                l_i,
+                o_accs,
+                s_scaled_prev,
+                corr_scalar_prev,
+                v_lo_prev,
+                v_hi_prev,
+                m_i_prev,
             )
         )
 
@@ -1498,8 +1509,15 @@ def flex_attn_fwd_gfx950_kernel(
         kv_last = _kv_lo + (_kv_pairs - fx.Int32(1)) * fx.Int32(2)
         m_i, l_i, o_accs, s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, m_i_prev = (
             _do_tile_overlapping_softmax_epilogue(
-                kv_last, m_i, l_i, o_accs,
-                s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, m_i_prev,
+                kv_last,
+                m_i,
+                l_i,
+                o_accs,
+                s_scaled_prev,
+                corr_scalar_prev,
+                v_lo_prev,
+                v_hi_prev,
+                m_i_prev,
             )
         )
 
@@ -1562,8 +1580,7 @@ def flex_attn_fwd_gfx950_kernel(
         ws_o_reg = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Float32)
         ws_o_div = fx.logical_divide(
             fx.rocdl.make_buffer_tensor(
-                fx.Tensor(fx.make_view(fx.recast_iter(fx.Float32, fx.get_iter(ws_o)),
-                                       fx.make_layout(0x7FFFFFFF, 1))),
+                fx.Tensor(fx.make_view(fx.recast_iter(fx.Float32, fx.get_iter(ws_o)), fx.make_layout(0x7FFFFFFF, 1))),
                 max_size=True,
             ),
             fx.make_layout(1, 1),
@@ -1574,10 +1591,12 @@ def flex_attn_fwd_gfx950_kernel(
         _ws_o_head_stride = _ws_sq * _ws_o_row_stride
         _ws_o_batch_stride = hq * _ws_o_head_stride
         _ws_o_split_stride = num_batches * _ws_o_batch_stride
-        _ws_o_base = (split_idx * _ws_o_split_stride
-                      + b_idx * _ws_o_batch_stride
-                      + fx.Int32(arith.index_cast(T.i32, h_idx)) * _ws_o_head_stride
-                      + (q_start + _qrow) * _ws_o_row_stride)
+        _ws_o_base = (
+            split_idx * _ws_o_split_stride
+            + b_idx * _ws_o_batch_stride
+            + fx.Int32(arith.index_cast(T.i32, h_idx)) * _ws_o_head_stride
+            + (q_start + _qrow) * _ws_o_row_stride
+        )
         for dc in range_constexpr(_n_d_chunks):
             o_vec = Vec(o_accs[dc])
             for k in range_constexpr(4):
@@ -1594,8 +1613,7 @@ def flex_attn_fwd_gfx950_kernel(
         ws_ml_reg = fx.make_rmem_tensor(fx.make_layout(2, 1), fx.Float32)
         ws_ml_div = fx.logical_divide(
             fx.rocdl.make_buffer_tensor(
-                fx.Tensor(fx.make_view(fx.recast_iter(fx.Float32, fx.get_iter(ws_ml)),
-                                       fx.make_layout(0x7FFFFFFF, 1))),
+                fx.Tensor(fx.make_view(fx.recast_iter(fx.Float32, fx.get_iter(ws_ml)), fx.make_layout(0x7FFFFFFF, 1))),
                 max_size=True,
             ),
             fx.make_layout(1, 1),
@@ -1604,10 +1622,12 @@ def flex_attn_fwd_gfx950_kernel(
         _ws_ml_head_stride = _ws_sq * _ws_ml_row_stride
         _ws_ml_batch_stride = hq * _ws_ml_head_stride
         _ws_ml_split_stride = num_batches * _ws_ml_batch_stride
-        _ws_ml_base = (split_idx * _ws_ml_split_stride
-                       + b_idx * _ws_ml_batch_stride
-                       + fx.Int32(arith.index_cast(T.i32, h_idx)) * _ws_ml_head_stride
-                       + (q_start + _qrow) * _ws_ml_row_stride)
+        _ws_ml_base = (
+            split_idx * _ws_ml_split_stride
+            + b_idx * _ws_ml_batch_stride
+            + fx.Int32(arith.index_cast(T.i32, h_idx)) * _ws_ml_head_stride
+            + (q_start + _qrow) * _ws_ml_row_stride
+        )
         ml_vec = Vec.from_elements([m_i[0], l_i[0]], fx.Float32)
         fx.memref_store_vec(ml_vec, ws_ml_reg)
         fx.copy(_ws_ml_store_atom, ws_ml_reg, fx.slice(ws_ml_div, (None, fx.Int32(_ws_ml_base))))
@@ -1616,8 +1636,7 @@ def flex_attn_fwd_gfx950_kernel(
         o_store_reg = fx.make_rmem_tensor(fx.make_layout(4, 1), _out_elem_dtype)
         o_div = fx.logical_divide(
             fx.rocdl.make_buffer_tensor(
-                fx.Tensor(fx.make_view(fx.recast_iter(_out_elem_dtype, fx.get_iter(o)),
-                                       fx.make_layout(0x7FFFFFFF, 1))),
+                fx.Tensor(fx.make_view(fx.recast_iter(_out_elem_dtype, fx.get_iter(o)), fx.make_layout(0x7FFFFFFF, 1))),
                 max_size=True,
             ),
             fx.make_layout(1, 1),
@@ -1639,9 +1658,9 @@ _COMBINE_BLOCK = 256
 
 @flyc.kernel(known_block_size=[_COMBINE_BLOCK, 1, 1])
 def flex_splitk_combine_kernel(
-    o: fx.Tensor,            # [B, Sq, Hq, D] output (bf16/f16)
-    ws_o: fx.Tensor,         # [num_splits, B, Hq, Sq, D] f32 partial O
-    ws_ml: fx.Tensor,        # [num_splits, B, Hq, Sq, 2] f32 (m, l) per split
+    o: fx.Tensor,  # [B, Sq, Hq, D] output (bf16/f16)
+    ws_o: fx.Tensor,  # [num_splits, B, Hq, Sq, D] f32 partial O
+    ws_ml: fx.Tensor,  # [num_splits, B, Hq, Sq, 2] f32 (m, l) per split
     num_splits: fx.Constexpr[int],
     head_dim: fx.Constexpr[int],
     out_dtype_id: fx.Constexpr[int],
@@ -1651,7 +1670,7 @@ def flex_splitk_combine_kernel(
     Each thread handles 4 D-values at one query row. Block covers
     head_dim/4 lanes × (256 / (head_dim/4)) rows per workgroup.
     """
-    from flydsl.expr.primitive import range_constexpr, const_expr
+    from flydsl.expr.primitive import const_expr, range_constexpr
 
     tid = fx.thread_idx.x
     bid = fx.block_idx.x
@@ -1666,7 +1685,11 @@ def flex_splitk_combine_kernel(
     global_row = fx.Int32(arith.index_cast(T.i32, bid)) * fx.Int32(_rows_per_block) + fx.Int32(row_in_block)
 
     # ws_o is [num_splits, B, Hq, Sq, D] — stride for split dim = B*Hq*Sq*D
-    _total_rows = fx.Int32(fx.get_scalar(ws_ml.shape[1])) * fx.Int32(fx.get_scalar(ws_ml.shape[2])) * fx.Int32(fx.get_scalar(ws_ml.shape[3]))
+    _total_rows = (
+        fx.Int32(fx.get_scalar(ws_ml.shape[1]))
+        * fx.Int32(fx.get_scalar(ws_ml.shape[2]))
+        * fx.Int32(fx.get_scalar(ws_ml.shape[3]))
+    )
     _split_o_stride = _total_rows * fx.Int32(head_dim)
     _split_ml_stride = _total_rows * fx.Int32(2)
 
@@ -1698,8 +1721,7 @@ def flex_splitk_combine_kernel(
         w_s = _hw_exp2(m_s - m_max) * l_s
 
         o_off = fx.Int32(s) * _split_o_stride + global_row * fx.Int32(head_dim) + d_col
-        o_vals = [fx.Float32(fx.ptr_load(ws_o_it + fx.Int32(o_off + fx.Int32(e))))
-                  for e in range_constexpr(4)]
+        o_vals = [fx.Float32(fx.ptr_load(ws_o_it + fx.Int32(o_off + fx.Int32(e)))) for e in range_constexpr(4)]
         o_vec = Vec.from_elements(o_vals, fx.Float32)
         w_vec = Vec.from_elements([w_s], fx.Float32).broadcast_to(4)
         acc = acc + o_vec * w_vec
@@ -1756,12 +1778,8 @@ def launch_flex_attn_gfx950(
     _SPLITK = int(param.num_kv_splits) > 1
     _num_kv_splits = int(param.num_kv_splits)
 
-    wave_layout = fx.make_layout(
-        (param.m_waves, param.n_waves, 1), (param.n_waves, 1, 0)
-    )
-    mma_atom_qk = fx.make_mma_atom(
-        fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype)
-    )
+    wave_layout = fx.make_layout((param.m_waves, param.n_waves, 1), (param.n_waves, 1, 0))
+    mma_atom_qk = fx.make_mma_atom(fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype))
     tiled_mma_qk = fx.make_tiled_mma(mma_atom_qk, wave_layout)
 
     rows_per_wg = param.block_m * param.num_groups
@@ -1778,8 +1796,21 @@ def launch_flex_attn_gfx950(
         grid_z = b
 
     flex_attn_fwd_gfx950_kernel(
-        o, q, k, v, seqlen_q, seqlen_kv, b, scale, tiled_mma_qk, param,
-        ws_o, ws_ml, block_table, block_table_stride, context_lens,
+        o,
+        q,
+        k,
+        v,
+        seqlen_q,
+        seqlen_kv,
+        b,
+        scale,
+        tiled_mma_qk,
+        param,
+        ws_o,
+        ws_ml,
+        block_table,
+        block_table_stride,
+        context_lens,
         value_attrs={
             "rocdl.waves_per_eu": _waves_per_eu,
             "rocdl.flat_work_group_size": f"{param.block_threads},{param.block_threads}",
@@ -1797,7 +1828,12 @@ def launch_flex_attn_gfx950(
         _total_rows = b * hq * seqlen_q
         _combine_blocks = (_total_rows + fx.Int32(_rows_per_block - 1)) // fx.Int32(_rows_per_block)
         flex_splitk_combine_kernel(
-            o, ws_o, ws_ml, _num_kv_splits, _head_dim, int(param.dtype_id),
+            o,
+            ws_o,
+            ws_ml,
+            _num_kv_splits,
+            _head_dim,
+            int(param.dtype_id),
         ).launch(
             grid=(_combine_blocks, fx.Index(1), fx.Index(1)),
             block=(_COMBINE_BLOCK, 1, 1),
@@ -1870,11 +1906,9 @@ def flydsl_flex_attention_layout(
         raise ValueError(f"num_kv_heads {num_kv_heads} != k head count {Hkv}")
     rows_per_wg = block_m * num_groups
     if Sq % rows_per_wg != 0:
-        raise ValueError(
-            f"seqlen_q ({Sq}) must be a multiple of block_m*num_groups ({rows_per_wg})"
-        )
+        raise ValueError(f"seqlen_q ({Sq}) must be a multiple of block_m*num_groups ({rows_per_wg})")
     if scale is None:
-        scale = 1.0 / (D ** 0.5)
+        scale = 1.0 / (D**0.5)
 
     if stream is None:
         stream = torch.cuda.current_stream()
@@ -1882,9 +1916,7 @@ def flydsl_flex_attention_layout(
         out = torch.empty(q.shape, dtype=q.dtype, device=q.device)
 
     if pipe_depth >= 2 and num_groups < 2:
-        raise ValueError(
-            "pipe_depth>=2 requires num_groups>=2 (Strategy A staggered pipeline)"
-        )
+        raise ValueError("pipe_depth>=2 requires num_groups>=2 (Strategy A staggered pipeline)")
 
     param = make_flex_attn_param(
         seqlen_kv=Skv,
@@ -1916,11 +1948,19 @@ def flydsl_flex_attention_layout(
     _dummy_bt = torch.empty(1, dtype=torch.int32, device=q.device)
     _dummy_ctx = torch.empty(1, dtype=torch.int32, device=q.device)
     launch_flex_attn_gfx950(
-        out.contiguous(), q.contiguous(), k.contiguous(), v.contiguous(),
-        fx.Float32(scale), param, stream,
-        ws_o=ws_o, ws_ml=ws_ml,
-        block_table=_dummy_bt, block_table_stride=fx.Int32(0),
-        context_lens=_dummy_ctx, max_seqlen_kv=fx.Int32(Skv),
+        out.contiguous(),
+        q.contiguous(),
+        k.contiguous(),
+        v.contiguous(),
+        fx.Float32(scale),
+        param,
+        stream,
+        ws_o=ws_o,
+        ws_ml=ws_ml,
+        block_table=_dummy_bt,
+        block_table_stride=fx.Int32(0),
+        context_lens=_dummy_ctx,
+        max_seqlen_kv=fx.Int32(Skv),
     )
     return out
 
@@ -1978,11 +2018,9 @@ def flydsl_flex_attention_layout_paged(
         raise ValueError(f"num_kv_heads {num_kv_heads} != k_cache head count {Hkv}")
     rows_per_wg = block_m * num_groups
     if Sq % rows_per_wg != 0:
-        raise ValueError(
-            f"seqlen_q ({Sq}) must be a multiple of block_m*num_groups ({rows_per_wg})"
-        )
+        raise ValueError(f"seqlen_q ({Sq}) must be a multiple of block_m*num_groups ({rows_per_wg})")
     if scale is None:
-        scale = 1.0 / (D ** 0.5)
+        scale = 1.0 / (D**0.5)
     if stream is None:
         stream = torch.cuda.current_stream()
     if out is None:
@@ -2017,11 +2055,19 @@ def flydsl_flex_attention_layout_paged(
     ws_ml = torch.empty(1, dtype=torch.float32, device=q.device)
 
     launch_flex_attn_gfx950(
-        out.contiguous(), q.contiguous(), k_cache.contiguous(), v_cache.contiguous(),
-        fx.Float32(scale), param, stream,
-        ws_o=ws_o, ws_ml=ws_ml,
-        block_table=bt_i32, block_table_stride=fx.Int32(bt_stride),
-        context_lens=ctx_i32, max_seqlen_kv=fx.Int32(max_seqlen_kv),
+        out.contiguous(),
+        q.contiguous(),
+        k_cache.contiguous(),
+        v_cache.contiguous(),
+        fx.Float32(scale),
+        param,
+        stream,
+        ws_o=ws_o,
+        ws_ml=ws_ml,
+        block_table=bt_i32,
+        block_table_stride=fx.Int32(bt_stride),
+        context_lens=ctx_i32,
+        max_seqlen_kv=fx.Int32(max_seqlen_kv),
     )
     return out
 
@@ -2031,5 +2077,3 @@ FLEX_DTYPE_FP8 = 4  # stub for test imports
 
 def flydsl_flex_attention_layout_fp8(*args, **kwargs):
     raise NotImplementedError("FP8 flex attention is not supported in this build")
-
-
