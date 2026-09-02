@@ -1,8 +1,91 @@
 {
  "schema": 1,
- "updated": "2026-09-02T15:32:49Z",
+ "updated": "2026-09-02T18:36:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33664949309,
+   "pr": 1089,
+   "commit": "8f94e564f978c59070b9bb76bb9d764b299402ed",
+   "branch": "codex/rdna-dynamic-buffer-bounds-check",
+   "event": "pull_request",
+   "title": "[DSL] Add dynamic RDNA buffer bounds checking",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33664949309",
+   "created_at": "2026-09-02T18:04:13Z",
+   "updated_at": "2026-09-02T18:04:13Z",
+   "actor": "big-yellow-duck",
+   "jobs": []
+  },
+  {
+   "run_id": 33664818179,
+   "pr": 1074,
+   "commit": "7c4d805c2385260151a363d1530755e0b501ad1a",
+   "branch": "codex/gfx120x-fp8-wmma-atom",
+   "event": "pull_request",
+   "title": "[Dialect] Add FP8 support to GFX120X WMMA atom",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33664818179",
+   "created_at": "2026-09-02T18:02:58Z",
+   "updated_at": "2026-09-02T18:02:58Z",
+   "actor": "big-yellow-duck",
+   "jobs": []
+  },
+  {
+   "run_id": 33658611447,
+   "pr": 1066,
+   "commit": "78e0171dd24c8b5ae8bf6a9718cfb26eb0d2dac6",
+   "branch": "upstream/fa-paged-fp8-asymmetric-v",
+   "event": "pull_request",
+   "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33658611447",
+   "created_at": "2026-09-02T17:02:31Z",
+   "updated_at": "2026-09-02T18:02:07Z",
+   "actor": "sammysun0711",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-02T18:02:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33658611447/job/100362551697"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-02T18:00:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33658611447/job/100362551768"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-02T18:01:14Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33658611447/job/100362551769"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-02T18:00:17Z",
+     "completed_at": "2026-09-02T18:13:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33658611447/job/100362551775",
+     "log_fetch_failed": true
+    }
+   ]
+  },
   {
    "run_id": 33639837271,
    "pr": 1069,
@@ -20,7 +103,7 @@
   },
   {
    "run_id": 33638486966,
-   "pr": 1089,
+   "pr": null,
    "commit": "a9d0b6b4869ecb6f1056ac1122c7620dc1482fe8",
    "branch": "codex/rdna-dynamic-buffer-bounds-check",
    "event": "pull_request",
@@ -90,7 +173,7 @@
   },
   {
    "run_id": 33600092510,
-   "pr": 1066,
+   "pr": null,
    "commit": "7b0046bb043cb9c6fd683f8071d70686b7092779",
    "branch": "upstream/fa-paged-fp8-asymmetric-v",
    "event": "pull_request",
@@ -202,7 +285,7 @@
   },
   {
    "run_id": 33531388649,
-   "pr": 1074,
+   "pr": null,
    "commit": "269e59feffed498bbbf1cd5e8a971e32760d5f49",
    "branch": "codex/gfx120x-fp8-wmma-atom",
    "event": "pull_request",
@@ -2446,51 +2529,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 33142554094,
-   "pr": null,
-   "commit": "76a005d2c3393fa21132010af891bc086a818bca",
-   "branch": "jli/gfx1250/fix-mma-atom",
-   "event": "pull_request",
-   "title": "[WIP][Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33142554094",
-   "created_at": "2026-08-28T04:41:51Z",
-   "updated_at": "2026-08-28T04:43:32Z",
-   "actor": "Boss2002n",
-   "jobs": []
-  },
-  {
-   "run_id": 33142484020,
-   "pr": null,
-   "commit": "afc2f9f3ae856589d53cda40b7e1b51e2d2134ae",
-   "branch": "jli/gfx1250/fix-mma-atom",
-   "event": "pull_request",
-   "title": "[WIP][Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33142484020",
-   "created_at": "2026-08-28T04:40:21Z",
-   "updated_at": "2026-08-28T04:41:38Z",
-   "actor": "Boss2002n",
-   "jobs": []
-  },
-  {
-   "run_id": 33141670336,
-   "pr": null,
-   "commit": "da14c079a7dabc9d4a2b550c9bc8f46b6514739e",
-   "branch": "jli/gfx1250/fix-mma-atom",
-   "event": "pull_request",
-   "title": "[WIP][Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33141670336",
-   "created_at": "2026-08-28T04:23:25Z",
-   "updated_at": "2026-08-28T04:24:50Z",
-   "actor": "Boss2002n",
-   "jobs": []
   }
  ]
 }
