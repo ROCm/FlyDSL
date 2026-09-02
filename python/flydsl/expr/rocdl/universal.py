@@ -226,12 +226,19 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
     )
 
 
-def make_buffer_ptr(ptr: Pointer, num_records_bytes=None):
+def make_buffer_ptr(ptr: Pointer, num_records_bytes=None, *, bounds_check=False):
     """Construct a new buffer-resource (``BufferDesc``) pointer from a global
     pointer, for hardware OOB-checked loads / stores.
 
     ``num_records_bytes`` is the descriptor byte count.  When ``None``
     (default) it falls back to the max size ``0xFFFFFFFF``.
+
+    On RDNA, ``bounds_check=True`` selects descriptor ``OOB_SELECT=3`` so a
+    raw buffer access whose byte offset is outside ``num_records_bytes`` is
+    suppressed. A dynamic FlyDSL Boolean predicate is also accepted, allowing
+    a tiled kernel to enable checking only for edge workgroups. The default
+    preserves the historical ``OOB_SELECT=2`` behavior used by kernels that
+    prove their accesses are in bounds.
     """
     if not is_generic_address_space(ptr.address_space, AddressSpace.Global):
         raise ValueError(f"make_buffer_ptr requires a global-address-space pointer, got {ptr.address_space}")
@@ -250,7 +257,15 @@ def make_buffer_ptr(ptr: Pointer, num_records_bytes=None):
     flags = (7 << 12) | (4 << 15)
     if is_rdna_arch(arch):
         flags |= 1 << 24  # reserved bit, must be 1 on RDNA
-        flags |= 2 << 28  # OOB_SELECT = 2 (no bounds checking)
+        if isinstance(bounds_check, bool):
+            flags |= (3 if bounds_check else 2) << 28
+        else:
+            # A dynamic, workgroup-uniform predicate lets a tiled kernel use
+            # checked descriptors only for its ragged edge workgroups.
+            flags = Int32(flags) | bounds_check.select(
+                Int32(3 << 28),
+                Int32(2 << 28),
+            )
 
     buf_ptr_ty = PointerType.get(
         elem_ty=elem_ty.ir_type,
@@ -273,6 +288,7 @@ def make_buffer_tensor(
     max_size: bool = True,
     *,
     num_records_bytes=None,
+    bounds_check=False,
 ) -> Tensor:
     """Construct a new buffer-resource-backed tensor from a global-pointer
     tensor, for hardware OOB-checked loads / stores and buffer_copy atoms
@@ -297,7 +313,11 @@ def make_buffer_tensor(
         else:
             num_records_bytes = Int64((get_scalar(cosize(layout)) * elem_bits + 7) // 8)
 
-    buf_ptr = make_buffer_ptr(ptr, num_records_bytes=num_records_bytes)
+    buf_ptr = make_buffer_ptr(
+        ptr,
+        num_records_bytes=num_records_bytes,
+        bounds_check=bounds_check,
+    )
     return make_view(buf_ptr, layout)
 
 
