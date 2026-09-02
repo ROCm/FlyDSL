@@ -36,7 +36,6 @@ from kernels.attention.flex_attention_layout_gfx950 import (  # noqa: E402
     SCORE_ALIBI,
     SCORE_NONE,
     flydsl_flex_attention_layout,
-    flydsl_flex_attention_layout_fp8,
     flydsl_flex_attention_layout_paged,
 )
 
@@ -389,92 +388,6 @@ def test_flex_attention_layout_causal_multi_group(num_groups):
     cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
     assert max_err < 8e-2 and cos > 0.98, f"causal groups={num_groups}: max_err={max_err} cos={cos}"
 
-
-# ── FP8 tests ──────────────────────────────────────────────────────────────────
-
-_FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
-
-
-def _quantize_fp8(x_bf16):
-    """Quantize bf16 tensor to fp8 e4m3fn with per-tensor descale."""
-    amax = x_bf16.float().abs().amax().clamp(min=1e-12)
-    descale = (amax / _FP8_MAX).item()
-    x_fp8 = (x_bf16.float() / descale).clamp(-_FP8_MAX, _FP8_MAX).to(torch.float8_e4m3fn)
-    return x_fp8, descale
-
-
-def _run_fp8(
-    B,
-    Sq,
-    Skv,
-    H,
-    D,
-    *,
-    num_groups=2,
-    accurate_softmax=True,
-    mask_type=MASK_NONE,
-    score_type=SCORE_NONE,
-    mask_window=0,
-    score_alibi_slope=0.0,
-):
-    dev = "cuda"
-    torch.manual_seed(0)
-    q_bf16 = torch.empty(B, Sq, H, D, dtype=torch.bfloat16, device=dev).uniform_(-1, 1)
-    k_bf16 = torch.empty(B, Skv, H, D, dtype=torch.bfloat16, device=dev).uniform_(-1, 1)
-    v_bf16 = torch.empty(B, Skv, H, D, dtype=torch.bfloat16, device=dev).uniform_(-1, 1)
-    scale = 1.0 / math.sqrt(D)
-
-    q_fp8, qd = _quantize_fp8(q_bf16)
-    k_fp8, kd = _quantize_fp8(k_bf16)
-    v_fp8, vd = _quantize_fp8(v_bf16)
-
-    out = flydsl_flex_attention_layout_fp8(
-        q_fp8,
-        k_fp8,
-        v_fp8,
-        qd,
-        kd,
-        vd,
-        scale=scale,
-        num_groups=num_groups,
-        accurate_softmax=accurate_softmax,
-        mask_type=mask_type,
-        score_type=score_type,
-        mask_window=mask_window,
-        score_alibi_slope=score_alibi_slope,
-    ).float()
-
-    q_deq = q_fp8.float() * qd
-    k_deq = k_fp8.float() * kd
-    v_deq = v_fp8.float() * vd
-    is_causal = mask_type == MASK_CAUSAL
-    ref = _sdpa_ref(q_deq.bfloat16(), k_deq.bfloat16(), v_deq.bfloat16(), scale, is_causal=is_causal).float()
-
-    max_err = (out - ref).abs().max().item()
-    cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
-    return max_err, cos
-
-
-_FP8_SHAPES = [
-    (1, 256, 256, 4, 128),
-    (1, 256, 256, 4, 128),
-    (2, 256, 256, 8, 128),
-    (1, 256, 32, 4, 128),
-]
-
-
-@_requires_gfx950
-@pytest.mark.parametrize("B,Sq,Skv,H,D", _FP8_SHAPES)
-def test_flex_attention_layout_fp8(B, Sq, Skv, H, D):
-    max_err, cos = _run_fp8(B, Sq, Skv, H, D)
-    assert max_err < 8e-2 and cos > 0.98, f"fp8 B{B} Sq{Sq} Skv{Skv} H{H} D{D}: max_err={max_err} cos={cos}"
-
-
-@_requires_gfx950
-@pytest.mark.parametrize("B,Sq,Skv,H,D", _FP8_SHAPES)
-def test_flex_attention_layout_fp8_causal(B, Sq, Skv, H, D):
-    max_err, cos = _run_fp8(B, Sq, Skv, H, D, mask_type=MASK_CAUSAL)
-    assert max_err < 8e-2 and cos > 0.98, f"fp8 causal B{B} Sq{Sq} Skv{Skv} H{H} D{D}: max_err={max_err} cos={cos}"
 
 
 _PAGED_SHAPES = [

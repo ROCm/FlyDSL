@@ -90,11 +90,6 @@ MASK_PREFIX_LM = 3
 SCORE_NONE = 0
 SCORE_ALIBI = 1
 
-PHASE_PROLOGUE = 0
-PHASE_MAIN = 1
-PHASE_EPILOGUE = 2
-
-
 class FlexMod:
     has_mask = False
     has_score = False
@@ -105,9 +100,6 @@ class FlexMod:
 
     def tile_needs_mask(self, kv_tile_idx, q_idx, block_n):
         return fx.Int32(0) != fx.Int32(0)
-
-    def needs_mask_in_phase(self, phase):
-        return True
 
     def apply_mask(self, score, q_idx, kv_idx):
         return score
@@ -128,9 +120,6 @@ class CausalMask(FlexMod):
     def tile_needs_mask(self, kv_tile_idx, q_idx, block_n):
         kv_tile_end = kv_tile_idx * fx.Int32(block_n) + fx.Int32(block_n - 1)
         return kv_tile_end > q_idx
-
-    def needs_mask_in_phase(self, phase):
-        return phase != PHASE_MAIN
 
     def apply_mask(self, score, q_idx, kv_idx):
         return (kv_idx <= q_idx).select(score, fx.Float32(-1e9))
@@ -179,9 +168,6 @@ class PrefixLMMask(FlexMod):
         kv_tile_end = kv_tile_idx * fx.Int32(block_n) + fx.Int32(block_n - 1)
         return kv_tile_end > q_idx
 
-    def needs_mask_in_phase(self, phase):
-        return phase != PHASE_MAIN
-
     def apply_mask(self, score, q_idx, kv_idx):
         visible = (kv_idx <= q_idx) | (kv_idx < fx.Int32(self.prefix_len))
         return visible.select(score, fx.Float32(-1e9))
@@ -211,9 +197,6 @@ class CompositeMod(FlexMod):
 
     def tile_needs_mask(self, kv_tile_idx, q_idx, block_n):
         return self._mask.tile_needs_mask(kv_tile_idx, q_idx, block_n)
-
-    def needs_mask_in_phase(self, phase):
-        return self._mask.needs_mask_in_phase(phase)
 
     def apply_mask(self, score, q_idx, kv_idx):
         return self._mask.apply_mask(score, q_idx, kv_idx)
@@ -1080,10 +1063,10 @@ def flex_attn_fwd_gfx950_kernel(
             kv_idx = kv_base + fx.Int32(kv_offsets[e])
             frag_S_in[e] = _mod_apply_mask(frag_S_in[e], q_idx_mod, kv_idx)
 
-    def apply_mods(frag_S_in, kv_tile_idx, phase):
+    def apply_mods(frag_S_in, kv_tile_idx):
         if const_expr(mod_has_score):
             apply_score_mods(frag_S_in, kv_tile_idx)
-        if const_expr(mod_has_mask and flex_mod.needs_mask_in_phase(phase)):
+        if const_expr(mod_has_mask):
             apply_mask_mods(frag_S_in, kv_tile_idx)
 
     # _n_d_chunks defined above as head_dim // 32 (= 4 for D=128).
@@ -1278,7 +1261,7 @@ def flex_attn_fwd_gfx950_kernel(
         (frag_S,) = gemm1_qk_unrolled(frag_Q, frag_K[0])
         s_raw = [frag_S[i] for i in range_constexpr(n_c)]
         if const_expr(mod_has_score or mod_has_mask):
-            apply_mods(s_raw, kv_i32, PHASE_PROLOGUE)
+            apply_mods(s_raw, kv_i32)
         corr_scalar_0, s_scaled_0, m_new = softmax_start(s_raw, m_i)
         m_i_at_tile0 = [m_new] + [m_i[r] for r in range_constexpr(1, npair)]
         m_i = m_i_at_tile0
@@ -1301,7 +1284,7 @@ def flex_attn_fwd_gfx950_kernel(
         l_i, o_accs = out_sm_0[2], out_sm_0[3]
         s_raw = [frag_S[i] for i in range_constexpr(n_c)]
         if const_expr(mod_has_score or mod_has_mask):
-            apply_mods(s_raw, kv_i32 + fx.Int32(1), PHASE_PROLOGUE)
+            apply_mods(s_raw, kv_i32 + fx.Int32(1))
         _neg_inf = fx.Float32(-1e9)
         s_raw = [odd_valid.select(s_raw[i], _neg_inf) for i in range_constexpr(n_c)]
         corr_scalar_1, s_scaled_1, m_new = softmax_start(s_raw, m_i)
@@ -1330,7 +1313,7 @@ def flex_attn_fwd_gfx950_kernel(
         l_i, o_accs = out_sm_prev[2], out_sm_prev[3]
         s_raw = [frag_S[i] for i in range_constexpr(n_c)]
         if const_expr(mod_has_score or mod_has_mask):
-            apply_mods(s_raw, kv_i32, PHASE_MAIN)
+            apply_mods(s_raw, kv_i32)
         corr_scalar_0, s_scaled_0, m_new = softmax_start(s_raw, m_i)
         m_i_at_tile0 = [m_new] + [m_i[r] for r in range_constexpr(1, npair)]
         m_i = m_i_at_tile0
@@ -1351,7 +1334,7 @@ def flex_attn_fwd_gfx950_kernel(
         l_i, o_accs = out_sm_0[2], out_sm_0[3]
         s_raw = [frag_S[i] for i in range_constexpr(n_c)]
         if const_expr(mod_has_score or mod_has_mask):
-            apply_mods(s_raw, kv_i32 + fx.Int32(1), PHASE_MAIN)
+            apply_mods(s_raw, kv_i32 + fx.Int32(1))
         corr_scalar_1, s_scaled_1, m_new = softmax_start(s_raw, m_i)
         m_i_at_tile1 = [m_new] + [m_i[r] for r in range_constexpr(1, npair)]
         m_i = m_i_at_tile1
@@ -1382,7 +1365,7 @@ def flex_attn_fwd_gfx950_kernel(
         l_i, o_accs = out_sm_prev[2], out_sm_prev[3]
         s_raw = [frag_S[i] for i in range_constexpr(n_c)]
         if const_expr(mod_has_score or mod_has_mask):
-            apply_mods(s_raw, kv_i32, PHASE_EPILOGUE)
+            apply_mods(s_raw, kv_i32)
         corr_scalar_0, s_scaled_0, m_new = softmax_start(s_raw, m_i)
         m_i_at_tile0 = [m_new] + [m_i[r] for r in range_constexpr(1, npair)]
         m_i = m_i_at_tile0
@@ -1405,7 +1388,7 @@ def flex_attn_fwd_gfx950_kernel(
         l_i, o_accs = out_sm_0[2], out_sm_0[3]
         s_raw = [frag_S[i] for i in range_constexpr(n_c)]
         if const_expr(mod_has_score or mod_has_mask):
-            apply_mods(s_raw, kv_i32 + fx.Int32(1), PHASE_EPILOGUE)
+            apply_mods(s_raw, kv_i32 + fx.Int32(1))
         _neg_inf = fx.Float32(-1e9)
         s_raw = [odd_valid.select(s_raw[i], _neg_inf) for i in range_constexpr(n_c)]
         corr_scalar_1, s_scaled_1, m_new = softmax_start(s_raw, m_i)
