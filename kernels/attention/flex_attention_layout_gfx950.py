@@ -1049,19 +1049,29 @@ def flex_attn_fwd_gfx950_kernel(
     b_i32 = fx.Int32(arith.index_cast(T.i32, b_idx))
     h_i32 = fx.Int32(arith.index_cast(T.i32, h_idx))
     q_idx_mod = fx.Int32(arith.index_cast(T.i32, q_start)) + fx.Int32(local_tid % 32)
+    _q_start_i32 = fx.Int32(arith.index_cast(T.i32, q_start))
     lane_group_off = fx.Int32((local_tid // 32) * 4)
     kv_offsets = [8 * (e // 4) + (e % 4) for e in range(n_c)]
 
-    def apply_mods(frag_S_in, kv_tile_idx):
+    def apply_score_mods(frag_S_in, kv_tile_idx):
         kv_base = kv_tile_idx * fx.Int32(block_n) + lane_group_off
+        for e in range_constexpr(n_c):
+            kv_idx = kv_base + fx.Int32(kv_offsets[e])
+            frag_S_in[e] = _mod_apply_score(frag_S_in[e], b_i32, h_i32, q_idx_mod, kv_idx)
+
+    def apply_mask_mods(frag_S_in, kv_tile_idx):
+        kv_base = kv_tile_idx * fx.Int32(block_n) + lane_group_off
+        for e in range_constexpr(n_c):
+            kv_idx = kv_base + fx.Int32(kv_offsets[e])
+            frag_S_in[e] = _mod_apply_mask(frag_S_in[e], q_idx_mod, kv_idx)
+
+    def apply_mods(frag_S_in, kv_tile_idx):
         if const_expr(mod_has_score):
-            for e in range_constexpr(n_c):
-                kv_idx = kv_base + fx.Int32(kv_offsets[e])
-                frag_S_in[e] = _mod_apply_score(frag_S_in[e], b_i32, h_i32, q_idx_mod, kv_idx)
+            apply_score_mods(frag_S_in, kv_tile_idx)
         if const_expr(mod_has_mask):
-            for e in range_constexpr(n_c):
-                kv_idx = kv_base + fx.Int32(kv_offsets[e])
-                frag_S_in[e] = _mod_apply_mask(frag_S_in[e], q_idx_mod, kv_idx)
+            _kv_tile_end = kv_tile_idx * fx.Int32(block_n) + fx.Int32(block_n - 1)
+            if _kv_tile_end > _q_start_i32:
+                apply_mask_mods(frag_S_in, kv_tile_idx)
 
     # _n_d_chunks defined above as head_dim // 32 (= 4 for D=128).
 
