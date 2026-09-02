@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-02T06:49:13Z",
+ "updated": "2026-09-02T08:38:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33607960407,
+   "pr": 1001,
+   "commit": "10c3b6097b9472d331e79333b60cbb4b9fbf945b",
+   "branch": "jli/gfx1250/fix-mma-atom",
+   "event": "pull_request",
+   "title": "[WIP][Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33607960407",
+   "created_at": "2026-09-02T08:17:52Z",
+   "updated_at": "2026-09-02T08:22:54Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 33600092510,
    "pr": 1066,
@@ -14,9 +29,48 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33600092510",
    "created_at": "2026-09-02T06:42:56Z",
-   "updated_at": "2026-09-02T06:46:24Z",
+   "updated_at": "2026-09-02T07:31:52Z",
    "actor": "sammysun0711",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-02T07:31:51Z",
+     "completed_at": "2026-09-02T07:58:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33600092510/job/100163399787",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-02T07:31:21Z",
+     "completed_at": "2026-09-02T08:27:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33600092510/job/100163399810",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-02T07:31:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33600092510/job/100163399845"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-02T07:31:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33600092510/job/100163399875"
+    }
+   ]
   },
   {
    "run_id": 33532114706,
@@ -81,13 +135,54 @@
    "branch": "codex/gfx120x-fp8-wmma-atom",
    "event": "pull_request",
    "title": "[Dialect] Add FP8 support to GFX120X WMMA atom",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33531388649",
    "created_at": "2026-09-01T16:22:30Z",
-   "updated_at": "2026-09-02T06:36:38Z",
+   "updated_at": "2026-09-02T08:35:14Z",
    "actor": "big-yellow-duck",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-02T07:10:11Z",
+     "completed_at": "2026-09-02T08:35:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33531388649/job/100158019685",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-02T07:09:29Z",
+     "completed_at": "2026-09-02T07:31:43Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33531388649/job/100158019693",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-02T07:10:37Z",
+     "completed_at": "2026-09-02T08:32:15Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33531388649/job/100158019704",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-02T07:10:01Z",
+     "completed_at": "2026-09-02T08:15:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33531388649/job/100158019829",
+     "log_fetch_failed": true
+    }
+   ]
   },
   {
    "run_id": 33521009982,
@@ -1517,7 +1612,7 @@
   },
   {
    "run_id": 33316875801,
-   "pr": 1001,
+   "pr": null,
    "commit": "84a50c785e51f538e9d03bd6c15dd0c993bea49d",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
@@ -2392,61 +2487,6 @@
      "completed_at": "2026-08-28T06:33:57Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33139751646/job/98752209439",
      "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 33137993066,
-   "pr": 1058,
-   "commit": "65c02a347333fdbb019fc4c4ee4929e8f2dc653c",
-   "branch": "perf/jit-compile-cache-fingerprint",
-   "event": "pull_request",
-   "title": "[Perf] avoid hashing when cache not enabled",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33137993066",
-   "created_at": "2026-08-28T03:07:54Z",
-   "updated_at": "2026-09-01T09:38:54Z",
-   "actor": "ppppqp",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-01T02:22:44Z",
-     "completed_at": "2026-09-01T03:23:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33137993066/job/99713615765",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-01T02:16:45Z",
-     "completed_at": "2026-09-01T03:41:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33137993066/job/99713615788",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-01T08:11:44Z",
-     "completed_at": "2026-09-01T09:38:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33137993066/job/99713615881",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-01T02:16:22Z",
-     "completed_at": "2026-09-01T02:31:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33137993066/job/99713615917"
     }
    ]
   }
