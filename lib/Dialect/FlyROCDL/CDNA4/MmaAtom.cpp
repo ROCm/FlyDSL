@@ -225,33 +225,12 @@ FailureOr<Value> MmaOpCDNA4_MFMAScaleType::emitAtomCallSSA(OpBuilder &builder, L
   Type accElemTy = getElemTyAcc();
   VectorType accTy = VectorType::get({accVecSize}, accElemTy);
 
-  auto matchWidth = [&](Value &val, Type targetTy) {
-    if (val.getType() == targetTy)
-      return;
-    auto srcVecTy = dyn_cast<VectorType>(val.getType());
-    auto dstVecTy = dyn_cast<VectorType>(targetTy);
-    if (srcVecTy && dstVecTy) {
-      int64_t srcBits = srcVecTy.getNumElements() *
-                        srcVecTy.getElementType().getIntOrFloatBitWidth();
-      int64_t dstBits = dstVecTy.getNumElements() *
-                        dstVecTy.getElementType().getIntOrFloatBitWidth();
-      if (srcBits > dstBits && srcBits % dstBits == 0) {
-        int64_t fullCount =
-            srcBits / dstVecTy.getElementType().getIntOrFloatBitWidth();
-        auto wideTy =
-            VectorType::get({fullCount}, dstVecTy.getElementType());
-        val = LLVM::BitcastOp::create(builder, loc, wideTy, val);
-        val = vector::ExtractStridedSliceOp::create(
-            builder, loc, val, /*offsets=*/{0},
-            /*sizes=*/{dstVecTy.getNumElements()}, /*strides=*/{1});
-        return;
-      }
-    }
-    val = LLVM::BitcastOp::create(builder, loc, targetTy, val);
-  };
-  matchWidth(a, abTyA);
-  matchWidth(b, abTyB);
-  matchWidth(c, accTy);
+  if (a.getType() != abTyA)
+    a = LLVM::BitcastOp::create(builder, loc, abTyA, a);
+  if (b.getType() != abTyB)
+    b = LLVM::BitcastOp::create(builder, loc, abTyB, b);
+  if (c.getType() != accTy)
+    c = LLVM::BitcastOp::create(builder, loc, accTy, c);
 
   Value scaleA = LLVM::ExtractValueOp::create(
       builder, loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleA)});

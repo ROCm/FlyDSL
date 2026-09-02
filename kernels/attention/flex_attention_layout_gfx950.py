@@ -31,9 +31,14 @@ from kernels.attention.flash_attn_utils import (
     _stagger_extra_barrier_if_one,
     _stagger_extra_barrier_if_zero,
 )
-from kernels.attention.pipeline import (
-    pipeline_stagger_enabled,
-)
+
+
+def pipeline_stagger_enabled(*, depth: int, num_groups: int, m_waves: int) -> bool:
+    return depth >= 2 and num_groups >= 2 and m_waves >= 2
+
+
+class _InfraContext:
+    stagger_i32: object = None
 
 try:
     from flydsl.expr.rocdl.universal import make_buffer_ptr as _make_buffer_ptr
@@ -849,8 +854,6 @@ def flex_attn_fwd_gfx950_kernel(
                     fx.make_view(lds_v, fx.make_layout(1, 1)),
                 )
 
-    from kernels.attention.pipeline import InfraContext
-
     def load_kv(tile_idx, slot, ops=_dma_ops_per_thread, op_offset=0):
         if const_expr(_paged):
             _pid = _load_page_id(tile_idx)
@@ -1148,7 +1151,7 @@ def flex_attn_fwd_gfx950_kernel(
             m_waves=int(param.m_waves),
         )
 
-    infra = InfraContext()
+    infra = _InfraContext()
     if const_expr(_enable_stagger):
         if const_expr(_is_32x32):
             _stagger_div = _flex_stagger_divisor(int(param.block_threads))
