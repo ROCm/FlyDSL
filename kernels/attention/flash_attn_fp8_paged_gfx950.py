@@ -30,6 +30,7 @@ from kernels.attention.flash_attn_utils import (
     dualwave_splitk_workspace_elems,  # noqa: F401
 )
 from kernels.common.kernels_common import dtype_to_elem_type
+from kernels.common.tensor_shim import _run_compiled
 
 
 def build_flash_attn_paged_fp8_module(
@@ -1161,29 +1162,8 @@ def build_flash_attn_paged_fp8_module(
         if v_descale is None:
             v_descale = O
         with CompilationContext.compile_hints(_dualwave_swp_compile_hints):
-            if stream is None:
-                return launch_flash_attn_dualwave_swp(
-                    Q,
-                    K,
-                    V,
-                    O,
-                    debug_counts,
-                    cu_seqlens_q,
-                    cu_seqlens_kv,
-                    block_table,
-                    block_table_stride,
-                    q_descale,
-                    k_descale,
-                    v_descale,
-                    batch_size,
-                    seq_len,
-                    seq_len_kv,
-                    stride_q_n,
-                    stride_o_n,
-                    stride_kv_n,
-                    head_dim_runtime,
-                )
-            return launch_flash_attn_dualwave_swp(
+            return _run_compiled(
+                launch_flash_attn_dualwave_swp,
                 Q,
                 K,
                 V,
@@ -1203,7 +1183,7 @@ def build_flash_attn_paged_fp8_module(
                 stride_o_n,
                 stride_kv_n,
                 head_dim_runtime,
-                stream=stream,
+                fx.Stream(stream),
             )
 
     def _compile(

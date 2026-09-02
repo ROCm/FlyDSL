@@ -22,6 +22,7 @@ Key features vs calling build_* directly:
 
 from __future__ import annotations
 
+import contextlib
 import functools
 from typing import Optional
 
@@ -68,6 +69,7 @@ def _dtype_str(t: torch.Tensor) -> str:
     return s
 
 
+@functools.lru_cache(maxsize=16)
 def _gpu_arch(device: torch.device) -> str:
     try:
         return torch.cuda.get_device_properties(device.index).gcnArchName.split(":")[0]
@@ -484,6 +486,7 @@ def _flydsl_flash_attn_paged(
 
     dtype_str = _dtype_str(q)
     paged_fp8 = dtype_str == "fp8"
+    arch = _gpu_arch(q.device)
     varlen = cu_seqlens_q is not None
     if varlen:
         # Packed varlen Q: [total_q, H, D]. Per-batch ranges come from cu_seqlens
@@ -532,9 +535,8 @@ def _flydsl_flash_attn_paged(
     if k_head_dim != D:
         raise ValueError(f"flydsl_flash_attn_func: paged K head_dim ({k_head_dim}) must match q head_dim ({D})")
     if paged_fp8:
-        _arch = _gpu_arch(q.device)
-        if not _arch.startswith("gfx950"):
-            raise ValueError(f"flydsl_flash_attn_func: paged FP8 requires gfx950, got '{_arch or 'unknown'}'")
+        if not arch.startswith("gfx950"):
+            raise ValueError(f"flydsl_flash_attn_func: paged FP8 requires gfx950, got '{arch or 'unknown'}'")
         fp8_head_dims = (D, value_head_dim)
         if not (
             causal
@@ -661,13 +663,12 @@ def _flydsl_flash_attn_paged(
     with torch.cuda.device(q.device.index):
         launch_stream = torch.cuda.current_stream(q.device) if stream is None else stream
         # Short paged attention uses generic light; unsupported cases stay on dualwave.
-        _arch = _gpu_arch(q.device)
         _paged_light_ok = (
             (num_kv_splits <= 1)
             and bias is None  # the light paged kernel has no bias path
             and D in (64, 128)
             and dtype_str in ("bf16", "f16")
-            and (not _arch.startswith("gfx950") or Sq <= _VARLEN_LIGHT_MAX_SEQ)
+            and (not arch.startswith("gfx950") or Sq <= _VARLEN_LIGHT_MAX_SEQ)
         )
         if paged_fp8:
             num_kv_pages = (skv + page_size - 1) // page_size
@@ -721,7 +722,11 @@ def _flydsl_flash_attn_paged(
                 kv_cache_layout=kv_cache_layout,
                 has_bias=bias is not None,
             )
-        with torch.cuda.stream(launch_stream):
+        # The ambient current stream is already ordered correctly. Enter a
+        # stream context only when the caller explicitly requests a different
+        # stream for wrapper-owned casts, copies, and allocations.
+        stream_context = contextlib.nullcontext() if stream is None else torch.cuda.stream(launch_stream)
+        with stream_context:
             # Keep wrapper-owned casts and copies ordered with an explicit
             # non-current launch stream.
             block_table_i32 = (
