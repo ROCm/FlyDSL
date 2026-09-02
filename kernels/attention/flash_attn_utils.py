@@ -2111,6 +2111,7 @@ class PagedDualwaveSwpFp8Traits:
     FP8_PV: bool
     FP8_PV_DIRECT: bool
     FP8_V_BANKPAD: bool
+    BF16_PV_ON_DEMAND: bool
     BN128: bool
     BN128_PF: bool
     QREG: bool
@@ -2208,6 +2209,7 @@ class PagedDualwaveSwpFp8Traits:
             self.FP8_PV,
             self.FP8_PV_DIRECT,
             self.FP8_V_BANKPAD,
+            self.BF16_PV_ON_DEMAND,
             self.NUM_PREFETCH_K,
             self.BN128,
             self.BN128_PF,
@@ -2236,6 +2238,7 @@ def _make_paged_dualwave_swp_fp8_traits(
     xcd_swizzle=False,
     paged=False,
     kv_cache_layout="linear",
+    bf16_pv_on_demand=False,
 ):
     """Build gfx950 DUALWAVE_SWP fp8 compile-time layout traits (dtype fixed to fp8)."""
     # Tile shape and wave geometry follow the gfx950 dual-wave 8-wave CTA.
@@ -2324,6 +2327,7 @@ def _make_paged_dualwave_swp_fp8_traits(
     fp8_pv_direct = bn128 and (not paged or fp8_pv)
     if fp8_pv_direct:
         fp8_pv = True
+    bf16_pv_on_demand = bool(bf16_pv_on_demand and paged and head_dim == 192 and value_head_dim == 192)
 
     return PagedDualwaveSwpFp8Traits(
         BLOCK_M=block_m,
@@ -2356,6 +2360,7 @@ def _make_paged_dualwave_swp_fp8_traits(
         FP8_PV=fp8_pv,
         FP8_PV_DIRECT=bool(fp8_pv_direct),
         FP8_V_BANKPAD=bool(fp8_v_bankpad),
+        BF16_PV_ON_DEMAND=bf16_pv_on_demand,
         BN128=bool(bn128),
         BN128_PF=bool(bn128_pf),
         QREG=bool(qreg),
@@ -5245,20 +5250,6 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
         v_o[step] = self._mfma_acc_fp8_wide(v_op, self._pv_p_fp8_cache, v_o[step])
         return v_o
 
-    def pv_step_k(self, step, v_p, v_v, v_o):
-        if const_expr(self.traits.FP8_PV):
-            return self._pv_step_fp8(step, v_p, v_v, v_o)
-        # HIPREC PV: P and V are both v8 bf16, accumulated by a bf16 MMA.
-        v_p_lo, v_p_hi = v_p
-        v_pk = v_v[step]
-        if const_expr(step < 2):
-            p_pk = v_p_lo[step]
-        else:
-            p_pk = v_p_hi[step - 2]
-        for dc in range_constexpr(self.traits.D_CHUNKS):
-            v_o[dc] = self._mfma_acc_bf16(v_pk[dc], p_pk, v_o[dc])
-        return v_o
-
     def _mfma_acc_fp8_wide(self, a_i32x8, b_i32x8, c_v16):
         # Wide fp8 QK: mfma_scale (32x32x64) with unit E8M0 scales, i32x8 operands.
         return rocdl.mfma_scale_f32_32x32x64_f8f6f4(
@@ -5294,6 +5285,37 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
             words.append(fx.Int32(v2[1]))
         return Vec.from_elements(words, fx.Int32).ir_value()
 
+    def _pv_step_bf16_on_demand(self, step, v_p, buf_id, v_o):
+        traits = self.traits
+        v_base = buf_id * traits.VT_BF16_ELEMS
+        lane_base = (
+            (self.lane_mod_32 // traits.SMEM_N_PER_WAVE) * traits.VEC_V_ROW_STRIDE
+            + self.lane_div_32 * traits.D128_BF
+            + (self.lane_mod_32 % traits.SMEM_N_PER_WAVE) * traits.VEC_BF
+        )
+        v_base_ptr = buffer_ops.get_element_ptr(
+            self.lds_vt_base_ptr,
+            byte_offset=fx.Int32((v_base + lane_base) * traits.EB_BF),
+            elem_type=T.i8,
+        )
+        v_values = []
+        for dc in range_constexpr(traits.D_CHUNKS):
+            const_off = dc * (traits.D_CHUNK // traits.SMEM_N_PER_WAVE) * traits.VEC_V_ROW_STRIDE + step * (
+                2 * traits.D128_BF
+            )
+            ptr = buffer_ops.get_element_ptr(
+                v_base_ptr,
+                byte_offset=fx.Int32(const_off * traits.EB_BF),
+                elem_type=T.i8,
+            )
+            v_values.append(llvm.LoadOp(self.v8bf16_type, ptr, alignment=16).result)
+        rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
+
+        v_p_lo, v_p_hi = v_p
+        p_pk = v_p_lo[step] if const_expr(step < 2) else v_p_hi[step - 2]
+        for dc in range_constexpr(traits.D_CHUNKS):
+            v_o[dc] = self._mfma_acc_bf16(v_values[dc], p_pk, v_o[dc])
+        return v_o
     def _load_q_wide_lds(self):
         traits = self.traits
         q_row_in_block = self.ctx_ref.q_row_in_block
@@ -5340,6 +5362,21 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
             rocdl.sched_group_barrier(traits.SCHED_MFMA_MASK, n_mfma - 1, 12)
         return (v_s_lo, v_s_hi)
 
+    def pv_step_k(self, step, v_p, v_v, v_o):
+        if const_expr(self.traits.BF16_PV_ON_DEMAND):
+            return self._pv_step_bf16_on_demand(step, v_p, v_v, v_o)
+        if const_expr(self.traits.FP8_PV):
+            return self._pv_step_fp8(step, v_p, v_v, v_o)
+        # HIPREC PV: P and V are both v8 bf16, accumulated by a bf16 MMA.
+        v_p_lo, v_p_hi = v_p
+        v_pk = v_v[step]
+        if const_expr(step < 2):
+            p_pk = v_p_lo[step]
+        else:
+            p_pk = v_p_hi[step - 2]
+        for dc in range_constexpr(self.traits.D_CHUNKS):
+            v_o[dc] = self._mfma_acc_bf16(v_pk[dc], p_pk, v_o[dc])
+        return v_o
     def cast_p_fp8_direct(self, v_p):
         lo_partial_list, hi_full = v_p
         f32 = []
@@ -5783,6 +5820,8 @@ class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
         return (_read_strip(n_lo), _read_strip(n_hi))
 
     def load_v(self, buf_id):
+        if const_expr(self.traits.BF16_PV_ON_DEMAND):
+            return fx.Index(buf_id)
         if const_expr(self.traits.FP8_PV):
             if const_expr(self.traits.KV_VECTORIZED and self.traits.FP8_V_BANKPAD):
                 return self._load_v_fp8_vectorized_bankpad(buf_id)
@@ -5840,6 +5879,8 @@ class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
         transient register set while preserving the existing LDS layout.
         """
         traits = self.traits
+        if const_expr(traits.BF16_PV_ON_DEMAND):
+            return fx.Index(buf_id)
         if const_expr(not traits.KV_VECTORIZED or traits.FP8_PV):
             raise RuntimeError("load_v_steps requires vectorized HIPREC V")
         if const_expr(first_step < 0 or num_steps < 1 or first_step + num_steps > 4):
