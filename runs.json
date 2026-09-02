@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-02T12:41:34Z",
+ "updated": "2026-09-02T14:17:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33639837271,
+   "pr": 1069,
+   "commit": "a4e3c651f93ac532a0a2a3a2a61203f1cfb57afe",
+   "branch": "feature/qwenimage-vae-conv-tests",
+   "event": "pull_request",
+   "title": "[Flydsl] Add Qwen-Image VAE classic conv shapes to conv3d tests",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33639837271",
+   "created_at": "2026-09-02T14:05:53Z",
+   "updated_at": "2026-09-02T14:13:38Z",
+   "actor": "huizzhan",
+   "jobs": []
+  },
+  {
+   "run_id": 33638486966,
+   "pr": 1089,
+   "commit": "a9d0b6b4869ecb6f1056ac1122c7620dc1482fe8",
+   "branch": "codex/rdna-dynamic-buffer-bounds-check",
+   "event": "pull_request",
+   "title": "[DSL] Add dynamic RDNA buffer bounds checking",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33638486966",
+   "created_at": "2026-09-02T13:53:11Z",
+   "updated_at": "2026-09-02T13:53:11Z",
+   "actor": "big-yellow-duck",
+   "jobs": []
+  },
   {
    "run_id": 33607960407,
    "pr": 1001,
@@ -2461,76 +2491,6 @@
    "updated_at": "2026-08-28T04:24:50Z",
    "actor": "Boss2002n",
    "jobs": []
-  },
-  {
-   "run_id": 33141560905,
-   "pr": null,
-   "commit": "8ce8604922e8759f62841a501a358a5a29a7b568",
-   "branch": "jli/gfx1250/fix-mma-atom",
-   "event": "pull_request",
-   "title": "[WIP][Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33141560905",
-   "created_at": "2026-08-28T04:21:07Z",
-   "updated_at": "2026-08-28T04:22:31Z",
-   "actor": "Boss2002n",
-   "jobs": []
-  },
-  {
-   "run_id": 33139751646,
-   "pr": 1073,
-   "commit": "828423f382695e93dcaf3741caa5d9926695afaa",
-   "branch": "rdna3-int8-wmma-gemm",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Add RDNA3 INT8 WMMA GEMM, 1.23-2.80x over torch",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33139751646",
-   "created_at": "2026-08-28T03:44:01Z",
-   "updated_at": "2026-08-29T20:25:52Z",
-   "actor": "vlluvia",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-28T04:14:19Z",
-     "completed_at": "2026-08-28T05:16:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33139751646/job/98752209351",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-28T04:13:50Z",
-     "completed_at": "2026-08-28T04:32:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33139751646/job/98752209364",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-28T04:13:31Z",
-     "completed_at": "2026-08-29T20:25:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33139751646/job/98752209366"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-28T04:31:43Z",
-     "completed_at": "2026-08-28T06:33:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33139751646/job/98752209439",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
