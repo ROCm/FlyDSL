@@ -135,6 +135,7 @@ fx.copy(copy, fx.slice(tA, (None, tid)), rA)   # after partitioning tA (§7b: pr
 | `arith.maximumf/minimumf(a,b)` | `fx.max(a, b)` / `fx.min(a, b)` |
 | `arith.maxsi/maxui/minsi/minui(a,b)` | `fx.max(a, b)` / `fx.min(a, b)` |
 | `arith.maxnumf(a,b)` | `fx.maxnumf(a, b)` — different NaN semantics from `fx.max` |
+| `arith.minnumf(a,b)` | `fx.minnumf(a, b)` — different NaN semantics from `fx.min` |
 | `arith.ceildivsi/ceildivui(a,b)` | `fx.ceildiv(a, b)` |
 
 Keep `arith.cmpf` / explicit `*FOp` only where no operator exists or fastmath is

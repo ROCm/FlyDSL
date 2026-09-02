@@ -38,10 +38,11 @@ from typing import Optional
 DEFAULT_REGRESSION_PCT = -3.0
 
 # Stable runner -> GPU arch map (the only durable identity of each CI box).
-# The MI35x validation runners are intentionally omitted from dashboard ingestion.
 RUNNER_ARCH = {
     "linux-flydsl-mi355-1": "gfx950",  # MI355 / MI350X
     "linux-flydsl-mi355-8": "gfx950",
+    "linux-flydsl-mi35x-1": "gfx950",  # MI350
+    "linux-flydsl-mi35x-8": "gfx950",
     "linux-flydsl-mi325-1": "gfx942",  # MI325
     "linux-flydsl-mi325-8": "gfx942",
     "linux-flydsl-navi-2": "gfx1201",  # Navi4x (RDNA)
