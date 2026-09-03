@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-03T03:08:40Z",
+ "updated": "2026-09-03T03:21:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -40,11 +40,11 @@
    "branch": "ci/fix-nightly-git-cache-checkout",
    "event": "pull_request",
    "title": "[CI] Bypass runner git-cache rewrite in sglang/vllm nightlies",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33702148372",
    "created_at": "2026-09-03T01:04:16Z",
-   "updated_at": "2026-09-03T02:13:32Z",
+   "updated_at": "2026-09-03T03:18:25Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -80,11 +80,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-03T01:56:45Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33702148372/job/100494061964"
+     "completed_at": "2026-09-03T03:18:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33702148372/job/100494061964",
+     "log_fetch_failed": true
     }
    ]
   },
