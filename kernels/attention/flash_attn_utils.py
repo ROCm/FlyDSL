@@ -5893,29 +5893,18 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
             all_below = arith.cmpi(arith.CmpIPredicate.eq, as_mlir_value(ballot), _read_exec_i64())
             all_below = llvm.intr_expect(all_below, arith.constant(1, type=ir.IntegerType.get_signless(1)))
 
-            state = [as_mlir_value(v_o[dc]) for dc in range(traits.D_CHUNKS)]
-            state += [self.v_p_to_vec32(v_p), as_mlir_value(l_row), as_mlir_value(m_row)]
-            names = tuple(f"_fp8_paged_lr{i}" for i in range(traits.D_CHUNKS + 3))
-
-            def _rescale(_names, *_state):
+            o_out = [as_mlir_value(v_o[dc]) for dc in range(traits.D_CHUNKS)]
+            vp_out = self.v_p_to_vec32(v_p)
+            l_out = as_mlir_value(l_row)
+            m_out = as_mlir_value(m_row)
+            if fx.Boolean(all_below):
+                pass
+            else:
                 m_new, corr, scaled_accs = self._lazy_correction(v_o, m_row, m_tile_max)
-                result = list(scaled_accs)
-                result.append(self.v_p_to_vec32(self.scale_v_p(v_p, corr)))
-                result.append(as_mlir_value(l_row * corr))
-                result.append(self.anchor_scalar_f32(m_new))
-                return result
-
-            result = scf_if_dispatch(
-                all_below,
-                lambda *_args: None,
-                _rescale,
-                state_names=names,
-                state_values=state,
-            )
-            o_out = list(result[: traits.D_CHUNKS])
-            vp_out = result[traits.D_CHUNKS]
-            l_out = result[traits.D_CHUNKS + 1]
-            m_out = result[traits.D_CHUNKS + 2]
+                o_out = [as_mlir_value(scaled_accs[dc]) for dc in range(traits.D_CHUNKS)]
+                vp_out = self.v_p_to_vec32(self.scale_v_p(v_p, corr))
+                l_out = as_mlir_value(l_row * corr)
+                m_out = self.anchor_scalar_f32(m_new)
             return (o_out, m_out, l_out, self.v_vec32_to_p(vp_out))
 
         return _run(v_o, m_row, l_row, m_tile_max, v_p)
