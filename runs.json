@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-03T08:18:02Z",
+ "updated": "2026-09-03T08:34:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33733599147,
+   "pr": 1015,
+   "commit": "06a7add0fdd24ff2e18030b92182e19af73098e1",
+   "branch": "phil/isa-resource-diff-arch-general",
+   "event": "pull_request",
+   "title": "[Tools] Add architecture-general ISA resource diff tool",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33733599147",
+   "created_at": "2026-09-03T08:29:11Z",
+   "updated_at": "2026-09-03T08:32:37Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 33725195926,
    "pr": 1093,
@@ -10,21 +25,22 @@
    "branch": "ci/dedup-gfx950-runners",
    "event": "pull_request",
    "title": "[CI] Drop the duplicate gfx950 test runner and revert the nightly README badges",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33725195926",
    "created_at": "2026-09-03T06:51:25Z",
-   "updated_at": "2026-09-03T07:43:56Z",
+   "updated_at": "2026-09-03T08:32:01Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-03T07:21:49Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33725195926/job/100560201609"
+     "completed_at": "2026-09-03T08:32:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33725195926/job/100560201609",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -2480,60 +2496,6 @@
      "started_at": "2026-08-30T11:32:23Z",
      "completed_at": "2026-08-30T11:47:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33307430832/job/99250939316"
-    }
-   ]
-  },
-  {
-   "run_id": 33269020743,
-   "pr": null,
-   "commit": "f9417e1c8eb9135b86a7afad482dc52f2b058598",
-   "branch": "convolution",
-   "event": "pull_request",
-   "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33269020743",
-   "created_at": "2026-08-29T18:43:12Z",
-   "updated_at": "2026-08-31T08:05:06Z",
-   "actor": "amd-nprotaso",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-29T19:01:18Z",
-     "completed_at": "2026-08-29T21:00:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33269020743/job/99146009288",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-29T19:01:07Z",
-     "completed_at": "2026-08-29T19:16:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33269020743/job/99146009305"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-29T19:00:45Z",
-     "completed_at": "2026-08-31T08:05:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33269020743/job/99146009326"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-29T19:01:18Z",
-     "completed_at": "2026-08-29T20:47:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33269020743/job/99146009394",
-     "log_fetch_failed": true
     }
    ]
   }
