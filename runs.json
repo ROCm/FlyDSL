@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-03T06:46:11Z",
+ "updated": "2026-09-03T06:54:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33725195926,
+   "pr": 1093,
+   "commit": "7e937bce1dc1c12e1f5d208e887bba49caea15fd",
+   "branch": "ci/dedup-gfx950-runners",
+   "event": "pull_request",
+   "title": "[CI] Drop the duplicate gfx950 test runner and revert the nightly README badges",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33725195926",
+   "created_at": "2026-09-03T06:51:25Z",
+   "updated_at": "2026-09-03T06:52:05Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 33723843587,
    "pr": 1069,
@@ -25,11 +40,11 @@
    "branch": "ci/dedup-gfx950-runners",
    "event": "pull_request",
    "title": "[CI] Drop the duplicate gfx950 test runner and revert the nightly README badges",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33723568282",
    "created_at": "2026-09-03T06:30:56Z",
-   "updated_at": "2026-09-03T06:34:10Z",
+   "updated_at": "2026-09-03T06:51:46Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -55,13 +70,50 @@
    "branch": "ci/strip-mlir-install",
    "event": "pull_request",
    "title": "[CI] Strip the MLIR install before tarring it",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33721690902",
    "created_at": "2026-09-03T06:05:58Z",
-   "updated_at": "2026-09-03T06:09:40Z",
+   "updated_at": "2026-09-03T06:49:19Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-03T06:50:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33721690902/job/100551998118"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-03T06:50:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33721690902/job/100551998214"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-03T06:49:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33721690902/job/100551998246"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-03T06:49:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33721690902/job/100551998250"
+    }
+   ]
   },
   {
    "run_id": 33720605367,
@@ -2402,60 +2454,6 @@
      "started_at": "2026-08-29T19:01:18Z",
      "completed_at": "2026-08-29T20:47:21Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33269020743/job/99146009394",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 33257823993,
-   "pr": 1078,
-   "commit": "a804f95705c415c8a564b9fec552544a1f180d47",
-   "branch": "gfx1250/bf16-gemm-opt-0828",
-   "event": "pull_request",
-   "title": "[gfx1250] Bf16 GEMM: Issue tdm prefetch earlier for wide tiles and add const init test",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33257823993",
-   "created_at": "2026-08-29T14:31:25Z",
-   "updated_at": "2026-08-31T01:23:11Z",
-   "actor": "HaonanWang98",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-29T15:29:46Z",
-     "completed_at": "2026-08-29T15:44:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33257823993/job/99121225848"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-29T15:33:55Z",
-     "completed_at": "2026-08-29T17:33:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33257823993/job/99121225863",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-29T15:29:41Z",
-     "completed_at": "2026-08-31T01:23:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33257823993/job/99121225867"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-29T15:30:32Z",
-     "completed_at": "2026-08-29T16:16:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33257823993/job/99121225910",
      "log_fetch_failed": true
     }
    ]
