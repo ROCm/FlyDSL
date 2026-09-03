@@ -144,7 +144,8 @@ struct PyMmaOpGFX120X_WMMAType : PyConcreteType<PyMmaOpGFX120X_WMMAType> {
         "sign_a"_a = false, "sign_b"_a = false, "clamp"_a = false, "context"_a = nb::none(),
         "Create a MmaOpGFX120X_WMMAType with m, n, k dimensions and element types "
         "(RDNA4 gfx1200 / gfx1201 wave32 WMMA, 16x16x16 with the v8 operand ABI). "
-        "sign_a/sign_b/clamp must be false: only the fp16/bf16 paths are supported.");
+        "sign_a/sign_b/clamp must be false: fp16, bf16, and every fp8(E4M3FN)/"
+        "bf8(E5M2) A/B combination are supported.");
   }
 };
 
