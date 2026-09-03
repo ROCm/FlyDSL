@@ -8,7 +8,8 @@ This guide covers the available FlyDSL kernels — normalization, softmax, GEMM,
 |---|---|---|---|---|
 | **LayerNorm** | `build_layernorm_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | Two-pass vectorized normalization |
 | **RMSNorm** | `build_rmsnorm_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16; optional fp32 weight | LDS-cached 3-pass pipeline |
-| **Softmax** | `build_softmax_module(M, N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | Online softmax, adaptive block size |
+| **Softmax** | `build_softmax_module(M, N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | Register-buffered softmax, opt-in autotuning |
+| **Softmax backward** | `build_softmax_bwd_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | fp32 dot reduction, native-dtype register buffering |
 | **GEMM** | `compile_preshuffle_gemm(...)` | `@flyc.kernel` | fp8, int8, fp16, bf16 | Preshuffle B, ping-pong LDS, MFMA 16x16 |
 | **FlashAttention** | `build_flash_attn_func_module(...)` | `@flyc.kernel` | bf16, f16 (any arch); fp8 e4m3fn (gfx950, D=128, dense) | Dual-wave SWP fwd, GQA/MQA, causal, descale ABI |
 
@@ -116,9 +117,63 @@ executor = build_softmax_module(M=32768, N=8192, dtype_str="bf16")
 **Configuration:**
 | Parameter | Value | Description |
 |---|---|---|
-| `BLOCK_SIZE` | `min(256, next_power_of_2(N))`, min 32 | Adaptive block size |
-| `VEC_WIDTH` | 8 | Vector load/store width |
-| `WARP_SIZE` | 64 | AMD wavefront size |
+| `BLOCK_THREADS` | 256 by default; 64/128/256/512 for full-row candidates | Total threads per block |
+| `THREADS_PER_ROW` | Defaults to `BLOCK_THREADS`; 8/16/32/64 for short-row candidates | Reduction subgroup assigned to one row |
+| `ROWS_PER_BLOCK` | 1 by default; derived from `BLOCK_THREADS / THREADS_PER_ROW` | Independent rows packed into one block |
+| `vec_width` | `128 // elem_bits` (8 for f16/bf16, 4 for f32) | Derived from the 128-bit transaction contract |
+| `WARP_SIZE` | 64 on CDNA, 32 on RDNA | Wavefront size, resolved from the target arch |
+
+`THREADS_PER_ROW` also selects the data-movement path: with
+`tile_cols = THREADS_PER_ROW * vec_width`, a row takes the vectorized fast path when
+`N % tile_cols == 0` and the scalar generic path otherwise.
+
+**Opt-in autotuning** (`kernels/norm/softmax_autotune.py`):
+```python
+from kernels.norm.softmax_autotune import softmax_autotuned
+
+softmax_autotuned(x, y)              # serves the tuned or default config, never searches
+```
+Ordinary calls follow the searched-winner cache → offline artifact → compatibility default
+(`BLOCK_THREADS=256`) ordering and never benchmark. `FLYDSL_AUTOTUNE=1` forces a search over
+a bounded, shape-aware space:
+
+- full-row `BLOCK_THREADS ∈ {64,128,256,512}` ×
+  `waves_per_eu ∈ {none,1,2,4}`;
+- Quack-style short-row packing that decouples `THREADS_PER_ROW` from total
+  block threads and processes several rows per block.
+
+The search-space rationale was checked against AITER
+`536118aaf94047b0b559e0730749352659419b34`, SGLang
+`955704544c60e920672aa434cefa2ce78c0ceb4c`, and Tri Dao's Quack
+`60d88082272a256fa9b3b2ab631c82cfa78337c6`. Quack's portable ideas are the
+row-width-dependent reduction subgroup, a separate 128/256-thread CTA size,
+multiple rows per CTA, and an online/non-online algorithm choice; its
+multi-CTA cluster reduction is NVIDIA-specific. AITER's standalone Triton
+kernel is a fixed two-pass online/reload implementation (`.cg`, eight warps,
+two stages, `waves_per_eu=2`), not an autotuned space. The pinned SGLang tree
+has attention-local and top-k softmax implementations but no directly comparable
+standalone row-wise kernel; attention tile/stage choices are therefore not
+imported here.
+
+Every candidate is numerically validated before ranking and uses the shared
+GPU-backlog and batched-event timer. Input cache policy is deliberately not a
+search axis: on gfx950, non-temporal loads changed rank between repeated use of
+one address and rotation across fresh addresses. Cache residency is absent from
+the shape-only artifact identity, so persisting either result would encode an
+unstated workload assumption. The tested three-pass reload algorithm is also
+excluded because it lost to the register-buffered compatibility path; a future
+algorithm axis should implement a true online pair reduction before entering
+the default search.
+
+Within a 2% timing tie, the selector favors the compatibility default, then no
+explicit `waves_per_eu`, then more rows per block. Larger measured improvements
+still win; the tie rule only avoids persisting noise-level differences between
+6–10 µs candidates. Softmax uses 10 warmup and 100 measured launches, divided
+into five GPU-backlogged event windows, so bandwidth-scale candidates are also
+ranked from a stable sample.
+
+Artifacts use the name `softmax_fwd` and cover forward only. Softmax backward
+has no autotune adopter in this change. See [`autotune_guide.md`](autotune_guide.md).
 
 **Algorithm (6 stages):**
 1. **Load data**: Vectorized global loads into register buffer with validity masks
@@ -129,12 +184,59 @@ executor = build_softmax_module(M=32768, N=8192, dtype_str="bf16")
 6. **Normalize + store**: Divide by sum, convert to output dtype, vectorized store
 
 **Kernel signature:**
-```
-GPU_MODULE_NAME = f"softmax_{dtype_str}"
+```python
+build_softmax_module(M, N, dtype_str="f32", BLOCK_THREADS=256)  # M is vestigial
+launch_softmax(A, C, m_in, stream=...)                          # returned launcher
 
-@kernel
-softmax_kernel(self, A, C, m_in)
+# Direct-JIT entry point used by the autotuner
+softmax_direct(A, C, m_in, N, dtype_str, BLOCK_THREADS, tuning_schema, stream=...)
 ```
+
+### 2.2 Softmax backward (`kernels/norm/softmax_bwd_kernel.py`)
+
+Computes the row-wise Softmax gradient: `dx = y * (dy - sum(dy * y))`, with the
+dot reduction accumulated in fp32.
+
+**Builder:**
+```python
+from kernels.norm.softmax_bwd_kernel import build_softmax_bwd_module
+
+launch = build_softmax_bwd_module(N=8192, dtype_str="bf16")
+launch(dy, y, dx, M, stream=torch.cuda.current_stream())
+```
+
+The builder takes `N` only; the row count is the runtime `m_in` launch argument.
+Inputs must be **contiguous 2-D** tensors — reshape a 4-D attention gradient to
+`(B*H*S, S)` before calling, since the buffer-tensor path assumes row-major rows.
+
+**Paths:**
+| Condition | Behaviour |
+|---|---|
+| `N >= tile_cols and N % tile_cols == 0` | 128-bit vectorized load/store (`tile_cols` = 1024 for f32, 2048 for 16-bit) |
+| otherwise | masked scalar path for arbitrary `N` |
+| `N <= 16384` | both operands register-resident across the reduction — ideal 3-unit traffic |
+| `16384 < N <= 32768` | `Y` resident, `DY` re-read — 4 units |
+| `N > 32768` | neither resident — 5 units |
+
+Ideal traffic is 3 units (read `Y`, read `DY`, write `DX`); each operand dropped
+from registers adds one more. The residency cap is on elements held per thread
+(`N / BLOCK_THREADS`), so the tier boundaries fall at the same `N` for every
+dtype. Use `softmax_bwd_buffered_operands(N, dtype_str)` to query the tier.
+
+Both bounds are measured on an idle gfx950, not assumed. Pushing the middle tier
+out to `N = 65536` spills and costs 29% (337.4 µs vs 261.8 µs at 2048x65536
+bf16); dropping the middle tier costs 30-38% on the shapes it covers (4096x32768
+bf16: 169.3 µs with `Y` resident vs 220.4 µs without).
+
+Benchmark these on an **idle** GPU. A neighbouring tenant on the same device
+distorts results by 20-35%, and single-sample idleness checks miss bursty
+neighbours — sample repeatedly and reject a device that is busy in any sample.
+
+**Notes:**
+- One block per row. Small `M`/`N` are launch-bound rather than bandwidth-bound;
+  effective bandwidth reads as a few percent of peak there and that is expected.
+- The generic path unrolls `2 * ceil(N / 256)` scalar bodies, so compile time
+  grows with `N` for large non-aligned rows.
 
 ---
 
@@ -258,7 +360,7 @@ Shared kernel utilities used across GEMM/MoE/norm kernels.
 
 | Function | Description |
 |---|---|
-| `get_warp_size(arch=None)` | Wave size for the arch: `32` on RDNA, else `64` |
+| `get_warp_size(arch=None)` | Wave size for the arch: `32` on gfx10/11/12, else `64` |
 | `dtype_to_elem_type(dtype_str)` | Map a dtype string to the Fly element type |
 | `validate_moe_dtypes(a_dtype, b_dtype)` | Validate an allowed MoE A/B dtype pairing |
 | `get_llvm_ptr(ptr, offset, dtype_bytes, ...)` | Compute a byte-offset LLVM pointer |
@@ -335,7 +437,8 @@ What operation do you need?
 │   └── No bias term?         → RMSNorm (kernels/norm/rmsnorm_kernel.py)
 │
 ├── Softmax
-│   └── Row-wise softmax      → Softmax (kernels/norm/softmax_kernel.py)
+│   ├── Row-wise softmax      → Softmax (kernels/norm/softmax_kernel.py)
+│   └── Softmax gradient      → Softmax backward (kernels/norm/softmax_bwd_kernel.py)
 │
 ├── Matrix Multiply (GEMM)
 │   ├── Standard GEMM (uniform precision)
@@ -372,6 +475,8 @@ What operation do you need?
 | `kernels/norm/layernorm_kernel.py` | LayerNorm (layout API) |
 | `kernels/norm/rmsnorm_kernel.py` | RMSNorm (layout API) |
 | `kernels/norm/softmax_kernel.py` | Softmax (layout API) |
+| `kernels/norm/softmax_bwd_kernel.py` | Softmax backward (layout API) |
+| `kernels/norm/softmax_autotune.py` | Softmax opt-in autotune adopter |
 | `kernels/attention/fused_rope_cache_kernel.py` | Fused RoPE + KV cache |
 | `kernels/comm/custom_all_reduce.py` | Multi-GPU all-reduce |
 | `kernels/gemm/rdna_f16_gemm.py` | RDNA FP16 GEMM |
@@ -397,6 +502,8 @@ What operation do you need?
 | `tests/kernels/test_layernorm.py` | LayerNorm |
 | `tests/kernels/test_rmsnorm.py` | RMSNorm |
 | `tests/kernels/test_softmax.py` | Softmax |
+| `tests/kernels/test_softmax_bwd.py` | Softmax backward |
+| `tests/kernels/test_softmax_autotune.py` | Softmax autotune selection and candidate correctness |
 | `tests/kernels/test_fused_rope_cache.py` | Fused RoPE + KV cache |
 | `tests/kernels/test_allreduce.py` | Multi-GPU all-reduce |
 | `tests/kernels/test_rdna_gemm.py` | RDNA GEMM |

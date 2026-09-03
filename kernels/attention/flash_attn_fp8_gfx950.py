@@ -43,6 +43,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
     waves_per_eu=2,
     daz=True,
     dualwave_swp_lazy_rescale=True,
+    rescale_threshold=6.0,
     dualwave_swp_setprio=True,
     dualwave_swp_debug_lazy_counts=False,
     dualwave_swp_enable_stagger=True,
@@ -90,6 +91,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
         waves_per_eu=waves_per_eu,
         daz=daz,
         dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
+        rescale_threshold=rescale_threshold,
         dualwave_swp_setprio=dualwave_swp_setprio,
         dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
         dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
@@ -219,6 +221,13 @@ def build_flash_attn_dualwave_swp_fp8_module(
                 return softmax_helper.causal_mask_pair_if_needed(v_s_a, v_s_b, j)
             return v_s_a, v_s_b
 
+        def _correct_o(v_o, m_row, l_row, m_tile):
+            if const_expr(traits.DUALWAVE_SWP_LAZY_RESCALE):
+                return softmax_helper.lazy_correct_o(v_o, m_row, l_row, m_tile)
+            m_new, corr = softmax_helper.rescale_from_tile_max(m_row, m_tile)
+            softmax_helper.scale_o(v_o, corr)
+            return v_o, m_new, softmax_helper.apply_l_rescale(l_row, corr)
+
         def _merge_tile_max(v_s_a, v_s_b):
             m_tile = softmax_helper.max2(softmax_helper.reduce_max(v_s_a), softmax_helper.reduce_max(v_s_b))
             if const_expr(traits.CAUSAL):
@@ -298,7 +307,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
                 v_s_b = _mask_sub(v_s_b, j + fx.Index(1))
                 v_s_a, v_s_b = _mask_pair(v_s_a, v_s_b, j)
                 m_tile = _merge_tile_max(v_s_a, v_s_b)
-                v_o, m_new, l_row = softmax_helper.lazy_correct_o(v_o, m_row, l_row, m_tile)
+                v_o, m_new, l_row = _correct_o(v_o, m_row, l_row, m_tile)
                 v_o = softmax_helper.anchor_v_o(v_o)
                 v_p_a, l_row = _softmax_part(v_s_a, l_row, m_new)
                 _phase_bar()
@@ -326,7 +335,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
                     v_o = _pv_part(v_p_b, v_v_b, v_o)
             else:
                 m_tile = _merge_tile_max(v_s_a, v_s_b)
-                v_o, m_new, l_row = softmax_helper.lazy_correct_o(v_o, m_row, l_row, m_tile)
+                v_o, m_new, l_row = _correct_o(v_o, m_row, l_row, m_tile)
                 v_o = softmax_helper.anchor_v_o(v_o)
 
                 v_o, l_row = _subtile_tail(v_s_a, v_v_a, v_o, l_row, m_new)
@@ -624,6 +633,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
             waves_per_eu=waves_per_eu,
             daz=daz,
             dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
+            rescale_threshold=rescale_threshold,
             dualwave_swp_setprio=dualwave_swp_setprio,
             dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
             dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,

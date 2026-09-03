@@ -4,6 +4,9 @@
 
 [![CI](https://github.com/ROCm/FlyDSL/actions/workflows/ci.yaml/badge.svg)](https://github.com/ROCm/FlyDSL/actions/workflows/ci.yaml)
 [![Benchmark](https://github.com/ROCm/FlyDSL/actions/workflows/flydsl.yaml/badge.svg)](https://github.com/ROCm/FlyDSL/actions/workflows/flydsl.yaml)
+[![ATOM](https://github.com/ROCm/FlyDSL/actions/workflows/flydsl-atom-integration.yaml/badge.svg)](https://github.com/ROCm/FlyDSL/actions/workflows/flydsl-atom-integration.yaml)
+[![vLLM](https://github.com/ROCm/FlyDSL/actions/workflows/flydsl-vllm-integration.yaml/badge.svg)](https://github.com/ROCm/FlyDSL/actions/workflows/flydsl-vllm-integration.yaml)
+[![SGLang](https://github.com/ROCm/FlyDSL/actions/workflows/flydsl-sglang-integration.yaml/badge.svg)](https://github.com/ROCm/FlyDSL/actions/workflows/flydsl-sglang-integration.yaml)
 [![Dashboard](https://img.shields.io/badge/Performance-Dashboard-blue)](https://rocm.github.io/FlyDSL/ci-dashboard/)
 [![Docs](https://img.shields.io/badge/Docs-rocm.github.io%2FFlyDSL-blue)](https://rocm.github.io/FlyDSL)
 
@@ -399,8 +402,3 @@ FlyDSL's design is inspired by ideas from several projects:
 ## 📄 License
 
 Apache License 2.0
-
-## Disclaimer
-
-This is an experimental feature/tool and is not part of the official ROCm distribution. It is provided for evaluation and testing purposes only.
-For further usage or inquiries, please initiate a discussion thread with the original authors.

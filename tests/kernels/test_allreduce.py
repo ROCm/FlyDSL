@@ -12,16 +12,9 @@ import socket
 import sys
 from pathlib import Path
 
-# Prefer embedded MLIR/flydsl to avoid mixing multiple runtimes.
+# Use the installed FlyDSL wheel. The repository root is only needed to import
+# the in-tree kernels package and does not shadow the installed flydsl package.
 _repo = Path(__file__).resolve().parents[2]
-_embedded = _repo / "build" / "python_packages" / "flydsl"
-_embedded2 = _repo / ".flir" / "build" / "python_packages" / "flydsl"
-_embedded_pick = _embedded if _embedded.exists() else _embedded2
-if _embedded_pick.exists():
-    sys.path.insert(0, str(_embedded_pick))
-_src_py = _repo / "python"
-if _src_py.exists():
-    sys.path.insert(0, str(_src_py))
 sys.path.insert(0, str(_repo))
 
 import pytest  # noqa: E402

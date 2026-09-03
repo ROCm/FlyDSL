@@ -9,6 +9,16 @@ on:
       - main
     types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
+    inputs:
+      prepare_runner:
+        description: 'Runner for prepare-mlir (compile-only; no GPU needed)'
+        type: choice
+        default: build-only-flydsl
+        options:
+          - build-only-flydsl
+          - linux-flydsl-mi325-1
+          - linux-flydsl-mi355-1
+          - linux-flydsl-navi-2
 
 permissions:
   contents: read
@@ -20,10 +30,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  DOCKER_IMAGE: "rocm/pytorch:rocm7.14_ubuntu24.04_py3.12_pytorch_release_2.12.0@sha256:c38eeda81d85f00fbe35d3d50ce42ce59c524e87d810624f4eb5c52fddb3b9ad"
+  DOCKER_IMAGE: "rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0"
   LLVM_BUILD_PROFILE: "amd-minimal"
   # Bump when the container or LLVM build environment changes incompatibly.
-  MLIR_CACHE_VERSION: "rocm7.14-ubuntu24.04-py3.12-v1"
+  MLIR_CACHE_VERSION: "manylinux228-rocm7.2-py3.12-v1"
   GITHUB_REPO_NAME: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
   GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.event.head_commit.id || github.sha }}
   # PRs compare against their exact base; main pushes compare against the previous commit.
@@ -104,6 +114,7 @@ jobs:
         runners: [
           'linux-flydsl-mi325-1',
           'linux-flydsl-mi355-1',
+          'linux-flydsl-mi35x-1',
           'linux-flydsl-navi-2',
         ]
     runs-on: ubuntu-latest
@@ -130,7 +141,10 @@ jobs:
           && needs.check-signal.result == 'success'
           && (needs.detect-changes.result != 'success'
               || needs.detect-changes.outputs.code_changed == 'true') }}
-    runs-on: linux-flydsl-mi325-1
+    # Compile-only, so it runs on the CPU builder instead of holding a GPU
+    # runner. These are ARC scale sets: runs-on names exactly one, and the
+    # dispatch input is how to retarget when it is busy.
+    runs-on: ${{ inputs.prepare_runner || 'build-only-flydsl' }}
     timeout-minutes: 150
     steps:
       - name: Checkout code
@@ -143,12 +157,151 @@ jobs:
           ref: ${{ env.GITHUB_COMMIT_SHA }}
           path: flydsl-test
 
+      # A pin bump leaves the base source uncompilable against the PR's MLIR, so
+      # the baseline wheel needs the base commit's own install. Every step gated
+      # on pin_changed is skipped for a PR that leaves the LLVM inputs alone.
+      - name: Resolve base LLVM pin
+        id: base-pin
+        # `run:` blocks are `bash -e`, and nothing decided here is worth failing
+        # prepare-mlir over: with no outputs written, the gated steps skip.
+        continue-on-error: true
+        # Some self-hosted runners rewrite GitHub URLs to a git cache, and this
+        # is the only fetch here that runs on the host, not in the container.
+        env:
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/flydsl-gitconfig
+          GIT_CONFIG_NOSYSTEM: "1"
+        run: |
+          set -uo pipefail
+          # Self-hosted workspaces are reused; drop what the last run left.
+          rm -rf base-pin
+          rm -f mlir_install_base.tgz
+          mkdir -p base-pin/thirdparty base-pin/scripts
+          if ! git -C flydsl-test fetch "https://github.com/${BASE_REPO_NAME}.git" \
+                 "${BASE_COMMIT_SHA}" --no-tags --depth=1; then
+            echo "Could not fetch base ${BASE_REPO_NAME}@${BASE_COMMIT_SHA}; treating LLVM pin as unchanged."
+            echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          for f in thirdparty/llvm-build-info.json thirdparty/llvm-rocdl-lld-argv0.patch scripts/build_llvm.sh; do
+            if ! git -C flydsl-test show "FETCH_HEAD:${f}" >"base-pin/${f}"; then
+              echo "Base commit has no ${f}; treating LLVM pin as unchanged."
+              echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
+              exit 0
+            fi
+          done
+          changed=false
+          for f in thirdparty/llvm-build-info.json thirdparty/llvm-rocdl-lld-argv0.patch scripts/build_llvm.sh; do
+            if ! diff -q "flydsl-test/${f}" "base-pin/${f}" >/dev/null; then
+              echo "LLVM input differs from base: ${f}"
+              changed=true
+            fi
+          done
+          # sed, not python3: every other python call here runs in the container
+          # and the runners promise no host interpreter. Scoped to "upstream" so a
+          # second entry carrying its own llvm_hash cannot be picked up.
+          base_hash="$(sed -n '/"upstream"/,/}/ s/.*"llvm_hash"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' \
+            base-pin/thirdparty/llvm-build-info.json)"
+          if [ -z "${base_hash}" ]; then
+            echo "Could not read the base LLVM hash; treating LLVM pin as unchanged."
+            echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "pin_changed=${changed}" >>"${GITHUB_OUTPUT}"
+          echo "base_llvm_hash=${base_hash}" >>"${GITHUB_OUTPUT}"
+          echo "Base LLVM pin: ${base_hash}"
+
+      # One script for both keys so they cannot drift; content-derived, which is
+      # what makes the base commit's key computable from the extracted files.
+      - name: Compute MLIR cache keys
+        id: keys
+        run: |
+          set -euo pipefail
+          self_key="$(bash flydsl-test/scripts/ci_mlir_cache_key.sh flydsl-test)"
+          echo "self=${self_key}" >>"${GITHUB_OUTPUT}"
+          echo "Shared MLIR cache key: ${self_key}"
+          if [ "${{ steps.base-pin.outputs.pin_changed }}" = "true" ]; then
+            base_key="$(bash flydsl-test/scripts/ci_mlir_cache_key.sh base-pin)"
+            echo "base=${base_key}" >>"${GITHUB_OUTPUT}"
+            echo "Baseline MLIR cache key: ${base_key}"
+          fi
+
+      # Restored before the shared entry and under the same `path`, then moved
+      # aside: actions/cache derives its version from the path list, so an entry
+      # saved as `mlir_install.tgz` is only findable under that name. No
+      # restore-keys either - a prefix fallback would return an install built
+      # from another pin.
+      #
+      # This is the entry every PR that leaves LLVM alone restores on every run,
+      # so it stays warm. A PR that also changes MLIR_CACHE_VERSION or
+      # LLVM_BUILD_PROFILE misses, since both feed the key from the PR side.
+      - name: Restore baseline MLIR cache
+        id: base-mlir-cache
+        if: steps.base-pin.outputs.pin_changed == 'true'
+        continue-on-error: true
+        timeout-minutes: 25
+        uses: actions/cache/restore@v4
+        with:
+          path: mlir_install.tgz
+          key: ${{ steps.keys.outputs.base }}
+
+      # This install is ~1.4 GB and these runners are spread across regions, so
+      # the transfer is slow enough (~1.6 MB/s observed) to be interrupted:
+      #
+      #   Received 1010827264 of 1396566653 (72.4%), 1.6 MBs/sec
+      #   ##[warning]Failed to restore: Server failed to authenticate the
+      #             request ... Authorization header ... signature.
+      #   Cache not found for input keys: mlir-install-...-4087a417...
+      #
+      # The entry was there and matched; the blob SAS auth failed mid-download,
+      # which actions/cache reports as a plain miss. One retry costs nothing on
+      # the normal path and is the difference between having a baseline and
+      # silently not having one.
+      - name: Retry baseline MLIR cache restore
+        id: base-mlir-cache-retry
+        if: >-
+          steps.base-pin.outputs.pin_changed == 'true' &&
+          steps.base-mlir-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 25
+        uses: actions/cache/restore@v4
+        with:
+          path: mlir_install.tgz
+          key: ${{ steps.keys.outputs.base }}
+
+      - name: Stash baseline MLIR tarball
+        if: >-
+          steps.base-mlir-cache.outputs.cache-hit == 'true' ||
+          steps.base-mlir-cache-retry.outputs.cache-hit == 'true'
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          if [ ! -s mlir_install.tgz ]; then
+            echo "::warning title=Benchmark baseline unavailable::Baseline MLIR cache reported a hit but produced no tarball."
+            rm -f mlir_install.tgz
+            exit 0
+          fi
+          mv mlir_install.tgz mlir_install_base.tgz
+
       - name: Restore shared MLIR cache
         id: mlir-cache
         uses: actions/cache/restore@v4
         with:
           path: mlir_install.tgz
-          key: mlir-install-${{ runner.os }}-${{ runner.arch }}-${{ env.MLIR_CACHE_VERSION }}-${{ env.LLVM_BUILD_PROFILE }}-${{ hashFiles('flydsl-test/thirdparty/llvm-build-info.json', 'flydsl-test/thirdparty/llvm-rocdl-lld-argv0.patch', 'flydsl-test/scripts/build_llvm.sh') }}
+          key: ${{ steps.keys.outputs.self }}
+
+      # Nothing publishes this tag; the fallback builds it the first time a
+      # runner needs it. Same step as build-whl.yaml.
+      - name: Pull or build manylinux Docker image
+        run: |
+          ROCM_VERSION=7.2
+          IMAGE="ghcr.io/rocm/flydsl-manylinux_2_28:rocm${ROCM_VERSION}-cp310-cp314"
+          if ! docker pull "${IMAGE}"; then
+            docker build \
+              --build-arg ROCM_VERSION="${ROCM_VERSION}" \
+              -t "${IMAGE}" \
+              - < flydsl-test/.github/workflows/Dockerfile.manylinux_2_28
+          fi
+          echo "MANYLINUX_IMAGE=${IMAGE}" >> $GITHUB_ENV
 
       - name: Start MLIR build container
         run: |
@@ -160,18 +313,26 @@ jobs:
             --security-opt seccomp=unconfined \
             -w /flydsl-test \
             --name flydsl_mlir_cache \
-            ${{ env.DOCKER_IMAGE }}
+            ${MANYLINUX_IMAGE}
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
 
+      # The image ships cmake, ninja, gcc, patchelf, git and ROCm at /opt/rocm.
       - name: Install MLIR build dependencies
         run: |
-          docker exec flydsl_mlir_cache bash -c "apt-get update && apt-get install -y cmake build-essential patchelf"
-          docker exec flydsl_mlir_cache bash -c "python3 -m pip install -U pip setuptools wheel"
-          docker exec flydsl_mlir_cache bash -c "python3 -m pip install ninja>=1.11.1"
-          docker exec flydsl_mlir_cache bash -c "python3 -m pip install --index-url https://repo.amd.com/rocm/whl-multi-arch/ 'rocm[devel]==7.14.0' && rocm-sdk init"
-          docker exec flydsl_mlir_cache bash -c "git config --global --add safe.directory /flydsl-test"
-          sdk_root="$(docker exec flydsl_mlir_cache rocm-sdk path --root)"
+          docker exec flydsl_mlir_cache bash -c '
+            for d in /opt/python/cp*; do
+              case "${d}" in *t) continue ;; esac
+              py="${d}/bin/python"
+              [ -x "${py}" ] || continue
+              ver=$("${py}" -c "import sys; print(f\"{sys.version_info.major}.{sys.version_info.minor}\")")
+              ln -sf "${py}" "/usr/local/bin/python${ver}"
+            done
+            ln -sf /usr/local/bin/python3.12 /usr/local/bin/python3
+          '
+          docker exec flydsl_mlir_cache bash -c "python3 -m pip install -q nanobind"
+          docker exec flydsl_mlir_cache bash -c "git config --global --add safe.directory '*'"
+          sdk_root="$(docker exec flydsl_mlir_cache bash -c 'if command -v rocm-sdk >/dev/null 2>&1; then rocm-sdk path --root; elif [ -d /opt/rocm ]; then printf "/opt/rocm\n"; fi')"
           test -n "${sdk_root}"
           docker exec flydsl_mlir_cache test -d "${sdk_root}"
           printf 'ROCM_PATH=%s\n' "${sdk_root}" >>"${GITHUB_ENV}"
@@ -200,16 +361,67 @@ jobs:
           docker cp flydsl_mlir_cache:/llvm-project/mlir_install.tgz ./mlir_install.tgz
           test -s ./mlir_install.tgz
 
+      # Checked against the VCSRevision.h the install ships: a wrong-pin baseline
+      # is worse than none, since it yields a plausible number nobody questions.
+      #
+      # Only a cache hit produces a baseline. Building the old pin here would
+      # cost a second llvm-project clone and full LLVM build on a GPU runner, per
+      # push, for an advisory number. Revisit if the logs show misses are common.
+      - name: Unpack and verify baseline MLIR
+        id: base-mlir
+        if: steps.base-pin.outputs.pin_changed == 'true'
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          if [ ! -s ./mlir_install_base.tgz ]; then
+            echo "::notice title=Benchmark baseline skipped::No cached MLIR install for the base commit's LLVM (${{ steps.base-pin.outputs.base_llvm_hash }}), so the vs-main comparison is skipped; vs latest tag is unaffected. This resolves itself once main has run under that pin."
+            exit 0
+          fi
+          docker cp ./mlir_install_base.tgz flydsl_mlir_cache:/tmp/mlir_install_base.tgz
+          docker exec flydsl_mlir_cache bash -c "
+            set -e
+            rm -rf /llvm-project/mlir_install_base
+            mkdir -p /tmp/mlir_base_extract
+            tar -xzf /tmp/mlir_install_base.tgz -C /tmp/mlir_base_extract
+            mv /tmp/mlir_base_extract/mlir_install /llvm-project/mlir_install_base
+            rmdir /tmp/mlir_base_extract
+            test -d /llvm-project/mlir_install_base/lib/cmake/mlir
+          " || { echo "::warning title=Benchmark baseline unavailable::Baseline MLIR install could not be unpacked."; exit 0; }
+          want="${{ steps.base-pin.outputs.base_llvm_hash }}"
+          got="$(docker exec flydsl_mlir_cache sed -n 's/.*LLVM_REVISION R"(\([0-9a-f]\{40\}\))".*/\1/p' \
+                   /llvm-project/mlir_install_base/include/llvm/Support/VCSRevision.h 2>/dev/null)"
+          if [ -z "${got}" ]; then
+            echo "Baseline MLIR carries no VC revision; relying on the content-derived cache key alone."
+          elif [ "${got}" != "${want}" ]; then
+            echo "::warning title=Benchmark baseline unavailable::Baseline MLIR is LLVM ${got}, expected ${want}; refusing to use it."
+            docker exec flydsl_mlir_cache rm -rf /llvm-project/mlir_install_base
+            exit 0
+          else
+            echo "Baseline MLIR verified at LLVM ${got}"
+          fi
+          echo "ready=true" >>"${GITHUB_OUTPUT}"
+
       - name: Build current and base FlyDSL wheels
+        env:
+          BASE_MLIR_PATH: ${{ steps.base-mlir.outputs.ready == 'true' && '/llvm-project/mlir_install_base' || '' }}
+          BASELINE_LLVM_HASH: ${{ steps.base-pin.outputs.base_llvm_hash }}
         run: |
           docker exec \
             -e BASE_REPO_NAME \
             -e BASE_COMMIT_SHA \
             -e ROCM_PATH \
+            -e BASE_MLIR_PATH \
             flydsl_mlir_cache bash -c '
               export MLIR_PATH=/llvm-project/mlir_install
-              export PATH="$(rocm-sdk path --bin):$PATH"
-              export CMAKE_PREFIX_PATH="$(rocm-sdk path --cmake)${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
+              if command -v rocm-sdk >/dev/null 2>&1; then
+                rocm_bin="$(rocm-sdk path --bin)"
+                rocm_cmake="$(rocm-sdk path --cmake)"
+              else
+                rocm_bin="${ROCM_PATH}/bin"
+                rocm_cmake="${ROCM_PATH}/lib/cmake"
+              fi
+              export PATH="${rocm_bin}:$PATH"
+              export CMAKE_PREFIX_PATH="${rocm_cmake}${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
               cd /flydsl-test
               bash scripts/build_ci_wheels.sh
             '
@@ -217,10 +429,24 @@ jobs:
           (cd flydsl-ci-wheels/pr && sha256sum -c SHA256SUMS)
           if [ -d flydsl-ci-wheels/base ]; then
             (cd flydsl-ci-wheels/base && sha256sum -c SHA256SUMS)
+            # Mark which LLVM the wheel was really built against. A bump needing
+            # no source adaptation still builds from the shared MLIR; labelling
+            # that "old LLVM" points at a codegen difference that is not there.
+            if [ -n "${BASE_MLIR_PATH}" ] && [ -n "${BASELINE_LLVM_HASH}" ]; then
+              printf '%s\n' "${BASELINE_LLVM_HASH}" >flydsl-ci-wheels/base/BASELINE_LLVM
+            fi
           else
             echo "::warning title=Baseline wheel unavailable::Uploading PR wheel without an exact base benchmark."
           fi
           (cd flydsl-ci-wheels/tools && sha256sum -c SHA256SUMS)
+
+      # The second install is the whole disk cost, and nothing below needs it.
+      - name: Drop baseline MLIR install
+        if: always() && steps.base-pin.outputs.pin_changed == 'true'
+        continue-on-error: true
+        run: |
+          rm -f ./mlir_install_base.tgz
+          docker exec flydsl_mlir_cache bash -c "rm -rf /llvm-project/mlir_install_base /tmp/mlir_install_base.tgz" || true
 
       - name: Save shared MLIR cache
         if: >-
@@ -275,6 +501,7 @@ jobs:
         runners: [
           'linux-flydsl-mi325-1',
           'linux-flydsl-mi355-1',
+          'linux-flydsl-mi35x-1',
           'linux-flydsl-navi-2',
         ]
       fail-fast: false
@@ -292,6 +519,11 @@ jobs:
           ref: ${{ env.GITHUB_COMMIT_SHA }}
           path: flydsl-test
 
+      # download-artifact overlays its destination. Self-hosted workspaces are
+      # persistent, so remove wheels left by an older package version first.
+      - name: Remove stale FlyDSL CI wheels
+        run: rm -rf "${GITHUB_WORKSPACE:?}/flydsl-ci-wheels"
+
       - name: Download FlyDSL CI wheels
         uses: actions/download-artifact@v4
         with:
@@ -300,8 +532,21 @@ jobs:
 
       - name: Verify FlyDSL CI wheels
         run: |
+          shopt -s nullglob
+          pr_wheels=(flydsl-ci-wheels/pr/*.whl)
+          if [ "${#pr_wheels[@]}" -ne 1 ]; then
+            printf 'Expected exactly one PR wheel, found %s:\n' "${#pr_wheels[@]}" >&2
+            printf '  %s\n' "${pr_wheels[@]}" >&2
+            exit 1
+          fi
           (cd flydsl-ci-wheels/pr && sha256sum -c SHA256SUMS)
           if [ -d flydsl-ci-wheels/base ]; then
+            base_wheels=(flydsl-ci-wheels/base/*.whl)
+            if [ "${#base_wheels[@]}" -ne 1 ]; then
+              printf 'Expected exactly one base wheel, found %s:\n' "${#base_wheels[@]}" >&2
+              printf '  %s\n' "${base_wheels[@]}" >&2
+              exit 1
+            fi
             (cd flydsl-ci-wheels/base && sha256sum -c SHA256SUMS)
           else
             echo "::warning title=Baseline wheel unavailable::Exact base benchmark will be skipped."
@@ -344,10 +589,10 @@ jobs:
           docker exec flydsl_test bash -c "apt-get update && apt-get install -y cmake build-essential patchelf"
           docker exec flydsl_test bash -c "python3 -m pip install -U pip setuptools wheel"
           docker exec flydsl_test bash -c "python3 -m pip install ninja>=1.11.1"
-          docker exec flydsl_test bash -c "python3 -m pip install --index-url https://repo.amd.com/rocm/whl-multi-arch/ 'rocm[devel]==7.14.0' && rocm-sdk init"
+          docker exec flydsl_test bash -c "if command -v rocm-sdk >/dev/null 2>&1; then rocm-sdk init; fi"
           docker exec flydsl_test bash -c "python3 -m pip install -U 'hypothesis>=6.82.0'"
           docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl-test && cd /flydsl-test && git log"
-          sdk_root="$(docker exec flydsl_test rocm-sdk path --root)"
+          sdk_root="$(docker exec flydsl_test bash -c 'if command -v rocm-sdk >/dev/null 2>&1; then rocm-sdk path --root; elif [ -d /opt/rocm ]; then printf "/opt/rocm\n"; fi')"
           test -n "${sdk_root}"
           docker exec flydsl_test test -d "${sdk_root}"
           printf 'ROCM_PATH=%s\n' "${sdk_root}" >>"${GITHUB_ENV}"
@@ -375,11 +620,11 @@ jobs:
       - name: Show tests logs
         if: failure()
         run: |
+          log_dir="$(mktemp -d "${RUNNER_TEMP}/flydsl-test-logs.XXXXXX")"
           docker exec flydsl_test bash -c 'cd /tmp && tar czf /tmp/logs.tgz *.log 2>/dev/null || echo "no logs"'
-          docker cp flydsl_test:/tmp/logs.tgz . || true
-          if [ -f logs.tgz ]; then
-            tar -xzf logs.tgz || true
-            cat *.log || true
+          if docker cp flydsl_test:/tmp/logs.tgz "${log_dir}/logs.tgz"; then
+            tar -xzf "${log_dir}/logs.tgz" -C "${log_dir}" || true
+            find "${log_dir}" -maxdepth 1 -type f -name '*.log' -print -exec cat {} \;
           else
             echo "logs.tgz not found; skipping log extraction"
           fi
@@ -418,6 +663,14 @@ jobs:
           elif git fetch "${base_repo_url}" "${BASE_COMMIT_SHA}" --no-tags --depth=1; then
             commit="$(git rev-parse FETCH_HEAD)"
             label="main"
+            # From prepare-mlir's marker, not from the pinned hashes: this job
+            # cannot see which MLIR the baseline wheel was compiled with.
+            display_label="main@${commit:0:8}"
+            baseline_llvm="$(cat /flydsl-ci-wheels/base/BASELINE_LLVM 2>/dev/null || true)"
+            if [ -n "${baseline_llvm}" ]; then
+              display_label="${display_label} (llvm ${baseline_llvm:0:8})"
+              echo "::notice title=Benchmark baseline uses a different LLVM::Baseline was built against LLVM ${baseline_llvm:0:8}, the PR against its own pin; deltas include LLVM codegen changes."
+            fi
             worktree="/tmp/flydsl-bench-main"
             csv="/tmp/bench_main_candidate.csv"
             output="/tmp/bench_main.out"
@@ -442,7 +695,7 @@ jobs:
               status=$?
               if [ "${status}" -eq 0 ] && [ -s "${csv}" ]; then
                 cp "${csv}" /tmp/bench_main.csv
-                echo "${label}" >/tmp/bench_main_label
+                echo "${display_label}" >/tmp/bench_main_label
               else
                 echo "Exact main benchmark baseline failed; not retrying older commits."
               fi
@@ -526,12 +779,12 @@ jobs:
       - name: Show benchmarks logs
         if: failure()
         run: |
+          log_dir="$(mktemp -d "${RUNNER_TEMP}/flydsl-benchmark-logs.XXXXXX")"
           docker exec flydsl_test bash -c 'cd /tmp && tar czf /tmp/flydsl_bench_logs.tgz flydsl_bench* bench_*.csv 2>/dev/null || echo "no logs"'
-          docker cp flydsl_test:/tmp/flydsl_bench_logs.tgz . || true
-          if [ -f flydsl_bench_logs.tgz ]; then
-            tar -xzf flydsl_bench_logs.tgz || true
-            cat flydsl_bench*/*.log || true
-            cat bench_*.csv || true
+          if docker cp flydsl_test:/tmp/flydsl_bench_logs.tgz "${log_dir}/logs.tgz"; then
+            tar -xzf "${log_dir}/logs.tgz" -C "${log_dir}" || true
+            find "${log_dir}" -type f -name '*.log' -print -exec cat {} \;
+            find "${log_dir}" -maxdepth 1 -type f -name 'bench_*.csv' -print -exec cat {} \;
           else
             echo "flydsl_bench_logs.tgz not found; skipping log extraction"
           fi
@@ -544,7 +797,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Multi-GPU communication operator tests: ONLY for 8-GPU runners.
-  # Runs on BOTH linux-flydsl-mi325-8 AND linux-flydsl-mi355-8 independently.
+  # Runs on linux-flydsl-mi325-8, linux-flydsl-mi355-8, and linux-flydsl-mi35x-8 independently.
   # Triggered when PR has label "multi-gpu" (added by a maintainer), or when
   # the workflow is manually dispatched.
   # fail-fast: false ensures both runners always complete even if one fails.
@@ -573,6 +826,7 @@ jobs:
         runners: [
           'linux-flydsl-mi325-8',
           'linux-flydsl-mi355-8',
+          'linux-flydsl-mi35x-8',
         ]
       fail-fast: false
     runs-on: ${{ matrix.runners }}
@@ -588,6 +842,11 @@ jobs:
           ref: ${{ env.GITHUB_COMMIT_SHA }}
           path: flydsl-test
 
+      # download-artifact overlays its destination. Self-hosted workspaces are
+      # persistent, so remove wheels left by an older package version first.
+      - name: Remove stale FlyDSL CI wheels
+        run: rm -rf "${GITHUB_WORKSPACE:?}/flydsl-ci-wheels"
+
       - name: Download FlyDSL CI wheels
         uses: actions/download-artifact@v4
         with:
@@ -596,8 +855,21 @@ jobs:
 
       - name: Verify FlyDSL CI wheels
         run: |
+          shopt -s nullglob
+          pr_wheels=(flydsl-ci-wheels/pr/*.whl)
+          if [ "${#pr_wheels[@]}" -ne 1 ]; then
+            printf 'Expected exactly one PR wheel, found %s:\n' "${#pr_wheels[@]}" >&2
+            printf '  %s\n' "${pr_wheels[@]}" >&2
+            exit 1
+          fi
           (cd flydsl-ci-wheels/pr && sha256sum -c SHA256SUMS)
           if [ -d flydsl-ci-wheels/base ]; then
+            base_wheels=(flydsl-ci-wheels/base/*.whl)
+            if [ "${#base_wheels[@]}" -ne 1 ]; then
+              printf 'Expected exactly one base wheel, found %s:\n' "${#base_wheels[@]}" >&2
+              printf '  %s\n' "${base_wheels[@]}" >&2
+              exit 1
+            fi
             (cd flydsl-ci-wheels/base && sha256sum -c SHA256SUMS)
           else
             echo "::warning title=Baseline wheel unavailable::Exact base benchmark will be skipped."
@@ -634,10 +906,10 @@ jobs:
           docker exec flydsl_test bash -c "apt-get update && apt-get install -y cmake build-essential patchelf"
           docker exec flydsl_test bash -c "python3 -m pip install -U pip setuptools wheel"
           docker exec flydsl_test bash -c "python3 -m pip install ninja>=1.11.1"
-          docker exec flydsl_test bash -c "python3 -m pip install --index-url https://repo.amd.com/rocm/whl-multi-arch/ 'rocm[devel]==7.14.0' && rocm-sdk init"
+          docker exec flydsl_test bash -c "if command -v rocm-sdk >/dev/null 2>&1; then rocm-sdk init; fi"
           docker exec flydsl_test bash -c "python3 -m pip install -U 'hypothesis>=6.82.0'"
           docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl-test && cd /flydsl-test && git log"
-          sdk_root="$(docker exec flydsl_test rocm-sdk path --root)"
+          sdk_root="$(docker exec flydsl_test bash -c 'if command -v rocm-sdk >/dev/null 2>&1; then rocm-sdk path --root; elif [ -d /opt/rocm ]; then printf "/opt/rocm\n"; fi')"
           test -n "${sdk_root}"
           docker exec flydsl_test test -d "${sdk_root}"
           printf 'ROCM_PATH=%s\n' "${sdk_root}" >>"${GITHUB_ENV}"
@@ -681,8 +953,8 @@ jobs:
               --output-dir /tmp/flydsl_ci_sweep
           "
 
-      # MegaMoEV2 A8W4 v4_pro accuracy against the torch f32 oracle. The test self-skips on gfx942.
-      - name: Run multi-GPU MegaMoEV2 A8W4 v4_pro accuracy tests
+      # MegaMoEV2 A8W4/A4W4 v4_pro accuracy against the torch f32 oracle. The test self-skips on gfx942.
+      - name: Run multi-GPU MegaMoEV2 v4_pro accuracy tests
         timeout-minutes: 45
         run: |
           docker exec -e ROCM_PATH flydsl_test bash -c "
@@ -768,11 +1040,11 @@ jobs:
       - name: Show test logs
         if: failure()
         run: |
+          log_dir="$(mktemp -d "${RUNNER_TEMP}/flydsl-test-logs.XXXXXX")"
           docker exec flydsl_test bash -c 'cd /tmp && tar czf /tmp/logs.tgz *.log 2>/dev/null || echo "no logs"'
-          docker cp flydsl_test:/tmp/logs.tgz . || true
-          if [ -f logs.tgz ]; then
-            tar -xzf logs.tgz || true
-            cat *.log || true
+          if docker cp flydsl_test:/tmp/logs.tgz "${log_dir}/logs.tgz"; then
+            tar -xzf "${log_dir}/logs.tgz" -C "${log_dir}" || true
+            find "${log_dir}" -maxdepth 1 -type f -name '*.log' -print -exec cat {} \;
           else
             echo "logs.tgz not found; skipping log extraction"
           fi

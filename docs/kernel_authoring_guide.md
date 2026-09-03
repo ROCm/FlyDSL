@@ -201,6 +201,9 @@ result = a + b
 result = a * 2
 result = a // 4
 result = a % 16
+largest = fx.max(a, b)
+smallest = fx.min(a, b)
+tiles = fx.ceildiv(count, tile_size)
 
 # Cast (prefer DSL numeric constructors)
 i64_val = fx.Int64(int_val) # cast to 64-bit integer (fx.Index is deprecated)
@@ -216,6 +219,9 @@ result = a << 4
 ```
 
 Use direct `arith.*FOp(..., fastmath=...)` only where explicit fastmath flags are performance-critical.
+Use `fx.max` / `fx.min` for type-dispatched extrema and `fx.ceildiv` for
+overflow-safe integer ceil division. `fx.maxnumf` / `fx.minnumf` intentionally
+retain non-NaN-wins semantics, and `fx.ceil_div` remains the layout/int-tuple API.
 
 ### 4.2 Vector values (`Vector`)
 
@@ -332,13 +338,19 @@ mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 32, T.i4, T.i32, sign_a=True, sign_b=T
 ```
 
 On RDNA4 (`gfx1200` / `gfx1201`) the same factory builds `MmaOpGFX120X_WMMAType`
-instead. RDNA4 shares the v8 register ABI but keeps the gfx11 instruction
-shapes, so the only valid form is `16x16x16` f16/bf16 → f32 — the 16x16x32 and
-fp8 K=64/128 shapes above are gfx1250-only and are rejected by the atom's
-verifier. See `kernels/gemm/rdna_f16_gemm.py` for a full pipelined example.
+instead. RDNA4 shares the v8 register ABI, while its supported floating-point
+forms use `16x16x16`: f16/bf16 and every fp8(E4M3FN)/bf8(E5M2) A/B combination
+accumulating to f32. Pass a different B type with the keyword-only `elem_ty_b`;
+it defaults to the A type. The 16x16x32 BF16 and fp8 K=64/128 forms above are
+gfx1250-only and are rejected by the atom's verifier. See
+`kernels/gemm/rdna_f16_gemm.py` for a full pipelined f16 example and
+`kernels/gemm/rdna4_fp8_blockscale.py` for raw FP8 operands.
 
 ```python
 mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 16, fx.BFloat16, fx.Float32))  # RDNA4
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 16, fx.Float8E4M3FN, fx.Float32))  # RDNA4 FP8
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 16, fx.Float8E4M3FN, fx.Float32,
+                                  elem_ty_b=fx.Float8E5M2))  # RDNA4 FP8 x BF8
 ```
 
 **MX-scaled WMMA** — `rocdl.WMMAScale(m, n, k, elem_ty_a, elem_ty_b=None,

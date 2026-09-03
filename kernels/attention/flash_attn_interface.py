@@ -29,7 +29,13 @@ import torch
 import torch.nn.functional as F  # noqa: F401  (imported for callers' convenience)
 
 # Re-export so callers only need to import from this module.
-from kernels.attention.flash_attn_utils import dualwave_splitk_workspace_elems
+from kernels.attention.flash_attn_utils import (
+    DUALWAVE_SWP_BLOCK_M,
+    MIN_Q_BLOCKS_XCD_SWIZZLE,
+    NUM_XCD_GFX950,
+    bias_addressing_error,
+    dualwave_splitk_workspace_elems,
+)
 
 __all__ = ["flydsl_flash_attn_func", "dualwave_splitk_workspace_elems"]
 
@@ -37,11 +43,22 @@ _DTYPE_MAP = {torch.bfloat16: "bf16", torch.float16: "f16", torch.float8_e4m3fn:
 
 # Short varlen/paged cases use the lightweight generic path.
 _VARLEN_LIGHT_MAX_SEQ = 256
+# Largest flat element count the fp8 C-ABI can address; see the split below.
+_FP8_MAX_FLAT_ELEMS = 2**31
+# fp8 lifts P by log2(448) - RESCALE_THRESHOLD. Past this KV length enough tiles
+# sit far below the running max that the extra two log2 units matter more than
+# the ~0.3% the lower threshold costs there; below it the two are equally
+# accurate and 6 is cheaper.
+_FP8_LONG_SEQ = 4096
 _DENSE_LIGHT_CU_FALLBACK = 256
 _DENSE_DUALWAVE_MIN_SEQ = 256
 _DENSE_DUALWAVE_LARGE_BATCH = 8
 _DENSE_DUALWAVE_MIN_SEQ_LARGE_BATCH = 192
 _DENSE_M256_MIN_TOKENS = 4096
+
+
+def _fp8_rescale_threshold(seqlen_kv: int) -> float:
+    return 6.0 if seqlen_kv <= _FP8_LONG_SEQ else 4.0
 
 
 def _dtype_str(t: torch.Tensor) -> str:
@@ -133,6 +150,10 @@ def _build_dense_dualwave(
     debug_lazy_counts: bool,
     enable_stagger: bool,
     return_lse: bool = False,
+    has_bias: bool = False,
+    has_alibi: bool = False,
+    has_sink: bool = False,
+    xcd_swizzle: bool = False,
 ):
     """Build (and cache) the dense gfx950 DUALWAVE_SWP launcher."""
     from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
@@ -151,6 +172,10 @@ def _build_dense_dualwave(
         dualwave_swp_debug_lazy_counts=debug_lazy_counts,
         dualwave_swp_enable_stagger=enable_stagger,
         return_lse=return_lse,
+        has_bias=has_bias,
+        has_alibi=has_alibi,
+        has_sink=has_sink,
+        _xcd_swizzle=xcd_swizzle,
     )
 
 
@@ -159,6 +184,7 @@ def _build_dense_fp8(
     num_heads: int,
     num_kv_heads: int,
     causal: bool,
+    rescale_threshold: float,
     waves_per_eu: int,
     daz: bool,
     lazy_rescale: bool,
@@ -176,6 +202,7 @@ def _build_dense_fp8(
         num_kv_heads=num_kv_heads,
         waves_per_eu=waves_per_eu,
         daz=daz,
+        rescale_threshold=rescale_threshold,
         dualwave_swp_lazy_rescale=lazy_rescale,
         dualwave_swp_setprio=setprio,
         dualwave_swp_enable_stagger=enable_stagger,
@@ -197,6 +224,9 @@ def _build_varlen(
     debug_lazy_counts: bool,
     enable_stagger: bool,
     return_lse: bool = False,
+    has_bias: bool = False,
+    has_alibi: bool = False,
+    has_sink: bool = False,
 ):
     """Build (and cache) a varlen-mode launcher (gfx950 DUALWAVE_SWP, varlen=True)."""
     from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
@@ -216,6 +246,9 @@ def _build_varlen(
         dualwave_swp_debug_lazy_counts=debug_lazy_counts,
         dualwave_swp_enable_stagger=enable_stagger,
         return_lse=return_lse,
+        has_bias=has_bias,
+        has_alibi=has_alibi,
+        has_sink=has_sink,
     )
 
 
@@ -268,6 +301,9 @@ def _build_splitk(
     setprio: bool,
     enable_stagger: bool,
     return_lse: bool = False,
+    has_bias: bool = False,
+    has_alibi: bool = False,
+    has_sink: bool = False,
 ):
     """Build (and cache) a split-K launcher (gfx950 DUALWAVE_SWP, num_kv_splits>1)."""
     from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
@@ -285,6 +321,9 @@ def _build_splitk(
         dualwave_swp_setprio=setprio,
         dualwave_swp_enable_stagger=enable_stagger,
         return_lse=return_lse,
+        has_bias=has_bias,
+        has_alibi=has_alibi,
+        has_sink=has_sink,
     )
 
 
@@ -305,6 +344,7 @@ def _build_paged(
     varlen: bool = False,
     kv_cache_layout: str = "linear",
     return_lse: bool = False,
+    has_bias: bool = False,
 ):
     """Build (and cache) a paged-KV launcher (gfx950 DUALWAVE_SWP, paged=True).
 
@@ -338,6 +378,7 @@ def _build_paged(
         dualwave_swp_setprio=setprio,
         dualwave_swp_enable_stagger=enable_stagger,
         return_lse=return_lse,
+        has_bias=has_bias,
     )
 
 
@@ -355,6 +396,7 @@ def _flydsl_flash_attn_paged(
     *,
     causal: bool,
     num_kv_heads: Optional[int],
+    bias: Optional[torch.Tensor],
     block_table: Optional[torch.Tensor],
     seqlen_k: Optional[torch.Tensor],
     max_seqlen_kv: Optional[int],
@@ -455,7 +497,8 @@ def _flydsl_flash_attn_paged(
 
     # Per-batch KV lengths differ in general → bottom-right cross-length masking. Varlen
     # paged always uses cross masking (per-batch seqlen_q/seqlen_kv come from cu_seqlens).
-    skv = int(max_seqlen_kv) if max_seqlen_kv is not None else int(seqlen_k.max().item())
+    _kv_lens = seqlen_k.reshape(-1).tolist() if max_seqlen_kv is None or (bias is not None and not varlen) else None
+    skv = int(max_seqlen_kv) if max_seqlen_kv is not None else int(max(_kv_lens))
     max_kv_pages = (skv + page_size - 1) // page_size
     max_pages_per_split = (max_kv_pages + int(num_kv_splits) - 1) // int(num_kv_splits)
     if max_pages_per_split > _PAGED_BT_LDS_SIZE:
@@ -469,6 +512,30 @@ def _flydsl_flash_attn_paged(
         cross = bool(cross_seqlen) if cross_seqlen is not None else True
     else:
         cross = skv != Sq
+    if bias is not None:
+        if not varlen:
+            if min(_kv_lens) != max(_kv_lens):
+                raise NotImplementedError(
+                    f"flydsl_flash_attn_func: dense paged bias requires uniform seqlen_k, got lengths in "
+                    f"[{min(_kv_lens)}, {max(_kv_lens)}]; the dense paged kernel receives only "
+                    f"max_seqlen_kv. Use the varlen paged path (cu_seqlens_q/cu_seqlens_kv) for "
+                    f"ragged KV lengths."
+                )
+        # Same convention as non-paged: rows are q tokens, columns are batch-local
+        # logical key positions (the block table only redirects the K/V fetch).
+        _bias_rows = int(q.shape[0]) if varlen else Sq
+        if bias.dim() != 2:
+            raise ValueError(f"flydsl_flash_attn_func: paged bias must be 2D, got {bias.dim()}D")
+        if bias.shape[0] != _bias_rows:
+            raise ValueError(
+                f"flydsl_flash_attn_func: paged bias must have {_bias_rows} rows "
+                f"({'total_q' if varlen else 'seq_len_q'}), got {tuple(bias.shape)}"
+            )
+        if bias.shape[1] < skv:
+            raise ValueError(
+                f"flydsl_flash_attn_func: paged bias needs >= max_seqlen_kv={skv} columns, got {bias.shape[1]}"
+            )
+
     block_table_stride = int(block_table.shape[1])
     # Flatten so the kernel's flat row-major index addresses block_table correctly.
     block_table_i32 = (
@@ -481,6 +548,7 @@ def _flydsl_flash_attn_paged(
         _arch = _gpu_arch(q.device)
         _paged_light_ok = (
             (num_kv_splits <= 1)
+            and bias is None  # the light paged kernel has no bias path
             and D in (64, 128)
             and dtype_str in ("bf16", "f16")
             and (not _arch.startswith("gfx950") or Sq <= _VARLEN_LIGHT_MAX_SEQ)
@@ -518,6 +586,7 @@ def _flydsl_flash_attn_paged(
                 num_kv_splits=int(num_kv_splits),
                 varlen=varlen,
                 kv_cache_layout=kv_cache_layout,
+                has_bias=bias is not None,
             )
         if out is None:
             out = torch.empty_like(q)
@@ -528,6 +597,8 @@ def _flydsl_flash_attn_paged(
         v_flat = v.contiguous()
         o_flat = out.contiguous()
         kwargs = dict(block_table=block_table_i32, block_table_stride=block_table_stride, stream=launch_stream)
+        if bias is not None:
+            kwargs["bias"] = bias
         if varlen:
             kwargs["cu_seqlens_q"] = cu_seqlens_q
             kwargs["cu_seqlens_kv"] = cu_seqlens_kv
@@ -610,6 +681,15 @@ def flydsl_flash_attn_func(
     kv_cache_layout: str = "linear",
     # Split-K (gfx950 only, seq_len >= 384, D=64/128, bf16/f16).
     num_kv_splits: int = 1,
+    # Additive attention bias, folded into the scores after sm_scale and before
+    # masking. gfx950 DUALWAVE_SWP only (dense / varlen / split-K / paged KV).
+    bias: Optional[torch.Tensor] = None,
+    # Per-head ALiBi slope table, computed analytically into the scores. Same
+    # path as `bias` but no paged-KV support; may be combined with `bias`.
+    alibi_slopes: Optional[torch.Tensor] = None,
+    # Per-head attention-sink logit: one extra softmax denominator term with no
+    # matching V row. Same path and restrictions as `alibi_slopes`; combinable.
+    sink: Optional[torch.Tensor] = None,
     # fp8 dense ABI: per-tensor descales for pre-quantized e4m3fn Q/K/V.
     q_descale: Optional[torch.Tensor] = None,
     k_descale: Optional[torch.Tensor] = None,
@@ -625,6 +705,10 @@ def flydsl_flash_attn_func(
     dualwave_swp_lazy_rescale: bool = True,
     dualwave_swp_setprio: bool = True,
     dualwave_swp_enable_stagger: bool = True,
+    # Re-derive (head, q_block) with head as the slow axis so one head's q-blocks
+    # stay on one XCD instead of every XCD re-streaming that head's K/V. None
+    # auto-selects on the shapes it helps; True/False force it. Dense non-fp8 only.
+    dualwave_swp_xcd_swizzle: Optional[bool] = None,
     # Debug: pass a pre-allocated float32[2] tensor to enable the lazy-rescale
     # branch counter (dualwave_swp_debug_lazy_counts=True). Only for dense mode.
     debug_counts: Optional[torch.Tensor] = None,
@@ -659,8 +743,49 @@ def flydsl_flash_attn_func(
             seqlen_q != seqlen_kv per batch.
         cross_seqlen: Whether seqlen_q and seqlen_kv differ. Required in varlen mode;
             dense mode infers it from ``q.shape[1] != k.shape[1]``.
-        block_table / seqlen_k: vLLM-style 2D block table metadata.
+        block_table / seqlen_k: vLLM-style 2D block table metadata. Enables the
+            native paged-KV path, which supports ``bias`` but not
+            ``alibi_slopes``, ``sink``, ``return_lse``, or fp8.
         num_kv_splits: Split-K factor (>1: gfx950 only, D=64/128, bf16/f16, seq>=384).
+        bias: Additive attention bias with the same dtype as q, folded in as
+            ``softmax(q @ k^T * sm_scale + bias)`` -- after the scale, before the
+            causal/padding mask. Dense: ``[Sq, Skv]``, broadcast over batch and
+            head. Varlen: ``[total_q, max_seqlen_kv]``, where the row is the
+            *global* packed q token index and the column is the *per-batch-local*
+            key index, broadcast over head. Varlen self-attention leaves
+            ``max_seqlen_kv`` unset, so its column bound is ``max_seqlen_q``.
+            Routes to the gfx950 DUALWAVE_SWP kernel; fp8 raises
+            NotImplementedError rather than silently dropping the bias.
+            Paged KV is supported (dense, varlen, and paged split-K) with the
+            same row/column convention: rows are ``seq_len_q`` (dense) or
+            ``total_q`` (varlen) q tokens, columns are batch-local key indices
+            and must number at least ``max_seqlen_kv``. Dense paged
+            additionally requires a uniform ``seqlen_k`` across the batch --
+            the dense paged launch only receives ``max_seqlen_kv``, so ragged
+            lengths would address the wrong bias columns and raise
+            ``NotImplementedError``; use the varlen paged path
+            (``cu_seqlens_q``/``cu_seqlens_kv``) for ragged KV.
+        alibi_slopes: fp32 ALiBi slope table, ``[H]`` (broadcast over batch) or
+            ``[B, H]``, values positive. Adds
+            ``-slope * |i + seqlen_kv - seqlen_q - j|`` to the scores after the
+            1/sqrt(D) scaling (the slope is not divided by it), bottom-right
+            aligned like the causal mask. Positions are measured *within* the
+            sequence, so varlen does not offset by the packed-token base. Same
+            kernel path as ``bias`` and may be combined with it, but unlike
+            ``bias`` it is not supported with paged KV (raises
+            NotImplementedError), nor with fp8.
+        sink: fp32 ``[H]`` per-head attention-sink logit -- one extra softmax
+            denominator term that has no matching V row::
+
+                O = sum_j exp(s_j - m) v_j / (exp(sink - m) + sum_j exp(s_j - m))
+
+            Consumed verbatim (no host-side scaling), so it lives in the same
+            post-sm_scale logit space as the scores. Applied in the epilogue, so
+            it touches no score element; under split-K the per-split partials
+            stay sink-free and the combine pass folds it in exactly once. Same
+            kernel path and restrictions as ``alibi_slopes`` -- not supported
+            with paged KV or fp8 -- but freely combinable with ``bias`` and
+            ``alibi_slopes``.
         q_descale / k_descale / v_descale: fp32 shape-[1] descales required
             for dense fp8 e4m3fn inputs.
         out: Optional pre-allocated output tensor. For fp8, output is bf16;
@@ -697,6 +822,88 @@ def flydsl_flash_attn_func(
         raise NotImplementedError("flydsl_flash_attn_func: fp8 flash_attn does not support paged KV")
     if return_lse and paged_kv:
         raise NotImplementedError("flydsl_flash_attn_func: return_lse is not supported for paged KV")
+    has_bias = bias is not None
+    has_alibi = alibi_slopes is not None
+    has_sink = sink is not None
+    for _name, _t in (("bias", bias), ("alibi_slopes", alibi_slopes), ("sink", sink)):
+        if _t is None:
+            continue
+        if paged_kv and _name != "bias":
+            raise NotImplementedError(f"flydsl_flash_attn_func: {_name} is not supported for paged KV")
+        if dtype_str == "fp8":
+            raise NotImplementedError(f"flydsl_flash_attn_func: {_name} is not supported for fp8")
+        if not _t.is_cuda or _t.device != q.device:
+            raise ValueError(f"flydsl_flash_attn_func: {_name} must be a CUDA tensor on {q.device}, got {_t.device}")
+
+    # The fp8 path flattens Q/K/V/O to 1-D and the C-ABI packs a dynamic dim as
+    # int32, so a launch aborts once any of them reaches 2**31 (S >= 131072 at
+    # D=128, H=64). K/V are checked too: cross-attention can hold a short Q and
+    # an over-long KV. Batch entries are independent and a leading slice of a
+    # contiguous tensor is still contiguous, so one launch per entry divides the
+    # flat dim by B at no copy. bf16 passes the natural 4-D shape and is exempt.
+    if (
+        dtype_str == "fp8"
+        and not paged_kv
+        and cu_seqlens_q is None
+        and cu_seqlens_kv is None
+        and q.dim() == 4
+        and max(q.numel(), k.numel(), v.numel()) >= _FP8_MAX_FLAT_ELEMS
+    ):
+        if q.shape[0] == 1:
+            # Out of batch to divide by. Launching would abort inside the C ABI
+            # with a struct.error naming neither the tensor nor the limit.
+            raise NotImplementedError(
+                "flydsl_flash_attn_func: fp8 flattens Q/K/V/O and packs the dynamic dim as int32, so a "
+                f"single batch entry cannot exceed {_FP8_MAX_FLAT_ELEMS} elements; got q={q.numel()}, "
+                f"k={k.numel()}, v={v.numel()}. Shorten the sequence or use bf16."
+            )
+        kw = dict(
+            causal=causal,
+            num_kv_heads=num_kv_heads,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+            cross_seqlen=cross_seqlen,
+            kv_cache_layout=kv_cache_layout,
+            num_kv_splits=num_kv_splits,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            waves_per_eu=waves_per_eu,
+            daz=daz,
+            dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
+            dualwave_swp_setprio=dualwave_swp_setprio,
+            dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
+            debug_counts=debug_counts,
+            stream=stream,
+        )
+        if out is None:
+            # Allocate once and hand each launch its own slice. Concatenating
+            # afterwards would consume the parts on the ambient stream while the
+            # kernels are still running on `stream`, and would hold two full
+            # outputs at a size where one is already several GB.
+            out = torch.empty(q.shape, dtype=torch.bfloat16 if dtype_str == "fp8" else q.dtype, device=q.device)
+        for i in range(q.shape[0]):
+            sl = slice(i, i + 1)
+            flydsl_flash_attn_func(q[sl].contiguous(), k[sl].contiguous(), v[sl].contiguous(), out=out[sl], **kw)
+        return out
+    if has_bias:
+        if bias.dtype != q.dtype:
+            raise ValueError(f"flydsl_flash_attn_func: bias dtype must match q dtype {q.dtype}, got {bias.dtype}")
+        if bias.dim() != 2:
+            raise ValueError(f"flydsl_flash_attn_func: bias must be 2D, got {bias.dim()}D")
+        _bias_err = bias_addressing_error(bias.shape[0] * bias.shape[1], bias.element_size())
+        if _bias_err is not None:
+            raise ValueError(f"flydsl_flash_attn_func: bias {tuple(bias.shape)} {_bias_err}")
+    if has_alibi:
+        if alibi_slopes.dtype != torch.float32:
+            raise ValueError(f"flydsl_flash_attn_func: alibi_slopes must be float32, got {alibi_slopes.dtype}")
+        if alibi_slopes.dim() not in (1, 2):
+            raise ValueError(f"flydsl_flash_attn_func: alibi_slopes must be [H] or [B, H], got {alibi_slopes.dim()}D")
+    if has_sink:
+        if sink.dtype != torch.float32:
+            raise ValueError(f"flydsl_flash_attn_func: sink must be float32, got {sink.dtype}")
+        if sink.dim() != 1:
+            raise ValueError(f"flydsl_flash_attn_func: sink must be 1D [H], got {sink.dim()}D")
     if paged_kv:
         return _flydsl_flash_attn_paged(
             q,
@@ -704,6 +911,7 @@ def flydsl_flash_attn_func(
             v,
             causal=causal,
             num_kv_heads=num_kv_heads,
+            bias=bias,
             block_table=block_table,
             seqlen_k=seqlen_k,
             max_seqlen_kv=max_seqlen_kv,
@@ -778,6 +986,39 @@ def flydsl_flash_attn_func(
     if D < 64 or D % 32 != 0:
         raise ValueError(f"flydsl_flash_attn_func: head_dim ({D}) must be >= 64 and a multiple of 32")
 
+    if has_bias:
+        # Bias rows are indexed by q token, columns by the per-batch-local key.
+        if varlen:
+            if bias.shape[0] != q.shape[0]:
+                raise ValueError(
+                    f"flydsl_flash_attn_func: varlen bias must be [total_q, max_seqlen_kv] with "
+                    f"total_q={q.shape[0]}, got {tuple(bias.shape)}"
+                )
+            _bias_cols_min = int(max_seqlen_kv) if cross else Sq
+            if bias.shape[1] < _bias_cols_min:
+                _bound = "max_seqlen_kv" if cross else "max_seqlen_q, the self-attention KV maximum"
+                raise ValueError(
+                    f"flydsl_flash_attn_func: varlen bias needs >= {_bound}={_bias_cols_min} "
+                    f"columns, got {bias.shape[1]}"
+                )
+        elif tuple(bias.shape) != (Sq, Skv):
+            raise ValueError(f"flydsl_flash_attn_func: dense bias must be [{Sq}, {Skv}], got {tuple(bias.shape)}")
+
+    if has_alibi:
+        if alibi_slopes.shape[-1] != H:
+            raise ValueError(
+                f"flydsl_flash_attn_func: alibi_slopes last dim must be num_heads={H}, "
+                f"got {tuple(alibi_slopes.shape)}"
+            )
+        if alibi_slopes.dim() == 2 and alibi_slopes.shape[0] != B:
+            raise ValueError(
+                f"flydsl_flash_attn_func: 2D alibi_slopes must be [batch={B}, num_heads={H}], "
+                f"got {tuple(alibi_slopes.shape)}"
+            )
+
+    if has_sink and sink.shape[0] != H:
+        raise ValueError(f"flydsl_flash_attn_func: sink must be [num_heads={H}], got {tuple(sink.shape)}")
+
     splitk = num_kv_splits > 1
 
     # ── split-K eligibility guard (SKIP analogous to run_splitk_config) ────
@@ -809,12 +1050,19 @@ def flydsl_flash_attn_func(
                 setprio=dualwave_swp_setprio,
                 enable_stagger=dualwave_swp_enable_stagger,
                 return_lse=return_lse,
+                has_bias=has_bias,
+                has_alibi=has_alibi,
+                has_sink=has_sink,
             )
         elif varlen:
             # Short varlen attention uses generic light; long/debug stays on dualwave.
             _arch = _gpu_arch(q.device)
             _prefer_light = (
                 (not debug_lazy)
+                # The light (generic) kernel folds in neither bias nor ALiBi.
+                and (not has_bias)
+                and (not has_alibi)
+                and (not has_sink)
                 and D in (64, 128)
                 and dtype_str in ("bf16", "f16")
                 and (not _arch.startswith("gfx950") or Sq <= _VARLEN_LIGHT_MAX_SEQ)
@@ -850,6 +1098,9 @@ def flydsl_flash_attn_func(
                     debug_lazy_counts=debug_lazy,
                     enable_stagger=dualwave_swp_enable_stagger,
                     return_lse=return_lse,
+                    has_bias=has_bias,
+                    has_alibi=has_alibi,
+                    has_sink=has_sink,
                 )
         else:
             _arch = _gpu_arch(q.device)
@@ -860,6 +1111,7 @@ def flydsl_flash_attn_func(
                     num_heads=H,
                     num_kv_heads=num_kv_heads,
                     causal=causal,
+                    rescale_threshold=_fp8_rescale_threshold(int(Skv)),
                     waves_per_eu=waves_per_eu,
                     daz=daz,
                     lazy_rescale=dualwave_swp_lazy_rescale,
@@ -872,7 +1124,38 @@ def flydsl_flash_attn_func(
                     raise NotImplementedError(
                         "flydsl_flash_attn_func: debug_counts requires the gfx950 DUALWAVE_SWP path"
                     )
-                if debug_lazy or (can_dualwave and _dense_routes_to_dualwave(B, Sq)):
+                if (has_bias or has_alibi or has_sink) and not can_dualwave:
+                    _term = "bias" if has_bias else ("alibi_slopes" if has_alibi else "sink")
+                    raise NotImplementedError(
+                        f"flydsl_flash_attn_func: {_term} requires the gfx950 DUALWAVE_SWP path "
+                        f"(D=64/128, bf16/f16, gfx950); got D={D}, dtype={dtype_str}, arch='{_arch or 'unknown'}'"
+                    )
+                # bias/ALiBi force dualwave: the generic dense kernel folds in neither.
+                if (
+                    debug_lazy
+                    or has_bias
+                    or has_alibi
+                    or has_sink
+                    or (can_dualwave and _dense_routes_to_dualwave(B, Sq))
+                ):
+                    # Workgroups map to XCDs as linear_id % 8, and linear_id is
+                    # bx + by*H + bz*H*nqb, so with H % 8 == 0 a head-fast grid pins
+                    # head h to XCD h % 8. The ~256 resident workgroups span all H
+                    # heads within one batch, leaving each XCD to juggle H/8 K/V
+                    # streams against its L2 slice. The head-slow remap in
+                    # _init_dualwave_thread_mapping puts the resident window inside a
+                    # single head instead: 1 stream. Measured penalty for leaving it
+                    # off tracks H/8 (-6% at 8 streams, -3% at 4, nil at <=2), not the
+                    # hit rate and not traffic volume. Bijective, so output is
+                    # unchanged. NB: that function's own comment states the opposite
+                    # rationale ("scatter across all XCDs") and is wrong.
+                    num_q_blocks = -(-int(Sq) // DUALWAVE_SWP_BLOCK_M)
+                    if dualwave_swp_xcd_swizzle is None:
+                        xcd_swizzle = (
+                            not causal and H % NUM_XCD_GFX950 == 0 and num_q_blocks >= MIN_Q_BLOCKS_XCD_SWIZZLE
+                        )
+                    else:
+                        xcd_swizzle = dualwave_swp_xcd_swizzle
                     exe = _build_dense_dualwave(
                         num_heads=H,
                         num_kv_heads=num_kv_heads,
@@ -887,6 +1170,10 @@ def flydsl_flash_attn_func(
                         debug_lazy_counts=debug_lazy,
                         enable_stagger=dualwave_swp_enable_stagger,
                         return_lse=return_lse,
+                        has_bias=has_bias,
+                        has_alibi=has_alibi,
+                        has_sink=has_sink,
+                        xcd_swizzle=xcd_swizzle,
                     )
                 else:
                     block_m, flat_work_group_size, path_tag = _dense_generic_tile(B, Sq, H, D, dtype_str, q.device)
@@ -932,11 +1219,20 @@ def flydsl_flash_attn_func(
         lse = torch.empty((B, H, Sq), dtype=torch.float32, device=q.device) if return_lse else None
 
         # ── launch ──────────────────────────────────────────────────────────
+        _bias_kw = {}
+        if has_bias:
+            _bias_kw["bias"] = bias
+        if has_alibi:
+            _bias_kw["alibi_slopes"] = alibi_slopes
+        if has_sink:
+            _bias_kw["sink"] = sink
         if splitk:
             _ws = torch.empty(ws_elems, dtype=torch.float32, device=q.device)
-            exe(q_flat, k_flat, v_flat, o_flat, B, Sq, workspace=_ws, lse=lse, stream=launch_stream)
+            exe(q_flat, k_flat, v_flat, o_flat, B, Sq, workspace=_ws, lse=lse, stream=launch_stream, **_bias_kw)
         elif varlen:
-            kwargs = dict(cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv, lse=lse, stream=launch_stream)
+            kwargs = dict(
+                cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv, lse=lse, stream=launch_stream, **_bias_kw
+            )
             if cross:
                 kwargs["seq_len_kv"] = int(max_seqlen_kv)
             if debug_lazy:
@@ -944,7 +1240,7 @@ def flydsl_flash_attn_func(
             else:
                 exe(q_flat, k_flat, v_flat, o_flat, B, Sq, **kwargs)
         else:
-            kwargs: dict = dict(stream=launch_stream)
+            kwargs: dict = dict(stream=launch_stream, **_bias_kw)
             # fp8 has no LSE path (guarded above) and its launcher takes no `lse` arg.
             if dtype_str != "fp8":
                 kwargs["lse"] = lse

@@ -144,7 +144,8 @@ struct PyMmaOpGFX120X_WMMAType : PyConcreteType<PyMmaOpGFX120X_WMMAType> {
         "sign_a"_a = false, "sign_b"_a = false, "clamp"_a = false, "context"_a = nb::none(),
         "Create a MmaOpGFX120X_WMMAType with m, n, k dimensions and element types "
         "(RDNA4 gfx1200 / gfx1201 wave32 WMMA, 16x16x16 with the v8 operand ABI). "
-        "sign_a/sign_b/clamp must be false: only the fp16/bf16 paths are supported.");
+        "sign_a/sign_b/clamp must be false: fp16, bf16, and every fp8(E4M3FN)/"
+        "bf8(E5M2) A/B combination are supported.");
   }
 };
 
@@ -241,6 +242,44 @@ struct PyCopyOpCDNA4LdsReadTransposeType : PyConcreteType<PyCopyOpCDNA4LdsReadTr
   }
 };
 
+struct PyCopyOpCDNA4BufferLoadAsyncLDSType : PyConcreteType<PyCopyOpCDNA4BufferLoadAsyncLDSType> {
+  FLYDSL_REGISTER_TYPE_BINDING(CopyOpCDNA4BufferLoadAsyncLDSType,
+                               "CopyOpCDNA4BufferLoadAsyncLDSType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](int32_t bitSize, DefaultingPyMlirContext context) {
+          MLIRContext *ctx = unwrap(context.get()->get());
+          return PyCopyOpCDNA4BufferLoadAsyncLDSType(
+              context->getRef(), wrap(CopyOpCDNA4BufferLoadAsyncLDSType::get(ctx, bitSize)));
+        },
+        "bit_size"_a, nb::kw_only(), "context"_a = nb::none(),
+        "Create a CopyOpCDNA4BufferLoadAsyncLDSType with the given bit size "
+        "(async BufferDesc -> Shared DMA; completion must be tracked with "
+        "rocdl.asyncmark / rocdl.wait.asyncmark)");
+  }
+};
+
+struct PyCopyOpCDNA4GlobalLoadAsyncLDSType : PyConcreteType<PyCopyOpCDNA4GlobalLoadAsyncLDSType> {
+  FLYDSL_REGISTER_TYPE_BINDING(CopyOpCDNA4GlobalLoadAsyncLDSType,
+                               "CopyOpCDNA4GlobalLoadAsyncLDSType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](int32_t bitSize, DefaultingPyMlirContext context) {
+          MLIRContext *ctx = unwrap(context.get()->get());
+          return PyCopyOpCDNA4GlobalLoadAsyncLDSType(
+              context->getRef(), wrap(CopyOpCDNA4GlobalLoadAsyncLDSType::get(ctx, bitSize)));
+        },
+        "bit_size"_a, nb::kw_only(), "context"_a = nb::none(),
+        "Create a CopyOpCDNA4GlobalLoadAsyncLDSType with the given bit size "
+        "(async Global -> Shared DMA; completion must be tracked with "
+        "rocdl.asyncmark / rocdl.wait.asyncmark)");
+  }
+};
+
 } // namespace fly_rocdl
 } // namespace MLIR_BINDINGS_PYTHON_DOMAIN
 } // namespace python
@@ -261,5 +300,7 @@ NB_MODULE(_mlirDialectsFlyROCDL, m) {
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferAtomicType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpGFX1250TDMType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA4LdsReadTransposeType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA4BufferLoadAsyncLDSType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA4GlobalLoadAsyncLDSType::bind(m);
   // clang-format on
 }

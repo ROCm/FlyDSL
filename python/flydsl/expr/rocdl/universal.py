@@ -55,6 +55,28 @@ def s_waitcnt(bitfield=None, *, vmcnt=None, lgkmcnt=None, expcnt=None):
     )
 
 
+@dsl_loc_tracing
+def asyncmark():
+    """Close the current group of async operations (``rocdl.asyncmark``).
+
+    Async LDS DMA copies (the ``*LoadAsyncLDS`` atoms, gfx1250 TDM / async global loads) are not
+    tracked by the compiler's automatic wait insertion. Group them with this and drain them with
+    :func:`wait_asyncmark`.
+    """
+    return mlir_rocdl.asyncmark()
+
+
+@dsl_loc_tracing
+def wait_asyncmark(count=0):
+    """Wait until at most ``count`` async groups remain outstanding.
+
+    ``count`` must be a compile time value: a Python ``int`` or a static DSL integer. ``count=0``
+    drains every outstanding group; ``None`` maps to the maximum, which waits for nothing.
+    """
+    n = normalize_s_waitcnt_field("count", count, 0xFFFF)
+    return mlir_rocdl.wait_asyncmark(ir.IntegerAttr.get(ir.IntegerType.get_signless(16), n))
+
+
 def BufferCopy(bit_size, cache_modifier=0):
     """Create a CDNA3 buffer copy atom (cache_modifier: 0=cached, 2=nt).
 
@@ -74,7 +96,13 @@ BufferCopy128b = lambda cache_modifier=0: CopyOpCDNA3BufferCopyType.get(128, cac
 def BufferCopyLDS(bit_size):
     """Create a CDNA3 buffer-to-LDS copy atom.
 
-    Only supports BufferDesc -> Shared address space direction.
+    ``bit_size`` must be 32 or 128. Only supports BufferDesc -> Shared address space direction.
+
+    This atom is synchronous in the sense that the compiler inserts the ``vmcnt`` wait for you
+    before the staged LDS data is read. If you want to insert ``vmcnt``, use the async counterparts
+    instead: :func:`flydsl.expr.rocdl.cdna4.BufferLoadAsyncLDS` (same direction and state) or
+    :func:`flydsl.expr.rocdl.cdna4.GlobalLoadAsyncLDS` (Global -> Shared). Those require explicit
+    ``fx.rocdl.asyncmark()`` / ``fx.rocdl.wait_asyncmark(n)`` tracking.
 
     Current atom state:
     - `soffset` (`i32`), default zero
@@ -84,8 +112,28 @@ def BufferCopyLDS(bit_size):
 
 
 BufferCopyLDS32b = lambda: CopyOpCDNA3BufferCopyLDSType.get(32)
-BufferCopyLDS64b = lambda: CopyOpCDNA3BufferCopyLDSType.get(64)
 BufferCopyLDS128b = lambda: CopyOpCDNA3BufferCopyLDSType.get(128)
+
+
+def BufferCopyLDS64b():
+    """Create a 64-bit CDNA3 buffer-to-LDS copy atom.
+
+    .. deprecated::
+        There is no 8-byte LDS DMA instruction on any AMD target: the transfer
+        widths are 1/2/4 bytes, plus 12/16 bytes on gfx950. This entry point
+        previously produced an atom that passed verification and then silently
+        failed instruction selection, so the copy never happened. It now raises.
+
+        Use :func:`BufferCopyLDS32b` or :func:`BufferCopyLDS128b` (gfx950)
+        instead. Kept as a named export for one deprecation window; see
+        ``docs/api_stability.md`` section 3.
+    """
+    raise ValueError(
+        "BufferCopyLDS64b is deprecated and unsupported: there is no 8-byte LDS DMA "
+        "instruction on any AMD target (widths are 1/2/4 bytes, plus 12/16 bytes on "
+        "gfx950). It previously verified but silently failed instruction selection. "
+        "Use BufferCopyLDS32b, or BufferCopyLDS128b on gfx950."
+    )
 
 
 def BufferAtomic(atomic_op, val_type):
@@ -117,7 +165,10 @@ def MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
 def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
     """Create an arch-appropriate WMMA atom.
 
-    Supported kwargs (integer paths only — iu8 / iu4):
+    Supported kwargs:
+        elem_ty_b: optional B operand type for mixed-type instructions; defaults
+            to ``elem_ty_ab``. RDNA4 accepts every FP8(E4M3FN)/BF8(E5M2)
+            combination.
         sign_a (bool, default False): treat A operand as signed.
         sign_b (bool, default False): treat B operand as signed.
         clamp  (bool, default False): saturate integer accumulator.
@@ -127,7 +178,9 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
     intrinsic has no such operands. Future WMMA ops for new architectures
     should extend kwargs here rather than growing the positional signature.
     """
-    ty_ab = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
+    ty_a = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
+    elem_ty_b = kwargs.pop("elem_ty_b", None)
+    ty_b = ty_a if elem_ty_b is None else (elem_ty_b.ir_type if hasattr(elem_ty_b, "ir_type") else elem_ty_b)
     if elem_ty_acc is None:
         ty_acc = ir.F32Type.get()
     else:
@@ -143,14 +196,14 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
 
     arch = get_rocm_arch() or ""
     if arch.startswith("gfx11"):
-        return MmaOpGFX11_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc, **kwargs)
+        return MmaOpGFX11_WMMAType.get(m, n, k, ty_a, ty_b, ty_acc, **kwargs)
     if arch.startswith("gfx1250"):
         return MmaOpGFX1250_WMMAType.get(
             m,
             n,
             k,
-            ty_ab,
-            ty_ab,
+            ty_a,
+            ty_b,
             ty_acc,
             sign_a=bool(kwargs.get("sign_a", False)),
             sign_b=bool(kwargs.get("sign_b", False)),
@@ -161,8 +214,8 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
             m,
             n,
             k,
-            ty_ab,
-            ty_ab,
+            ty_a,
+            ty_b,
             ty_acc,
             sign_a=bool(kwargs.get("sign_a", False)),
             sign_b=bool(kwargs.get("sign_b", False)),
