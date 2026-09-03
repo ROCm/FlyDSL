@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-03T10:48:09Z",
+ "updated": "2026-09-03T11:31:03Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33749691782,
+   "pr": 931,
+   "commit": "a414513e66b6d8aae1164959ef840b9195f3db67",
+   "branch": "rchamber/flex_attention",
+   "event": "pull_request",
+   "title": "Add flex_attention (score_mod / mask_mod) on the generic flash-attention kernel",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33749691782",
+   "created_at": "2026-09-03T11:26:27Z",
+   "updated_at": "2026-09-03T11:27:58Z",
+   "actor": "RichardChamberlain1",
+   "jobs": []
+  },
   {
    "run_id": 33745734428,
    "pr": 931,
@@ -2331,58 +2346,6 @@
    "updated_at": "2026-09-01T01:36:59Z",
    "actor": "LWenH",
    "jobs": []
-  },
-  {
-   "run_id": 33361415004,
-   "pr": null,
-   "commit": "5e44edb503a85b10f41b67001fc304fc0b72cea8",
-   "branch": "fix_mxf8",
-   "event": "pull_request",
-   "title": "add mxfp8 a8w8(blockscale&mx1*32)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33361415004",
-   "created_at": "2026-08-31T05:41:15Z",
-   "updated_at": "2026-08-31T06:23:37Z",
-   "actor": "solinzby1",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-31T06:18:50Z",
-     "completed_at": "2026-08-31T06:23:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33361415004/job/99399690710"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-31T06:18:21Z",
-     "completed_at": "2026-08-31T06:23:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33361415004/job/99399690732"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-31T06:17:45Z",
-     "completed_at": "2026-08-31T06:23:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33361415004/job/99399690753"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-31T06:20:29Z",
-     "completed_at": "2026-08-31T06:23:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33361415004/job/99399690781"
-    }
-   ]
   }
  ]
 }
