@@ -9,6 +9,16 @@ on:
       - main
     types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
+    inputs:
+      prepare_runner:
+        description: 'Runner for prepare-mlir (compile-only; no GPU needed)'
+        type: choice
+        default: build-only-flydsl
+        options:
+          - build-only-flydsl
+          - linux-flydsl-mi325-1
+          - linux-flydsl-mi355-1
+          - linux-flydsl-navi-2
 
 permissions:
   contents: read
@@ -23,7 +33,7 @@ env:
   DOCKER_IMAGE: "rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0"
   LLVM_BUILD_PROFILE: "amd-minimal"
   # Bump when the container or LLVM build environment changes incompatibly.
-  MLIR_CACHE_VERSION: "rocm7.2.4-ubuntu24.04-py3.12-v1"
+  MLIR_CACHE_VERSION: "manylinux228-rocm7.2-py3.12-v1"
   GITHUB_REPO_NAME: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
   GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.event.head_commit.id || github.sha }}
   # PRs compare against their exact base; main pushes compare against the previous commit.
@@ -131,7 +141,10 @@ jobs:
           && needs.check-signal.result == 'success'
           && (needs.detect-changes.result != 'success'
               || needs.detect-changes.outputs.code_changed == 'true') }}
-    runs-on: linux-flydsl-mi325-1
+    # Compile-only, so it runs on the CPU builder instead of holding a GPU
+    # runner. These are ARC scale sets: runs-on names exactly one, and the
+    # dispatch input is how to retarget when it is busy.
+    runs-on: ${{ inputs.prepare_runner || 'build-only-flydsl' }}
     timeout-minutes: 150
     steps:
       - name: Checkout code
@@ -276,6 +289,20 @@ jobs:
           path: mlir_install.tgz
           key: ${{ steps.keys.outputs.self }}
 
+      # Nothing publishes this tag; the fallback builds it the first time a
+      # runner needs it. Same step as build-whl.yaml.
+      - name: Pull or build manylinux Docker image
+        run: |
+          ROCM_VERSION=7.2
+          IMAGE="ghcr.io/rocm/flydsl-manylinux_2_28:rocm${ROCM_VERSION}-cp310-cp314"
+          if ! docker pull "${IMAGE}"; then
+            docker build \
+              --build-arg ROCM_VERSION="${ROCM_VERSION}" \
+              -t "${IMAGE}" \
+              - < flydsl-test/.github/workflows/Dockerfile.manylinux_2_28
+          fi
+          echo "MANYLINUX_IMAGE=${IMAGE}" >> $GITHUB_ENV
+
       - name: Start MLIR build container
         run: |
           docker ps -aq -f name=flydsl_mlir_cache | xargs -r docker stop | xargs -r docker rm || true
@@ -286,17 +313,25 @@ jobs:
             --security-opt seccomp=unconfined \
             -w /flydsl-test \
             --name flydsl_mlir_cache \
-            ${{ env.DOCKER_IMAGE }}
+            ${MANYLINUX_IMAGE}
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
 
+      # The image ships cmake, ninja, gcc, patchelf, git and ROCm at /opt/rocm.
       - name: Install MLIR build dependencies
         run: |
-          docker exec flydsl_mlir_cache bash -c "apt-get update && apt-get install -y cmake build-essential patchelf"
-          docker exec flydsl_mlir_cache bash -c "python3 -m pip install -U pip setuptools wheel"
-          docker exec flydsl_mlir_cache bash -c "python3 -m pip install ninja>=1.11.1"
-          docker exec flydsl_mlir_cache bash -c "if command -v rocm-sdk >/dev/null 2>&1; then rocm-sdk init; fi"
-          docker exec flydsl_mlir_cache bash -c "git config --global --add safe.directory /flydsl-test"
+          docker exec flydsl_mlir_cache bash -c '
+            for d in /opt/python/cp*; do
+              case "${d}" in *t) continue ;; esac
+              py="${d}/bin/python"
+              [ -x "${py}" ] || continue
+              ver=$("${py}" -c "import sys; print(f\"{sys.version_info.major}.{sys.version_info.minor}\")")
+              ln -sf "${py}" "/usr/local/bin/python${ver}"
+            done
+            ln -sf /usr/local/bin/python3.12 /usr/local/bin/python3
+          '
+          docker exec flydsl_mlir_cache bash -c "python3 -m pip install -q nanobind"
+          docker exec flydsl_mlir_cache bash -c "git config --global --add safe.directory '*'"
           sdk_root="$(docker exec flydsl_mlir_cache bash -c 'if command -v rocm-sdk >/dev/null 2>&1; then rocm-sdk path --root; elif [ -d /opt/rocm ]; then printf "/opt/rocm\n"; fi')"
           test -n "${sdk_root}"
           docker exec flydsl_mlir_cache test -d "${sdk_root}"
