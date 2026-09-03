@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-03T13:23:59Z",
+ "updated": "2026-09-03T14:36:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,52 @@
    "branch": "rchamber/flex_attention",
    "event": "pull_request",
    "title": "Add flex_attention (score_mod / mask_mod) on the generic flash-attention kernel",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33760444736",
    "created_at": "2026-09-03T13:19:11Z",
-   "updated_at": "2026-09-03T13:20:32Z",
+   "updated_at": "2026-09-03T14:34:17Z",
    "actor": "RichardChamberlain1",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-03T13:40:00Z",
+     "completed_at": "2026-09-03T13:56:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33760444736/job/100671667462",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-03T13:40:14Z",
+     "completed_at": "2026-09-03T14:15:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33760444736/job/100671667484",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-03T13:40:17Z",
+     "completed_at": "2026-09-03T14:31:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33760444736/job/100671667493"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-03T13:40:09Z",
+     "completed_at": "2026-09-03T14:34:16Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33760444736/job/100671667523"
+    }
+   ]
   },
   {
    "run_id": 33758073575,
