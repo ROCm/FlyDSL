@@ -8,8 +8,6 @@ import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
-from flydsl.expr.utils.arith import ArithValue
-from flydsl.expr.utils.arith import _to_raw as _raw
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from kernels.attention.flash_attn_utils import (
     DualwaveFp8GemmHelper,
@@ -367,10 +365,9 @@ def build_flash_attn_paged_fp8_module(
         l_row = loop_results[1]
         v_o = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
 
-        inv_l_rcp = rocdl.rcp(T.f32, _raw(l_row))
-        inv_l = ArithValue(fx.Float32(l_row) > ctx.c_zero_f).select(inv_l_rcp, ctx.c_zero_f)
+        inv_l = softmax_helper.safe_l_inv(l_row)
         if const_expr(traits.FP8_PV):
-            inv_l = ArithValue(inv_l) * ctx.vd_fp8
+            inv_l = inv_l * ctx.vd_fp8
         softmax_helper.scale_o(v_o, inv_l)
         rocdl.s_barrier()
         output_store.store_final_o(v_o, q_row)
@@ -958,10 +955,9 @@ def build_flash_attn_paged_fp8_module(
             # range; the combine kernel later applies w_s*l_s.
             # HIPREC folds v_descale into the bf16 vt scratch. The direct FP8
             # D128 path keeps raw V and applies its descale once at the end.
-            inv_l_rcp = rocdl.rcp(T.f32, _raw(l_row))
-            inv_l = ArithValue(fx.Float32(l_row) > ctx.c_zero_f).select(inv_l_rcp, ctx.c_zero_f)
+            inv_l = softmax_helper.safe_l_inv(l_row)
             if const_expr(traits.FP8_PV):
-                inv_l = ArithValue(inv_l) * ctx.vd_fp8
+                inv_l = inv_l * ctx.vd_fp8
             softmax_helper.scale_o(v_o, inv_l)
 
             # CLOSE the phase shift: one extra s_barrier on group A (complement of
