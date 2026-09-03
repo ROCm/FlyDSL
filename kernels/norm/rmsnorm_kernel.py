@@ -45,7 +45,6 @@ from kernels.norm.rmsnorm_common import store_scalar as _store_scalar
 from kernels.norm.rmsnorm_common import store_vec as _store_vec
 from kernels.norm.rmsnorm_common import to_elem_scalar as _to_elem_scalar
 from kernels.norm.rmsnorm_common import to_elem_vec as _to_elem_vec
-from kernels.norm.rmsnorm_common import to_elem_vec_rna as _to_elem_vec_rna
 from kernels.norm.rmsnorm_common import weight_vec_width as _weight_vec_width
 
 try:
@@ -108,7 +107,6 @@ def build_rmsnorm_module(
     OUTPUT_CACHE_MODIFIER = (
         2 if USE_GFX942_BF16_FAST_PATH and VEC_TILES > WARP_SIZE * FWD_THROUGHPUT_MAX_VEC_ITERS else 0
     )
-    USE_FAST_BF16_OUTPUT = USE_GFX942_BF16_FAST_PATH
 
     one_wave_vec_iters = (VEC_TILES + WARP_SIZE - 1) // WARP_SIZE if USE_VEC_N else 0
     THROUGHPUT_BLOCK_THREADS = WARP_SIZE if 0 < one_wave_vec_iters <= FWD_THROUGHPUT_MAX_VEC_ITERS else BLOCK_THREADS
@@ -330,15 +328,7 @@ def build_rmsnorm_module(
                     x = in_local[tile_i].to(fx.Float32)
 
                     y = (x * rrms) * g
-                    if const_expr(USE_FAST_BF16_OUTPUT):
-                        out_e = _to_elem_vec_rna(
-                            dtype_str,
-                            elem_dtype,
-                            USE_HW_CVT_PK_BF16_F32,
-                            y,
-                        )
-                    else:
-                        out_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
+                    out_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
                     _store_vec(output_copy_atom, VEC_WIDTH, elem_dtype, out_e, out_div, idx)
 
             if const_expr(TAIL_ELEMS > 0):
