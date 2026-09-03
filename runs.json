@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-03T05:43:22Z",
+ "updated": "2026-09-03T05:49:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "feature/qwenimage-vae-conv-tests",
    "event": "pull_request",
    "title": "[Flydsl] Add Qwen-Image VAE classic conv shapes to conv3d tests",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33719811519",
    "created_at": "2026-09-03T05:39:57Z",
-   "updated_at": "2026-09-03T05:40:29Z",
+   "updated_at": "2026-09-03T05:45:50Z",
    "actor": "huizzhan",
    "jobs": []
   },
