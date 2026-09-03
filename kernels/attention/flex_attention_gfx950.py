@@ -1881,7 +1881,7 @@ _flex_attn_compile_hints = {
 launch_flex_attn_gfx950.compile_hints = dict(_flex_attn_compile_hints)
 
 
-def flydsl_flex_attention_layout(
+def flydsl_flex_attention(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -1916,7 +1916,7 @@ def flydsl_flex_attention_layout(
     """
     arch = get_rocm_arch()
     if not arch.startswith("gfx950"):
-        raise RuntimeError(f"flex_attention_layout targets gfx950; got {arch!r}")
+        raise RuntimeError(f"flex_attention targets gfx950; got {arch!r}")
     if not (q.is_cuda and k.is_cuda and v.is_cuda):
         raise ValueError("q/k/v must be CUDA tensors")
     if q.dtype != k.dtype or q.dtype != v.dtype:
@@ -1993,7 +1993,7 @@ def flydsl_flex_attention_layout(
     return out
 
 
-def flydsl_flex_attention_layout_paged(
+def flydsl_flex_attention_paged(
     q: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
@@ -2023,7 +2023,7 @@ def flydsl_flex_attention_layout_paged(
     """
     arch = get_rocm_arch()
     if not arch.startswith("gfx950"):
-        raise RuntimeError(f"flex_attention_layout_paged targets gfx950; got {arch!r}")
+        raise RuntimeError(f"flex_attention_paged targets gfx950; got {arch!r}")
     if not (q.is_cuda and k_cache.is_cuda and v_cache.is_cuda):
         raise ValueError("q/k_cache/v_cache must be CUDA tensors")
     if q.dtype != k_cache.dtype or q.dtype != v_cache.dtype:
@@ -2103,5 +2103,5 @@ def flydsl_flex_attention_layout_paged(
 FLEX_DTYPE_FP8 = 4  # stub for test imports
 
 
-def flydsl_flex_attention_layout_fp8(*args, **kwargs):
+def flydsl_flex_attention_fp8(*args, **kwargs):
     raise NotImplementedError("FP8 flex attention is not supported in this build")

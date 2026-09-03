@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Correctness test for the layout-API flex/flash attention forward (gfx950).
 
-Compares flydsl_flex_attention_layout against torch scaled_dot_product_attention
+Compares flydsl_flex_attention against torch scaled_dot_product_attention
 (non-causal). gfx950-only (uses cdna4-era MFMA + the layout API); skipped elsewhere.
 
 Phase 0 kernel constraints (see the kernel's make_flex_attn_param): block_m=32,
@@ -34,8 +34,8 @@ from kernels.attention.flex_attention_gfx950 import (  # noqa: E402
     MASK_PREFIX_LM,
     MASK_SLIDING_WINDOW,
     SCORE_ALIBI,
-    flydsl_flex_attention_layout,
-    flydsl_flex_attention_layout_paged,
+    flydsl_flex_attention,
+    flydsl_flex_attention_paged,
 )
 
 _requires_gfx950 = pytest.mark.skipif(
@@ -90,7 +90,7 @@ def _sliding_window_mask(Sq, Skv, window, device):
 
 def _run(B, Sq, Skv, H, D, dtype_str, *, num_groups=8, accurate_softmax=True):
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, _DTYPES[dtype_str])
-    out = flydsl_flex_attention_layout(
+    out = flydsl_flex_attention(
         q,
         k,
         v,
@@ -118,7 +118,7 @@ _SHAPES = [
 @_requires_gfx950
 @pytest.mark.parametrize("dtype_str", ["bf16", "f16"])
 @pytest.mark.parametrize("B,Sq,Skv,H,D", _SHAPES)
-def test_flex_attention_layout(B, Sq, Skv, H, D, dtype_str):
+def test_flex_attention(B, Sq, Skv, H, D, dtype_str):
     max_err, cos = _run(B, Sq, Skv, H, D, dtype_str)
     assert max_err < 8e-2 and cos > 0.98, f"B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
 
@@ -126,7 +126,7 @@ def test_flex_attention_layout(B, Sq, Skv, H, D, dtype_str):
 @_requires_gfx950
 @pytest.mark.parametrize("dtype_str", ["bf16"])
 @pytest.mark.parametrize("B,Sq,Skv,H,D", _SHAPES)
-def test_flex_attention_layout_approx_softmax(B, Sq, Skv, H, D, dtype_str):
+def test_flex_attention_approx_softmax(B, Sq, Skv, H, D, dtype_str):
     _, cos = _run(B, Sq, Skv, H, D, dtype_str, accurate_softmax=False)
     assert cos > 0.95, f"approx B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: cos={cos}"
 
@@ -144,9 +144,9 @@ _MOD_SHAPES = [
 @_requires_gfx950
 @pytest.mark.parametrize("dtype_str", ["bf16", "f16"])
 @pytest.mark.parametrize("B,Sq,Skv,H,D", _MOD_SHAPES)
-def test_flex_attention_layout_causal(B, Sq, Skv, H, D, dtype_str):
+def test_flex_attention_causal(B, Sq, Skv, H, D, dtype_str):
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, _DTYPES[dtype_str])
-    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_type=MASK_CAUSAL)
+    out = flydsl_flex_attention(q, k, v, scale=scale, mask_type=MASK_CAUSAL)
     ref = _sdpa_ref(q, k, v, scale, is_causal=True)
     _check(out, ref, label=f"causal B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}")
 
@@ -154,10 +154,10 @@ def test_flex_attention_layout_causal(B, Sq, Skv, H, D, dtype_str):
 @_requires_gfx950
 @pytest.mark.parametrize("dtype_str", ["bf16", "f16"])
 @pytest.mark.parametrize("B,Sq,Skv,H,D", _MOD_SHAPES)
-def test_flex_attention_layout_alibi(B, Sq, Skv, H, D, dtype_str):
+def test_flex_attention_alibi(B, Sq, Skv, H, D, dtype_str):
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, _DTYPES[dtype_str])
     slope = 0.125
-    out = flydsl_flex_attention_layout(q, k, v, scale=scale, score_type=SCORE_ALIBI, score_alibi_slope=slope)
+    out = flydsl_flex_attention(q, k, v, scale=scale, score_type=SCORE_ALIBI, score_alibi_slope=slope)
     dev = q.device
     qi = torch.arange(Sq, device=dev).unsqueeze(1)
     ki = torch.arange(Skv, device=dev).unsqueeze(0)
@@ -169,31 +169,31 @@ def test_flex_attention_layout_alibi(B, Sq, Skv, H, D, dtype_str):
 @_requires_gfx950
 @pytest.mark.parametrize("dtype_str", ["bf16", "f16"])
 @pytest.mark.parametrize("B,Sq,Skv,H,D", _MOD_SHAPES)
-def test_flex_attention_layout_sliding_window(B, Sq, Skv, H, D, dtype_str):
+def test_flex_attention_sliding_window(B, Sq, Skv, H, D, dtype_str):
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, _DTYPES[dtype_str])
     window = 16
-    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_type=MASK_SLIDING_WINDOW, mask_window=window)
+    out = flydsl_flex_attention(q, k, v, scale=scale, mask_type=MASK_SLIDING_WINDOW, mask_window=window)
     ref = _sdpa_ref(q, k, v, scale, attn_mask=_sliding_window_mask(Sq, Skv, window, q.device))
     _check(out, ref, cos_tol=0.97, label=f"sw B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}")
 
 
 @_requires_gfx950
 @pytest.mark.parametrize("window", [33, 97])
-def test_flex_attention_layout_sliding_window_odd(window):
+def test_flex_attention_sliding_window_odd(window):
     """Non-block-aligned windows that straddle tile boundaries."""
     B, Sq, Skv, H, D = 2, 256, 256, 4, 128
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, torch.bfloat16)
-    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_type=MASK_SLIDING_WINDOW, mask_window=window)
+    out = flydsl_flex_attention(q, k, v, scale=scale, mask_type=MASK_SLIDING_WINDOW, mask_window=window)
     ref = _sdpa_ref(q, k, v, scale, attn_mask=_sliding_window_mask(Sq, Skv, window, q.device))
     _check(out, ref, cos_tol=0.97, label=f"sw_odd w={window}")
 
 
 @_requires_gfx950
 @pytest.mark.parametrize("Hq,Hkv", [(8, 1), (8, 2), (32, 8)])
-def test_flex_attention_layout_gqa(Hq, Hkv):
+def test_flex_attention_gqa(Hq, Hkv):
     B, Sq, Skv, D = 1, 256, 256, 128
     q, k, v, scale = _make_qkv(B, Sq, Skv, Hq, D, torch.bfloat16, Hkv=Hkv)
-    out = flydsl_flex_attention_layout(q, k, v, scale=scale, num_kv_heads=Hkv)
+    out = flydsl_flex_attention(q, k, v, scale=scale, num_kv_heads=Hkv)
     qh = q.permute(0, 2, 1, 3).float()
     kh = k.permute(0, 2, 1, 3).float().repeat_interleave(Hq // Hkv, dim=1)
     vh = v.permute(0, 2, 1, 3).float().repeat_interleave(Hq // Hkv, dim=1)
@@ -203,20 +203,20 @@ def test_flex_attention_layout_gqa(Hq, Hkv):
 
 @_requires_gfx950
 @pytest.mark.parametrize("num_groups", [4, 8])
-def test_flex_attention_layout_multi_group(num_groups):
+def test_flex_attention_multi_group(num_groups):
     B, Sq, Skv, H, D = 1, num_groups * 32, 128, 4, 128
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, torch.bfloat16)
-    out = flydsl_flex_attention_layout(q, k, v, scale=scale, num_groups=num_groups)
+    out = flydsl_flex_attention(q, k, v, scale=scale, num_groups=num_groups)
     ref = _sdpa_ref(q, k, v, scale)
     _check(out, ref, label=f"groups={num_groups}")
 
 
 @_requires_gfx950
-def test_flex_attention_layout_sliding_window_full():
+def test_flex_attention_sliding_window_full():
     """Window >= Skv: everything visible, should match dense."""
     B, Sq, Skv, H, D = 1, 256, 256, 4, 128
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, torch.bfloat16)
-    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_type=MASK_SLIDING_WINDOW, mask_window=Skv)
+    out = flydsl_flex_attention(q, k, v, scale=scale, mask_type=MASK_SLIDING_WINDOW, mask_window=Skv)
     ref = _sdpa_ref(q, k, v, scale, is_causal=True)
     _check(out, ref, label="sw_full")
 
@@ -224,10 +224,10 @@ def test_flex_attention_layout_sliding_window_full():
 @_requires_gfx950
 @pytest.mark.parametrize("dtype_str", ["bf16", "f16"])
 @pytest.mark.parametrize("B,Sq,Skv,H,D", _MOD_SHAPES)
-def test_flex_attention_layout_prefix_lm(B, Sq, Skv, H, D, dtype_str):
+def test_flex_attention_prefix_lm(B, Sq, Skv, H, D, dtype_str):
     prefix_len = max(1, Sq // 4)
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, _DTYPES[dtype_str])
-    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_type=MASK_PREFIX_LM, mask_prefix_len=prefix_len)
+    out = flydsl_flex_attention(q, k, v, scale=scale, mask_type=MASK_PREFIX_LM, mask_prefix_len=prefix_len)
     dev = q.device
     qi = torch.arange(Sq, device=dev).unsqueeze(1)
     ki = torch.arange(Skv, device=dev).unsqueeze(0)
@@ -240,10 +240,10 @@ def test_flex_attention_layout_prefix_lm(B, Sq, Skv, H, D, dtype_str):
 
 @_requires_gfx950
 @pytest.mark.parametrize("num_groups", [4, 8])
-def test_flex_attention_layout_causal_multi_group(num_groups):
+def test_flex_attention_causal_multi_group(num_groups):
     B, Sq, Skv, H, D = 1, num_groups * 32, num_groups * 32, 4, 128
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, torch.bfloat16)
-    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_type=MASK_CAUSAL, num_groups=num_groups)
+    out = flydsl_flex_attention(q, k, v, scale=scale, mask_type=MASK_CAUSAL, num_groups=num_groups)
     ref = _sdpa_ref(q, k, v, scale, is_causal=True)
     _check(out, ref, label=f"causal groups={num_groups}")
 
@@ -300,25 +300,25 @@ def _make_block_table(B, Skv, block_n, device):
 @_requires_gfx950
 @pytest.mark.parametrize("dtype_str", ["bf16", "f16"])
 @pytest.mark.parametrize("B,Sq,Skv,H,D", _PAGED_SHAPES)
-def test_flex_attention_layout_paged(B, Sq, Skv, H, D, dtype_str):
+def test_flex_attention_paged(B, Sq, Skv, H, D, dtype_str):
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, _DTYPES[dtype_str])
     block_n = 32
     ref = _sdpa_ref(q, k, v, scale)
     block_table, context_lens, _ = _make_block_table(B, Skv, block_n, q.device)
     k_cache, v_cache = _scatter_to_paged(k, v, block_n, block_table, context_lens)
-    out = flydsl_flex_attention_layout_paged(q, k_cache, v_cache, block_table, context_lens, scale=scale)
+    out = flydsl_flex_attention_paged(q, k_cache, v_cache, block_table, context_lens, scale=scale)
     _check(out, ref, max_err_tol=1e-1, cos_tol=0.97, label=f"paged B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}")
 
 
 @_requires_gfx950
 @pytest.mark.parametrize("B,Sq,Skv,H,D,dtype_str", _paged_causal_cases())
-def test_flex_attention_layout_paged_causal(B, Sq, Skv, H, D, dtype_str):
+def test_flex_attention_paged_causal(B, Sq, Skv, H, D, dtype_str):
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, _DTYPES[dtype_str])
     block_n = 32
     ref = _sdpa_ref(q, k, v, scale, is_causal=True)
     block_table, context_lens, _ = _make_block_table(B, Skv, block_n, q.device)
     k_cache, v_cache = _scatter_to_paged(k, v, block_n, block_table, context_lens)
-    out = flydsl_flex_attention_layout_paged(
+    out = flydsl_flex_attention_paged(
         q, k_cache, v_cache, block_table, context_lens, scale=scale, mask_type=MASK_CAUSAL
     )
     _check(out, ref, max_err_tol=1.2e-1, cos_tol=0.97, label=f"paged_causal B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}")
