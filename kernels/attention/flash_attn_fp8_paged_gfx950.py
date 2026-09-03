@@ -53,6 +53,7 @@ def build_flash_attn_paged_fp8_module(
     paged=False,
     kv_cache_layout="linear",
     paged_bn128=False,
+    paged_bn128_varlen=False,
     fp8_pv_segmented=False,
 ):
     """Build the gfx950 packed-varlen page-64 FP8 attention launcher."""
@@ -104,11 +105,12 @@ def build_flash_attn_paged_fp8_module(
         dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
         dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
         num_kv_splits=num_kv_splits,
-        varlen=False if paged_bn128 else varlen,
+        varlen=varlen if paged_bn128_varlen else False if paged_bn128 else varlen,
         cross_seqlen=cross_seqlen,
         paged=paged,
         kv_cache_layout=kv_cache_layout,
         fp8_pv_segmented=fp8_pv_segmented,
+        force_bn128=paged_bn128,
     )
     # Builder-level aliases used by SharedStorage and the launch/compile wrappers.
     SPLITK = traits.SPLITK
@@ -118,6 +120,7 @@ def build_flash_attn_paged_fp8_module(
     NUM_HEADS_Q = traits.NUM_HEADS_Q
     PAGED = traits.PAGED
     PAGED_BN128 = bool(paged_bn128)
+    PAGED_BN128_VARLEN = bool(paged_bn128_varlen)
     DEFAULT_STRIDE_Q_N = traits.DEFAULT_STRIDE_Q_N
     DEFAULT_STRIDE_O_N = traits.NUM_HEADS_Q * traits.V_HEAD_DIM
     DEFAULT_STRIDE_KV_N = traits.DEFAULT_STRIDE_KV_N
@@ -185,9 +188,21 @@ def build_flash_attn_paged_fp8_module(
         ctx.init_runtime_indices()
         ctx.init_lds(SharedStorage)
         ctx.init_thread_mapping()
-        if const_expr(traits.CAUSAL):
-            ctx.init_causal_lpt_order()
-        ctx.init_sequence_lengths()
+        if const_expr(PAGED_BN128_VARLEN):
+            ctx.init_sequence_lengths()
+            if const_expr(traits.CAUSAL):
+                num_q_blocks = (ctx.seqlen_q_v + traits.BLOCK_M - 1) // traits.BLOCK_M
+                active_q_block = ctx.q_block_idx < num_q_blocks
+                reversed_q_block = num_q_blocks - fx.Index(1) - ctx.q_block_idx
+                ctx.q_block_idx = active_q_block.select(reversed_q_block, ctx.q_block_idx)
+                ctx.q_start = ctx.q_block_idx * traits.BLOCK_M
+                ctx.q_gmem_elem_offset = (
+                    ctx.q_tok_base + ctx.q_start
+                ) * ctx.stride_q_n_v + ctx.q_head_idx * traits.HEAD_DIM
+        else:
+            if const_expr(traits.CAUSAL):
+                ctx.init_causal_lpt_order()
+            ctx.init_sequence_lengths()
         ctx.init_descriptors()
         ctx.init_atoms_and_lds_ptrs()
         ctx.init_dma_thread_offsets()
@@ -1106,9 +1121,10 @@ def build_flash_attn_paged_fp8_module(
         seq_len_kv = int(seq_len_kv)
         block_table_stride = int(block_table_stride)
         num_kv_pages = (seq_len_kv + traits.PAGE_SIZE - 1) // traits.PAGE_SIZE
-        if batch_size != 1 or num_kv_pages < 2 or num_kv_pages % 2 != 0:
+        if (not PAGED_BN128_VARLEN and batch_size != 1) or num_kv_pages < 2 or num_kv_pages % 2 != 0:
             raise ValueError(
-                "paged BN128 requires batch_size=1 and a positive even number "
+                "paged BN128 requires batch_size=1 unless compiled for packed varlen, "
+                "and a positive even number "
                 f"of KV pages; got batch_size={batch_size}, seq_len_kv={seq_len_kv}, "
                 f"page_size={traits.PAGE_SIZE}"
             )
