@@ -20,6 +20,7 @@ from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 from flydsl.expr.rocdl.universal import make_buffer_ptr
 from flydsl.expr.typing import T
 from kernels.common.mem_ops import buffer_atomic_add
+from kernels.common.tensor_shim import _run_compiled
 
 TILE_K = 32
 STAGES = 2
@@ -196,7 +197,10 @@ def _ncdhw_to_ndhwc(x, stream):
         return x.permute(0, 2, 3, 4, 1).contiguous()
     out = torch.empty((n, t, h, w, c), device=x.device, dtype=x.dtype)
     exe = compile_transpose_ncdhw_ndhwc(n, c, s)
-    exe(out, x, torch.cuda.current_stream() if stream is None else stream)
+    # Fast dispatch: the @flyc.jit wrapper re-marshals arguments on every call,
+    # which costs ~30 us of host time and dominates this kernel outright — the
+    # 12.6 MB transpose in the VAE bottleneck runs in 9 us.
+    _run_compiled(exe, out, x, torch.cuda.current_stream() if stream is None else stream)
     return out
 
 
@@ -778,7 +782,7 @@ def _conv3d_impl(
         exe = compile_conv3d_implicit(
             n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, sk, the_tile, the_wgm
         )
-        exe(y, x_ndhwc, w_packed, bias_arg, launch_stream)
+        _run_compiled(exe, y, x_ndhwc, w_packed, bias_arg, launch_stream)
         return y, sk
 
     if tile is not None:
