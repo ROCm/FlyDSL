@@ -428,7 +428,7 @@ MEASURED_TILES_GFX1100 = [
     pytest.param((4096, 4096, 4096), TILE_128x128x32, id="4096x4096x4096"),
 ]
 
-# Representative gfx1151 square shapes.
+# Representative gfx1151 measured shapes.
 MEASURED_TILES_GFX1151 = [
     pytest.param((256, 256, 256), TILE_32x64x64, id="256x256x256"),
     pytest.param((256, 256, 4096), TILE_32x64x64, id="256x256x4096"),
@@ -440,6 +440,10 @@ MEASURED_TILES_GFX1151 = [
     pytest.param((1536, 1536, 1536), TILE_256x256x32, id="1536x1536x1536"),
     pytest.param((2048, 2048, 2048), TILE_128x128x32, id="2048x2048x2048"),
     pytest.param((8192, 8192, 8192), TILE_128x128x32, id="8192x8192x8192"),
+    pytest.param((1024, 2048, 2048), TILE_256x256x32, id="1024x2048x2048"),
+    pytest.param((2048, 1024, 2048), TILE_256x256x32, id="2048x1024x2048"),
+    pytest.param((512, 4096, 4096), TILE_64x64x64, id="512x4096x4096"),
+    pytest.param((4096, 512, 4096), TILE_64x64x64, id="4096x512x4096"),
 ]
 
 # Square and skewed both ways, K on both sides of the ladder split, sizes from

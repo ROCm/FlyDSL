@@ -116,7 +116,11 @@ def _pick_tile_gfx1100(M, N, K):
 
 
 def _pick_tile_gfx1151(M, N, K):
-    """Return a tile for square GEMMs measured on gfx1151."""
+    """Return a tile for the measured gfx1151 shape families.
+
+    The 256x256 occupancy band extends to near-square shapes; other rectangular
+    shapes retain the gfx1100 fallback.
+    """
     feasible = dict(feasible_tiles(M, N, K))
     if not feasible:
         return _ladder_for(K)[0]
@@ -127,13 +131,15 @@ def _pick_tile_gfx1151(M, N, K):
     wgs_128 = feasible.get(TILE_128x128x32, 0)
     one_wave = 0.9 * GFX1151_NUM_CU <= wgs_128 <= 1.6 * GFX1151_NUM_CU
     deep_grid = wgs_128 >= 2.5 * GFX1151_NUM_CU
-    if M == N and (one_wave or deep_grid):
+    if one_wave or deep_grid:
         wgs_256 = feasible.get(TILE_256x256x32, 0)
-        if 32 <= wgs_256 <= GFX1151_NUM_CU:
+        near_square = max(M, N) <= 2 * min(M, N)
+        if near_square and 32 <= wgs_256 <= GFX1151_NUM_CU:
             return TILE_256x256x32
-        if M == 1024 and K >= 1024 and TILE_64x64x64 in feasible:
-            return TILE_64x64x64
-        return TILE_128x128x32
+        if M == N:
+            if M == 1024 and K >= 1024 and TILE_64x64x64 in feasible:
+                return TILE_64x64x64
+            return TILE_128x128x32
 
     return _pick_tile_gfx1100(M, N, K)
 
