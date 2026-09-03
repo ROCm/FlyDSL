@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-03T06:39:45Z",
+ "updated": "2026-09-03T06:43:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33723843587",
    "created_at": "2026-09-03T06:34:27Z",
-   "updated_at": "2026-09-03T06:36:31Z",
+   "updated_at": "2026-09-03T06:39:34Z",
    "actor": "huizzhan",
    "jobs": []
   },
@@ -156,11 +156,11 @@
    "branch": "codex/rdna-dynamic-buffer-bounds-check",
    "event": "pull_request",
    "title": "[DSL] Add dynamic RDNA buffer bounds checking",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33711959695",
    "created_at": "2026-09-03T03:36:15Z",
-   "updated_at": "2026-09-03T06:32:15Z",
+   "updated_at": "2026-09-03T06:37:43Z",
    "actor": "big-yellow-duck",
    "jobs": [
     {
@@ -193,9 +193,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-03T06:32:15Z",
+     "started_at": "2026-09-03T06:37:43Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33711959695/job/100547881409"
     }
