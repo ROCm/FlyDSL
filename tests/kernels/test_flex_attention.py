@@ -28,7 +28,7 @@ if not torch.cuda.is_available():
 import pytest  # noqa: E402
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.attention.flex_attention_layout_gfx950 import (  # noqa: E402
+from kernels.attention.flex_attention_gfx950 import (  # noqa: E402
     MASK_CAUSAL,
     MASK_NONE,
     MASK_PREFIX_LM,
