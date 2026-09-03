@@ -53,7 +53,7 @@ def build_flash_attn_paged_fp8_module(
     paged=False,
     kv_cache_layout="linear",
     paged_bn128=False,
-    v192_bf16_on_demand=False,
+    fp8_pv_segmented=False,
 ):
     """Build the gfx950 packed-varlen page-64 FP8 attention launcher."""
     gpu_arch = get_hip_arch()
@@ -108,7 +108,7 @@ def build_flash_attn_paged_fp8_module(
         cross_seqlen=cross_seqlen,
         paged=paged,
         kv_cache_layout=kv_cache_layout,
-        bf16_pv_on_demand=v192_bf16_on_demand,
+        fp8_pv_segmented=fp8_pv_segmented,
     )
     # Builder-level aliases used by SharedStorage and the launch/compile wrappers.
     SPLITK = traits.SPLITK
