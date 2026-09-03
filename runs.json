@@ -1,11 +1,41 @@
 {
  "schema": 1,
- "updated": "2026-09-03T03:36:43Z",
+ "updated": "2026-09-03T04:08:49Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 33711595655,
+   "run_id": 33711964013,
+   "pr": 1091,
+   "commit": "4cd46ac962c36819579400916acbdc4b9db64430",
+   "branch": "ci/prepare-mlir-manylinux-cpu",
+   "event": "pull_request",
+   "title": "[CI] accelerate prepare-mlir: run the CPU builder in the manylinux image",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33711964013",
+   "created_at": "2026-09-03T03:36:20Z",
+   "updated_at": "2026-09-03T03:41:21Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 33711959695,
    "pr": 1089,
+   "commit": "a1487262bdb64447a7c26e47a026e06afd2d477e",
+   "branch": "codex/rdna-dynamic-buffer-bounds-check",
+   "event": "pull_request",
+   "title": "[DSL] Add dynamic RDNA buffer bounds checking",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33711959695",
+   "created_at": "2026-09-03T03:36:15Z",
+   "updated_at": "2026-09-03T03:36:15Z",
+   "actor": "big-yellow-duck",
+   "jobs": []
+  },
+  {
+   "run_id": 33711595655,
+   "pr": null,
    "commit": "0f4296b943c6b271709b529230a6406548bc2bfe",
    "branch": "codex/rdna-dynamic-buffer-bounds-check",
    "event": "pull_request",
@@ -2508,114 +2538,6 @@
    "updated_at": "2026-08-28T11:02:18Z",
    "actor": "aoli26",
    "jobs": []
-  },
-  {
-   "run_id": 33159363986,
-   "pr": null,
-   "commit": "48338ca3eef11e5e4ef6b931880d9d90629d6049",
-   "branch": "gfx1250/bf16-gemm-opt-0828",
-   "event": "pull_request",
-   "title": "[gfx1250] Bf16 GEMM: Issue tdm prefetch earlier for wide tiles and add const init test",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33159363986",
-   "created_at": "2026-08-28T09:26:19Z",
-   "updated_at": "2026-08-28T10:40:26Z",
-   "actor": "aoli26",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-28T09:48:23Z",
-     "completed_at": "2026-08-28T10:40:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33159363986/job/98814529309"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-28T09:48:05Z",
-     "completed_at": "2026-08-28T10:04:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33159363986/job/98814529327",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-28T09:47:27Z",
-     "completed_at": "2026-08-28T10:39:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33159363986/job/98814529356"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-28T09:48:24Z",
-     "completed_at": "2026-08-28T10:40:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33159363986/job/98814529445"
-    }
-   ]
-  },
-  {
-   "run_id": 33154548148,
-   "pr": 971,
-   "commit": "9d6e73682013bfabcd573d87b6fd3ed2328c1d8e",
-   "branch": "gfx1250/gemm-opt-0805",
-   "event": "pull_request",
-   "title": "[gfx1250] Add A8W8/A8W4/A4W4 compute-bound GEMM",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33154548148",
-   "created_at": "2026-08-28T08:14:18Z",
-   "updated_at": "2026-08-30T11:21:53Z",
-   "actor": "aoli26",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-28T08:45:05Z",
-     "completed_at": "2026-08-28T11:08:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33154548148/job/98800426449",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-28T08:44:12Z",
-     "completed_at": "2026-08-28T08:58:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33154548148/job/98800426489",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-28T08:43:59Z",
-     "completed_at": "2026-08-30T11:21:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33154548148/job/98800426500"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-28T08:45:05Z",
-     "completed_at": "2026-08-28T10:34:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33154548148/job/98800426568",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
