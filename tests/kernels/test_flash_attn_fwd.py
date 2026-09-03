@@ -4579,6 +4579,20 @@ def test_paged_fp8_asymmetric_value_matches_torch(
 
 
 @_requires_gfx950
+def test_paged_fp8_d128_bn128_ragged_multiblock_matches_torch():
+    """The multi-batch BN128 path handles distinct causal offsets and inactive q-blocks."""
+    test_paged_fp8_asymmetric_value_matches_torch(
+        head_dim=128,
+        value_head_dim=128,
+        use_non_default_stream=False,
+        force_internal_copies=False,
+        query_lengths=[512, 128],
+        kv_lengths=[1024, 512],
+        block_table_rows=[list(range(15, -1, -1)), list(range(23, 15, -1)) + [0] * 8],
+    )
+
+
+@_requires_gfx950
 @pytest.mark.parametrize(
     ("head_dim", "value_head_dim"),
     [(128, 128), (192, 128), (192, 192)],

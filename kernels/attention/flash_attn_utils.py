@@ -1944,6 +1944,7 @@ def _make_dualwave_swp_fp8_traits(
     paged=False,
     kv_cache_layout="linear",
     fp8_pv_segmented=False,
+    force_bn128=None,
 ):
     """Build gfx950 DUALWAVE_SWP fp8 compile-time layout traits (dtype fixed to fp8)."""
     # Tile shape and wave geometry follow the gfx950 dual-wave 8-wave CTA.
@@ -1985,7 +1986,7 @@ def _make_dualwave_swp_fp8_traits(
     smem_v_line_stride = smem_linear_wave + smem_v_pad
     smem_k_tile_elems = smem_n_rpt * smem_d_rpt * smem_k_line_stride
     smem_v_tile_elems = smem_n_rpt * smem_d_rpt * smem_v_line_stride
-    bn128 = (num_kv_splits <= 1) and (not varlen)
+    bn128 = bool(force_bn128) if force_bn128 is not None else (num_kv_splits <= 1) and (not varlen)
     bn128_pf = bn128
     qreg = bn128_pf
     vdma = bn128_pf

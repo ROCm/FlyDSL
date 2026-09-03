@@ -396,6 +396,7 @@ def _build_paged_fp8(
     setprio: bool,
     enable_stagger: bool,
     use_bn128: bool,
+    paged_bn128_varlen: bool,
     fp8_pv_segmented: bool,
 ):
     """Build the gfx950 packed-varlen, vectorized page-64 FP8 launcher."""
@@ -419,6 +420,7 @@ def _build_paged_fp8(
         paged=True,
         kv_cache_layout="vectorized",
         paged_bn128=use_bn128,
+        paged_bn128_varlen=paged_bn128_varlen,
         fp8_pv_segmented=fp8_pv_segmented,
     )
 
@@ -678,7 +680,8 @@ def _flydsl_flash_attn_paged(
         )
         if paged_fp8:
             num_kv_pages = (skv + page_size - 1) // page_size
-            use_bn128 = fp8_head_dims == (128, 128) and B == 1 and num_kv_pages % 2 == 0
+            use_bn128 = fp8_head_dims == (128, 128) and num_kv_pages % 2 == 0
+            paged_bn128_varlen = use_bn128 and B > 1
             paged_setprio = dualwave_swp_setprio and D != 192
             fp8_pv_segmented = _use_paged_fp8_segmented_pv(fp8_head_dims)
             # The BF16 phase shift exposes H2 staging and probability-pack
@@ -695,6 +698,7 @@ def _flydsl_flash_attn_paged(
                 setprio=paged_setprio,
                 enable_stagger=paged_stagger,
                 use_bn128=use_bn128,
+                paged_bn128_varlen=paged_bn128_varlen,
                 fp8_pv_segmented=fp8_pv_segmented,
             )
         elif _paged_light_ok:
