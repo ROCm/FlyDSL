@@ -7,7 +7,6 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import const_expr, range_constexpr, rocdl
-from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from kernels.attention.flash_attn_utils import (
     DualwaveFp8GemmHelper,
@@ -17,15 +16,12 @@ from kernels.attention.flash_attn_utils import (
     DualwaveFp8QLoader,
     DualwaveFp8SoftmaxHelper,
     DualwaveFp8StoreHelper,
-    DualwaveSplitKCombineContext,
-    DualwaveSplitKCombineHelper,
     _make_dualwave_swp_fp8_traits,
     _sched_barrier_exp_pairs,
     _sched_barrier_pairs,
     _stagger_extra_barrier_if_one,
     _stagger_extra_barrier_if_zero,
     _waitcnt_vm_n,
-    dualwave_splitk_workspace_elems,  # noqa: F401
 )
 from kernels.common.kernels_common import dtype_to_elem_type
 from kernels.common.tensor_shim import _run_compiled
@@ -89,11 +85,6 @@ def build_flash_attn_paged_fp8_module(
     if paged_bn128 and (head_dim, value_head_dim) != (128, 128):
         raise RuntimeError("paged BN128 currently requires head_dim=value_head_dim=128")
     assert num_heads % num_kv_heads == 0
-    NUM_KV_SPLITS = int(num_kv_splits)
-    assert NUM_KV_SPLITS >= 1
-    if varlen and num_kv_splits and int(num_kv_splits) > 1:
-        raise ValueError("varlen is not supported together with num_kv_splits > 1")
-
     # All compile-time tile/layout constants live in the fp8 traits object.
     traits = _make_dualwave_swp_fp8_traits(
         num_heads,
@@ -118,7 +109,6 @@ def build_flash_attn_paged_fp8_module(
         batch_interleave_group=batch_interleave_group,
     )
     # Builder-level aliases used by SharedStorage and the launch/compile wrappers.
-    SPLITK = traits.SPLITK
     BLOCK_M = traits.BLOCK_M
     BLOCK_SIZE = traits.BLOCK_SIZE
     HEAD_DIM = traits.HEAD_DIM
@@ -214,7 +204,6 @@ def build_flash_attn_paged_fp8_module(
         ctx.init_dma_thread_offsets()
         ctx.init_descale()
         ctx.init_tile_bounds()
-        ctx.init_workspace_io()
 
         q_loader = DualwaveFp8QLoader(ctx)
         gemm_helper = DualwaveFp8GemmHelper(ctx)
@@ -436,7 +425,6 @@ def build_flash_attn_paged_fp8_module(
         ctx.init_dma_thread_offsets()
         ctx.init_descale()
         ctx.init_tile_bounds()
-        ctx.init_workspace_io()
 
         # fp8 pipeline helpers (logic lives in flash_attn_utils; the kernel drives the
         # software-pipeline schedule below and calls into these).
@@ -483,20 +471,12 @@ def build_flash_attn_paged_fp8_module(
             v_s_0 = gemm_helper.qk(v_k, q_all_wide)
             rocdl.sched_barrier(0)
             if const_expr(traits.CAUSAL):
-                if const_expr(SPLITK):
-                    v_s_0 = softmax_helper.causal_mask_prologue_if_needed(
-                        v_s_0, ctx.split_t0, (ctx.split_t0 + 1) * traits.BLOCK_N
-                    )
-                else:
-                    v_s_0 = softmax_helper.causal_mask_prologue_if_needed(v_s_0)
+                v_s_0 = softmax_helper.causal_mask_prologue_if_needed(v_s_0)
             else:
                 # Non-causal padding mask for the prologue tile too: for tiny seq_len
                 # tile 0 is the only real tile, so its keys >= seq_len must be masked
                 # here. Gated -> no-op once tile 0 is full (seq_len >= BLOCK_N).
-                if const_expr(SPLITK):
-                    v_s_0 = softmax_helper.seq_pad_mask_if_needed(v_s_0, ctx.split_t0)
-                else:
-                    v_s_0 = softmax_helper.seq_pad_mask_if_needed(v_s_0)
+                v_s_0 = softmax_helper.seq_pad_mask_if_needed(v_s_0)
             m_row_pro = softmax_helper.reduce_max(v_s_0)
             if const_expr(traits.CAUSAL):
                 # Floor fully-masked rows (-inf) to finite so exp2 yields 0, not NaN.
@@ -519,10 +499,7 @@ def build_flash_attn_paged_fp8_module(
 
             # ============================= Main loop =============================
             # Software-pipelined inner loop
-            if const_expr(SPLITK):
-                loop_lb = ctx.split_t0 + 3
-            else:
-                loop_lb = fx.Index(3)
+            loop_lb = fx.Index(3)
             loop_results = init_args
             for j, loop_args in range(
                 loop_lb,
@@ -951,8 +928,6 @@ def build_flash_attn_paged_fp8_module(
                 v_o = gemm_helper.pv(v_p_1, v_packs_e13, v_o)
 
             # Normalize by l_row; zero rows become zero instead of NaN.
-            # Split-K normalizes before packing so O_partial keeps useful mantissa
-            # range; the combine kernel later applies w_s*l_s.
             # HIPREC folds v_descale into the bf16 vt scratch. The direct FP8
             # D128 path keeps raw V and applies its descale once at the end.
             inv_l = softmax_helper.safe_l_inv(l_row)
@@ -970,47 +945,13 @@ def build_flash_attn_paged_fp8_module(
 
             # 128b stores fuse this lane and its half-wave partner, so each pair
             # covers 8 contiguous columns instead of two 64b stores.
-            if const_expr(not SPLITK):
-                if const_expr(traits.VARLEN):
-                    output_store.store_final_o_if_valid(v_o, q_row)
-                else:
-                    output_store.store_final_o(v_o, q_row)
+            if const_expr(traits.VARLEN):
+                output_store.store_final_o_if_valid(v_o, q_row)
             else:
-                output_store.store_splitk_partial_o(v_o, m_row, l_row, q_row)
+                output_store.store_final_o(v_o, q_row)
 
         if ctx.q_start < ctx.seqlen_q_v:
             _run_q_block()
-
-        if const_expr(SPLITK):
-            output_store.store_empty_split()
-
-    # Combine kernel: out = sum_s w_s * O_s / sum_s w_s * l_s, w_s = exp2(m_s - m_max).
-    # One wave row of 32 lanes covers a (b, h, s) row, 4 contiguous cols/lane.
-    COMBINE_BLOCK = 256
-    COMBINE_LANES_PER_ROW = traits.HEAD_DIM // 4
-    COMBINE_ROWS_PER_BLOCK = COMBINE_BLOCK // COMBINE_LANES_PER_ROW
-
-    @flyc.kernel(known_block_size=[COMBINE_BLOCK, 1, 1])
-    def flash_attn_splitk_combine_kernel(
-        O: fx.Tensor,  # noqa: E741
-        WS: fx.Tensor,
-        batch_size: fx.Int32,
-        seq_len: fx.Int32,
-        stride_q_n: fx.Int32,
-    ):
-        ctx = DualwaveSplitKCombineContext(traits, O, WS, batch_size, seq_len, stride_q_n)
-        ctx.init_types_and_constants()
-        ctx.init_runtime_indices()
-        ctx.init_thread_mapping(COMBINE_ROWS_PER_BLOCK, COMBINE_LANES_PER_ROW)
-        ctx.init_workspace()
-        ctx.init_descriptors()
-
-        combine = DualwaveSplitKCombineHelper(ctx)
-        m_s, l_s = combine.load_ml_rows()
-        m_max = combine.reduce_m_max(m_s)
-        acc, den = combine.accumulate_splits(m_s, l_s, m_max)
-        o_pack = combine.pack_output(acc, den)
-        combine.store_output(o_pack)
 
     @flyc.jit
     def launch_flash_attn_dualwave_swp(
@@ -1040,10 +981,7 @@ def build_flash_attn_paged_fp8_module(
         bs_idx = fx.Index(batch_size)
         sl_idx = fx.Index(seq_len)
         num_q_blocks = (sl_idx + BLOCK_M - 1) // BLOCK_M
-        if const_expr(SPLITK):
-            grid_z = bs_idx * NUM_KV_SPLITS
-        else:
-            grid_z = bs_idx
+        grid_z = bs_idx
 
         passthrough_entries = (
             [
@@ -1118,13 +1056,6 @@ def build_flash_attn_paged_fp8_module(
                 block=(BLOCK_SIZE, 1, 1),
                 stream=stream,
             )
-        if const_expr(SPLITK):
-            combine_rows = bs_idx * NUM_HEADS_Q * sl_idx
-            flash_attn_splitk_combine_kernel(O, DebugCounts, batch_size, seq_len, stride_o_n).launch(
-                grid=(combine_rows // COMBINE_ROWS_PER_BLOCK, 1, 1),
-                block=(COMBINE_BLOCK, 1, 1),
-                stream=stream,
-            )
 
     _dualwave_swp_compile_hints = {
         "fast_fp_math": True,
@@ -1176,7 +1107,6 @@ def build_flash_attn_paged_fp8_module(
         debug_counts=None,
         *,
         seq_len_kv=None,
-        workspace=None,
         cu_seqlens_q=None,
         cu_seqlens_kv=None,
         block_table=None,
@@ -1197,10 +1127,6 @@ def build_flash_attn_paged_fp8_module(
         # seq_len_kv defaults to seq_len (self-attention / equal Q,KV lengths).
         if seq_len_kv is None:
             seq_len_kv = seq_len
-        if SPLITK:
-            if workspace is None:
-                raise ValueError("num_kv_splits > 1 requires a fp32 workspace (see dualwave_splitk_workspace_elems)")
-            debug_counts = workspace
         if debug_counts is None:
             debug_counts = O
         # Dense launches still pass valid tensors for the (unused) cu_seqlens slots;
@@ -1264,7 +1190,6 @@ def build_flash_attn_paged_fp8_module(
         debug_counts=None,
         *,
         seq_len_kv=None,
-        workspace=None,
         cu_seqlens_q=None,
         cu_seqlens_kv=None,
         block_table=None,
@@ -1284,10 +1209,6 @@ def build_flash_attn_paged_fp8_module(
             head_dim_runtime = HEAD_DIM
         if seq_len_kv is None:
             seq_len_kv = seq_len
-        if SPLITK:
-            if workspace is None:
-                raise ValueError("num_kv_splits > 1 requires a fp32 workspace (see dualwave_splitk_workspace_elems)")
-            debug_counts = workspace
         if debug_counts is None:
             debug_counts = O
         if cu_seqlens_q is None:
