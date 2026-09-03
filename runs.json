@@ -1,8 +1,60 @@
 {
  "schema": 1,
- "updated": "2026-09-03T14:36:23Z",
+ "updated": "2026-09-03T15:32:36Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33770745793,
+   "pr": 931,
+   "commit": "b4660b0b150594eb41ffc01a4f33e7455dfb7162",
+   "branch": "rchamber/flex_attention",
+   "event": "pull_request",
+   "title": "Add flex_attention (score_mod / mask_mod) on the generic flash-attention kernel",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33770745793",
+   "created_at": "2026-09-03T15:06:40Z",
+   "updated_at": "2026-09-03T15:22:52Z",
+   "actor": "RichardChamberlain1",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-03T15:22:47Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33770745793/job/100704850884"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-03T15:22:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33770745793/job/100704851035"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-03T15:22:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33770745793/job/100704851041"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-03T15:22:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33770745793/job/100704851056"
+    }
+   ]
+  },
   {
    "run_id": 33760444736,
    "pr": 931,
@@ -352,7 +404,7 @@
   },
   {
    "run_id": 33723568282,
-   "pr": 1093,
+   "pr": null,
    "commit": "83e04a9b8910e2c968fd96a50be61672b1353a41",
    "branch": "ci/dedup-gfx950-runners",
    "event": "pull_request",
@@ -485,10 +537,10 @@
    "event": "pull_request",
    "title": "[Kernel][Perf] Add gfx1151 tile selection for RDNA3 GEMM",
    "status": "completed",
-   "conclusion": "action_required",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33720605367",
    "created_at": "2026-09-03T05:51:05Z",
-   "updated_at": "2026-09-03T05:51:05Z",
+   "updated_at": "2026-09-03T15:28:10Z",
    "actor": "tangzzycc",
    "jobs": []
   },
@@ -2264,50 +2316,6 @@
      "started_at": "2026-08-31T10:58:04Z",
      "completed_at": "2026-08-31T11:12:33Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33379508788/job/99464751087"
-    }
-   ]
-  },
-  {
-   "run_id": 33377511770,
-   "pr": null,
-   "commit": "be8147cda9d2748d239312c92bb321df6963eb96",
-   "branch": "ci/shared-gfx950-runner",
-   "event": "pull_request",
-   "title": "[CI] Run gfx950 validation on the MI355 and MI35x pools",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33377511770",
-   "created_at": "2026-08-31T09:24:29Z",
-   "updated_at": "2026-08-31T13:33:13Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-31T10:38:34Z",
-     "completed_at": "2026-08-31T10:49:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33377511770/job/99458738437"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-31T10:31:43Z",
-     "completed_at": "2026-08-31T13:33:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33377511770/job/99458738441"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-31T10:32:28Z",
-     "completed_at": "2026-08-31T11:22:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33377511770/job/99458738470",
-     "log_fetch_failed": true
     }
    ]
   }
