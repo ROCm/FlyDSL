@@ -1015,10 +1015,13 @@ def _init_dualwave_thread_mapping(ctx):
         linear_wg = fx.Index(gpu.block_idx.x) + fx.Index(gpu.block_idx.y) * fx.Index(traits.NUM_HEADS_Q)
         ctx.h_idx = linear_wg // num_q_blocks
         ctx.q_block_idx = linear_wg % num_q_blocks
-    elif const_expr(batch_interleave_group > 1):
+    elif const_expr(batch_interleave_group > 1 and not traits.SPLITK):
+        # Keep a bounded batch group head-fast so the final causal q-block
+        # occupies more CUs without abandoning K/V locality across all batches.
         linear_head_batch = fx.Index(gpu.block_idx.x)
         ctx.h_idx = linear_head_batch % traits.NUM_HEADS_Q
-        ctx.batch_idx = fx.Index(gpu.block_idx.z) * batch_interleave_group + linear_head_batch // traits.NUM_HEADS_Q
+        batch_in_group = linear_head_batch // traits.NUM_HEADS_Q
+        ctx.batch_idx = fx.Index(gpu.block_idx.z) * batch_interleave_group + batch_in_group
         ctx.q_block_idx = fx.Index(gpu.block_idx.y)
     else:
         ctx.h_idx = fx.Index(gpu.block_idx.x)
@@ -1027,10 +1030,10 @@ def _init_dualwave_thread_mapping(ctx):
         ctx.bz_idx = fx.Index(gpu.block_idx.z)
         ctx.batch_idx = ctx.bz_idx // traits.NUM_KV_SPLITS
         ctx.split_idx = ctx.bz_idx % traits.NUM_KV_SPLITS
-    elif const_expr(batch_interleave_group > 1):
+    elif const_expr(batch_interleave_group <= 1):
+        ctx.batch_idx = fx.Index(gpu.block_idx.z)
         ctx.split_idx = None
     else:
-        ctx.batch_idx = fx.Index(gpu.block_idx.z)
         ctx.split_idx = None
     ctx.tid = fx.Index(gpu.thread_idx.x)
 
@@ -2169,6 +2172,7 @@ class PagedDualwaveSwpFp8Traits:
     NEG_INF_F32_BITS: int
     LGKMCNT_0_ONLY: int
     XCD_SWIZZLE: bool = False
+    BATCH_INTERLEAVE_GROUP: int = 1
 
     @property
     def HEAD_DIM_V(self):
@@ -2220,6 +2224,7 @@ class PagedDualwaveSwpFp8Traits:
             self.QREG,
             self.VDMA,
             self.XCD_SWIZZLE,
+            self.BATCH_INTERLEAVE_GROUP,
         )
 
 
@@ -2255,6 +2260,7 @@ def _make_paged_dualwave_swp_fp8_traits(
     kv_cache_layout="linear",
     fp8_pv_segmented=False,
     force_bn128=None,
+    batch_interleave_group=1,
 ):
     """Build gfx950 DUALWAVE_SWP fp8 compile-time layout traits (dtype fixed to fp8)."""
     # Tile shape and wave geometry follow the gfx950 dual-wave 8-wave CTA.
@@ -2449,6 +2455,7 @@ def _make_paged_dualwave_swp_fp8_traits(
         NEG_INF_F32_BITS=0xFF800000,
         LGKMCNT_0_ONLY=0xC07F,
         XCD_SWIZZLE=bool(xcd_swizzle),
+        BATCH_INTERLEAVE_GROUP=int(batch_interleave_group),
     )
 
 

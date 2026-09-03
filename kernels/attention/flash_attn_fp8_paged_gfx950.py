@@ -55,6 +55,7 @@ def build_flash_attn_paged_fp8_module(
     paged_bn128=False,
     paged_bn128_varlen=False,
     fp8_pv_segmented=False,
+    batch_interleave_group=1,
 ):
     """Build the gfx950 packed-varlen page-64 FP8 attention launcher."""
     gpu_arch = get_hip_arch()
@@ -82,6 +83,11 @@ def build_flash_attn_paged_fp8_module(
 
     if num_kv_heads is None:
         num_kv_heads = num_heads
+    batch_interleave_group = int(batch_interleave_group)
+    if batch_interleave_group < 1:
+        raise ValueError(f"batch_interleave_group must be positive, got {batch_interleave_group}")
+    if batch_interleave_group > 1 and (paged_bn128 or head_dim != 192):
+        raise ValueError("batch interleaving is supported only by the generic paged D192 kernel")
     if paged_bn128 and (head_dim, value_head_dim) != (128, 128):
         raise RuntimeError("paged BN128 currently requires head_dim=value_head_dim=128")
     assert num_heads % num_kv_heads == 0
@@ -111,6 +117,7 @@ def build_flash_attn_paged_fp8_module(
         kv_cache_layout=kv_cache_layout,
         fp8_pv_segmented=fp8_pv_segmented,
         force_bn128=paged_bn128,
+        batch_interleave_group=batch_interleave_group,
     )
     # Builder-level aliases used by SharedStorage and the launch/compile wrappers.
     SPLITK = traits.SPLITK
@@ -121,6 +128,7 @@ def build_flash_attn_paged_fp8_module(
     PAGED = traits.PAGED
     PAGED_BN128 = bool(paged_bn128)
     PAGED_BN128_VARLEN = bool(paged_bn128_varlen)
+    BATCH_INTERLEAVE_GROUP = traits.BATCH_INTERLEAVE_GROUP
     DEFAULT_STRIDE_Q_N = traits.DEFAULT_STRIDE_Q_N
     DEFAULT_STRIDE_O_N = traits.NUM_HEADS_Q * traits.V_HEAD_DIM
     DEFAULT_STRIDE_KV_N = traits.DEFAULT_STRIDE_KV_N
@@ -416,6 +424,16 @@ def build_flash_attn_paged_fp8_module(
         ctx.init_lds(SharedStorage)
         ctx.init_thread_mapping()
         ctx.init_sequence_lengths()
+        if const_expr(traits.HEAD_DIM == 192 and traits.CAUSAL and traits.BATCH_INTERLEAVE_GROUP > 1):
+            # Issue the longest active q-blocks first within each batch group.
+            num_q_blocks = (ctx.seqlen_q_v + traits.BLOCK_M - 1) // traits.BLOCK_M
+            active_q_block = ctx.q_block_idx < num_q_blocks
+            reversed_q_block = num_q_blocks - fx.Index(1) - ctx.q_block_idx
+            ctx.q_block_idx = active_q_block.select(reversed_q_block, ctx.q_block_idx)
+            ctx.q_start = ctx.q_block_idx * traits.BLOCK_M
+            ctx.q_gmem_elem_offset = (
+                ctx.q_tok_base + ctx.q_start
+            ) * ctx.stride_q_n_v + ctx.q_head_idx * traits.HEAD_DIM
         ctx.init_descriptors()
         ctx.init_atoms_and_lds_ptrs()
         ctx.init_dma_thread_offsets()
@@ -1092,7 +1110,15 @@ def build_flash_attn_paged_fp8_module(
                 head_dim_runtime,
                 value_attrs=kernel_attrs,
             ).launch(
-                grid=(NUM_HEADS_Q, num_q_blocks, grid_z),
+                grid=(
+                    (
+                        NUM_HEADS_Q * traits.BATCH_INTERLEAVE_GROUP,
+                        num_q_blocks,
+                        grid_z // traits.BATCH_INTERLEAVE_GROUP,
+                    )
+                    if const_expr(traits.BATCH_INTERLEAVE_GROUP > 1)
+                    else (NUM_HEADS_Q, num_q_blocks, grid_z)
+                ),
                 block=(BLOCK_SIZE, 1, 1),
                 stream=stream,
             )
@@ -1131,6 +1157,13 @@ def build_flash_attn_paged_fp8_module(
         if block_table_stride < num_kv_pages:
             raise ValueError(
                 "paged BN128 block table has too few entries: " f"need {num_kv_pages}, got stride {block_table_stride}"
+            )
+
+    def _validate_batch_interleave_launch(batch_size):
+        if int(batch_size) % BATCH_INTERLEAVE_GROUP != 0:
+            raise ValueError(
+                "paged D192 batch size must be divisible by its interleave group: "
+                f"batch_size={int(batch_size)}, group={BATCH_INTERLEAVE_GROUP}"
             )
 
     def _launch(
@@ -1187,6 +1220,7 @@ def build_flash_attn_paged_fp8_module(
         if PAGED and block_table is O:
             raise ValueError("paged fp8 flash_attn requires block_table")
         _validate_paged_bn128_launch(batch_size, seq_len_kv, block_table_stride)
+        _validate_batch_interleave_launch(batch_size)
         # Per-tensor fp8 descales (shape-[1] fp32). The kernel only reads them on
         # the fp8 path; bf16/f16 launches pass O as an unused placeholder.
         if q_descale is None:
@@ -1269,6 +1303,7 @@ def build_flash_attn_paged_fp8_module(
         if block_table_stride is None:
             block_table_stride = 0
         _validate_paged_bn128_launch(batch_size, seq_len_kv, block_table_stride)
+        _validate_batch_interleave_launch(batch_size)
         if q_descale is None:
             q_descale = O
         if k_descale is None:
