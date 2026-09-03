@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-03T12:42:33Z",
+ "updated": "2026-09-03T13:01:52Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33758073575,
+   "pr": 931,
+   "commit": "f99608a0abb1ba22353c4da5c7e0c45483179f0a",
+   "branch": "rchamber/flex_attention",
+   "event": "pull_request",
+   "title": "Add flex_attention (score_mod / mask_mod) on the generic flash-attention kernel",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33758073575",
+   "created_at": "2026-09-03T12:55:47Z",
+   "updated_at": "2026-09-03T12:57:38Z",
+   "actor": "RichardChamberlain1",
+   "jobs": []
+  },
   {
    "run_id": 33751770374,
    "pr": 931,
@@ -78,11 +93,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-03T12:06:40Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33751132103/job/100641668018"
+     "completed_at": "2026-09-03T12:39:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33751132103/job/100641668018",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -2292,21 +2308,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 33371227239,
-   "pr": null,
-   "commit": "1c6b5af935c66e50fd2aba2e4b1824b44d9c22c0",
-   "branch": "convolution",
-   "event": "pull_request",
-   "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33371227239",
-   "created_at": "2026-08-31T08:05:04Z",
-   "updated_at": "2026-08-31T09:18:01Z",
-   "actor": "amd-nprotaso",
-   "jobs": []
   }
  ]
 }
