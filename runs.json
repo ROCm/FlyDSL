@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-03T03:06:30Z",
+ "updated": "2026-09-03T03:08:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "main",
    "event": "push",
    "title": "[CI] Bypass runner git-cache rewrite in sglang/vllm nightlies (#1090)",
-   "status": "pending",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33710068450",
    "created_at": "2026-09-03T03:05:18Z",
-   "updated_at": "2026-09-03T03:05:19Z",
+   "updated_at": "2026-09-03T03:07:29Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -25,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Dialect] Add FP8 support to GFX120X WMMA atom (#1074)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33710023316",
    "created_at": "2026-09-03T03:04:37Z",
-   "updated_at": "2026-09-03T03:05:17Z",
+   "updated_at": "2026-09-03T03:05:34Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -124,11 +124,12 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-03T01:56:28Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33701059511/job/100493917311"
+     "completed_at": "2026-09-03T03:06:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33701059511/job/100493917311",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
