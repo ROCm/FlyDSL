@@ -146,12 +146,7 @@ def _as_num_records(num_records_bytes) -> fx.Int64 | None:
     if num_records_bytes is None:
         return None
     if isinstance(num_records_bytes, int):
-        return fx.Int64(max(0, min(int(num_records_bytes), _MAX_NUM_RECORDS)))
-    if isinstance(num_records_bytes, ir.Value):
-        if isinstance(num_records_bytes.type, ir.IndexType):
-            num_records_bytes = _unwrap_value(std_arith.IndexCastOp(T.i64(), num_records_bytes).result)
-        elif num_records_bytes.type.width != 64:
-            num_records_bytes = _unwrap_value(std_arith.ExtSIOp(T.i64(), num_records_bytes).result)
+        num_records_bytes = max(0, min(int(num_records_bytes), _MAX_NUM_RECORDS))
     return fx.Int64(num_records_bytes)
 
 
@@ -171,12 +166,7 @@ def _add_soffset_bytes(byte_offset: ir.Value, soffset_bytes) -> ir.Value:
     """Fold ``soffset_bytes`` into the byte offset."""
     if soffset_bytes is None:
         return byte_offset
-    if isinstance(soffset_bytes, int):
-        soffset = _create_i32_constant(soffset_bytes)
-    else:
-        soffset = _unwrap_value(soffset_bytes)
-        if not isinstance(soffset.type, ir.IntegerType) or soffset.type.width != 32:
-            soffset = _unwrap_value(std_arith.IndexCastOp(T.i32(), soffset).result)
+    soffset = fx.Int32(soffset_bytes).ir_value()
     return _unwrap_value(std_arith.AddIOp(byte_offset, soffset).result)
 
 
@@ -185,8 +175,7 @@ def create_llvm_ptr(value, address_space: int = 0) -> ir.Value:
     """Create an LLVM pointer from an integer or index value."""
     value = _unwrap_value(value)
     if isinstance(value.type, ir.IndexType):
-        i64_type = T.i64()
-        value = _unwrap_value(std_arith.IndexCastOp(i64_type, value).result)
+        value = fx.Int64(value).ir_value()
     ptr_type = ir.Type.parse(f"!llvm.ptr<{address_space}>")
     return llvm.IntToPtrOp(ptr_type, value).result
 
@@ -212,7 +201,7 @@ def extract_base_index(tensor, address_space: int = 1) -> ir.Value:
     ptr_type = ir.Type.parse(f"!llvm.ptr<{address_space}>")
     ptr = _fly.extract_aligned_pointer_as_index(ptr_type, raw)
     i64_val = llvm.PtrToIntOp(ir.IntegerType.get_signless(64), ptr).result
-    return _unwrap_value(std_arith.IndexCastOp(ir.IndexType.get(), i64_val).result)
+    return fx.Index(i64_val).ir_value()
 
 
 @dsl_loc_tracing
@@ -243,8 +232,7 @@ def get_element_ptr(
     else:
         offset_val = _unwrap_value(byte_offset)
         if isinstance(offset_val.type, ir.IndexType):
-            i64_type = T.i64()
-            offset_val = _unwrap_value(std_arith.IndexCastOp(i64_type, offset_val).result)
+            offset_val = fx.Int64(offset_val).ir_value()
         elif not isinstance(offset_val.type, ir.IntegerType):
             raise TypeError("byte_offset must be int, index, or integer-typed MLIR value; " f"got {offset_val.type}")
 
@@ -472,9 +460,7 @@ def buffer_load(
     offset = _unwrap_value(offset)
 
     # Convert offset to i32 if needed
-    if not isinstance(offset.type, ir.IntegerType) or offset.type.width != 32:
-        op = std_arith.IndexCastOp(T.i32(), offset)
-        offset = _unwrap_value(op.result)
+    offset = fx.Int32(offset).ir_value()
 
     # IMPORTANT: Buffer load offset is in BYTES, not elements!
     # For vec4xf32, each element is 4 bytes, so multiply offset by 4
@@ -564,9 +550,7 @@ def buffer_store(
     offset = _unwrap_value(offset)
 
     # Convert offset to i32 if needed
-    if not isinstance(offset.type, ir.IntegerType) or offset.type.width != 32:
-        op = std_arith.IndexCastOp(T.i32(), offset)
-        offset = _unwrap_value(op.result)
+    offset = fx.Int32(offset).ir_value()
 
     # Get element size from data type
     data_type = data.type
