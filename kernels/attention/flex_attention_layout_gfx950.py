@@ -180,7 +180,7 @@ class AlibiScore(FlexMod):
         self.slope = slope
 
     def apply_score(self, score, b, h, q_idx, kv_idx):
-        bias = (kv_idx - q_idx).to(fx.Float32) * fx.Float32(self.slope)
+        bias = (kv_idx - q_idx).to(fx.Float32) * fx.Float32(self.slope) * fx.Float32(_LOG2E)
         return fx.Float32(score) + bias
 
 
