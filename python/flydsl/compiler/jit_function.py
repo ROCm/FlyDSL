@@ -1128,7 +1128,7 @@ def _build_call_state(sig, args_tuple, func_exe):
 
 
 class JitFunction:
-    def __init__(self, func: Callable, compile_hints: Optional[dict] = None):
+    def __init__(self, func: Callable, compile_hints: Optional[dict] = None, *, arch: str = ""):
         install_excepthook()
         # Same rationale as KernelFunction._original_func: ASTRewriter.transform
         # mutates `func.__code__` in place, after which the JIT cache walker
@@ -1150,6 +1150,7 @@ class JitFunction:
         self._original_func.__module__ = func.__module__
         self.func = ASTRewriter.transform(func)
         self.compile_hints = dict(compile_hints) if compile_hints is not None else {}
+        self._arch = arch
         self.manager_key = None
         self._manager_owner_cls = None
         self.cache_manager = None
@@ -1230,7 +1231,7 @@ class JitFunction:
             self._sig = full_sig.replace(parameters=params[1:])
         else:
             self._sig = full_sig
-        self._backend_target = get_backend().target  # frozen dataclass, stable
+        self._backend_target = get_backend(arch=self._arch).target  # frozen dataclass, stable
 
         # Definition-time annotation validity check (once per function, signature-only).
         warn_invalid_annotations(self._sig, context="@jit")
@@ -1491,7 +1492,7 @@ class JitFunction:
                     module.operation.attributes["gpu.container_module"] = ir.UnitAttr.get()
 
                     with ir.InsertionPoint(module.body), loc:
-                        backend = get_backend()
+                        backend = get_backend(self._backend_target.backend, arch=self._backend_target.arch)
                         gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets())
 
                         func_op = func.FuncOp(self.func.__name__, (ir_types, []))
@@ -1603,11 +1604,15 @@ def _ensure_stream_arg(jit_args: list) -> bool:
     return False
 
 
-def jit(func: Optional[Callable] = None) -> JitFunction:
-    """JIT decorator for host launcher functions."""
+def jit(func: Optional[Callable] = None, *, arch: str = "") -> JitFunction:
+    """JIT decorator for host launcher functions.
+
+    ``arch`` optionally fixes the compile target; an empty string uses backend
+    auto-detection and does not select the runtime device.
+    """
     if func is None:
-        return lambda f: JitFunction(f)
-    return JitFunction(func)
+        return lambda f: JitFunction(f, arch=arch)
+    return JitFunction(func, arch=arch)
 
 
 class CompiledFunction:

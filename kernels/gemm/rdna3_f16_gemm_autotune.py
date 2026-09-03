@@ -146,8 +146,9 @@ def pick_tile(M, N, K, arch=None):
     return _pick_tile_gfx1100(M, N, K)
 
 
-def _device_arch(device):
-    return str(torch.cuda.get_device_properties(device).gcnArchName).split(":", 1)[0]
+@functools.lru_cache(maxsize=None)
+def _device_arch(device_index):
+    return str(torch.cuda.get_device_properties(device_index).gcnArchName).split(":", 1)[0]
 
 
 _GRAPH_LAUNCHES = 20
@@ -181,7 +182,7 @@ def persistent_wgs(M, N, K, tile):
 
 
 @functools.lru_cache(maxsize=None)
-def _build(M, N, K, in_dtype, out_dtype, rounding, reg_m, reg_n, reg_k, waves_m, waves_n, lda, ldb, ldc):
+def _build(M, N, K, arch, in_dtype, out_dtype, rounding, reg_m, reg_n, reg_k, waves_m, waves_n, lda, ldb, ldc):
     opts = dict(tile_opts((reg_m, reg_n, reg_k, waves_m, waves_n)))
     # Padded strides and stagger both break L2 set camping; do not combine them.
     if lda > K or ldb > K:
@@ -202,6 +203,7 @@ def _build(M, N, K, in_dtype, out_dtype, rounding, reg_m, reg_n, reg_k, waves_m,
         ldb=ldb,
         ldc=ldc,
         persistent_wgs=persistent_wgs(M, N, K, (reg_m, reg_n, reg_k, waves_m, waves_n)),
+        arch=arch,
         **opts,
     )
     return launch_fn
@@ -234,7 +236,7 @@ def rdna3_gemm_dispatch(
     """
     if stream is None:
         stream = torch.cuda.current_stream(A.device)
-    arch = _device_arch(A.device) if arch is None else str(arch)
+    arch = _device_arch(A.device.index) if arch is None else str(arch)
     # Resolve before the cache key so a partially specified tile and the fully
     # spelled-out one it means share a single built module.
     tile = tuple(
@@ -244,7 +246,7 @@ def rdna3_gemm_dispatch(
     # Taken from the tensors rather than asked of the caller, so that handing in
     # a row-padded slice is all it takes to get the padded kernel.
     strides = (A.stride(0), B_T.stride(0), C.stride(0))
-    launch_fn = _build(M, N, K, in_dtype, out_dtype, rounding, *tile, *strides)
+    launch_fn = _build(M, N, K, arch, in_dtype, out_dtype, rounding, *tile, *strides)
     # A search calls this once per candidate and then once more on the winner,
     # so the last write is the config the tuner settled on.
     _resolved[_signature(M, N, K, arch, in_dtype, out_dtype, rounding, *strides)] = launch_fn
@@ -264,7 +266,7 @@ def _default_config(
     arch=None,
     **_kwargs,
 ):
-    arch = _device_arch(A.device) if arch is None and A is not None else arch
+    arch = _device_arch(A.device.index) if arch is None and A is not None else arch
     return _tile_config(pick_tile(M, N, K, arch=arch))
 
 
@@ -345,7 +347,7 @@ def rdna3_gemm_autotuned(
     M, K = A.shape
     N = B_T.shape[0]
     M, N, K = int(M), int(N), int(K)
-    arch = _device_arch(A.device)
+    arch = _device_arch(A.device.index)
 
     launch_fn = _resolved.get(
         _signature(M, N, K, arch, in_dtype, out_dtype, rounding, A.stride(0), B_T.stride(0), C.stride(0))

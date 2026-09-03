@@ -248,7 +248,7 @@ def test_f16_gemm_autotuned_matches_the_heuristic_path(M, N, K):
     C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
 
     strides = (A.stride(0), B_T.stride(0), C.stride(0))
-    arch = gemm_autotune._device_arch(A.device)
+    arch = gemm_autotune._device_arch(A.device.index)
     signature = gemm_autotune._signature(M, N, K, arch, "bf16", "bf16", "rn", *strides)
     gemm_autotune._resolved.pop(signature, None)
 
@@ -258,7 +258,7 @@ def test_f16_gemm_autotuned_matches_the_heuristic_path(M, N, K):
 
     resolved = gemm_autotune._resolved[signature]
     expected_tile = pick_tile(M, N, K, arch=arch)
-    assert resolved is gemm_autotune._build(M, N, K, "bf16", "bf16", "rn", *expected_tile, *strides)
+    assert resolved is gemm_autotune._build(M, N, K, arch, "bf16", "bf16", "rn", *expected_tile, *strides)
 
     C.zero_()
     gemm_autotune.rdna3_gemm_autotuned(C, A, B_T)
@@ -498,10 +498,61 @@ def test_default_config_uses_the_input_device_arch(monkeypatch, device_index, ar
         return SimpleNamespace(gcnArchName=arch)
 
     monkeypatch.setattr(torch.cuda, "get_device_properties", get_device_properties)
-    config = gemm_autotune._default_config(A=SimpleNamespace(device=device), M=768, N=768, K=768)
+    gemm_autotune._device_arch.cache_clear()
+    try:
+        config = gemm_autotune._default_config(A=SimpleNamespace(device=device), M=768, N=768, K=768)
 
-    assert seen == [device]
-    assert tuple(config.kwargs[field] for field in _TILE_FIELDS) == expected
+        assert seen == [device_index]
+        assert tuple(config.kwargs[field] for field in _TILE_FIELDS) == expected
+    finally:
+        gemm_autotune._device_arch.cache_clear()
+
+
+def test_device_arch_is_cached_by_device_index(monkeypatch):
+    _requires_rdna3()
+    from kernels.gemm import rdna3_f16_gemm_autotune as gemm_autotune
+
+    seen = []
+
+    def get_device_properties(device_index):
+        seen.append(device_index)
+        return SimpleNamespace(gcnArchName=("gfx1100", "gfx1151:sramecc-:xnack+")[device_index])
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", get_device_properties)
+    gemm_autotune._device_arch.cache_clear()
+
+    try:
+        assert gemm_autotune._device_arch(0) == "gfx1100"
+        assert gemm_autotune._device_arch(0) == "gfx1100"
+        assert gemm_autotune._device_arch(1) == "gfx1151"
+        assert seen == [0, 1]
+    finally:
+        gemm_autotune._device_arch.cache_clear()
+
+
+def test_build_cache_is_arch_specific(monkeypatch):
+    _requires_rdna3()
+    from kernels.gemm import rdna3_f16_gemm_autotune as gemm_autotune
+
+    seen = []
+
+    def create_module(*_args, arch=None, **_kwargs):
+        seen.append(arch)
+        return object(), None, None, None
+
+    monkeypatch.setattr(gemm_autotune, "create_wmma_gemm_module", create_module)
+    gemm_autotune._build.cache_clear()
+    args = (256, 256, 256, "bf16", "bf16", "rn", *TILE_64x64x64, 256, 256, 256)
+
+    try:
+        gfx1100 = gemm_autotune._build(args[0], args[1], args[2], "gfx1100", *args[3:])
+        gfx1151 = gemm_autotune._build(args[0], args[1], args[2], "gfx1151", *args[3:])
+
+        assert gfx1100 is gemm_autotune._build(args[0], args[1], args[2], "gfx1100", *args[3:])
+        assert gfx1100 is not gfx1151
+        assert seen == ["gfx1100", "gfx1151"]
+    finally:
+        gemm_autotune._build.cache_clear()
 
 
 @pytest.mark.parametrize("shape", SELECTION_SHAPES, ids=_shape_id)
@@ -547,6 +598,6 @@ def test_untuned_config_is_the_heuristic_tile(shape):
 
     M, N, K = shape
     A = torch.empty(0, device="cuda")
-    arch = gemm_autotune._device_arch(A.device)
+    arch = gemm_autotune._device_arch(A.device.index)
     config = _default_config(A=A, M=M, N=N, K=K)
     assert tuple(config.kwargs[field] for field in _TILE_FIELDS) == pick_tile(*shape, arch=arch)
