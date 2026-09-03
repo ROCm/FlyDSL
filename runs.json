@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-03T04:08:49Z",
+ "updated": "2026-09-03T04:49:42Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,51 @@
    "branch": "ci/prepare-mlir-manylinux-cpu",
    "event": "pull_request",
    "title": "[CI] accelerate prepare-mlir: run the CPU builder in the manylinux image",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33711964013",
    "created_at": "2026-09-03T03:36:20Z",
-   "updated_at": "2026-09-03T03:41:21Z",
+   "updated_at": "2026-09-03T04:18:36Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-03T04:20:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33711964013/job/100520905230"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-03T04:19:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33711964013/job/100520905254"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-03T04:19:36Z",
+     "completed_at": "2026-09-03T04:42:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33711964013/job/100520905275",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-03T04:18:35Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33711964013/job/100520905340"
+    }
+   ]
   },
   {
    "run_id": 33711959695,
