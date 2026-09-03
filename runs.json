@@ -1,57 +1,111 @@
 {
  "schema": 1,
- "updated": "2026-09-03T15:34:28Z",
+ "updated": "2026-09-03T16:26:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 33770745793,
-   "pr": 931,
-   "commit": "b4660b0b150594eb41ffc01a4f33e7455dfb7162",
-   "branch": "rchamber/flex_attention",
+   "run_id": 33775162399,
+   "pr": 1089,
+   "commit": "e649c87da2afb9728b576e8103c735e00810b972",
+   "branch": "codex/rdna-dynamic-buffer-bounds-check",
    "event": "pull_request",
-   "title": "Add flex_attention (score_mod / mask_mod) on the generic flash-attention kernel",
+   "title": "[DSL] Add dynamic RDNA buffer bounds checking",
    "status": "in_progress",
    "conclusion": null,
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33770745793",
-   "created_at": "2026-09-03T15:06:40Z",
-   "updated_at": "2026-09-03T15:22:52Z",
-   "actor": "RichardChamberlain1",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33775162399",
+   "created_at": "2026-09-03T15:51:53Z",
+   "updated_at": "2026-09-03T16:14:29Z",
+   "actor": "big-yellow-duck",
    "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
-     "started_at": "2026-09-03T15:22:47Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33770745793/job/100704850884"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
-     "started_at": "2026-09-03T15:22:45Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33770745793/job/100704851035"
-    },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
      "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-03T15:22:28Z",
+     "started_at": "2026-09-03T16:13:54Z",
      "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33770745793/job/100704851041"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33775162399/job/100722183997"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-03T16:14:12Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33775162399/job/100722184018"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
      "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-03T15:22:52Z",
+     "started_at": "2026-09-03T16:14:28Z",
      "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33770745793/job/100704851056"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33775162399/job/100722184061"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-03T16:14:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33775162399/job/100722184113"
+    }
+   ]
+  },
+  {
+   "run_id": 33770745793,
+   "pr": 931,
+   "commit": "b4660b0b150594eb41ffc01a4f33e7455dfb7162",
+   "branch": "rchamber/flex_attention",
+   "event": "pull_request",
+   "title": "Add flex/flash-attention forward kernel on the layout API (gfx950)",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33770745793",
+   "created_at": "2026-09-03T15:06:40Z",
+   "updated_at": "2026-09-03T16:24:59Z",
+   "actor": "RichardChamberlain1",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-03T15:22:47Z",
+     "completed_at": "2026-09-03T16:18:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33770745793/job/100704850884"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-03T15:22:45Z",
+     "completed_at": "2026-09-03T16:18:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33770745793/job/100704851035"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-03T15:22:28Z",
+     "completed_at": "2026-09-03T15:39:16Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33770745793/job/100704851041",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-03T15:22:52Z",
+     "completed_at": "2026-09-03T16:24:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33770745793/job/100704851056",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -61,7 +115,7 @@
    "commit": "ee54e1c29c4e63c8c719f6dd7ab41ce661f902dc",
    "branch": "rchamber/flex_attention",
    "event": "pull_request",
-   "title": "Add flex_attention (score_mod / mask_mod) on the generic flash-attention kernel",
+   "title": "Add flex/flash-attention forward kernel on the layout API (gfx950)",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33760444736",
@@ -115,7 +169,7 @@
    "commit": "f99608a0abb1ba22353c4da5c7e0c45483179f0a",
    "branch": "rchamber/flex_attention",
    "event": "pull_request",
-   "title": "Add flex_attention (score_mod / mask_mod) on the generic flash-attention kernel",
+   "title": "Add flex/flash-attention forward kernel on the layout API (gfx950)",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33758073575",
@@ -130,7 +184,7 @@
    "commit": "6ec190372dd7bf092b38d321bcc4fe6e06bbd416",
    "branch": "rchamber/flex_attention",
    "event": "pull_request",
-   "title": "Add flex_attention (score_mod / mask_mod) on the generic flash-attention kernel",
+   "title": "Add flex/flash-attention forward kernel on the layout API (gfx950)",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33751770374",
@@ -145,7 +199,7 @@
    "commit": "1f2c3bd6dd6814c523f291fc6b37d1ef5f6291cb",
    "branch": "rchamber/flex_attention",
    "event": "pull_request",
-   "title": "Add flex_attention (score_mod / mask_mod) on the generic flash-attention kernel",
+   "title": "Add flex/flash-attention forward kernel on the layout API (gfx950)",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33751547157",
@@ -216,7 +270,7 @@
    "commit": "a414513e66b6d8aae1164959ef840b9195f3db67",
    "branch": "rchamber/flex_attention",
    "event": "pull_request",
-   "title": "Add flex_attention (score_mod / mask_mod) on the generic flash-attention kernel",
+   "title": "Add flex/flash-attention forward kernel on the layout API (gfx950)",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33749691782",
@@ -231,7 +285,7 @@
    "commit": "4706f324dd6742d86f8892bf11598cd8c1d2e607",
    "branch": "rchamber/flex_attention",
    "event": "pull_request",
-   "title": "Add flex_attention (score_mod / mask_mod) on the generic flash-attention kernel",
+   "title": "Add flex/flash-attention forward kernel on the layout API (gfx950)",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33745734428",
@@ -246,7 +300,7 @@
    "commit": "a18224d52a88c79114a831ab0f258f6485a8e36f",
    "branch": "rchamber/flex_attention",
    "event": "pull_request",
-   "title": "Add flex_attention (score_mod / mask_mod) on the generic flash-attention kernel",
+   "title": "Add flex/flash-attention forward kernel on the layout API (gfx950)",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33740490425",
@@ -617,7 +671,7 @@
   },
   {
    "run_id": 33711959695,
-   "pr": 1089,
+   "pr": null,
    "commit": "a1487262bdb64447a7c26e47a026e06afd2d477e",
    "branch": "codex/rdna-dynamic-buffer-bounds-check",
    "event": "pull_request",
@@ -2262,60 +2316,6 @@
      "completed_at": "2026-08-31T17:57:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33397185598/job/99534348539",
      "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 33379508788,
-   "pr": 1081,
-   "commit": "55cb571e17ba577d756f0b118a459d516d7fa189",
-   "branch": "fix_mxf8",
-   "event": "pull_request",
-   "title": "add mxfp8 a8w8(blockscale&mx1*32)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33379508788",
-   "created_at": "2026-08-31T09:48:46Z",
-   "updated_at": "2026-09-01T07:27:55Z",
-   "actor": "solinzby1",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-31T10:58:34Z",
-     "completed_at": "2026-08-31T12:20:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33379508788/job/99464750955",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-01T07:04:52Z",
-     "completed_at": "2026-09-01T07:27:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33379508788/job/99464750993"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-31T10:58:59Z",
-     "completed_at": "2026-08-31T11:48:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33379508788/job/99464751027",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-31T10:58:04Z",
-     "completed_at": "2026-08-31T11:12:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33379508788/job/99464751087"
     }
    ]
   }
