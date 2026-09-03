@@ -117,7 +117,7 @@ class CausalMask(FlexMod):
 
     def kv_range(self, q_min_wg, q_max_wg, n_kv_tiles, block_n):
         raw_hi = (q_max_wg + fx.Int32(block_n)) // fx.Int32(block_n)
-        kv_hi = fx.Int32(arith.minsi(raw_hi.ir_value(), fx.Int32(n_kv_tiles).ir_value()))
+        kv_hi = fx.min(raw_hi, fx.Int32(n_kv_tiles))
         return fx.Int32(0), kv_hi
 
     def tile_needs_mask(self, kv_tile_idx, q_idx, block_n):
@@ -137,9 +137,9 @@ class SlidingWindowMask(FlexMod):
 
     def kv_range(self, q_min_wg, q_max_wg, n_kv_tiles, block_n):
         raw_hi = (q_max_wg + fx.Int32(block_n)) // fx.Int32(block_n)
-        kv_hi = fx.Int32(arith.minsi(raw_hi.ir_value(), fx.Int32(n_kv_tiles).ir_value()))
+        kv_hi = fx.min(raw_hi, fx.Int32(n_kv_tiles))
         raw_lo = (q_min_wg - fx.Int32(self.window)) // fx.Int32(block_n)
-        kv_lo = fx.Int32(arith.maxsi(raw_lo.ir_value(), fx.Int32(0).ir_value()))
+        kv_lo = fx.max(raw_lo, fx.Int32(0))
         return kv_lo, kv_hi
 
     def tile_needs_mask(self, kv_tile_idx, q_idx, block_n):
@@ -164,7 +164,7 @@ class PrefixLMMask(FlexMod):
 
     def kv_range(self, q_min_wg, q_max_wg, n_kv_tiles, block_n):
         raw_hi = (q_max_wg + fx.Int32(block_n)) // fx.Int32(block_n)
-        kv_hi = fx.Int32(arith.minsi(raw_hi.ir_value(), fx.Int32(n_kv_tiles).ir_value()))
+        kv_hi = fx.min(raw_hi, fx.Int32(n_kv_tiles))
         return fx.Int32(0), kv_hi
 
     def tile_needs_mask(self, kv_tile_idx, q_idx, block_n):
@@ -460,7 +460,7 @@ def _permlane32_reduce(x, mode):
     lhs = fx.Float32(_arith.bitcast(T.f32, lhs_i32))
     rhs = fx.Float32(_arith.bitcast(T.f32, rhs_i32))
     if mode == "max":
-        return lhs.maximumf(rhs)
+        return fx.max(lhs, rhs)
     else:
         return lhs.addf(rhs, fastmath=_FM)
 
@@ -1098,9 +1098,9 @@ def flex_attn_fwd_gfx950_kernel(
             s_out = s_elems
         tile_max = s_out[0]
         for i in range_constexpr(1, n_c):
-            tile_max = tile_max.maximumf(s_out[i])
+            tile_max = fx.max(tile_max, s_out[i])
         tile_max = _permlane32_reduce(tile_max, "max")
-        m_new = m_i_in[0].maximumf(tile_max)
+        m_new = fx.max(m_i_in[0], tile_max)
         corr_scalar = _hw_exp2(m_i_in[0] - m_new)
         return corr_scalar, s_out, m_new
 
@@ -1235,7 +1235,7 @@ def flex_attn_fwd_gfx950_kernel(
         _chunk = (_total_tiles + fx.Int32(_num_kv_splits - 1)) // fx.Int32(_num_kv_splits)
         _kv_lo = _kv_lo + split_idx * _chunk
         _kv_hi_split = _kv_lo + _chunk
-        _kv_hi = fx.Int32(arith.minsi(_kv_hi_split.ir_value(), _kv_hi.ir_value()))
+        _kv_hi = fx.min(_kv_hi_split, _kv_hi)
     rocdl.s_barrier()
     rocdl.s_barrier()
 
@@ -1579,7 +1579,7 @@ def flex_attn_fwd_gfx950_kernel(
     # O normalization: divide each v16f32 by l_i[0].
     # Guard against fully-masked rows (l_i == 0) producing NaN.
     if const_expr(flex_mod.needs_safe_norm):
-        _safe_l = l_i[0].maximumf(fx.Float32(1e-12))
+        _safe_l = fx.max(l_i[0], fx.Float32(1e-12))
         inv_l = fx.Float32(rocdl.rcp(T.f32, _safe_l.ir_value()))
     else:
         inv_l = fx.Float32(rocdl.rcp(T.f32, l_i[0].ir_value()))
@@ -1736,7 +1736,7 @@ def flex_splitk_combine_kernel(
     for s in range_constexpr(num_splits):
         ml_off = fx.Int32(s) * _split_ml_stride + global_row * fx.Int32(2)
         m_s = fx.Float32(fx.ptr_load(ws_ml_it + fx.Int32(ml_off)))
-        m_max = m_max.maximumf(m_s)
+        m_max = fx.max(m_max, m_s)
 
     # Second pass: weighted accumulate O and denominator
     Vec = fx.Vector
@@ -1756,7 +1756,7 @@ def flex_splitk_combine_kernel(
         den = den + w_s
 
     # Normalize and store
-    inv_den = fx.Float32(1.0) / den.maximumf(fx.Float32(1e-12))
+    inv_den = fx.Float32(1.0) / fx.max(den, fx.Float32(1e-12))
     inv_vec = Vec.from_elements([inv_den], fx.Float32).broadcast_to(4)
     result = acc * inv_vec
 
