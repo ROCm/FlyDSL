@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-09-03T09:32:50Z",
+ "updated": "2026-09-03T09:45:52Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33740490425,
+   "pr": 931,
+   "commit": "a18224d52a88c79114a831ab0f258f6485a8e36f",
+   "branch": "rchamber/flex_attention",
+   "event": "pull_request",
+   "title": "Add flex_attention (score_mod / mask_mod) on the generic flash-attention kernel",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33740490425",
+   "created_at": "2026-09-03T09:44:15Z",
+   "updated_at": "2026-09-03T09:44:39Z",
+   "actor": "RichardChamberlain1",
+   "jobs": []
+  },
+  {
+   "run_id": 33740426417,
+   "pr": 1069,
+   "commit": "425f1c1cde816d13742a9ff8eb3a23d8f73ab73c",
+   "branch": "feature/qwenimage-vae-conv-tests",
+   "event": "pull_request",
+   "title": "[Flydsl] Add Qwen-Image VAE classic conv shapes to conv3d tests",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33740426417",
+   "created_at": "2026-09-03T09:43:34Z",
+   "updated_at": "2026-09-03T09:43:37Z",
+   "actor": "huizzhan",
+   "jobs": []
+  },
+  {
+   "run_id": 33740358075,
+   "pr": 1069,
+   "commit": "124b9e2671c75ccb52d943f4bd9ddebc902dee5d",
+   "branch": "feature/qwenimage-vae-conv-tests",
+   "event": "pull_request",
+   "title": "[Flydsl] Add Qwen-Image VAE classic conv shapes to conv3d tests",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33740358075",
+   "created_at": "2026-09-03T09:42:50Z",
+   "updated_at": "2026-09-03T09:43:37Z",
+   "actor": "huizzhan",
+   "jobs": []
+  },
   {
    "run_id": 33733599147,
    "pr": 1015,
@@ -2372,168 +2417,6 @@
      "completed_at": "2026-08-31T08:34:44Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33353867337/job/99403545391",
      "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 33343144185,
-   "pr": null,
-   "commit": "05d6f49bf3184b537c48ce961e6ed4c0915ba8a7",
-   "branch": "feat/gfx950-paged-attention-vllm-kv-layouts",
-   "event": "pull_request",
-   "title": "Support vLLM paged KV cache layouts on the gfx950 attention kernel",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33343144185",
-   "created_at": "2026-08-30T23:57:07Z",
-   "updated_at": "2026-09-01T09:51:13Z",
-   "actor": "akii96",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-01T09:50:55Z",
-     "completed_at": "2026-09-01T09:51:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33343144185/job/99812397172"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-31T00:12:06Z",
-     "completed_at": "2026-08-31T01:31:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33343144185/job/99812398109",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-31T00:11:56Z",
-     "completed_at": "2026-08-31T00:22:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33343144185/job/99812398151"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-31T00:12:08Z",
-     "completed_at": "2026-08-31T02:09:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33343144185/job/99812398363",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 33316875801,
-   "pr": null,
-   "commit": "84a50c785e51f538e9d03bd6c15dd0c993bea49d",
-   "branch": "jli/gfx1250/fix-mma-atom",
-   "event": "pull_request",
-   "title": "[WIP][Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33316875801",
-   "created_at": "2026-08-30T14:26:35Z",
-   "updated_at": "2026-09-01T07:04:20Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-30T15:15:19Z",
-     "completed_at": "2026-08-30T16:03:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33316875801/job/99277724177",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-01T07:04:12Z",
-     "completed_at": "2026-09-01T07:04:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33316875801/job/99277724186"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-30T15:15:19Z",
-     "completed_at": "2026-08-30T16:35:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33316875801/job/99277724195",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-30T15:15:06Z",
-     "completed_at": "2026-08-30T15:26:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33316875801/job/99277724208"
-    }
-   ]
-  },
-  {
-   "run_id": 33307430832,
-   "pr": null,
-   "commit": "a7d7c4a9923309d32837c8bbef4b5ff191dbfda0",
-   "branch": "main",
-   "event": "push",
-   "title": "[gfx1250] Bf16 GEMM: Issue tdm prefetch earlier for wide tiles and ad\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33307430832",
-   "created_at": "2026-08-30T10:50:06Z",
-   "updated_at": "2026-08-31T03:26:44Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-30T11:33:05Z",
-     "completed_at": "2026-08-30T13:44:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33307430832/job/99250939241",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-30T11:31:49Z",
-     "completed_at": "2026-08-31T03:26:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33307430832/job/99250939251"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-30T11:32:32Z",
-     "completed_at": "2026-08-30T13:09:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33307430832/job/99250939269",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-08-30T11:32:23Z",
-     "completed_at": "2026-08-30T11:47:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33307430832/job/99250939316"
     }
    ]
   }
