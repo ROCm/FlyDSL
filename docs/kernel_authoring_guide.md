@@ -250,12 +250,10 @@ from flydsl.expr import rocdl
 # Buffer tensor — wraps a Tensor with AMD buffer resource descriptor
 A_buf = rocdl.make_buffer_tensor(A)
 
-# RDNA edge tile — select checked raw-buffer accesses for a dynamic predicate
-edge_tile = tile_start + tile_size > problem_size
+# RDNA bounded buffer — supplying the byte extent enables hardware OOB checks
 A_buf = rocdl.make_buffer_tensor(
     A,
     num_records_bytes=problem_size * element_bytes,
-    bounds_check=edge_tile,
 )
 
 # MFMA MMA atom constructor (CDNA3/CDNA4) — returns MmaAtomCDNA3_MFMAType
@@ -267,11 +265,10 @@ copy_op = rocdl.BufferCopy64b()    # 64-bit buffer copy
 copy_op = rocdl.BufferCopy32b()    # 32-bit buffer copy
 ```
 
-On RDNA, `bounds_check=True` selects the raw-buffer descriptor mode where
-out-of-range reads return zero and writes are suppressed. The argument may also
-be a dynamic, workgroup-uniform FlyDSL Boolean as shown above, so complete tiles
-retain the default unchecked descriptor while a ragged edge tile is protected.
-`num_records_bytes` must describe the valid allocation extent in bytes.
+On RDNA, supplying `num_records_bytes` selects the raw-buffer descriptor mode
+where out-of-range reads return zero and writes are suppressed. The byte count
+may be dynamic. Omitting it keeps the default unchecked descriptor; passing
+`max_size=False` derives the count from the tensor layout and enables checking.
 
 See [gfx1250 WMMA & TDM atoms](#gfx1250-wmma-tdm-atoms-wave32) below for the
 gfx1250 WMMA (incl. MX-scaled) MMA atoms and the TDM async copy atom.

@@ -226,25 +226,22 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
     )
 
 
-def make_buffer_ptr(ptr: Pointer, num_records_bytes=None, *, bounds_check=False):
+def make_buffer_ptr(ptr: Pointer, num_records_bytes=None):
     """Construct a new buffer-resource (``BufferDesc``) pointer from a global
     pointer, for hardware OOB-checked loads / stores.
 
-    ``num_records_bytes`` is the descriptor byte count.  When ``None``
-    (default) it falls back to the max size ``0xFFFFFFFF``.
-
-    On RDNA, ``bounds_check=True`` selects descriptor ``OOB_SELECT=3`` so a
-    raw buffer access whose byte offset is outside ``num_records_bytes`` is
-    suppressed. A dynamic FlyDSL Boolean predicate is also accepted, allowing
-    a tiled kernel to enable checking only for edge workgroups. The default
-    preserves the historical ``OOB_SELECT=2`` behavior used by kernels that
-    prove their accesses are in bounds.
+    ``num_records_bytes`` is the descriptor byte count. When supplied, RDNA
+    selects descriptor ``OOB_SELECT=3`` so a raw buffer access outside that
+    bound is suppressed. When ``None`` (default), the descriptor uses the max
+    size ``0xFFFFFFFF`` and preserves the historical unchecked
+    ``OOB_SELECT=2`` behavior.
     """
     if not is_generic_address_space(ptr.address_space, AddressSpace.Global):
         raise ValueError(f"make_buffer_ptr requires a global-address-space pointer, got {ptr.address_space}")
 
     elem_ty = ptr.element_type
 
+    check_bounds = num_records_bytes is not None
     if num_records_bytes is None:
         num_records_bytes = Int64(0xFFFFFFFF)
     elif not isinstance(num_records_bytes, Int64):
@@ -257,15 +254,7 @@ def make_buffer_ptr(ptr: Pointer, num_records_bytes=None, *, bounds_check=False)
     flags = (7 << 12) | (4 << 15)
     if is_rdna_arch(arch):
         flags |= 1 << 24  # reserved bit, must be 1 on RDNA
-        if isinstance(bounds_check, bool):
-            flags |= (3 if bounds_check else 2) << 28
-        else:
-            # A dynamic, workgroup-uniform predicate lets a tiled kernel use
-            # checked descriptors only for its ragged edge workgroups.
-            flags = Int32(flags) | bounds_check.select(
-                Int32(3 << 28),
-                Int32(2 << 28),
-            )
+        flags |= (3 if check_bounds else 2) << 28
 
     buf_ptr_ty = PointerType.get(
         elem_ty=elem_ty.ir_type,
@@ -288,17 +277,17 @@ def make_buffer_tensor(
     max_size: bool = True,
     *,
     num_records_bytes=None,
-    bounds_check=False,
 ) -> Tensor:
     """Construct a new buffer-resource-backed tensor from a global-pointer
     tensor, for hardware OOB-checked loads / stores and buffer_copy atoms
     (CDNA buffer copy); layout is unchanged. For the gfx1250 TDM DMA use
     :func:`make_tdm_atom` instead — TDM needs a raw VA, not a buffer resource.
 
-    ``max_size=True`` (default) sets the descriptor to ``0xFFFFFFFF``.
-    Pass ``num_records_bytes`` when the byte count is a compile-time
-    constant (folds to a constant in IR).  Otherwise with ``max_size=False``
-    it is derived at runtime from ``cosize(layout) * elem_bytes``.
+    ``max_size=True`` (default) leaves RDNA bounds checking disabled and sets
+    the descriptor size to ``0xFFFFFFFF``. Pass ``num_records_bytes`` to enable
+    checking against an explicit byte count. Otherwise, with
+    ``max_size=False``, the byte count is derived at runtime from
+    ``cosize(layout) * elem_bytes`` and checking is enabled.
     """
     elem_ty = tensor.element_type
 
@@ -313,11 +302,7 @@ def make_buffer_tensor(
         else:
             num_records_bytes = Int64((get_scalar(cosize(layout)) * elem_bits + 7) // 8)
 
-    buf_ptr = make_buffer_ptr(
-        ptr,
-        num_records_bytes=num_records_bytes,
-        bounds_check=bounds_check,
-    )
+    buf_ptr = make_buffer_ptr(ptr, num_records_bytes=num_records_bytes)
     return make_view(buf_ptr, layout)
 
 
