@@ -4592,6 +4592,41 @@ def test_paged_fp8_d128_bn128_ragged_multiblock_matches_torch():
     )
 
 
+@pytest.mark.parametrize(
+    ("batch_size", "head_dims", "expected"),
+    [
+        (1, (192, 128), 1),
+        (2, (192, 128), 2),
+        (8, (192, 128), 8),
+        (16, (192, 128), 8),
+        (32, (192, 128), 8),
+        (16, (192, 192), 8),
+        (32, (192, 192), 1),
+        (24, (192, 192), 1),
+        (12, (192, 128), 4),
+        (3, (192, 128), 1),
+        (8, (128, 128), 1),
+    ],
+)
+def test_paged_fp8_d192_batch_interleave_group(batch_size, head_dims, expected):
+    assert flash_attn_interface._paged_fp8_batch_interleave_group(batch_size, head_dims) == expected
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("value_head_dim", [128, 192])
+def test_paged_fp8_d192_batch_interleave_ragged_multiblock_matches_torch(value_head_dim):
+    """The D192 batch-interleaved grid preserves ragged causal q-block mapping."""
+    test_paged_fp8_asymmetric_value_matches_torch(
+        head_dim=192,
+        value_head_dim=value_head_dim,
+        use_non_default_stream=False,
+        force_internal_copies=False,
+        query_lengths=[512, 128],
+        kv_lengths=[1024, 512],
+        block_table_rows=[list(range(15, -1, -1)), list(range(23, 15, -1)) + [0] * 8],
+    )
+
+
 @_requires_gfx950
 @pytest.mark.parametrize(
     ("head_dim", "value_head_dim"),

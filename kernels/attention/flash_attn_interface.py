@@ -398,6 +398,7 @@ def _build_paged_fp8(
     use_bn128: bool,
     paged_bn128_varlen: bool,
     fp8_pv_segmented: bool,
+    batch_interleave_group: int,
 ):
     """Build the gfx950 packed-varlen, vectorized page-64 FP8 launcher."""
     from kernels.attention.flash_attn_fp8_paged_gfx950 import build_flash_attn_paged_fp8_module
@@ -422,6 +423,7 @@ def _build_paged_fp8(
         paged_bn128=use_bn128,
         paged_bn128_varlen=paged_bn128_varlen,
         fp8_pv_segmented=fp8_pv_segmented,
+        batch_interleave_group=batch_interleave_group,
     )
 
 
@@ -430,10 +432,25 @@ def _build_paged_fp8(
 # gfx950 dualwave paged-KV currently supports exactly one configuration.
 _PAGED_PAGE_SIZE = 64
 _PAGED_BT_LDS_SIZE = 2048
+_PAGED_FP8_BATCH_INTERLEAVE_MAX_GROUP = 8
+_PAGED_FP8_V192_BATCH_INTERLEAVE_MAX_BATCH = 16
 
 
 def _use_paged_fp8_segmented_pv(head_dims: tuple[int, int]) -> bool:
     return head_dims == (192, 192)
+
+
+def _paged_fp8_batch_interleave_group(batch_size: int, head_dims: tuple[int, int]) -> int:
+    """Choose a divisor-sized batch group for the tuned MiMo D192 launch."""
+    if head_dims[0] != 192 or batch_size <= 1:
+        return 1
+    # V192 crosses back to the cache-locality-favored original grid above B=16.
+    if head_dims == (192, 192) and batch_size > _PAGED_FP8_V192_BATCH_INTERLEAVE_MAX_BATCH:
+        return 1
+    for group_size in (_PAGED_FP8_BATCH_INTERLEAVE_MAX_GROUP, 4, 2):
+        if batch_size % group_size == 0:
+            return group_size
+    return 1
 
 
 def _flydsl_flash_attn_paged(
@@ -700,6 +717,9 @@ def _flydsl_flash_attn_paged(
                 use_bn128=use_bn128,
                 paged_bn128_varlen=paged_bn128_varlen,
                 fp8_pv_segmented=fp8_pv_segmented,
+                batch_interleave_group=(
+                    _paged_fp8_batch_interleave_group(B, fp8_head_dims) if H == 16 and num_kv_heads == 1 else 1
+                ),
             )
         elif _paged_light_ok:
             exe = _build_paged_light(
