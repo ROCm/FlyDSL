@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-03T03:21:44Z",
+ "updated": "2026-09-03T03:36:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33711595655,
+   "pr": 1089,
+   "commit": "0f4296b943c6b271709b529230a6406548bc2bfe",
+   "branch": "codex/rdna-dynamic-buffer-bounds-check",
+   "event": "pull_request",
+   "title": "[DSL] Add dynamic RDNA buffer bounds checking",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33711595655",
+   "created_at": "2026-09-03T03:30:17Z",
+   "updated_at": "2026-09-03T03:30:17Z",
+   "actor": "big-yellow-duck",
+   "jobs": []
+  },
   {
    "run_id": 33710068450,
    "pr": null,
@@ -96,11 +111,11 @@
    "branch": "feat/gfx950-paged-attention-vllm-kv-layouts",
    "event": "pull_request",
    "title": "Support vLLM paged KV cache layouts on the gfx950 attention kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33701059511",
    "created_at": "2026-09-03T00:48:28Z",
-   "updated_at": "2026-09-03T02:09:36Z",
+   "updated_at": "2026-09-03T03:33:19Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -116,11 +131,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-03T01:56:32Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33701059511/job/100493917297"
+     "completed_at": "2026-09-03T03:33:18Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33701059511/job/100493917297",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi35x-1",
@@ -146,7 +162,7 @@
   },
   {
    "run_id": 33664949309,
-   "pr": 1089,
+   "pr": null,
    "commit": "8f94e564f978c59070b9bb76bb9d764b299402ed",
    "branch": "codex/rdna-dynamic-buffer-bounds-check",
    "event": "pull_request",
@@ -2597,61 +2613,6 @@
      "started_at": "2026-08-28T08:45:05Z",
      "completed_at": "2026-08-28T10:34:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33154548148/job/98800426568",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 33154122125,
-   "pr": null,
-   "commit": "b83922b7cd9808f0a51c1d8415af359748599509",
-   "branch": "feat/gfx950-paged-attention-vllm-kv-layouts",
-   "event": "pull_request",
-   "title": "Support vLLM paged KV cache layouts on the gfx950 attention kernel",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33154122125",
-   "created_at": "2026-08-28T08:07:54Z",
-   "updated_at": "2026-08-30T11:21:18Z",
-   "actor": "akii96",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-28T08:59:21Z",
-     "completed_at": "2026-08-28T09:17:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33154122125/job/98801240731",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-08-28T08:47:44Z",
-     "completed_at": "2026-08-30T11:21:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33154122125/job/98801240742"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-28T08:48:45Z",
-     "completed_at": "2026-08-28T10:44:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33154122125/job/98801240743",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-08-28T08:49:03Z",
-     "completed_at": "2026-08-28T11:19:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33154122125/job/98801240751",
      "log_fetch_failed": true
     }
    ]
