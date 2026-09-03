@@ -220,8 +220,8 @@ result = a << 4
 
 Use direct `arith.*FOp(..., fastmath=...)` only where explicit fastmath flags are performance-critical.
 Use `fx.max` / `fx.min` for type-dispatched extrema and `fx.ceildiv` for
-overflow-safe integer ceil division. `fx.maxnumf` intentionally retains
-non-NaN-wins semantics, and `fx.ceil_div` remains the layout/int-tuple API.
+overflow-safe integer ceil division. `fx.maxnumf` / `fx.minnumf` intentionally
+retain non-NaN-wins semantics, and `fx.ceil_div` remains the layout/int-tuple API.
 
 ### 4.2 Vector values (`Vector`)
 

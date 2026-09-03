@@ -158,7 +158,8 @@ Preferred APIs:
 - **cond.select(true_val, false_val)** -- ternary select when ``cond`` is an ``ArithValue``
 - **arith.cmpi(predicate, lhs, rhs)** -- integer comparison
 - **arith.cmpf(predicate, lhs, rhs)** -- float comparison
-- **arith.maxnumf(a, b)** -- float maximum returning the non-NaN operand (libm ``fmax``); preserves the DSL type of ``a``
+- **fx.maxnumf(a, b)** -- float maximum returning the non-NaN operand (libm ``fmax``); preserves the DSL type of ``a``
+- **fx.minnumf(a, b)** -- float minimum returning the non-NaN operand (libm ``fmin``); preserves the DSL type of ``a``
 - **Chained comparisons** (``lo <= x < hi``) are supported inside traced kernels and lower to combined ``cmp`` + ``and``.
 
 You can apply fastmath flags ambiently to a block or per-op:
