@@ -263,8 +263,14 @@ def build_flash_attn_paged_fp8_module(
         kv_gmem_to_lds.load_v((t0 + 1) * BN, (t0 + 1) % fx.Index(NPF), page_id=page_t1)
         kv_gmem_to_lds.load_k((t0 + 2) * BN, (t0 + 2) % fx.Index(NPF), page_id=page_t2)
         kv_gmem_to_lds.load_k((t0 + 3) * BN, (t0 + 3) % fx.Index(NPF), page_id=page_t3)
-        kv_gmem_to_lds.load_v((t0 + 2) * BN, (t0 + 2) % fx.Index(NPF), page_id=page_t2)
-        kv_gmem_to_lds.load_v((t0 + 3) * BN, (t0 + 3) % fx.Index(NPF), page_id=page_t3)
+        next_v_a = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
+            (t0 + 2) * BN,
+            page_id=page_t2,
+        )
+        next_v_b = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
+            (t0 + 3) * BN,
+            page_id=page_t3,
+        )
         rocdl.s_waitcnt(0)
         rocdl.sched_barrier(0)
         rocdl.s_barrier()
@@ -279,8 +285,9 @@ def build_flash_attn_paged_fp8_module(
         def _ring_wrap(x):
             return (x >= NPF_I).select(x - NPF_I, x)
 
-        init_args = [m_row, l_row] + v_o + [t0 % fx.Index(NPF)]
+        init_args = [m_row, l_row] + v_o + [t0 % fx.Index(NPF), next_v_a, next_v_b]
         loop_results = init_args
+        next_v_arg_idx = 3 + D_CHUNKS
         for j, loop_args in range(fx.Index(t0), t_end, fx.Index(2), init=init_args):
             m_row = loop_args[0]
             l_row = loop_args[1]
@@ -289,25 +296,33 @@ def build_flash_attn_paged_fp8_module(
             a_buf = loop_args[2 + D_CHUNKS]
             b_buf = _ring_wrap(a_buf + fx.Index(1))
             nn_a_buf = _ring_wrap(a_buf + fx.Index(2))
+            nn_b_buf = _ring_wrap(a_buf + fx.Index(3))
             f_a_buf = _ring_wrap(a_buf + fx.Index(4))
             f_b_buf = _ring_wrap(a_buf + fx.Index(5))
+
+            next_v_a = loop_args[next_v_arg_idx]
+            next_v_b = loop_args[next_v_arg_idx + 1]
 
             v_k_a = kv_lds_to_regs.load_k(a_buf)
             v_k_b = kv_lds_to_regs.load_k(b_buf)
             v_v_a = kv_lds_to_regs.load_v(a_buf)
 
             page_f_a, page_f_b = ctx.load_page_id_pair((j + fx.Index(4)) * BN)
-            # Keep only one prefetched V vector live at a time and overlap each
-            # load with one of the two independent QK contractions.
-            v_f_a = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source((j + fx.Index(4)) * BN, page_id=page_f_a)
             kv_gmem_to_lds.load_k((j + fx.Index(4)) * BN, f_a_buf, page_id=page_f_a)
             kv_gmem_to_lds.load_k((j + fx.Index(5)) * BN, f_b_buf, page_id=page_f_b)
 
             v_s_a = gemm_helper.qk(v_k_a, q_wide)
-            kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(v_f_a, f_a_buf)
-            v_f_b = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source((j + fx.Index(5)) * BN, page_id=page_f_b)
+            kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(next_v_a, nn_a_buf)
+            v_f_a = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
+                (j + fx.Index(4)) * BN,
+                page_id=page_f_a,
+            )
+            v_f_b = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
+                (j + fx.Index(5)) * BN,
+                page_id=page_f_b,
+            )
             v_s_b = gemm_helper.qk(v_k_b, q_wide)
-            kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(v_f_b, f_b_buf)
+            kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(next_v_b, nn_b_buf)
             v_s_a, v_s_b = _mask_pair(v_s_a, v_s_b, j)
             m_tile = _merge_tile_max(v_s_a, v_s_b)
             v_o, m_new, l_row = _correct_o(v_o, m_row, l_row, m_tile)
@@ -323,7 +338,8 @@ def build_flash_attn_paged_fp8_module(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-            loop_results = yield [m_row, l_row] + v_o + [nn_a_buf]
+            next_args = [m_row, l_row] + v_o + [nn_a_buf, v_f_a, v_f_b]
+            loop_results = yield next_args
         m_row = loop_results[0]
         l_row = loop_results[1]
         v_o = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]

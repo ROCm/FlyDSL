@@ -4806,13 +4806,15 @@ class DualwaveFp8KernelContext:
 
     def load_page_id_pair(self, tile_start):
         """Load two adjacent physical page IDs for a BN128 tile pair."""
-        local_page = fx.Index(tile_start) // fx.Index(self.traits.PAGE_SIZE)
-        page_idx = self.page_base + local_page
-        safe_idx = fx.Index((local_page < self.num_kv_tiles).select(page_idx, self.page_base))
+        local_page = fx.Int32(fx.Index(tile_start) // fx.Index(self.traits.PAGE_SIZE))
+        page_base = fx.Int32(self.page_base)
+        num_kv_tiles = fx.Int32(self.num_kv_tiles)
+        page_idx = page_base + local_page
+        safe_idx = (local_page < num_kv_tiles).select(page_idx, page_base)
         v = fly.copy_atom_call_ssa(
             [self.page_v2i32],
             self.page_i32x2_atom,
-            fx.slice(self.page_indices_div, (None, fx.Int32(safe_idx))),
+            fx.slice(self.page_indices_div, (None, safe_idx)),
         )
         pages = Vec(v, (2,), fx.Int32)
         page0 = rocdl.readfirstlane(T.i32, as_mlir_value(fx.Int32(pages[0])))
