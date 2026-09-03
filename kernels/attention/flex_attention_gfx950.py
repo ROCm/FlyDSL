@@ -40,6 +40,7 @@ def pipeline_stagger_enabled(*, depth: int, num_groups: int, m_waves: int) -> bo
 class _InfraContext:
     stagger_i32: object = None
 
+
 try:
     from flydsl.expr.rocdl.universal import make_buffer_ptr as _make_buffer_ptr
 except ImportError:
@@ -81,6 +82,7 @@ FLEX_DTYPE_BF16 = 2
 FLEX_DTYPE_FP16 = 3
 
 _LOG2E = 1.4426950408889634
+_MAX_BUFFER_BYTES = 0x7FFFFFFF
 
 MASK_NONE = 0
 MASK_CAUSAL = 1
@@ -89,6 +91,7 @@ MASK_PREFIX_LM = 3
 
 SCORE_NONE = 0
 SCORE_ALIBI = 1
+
 
 class FlexMod:
     has_mask = False
@@ -470,6 +473,10 @@ def _mfma_acc(a, b, c, mma_atom):
     return fly.mma_atom_call_ssa([acc_ty], mma_atom, a, b, c)
 
 
+def _idx_to_i32(idx):
+    return fx.Int32(arith.index_cast(T.i32, idx))
+
+
 @flyc.kernel
 def flex_attn_fwd_gfx950_kernel(
     o: fx.Tensor,  # [B, Sq, Hq, D]
@@ -509,15 +516,13 @@ def flex_attn_fwd_gfx950_kernel(
     _is_causal = int(param.mask_type) in (MASK_CAUSAL, MASK_PREFIX_LM)
     if const_expr(_is_causal):
         _num_q_tiles = (seqlen_q + fx.Int32(num_groups * block_m - 1)) // fx.Int32(num_groups * block_m)
-        q_tile = fx.Index(
-            arith.index_cast(T.index, _num_q_tiles - fx.Int32(1) - fx.Int32(arith.index_cast(T.i32, fx.block_idx.x)))
-        )
+        q_tile = fx.Index(arith.index_cast(T.index, _num_q_tiles - fx.Int32(1) - _idx_to_i32(fx.block_idx.x)))
     else:
         q_tile = fx.block_idx.x
     h_idx = fx.block_idx.y
     if const_expr(_SPLITK):
         b_idx = fx.block_idx.z // fx.Index(_num_kv_splits)
-        split_idx = fx.Int32(arith.index_cast(T.i32, fx.block_idx.z % fx.Index(_num_kv_splits)))
+        split_idx = _idx_to_i32(fx.block_idx.z % fx.Index(_num_kv_splits))
     else:
         b_idx = fx.block_idx.z
     kv_head = h_idx // param.gqa_group
@@ -526,7 +531,7 @@ def flex_attn_fwd_gfx950_kernel(
 
     if const_expr(_paged):
         _ctx_len_it = fx.recast_iter(fx.Int32, fx.get_iter(context_lens))
-        _ctx_len = fx.Int32(fx.ptr_load(_ctx_len_it + fx.Int32(arith.index_cast(T.i32, b_idx))))
+        _ctx_len = fx.Int32(fx.ptr_load(_ctx_len_it + _idx_to_i32(b_idx)))
         n_kv_tiles = (_ctx_len + fx.Int32(block_n - 1)) // fx.Int32(block_n)
     else:
         n_kv_tiles = param.n_kv_tiles
@@ -691,13 +696,13 @@ def flex_attn_fwd_gfx950_kernel(
     _v_row_stride_bytes = hkv * head_dim * param.in_data_bytes
     # Paged KV cache: [num_blocks, block_n, Hkv, D] — page stride and head offset.
     _page_byte_stride = block_n * hkv * head_dim * param.in_data_bytes
-    _kv_head_byte_offset = fx.Int32(arith.index_cast(T.i32, kv_head)) * fx.Int32(head_dim * param.in_data_bytes)
+    _kv_head_byte_offset = _idx_to_i32(kv_head) * fx.Int32(head_dim * param.in_data_bytes)
     gK_flat = fx.rocdl.make_buffer_tensor(
-        fx.Tensor(fx.make_view(fx.recast_iter(fx.Int8, fx.get_iter(k)), fx.make_layout(0x7FFFFFFF, 1))),
+        fx.Tensor(fx.make_view(fx.recast_iter(fx.Int8, fx.get_iter(k)), fx.make_layout(_MAX_BUFFER_BYTES, 1))),
         max_size=True,
     )
     gV_flat = fx.rocdl.make_buffer_tensor(
-        fx.Tensor(fx.make_view(fx.recast_iter(fx.Int8, fx.get_iter(v)), fx.make_layout(0x7FFFFFFF, 1))),
+        fx.Tensor(fx.make_view(fx.recast_iter(fx.Int8, fx.get_iter(v)), fx.make_layout(_MAX_BUFFER_BYTES, 1))),
         max_size=True,
     )
     k_div = fx.logical_divide(gK_flat, fx.make_layout(1, 1))
@@ -1046,9 +1051,9 @@ def flex_attn_fwd_gfx950_kernel(
     mod_has_mask = flex_mod.has_mask
     _mod_apply_score = flex_mod.apply_score
     _mod_apply_mask = flex_mod.apply_mask
-    b_i32 = fx.Int32(arith.index_cast(T.i32, b_idx))
-    h_i32 = fx.Int32(arith.index_cast(T.i32, h_idx))
-    q_idx_mod = fx.Int32(arith.index_cast(T.i32, q_start)) + fx.Int32(local_tid % 32)
+    b_i32 = _idx_to_i32(b_idx)
+    h_i32 = _idx_to_i32(h_idx)
+    q_idx_mod = _idx_to_i32(q_start) + fx.Int32(local_tid % 32)
     lane_group_off = fx.Int32((local_tid // 32) * 4)
     kv_offsets = [8 * (e // 4) + (e % 4) for e in range(n_c)]
 
@@ -1185,11 +1190,13 @@ def flex_attn_fwd_gfx950_kernel(
         _bt_lds_ptr = storage.bt.peek().ptr
         _bt_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
         _bt_flat = fx.rocdl.make_buffer_tensor(
-            fx.Tensor(fx.make_view(fx.recast_iter(fx.Int32, fx.get_iter(block_table)), fx.make_layout(0x7FFFFFFF, 1))),
+            fx.Tensor(
+                fx.make_view(fx.recast_iter(fx.Int32, fx.get_iter(block_table)), fx.make_layout(_MAX_BUFFER_BYTES, 1))
+            ),
             max_size=True,
         )
         _bt_div = fx.logical_divide(_bt_flat, fx.make_layout(1, 1))
-        _bt_batch_off = fx.Int32(arith.index_cast(T.i32, b_idx)) * block_table_stride
+        _bt_batch_off = _idx_to_i32(b_idx) * block_table_stride
         _bt_entries = n_kv_tiles
         for _bt_pass in range_constexpr((_PAGED_BT_LDS_SIZE + block_threads - 1) // block_threads):
             _bt_local = fx.Int32(_bt_pass) * fx.Int32(block_threads) + fx.Int32(tid)
@@ -1220,7 +1227,7 @@ def flex_attn_fwd_gfx950_kernel(
             return fx.Int32(0)
 
     # KV tile range: clamp to the mask's valid range to skip fully-masked tiles.
-    _q_min_wg = fx.Int32(arith.index_cast(T.i32, q_tile)) * fx.Int32(num_groups * block_m)
+    _q_min_wg = _idx_to_i32(q_tile) * fx.Int32(num_groups * block_m)
     _q_max_wg = _q_min_wg + fx.Int32(num_groups * block_m - 1)
     _kv_lo, _kv_hi = flex_mod.kv_range(_q_min_wg, _q_max_wg, n_kv_tiles, block_n)
     if const_expr(_SPLITK):
@@ -1455,7 +1462,7 @@ def flex_attn_fwd_gfx950_kernel(
         v_hi_prev = [loop_args[_v_base + _n_d_chunks + dc] for dc in range_constexpr(_n_d_chunks)]
         m_i_prev = [loop_args[_mi_prev_base + r] for r in range_constexpr(npair)]
 
-        kv_even = _kv_lo + (fx.Int32(arith.index_cast(T.i32, kv_mid)) + fx.Int32(1)) * fx.Int32(2)
+        kv_even = _kv_lo + (_idx_to_i32(kv_mid) + fx.Int32(1)) * fx.Int32(2)
         m_i, l_i, o_accs, s_scaled_prev, corr_scalar_prev, v_lo_prev, v_hi_prev, m_i_prev = (
             _do_tile_overlapping_softmax_main(
                 kv_even,
@@ -1595,7 +1602,9 @@ def flex_attn_fwd_gfx950_kernel(
         ws_o_reg = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Float32)
         ws_o_div = fx.logical_divide(
             fx.rocdl.make_buffer_tensor(
-                fx.Tensor(fx.make_view(fx.recast_iter(fx.Float32, fx.get_iter(ws_o)), fx.make_layout(0x7FFFFFFF, 1))),
+                fx.Tensor(
+                    fx.make_view(fx.recast_iter(fx.Float32, fx.get_iter(ws_o)), fx.make_layout(_MAX_BUFFER_BYTES, 1))
+                ),
                 max_size=True,
             ),
             fx.make_layout(1, 1),
@@ -1609,7 +1618,7 @@ def flex_attn_fwd_gfx950_kernel(
         _ws_o_base = (
             split_idx * _ws_o_split_stride
             + b_idx * _ws_o_batch_stride
-            + fx.Int32(arith.index_cast(T.i32, h_idx)) * _ws_o_head_stride
+            + _idx_to_i32(h_idx) * _ws_o_head_stride
             + (q_start + _qrow) * _ws_o_row_stride
         )
         for dc in range_constexpr(_n_d_chunks):
@@ -1628,7 +1637,9 @@ def flex_attn_fwd_gfx950_kernel(
         ws_ml_reg = fx.make_rmem_tensor(fx.make_layout(2, 1), fx.Float32)
         ws_ml_div = fx.logical_divide(
             fx.rocdl.make_buffer_tensor(
-                fx.Tensor(fx.make_view(fx.recast_iter(fx.Float32, fx.get_iter(ws_ml)), fx.make_layout(0x7FFFFFFF, 1))),
+                fx.Tensor(
+                    fx.make_view(fx.recast_iter(fx.Float32, fx.get_iter(ws_ml)), fx.make_layout(_MAX_BUFFER_BYTES, 1))
+                ),
                 max_size=True,
             ),
             fx.make_layout(1, 1),
@@ -1640,7 +1651,7 @@ def flex_attn_fwd_gfx950_kernel(
         _ws_ml_base = (
             split_idx * _ws_ml_split_stride
             + b_idx * _ws_ml_batch_stride
-            + fx.Int32(arith.index_cast(T.i32, h_idx)) * _ws_ml_head_stride
+            + _idx_to_i32(h_idx) * _ws_ml_head_stride
             + (q_start + _qrow) * _ws_ml_row_stride
         )
         ml_vec = Vec.from_elements([m_i[0], l_i[0]], fx.Float32)
@@ -1651,7 +1662,9 @@ def flex_attn_fwd_gfx950_kernel(
         o_store_reg = fx.make_rmem_tensor(fx.make_layout(4, 1), _out_elem_dtype)
         o_div = fx.logical_divide(
             fx.rocdl.make_buffer_tensor(
-                fx.Tensor(fx.make_view(fx.recast_iter(_out_elem_dtype, fx.get_iter(o)), fx.make_layout(0x7FFFFFFF, 1))),
+                fx.Tensor(
+                    fx.make_view(fx.recast_iter(_out_elem_dtype, fx.get_iter(o)), fx.make_layout(_MAX_BUFFER_BYTES, 1))
+                ),
                 max_size=True,
             ),
             fx.make_layout(1, 1),
@@ -1697,7 +1710,7 @@ def flex_splitk_combine_kernel(
 
     # Global row = bid * rows_per_block + row_in_block
     # This row maps to (batch, head, seq_pos) in the flattened [B*Hq*Sq] space.
-    global_row = fx.Int32(arith.index_cast(T.i32, bid)) * fx.Int32(_rows_per_block) + fx.Int32(row_in_block)
+    global_row = _idx_to_i32(bid) * fx.Int32(_rows_per_block) + fx.Int32(row_in_block)
 
     # ws_o is [num_splits, B, Hq, Sq, D] — stride for split dim = B*Hq*Sq*D
     _total_rows = (
