@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-04T15:29:38Z",
+ "updated": "2026-09-04T15:58:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33891677289,
+   "pr": 1096,
+   "commit": "3ea1a44210adaeec7a79362a37a18f6f51370234",
+   "branch": "feat/rocdl-ordered-memory-primitives",
+   "event": "pull_request",
+   "title": "[DSL] Add ordered ROCDL memory primitives",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33891677289",
+   "created_at": "2026-09-04T15:49:24Z",
+   "updated_at": "2026-09-04T15:49:24Z",
+   "actor": "big-yellow-duck",
+   "jobs": []
+  },
   {
    "run_id": 33883742262,
    "pr": 1095,
@@ -25,11 +40,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33882020332",
    "created_at": "2026-09-04T14:08:33Z",
-   "updated_at": "2026-09-04T14:30:20Z",
+   "updated_at": "2026-09-04T15:54:53Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -55,11 +70,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-04T14:29:58Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33882020332/job/101059376273"
+     "completed_at": "2026-09-04T15:54:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33882020332/job/101059376273",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -2249,21 +2265,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 33477401202,
-   "pr": null,
-   "commit": "1e9d8992ff264fc453d2405b2e5d6e6527b5a803",
-   "branch": "xyt/refine_async",
-   "event": "pull_request",
-   "title": "[A16W16 GEMM] Consolidate gfx950 A/B load setup",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33477401202",
-   "created_at": "2026-09-01T06:23:38Z",
-   "updated_at": "2026-09-01T06:24:56Z",
-   "actor": "xytpai",
-   "jobs": []
   }
  ]
 }
