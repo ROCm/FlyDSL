@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-04T12:19:32Z",
+ "updated": "2026-09-04T12:25:24Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33872512036,
+   "pr": 1094,
+   "commit": "014f06249413b45abb2ac3857d57e92c9aa42c35",
+   "branch": "ci/pypi-moe-csv-hgemm",
+   "event": "pull_request",
+   "title": "[CI] Run aiter CSV MoE and HGEMM in the wheel/PyPI test job",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33872512036",
+   "created_at": "2026-09-04T12:23:20Z",
+   "updated_at": "2026-09-04T12:24:13Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 33872004498,
    "pr": 1094,
@@ -10,11 +25,11 @@
    "branch": "ci/pypi-moe-csv-hgemm",
    "event": "pull_request",
    "title": "[CI] Run aiter CSV MoE and HGEMM in the wheel/PyPI test job",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33872004498",
    "created_at": "2026-09-04T12:17:10Z",
-   "updated_at": "2026-09-04T12:18:21Z",
+   "updated_at": "2026-09-04T12:23:37Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -44,9 +59,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33870854310",
    "created_at": "2026-09-04T12:03:18Z",
-   "updated_at": "2026-09-04T12:05:17Z",
+   "updated_at": "2026-09-04T12:23:34Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-04T12:23:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33870854310/job/101021543495"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-04T12:23:23Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33870854310/job/101021543548"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-04T12:23:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33870854310/job/101021543629"
+    }
+   ]
   },
   {
    "run_id": 33867260533,
@@ -2204,51 +2247,6 @@
      "completed_at": "2026-09-01T04:32:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33466887196/job/99734859049",
      "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 33464111861,
-   "pr": null,
-   "commit": "ec4b9ae69698cca06d025589ed3dd3e425a45f98",
-   "branch": "ci/shared-gfx950-runner",
-   "event": "pull_request",
-   "title": "[CI] Run gfx950 validation on the MI355 and MI35x pools",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33464111861",
-   "created_at": "2026-09-01T02:51:43Z",
-   "updated_at": "2026-09-01T05:09:40Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-01T03:40:23Z",
-     "completed_at": "2026-09-01T03:57:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33464111861/job/99728799277",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-01T03:52:25Z",
-     "completed_at": "2026-09-01T04:29:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33464111861/job/99728799279",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-01T03:42:39Z",
-     "completed_at": "2026-09-01T05:09:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33464111861/job/99728799319"
     }
    ]
   }
