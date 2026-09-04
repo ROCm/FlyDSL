@@ -120,6 +120,7 @@ def create_wmma_gemm_module(
     lda=None,
     ldb=None,
     ldc=None,
+    arch=None,
 ):
     ld_a = K if lda is None else int(lda)
     ld_b = K if ldb is None else int(ldb)
@@ -135,7 +136,7 @@ def create_wmma_gemm_module(
             f"each row 16-byte aligned for the 128-bit copy"
         )
 
-    gpu_arch = str(get_rocm_arch() or "")
+    gpu_arch = str(arch or get_rocm_arch() or "")
     if not gpu_arch.startswith("gfx11"):
         raise RuntimeError(
             f"rdna3_f16_gemm requires gfx11* (RDNA3 / RDNA3.5); current arch is {gpu_arch!r}. "
@@ -524,7 +525,7 @@ def create_wmma_gemm_module(
                 _store_C(accs, bid_m, bid_n, t32)
                 _ = yield [fx.Int32(0)]
 
-    @flyc.jit
+    @flyc.jit(arch=gpu_arch)
     def launch_gemm(
         arg_c: fx.Tensor,
         arg_a: fx.Tensor,
