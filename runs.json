@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-04T14:07:12Z",
+ "updated": "2026-09-04T14:11:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 33882020332,
+   "pr": null,
+   "commit": "b81e99d69fcb2cd6100502b6360d643be898d669",
+   "branch": "main",
+   "event": "push",
+   "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33882020332",
+   "created_at": "2026-09-04T14:08:33Z",
+   "updated_at": "2026-09-04T14:09:24Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 33881669473,
+   "pr": 1051,
+   "commit": "1cda14dca713a6d0529169edb34c9afe033ac1b0",
+   "branch": "phil/bump-llvm-941a04e6",
+   "event": "pull_request",
+   "title": "[FlyToROCDL] Bump LLVM to 941a04e6 and adapt gpu.launch_func lowering",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33881669473",
+   "created_at": "2026-09-04T14:04:55Z",
+   "updated_at": "2026-09-04T14:08:14Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 33881617109,
    "pr": null,
@@ -10,11 +40,11 @@
    "branch": "main",
    "event": "push",
    "title": "[CI] Drop the duplicate gfx950 test runner and revert the nightly REA\u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33881617109",
    "created_at": "2026-09-04T14:04:24Z",
-   "updated_at": "2026-09-04T14:04:24Z",
+   "updated_at": "2026-09-04T14:08:50Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -2173,86 +2203,6 @@
    "created_at": "2026-09-01T06:17:32Z",
    "updated_at": "2026-09-01T06:19:33Z",
    "actor": "xytpai",
-   "jobs": []
-  },
-  {
-   "run_id": 33473397006,
-   "pr": 1084,
-   "commit": "28e6db8a4a778db4764c06d117288f883061d381",
-   "branch": "ci/shared-gfx950-runner",
-   "event": "pull_request",
-   "title": "[CI] Run gfx950 validation on the MI355 and MI35x pools",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33473397006",
-   "created_at": "2026-09-01T05:23:08Z",
-   "updated_at": "2026-09-01T09:04:04Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-01T05:58:52Z",
-     "completed_at": "2026-09-01T06:16:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33473397006/job/99754191561",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-01T07:13:53Z",
-     "completed_at": "2026-09-01T08:13:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33473397006/job/99754191593",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-01T06:01:22Z",
-     "completed_at": "2026-09-01T07:33:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33473397006/job/99754191603"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-01T07:38:05Z",
-     "completed_at": "2026-09-01T09:04:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33473397006/job/99754191609",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-01T06:01:38Z",
-     "completed_at": "2026-09-01T07:27:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33473397006/job/99754191632",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 33467360238,
-   "pr": null,
-   "commit": "d5c9c7d72876a242170d3a4d7f513b187e272eb1",
-   "branch": "codex/gfx120x-fp8-wmma-atom",
-   "event": "pull_request",
-   "title": "[Dialect] Add FP8 support to GFX120X WMMA atom",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33467360238",
-   "created_at": "2026-09-01T03:45:26Z",
-   "updated_at": "2026-09-03T03:04:35Z",
-   "actor": "big-yellow-duck",
    "jobs": []
   }
  ]
