@@ -73,7 +73,7 @@ jobs:
             done
             ln -sf /usr/local/bin/python3.12 /usr/local/bin/python3
           '
-          docker exec flydsl_build bash -c "python3 -m pip install -q nanobind"
+          docker exec flydsl_build bash -c "python3 -m pip install -q 'nanobind==2.12.0'"
           docker exec flydsl_build bash -c "git config --global --add safe.directory '*'"
 
       - name: Checkout source and submodules in build container
