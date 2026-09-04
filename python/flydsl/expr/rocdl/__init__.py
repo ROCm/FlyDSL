@@ -582,8 +582,8 @@ def disable_xdl_arb_stall():
     from .. import arith as _arith
     from ..typing import T
 
-    # hwreg encoding: ID=26(SCHED_MODE), Offset=4, Size=1 -> 282
-    imm_val = _arith.unwrap(_arith.constant(282, type=T.i32))
+    # hwreg encoding: ID=26(SCHED_MODE), Offset=2, Size=1 -> 154.
+    imm_val = _arith.unwrap(_arith.constant(154, type=T.i32))
     val_val = _arith.unwrap(_arith.constant(1, type=T.i32))
 
     _llvm.call_intrinsic(None, "llvm.amdgcn.s.setreg", [imm_val, val_val], [], [])

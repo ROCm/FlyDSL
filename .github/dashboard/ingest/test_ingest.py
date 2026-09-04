@@ -189,7 +189,8 @@ def test_merge_history_sorted_by_ts_then_runner_op_shape():
 # --------------------------------------------------------------------------- #
 def test_runner_of_matches_known_box_and_rejects_unknown():
     assert ingest.runner_of("test (linux-flydsl-mi355-1)") == "linux-flydsl-mi355-1"
-    assert ingest.runner_of("test (linux-flydsl-mi35x-1)") is None  # MI35x test results stay out of the dashboard
+    assert ingest.runner_of("test (linux-flydsl-mi35x-1)") == "linux-flydsl-mi35x-1"
+    assert ingest.runner_of("test (linux-flydsl-mi35x-8)") == "linux-flydsl-mi35x-8"
     assert ingest.runner_of("test (linux-flydsl-unknown-9)") is None  # not in RUNNER_ARCH
     assert ingest.runner_of("build") is None
     assert ingest.runner_of("") is None
