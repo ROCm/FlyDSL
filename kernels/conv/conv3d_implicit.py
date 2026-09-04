@@ -20,6 +20,7 @@ from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 from flydsl.expr.rocdl.universal import make_buffer_ptr
 from flydsl.expr.typing import T
 from kernels.common.mem_ops import buffer_atomic_add
+from kernels.common.tensor_shim import _run_compiled
 
 TILE_K = 32
 STAGES = 2
@@ -43,21 +44,32 @@ def _autotune_enabled():
 
 
 _WEIGHT_CACHE = {}
+_WEIGHT_CACHE_MAX = 64
 
 
 def _pad_channels(c):
     return (c + LDG_VEC - 1) // LDG_VEC * LDG_VEC
 
 
-def _prep_weight(w, k, kt, kh, kw, c):
-    key = id(w)
+def _prep_weight(w, k, kt, kh, kw, c, anchor=None):
+    """Pack (K,C,T,R,S) -> (K, T*R*S*Cpad), memoized on the caller's tensor.
+
+    ``anchor`` is the weight the caller owns. The 1D/2D entry points reshape to
+    5D before calling, and that view is a fresh object per call, so keying on it
+    would miss every time and repack the weights on every launch.
+    """
+    src = w if anchor is None else anchor
+    key = id(src)
     ent = _WEIGHT_CACHE.get(key)
-    if ent is not None and ent[0]() is w:
+    if ent is not None and ent[0]() is src:
         return ent[1]
     cp = _pad_channels(c)
     wsrc = torch.nn.functional.pad(w, (0, 0, 0, 0, 0, 0, 0, cp - c)) if cp != c else w
     wk = wsrc.permute(0, 2, 3, 4, 1).contiguous().reshape(k, kt * kh * kw * cp)
-    _WEIGHT_CACHE[key] = (weakref.ref(w), wk)
+    if len(_WEIGHT_CACHE) >= _WEIGHT_CACHE_MAX:
+        for dead in [k2 for k2, e in _WEIGHT_CACHE.items() if e[0]() is None]:
+            del _WEIGHT_CACHE[dead]
+    _WEIGHT_CACHE[key] = (weakref.ref(src), wk)
     return wk
 
 
@@ -185,7 +197,10 @@ def _ncdhw_to_ndhwc(x, stream):
         return x.permute(0, 2, 3, 4, 1).contiguous()
     out = torch.empty((n, t, h, w, c), device=x.device, dtype=x.dtype)
     exe = compile_transpose_ncdhw_ndhwc(n, c, s)
-    exe(out, x, torch.cuda.current_stream() if stream is None else stream)
+    # Fast dispatch: the @flyc.jit wrapper re-marshals arguments on every call,
+    # which costs ~30 us of host time and dominates this kernel outright — the
+    # 12.6 MB transpose in the VAE bottleneck runs in 9 us.
+    _run_compiled(exe, out, x, torch.cuda.current_stream() if stream is None else stream)
     return out
 
 
@@ -716,7 +731,9 @@ def _resolve_splitk(splitk, npq, crs, k, device, tile=DEFAULT_TILE):
     return sk
 
 
-def _conv3d_impl(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=None, tile=None, autotune=None):
+def _conv3d_impl(
+    x, weight, bias=None, stride=1, padding=0, splitk=None, stream=None, tile=None, autotune=None, weight_src=None
+):
     n, c, d, h, w = x.shape
     k, wc, kt, kh, kw = weight.shape
     assert c == wc
@@ -752,7 +769,7 @@ def _conv3d_impl(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=
     bias_arg = bias.to(torch.float32).contiguous() if has_bias else torch.empty(1, device=x.device, dtype=torch.float32)
 
     x_ndhwc = _ncdhw_to_ndhwc(x, stream)
-    w_packed = _prep_weight(weight, k, kt, kh, kw, wc)
+    w_packed = _prep_weight(weight, k, kt, kh, kw, wc, anchor=weight_src)
 
     shape = (n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias)
 
@@ -765,7 +782,7 @@ def _conv3d_impl(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=
         exe = compile_conv3d_implicit(
             n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, sk, the_tile, the_wgm
         )
-        exe(y, x_ndhwc, w_packed, bias_arg, launch_stream)
+        _run_compiled(exe, y, x_ndhwc, w_packed, bias_arg, launch_stream)
         return y, sk
 
     if tile is not None:
@@ -798,7 +815,7 @@ def _conv2d_impl(x, weight, bias=None, stride=1, padding=0, **kwargs):
     k, wc, r, s = weight.shape
     x5 = x.reshape(n, c, 1, h, w)
     w5 = weight.reshape(k, wc, 1, r, s)
-    y5 = _conv3d_impl(x5, w5, bias=bias, stride=(1, sh, sw), padding=(0, ph, pw), **kwargs)
+    y5 = _conv3d_impl(x5, w5, bias=bias, stride=(1, sh, sw), padding=(0, ph, pw), weight_src=weight, **kwargs)
     return y5.reshape(y5.shape[0], y5.shape[1], y5.shape[3], y5.shape[4])
 
 
@@ -810,7 +827,7 @@ def _conv1d_impl(x, weight, bias=None, stride=1, padding=0, **kwargs):
     k, wc, s = weight.shape
     x5 = x.reshape(n, c, 1, 1, w)
     w5 = weight.reshape(k, wc, 1, 1, s)
-    y5 = _conv3d_impl(x5, w5, bias=bias, stride=(1, 1, sw), padding=(0, 0, pw), **kwargs)
+    y5 = _conv3d_impl(x5, w5, bias=bias, stride=(1, 1, sw), padding=(0, 0, pw), weight_src=weight, **kwargs)
     return y5.reshape(y5.shape[0], y5.shape[1], y5.shape[4])
 
 
