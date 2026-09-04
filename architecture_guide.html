@@ -1,0 +1,1428 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="./" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Architecture &amp; compilation pipeline guide &#8212; FlyDSL 0.3.3</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+
+  
+  <link href="_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-regular-400.woff2" />
+
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=8f2a1f02" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/sphinx-book-theme.css?v=eba8b062" />
+    <link rel="stylesheet" type="text/css" href="_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="_static/custom.css?v=22b90084" />
+    <link rel="stylesheet" type="text/css" href="_static/rocm_header.css?v=037afccf" />
+    <link rel="stylesheet" type="text/css" href="_static/rocm_footer.css?v=7095035a" />
+    <link rel="stylesheet" type="text/css" href="_static/fonts.css?v=fcff5274" />
+    <link rel="stylesheet" type="text/css" href="_static/sphinx-design.min.css?v=95c83b7e" />
+    <link rel="stylesheet" type="text/css" href="_static/ai_ecosystem.css" />
+  
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
+<link rel="preload" as="script" href="_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
+  <script src="_static/vendor/fontawesome/6.5.2/js/all.min.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    <script src="_static/documentation_options.js?v=94d292f4"></script>
+    <script src="_static/doctools.js?v=9bcbadda"></script>
+    <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="_static/copybutton.js?v=91c4cb68"></script>
+    <script async="async" src="_static/code_word_breaks.js?v=327952c4"></script>
+    <script async="async" src="_static/renameVersionLinks.js?v=929fe5e4"></script>
+    <script async="async" src="_static/rdcMisc.js?v=01f88d96"></script>
+    <script async="async" src="_static/theme_mode_captions.js?v=15f4ec5d"></script>
+    <script defer="defer" src="_static/search.js?v=90a4452c"></script>
+    <script src="_static/scripts/sphinx-book-theme.js?v=887ef09a"></script>
+    <script src="_static/design-tabs.js?v=f930bc37"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'architecture_guide';</script>
+    <script async="async" src="https://download.amd.com/js/analytics/analyticsinit.js"></script>
+    <link rel="icon" href="https://www.amd.com/content/dam/code/images/favicon/favicon.ico"/>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Layout algebra guide" href="layout_system_guide.html" />
+    <link rel="prev" title="Storage and Allocator" href="language/storage_and_allocator.html" />
+    <meta name="google-site-verification" content="vo35SZt_GASsTHAEmdww7AYKPCvZyzLvOXBl8guBME4" />
+
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-primary-sidebar-checkbox"/>
+  <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-secondary-sidebar-checkbox"/>
+  <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
+  
+  <div class="search-button__wrapper">
+    <div class="search-button__overlay"></div>
+    <div class="search-button__search-container">
+<form class="bd-search d-flex align-items-center"
+      action="search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         id="search-input"
+         placeholder="Search..."
+         aria-label="Search..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form></div>
+  </div>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="common-header" >
+        <nav class="navbar navbar-expand-xl">
+            <div class="container-fluid main-nav rocm-header">
+                <div class="header-logo">
+                    <div class="header-logo-title">
+                        
+                            <button class="navbar-toggler collapsed" id="nav-icon" data-tracking-information="mainMenuToggle" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
+                                <span></span>
+                                <span></span>
+                                <span></span>
+                            </button>
+                        
+                        <a class="navbar-brand" href="https://www.amd.com/">
+                            <img src="_static/images/amd-header-logo.svg" alt="AMD Logo" title="AMD Logo" width="90" class="d-inline-block align-text-top hover-opacity"/>
+                        </a>
+                        <div class="vr mx-40 my-25"></div>
+                        <a class="klavika-font hover-opacity" href="https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest">ROCm&#8482; AI Ecosystem</a>
+                    </div>
+                    
+                </div>
+                <div class="icon-nav text-center d-flex ms-auto"></div>
+            </div>
+        </nav>
+        
+        <nav class="navbar navbar-expand-xl second-level-nav">
+            <div class="container-fluid main-nav">
+                <div class="navbar-nav-container collapse navbar-collapse" id="navbarSupportedContent">
+                    
+                    <div class="d-flex w-100 align-items-stretch">
+                        <ul class="navbar-nav nav-mega mb-2 mb-lg-0">
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://rocm.docs.amd.com" id="navcore-sdk" role="button" aria-expanded="false" target="_blank">Core SDK</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links fw-bold" href="https://rocm.docs.amd.com/projects/ai-ecosystem" id="navai-ecosystem" role="button" aria-expanded="false" target="_blank">AI Ecosystem</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://instinct.docs.amd.com" id="navgpu-systems-and-infrastructure" role="button" aria-expanded="false" target="_blank">GPU Systems and Infrastructure</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item dropdown">
+                                
+                                    <a class="nav-link top-level header-menu-links dropdown-toggle header-nav-dropdown-toggle" href="#" id="navtoolkits" role="button" data-bs-toggle="dropdown" aria-expanded="false">Toolkits</a>
+                                    <ul class="dropdown-menu header-nav-dropdown-menu" aria-labelledby="navtoolkits">
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-ds/en/latest/index.html" target="_blank">AMD Data Science</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-finance/en/latest/index.html" target="_blank">AMD Finance</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-ls/en/latest/index.html" target="_blank">AMD Life Science</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-llmext/en/latest/index.html" target="_blank">AMD LLM Extension</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-simulation/en/latest/index.html" target="_blank">AMD Simulation</a></li>
+                                        
+                                    </ul>
+                                
+                            </li>
+                            
+                            <li class="nav-item dropdown">
+                                
+                                    <a class="nav-link top-level header-menu-links dropdown-toggle header-nav-dropdown-toggle" href="#" id="navrocm.ai" role="button" data-bs-toggle="dropdown" aria-expanded="false">ROCm.AI</a>
+                                    <ul class="dropdown-menu header-nav-dropdown-menu" aria-labelledby="navrocm.ai">
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/amd-skills/en/latest/" target="_blank">AMD Skills</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/hyperloom/en/latest/" target="_blank">Hyperloom</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-cli/en/latest/" target="_blank">ROCm CLI</a></li>
+                                        
+                                    </ul>
+                                
+                            </li>
+                            
+                        </ul>
+                        <div class="nav-group-separator"></div>
+                        <ul class="navbar-nav nav-mega mb-2 mb-lg-0">
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://rocm.blogs.amd.com/" id="navblogs" role="button" aria-expanded="false" target="_blank">Blogs</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://www.amd.com/en/developer/resources/rocm-hub.html" id="navdeveloper-hub" role="button" aria-expanded="false" target="_blank">Developer Hub</a>
+                                
+                            </li>
+                            
+                        </ul>
+                    </div>
+                    
+                </div>
+            </div>
+        </nav>
+        
+    </header>
+    
+
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <div class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+
+<a class="navbar-brand logo" href="https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest">
+    <p>ROCm AI Ecosystem</p>
+</a></div>
+          
+        
+      </div>
+    
+    
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="index.html">
+  
+  
+  
+  
+  
+  
+    <p class="title logo__title">FlyDSL 0.3.3</p>
+  
+</a></div>
+        <div class="sidebar-primary-item">
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">Search</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script></div>
+        <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
+    <div class="bd-toc-item navbar-nav active">
+        <ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Install FlyDSL</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api_stability.html">API stability</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Language</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="language/arithmetic_types.html">Arithmetic types</a></li>
+<li class="toctree-l1"><a class="reference internal" href="language/composite_types.html">Composite types</a></li>
+<li class="toctree-l1"><a class="reference internal" href="language/storage_and_allocator.html">Storage and allocator</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">Architecture and compilation pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="layout_system_guide.html">Layout algebra</a></li>
+<li class="toctree-l1"><a class="reference internal" href="kernel_authoring_guide.html">Kernel authoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="kernel_tuning_guide.html">Kernel tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="autotune_guide.html">Offline autotune configs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="prebuilt_kernels_guide.html">Prebuilt kernel library</a></li>
+<li class="toctree-l1"><a class="reference internal" href="testing_benchmarking_guide.html">Testing and benchmarking</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cute_layout_algebra_guide.html">CuTe layout algebra</a></li>
+<li class="toctree-l1"><a class="reference internal" href="extern_integration_guide.html">External bitcode integration</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">API reference</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="api/dsl.html">FlyDSL Python DSL</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/compiler.html">Compiler and pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/kernels.html">Prebuilt kernels</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Tutorials</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="tutorials/basic_usage.html">Basic usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="tutorials/kernel_development.html">Kernel development techniques</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">About</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="about/license.html">License</a></li>
+</ul>
+
+    </div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+  
+  <div id="rtd-footer-container"></div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+
+<div class="sbt-scroll-pixel-helper"></div>
+
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item"><label class="sidebar-toggle primary-toggle btn btn-sm" for="__primary" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-angle-right"></span>
+  </label></div>
+      
+        <div class="header-article-item">
+
+
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    <li class="breadcrumb-item active" aria-current="page">Architecture...</li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+    <div class="header-article-items__end">
+      
+        <div class="header-article-item">
+
+<div class="article-header-buttons">
+
+
+
+
+
+<div class="dropdown dropdown-source-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Source repositories">
+    <i class="fab fa-github"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL" target="_blank"
+   class="btn btn-sm btn-source-repository-button dropdown-item"
+   title="Source repository"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fab fa-github"></i>
+  </span>
+<span class="btn__text-container">Repository</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL/blob/main/docs/architecture_guide.md?plain=1" target="_blank"
+   class="btn btn-sm btn-source-file-button dropdown-item"
+   title="Show source"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-code"></i>
+  </span>
+<span class="btn__text-container">Show source</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL/issues/new?title=Issue%20on%20page%20%2Farchitecture_guide.html&body=Your%20issue%20content%20here." target="_blank"
+   class="btn btn-sm btn-source-issues-button dropdown-item"
+   title="Open an issue"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-lightbulb"></i>
+  </span>
+<span class="btn__text-container">Open issue</span>
+</a>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+
+
+<div class="dropdown dropdown-download-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Download this page">
+    <i class="fas fa-download"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="_sources/architecture_guide.md" target="_blank"
+   class="btn btn-sm btn-download-source-button dropdown-item"
+   title="Download source file"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file"></i>
+  </span>
+<span class="btn__text-container">.md</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li>
+<button onclick="window.print()"
+  class="btn btn-sm btn-download-pdf-button dropdown-item"
+  title="Print to PDF"
+  data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file-pdf"></i>
+  </span>
+<span class="btn__text-container">.pdf</span>
+</button>
+</li>
+      
+  </ul>
+</div>
+
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script>
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm pst-navbar-icon search-button search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass fa-lg"></i>
+  </button>
+`);
+</script>
+<button class="sidebar-toggle secondary-toggle btn btn-sm" title="Toggle secondary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-list"></span>
+</button>
+</div></div>
+      
+    </div>
+  
+</div>
+</div>
+              
+              
+
+<div id="jb-print-docs-body" class="onlyprint">
+    <h1>Architecture & compilation pipeline guide</h1>
+    <!-- Table of contents -->
+    <div id="print-main-content">
+        <div id="jb-print-toc">
+            
+            <div>
+                <h2> Contents </h2>
+            </div>
+            <nav aria-label="Page">
+                <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#quick-reference">Quick Reference</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#project-structure">1. Project structure</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#architecture">2. Architecture</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#compilation-pipeline">3. Compilation pipeline</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#high-level-flow">3.1 High-level flow</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#pipeline-stages-in-detail">3.2 Pipeline stages in detail</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#jit-compilation-flow">3.3 JIT compilation flow</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#key-abstractions">4. Key abstractions</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flyc-jit-host-launcher">4.1 <code class="docutils literal notranslate"><span class="pre">@flyc.jit</span></code> — Host launcher</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flyc-kernel-gpu-kernel">4.2 <code class="docutils literal notranslate"><span class="pre">@flyc.kernel</span></code> — GPU kernel</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#kernellauncher">4.3 <code class="docutils literal notranslate"><span class="pre">KernelLauncher</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#jitcfunction">4.4 <code class="docutils literal notranslate"><span class="pre">JITCFunction</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#dsltype-jitargument-protocols">4.5 <code class="docutils literal notranslate"><span class="pre">DslType</span></code> / <code class="docutils literal notranslate"><span class="pre">JitArgument</span></code> protocols</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#astrewriter">4.6 <code class="docutils literal notranslate"><span class="pre">ASTRewriter</span></code></a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#environment-variables">5. Environment variables</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#compilation-options-flydsl-compile">5.1 Compilation options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_COMPILE_*</span></code>)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#debug-options-flydsl-debug">5.2 Debug options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_*</span></code>)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#runtime-options-flydsl-runtime">5.3 Runtime options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_RUNTIME_*</span></code>)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#architecture-detection-priority">5.4 Architecture detection priority</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#target-hardware">6. Target hardware</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#ir-dump-workflow">7. IR dump workflow</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#source-files">8. Source files</a></li>
+</ul>
+            </nav>
+        </div>
+    </div>
+</div>
+
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section class="tex2jax_ignore mathjax_ignore" id="architecture-compilation-pipeline-guide">
+<h1>Architecture &amp; compilation pipeline guide<a class="headerlink" href="#architecture-compilation-pipeline-guide" title="Link to this heading">#</a></h1>
+<p>This guide covers the FlyDSL project structure, compilation stages, key abstractions, and environment configuration.</p>
+<section id="quick-reference">
+<h2>Quick Reference<a class="headerlink" href="#quick-reference" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Component</p></th>
+<th class="head"><p>Description</p></th>
+<th class="head"><p>Key File</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>FlyDSL</strong></p></td>
+<td><p>Python DSL front-end for authoring GPU kernels</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>FlyDSL Compiler</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code> / <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> — trace-based JIT compiler</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><strong>FlyDSL Expr</strong></p></td>
+<td><p>DSL expression ops (arith, vector, gpu, buffer, rocdl)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/expr/</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Fly Dialect</strong></p></td>
+<td><p>Flexible Layout IR — MLIR dialect with layout algebra</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">include/flydsl/Dialect/Fly/</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><strong>MlirCompiler</strong></p></td>
+<td><p>End-to-end MLIR pass pipeline (DSL → binary)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/jit_function.py</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>JITCFunction</strong></p></td>
+<td><p>MLIR ExecutionEngine wrapper for JIT execution</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/jit_executor.py</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<hr class="docutils" />
+<section id="project-structure">
+<h2>1. Project structure<a class="headerlink" href="#project-structure" title="Link to this heading">#</a></h2>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>FlyDSL/
+├── include/flydsl/                   # C++ dialect headers
+│   └── Dialect/
+│       ├── Fly/                      # Fly layout dialect
+│       │   ├── IR/
+│       │   │   ├── FlyDialect.td     # Dialect declaration (name = "fly")
+│       │   │   ├── FlyOps.td         # Layout ops (make_shape, crd2idx, composition, ...)
+│       │   │   ├── FlyTypeDefs.td    # Custom types (!fly.int_tuple, !fly.layout, ...)
+│       │   │   ├── FlyAttrDefs.td    # Attributes
+│       │   │   └── FlyInterfaces.td  # Op interfaces
+│       │   └── Transforms/
+│       │       ├── Passes.td         # Pass declarations (fly-layout-lowering, etc.)
+│       │       └── LayoutLowering.td # Layout lowering pass
+│       └── FlyROCDL/                 # FlyROCDL dialect (copy/MMA atoms)
+│           └── IR/
+│               ├── Dialect.td        # FlyROCDL dialect declaration
+│               ├── CopyAtom.td       # Copy atom ops
+│               └── MmaAtom.td        # MMA atom ops
+│
+├── lib/                              # C++ dialect implementation
+│   ├── Dialect/Fly/                  # Fly dialect ops, type inference, lowering
+│   ├── Dialect/FlyROCDL/             # FlyROCDL dialect implementation
+│   ├── Conversion/                   # Dialect conversion passes
+│   └── Transforms/                   # Optimization passes
+│
+├── python/flydsl/                    # Python DSL package
+│   ├── __init__.py                   # Package version
+│   ├── compiler/
+│   │   ├── __init__.py               # Public API: jit, kernel, from_dlpack
+│   │   ├── jit_function.py           # @jit decorator, MlirCompiler, JitCacheManager
+│   │   ├── kernel_function.py        # @kernel decorator, KernelFunction, KernelLauncher
+│   │   ├── jit_executor.py           # JITCFunction (ExecutionEngine wrapper)
+│   │   ├── jit_argument.py           # Argument conversion (Tensor, Stream, Int32)
+│   │   ├── ast_rewriter.py           # AST rewriting for Python control flow → MLIR
+│   │   └── protocol.py              # DslType / JitArgument protocols
+│   ├── expr/
+│   │   ├── __init__.py               # Public expr API
+│   │   ├── typing.py                 # Types (T.f32, Tensor, Stream, Constexpr)
+│   │   ├── numeric.py                # DSL numeric types (Float32, Int32, ...)
+│   │   ├── primitive.py              # Primitive operations (layout algebra, copy, gemm)
+│   │   ├── derived.py                # Derived types (CopyAtom, MmaAtom, TiledCopy)
+│   │   ├── arith.py                  # Arithmetic dialect ops
+│   │   ├── gpu.py                    # GPU dialect ops (thread_idx, block_idx, barrier)
+│   │   └── rocdl/                    # ROCm-specific intrinsics (MFMA/WMMA, buffer, TDM, cluster)
+│   ├── runtime/
+│   │   └── device.py                 # get_rocm_arch() — GPU architecture detection
+│   └── utils/
+│       ├── env.py                    # EnvManager — typed environment config
+│       ├── logger.py                 # Logging utilities
+│       └── smem_allocator.py         # SmemAllocator for LDS management
+│
+├── examples/                         # Runnable examples
+│   ├── 01-vectorAdd.py               # Vector addition with layout algebra
+│   ├── 02-tiledCopy.py               # Tiled copy with partitioned tensors
+│   ├── 03-tiledMma.py                # Tiled MMA (GEMM) with MFMA atoms
+│   └── 04-preshuffle_gemm.py         # Preshuffle GEMM end-to-end example
+│
+├── kernels/                          # Production GPU kernels (organized by domain)
+│   ├── gemm/                         # Dense GEMM kernels
+│   │   ├── preshuffle_gemm.py        # GEMM (preshuffle layout)
+│   │   ├── mxfp4_preshuffle.py       # MXFP4 preshuffle GEMM
+│   │   ├── fp4_gemm_4wave.py         # FP4 4-wave GEMM
+│   │   ├── fp8_gemm_4wave.py         # FP8 4-wave GEMM
+│   │   ├── fp8_gemm_8wave.py         # FP8 8-wave GEMM
+│   │   ├── rdna_f16_gemm.py          # RDNA FP16 GEMM
+│   │   ├── rdna_fp8_preshuffle_gemm.py # RDNA FP8 GEMM
+│   │   ├── gemm_common_gfx1250.py    # GFX1250 GEMM common
+│   │   ├── gemm_fp8fp4_gfx1250.py    # GFX1250 FP8/FP4 GEMM
+│   │   ├── wmma_gemm_gfx1250.py      # GFX1250 WMMA GEMM
+│   │   └── fp8_gemm_utils.py         # FP8 GEMM helpers
+│   ├── norm/                         # Normalization kernels
+│   │   ├── layernorm_kernel.py       # LayerNorm (layout API)
+│   │   ├── rmsnorm_kernel.py         # RMSNorm (layout API)
+│   │   └── softmax_kernel.py         # Softmax (layout API)
+│   ├── attention/                    # Attention kernels
+│   │   ├── pa_decode_fp8.py          # Paged attention decode (FP8)
+│   │   ├── pa_decode_swa.py          # Paged attention sliding-window
+│   │   ├── flash_attn_generic.py     # FlashAttention generic fallback
+│   │   ├── flash_attn_gfx950.py      # FlashAttention gfx950 fast path
+│   │   ├── mla_fwd_decode.py         # MLA forward decode
+│   │   └── fused_rope_cache_kernel.py # Fused RoPE + KV cache
+│   ├── moe/                          # Mixture-of-experts kernels
+│   │   ├── moe_gemm_2stage.py        # MoE GEMM (2-stage gate/up + reduce)
+│   │   ├── mxfp_moe/               # Fused a4w4/a8w4 MoE 2-stage (device fp4 re-quant)
+│   │   ├── moe_sorting_kernel.py     # MoE token sorting
+│   │   └── topk_gating_softmax_kernel.py # Top-k gating softmax
+│   ├── mma/                          # Shared MMA pipeline helpers
+│   │   ├── mfma_epilogues.py         # MFMA epilogue helpers
+│   │   ├── mfma_preshuffle_pipeline.py # Preshuffle helpers for MFMA kernels
+│   │   └── pipeline_utils.py         # Pipeline utility helpers
+│   ├── conv/                         # Convolution kernels
+│   │   └── conv3d_implicit_8wave.py  # Implicit-GEMM 3D convolution
+│   ├── comm/                         # Multi-GPU communication
+│   │   └── custom_all_reduce.py      # Multi-GPU all-reduce
+│   └── common/                       # Cross-domain kernel utilities
+│       ├── kernels_common.py         # Common kernel utilities
+│       ├── layout_utils.py           # Layout helpers
+│       └── tensor_shim.py            # GTensor/STensor abstraction
+│
+├── tests/
+│   ├── mlir/                         # MLIR-level tests (Conversion, LayoutAlgebra, Transforms)
+│   ├── kernels/                      # GPU kernel tests + benchmarks
+│   ├── python/                       # Python-based tests (examples, AOT)
+│   ├── unit/                         # Unit tests (streams, async, etc.)
+│   ├── conftest.py                   # Pytest fixtures
+│   ├── test_common.py                # Shared test utilities
+│   └── utils.py                      # Compilation helpers
+│
+└── scripts/                          # Build and test helpers
+    ├── build.sh                      # Build FlyDSL (CMake + ninja)
+    ├── build_llvm.sh                 # Build MLIR from ROCm llvm-project
+    ├── run_tests.sh                  # Run full test suite (pytest + examples + FileCheck)
+    ├── run_benchmark.sh              # Run benchmarks
+    └── dumpir.sh                     # Dump intermediate IR
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="architecture">
+<h2>2. Architecture<a class="headerlink" href="#architecture" title="Link to this heading">#</a></h2>
+<p>The user-facing API lives in <code class="docutils literal notranslate"><span class="pre">python/flydsl/</span></code>. Kernel authors use <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code> and <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> decorators with expression operations from <code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code>:</p>
+<ul class="simple">
+<li><p><strong>Traces</strong> Python functions via AST rewriting and execution</p></li>
+<li><p><strong>Generates</strong> Fly dialect ops and standard MLIR dialects (gpu, arith, scf, memref, vector, rocdl)</p></li>
+<li><p><strong>Compiles</strong> through the <code class="docutils literal notranslate"><span class="pre">MlirCompiler</span></code> pass pipeline (Fly → ROCDL → LLVM → HSACO)</p></li>
+<li><p><strong>Caches</strong> compiled kernels to disk for fast reuse</p></li>
+<li><p><strong>Executes</strong> via MLIR ExecutionEngine</p></li>
+</ul>
+<p>The Fly dialect (<code class="docutils literal notranslate"><span class="pre">include/flydsl/Dialect/Fly/</span></code>) provides the MLIR-level layout algebra (composition, product, divide, coordinate mapping). Python DSL operations in <code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code> lower to Fly dialect ops during tracing, and are then compiled through the <code class="docutils literal notranslate"><span class="pre">MlirCompiler</span></code> pipeline.</p>
+</section>
+<hr class="docutils" />
+<section id="compilation-pipeline">
+<h2>3. Compilation pipeline<a class="headerlink" href="#compilation-pipeline" title="Link to this heading">#</a></h2>
+<section id="high-level-flow">
+<h3>3.1 High-level flow<a class="headerlink" href="#high-level-flow" title="Link to this heading">#</a></h3>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>Python Function (@flyc.kernel / @flyc.jit)
+        │
+        ▼  AST Rewriting
+   Transformed Python Function
+        │
+        ▼  Tracing (execution inside MLIR Context)
+   MLIR Module (fly, gpu, arith, scf, memref, vector dialects)
+        │
+        ▼  MlirCompiler.compile()
+   ┌────────────────────────────────────────────────────────┐
+   │ Stage A — pre_binary_fragments  (Fly → ROCDL)          │
+   │   fly-rewrite-func-signature                           │
+   │   fly-canonicalize                                     │
+   │   fly-layout-lowering                                  │
+   │   fly-int-swizzle-simplify                             │
+   │   canonicalize                                         │
+   │   fly-convert-atom-call-to-ssa-form                    │
+   │   fly-promote-regmem-to-vectorssa                      │
+   │   convert-fly-to-rocdl                                 │
+   │   canonicalize                                         │
+   │   gpu.module(convert-scf-to-cf, cse,                   │
+   │              convert-gpu-to-rocdl{chipset=gfxNNN ...}, │
+   │              fly-rocdl-cluster-attr)                   │
+   ├────────────────────────────────────────────────────────┤
+   │ Stage B — binary_prep_fragments  (→ LLVM)              │
+   │   rocdl-attach-target{chip=gfxNNN ...}                 │
+   │   convert-scf-to-cf                                    │
+   │   convert-cf-to-llvm                                   │
+   │   gpu-to-llvm{use-bare-pointers-...=true}              │
+   │   convert-vector-to-llvm                               │
+   │   convert-arith-to-llvm                                │
+   │   convert-func-to-llvm                                 │
+   │   reconcile-unrealized-casts                           │
+   │   ensure-debug-info-scope-on-llvm-func  (optional)     │
+   ├────────────────────────────────────────────────────────┤
+   │ Stage C — binary_fragment                              │
+   │   gpu-module-to-binary{format=fatbin opts="..."}       │
+   └────────────────────────────────────────────────────────┘
+        │
+        ▼
+   JITCFunction (ExecutionEngine)
+</pre></div>
+</div>
+</section>
+<section id="pipeline-stages-in-detail">
+<h3>3.2 Pipeline stages in detail<a class="headerlink" href="#pipeline-stages-in-detail" title="Link to this heading">#</a></h3>
+<p>The pipeline is built by <code class="docutils literal notranslate"><span class="pre">RocmBackend._pipeline_parts()</span></code> in
+<code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/backends/rocm.py</span></code>. The orchestrator
+<code class="docutils literal notranslate"><span class="pre">_pipeline_fragments_for_mode()</span></code> in <code class="docutils literal notranslate"><span class="pre">jit_function.py</span></code> decides whether to run
+the pipeline as a single combined pass list (<code class="docutils literal notranslate"><span class="pre">pipeline_fragments()</span></code>) or split
+it for external LLVM codegen (<code class="docutils literal notranslate"><span class="pre">external_binary_pipeline_fragments()</span></code>). External
+mode runs Stages A and B with the bundled MLIR runtime, then invokes the
+external LLVM toolchain only for Stage C (<code class="docutils literal notranslate"><span class="pre">gpu-module-to-binary</span></code>).</p>
+<p><strong>Stage A — <code class="docutils literal notranslate"><span class="pre">pre_binary_fragments</span></code></strong> (Fly dialect → ROCDL lowering)</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>#</p></th>
+<th class="head"><p>Pass</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>1</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly-rewrite-func-signature</span></code></p></td>
+<td><p>Rewrite DSL types at function and SCF control-flow boundaries; lowers <code class="docutils literal notranslate"><span class="pre">IntTuple</span></code> / <code class="docutils literal notranslate"><span class="pre">Layout</span></code> / <code class="docutils literal notranslate"><span class="pre">ComposedLayout</span></code> / <code class="docutils literal notranslate"><span class="pre">CoordTensor</span></code> / <code class="docutils literal notranslate"><span class="pre">MemRef</span></code> to packed LLVM struct types and reconstructs them in the body via constructor ops.</p></td>
+</tr>
+<tr class="row-odd"><td><p>2</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly-canonicalize</span></code></p></td>
+<td><p>FlyDSL-specific canonicalization (folds <code class="docutils literal notranslate"><span class="pre">!fly.layout</span></code> algebra when shapes are static).</p></td>
+</tr>
+<tr class="row-even"><td><p>3</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly-layout-lowering</span></code></p></td>
+<td><p>Lowers layout algebra (<code class="docutils literal notranslate"><span class="pre">fly.crd2idx</span></code>, partitions, divides) to concrete <code class="docutils literal notranslate"><span class="pre">arith</span></code> + <code class="docutils literal notranslate"><span class="pre">vector</span></code> ops.</p></td>
+</tr>
+<tr class="row-odd"><td><p>4</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly-int-swizzle-simplify</span></code></p></td>
+<td><p>Algebraically simplifies the swizzle-shaped arith sequences emitted by <code class="docutils literal notranslate"><span class="pre">applySwizzle</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p>5</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">canonicalize</span></code></p></td>
+<td><p>Standard MLIR canonicalization (constant folding, etc.).</p></td>
+</tr>
+<tr class="row-odd"><td><p>6</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly-convert-atom-call-to-ssa-form</span></code></p></td>
+<td><p>Converts <code class="docutils literal notranslate"><span class="pre">copy_atom_call</span></code> / <code class="docutils literal notranslate"><span class="pre">mma_atom_call</span></code> to their SSA counterparts; promotes register tensors to vector SSA values.</p></td>
+</tr>
+<tr class="row-even"><td><p>7</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly-promote-regmem-to-vectorssa</span></code></p></td>
+<td><p>Promotes <code class="docutils literal notranslate"><span class="pre">fly.make_ptr(register)</span></code> memory semantics to vector SSA values (requires #6).</p></td>
+</tr>
+<tr class="row-odd"><td><p>8</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">convert-fly-to-rocdl</span></code></p></td>
+<td><p>Lowers remaining Fly ops to MLIR upstream + ROCDL dialects (copy atoms → <code class="docutils literal notranslate"><span class="pre">rocdl.buffer_load/store</span></code>, or gfx1250 TDM → <code class="docutils literal notranslate"><span class="pre">rocdl.tensor.load.to.lds</span></code> / <code class="docutils literal notranslate"><span class="pre">store.from.lds</span></code>; MMA atoms → <code class="docutils literal notranslate"><span class="pre">rocdl.mfma.*</span></code> on CDNA, <code class="docutils literal notranslate"><span class="pre">rocdl.wmma.*</span></code> on gfx11/gfx1250).</p></td>
+</tr>
+<tr class="row-even"><td><p>9</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">canonicalize</span></code></p></td>
+<td><p>Second canonicalization round after ROCDL lowering.</p></td>
+</tr>
+<tr class="row-odd"><td><p>10</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">gpu.module(convert-scf-to-cf,</span> <span class="pre">cse,</span> <span class="pre">convert-gpu-to-rocdl{chipset=gfxNNN</span> <span class="pre">...},</span> <span class="pre">fly-rocdl-cluster-attr)</span></code></p></td>
+<td><p>Inside the GPU module: SCF→CF, CSE, GPU intrinsics→ROCDL, then <code class="docutils literal notranslate"><span class="pre">fly-rocdl-cluster-attr</span></code> injects <code class="docutils literal notranslate"><span class="pre">amdgpu-cluster-dims</span></code> into the <code class="docutils literal notranslate"><span class="pre">llvm.func</span></code> <code class="docutils literal notranslate"><span class="pre">passthrough</span></code>.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><strong>Stage B — <code class="docutils literal notranslate"><span class="pre">binary_prep_fragments</span></code></strong> (LLVM lowering, host + kernel)</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>#</p></th>
+<th class="head"><p>Pass</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>11</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">rocdl-attach-target{chip=gfxNNN</span> <span class="pre">...}</span></code></p></td>
+<td><p>Attaches <code class="docutils literal notranslate"><span class="pre">#rocdl.target&lt;chip=gfxNNN&gt;</span></code> (plus <code class="docutils literal notranslate"><span class="pre">fast</span></code>/<code class="docutils literal notranslate"><span class="pre">unsafe-math</span></code>/<code class="docutils literal notranslate"><span class="pre">wave64</span></code> options) to the GPU module for codegen.</p></td>
+</tr>
+<tr class="row-odd"><td><p>12</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">convert-scf-to-cf</span></code></p></td>
+<td><p>Host-side SCF → ControlFlow.</p></td>
+</tr>
+<tr class="row-even"><td><p>13</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">convert-cf-to-llvm</span></code></p></td>
+<td><p>ControlFlow → LLVM dialect.</p></td>
+</tr>
+<tr class="row-odd"><td><p>14</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">gpu-to-llvm{use-bare-pointers-for-host=true</span> <span class="pre">use-bare-pointers-for-kernels=true}</span></code></p></td>
+<td><p>GPU types and host launcher → LLVM.</p></td>
+</tr>
+<tr class="row-even"><td><p>15</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">convert-vector-to-llvm</span></code></p></td>
+<td><p>Vector → LLVM.</p></td>
+</tr>
+<tr class="row-odd"><td><p>16</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">convert-arith-to-llvm</span></code></p></td>
+<td><p>Arith → LLVM.</p></td>
+</tr>
+<tr class="row-even"><td><p>17</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">convert-func-to-llvm</span></code></p></td>
+<td><p>Func → LLVM.</p></td>
+</tr>
+<tr class="row-odd"><td><p>18</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">reconcile-unrealized-casts</span></code></p></td>
+<td><p>Final cast cleanup.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>When <code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1</span></code>, Stage B appends
+<code class="docutils literal notranslate"><span class="pre">ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}</span></code> after
+<code class="docutils literal notranslate"><span class="pre">reconcile-unrealized-casts</span></code> and before Stage C.</p>
+<p><strong>Stage C — <code class="docutils literal notranslate"><span class="pre">binary_fragment</span></code></strong></p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>#</p></th>
+<th class="head"><p>Pass</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>19</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">gpu-module-to-binary{format=fatbin</span> <span class="pre">opts=&quot;...&quot;}</span></code></p></td>
+<td><p>Invokes the LLVM AMDGPU backend and emits an HSA fatbin.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">gpu-kernel-outlining</span></code> is no longer a pass in the runtime pipeline. Kernel
+outlining happens during Python tracing, when <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> emits
+<code class="docutils literal notranslate"><span class="pre">gpu.func</span></code> ops directly into a <code class="docutils literal notranslate"><span class="pre">gpu.container_module</span></code>.</p>
+</section>
+<section id="jit-compilation-flow">
+<h3>3.3 JIT compilation flow<a class="headerlink" href="#jit-compilation-flow" title="Link to this heading">#</a></h3>
+<p>When a <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code> function is called:</p>
+<ol class="arabic simple">
+<li><p><strong>Cache check</strong>: Look up by argument type signature (in-memory → disk).</p></li>
+<li><p><strong>AST rewriting</strong>: <code class="docutils literal notranslate"><span class="pre">ASTRewriter.transform</span></code> converts Python <code class="docutils literal notranslate"><span class="pre">for</span></code>/<code class="docutils literal notranslate"><span class="pre">if</span></code> to MLIR <code class="docutils literal notranslate"><span class="pre">scf.for</span></code>/<code class="docutils literal notranslate"><span class="pre">scf.if</span></code>.</p></li>
+<li><p><strong>MLIR module creation</strong>: Sets up <code class="docutils literal notranslate"><span class="pre">gpu.container_module</span></code> with target.</p></li>
+<li><p><strong>Argument conversion</strong>: <code class="docutils literal notranslate"><span class="pre">convert_to_jit_arguments</span></code> maps Python args to IR types.</p></li>
+<li><p><strong>Function tracing</strong>: Execute the transformed function body to generate MLIR ops.</p></li>
+<li><p><strong>GPU kernel emission</strong>: <code class="docutils literal notranslate"><span class="pre">&#64;kernel</span></code> calls emit <code class="docutils literal notranslate"><span class="pre">gpu.func</span></code> into <code class="docutils literal notranslate"><span class="pre">gpu.module</span></code>.</p></li>
+<li><p><strong>Pipeline compilation</strong>: <code class="docutils literal notranslate"><span class="pre">MlirCompiler.compile()</span></code> runs the full pass pipeline.</p></li>
+<li><p><strong>Execution</strong>: <code class="docutils literal notranslate"><span class="pre">JITCFunction</span></code> wraps MLIR ExecutionEngine to invoke the compiled code.</p></li>
+<li><p><strong>Cache store</strong>: Serialize the compiled function to disk for future runs.</p></li>
+</ol>
+</section>
+</section>
+<hr class="docutils" />
+<section id="key-abstractions">
+<h2>4. Key abstractions<a class="headerlink" href="#key-abstractions" title="Link to this heading">#</a></h2>
+<section id="flyc-jit-host-launcher">
+<h3>4.1 <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code> — Host launcher<a class="headerlink" href="#flyc-jit-host-launcher" title="Link to this heading">#</a></h3>
+<p>Decorates a Python function as a JIT-compiled host launcher:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.compiler</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">flyc</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.expr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">fx</span>
+
+<span class="nd">@flyc</span><span class="o">.</span><span class="n">jit</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">launch</span><span class="p">(</span><span class="n">a</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">b</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">n</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Constexpr</span><span class="p">[</span><span class="nb">int</span><span class="p">],</span>
+           <span class="n">stream</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Stream</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">Stream</span><span class="p">(</span><span class="kc">None</span><span class="p">)):</span>
+    <span class="n">my_kernel</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">,</span> <span class="n">n</span><span class="p">)</span><span class="o">.</span><span class="n">launch</span><span class="p">(</span><span class="n">grid</span><span class="o">=</span><span class="p">(</span><span class="n">n</span> <span class="o">//</span> <span class="mi">256</span><span class="p">,),</span> <span class="n">block</span><span class="o">=</span><span class="p">(</span><span class="mi">256</span><span class="p">,),</span> <span class="n">stream</span><span class="o">=</span><span class="n">stream</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Key behaviors:</p>
+<ul class="simple">
+<li><p>The first call triggers compilation; subsequent calls with the same type signature use the cached binary.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">Constexpr[T]</span></code> parameters become compile-time constants and affect the cache key.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">Tensor</span></code> parameters map to memref descriptors via DLPack.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">Stream</span></code> parameters pass a CUDA/HIP stream to the GPU runtime.</p></li>
+<li><p>When called inside an existing MLIR context, the function acts as a normal composable function.</p></li>
+</ul>
+</section>
+<section id="flyc-kernel-gpu-kernel">
+<h3>4.2 <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> — GPU kernel<a class="headerlink" href="#flyc-kernel-gpu-kernel" title="Link to this heading">#</a></h3>
+<p>Decorates a Python function as a GPU kernel:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="nd">@flyc</span><span class="o">.</span><span class="n">kernel</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">my_kernel</span><span class="p">(</span><span class="n">a</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">b</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">n</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Constexpr</span><span class="p">[</span><span class="nb">int</span><span class="p">]):</span>
+    <span class="n">tid</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">gpu</span><span class="o">.</span><span class="n">thread_id</span><span class="p">(</span><span class="s2">"x"</span><span class="p">)</span>
+    <span class="n">bid</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">gpu</span><span class="o">.</span><span class="n">block_id</span><span class="p">(</span><span class="s2">"x"</span><span class="p">)</span>
+    <span class="c1"># ... kernel body ...</span>
+</pre></div>
+</div>
+<p>Key behaviors:</p>
+<ul class="simple">
+<li><p>You can only call this inside a <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code> function.</p></li>
+<li><p>Calling the kernel returns a <code class="docutils literal notranslate"><span class="pre">KernelLauncher</span></code>; you must call <code class="docutils literal notranslate"><span class="pre">.launch()</span></code> to emit the launch op.</p></li>
+<li><p>Supports <code class="docutils literal notranslate"><span class="pre">Constexpr[T]</span></code> for compile-time specialization.</p></li>
+<li><p>Emits a <code class="docutils literal notranslate"><span class="pre">gpu.func</span></code> with <code class="docutils literal notranslate"><span class="pre">gpu.kernel</span></code> attribute into the <code class="docutils literal notranslate"><span class="pre">gpu.module</span></code>.</p></li>
+</ul>
+</section>
+<section id="kernellauncher">
+<h3>4.3 <code class="docutils literal notranslate"><span class="pre">KernelLauncher</span></code><a class="headerlink" href="#kernellauncher" title="Link to this heading">#</a></h3>
+<p>Calling a <code class="docutils literal notranslate"><span class="pre">&#64;kernel</span></code> function returns a <code class="docutils literal notranslate"><span class="pre">KernelLauncher</span></code>. Use <code class="docutils literal notranslate"><span class="pre">.launch()</span></code> to configure and emit the GPU launch:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">launcher</span> <span class="o">=</span> <span class="n">my_kernel</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">,</span> <span class="mi">1024</span><span class="p">)</span>
+<span class="n">launcher</span><span class="o">.</span><span class="n">launch</span><span class="p">(</span>
+    <span class="n">grid</span><span class="o">=</span><span class="p">(</span><span class="n">num_blocks</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span>
+    <span class="n">block</span><span class="o">=</span><span class="p">(</span><span class="mi">256</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span>
+    <span class="n">smem</span><span class="o">=</span><span class="n">shared_mem_bytes</span><span class="p">,</span>
+    <span class="n">stream</span><span class="o">=</span><span class="n">stream_value</span><span class="p">,</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="jitcfunction">
+<h3>4.4 <code class="docutils literal notranslate"><span class="pre">JITCFunction</span></code><a class="headerlink" href="#jitcfunction" title="Link to this heading">#</a></h3>
+<p>Wraps MLIR’s <code class="docutils literal notranslate"><span class="pre">ExecutionEngine</span></code> for JIT execution:</p>
+<ul class="simple">
+<li><p>Thread-safe with lazy engine initialization.</p></li>
+<li><p>Serializable (pickle) for disk caching.</p></li>
+<li><p>Supports packed calling convention via <code class="docutils literal notranslate"><span class="pre">ctypes</span></code>.</p></li>
+<li><p>Provides <code class="docutils literal notranslate"><span class="pre">.print_ir()</span></code> for debugging compiled or original IR.</p></li>
+</ul>
+</section>
+<section id="dsltype-jitargument-protocols">
+<h3>4.5 <code class="docutils literal notranslate"><span class="pre">DslType</span></code> / <code class="docutils literal notranslate"><span class="pre">JitArgument</span></code> protocols<a class="headerlink" href="#dsltype-jitargument-protocols" title="Link to this heading">#</a></h3>
+<p>Extensible type system for mapping Python values to MLIR:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># DslType protocol — for values used inside kernel/jit functions</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">DslType</span><span class="p">(</span><span class="n">Protocol</span><span class="p">):</span>
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">__construct_from_ir_values__</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">values</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">ir</span><span class="o">.</span><span class="n">Value</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="s2">"DslType"</span><span class="p">:</span> <span class="o">...</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">__extract_to_ir_values__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="n">ir</span><span class="o">.</span><span class="n">Value</span><span class="p">]:</span> <span class="o">...</span>
+
+<span class="c1"># JitArgument protocol — for values passed at the host boundary</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">JitArgument</span><span class="p">(</span><span class="n">Protocol</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">__get_ir_types__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="n">ir</span><span class="o">.</span><span class="n">Type</span><span class="p">]:</span> <span class="o">...</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">__get_c_pointers__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="n">ctypes</span><span class="o">.</span><span class="n">c_void_p</span><span class="p">]:</span> <span class="o">...</span>
+</pre></div>
+</div>
+<p>Built-in types: <code class="docutils literal notranslate"><span class="pre">Tensor</span></code>, <code class="docutils literal notranslate"><span class="pre">Stream</span></code>, <code class="docutils literal notranslate"><span class="pre">Int32</span></code>, and <code class="docutils literal notranslate"><span class="pre">Constexpr[T]</span></code></p>
+<p>To register custom types:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">flydsl.compiler</span><span class="w"> </span><span class="kn">import</span> <span class="n">JitArgumentRegistry</span>
+
+<span class="nd">@JitArgumentRegistry</span><span class="o">.</span><span class="n">register</span><span class="p">(</span><span class="n">MyPythonType</span><span class="p">,</span> <span class="n">dsl_type</span><span class="o">=</span><span class="n">MyDslType</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">MyJitArg</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">__get_ir_types__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span> <span class="o">...</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">__get_c_pointers__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span> <span class="o">...</span>
+</pre></div>
+</div>
+</section>
+<section id="astrewriter">
+<h3>4.6 <code class="docutils literal notranslate"><span class="pre">ASTRewriter</span></code><a class="headerlink" href="#astrewriter" title="Link to this heading">#</a></h3>
+<p>Transforms Python control flow to MLIR ops at the AST level:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">for</span> <span class="pre">i</span> <span class="pre">in</span> <span class="pre">range(n)</span></code> → <code class="docutils literal notranslate"><span class="pre">scf.for</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">for</span> <span class="pre">i</span> <span class="pre">in</span> <span class="pre">range_constexpr(n)</span></code> → compile-time unrolled loop</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">if</span> <span class="pre">condition</span></code> → <code class="docutils literal notranslate"><span class="pre">scf.if</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">const_expr(value)</span></code> → compile-time constant</p></li>
+</ul>
+</section>
+</section>
+<hr class="docutils" />
+<section id="environment-variables">
+<h2>5. Environment variables<a class="headerlink" href="#environment-variables" title="Link to this heading">#</a></h2>
+<section id="compilation-options-flydsl-compile">
+<h3>5.1 Compilation options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_COMPILE_*</span></code>)<a class="headerlink" href="#compilation-options-flydsl-compile" title="Link to this heading">#</a></h3>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Variable</p></th>
+<th class="head"><p>Default</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_COMPILE_OPT_LEVEL</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">2</span></code></p></td>
+<td><p>Optimization level (0–3)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">COMPILE_ONLY</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">0</span></code></p></td>
+<td><p>If <code class="docutils literal notranslate"><span class="pre">1</span></code>, compile without creating an executor. Returns <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">ARCH</span></code></p></td>
+<td><p>auto-detect</p></td>
+<td><p>Override target GPU architecture (e.g., <code class="docutils literal notranslate"><span class="pre">gfx942</span></code>, <code class="docutils literal notranslate"><span class="pre">gfx950</span></code>).</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="debug-options-flydsl-debug">
+<h3>5.2 Debug options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_*</span></code>)<a class="headerlink" href="#debug-options-flydsl-debug" title="Link to this heading">#</a></h3>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Variable</p></th>
+<th class="head"><p>Default</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DUMP_IR</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">false</span></code></p></td>
+<td><p>Dump intermediate IR at each pipeline stage.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DUMP_DIR</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">~/.flydsl/debug</span></code></p></td>
+<td><p>Directory for IR dumps.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_DUMP_ASM</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">false</span></code></p></td>
+<td><p>Dump final AMD ISA assembly.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_AST_DIFF</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">false</span></code></p></td>
+<td><p>Print AST diff during rewrite.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_PRINT_ORIGIN_IR</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">false</span></code></p></td>
+<td><p>Print origin IR before compilation.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_PRINT_AFTER_ALL</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">false</span></code></p></td>
+<td><p>Print IR after each MLIR pass.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_ENABLE_DEBUG_INFO</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">false</span></code></p></td>
+<td><p>Generate debug info in compiled code.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_ENABLE_VERIFIER</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">true</span></code></p></td>
+<td><p>Verify IR module.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_LOG_LEVEL</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">WARNING</span></code></p></td>
+<td><p>Logging level (DEBUG, INFO, WARNING, ERROR).</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="runtime-options-flydsl-runtime">
+<h3>5.3 Runtime options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_RUNTIME_*</span></code>)<a class="headerlink" href="#runtime-options-flydsl-runtime" title="Link to this heading">#</a></h3>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Variable</p></th>
+<th class="head"><p>Default</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_RUNTIME_CACHE_DIR</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">~/.flydsl/cache</span></code></p></td>
+<td><p>Directory for caching compiled kernels.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_RUNTIME_ENABLE_CACHE</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">true</span></code></p></td>
+<td><p>Enable kernel disk caching (in-memory cache is always active).</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="architecture-detection-priority">
+<h3>5.4 Architecture detection priority<a class="headerlink" href="#architecture-detection-priority" title="Link to this heading">#</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">get_rocm_arch()</span></code> in <code class="docutils literal notranslate"><span class="pre">runtime/device.py</span></code> checks in the following order:</p>
+<ol class="arabic simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_GPU_ARCH</span></code> env var</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">HSA_OVERRIDE_GFX_VERSION</span></code> env var (supports <code class="docutils literal notranslate"><span class="pre">9.4.2</span></code> → <code class="docutils literal notranslate"><span class="pre">gfx942</span></code> format)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">rocm_agent_enumerator</span></code> system tool</p></li>
+<li><p>Default: <code class="docutils literal notranslate"><span class="pre">gfx942</span></code></p></li>
+</ol>
+</section>
+</section>
+<hr class="docutils" />
+<section id="target-hardware">
+<h2>6. Target hardware<a class="headerlink" href="#target-hardware" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Architecture</p></th>
+<th class="head"><p>GPU</p></th>
+<th class="head"><p>LDS per CU</p></th>
+<th class="head"><p>Notes</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">gfx942</span></code></p></td>
+<td><p>MI300A / MI300X</p></td>
+<td><p>64 KB</p></td>
+<td><p>CDNA 3, primary development target</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">gfx950</span></code></p></td>
+<td><p>MI350 / MI355X</p></td>
+<td><p>160 KB</p></td>
+<td><p>CDNA 4, larger LDS</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">gfx1201</span></code></p></td>
+<td><p>Radeon AI PRO R9700</p></td>
+<td><p>64 KB</p></td>
+<td><p>RDNA 4</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">gfx1250</span></code></p></td>
+<td><p>—</p></td>
+<td><p>320 KB</p></td>
+<td><p>GFX12, wave32, WMMA, TDM ops</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">gfx90a</span></code></p></td>
+<td><p>MI250X</p></td>
+<td><p>64 KB</p></td>
+<td><p>CDNA 2 (verified platform)</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<hr class="docutils" />
+<section id="ir-dump-workflow">
+<h2>7. IR dump workflow<a class="headerlink" href="#ir-dump-workflow" title="Link to this heading">#</a></h2>
+<p>Enable with <code class="docutils literal notranslate"><span class="pre">FLYDSL_DUMP_IR=1</span></code>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">FLYDSL_DUMP_IR</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="nv">FLYDSL_DUMP_DIR</span><span class="o">=</span>./dumps<span class="w"> </span>python<span class="w"> </span>test_my_kernel.py
+</pre></div>
+</div>
+<p>This produces numbered dump files (exact pass count tracks <code class="docutils literal notranslate"><span class="pre">RocmBackend._pipeline_parts()</span></code>):</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>dumps/my_func_name/
+├── 00_origin.mlir
+├── 01_fly_rewrite_func_signature.mlir
+├── 02_fly_canonicalize.mlir
+├── 03_fly_layout_lowering.mlir
+├── 04_fly_int_swizzle_simplify.mlir
+├── 05_canonicalize.mlir
+├── 06_fly_convert_atom_call_to_ssa_form.mlir
+├── 07_fly_promote_regmem_to_vectorssa.mlir
+├── 08_convert_fly_to_rocdl.mlir
+├── 09_canonicalize.mlir
+├── 10_convert_scf_to_cf_cse_convert_gpu_to_rocdl.mlir
+│                                      # also runs fly-rocdl-cluster-attr
+├── 11_rocdl_attach_target.mlir
+├── 12_convert_scf_to_cf.mlir
+├── 13_convert_cf_to_llvm.mlir
+├── 14_gpu_to_llvm.mlir
+├── 15_convert_vector_to_llvm.mlir
+├── 16_convert_arith_to_llvm.mlir
+├── 17_convert_func_to_llvm.mlir
+├── 18_reconcile_unrealized_casts.mlir
+├── 19_gpu_module_to_binary.mlir
+├── 20_llvm_ir.ll
+└── 21_final_isa.s                    # AMD ISA assembly (best-effort)
+</pre></div>
+</div>
+<p>If <code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1</span></code>, the debug-info pass adds an extra numbered dump before <code class="docutils literal notranslate"><span class="pre">gpu_module_to_binary</span></code>.</p>
+</section>
+<hr class="docutils" />
+<section id="source-files">
+<h2>8. Source files<a class="headerlink" href="#source-files" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>File</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/jit_function.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&#64;jit</span></code> decorator, <code class="docutils literal notranslate"><span class="pre">MlirCompiler</span></code>, <code class="docutils literal notranslate"><span class="pre">JitCacheManager</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/kernel_function.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&#64;kernel</span></code> decorator, <code class="docutils literal notranslate"><span class="pre">KernelFunction</span></code>, <code class="docutils literal notranslate"><span class="pre">KernelLauncher</span></code>, <code class="docutils literal notranslate"><span class="pre">CompilationContext</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/jit_executor.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">JITCFunction</span></code> — ExecutionEngine wrapper</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/jit_argument.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">JitArgumentRegistry</span></code>, <code class="docutils literal notranslate"><span class="pre">TensorAdaptor</span></code>, <code class="docutils literal notranslate"><span class="pre">from_dlpack</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/ast_rewriter.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">ASTRewriter</span></code> — Python AST → MLIR control flow</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/protocol.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">get_ir_types</span></code>, <code class="docutils literal notranslate"><span class="pre">extract_to_ir_values</span></code>, <code class="docutils literal notranslate"><span class="pre">construct_from_ir_values</span></code> protocols</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/expr/typing.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Types</span></code> (<code class="docutils literal notranslate"><span class="pre">T</span></code>), <code class="docutils literal notranslate"><span class="pre">Tensor</span></code>, <code class="docutils literal notranslate"><span class="pre">Stream</span></code>, <code class="docutils literal notranslate"><span class="pre">Constexpr</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/expr/primitive.py</span></code></p></td>
+<td><p>Layout algebra primitives (make_shape, crd2idx, copy, gemm)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/expr/derived.py</span></code></p></td>
+<td><p>Derived types (<code class="docutils literal notranslate"><span class="pre">CopyAtom</span></code>, <code class="docutils literal notranslate"><span class="pre">MmaAtom</span></code>, <code class="docutils literal notranslate"><span class="pre">TiledCopy</span></code>)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/expr/numeric.py</span></code></p></td>
+<td><p>DSL numeric types (Float32, Int32, …)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/utils/env.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">EnvManager</span></code> — typed environment variable configuration</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/runtime/device.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">get_rocm_arch()</span></code> GPU detection</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">include/flydsl/Dialect/Fly/IR/FlyOps.td</span></code></p></td>
+<td><p>Fly dialect op definitions</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">include/flydsl/Dialect/Fly/Transforms/Passes.td</span></code></p></td>
+<td><p>Pass declarations (fly-layout-lowering, etc.)</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+</section>
+
+
+                </article>
+              
+
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="language/storage_and_allocator.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">Storage and Allocator</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="layout_system_guide.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">Layout algebra guide</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+    
+        
+              
+                <div class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+  <div class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> Contents
+  </div>
+  <nav class="bd-toc-nav page-toc">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#quick-reference">Quick Reference</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#project-structure">1. Project structure</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#architecture">2. Architecture</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#compilation-pipeline">3. Compilation pipeline</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#high-level-flow">3.1 High-level flow</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#pipeline-stages-in-detail">3.2 Pipeline stages in detail</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#jit-compilation-flow">3.3 JIT compilation flow</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#key-abstractions">4. Key abstractions</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flyc-jit-host-launcher">4.1 <code class="docutils literal notranslate"><span class="pre">@flyc.jit</span></code> — Host launcher</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flyc-kernel-gpu-kernel">4.2 <code class="docutils literal notranslate"><span class="pre">@flyc.kernel</span></code> — GPU kernel</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#kernellauncher">4.3 <code class="docutils literal notranslate"><span class="pre">KernelLauncher</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#jitcfunction">4.4 <code class="docutils literal notranslate"><span class="pre">JITCFunction</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#dsltype-jitargument-protocols">4.5 <code class="docutils literal notranslate"><span class="pre">DslType</span></code> / <code class="docutils literal notranslate"><span class="pre">JitArgument</span></code> protocols</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#astrewriter">4.6 <code class="docutils literal notranslate"><span class="pre">ASTRewriter</span></code></a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#environment-variables">5. Environment variables</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#compilation-options-flydsl-compile">5.1 Compilation options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_COMPILE_*</span></code>)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#debug-options-flydsl-debug">5.2 Debug options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_*</span></code>)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#runtime-options-flydsl-runtime">5.3 Runtime options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_RUNTIME_*</span></code>)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#architecture-detection-priority">5.4 Architecture detection priority</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#target-hardware">6. Target hardware</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#ir-dump-workflow">7. IR dump workflow</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#source-files">8. Source files</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+    
+
+          </div>
+          <footer class="bd-footer-content">
+            <p>
+  </p>
+          </footer>
+        
+
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script src="_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
+<script src="_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    
+<footer class="rocm-footer">
+    <div class="container-lg">
+        <section class="bottom-menu menu py-45">
+            <div class="row d-flex align-items-center">
+                <div class="col-12 text-center">
+                    <ul>
+                        <li><a href="https://www.amd.com/en/corporate/copyright" target="_blank">Terms and Conditions</a></li>
+                        <li><a href="https://rocm.docs.amd.com/en/latest/about/license.html">ROCm Licenses and Disclaimers</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/privacy" target="_blank">Privacy</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/trademarks" target="_blank">Trademarks</a></li>
+                        <li><a href="https://www.amd.com/content/dam/amd/en/documents/corporate/cr/supply-chain-transparency.pdf" target="_blank">Supply Chain Transparency</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/competition" target="_blank">Fair and Open Competition</a></li>
+                        <li><a href="https://www.amd.com/system/files/documents/amd-uk-tax-strategy.pdf" target="_blank">UK Tax Strategy</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/cookies" target="_blank">Cookie Policy</a></li>
+                        <!-- OneTrust Cookies Settings button start -->
+                        <li><a href="#cookie-settings" id="ot-sdk-btn" class="ot-sdk-show-settings">Cookie Settings</a></li>
+                        <!-- OneTrust Cookies Settings button end -->
+                    </ul>
+                </div>
+            </div>
+            <div class="row d-flex align-items-center">
+                <div class="col-12 text-center">
+                    <div>
+                        <span class="copyright">© 2026 Advanced Micro Devices, Inc</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+</footer>
+
+<!-- <div id="rdc-watermark-container">
+    <img id="rdc-watermark" src="_static/images/alpha-watermark.svg" alt="DRAFT watermark"/>
+</div> -->
+    
+  </body>
+</html>

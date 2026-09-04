@@ -1,0 +1,27 @@
+# FlyDSL
+
+> Note: ROCm documentation is split across multiple projects. In addition to this file, each project publishes its own `llms.txt` and `llms-full.txt` under `https://<base_url>/projects/<project_name>/en/latest/`.
+
+## Docs
+
+- [Install FlyDSL](installation.html)
+- [Quick start](quickstart.html)
+- [API stability](api_stability.html)
+- [Arithmetic types](language/arithmetic_types.html)
+- [Composite types](language/composite_types.html)
+- [Storage and allocator](language/storage_and_allocator.html)
+- [Architecture and compilation pipeline](architecture_guide.html)
+- [Layout algebra](layout_system_guide.html)
+- [Kernel authoring](kernel_authoring_guide.html)
+- [Kernel tuning](kernel_tuning_guide.html)
+- [Offline autotune configs](autotune_guide.html)
+- [Prebuilt kernel library](prebuilt_kernels_guide.html)
+- [Testing and benchmarking](testing_benchmarking_guide.html)
+- [CuTe layout algebra](cute_layout_algebra_guide.html)
+- [External bitcode integration](extern_integration_guide.html)
+- [FlyDSL Python DSL](api/dsl.html)
+- [Compiler and pipeline](api/compiler.html)
+- [Prebuilt kernels](api/kernels.html)
+- [Basic usage](tutorials/basic_usage.html)
+- [Kernel development techniques](tutorials/kernel_development.html)
+- [License](about/license.html)
