@@ -98,6 +98,36 @@ jobs:
             cat *.log || true
           fi
 
+      # gfx950 only: aiter FlyDSL kernels + kimik3/dsv4/glm5 tuned-fmoe CSVs.
+      - name: Prepare aiter
+        if: ${{ !contains(matrix.runners, 'mi325') }}
+        run: |
+          docker exec flydsl_test bash -c "rm -rf /tmp/aiter && git clone --depth 1 --recursive --shallow-submodules https://github.com/ROCm/aiter.git /tmp/aiter"
+          docker exec flydsl_test bash -c "python3 -c \"from pathlib import Path; src = Path('/tmp/aiter/requirements.txt'); dst = Path('/tmp/aiter/requirements-flydsl-ci.txt'); lines = [line for line in src.read_text().splitlines() if line.strip() and not line.strip().startswith('flydsl==')]; dst.write_text('\\n'.join(lines) + '\\n')\" && python3 -m pip install -r /tmp/aiter/requirements-flydsl-ci.txt"
+
+      - name: Run aiter CSV MoE and HGEMM
+        id: aiter
+        if: ${{ !contains(matrix.runners, 'mi325') }}
+        timeout-minutes: 180
+        run: |
+          docker exec -i flydsl_test bash <<'BASH' 2>&1 | tee /tmp/aiter_output.log
+          set -euo pipefail
+          export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-}
+          export AITER_REPO=/tmp/aiter
+          CFG=/tmp/aiter/aiter/configs/model_configs
+          export AITER_CONFIG_FMOE="${CFG}/kimik3_a8w4_tuned_fmoe.csv:${CFG}/dsv4_fp8fp4_tuned_fmoe.csv:${CFG}/glm5_fp4_tuned_fmoe.csv"
+          cd /tmp/aiter
+          python3 op_tests/test_moe_2stage.py --no-legacy --csv-filter flydsl_
+          python3 op_tests/test_flydsl_hgemm.py
+          BASH
+
+      - name: Show aiter logs
+        if: failure()
+        run: |
+          if [ -f /tmp/aiter_output.log ]; then
+            tail -n 200 /tmp/aiter_output.log
+          fi
+
       - name: Test summary
         if: always()
         env:
@@ -105,6 +135,7 @@ jobs:
           SUMMARY_INSTALL_OUTCOME: ${{ steps.install.outcome }}
           SUMMARY_TESTS_OUTCOME: ${{ steps.tests.outcome }}
           SUMMARY_BENCHMARKS_OUTCOME: ${{ steps.benchmarks.outcome }}
+          SUMMARY_AITER_OUTCOME: ${{ steps.aiter.outcome }}
           SUMMARY_TEST_LOG: /tmp/test_output.log
           SUMMARY_BENCH_LOG: /tmp/bench_output.log
         run: python3 flydsl/scripts/generate_summary.py test

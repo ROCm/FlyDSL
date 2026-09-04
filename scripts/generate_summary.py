@@ -84,19 +84,23 @@ def test_summary(summary: Path) -> None:
     install_outcome = os.environ.get("SUMMARY_INSTALL_OUTCOME", "unknown")
     tests_outcome = os.environ.get("SUMMARY_TESTS_OUTCOME", "unknown")
     bench_outcome = os.environ.get("SUMMARY_BENCHMARKS_OUTCOME", "unknown")
+    aiter_outcome = os.environ.get("SUMMARY_AITER_OUTCOME")
     test_log = os.environ.get("SUMMARY_TEST_LOG", "/tmp/test_output.log")
     bench_log = os.environ.get("SUMMARY_BENCH_LOG", "/tmp/bench_output.log")
 
     _out(summary, f"## Test Summary (`{runner}`)")
     _out(summary)
+    step_rows = [
+        ["Install wheels", f"`{install_outcome}`"],
+        ["Run tests", f"`{tests_outcome}`"],
+        ["Run benchmarks", f"`{bench_outcome}`"],
+    ]
+    if aiter_outcome:
+        step_rows.append(["Aiter CSV MoE / HGEMM", f"`{aiter_outcome}`"])
     _table(
         summary,
         ["Step", "Status"],
-        [
-            ["Install wheels", f"`{install_outcome}`"],
-            ["Run tests", f"`{tests_outcome}`"],
-            ["Run benchmarks", f"`{bench_outcome}`"],
-        ],
+        step_rows,
     )
 
     _write_test_results(summary, test_log)
