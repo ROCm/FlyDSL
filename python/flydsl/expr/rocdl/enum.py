@@ -7,11 +7,23 @@ from ..._mlir.dialects.fly_rocdl import TargetAddressSpace
 
 __all__ = [
     "AddressSpace",
+    "MemoryOrder",
     "TargetAddressSpace",
     "SyncScope",
 ]
 
 AddressSpace = TargetAddressSpace
+
+
+class MemoryOrder:
+    """LLVM-compatible memory orderings accepted by ROCDL memory ops."""
+
+    NotAtomic = "not_atomic"
+    Unordered = "unordered"
+    Monotonic = "monotonic"
+    Acquire = "acquire"
+    Release = "release"
+    SequentiallyConsistent = "seq_cst"
 
 
 class SyncScope:
