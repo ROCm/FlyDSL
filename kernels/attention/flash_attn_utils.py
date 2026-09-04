@@ -2596,8 +2596,8 @@ class GenericKvGmemToLdsLoader:
         traits = ctx.traits
         pid = self._tile_page_id(tile_start)
         paddr = as_mlir_value(self._v_dma_base_i64 + fx.Int64(pid) * self._v_dma_page_bytes)
-        rsrc = buffer_ops.create_buffer_resource_from_addr(
-            paddr, num_records_bytes=as_mlir_value(self._v_dma_page_bytes)
+        rsrc = fx.rocdl.get_buffer_rsrc(
+            buffer_ops.create_buffer_resource_from_addr(paddr, num_records_bytes=as_mlir_value(self._v_dma_page_bytes))
         )
         if const_expr(isinstance(buf_id, int)):
             vb = self._v_dma_lds_base + fx.Index((traits.LDS_V_BASE + buf_id * traits.LDS_V_TILE_SIZE) * 2)
@@ -2630,14 +2630,18 @@ class GenericKvGmemToLdsLoader:
         self._dma_soff = fx.Int32(0)
         self._dma_off = fx.Int32(0)
         self._dma_aux = fx.Int32(1)
-        self.k_rsrc = buffer_ops.create_buffer_resource(
-            ctx.K, max_size=False, num_records_bytes=ctx.kv_nrec_bytes, base_byte_offset=ctx.kv_batch_byte_off
+        self.k_rsrc = fx.rocdl.get_buffer_rsrc(
+            buffer_ops.create_buffer_resource(
+                ctx.K, max_size=False, num_records_bytes=ctx.kv_nrec_bytes, base_byte_offset=ctx.kv_batch_byte_off
+            )
         )
         self.NUM_DMA_K = (traits.BLOCK_N * traits.K_STRIDE * 2) // self.DMA_BATCH_BYTES
         self.LANES_PER_K_ROW = traits.HEAD_DIM * 2 // self.DMA_BYTES
         self.ROWS_PER_DMA_BATCH = self.DMA_BATCH_BYTES // (traits.HEAD_DIM * 2)
-        self.v_rsrc = buffer_ops.create_buffer_resource(
-            ctx.V, max_size=False, num_records_bytes=ctx.kv_nrec_bytes, base_byte_offset=ctx.kv_batch_byte_off
+        self.v_rsrc = fx.rocdl.get_buffer_rsrc(
+            buffer_ops.create_buffer_resource(
+                ctx.V, max_size=False, num_records_bytes=ctx.kv_nrec_bytes, base_byte_offset=ctx.kv_batch_byte_off
+            )
         )
         self.NUM_DMA_V = (traits.BLOCK_N * traits.V_STRIDE * 2) // self.DMA_BATCH_BYTES
         self.LANES_PER_V_ROW = traits.HEAD_DIM * 2 // self.DMA_BYTES
