@@ -48,7 +48,7 @@ jobs:
             -w /flydsl \
             --name llvm_build \
             "${MANYLINUX_IMAGE}"
-          docker exec llvm_build bash -c "python3 -m pip install -q nanobind"
+          docker exec llvm_build bash -c "python3 -m pip install -q 'nanobind==2.12.0'"
           docker exec llvm_build bash -c "git config --global --add safe.directory '*'"
 
       - name: Checkout source in build container
