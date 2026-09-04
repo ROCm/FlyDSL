@@ -40,13 +40,13 @@ from flydsl._mlir.dialects import fly as fly_dialect
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
 from flydsl.expr import arith, const_expr, range_constexpr, rocdl
-from flydsl.expr import buffer_ops as _buffer_ops
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 
 # Reuse the stable shared primitives (LDS coop-loaders, global swizzle, barriers).
+from kernels.common import buffer_ops as _buffer_ops
 from kernels.gemm.fp8_gemm_utils import (
     G2SLoader,
     S2RLoader,
