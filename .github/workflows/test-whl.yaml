@@ -7,6 +7,11 @@ on:
         description: 'Docker base image for testing'
         type: string
         required: true
+      aiter_ref:
+        description: 'aiter branch or tag for the current CSV/HGEMM run (compared against aiter main)'
+        type: string
+        required: false
+        default: 'main'
 
 jobs:
   test:
@@ -98,27 +103,71 @@ jobs:
             cat *.log || true
           fi
 
-      # gfx950 only: aiter FlyDSL kernels + kimik3/dsv4/glm5 tuned-fmoe CSVs.
+      # gfx950: aiter CSV MoE (kimik3/dsv4/glm5 from aiter main) + HGEMM.
+      # Current checkout is inputs.aiter_ref; when that is not main, also run
+      # aiter main and compare the two tuned_op_bench.csv files.
       - name: Prepare aiter
         if: ${{ !contains(matrix.runners, 'mi325') }}
+        env:
+          AITER_REF: ${{ inputs.aiter_ref }}
         run: |
-          docker exec flydsl_test bash -c "rm -rf /tmp/aiter && git clone --depth 1 --recursive --shallow-submodules https://github.com/ROCm/aiter.git /tmp/aiter"
-          docker exec flydsl_test bash -c "python3 -c \"from pathlib import Path; src = Path('/tmp/aiter/requirements.txt'); dst = Path('/tmp/aiter/requirements-flydsl-ci.txt'); lines = [line for line in src.read_text().splitlines() if line.strip() and not line.strip().startswith('flydsl==')]; dst.write_text('\\n'.join(lines) + '\\n')\" && python3 -m pip install -r /tmp/aiter/requirements-flydsl-ci.txt"
+          docker exec -e AITER_REF -i flydsl_test bash <<'BASH'
+          set -euo pipefail
+          REF="${AITER_REF:-main}"
+          rm -rf /tmp/aiter /tmp/aiter-main
+          git clone --depth 1 --recursive --shallow-submodules --branch "${REF}" https://github.com/ROCm/aiter.git /tmp/aiter
+          if [ "${REF}" != "main" ]; then
+            git clone --depth 1 --recursive --shallow-submodules --branch main https://github.com/ROCm/aiter.git /tmp/aiter-main
+          fi
+          python3 -c "from pathlib import Path; src = Path('/tmp/aiter/requirements.txt'); dst = Path('/tmp/aiter/requirements-flydsl-ci.txt'); lines = [line for line in src.read_text().splitlines() if line.strip() and not line.strip().startswith('flydsl==')]; dst.write_text('\\n'.join(lines) + '\\n')"
+          python3 -m pip install -r /tmp/aiter/requirements-flydsl-ci.txt
+          BASH
 
       - name: Run aiter CSV MoE and HGEMM
         id: aiter
         if: ${{ !contains(matrix.runners, 'mi325') }}
-        timeout-minutes: 180
+        timeout-minutes: 360
+        env:
+          AITER_REF: ${{ inputs.aiter_ref }}
         run: |
-          docker exec -i flydsl_test bash <<'BASH' 2>&1 | tee /tmp/aiter_output.log
+          docker exec -e AITER_REF -i flydsl_test bash <<'BASH' 2>&1 | tee /tmp/aiter_output.log
           set -euo pipefail
-          export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-}
-          export AITER_REPO=/tmp/aiter
-          CFG=/tmp/aiter/aiter/configs/model_configs
-          export AITER_CONFIG_FMOE="${CFG}/kimik3_a8w4_tuned_fmoe.csv:${CFG}/dsv4_fp8fp4_tuned_fmoe.csv:${CFG}/glm5_fp4_tuned_fmoe.csv"
-          cd /tmp/aiter
-          python3 op_tests/test_moe_2stage.py --no-legacy --csv-filter flydsl_
-          python3 op_tests/test_flydsl_hgemm.py
+          REF="${AITER_REF:-main}"
+          PYTHONPATH_BASE="${PYTHONPATH:-}"
+          MAIN_ROOT=/tmp/aiter
+          if [ -d /tmp/aiter-main ]; then
+            MAIN_ROOT=/tmp/aiter-main
+          fi
+          CFG="${MAIN_ROOT}/aiter/configs/model_configs"
+          FMOE="${CFG}/kimik3_a8w4_tuned_fmoe.csv:${CFG}/dsv4_fp8fp4_tuned_fmoe.csv:${CFG}/glm5_fp4_tuned_fmoe.csv"
+
+          run_moe_csv() {
+            root="$1"
+            out="$2"
+            rm -f "${out}"
+            export PYTHONPATH="${root}:${PYTHONPATH_BASE}"
+            export AITER_REPO="${root}"
+            export AITER_CONFIG_FMOE="${FMOE}"
+            export AITER_TUNED_OP_BENCH_CSV="${out}"
+            export FLYDSL_RUNTIME_CACHE_DIR="/tmp/flydsl_cache_$(basename "${root}")"
+            python3 "${root}/op_tests/test_moe_2stage.py" --no-legacy --csv-filter flydsl_
+          }
+
+          echo "=== aiter current (${REF}) CSV MoE ==="
+          run_moe_csv /tmp/aiter /tmp/tuned_op_bench_current.csv
+          PYTHONPATH="/tmp/aiter:${PYTHONPATH_BASE}" AITER_REPO=/tmp/aiter python3 /tmp/aiter/op_tests/test_flydsl_hgemm.py
+
+          if [ -d /tmp/aiter-main ]; then
+            echo "=== aiter main CSV MoE ==="
+            run_moe_csv /tmp/aiter-main /tmp/tuned_op_bench_main.csv
+            python3 /tmp/aiter-main/.github/scripts/compare_benchmark.py \
+              /tmp/tuned_op_bench_main.csv \
+              /tmp/tuned_op_bench_current.csv \
+              --baseline-label "aiter-main" \
+              --current-label "aiter-${REF}"
+          else
+            echo "aiter_ref is main; skipping vs-main CSV compare"
+          fi
           BASH
 
       - name: Show aiter logs
@@ -138,6 +187,7 @@ jobs:
           SUMMARY_AITER_OUTCOME: ${{ steps.aiter.outcome }}
           SUMMARY_TEST_LOG: /tmp/test_output.log
           SUMMARY_BENCH_LOG: /tmp/bench_output.log
+          SUMMARY_AITER_LOG: /tmp/aiter_output.log
         run: python3 flydsl/scripts/generate_summary.py test
 
       - name: Clean up

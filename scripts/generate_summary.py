@@ -105,6 +105,9 @@ def test_summary(summary: Path) -> None:
 
     _write_test_results(summary, test_log)
     _write_bench_results(summary, bench_log)
+    aiter_log = os.environ.get("SUMMARY_AITER_LOG", "")
+    if aiter_log:
+        _write_aiter_compare(summary, aiter_log)
 
 
 def _write_test_results(summary: Path, log_path: str) -> None:
@@ -166,6 +169,28 @@ def _extract_perf_table(text: str) -> list[str]:
                 break
             lines.append(line)
     return lines
+
+
+def _write_aiter_compare(summary: Path, log_path: str) -> None:
+    log = Path(log_path)
+    if not log.is_file():
+        return
+    lines = []
+    capturing = False
+    for line in log.read_text(errors="replace").splitlines():
+        if line.startswith("=== Tuned op bench:"):
+            capturing = True
+        if capturing:
+            lines.append(line)
+    if not lines:
+        return
+    _out(summary, "### Aiter CSV vs main")
+    _out(summary)
+    _out(summary, "```")
+    for line in lines[:80]:
+        _out(summary, line)
+    _out(summary, "```")
+    _out(summary)
 
 
 # ── Promote summary ─────────────────────────────────────────────────────────
