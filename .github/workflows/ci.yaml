@@ -18,7 +18,7 @@ on:
         type: string
         default: "rocm/pytorch:rocm7.14_ubuntu24.04_py3.11_pytorch_release_2.12.0@sha256:05743468394cc8f9cce06822635836a31ddfd5956bac36976666d7057713441d"
       aiter_ref:
-        description: 'aiter branch/tag for the current CSV run (compared against aiter main)'
+        description: 'aiter branch/tag for the current CSV run (default main). Compared against flydsl== from aiter main requirements.txt.'
         type: string
         default: 'main'
 

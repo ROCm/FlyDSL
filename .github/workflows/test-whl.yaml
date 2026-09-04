@@ -8,7 +8,7 @@ on:
         type: string
         required: true
       aiter_ref:
-        description: 'aiter branch or tag for the current CSV/HGEMM run (compared against aiter main)'
+        description: 'aiter branch/tag for the current CSV/HGEMM run (default main). Compared against flydsl== from aiter main requirements.txt.'
         type: string
         required: false
         default: 'main'
@@ -104,8 +104,8 @@ jobs:
           fi
 
       # gfx950: aiter CSV MoE (kimik3/dsv4/glm5 from aiter main) + HGEMM.
-      # Current checkout is inputs.aiter_ref; when that is not main, also run
-      # aiter main and compare the two tuned_op_bench.csv files.
+      # Current: wheel under test (PyPI tag / nightly) + aiter at aiter_ref.
+      # Baseline: flydsl== pinned in aiter main requirements.txt, same aiter + CSV.
       - name: Prepare aiter
         if: ${{ !contains(matrix.runners, 'mi325') }}
         env:
@@ -140,34 +140,39 @@ jobs:
           fi
           CFG="${MAIN_ROOT}/aiter/configs/model_configs"
           FMOE="${CFG}/kimik3_a8w4_tuned_fmoe.csv:${CFG}/dsv4_fp8fp4_tuned_fmoe.csv:${CFG}/glm5_fp4_tuned_fmoe.csv"
+          PIN="$(awk -F== '/^flydsl==/{print $2; exit}' "${MAIN_ROOT}/requirements.txt" | awk -F';' '{print $1}' | tr -d '[:space:]')"
+          if [ -z "${PIN}" ]; then
+            echo "aiter main requirements.txt has no flydsl== pin" >&2
+            exit 1
+          fi
 
           run_moe_csv() {
-            root="$1"
-            out="$2"
+            out="$1"
+            cache="$2"
             rm -f "${out}"
-            export PYTHONPATH="${root}:${PYTHONPATH_BASE}"
-            export AITER_REPO="${root}"
+            export PYTHONPATH="/tmp/aiter:${PYTHONPATH_BASE}"
+            export AITER_REPO=/tmp/aiter
             export AITER_CONFIG_FMOE="${FMOE}"
             export AITER_TUNED_OP_BENCH_CSV="${out}"
-            export FLYDSL_RUNTIME_CACHE_DIR="/tmp/flydsl_cache_$(basename "${root}")"
-            python3 "${root}/op_tests/test_moe_2stage.py" --no-legacy --csv-filter flydsl_
+            export FLYDSL_RUNTIME_CACHE_DIR="${cache}"
+            python3 /tmp/aiter/op_tests/test_moe_2stage.py --no-legacy --csv-filter flydsl_
           }
 
-          echo "=== aiter current (${REF}) CSV MoE ==="
-          run_moe_csv /tmp/aiter /tmp/tuned_op_bench_current.csv
+          echo "=== current wheel CSV MoE (aiter ${REF}) ==="
+          run_moe_csv /tmp/tuned_op_bench_current.csv /tmp/flydsl_cache_current
           PYTHONPATH="/tmp/aiter:${PYTHONPATH_BASE}" AITER_REPO=/tmp/aiter python3 /tmp/aiter/op_tests/test_flydsl_hgemm.py
 
-          if [ -d /tmp/aiter-main ]; then
-            echo "=== aiter main CSV MoE ==="
-            run_moe_csv /tmp/aiter-main /tmp/tuned_op_bench_main.csv
-            python3 /tmp/aiter-main/.github/scripts/compare_benchmark.py \
-              /tmp/tuned_op_bench_main.csv \
-              /tmp/tuned_op_bench_current.csv \
-              --baseline-label "aiter-main" \
-              --current-label "aiter-${REF}"
-          else
-            echo "aiter_ref is main; skipping vs-main CSV compare"
-          fi
+          echo "=== aiter-main requirements flydsl==${PIN} CSV MoE ==="
+          python3 -m pip install --force-reinstall --no-deps --only-binary=:all: "flydsl==${PIN}"
+          run_moe_csv /tmp/tuned_op_bench_main.csv /tmp/flydsl_cache_main_pin
+
+          python3 "${MAIN_ROOT}/.github/scripts/compare_benchmark.py" \
+            /tmp/tuned_op_bench_main.csv \
+            /tmp/tuned_op_bench_current.csv \
+            --baseline-label "flydsl==${PIN}" \
+            --current-label "flydsl-wheel (aiter ${REF})"
+
+          python3 -m pip install --force-reinstall --no-deps --no-index --find-links=/dist flydsl
           BASH
 
       - name: Show aiter logs

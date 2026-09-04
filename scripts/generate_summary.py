@@ -184,7 +184,7 @@ def _write_aiter_compare(summary: Path, log_path: str) -> None:
             lines.append(line)
     if not lines:
         return
-    _out(summary, "### Aiter CSV vs main")
+    _out(summary, "### Aiter CSV: wheel vs aiter-main flydsl pin")
     _out(summary)
     _out(summary, "```")
     for line in lines[:80]:
