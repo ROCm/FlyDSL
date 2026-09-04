@@ -365,10 +365,11 @@ def build_routing_buffers(
 def _print_mxfp_moe_perf(
     stage, us, label, tokens, topk, model_dim, inter_dim, experts, *, a_dtype="fp4", use_reduce=False
 ):
-    """Emit the stage1/stage2 timing line the benchmark harness (run_benchmark.sh) greps for.
+    """Emit stage1/stage2 timing lines for ``scripts/run_benchmark.sh``.
 
-    Emits the inline ``FlyDSL MoE stage{1,2}`` prints so the fused a4w4/a8w4
-    path reports through the same table rows.
+    Machine fields are ``TFLOPS=`` / ``TB/s=`` (same shape as MLA decode) so the
+    harness can parse without scraping prose. Stage2 tags the mode as
+    ``atomic`` or ``reduce`` immediately after the dtype bracket.
     """
     active = min(experts, tokens * topk)  # only routed experts move weights/scales
     a_bits = {"fp8": 8, "a16": 16}.get(a_dtype, 4)
@@ -389,15 +390,13 @@ def _print_mxfp_moe_perf(
     tflops = float("nan") if us <= 0 else flops / (us / 1e6) / 1e12
     tbps = float("nan") if us <= 0 else nbytes / 1e12 / (us / 1e6)
     if stage == 1:
-        print(
-            f"FlyDSL MoE stage1[{label}]: "
-            f"{us:.1f} us, {tflops:.2f} TFLOPS(logical, M={tokens*topk}), {tbps:.3f} TB/s"
-        )
+        print(f"FlyDSL MoE stage1[{label}]: {us:.1f} us " f"M_eff={tokens * topk} TFLOPS={tflops:.2f} TB/s={tbps:.3f}")
     else:
+        mode = "reduce" if use_reduce else "atomic"
         print(
-            f"FlyDSL MoE stage2 [mxfp_moe] {label} {'reduce' if use_reduce else 'atomic'} | "
-            f"{model_dim}x{inter_dim}, E={experts}, K={topk}, M_eff={tokens*topk} | "
-            f"{us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s"
+            f"FlyDSL MoE stage2[{label}] {mode}: {us:.1f} us "
+            f"{model_dim}x{inter_dim} E={experts} K={topk} M_eff={tokens * topk} "
+            f"TFLOPS={tflops:.2f} TB/s={tbps:.3f}"
         )
 
 
@@ -1436,7 +1435,7 @@ def test_moe_gemm_2stage(
             # in script mode.
             if os.environ.get("PYTEST_CURRENT_TEST"):
                 pytest.xfail(_xfail_reason)
-            print(f"[xfail/skip] {in_dtype}: {_xfail_reason}")
+            print(f"Skipped: {in_dtype}: {_xfail_reason}")
             return
         _run_mxfp_moe_e2e(
             tokens=tokens,
@@ -1725,10 +1724,10 @@ if __name__ == "__main__":
         in_dtypes = ["a16w4", "fp4", "a8w4"]
     for dt in in_dtypes:
         if dt in ("fp4", "a8w4", "a16w4") and "gfx95" not in ARCH:
-            print(f"Skipping {dt}: requires gfx950+, got {ARCH}")
+            print(f"Skipped: {dt}: requires gfx950+, got {ARCH}")
             continue
         if dt == "int4_bf16" and not _A16WMIX_GFX:
-            print(f"Skipping {dt}: requires gfx942 or gfx950+, got {ARCH}")
+            print(f"Skipped: {dt}: requires gfx942 or gfx950+, got {ARCH}")
             continue
         # mxfp_moe (fp4/a8w4) stage2 mode is coupled to tile_m: atomic for tile_m<128,
         # reduce (nonatomic) only at tile_m==128. a16w4 / int4_bf16 gemm2 is atomic-only.

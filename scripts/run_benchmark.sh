@@ -490,62 +490,54 @@ print(f"{op}\t{shape}\t{dtype}\t{fmt(tbps)}\t{fmt(tflops)}")
 PY
 }
 
-_emit_moe_s2_rows() {
-  # Args: op_prefix shape log_path
-  # Extract separate atomic/reduce rows from MoE stage2 log lines. A line looks like:
-  #   FlyDSL MoE stage2 [moe_gemm2] fp4 atomic | 7168x2048, ... | 1163.2 us, 1654.24 TFLOPS, 0.377 TB/s
-  # Emit table rows (op_prefix_atomic / op_prefix_reduce) when those modes are present.
-  op_prefix="$1"; shape="$2"; log_path="$3"
-  python3 - "$op_prefix" "$shape" "$log_path" <<'PY'
+_emit_moe_rows() {
+  # Args: s1_op s2_prefix shape log_path
+  # Machine fields from tests/kernels/test_moe_gemm.py and test_moe_gemm_2stage.py:
+  #   FlyDSL MoE stage1[fp8]: ... TFLOPS=12.34 TB/s=5.678
+  #   FlyDSL MoE stage2[fp8] atomic: ... TFLOPS=12.34 TB/s=5.678
+  # Parse failure emits nothing so the dashboard is not filled with "-" rows.
+  s1_op="$1"; s2_prefix="$2"; shape="$3"; log_path="$4"
+  _moe_rows="$(python3 - "$s1_op" "$s2_prefix" "$shape" "$log_path" <<'PY'
 import re, sys
 
-op_prefix, shape, path = sys.argv[1], sys.argv[2], sys.argv[3]
+s1_op, s2_prefix, shape, path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 try:
     with open(path, "r", errors="ignore") as f:
         txt = f.read()
 except Exception:
     txt = ""
 
-pat = re.compile(
-    r"FlyDSL MoE stage2 \[[^]]+\]\s+(\S+)\s+(atomic|reduce)\b.*?"
-    r"([0-9.]+)\s*TFLOPS.*?([0-9.]+)\s*TB/s"
-)
-# keep last occurrence per mode
-found = {}
-for m in pat.finditer(txt):
-    dtype, mode = m.group(1), m.group(2)
-    found[mode] = (dtype, float(m.group(3)), float(m.group(4)))
-
 def fmt(x):
     return f"{x:.3f}"
 
-# Emit atomic first (if any), then reduce. Parse failure emits nothing so the
-# dashboard is not filled with placeholder "-" rows.
+s1 = None
+for m in re.finditer(
+    r"FlyDSL MoE stage1\[(\S+)\]:.*?TFLOPS=([0-9.]+)\s+TB/s=([0-9.]+)",
+    txt,
+):
+    s1 = m
+if s1:
+    print(f"{s1_op}\t{shape}\t{s1.group(1)}\t{fmt(float(s1.group(3)))}\t{fmt(float(s1.group(2)))}")
+
+found = {}
+for m in re.finditer(
+    r"FlyDSL MoE stage2\[(\S+)\]\s+(atomic|reduce):.*?TFLOPS=([0-9.]+)\s+TB/s=([0-9.]+)",
+    txt,
+):
+    found[m.group(2)] = (m.group(1), float(m.group(3)), float(m.group(4)))
 for mode in ("atomic", "reduce"):
     if mode not in found:
         continue
     dtype, tflops, tbps = found[mode]
-    print(f"{op_prefix}_{mode}\t{shape}\t{dtype}\t{fmt(tbps)}\t{fmt(tflops)}")
+    print(f"{s2_prefix}_{mode}\t{shape}\t{dtype}\t{fmt(tbps)}\t{fmt(tflops)}")
 PY
-}
-
-_emit_moe_rows_from_log() {
-  # Args: s1_op s2_prefix shape log_path
-  s1_op="$1"; s2_prefix="$2"; shape="$3"; log_path="$4"
-  dt_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:' "${log_path}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
-  tf_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log_path}" | tail -1 | awk '{print $(NF-1)}' || true)"
-  tb_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log_path}" | tail -1 | awk '{print $(NF-1)}' || true)"
-  if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
-    _emit_row "${s1_op}" "${shape}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
-  fi
-  _emit_moe_s2_rows "${s2_prefix}" "${shape}" "${log_path}" | while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf; do
+)"
+  [ -z "${_moe_rows}" ] && return 0
+  while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf; do
     _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}"
-  done || true
-}
-
-_moe_log_skipped() {
-  # Arch / xfail skip lines printed by tests/kernels/test_moe_gemm.py CLI.
-  grep -qE 'requires gfx942|requires gfx950|Skipping (fp4|FP4|a8w4|int4_bf16)|\[xfail/skip\]|not supported' "$1" 2>/dev/null
+  done <<EOF
+${_moe_rows}
+EOF
 }
 
 # ============================================================================
@@ -959,7 +951,7 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     # Emit stage1 + stage2 rows (parse from log; keep terminal output concise).
     # Keep shape string compact (no spaces/commas) so table alignment stays stable.
     shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
-    _emit_moe_rows_from_log "moe_gemm1" "moe_gemm2" "${shape_moe}" "${log}"
+    _emit_moe_rows "moe_gemm1" "moe_gemm2" "${shape_moe}" "${log}"
   done
 
   # MoE FP4 (gfx950 only). skip_ref=true: fused mxfp4 e2e is numerically broken
@@ -991,20 +983,14 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       --tile_k2 "$tile_k2" \
       --skip_ref true \
       --compare_aiter_ck false >"${log}" 2>&1; then
-      if _moe_log_skipped "${log}"; then
+      if grep -q "Skipped:" "${log}"; then
         _emit_row "moe_fp4" "${shape_moe}" "${dtype}" "skip" "skip"
       else
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-        _emit_moe_rows_from_log "moe_fp4_s1" "moe_fp4_s2" "${shape_moe}" "${log}"
+        _emit_moe_rows "moe_fp4_s1" "moe_fp4_s2" "${shape_moe}" "${log}"
       fi
     else
-      if _moe_log_skipped "${log}"; then
-        _emit_row "moe_fp4" "${shape_moe}" "${dtype}" "skip" "skip"
-      else
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-        echo "moe fp4 failed. Log: ${log}" >&2
-        _show_fail_log "${log}" "moe_fp4"
-      fi
+      _fail_or_skip "${log}" "moe_fp4"
     fi
   done
 
@@ -1035,18 +1021,14 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       --tile_k2 "$tile_k2" \
       --skip_ref true \
       --compare_aiter_ck false >"${log}" 2>&1; then
-      if _moe_log_skipped "${log}"; then
+      if grep -q "Skipped:" "${log}"; then
         _emit_row "moe_w4a16" "${shape_moe}" "${dtype}" "skip" "skip"
       else
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-        _emit_moe_rows_from_log "moe_w4a16_s1" "moe_w4a16_s2" "${shape_moe}" "${log}"
+        _emit_moe_rows "moe_w4a16_s1" "moe_w4a16_s2" "${shape_moe}" "${log}"
       fi
     else
-      if _moe_log_skipped "${log}"; then
-        _emit_row "moe_w4a16" "${shape_moe}" "${dtype}" "skip" "skip"
-      else
-        _fail_or_skip "${log}" "moe_w4a16"
-      fi
+      _fail_or_skip "${log}" "moe_w4a16"
     fi
   done
 
@@ -1078,20 +1060,14 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       --tile_k2 "$tile_k2" \
       --skip_ref true \
       --compare_aiter_ck false >"${log}" 2>&1; then
-      if _moe_log_skipped "${log}"; then
+      if grep -q "Skipped:" "${log}"; then
         _emit_row "moe_a8w4" "${shape_moe}" "${dtype}" "skip" "skip"
       else
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-        _emit_moe_rows_from_log "moe_a8w4_s1" "moe_a8w4_s2" "${shape_moe}" "${log}"
+        _emit_moe_rows "moe_a8w4_s1" "moe_a8w4_s2" "${shape_moe}" "${log}"
       fi
     else
-      if _moe_log_skipped "${log}"; then
-        _emit_row "moe_a8w4" "${shape_moe}" "${dtype}" "skip" "skip"
-      else
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-        echo "moe a8w4 failed. Log: ${log}" >&2
-        _show_fail_log "${log}" "moe_a8w4"
-      fi
+      _fail_or_skip "${log}" "moe_a8w4"
     fi
   done
 fi
