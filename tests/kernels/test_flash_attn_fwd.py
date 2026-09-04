@@ -7,6 +7,7 @@ Tests flash_attn_func against PyTorch SDPA.
 import argparse
 import csv
 import hashlib
+import inspect
 import logging
 import math
 import random
@@ -35,7 +36,17 @@ import pytest  # noqa: E402
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.attention import flash_attn_interface  # noqa: E402
 from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module  # noqa: E402
-from kernels.attention.flash_attn_interface import flydsl_flash_attn_func  # noqa: E402
+from kernels.attention.flash_attn_interface import (  # noqa: E402
+    _PAGED_TILE,
+    _build_dense_dualwave,
+    _build_paged,
+    _build_splitk,
+    _build_varlen,
+    _paged_kv_row_stride,
+    _paged_page_descriptor_fits,
+    _varlen_causal_lpt,
+    flydsl_flash_attn_func,
+)
 from kernels.attention.flash_attn_utils import (  # noqa: E402
     BIAS_MAX_DESCRIPTOR_BYTES,
     BIAS_MAX_OFFSET_ELEMS,
@@ -4453,6 +4464,27 @@ def test_xcd_swizzle_is_bit_identical(H):
 
 
 @_requires_gfx950
+@pytest.mark.parametrize("H", [8, 16])
+def test_causal_lpt_is_bit_identical(H):
+    """LPT only reorders q-blocks, so the output must not move a bit.
+
+    This is also the guard against a reversal that drops or double-computes
+    q-blocks, which would otherwise read as a speedup.
+    """
+    B, S, D = 1, 8192, 128
+    torch.manual_seed(H)
+    q = _rand_lse(B, S, H, D, dtype=torch.bfloat16)
+    k, v = torch.randn_like(q), torch.randn_like(q)
+
+    def run(flag):
+        return flydsl_flash_attn_func(q, k, v, causal=True, causal_lpt=flag).clone()
+
+    off, on = run(False), run(True)
+    torch.cuda.synchronize()
+    assert torch.equal(off, on)
+
+
+@_requires_gfx950
 @pytest.mark.parametrize("xcd_swizzle", [None, True])
 def test_xcd_swizzle_heads_not_multiple_of_xcd(xcd_swizzle):
     """H % 8 != 0 must fall back rather than mis-map, however the flag is set.
@@ -4476,6 +4508,499 @@ def test_xcd_swizzle_heads_not_multiple_of_xcd(xcd_swizzle):
         q.transpose(1, 2).float(), k.transpose(1, 2).float(), v.transpose(1, 2).float()
     ).transpose(1, 2)
     torch.testing.assert_close(out.float(), ref, atol=_ATOL_BF16, rtol=0)
+
+
+@_requires_gfx950
+def test_causal_lpt_ignored_when_not_causal():
+    """Non-causal has no work gradient across q-blocks, so the flag is inert."""
+    B, S, H, D = 1, 4096, 8, 128
+    torch.manual_seed(3)
+    q = _rand_lse(B, S, H, D, dtype=torch.bfloat16)
+    k, v = torch.randn_like(q), torch.randn_like(q)
+
+    off = flydsl_flash_attn_func(q, k, v, causal=False, causal_lpt=False).clone()
+    on = flydsl_flash_attn_func(q, k, v, causal=False, causal_lpt=True).clone()
+    torch.cuda.synchronize()
+    assert torch.equal(off, on)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("num_kv_splits", [2, 3])
+def test_causal_lpt_splitk_off_on_bit_identical(num_kv_splits):
+    """Split-K reaches the dualwave builder by its own route, so pin the flag there too.
+
+    Split-K puts the splits on grid z and leaves q-blocks on grid y, so reversing y
+    stays a permutation; this checks that it is one in practice, not just in argument.
+    """
+    B, S, H, D = 1, 512, 8, 128
+    torch.manual_seed(num_kv_splits)
+    q = _rand_lse(B, S, H, D, dtype=torch.bfloat16)
+    k, v = torch.randn_like(q), torch.randn_like(q)
+
+    def run(flag):
+        return flydsl_flash_attn_func(q, k, v, causal=True, num_kv_splits=num_kv_splits, causal_lpt=flag).clone()
+
+    off, on = run(False), run(True)
+    torch.cuda.synchronize()
+    assert torch.equal(off, on)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("seqs", [[1024, 1, 512], [4096, 1]])
+def test_causal_lpt_varlen_off_on_matches_reference(seqs):
+    """Long varlen takes _build_varlen; both flag settings must match the reference.
+
+    Both batches mix a long prefill with a single-token decode row, the shape whose
+    dispatch order the auto-gate decides. Forcing the flag must stay correct either
+    way, which is what this pins; the gate itself only picks which way is faster.
+    """
+    dtype = torch.bfloat16
+    D, H, Hkv = 128, 4, 4
+    cu = torch.tensor([0, *np.cumsum(seqs)], dtype=torch.int32, device="cuda")
+    max_seqlen_q = max(seqs)
+    total = int(cu[-1].item())
+    torch.manual_seed(total)
+    q = _rand_lse(total, H, D, dtype=dtype)
+    k = _rand_lse(total, Hkv, D, dtype=dtype)
+    v = _rand_lse(total, Hkv, D, dtype=dtype)
+
+    def run(flag):
+        return flydsl_flash_attn_func(
+            q,
+            k,
+            v,
+            causal=True,
+            cu_seqlens_q=cu,
+            cu_seqlens_kv=cu,
+            max_seqlen_q=max_seqlen_q,
+            cross_seqlen=False,
+            causal_lpt=flag,
+        ).clone()
+
+    off, on = run(False), run(True)
+    torch.cuda.synchronize()
+    assert torch.equal(off, on)
+    for s0, s1 in zip(cu[:-1].tolist(), cu[1:].tolist()):
+        qb, kb, vb = (t[s0:s1].unsqueeze(0) for t in (q, k, v))
+        ref = flydsl_flash_attn_func(qb, kb, vb, causal=True)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(off[s0:s1].unsqueeze(0), ref, atol=_ATOL_BF16, rtol=0)
+
+
+def test_varlen_causal_lpt_auto_gate():
+    """None auto-selects on the batch shape; an explicit setting is never overridden.
+
+    grid_dim.y is sized from the batch-wide max seqlen, so LPT only helps while one
+    sequence still spans at least twice as many q-blocks as the batch has sequences.
+    BLOCK_M is 256, so max_seqlen_q=8192 gives 32 q-blocks, and the gate flips at B=16.
+    The measured crossover is 0.75-0.875 of the q-block count, so the boundary is pinned
+    below it rather than at it: B=24 and B=32 both regress with LPT forced on.
+    """
+    assert _varlen_causal_lpt(None, 1, 8192) is True  # pure prefill, 2 <= 32
+    assert _varlen_causal_lpt(None, 16, 8192) is True  # exactly at the boundary, 1.035x
+    assert _varlen_causal_lpt(None, 17, 8192) is False  # first B past it
+    assert _varlen_causal_lpt(None, 32, 8192) is False  # measured 0.985x forced on
+    assert _varlen_causal_lpt(None, 129, 8192) is False  # long prefill + 128 decodes
+    assert _varlen_causal_lpt(None, 4, 1) is False  # decode-only batch
+    # An explicit request wins in both directions, so an A/B stays trustworthy.
+    assert _varlen_causal_lpt(True, 1024, 8192) is True
+    assert _varlen_causal_lpt(False, 1, 8192) is False
+
+
+@_requires_gfx950
+def test_varlen_causal_lpt_auto_matches_forced():
+    """Whichever way the gate resolves, the output must be the reference output.
+
+    The gate picks a dispatch order, not a result, so auto must agree bit-for-bit with
+    both forced settings on a batch either side of the threshold.
+    """
+    for seqs in ([4096, 4096], [4096] + [1] * 64):
+        cu = torch.tensor([0, *np.cumsum(seqs)], dtype=torch.int32, device="cuda")
+        total, max_q = int(cu[-1].item()), max(seqs)
+        torch.manual_seed(total)
+        q = _rand_lse(total, 8, 128, dtype=torch.bfloat16)
+        k, v = torch.randn_like(q), torch.randn_like(q)
+
+        def run(flag):
+            return flydsl_flash_attn_func(
+                q,
+                k,
+                v,
+                causal=True,
+                cu_seqlens_q=cu,
+                cu_seqlens_kv=cu,
+                max_seqlen_q=max_q,
+                cross_seqlen=False,
+                causal_lpt=flag,
+            ).clone()
+
+        auto, off, on = run(None), run(False), run(True)
+        torch.cuda.synchronize()
+        assert torch.equal(auto, off) and torch.equal(auto, on)
+
+
+def test_causal_lpt_is_threaded_through_every_dualwave_route():
+    """Every cached dualwave builder must take the flag, or its route silently defaults on.
+
+    _build_splitk and _build_varlen reach build_flash_attn_dualwave_swp_module directly,
+    so a missing parameter here is not a type error -- it just restores the builder
+    default and makes the public override a no-op on that route.
+    """
+    for builder in (_build_dense_dualwave, _build_varlen, _build_splitk, _build_paged):
+        assert "causal_lpt" in inspect.signature(builder).parameters, builder.__name__
+
+
+@_requires_gfx950
+def test_causal_lpt_reaches_the_builder_through_the_call_site():
+    """The signature test above pins the parameter; this pins the argument.
+
+    Neither is redundant, and on its own neither catches the original defect. Both
+    builders default causal_lpt=True, so dropping the kwarg at a call site is not a
+    type error, and because LPT is a permutation the outputs still match -- every
+    off/on test in this file passes with the flag ignored. What does not survive it
+    is the cache key: two calls differing only in causal_lpt must produce two
+    distinct builder entries, and collapse into one if the call site drops the flag.
+    """
+    dtype = torch.bfloat16
+    # max_seqlen_q above _VARLEN_LIGHT_MAX_SEQ so varlen takes the long builder, and
+    # a dense seqlen past the split-K eligibility floor so num_kv_splits is honored.
+    s_varlen, s_dense = 1024, 512
+    cu = torch.tensor([0, s_varlen], dtype=torch.int32, device="cuda")
+    qv = _rand_lse(s_varlen, 8, 128, dtype=dtype)
+    qd = _rand_lse(1, s_dense, 8, 128, dtype=dtype)
+    routes = (
+        (
+            _build_varlen,
+            (qv, torch.randn_like(qv), torch.randn_like(qv)),
+            dict(cu_seqlens_q=cu, cu_seqlens_kv=cu, max_seqlen_q=s_varlen, cross_seqlen=False),
+        ),
+        (_build_splitk, (qd, torch.randn_like(qd), torch.randn_like(qd)), dict(num_kv_splits=2)),
+    )
+
+    for builder, (q, k, v), kwargs in routes:
+        builder.cache_clear()
+        flydsl_flash_attn_func(q, k, v, causal=True, causal_lpt=False, **kwargs)
+        assert builder.cache_info().currsize == 1, builder.__name__
+        flydsl_flash_attn_func(q, k, v, causal=True, causal_lpt=True, **kwargs)
+        torch.cuda.synchronize()
+        assert builder.cache_info().currsize == 2, f"{builder.__name__} ignored causal_lpt"
+
+
+def _paged_cache_from_dense(k, v, page_size, packed=False):
+    """Scatter dense [B, S, Hkv, D] K/V into a shuffled page cache.
+
+    ``packed=True`` mimics the vLLM cache, where K and V are views into one page
+    entry and a KV row is therefore ``2 * Hkv * D`` elements wide.
+    """
+    B, S, Hkv, D = k.shape
+    assert S % page_size == 0
+    num_pages = B * (S // page_size)
+    block_table = torch.randperm(num_pages, device=k.device).view(B, -1).to(torch.int32)
+    if packed:
+        cache = torch.empty(num_pages, page_size, 2, Hkv, D, dtype=k.dtype, device=k.device)
+        k_cache, v_cache = cache[:, :, 0], cache[:, :, 1]
+    else:
+        k_cache = torch.empty(num_pages, page_size, Hkv, D, dtype=k.dtype, device=k.device)
+        v_cache = torch.empty_like(k_cache)
+    pages = block_table.reshape(-1).long()
+    k_cache[pages] = k.reshape(num_pages, page_size, Hkv, D)
+    v_cache[pages] = v.reshape(num_pages, page_size, Hkv, D)
+    return k_cache, v_cache, block_table
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("page_size", [64, 128, 256])
+def test_paged_page_size_matches_dense(page_size):
+    """A page wider than the 64-token KV tile is walked tile by tile."""
+    B, S, H, Hkv, D = 2, 1024, 8, 2, 128
+    torch.manual_seed(page_size)
+    q = _rand_lse(B, S, H, D, dtype=torch.bfloat16)
+    k = _rand_lse(B, S, Hkv, D, dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+    k_cache, v_cache, block_table = _paged_cache_from_dense(k, v, page_size)
+    seqlen_k = torch.full((B,), S, dtype=torch.int32, device=q.device)
+
+    ref = flydsl_flash_attn_func(q, k, v, causal=True)
+    out = flydsl_flash_attn_func(
+        q,
+        k_cache,
+        v_cache,
+        causal=True,
+        block_table=block_table,
+        seqlen_k=seqlen_k,
+        max_seqlen_kv=S,
+    )
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, ref, atol=2e-2, rtol=1e-2)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("page_size", [64, 128, 256])
+def test_paged_strided_kv_matches_contiguous(page_size):
+    """K/V views into a packed cache only change addressing, never the values read."""
+    B, S, H, Hkv, D = 2, 1024, 8, 2, 128
+    torch.manual_seed(page_size)
+    q = _rand_lse(B, S, H, D, dtype=torch.bfloat16)
+    k = _rand_lse(B, S, Hkv, D, dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+    seqlen_k = torch.full((B,), S, dtype=torch.int32, device=q.device)
+
+    def run(packed):
+        torch.manual_seed(0)  # same block table for both layouts
+        k_cache, v_cache, block_table = _paged_cache_from_dense(k, v, page_size, packed=packed)
+        assert k_cache.is_contiguous() == (not packed)
+        return flydsl_flash_attn_func(
+            q,
+            k_cache,
+            v_cache,
+            causal=True,
+            block_table=block_table,
+            seqlen_k=seqlen_k,
+            max_seqlen_kv=S,
+        ).clone()
+
+    dense, packed = run(False), run(True)
+    torch.cuda.synchronize()
+    assert torch.equal(dense, packed)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("page_size", [64, 128, 256])
+def test_paged_vllm_cache_view(page_size):
+    """vLLM's cache is [NumBlocks, Hkv, PageSize, 2*D] split into two K/V views.
+
+    Its head stride is PageSize*2*D rather than D, which the kernel only reads
+    with more than one KV head, so the single-head case must run in place.
+    """
+    B, S, H, D = 2, 1024, 8, 128
+    torch.manual_seed(page_size)
+    q = _rand_lse(B, S, H, D, dtype=torch.bfloat16)
+    k = _rand_lse(B, S, 1, D, dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+
+    num_pages = B * (S // page_size)
+    cache = torch.empty(num_pages, 1, page_size, 2 * D, dtype=k.dtype, device=k.device)
+    k_cache, v_cache = cache.transpose(1, 2).split(D, dim=-1)
+    block_table = torch.randperm(num_pages, device=k.device).view(B, -1).to(torch.int32)
+    pages = block_table.reshape(-1).long()
+    k_cache[pages] = k.reshape(num_pages, page_size, 1, D)
+    v_cache[pages] = v.reshape(num_pages, page_size, 1, D)
+
+    ref = flydsl_flash_attn_func(q, k, v, causal=True)
+    out = flydsl_flash_attn_func(
+        q,
+        k_cache,
+        v_cache,
+        causal=True,
+        block_table=block_table,
+        seqlen_k=torch.full((B,), S, dtype=torch.int32, device=q.device),
+        max_seqlen_kv=S,
+    )
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, ref, atol=2e-2, rtol=1e-2)
+
+
+@_requires_gfx950
+def test_paged_rejected_pitch_still_computes_the_right_answer(monkeypatch):
+    """A rejected pitch must fall back to a correct copy, not merely be refused.
+
+    _paged_kv_row_stride is unit-tested on stride tuples, and the pitches that trip its
+    bound span gigabytes, so the bound itself cannot be reached with a real cache here.
+    What is left untested by that is the consequence: returning None reports the cache as
+    dense, and the caller is then expected to copy it into a layout the descriptor can
+    address. This forces the rejection on a cache whose pitch is genuinely non-dense and
+    checks the output still matches, which fails if that path drops the strides instead of
+    copying.
+    """
+    B, S, H, D, page_size = 2, 1024, 8, 128, 128
+    torch.manual_seed(0)
+    q = _rand_lse(B, S, H, D, dtype=torch.bfloat16)
+    k = _rand_lse(B, S, 1, D, dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+
+    num_pages = B * (S // page_size)
+    cache = torch.empty(num_pages, 1, page_size, 2 * D, dtype=k.dtype, device=k.device)
+    k_cache, v_cache = cache.transpose(1, 2).split(D, dim=-1)
+    block_table = torch.randperm(num_pages, device=k.device).view(B, -1).to(torch.int32)
+    pages = block_table.reshape(-1).long()
+    k_cache[pages] = k.reshape(num_pages, page_size, 1, D)
+    v_cache[pages] = v.reshape(num_pages, page_size, 1, D)
+    # Guard the premise: this cache is only interesting because its pitch is accepted.
+    assert _paged_kv_row_stride(k_cache, v_cache, page_size, 1, D) == 2 * D
+
+    paged_kw = dict(
+        causal=True,
+        block_table=block_table,
+        seqlen_k=torch.full((B,), S, dtype=torch.int32, device=q.device),
+        max_seqlen_kv=S,
+    )
+    ref = flydsl_flash_attn_func(q, k, v, causal=True)
+    accepted = flydsl_flash_attn_func(q, k_cache, v_cache, **paged_kw)
+
+    monkeypatch.setattr("kernels.attention.flash_attn_interface._paged_kv_row_stride", lambda *a, **kw: None)
+    rejected = flydsl_flash_attn_func(q, k_cache, v_cache, **paged_kw)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(rejected, ref, atol=2e-2, rtol=1e-2)
+    assert torch.equal(rejected, accepted), "the copy path disagrees with the in-place path"
+
+
+class _FakeKV:
+    """Stride-only stand-in: the pitch gate reads nothing else off the tensor.
+
+    The pitches under test span gigabytes, so a real allocation is out of the question.
+    """
+
+    def __init__(self, strides, elem_size=2):
+        self._strides = strides
+        self._elem_size = elem_size
+
+    def stride(self):
+        return self._strides
+
+    def element_size(self):
+        return self._elem_size
+
+
+@pytest.mark.parametrize(
+    "row_stride, accepted",
+    [
+        (256, True),  # ordinary packed-cache pitch
+        (2**24 - 1, True),  # widest page that still fits both descriptor fields
+        (2**24, False),  # page_elems == 2**31, overflows the signed-int32 extent
+        (2**25, False),  # comfortably past both bounds
+    ],
+)
+def test_paged_kv_row_stride_bounds_pitch(row_stride, accepted):
+    """A pitch whose page overruns the descriptor must be reported dense, not passed through.
+
+    page_elems = page_size * row_stride is emitted as a signed-int32 extent and a
+    32-bit byte span; at page_size 128 that caps row_stride at 2**24 - 1. Beyond it the
+    descriptor wraps and the kernel reads the wrong rows, so the gate returns None and
+    the caller copies instead.
+    """
+    page_size, num_kv_heads, head_dim = 128, 1, 128
+    strides = (page_size * row_stride, row_stride, head_dim, 1)
+    kv = _FakeKV(strides)
+    got = _paged_kv_row_stride(kv, kv, page_size, num_kv_heads, head_dim)
+    assert got == (row_stride if accepted else None)
+
+
+def test_paged_kv_row_stride_dense_reports_none():
+    """A densely packed cache has no runtime pitch to pass; the kernel uses its default."""
+    page_size, num_kv_heads, head_dim = 128, 2, 128
+    dense_row = num_kv_heads * head_dim
+    kv = _FakeKV((page_size * dense_row, dense_row, head_dim, 1))
+    assert _paged_kv_row_stride(kv, kv, page_size, num_kv_heads, head_dim) is None
+
+
+@pytest.mark.parametrize(
+    "page_size, num_kv_heads, head_dim, elem_size, fits",
+    [
+        (128, 1, 128, 2, True),  # ordinary vLLM page
+        (256, 8, 128, 2, True),  # a 4-tile page with 8 KV heads is still tiny
+        (2**24 - 64, 1, 128, 2, True),  # widest addressable page at Hkv=1, D=128
+        (2**24, 1, 128, 2, False),  # exactly 2**31 elements, wraps the int32 extent
+        (2**21, 8, 128, 2, False),  # more KV heads reach the bound at a smaller page
+        (2**23, 1, 128, 4, False),  # 2**30 elements fits, but 2**32 bytes does not
+    ],
+)
+def test_paged_page_descriptor_fits_is_exclusive_on_both_bounds(page_size, num_kv_heads, head_dim, elem_size, fits):
+    """The shared predicate's arithmetic, at the boundary from both directions.
+
+    This pins the numbers only. That the dense pitch is actually put through it on the
+    launch path is test_paged_oversized_dense_page_is_rejected.
+
+    A dense cache returns from the row-stride gate before its page-span check, so once
+    page_size became any multiple of the tile, page_size * Hkv * D was unbounded on that
+    path. It cannot fall back to a copy the way an overwide strided pitch does, since
+    dense is already the narrowest layout, so the entry point rejects it instead. The
+    fourth case is the boundary; the last shows the byte bound binding before the element
+    bound once an element is wider than two bytes.
+    """
+    assert _paged_page_descriptor_fits(page_size * num_kv_heads * head_dim, elem_size) is fits
+
+
+@_requires_gfx950
+def test_paged_oversized_dense_page_is_rejected():
+    """An oversized dense page must be refused at the entry point rather than wrapped.
+
+    A page wide enough to overrun the descriptor spans gigabytes, but nothing before the
+    check reads the pages themselves, so a stride-0 expand buys a real cache shape at no
+    allocation cost. That keeps the arguments the check is called with under test, which
+    a stubbed predicate would not.
+
+    The second case is the same wrap reached through the head count rather than the page:
+    the kernel strides the dense case by the resolved num_kv_heads, so a cache whose own
+    page fits can still be oversized once the caller asks for more KV heads than it holds.
+    """
+    D = 128
+    q = _rand_lse(1, 256, 8, D, dtype=torch.bfloat16)
+    one = torch.empty(1, 1, 1, D, dtype=torch.bfloat16, device=q.device)
+    paged_kw = dict(
+        causal=True,
+        block_table=torch.zeros(1, 1, dtype=torch.int32, device=q.device),
+        seqlen_k=torch.full((1,), _PAGED_TILE, dtype=torch.int32, device=q.device),
+        max_seqlen_kv=_PAGED_TILE,
+    )
+
+    # 2**24 * 1 * 128 is exactly 2**31 elements, the first page that does not fit.
+    too_wide = one.expand(1, 2**24, 1, D)
+    with pytest.raises(NotImplementedError, match="page descriptor"):
+        flydsl_flash_attn_func(q, too_wide, too_wide, **paged_kw)
+
+    # 2**21 * 1 * 128 fits; 2**21 * 8 * 128 is again exactly 2**31.
+    fits_alone = one.expand(1, 2**21, 1, D)
+    with pytest.raises(NotImplementedError, match="page descriptor"):
+        flydsl_flash_attn_func(q, fits_alone, fits_alone, num_kv_heads=8, **paged_kw)
+
+
+@_requires_gfx950
+def test_paged_rejects_unsupported_page_size():
+    B, S, H, Hkv, D = 1, 512, 8, 2, 128
+    q = _rand_lse(B, S, H, D, dtype=torch.bfloat16)
+    k = _rand_lse(B, S, Hkv, D, dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+    k_cache, v_cache, block_table = _paged_cache_from_dense(k, v, 32)
+    with pytest.raises(NotImplementedError):
+        flydsl_flash_attn_func(
+            q,
+            k_cache,
+            v_cache,
+            causal=True,
+            block_table=block_table,
+            seqlen_k=torch.full((B,), S, dtype=torch.int32, device=q.device),
+            max_seqlen_kv=S,
+        )
+
+
+@_requires_gfx950
+def test_paged_vectorized_rejects_multi_tile_page():
+    """The vectorized layout keeps one tile per page in its address arithmetic.
+
+    The linear layout walks a wide page tile by tile, but the vectorized 5D form still
+    folds the page into the descriptor, so a multi-tile page there reads the wrong rows
+    without failing. It has to be refused at the boundary instead.
+    """
+    B, S, H, Hkv, D = 1, 512, 8, 2, 128
+    page_size = 128  # two 64-token KV tiles
+    kvs = 8  # 16 bytes / bf16
+    num_pages = B * (S // page_size)
+    q = _rand_lse(B, S, H, D, dtype=torch.bfloat16)
+    cache = torch.zeros(num_pages, Hkv, D // kvs, page_size, kvs, dtype=torch.bfloat16, device=q.device)
+    block_table = torch.arange(num_pages, dtype=torch.int32, device=q.device).view(B, -1)
+
+    with pytest.raises(NotImplementedError, match="vectorized"):
+        flydsl_flash_attn_func(
+            q,
+            cache,
+            cache.clone(),
+            causal=True,
+            block_table=block_table,
+            seqlen_k=torch.full((B,), S, dtype=torch.int32, device=q.device),
+            max_seqlen_kv=S,
+            kv_cache_layout="vectorized",
+        )
 
 
 if __name__ == "__main__":
