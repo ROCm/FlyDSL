@@ -84,23 +84,30 @@ def test_summary(summary: Path) -> None:
     install_outcome = os.environ.get("SUMMARY_INSTALL_OUTCOME", "unknown")
     tests_outcome = os.environ.get("SUMMARY_TESTS_OUTCOME", "unknown")
     bench_outcome = os.environ.get("SUMMARY_BENCHMARKS_OUTCOME", "unknown")
+    aiter_outcome = os.environ.get("SUMMARY_AITER_OUTCOME")
     test_log = os.environ.get("SUMMARY_TEST_LOG", "/tmp/test_output.log")
     bench_log = os.environ.get("SUMMARY_BENCH_LOG", "/tmp/bench_output.log")
 
     _out(summary, f"## Test Summary (`{runner}`)")
     _out(summary)
+    step_rows = [
+        ["Install wheels", f"`{install_outcome}`"],
+        ["Run tests", f"`{tests_outcome}`"],
+        ["Run benchmarks", f"`{bench_outcome}`"],
+    ]
+    if aiter_outcome:
+        step_rows.append(["Aiter CSV MoE / HGEMM", f"`{aiter_outcome}`"])
     _table(
         summary,
         ["Step", "Status"],
-        [
-            ["Install wheels", f"`{install_outcome}`"],
-            ["Run tests", f"`{tests_outcome}`"],
-            ["Run benchmarks", f"`{bench_outcome}`"],
-        ],
+        step_rows,
     )
 
     _write_test_results(summary, test_log)
     _write_bench_results(summary, bench_log)
+    aiter_log = os.environ.get("SUMMARY_AITER_LOG", "")
+    if aiter_log:
+        _write_aiter_compare(summary, aiter_log)
 
 
 def _write_test_results(summary: Path, log_path: str) -> None:
@@ -162,6 +169,28 @@ def _extract_perf_table(text: str) -> list[str]:
                 break
             lines.append(line)
     return lines
+
+
+def _write_aiter_compare(summary: Path, log_path: str) -> None:
+    log = Path(log_path)
+    if not log.is_file():
+        return
+    lines = []
+    capturing = False
+    for line in log.read_text(errors="replace").splitlines():
+        if line.startswith("=== Tuned op bench:"):
+            capturing = True
+        if capturing:
+            lines.append(line)
+    if not lines:
+        return
+    _out(summary, "### Aiter CSV: wheel vs aiter-main flydsl pin")
+    _out(summary)
+    _out(summary, "```")
+    for line in lines[:80]:
+        _out(summary, line)
+    _out(summary, "```")
+    _out(summary)
 
 
 # ── Promote summary ─────────────────────────────────────────────────────────
