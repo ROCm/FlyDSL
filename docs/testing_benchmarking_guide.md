@@ -131,9 +131,9 @@ Specialized benchmarking harness for performance characterization.
 
 **Default configurations:**
 ```bash
-# Softmax/LayerNorm: "M,N,dtype"
+# Softmax/RMSNorm: "M,N,dtype"
 SOFTMAX_SHAPES='32768,8192,bf16'
-LAYERNORM_SHAPES='32768,8192,bf16'
+RMSNORM_SHAPES='32768,8192,bf16'
 
 # Preshuffle GEMM: "dtype,M,N,K,tile_m,tile_n,tile_k"
 GEMM_SHAPES='
@@ -154,7 +154,7 @@ GEMM_FP4_SHAPES='8192,8192,8192,64,128,256'
 bash scripts/run_benchmark.sh                    # default: GEMM only
 bash scripts/run_benchmark.sh softmax             # only softmax
 bash scripts/run_benchmark.sh gemm moe            # GEMM and MoE
-bash scripts/run_benchmark.sh --only softmax,layernorm
+bash scripts/run_benchmark.sh --only softmax,rmsnorm
 bash scripts/run_benchmark.sh --list              # list available ops
 ```
 

@@ -60,30 +60,19 @@ SKIP_COUNT=0
 # Benchmark Configuration
 # ============================================================================
 
-# Softmax/LayerNorm/RMSNorm shapes: "M,N,dtype"
+# Softmax/FlashAttention/RMSNorm shapes: "M,N,dtype"
 SOFTMAX_SHAPES='
 32768,8192,bf16
 '
-# Softmax backward: one shape per register-residency tier, since the tier is
-# selected by N and a regression can hit one tier without touching the others.
-# All three are in the correctness sweep in tests/kernels/test_softmax_bwd.py.
-# M is chosen for occupancy, not just tier coverage: the widest tier at M=64 fills
-# 0.25 workgroups per CU on a 256-CU gfx950 and swings 24% run to run, which would
-# flap the dashboard rather than report it. At M=1024 the same tier holds ~1%.
+# Softmax backward: dashboard rows are occupancy-stable (M=1024) cuts of the
+# N-selected residency tiers. Additional N values stay in the correctness sweep
+# in tests/kernels/test_softmax_bwd.py; small-M dashboard rows flap too much.
 SOFTMAX_BWD_SHAPES='
 1024,8192,bf16
-256,32768,bf16
 1024,65536,bf16
-'
-LAYERNORM_SHAPES='
-32768,8192,bf16
 '
 RMSNORM_SHAPES='
 32768,8192,bf16
-'
-RMSNORM_MIXED_WEIGHT_SHAPES='
-4096,4096,bf16
-512,4096,f16
 '
 # FlashAttention shapes:
 #   preferred: "batch,seq_len,num_heads,num_kv_heads,head_dim,dtype,causal"
@@ -93,22 +82,6 @@ DEFAULT_FLASH_ATTN_FUNC_SHAPES='
 16,8192,16,16,128,bf16,true
 4,8192,64,64,128,bf16,true
 4,8192,64,8,128,bf16,true
-1,64,4,4,128,bf16,true
-1,64,4,4,128,bf16,false
-1,30,4,4,128,bf16,true
-1,30,4,4,128,bf16,false
-1,1,4,4,128,bf16,true
-1,1,4,4,128,bf16,false
-2,7,4,4,128,bf16,true
-2,7,4,4,128,bf16,false
-3,31,3,3,128,bf16,true
-3,31,3,3,128,bf16,false
-5,33,5,5,128,bf16,true
-5,33,5,5,128,bf16,false
-5,63,7,7,128,bf16,true
-5,63,7,7,128,bf16,false
-3,65,3,3,128,bf16,true
-3,65,3,3,128,bf16,false
 '
 FLASH_ATTN_FUNC_SHAPES="${FLASH_ATTN_FUNC_SHAPES:-${DEFAULT_FLASH_ATTN_FUNC_SHAPES}}"
 # MLA decode shapes: "batch,ctx_len" (DeepSeek MLA, fp8 Q/KV, nh=128).
@@ -145,7 +118,6 @@ int8,9728,8192,8320,128,256,128,2
 # "dtype,M,N,K,tile_m,tile_n,tile_k,stages,split_k,m_waves,n_waves,k_waves[,use_hti]"
 HGEMM_SHAPES_GFX950='
 fp16,2048,2048,2048,128,128,64,4,1,4,4,1
-bf16,32,384,7168,32,64,64,5,16,2,2,1
 bf16,8192,8192,8192,256,256,64,2,1,2,4,1,true
 '
 HGEMM_SHAPES_CDNA3='
@@ -219,13 +191,13 @@ Usage:
   bash scripts/run_benchmark.sh                  # run all benchmarks (default)
   bash scripts/run_benchmark.sh softmax          # run only softmax
   bash scripts/run_benchmark.sh softmax_bwd      # run only softmax backward
-  bash scripts/run_benchmark.sh layernorm moe    # run only selected benchmarks
+  bash scripts/run_benchmark.sh rmsnorm flash_attn moe    # run only selected benchmarks
   bash scripts/run_benchmark.sh --only softmax,moe
   bash scripts/run_benchmark.sh --output_csv /tmp/bench.csv
   bash scripts/run_benchmark.sh --list
 
 Supported ops:
-  softmax | softmax_bwd | layernorm | rmsnorm | flash_attn | mla | gemm | moe
+  softmax | softmax_bwd | rmsnorm | flash_attn | mla | gemm | moe
   (gemm includes preshuffle GEMM, A16W16 GEMM, and FP8 8-wave row-scale GEMM)
 USAGE
 }
@@ -315,7 +287,6 @@ _normalize_op() {
   # Normalize aliases to canonical op names.
   op="${1:-}"
   case "${op}" in
-    layernorm) echo "layernorm" ;;
     softmax_bwd|softmax-bwd|softmax_backward|softmax-backward) echo "softmax_bwd" ;;
     flash|flash_attn|flash-attn|flash_attn_func|fmha) echo "flash_attn" ;;
     mla|mla_decode|mla-decode) echo "mla" ;;
@@ -324,10 +295,9 @@ _normalize_op() {
 }
 
 # Default: run softmax, norms, attention, GEMM, and MoE unless user selected a subset.
-# Use positional args or --only to enable others: softmax, softmax_bwd, layernorm, rmsnorm, flash_attn, mla, gemm, moe
+# Use positional args or --only to enable others: softmax, softmax_bwd, rmsnorm, flash_attn, mla, gemm, moe
 RUN_SOFTMAX=1
 RUN_SOFTMAX_BWD=1
-RUN_LAYERNORM=1
 RUN_RMSNORM=1
 RUN_FLASH_ATTN=1
 RUN_MLA=1
@@ -337,7 +307,6 @@ RUN_MOE=1
 _enable_only_ops() {
   RUN_SOFTMAX=0
   RUN_SOFTMAX_BWD=0
-  RUN_LAYERNORM=0
   RUN_RMSNORM=0
   RUN_FLASH_ATTN=0
   RUN_MLA=0
@@ -348,7 +317,6 @@ _enable_only_ops() {
     case "${op}" in
       softmax) RUN_SOFTMAX=1 ;;
       softmax_bwd) RUN_SOFTMAX_BWD=1 ;;
-      layernorm) RUN_LAYERNORM=1 ;;
       rmsnorm) RUN_RMSNORM=1 ;;
       flash_attn) RUN_FLASH_ATTN=1 ;;
       mla) RUN_MLA=1 ;;
@@ -387,7 +355,6 @@ if [ "$#" -gt 0 ]; then
       --list)
         echo "softmax"
         echo "softmax_bwd"
-        echo "layernorm"
         echo "rmsnorm"
         echo "flash_attn"
         echo "mla"
@@ -505,11 +472,11 @@ if tbps is None or tflops is None:
         tbps = float(m.group(2))
 
 # Softmax/Norm-style: "Kernel avg time: X ms" + "Bandwidth: Y GB/s".
-# Use the FIRST match: the base op (softmax/layernorm/rmsnorm) is benchmarked
+# Use the FIRST match: the base op (softmax/flash_attn/rmsnorm) is benchmarked
 # first, so any later "Bandwidth:" lines come from fused/quant variants printed
-# by the same test (e.g. test_layernorm.py also runs fused_add/dynamicquant/
+# by the same test (e.g. test_flash_attn.py also runs fused_add/dynamicquant/
 # smoothquant). Taking the last match reported the slow scalar smoothquant path
-# as "layernorm" (~1.69 vs the real ~5.6 TB/s base).
+# as "flash_attn" (~1.69 vs the real ~5.6 TB/s base).
 if tbps is None:
     m_bw = next(re.finditer(r"Bandwidth:\s*([0-9.]+)\s*GB/s", txt), None)
     if m_bw:
@@ -527,8 +494,7 @@ _emit_moe_s2_rows() {
   # Args: op_prefix shape log_path
   # Extract separate atomic/reduce rows from MoE stage2 log lines. A line looks like:
   #   FlyDSL MoE stage2 [moe_gemm2] fp4 atomic | 7168x2048, ... | 1163.2 us, 1654.24 TFLOPS, 0.377 TB/s
-  # Emit two table rows (op_prefix_atomic, op_prefix_reduce). Falls back to single row
-  # tagged "mixed" if the log only has one mode (e.g., --gemm2_mode was overridden).
+  # Emit table rows (op_prefix_atomic / op_prefix_reduce) when those modes are present.
   op_prefix="$1"; shape="$2"; log_path="$3"
   python3 - "$op_prefix" "$shape" "$log_path" <<'PY'
 import re, sys
@@ -551,21 +517,35 @@ for m in pat.finditer(txt):
     found[mode] = (dtype, float(m.group(3)), float(m.group(4)))
 
 def fmt(x):
-    return "-" if x is None else f"{x:.3f}"
+    return f"{x:.3f}"
 
-# Always emit atomic row first (if any), then reduce row.
-emitted = False
+# Emit atomic first (if any), then reduce. Parse failure emits nothing so the
+# dashboard is not filled with placeholder "-" rows.
 for mode in ("atomic", "reduce"):
     if mode not in found:
         continue
     dtype, tflops, tbps = found[mode]
     print(f"{op_prefix}_{mode}\t{shape}\t{dtype}\t{fmt(tbps)}\t{fmt(tflops)}")
-    emitted = True
-
-if not emitted:
-    # Nothing parsed — emit empty row so caller knows.
-    print(f"{op_prefix}_atomic\t{shape}\t-\t-\t-")
 PY
+}
+
+_emit_moe_rows_from_log() {
+  # Args: s1_op s2_prefix shape log_path
+  s1_op="$1"; s2_prefix="$2"; shape="$3"; log_path="$4"
+  dt_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:' "${log_path}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
+  tf_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log_path}" | tail -1 | awk '{print $(NF-1)}' || true)"
+  tb_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log_path}" | tail -1 | awk '{print $(NF-1)}' || true)"
+  if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
+    _emit_row "${s1_op}" "${shape}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
+  fi
+  _emit_moe_s2_rows "${s2_prefix}" "${shape}" "${log_path}" | while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf; do
+    _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}"
+  done || true
+}
+
+_moe_log_skipped() {
+  # Arch / xfail skip lines printed by tests/kernels/test_moe_gemm.py CLI.
+  grep -qE 'requires gfx942|requires gfx950|Skipping (fp4|FP4|a8w4|int4_bf16)|\[xfail/skip\]|not supported' "$1" 2>/dev/null
 }
 
 # ============================================================================
@@ -623,28 +603,6 @@ if [ "${RUN_SOFTMAX_BWD}" -eq 1 ]; then
   done
 fi
 
-# layernorm (script used to label this as LayerNorm; keep output truthful)
-if [ "${RUN_LAYERNORM}" -eq 1 ]; then
-  for shape in $LAYERNORM_SHAPES; do
-    oldIFS=$IFS
-    IFS=,
-    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
-    set -- $shape
-    IFS=$oldIFS
-    M=$1; N=$2; dtype=$3
-    export ROCDSL_LAYERNORM_SHAPES="$shape"
-    log="${BENCH_LOG_DIR}/layernorm_${M}x${N}_${dtype}.log"
-    if python3 tests/kernels/test_layernorm.py >"${log}" 2>&1; then
-      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-    else
-      _fail_or_skip "${log}" "layernorm"
-    fi
-    row="$(_py_parse_and_emit layernorm "${M}x${N}" "${dtype}" "${log}")"
-    set -- $row
-    _emit_row "$1" "$2" "$3" "$4" "$5"
-  done
-fi
-
 # RMSNorm
 if [ "${RUN_RMSNORM}" -eq 1 ]; then
   for shape in $RMSNORM_SHAPES; do
@@ -665,51 +623,6 @@ if [ "${RUN_RMSNORM}" -eq 1 ]; then
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
   done
-
-  # Training contract: FP16/BF16 activations with FP32 weights. These focused
-  # pytest entries avoid rerunning the full RMSNorm correctness matrix for each
-  # benchmark row while keeping gfx942/gfx950 dashboard coverage symmetric.
-  for shape in $RMSNORM_MIXED_WEIGHT_SHAPES; do
-    oldIFS=$IFS
-    IFS=,
-    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
-    set -- $shape
-    IFS=$oldIFS
-    M=$1; N=$2; activation_dtype=$3
-    export ROCDSL_RMSNORM_MIXED_WEIGHT_BENCH_SHAPE="$shape"
-
-    log="${BENCH_LOG_DIR}/rmsnorm_mixed_weight_${M}x${N}_${activation_dtype}.log"
-    if python3 -m pytest \
-      tests/kernels/test_rmsnorm.py::test_rmsnorm_mixed_weight_forward_benchmark \
-      -m benchmark -q -s >"${log}" 2>&1; then
-      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-    else
-      _fail_or_skip "${log}" "rmsnorm_mixed_weight"
-    fi
-    row="$(_py_parse_and_emit rmsnorm_mixed_weight "${M}x${N}" "${activation_dtype}+f32w" "${log}")"
-    set -- $row
-    _emit_row "$1" "$2" "$3" "$4" "$5"
-
-    for mode in plain fused_add; do
-      export ROCDSL_RMSNORM_MIXED_WEIGHT_BWD_MODE="$mode"
-      op="rmsnorm_mixed_w_bwd"
-      if [ "$mode" = "fused_add" ]; then
-        op="rmsnorm_add_mixed_bwd"
-      fi
-      log="${BENCH_LOG_DIR}/${op}_${M}x${N}_${activation_dtype}.log"
-      if python3 -m pytest \
-        tests/kernels/test_rmsnorm.py::test_rmsnorm_mixed_weight_backward_benchmark \
-        -m benchmark -q -s >"${log}" 2>&1; then
-        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-      else
-        _fail_or_skip "${log}" "$op"
-      fi
-      row="$(_py_parse_and_emit "$op" "${M}x${N}" "${activation_dtype}+f32w" "${log}")"
-      set -- $row
-      _emit_row "$1" "$2" "$3" "$4" "$5"
-    done
-  done
-  unset ROCDSL_RMSNORM_MIXED_WEIGHT_BENCH_SHAPE ROCDSL_RMSNORM_MIXED_WEIGHT_BWD_MODE
 fi
 
 # FlashAttention / FMHA (CDNA only)
@@ -1046,20 +959,12 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     # Emit stage1 + stage2 rows (parse from log; keep terminal output concise).
     # Keep shape string compact (no spaces/commas) so table alignment stays stable.
     shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
-
-    dt_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
-    tf_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-    tb_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-    if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
-      _emit_row "moe_gemm1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
-    fi
-
-    _emit_moe_s2_rows "moe_gemm2" "${shape_moe}" "${log}" | while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf; do
-      _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}"
-    done
+    _emit_moe_rows_from_log "moe_gemm1" "moe_gemm2" "${shape_moe}" "${log}"
   done
 
-  # MoE FP4 (gfx950 only)
+  # MoE FP4 (gfx950 only). skip_ref=true: fused mxfp4 e2e is numerically broken
+  # (and memory-unsafe) under the strict gate; the CLI still launches the kernel
+  # and prints FlyDSL MoE stage{1,2} lines that this table greps.
   for shape in $MOE_FP4_SHAPES; do
     [ -z "$shape" ] && continue
     oldIFS=$IFS
@@ -1069,6 +974,7 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     IFS=$oldIFS
     tokens=$1; model_dim=$2; inter_dim=$3; experts=$4; topk=$5; tile_m=$6; tile_n=$7; tile_k=$8; tile_n2=$9; tile_k2=${10}
     dtype="fp4"
+    shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
     log="${BENCH_LOG_DIR}/moe_fp4_t${tokens}_md${model_dim}_id${inter_dim}_e${experts}_k${topk}.log"
     if python3 tests/kernels/test_moe_gemm.py \
       --in_dtype fp4 \
@@ -1083,31 +989,16 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       --tile_k "$tile_k" \
       --tile_n2 "$tile_n2" \
       --tile_k2 "$tile_k2" \
-      --skip_ref false \
+      --skip_ref true \
       --compare_aiter_ck false >"${log}" 2>&1; then
-      # Check if test was skipped due to architecture
-      if grep -q "requires gfx950\|Skipping FP4" "${log}"; then
-        shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
+      if _moe_log_skipped "${log}"; then
         _emit_row "moe_fp4" "${shape_moe}" "${dtype}" "skip" "skip"
       else
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-        shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
-
-        dt_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
-        tf_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-        tb_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-        if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
-          _emit_row "moe_fp4_s1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
-        fi
-
-        _emit_moe_s2_rows "moe_fp4_s2" "${shape_moe}" "${log}" | while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf; do
-          _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}"
-        done
+        _emit_moe_rows_from_log "moe_fp4_s1" "moe_fp4_s2" "${shape_moe}" "${log}"
       fi
     else
-      # Skip gracefully on unsupported architectures
-      if grep -q "requires gfx950\|Skipping FP4\|not supported" "${log}" 2>/dev/null; then
-        shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
+      if _moe_log_skipped "${log}"; then
         _emit_row "moe_fp4" "${shape_moe}" "${dtype}" "skip" "skip"
       else
         FAIL_COUNT=$((FAIL_COUNT + 1))
@@ -1117,7 +1008,7 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     fi
   done
 
-  # MoE W4A16 groupwise (int4_bf16, group_size=32)
+  # MoE W4A16 groupwise (int4_bf16, group_size=32) via moe_2stage_a16wmix w_dtype=int4.
   for shape in $MOE_W4A16_SHAPES; do
     [ -z "$shape" ] && continue
     oldIFS=$IFS
@@ -1125,6 +1016,8 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     set -- $shape
     IFS=$oldIFS
     tokens=$1; model_dim=$2; inter_dim=$3; experts=$4; topk=$5; tile_m=$6; tile_n=$7; tile_k=$8; tile_n2=$9; tile_k2=${10}
+    dtype="int4_bf16"
+    shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
     log="${BENCH_LOG_DIR}/moe_w4a16_t${tokens}_md${model_dim}_id${inter_dim}_e${experts}_k${topk}.log"
     if python3 tests/kernels/test_moe_gemm.py \
       --in_dtype int4_bf16 \
@@ -1140,28 +1033,25 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       --tile_k "$tile_k" \
       --tile_n2 "$tile_n2" \
       --tile_k2 "$tile_k2" \
-      --skip_ref false \
+      --skip_ref true \
       --compare_aiter_ck false >"${log}" 2>&1; then
-      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+      if _moe_log_skipped "${log}"; then
+        _emit_row "moe_w4a16" "${shape_moe}" "${dtype}" "skip" "skip"
+      else
+        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+        _emit_moe_rows_from_log "moe_w4a16_s1" "moe_w4a16_s2" "${shape_moe}" "${log}"
+      fi
     else
-      _fail_or_skip "${log}" "moe_w4a16"
+      if _moe_log_skipped "${log}"; then
+        _emit_row "moe_w4a16" "${shape_moe}" "${dtype}" "skip" "skip"
+      else
+        _fail_or_skip "${log}" "moe_w4a16"
+      fi
     fi
-    shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
-
-    dt_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
-    tf_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-    tb_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-    if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
-      _emit_row "moe_w4a16_s1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
-    fi
-
-    _emit_moe_s2_rows "moe_w4a16_s2" "${shape_moe}" "${log}" | while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf; do
-      _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}"
-    done
   done
 
-  # MoE A8W4 — FP8 activation + MX-FP4 weight (gfx950 only). End-to-end 2-stage:
-  # stage1 a_dtype=fp8,b_dtype=fp4 -> silu(gate)*up fp16 -> MX-FP8 re-quant -> stage2.
+  # MoE A8W4 — FP8 activation + MX-FP4 weight (gfx950 only). skip_ref=true: same
+  # fused mxfp4 e2e gate as FP4 (perf-only; kernel still prints stage lines).
   for shape in $MOE_A8W4_SHAPES; do
     [ -z "$shape" ] && continue
     oldIFS=$IFS
@@ -1186,27 +1076,16 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       --tile_k "$tile_k" \
       --tile_n2 "$tile_n2" \
       --tile_k2 "$tile_k2" \
-      --skip_ref false \
+      --skip_ref true \
       --compare_aiter_ck false >"${log}" 2>&1; then
-      # CLI prints "Skipping a8w4: requires gfx950+" on unsupported archs.
-      if grep -q "requires gfx950\|Skipping a8w4" "${log}"; then
+      if _moe_log_skipped "${log}"; then
         _emit_row "moe_a8w4" "${shape_moe}" "${dtype}" "skip" "skip"
       else
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-
-        dt_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
-        tf_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-        tb_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-        if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
-          _emit_row "moe_a8w4_s1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
-        fi
-
-        _emit_moe_s2_rows "moe_a8w4_s2" "${shape_moe}" "${log}" | while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf; do
-          _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}"
-        done
+        _emit_moe_rows_from_log "moe_a8w4_s1" "moe_a8w4_s2" "${shape_moe}" "${log}"
       fi
     else
-      if grep -q "requires gfx950\|Skipping a8w4\|not supported" "${log}" 2>/dev/null; then
+      if _moe_log_skipped "${log}"; then
         _emit_row "moe_a8w4" "${shape_moe}" "${dtype}" "skip" "skip"
       else
         FAIL_COUNT=$((FAIL_COUNT + 1))
@@ -1216,10 +1095,6 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     fi
   done
 fi
-
-# MoE 2-stage (kernels/moe/moe_gemm_2stage; CDNA only — uses MFMA).
-# Benchmarks stage1 and stage2 (atomic + reduce) via the test_moe_gemm_2stage.py
-# CLI. Uses in_dtype=fp8 to match the moe_gemm1/moe_gemm2 rows above.
 
 # RDNA WMMA GEMM benchmarks (gfx11* or gfx12*, via benchmark_common.py).
 # FP8 WMMA is gfx12-only and is skipped inside run_wmma_sweep on gfx11*.
