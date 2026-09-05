@@ -52,6 +52,36 @@ Use the same names as [`python/flydsl/utils/env.py`](../python/flydsl/utils/env.
 | IR dump | `FLYDSL_DUMP_IR`, `FLYDSL_DUMP_DIR` |
 | Device runtime kind | `FLYDSL_RUNTIME_KIND` |
 | ROCm arch hints (detection helpers) | `FLYDSL_GPU_ARCH`, `HSA_OVERRIDE_GFX_VERSION` |
+| AOT worker-process limit | `FLYDSL_AOT_WORKERS` (positive: explicit limit; unset, empty, zero, or negative: automatic CPU/memory limit) |
+| AOT automatic memory cap | `FLYDSL_AOT_MEM_PER_WORKER_GB` (default `2.0`; non-positive disables) |
+| AOT per-job timeout | `FLYDSL_AOT_TIMEOUT` (default `1200` seconds; non-positive disables) |
+| AOT abnormal-exit retries | `FLYDSL_AOT_MAX_RETRIES` (default `2`) |
+
+`flydsl.utils.parallel.run_parallel_jobs` uses the Linux `fork` multiprocessing
+context and is intended for compile-only AOT jobs. It is not a device-runtime
+executor. Its automatic memory cap requires the optional `psutil` package and
+emits both a warning and `RuntimeWarning` before falling back to at most four
+workers when the optional package is unavailable or memory cannot be queried.
+The `RuntimeWarning` points to the public caller and follows Python's standard
+once-per-call-site filtering; the logger records each fallback.
+OOM-like `SIGKILL` (`exitcode=-9`) and timeout failures are classified
+separately and retried according to `FLYDSL_AOT_MAX_RETRIES`; neither changes
+global concurrency. Retries are appended behind jobs that have not started yet.
+Call the scheduler only when no compiler/MLIR work is active on other native
+threads, and do not let workers create long-lived child processes: the
+fork-based pool supervises only its direct workers.
+Progress and final summary lines report terminal failure counts separately from
+the number of jobs that have finished. Scheduler messages use the FlyDSL logger;
+set `FLYDSL_DEBUG_LOG_TO_CONSOLE=1` and `FLYDSL_DEBUG_LOG_LEVEL=INFO` to emit
+progress and summaries to the console.
+
+Failed results retain `compile_time=None` and include a machine-readable
+`failure` mapping. Its `kind` distinguishes `compile_error`,
+`worker_exception`, `worker_crash`, `possible_oom`, `timeout`,
+and `invalid_result`; `reason` and `attempts` are always included when known,
+while process failures also carry `exitcode`. Uncaught Python exceptions are
+not retried and carry bounded `reason` and `traceback` strings. A valid atomic
+result remains authoritative if the process is killed during teardown.
 
 Session-level pytest options are supported in `tests/conftest.py`:
 
