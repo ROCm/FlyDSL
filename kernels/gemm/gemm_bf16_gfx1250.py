@@ -69,7 +69,7 @@ def launch_gemm_bf16(
     if K_WS < 2:
         raise ValueError(f"tile_k={tile_k} needs at least 2 WMMA K-steps to hide the LDS reads")
 
-    LDS_PAD = 16  # keeps consecutive rows 4 dwords apart -> conflict-free b128 reads
+    LDS_PAD = 32  # 32-byte pad keeps rows 32-byte aligned for ds_read_b256
     LDS_ROW = KB + LDS_PAD
     STAGE_A = ((tile_m * LDS_ROW + 15) // 16) * 16
     STAGE_B = ((tile_n * LDS_ROW + 15) // 16) * 16
@@ -169,21 +169,20 @@ def launch_gemm_bf16(
 
         wmb = wave_m * warp_tile_m
         wnb = wave_n * warp_tile_n
-        lds_load_b128, _ = make_lds_copy_ops(128)
+        lds_load_b256, _ = make_lds_copy_ops(256)
 
         def _frag(buf, b0):
-            """One 16-element operand fragment: two 16-byte chunks 32 bytes apart."""
-            v0 = Vec(lds_load_b128(buf, b0))
-            v1 = Vec(lds_load_b128(buf, b0 + 32))
-            return v0.shuffle(v1, list(range(8)))
+            """One 8-int32 fragment via single ds_read_b256."""
+            return Vec(lds_load_b256(buf, b0))
 
         def load_a(buf, wm, ks):
             row = wmb + wm * WMMA_M + lane16
-            return _frag(buf, fx.Int64(row * LDS_ROW + ks * KSB + kgrp * 16))
+            # kgrp*32: kgrp=0→bytes[0-31], kgrp=1→bytes[32-63] of K-step row
+            return _frag(buf, fx.Int64(row * LDS_ROW + ks * KSB + kgrp * 32))
 
         def load_b(buf, wn, ks):
             col = wnb + wn * WMMA_N + lane16
-            return _frag(buf, fx.Int64(STAGE_A + col * LDS_ROW + ks * KSB + kgrp * 16))
+            return _frag(buf, fx.Int64(STAGE_A + col * LDS_ROW + ks * KSB + kgrp * 32))
 
         wmma_atom = fx.make_mma_atom(fx.rocdl.WMMA(WMMA_M, WMMA_N, WMMA_K, elem_cls, fx.Float32))
         c_frags = [fx.make_rmem_tensor(8, fx.Float32) for _ in range_constexpr(n_acc)]
@@ -195,7 +194,7 @@ def launch_gemm_bf16(
             t.store(v)
             return t
 
-        DS_A = DS_B = 2  # ds_read_b128 per fragment
+        DS_A = DS_B = 1  # ds_read_b256 per fragment (halved from 2×b128)
         KS_DS = wmma_m_rep * DS_A + wmma_n_rep * DS_B  # ds_reads for one WMMA K-step
 
         def _load_ks(buf, ks):
