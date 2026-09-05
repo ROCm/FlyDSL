@@ -39,7 +39,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly as fly_dialect
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
-from flydsl.expr import arith, const_expr, range_constexpr, rocdl
+from flydsl.expr import arith, as_ir_value, const_expr, range_constexpr, rocdl
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
@@ -136,7 +136,7 @@ def asm_mma_do(a, b, c, mode="2", cbsz=0, blgp=0):
     mods = f" cbsz:{cbsz} blgp:{blgp}" if (cbsz or blgp) else ""
     op = _llvm.InlineAsmOp(
         res=v4f32,
-        operands_=[_raw(a), _raw(b), _raw(c)],
+        operands_=[as_ir_value(a), as_ir_value(b), as_ir_value(c)],
         asm_string=f"v_mfma_f32_16x16x128_f8f6f4 $0, $1, $2, $0{mods}",
         constraints=cons,
         has_side_effects=False,
@@ -182,6 +182,16 @@ def _build_mfma(n_tiles_a, n_tiles_b, cbsz, blgp, asm_mode=None):
         _eb = fx.Float8E5M2 if blgp else fx.Float8E4M3FN
         mfma.atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, _ea, _eb))
     if asm_mode is not None:
+        # mode "2" ties the accumulator to an AGPR-class inline-asm output ("=a,v,v,0"). That
+        # miscompiles silently on flydsl 0.3.x -- the result is uncorrelated with the reference
+        # (every 4th output row drops out entirely) while everything still compiles and runs.
+        # Isolated to the constraint itself: dropping the amdgpu-agpr-alloc attribute does not
+        # help, and the same asm with "=v" (mode "3") is correct. Fail loudly instead of
+        # returning wrong numbers.
+        assert asm_mode != "2", (
+            'acc_mode="agpr" (inline-asm AGPR accumulator) produces wrong results on flydsl '
+            '0.3.x; use acc_mode="vgpr", or agpr_inplace=False for the intrinsic MMA.'
+        )
         mfma._do_mma = lambda _a, _b, _c: asm_mma_do(_a, _b, _c, mode=asm_mode, cbsz=cbsz, blgp=blgp)
     return mfma
 
@@ -377,7 +387,7 @@ def compile_fp8_grouped_gemm(
     nt_vmcnt: int = 3,
     num_xcd: int = 1,
     agpr_inplace: bool = True,
-    acc_mode: str = "agpr",  # "agpr"=AGPR in-place (mma mode 2); "vgpr"=VGPR in-place (mode 3)
+    acc_mode: str = "vgpr",  # "vgpr"=VGPR in-place (mma mode 3). "agpr" is broken -- see below.
     cbsz: int = 0,
     blgp: int = 0,
     out_fp16: bool = False,
