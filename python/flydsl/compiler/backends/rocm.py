@@ -84,6 +84,7 @@ class RocmBackend(BaseBackend):
             "fly-convert-atom-call-to-ssa-form",
             "fly-promote-regmem-to-vectorssa",
             "convert-fly-to-rocdl",
+            "fly-fix-bitcast-width",
             "canonicalize",
             f"gpu.module(convert-scf-to-cf,cse,"
             f"convert-rocdl-fastmath-ops,"
