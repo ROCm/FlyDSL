@@ -121,6 +121,9 @@ jobs:
           fi
           python3 -c "from pathlib import Path; src = Path('/tmp/aiter/requirements.txt'); dst = Path('/tmp/aiter/requirements-flydsl-ci.txt'); lines = [line for line in src.read_text().splitlines() if line.strip() and not line.strip().startswith('flydsl==')]; dst.write_text('\\n'.join(lines) + '\\n')"
           python3 -m pip install -r /tmp/aiter/requirements-flydsl-ci.txt
+          # 7.14 PyTorch image: TheRock pip-ROCm. libamdhip64.so (unversioned) is
+          # in rocm-sdk-devel after `rocm-sdk init`; core only has libamdhip64.so.N.
+          python3 /flydsl/.github/scripts/find_rocm_path.py --ensure-devel
           BASH
 
       - name: Run aiter CSV MoE and HGEMM
@@ -135,32 +138,7 @@ jobs:
           set -euo pipefail
           # hipcc in this image lives under the venv; without ROCM_PATH aiter
           # treats /opt/venv as ROCm home and links -L/opt/venv/lib -lamdhip64.
-          # Initialize before any ${ROCM_PATH} expansion: set -u aborts otherwise.
-          ROCM_PATH="${ROCM_PATH:-}"
-          if [ -z "${ROCM_PATH}" ]; then
-            if command -v rocm-sdk >/dev/null 2>&1; then
-              _sdk="$(rocm-sdk path --root 2>/dev/null || true)"
-              if [ -n "${_sdk}" ] && { [ -e "${_sdk}/lib/libamdhip64.so" ] || [ -e "${_sdk}/lib64/libamdhip64.so" ]; }; then
-                ROCM_PATH="${_sdk}"
-              fi
-            fi
-          fi
-          if [ -z "${ROCM_PATH}" ]; then
-            for cand in /opt/rocm /opt/rocm-7.14.0 /opt/rocm-7.14; do
-              if [ -e "${cand}/lib/libamdhip64.so" ] || [ -e "${cand}/lib64/libamdhip64.so" ]; then
-                ROCM_PATH="${cand}"
-                break
-              fi
-            done
-          fi
-          if [ -z "${ROCM_PATH}" ]; then
-            echo "ROCM_PATH is unset and libamdhip64.so was not found under /opt/rocm*" >&2
-            exit 1
-          fi
-          if [ ! -e "${ROCM_PATH}/lib/libamdhip64.so" ] && [ ! -e "${ROCM_PATH}/lib64/libamdhip64.so" ]; then
-            echo "libamdhip64.so not found under ${ROCM_PATH}" >&2
-            exit 1
-          fi
+          ROCM_PATH="$(python3 /flydsl/.github/scripts/find_rocm_path.py)"
           export ROCM_PATH
           export ROCM_HOME="${ROCM_HOME:-$ROCM_PATH}"
           export LIBRARY_PATH="${ROCM_PATH}/lib:${ROCM_PATH}/lib64:${LIBRARY_PATH:-}"
