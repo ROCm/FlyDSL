@@ -137,7 +137,10 @@ jobs:
           # treats /opt/venv as ROCm home and links -L/opt/venv/lib -lamdhip64.
           if [ -z "${ROCM_PATH:-}" ]; then
             if command -v rocm-sdk >/dev/null 2>&1; then
-              ROCM_PATH="$(rocm-sdk path --root 2>/dev/null || true)"
+              _sdk="$(rocm-sdk path --root 2>/dev/null || true)"
+              if [ -n "${_sdk}" ] && { [ -e "${_sdk}/lib/libamdhip64.so" ] || [ -e "${_sdk}/lib64/libamdhip64.so" ]; }; then
+                ROCM_PATH="${_sdk}"
+              fi
             fi
           fi
           if [ -z "${ROCM_PATH}" ]; then
